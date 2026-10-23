@@ -40,7 +40,8 @@ const (
 // IdleExpiresAt is present for a credential with an idle bound (issue #704,
 // ADR-009): a guest's and an operator's browser session. It is where the
 // idle bound stands now: a REST request carrying the bearer moves it, at
-// most once a minute and never past ExpiresAt, and nothing else does (not a
+// most once a minute, or once a quarter of the idle bound, whichever is
+// shorter, and never past ExpiresAt, and nothing else does (not a
 // socket, a ping, a ticket or the voice poller; security review F5). The
 // credential is live until the earlier of the two. Scope is the
 // credential's reach; absent means full, which every credential had before

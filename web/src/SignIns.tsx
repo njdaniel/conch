@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import * as api from './api';
 import type { OwnCredentialV1 } from './schema/credential';
 
@@ -21,7 +21,18 @@ function endLine(result: { readonly failure: api.ApiFailure; readonly code?: str
   return 'The server refused. The sign-in was not ended.';
 }
 
-export function YourSignIns({ onEndThis, onUnauthorized }: { readonly onEndThis: () => void; readonly onUnauthorized: () => void }) {
+// Add a device (issue #714) sits in the section, for a member: addDevice is
+// it, or null for anyone else. It is there only while the section is open,
+// so closing it forgets a link just made.
+export function YourSignIns({
+  onEndThis,
+  onUnauthorized,
+  addDevice = null,
+}: {
+  readonly onEndThis: () => void;
+  readonly onUnauthorized: () => void;
+  readonly addDevice?: ReactNode;
+}) {
   const id = useId();
   const [open, setOpen] = useState(false);
   const [loaded, setLoaded] = useState<Loaded>({ kind: 'loading' });
@@ -90,8 +101,8 @@ export function YourSignIns({ onEndThis, onUnauthorized }: { readonly onEndThis:
       </button>
       <div id={`${id}-panel`} role="region" aria-label="Your sign-ins" className="signins-panel" hidden={!open}>
         <p className="hint">
-          Each is a browser or app signed in as you. One labelled “sign-in link” began when a sign-in link from an operator was used: if that was not you, end
-          it and tell an operator.
+          Each is a browser or app signed in as you. One labelled “sign-in link” began when a sign-in link from an operator was used, and one labelled
+          “device link” when a link you made under Add a device was: if that was not you, end it and tell an operator.
         </p>
         {loaded.kind === 'loading' ? (
           <p className="empty">Loading your sign-ins…</p>
@@ -157,6 +168,7 @@ export function YourSignIns({ onEndThis, onUnauthorized }: { readonly onEndThis:
         <p role="status" className={line?.refused === true ? 'notice' : 'hint'}>
           {line?.text ?? ''}
         </p>
+        {open ? addDevice : null}
       </div>
     </div>
   );

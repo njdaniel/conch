@@ -84,6 +84,10 @@ test('C728 an operator renames the open channel; a second page moves too; a relo
     await showsOpen(page, from);
     // The events socket is live: the panel has its roster.
     await expect(panel(page).getByRole('heading', { name: 'People' })).toBeVisible();
+    // The message socket is open: the composer takes a message. Until then
+    // its first open could still come, and be counted below as one the
+    // rename caused (issue #802).
+    await expect(page.getByLabel(`Message #${from}`)).toBeEnabled();
   }
   const opened = { a: sockets(a), b: sockets(b) };
   const asked = requests(a);
@@ -228,6 +232,9 @@ test.describe('in voice, with LiveKit', () => {
       await expect(inVoice).toContainText('You');
       await expect(inVoice).toContainText('dave');
       await expect(panel(a.page).getByRole('heading', { name: 'People' })).toBeVisible();
+      // Its message socket is open too, so a late first open is not counted
+      // as one the rename caused (issue #802).
+      await expect(a.page.getByLabel(`Message #${vw.channel}`)).toBeEnabled();
       const roster = await inVoice.textContent();
       const socketsBefore = a.opened.length;
       const sessionsBefore = a.asked.filter((r) => r.endsWith('/voice/session')).length;

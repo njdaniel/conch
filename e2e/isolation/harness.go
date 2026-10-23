@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -36,7 +38,11 @@ type harness struct {
 	repo   string
 	tmp    string
 	conchd string // the binary this run built
-	kit    *lkit.Kit
+	// commit and dirty are what git says the checkout is at; stamp is the
+	// version the binary was built with (build).
+	commit, stamp string
+	dirty         bool
+	kit           *lkit.Kit
 
 	mu      sync.Mutex
 	secrets map[string]string
@@ -226,7 +232,20 @@ func (h *harness) build() error {
 		return err
 	}
 	h.conchd = filepath.Join(dir, "conchd")
-	cmd := lkit.GroupCommand(stopCtx, "go", "build", "-o", h.conchd, "./cmd/conchd")
+	// The binary is stamped with the commit git says this checkout is at,
+	// as make build stamps it: Go's own stamping reads the repository's main
+	// checkout when this one is a git worktree (#813), and would name the
+	// wrong commit.
+	h.commit, h.dirty = gitHead(h.repo)
+	args := []string{"build", "-o", h.conchd}
+	if h.commit != "" {
+		h.stamp = "dev-" + h.commit[:min(12, len(h.commit))]
+		if h.dirty {
+			h.stamp += "-dirty"
+		}
+		args = append(args, "-ldflags", "-X main.version="+h.stamp)
+	}
+	cmd := lkit.GroupCommand(stopCtx, "go", append(args, "./cmd/conchd")...)
 	cmd.Dir = h.repo
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("go build ./cmd/conchd: %w\n%s", err, out)
@@ -253,7 +272,19 @@ type conchdProc struct {
 	baseURL string
 	op      api
 	done    chan struct{}
+	// dataDir and env are the server's, for the host commands the operator
+	// runs beside it (conchd operator setup and recover, issue #709).
+	dataDir string
+	env     []string
 }
+
+// trustedProxy is the proxy conchd is told to believe: loopback, where this
+// run's requests come from. A request that names a client address in
+// X-Forwarded-For (api.addr) is then that client's, as it would be behind
+// the deployment's reverse proxy, and spends that address's allowances, not
+// the one every other request of the run shares. A request with no such
+// header is loopback's own, as before.
+const trustedProxy = "127.0.0.1/32"
 
 // startConchd bootstraps an operator into a fresh data directory and serves
 // it, configured for srv when there is one.
@@ -268,7 +299,16 @@ func (h *harness) startConchd(srv *lkit.Server) (*conchdProc, error) {
 			return nil, err
 		}
 	}
-	env := append(cleanEnv(), "HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, "config"), "XDG_DATA_HOME="+filepath.Join(home, "data"))
+	// The host key the operator's second factor is sealed under (issue
+	// #709): random for each run, in the environment only, as in production.
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
+	totpKey := base64.StdEncoding.EncodeToString(key)
+	h.secret("the server's TOTP key", totpKey)
+	env := append(cleanEnv(), "HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, "config"), "XDG_DATA_HOME="+filepath.Join(home, "data"),
+		"CONCHD_TOTP_KEY="+totpKey)
 	boot := lkit.GroupCommand(stopCtx, h.conchd, "bootstrap-operator", "--data", dataDir, "--name", "isolation-operator")
 	boot.Env = env
 	out, err := boot.Output()
@@ -284,7 +324,7 @@ func (h *harness) startConchd(srv *lkit.Server) (*conchdProc, error) {
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"serve", "--data", dataDir, "--listen", addr}
+	args := []string{"serve", "--data", dataDir, "--listen", addr, "--trusted-proxies", trustedProxy}
 	if srv != nil {
 		args = append(args, "--livekit-url", srv.WSURL)
 		env = append(env, "CONCHD_LIVEKIT_API_KEY="+srv.Key, "CONCHD_LIVEKIT_API_SECRET="+srv.Secret)
@@ -301,7 +341,7 @@ func (h *harness) startConchd(srv *lkit.Server) (*conchdProc, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	p := &conchdProc{cmd: cmd, baseURL: "http://" + addr, done: make(chan struct{})}
+	p := &conchdProc{cmd: cmd, baseURL: "http://" + addr, done: make(chan struct{}), dataDir: dataDir, env: env}
 	p.op = api{h: h, base: p.baseURL, token: opToken, who: "the operator"}
 	go func() { _ = cmd.Wait(); _ = logFile.Close(); close(p.done) }()
 	h.onCleanup(func() {
@@ -321,6 +361,60 @@ func (h *harness) startConchd(srv *lkit.Server) (*conchdProc, error) {
 	})
 }
 
+// gitHead is the commit git says repo is at, and whether its tree has
+// changes beyond it; "" when it is not a git checkout.
+func gitHead(repo string) (string, bool) {
+	out, err := exec.CommandContext(stopCtx, "git", "-C", repo, "rev-parse", "HEAD").Output() // #nosec G204 -- constant command on this run's repository
+	if err != nil {
+		return "", false
+	}
+	st, err := exec.CommandContext(stopCtx, "git", "-C", repo, "status", "--porcelain").Output() // #nosec G204 -- as above
+	return strings.TrimSpace(string(out)), err == nil && len(bytes.TrimSpace(st)) > 0
+}
+
+// recordBuild says what the run tested (issue #717: the evidence names its
+// build): the commit git says the checkout is at, and whether its tree had
+// changes beyond it; the version the running conchd reports, which must be
+// the one the build stamped (anything else fails the run); the Go that
+// built it; and the command.
+func (h *harness) recordBuild(d *conchdProc) error {
+	var health schema.Health
+	if err := (api{h: h, base: d.baseURL, who: "anyone"}).call(http.MethodGet, "/healthz", nil, &health); err != nil {
+		return err
+	}
+	commit, reports := "unknown (not a git checkout)", "conchd reports "+health.Version
+	if h.commit != "" {
+		commit = h.commit
+		if h.dirty {
+			commit += ", with uncommitted changes"
+		}
+		// The run stamped this binary itself: another version means the
+		// server under test is not the one it built.
+		if health.Version != h.stamp {
+			return fmt.Errorf("conchd reports version %s, not %s, the version this run stamped it with: the server under test is not the binary the run built", health.Version, h.stamp)
+		}
+		reports += ", the version the build stamped from it"
+	}
+	h.say("ok   build: git HEAD %s; %s; built with %s by go build ./cmd/conchd; run as go run ./e2e/isolation (CI %v)", commit, reports, runtime.Version(), inCI())
+	return nil
+}
+
+// hostCommand runs a conchd host command on the server's data directory, as
+// the operator would on the host, beside the running server, and returns
+// what it printed on stdout. Its stderr, which says what it did, is in the
+// error when it fails.
+func (p *conchdProc) hostCommand(h *harness, args ...string) (string, error) {
+	cmd := lkit.GroupCommand(stopCtx, h.conchd, args...)
+	cmd.Env = p.env
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("conchd %s: %w: %s", strings.Join(args, " "), err, h.redact(lkit.Truncate(stderr.String(), 400)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func freeAddr() (string, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -337,6 +431,21 @@ type api struct {
 	h           *harness
 	base, token string
 	who         string
+	// addr is the client address the request comes from, through the
+	// trusted proxy (X-Forwarded-For, with X-Forwarded-Proto https, which
+	// the routes that take a password or mint a credential require of a
+	// forwarded request); "" is loopback, as every request of the run that
+	// predates guests is.
+	addr string
+}
+
+// forwarded sets the proxy's headers for a request from addr.
+func forwarded(hdr http.Header, addr string) {
+	if addr == "" {
+		return
+	}
+	hdr.Set("X-Forwarded-For", addr)
+	hdr.Set("X-Forwarded-Proto", "https")
 }
 
 var httpClient = &http.Client{Timeout: 20 * time.Second}
@@ -349,6 +458,13 @@ func (a api) send(method, path, contentType string, body []byte) (int, []byte, e
 
 // request is send, with the response's headers.
 func (a api) request(method, path, contentType string, body []byte) (int, []byte, http.Header, error) {
+	return a.requestWith(method, path, contentType, body, nil)
+}
+
+// requestWith is request with headers set after the client's own: a value
+// replaces the header, an empty one removes it (a forwarded request without
+// its protocol, say).
+func (a api) requestWith(method, path, contentType string, body []byte, headers map[string]string) (int, []byte, http.Header, error) {
 	var reader io.Reader
 	if body != nil {
 		reader = bytes.NewReader(body)
@@ -362,6 +478,14 @@ func (a api) request(method, path, contentType string, body []byte) (int, []byte
 	}
 	if a.token != "" {
 		req.Header.Set("Authorization", "Bearer "+a.token)
+	}
+	forwarded(req.Header, a.addr)
+	for k, v := range headers {
+		if v == "" {
+			req.Header.Del(k)
+		} else {
+			req.Header.Set(k, v)
+		}
 	}
 	a.h.called(method, req.URL.Path)
 	resp, err := httpClient.Do(req)

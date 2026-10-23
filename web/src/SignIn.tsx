@@ -5,6 +5,12 @@
 // and a password for a returning member, then the advanced way in: a
 // credential an operator issued, for operators and scripts. The server
 // decides again whatever is sent; hiding a button is not enforcement.
+//
+// An operator signs in with a password and then a code from an authenticator
+// app (issue #714, design §5.3). A right password alone signs nobody in: the
+// page then shows the code's step and nothing of the server, and the step
+// ends at the challenge's five minutes. An operator's first setup, from a
+// token made on the host, is its own page (Setup.tsx), reached from here.
 import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { CreateAccount, type AccountProblem } from './CreateAccount';
@@ -21,23 +27,48 @@ const keepLine = 'You joined, but this browser will not let the page keep your s
 
 type Info = { readonly state: 'loading' } | { readonly state: 'ready'; readonly info: JoinInfoV1 } | { readonly state: 'unknown' };
 
+// What the page says of a setup token pasted where a credential goes: it is
+// not one, and is not sent as one.
+export const setupTokenLine = 'That is a setup token, not a credential. Use it under Set up an operator account.';
+const setupTokenPrefix = 'conch_setup_';
+
+// The code's step, while an operator's password was right (issue #714).
+export interface CodeStep {
+  readonly name: string;
+  readonly until: string;
+  readonly checking: boolean;
+  readonly line?: string;
+}
+
 export function SignIn({
   origin,
   notice,
   line,
   checking,
+  code,
   onSubmit,
   onPassword,
+  onCode,
+  onCodeOver,
   onForget,
   onJoined,
+  onSetup,
 }: {
   readonly origin: string;
   readonly notice: AuthNotice | null;
   // The page's own words for a refused password sign-in, in place of a notice.
   readonly line?: string;
   readonly checking: boolean;
+  // The code's step, when an operator's password was right.
+  readonly code?: CodeStep;
   readonly onSubmit: (credential: string) => void;
   readonly onPassword: (name: string, password: string) => void;
+  readonly onCode?: (code: string) => void;
+  // The code's step given up, by the person or by its time running out
+  // (over): the password comes first again.
+  readonly onCodeOver?: (over: boolean) => void;
+  // Opens an operator's setup from a host-made token.
+  readonly onSetup?: () => void;
   // Forgetting a stored sign-in that could not be checked (issue #469),
   // offered only when signing in was refused because of one.
   readonly onForget: () => void;
@@ -53,6 +84,7 @@ export function SignIn({
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<AccountProblem | null>(null);
   const [guestProblem, setGuestProblem] = useState<string | null>(null);
+  const [credentialLine, setCredentialLine] = useState<string | null>(null);
   const insecure = needsHttps(origin);
 
   useEffect(() => {
@@ -85,7 +117,15 @@ export function SignIn({
     // The field is emptied at once: the credential is held by the caller, not
     // by the page.
     input.value = '';
+    setCredentialLine(null);
     if (credential === '') {
+      input.focus();
+      return;
+    }
+    // A host-made setup token signs nobody in (issue #714): it is not sent
+    // as a credential, and the page says where it goes.
+    if (credential.startsWith(setupTokenPrefix)) {
+      setCredentialLine(setupTokenLine);
       input.focus();
       return;
     }
@@ -163,6 +203,10 @@ export function SignIn({
   const join = ready?.join;
   const passwordLogin = ready === null || ready.password_login;
   const shown = line ?? (notice === null ? '' : noticeText(notice));
+
+  if (code !== undefined) {
+    return <CodeSignIn origin={origin} step={code} insecure={insecure} onCode={onCode} onCodeOver={onCodeOver} />;
+  }
 
   return (
     <main className="signin">
@@ -272,6 +316,17 @@ export function SignIn({
       )}
       <section aria-labelledby="credential-heading" className="credential-signin">
         <h2 id="credential-heading">Operators and scripts</h2>
+        <p className="hint">
+          An operator signs in above, with a name, a password and a code from an authenticator app. A credential pasted here
+          is a script’s: no password or code is checked, so it is never an operator’s sign-in.
+        </p>
+        {onSetup === undefined || insecure ? null : (
+          <div className="actions">
+            <button type="button" onClick={onSetup}>
+              Set up an operator account
+            </button>
+          </div>
+        )}
         <form onSubmit={submit}>
           <label htmlFor="credential">Credential</label>
           <p id="credential-help" className="hint">
@@ -295,7 +350,122 @@ export function SignIn({
               Forget the stored sign-in
             </button>
           )}
+          <p role="status" className="notice">
+            {credentialLine ?? ''}
+          </p>
         </form>
+      </section>
+      <ServerVersion className="hint" />
+    </main>
+  );
+}
+
+// typedCode is a typed code as it is sent: six digits, as an authenticator
+// shows them, spaces allowed between; null for anything else.
+export function typedCode(typed: string): string | null {
+  const digits = typed.replace(/\s+/g, '');
+  return new RegExp(`^\\d{${String(api.codeDigits)}}$`).test(digits) ? digits : null;
+}
+
+// CodeSignIn is the second step of an operator's sign-in: the code from the
+// authenticator app, for the name whose password was right. Nothing else of
+// the page is shown, and nobody is signed in until the code is accepted. The
+// code is in its field alone, never in the page's state, and the field is
+// emptied as it is sent. The step ends by itself when the challenge does.
+function CodeSignIn({
+  origin,
+  step,
+  insecure,
+  onCode,
+  onCodeOver,
+}: {
+  readonly origin: string;
+  readonly step: CodeStep;
+  readonly insecure: boolean;
+  readonly onCode: ((code: string) => void) | undefined;
+  readonly onCodeOver: ((over: boolean) => void) | undefined;
+}) {
+  const field = useRef<HTMLInputElement>(null);
+  const [local, setLocal] = useState<string | null>(null);
+
+  useEffect(() => {
+    field.current?.focus();
+  }, [step.line]);
+
+  // Out of time, the challenge is of no more use: the password comes first
+  // again, before a code is typed in vain.
+  useEffect(() => {
+    const wait = Math.min(Math.max(0, Date.parse(step.until) - Date.now()), 2 ** 31 - 1);
+    const timer = window.setTimeout(() => onCodeOver?.(true), wait);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [step.until, onCodeOver]);
+
+  function send(event: SyntheticEvent) {
+    event.preventDefault();
+    const input = field.current;
+    if (input === null || step.checking) return;
+    const code = typedCode(input.value);
+    input.value = '';
+    if (code === null) {
+      setLocal(`Type the ${String(api.codeDigits)} digits your authenticator app shows for this server.`);
+      input.focus();
+      return;
+    }
+    setLocal(null);
+    onCode?.(code);
+  }
+
+  const until = new Date(step.until);
+  return (
+    <main className="signin">
+      <h1>Conch</h1>
+      <p>
+        Server: <code>{origin}</code>
+      </p>
+      <section aria-labelledby="code-heading">
+        <h2 id="code-heading">Sign in: your code</h2>
+        {insecure ? (
+          <p className="notice insecure">{insecureLine}</p>
+        ) : (
+          <form onSubmit={send}>
+            <p>
+              The password for <strong>{step.name}</strong> was right. You are not signed in yet: type the code your
+              authenticator app shows now.
+            </p>
+            <label htmlFor="signin-code">Code from your authenticator app</label>
+            <input
+              id="signin-code"
+              ref={field}
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              aria-describedby="signin-code-help"
+            />
+            <p id="signin-code-help" className="hint">
+              This step ends at <time dateTime={step.until}>{until.toLocaleTimeString()}</time>; after that, sign in with
+              your password again. Lost your authenticator? Recovery happens on the server’s host: conchd operator recover.
+            </p>
+            <button type="submit" aria-busy={step.checking}>
+              {step.checking ? 'Checking…' : 'Sign in'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onCodeOver?.(false);
+              }}
+            >
+              Start again
+            </button>
+          </form>
+        )}
+        <p role="alert" className="notice">
+          {local ?? step.line ?? ''}
+        </p>
       </section>
       <ServerVersion className="hint" />
     </main>

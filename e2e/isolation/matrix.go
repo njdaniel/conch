@@ -71,6 +71,8 @@ type probe struct {
 	// frame waits, once upgraded, for the socket's first frame, the
 	// document it sends on connect, and answers with it as the body.
 	frame bool
+	// headers replace the client's own (requestWith); "" removes one.
+	headers map[string]string
 }
 
 // row is one line of the matrix.
@@ -218,7 +220,7 @@ func matrixRows() []row {
 		{route: "POST /v1/login", what: "signs in as an A member with a password of her own", pick: aMemberName,
 			want: answer{http.StatusUnauthorized, schema.ErrorCodeAuthFailed},
 			probe: func(_ *world, s subject) probe {
-				return post("/v1/login", schema.LoginRequestV1{Name: s.name, Password: "a password of the prober's own"})
+				return post("/v1/login", schema.LoginRequestV1{Name: s.name, Password: proberLoginPassword})
 			}},
 		// Passwords (issue #708). B presents the operator's sign-in link for
 		// an A member as her own enrollment proof, and as a reset: a link is
@@ -242,24 +244,24 @@ func matrixRows() []row {
 				if !strings.HasPrefix(proof, schema.SignInLinkCodePrefix) {
 					proof = schema.SignInLinkCodePrefix + strings.Repeat("Q", schema.SignInLinkCodeLength-len(schema.SignInLinkCodePrefix))
 				}
-				return post("/v1/password/mine", schema.SetPasswordRequestV1{Password: "a long password of the prober's own", Proof: proof})
+				return post("/v1/password/mine", schema.SetPasswordRequestV1{Password: proberPassword, Proof: proof})
 			}},
 		{route: "POST /v1/password/reset", what: "resets an A member's password with A's sign-in link", pick: aSignInCode,
 			want: answer{http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
 			probe: func(_ *world, s subject) probe {
-				return post("/v1/password/reset", schema.ResetPasswordRequestV1{Code: s.name, Password: "a long password of the prober's own"})
+				return post("/v1/password/reset", schema.ResetPasswordRequestV1{Code: s.name, Password: proberPassword})
 			}},
 		{route: "PUT /v1/password/mine", what: "changes her password with a wrong guess at the current one",
 			want:         answer{http.StatusConflict, schema.ErrorCodePasswordNotSet},
 			withPassword: answer{http.StatusUnauthorized, schema.ErrorCodeAuthFailed},
 			probe: func(*world, subject) probe {
-				return put("/v1/password/mine", schema.ChangePasswordRequestV1{Current: "a guess at somebody's password", Password: "a long password of the prober's own"})
+				return put("/v1/password/mine", schema.ChangePasswordRequestV1{Current: guessedPassword, Password: proberPassword})
 			}},
 		{route: "POST /v1/reauth", what: "proves her password with a wrong guess",
 			want:         answer{http.StatusConflict, schema.ErrorCodePasswordNotSet},
 			withPassword: answer{http.StatusUnauthorized, schema.ErrorCodeAuthFailed},
 			probe: func(*world, subject) probe {
-				return post("/v1/reauth", schema.ReauthRequestV1{Password: "a guess at somebody's password"})
+				return post("/v1/reauth", schema.ReauthRequestV1{Password: guessedPassword})
 			}},
 
 		// Messages, every version, search and threads.
@@ -500,12 +502,12 @@ func matrixRows() []row {
 		{route: "POST /v1/guest/convert", what: "creates an account with an A member's sign-in link as her permit", pick: aSignInCode,
 			want: answer{http.StatusForbidden, schema.ErrorCodeNotAGuest},
 			probe: func(_ *world, s subject) probe {
-				return post("/v1/guest/convert", schema.ConvertGuestRequestV1{Name: "a-name-of-her-own", Password: "a long password of the prober's own", Permit: s.name})
+				return post("/v1/guest/convert", schema.ConvertGuestRequestV1{Name: "a-name-of-her-own", Password: proberPassword, Permit: s.name})
 			}},
 		// Guest entry (issue #710). The front door answers anyone with the
-		// server's label and what it offers, nothing of A's (the two entry
-		// routes are exempt, below). The operator's guest routes are
-		// operators'.
+		// server's label and what it offers, nothing of A's (the entry routes
+		// are the newcomers' rows, guestrows.go). The operator's guest routes
+		// are operators'.
 		own("GET /v1/join", "reads the front door", func(*world, subject) probe { return get("/v1/join") }),
 		operator("GET /v1/join/settings", "reads the joining settings", nil, func(*world, subject) probe { return get("/v1/join/settings") }),
 		operator("PUT /v1/join/settings", "opens the bare address to guests in A's channel", aChannel, func(_ *world, s subject) probe {
@@ -651,20 +653,19 @@ func matrixRows() []row {
 	}
 }
 
-// exempt are the routes with no row, and why. Each is a route no group owns
-// anything behind.
+// exempt are the routes with no row, and why, each with the test of its own
+// authentication. Each is a route no group owns anything behind. (The entry
+// and code routes were here while every request of the run came from one
+// address and shared one redemption allowance; they are the newcomers' rows
+// now, each from an address of its own: entryRows, guestrows.go.)
 var exempt = map[string]string{
-	"GET /healthz":                   "takes no credential and answers the same to everyone: the server's health and version",
-	"/mcp":                           "the agents' surface, with its own bearer authentication and the manifest and membership gates; no B member is an agent (the MCP tests cover it)",
-	"POST /v1/hooks/{token}":         "authenticated by the hook's own URL token, which only an operator is shown",
-	"POST /v1/invites/preview":       "takes an invite code and answers only with what that code grants; B does not hold A's codes, and every other code answers the one invite_invalid (the revocation step checks a closed one)",
-	"POST /v1/invites/redeem":        "makes no account and reads nothing (#713, design §7.6 B1): every request, whatever its code, answers 409 password_required before the body is read, so it says nothing of any group's (the revocation step checks it with a closed link)",
-	"POST /v1/join/guest":            "takes no credential and names nothing of any group's: it starts a visit in the bare address's open channels, which this world never opens (guests_disabled); and it spends the per-address redemption allowance the world's own invite redemptions need, so a row per prober would run that allowance out",
-	"POST /v1/join/account":          "as Join as guest: takes no credential and names nothing of any group's. It makes an account in the bare address's open channels, which this world never opens, so every request is joining_closed before a name is looked at; and it spends the per-address redemption allowance the world's own invite redemptions need, so a row per prober would run that allowance out",
-	"POST /v1/invites/redeem-guest":  "as redeem: the code is the credential, and B holds none of A's. A malformed code is refused with invite_invalid by the handler's format check, before the store is reached; a well-formed one, with guests off as in this world, answers guests_disabled before it is looked up, and with guests on an unknown or closed one answers invite_invalid",
-	"POST /v2/invites/redeem":        "as preview, with a name and a password: the code is the credential, B holds none of A's, and a closed or unknown one answers invite_invalid before anything is hashed (the revocation step checks a closed one)",
-	"POST /v1/sign-in-links/preview": "takes a sign-in link's code and answers only with the name it signs in as; only an operator is shown a code, and A's are never given to B",
-	"POST /v1/sign-in-links/redeem":  "as preview: the code is the credential, made by an operator for one principal; B holds no code of A's",
+	"GET /healthz": "takes no credential and answers the same to everyone: the server's health and version " +
+		"(internal/server/server_test.go TestHealthzOK; auth_test.go TestRouteTable holds it exempt)",
+	"/mcp": "the agents' surface, with its own bearer authentication and the manifest and membership gates; no B member is an agent, " +
+		"and a guest's credential is refused there (the guests' phase, guestrevoke.go checkMCPClosed: the one 401, the same as for a token nobody was issued; internal/server/mcp_test.go " +
+		"TestMCPRejectsInvalidCredentialsIdentically for a person's credential, TestMCPRejectsDisabledAgent, mcp_audience_test.go TestMCPAudienceAuthorizationMatrix)",
+	"POST /v1/hooks/{token}": "authenticated by the hook's own URL token, which only an operator is shown " +
+		"(internal/server/hooks_test.go TestHookIngestErrors; auth_test.go TestHookIngestExemptUnderRequired)",
 }
 
 // result is what one request was answered.
@@ -708,7 +709,7 @@ func (w *world) send(a api, p probe) (result, error) {
 		}
 		raw, contentType = encoded, "application/json"
 	}
-	status, body, header, err := a.request(p.method, p.path, contentType, raw)
+	status, body, header, err := a.requestWith(p.method, p.path, contentType, raw, p.headers)
 	return result{status: status, body: body, header: header}, err
 }
 
@@ -760,10 +761,10 @@ func (w *world) runRow(r row) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	if leaks := w.marks.leaks(got.body, a); len(leaks) > 0 {
+	if leaks := w.leaks(got.body, a); len(leaks) > 0 {
 		return 1, fmt.Errorf("status %d, and the body holds %s", got.status, strings.Join(leaks, "; "))
 	}
-	if leaks := w.marks.headerLeaks(got.header, a); len(leaks) > 0 {
+	if leaks := w.headerLeaks(got.header, a); len(leaks) > 0 {
 		return 1, fmt.Errorf("status %d, and the response headers hold %s", got.status, strings.Join(leaks, "; "))
 	}
 	success := got.status >= 200 && got.status <= 299 || (p.socket && got.status == http.StatusSwitchingProtocols)
@@ -812,25 +813,36 @@ func (w *world) runRow(r row) (int, error) {
 // checkRefusal requires the status and code of want, a body that is exactly
 // an error document, and a message with no number but the one asked about.
 func checkRefusal(got result, want answer, a asked) error {
-	if got.status != want.status {
-		return fmt.Errorf("status %d %s, want %d %s", got.status, strings.TrimSpace(string(got.body)), want.status, want.code)
-	}
-	if got.body == nil && want.status == http.StatusSwitchingProtocols {
-		return nil
-	}
-	var e schema.Error
-	dec := json.NewDecoder(bytes.NewReader(got.body))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&e); err != nil {
-		return fmt.Errorf("status %d with a body that is not exactly an error document (%w): %s", got.status, err, strings.TrimSpace(string(got.body)))
-	}
-	if e.Code != want.code {
-		return fmt.Errorf("status %d code %q (%q), want code %q", got.status, e.Code, e.Message, want.code)
+	e, err := checkAnswer(got, want)
+	if err != nil || e.Message == "" {
+		return err
 	}
 	if extra := numbersBeyond(e.Message, a); len(extra) > 0 {
 		return fmt.Errorf("the error message %q holds numbers %v beyond the one asked about", e.Message, extra)
 	}
 	return nil
+}
+
+// checkAnswer is checkRefusal without the numbers check, for a refusal of a
+// rule's that may name its own bounds (a password's length) and names
+// nothing of anyone's. It returns the error document.
+func checkAnswer(got result, want answer) (schema.Error, error) {
+	var e schema.Error
+	if got.status != want.status {
+		return e, fmt.Errorf("status %d %s, want %d %s", got.status, strings.TrimSpace(string(got.body)), want.status, want.code)
+	}
+	if got.body == nil && want.status == http.StatusSwitchingProtocols {
+		return e, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(got.body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&e); err != nil {
+		return e, fmt.Errorf("status %d with a body that is not exactly an error document (%w): %s", got.status, err, strings.TrimSpace(string(got.body)))
+	}
+	if e.Code != want.code {
+		return e, fmt.Errorf("status %d code %q (%q), want code %q", got.status, e.Code, e.Message, want.code)
+	}
+	return e, nil
 }
 
 // normalize sets aside the name and id a request named, so that the answers
@@ -848,34 +860,7 @@ func normalize(body []byte, s subject) []byte {
 
 // checkReadClamp is the read-state row's own check: a mark past every message
 // is stored as the newest message B can see in the channel.
-func checkReadClamp(w *world, a api) error {
-	channel := w.b.main()
-	var mark schema.ReadStateV1
-	if err := a.call(http.MethodPut, "/v1/channels/"+channel+"/read-state", schema.MarkReadRequestV1{LastReadID: w.ghost().id}, &mark); err != nil {
-		return err
-	}
-	if leaks := w.marks.leaks(mustJSON(mark), asked{}); len(leaks) > 0 {
-		return fmt.Errorf("the read mark holds %s", strings.Join(leaks, "; "))
-	}
-	var newest int64
-	for after := int64(0); ; {
-		var page schema.ListMessagesResponseV2
-		if err := a.call(http.MethodGet, fmt.Sprintf("/v2/channels/%s/messages?after=%d&limit=100", channel, after), nil, &page); err != nil {
-			return err
-		}
-		for _, m := range page.Messages {
-			newest = max(newest, m.ID)
-		}
-		if page.NextAfter <= after {
-			break
-		}
-		after = page.NextAfter
-	}
-	if mark.LastReadID != newest {
-		return fmt.Errorf("a mark at %d is stored as %d, want %d, the newest message B can see in %s", w.ghost().id, mark.LastReadID, newest, channel)
-	}
-	return nil
-}
+func checkReadClamp(w *world, a api) error { return readClampIn(w, a, w.b.main()) }
 
 // checkOwnSignIns is the sign-in list's own check: what B is shown is exactly
 // her live credentials as the operator sees them, with the one the request

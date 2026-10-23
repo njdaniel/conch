@@ -20,11 +20,16 @@ import type { WhoAmIResponseV1 } from './schema/principal';
 import { SignIn } from './SignIn';
 import { YourSignIns } from './SignIns';
 import { SignInLink } from './SignInLink';
-import { authReducer, initialAuth } from './state/auth';
+import { AddDevice } from './AddDevice';
+import { GuestSettings } from './GuestSettings';
+import { Reauth } from './Reauth';
+import { PasswordSettings } from './Settings';
+import { Setup } from './Setup';
+import { authReducer, initialAuth, keptAcross, operatorSession } from './state/auth';
 import { channelsReducer, initialChannels, type ChannelsAction } from './state/channels';
 import { connectionReducer } from './state/connection';
 import { whisperNotice } from './Composer';
-import { draftFor, draftsReducer, initialDrafts, initialTargets, targetFor, targetsReducer } from './state/drafts';
+import { draftFor, draftsReducer, initialDrafts, initialTargets, targetFor, targetsReducer, type Drafts } from './state/drafts';
 import type { Audience } from './schema/message';
 import { canLoadOlder, chatFor, chatReducer, initialChat, lastId, oldestId, ordered, type ChatAction } from './state/messages';
 import { useLiveChannel } from './useLiveChannel';
@@ -131,8 +136,27 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     };
   }, [signedIn, attempt, dispatchChannels]);
 
+  // What was being typed when a sign-in ended by itself (issue #714: an
+  // operator's session runs out after an hour without use, or any
+  // credential is revoked mid-sentence), kept in memory for the same person
+  // signing back in, and for nobody else. A sign-out the person chose
+  // forgets it.
+  const kept = useRef<{ readonly principal: number; readonly drafts: Drafts } | null>(null);
+  const draftsNow = useRef(drafts);
+  useEffect(() => {
+    draftsNow.current = drafts;
+  }, [drafts]);
+  const lastSignedIn = useRef<number | null>(null);
+  const endedNotice = auth.phase === 'signedOut' ? auth.notice : null;
+
   useEffect(() => {
     if (auth.phase === 'signedOut') {
+      // Once, as the sign-in ends; the notice is the one it ended with.
+      if (lastSignedIn.current !== null) {
+        const typed = draftsNow.current;
+        kept.current = keptAcross(endedNotice) && Object.keys(typed).length > 0 ? { principal: lastSignedIn.current, drafts: typed } : null;
+        lastSignedIn.current = null;
+      }
       dispatchConnection({ type: 'closed' });
       dispatchChannels({ type: 'reset' });
       dispatchChat({ type: 'reset' });
@@ -367,8 +391,13 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             whisperNoted.current = true;
             dispatchTargets({ type: 'whispered', channel: name, sent: audience.principal_ids, note });
           }
-        } else if (result.outcome === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
-        else {
+        } else if (result.outcome === 'unauthorized') {
+          // The sign-in ended under the message, which was not stored: it
+          // goes back into the draft, kept for the same person signing in
+          // again (issue #714), unless something else was typed since.
+          if ((draftsNow.current[name] ?? '') === '') dispatchDrafts({ type: 'edit', channel: name, text: body });
+          dispatchAuth({ type: 'unauthorized' });
+        } else {
           // A refusal stays as a Failed line with Retry and Dismiss, so the text
           // is never lost; the server's own line is shown beside the composer.
           if (result.outcome === 'refused') dispatchTargets({ type: 'refused', channel: name, line: result.reason });
@@ -447,6 +476,70 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       window.clearTimeout(timer);
     };
   }, [visitEnds]);
+
+  // Signed in (issue #714): drafts kept from this person's last sign-in,
+  // which ended by itself, come back; anyone else's are dropped.
+  useEffect(() => {
+    if (principalId === null) return;
+    lastSignedIn.current = principalId;
+    const was = kept.current;
+    kept.current = null;
+    if (was !== null && was.principal === principalId) dispatchDrafts({ type: 'restore', drafts: was.drafts });
+  }, [principalId]);
+
+  // An operator's session ends at its twelve hours (issue #714, design
+  // §5.3): when it comes, the page asks who it is, and the server's 401
+  // signs out with the operator's own words, as a visit's hard end does. An
+  // hour without use ends it too, which the next request learns.
+  const sessionEnds = principal !== null && operatorSession(principal) ? (principal.auth?.expires_at ?? null) : null;
+  useEffect(() => {
+    if (sessionEnds === null) return;
+    const wait = Math.min(Math.max(0, Date.parse(sessionEnds) - Date.now()) + 1_000, 2 ** 31 - 1);
+    const timer = window.setTimeout(() => {
+      void api.whoAmI().then((result) => {
+        if (!result.ok && result.failure === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
+      });
+    }, wait);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [sessionEnds]);
+
+  // The recent proof (issue #714): a call answered reauth_required asks
+  // here, over the page, and api.ts sends it again once the proof stands.
+  // Whatever form asked stays as it was underneath. Leaving the lobby
+  // answers a question still open with no.
+  const [asking, setAsking] = useState(false);
+  const answer = useRef<((proved: boolean) => void) | null>(null);
+  const finishReauth = useCallback((proved: boolean) => {
+    const resolve = answer.current;
+    answer.current = null;
+    setAsking(false);
+    resolve?.(proved);
+  }, []);
+  useEffect(() => {
+    if (!signedIn) return;
+    api.onReauthRequired(
+      () =>
+        new Promise<boolean>((resolve) => {
+          answer.current = resolve;
+          setAsking(true);
+        }),
+    );
+    return () => {
+      api.onReauthRequired(null);
+      finishReauth(false);
+    };
+  }, [signedIn, finishReauth]);
+
+  // whoami read again after a change to the person's own account (a
+  // password set or changed).
+  const refreshWho = useCallback(() => {
+    void api.whoAmI().then((result) => {
+      if (result.ok) dispatchAuth({ type: 'refreshed', principal: result.value });
+      else if (result.failure === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
+    });
+  }, []);
 
   // End visit: the session is ended first, as for a sign-out, then the
   // visit. Only the server's word that it ended signs the guest out here.
@@ -586,16 +679,56 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           dispatchAuth({ type: 'refused', line: 'This browser will not let the page keep your sign-in. Allow this site to keep data, then sign in again.' });
           return;
         case 'totp':
-          dispatchAuth({
-            type: 'refused',
-            line: 'This account also needs a code from an authenticator app, which this page does not take yet. Sign in with a credential, under Operators and scripts, instead.',
-          });
+          // A right password for an account that needs a code: nobody is
+          // signed in yet (issue #714).
+          dispatchAuth({ type: 'challenged', name, until: result.expiresAt });
           return;
         default:
           dispatchAuth({ type: 'refused', line: passwordRefusal(result) });
       }
     });
   }, []);
+
+  // An operator's code, the second step (issue #714). A code that is not
+  // right leaves the step open for the next; a step out of time or of tries
+  // goes back to the password.
+  const submitCode = useCallback((code: string) => {
+    dispatchAuth({ type: 'codeSent' });
+    void api.signInWithCode(code).then((result) => {
+      if (result.ok) {
+        dispatchAuth({ type: 'verified', principal: result.value });
+        return;
+      }
+      switch (result.failure) {
+        case 'over':
+          dispatchAuth({ type: 'signOut', notice: 'codeOver' });
+          return;
+        case 'held':
+          dispatchAuth({ type: 'failed', failure: 'held' });
+          return;
+        case 'unchecked':
+          void api.whoAmI().then((who) => {
+            if (who.ok) dispatchAuth({ type: 'verified', principal: who.value });
+            else dispatchAuth({ type: 'failed', failure: who.failure });
+          });
+          return;
+        case 'unkept':
+          dispatchAuth({ type: 'refused', line: 'This browser will not let the page keep your sign-in. Allow this site to keep data, then sign in again.' });
+          return;
+        default:
+          dispatchAuth({ type: 'codeRefused', line: codeRefusal(result) });
+      }
+    });
+  }, []);
+
+  const codeOver = useCallback((over: boolean) => {
+    api.cancelCodeSignIn();
+    dispatchAuth({ type: 'signOut', notice: over ? 'codeOver' : null });
+  }, []);
+
+  // An operator's setup from a host-made token (issue #714) is a page of its
+  // own, reached from the sign-in page.
+  const [settingUp, setSettingUp] = useState(false);
 
   // Forgetting a stored sign-in that could not be checked (issue #469): it is
   // revoked if the server answers, then dropped, and signing in is open again.
@@ -648,7 +781,39 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     );
   }
 
+  if (settingUp && (auth.phase === 'signedOut' || auth.phase === 'checking')) {
+    return (
+      <Setup
+        origin={origin}
+        onDone={() => {
+          setSettingUp(false);
+          dispatchAuth({ type: 'signOut', notice: 'setupDone' });
+        }}
+        onBack={() => {
+          setSettingUp(false);
+        }}
+      />
+    );
+  }
+
   switch (auth.phase) {
+    case 'code':
+      return (
+        <SignIn
+          origin={origin}
+          notice={null}
+          checking={false}
+          code={{ name: auth.name, until: auth.until, checking: auth.checking, ...(auth.line === undefined ? {} : { line: auth.line }) }}
+          onSubmit={submit}
+          onPassword={submitPassword}
+          onCode={submitCode}
+          onCodeOver={codeOver}
+          onForget={forgetStored}
+          onJoined={(who) => {
+            joined(who, undefined);
+          }}
+        />
+      );
     case 'restoring':
       return (
         <main className="signin">
@@ -669,6 +834,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           onForget={forgetStored}
           onJoined={(who) => {
             joined(who, undefined);
+          }}
+          onSetup={() => {
+            setSettingUp(true);
           }}
         />
       );
@@ -730,17 +898,51 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             // A person renames themselves; an agent's name is an operator's to
             // set, and a guest's is its handle (issue #713).
             auth.principal.kind === 'human' && visit === null ? (
-              <ChangeName
-                id={auth.principal.id}
-                name={auth.principal.name}
-                onRenamed={(p) => {
-                  dispatchAuth({ type: 'renamed', name: p.name });
-                }}
-                onUnauthorized={onUnauthorized}
-              />
+              <>
+                <ChangeName
+                  id={auth.principal.id}
+                  name={auth.principal.name}
+                  onRenamed={(p) => {
+                    dispatchAuth({ type: 'renamed', name: p.name });
+                  }}
+                  onUnauthorized={onUnauthorized}
+                />
+                {auth.principal.role === 'operator' && !operatorSession(auth.principal) ? (
+                  <p className="hint">
+                    This browser uses a script’s credential, not your sign-in: no password or code was checked, and it does
+                    not end after an hour without use. Sign out, and sign in with your name, password and a code.
+                  </p>
+                ) : null}
+                {/* A server that predates passwords says nothing of them. */}
+                {auth.principal.auth === undefined ? null : (
+                  <PasswordSettings who={auth.principal} insecure={needsHttps(origin)} onChanged={refreshWho} onUnauthorized={onUnauthorized} />
+                )}
+              </>
             ) : null
           }
-          {...(visit === null ? { signIns: (endThis: () => void) => <YourSignIns onEndThis={endThis} onUnauthorized={onUnauthorized} /> } : {})}
+          {...(visit === null
+            ? {
+                signIns: (endThis: () => void) => (
+                  <YourSignIns
+                    onEndThis={endThis}
+                    onUnauthorized={onUnauthorized}
+                    // Add a device is a member's alone (design §6.2): an
+                    // operator signs in elsewhere with a password and a code.
+                    addDevice={
+                      auth.principal.kind === 'human' && auth.principal.role === 'member' && auth.principal.auth !== undefined ? (
+                        <AddDevice origin={origin} insecure={needsHttps(origin)} onUnauthorized={onUnauthorized} />
+                      ) : null
+                    }
+                  />
+                ),
+              }
+            : {})}
+          admin={auth.principal.role === 'operator' ? <GuestSettings channels={channels.channels} onUnauthorized={onUnauthorized} /> : null}
+          overlay={
+            asking ? (
+              <Reauth operator={auth.principal.role === 'operator'} insecure={needsHttps(origin)} onDone={finishReauth} onUnauthorized={onUnauthorized} />
+            ) : null
+          }
           report={<ReportProblem onUnauthorized={onUnauthorized} />}
           voice={
             <VoiceStatus
@@ -854,6 +1056,20 @@ function passwordRefusal(result: api.InviteRefusal): string {
     case 'auth_failed':
     case 'invalid_request':
       return 'The name or password is not right.';
+    case 'rate_limited':
+      return `Too many tries. Try again in ${waitWords(result.retryAfter)}.`;
+    default:
+      return refusalLine(result);
+  }
+}
+
+// codeRefusal is the line shown for a refused code, while the step is open.
+function codeRefusal(result: api.InviteRefusal): string {
+  if (result.failure === 'network') return 'Cannot reach the server. Try the code again.';
+  switch (result.code) {
+    case 'auth_failed':
+    case 'invalid_request':
+      return 'That code is not right. Type the code the app shows now.';
     case 'rate_limited':
       return `Too many tries. Try again in ${waitWords(result.retryAfter)}.`;
     default:

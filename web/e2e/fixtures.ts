@@ -58,6 +58,12 @@ export const test = base.extend<{
         for (const where of await leaks(page, [...allTokens(world), ...secrets])) found.push(where);
       }
     } finally {
+      // Each page is closed before its context, as a person closes a tab: its
+      // pagehide ends the session the page started. Closing the context alone
+      // fires no pagehide and leaves the session live until conchd marks it
+      // offline, counted against the credential's budget of live sessions,
+      // which a spec run again and again soon spends (issue #802).
+      for (const { page } of people) if (!page.isClosed()) await page.close();
       for (const { context } of people) await context.close();
     }
     expect(found, 'a credential in the address bar, in performance.getEntries() or in the page').toEqual([]);

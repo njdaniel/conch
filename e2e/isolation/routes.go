@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -44,13 +45,19 @@ func coverage(table []routetable.Route, rows []row, exempt map[string]string) (m
 	return missing, stale
 }
 
+// allRows is every table of rows: B's members', B's agent's, the plaza's
+// guests' and the newcomers'.
+func allRows() []row {
+	return slices.Concat(matrixRows(), agentRows(), guestRows(), entryRows())
+}
+
 // checkCoverage reads the table and fails on any gap.
 func (h *harness) checkCoverage() ([]routetable.Route, error) {
 	table, err := routetable.Read(h.repo)
 	if err != nil {
 		return nil, err
 	}
-	missing, stale := coverage(table, append(matrixRows(), agentRows()...), exempt)
+	missing, stale := coverage(table, allRows(), exempt)
 	var problems []string
 	if len(missing) > 0 {
 		problems = append(problems, "routes with no row in the isolation matrix (e2e/isolation/matrix.go) and no exemption: "+strings.Join(missing, ", "))

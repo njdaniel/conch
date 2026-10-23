@@ -64,6 +64,7 @@ func dialWithTicket(a api, what, path string, q url.Values, ticket string) (*fee
 }
 
 func dial(a api, what, path string, q url.Values, hdr http.Header) (*feed, refused, error) {
+	forwarded(hdr, a.addr)
 	a.h.called(http.MethodGet, path)
 	ctx, cancel := context.WithTimeout(stopCtx, 10*time.Second)
 	defer cancel()
@@ -241,8 +242,8 @@ func (s *bSockets) checkQuiet(w *world, c controls) error {
 		}
 		frames := f.received()
 		for i, fr := range frames {
-			if leaks := w.marks.leaks(fr, asked{}); len(leaks) > 0 {
-				return fmt.Errorf("frame %d on %s holds A's %s", i, f.what, strings.Join(leaks, "; "))
+			if leaks := w.leaks(fr, asked{}); len(leaks) > 0 {
+				return fmt.Errorf("frame %d on %s holds %s", i, f.what, strings.Join(leaks, "; "))
 			}
 		}
 		if ended, _ := f.ended(); ended {

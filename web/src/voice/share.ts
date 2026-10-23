@@ -116,6 +116,42 @@ export type ShareState =
 
 export const idleShare: ShareState = { kind: 'idle', ended: null };
 
+// Whether this tab is sharing its screen (issue #714), for the pages that
+// show a secret once (Add a device's link, an authenticator's setup key) and
+// refuse to while it is: a share of this tab's in any state but idle, from
+// the claim before the picker opens to the end of its stop, since the
+// picker may be choosing a screen that shows this page, and a capture lives
+// until it is stopped. A share that never went back to idle (its connection
+// let go mid-share) still counts, which errs towards refusing.
+//
+// What it cannot know: another tab, another browser or another application
+// capturing or sharing the screen, a screen recorder, a remote-desktop
+// session or someone looking over a shoulder. The browser tells a page none
+// of these. The pages that ask say so beside the secret.
+const sharing = new Set<ScreenShare>();
+const sharingWatchers = new Set<() => void>();
+
+function noteSharing(share: ScreenShare, state: ShareState): void {
+  const was = sharing.size > 0;
+  if (state.kind === 'idle') sharing.delete(share);
+  else sharing.add(share);
+  if (was !== sharing.size > 0) for (const watcher of sharingWatchers) watcher();
+}
+
+// tabSharing says whether a share of this tab is under way.
+export function tabSharing(): boolean {
+  return sharing.size > 0;
+}
+
+// onTabSharing calls back each time tabSharing changes, and returns the
+// function that stops it.
+export function onTabSharing(callback: () => void): () => void {
+  sharingWatchers.add(callback);
+  return () => {
+    sharingWatchers.delete(callback);
+  };
+}
+
 // How long a share waits to be resumed after its room was renewed: longer
 // than conchd's sweep takes to delete an old room whose deletion failed (30
 // s), and a reconnect after it. Past it the capture is stopped.
@@ -198,6 +234,7 @@ export class ScreenShare {
 
   private set(state: ShareState): void {
     this.state = state;
+    noteSharing(this, state);
     this.onChange(state);
   }
 
