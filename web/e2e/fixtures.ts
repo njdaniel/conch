@@ -72,9 +72,31 @@ export { expect };
 export async function signIn(page: Page, world: Pick<World, 'appUrl'>, token: string, name: string): Promise<void> {
   await page.goto(world.appUrl);
   await page.getByLabel('Credential').fill(token);
-  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Use credential' }).click();
   await expect(statusLine(page)).toContainText(name);
   await expect(statusLine(page)).toContainText('Connected');
+}
+
+// The password the suite's new accounts choose (issue #713: an invite or the
+// bare address makes an account with a name and a password together). It
+// passes the server's policy for every name the specs use.
+export const accountPassword = 'a long enough passphrase for the browser suite';
+
+// fillAccount fills the account form, a name and a password together, and
+// sends it with the button the form shows ('Create account', or 'Create my
+// account' for a guest's). It waits for nothing: the caller says what comes.
+export async function fillAccount(page: Page, name: string, password = accountPassword, button = 'Create account'): Promise<void> {
+  await page.getByLabel('Your name').fill(name);
+  await page.getByLabel('Choose a password').fill(password);
+  await page.getByLabel('Type the password again').fill(password);
+  await page.getByRole('button', { name: button, exact: true }).click();
+}
+
+// signInWithPassword signs a returning member in on the sign-in page.
+export async function signInWithPassword(page: Page, name: string, password = accountPassword): Promise<void> {
+  await page.getByLabel('Name', { exact: true }).fill(name);
+  await page.getByLabel('Password', { exact: true }).fill(password);
+  await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 }
 
 export const statusLine = (page: Page) => page.getByRole('status', { name: 'Status' });

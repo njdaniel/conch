@@ -3,6 +3,7 @@
 // still listed, as offline; a principal only the roster knows is added after
 // the members (a member list read a moment earlier does not have it yet).
 // Each principal appears once.
+import { memberName } from '../guestName';
 import type { ChannelMemberV1 } from '../schema/channel';
 import type { PrincipalKind } from '../schema/principal';
 import type { SessionState, SessionStatus, SessionV1 } from '../schema/session';
@@ -84,7 +85,7 @@ export function joinMembers(members: readonly ChannelMemberV1[], sessions: reado
   const order: number[] = [];
   for (const m of [...members].sort((a, b) => a.principal_id - b.principal_id)) {
     if (byPrincipal.has(m.principal_id)) continue;
-    byPrincipal.set(m.principal_id, { name: entryName(m.name, m.principal_id), kind: m.kind ?? 'human', sessions: [] });
+    byPrincipal.set(m.principal_id, { name: entryName(memberName(m), m.principal_id), kind: m.kind ?? 'human', sessions: [] });
     order.push(m.principal_id);
   }
   for (const s of sessions) {

@@ -401,7 +401,7 @@ func TestHideClosesSocketsAndVoice(t *testing.T) {
 		t.Fatalf("create = %d %s", rec.Code, rec.Body)
 	}
 	link := decodeBody[schema.CreateInviteResponseV1](t, rec)
-	rec = f.do(t, "POST", "/v1/invites/redeem", "", inviteJSON(t, schema.RedeemInviteRequestV1{Code: link.Code, Name: "wren"}))
+	rec = secureDo(t, f.authFixture, "POST", "/v2/invites/redeem", "", redeemJSON(t, link.Code, "wren"))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("redeem = %d %s", rec.Code, rec.Body)
 	}

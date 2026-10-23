@@ -36,7 +36,7 @@ test('C695 an operator makes a channel, sees it, reloads and still sees it, with
   const voice = voiceRequests(page);
   await page.goto(world.appUrl);
   await page.getByLabel('Credential').fill(world.tokens.operator);
-  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');
 

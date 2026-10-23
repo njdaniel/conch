@@ -49,8 +49,8 @@ func TestInviteLimitsRealValuesRefuse(t *testing.T) {
 		body  func(*testing.T) string
 		allow int
 	}{
-		{"/v1/invites/redeem", func(t *testing.T) string {
-			return inviteJSON(t, schema.RedeemInviteRequestV1{Code: fakeInviteCode, Name: "someone"})
+		{"/v2/invites/redeem", func(t *testing.T) string {
+			return redeemJSON(t, fakeInviteCode, "someone")
 		}, 10},
 		{"/v1/invites/preview", func(t *testing.T) string {
 			return inviteJSON(t, schema.InvitePreviewRequestV1{Code: fakeInviteCode})
@@ -75,9 +75,9 @@ func TestInviteLimitsRealValuesRefuse(t *testing.T) {
 func TestInviteLimitsRelaxedDoNotRefuse(t *testing.T) {
 	f := newInviteFixture(t, Config{})
 	f.srv.setInviteLimits(inviteLimitsFor(Config{TestRelaxInviteLimits: true}))
-	body := inviteJSON(t, schema.RedeemInviteRequestV1{Code: fakeInviteCode, Name: "someone"})
+	body := redeemJSON(t, fakeInviteCode, "someone")
 	for i := range 200 {
-		if rec := f.send(t, "POST", "/v1/invites/redeem", "", body, "198.51.100.1:1000"); rec.Code != http.StatusNotFound {
+		if rec := f.send(t, "POST", "/v2/invites/redeem", "", body, "198.51.100.1:1000"); rec.Code != http.StatusNotFound {
 			t.Fatalf("attempt %d = %d %s", i+1, rec.Code, rec.Body)
 		}
 	}

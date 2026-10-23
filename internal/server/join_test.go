@@ -923,7 +923,7 @@ func TestGuestEntrySharesInviteLimits(t *testing.T) {
 	inv := f.createInvite(t, f.rootTok, openLink("red"))
 	const remote = "198.51.100.40:1"
 	mustJoined(t, f.joinGuest(t, "", remote))
-	if rec := f.send(t, "POST", "/v1/invites/redeem", "", inviteJSON(t, schema.RedeemInviteRequestV1{Code: inv.Code, Name: "newcomer"}), remote); rec.Code != http.StatusCreated {
+	if rec := f.send(t, "POST", "/v2/invites/redeem", "", redeemJSON(t, inv.Code, "newcomer"), remote); rec.Code != http.StatusCreated {
 		t.Fatalf("redeem = %d %s", rec.Code, rec.Body)
 	}
 	assertErrorBody(t, f.redeemGuest(t, inv.Code, "", remote), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)

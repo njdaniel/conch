@@ -35,14 +35,16 @@ function useWide(): boolean {
   return wideNow;
 }
 
-// What signing out costs, said before it is done (issue #493). A person who
-// joined by invite has no password: once their sign-in is revoked, only an
-// operator can let them back into this account.
+// What signing out costs, said before it is done (issue #493). A person
+// with no password (one who joined before passwords, or was made by an
+// operator) can only be let back into this account by an operator; one with
+// a password signs in again with it (issue #713).
 export const signOutWarning = 'To come back into this account, you will need a new link from an operator.';
-const signOutQuestion = {
-  here: `Sign out of this browser? ${signOutWarning}`,
-  everywhere: `Sign out on every device, this browser included? ${signOutWarning}`,
-} as const;
+export const passwordSignOutWarning = 'To come back into this account, sign in again with your name and password.';
+function signOutQuestion(which: 'here' | 'everywhere', passwordSet: boolean): string {
+  const warning = passwordSet ? passwordSignOutWarning : signOutWarning;
+  return which === 'here' ? `Sign out of this browser? ${warning}` : `Sign out on every device, this browser included? ${warning}`;
+}
 
 // The lobby: a top bar (who, which server, the connection, Invite, Members,
 // Settings), channels on the left, the open channel in the middle, the
@@ -71,6 +73,9 @@ export function Lobby({
   onSignOut,
   onSignOutEverywhere,
   signOutProblem,
+  passwordSet = false,
+  banner,
+  visit,
 }: {
   readonly origin: string;
   readonly name: string;
@@ -109,6 +114,15 @@ export function Lobby({
   // Sign out everywhere (issue #439), and why it last failed, if it did.
   readonly onSignOutEverywhere: () => void;
   readonly signOutProblem: string | null;
+  // Whether the person has a password to sign in again with (whoami's
+  // auth.password_set), which changes what signing out is said to cost.
+  readonly passwordSet?: boolean;
+  // Shown above the conversation: a guest's visit, or what signing in from
+  // an invite did not do (issue #713).
+  readonly banner?: ReactNode;
+  // For a temporary guest, what Settings says in place of the sign-outs:
+  // a visit ends with End visit, in the banner.
+  readonly visit?: ReactNode;
 }) {
   const [panelOpen, setPanelOpen] = useState(isWide);
   const wideNow = useWide();
@@ -266,6 +280,7 @@ export function Lobby({
         <main className="centre">
           <div ref={setStage} className="stage" />
           <section aria-label="Conversation" className="conversation">
+            {banner}
             {channels.lost === undefined ? null : (
               <p role="alert" className="banner">
                 You no longer have access to #{channels.lost}
@@ -329,7 +344,9 @@ export function Lobby({
           })}
         </section>
         <section aria-label="Sign out" className="drawer-section signout">
-          {confirming === null ? (
+          {visit !== undefined ? (
+            visit
+          ) : confirming === null ? (
             <>
               <div className="actions">
                 <button
@@ -353,12 +370,14 @@ export function Lobby({
               </div>
               <p id="signout-note" className="hint">
                 Sign out ends this sign-in, in every tab of this browser. Sign out everywhere ends all of yours, on every device.
-                Either way, you will need a new link from an operator to come back into this account.
+                {passwordSet
+                  ? ' Either way, you sign in again with your name and password.'
+                  : ' Either way, you will need a new link from an operator to come back into this account.'}
               </p>
             </>
           ) : (
             <div role="group" aria-labelledby="signout-question" className="signout-confirm">
-              <p id="signout-question">{signOutQuestion[confirming]}</p>
+              <p id="signout-question">{signOutQuestion(confirming, passwordSet)}</p>
               <div className="actions">
                 <button
                   type="button"

@@ -308,45 +308,20 @@ func (s *Server) previewGuestJoin(ctx context.Context, join *schema.JoinOptionsV
 }
 
 // handleRedeemInvite serves POST /v1/invites/redeem, exempt from
-// authentication: it uses the invite to make a new human member and returns
-// its first credential. The order is part of the contract: the per-address
-// limit before the body is read; a malformed code the same 404 as any invalid
-// one; a bad name a 400 that says nothing about the code; the server-wide
-// limit last, so only a redemption that reaches the store can spend it, and
-// one that fails there gives it back.
-//
-// The account has no password. ADR-009 ends that (design §7.6 B1): the route
-// is to answer password_required once the browser redeems through POST
-// /v2/invites/redeem (#713). Until then it is unchanged.
-func (s *Server) handleRedeemInvite(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	addr := clientAddr(r, s.cfg.TrustedProxies)
-	if limit, ok, retry := s.inviteLimits.takeAddress(true, addr, s.now()); !ok {
-		s.refuseInviteRateLimited(w, r, limit, retry, 0, addr)
-		return
-	}
-	var req schema.RedeemInviteRequestV1
-	if !decodeInviteBody(w, r, &req) {
-		return
-	}
-	if schema.ValidateInviteCode(req.Code) != nil {
-		writeInviteInvalid(w)
-		return
-	}
-	// The schema's messages name the rule broken, never the name sent.
-	if err := (schema.CreatePrincipalRequest{Kind: schema.PrincipalHuman, Name: req.Name}).Validate(); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	if limit, ok, retry := s.inviteLimits.takeGlobal(s.now()); !ok {
-		s.refuseInviteRateLimited(w, r, limit, retry, 0, addr)
-		return
-	}
-	res, err := s.store.RedeemInvite(ctx, store.HashInviteCode(req.Code), req.Name, s.now())
-	if err != nil {
-		s.inviteLimits.refundGlobal(s.now())
-	}
-	s.writeRedeemed(w, r, res, err)
+// authentication. It made an account with no password; ADR-009 ends that
+// (design §7.6 B1, issue #713): every request is now answered 409
+// password_required and makes nothing. It is answered before the body is
+// read, with no rate-limit token spent and no store asked, so the route says
+// nothing about any code or name, and a client that predates passwords is
+// told by the code that it needs one (POST /v2/invites/redeem, as the code's
+// comment in pkg/schema says) rather than shown a refusal that looks like a
+// bad invite.
+func (s *Server) handleRedeemInvite(w http.ResponseWriter, _ *http.Request) {
+	// The message names no route: it carries no digit, so it can never be
+	// read as an id (the isolation check holds every refusal to that), and
+	// the code is what a client acts on.
+	writeError(w, http.StatusConflict, schema.ErrorCodePasswordRequired,
+		"this route makes no account; an invite is now redeemed with a name and a password")
 }
 
 // handleRedeemInviteV2 serves POST /v2/invites/redeem, exempt from

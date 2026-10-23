@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Composer } from './Composer';
+import { guestName } from './guestName';
 import { Avatar } from './Icons';
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
 import type { Audience, MessageV2 } from './schema/message';
@@ -91,6 +92,14 @@ function Line({
   );
 }
 
+// authorOf names a message's author. A post made during a guest visit is
+// named by the attribution stored with it (issue #713, design §4.4), the same
+// for ever: after the visit ended, after the guest made an account, and
+// whoever is in the members list now. Anyone else is named from the list.
+export function authorOf(message: MessageV2, people: ReadonlyMap<number, Person>): string {
+  return message.guest_author === undefined ? nameOf(people, message.author_id) : guestName(message.guest_author);
+}
+
 function Message({
   message,
   people,
@@ -112,7 +121,7 @@ function Message({
     <li className={cont ? 'message cont' : 'message'} data-message-id={message.id} tabIndex={-1}>
       <Line
         time={clock(message.created_at)}
-        author={nameOf(people, message.author_id)}
+        author={authorOf(message, people)}
         authorId={message.author_id}
         kind={people.get(message.author_id)?.kind ?? null}
         badge={message.audience === undefined ? null : audienceLabel(message.audience, viewer, nets)}
@@ -190,6 +199,9 @@ function audienceKey(audience: Audience | undefined): string {
 // same author, the same audience, soon after, and neither an approval.
 function continues(before: MessageV2 | undefined, message: MessageV2): boolean {
   if (before === undefined || before.author_id !== message.author_id) return false;
+  // A guest who made an account is the same principal: its posts as a guest
+  // and as a member are drawn apart.
+  if (before.guest_author?.handle !== message.guest_author?.handle) return false;
   if (audienceKey(before.audience) !== audienceKey(message.audience)) return false;
   if (approvalOf(before) !== null || approvalOf(message) !== null) return false;
   return Date.parse(message.created_at) - Date.parse(before.created_at) < sameRun;

@@ -608,9 +608,10 @@ func (s *Store) PreviewInvite(ctx context.Context, codeHash string, now time.Tim
 // All audit rows are attributed to "invite:<id>": the joiner has no identity
 // before the redemption commits.
 //
-// The account it makes has no password: POST /v1/invites/redeem, which
-// clients use until they move to POST /v2/invites/redeem and
-// RedeemInviteWithPassword (issue #707).
+// The account it makes has no password. No route calls it any more: POST
+// /v1/invites/redeem answers password_required (#713) and POST
+// /v2/invites/redeem uses RedeemInviteWithPassword (issue #707). It stays
+// for tests that need a member made through an invite without a password.
 func (s *Store) RedeemInvite(ctx context.Context, codeHash, name string, now time.Time) (RedeemedInvite, error) {
 	return s.redeemInvite(ctx, codeHash, name, "", now)
 }
@@ -692,9 +693,9 @@ func (s *Store) redeemInvite(ctx context.Context, codeHash, name, record string,
 		if err != nil {
 			return err
 		}
-		// An invite for guests only makes no account, by either route: v1
-		// makes one with no password, and a guest invite must not mint a
-		// member through it (#710; v1 itself is retired by #713). Said only
+		// An invite for guests only makes no account, whichever caller asks:
+		// a guest invite must not mint a member through it (#710). POST
+		// /v1/invites/redeem no longer reaches here (#713). Said only
 		// once the code proved good, so the mode is told only to its holder.
 		if !admitsAccount(r.joinAs) {
 			return ErrJoiningClosed

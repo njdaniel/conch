@@ -164,8 +164,8 @@ func (s *Server) routeTable() []route {
 		rt("DELETE /v1/invites/{id}", accessAuthenticated, hf(s.handleCloseInvite)),
 		rt("POST /v1/invites/preview", accessExempt, hf(s.handlePreviewInvite)),
 		// v2 (issue #707) makes the account with a password, taken with the
-		// name, over HTTPS or loopback only. v1 makes one without, as before,
-		// until the browser has moved to v2 (#713).
+		// name, over HTTPS or loopback only. v1 makes nothing: it answers
+		// 409 password_required to every request (#713, design §7.6 B1).
 		rt("POST /v1/invites/redeem", accessExempt, hf(s.handleRedeemInvite)),
 		// Guest entry (issue #710): the front door, Join as guest from the
 		// bare address and through an invite. Exempt, limited and bounded as

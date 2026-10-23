@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { goneHeading, heldLine, noLongerWorks } from './Invite';
 import { addressWithoutFragment, inviteFromHash, inviteLink, takeLinkFromAddress } from './route';
+import { insecureLine } from './transport';
 
 const origin = 'http://127.0.0.1:8080';
 const inviteCode = `conch_inv_${'Q'.repeat(40)}x-_`;
@@ -68,7 +69,7 @@ function as(token: string, who: object, channels: object): Record<string, Route>
 // A joiner's server: the preview, a redemption, and the joiner's lobby.
 const joining: Record<string, Route> = {
   'POST /v1/invites/preview': () => json(preview),
-  'POST /v1/invites/redeem': () => json(redeemed, 201),
+  'POST /v2/invites/redeem': () => json(redeemed, 201),
   ...as(joinerToken, joiner, channelList('red', 'blue')),
 };
 
@@ -90,10 +91,18 @@ function expectNoCode(container: HTMLElement): void {
   }
 }
 
+// The password every joiner here chooses (issue #713: an invite makes an
+// account with a password, through POST /v2/invites/redeem).
+const password = 'correct horse battery staple';
+
+// chooseName fills in the account form, name and password together, and
+// sends it.
 async function chooseName(name: string): Promise<void> {
   const field = await screen.findByLabelText('Your name');
   fireEvent.change(field, { target: { value: name } });
-  fireEvent.click(screen.getByRole('button', { name: 'Join' }));
+  fireEvent.change(screen.getByLabelText('Choose a password'), { target: { value: password } });
+  fireEvent.change(screen.getByLabelText('Type the password again'), { target: { value: password } });
+  fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
 }
 
 beforeEach(() => {
@@ -192,17 +201,20 @@ describe('the landing page', () => {
     // or a header; the credential is kept to last, as a member's is.
     expect(calls.filter((c) => JSON.stringify(c).includes(inviteCode)).map((c) => `${c.method} ${c.path}`)).toEqual([
       'POST /v1/invites/preview',
-      'POST /v1/invites/redeem',
+      'POST /v2/invites/redeem',
     ]);
-    expect(calls.find((c) => c.path === '/v1/invites/redeem')?.body).toEqual({ code: inviteCode, name: 'wren' });
-    expect(calls.filter((c) => c.path.startsWith('/v1/invites/')).every((c) => c.auth === null)).toBe(true);
+    expect(calls.find((c) => c.path === '/v2/invites/redeem')?.body).toEqual({ code: inviteCode, name: 'wren', password });
+    expect(calls.filter((c) => c.path.includes('/invites/')).every((c) => c.auth === null)).toBe(true);
     expect(window.localStorage.getItem(key)).toBe(joinerToken);
     // Every call after the redemption carries the new credential.
-    const after = calls.slice(calls.findIndex((c) => c.path === '/v1/invites/redeem') + 1).filter((c) => !c.path.startsWith('/healthz'));
+    const after = calls.slice(calls.findIndex((c) => c.path === '/v2/invites/redeem') + 1).filter((c) => !c.path.startsWith('/healthz'));
     expect(after.length).toBeGreaterThan(0);
     expect(after.every((c) => c.auth === `Bearer ${joinerToken}`)).toBe(true);
     expectNoCode(view.container);
     expect(view.container.innerHTML).not.toContain(joinerToken);
+    // The password went in the redemption's body and nowhere else.
+    expect(calls.filter((c) => JSON.stringify(c).includes(password)).map((c) => c.path)).toEqual(['/v2/invites/redeem']);
+    expect(view.container.innerHTML).not.toContain(password);
     expect(window.location.hash).toBe('#/c/red');
   });
 
@@ -224,7 +236,7 @@ describe('the landing page', () => {
   });
 
   it('keeps the form and what was typed when the name is taken', async () => {
-    const { calls } = opened({ ...joining, 'POST /v1/invites/redeem': () => refusal(409, 'principal_exists', 'that name is taken; choose another') });
+    const { calls } = opened({ ...joining, 'POST /v2/invites/redeem': () => refusal(409, 'principal_exists', 'that name is taken; choose another') });
     await chooseName('ada');
     expect(await screen.findByText('That name is taken. Choose another.')).toBeDefined();
     const field = screen.getByLabelText<HTMLInputElement>('Your name');
@@ -237,11 +249,11 @@ describe('the landing page', () => {
     serve(joining);
     await chooseName('wren');
     await screen.findByRole('navigation', { name: 'Channels' });
-    expect(calls.filter((c) => c.path === '/v1/invites/redeem')).toHaveLength(1);
+    expect(calls.filter((c) => c.path === '/v2/invites/redeem')).toHaveLength(1);
   });
 
   it("shows the server's own words for a name it does not accept", async () => {
-    opened({ ...joining, 'POST /v1/invites/redeem': () => refusal(400, 'invalid_request', 'schema: principal name must not contain invisible formatting characters') });
+    opened({ ...joining, 'POST /v2/invites/redeem': () => refusal(400, 'invalid_request', 'schema: principal name must not contain invisible formatting characters') });
     await chooseName('a\u200bb');
     expect(await screen.findByText('Principal name must not contain invisible formatting characters.')).toBeDefined();
     expect(screen.getByLabelText<HTMLInputElement>('Your name').value).toBe('a\u200bb');
@@ -249,16 +261,17 @@ describe('the landing page', () => {
 
   it.each<{ readonly when: string; readonly routes: Record<string, Route> }>([
     { when: 'previewed', routes: { 'POST /v1/invites/preview': () => refusal(404, 'invite_invalid', 'this invite is not valid') } },
-    { when: 'redeemed', routes: { 'POST /v1/invites/redeem': () => refusal(404, 'invite_invalid', 'this invite is not valid') } },
+    { when: 'redeemed', routes: { 'POST /v2/invites/redeem': () => refusal(404, 'invite_invalid', 'this invite is not valid') } },
   ])('says the one "can\'t be used" when the invite is invalid, $when', async ({ routes }) => {
     const { view } = opened({ ...joining, ...routes });
-    if (routes['POST /v1/invites/redeem'] !== undefined) await chooseName('wren');
+    if (routes['POST /v2/invites/redeem'] !== undefined) await chooseName('wren');
     expect(await screen.findByText(noLongerWorks)).toBeDefined();
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe("This link can't be used");
     expect(screen.queryByLabelText('Your name')).toBeNull();
     expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
-    // Nobody is signed in here: no button, so none leads to the credential form.
-    expect(screen.queryAllByRole('button')).toHaveLength(0);
+    // Nobody is signed in here: the one button is Sign in, for someone who
+    // joined from this link already (issue #713). Nothing else.
+    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['Sign in']);
     expectNoCode(view.container);
   });
 
@@ -274,11 +287,11 @@ describe('the landing page', () => {
     window.location.hash = hash;
     const view = render(<App origin={origin} />);
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toBe('Ask the person who sent it for a new one. If you already joined from this link, ask them for a sign-in link instead.');
+    expect(alert.textContent).toBe('Ask the person who sent it for a new one. If you already joined from this link, sign in instead.');
     const heading = screen.getByRole('heading', { level: 1 });
     expect(heading.textContent).toBe(goneHeading);
     expect(alert.textContent).not.toContain(heading.textContent);
-    expect(screen.queryAllByRole('button')).toHaveLength(0);
+    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['Sign in']);
     expect(screen.queryByLabelText('Credential')).toBeNull();
     expectNoCode(view.container);
   });
@@ -316,7 +329,7 @@ describe('the landing page', () => {
     { name: 'paused', answer: () => refusal(503, 'invites_paused'), line: 'Invites are paused on this server for now. Try the link again later.' },
     { name: 'rate-limited', answer: () => refusal(429, 'rate_limited', 'slow down', { 'Retry-After': '61' }), line: 'Too many tries from your network. Try again in 2 minutes.' },
   ])('says so when redeeming is $name, and keeps the form', async ({ answer, line }) => {
-    opened({ ...joining, 'POST /v1/invites/redeem': answer });
+    opened({ ...joining, 'POST /v2/invites/redeem': answer });
     await chooseName('wren');
     expect(await screen.findByText(line)).toBeDefined();
     expect(screen.getByLabelText<HTMLInputElement>('Your name').value).toBe('wren');
@@ -339,7 +352,7 @@ describe('the landing page', () => {
     // The old credential was revoked on the server before the invite was used.
     const order = calls.map((c) => `${c.method} ${c.path}`);
     expect(order.indexOf('DELETE /v1/credentials/current')).toBeGreaterThan(-1);
-    expect(order.indexOf('DELETE /v1/credentials/current')).toBeLessThan(order.indexOf('POST /v1/invites/redeem'));
+    expect(order.indexOf('DELETE /v1/credentials/current')).toBeLessThan(order.indexOf('POST /v2/invites/redeem'));
     expect(calls.find((c) => c.path === '/v1/credentials/current')?.auth).toBe(`Bearer ${memberToken}`);
     expect(window.localStorage.getItem(key)).toBe(joinerToken);
     expectNoCode(view.container);
@@ -371,8 +384,8 @@ describe('the landing page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     expect(await screen.findByText(heldLine)).toBeDefined();
     expect(screen.queryByLabelText('Your name')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Join' })).toBeNull();
-    expect(calls.some((c) => c.path === '/v1/invites/redeem')).toBe(false);
+    expect(screen.queryByRole('button', { name: 'Create account' })).toBeNull();
+    expect(calls.some((c) => c.path === '/v2/invites/redeem')).toBe(false);
     expect(storage().getItem(key)).toBe(token);
     expectNoCode(view.container);
   });
@@ -394,7 +407,7 @@ describe('the landing page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Go back' }));
     await screen.findByRole('navigation', { name: 'Channels' });
     expect(window.localStorage.getItem(key)).toBe(memberToken);
-    expect(calls.some((c) => c.path === '/v1/invites/redeem' || c.path === '/v1/credentials/current')).toBe(false);
+    expect(calls.some((c) => c.path === '/v2/invites/redeem' || c.path === '/v1/credentials/current')).toBe(false);
   });
 
   it('answers a link pasted into a tab that is already open', async () => {
@@ -773,5 +786,32 @@ describe('invite someone', () => {
     await within(panel).findByRole('list', { name: 'Your invites' });
     expect(within(panel).getByRole('checkbox', { name: 'Voice' })).toBeDefined();
     expect(within(panel).queryByText(/invites? left/)).toBeNull();
+  });
+});
+
+// Design §5.4 (security review of #713, B-1): on plain HTTP beyond this
+// machine the landing page offers no form that would send a password or
+// start a visit, whatever the invite allows, and says what the operator has
+// to do. Signing in instead is still offered: that page is held to the same
+// rule.
+describe('the landing page over plain HTTP', () => {
+  it.each([
+    { name: 'an account-only invite', join: undefined },
+    { name: 'an invite that admits both', join: { guest: true, account: true } },
+    { name: 'a guest-only invite', join: { guest: true, account: false } },
+  ])('offers no password or guest form for $name, and explains HTTPS', async ({ join }) => {
+    const calls = serve({ ...joining, 'POST /v1/invites/preview': () => json(join === undefined ? preview : { ...preview, join }) });
+    window.location.hash = `#/invite/${inviteCode}`;
+    render(<App origin="http://192.168.1.20:8080" />);
+    expect(await screen.findByText(insecureLine)).toBeDefined();
+    expect(document.querySelector('input[type="password"]')).toBeNull();
+    expect(screen.queryByLabelText('Your name')).toBeNull();
+    expect(screen.queryByLabelText('Name to show (optional)')).toBeNull();
+    expect(screen.queryByRole('group', { name: 'How to join' })).toBeNull();
+    expect(calls.some((c) => c.path.includes('/redeem'))).toBe(false);
+    // The sign-in page it leads to is gated too.
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in instead' }));
+    expect(await screen.findByText(insecureLine)).toBeDefined();
+    expect(screen.queryByLabelText('Password')).toBeNull();
   });
 });

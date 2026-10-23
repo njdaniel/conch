@@ -278,14 +278,17 @@ describe('the sign-in link landing page', () => {
     const inviteCode = `conch_inv_${'Q'.repeat(43)}`;
     const calls = serve({
       'POST /v1/invites/preview': () => json({ kind: 'personal', inviter: 'ada', channels: ['red'], voice: false, expires_at }),
-      'POST /v1/invites/redeem': () => json(redeemed, 201),
+      'POST /v2/invites/redeem': () => json(redeemed, 201),
       ...people({ [newToken]: { who: { ...wren, id: 99 }, channels: channelList('red') } }),
       'DELETE /v1/credentials/current': () => new Response(null, { status: 204 }),
     });
     window.location.hash = `#/invite/${inviteCode}`;
     render(<App origin={origin} />);
+    // An invite makes an account with a password, through v2 (issue #713).
     fireEvent.change(await screen.findByLabelText('Your name'), { target: { value: 'wren' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Join' }));
+    fireEvent.change(screen.getByLabelText('Choose a password'), { target: { value: 'correct horse battery staple' } });
+    fireEvent.change(screen.getByLabelText('Type the password again'), { target: { value: 'correct horse battery staple' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
     await waitFor(() => {
       expect(calls.some((c) => c.method === 'DELETE' && c.path === '/v1/credentials/current' && c.auth === `Bearer ${newToken}`)).toBe(true);
     });

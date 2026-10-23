@@ -6,7 +6,9 @@ import * as api from './api';
 import { ChangeName } from './ChangeName';
 import { CreateChannel } from './CreateChannel';
 import { Conversation } from './Conversation';
-import { Invite } from './Invite';
+import { GuestVisit } from './Guest';
+import { displayName, visitOf } from './guestName';
+import { channelWords, Invite, refusalLine, waitWords } from './Invite';
 import { InvitePanel } from './InvitePanel';
 import { Lobby } from './Lobby';
 import { ReportProblem } from './Report';
@@ -33,8 +35,21 @@ import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
 import { VoiceStatus } from './VoiceStatus';
 import { useOccupancy } from './voice/useOccupancy';
+import { needsHttps } from './transport';
 
+// App is the page. A guest who creates an account (issue #713) becomes a
+// member with a new credential, and every socket, session and list the page
+// held was the guest's: the page starts over, as on a reload, with the
+// member's credential, rather than mend each of them in place.
 export function App({ origin }: { readonly origin: string }) {
+  const [generation, setGeneration] = useState(0);
+  const restart = useCallback(() => {
+    setGeneration((n) => n + 1);
+  }, []);
+  return <Session key={generation} origin={origin} onRestart={restart} />;
+}
+
+function Session({ origin, onRestart }: { readonly origin: string; readonly onRestart: () => void }) {
   const [auth, dispatchAuth] = useReducer(authReducer, undefined, () => initialAuth(api.hasToken()));
   const [connection, dispatchConnection] = useReducer(connectionReducer, 'signedOut');
   const [channels, dispatchChannelsRaw] = useReducer(channelsReducer, initialChannels);
@@ -46,6 +61,10 @@ export function App({ origin }: { readonly origin: string }) {
   const [attempt, setAttempt] = useState(0);
   // Why the last sign out everywhere did not happen, shown in the lobby.
   const [everywhereFailed, setEverywhereFailed] = useState<string | null>(null);
+  // The invite a person chose to sign in instead of using (issue #713): its
+  // channels and who sent it, so the lobby can say if the account they
+  // signed in to is not in them. Signing in uses nothing of an invite.
+  const [destination, setDestination] = useState<{ readonly channels: readonly string[]; readonly inviter: string } | null>(null);
   // The newest chat state, for code that outlives a render (the socket's resume point).
   // It is moved by the same reducer in the same call as the state, so it is
   // never behind: the history is loaded and the socket opened in one tick.
@@ -123,6 +142,14 @@ export function App({ origin }: { readonly origin: string }) {
       setEverywhereFailed(null);
     }
   }, [auth.phase, dispatchChannels, dispatchChat]);
+
+  // Signing out forgets the invite a person signed in instead of using: the
+  // next person here did not open it.
+  const lastPhase = useRef(auth.phase);
+  useEffect(() => {
+    if (lastPhase.current === 'signedIn' && auth.phase !== 'signedIn') setDestination(null);
+    lastPhase.current = auth.phase;
+  }, [auth.phase]);
 
   // The hash names the open channel, so back, forward and a pasted link work.
   useEffect(() => {
@@ -230,6 +257,10 @@ export function App({ origin }: { readonly origin: string }) {
   }, []);
 
   const principal = auth.phase === 'signedIn' ? auth.principal : null;
+  // A temporary guest's live visit (issue #713), and how the page names the
+  // person: a guest by its attribution, never by the text of its handle.
+  const visit = principal === null ? null : visitOf(principal);
+  const shownName = principal === null ? '' : displayName(principal);
   const selected = signedIn ? channels.selected : null;
   const channelId = channels.channels.find((c) => c.name === selected)?.id ?? null;
   // The browser's own session, the events socket and what the panel and run
@@ -248,7 +279,7 @@ export function App({ origin }: { readonly origin: string }) {
     channel: channelId === null ? null : selected,
     channelId,
     nameOf,
-    me: principal ?? { id: 0, name: '', kind: 'human' },
+    me: principal === null ? { id: 0, name: '', kind: 'human' } : { id: principal.id, name: shownName, kind: principal.kind },
     members: agents.members,
     getAfter,
     getOldest,
@@ -399,6 +430,73 @@ export function App({ origin }: { readonly origin: string }) {
     });
   }, [signedIn]);
 
+  // A visit's hard end (issue #713): when it comes, the page asks who it is,
+  // and the server's 401 signs the guest out with its own words. The server
+  // ends the visit whether or not the page is open; this only stops the page
+  // from showing a visit that is over until its next request.
+  const visitEnds = visit?.expires_at ?? null;
+  useEffect(() => {
+    if (visitEnds === null) return;
+    const wait = Math.min(Math.max(0, Date.parse(visitEnds) - Date.now()) + 1_000, 2 ** 31 - 1);
+    const timer = window.setTimeout(() => {
+      void api.whoAmI().then((result) => {
+        if (!result.ok && result.failure === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
+      });
+    }, wait);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [visitEnds]);
+
+  // End visit: the session is ended first, as for a sign-out, then the
+  // visit. Only the server's word that it ended signs the guest out here.
+  const endVisit = useCallback(async (): Promise<'ended' | 'unconfirmed'> => {
+    if (signingOut.current) return 'unconfirmed';
+    signingOut.current = true;
+    await releaseSession();
+    const outcome = await api.endVisit();
+    signingOut.current = false;
+    if (outcome === 'unconfirmed') return outcome;
+    // unsent: this tab no longer held the credential, so it told the server
+    // nothing, and says so.
+    forgetChannel();
+    dispatchAuth({ type: 'signOut', notice: outcome === 'ended' ? 'visitEnded' : 'visitUntold' });
+    return 'ended';
+  }, [releaseSession]);
+
+  // Forget the visit in this tab after an End visit the server did not
+  // confirm: the sign-out tries once more to tell the server.
+  const forgetVisit = useCallback(() => {
+    if (signingOut.current) return;
+    signingOut.current = true;
+    void api.signOut().then((told) => {
+      signingOut.current = false;
+      forgetChannel();
+      dispatchAuth({ type: 'signOut', notice: told ? 'visitEnded' : 'visitUntold' });
+    });
+  }, []);
+
+  // Create an account during the visit. Made, the page starts over as the
+  // member; a visit that is over signs out with the way back in; anything
+  // else is the guest panel's to say, and the guest is as it was.
+  const convert = useCallback(
+    async (name: string, password: string): Promise<api.ConvertResult> => {
+      const result = await api.convertGuest(name, password);
+      if (result.ok) {
+        onRestart();
+      } else if (result.failure === 'gone' || result.failure === 'unkept') {
+        forgetChannel();
+        dispatchAuth({ type: 'signOut', notice: result.failure === 'gone' ? 'convertGone' : 'convertUnkept' });
+      }
+      return result;
+    },
+    [onRestart],
+  );
+
+  // What of the invite a person signed in instead of using is not theirs.
+  const missing =
+    destination === null || !signedIn || !channels.loaded ? [] : destination.channels.filter((name) => !channels.channels.some((c) => c.name === name));
+
   // The code of an invite link (issue #440) or a sign-in link (issue #493),
   // held here in memory only: never stored, and dropped once it is used or
   // the person goes back. It is taken out of the address before the first
@@ -463,6 +561,42 @@ export function App({ origin }: { readonly origin: string }) {
     });
   }, []);
 
+  // A returning member signs in with a name and a password (issue #713).
+  const submitPassword = useCallback((name: string, password: string) => {
+    dispatchAuth({ type: 'submit' });
+    void api.signInWithPassword(name, password).then((result) => {
+      if (result.ok) {
+        dispatchAuth({ type: 'verified', principal: result.value });
+        return;
+      }
+      switch (result.failure) {
+        case 'stored':
+          dispatchAuth({ type: 'recheck' });
+          return;
+        case 'held':
+          dispatchAuth({ type: 'failed', failure: 'held' });
+          return;
+        case 'unchecked':
+          void api.whoAmI().then((who) => {
+            if (who.ok) dispatchAuth({ type: 'verified', principal: who.value });
+            else dispatchAuth({ type: 'failed', failure: who.failure });
+          });
+          return;
+        case 'unkept':
+          dispatchAuth({ type: 'refused', line: 'This browser will not let the page keep your sign-in. Allow this site to keep data, then sign in again.' });
+          return;
+        case 'totp':
+          dispatchAuth({
+            type: 'refused',
+            line: 'This account also needs a code from an authenticator app, which this page does not take yet. Sign in with a credential, under Operators and scripts, instead.',
+          });
+          return;
+        default:
+          dispatchAuth({ type: 'refused', line: passwordRefusal(result) });
+      }
+    });
+  }, []);
+
   // Forgetting a stored sign-in that could not be checked (issue #469): it is
   // revoked if the server answers, then dropped, and signing in is open again.
   const forgetStored = useCallback(() => {
@@ -486,6 +620,10 @@ export function App({ origin }: { readonly origin: string }) {
           setInviteCode(null);
         }}
         onJoined={joined}
+        onSignIn={(inviteChannels, inviter) => {
+          setInviteCode(null);
+          setDestination({ channels: inviteChannels, inviter });
+        }}
       />
     );
   }
@@ -524,9 +662,14 @@ export function App({ origin }: { readonly origin: string }) {
         <SignIn
           origin={origin}
           notice={auth.phase === 'signedOut' ? auth.notice : null}
+          {...(auth.phase === 'signedOut' && auth.line !== undefined ? { line: auth.line } : {})}
           checking={auth.phase === 'checking'}
           onSubmit={submit}
+          onPassword={submitPassword}
           onForget={forgetStored}
+          onJoined={(who) => {
+            joined(who, undefined);
+          }}
         />
       );
     case 'operatorWarning':
@@ -544,16 +687,49 @@ export function App({ origin }: { readonly origin: string }) {
       return (
         <Lobby
           origin={origin}
-          name={auth.principal.name}
+          name={shownName}
           me={auth.principal.id}
+          passwordSet={auth.principal.auth?.password_set === true}
+          banner={
+            <>
+              {visit === null ? null : <GuestVisit guest={visit} insecure={needsHttps(origin)} onConvert={convert} onEnd={endVisit} onForget={forgetVisit} />}
+              {missing.length === 0 || destination === null ? null : (
+                <div role="status" className="banner destination">
+                  <p>
+                    Signing in did not use the invite from {destination.inviter}: this account is not in {channelWords(missing)}.
+                    Ask {destination.inviter} to add you.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDestination(null);
+                    }}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+            </>
+          }
+          {...(visit === null
+            ? {}
+            : {
+                visit: (
+                  <p className="hint">
+                    You are visiting as a temporary guest. To leave, use End visit at the top of the conversation: closing the
+                    tab does not end the visit.
+                  </p>
+                ),
+              })}
           channels={channels}
           unread={unread}
           occupancy={occupancy}
           connection={connection}
           panel={<MembersPanel agents={agents} now={now} />}
           account={
-            // A person renames themselves; an agent's name is an operator's to set.
-            auth.principal.kind === 'human' ? (
+            // A person renames themselves; an agent's name is an operator's to
+            // set, and a guest's is its handle (issue #713).
+            auth.principal.kind === 'human' && visit === null ? (
               <ChangeName
                 id={auth.principal.id}
                 name={auth.principal.name}
@@ -564,7 +740,7 @@ export function App({ origin }: { readonly origin: string }) {
               />
             ) : null
           }
-          signIns={(endThis) => <YourSignIns onEndThis={endThis} onUnauthorized={onUnauthorized} />}
+          {...(visit === null ? { signIns: (endThis: () => void) => <YourSignIns onEndThis={endThis} onUnauthorized={onUnauthorized} /> } : {})}
           report={<ReportProblem onUnauthorized={onUnauthorized} />}
           voice={
             <VoiceStatus
@@ -668,6 +844,20 @@ export function App({ origin }: { readonly origin: string }) {
           signOutProblem={everywhereFailed}
         />
       );
+  }
+}
+
+// passwordRefusal is the line shown for a refused password sign-in. Every
+// wrong name or password is the server's one answer, and the page's too.
+function passwordRefusal(result: api.InviteRefusal): string {
+  switch (result.code) {
+    case 'auth_failed':
+    case 'invalid_request':
+      return 'The name or password is not right.';
+    case 'rate_limited':
+      return `Too many tries. Try again in ${waitWords(result.retryAfter)}.`;
+    default:
+      return refusalLine(result);
   }
 }
 

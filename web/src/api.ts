@@ -3,7 +3,12 @@
 // decision O1). A member's lasts: it is kept in localStorage, so it survives
 // closing the browser and every tab of the origin shares it, until it is
 // signed out or stops working. An operator's stays with the one tab that
-// agreed to use it, in sessionStorage (decision D2, kept for operators). The
+// agreed to use it, in sessionStorage (decision D2, kept for operators). A
+// temporary guest's is kept for its one tab too (issue #713, ADR-009 D2): a
+// refresh keeps the visit, another tab or another browser does not have it,
+// and it is never kept to last. Closing a tab is no reliable end of a visit
+// (a browser may restore its tabs, storage and all): End visit is, and the
+// server's expiry bounds the rest. The
 // page has no third-party script (script-src 'self'), which is what makes
 // local storage acceptable. The token is sent only as the Authorization
 // header, and never put in a URL, a log call, the DOM or an error: a failure
@@ -11,6 +16,18 @@
 import { listActivityResponseV1, type AgentActivityV1 } from './schema/activity';
 import { listOwnCredentialsResponseV1, revokeAllCredentialsResponseV1, type OwnCredentialV1 } from './schema/credential';
 import { errorV0, type ErrorV0 } from './schema/error';
+import { loginResponseV1, type LoginRequestV1 } from './schema/auth';
+import {
+  convertGuestResponseV1,
+  joinAccountResponseV1,
+  joinGuestResponseV1,
+  joinInfoV1,
+  type ConvertGuestRequestV1,
+  type ConvertGuestResponseV1,
+  type JoinAccountRequestV1,
+  type JoinGuestRequestV1,
+  type JoinInfoV1,
+} from './schema/guest';
 import { health } from './schema/health';
 import {
   createInviteResponseV1,
@@ -22,7 +39,8 @@ import {
   type InvitePreviewRequestV1,
   type InvitePreviewV1,
   type InviteV1,
-  type RedeemInviteRequestV1,
+  type RedeemInviteGuestRequestV1,
+  type RedeemInviteRequestV2,
 } from './schema/invite';
 import { interventionV1, listInterventionsResponseV1, type CreateInterventionRequestV1, type InterventionV1 } from './schema/intervention';
 import { listRunsResponseV1, runV1, type RunV1 } from './schema/run';
@@ -66,6 +84,7 @@ import { createProblemReportResponseV1, type CreateProblemReportRequestV1, type 
 import type { Validator } from './schema/validate';
 import type { FeedSocket, OpenSocket, SocketEvents } from './state/feed';
 import { forget as forgetDiagnostics, record } from './diagnostics';
+import { visitOf } from './guestName';
 
 // Why a call failed. unauthorized is a 401: the server does not accept the
 // credential. network means no answer at all. invalid is any other reply
@@ -80,8 +99,8 @@ export type ApiResult<T> =
 const tokenKey = 'conch.web.token';
 
 // Where a credential is kept: 'tab' is this tab alone (sessionStorage), for an
-// operator's; 'lasting' is every tab of the origin until it is signed out
-// (localStorage), for a member's.
+// operator's and a guest's; 'lasting' is every tab of the origin until it is
+// signed out (localStorage), for a member's.
 type Place = 'tab' | 'lasting';
 
 // The credential this tab uses, and where it was found, so that what drops
@@ -383,10 +402,12 @@ export async function signIn(candidate: string): Promise<ApiResult<WhoAmIRespons
   pinned = null;
   const result = await get('/v1/whoami', candidate, whoAmIResponseV1);
   if (!result.ok) return result;
+  // A guest's credential pasted here stays with this tab, as a visit's does.
+  const place: Place = visitOf(result.value) === null ? 'lasting' : 'tab';
   if (result.value.role === 'operator') {
     pending = candidate;
-  } else if (writeToken(candidate, 'lasting')) {
-    pinned = { token: candidate, place: 'lasting' };
+  } else if (writeToken(candidate, place)) {
+    pinned = { token: candidate, place };
   } else {
     // localStorage is refused (blocked site data): signing in would not last
     // a reload, and the lobby could not call the API either.
@@ -420,7 +441,7 @@ export async function restore(): Promise<ApiResult<Restored>> {
   pending = null;
   pinned = null;
   unchecked = null;
-  const held = readToken();
+  let held = readToken();
   if (held === null) return { ok: false, failure: 'unauthorized' };
   const result = await get('/v1/whoami', held.token, whoAmIResponseV1);
   if (!result.ok) {
@@ -432,6 +453,18 @@ export async function restore(): Promise<ApiResult<Restored>> {
     dropToken(held);
     pending = held.token;
     return { ok: true, value: { principal: result.value, warn: true } };
+  }
+  if (held.place === 'lasting' && visitOf(result.value) !== null) {
+    // A visit is never kept to last: found there, it is moved to this tab,
+    // and the other tabs of the origin no longer have it.
+    dropToken(held);
+    held = { token: held.token, place: 'tab' };
+    if (!writeToken(held.token, held.place)) {
+      // This tab cannot keep it either: it is revoked (if the server
+      // answers) rather than left alive and kept nowhere.
+      await sendAs(held, 'DELETE', '/v1/credentials/current');
+      return { ok: false, failure: 'unauthorized' };
+    }
   }
   pinned = held;
   return { ok: true, value: { principal: result.value, warn: false } };
@@ -526,7 +559,7 @@ export type InviteResult<T> =
       readonly retryAfter?: number;
     };
 
-type InviteRefusal = Extract<InviteResult<never>, { ok: false }>;
+export type InviteRefusal = Extract<InviteResult<never>, { ok: false }>;
 
 async function inviteRefused(res: Response): Promise<InviteRefusal> {
   let doc: ErrorV0 | undefined;
@@ -557,15 +590,16 @@ async function readBody<T>(res: Response, check: Validator<T>): Promise<InviteRe
   return { ok: false, failure: 'invalid' };
 }
 
-// sendOpen posts a JSON body with no credential at all, for the invite and
-// sign-in link routes that take none. It is null when there was no answer.
-async function sendOpen(path: string, body: unknown): Promise<Response | null> {
+// sendOpen posts a JSON body with no credential at all, for the invite,
+// sign-in link, joining and password routes that take none; with no body it
+// is a GET (the front door). It is null when there was no answer.
+async function sendOpen(path: string, body?: unknown): Promise<Response | null> {
   let res: Response;
   try {
     res = await fetch(path, {
-      method: 'POST',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      method: body === undefined ? 'GET' : 'POST',
+      headers: body === undefined ? { Accept: 'application/json' } : { Accept: 'application/json', 'Content-Type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       cache: 'no-store',
       credentials: 'omit',
     });
@@ -592,7 +626,11 @@ export async function previewInvite(inviteCode: string): Promise<InviteResult<In
 // browser would not keep (site data blocked), so it cannot sign in with it;
 // unchecked is one made and kept whose whoami did not answer, which a reload
 // finishes.
-export type RedeemResult = InviteResult<WhoAmIResponseV1> | { readonly ok: false; readonly failure: 'held' | 'unkept' | 'unchecked' };
+export type RedeemResult =
+  | InviteResult<WhoAmIResponseV1>
+  | { readonly ok: false; readonly failure: 'held' }
+  | { readonly ok: false; readonly failure: 'unkept' }
+  | { readonly ok: false; readonly failure: 'unchecked' };
 
 // heldElsewhere says whether this browser holds a sign-in other than one
 // redeeming could make: a credential pinned, one waiting behind the operator
@@ -616,32 +654,91 @@ export async function forgetStored(): Promise<boolean> {
   return reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok);
 }
 
-// redeemInvite uses an invite to make a new member called name. The token in
-// the answer is kept as signIn keeps a member's, to last, and pinned; then
-// whoami says who the page now is.
+// redeemInvite uses an invite to make a new member called name, with the
+// password it chose (POST /v2/invites/redeem, issue #713: the v1 route makes
+// no account, design §7.6 B1). The token in the answer is kept as signIn
+// keeps a member's, to last, and pinned; then whoami says who the page now is.
 //
 // Redeeming makes a new person, so it is refused while this browser holds any
 // other sign-in, checked or not: the page signs it out first (signOut), which
 // revokes it rather than leaving it behind. Writing over one that could not
 // be checked would leave a member's credential alive and unrevoked, and an
 // operator's tab credential would win over the joiner's at the next load.
-export async function redeemInvite(inviteCode: string, name: string): Promise<RedeemResult> {
+// The password goes in the body alone and is kept nowhere.
+export async function redeemInvite(inviteCode: string, name: string, password: string): Promise<RedeemResult> {
   if (heldElsewhere()) return { ok: false, failure: 'held' };
   pinned = null;
-  const request: RedeemInviteRequestV1 = { code: inviteCode, name };
-  const res = await sendOpen('/v1/invites/redeem', request);
+  const request: RedeemInviteRequestV2 = { code: inviteCode, name, password };
+  const res = await sendOpen('/v2/invites/redeem', request);
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   const redeemed = await readBody(res, redeemInviteResponseV1);
   if (!redeemed.ok) return redeemed;
-  return keepRedeemed(redeemed.value.token, redeemed.value.principal.id);
+  return keepRedeemed(redeemed.value.token, redeemed.value.principal.id, 'lasting');
 }
 
-// keepRedeemed keeps the credential an invite or a sign-in link gave, as
-// signIn keeps a member's, to last, and pins it; then whoami says who the
-// page now is, which must be the principal the answer named.
-async function keepRedeemed(token: string, principal: number): Promise<RedeemResult> {
-  const held: Held = { token, place: 'lasting' };
+// redeemInviteAsGuest uses an invite that admits guests to start a visit
+// (POST /v1/invites/redeem-guest), with the display label typed, if any. The
+// visit's credential is kept for this tab alone. It is refused while this
+// browser holds another sign-in, as redeemInvite is.
+export async function redeemInviteAsGuest(inviteCode: string, label: string): Promise<RedeemResult> {
+  if (heldElsewhere()) return { ok: false, failure: 'held' };
+  pinned = null;
+  const request: RedeemInviteGuestRequestV1 = label === '' ? { code: inviteCode } : { code: inviteCode, label };
+  const res = await sendOpen('/v1/invites/redeem-guest', request);
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  const joined = await readBody(res, joinGuestResponseV1);
+  if (!joined.ok) return joined;
+  return keepRedeemed(joined.value.token, joined.value.principal.id, 'tab');
+}
+
+// Joining from the bare address (issue #713). The front door says what the
+// address offers now; the server decides again when someone joins.
+
+// joinInfo reads the front door (GET /v1/join), with no credential.
+export async function joinInfo(): Promise<InviteResult<JoinInfoV1>> {
+  const res = await sendOpen('/v1/join');
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  return readBody(res, joinInfoV1);
+}
+
+// joinAsGuest starts a visit from the bare address (POST /v1/join/guest).
+// Its credential is kept for this tab alone, as an invite's guest's is.
+export async function joinAsGuest(label: string): Promise<RedeemResult> {
+  if (heldElsewhere()) return { ok: false, failure: 'held' };
+  pinned = null;
+  const request: JoinGuestRequestV1 = label === '' ? {} : { label };
+  const res = await sendOpen('/v1/join/guest', request);
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  const joined = await readBody(res, joinGuestResponseV1);
+  if (!joined.ok) return joined;
+  return keepRedeemed(joined.value.token, joined.value.principal.id, 'tab');
+}
+
+// createAccount makes a member from the bare address, name and password
+// together (POST /v1/join/account). Its credential is kept to last, as an
+// invite's member's is.
+export async function createAccount(name: string, password: string): Promise<RedeemResult> {
+  if (heldElsewhere()) return { ok: false, failure: 'held' };
+  pinned = null;
+  const request: JoinAccountRequestV1 = { name, password };
+  const res = await sendOpen('/v1/join/account', request);
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  const made = await readBody(res, joinAccountResponseV1);
+  if (!made.ok) return made;
+  return keepRedeemed(made.value.token, made.value.principal.id, 'lasting');
+}
+
+// keepRedeemed keeps the credential an invite, a sign-in link, a join or a
+// sign-in gave at place: a member's to last, as signIn keeps one, and a
+// guest's for this tab; and pins it. Then whoami says who the page now is,
+// which must be the principal the answer named.
+async function keepRedeemed(token: string, principal: number, place: Place): Promise<RedeemResult> {
+  const held: Held = { token, place };
   if (!writeToken(held.token, held.place)) {
     // The credential works, but cannot be kept here: it is revoked (if the
     // server answers) rather than left alive.
@@ -651,16 +748,162 @@ async function keepRedeemed(token: string, principal: number): Promise<RedeemRes
   pinned = { token: held.token, place: held.place };
   const who = await whoAmI();
   if (!who.ok) return { ok: false, failure: 'unchecked' };
-  if (who.value.role === 'operator' || who.value.id !== principal) {
-    // Neither an invite nor a sign-in link is for an operator. Should the
-    // server ever say otherwise, or name someone else, the credential is
-    // revoked on the server (best effort, as when it cannot be kept) and
-    // not left to last in this browser.
+  if (who.value.role === 'operator' || who.value.id !== principal || (place === 'lasting' && visitOf(who.value) !== null)) {
+    // None of these is for an operator, and a guest's is never kept to
+    // last. Should the server ever say otherwise, or name someone else, the
+    // credential is revoked on the server (best effort, as when it cannot
+    // be kept) and not left in this browser.
     await sendAs(held, 'DELETE', '/v1/credentials/current');
     forget(held);
     return { ok: false, failure: 'invalid' };
   }
   return who;
+}
+
+// What a password sign-in gave besides an answer: held and stored as signIn's
+// (another sign-in is held here); totp is a right password for an account
+// that also needs a code, which this page does not take yet (#714).
+export type PasswordSignInResult = RedeemResult | { readonly ok: false; readonly failure: 'stored' } | { readonly ok: false; readonly failure: 'totp' };
+
+// signInWithPassword signs a returning member in with a name and a password
+// (POST /v1/login, design §3.2). The credential is kept to last, as one an
+// invite gave. It is refused, before anything is sent, while this browser
+// holds another sign-in, for the reasons signIn is. Every wrong name or
+// password is the server's one answer, auth_failed; the page says no more.
+export async function signInWithPassword(name: string, password: string): Promise<PasswordSignInResult> {
+  if (unchecked !== null && !stillStored(unchecked)) unchecked = null;
+  if (pending !== null || unchecked !== null) return { ok: false, failure: 'held' };
+  if (hasToken()) return { ok: false, failure: 'stored' };
+  pinned = null;
+  const request: LoginRequestV1 = { name, password };
+  const res = await sendOpen('/v1/login', request);
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  const answer = await readBody(res, loginResponseV1);
+  if (!answer.ok) return answer;
+  if (answer.value.next === 'totp') return { ok: false, failure: 'totp' };
+  return keepRedeemed(answer.value.token, answer.value.principal.id, 'lasting');
+}
+
+// Ending a visit and making it an account (issue #713, design §3.3, §3.4).
+
+// endVisit ends this tab's guest visit (POST /v1/guest/end). It is ended
+// when the server says so: the visit as it now is, or guest_ended (it had
+// ended already), or a 401 (its credential no longer works, so neither does
+// the visit); then the credential is forgotten here. Anything else is
+// unconfirmed, and the credential is kept, so the person can try again:
+// forgetting it here would prove nothing about the server, where the visit
+// would go on until its expiry. unsent is a tab that no longer holds the
+// credential (another tab or the browser removed it): nothing was sent, so
+// nothing is claimed.
+export async function endVisit(): Promise<'ended' | 'unconfirmed' | 'unsent'> {
+  const held = current();
+  if (held === null) return 'unsent';
+  const reply = await sendAs(held, 'POST', '/v1/guest/end');
+  // sendAs has forgotten it on a 401.
+  if (reply.kind === 'unauthorized') return 'ended';
+  if (reply.kind === 'none') return 'unconfirmed';
+  // A success is the server's word that the visit ended, whatever its body
+  // turns out to be (EndVisitResponseV1); it is read to its end all the same.
+  const ended = reply.res.ok || (await refusalCode(reply.res)) === 'guest_ended';
+  if (reply.res.ok) await discard(reply.res);
+  if (!ended) return 'unconfirmed';
+  forget(held);
+  return 'ended';
+}
+
+// What Create an account during a visit gave. ok is an account made, its
+// credential kept and this tab's guest credential dropped: the page starts
+// over as the member. A refusal of the server's leaves the guest as it was.
+// gone is a visit that is over: the account was made and its answer lost, or
+// the visit ended, so the guest credential no longer works and is dropped;
+// either way the person signs in again with the new name and password, if
+// the account was made. unconfirmed is no answer whose outcome the page could
+// learn: the guest is kept, and the person can try again. unkept is an
+// account made whose credential this browser would not keep.
+export type ConvertResult =
+  | { readonly ok: true }
+  | InviteRefusal
+  | { readonly ok: false; readonly failure: 'gone' }
+  | { readonly ok: false; readonly failure: 'unconfirmed' }
+  | { readonly ok: false; readonly failure: 'unkept' };
+
+// convertGuest makes this tab's visit an account, with a permanent name and
+// a password (POST /v1/guest/convert). The guest stays what it was until the
+// server's answer says the account is made: nothing here changes on a
+// refusal or a cancel. When the answer is lost, the guest credential is asked
+// about: the conversion revokes it in the transaction that makes the account,
+// so a credential that no longer works means the account may be there, and
+// password sign-in is the way back in (never the old guest credential).
+export async function convertGuest(name: string, password: string): Promise<ConvertResult> {
+  const held = current();
+  if (held === null) return { ok: false, failure: 'gone' };
+  const request: ConvertGuestRequestV1 = { name, password };
+  const reply = await sendAs(held, 'POST', '/v1/guest/convert', request);
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'gone' };
+  // A 5xx may come from something in front of conchd after it committed.
+  if (reply.kind === 'none' || reply.res.status >= 500) return lostConversion(held);
+  if (!reply.res.ok) {
+    const refusal = await inviteRefused(reply.res);
+    // A refusal with no error document of conchd's is from something in
+    // front of it (a proxy's 404 or 408), which says nothing of whether the
+    // conversion happened: it is asked about as a lost answer is.
+    if (refusal.code === undefined) return lostConversion(held);
+    if (refusal.code === 'guest_ended') {
+      forget(held);
+      return { ok: false, failure: 'gone' };
+    }
+    return refusal;
+  }
+  let body: unknown;
+  try {
+    body = await reply.res.json();
+  } catch {
+    body = undefined;
+  }
+  if (convertGuestResponseV1(body).length > 0) {
+    // A success whose body is not the schema's shape may still carry the
+    // member's new credential: it is revoked (best effort) rather than left
+    // alive, and the person signs in with the password.
+    const stray = tokenIn(body);
+    if (stray !== null) await sendAs({ token: stray, place: 'tab' }, 'DELETE', '/v1/credentials/current');
+    return lostConversion(held);
+  }
+  const made = { value: body as ConvertGuestResponseV1 };
+  // The guest credential is revoked already, with the visit.
+  dropToken(held);
+  pinned = null;
+  forgetDiagnostics();
+  // The member's credential is kept to last, as any member's is, unless
+  // another tab keeps a sign-in there (with this tab's gone, hasToken finds
+  // only that one): writing over it would leave it alive and unrevoked, so
+  // this tab keeps the member's instead.
+  const member: Held = { token: made.value.token, place: hasToken() ? 'tab' : 'lasting' };
+  if (!writeToken(member.token, member.place)) {
+    await sendAs(member, 'DELETE', '/v1/credentials/current');
+    return { ok: false, failure: 'unkept' };
+  }
+  pinned = { token: member.token, place: member.place };
+  return { ok: true };
+}
+
+// tokenIn is the token field of an answer that is not the shape it should
+// be, when it has a string there, else null.
+function tokenIn(body: unknown): string | null {
+  if (typeof body !== 'object' || body === null || !('token' in body)) return null;
+  const token: unknown = body.token;
+  return typeof token === 'string' && token !== '' ? token : null;
+}
+
+// lostConversion asks whether the guest credential still works, after a
+// conversion whose answer was lost.
+async function lostConversion(held: Held): Promise<ConvertResult> {
+  const who = await get('/v1/whoami', held.token, whoAmIResponseV1);
+  if (!who.ok && who.failure === 'unauthorized') {
+    forget(held);
+    return { ok: false, failure: 'gone' };
+  }
+  return { ok: false, failure: 'unconfirmed' };
 }
 
 // Sign-in links (issue #493). An operator makes one for a person who signed
@@ -691,7 +934,7 @@ export async function redeemSignInLink(signInCode: string): Promise<RedeemResult
   if (!res.ok) return inviteRefused(res);
   const redeemed = await readBody(res, redeemSignInLinkResponseV1);
   if (!redeemed.ok) return redeemed;
-  return keepRedeemed(redeemed.value.token, redeemed.value.principal.id);
+  return keepRedeemed(redeemed.value.token, redeemed.value.principal.id, 'lasting');
 }
 
 // createInvite makes an invite. The answer carries its code, shown once to

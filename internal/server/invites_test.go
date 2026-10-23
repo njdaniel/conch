@@ -118,9 +118,11 @@ func (f *inviteFixture) preview(t *testing.T, code string) *httptest.ResponseRec
 	return f.send(t, "POST", "/v1/invites/preview", "", inviteJSON(t, schema.InvitePreviewRequestV1{Code: code}), "")
 }
 
+// redeem joins through an invite as a person does: POST /v2/invites/redeem,
+// with testJoinPassword. The v1 route makes no account any more (#713).
 func (f *inviteFixture) redeem(t *testing.T, code, name string) *httptest.ResponseRecorder {
 	t.Helper()
-	return f.send(t, "POST", "/v1/invites/redeem", "", inviteJSON(t, schema.RedeemInviteRequestV1{Code: code, Name: name}), "")
+	return f.redeemWithPassword(t, code, name)
 }
 
 // testJoinPassword is the password every joiner of the v2 tests chooses: it
@@ -440,6 +442,56 @@ func TestInvalidInviteCodesAreIndistinguishable(t *testing.T) {
 	}
 }
 
+// POST /v1/invites/redeem makes no account any more (design §7.6 B1, #713):
+// every request, a good one with a valid code included, over HTTPS or not,
+// is 409 password_required, and it uses no invite, makes nobody, writes no
+// audit row and spends no rate-limit token, so v2 still works afterwards
+// with limits of one.
+func TestRedeemV1MakesNothing(t *testing.T) {
+	f := newInviteFixture(t, Config{})
+	limits := looseInviteLimits()
+	limits.redeemPerAddress = inviteLimit{"redeem_per_address", 1, time.Hour}
+	limits.redeemGlobal = inviteLimit{"redeem_server_wide", 1, time.Hour}
+	f.srv.setInviteLimits(limits)
+	code := f.createInvite(t, f.rootTok, personal("general")).Code
+	before := len(f.audit(t))
+	plain := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/v1/invites/redeem", strings.NewReader(body))
+		req.RemoteAddr = "198.51.100.3:1"
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	good := inviteJSON(t, schema.RedeemInviteRequestV1{Code: code, Name: "wren"})
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"a good request":         f.send(t, "POST", "/v1/invites/redeem", "", good, ""),
+		"over plain HTTP":        plain(good),
+		"with a password beside": f.send(t, "POST", "/v1/invites/redeem", "", redeemJSON(t, code, "wren"), ""),
+		"an unknown code":        f.send(t, "POST", "/v1/invites/redeem", "", inviteJSON(t, schema.RedeemInviteRequestV1{Code: fakeInviteCode, Name: "wren"}), ""),
+		"not JSON":               f.send(t, "POST", "/v1/invites/redeem", "", "code="+code, ""),
+		"no body":                f.send(t, "POST", "/v1/invites/redeem", "", "", ""),
+	} {
+		assertErrorBody(t, rec, http.StatusConflict, schema.ErrorCodePasswordRequired)
+		if strings.Contains(rec.Body.String(), code) || strings.Contains(rec.Body.String(), "wren") {
+			t.Errorf("%s: the refusal echoes the request: %s", name, rec.Body)
+		}
+	}
+	if got := f.audit(t); len(got) != before {
+		t.Errorf("v1 wrote %d audit rows, want none: %+v", len(got)-before, got[before:])
+	}
+	if n := countJoinersCreated(t, f.authFixture); n != 0 {
+		t.Errorf("principal_created rows = %d after v1, want 0", n)
+	}
+	if got := decodeBody[schema.ListInvitesResponseV1](t, f.send(t, "GET", "/v1/invites", f.rootTok, "", "")); got.Invites[0].Uses != 0 {
+		t.Errorf("uses = %d after v1, want 0", got.Invites[0].Uses)
+	}
+	// Neither the address's token nor the server-wide one was spent: v2,
+	// with limits of one, still makes the account with the same invite.
+	if rec := f.redeem(t, code, "wren"); rec.Code != http.StatusCreated {
+		t.Fatalf("v2 after v1 = %d %s", rec.Code, rec.Body)
+	}
+}
+
 // A taken name is a 409 that does not use the invite up.
 func TestRedeemTakenNameKeepsTheInvite(t *testing.T) {
 	f := newInviteFixture(t, Config{})
@@ -464,16 +516,16 @@ func TestRedeemNameRefusals(t *testing.T) {
 		want       int
 		wantCode   string
 	}{
-		{"blank name", inviteJSON(t, schema.RedeemInviteRequestV1{Code: code, Name: "  "}), 400, "invalid_request"},
-		{"control character", inviteJSON(t, schema.RedeemInviteRequestV1{Code: code, Name: "sneaky\u0007name"}), 400, "invalid_request"},
-		{"too long", inviteJSON(t, schema.RedeemInviteRequestV1{Code: code, Name: strings.Repeat("n", schema.MaxPrincipalNameLength+1)}), 400, "invalid_request"},
+		{"blank name", redeemJSON(t, code, "  "), 400, "invalid_request"},
+		{"control character", redeemJSON(t, code, "sneaky\u0007name"), 400, "invalid_request"},
+		{"too long", redeemJSON(t, code, strings.Repeat("n", schema.MaxPrincipalNameLength+1)), 400, "invalid_request"},
 		{"not JSON", "code=" + code, 400, "invalid_request"},
-		{"unknown field", `{"code":"` + code + `","name":"x","role":"operator"}`, 400, "invalid_request"},
-		{"too large", `{"code":"` + code + `","name":"` + strings.Repeat("n", inviteBodyMaxBytes) + `"}`, 413, "request_too_large"},
+		{"unknown field", `{"code":"` + code + `","name":"x","password":"` + testJoinPassword + `","role":"operator"}`, 400, "invalid_request"},
+		{"too large", `{"code":"` + code + `","name":"` + strings.Repeat("n", inviteBodyMaxBytes) + `","password":"` + testJoinPassword + `"}`, 413, "request_too_large"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rec := f.send(t, "POST", "/v1/invites/redeem", "", tt.body, "")
+			rec := f.send(t, "POST", "/v2/invites/redeem", "", tt.body, "")
 			assertErrorBody(t, rec, tt.want, tt.wantCode)
 			if strings.Contains(rec.Body.String(), code) || strings.Contains(rec.Body.String(), "sneaky") {
 				t.Errorf("the refusal echoes the request: %s", rec.Body)
@@ -659,7 +711,7 @@ func TestInviteEndToEnd(t *testing.T) {
 
 	var tokens []string
 	for i, name := range []string{"wren", "piper"} {
-		rec := f.send(t, "POST", "/v1/invites/redeem", "", inviteJSON(t, schema.RedeemInviteRequestV1{Code: link.Code, Name: name}),
+		rec := f.send(t, "POST", "/v2/invites/redeem", "", redeemJSON(t, link.Code, name),
 			fmt.Sprintf("198.51.100.%d:4000", i+1))
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("redeem %s = %d %s", name, rec.Code, rec.Body)
@@ -745,7 +797,7 @@ func TestInviteSecretsStayOut(t *testing.T) {
 	link := f.createInvite(t, f.rootTok, openLink("general"))
 	var bodies []string
 	redeem := func(code, name string) *httptest.ResponseRecorder {
-		rec := f.send(t, "POST", "/v1/invites/redeem", "", inviteJSON(t, schema.RedeemInviteRequestV1{Code: code, Name: name}), proxy, client)
+		rec := f.send(t, "POST", "/v2/invites/redeem", "", redeemJSON(t, code, name), proxy, client)
 		bodies = append(bodies, rec.Body.String())
 		return rec
 	}

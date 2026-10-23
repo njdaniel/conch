@@ -33,7 +33,7 @@ async function operatorPage(meet: () => Promise<{ page: Page }>, world: World, h
   const { page } = await meet();
   await page.goto(world.appUrl + hash);
   await page.getByLabel('Credential').fill(world.tokens.operator);
-  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');
   return page;
@@ -146,7 +146,7 @@ test('C728 a rename refused because the channel was renamed meanwhile says so, m
   await page.routeWebSocket(/\/v1\/events\/ws/, () => undefined);
   await page.goto(world.appUrl);
   await page.getByLabel('Credential').fill(world.tokens.operator);
-  await page.getByRole('button', { name: 'Sign in' }).click();
+  await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');
   await channelButton(page, from).click();

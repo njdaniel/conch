@@ -1005,7 +1005,7 @@ func TestRedeemSetupTokenRateLimit(t *testing.T) {
 		t.Errorf("the eleventh try = %d %s, want 429 with Retry-After", rec.Code, rec.Body)
 	}
 	assertErrorBody(t, f.send(t, "POST", "/v1/setup/redeem", "", unknown, otherAddress), http.StatusNotFound, schema.ErrorCodeSetupTokenInvalid)
-	assertErrorBody(t, f.send(t, "POST", "/v1/invites/redeem", "", inviteJSON(t, schema.RedeemInviteRequestV1{Code: "nope", Name: "x"}), ""),
+	assertErrorBody(t, f.send(t, "POST", "/v2/invites/redeem", "", redeemJSON(t, "nope", "x"), ""),
 		http.StatusNotFound, schema.ErrorCodeInviteInvalid)
 }
 

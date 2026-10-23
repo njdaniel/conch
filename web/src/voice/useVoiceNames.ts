@@ -11,6 +11,7 @@
 // read: the page's people already hold everyone.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as api from '../api';
+import { memberName } from '../guestName';
 import type { VoicePresenceV1 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
 import { occupants } from './presence';
@@ -81,7 +82,8 @@ export function useVoiceNames({
       }
       const named = new Map<number, Person>();
       for (const m of result.value) {
-        if (m.name !== undefined) named.set(m.principal_id, { name: m.name, kind: m.kind ?? null });
+        const name = memberName(m);
+        if (name !== undefined) named.set(m.principal_id, { name, kind: m.kind ?? null });
       }
       setNames({ channel: elsewhere, people: named, known: new Set(result.value.map((m) => m.principal_id)) });
     });

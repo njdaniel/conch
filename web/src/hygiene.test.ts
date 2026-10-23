@@ -43,10 +43,12 @@ describe('credential handling', () => {
     // still stored, issue #469). A new reader trips this.
     expect(code.match(/getItem\(tokenKey\)/g)?.length ?? 0).toBe(4);
     expect(code).not.toMatch(/export\s+(async\s+)?function\s+((read|write|drop)Token|sendAs|current|forget)\b/);
-    // The pin is set in four places only: signIn, continueAsOperator,
-    // restore, and redeemInvite (issue #440), which keeps the credential an
-    // invite gives as signIn keeps a member's.
-    expect(code.match(/\bpinned = \{|\bpinned = held\b/g)?.length ?? 0).toBe(4);
+    // The pin is set in five places only: signIn, continueAsOperator,
+    // restore, keepRedeemed (issue #440), which keeps the credential an
+    // invite, a join or a password sign-in gives as signIn keeps a member's,
+    // and convertGuest (issue #713), which keeps the member's credential a
+    // guest's Create an account gives.
+    expect(code.match(/\bpinned = \{|\bpinned = held\b/g)?.length ?? 0).toBe(5);
   });
 
   it('is not placed in a URL: the only fetch sends it as a header', () => {
