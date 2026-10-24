@@ -139,7 +139,9 @@ func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := schema.ListChannelsResponse{Channels: make([]schema.ChannelV0, 0, len(channels))}
 	for _, ch := range channels {
-		resp.Channels = append(resp.Channels, channelFromStore(ch))
+		doc := channelFromStore(ch)
+		doc.Manages = ch.Manages
+		resp.Channels = append(resp.Channels, doc)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

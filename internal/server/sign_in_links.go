@@ -60,6 +60,9 @@ func (s *Server) handleCreateSignInLink(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	if s.ownerProtected(w, r, id) {
+		return
+	}
 	// Making one is limited per operator, in the bucket invites use.
 	if limit, ok, retry := s.inviteLimits.takeCreate(caller.ID, s.now()); !ok {
 		s.refuseInviteRateLimited(w, r, limit, retry, caller.ID, clientAddr(r, s.cfg.TrustedProxies))
@@ -75,8 +78,10 @@ func (s *Server) handleCreateSignInLink(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	resp, err := s.store.CreateSignInLink(ctx, auditActor(ctx), caller.ID, id, req, now)
+	resp, err := s.store.CreateSignInLink(ctx, auditActor(ctx), caller.ID, id, req, now, !isOwner(caller))
 	switch {
+	case errors.Is(err, store.ErrOwnerProtected):
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
 	case errors.Is(err, store.ErrSignInLinkRequestInvalid):
 		// Validated above; the clock moved past a just-valid expiry.
 		writeError(w, http.StatusBadRequest, "invalid_request", "the sign-in link request is not valid")
@@ -120,14 +125,15 @@ func signInLinkTargetMessage(err error) string {
 // is a 204 that changes nothing; an unknown id is a 404.
 func (s *Server) handleCloseSignInLink(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, ok := s.inviteCaller(w, r); !ok {
+	caller, ok := s.inviteCaller(w, r)
+	if !ok {
 		return
 	}
 	id, ok := pathID(w, r, "id", "sign-in link")
 	if !ok {
 		return
 	}
-	_, err := s.store.CloseSignInLink(ctx, auditActor(ctx), id, s.now())
+	_, err := s.store.CloseSignInLink(ctx, auditActor(ctx), id, s.now(), !isOwner(caller))
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, schema.ErrorCodeSignInLinkNotFound, "sign-in link not found")

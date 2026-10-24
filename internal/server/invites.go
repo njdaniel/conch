@@ -570,6 +570,9 @@ func (s *Server) handleDisableInvitees(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if s.ownerProtected(w, r, id) {
+		return
+	}
 	var req schema.DisableInviteesRequestV1
 	if !decodeInviteBody(w, r, &req) {
 		return
@@ -597,7 +600,7 @@ func (s *Server) handleDisableInvitees(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, schema.DisableJoinersResponseV1{DryRun: true, Count: len(targets), PrincipalIDs: targets})
 		return
 	}
-	done, err := s.disablePrincipals(ctx, targets)
+	done, err := s.disablePrincipals(ctx, targets, !isOwner(caller))
 	detail := fmt.Sprintf("root=%d depth=%s count=%d", id, req.EffectiveDepth(), len(done))
 	s.finishBulkDisable(w, r, err, store.AuditInviteesDisabled, fmt.Sprintf("principal:%d", id), detail, done)
 }
@@ -624,12 +627,12 @@ func bulkDisableTargets(caller store.Principal, found []store.Principal) []int64
 //
 // It does not stop when the operator's client goes away: a leak response cut
 // short by a dropped connection would leave the rest enabled, unseen.
-func (s *Server) disablePrincipals(ctx context.Context, ids []int64) ([]int64, error) {
+func (s *Server) disablePrincipals(ctx context.Context, ids []int64, forbidOwner ...bool) ([]int64, error) {
 	ctx = context.WithoutCancel(ctx)
 	actor := auditActor(ctx)
 	done := []int64{}
 	for _, id := range ids {
-		changed, err := s.store.DisablePrincipal(ctx, actor, id)
+		changed, err := s.store.DisablePrincipal(ctx, actor, id, forbidOwner...)
 		switch {
 		case errors.Is(err, store.ErrPrincipalNotFound), errors.Is(err, store.ErrLastOperator):
 			continue
@@ -645,13 +648,18 @@ func (s *Server) disablePrincipals(ctx context.Context, ids []int64) ([]int64, e
 }
 
 // finishBulkDisable writes the summary audit row of a bulk disable, for what
-// was done even when it stopped early, and answers. A failure of either is a
-// 500: the principals already disabled stay disabled, and each has its own
-// audit rows.
+// was done even when it stopped early, and answers. An owner refused after the
+// selection is the same audited 403 as the single routes; any other failure is
+// a 500. Principals already disabled stay disabled, with their own audit rows.
 func (s *Server) finishBulkDisable(w http.ResponseWriter, r *http.Request, disableErr error, action, subject, detail string, done []int64) {
 	// The client may be gone; what was done must still be recorded.
 	ctx := context.WithoutCancel(r.Context())
 	_, auditErr := s.store.AppendAuditEvent(ctx, auditActor(ctx), action, subject, detail)
+	if errors.Is(disableErr, store.ErrOwnerProtected) && auditErr == nil {
+		caller, _ := callerFrom(ctx)
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
+		return
+	}
 	if disableErr != nil || auditErr != nil {
 		slog.ErrorContext(ctx, "invites: bulk disable failed", "action", action, "subject", subject, "disabled", len(done),
 			"error", errors.Join(disableErr, auditErr))
@@ -670,19 +678,25 @@ func (s *Server) finishBulkDisable(w http.ResponseWriter, r *http.Request, disab
 // transaction.
 func (s *Server) handleInvitePermission(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, ok := s.inviteCaller(w, r); !ok {
+	caller, ok := s.inviteCaller(w, r)
+	if !ok {
 		return
 	}
 	id, ok := pathID(w, r, "id", "principal")
 	if !ok {
 		return
 	}
+	if s.ownerProtected(w, r, id) {
+		return
+	}
 	var req schema.InvitePermissionRequestV1
 	if !decodeInviteBody(w, r, &req) {
 		return
 	}
-	_, err := s.store.SetMayInvite(ctx, auditActor(ctx), id, req.MayInvite)
+	_, err := s.store.SetMayInvite(ctx, auditActor(ctx), id, req.MayInvite, !isOwner(caller))
 	switch {
+	case errors.Is(err, store.ErrOwnerProtected):
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
 	case errors.Is(err, store.ErrInviteNotAllowed):

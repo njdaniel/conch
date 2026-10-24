@@ -61,6 +61,13 @@ const (
 	accessAuthenticated access = iota
 	// accessOperator: valid credential whose principal has the operator role.
 	accessOperator
+	// accessOwner: valid credential whose principal is an operator holding the
+	// owner mark (issue #790, ADR-010 §3.1, §5.2).
+	accessOwner
+	// accessChannelManager: valid human credential whose principal is an
+	// operator or a member of the path's {channel} holding manages = 1 (issue
+	// #790, ADR-010 §3.2, §5.2).
+	accessChannelManager
 	// accessOperatorOrSelf: authenticated; the handler additionally requires
 	// the operator role or that the caller is the principal named in the path.
 	accessOperatorOrSelf
@@ -122,6 +129,34 @@ func auditActor(ctx context.Context) string {
 }
 
 func isOperator(p store.Principal) bool { return p.Role == store.RoleOperator }
+
+func isOwner(p store.Principal) bool { return p.IsOwner() }
+
+// ownerProtected refuses a non-owner operator acting on an owner principal
+// (issue #790, ADR-010 §3.1, §4.1): when there is an authenticated caller who
+// is not an owner and targetID belongs to an owner, it writes 403 forbidden
+// (auditing access_denied) and returns true. An unknown targetID returns false
+// so the handler's normal 404 path answers.
+func (s *Server) ownerProtected(w http.ResponseWriter, r *http.Request, targetID int64) bool {
+	caller, authed := callerFrom(r.Context())
+	if !authed || isOwner(caller) {
+		return false
+	}
+	target, err := s.store.PrincipalByID(r.Context(), targetID)
+	if errors.Is(err, store.ErrNotFound) {
+		return false
+	}
+	if err != nil {
+		slog.ErrorContext(r.Context(), "auth: find principal failed", "principal", targetID, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return true
+	}
+	if !target.IsOwner() {
+		return false
+	}
+	s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
+	return true
+}
 
 // writeUnauthenticated writes the single 401 response used for every
 // credential failure, so a client cannot tell a missing credential from a
@@ -212,10 +247,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 func isSocketRoute(pattern string) bool { return strings.HasSuffix(pattern, "/ws") }
 
 // guard returns the handler to register for rt. Under AuthOff it is the bare
-// handler, so behaviour is unchanged. Under AuthRequired operator routes are
-// wrapped with the role check, and the routes of the re-authentication class
-// (recentAuthRoutes) with the recent-auth gate inside it, so a member is
-// told the role is missing before anything about a proof.
+// handler, so behaviour is unchanged. Under AuthRequired operator, owner and
+// channel-manager routes are wrapped with their class check, and the routes of
+// the re-authentication class (recentAuthRoutes) with the recent-auth gate
+// inside it, so a caller without the role, mark or grant is told so before
+// anything about a proof (issue #790, ADR-010 §5.2, §5.3).
 func (s *Server) guard(rt route) http.Handler {
 	if !s.cfg.authRequired() {
 		return rt.handler
@@ -224,23 +260,79 @@ func (s *Server) guard(rt route) http.Handler {
 	if rule := recentAuthRoutes[rt.pattern]; rule != reauthNone {
 		handler = s.recentAuthGate(rule, handler)
 	}
-	if rt.access != accessOperator {
+	switch rt.access {
+	case accessOperator:
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			caller, ok := callerFrom(r.Context())
+			if !ok {
+				// The middleware always sets a caller on non-exempt routes; its
+				// absence is a wiring bug, which must deny rather than allow.
+				writeUnauthenticated(w)
+				return
+			}
+			if !isOperator(caller) {
+				s.denyForbidden(w, r, caller, "forbidden", "operator role required")
+				return
+			}
+			handler.ServeHTTP(w, r)
+		})
+	case accessOwner:
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			caller, ok := callerFrom(r.Context())
+			if !ok {
+				writeUnauthenticated(w)
+				return
+			}
+			if !isOwner(caller) {
+				s.denyForbidden(w, r, caller, "forbidden", "owner required")
+				return
+			}
+			handler.ServeHTTP(w, r)
+		})
+	case accessChannelManager:
+		return s.humansOnlyBecause(denyAgentOnHumanRoute, "agents cannot administer channel membership", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			caller, ok := callerFrom(r.Context())
+			if !ok {
+				writeUnauthenticated(w)
+				return
+			}
+			channel, err := s.store.ChannelByName(r.Context(), r.PathValue("channel"))
+			if errors.Is(err, store.ErrNotFound) {
+				writeChannelNotFound(w)
+				return
+			}
+			if err != nil {
+				slog.ErrorContext(r.Context(), "auth: find channel failed", "error", err)
+				writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+				return
+			}
+			if !isOperator(caller) {
+				member, err := s.store.IsChannelMember(r.Context(), channel.ID, caller.ID)
+				if err != nil {
+					slog.ErrorContext(r.Context(), "auth: check channel membership failed", "error", err)
+					writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+					return
+				}
+				if !member {
+					writeChannelNotFound(w)
+					return
+				}
+				manages, err := s.store.ManagesChannel(r.Context(), channel.ID, caller.ID)
+				if err != nil {
+					slog.ErrorContext(r.Context(), "auth: check channel manager failed", "error", err)
+					writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+					return
+				}
+				if !manages {
+					s.denyForbidden(w, r, caller, "forbidden", "operator role or channel manager required")
+					return
+				}
+			}
+			handler.ServeHTTP(w, r)
+		}))
+	default:
 		return handler
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller, ok := callerFrom(r.Context())
-		if !ok {
-			// The middleware always sets a caller on non-exempt routes; its
-			// absence is a wiring bug, which must deny rather than allow.
-			writeUnauthenticated(w)
-			return
-		}
-		if !isOperator(caller) {
-			s.denyForbidden(w, r, caller, "forbidden", "operator role required")
-			return
-		}
-		handler.ServeHTTP(w, r)
-	})
 }
 
 // denyForbidden writes a 403 with the given error code and appends an
@@ -316,6 +408,7 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		Kind:          schema.PrincipalKind(caller.Kind),
 		Name:          caller.Name,
 		Role:          schema.PrincipalRole(caller.Role),
+		Owner:         caller.IsOwner(),
 		ServerVersion: s.cfg.Version,
 		MayInvite:     mayInvite(caller),
 		VoiceAllowed:  &voice,

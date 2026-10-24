@@ -27,19 +27,19 @@ type ChannelMemberV1 struct {
 	Name        string        `json:"name,omitempty"`
 	Kind        PrincipalKind `json:"kind,omitempty"`
 	// CanDecide is whether the member may decide the channel's approvals
-	// (issue #450). The server fills it for human members; it is absent for
-	// agents, which never decide. The store keeps it false for a guest
-	// (ADR-009; security review F1).
+	// (issue #450). It is filled for every human row when the viewer is an
+	// operator or channel manager; a plain member sees only their own. It is
+	// absent for agents, which never decide. The store keeps it false for a
+	// guest (ADR-009; security review F1).
 	CanDecide *bool `json:"can_decide,omitempty"`
 	// Manages is whether the member is a manager of the channel (ADR-010,
-	// issue #697). Filled for the caller's own row and when the caller is
-	// an operator or a manager of the channel; absent otherwise, and
-	// absent for agents and guests, which never manage.
+	// issue #697). Every viewer sees it on every human row, false for guests;
+	// it is absent for agents.
 	Manages *bool `json:"manages,omitempty"`
-	// Role is the member's server role: filled when the caller is an
-	// operator or a manager of the channel, and for the caller's own row,
-	// so a manager sees why an operator row cannot be removed; absent for
-	// other members, for agents and for guests.
+	// Role is the member's server role: filled for non-guest humans when the
+	// caller is an operator or a manager of the channel, so a manager sees why
+	// an operator row cannot be removed; absent for other viewers, agents and
+	// guests.
 	Role PrincipalRole `json:"role,omitempty"`
 	// HistoryAfter is the membership's history bound (issue #704, ADR-009
 	// §4.3): the id of the last message of the channel at admission, chosen

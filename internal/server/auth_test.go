@@ -114,6 +114,10 @@ const (
 	classAuth   routeClass = "auth"
 	classOp     routeClass = "operator"
 	classSelf   routeClass = "operator-or-self"
+	// classOwner routes need an operator holding the owner mark, and
+	// classManager routes an operator or a manager of the channel (issue #790).
+	classOwner   routeClass = "owner"
+	classManager routeClass = "channel-manager"
 )
 
 // routeExpectation pins, per route pattern: its class, the request to send,
@@ -140,8 +144,11 @@ var routeExpectations = map[string]routeExpectation{
 	// Both membership writes are no-ops in the fixture (alice is already a
 	// member; ghost, id 4, is not), so they change nothing and audit nothing.
 	"GET /v1/channels/{channel}/members":                   {classAuth, "/v1/channels/general/members", "", 200},
-	"PUT /v1/channels/{channel}/members/{principal_id}":    {classOp, "/v1/channels/general/members/2", "", 204},
-	"DELETE /v1/channels/{channel}/members/{principal_id}": {classOp, "/v1/channels/general/members/4", "", 204},
+	"PUT /v1/channels/{channel}/members/{principal_id}":    {classManager, "/v1/channels/general/members/2", "", 204},
+	"DELETE /v1/channels/{channel}/members/{principal_id}": {classManager, "/v1/channels/general/members/4", "", 204},
+	// Adding a member by name (issue #790): an empty body is a 400 before
+	// anyone is looked up.
+	"POST /v1/channels/{channel}/members": {classManager, "/v1/channels/general/members", `{}`, 400},
 	// Nets (issue #115). The net-addressed routes use a net that does not
 	// exist, so they change and audit nothing.
 	"POST /v1/channels/{channel}/nets":                                {classOp, "/v1/channels/general/nets", `{}`, 400},
@@ -266,7 +273,7 @@ var routeExpectations = map[string]routeExpectation{
 	"/mcp":                                            {classExempt, "/mcp", `{}`, 401},
 	// limit=0 is a 400 before anything is exported or recorded, so the AuthOff
 	// audit count below is unaffected by a route that audits every success.
-	"GET /v1/audit": {classOp, "/v1/audit?limit=0", "", 400},
+	"GET /v1/audit": {classOwner, "/v1/audit?limit=0", "", 400},
 	// A ticket is for a credential: AuthOff gets 400 tickets_require_auth
 	// (special-cased below). Issuing one writes no audit row.
 	"POST /v1/ws-tickets": {classAuth, "/v1/ws-tickets", "", 201},
@@ -304,7 +311,7 @@ var routeExpectations = map[string]routeExpectation{
 	// written; the per-id end names a principal that does not exist. AuthOff
 	// is 403 accounts_require_auth (special-cased below).
 	"GET /v1/join/settings":    {classOp, "/v1/join/settings", "", 200},
-	"PUT /v1/join/settings":    {classOp, "/v1/join/settings", `{}`, 400},
+	"PUT /v1/join/settings":    {classOwner, "/v1/join/settings", `{}`, 400},
 	"GET /v1/guests":           {classOp, "/v1/guests", "", 200},
 	"POST /v1/guests/{id}/end": {classOp, "/v1/guests/9999/end", "", 404},
 	"POST /v1/guests/end":      {classOp, "/v1/guests/end", `{}`, 400},
@@ -373,6 +380,10 @@ var routeExpectations = map[string]routeExpectation{
 	// Renaming a channel (issue #727): an empty body is a 400 before the
 	// channel is looked up, so it changes and audits nothing.
 	"PUT /v1/channels/{id}/name": {classOp, "/v1/channels/9999/name", `{}`, 400},
+
+	// Changing a role or the owner mark (issue #790): an empty body is a 400
+	// before the target is looked up.
+	"PUT /v1/principals/{id}/role": {classOwner, "/v1/principals/1/role", `{}`, 400},
 }
 
 // isDeviceLinkRoute reports whether pattern is one of a member's own device
@@ -440,7 +451,7 @@ func TestRouteTable(t *testing.T) {
 			t.Errorf("route %q has no entry in routeExpectations: decide its authentication class", rt.pattern)
 			continue
 		}
-		want := map[routeClass]access{classExempt: accessExempt, classAuth: accessAuthenticated, classOp: accessOperator, classSelf: accessOperatorOrSelf}[exp.class]
+		want := map[routeClass]access{classExempt: accessExempt, classAuth: accessAuthenticated, classOp: accessOperator, classSelf: accessOperatorOrSelf, classOwner: accessOwner, classManager: accessChannelManager}[exp.class]
 		if rt.access != want {
 			t.Errorf("route %q access = %d, expectation says %s", rt.pattern, rt.access, exp.class)
 		}
@@ -520,7 +531,7 @@ func TestRoleMatrix(t *testing.T) {
 		t.Run(rt.pattern, func(t *testing.T) {
 			method := routeMethod(rt.pattern)
 			memberWant := exp.allowed
-			if exp.class == classOp || exp.class == classSelf {
+			if exp.class == classOp || exp.class == classSelf || exp.class == classOwner || exp.class == classManager {
 				memberWant = http.StatusForbidden
 			}
 			// The approval REST routes are the human surface: an agent
@@ -992,7 +1003,7 @@ func TestWhoAmI(t *testing.T) {
 		// are told how they are authenticated (issue #708): neither has a
 		// password yet, so neither has finished setting up.
 		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true, VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityOperator,
-			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}}},
+			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}, Owner: true}}, // the bootstrap operator is the owner (issue #790)
 		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityMember,
 			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}}},
 		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false), IdentityClass: schema.IdentityAgent}},

@@ -58,6 +58,12 @@ func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+	caller, authed := callerFrom(ctx)
+	forbidOwner := authed && !isOwner(caller)
+	if forbidOwner && principal.IsOwner() {
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
+		return
+	}
 	// A hook is a posting credential for its principal, so a disabled
 	// principal cannot be given one (issue #101).
 	if principal.DisabledAt != nil {
@@ -71,7 +77,11 @@ func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	hook, err := s.store.CreateHookWithLabel(ctx, auditActor(ctx), token, req.Label, channel.ID, req.Principal)
+	hook, err := s.store.CreateHookWithLabel(ctx, auditActor(ctx), token, req.Label, channel.ID, req.Principal, forbidOwner)
+	if errors.Is(err, store.ErrOwnerProtected) {
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
+		return
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "hooks: create failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -83,7 +93,8 @@ func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListHooks(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	hooks, err := s.store.ListHooks(ctx)
+	caller, authed := callerFrom(ctx)
+	hooks, err := s.store.ListHooks(ctx, authed && !isOwner(caller))
 	if err != nil {
 		slog.ErrorContext(ctx, "hooks: list failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -100,7 +111,8 @@ func (s *Server) handleRevokeHook(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	err := s.store.RevokeHook(ctx, auditActor(ctx), id)
+	caller, authed := callerFrom(ctx)
+	err := s.store.RevokeHook(ctx, auditActor(ctx), id, authed && !isOwner(caller))
 	switch {
 	case errors.Is(err, store.ErrHookNotFound):
 		writeError(w, http.StatusNotFound, "hook_not_found", "hook not found")

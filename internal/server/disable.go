@@ -33,8 +33,15 @@ func (s *Server) handleDisablePrincipal(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	_, err := s.store.DisablePrincipal(ctx, auditActor(ctx), id)
+	if s.ownerProtected(w, r, id) {
+		return
+	}
+	caller, authed := callerFrom(ctx)
+	_, err := s.store.DisablePrincipal(ctx, auditActor(ctx), id, authed && !isOwner(caller))
 	switch {
+	case errors.Is(err, store.ErrOwnerProtected):
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
+		return
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
 		return
@@ -72,8 +79,15 @@ func (s *Server) handleEnablePrincipal(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, err := s.store.EnablePrincipal(ctx, auditActor(ctx), id)
+	if s.ownerProtected(w, r, id) {
+		return
+	}
+	caller, authed := callerFrom(ctx)
+	_, err := s.store.EnablePrincipal(ctx, auditActor(ctx), id, authed && !isOwner(caller))
 	switch {
+	case errors.Is(err, store.ErrOwnerProtected):
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
+		return
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
 		return
@@ -100,12 +114,19 @@ func (s *Server) handleRevokeAllCredentials(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	if caller, authed := callerFrom(ctx); authed && !isOperator(caller) && caller.ID != id {
+	caller, authed := callerFrom(ctx)
+	if authed && !isOperator(caller) && caller.ID != id {
 		s.denyForbidden(w, r, caller, "forbidden", "operator role or the principal itself required")
 		return
 	}
-	n, err := s.store.RevokeAllCredentials(ctx, auditActor(ctx), id)
+	if s.ownerProtected(w, r, id) {
+		return
+	}
+	n, err := s.store.RevokeAllCredentials(ctx, auditActor(ctx), id, authed && !isOwner(caller))
 	switch {
+	case errors.Is(err, store.ErrOwnerProtected):
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
+		return
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
 		return
@@ -126,5 +147,5 @@ func (s *Server) handleRevokeAllCredentials(w http.ResponseWriter, r *http.Reque
 }
 
 // lastOperatorMessage explains a 409 last_operator: the action would leave no
-// enabled operator holding a live credential.
-const lastOperatorMessage = "this would leave no operator able to sign in; give another operator a credential first"
+// enabled owner able to sign in (issue #790, ADR-010 §5.5).
+const lastOperatorMessage = "this would leave no owner able to sign in; give another owner a credential first"

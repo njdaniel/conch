@@ -87,8 +87,9 @@ func (s *Server) handleRenamePrincipal(w http.ResponseWriter, r *http.Request) {
 	}
 	var lim store.RenameLimits
 	self := false
+	caller, authed := callerFrom(ctx)
 	// No caller is AuthOff, where the route is open like every other.
-	if caller, authed := callerFrom(ctx); authed && !isOperator(caller) {
+	if authed && !isOperator(caller) {
 		if caller.ID != id {
 			s.denyForbidden(w, r, caller, "forbidden", "operator role or the principal itself required")
 			return
@@ -101,6 +102,9 @@ func (s *Server) handleRenamePrincipal(w http.ResponseWriter, r *http.Request) {
 		self = true
 	}
 
+	if !self && s.ownerProtected(w, r, id) {
+		return
+	}
 	var req schema.RenamePrincipalRequestV1
 	if err := decodeJSONBody(w, r, &req); err != nil {
 		var tooLarge *http.MaxBytesError
@@ -116,9 +120,12 @@ func (s *Server) handleRenamePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.store.RenamePrincipal(ctx, auditActor(ctx), id, req.Name, lim, s.now())
+	res, err := s.store.RenamePrincipal(ctx, auditActor(ctx), id, req.Name, lim, s.now(), authed && !isOwner(caller))
 	var limited *store.RenameLimitedError
 	switch {
+	case errors.Is(err, store.ErrOwnerProtected):
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
+		return
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
 		return
