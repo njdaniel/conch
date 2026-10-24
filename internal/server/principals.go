@@ -115,6 +115,9 @@ func (s *Server) handleRenamePrincipal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if !self && s.ownerProtected(w, r, id) {
+		return
+	}
 
 	res, err := s.store.RenamePrincipal(ctx, auditActor(ctx), id, req.Name, lim, s.now())
 	var limited *store.RenameLimitedError

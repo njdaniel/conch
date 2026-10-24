@@ -33,6 +33,8 @@ func (s *Server) routeTable() []route {
 		// Renaming (issue #441): operators rename anyone, a person themselves
 		// (checked in the handler).
 		rt("PUT /v1/principals/{id}/name", accessOperatorOrSelf, hf(s.handleRenamePrincipal)),
+		// Role and owner-mark administration (issue #790, ADR-010 §6).
+		rt("PUT /v1/principals/{id}/role", accessOwner, hf(s.handleSetRole)),
 		rt("POST /v0/channels/{channel}/messages", accessAuthenticated, hf(s.handlePostMessage)),
 		rt("GET /v0/channels/{channel}/messages", accessAuthenticated, hf(s.handleListMessages)),
 		rt("POST /v1/channels/{channel}/messages", accessAuthenticated, hf(s.handlePostMessageV1)),
@@ -50,8 +52,9 @@ func (s *Server) routeTable() []route {
 		// Members of the channel and operators (checked in the handler); anyone
 		// else gets the channel-not-found response.
 		rt("GET /v1/channels/{channel}/members", accessAuthenticated, hf(s.handleListChannelMembers)),
-		rt("PUT /v1/channels/{channel}/members/{principal_id}", accessOperator, hf(s.handlePutChannelMember)),
-		rt("DELETE /v1/channels/{channel}/members/{principal_id}", accessOperator, hf(s.handleDeleteChannelMember)),
+		rt("POST /v1/channels/{channel}/members", accessChannelManager, hf(s.handleAddChannelMemberByName)),
+		rt("PUT /v1/channels/{channel}/members/{principal_id}", accessChannelManager, hf(s.handlePutChannelMember)),
+		rt("DELETE /v1/channels/{channel}/members/{principal_id}", accessChannelManager, hf(s.handleDeleteChannelMember)),
 		// Nets (issue #115). Management is operator-only; the list is open to
 		// authenticated callers and filtered to the nets they are on.
 		rt("POST /v1/channels/{channel}/nets", accessOperator, hf(s.handleCreateNet)),
@@ -149,7 +152,7 @@ func (s *Server) routeTable() []route {
 		// Operators, or the principal itself: "sign out everywhere" (issue
 		// #439; checked in the handler).
 		rt("POST /v1/principals/{id}/credentials/revoke-all", accessOperatorOrSelf, hf(s.handleRevokeAllCredentials)),
-		rt("GET /v1/audit", accessOperator, hf(s.handleExportAudit)),
+		rt("GET /v1/audit", accessOwner, hf(s.handleExportAudit)),
 		rt("POST /v1/hooks", accessOperator, hf(s.handleCreateHook)),
 		rt("GET /v1/hooks", accessOperator, hf(s.handleListHooks)),
 		rt("DELETE /v1/hooks/{id}", accessOperator, hf(s.handleRevokeHook)),
@@ -178,11 +181,12 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/join/guest", accessExempt, hf(s.handleJoinGuest)),
 		rt("POST /v1/join/account", accessExempt, hf(s.handleJoinAccount)),
 		rt("POST /v1/invites/redeem-guest", accessExempt, hf(s.handleRedeemInviteGuest)),
-		// The joining settings, the guest list and ending visits: operators.
+		// The joining settings (reading is for operators, changing is for
+		// owners; issue #790), the guest list and ending visits: operators.
 		// The bulk end has one segment fewer than the per-id one, so the two
 		// never meet in the mux.
 		rt("GET /v1/join/settings", accessOperator, hf(s.handleGetJoinSettings)),
-		rt("PUT /v1/join/settings", accessOperator, hf(s.handlePutJoinSettings)),
+		rt("PUT /v1/join/settings", accessOwner, hf(s.handlePutJoinSettings)),
 		rt("GET /v1/guests", accessOperator, hf(s.handleListGuests)),
 		rt("POST /v1/guests/{id}/end", accessOperator, hf(s.handleEndGuest)),
 		rt("POST /v1/guests/end", accessOperator, hf(s.handleEndGuests)),
@@ -287,7 +291,9 @@ var setupScopeRoutes = map[string]bool{
 // write to a decision either way, with the reason.
 var recentAuthRoutes = map[string]reauthRule{
 	"POST /v0/principals":                                          reauthAlways,
-	"PUT /v1/channels/{channel}/members/{principal_id}":            reauthAlways,
+	"PUT /v1/principals/{id}/role":                                 reauthAlways,
+	"POST /v1/channels/{channel}/members":                          reauthOperators,
+	"PUT /v1/channels/{channel}/members/{principal_id}":            reauthOperators,
 	"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}": reauthAlways,
 	"PUT /v1/principals/{id}/manifest":                             reauthAlways,
 	"POST /v1/principals/{id}/credentials":                         reauthAlways,

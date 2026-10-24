@@ -134,6 +134,9 @@ func (s *Server) handleHidePrincipal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "an operator cannot hide themselves")
 		return
 	}
+	if s.ownerProtected(w, r, id) {
+		return
+	}
 	_, err := s.store.HidePrincipal(ctx, auditActor(ctx), id, store.HideOptions{})
 	switch {
 	case errors.Is(err, store.ErrPrincipalNotFound):

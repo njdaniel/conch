@@ -29,6 +29,10 @@ const (
 	// to a member's right to manage the channel (issue #789, ADR-010 §3.2).
 	AuditMemberManageGranted = "member_manage_granted"
 	AuditMemberManageRevoked = "member_manage_revoked"
+	// AuditMemberAddRefused records a refused membership add by name or by a
+	// channel manager (issue #790, ADR-010 §3.3): actor the caller, subject
+	// the channel, detail empty so no tried name or id is stored.
+	AuditMemberAddRefused = "member_add_refused"
 )
 
 // ErrNotMember is returned by SetChannelMemberCanDecide and
@@ -928,4 +932,40 @@ func (s *Store) ListChannelsForPrincipal(ctx context.Context, principalID int64)
 		return nil, fmt.Errorf("store: list channels of principal %d: %w", principalID, err)
 	}
 	return channels, nil
+}
+
+// CheckMemberAddLimit refuses a membership add when callerID has already had
+// limit or more refused member-add attempts in the RenameWindow ending at now
+// (issue #790, ADR-010 §3.3). When full, it returns a *RenameLimitedError
+// naming when the next attempt fits.
+func (s *Store) CheckMemberAddLimit(ctx context.Context, callerID int64, limit int, now time.Time) error {
+	if callerID <= 0 || limit <= 0 {
+		return nil
+	}
+	now = now.Truncate(time.Millisecond)
+	since := now.Add(-RenameWindow).UnixMilli()
+	actor := principalActor(callerID)
+	const where = `FROM audit_events WHERE actor = ? AND action = ? AND created_at > ?`
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) `+where, actor, AuditMemberAddRefused, since).Scan(&count); err != nil {
+		return fmt.Errorf("store: count refused member adds of principal %d: %w", callerID, err)
+	}
+	if count < limit {
+		return nil
+	}
+	var freeing int64
+	if err := s.db.QueryRowContext(ctx, `SELECT created_at `+where+` ORDER BY created_at, id LIMIT 1 OFFSET ?`,
+		actor, AuditMemberAddRefused, since, count-limit).Scan(&freeing); err != nil {
+		return fmt.Errorf("store: count refused member adds of principal %d: %w", callerID, err)
+	}
+	return &RenameLimitedError{Until: time.UnixMilli(freeing).Add(RenameWindow)}
+}
+
+// RecordMemberAddRefused appends a member_add_refused audit row for callerID
+// on channelID, with an empty detail so no tried name or principal id is
+// recorded (issue #790, ADR-010 §3.3).
+func (s *Store) RecordMemberAddRefused(ctx context.Context, callerID, channelID int64, now time.Time) error {
+	_, err := s.AppendAuditEventAt(ctx, principalActor(callerID), AuditMemberAddRefused, channelSubject(channelID),
+		"", now.Truncate(time.Millisecond))
+	return err
 }

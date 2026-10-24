@@ -160,12 +160,20 @@ func (s *Store) HookByToken(ctx context.Context, token string) (Hook, error) {
 }
 
 // ListHooks returns every hook, revoked ones included, newest first (ties by
-// id descending). The result is never nil and never carries a token or hash.
-func (s *Store) ListHooks(ctx context.Context) ([]schema.HookV1, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT h.id, c.name, h.principal_id, h.label, h.created_at, h.revoked_at
-		 FROM hooks h JOIN channels c ON c.id = h.channel_id
-		 ORDER BY h.created_at DESC, h.id DESC`)
+// id descending). When excludeOwners is true, hooks bound to an owner are
+// omitted (issue #790, ADR-010 §4.1). The result is never nil and never
+// carries a token or hash.
+func (s *Store) ListHooks(ctx context.Context, excludeOwners ...bool) ([]schema.HookV1, error) {
+	hideOwners := len(excludeOwners) > 0 && excludeOwners[0]
+	q := `SELECT h.id, c.name, h.principal_id, h.label, h.created_at, h.revoked_at
+		 FROM hooks h
+		 JOIN channels c ON c.id = h.channel_id
+		 JOIN principals p ON p.id = h.principal_id`
+	if hideOwners {
+		q += ` WHERE NOT (p.role = 'operator' AND p.owner = 1)`
+	}
+	q += ` ORDER BY h.created_at DESC, h.id DESC`
+	rows, err := s.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("store: list hooks: %w", err)
 	}
@@ -196,21 +204,28 @@ func (s *Store) ListHooks(ctx context.Context) ([]schema.HookV1, error) {
 // stands and no second audit event is written). A hook_revoked audit event is
 // appended in the same transaction as the first revocation; its detail names
 // the hook id, channel and label, never the token or hash. It returns
-// ErrHookNotFound for an unknown id.
-func (s *Store) RevokeHook(ctx context.Context, actor string, hookID int64) error {
+// ErrHookNotFound for an unknown id, or when forbidOwner is true and the hook
+// is bound to an owner (issue #790, ADR-010 §4.1).
+func (s *Store) RevokeHook(ctx context.Context, actor string, hookID int64, forbidOwner ...bool) error {
+	hideOwner := len(forbidOwner) > 0 && forbidOwner[0]
 	return s.withImmediateTx(ctx, func(tx execer) error {
 		var (
 			principalID, channelID int64
-			label                  string
+			label, role            string
+			targetOwner            bool
 			revokedAt              sql.NullInt64
 		)
 		switch err := tx.QueryRowContext(ctx,
-			"SELECT principal_id, channel_id, label, revoked_at FROM hooks WHERE id = ?", hookID,
-		).Scan(&principalID, &channelID, &label, &revokedAt); {
+			`SELECT h.principal_id, h.channel_id, h.label, h.revoked_at, p.role, p.owner
+			 FROM hooks h JOIN principals p ON p.id = h.principal_id WHERE h.id = ?`, hookID,
+		).Scan(&principalID, &channelID, &label, &revokedAt, &role, &targetOwner); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrHookNotFound
 		case err != nil:
 			return fmt.Errorf("store: revoke hook: read: %w", err)
+		}
+		if hideOwner && Role(role) == RoleOperator && targetOwner {
+			return ErrHookNotFound
 		}
 		if revokedAt.Valid {
 			return nil

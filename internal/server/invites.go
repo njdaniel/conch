@@ -578,6 +578,9 @@ func (s *Server) handleDisableInvitees(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if s.ownerProtected(w, r, id) {
+		return
+	}
 	depth := 1
 	if req.EffectiveDepth() == schema.InviteeDepthAll {
 		depth = 0
@@ -679,6 +682,9 @@ func (s *Server) handleInvitePermission(w http.ResponseWriter, r *http.Request) 
 	}
 	var req schema.InvitePermissionRequestV1
 	if !decodeInviteBody(w, r, &req) {
+		return
+	}
+	if s.ownerProtected(w, r, id) {
 		return
 	}
 	_, err := s.store.SetMayInvite(ctx, auditActor(ctx), id, req.MayInvite)

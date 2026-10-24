@@ -512,7 +512,9 @@ type reauthDecision struct {
 var reauthDecisions = map[string]reauthDecision{
 	"POST /v0/channels":   {reauthNone, "makes a channel: no principal, credential, link, permit or hook, no grant"},
 	"POST /v0/principals": {reauthAlways, "creates a principal"},
-	"PUT /v1/channels/{channel}/members/{principal_id}":               {reauthAlways, "grants access, and can_decide (approval-path)"},
+	"PUT /v1/channels/{channel}/members/{principal_id}":               {reauthOperators, "grants access, and can_decide (approval-path); a manager's add is a member's write (issue #790)"},
+	"POST /v1/channels/{channel}/members":                             {reauthOperators, "grants access, as the PUT by id; a manager's add is a member's write (issue #790)"},
+	"PUT /v1/principals/{id}/role":                                    {reauthAlways, "makes or unmakes an operator or an owner (issue #790)"},
 	"DELETE /v1/channels/{channel}/members/{principal_id}":            {reauthNone, "narrows access; the person stays"},
 	"POST /v1/channels/{channel}/nets":                                {reauthNone, "a net, as a channel"},
 	"DELETE /v1/channels/{channel}/nets/{net}":                        {reauthNone, "archives a net"},
@@ -532,27 +534,27 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/principals/hide":                                        {reauthAlways, "removes people in bulk"},
 	"GET /v1/principals":                                              {reauthNone, "a list"},
 	"POST /v1/principals/{id}/credentials/revoke-all":                 {reauthOnOthers, "bulk revoke of someone else; signing oneself out is not"},
-	"GET /v1/audit":                             {reauthNone, "audit export"},
-	"POST /v1/hooks":                            {reauthAlways, "creates a hook"},
-	"GET /v1/hooks":                             {reauthNone, "a list"},
-	"DELETE /v1/hooks/{id}":                     {reauthNone, "closes a hook, as an invite close"},
-	"GET /v1/invites/{id}/principals":           {reauthNone, "a list"},
-	"POST /v1/invites/{id}/disable-joiners":     {reauthAlways, "ends people in bulk"},
-	"POST /v1/principals/{id}/disable-invitees": {reauthAlways, "ends people in bulk"},
-	"PUT /v1/principals/{id}/invite-permission": {reauthAlways, "grants invite permission"},
-	"GET /v1/invites/settings":                  {reauthNone, "a settings read"},
-	"PUT /v1/invites/settings":                  {reauthAlways, "opens or closes joining through invites"},
-	"POST /v1/principals/{id}/sign-in-links":    {reauthAlways, "creates a link"},
-	"DELETE /v1/sign-in-links/{id}":             {reauthNone, "closes a link, as an invite close"},
-	"GET /v1/join/settings":                     {reauthNone, "a settings read"},
-	"PUT /v1/join/settings":                     {reauthAlways, "opens or closes joining to guests"},
-	"GET /v1/guests":                            {reauthNone, "a list"},
-	"POST /v1/guests/{id}/end":                  {reauthAlways, "ends a person"},
-	"POST /v1/guests/end":                       {reauthAlways, "ends people in bulk"},
-	"POST /v1/guests/{id}/conversion-permit":    {reauthAlways, "creates a permit"},
-	"GET /v1/reports":                           {reauthNone, "reports"},
-	"GET /v1/reports/{id}":                      {reauthNone, "reports"},
-	"PUT /v1/reports/{id}":                      {reauthNone, "files a report"},
+	"GET /v1/audit":                                                   {reauthNone, "audit export"},
+	"POST /v1/hooks":                                                  {reauthAlways, "creates a hook"},
+	"GET /v1/hooks":                                                   {reauthNone, "a list"},
+	"DELETE /v1/hooks/{id}":                                           {reauthNone, "closes a hook, as an invite close"},
+	"GET /v1/invites/{id}/principals":                                 {reauthNone, "a list"},
+	"POST /v1/invites/{id}/disable-joiners":                           {reauthAlways, "ends people in bulk"},
+	"POST /v1/principals/{id}/disable-invitees":                       {reauthAlways, "ends people in bulk"},
+	"PUT /v1/principals/{id}/invite-permission":                       {reauthAlways, "grants invite permission"},
+	"GET /v1/invites/settings":                                        {reauthNone, "a settings read"},
+	"PUT /v1/invites/settings":                                        {reauthAlways, "opens or closes joining through invites"},
+	"POST /v1/principals/{id}/sign-in-links":                          {reauthAlways, "creates a link"},
+	"DELETE /v1/sign-in-links/{id}":                                   {reauthNone, "closes a link, as an invite close"},
+	"GET /v1/join/settings":                                           {reauthNone, "a settings read"},
+	"PUT /v1/join/settings":                                           {reauthAlways, "opens or closes joining to guests"},
+	"GET /v1/guests":                                                  {reauthNone, "a list"},
+	"POST /v1/guests/{id}/end":                                        {reauthAlways, "ends a person"},
+	"POST /v1/guests/end":                                             {reauthAlways, "ends people in bulk"},
+	"POST /v1/guests/{id}/conversion-permit":                          {reauthAlways, "creates a permit"},
+	"GET /v1/reports":                                                 {reauthNone, "reports"},
+	"GET /v1/reports/{id}":                                            {reauthNone, "reports"},
+	"PUT /v1/reports/{id}":                                            {reauthNone, "files a report"},
 
 	// Every write anyone authenticated may make: in the class only where an
 	// operator's use creates a principal or a link (rule: reauthOperators).
@@ -597,8 +599,8 @@ func TestRecentAuthClass(t *testing.T) {
 	inTable := map[string]route{}
 	for _, rt := range f.srv.routes {
 		inTable[rt.pattern] = rt
-		decide := rt.access == accessOperator || rt.access == accessOperatorOrSelf ||
-			(rt.access == accessAuthenticated && routeMethod(rt.pattern) != http.MethodGet)
+		decide := rt.access == accessOperator || rt.access == accessOperatorOrSelf || rt.access == accessOwner ||
+			((rt.access == accessAuthenticated || rt.access == accessChannelManager) && routeMethod(rt.pattern) != http.MethodGet)
 		if !decide {
 			if _, ok := recentAuthRoutes[rt.pattern]; ok {
 				t.Errorf("%s is in the class but is neither an operator route nor an authenticated write", rt.pattern)
@@ -610,7 +612,7 @@ func TestRecentAuthClass(t *testing.T) {
 			t.Errorf("route %s has no re-authentication decision: classify it by the rule of design §5.3", rt.pattern)
 			continue
 		}
-		if rt.access == accessAuthenticated && d.rule != reauthNone && d.rule != reauthOperators {
+		if (rt.access == accessAuthenticated || rt.access == accessChannelManager) && d.rule != reauthNone && d.rule != reauthOperators {
 			t.Errorf("%s: an authenticated route is in the class for operators only, not %d", rt.pattern, d.rule)
 		}
 		if got := recentAuthRoutes[rt.pattern]; got != d.rule {

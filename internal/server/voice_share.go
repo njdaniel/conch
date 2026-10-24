@@ -216,8 +216,8 @@ func (s *Server) handleVoiceShareStop(w http.ResponseWriter, r *http.Request) {
 		claim = &started
 	}
 	var channel store.Channel
-	operator := isOperator(caller)
-	if operator {
+	moderator := isOperator(caller)
+	if moderator {
 		ch, err := s.store.ChannelByName(ctx, r.PathValue("channel"))
 		if errors.Is(err, store.ErrNotFound) {
 			writeChannelNotFound(w)
@@ -235,6 +235,13 @@ func (s *Server) handleVoiceShareStop(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		channel = ch
+		manages, err := s.store.ManagesChannel(ctx, channel.ID, caller.ID)
+		if err != nil {
+			slog.ErrorContext(ctx, "voice: check channel manager failed", "channel", channel.ID, "error", err)
+			writeInternalError(w)
+			return
+		}
+		moderator = manages
 	}
 	if s.lk == nil {
 		writeError(w, http.StatusServiceUnavailable, schema.ErrorCodeVoiceNotConfigured, "voice is not configured on this server")
@@ -256,9 +263,9 @@ func (s *Server) handleVoiceShareStop(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	switch err := s.voice.stopShare(ctx, room, caller.ID, operator, claim); {
+	switch err := s.voice.stopShare(ctx, room, caller.ID, moderator, claim); {
 	case errors.Is(err, errVoiceShareNotYours):
-		s.denyForbidden(w, r, caller, errForbidden.Code, "only the person sharing or an operator can stop a share")
+		s.denyForbidden(w, r, caller, errForbidden.Code, "only the person sharing, a manager of the channel or an operator can stop a share")
 		return
 	case errors.Is(err, errVoiceShareStale):
 		writeVoiceShareStale(w)

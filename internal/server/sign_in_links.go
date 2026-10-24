@@ -75,6 +75,9 @@ func (s *Server) handleCreateSignInLink(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if s.ownerProtected(w, r, id) {
+		return
+	}
 	resp, err := s.store.CreateSignInLink(ctx, auditActor(ctx), caller.ID, id, req, now)
 	switch {
 	case errors.Is(err, store.ErrSignInLinkRequestInvalid):
@@ -120,14 +123,15 @@ func signInLinkTargetMessage(err error) string {
 // is a 204 that changes nothing; an unknown id is a 404.
 func (s *Server) handleCloseSignInLink(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, ok := s.inviteCaller(w, r); !ok {
+	caller, ok := s.inviteCaller(w, r)
+	if !ok {
 		return
 	}
 	id, ok := pathID(w, r, "id", "sign-in link")
 	if !ok {
 		return
 	}
-	_, err := s.store.CloseSignInLink(ctx, auditActor(ctx), id, s.now())
+	_, err := s.store.CloseSignInLink(ctx, auditActor(ctx), id, s.now(), !isOwner(caller))
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, schema.ErrorCodeSignInLinkNotFound, "sign-in link not found")

@@ -1,0 +1,64 @@
+package server
+
+import (
+	"errors"
+	"log/slog"
+	"net/http"
+
+	"github.com/njdaniel/conch/internal/server/store"
+	"github.com/njdaniel/conch/pkg/schema"
+)
+
+// handleSetRole serves PUT /v1/principals/{id}/role (owner only, recent
+// authentication required; issue #790, ADR-010 §6).
+func (s *Server) handleSetRole(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	id, ok := pathID(w, r, "id", "principal")
+	if !ok {
+		return
+	}
+	var req schema.RoleChangeRequestV1
+	if !decodeInviteBody(w, r, &req) {
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	caller, authed := callerFrom(ctx)
+	if !authed {
+		writeUnauthenticated(w)
+		return
+	}
+	res, err := s.store.SetRole(ctx, auditActor(ctx), caller.ID, id, store.Role(req.Role), req.Owner)
+	switch {
+	case errors.Is(err, store.ErrNotOwner):
+		s.denyForbidden(w, r, caller, "forbidden", "owner required")
+		return
+	case errors.Is(err, store.ErrPrincipalNotFound):
+		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
+		return
+	case errors.Is(err, store.ErrRoleNotAllowed):
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	case errors.Is(err, store.ErrLastOperator):
+		writeError(w, http.StatusConflict, "last_operator", lastOperatorMessage)
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "principals: set role failed", "principal", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	if res.CredentialsRevoked > 0 {
+		// Setting the owner mark revoked the target's live credentials; close
+		// their open message, events and voice sockets as handleRevokeAllCredentials
+		// does (disable.go).
+		s.hub.DropPrincipalAll(id)
+		s.events.dropPrincipalAll(id)
+		s.events.notifyRosters()
+		s.voicePrincipalLostAccess(ctx, id, voiceReasonCredsRevoked)
+	} else if res.Changed {
+		s.events.notifyRosters()
+	}
+	writeJSON(w, http.StatusOK, res.RoleChangeResponseV1)
+}

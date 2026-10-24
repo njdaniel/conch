@@ -252,6 +252,14 @@ func (s *Server) handleDeleteNetMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if _, err := s.store.NetByName(ctx, channel.ID, name); err != nil {
+		if s.writeNetError(w, r, err) {
+			return
+		}
+	}
+	if s.ownerProtected(w, r, principalID) {
+		return
+	}
 	_, err := s.store.RemoveNetMember(ctx, auditActor(ctx), channel.ID, name, principalID)
 	if s.writeNetError(w, r, err) {
 		return
