@@ -101,7 +101,7 @@ export function Lobby({
   // Rename the open channel (issue #728), under the channel list, or null for
   // a person who may not.
   readonly renameChannel?: ReactNode;
-  // The caller's own account: changing their name (issue #441), in Settings.
+  // The caller's standing and own account settings, in Settings.
   readonly account?: ReactNode;
   // "Your sign-ins" (issue #496), in Settings. Ending this browser's own
   // sign-in is signing out, so the section is handed endThis, which asks the

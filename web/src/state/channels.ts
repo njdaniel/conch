@@ -28,6 +28,8 @@ export type ChannelsAction =
   // channel_not_found. It stays where it is in the list, and stays open if it
   // was.
   | { readonly type: 'renamed'; readonly id: number; readonly name: string }
+  // The caller's manager grant in one channel, from its accepted member list.
+  | { readonly type: 'managed'; readonly id: number; readonly manages: boolean }
   | { readonly type: 'lost'; readonly name: string }
   | { readonly type: 'reset' };
 
@@ -80,6 +82,12 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
       const channels = state.channels.map((c) => (c.id === action.id ? { ...c, name: action.name } : c));
       const selected = state.selected === was.name ? action.name : state.selected;
       return { ...state, channels, selected };
+    }
+    case 'managed': {
+      const held = state.channels.find((channel) => channel.id === action.id);
+      if (held === undefined || (held.manages ?? false) === action.manages) return state;
+      const channels = state.channels.map((channel) => (channel.id === action.id ? { ...channel, manages: action.manages } : channel));
+      return { ...state, channels };
     }
     case 'lost': {
       const channels = state.channels.filter((c) => c.name !== action.name);

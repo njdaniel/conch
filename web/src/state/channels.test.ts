@@ -73,6 +73,23 @@ describe('channelsReducer renamed', () => {
   });
 });
 
+describe('channelsReducer managed', () => {
+  it('changes only the named channel and preserves every other standing', () => {
+    const from: ChannelsState = { ...listed('general'), channels: [{ ...general, manages: false }, { ...ops, manages: true }, dev] };
+    const granted = channelsReducer(from, { type: 'managed', id: 1, manages: true });
+    expect(granted.channels).toEqual([{ ...general, manages: true }, { ...ops, manages: true }, dev]);
+    expect(granted.selected).toBe('general');
+    const revoked = channelsReducer(granted, { type: 'managed', id: 2, manages: false });
+    expect(revoked.channels).toEqual([{ ...general, manages: true }, { ...ops, manages: false }, dev]);
+  });
+
+  it('returns the same state for an unknown channel or an unchanged grant', () => {
+    const from = listed('general');
+    expect(channelsReducer(from, { type: 'managed', id: 9, manages: true })).toBe(from);
+    expect(channelsReducer(from, { type: 'managed', id: 1, manages: false })).toBe(from);
+  });
+});
+
 describe('what is kept by name moves with a rename', () => {
   const message = (id: number) => ({ schema: 'conch.message.v2' as const, id, channel_id: 2, author_id: 3, created_at: at, body: `m${String(id)}` });
 
