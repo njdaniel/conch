@@ -703,6 +703,46 @@ describe('lobby', () => {
     await screen.findByRole('button', { name: 'general' });
     expect(screen.getByRole('status', { name: 'Status' }).textContent).toContain('Connected');
   });
+
+  it.each([
+    ['owner', { ...operator, owner: true }, [], 'You are the owner.'],
+    ['operator', operator, [], 'You are an operator. Only the owner changes roles or acts on the owner.'],
+    ['manager', member, ['general', 'ops'], 'You manage #general and #ops.'],
+    ['member', member, [], 'You are a member.'],
+    [
+      'guest',
+      {
+        id: 12,
+        kind: 'human',
+        name: 'guest-a7k4m2q9x3h5t8wz',
+        role: 'member',
+        identity_class: 'guest',
+        guest: {
+          state: 'active',
+          origin: 'address',
+          handle: 'guest-a7k4m2q9x3h5t8wz',
+          tag: 'a7k4',
+          started_at: created_at,
+          expires_at: '2099-10-22T12:00:00.000Z',
+          idle_expires_at: '2099-10-21T14:00:00.000Z',
+          can_convert: true,
+        },
+      },
+      [],
+      'You are a guest; a visit cannot hold any right.',
+    ],
+  ])('states the caller\'s standing as %s in Who can administer', async (_standing: string, who: Record<string, unknown>, managed: readonly string[], line: string) => {
+    window.sessionStorage.setItem('conch.web.token', secret);
+    serve({
+      '/v1/whoami': () => json(who),
+      '/v1/channels': () => json({ channels: channels.channels.map((channel) => ({ ...channel, manages: managed.includes(channel.name) })) }),
+    });
+    render(<App origin={origin} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    const account = screen.getByRole('region', { name: 'Account' });
+    expect(within(account).getByRole('heading', { name: 'Who can administer' })).toBeDefined();
+    expect(within(account).getByText(line)).toBeDefined();
+  });
 });
 
 // Issue #590 (F20): arriving in the lobby puts focus on the open channel's

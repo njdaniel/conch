@@ -3,8 +3,8 @@
 // the members list joined with the latest roster frame. Every name, task,
 // runtime and model is another person's or agent's text and is rendered as a
 // text node.
-import { useEffect, useId, useState } from 'react';
-import { Avatar } from '../Icons';
+import { useEffect, useState } from 'react';
+import { MemberControls, Members, type MemberControlsProps } from '../Members';
 import type { RunV1 } from '../schema/run';
 import type { SessionV1 } from '../schema/session';
 import { ago } from './format';
@@ -61,13 +61,14 @@ function SessionRow({ session, runs, now, onOpen }: {
   );
 }
 
-function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen }: {
+function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen, controls }: {
   readonly entry: Entry;
   readonly expanded: boolean;
   readonly onToggle: () => void;
   readonly sessionRuns: Agents['state']['sessionRuns'];
   readonly now: number;
   readonly onOpen: (runId: number, sessionId: number, known: RunV1 | null) => void;
+  readonly controls: MemberControlsProps;
 }) {
   const lead = entry.sessions.find((s) => s.status === entry.status);
   return (
@@ -79,6 +80,7 @@ function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen }: {
       {entry.sessions.length > 1 ? <span> ({entry.sessions.length} sessions)</span> : null}
       {lead?.outcome_unknown === true ? <span> · outcome unknown</span> : null}
       {lead?.task === undefined ? null : <span> · task: {lead.task}</span>}
+      <MemberControls key={`${String(controls.channel.id)}:${String(entry.id)}`} {...controls} principalId={entry.id} />
       {expanded ? (
         entry.sessions.length === 0 ? (
           <p className="hint">No sessions</p>
@@ -94,37 +96,19 @@ function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen }: {
   );
 }
 
-// A group of people under its heading, with how many it holds; the list is
-// named by the heading. An empty group is not shown.
-function PeopleGroup({ title, people }: { readonly title: string; readonly people: readonly Entry[] }) {
-  const id = useId();
-  if (people.length === 0) return null;
-  return (
-    <>
-      <h4 id={id}>{`${title} — ${String(people.length)}`}</h4>
-      <ul aria-labelledby={id}>
-        {people.map((p) => (
-          <li key={p.id} className={`ag-person state-${p.state}`}>
-            <Avatar id={p.id} name={p.name} />
-            <span className="ag-name">{p.name}</span>
-            {p.live > 1 ? <span> ({p.live} sessions)</span> : null} <span className="ag-status">{p.state}</span>
-          </li>
-        ))}
-      </ul>
-    </>
-  );
-}
-
 const unavailable: Record<'ended' | 'unavailable', string> = {
   ended: 'Session ended; could not start a new one',
   unavailable: 'Could not start a session',
 };
 
-export function MembersPanel({ agents, now }: { readonly agents: Agents; readonly now: number }) {
+type PanelControls = Omit<MemberControlsProps, 'members' | 'refreshMembers'>;
+
+export function MembersPanel({ agents, now, controls }: { readonly agents: Agents; readonly now: number; readonly controls: PanelControls | null }) {
   const { state, session, members } = agents;
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(new Set());
   const joined = joinMembers(members, state.roster);
   const live = state.link === 'live';
+  const memberControls: MemberControlsProps | null = controls === null ? null : { ...controls, members, refreshMembers: agents.refreshMembers };
 
   // The runs of every unfolded agent's sessions are read when the socket
   // comes back and when a session appears: nothing is replayed.
@@ -144,10 +128,6 @@ export function MembersPanel({ agents, now }: { readonly agents: Agents; readonl
     setExpanded(new Set());
   }, [channelId]);
 
-  // Stale people are still here, so they are listed as online, each with its
-  // word; the order within a group is the joined order.
-  const online = joined.people.filter((p) => p.state !== 'offline');
-  const offline = joined.people.filter((p) => p.state === 'offline');
   // Most channels have neither agents nor runs: one line instead of two empty
   // sections, once the runs are known to be none. While they load, or after a
   // failed read (which offers Try again), the sections show.
@@ -169,17 +149,10 @@ export function MembersPanel({ agents, now }: { readonly agents: Agents; readonl
       <p role="status">Connecting…</p>
     );
   }
+  if (memberControls === null) return <p role="status">Members unavailable</p>;
   return (
     <div className="ag-panel">
-      <h3>People</h3>
-      {joined.people.length === 0 ? (
-        <p className="empty">Nobody</p>
-      ) : (
-        <>
-          <PeopleGroup title="Online" people={online} />
-          <PeopleGroup title="Offline" people={offline} />
-        </>
-      )}
+      <Members {...memberControls} people={joined.people} />
       {folded ? (
         <p className="empty">No agents or runs in this channel.</p>
       ) : (
@@ -204,6 +177,7 @@ export function MembersPanel({ agents, now }: { readonly agents: Agents; readonl
                   sessionRuns={state.sessionRuns}
                   now={now}
                   onOpen={agents.openRun}
+                  controls={memberControls}
                 />
               ))}
             </ul>

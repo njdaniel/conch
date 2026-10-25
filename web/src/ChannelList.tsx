@@ -6,6 +6,7 @@ import { nobody, type InVoice } from './voice/useOccupancy';
 
 const badgeId = (channel: number) => `unread-${String(channel)}`;
 const voiceId = (channel: number) => `in-voice-${String(channel)}`;
+const managesId = (channel: number) => `manages-${String(channel)}`;
 
 // The count after a channel's name, with a name of its own ("3 unread") that the
 // channel's button is described by. It sits beside the button, not in it, so the
@@ -36,8 +37,8 @@ function VoiceMark({ id, count }: { readonly id: number; readonly count: number 
 
 // The channels as a list of buttons. Tab reaches the list once; the arrow keys
 // move between channels (Home and End jump), Enter or Space opens the one
-// focused. Under it, for an operator, the control that renames the open
-// channel (issue #728).
+// focused. Under it, for an operator or this channel's manager, the control
+// that renames the open channel (issue #728). Managed channels carry a badge.
 export function ChannelList({
   channels,
   selected,
@@ -119,8 +120,9 @@ export function ChannelList({
     <>
       <ul className={`channel-list${more}`} ref={list}>
         {channels.map((channel, i) => {
-          // What describes the button: who is in its voice, then its unread.
+          // What describes the button: a manager grant, who is in its voice, then its unread.
           const described = [
+            channel.manages === true ? managesId(channel.id) : null,
             (occupancy.get(channel.id) ?? 0) > 0 ? voiceId(channel.id) : null,
             (unread.get(channel.name) ?? 0) > 0 ? badgeId(channel.id) : null,
           ].filter((x) => x !== null);
@@ -144,6 +146,11 @@ export function ChannelList({
               >
                 {channel.name}
               </button>
+              {channel.manages === true ? (
+                <span id={managesId(channel.id)} className="ag-badge manages">
+                  manages
+                </span>
+              ) : null}
               <VoiceMark id={channel.id} count={occupancy.get(channel.id) ?? 0} />
               <UnreadBadge id={channel.id} count={unread.get(channel.name) ?? 0} />
             </li>

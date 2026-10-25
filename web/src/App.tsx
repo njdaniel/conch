@@ -256,6 +256,12 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     },
     [renamed],
   );
+  const onManages = useCallback(
+    (id: number, manages: boolean) => {
+      dispatchChannels({ type: 'managed', id, manages });
+    },
+    [dispatchChannels],
+  );
 
   const onUnauthorized = useCallback(() => {
     dispatchAuth({ type: 'unauthorized' });
@@ -286,7 +292,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const visit = principal === null ? null : visitOf(principal);
   const shownName = principal === null ? '' : displayName(principal);
   const selected = signedIn ? channels.selected : null;
-  const channelId = channels.channels.find((c) => c.name === selected)?.id ?? null;
+  const currentChannel = channels.channels.find((c) => c.name === selected) ?? null;
+  const channelId = currentChannel?.id ?? null;
   // The browser's own session, the events socket and what the panel and run
   // detail show from them. The member list it keeps current also names the
   // authors in the conversation.
@@ -295,8 +302,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     channel: channelId === null ? null : selected,
     channelId,
     nameOf,
+    viewer: principal?.id ?? 0,
     onUnauthorized,
     onChannel,
+    onManages,
     onMissing,
   });
   const live = useLiveChannel({
@@ -893,32 +902,53 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           unread={unread}
           occupancy={occupancy}
           connection={connection}
-          panel={<MembersPanel agents={agents} now={now} />}
+          panel={
+            <MembersPanel
+              agents={agents}
+              now={now}
+              controls={
+                currentChannel === null
+                  ? null
+                  : {
+                      channel: currentChannel,
+                      channels: channels.channels,
+                      viewer: { role: auth.principal.role, guest: visit !== null },
+                      onUnauthorized,
+                    }
+              }
+            />
+          }
           account={
-            // A person renames themselves; an agent's name is an operator's to
-            // set, and a guest's is its handle (issue #713).
-            auth.principal.kind === 'human' && visit === null ? (
-              <>
-                <ChangeName
-                  id={auth.principal.id}
-                  name={auth.principal.name}
-                  onRenamed={(p) => {
-                    dispatchAuth({ type: 'renamed', name: p.name });
-                  }}
-                  onUnauthorized={onUnauthorized}
-                />
-                {auth.principal.role === 'operator' && !operatorSession(auth.principal) ? (
-                  <p className="hint">
-                    This browser uses a script’s credential, not your sign-in: no password or code was checked, and it does
-                    not end after an hour without use. Sign out, and sign in with your name, password and a code.
-                  </p>
-                ) : null}
-                {/* A server that predates passwords says nothing of them. */}
-                {auth.principal.auth === undefined ? null : (
-                  <PasswordSettings who={auth.principal} insecure={needsHttps(origin)} onChanged={refreshWho} onUnauthorized={onUnauthorized} />
-                )}
-              </>
-            ) : null
+            <>
+              <div className="standing">
+                <h3>Who can administer</h3>
+                <p>{administrationLine(auth.principal, channels.channels, visit !== null)}</p>
+              </div>
+              {/* A person renames themselves; an agent's name is an operator's to
+                  set, and a guest's is its handle (issue #713). */}
+              {auth.principal.kind === 'human' && visit === null ? (
+                <>
+                  <ChangeName
+                    id={auth.principal.id}
+                    name={auth.principal.name}
+                    onRenamed={(p) => {
+                      dispatchAuth({ type: 'renamed', name: p.name });
+                    }}
+                    onUnauthorized={onUnauthorized}
+                  />
+                  {auth.principal.role === 'operator' && !operatorSession(auth.principal) ? (
+                    <p className="hint">
+                      This browser uses a script’s credential, not your sign-in: no password or code was checked, and it does
+                      not end after an hour without use. Sign out, and sign in with your name, password and a code.
+                    </p>
+                  ) : null}
+                  {/* A server that predates passwords says nothing of them. */}
+                  {auth.principal.auth === undefined ? null : (
+                    <PasswordSettings who={auth.principal} insecure={needsHttps(origin)} onChanged={refreshWho} onUnauthorized={onUnauthorized} />
+                  )}
+                </>
+              ) : null}
+            </>
           }
           {...(visit === null
             ? {
@@ -959,10 +989,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             />
           }
           renameChannel={
-            // Operators alone may rename (the server's rule); anyone else is
-            // not offered it. Keyed by id: opening another channel starts the
-            // form over, and a rename of this one keeps it.
-            auth.principal.role === 'operator' && channelId !== null && selected !== null ? (
+            // Operators and this channel's managers may rename. Keyed by id:
+            // opening another channel starts the form over, and a rename of
+            // this one keeps it.
+            visit === null && (auth.principal.role === 'operator' || currentChannel?.manages === true) && channelId !== null && selected !== null ? (
               <RenameChannel
                 key={channelId}
                 channel={{ id: channelId, name: selected }}
@@ -1047,6 +1077,15 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         />
       );
   }
+}
+
+function administrationLine(who: WhoAmIResponseV1, channels: readonly { readonly name: string; readonly manages?: boolean }[], guest: boolean): string {
+  if (who.role === 'operator' && who.owner === true) return 'You are the owner.';
+  if (who.role === 'operator') return 'You are an operator. Only the owner changes roles or acts on the owner.';
+  if (guest) return 'You are a guest; a visit cannot hold any right.';
+  const managed = channels.filter((channel) => channel.manages === true).map((channel) => channel.name);
+  if (managed.length > 0) return `You manage ${channelWords(managed)}.`;
+  return 'You are a member.';
 }
 
 // passwordRefusal is the line shown for a refused password sign-in. Every

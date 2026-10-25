@@ -168,6 +168,7 @@ export interface Agents {
   readonly state: AgentsState;
   readonly session: OwnSession;
   readonly members: readonly ChannelMemberV1[];
+  readonly refreshMembers: () => void;
   readonly release: () => Promise<void>;
   readonly loadRuns: (session: number) => void;
   readonly openRun: (runId: number, sessionId: number, known: RunV1 | null) => void;
@@ -206,13 +207,16 @@ export function useAgents({
   channel,
   channelId,
   nameOf,
+  viewer,
   onUnauthorized,
   onChannel,
+  onManages,
   onMissing,
 }: {
   readonly signedIn: boolean;
   readonly channel: string | null;
   readonly channelId: number | null;
+  readonly viewer: number;
   // The channel's name now, by id: what a reconnect and a read name, so a
   // channel renamed while open (issue #728) keeps its socket.
   readonly nameOf: (channelId: number) => string | null;
@@ -220,6 +224,8 @@ export function useAgents({
   // The channel as it now is, from the events socket (conch.channel.v1): it
   // was renamed.
   readonly onChannel: (channel: ChannelDocV1) => void;
+  // The accepted member list's word on the caller's grant in this channel.
+  readonly onManages: (channelId: number, manages: boolean) => void;
   // A read for the channel answered channel_not_found: it may have been
   // renamed under this page.
   readonly onMissing: (channelId: number) => void;
@@ -264,14 +270,17 @@ export function useAgents({
     void api.listMembers(name).then((result) => {
       if (!live) return;
       if (result.ok) {
-        if (asked === membersSent.current) setMembers(result.value);
+        if (asked === membersSent.current) {
+          setMembers(result.value);
+          onManages(id, result.value.some((member) => member.principal_id === viewer && member.manages === true));
+        }
       } else if (result.failure === 'unauthorized') onUnauthorized();
       else if (result.code === api.channelNotFound) onMissing(id);
     });
     return () => {
       live = false;
     };
-  }, [open, channelId, nameOf, membersAttempt, onUnauthorized, onMissing]);
+  }, [open, channelId, nameOf, viewer, membersAttempt, onUnauthorized, onManages, onMissing]);
 
   const heldIds = members.map((m) => m.principal_id).join(',');
   const unknownKey = (() => {
@@ -372,6 +381,7 @@ export function useAgents({
             if (frame.members.channel_id !== id) return;
             membersSent.current++;
             setMembers(frame.members.members);
+            onManages(id, frame.members.members.some((member) => member.principal_id === viewer && member.manages === true));
             break;
           case 'run':
             dispatch({ type: 'run', run: frame.run });
@@ -397,7 +407,7 @@ export function useAgents({
       if (retry !== null) realClock.clearTimeout(retry);
       feed.stop();
     };
-  }, [open, channelId, nameOf, sessionId, onUnauthorized, onChannel, replace, healthy]);
+  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, replace, healthy]);
 
   // The members line is read again each time the socket comes back.
   useEffect(() => {
@@ -550,5 +560,9 @@ export function useAgents({
     [onUnauthorized, readRun],
   );
 
-  return { state, session: own.session, members, release, loadRuns, openRun, closeRun, moreRuns, setRunFilter, ask };
+  const refreshMembers = useCallback(() => {
+    setMembersAttempt((n) => n + 1);
+  }, []);
+
+  return { state, session: own.session, members, refreshMembers, release, loadRuns, openRun, closeRun, moreRuns, setRunFilter, ask };
 }

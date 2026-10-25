@@ -15,7 +15,7 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 
 type Json = Record<string, unknown>;
 type Call = { readonly method: string; readonly path: string; readonly body: unknown };
-type Channel = { id: number; name: string; created_at: string };
+type Channel = { id: number; name: string; created_at: string; manages?: boolean };
 type Who = { id: number; kind: string; name: string; role: string };
 
 const operator: Who = { id: 1, kind: 'human', name: 'nick', role: 'operator' };
@@ -149,7 +149,7 @@ function install(me: Who = operator) {
         if (channel === undefined) return notFound();
         switch (m[2]) {
           case 'members':
-            return Promise.resolve(json({ members: [{ principal_id: server.me.id, created_at: at, name: server.me.name, kind: 'human' }] }));
+            return Promise.resolve(json({ members: [{ principal_id: server.me.id, created_at: at, name: server.me.name, kind: 'human', manages: channel.manages }] }));
           case 'nets':
             return Promise.resolve(json({ nets: [] }));
           case 'read-state': {
@@ -243,6 +243,20 @@ describe('the rename control', () => {
     await open();
     expect(within(nav()).getByRole('button', { name: 'Rename #general' })).toBeDefined();
     expect((document.getElementById('rename-channel-form') as HTMLFormElement).hidden).toBe(true);
+  });
+
+  it('is offered to this channel\'s manager, who can rename it', async () => {
+    window.sessionStorage.clear();
+    window.localStorage.setItem(key, secret);
+    install(member);
+    (server.channels[0] as Channel).manages = true;
+    await open();
+    const form = openForm('general');
+    fireEvent.change(field(), { target: { value: 'managed-room' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Rename channel' }));
+    await within(nav()).findByText('Renamed to #managed-room');
+    expect(renames()).toEqual([{ method: 'PUT', path: '/v1/channels/7/name', body: { name: 'managed-room', from: 'general' } }]);
+    await movedTo('managed-room', 'general');
   });
 
   it('is not offered to a member', async () => {

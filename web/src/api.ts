@@ -72,13 +72,16 @@ import { interventionV1, listInterventionsResponseV1, type CreateInterventionReq
 import { listRunsResponseV1, runV1, type RunV1 } from './schema/run';
 import { sessionV1, type CreateSessionRequestV1, type SessionV1 } from './schema/session';
 import {
+  channelMemberV1,
   createChannelResponse,
   listChannelMembersResponseV1,
   listChannelsResponse,
   renameChannelResponseV1,
+  type AddChannelMemberRequestV1,
   type ChannelMemberV1,
   type ChannelV0,
   type CreateChannelRequest,
+  type PutChannelMemberRequestV1,
   type RenameChannelRequestV1,
 } from './schema/channel';
 import { listMessagesResponseV2, postMessageResponseV2, type Audience, type MessageV2, type PostMessageRequestV2 } from './schema/message';
@@ -1445,8 +1448,8 @@ export async function createChannel(name: string): Promise<InviteResult<ChannelV
   return created.ok ? { ok: true, value: created.value.channel } : created;
 }
 
-// renameChannel renames a channel by its id (issue #728): operators alone
-// (403 forbidden for anyone else). from is the name the caller's list shows
+// renameChannel renames a channel by its id (issue #728): operators and this
+// channel's managers. from is the name the caller's list shows
 // now; the server refuses the rename when that is no longer the channel's name
 // (channel_name_stale), so two operators cannot rename past each other. Other
 // refusals carry their code and line as createChannel's do: channel_exists for
@@ -1490,6 +1493,19 @@ export async function loadMessages(channel: string, before?: number): Promise<Ap
 export async function listMembers(channel: string): Promise<ApiResult<ChannelMemberV1[]>> {
   const result = await authed(`${channelPath(channel)}/members`, listChannelMembersResponseV1);
   return result.ok ? { ok: true, value: result.value.members } : result;
+}
+
+export async function addChannelMember(channel: string, name: string): Promise<InviteResult<ChannelMemberV1>> {
+  const request: AddChannelMemberRequestV1 = { name };
+  return readSent(await authedPost(`${channelPath(channel)}/members`, request), channelMemberV1);
+}
+
+export async function putChannelMember(channel: string, principal: number, request: PutChannelMemberRequestV1): Promise<InviteResult<null>> {
+  return readDone(await authedSend('PUT', `${channelPath(channel)}/members/${String(principal)}`, request));
+}
+
+export async function removeChannelMember(channel: string, principal: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend('DELETE', `${channelPath(channel)}/members/${String(principal)}`));
 }
 
 export async function listNets(channel: string): Promise<ApiResult<NetV1[]>> {

@@ -126,6 +126,20 @@ describe('the overflow cue', () => {
   });
 });
 
+describe('a manages badge', () => {
+  it('marks only managed channels and describes the channel button without changing its name', () => {
+    const managed = channels.map((channel) => ({ ...channel, manages: channel.id === 2 }));
+    render(<ChannelList channels={managed} selected="general" unread={new Map()} onOpen={() => undefined} />);
+    const button = screen.getByRole('button', { name: 'book-club' });
+    const badge = screen.getByText('manages');
+    expect(button.textContent).toBe('book-club');
+    expect(button.getAttribute('aria-describedby')).toBe(badge.id);
+    expect(badge.closest('button')).toBeNull();
+    expect(badge.parentElement).toBe(button.parentElement);
+    expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-describedby')).toBeNull();
+  });
+});
+
 describe('an unread count', () => {
   it('describes its channel button and leaves the button named for the channel alone', async () => {
     render(<ChannelList channels={channels} selected="general" unread={new Map([['book-club', 3]])} onOpen={() => undefined} />);
@@ -210,9 +224,9 @@ describe('an empty list', () => {
   });
 });
 
-// The rename control (issue #728) is the caller's to give, for an operator
-// alone; the list shows it under itself while a channel is open, and keeps
-// each channel's place, count and focus stop by id across a rename.
+// The rename control (issue #728) is the caller's to give, for an operator or
+// this channel's manager; the list shows it under itself while a channel is
+// open, and keeps each channel's place, count and focus stop by id across a rename.
 describe('the rename control', () => {
   const control = <button type="button">Rename the open channel</button>;
 
@@ -222,7 +236,7 @@ describe('the rename control', () => {
     expect(screen.getByRole('list').contains(button)).toBe(false);
   });
 
-  it('is not shown when not given (anyone but an operator), nor while no channel is open', () => {
+  it('is not shown when not given (anyone without the grant), nor while no channel is open', () => {
     const view = render(<ChannelList channels={channels} selected="book-club" unread={new Map()} onOpen={() => undefined} />);
     expect(screen.queryByRole('button', { name: 'Rename the open channel' })).toBeNull();
     view.rerender(<ChannelList channels={channels} selected={null} unread={new Map()} rename={control} onOpen={() => undefined} />);

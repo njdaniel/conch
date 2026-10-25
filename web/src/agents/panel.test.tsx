@@ -459,6 +459,35 @@ async function openSettled(sessions: Json[] = [session(100, 2)]) {
 }
 
 describe('the member list the socket sends', () => {
+  it('applies a live grant and revocation to the badge, rename and member controls, and the standing line', async () => {
+    const socket = await openSettled();
+    const nav = () => within(screen.getByRole('navigation', { name: 'Channels' }));
+    const granted = members.members.map((member) => (member.principal_id === 2 ? { ...member, manages: true, can_decide: false, role: 'member' } : member));
+
+    socket.send(memberList(granted, 8));
+    await act(async () => {});
+    expect(nav().queryByText('manages')).toBeNull();
+    expect(panel().queryByRole('form', { name: 'Add person by name' })).toBeNull();
+
+    socket.send(memberList(granted));
+    await panel().findByRole('form', { name: 'Add person by name' });
+    expect(nav().getByText('manages')).toBeDefined();
+    expect(nav().getByRole('button', { name: 'Rename #general' })).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(screen.getByText('You manage #general.')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+    socket.send(memberList(granted.map((member) => (member.principal_id === 2 ? { ...member, manages: false } : member))));
+    await waitFor(() => {
+      expect(panel().queryByRole('form', { name: 'Add person by name' })).toBeNull();
+    });
+    expect(nav().queryByText('manages')).toBeNull();
+    expect(nav().queryByRole('button', { name: 'Rename #general' })).toBeNull();
+    expect(panel().getByText('Only operators and this channel\'s managers add people.')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(screen.getByText('You are a member.')).toBeDefined();
+  });
+
   it('drops a member who left, without reading the list again', async () => {
     const socket = await openSettled();
     const reads = server.membersReads;

@@ -8,7 +8,7 @@ import type { ChannelV0 } from './schema/channel';
 // not in and cannot see.
 const refusals: Readonly<Record<string, string>> = {
   channel_exists: 'There is already a channel with that name, or one that reads the same, perhaps one you are not in. Choose another name.',
-  forbidden: 'Only an operator can rename channels.',
+  forbidden: "Only operators and this channel's managers rename it.",
   channel_not_found: 'That channel is gone, or you can no longer see it.',
 };
 
@@ -36,7 +36,7 @@ function refusalLine(result: Refusal): string {
   return (result.code === undefined ? undefined : refusals[result.code]) ?? 'The server could not rename the channel. Try again.';
 }
 
-// "Rename" (issue #728): an operator renames the open channel from the
+// "Rename" (issue #728): an operator or this channel's manager renames it from the
 // channel list, one request per submit, however often the button is pressed.
 // It sends the name the list shows now with the new one, so a rename someone
 // else made meanwhile is refused rather than undone. Nothing changes on the
