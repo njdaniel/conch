@@ -1,9 +1,13 @@
 package server
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
 
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -59,19 +63,11 @@ const (
 	channelNameStaleMessage     = "the channel is no longer called that: it was renamed meanwhile; list the channels and try again"
 )
 
-// handleRenameChannel serves PUT /v1/channels/{id}/name (issue #727,
-// docs/design/channel-rename.md). The route is for operators: a member is
-// refused by the route class (403 forbidden, audited access_denied) before
-// the body is read or the channel looked up, so nobody else learns which ids
-// exist. The answers, in the order they are decided: a body that is not a
-// valid RenameChannelRequestV1 is 400; an unknown id is 404
-// channel_not_found; a name that is already the channel's is 200 with
-// nothing written; a from that is not the channel's name now is 409
-// channel_name_stale; a name nobody can see is 400; a name another channel's
-// reads the same as is 409 channel_exists. A rename writes one
-// channel_renamed row and tells every events socket of the channel, which
-// stays open. The old name is then free, and answers 404 like any name
-// nobody has.
+// handleRenameChannel serves PUT /v1/channels/{id}/name (issues #727, #791).
+// Operators are unlimited; a channel manager has the same rename and attempt
+// bounds as a principal self-rename. The route class hides an unknown or
+// non-member channel before the body is read. A duplicate-name refusal is
+// audited without either name and counts toward the manager's attempt limit.
 func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, ok := pathID(w, r, "id", "channel")
@@ -93,10 +89,19 @@ func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.store.RenameChannel(ctx, auditActor(ctx), id, req.From, req.Name, s.now())
+	caller, authed := callerFrom(ctx)
+	var opt store.ChannelRenameOptions
+	if authed {
+		opt = store.ChannelRenameOptions{CallerID: caller.ID, Limits: store.RenameLimits{Renames: renamesPerDay, Attempts: renameAttemptsPerDay}}
+	}
+	res, err := s.store.RenameChannel(ctx, auditActor(ctx), id, req.From, req.Name, s.now(), opt)
+	var limited *store.RenameLimitedError
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeChannelNotFound(w)
+		return
+	case errors.Is(err, store.ErrManagerRefused):
+		s.denyForbidden(w, r, caller, "forbidden", "operator role or channel manager required")
 		return
 	case errors.Is(err, store.ErrChannelNameStale):
 		writeError(w, http.StatusConflict, schema.ErrorCodeChannelNameStale, channelNameStaleMessage)
@@ -105,7 +110,26 @@ func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", channelNameInvisibleMessage)
 		return
 	case errors.Is(err, store.ErrDuplicate):
+		if authed {
+			if rerr := s.store.RecordChannelRenameRefused(context.WithoutCancel(ctx), caller.ID, id, opt.Limits, s.now()); rerr != nil {
+				switch {
+				case errors.As(rerr, &limited):
+					s.writeChannelRenameLimitError(w, limited)
+				case errors.Is(rerr, store.ErrNotFound):
+					writeChannelNotFound(w)
+				case errors.Is(rerr, store.ErrManagerRefused):
+					s.denyForbidden(w, r, caller, "forbidden", "operator role or channel manager required")
+				default:
+					slog.ErrorContext(ctx, "channels: audit refused rename failed", "channel", id, "error", rerr)
+					writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+				}
+				return
+			}
+		}
 		writeError(w, http.StatusConflict, "channel_exists", channelExistsMessage)
+		return
+	case errors.As(err, &limited):
+		s.writeChannelRenameLimitError(w, limited)
 		return
 	case err != nil:
 		slog.ErrorContext(ctx, "channels: rename failed", "channel", id, "error", err)
@@ -119,6 +143,16 @@ func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 		s.events.notifyChannel(id, eventRef{kind: eventChannel, id: id})
 	}
 	writeJSON(w, http.StatusOK, schema.RenameChannelResponseV1{Channel: channelFromStore(res.Channel)})
+}
+
+func (s *Server) writeChannelRenameLimitError(w http.ResponseWriter, limited *store.RenameLimitedError) {
+	seconds := max(1, int(math.Ceil(limited.Until.Sub(s.now()).Seconds())))
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeJSON(w, http.StatusTooManyRequests, schema.Error{
+		Code:              schema.ErrorCodeRateLimited,
+		Message:           fmt.Sprintf("you may rename channels at most %d times, and try at most %d times, a day", renamesPerDay, renameAttemptsPerDay),
+		RetryAfterSeconds: seconds,
+	})
 }
 
 func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {

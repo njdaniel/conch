@@ -452,3 +452,209 @@ func TestChannelNameKeyMigration(t *testing.T) {
 		t.Errorf("a change of case only, clashing with nobody: %v", err)
 	}
 }
+
+func TestRenameChannelManagerLimits(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Millisecond)
+	opt := ChannelRenameOptions{CallerID: 1, Limits: RenameLimits{Renames: 2, Attempts: 3}}
+	grantManager := func(t *testing.T, s *Store, channelID int64) {
+		t.Helper()
+		p, err := s.CreatePrincipal(ctx, PrincipalHuman, "manager")
+		if err != nil {
+			t.Fatal(err)
+		}
+		no, yes := false, true
+		if _, err := s.PutChannelMember(ctx, "system", channelID, p.ID, 0, &no, &yes); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("successful renames", func(t *testing.T) {
+		s := openTestStore(t)
+		ch, err := s.CreateChannel(ctx, "ops")
+		if err != nil {
+			t.Fatal(err)
+		}
+		grantManager(t, s, ch.ID)
+		from := ch.Name
+		for i, name := range []string{"one", "two"} {
+			if _, err := s.RenameChannel(ctx, "principal:1", ch.ID, from, name, now, opt); err != nil {
+				t.Fatalf("rename %d: %v", i+1, err)
+			}
+			from = name
+		}
+		if _, err := s.RenameChannel(ctx, "principal:1", ch.ID, from, "three", now, opt); !errors.Is(err, ErrRenameLimited) {
+			t.Fatalf("third rename = %v, want ErrRenameLimited", err)
+		}
+		if _, err := s.RenameChannel(ctx, "principal:1", ch.ID, from, "operator", now); err != nil {
+			t.Fatalf("unlimited rename = %v", err)
+		}
+	})
+
+	t.Run("refused attempts", func(t *testing.T) {
+		s := openTestStore(t)
+		ch, err := s.CreateChannel(ctx, "ops")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CreateChannel(ctx, "taken"); err != nil {
+			t.Fatal(err)
+		}
+		grantManager(t, s, ch.ID)
+		for i := 0; i < 3; i++ {
+			if _, err := s.RenameChannel(ctx, "principal:1", ch.ID, "ops", "taken", now, opt); !errors.Is(err, ErrDuplicate) {
+				t.Fatalf("duplicate %d = %v, want ErrDuplicate", i+1, err)
+			}
+			if err := s.RecordChannelRenameRefused(ctx, 1, ch.ID, opt.Limits, now); err != nil {
+				t.Fatal(err)
+			}
+		}
+		last, err := s.LastAuditEvent(ctx, AuditChannelRenameRefused)
+		if err != nil || last.Detail != "" || last.Actor != "principal:1" {
+			t.Errorf("refusal audit = %+v, %v", last, err)
+		}
+		if _, err := s.RenameChannel(ctx, "principal:1", ch.ID, "ops", "taken", now, opt); !errors.Is(err, ErrRenameLimited) {
+			t.Fatalf("fourth attempt = %v, want ErrRenameLimited", err)
+		}
+		if _, err := s.RenameChannel(ctx, "principal:1", ch.ID, "stale-is-ignored", "ops", now, opt); err != nil {
+			t.Fatalf("a no-op past the limit = %v", err)
+		}
+	})
+}
+
+func TestRenameChannelManagerRevokedBeforeWrite(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	ch, err := s.CreateChannel(ctx, "ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := s.CreatePrincipal(ctx, PrincipalHuman, "manager")
+	if err != nil {
+		t.Fatal(err)
+	}
+	no, yes := false, true
+	if _, err := s.PutChannelMember(ctx, "system", ch.ID, manager.ID, 0, &no, &yes); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetChannelMemberManages(ctx, "system", ch.ID, manager.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	opt := ChannelRenameOptions{CallerID: manager.ID, Limits: RenameLimits{Renames: 5, Attempts: 20}}
+	if _, err := s.RenameChannel(ctx, "principal:1", ch.ID, "ops", "renamed", time.Now(), opt); !errors.Is(err, ErrManagerRefused) {
+		t.Fatalf("rename with a revoked grant = %v, want ErrManagerRefused", err)
+	}
+	if err := s.RecordChannelRenameRefused(ctx, manager.ID, ch.ID, opt.Limits, time.Now()); !errors.Is(err, ErrManagerRefused) {
+		t.Fatalf("refusal with a revoked grant = %v, want ErrManagerRefused", err)
+	}
+	stored, err := s.ChannelByID(ctx, ch.ID)
+	if err != nil || stored.Name != "ops" {
+		t.Errorf("stored = %+v, %v", stored, err)
+	}
+}
+
+func TestChannelRenameRefusalLimitIsAtomic(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	ch, err := s.CreateChannel(ctx, "ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := s.CreatePrincipal(ctx, PrincipalHuman, "manager")
+	if err != nil {
+		t.Fatal(err)
+	}
+	no, yes := false, true
+	if _, err := s.PutChannelMember(ctx, "system", ch.ID, manager.ID, 0, &no, &yes); err != nil {
+		t.Fatal(err)
+	}
+	lim := RenameLimits{Attempts: 20}
+	now := time.Now().Truncate(time.Millisecond)
+	results := make(chan error, 30)
+	for range 30 {
+		go func() {
+			results <- s.RecordChannelRenameRefused(ctx, manager.ID, ch.ID, lim, now)
+		}()
+	}
+	accepted := 0
+	for range 30 {
+		if err := <-results; err == nil {
+			accepted++
+		} else if !errors.Is(err, ErrRenameLimited) {
+			t.Errorf("refusal = %v, want ErrRenameLimited", err)
+		}
+	}
+	if accepted != lim.Attempts {
+		t.Errorf("accepted = %d, want %d", accepted, lim.Attempts)
+	}
+	if n := auditCount(t, s, AuditChannelRenameRefused); n != lim.Attempts {
+		t.Errorf("audit rows = %d, want %d", n, lim.Attempts)
+	}
+}
+
+func TestRenameChannelCurrentStanding(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T) (*Store, Channel, Principal) {
+		t.Helper()
+		s := openTestStore(t)
+		ch, err := s.CreateChannel(ctx, "ops")
+		if err != nil {
+			t.Fatal(err)
+		}
+		caller, err := s.CreatePrincipal(ctx, PrincipalHuman, "caller")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s, ch, caller
+	}
+	opt := func(id int64) ChannelRenameOptions {
+		return ChannelRenameOptions{CallerID: id, Limits: RenameLimits{Renames: 5, Attempts: 20}}
+	}
+
+	t.Run("owner promoted before write", func(t *testing.T) {
+		s, ch, caller := setup(t)
+		if _, err := s.db.Exec("UPDATE principals SET role = 'operator', owner = 1 WHERE id = ?", caller.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.RenameChannel(ctx, "principal:1", ch.ID, "ops", "renamed", time.Now(), opt(caller.ID)); err != nil {
+			t.Fatalf("owner rename = %v", err)
+		}
+		last, err := s.LastAuditEvent(ctx, AuditChannelRenamed)
+		if err != nil || strings.HasSuffix(last.Detail, channelRenameLimitedDetail) {
+			t.Errorf("owner audit = %+v, %v", last, err)
+		}
+	})
+
+	t.Run("operator demoted to non-member before write", func(t *testing.T) {
+		s, ch, caller := setup(t)
+		if _, err := s.db.Exec("UPDATE principals SET role = 'operator' WHERE id = ?", caller.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.Exec("UPDATE principals SET role = 'member' WHERE id = ?", caller.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.RenameChannel(ctx, "principal:1", ch.ID, "ops", "renamed", time.Now(), opt(caller.ID)); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("demoted non-member rename = %v, want ErrNotFound", err)
+		}
+		if err := s.RecordChannelRenameRefused(ctx, caller.ID, ch.ID, opt(caller.ID).Limits, time.Now()); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("demoted non-member refusal = %v, want ErrNotFound", err)
+		}
+	})
+
+	t.Run("manager removed before write", func(t *testing.T) {
+		s, ch, caller := setup(t)
+		no, yes := false, true
+		if _, err := s.PutChannelMember(ctx, "system", ch.ID, caller.ID, 0, &no, &yes); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.RemoveChannelMember(ctx, "system", ch.ID, caller.ID, 0); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.RenameChannel(ctx, "principal:1", ch.ID, "ops", "renamed", time.Now(), opt(caller.ID)); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("removed manager rename = %v, want ErrNotFound", err)
+		}
+		if err := s.RecordChannelRenameRefused(ctx, caller.ID, ch.ID, opt(caller.ID).Limits, time.Now()); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("removed manager refusal = %v, want ErrNotFound", err)
+		}
+	})
+}

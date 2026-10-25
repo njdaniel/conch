@@ -377,9 +377,9 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/totp/enroll":  {classAuth, "/v1/totp/enroll", "", 403},
 	"POST /v1/totp/confirm": {classAuth, "/v1/totp/confirm", `{}`, 403},
 
-	// Renaming a channel (issue #727): an empty body is a 400 before the
-	// channel is looked up, so it changes and audits nothing.
-	"PUT /v1/channels/{id}/name": {classOp, "/v1/channels/9999/name", `{}`, 400},
+	// Renaming a channel (issues #727, #791): the manager class resolves the
+	// id before the body, so an unknown channel is 404 and changes nothing.
+	"PUT /v1/channels/{id}/name": {classManager, "/v1/channels/9999/name", `{}`, 404},
 
 	// Changing a role or the owner mark (issue #790): an empty body is a 400
 	// before the target is looked up.
@@ -534,9 +534,15 @@ func TestRoleMatrix(t *testing.T) {
 			if exp.class == classOp || exp.class == classSelf || exp.class == classOwner || exp.class == classManager {
 				memberWant = http.StatusForbidden
 			}
+			if rt.pattern == "PUT /v1/channels/{id}/name" {
+				memberWant = exp.allowed // a non-member cannot discover the channel id
+			}
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
 			agentWant := memberWant
+			if rt.pattern == "PUT /v1/channels/{id}/name" {
+				agentWant = http.StatusForbidden // kind is refused before channel lookup
+			}
 			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
@@ -611,6 +617,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") {
 					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous
+				}
+				if rt.pattern == "PUT /v1/channels/{id}/name" {
+					want = http.StatusBadRequest // AuthOff skips the guard and reaches body validation
 				}
 				if isFileRoute(rt.pattern) {
 					want = http.StatusBadRequest // files_require_auth: files are never anonymous

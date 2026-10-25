@@ -65,8 +65,8 @@ const (
 	// owner mark (issue #790, ADR-010 §3.1, §5.2).
 	accessOwner
 	// accessChannelManager: valid human credential whose principal is an
-	// operator or a member of the path's {channel} holding manages = 1 (issue
-	// #790, ADR-010 §3.2, §5.2).
+	// operator or a member of the channel addressed by {channel} or {id}
+	// holding manages = 1 (issues #790, #791, ADR-010 §3.2, §5.2).
 	accessChannelManager
 	// accessOperatorOrSelf: authenticated; the handler additionally requires
 	// the operator role or that the caller is the principal named in the path.
@@ -290,13 +290,23 @@ func (s *Server) guard(rt route) http.Handler {
 			handler.ServeHTTP(w, r)
 		})
 	case accessChannelManager:
-		return s.humansOnlyBecause(denyAgentOnHumanRoute, "agents cannot administer channel membership", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		return s.humansOnlyBecause(denyAgentOnHumanRoute, "agents cannot administer channels", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			caller, ok := callerFrom(r.Context())
 			if !ok {
 				writeUnauthenticated(w)
 				return
 			}
-			channel, err := s.store.ChannelByName(r.Context(), r.PathValue("channel"))
+			var channel store.Channel
+			var err error
+			if name := r.PathValue("channel"); name != "" {
+				channel, err = s.store.ChannelByName(r.Context(), name)
+			} else {
+				id, ok := pathID(w, r, "id", "channel")
+				if !ok {
+					return
+				}
+				channel, err = s.store.ChannelByID(r.Context(), id)
+			}
 			if errors.Is(err, store.ErrNotFound) {
 				writeChannelNotFound(w)
 				return

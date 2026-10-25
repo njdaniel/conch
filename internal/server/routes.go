@@ -25,10 +25,10 @@ func (s *Server) routeTable() []route {
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
 		rt("POST /v0/channels", accessOperator, hf(s.handleCreateChannel)),
 		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
-		// Renaming a channel (issue #727): operators only, and the one channel
-		// route addressed by id, since the name is what it changes. /name is
-		// a literal no {channel} route ends in, so no two patterns meet.
-		rt("PUT /v1/channels/{id}/name", accessOperator, hf(s.handleRenameChannel)),
+		// Renaming a channel (issues #727, #791): operators or its managers,
+		// addressed by id since the name is what it changes. /name is a literal
+		// no {channel} route ends in, so no two patterns meet.
+		rt("PUT /v1/channels/{id}/name", accessChannelManager, hf(s.handleRenameChannel)),
 		rt("POST /v0/principals", accessOperator, hf(s.handleCreatePrincipal)),
 		// Renaming (issue #441): operators rename anyone, a person themselves
 		// (checked in the handler).
