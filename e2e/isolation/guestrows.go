@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -175,6 +176,21 @@ func guestRows() []row {
 			return post("/v2/channels/"+pch(w)+"/messages", schema.PostMessageRequestV2{Body: "psst",
 				Audience: &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: []int64{w.p.pia.id}}})
 		}),
+		// Approvals (issue #720, design §7.2): a guest can neither raise, see
+		// nor decide one. The refusal is guest_not_allowed before anything is
+		// looked up, so A's approval and one that never existed answer alike.
+		refused("POST /v1/approvals", "raises an approval in the plaza", notAllowed, func(w *world) probe {
+			return post("/v1/approvals", schema.CreateApprovalRequestV1{RequesterID: w.prober.id, ChannelID: w.p.chanID, Title: "t", Body: "b",
+				Options:  []schema.Option{{ID: "yes", Label: "Yes", Kind: schema.OptionKindApprove}, {ID: "no", Label: "No", Kind: schema.OptionKindReject}},
+				Deadline: schema.NewTimestamp(time.Now().Add(time.Hour))})
+		}),
+		refused("GET /v1/approvals", "lists the open approvals", notAllowed, func(*world) probe { return get("/v1/approvals") }),
+		{route: "GET /v1/approvals/{id}", what: "reads A's approval", pick: aApproval, want: notAllowed,
+			probe: func(_ *world, s subject) probe { return get("/v1/approvals/" + id(s.id)) }},
+		{route: "POST /v1/approvals/{id}/decisions", what: "decides A's approval", pick: aApproval, want: notAllowed,
+			probe: func(_ *world, s subject) probe {
+				return post("/v1/approvals/"+id(s.id)+"/decisions", schema.CastDecisionRequestV1{OptionID: "yes", Reason: "r"})
+			}},
 		refused("POST /v1/sign-in-links/mine", "makes a device link", notAllowed, func(*world) probe {
 			return post("/v1/sign-in-links/mine", schema.CreateDeviceLinkRequestV1{Label: "a phone"})
 		}),
