@@ -64,3 +64,65 @@ func TestClientListChannelMembers(t *testing.T) {
 		})
 	}
 }
+
+func TestClientDelegatedAdministration(t *testing.T) {
+	yes := true
+	roleResponse := schema.RoleChangeResponseV1{
+		Principal: schema.PrincipalAdminV1{ID: 7, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleOperator, Owner: true},
+		Manages:   []int64{2, 5}, InvitesClosed: 1, CredentialsRevoked: 2, HooksRevoked: 3, LiveCredentials: 4, HooksBound: 5,
+	}
+	member := schema.ChannelMemberV1{PrincipalID: 7, Name: "alice", Kind: schema.PrincipalHuman}
+	tests := []struct {
+		name       string
+		status     int
+		response   any
+		call       func(*Client) (any, error)
+		wantMethod string
+		wantPath   string
+		wantBody   string
+		want       any
+	}{
+		{name: "role without an owner change", status: http.StatusOK, response: roleResponse,
+			call: func(c *Client) (any, error) {
+				return c.ChangePrincipalRole(context.Background(), 7, schema.RoleChangeRequestV1{Role: schema.RoleOperator})
+			}, wantMethod: http.MethodPut, wantPath: "/v1/principals/7/role", wantBody: `{"role":"operator"}`, want: roleResponse},
+		{name: "role with owner", status: http.StatusOK, response: roleResponse,
+			call: func(c *Client) (any, error) {
+				return c.ChangePrincipalRole(context.Background(), 7, schema.RoleChangeRequestV1{Role: schema.RoleOperator, Owner: &yes})
+			}, wantMethod: http.MethodPut, wantPath: "/v1/principals/7/role", wantBody: `{"role":"operator","owner":true}`, want: roleResponse},
+		{name: "add by name", status: http.StatusCreated, response: member,
+			call: func(c *Client) (any, error) {
+				return c.AddChannelMember(context.Background(), "a b/c", "Alice Liddell")
+			},
+			wantMethod: http.MethodPost, wantPath: "/v1/channels/a%20b%2Fc/members", wantBody: `{"name":"Alice Liddell"}`, want: member},
+		{name: "grant management", status: http.StatusNoContent,
+			call: func(c *Client) (any, error) {
+				return nil, c.PutChannelMemberManage(context.Background(), "general", 7, true)
+			},
+			wantMethod: http.MethodPut, wantPath: "/v1/channels/general/members/7", wantBody: `{"manages":true}`},
+		{name: "revoke management", status: http.StatusNoContent,
+			call: func(c *Client) (any, error) {
+				return nil, c.PutChannelMemberManage(context.Background(), "general", 7, false)
+			},
+			wantMethod: http.MethodPut, wantPath: "/v1/channels/general/members/7", wantBody: `{"manages":false}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, got := recordingServer(t, tt.status, tt.response)
+			client, err := NewClient(server.URL, server.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := tt.call(client.WithToken("tok"))
+			if got.method != tt.wantMethod || got.path != tt.wantPath || got.auth != "Bearer tok" || got.body != tt.wantBody {
+				t.Errorf("request = %s %s auth %q body %q", got.method, got.path, got.auth, got.body)
+			}
+			if err != nil {
+				t.Fatalf("call: %v", err)
+			}
+			if !reflect.DeepEqual(result, tt.want) {
+				t.Errorf("result = %+v, want %+v", result, tt.want)
+			}
+		})
+	}
+}

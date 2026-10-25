@@ -398,7 +398,8 @@ func TestAdminUsageErrors(t *testing.T) {
 	}{
 		{"no subcommand", []string{"admin"}, "usage: conch admin <channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link>"},
 		{"unknown group", []string{"admin", "frob"}, `unknown subcommand "frob"`},
-		{"group without verb", []string{"admin", "member"}, "usage: conch admin member <add|decide|remove>"},
+		{"group without verb", []string{"admin", "member"}, "usage: conch admin member <add|manage|decide|remove>"},
+		{"principal group lists role", []string{"admin", "principal"}, "create|disable|enable|rename|role|list|hide"},
 		{"unknown verb", []string{"admin", "member", "frob"}, `unknown subcommand "frob"`},
 		{"channel create without name", []string{"admin", "channel", "create"}, "usage: conch admin channel create [--server <url>] [--json] <name>"},
 		{"channel create extra", []string{"admin", "channel", "create", "a", "b"}, "expected <name>"},
@@ -419,7 +420,11 @@ func TestAdminUsageErrors(t *testing.T) {
 		{"credential issue renew negative", []string{"admin", "credential", "issue", "3", "--label", "x", "--renew-days", "-90"}, "--renew-days must be between 2 and 365"},
 		{"credential issue renew and expiry", []string{"admin", "credential", "issue", "3", "--label", "x", "--renew-days", "90", "--expires-at", "2099-01-01T00:00:00Z"}, "cannot both be given"},
 		{"credential revoke zero", []string{"admin", "credential", "revoke", "0"}, "credential-id must be a positive integer"},
-		{"member add missing id", []string{"admin", "member", "add", "ops"}, "expected <channel> <principal-id>"},
+		{"member add missing id and name", []string{"admin", "member", "add", "ops"}, "give exactly one of <principal-id> or --name"},
+		{"member add id and name", []string{"admin", "member", "add", "ops", "3", "--name", "alice"}, "give exactly one of <principal-id> or --name"},
+		{"member add no-decide with name", []string{"admin", "member", "add", "ops", "--name", "alice", "--no-decide"}, "--no-decide requires <principal-id>"},
+		{"role owner flags conflict", []string{"admin", "principal", "role", "3", "operator", "--owner", "--no-owner"}, "not both"},
+		{"role unknown", []string{"admin", "principal", "role", "3", "owner"}, `role must be "operator" or "member"`},
 		{"unknown flag", []string{"admin", "channel", "create", "--frob", "x"}, "flag provided but not defined"},
 		{"manifest put without id", []string{"admin", "manifest", "put"}, "expected <principal-id>"},
 		{"principal hide with nothing", []string{"admin", "principal", "hide"}, "give an id, or --prefix or --invite"},
@@ -565,7 +570,8 @@ func TestAdminIssueRefusesMalformedToken(t *testing.T) {
 func TestUsageListsAdmin(t *testing.T) {
 	var out bytes.Buffer
 	Usage(&out)
-	for _, want := range []string{"conch admin channel create", "conch admin credential issue", "conch admin manifest put"} {
+	for _, want := range []string{"conch admin channel create", "conch admin credential issue", "conch admin manifest put",
+		"conch admin principal role", "conch admin member manage", "<channel> --name <name>"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("help lacks %q", want)
 		}
@@ -591,7 +597,7 @@ func TestAdminPrincipalListAndHide(t *testing.T) {
 			"4 agent member active creds 0 invite - test-b\n" +
 			"3 human member active creds 0 invite - test-a\n" +
 			"2 human member active creds 1 invite - mallory\n" +
-			"1 human operator active creds 1 invite - root\n"},
+			"1 human operator owner active creds 1 invite - root\n"},
 		{"dry run", []string{"principal", "hide", "--prefix", "test-"}, "3 test-a\n4 test-b\nwould hide 2 principal(s); run again with --yes to do it\n"},
 		{"nothing hidden by the dry run", []string{"principal", "list", "--prefix", "test-"}, "4 agent member active creds 0 invite - test-b\n" +
 			"3 human member active creds 0 invite - test-a\n"},
@@ -601,7 +607,7 @@ func TestAdminPrincipalListAndHide(t *testing.T) {
 			"3 human member hidden creds 0 invite - hidden-3\n"},
 		{"not hidden", []string{"principal", "list", "--state", "active", "--kind", "human"}, "5 human member active creds 0 invite - keeper\n" +
 			"2 human member active creds 1 invite - mallory\n" +
-			"1 human operator active creds 1 invite - root\n"},
+			"1 human operator owner active creds 1 invite - root\n"},
 		{"nothing left", []string{"principal", "hide", "--prefix", "test-", "--yes"}, "hid 0 principal(s)\n"},
 		{"the name is free", []string{"principal", "create", "--kind", "human", "test-a"}, "created human test-a (id 6)\n"},
 	}
@@ -683,5 +689,114 @@ func TestAdminPrincipalListPages(t *testing.T) {
 				t.Errorf("queries = %q, want %q", queries, want)
 			}
 		})
+	}
+}
+
+func TestAdminDelegatedCommands(t *testing.T) {
+	roleResponse := schema.RoleChangeResponseV1{
+		Principal: schema.PrincipalAdminV1{ID: 7, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember},
+		Manages:   []int64{2, 5}, InvitesClosed: 1, CredentialsRevoked: 2, HooksRevoked: 3, LiveCredentials: 4, HooksBound: 5,
+	}
+	roleOutput := "principal 7 role member owner false manages 2,5 invites closed 1 credentials revoked 2 hooks revoked 3 live credentials 4 hooks bound 5\n"
+	member := schema.ChannelMemberV1{PrincipalID: 7, Name: "Alice Liddell", Kind: schema.PrincipalHuman}
+	tests := []struct {
+		name       string
+		args       []string
+		status     int
+		response   any
+		wantMethod string
+		wantPath   string
+		wantBody   string
+		wantStdout string
+	}{
+		{name: "role leaves owner absent", args: []string{"principal", "role", "7", "member"}, status: http.StatusOK, response: roleResponse,
+			wantMethod: http.MethodPut, wantPath: "/v1/principals/7/role", wantBody: `{"role":"member"}`, wantStdout: roleOutput},
+		{name: "role grants owner", args: []string{"principal", "role", "7", "operator", "--owner"}, status: http.StatusOK, response: roleResponse,
+			wantMethod: http.MethodPut, wantPath: "/v1/principals/7/role", wantBody: `{"role":"operator","owner":true}`, wantStdout: roleOutput},
+		{name: "role clears owner", args: []string{"principal", "role", "7", "operator", "--no-owner"}, status: http.StatusOK, response: roleResponse,
+			wantMethod: http.MethodPut, wantPath: "/v1/principals/7/role", wantBody: `{"role":"operator","owner":false}`, wantStdout: roleOutput},
+		{name: "manage", args: []string{"member", "manage", "ops", "7"}, status: http.StatusNoContent,
+			wantMethod: http.MethodPut, wantPath: "/v1/channels/ops/members/7", wantBody: `{"manages":true}`, wantStdout: "7 manages ops\n"},
+		{name: "manage off", args: []string{"member", "manage", "ops", "7", "--off"}, status: http.StatusNoContent,
+			wantMethod: http.MethodPut, wantPath: "/v1/channels/ops/members/7", wantBody: `{"manages":false}`, wantStdout: "7 no longer manages ops\n"},
+		{name: "add by id has no body", args: []string{"member", "add", "ops", "7"}, status: http.StatusNoContent,
+			wantMethod: http.MethodPut, wantPath: "/v1/channels/ops/members/7", wantStdout: "added 7 to ops\n"},
+		{name: "add by id without decide", args: []string{"member", "add", "ops", "7", "--no-decide"}, status: http.StatusNoContent,
+			wantMethod: http.MethodPut, wantPath: "/v1/channels/ops/members/7", wantBody: `{"can_decide":false}`, wantStdout: "added 7 to ops, without the right to decide its approvals\n"},
+		{name: "add by name", args: []string{"member", "add", "ops", "--name", "Alice Liddell"}, status: http.StatusCreated, response: member,
+			wantMethod: http.MethodPost, wantPath: "/v1/channels/ops/members", wantBody: `{"name":"Alice Liddell"}`, wantStdout: "added 7 to ops\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			t.Setenv("CONCH_TOKEN", fakeToken)
+			server, got := recordingServer(t, tt.status, tt.response)
+			args := append([]string{"admin"}, tt.args...)
+			stdout, stderr, err := runCLI(t, "", append(args, "--server", server.URL)...)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if got.method != tt.wantMethod || got.path != tt.wantPath || got.body != tt.wantBody {
+				t.Errorf("request = %s %s body %q, want %s %s body %q", got.method, got.path, got.body, tt.wantMethod, tt.wantPath, tt.wantBody)
+			}
+			if stdout != tt.wantStdout || stderr != "" {
+				t.Errorf("stdout = %q, stderr = %q; want stdout %q", stdout, stderr, tt.wantStdout)
+			}
+		})
+	}
+}
+
+func TestAdminDelegatedRefusals(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		status  int
+		code    string
+		message string
+	}{
+		{name: "role requires an owner", args: []string{"principal", "role", "7", "operator"}, status: http.StatusForbidden,
+			code: "forbidden", message: "Only the owner can change roles."},
+		{name: "manage requires an operator", args: []string{"member", "manage", "ops", "7"}, status: http.StatusForbidden,
+			code: "forbidden", message: "Only operators choose who manages a channel."},
+		{name: "manager cannot set decide", args: []string{"member", "add", "ops", "7", "--no-decide"}, status: http.StatusForbidden,
+			code: "forbidden", message: "Only operators choose who decides approvals."},
+		{name: "name is not addable", args: []string{"member", "add", "ops", "--name", "nobody"}, status: http.StatusNotFound,
+			code: "principal_not_found", message: "No addable person has that name."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateConfig(t)
+			t.Setenv("CONCH_TOKEN", fakeToken)
+			server, _ := recordingServer(t, tt.status, schema.Error{Code: tt.code, Message: tt.message})
+			args := append([]string{"admin"}, tt.args...)
+			stdout, _, err := runCLI(t, "", append(args, "--server", server.URL)...)
+			if err == nil || !strings.Contains(err.Error(), tt.message) {
+				t.Fatalf("error = %v, want server message %q", err, tt.message)
+			}
+			if strings.Contains(ErrorLine(err), "\n") {
+				t.Errorf("error is not one line: %q", ErrorLine(err))
+			}
+			if stdout != "" {
+				t.Errorf("stdout = %q, want empty", stdout)
+			}
+		})
+	}
+}
+
+func TestAdminPrincipalListOwnerMarks(t *testing.T) {
+	isolateConfig(t)
+	t.Setenv("CONCH_TOKEN", fakeToken)
+	response := schema.ListPrincipalsResponseV1{Principals: []schema.PrincipalAdminV1{
+		{ID: 2, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, Owner: true, LiveCredentials: 1},
+		{ID: 1, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleOperator},
+	}}
+	server, _ := recordingServer(t, http.StatusOK, response)
+	stdout, _, err := runCLI(t, "", "admin", "principal", "list", "--server", server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "2 human operator owner active creds 1 invite - root\n1 human operator active creds 0 invite - alice\n"
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
 	}
 }

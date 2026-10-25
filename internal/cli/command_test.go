@@ -559,7 +559,7 @@ var (
 		StartedAt: schema.NewTimestamp(whoStart), ExpiresAt: schema.NewTimestamp(whoStart.Add(24 * time.Hour)), IdleExpiresAt: schema.NewTimestamp(whoStart.Add(2 * time.Hour))}
 )
 
-func TestWhoAmIPrintsServerVersion(t *testing.T) {
+func TestWhoAmIPrintsServerFields(t *testing.T) {
 	tests := []struct {
 		name string
 		body schema.WhoAmIResponseV1
@@ -569,6 +569,8 @@ func TestWhoAmIPrintsServerVersion(t *testing.T) {
 			"id: 42\nkind: human\nname: nick\nrole: operator\nserver: v0.1.0-alpha.1\n"},
 		{"an older server says nothing", schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "nick", Role: schema.RoleOperator},
 			"id: 42\nkind: human\nname: nick\nrole: operator\n"},
+		{"an owner", schema.WhoAmIResponseV1{ID: 1, Kind: "human", Name: "root", Role: schema.RoleOperator, Owner: true},
+			"id: 1\nkind: human\nname: root\nrole: operator\nowner: true\n"},
 		// Issue #715: the class, a guest's visit and its bounds, and setup.
 		{"a guest", schema.WhoAmIResponseV1{ID: 9, Kind: "human", Name: whoHandle, Role: schema.RoleMember, IdentityClass: schema.IdentityGuest, Guest: &whoVisit,
 			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull, ExpiresAt: &whoVisit.ExpiresAt, IdleExpiresAt: &whoVisit.IdleExpiresAt}},

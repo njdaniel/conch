@@ -123,13 +123,17 @@ Usage:
   conch admin principal create [--server <url>] [--json] --kind human|agent <name>
   conch admin principal disable|enable [--server <url>] [--json] <id>
   conch admin principal rename [--server <url>] [--json] <id> <name>
+  conch admin principal role [--server <url>] [--json] [--owner|--no-owner] <id> operator|member
   conch admin principal list [--server <url>] [--json] [--state active|disabled|hidden] [--prefix <name-prefix>] [--invite <id>] [--kind human|agent]
   conch admin principal hide [--server <url>] [--json] <id>
   conch admin principal hide [--server <url>] [--json] --prefix <name-prefix>|--invite <id> [--kind human|agent] [--yes]
   conch admin credential issue [--server <url>] [--json] --label <label> [--expires-at <RFC3339>] <principal-id>
   conch admin credential list [--server <url>] [--json] <principal-id>
   conch admin credential revoke [--server <url>] [--json] <credential-id>
-  conch admin member add|remove [--server <url>] [--json] <channel> <principal-id>
+  conch admin member add [--server <url>] [--json] [--no-decide] <channel> <principal-id>
+  conch admin member add [--server <url>] [--json] <channel> --name <name>
+  conch admin member manage|decide [--server <url>] [--json] [--off] <channel> <principal-id>
+  conch admin member remove [--server <url>] [--json] <channel> <principal-id>
   conch admin manifest put [--server <url>] [--json] [--file <path>] <principal-id>
   conch admin manifest get [--server <url>] [--json] <principal-id>
   conch admin invite create [--server <url>] [--json] --open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] [--join-as account|guest|both]
@@ -1089,6 +1093,11 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	_, err = fmt.Fprintf(stdout, "id: %d\nkind: %s\nname: %s\nrole: %s\n", who.ID, safeLine(string(who.Kind)), safeLine(who.Name), safeLine(string(who.Role)))
 	if err != nil {
 		return err
+	}
+	if who.Owner {
+		if _, err := fmt.Fprintln(stdout, "owner: true"); err != nil {
+			return err
+		}
 	}
 	if who.ServerVersion != "" { // a server that predates the field says nothing
 		if _, err := fmt.Fprintf(stdout, "server: %s\n", safeLine(who.ServerVersion)); err != nil {
