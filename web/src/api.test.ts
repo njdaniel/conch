@@ -6,12 +6,16 @@ import {
   endSession,
   endSignIn,
   createInvite,
+  fetchFileBytes,
+  fileAttachmentPayload,
   forgetStored,
+  getFileMeta,
   hasToken,
   heldElsewhere,
   listChannels,
   listInvites,
   listSignIns,
+  loadMessagesAscending,
   onSignedOutElsewhere,
   openSocket,
   postMessage,
@@ -23,6 +27,7 @@ import {
   signOut,
   signOutEverywhere,
   stopVoiceShare,
+  uploadFile,
   whoAmI,
 } from './api';
 
@@ -779,5 +784,173 @@ describe('signing in over a sign-in that could not be checked', () => {
     serve(whoami);
     expect(heldElsewhere()).toBe(false);
     expect((await signIn(memberToken)).ok).toBe(true);
+  });
+});
+
+describe('file attachments', () => {
+  const file = {
+    schema: 'conch.file.v1',
+    id: 17,
+    channel_id: 4,
+    uploader_id: 2,
+    filename: 'screen shot.png',
+    media_type: 'image/png',
+    size: 3,
+    sha256: 'a'.repeat(64),
+    created_at: '2026-10-25T12:00:00.000Z',
+  };
+  const message = (id: number, payload?: unknown) => ({
+    schema: 'conch.message.v2',
+    id,
+    channel_id: 4,
+    author_id: 2,
+    created_at: '2026-10-25T12:00:00.000Z',
+    body: 'caption',
+    ...(payload === undefined ? {} : { payload }),
+  });
+
+  it('uploads the raw Blob with its filename, declared type and pinned credential', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const bytes = new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' });
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockResolvedValue(json(file, 201));
+    vi.stubGlobal('fetch', request);
+    const controller = new AbortController();
+    expect(await uploadFile('red team', 'screen shot.png', 'image/png', bytes, controller.signal)).toEqual({ ok: true, file });
+    const [path, init] = request.mock.calls[0] ?? [];
+    expect(path).toBe('/v2/channels/red%20team/files?filename=screen%20shot.png');
+    expect(init?.method).toBe('POST');
+    expect(init?.body).toBe(bytes);
+    expect(init?.cache).toBe('no-store');
+    expect(init?.credentials).toBe('omit');
+    expect(init?.signal).toBe(controller.signal);
+    const headers = new Headers(init?.headers);
+    expect(headers.get('Authorization')).toBe(`Bearer ${memberToken}`);
+    expect(headers.get('Content-Type')).toBe('image/png');
+    expect(headers.get('Accept')).toBe('application/json');
+  });
+
+  it('downloads the raw bytes privately with the pinned credential', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const bytes = new Uint8Array([137, 80, 78, 71]);
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockResolvedValue(new Response(bytes as BodyInit));
+    vi.stubGlobal('fetch', request);
+    const result = await fetchFileBytes(17);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(new Uint8Array(await result.value.arrayBuffer())).toEqual(bytes);
+    const [path, init] = request.mock.calls[0] ?? [];
+    expect(path).toBe('/v2/files/17');
+    expect(init?.method).toBeUndefined();
+    expect(init?.body).toBeUndefined();
+    expect(init?.cache).toBe('no-store');
+    expect(init?.credentials).toBe('omit');
+    expect(new Headers(init?.headers).get('Authorization')).toBe(`Bearer ${memberToken}`);
+  });
+
+  it('reads metadata and maps the private 404 to unavailable', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json(file));
+    expect(await getFileMeta(17)).toEqual({ ok: true, value: file });
+    serve(() => json({ code: 'file_not_found', message: 'file not found' }, 404));
+    expect(await getFileMeta(17)).toEqual({ ok: false, failure: 'unavailable' });
+    expect(await fetchFileBytes(17)).toEqual({ ok: false, failure: 'unavailable' });
+  });
+
+  it('builds the registered payload and posts it as JSON', async () => {
+    const ids = [7, 11];
+    const payload = fileAttachmentPayload(ids);
+    ids.push(13);
+    expect(payload).toEqual({ schema: 'conch.file_attachment.v1', data: { file_ids: [7, 11] } });
+    await signedInFrom(window.localStorage, memberToken);
+    const answer = message(20, payload);
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockResolvedValue(json({ message: answer }, 201));
+    vi.stubGlobal('fetch', request);
+    expect(await postMessage('red team', 'caption', undefined, payload)).toEqual({ ok: true, message: answer });
+    const [path, init] = request.mock.calls[0] ?? [];
+    expect(path).toBe('/v2/channels/red%20team/messages');
+    expect(init?.body).toBe(JSON.stringify({ body: 'caption', payload }));
+  });
+
+  it("passes through an upload refusal's code and line", async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ code: 'file_too_large', message: 'a file may be at most 10 bytes' }, 413));
+    expect(await uploadFile('red', 'x.png', 'image/png', new Blob(['x']), new AbortController().signal)).toEqual({
+      ok: false,
+      outcome: 'refused',
+      code: 'file_too_large',
+      reason: 'a file may be at most 10 bytes',
+    });
+  });
+
+  it('calls an undocumented upload refusal an upload, not a message', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => new Response('no', { status: 502 }));
+    expect(await uploadFile('red', 'x.png', 'image/png', new Blob(['x']), new AbortController().signal)).toEqual({
+      ok: false,
+      outcome: 'refused',
+      reason: 'The server refused the upload',
+    });
+  });
+
+  it('distinguishes upload cancellation from a network failure', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const controller = new AbortController();
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('aborted', 'AbortError'));
+      }, { once: true });
+    })));
+    const pending = uploadFile('red', 'x.png', 'image/png', new Blob(['x']), controller.signal);
+    controller.abort();
+    expect(await pending).toEqual({ ok: false, outcome: 'cancelled' });
+    serve(() => Promise.reject(new TypeError('Failed to fetch')));
+    expect(await uploadFile('red', 'x.png', 'image/png', new Blob(['x']), new AbortController().signal)).toEqual({ ok: false, outcome: 'network' });
+  });
+
+  it.each([
+    { name: 'upload', run: () => uploadFile('red', 'x.png', 'image/png', new Blob(['x']), new AbortController().signal) },
+    { name: 'download', run: () => fetchFileBytes(17) },
+  ])('drops the pinned credential after a $name 401', async ({ run }) => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({}, 401));
+    expect(await run()).toMatchObject({ ok: false });
+    expect(window.localStorage.getItem(key)).toBeNull();
+  });
+
+  it('follows ascending history cursors for uncertain-send reconciliation', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const first = message(10);
+    const second = message(11);
+    const calls = serve((call) => call.path.endsWith('after=0')
+      ? json({ messages: [first], next_after: 10 })
+      : json({ messages: [second] }));
+    expect(await loadMessagesAscending('red team', 0)).toEqual({ ok: true, complete: true, value: [first, second] });
+    expect(calls.map((call) => call.path)).toEqual([
+      '/v2/channels/red%20team/messages?order=asc&limit=100&after=0',
+      '/v2/channels/red%20team/messages?order=asc&limit=100&after=10',
+    ]);
+  });
+
+  it('marks a history walk incomplete when a matching message is beyond the page cap', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const pages = Array.from({ length: 101 }, (_, index) => message(index + 1));
+    const calls = serve((call) => {
+      const after = Number(new URL(call.path, 'https://conch.test').searchParams.get('after'));
+      return json({ messages: [pages[after]], ...(after < 100 ? { next_after: after + 1 } : {}) });
+    });
+    const result = await loadMessagesAscending('red', 0);
+    expect(result).toEqual({ ok: true, complete: false, value: pages.slice(0, 100) });
+    expect(calls).toHaveLength(100);
+    expect(calls.some((call) => call.path.endsWith('after=100'))).toBe(false);
+  });
+
+  it.each([
+    { name: 'non-advancing', next: 10 },
+    { name: 'malformed', next: -1 },
+  ])('marks a history walk with a $name cursor incomplete', async ({ next }) => {
+    await signedInFrom(window.localStorage, memberToken);
+    const first = message(11);
+    const calls = serve(() => json({ messages: [first], next_after: next }));
+    expect(await loadMessagesAscending('red', 10)).toEqual({ ok: true, complete: false, value: [first] });
+    expect(calls).toHaveLength(1);
   });
 });

@@ -650,7 +650,7 @@ describe('what was being typed', () => {
     expect(document.body.innerHTML).not.toContain('half a thought');
   });
 
-  it('is kept when the operator’s session ends, and given back when the same operator signs in again', async () => {
+  it('restores an initial POST 401 only as a draft when the same operator signs in again', async () => {
     const { revive } = await typedThenEnded();
     revive();
     signInWithPassword();
@@ -660,5 +660,7 @@ describe('what was being typed', () => {
     await waitFor(() => {
       expect(back.value).toBe('half a thought');
     });
+    expect(screen.queryByText(/^Not confirmed/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
   });
 });

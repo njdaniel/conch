@@ -76,6 +76,11 @@ var TSTypes = []TSType{
 	{Value: Option{}, Family: "approval-option-v1"},
 	{Value: ApprovalV1{}, Family: "conch-approval-v1"},
 
+	// Files (issue #23): the metadata the upload and metadata routes answer,
+	// and the payload a message attaches them with (issue #762).
+	{Value: FileV1{}, Family: "file-v1", Schema: FileSchemaV1},
+	{Value: FileAttachmentV1{}, Family: "file-attachment-v1"},
+
 	// Nets.
 	{Value: NetMember{}},
 	{Value: NetV1{}, Family: "net-v1"},

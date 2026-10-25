@@ -19,7 +19,9 @@ import (
 // everything it loads come from conchd's own origin; it may not be framed, may
 // not set a <base>, embeds no plugin content, and may submit a form only to
 // conchd (form-action does not fall back to default-src, so it is spelled out).
-const webCSP = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+// blob: in img-src alone is the attachment previews (issue #762): thumbnails of
+// bytes the page fetched itself, never a URL it was given.
+const webCSP = "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 
 // webPermissionsPolicy limits the powers the page may use: its own origin may
 // capture a microphone (browser voice, #442) and a screen (screen share, #444),

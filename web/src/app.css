@@ -1100,6 +1100,100 @@ label {
   overflow-wrap: anywhere;
 }
 
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  margin-top: var(--s2);
+  white-space: normal;
+}
+
+.attachment {
+  display: grid;
+  justify-items: start;
+  gap: var(--s1);
+  max-width: 100%;
+  margin: 0;
+}
+
+.attachment-thumbnail {
+  display: block;
+  max-width: min(20rem, 100%);
+  padding: 0;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.attachment-thumbnail img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(20rem, 75vw);
+  max-height: 16rem;
+  object-fit: contain;
+}
+
+.attachment-filename {
+  max-width: 20rem;
+  overflow-wrap: anywhere;
+  font-size: var(--small);
+}
+
+.attachment-note,
+.attachment-download-error {
+  max-width: 20rem;
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.attachment-download-error {
+  color: var(--danger);
+}
+
+.attachment-dialog-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: var(--s4);
+}
+
+.attachment-dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 0.75);
+}
+
+.attachment-dialog {
+  position: relative;
+  display: grid;
+  gap: var(--s3);
+  max-width: 95vw;
+  max-height: 95vh;
+  padding: var(--s4);
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.attachment-dialog h2 {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 1.1rem;
+}
+
+.attachment-enlarged {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 90vw;
+  max-height: 75vh;
+  object-fit: contain;
+}
+
 .state {
   color: var(--muted);
   font-size: var(--small);
@@ -1144,6 +1238,70 @@ label {
   transform: translateX(-50%);
   border-radius: 999px;
   box-shadow: var(--shadow);
+}
+
+.image-file-input {
+  display: none;
+}
+
+.draft-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.draft-attachment {
+  display: grid;
+  grid-template-columns: 4rem minmax(5rem, 1fr);
+  gap: var(--s1) var(--s2);
+  align-items: center;
+  max-width: 100%;
+  padding: var(--s2);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.draft-attachment img,
+.draft-image-fallback {
+  grid-row: 1 / span 3;
+  width: 4rem;
+  height: 4rem;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+}
+
+.draft-image-fallback {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: var(--small);
+}
+
+.draft-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.draft-attachment progress {
+  width: 7rem;
+  height: 0.65rem;
+}
+
+.draft-attachment-error {
+  max-width: 18rem;
+  color: var(--danger);
+  font-size: var(--small);
+}
+
+.attach-image {
+  align-self: center;
+  white-space: nowrap;
 }
 
 .composer {
@@ -2128,6 +2286,7 @@ button.link {
   .topbar .label,
   .channels h2,
   .send .label,
+  .attach-image .label,
   .voice-controls button:not(.sharing) .label,
   .voice-controls .dest,
   .share-controls .label {

@@ -138,6 +138,12 @@ function install() {
       const before = url.searchParams.get('before');
       const asked = Number(url.searchParams.get('limit'));
       const limit = server.firstPage !== undefined && server.historyRequests.length === 1 ? server.firstPage : asked;
+      if (url.searchParams.get('order') === 'asc') {
+        const after = Number(url.searchParams.get('after') ?? '0');
+        const visible = (server.history[channel] ?? []).filter((x) => (x as { id: number }).id > after);
+        const page = visible.slice(0, limit);
+        return Promise.resolve(json({ messages: page, ...(page.length === limit ? { next_after: (page.at(-1) as { id: number } | undefined)?.id ?? after } : {}) }));
+      }
       const visible = (server.history[channel] ?? []).filter((x) => before === null || (x as { id: number }).id < Number(before));
       return Promise.resolve(json({ messages: visible.slice(-limit).reverse() }));
     }),
@@ -380,6 +386,27 @@ describe('sending', () => {
   const enter = () => {
     fireEvent.keyDown(screen.getByLabelText('Message #general'), { key: 'Enter' });
   };
+  async function openWithEvents(): Promise<FakeSocket> {
+    const real = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, origin);
+      if (url.pathname === '/v1/sessions' && init?.method === 'POST') {
+        return Promise.resolve(json({
+          schema: 'conch.session.v1', id: 100, principal_id: 2, kind: 'human', name: 'ada', client: 'browser',
+          state: 'online', status: 'online', started_at: at, last_seen_at: at, interventions: [], outcome_unknown: false,
+        }, 201));
+      }
+      if (url.pathname === '/v1/runs') return Promise.resolve(json({ runs: [] }));
+      return real(input, init);
+    });
+    await connect(await openChat());
+    await waitFor(() => {
+      expect(FakeSocket.all.some((socket) => new URL(socket.url).pathname === '/v1/events/ws')).toBe(true);
+    });
+    const events = FakeSocket.all.find((socket) => new URL(socket.url).pathname === '/v1/events/ws') as FakeSocket;
+    events.open();
+    return events;
+  }
 
   it('names the audience, sends on Enter but not on Shift+Enter, shows Sending then Sent once', async () => {
     const socket = await openChat();
@@ -438,6 +465,137 @@ describe('sending', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
     expect(screen.queryByText('maybe')).toBeNull();
+  });
+
+  it('reconciles concurrent identical retries against one stored message only once', async () => {
+    await connect(await openChat());
+    let calls = 0;
+    server.post = (_channel, body) => {
+      calls += 1;
+      if (calls === 1) server.history.general = [message(100, body, { author_id: 2 })];
+      return Promise.reject(new TypeError('connection dropped'));
+    };
+    type('same');
+    enter();
+    type('same');
+    enter();
+    await waitFor(() => { expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(2); });
+    nextId = 101;
+    server.post = (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201);
+    for (const retry of screen.getAllByRole('button', { name: 'Retry' })) fireEvent.click(retry);
+    await waitFor(() => { expect(server.posts).toHaveLength(3); });
+    await waitFor(() => { expect(screen.getAllByText('Sent')).toHaveLength(2); });
+    expect(server.posts[2]).toEqual({ channel: 'general', body: 'same' });
+    expect(lines().filter((line) => line.includes('same'))).toHaveLength(2);
+  });
+
+  it('invalidates an initial POST on rename and retries by id, not a recreated old name', async () => {
+    const events = await openWithEvents();
+    let answer: (response: Response) => void = () => undefined;
+    server.post = () => new Promise<Response>((resolve) => { answer = resolve; });
+    type('original only');
+    enter();
+    await screen.findByText('Sending');
+    server.channels = [
+      { id: 9, name: 'general', created_at: at },
+      { id: 7, name: 'original', created_at: at },
+      { id: 8, name: 'ops', created_at: at },
+    ];
+    events.send({ schema: 'conch.channel.v1', channel_id: 7, name: 'original', created_at: at });
+    await screen.findByLabelText('Message #original');
+    await screen.findByText(/^Not confirmed/);
+    await act(async () => {
+      answer(json({ message: message(100, 'original only', { author_id: 2 }) }, 201));
+      await Promise.resolve();
+    });
+    expect(screen.getByText(/^Not confirmed/)).toBeDefined();
+    expect(server.posts).toHaveLength(1);
+
+    server.post = (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Sent');
+    expect(server.posts.map((post) => post.channel)).toEqual(['general', 'original']);
+  });
+
+  it('drops reconciliation history after rename and old-name recreation, then retries under the current name', async () => {
+    const events = await openWithEvents();
+    server.post = () => Promise.reject(new TypeError('connection dropped'));
+    type('reconcile by id');
+    enter();
+    await screen.findByText(/^Not confirmed/);
+    const real = globalThis.fetch;
+    let answerHistory: (response: Response) => void = () => undefined;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, origin);
+      if (url.pathname === '/v2/channels/general/messages' && url.searchParams.get('order') === 'asc') {
+        return new Promise<Response>((resolve) => { answerHistory = resolve; });
+      }
+      return real(input, init);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Sending');
+    server.channels = [
+      { id: 9, name: 'general', created_at: at },
+      { id: 7, name: 'original', created_at: at },
+      { id: 8, name: 'ops', created_at: at },
+    ];
+    server.history.original = [];
+    events.send({ schema: 'conch.channel.v1', channel_id: 7, name: 'original', created_at: at });
+    await screen.findByLabelText('Message #original');
+    await act(async () => {
+      answerHistory(json({ messages: [] }));
+      await Promise.resolve();
+    });
+    await screen.findByText(/^Not confirmed/);
+    expect(server.posts).toHaveLength(1);
+
+    server.post = (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Sent');
+    expect(server.posts.map((post) => post.channel)).toEqual(['general', 'original']);
+  });
+
+  it('restores a pending send by channel id after a rename and old-name recreation during signout', async () => {
+    await connect(await openChat());
+    server.post = () => Promise.reject(new TypeError('connection dropped'));
+    type('for the original channel');
+    enter();
+    await screen.findByText(/^Not confirmed/);
+    const real = globalThis.fetch;
+    let expireHistory = false;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, origin);
+      if (expireHistory && url.pathname === '/v2/channels/general/messages' && url.searchParams.get('order') === 'asc') return Promise.resolve(json({}, 401));
+      return real(input, init);
+    });
+    expireHistory = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByLabelText('Credential');
+    expireHistory = false;
+    server.channels = [
+      { id: 9, name: 'general', created_at: at },
+      { id: 7, name: 'original', created_at: at },
+      { id: 8, name: 'ops', created_at: at },
+    ];
+    server.history.original = [];
+    fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
+    await screen.findByLabelText('Message #general');
+    fireEvent.click(screen.getByRole('button', { name: 'original' }));
+    await screen.findByText('for the original channel');
+    fireEvent.click(screen.getByRole('button', { name: 'general' }));
+    await screen.findByLabelText('Message #general');
+    expect(screen.queryByText('for the original channel')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'original' }));
+    await screen.findByText('for the original channel');
+    server.post = (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Sent');
+    expect(server.posts).toEqual([
+      { channel: 'general', body: 'for the original channel' },
+      { channel: 'original', body: 'for the original channel' },
+    ]);
   });
 
   it('treats a server error as not confirmed, and a refusal as failed', async () => {
