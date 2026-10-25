@@ -204,9 +204,9 @@ func matrixRows() []row {
 		operator("POST /v0/channels", "makes a channel with A's channel's name", aChannel, func(_ *world, s subject) probe {
 			return post("/v0/channels", schema.CreateChannelRequest{Name: s.name})
 		}),
-		// Renaming a channel (issue #727) is for operators: refused by the
-		// route class before the body is read or the channel looked up.
-		operator("PUT /v1/channels/{id}/name", "renames A's channel", aChannel, func(_ *world, s subject) probe {
+		// Renaming a channel (issue #791) hides A's channel from B's members,
+		// including a manager of a different channel.
+		byChannel("PUT /v1/channels/{id}/name", "renames A's channel", func(_ *world, s subject) probe {
 			return put("/v1/channels/"+id(s.id)+"/name", schema.RenameChannelRequestV1{Name: "renamed", From: s.name})
 		}),
 		operator("POST /v0/principals", "makes a principal with an A member's name", aMemberName, func(_ *world, s subject) probe {

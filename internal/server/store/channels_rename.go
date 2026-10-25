@@ -23,6 +23,12 @@ import (
 // caller, subject the channel, detail from=<old> to=<new>, each quoted.
 const AuditChannelRenamed = "channel_renamed"
 
+// AuditChannelRenameRefused counts a manager's refused rename attempt. Its
+// detail deliberately carries neither the requested nor the existing name.
+const AuditChannelRenameRefused = "channel_rename_refused"
+
+const channelRenameLimitedDetail = " limited=1"
+
 // ErrChannelNameStale is returned by RenameChannel when the name the caller
 // believed the channel had is not its name now: another rename came first.
 var ErrChannelNameStale = errors.New("store: the channel is no longer called that")
@@ -90,10 +96,24 @@ type ChannelRenameResult struct {
 // already be a valid name (schema.RenameChannelRequestV1.Validate); the
 // store does not check.
 //
+// ChannelRenameOptions carries an authenticated caller and the limits to apply
+// if the write transaction finds they are currently a channel manager. The
+// zero value is an unconstrained AuthOff rename.
+type ChannelRenameOptions struct {
+	CallerID int64
+	Limits   RenameLimits
+}
+
 // Every table that refers to a channel does so by id, so messages, members,
 // nets, invites, read marks, files, runs and the voice room stay with it.
-func (s *Store) RenameChannel(ctx context.Context, actor string, id int64, from, name string, now time.Time) (ChannelRenameResult, error) {
+// Current standing, limits and audit marking are decided in the transaction,
+// so a role or grant change cannot race them.
+func (s *Store) RenameChannel(ctx context.Context, actor string, id int64, from, name string, now time.Time, options ...ChannelRenameOptions) (ChannelRenameResult, error) {
 	now = now.Truncate(time.Millisecond)
+	var opt ChannelRenameOptions
+	if len(options) > 0 {
+		opt = options[0]
+	}
 	var out ChannelRenameResult
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		out = ChannelRenameResult{}
@@ -101,12 +121,25 @@ func (s *Store) RenameChannel(ctx context.Context, actor string, id int64, from,
 		if err != nil {
 			return err
 		}
+		limitedManager := false
+		if opt.CallerID != 0 {
+			standing, err := channelRenameStandingTx(ctx, tx, id, opt.CallerID)
+			if err != nil {
+				return err
+			}
+			limitedManager = standing == standingManager
+		}
 		out.Channel, out.From = ch, ch.Name
 		if ch.Name == name {
 			return nil
 		}
 		if ch.Name != from {
 			return fmt.Errorf("store: rename channel %d: %w", id, ErrChannelNameStale)
+		}
+		if limitedManager {
+			if err := channelRenameLimitTx(ctx, tx, principalActor(opt.CallerID), opt.Limits, now); err != nil {
+				return err
+			}
 		}
 		keys, err := claimChannelNameTx(ctx, tx, name, id)
 		if err != nil {
@@ -123,9 +156,13 @@ func (s *Store) RenameChannel(ctx context.Context, actor string, id int64, from,
 		}
 		// Quoted, as a principal rename's names are, so a name with spaces
 		// or "to=" in it reads as one field and an invisible character
-		// shows as an escape.
-		if err := appendAuditEventTx(ctx, tx, actor, AuditChannelRenamed, channelSubject(id),
-			fmt.Sprintf("from=%q to=%q", ch.Name, name), now); err != nil {
+		// shows as an escape. The marker keeps unlimited operator renames
+		// out of that person's later manager limits.
+		detail := fmt.Sprintf("from=%q to=%q", ch.Name, name)
+		if limitedManager {
+			detail += channelRenameLimitedDetail
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditChannelRenamed, channelSubject(id), detail, now); err != nil {
 			return err
 		}
 		out.Channel.Name = name
@@ -136,6 +173,97 @@ func (s *Store) RenameChannel(ctx context.Context, actor string, id int64, from,
 		return ChannelRenameResult{}, err
 	}
 	return out, nil
+}
+
+func channelRenameStandingTx(ctx context.Context, tx execer, channelID, callerID int64) (memberActorStanding, error) {
+	caller, found, err := queryPrincipal(ctx, tx, callerID)
+	if err != nil {
+		return 0, err
+	}
+	if !found || caller.DisabledAt != nil || caller.HiddenAt != nil || caller.Kind != PrincipalHuman || caller.guestTarget() {
+		return 0, ErrManagerRefused
+	}
+	if caller.Role == RoleOperator {
+		if caller.Owner {
+			return standingOwner, nil
+		}
+		return standingOperator, nil
+	}
+	if caller.Role != RoleMember {
+		return 0, ErrManagerRefused
+	}
+	var manages int
+	switch err := tx.QueryRowContext(ctx, "SELECT manages FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, callerID).Scan(&manages); {
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, ErrNotFound
+	case err != nil:
+		return 0, fmt.Errorf("store: check channel rename standing of %d in channel %d: %w", callerID, channelID, err)
+	}
+	if manages != 1 {
+		return 0, ErrManagerRefused
+	}
+	return standingManager, nil
+}
+
+func channelRenameLimitTx(ctx context.Context, tx execer, actor string, lim RenameLimits, now time.Time) error {
+	var until time.Time
+	for _, c := range []struct {
+		limit   int
+		attempt bool
+	}{
+		{lim.Renames, false},
+		{lim.Attempts, true},
+	} {
+		if c.limit <= 0 {
+			continue
+		}
+		where := `FROM audit_events WHERE actor = ? AND created_at > ? AND action = ? AND detail LIKE '% limited=1'`
+		args := []any{actor, now.Add(-RenameWindow).UnixMilli(), AuditChannelRenamed}
+		if c.attempt {
+			where = `FROM audit_events WHERE actor = ? AND created_at > ? AND (action = ? OR (action = ? AND detail LIKE '% limited=1'))`
+			args = []any{actor, now.Add(-RenameWindow).UnixMilli(), AuditChannelRenameRefused, AuditChannelRenamed}
+		}
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) `+where, args...).Scan(&count); err != nil {
+			return fmt.Errorf("store: count channel renames of %s: %w", actor, err)
+		}
+		if count < c.limit {
+			continue
+		}
+		var freeing int64
+		if err := tx.QueryRowContext(ctx, `SELECT created_at `+where+` ORDER BY created_at, id LIMIT 1 OFFSET ?`, append(args, count-c.limit)...).Scan(&freeing); err != nil {
+			return fmt.Errorf("store: count channel renames of %s: %w", actor, err)
+		}
+		if free := time.UnixMilli(freeing).Add(RenameWindow); free.After(until) {
+			until = free
+		}
+	}
+	if until.IsZero() {
+		return nil
+	}
+	return &RenameLimitedError{Until: until}
+}
+
+// RecordChannelRenameRefused atomically re-checks a manager's limits and
+// records a refused attempt without either channel name.
+func (s *Store) RecordChannelRenameRefused(ctx context.Context, callerID, channelID int64, lim RenameLimits, now time.Time) error {
+	if callerID == 0 {
+		return nil
+	}
+	now = now.Truncate(time.Millisecond)
+	return s.withImmediateTx(ctx, func(tx execer) error {
+		standing, err := channelRenameStandingTx(ctx, tx, channelID, callerID)
+		if err != nil {
+			return err
+		}
+		if standing != standingManager {
+			return nil
+		}
+		if err := channelRenameLimitTx(ctx, tx, principalActor(callerID), lim, now); err != nil {
+			return err
+		}
+		return appendAuditEventTx(ctx, tx, principalActor(callerID), AuditChannelRenameRefused, channelSubject(channelID), "", now)
+	})
 }
 
 // channelByIDTx is ChannelByID inside a transaction.

@@ -302,14 +302,14 @@ func TestRenameChannelAnswers(t *testing.T) {
 			body: func(t *testing.T) string { return channelRenameBody(t, "general", "town square") }},
 		{name: "an operator changes only the case", caller: "root", target: "general", status: 200, renamed: "General",
 			body: func(t *testing.T) string { return channelRenameBody(t, "general", "General") }},
-		// The route class refuses a member before the body is read or the
-		// channel looked up: a member of the channel, an agent, and an id
-		// nobody has get the same answer.
+		// The route class refuses a member or agent before the body is read.
+		// A non-member probing an id nobody has gets the same 404 as a member
+		// probing a channel that exists but is not theirs.
 		{name: "a member renames her channel", caller: "alice", target: "general", status: 403, code: "forbidden", denied: true,
 			body: func(t *testing.T) string { return channelRenameBody(t, "general", "evil") }},
 		{name: "an agent renames its channel", caller: "bot", target: "general", status: 403, code: "forbidden", denied: true,
 			body: func(t *testing.T) string { return channelRenameBody(t, "general", "evil") }},
-		{name: "a member probes an id nobody has", caller: "alice", target: "nobody", status: 403, code: "forbidden", denied: true,
+		{name: "a member probes an id nobody has", caller: "alice", target: "nobody", status: 404, code: "channel_not_found",
 			body: func(t *testing.T) string { return channelRenameBody(t, "general", "evil") }},
 		{name: "a member sends a bad body", caller: "alice", target: "general", status: 403, code: "forbidden", denied: true,
 			body: func(*testing.T) string { return `{` }},
@@ -384,6 +384,143 @@ func TestRenameChannelAnswers(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRenameChannelManagerStandings(t *testing.T) {
+	tests := []struct {
+		name       string
+		caller     string
+		other      bool
+		status     int
+		code       string
+		socket     bool
+		wantDenial bool
+	}{
+		{name: "owner", caller: "owner", status: http.StatusOK},
+		{name: "operator", caller: "operator", status: http.StatusOK},
+		{name: "manager", caller: "manager", status: http.StatusOK, socket: true},
+		{name: "manager of another channel", caller: "manager", other: true, status: http.StatusForbidden, code: "forbidden", wantDenial: true},
+		{name: "member", caller: "member", status: http.StatusForbidden, code: "forbidden", wantDenial: true},
+		{name: "non-member", caller: "non-member", status: http.StatusNotFound, code: "channel_not_found"},
+		{name: "guest", caller: "guest", status: http.StatusForbidden, code: "forbidden", wantDenial: true},
+		{name: "agent", caller: "agent", status: http.StatusForbidden, code: "forbidden", wantDenial: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newAdminFixture(t)
+			tokens := map[string]string{
+				"owner": f.rootTok, "operator": f.op2Tok, "manager": f.mgrTok,
+				"member": f.aliceTok, "non-member": f.outsiderTok, "guest": f.guestTok, "agent": f.botTok,
+			}
+			ids := map[string]int64{
+				"owner": f.root.ID, "operator": f.op2.ID, "manager": f.mgr.ID,
+				"member": f.alice.ID, "non-member": f.outsider.ID, "guest": f.guest.ID, "agent": f.bot.ID,
+			}
+			channel, from := f.general, "general"
+			if tt.other {
+				channel, from = f.lobby, "lobby"
+			}
+			var events *eventsClient
+			if tt.socket {
+				events = dialEvents(t, wsTestServer(t, f.srv), "/v1/events/ws?channel=general", f.mgrTok)
+				if first := events.next(); first.schema != schema.SessionRosterSchemaV1 {
+					t.Fatalf("first frame = %v, want roster", first)
+				}
+			}
+			before := f.deniedRows(t, ids[tt.caller])
+			rec := f.do(t, http.MethodPut, channelNamePath(channel.ID), tokens[tt.caller], channelRenameBody(t, from, "renamed"))
+			if tt.status == http.StatusOK {
+				if rec.Code != tt.status || decodeBody[schema.RenameChannelResponseV1](t, rec).Channel.Name != "renamed" {
+					t.Fatalf("rename = %d %s", rec.Code, rec.Body)
+				}
+			} else {
+				assertErrorBody(t, rec, tt.status, tt.code)
+			}
+			if tt.wantDenial && f.deniedRows(t, ids[tt.caller]) == before {
+				t.Error("no access_denied row")
+			}
+			if tt.code == "channel_not_found" {
+				ref := f.do(t, http.MethodPut, channelNamePath(999999), tokens[tt.caller], channelRenameBody(t, from, "renamed"))
+				if ref.Code != rec.Code || ref.Body.String() != rec.Body.String() {
+					t.Errorf("non-member = %d %s, unknown id = %d %s", rec.Code, rec.Body, ref.Code, ref.Body)
+				}
+			}
+			if tt.socket {
+				frames := events.until("the renamed channel", func(fr eventFrame) bool {
+					return fr.schema == schema.ChannelSchemaV1 && fr.channel.ChannelID == channel.ID && fr.channel.Name == "renamed"
+				})
+				if got := frames[len(frames)-1].channel.Name; got != "renamed" {
+					t.Errorf("socket channel name = %q", got)
+				}
+			}
+		})
+	}
+}
+
+func TestRenameChannelManagerLimits(t *testing.T) {
+	t.Run("sixth rename", func(t *testing.T) {
+		f := newAdminFixture(t)
+		from := "general"
+		for i := 1; i <= renamesPerDay; i++ {
+			name := fmt.Sprintf("renamed-%d", i)
+			if rec := f.do(t, http.MethodPut, channelNamePath(f.general.ID), f.mgrTok, channelRenameBody(t, from, name)); rec.Code != http.StatusOK {
+				t.Fatalf("rename %d = %d %s", i, rec.Code, rec.Body)
+			}
+			from = name
+		}
+		rec := f.do(t, http.MethodPut, channelNamePath(f.general.ID), f.mgrTok, channelRenameBody(t, from, "one-too-many"))
+		assertErrorBody(t, rec, http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
+		if rec.Header().Get("Retry-After") == "" {
+			t.Error("no Retry-After")
+		}
+		stored, err := f.srv.store.ChannelByID(context.Background(), f.general.ID)
+		if err != nil || stored.Name != from {
+			t.Errorf("stored = %+v, %v; want %q", stored, err, from)
+		}
+	})
+	t.Run("21st attempt and unlimited operator", func(t *testing.T) {
+		f := newAdminFixture(t)
+		for i := 1; i <= renameAttemptsPerDay; i++ {
+			rec := f.do(t, http.MethodPut, channelNamePath(f.general.ID), f.mgrTok, channelRenameBody(t, "general", "lobby"))
+			assertErrorBody(t, rec, http.StatusConflict, "channel_exists")
+		}
+		rec := f.do(t, http.MethodPut, channelNamePath(f.general.ID), f.mgrTok, channelRenameBody(t, "general", "lobby"))
+		assertErrorBody(t, rec, http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
+		for _, event := range auditRows(t, f.authFixture, store.AuditChannelRenameRefused) {
+			if event.Actor != fmt.Sprintf("principal:%d", f.mgr.ID) || event.Detail != "" {
+				t.Errorf("refusal audit = %+v", event)
+			}
+		}
+		for i := 0; i <= renameAttemptsPerDay; i++ {
+			assertErrorBody(t, f.do(t, http.MethodPut, channelNamePath(f.general.ID), f.rootTok, channelRenameBody(t, "general", "lobby")), http.StatusConflict, "channel_exists")
+		}
+		if rec := f.do(t, http.MethodPut, channelNamePath(f.general.ID), f.rootTok, channelRenameBody(t, "general", "operator-renamed")); rec.Code != http.StatusOK {
+			t.Fatalf("operator rename = %d %s", rec.Code, rec.Body)
+		}
+		if n := countAction(f.audit(t), store.AuditChannelRenameRefused); n != renameAttemptsPerDay {
+			t.Errorf("refusal rows = %d, want %d", n, renameAttemptsPerDay)
+		}
+	})
+	t.Run("operator history does not count after demotion", func(t *testing.T) {
+		f := newAdminFixture(t)
+		from := "general"
+		for i := 0; i < renamesPerDay; i++ {
+			name := fmt.Sprintf("operator-%d", i)
+			if rec := f.do(t, http.MethodPut, channelNamePath(f.general.ID), f.rootTok, channelRenameBody(t, from, name)); rec.Code != http.StatusOK {
+				t.Fatalf("operator rename %d = %d %s", i, rec.Code, rec.Body)
+			}
+			from = name
+		}
+		if rec := f.do(t, http.MethodPut, fmt.Sprintf("/v1/principals/%d/role", f.root.ID), f.own2Tok, `{"role":"member"}`); rec.Code != http.StatusOK {
+			t.Fatalf("demote operator = %d %s", rec.Code, rec.Body)
+		}
+		if rec := f.do(t, http.MethodPut, fmt.Sprintf("/v1/channels/%s/members/%d", from, f.root.ID), f.op2Tok, `{"manages":true}`); rec.Code != http.StatusNoContent {
+			t.Fatalf("grant manager = %d %s", rec.Code, rec.Body)
+		}
+		if rec := f.do(t, http.MethodPut, channelNamePath(f.general.ID), f.rootTok, channelRenameBody(t, from, "first-manager-rename")); rec.Code != http.StatusOK {
+			t.Fatalf("first manager rename = %d %s", rec.Code, rec.Body)
+		}
+	})
 }
 
 func cmpOr(a, b string) string {
