@@ -95,6 +95,10 @@ type Channel struct {
 	ID        int64
 	Name      string
 	CreatedAt time.Time
+	// Manages is whether the listing principal holds the channel manager
+	// grant on this channel (ListChannelsForPrincipal, issue #789, ADR-010
+	// §3.2); false on reads that are not bound to a principal.
+	Manages bool
 }
 
 // Message is a single rendered message in a channel, with an optional typed
