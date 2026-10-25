@@ -13,6 +13,19 @@ Conch is an MCP-native, self-hosted chat platform: `conchd` (server) + `conch` (
    **And idiomatic Rust under `voice/`:** `cargo fmt` and `cargo clippy -D warnings` clean. No `unwrap` or `expect` outside tests and `main`; one `thiserror` enum per crate. No `unsafe` in this repository's Rust (every crate forbids it; native code is reached only through dependencies). Tests never need a microphone, PipeWire, a keyboard or LiveKit: one that does is marked `#[ignore]` and says what it needs. Every crate's `lib.rs` doc comment states its input, its output and what it owns.
    **And idiomatic TypeScript under `web/`** (React, TypeScript, Vite; ADR-007): `npm ci` only, never `npm install` in a script, target or CI step. `tsc` and `eslint` clean. No `any`, no `dangerouslySetInnerHTML`, no inline script or style (conchd serves `/app/` with `script-src 'self'` and `style-src 'self'`). Wire types come only from `web/src/schema/`, generated from `pkg/schema` by `go generate ./pkg/schema` (the tables in `pkg/schema/ts.go` and `vocabularies.go`) and never edited by hand (`scripts/schema-ts-check.sh`, in `make check`, fails on a stale or edited file); each is checked against the Go golden fixtures in `pkg/schema/testdata/`. Unit tests need no network, no browser and no running `conchd`; one that does is a Playwright test, in its own job. A new direct dependency needs Nick's sign-off and a line in `web/deps-allowlist.txt`, at an exact version (`scripts/web-depgate.sh`); a new licence in the lockfile needs his sign-off and a line in `web/licences-allowlist.txt` (`scripts/web-licences.sh`). `make web-check` needs the Node in `web/.nvmrc` and fails without it.
 7. **Issues must be executable cold** — a fresh session with zero chat context can pick one up. The issue template (Context / Files / Acceptance criteria / Required tests / Blocked-by) is normative.
+8. **Claim before implementation.** Check the live issue's comments, busy label,
+   linked PRs and Project status. The dispatcher must successfully run
+   `bash ops/issue-claim.sh claim ISSUE --agent SESSION --branch BRANCH --files PATHS`
+   before starting work. Use a unique session name and reserve the actual files.
+   A busy issue or overlapping active scope goes back to the dispatcher; never
+   steal it. The helper reserves the issue across clones, posts the claim, sets
+   `agent/in-progress`, and verifies Project Status is In progress. If any step
+   fails, do not launch; reconcile with `status`/`resume`. Restricted workers
+   receive the dispatcher's existing claim receipt in their brief and do not
+   run GitHub commands. At PR handoff use `review`; after merge use `complete`
+   (Ready to test). Abandonment requires `release --reason`, after checking the
+   session has stopped. Never clear another session's claim or mark acceptance
+   Done merely because code merged. See [claim lifecycle](docs/design/agent-dispatch.md#issue-claims).
 
 ## Working here
 
