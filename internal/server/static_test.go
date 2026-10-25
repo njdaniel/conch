@@ -229,7 +229,7 @@ func TestStaticPermissionsPolicy(t *testing.T) {
 
 // The policy text is part of the contract; pin it character for character.
 func TestStaticCSPIsExact(t *testing.T) {
-	const want = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+	const want = "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 	if webCSP != want {
 		t.Errorf("webCSP = %q", webCSP)
 	}
@@ -645,7 +645,7 @@ func TestSocketOriginMatrix(t *testing.T) {
 // LiveKit origin, as socket and http scheme; with it not configured the policy
 // is webCSP, character for character (issue #442).
 func TestStaticCSPWithVoice(t *testing.T) {
-	const base = "default-src 'self'; connect-src 'self'%s; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+	const base = "default-src 'self'; connect-src 'self'%s; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 	tests := []struct {
 		name  string
 		url   string

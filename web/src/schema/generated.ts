@@ -508,6 +508,45 @@ export const approvalV1 = object<ApprovalV1>({
   created_at: timestamp,
 });
 
+// schema.FileV1
+export const fileV1Schema = 'conch.file.v1';
+
+export interface FileV1 {
+  schema: typeof fileV1Schema;
+  id: number;
+  channel_id: number;
+  uploader_id: number;
+  filename: string;
+  media_type: string;
+  size: number;
+  sha256: string;
+  created_at: string;
+}
+
+export const fileV1 = object<FileV1>({
+  schema: vocab<typeof fileV1Schema>({ [fileV1Schema]: true }),
+  id: int,
+  channel_id: int,
+  uploader_id: int,
+  filename: str,
+  media_type: str,
+  size: int,
+  sha256: str,
+  created_at: timestamp,
+});
+
+// schema.FileAttachmentV1
+// A message payload of schema fileAttachmentV1PayloadSchema carries one as its data.
+export const fileAttachmentV1PayloadSchema = 'conch.file_attachment.v1';
+
+export interface FileAttachmentV1 {
+  file_ids: number[];
+}
+
+export const fileAttachmentV1 = object<FileAttachmentV1>({
+  file_ids: array(int),
+});
+
 // schema.NetRole
 export type NetRole = 'member' | 'monitor';
 

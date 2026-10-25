@@ -1,6 +1,8 @@
-import { useRef, type KeyboardEvent } from 'react';
+import { createContext, useContext, useEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { Glyph } from './Icons';
+import { validateImage, type ImageValidationResult } from './image';
 import type { Audience } from './schema/message';
+import { audienceScope, maxDraftAttachments, type DraftAttachment, type NewDraftAttachment } from './state/attachments';
 import type { Target, TargetAction } from './state/drafts';
 import type { Person } from './useLiveChannel';
 
@@ -14,6 +16,79 @@ const pausedId = 'composer-paused';
 const channelValue = 'channel';
 const whisperValue = 'whisper';
 const netValue = (id: number) => `net:${String(id)}`;
+
+export interface ComposerAttachmentContextValue {
+  readonly attachments: readonly DraftAttachment[];
+  readonly add: (files: readonly NewDraftAttachment[]) => void;
+  readonly remove: (clientId: number) => void;
+  readonly cancel: (clientId: number) => void;
+  readonly retry: (clientId: number) => void;
+}
+
+const noAttachments: ComposerAttachmentContextValue = {
+  attachments: [],
+  add: () => undefined,
+  remove: () => undefined,
+  cancel: () => undefined,
+  retry: () => undefined,
+};
+const ComposerAttachmentContext = createContext<ComposerAttachmentContextValue>(noAttachments);
+
+// App owns the bytes and upload lifecycle. The context keeps Conversation's
+// existing public props unchanged while Composer remains its child.
+export function ComposerAttachmentProvider({ value, children }: { readonly value: ComposerAttachmentContextValue; readonly children: ReactNode }) {
+  return <ComposerAttachmentContext.Provider value={value}>{children}</ComposerAttachmentContext.Provider>;
+}
+
+function DraftPreview({ attachment, busy, onRemove, onCancel, onRetry }: {
+  readonly attachment: DraftAttachment;
+  readonly busy: boolean;
+  readonly onRemove: () => void;
+  readonly onCancel: () => void;
+  readonly onRetry: () => void;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [broken, setBroken] = useState(false);
+  useEffect(() => {
+    const made = URL.createObjectURL(attachment.bytes);
+    setUrl(made);
+    return () => {
+      URL.revokeObjectURL(made);
+    };
+  }, [attachment.bytes]);
+
+  return (
+    <li className="draft-attachment">
+      {url !== null && !broken ? <img src={url} alt="" onError={() => { setBroken(true); }} /> : <span className="draft-image-fallback" aria-hidden="true">Image</span>}
+      <span className="draft-attachment-name">{attachment.filename}</span>
+      {attachment.status === 'uploading' ? (
+        <>
+          <progress aria-label={`Uploading ${attachment.filename}`} />
+          <span className="hint">Uploading…</span>
+          <button type="button" onClick={onCancel} aria-label={`Cancel upload of ${attachment.filename}`}>Cancel</button>
+        </>
+      ) : null}
+      {attachment.status === 'failed' || attachment.status === 'cancelled' ? (
+        <>
+          {attachment.status === 'failed' ? <span role="alert" className="draft-attachment-error">{attachment.error ?? 'Upload failed. Try again.'}</span> : <span className="hint">Upload cancelled.</span>}
+          <button type="button" onClick={onRetry} aria-label={`Retry upload of ${attachment.filename}`}>Retry</button>
+        </>
+      ) : null}
+      <button type="button" onClick={onRemove} disabled={busy} aria-label={`Remove ${attachment.filename}`}>Remove</button>
+    </li>
+  );
+}
+
+function validationLine(file: File, result: ImageValidationResult): string | null {
+  if (result.ok) return null;
+  const name = file.name === '' ? 'The image' : file.name;
+  switch (result.failure) {
+    case 'unsupported': return `${name}: only PNG and JPEG images can be attached.`;
+    case 'invalid': return `${name}: the image is damaged or is not really a PNG or JPEG.`;
+    case 'too-large': return `${name}: the image dimensions are too large.`;
+    case 'unavailable': return `${name}: this browser cannot check image previews.`;
+  }
+}
 
 // The composer: who the message goes to, the box to write in, and Send. The
 // audience is the server's to allow; this offers what the viewer can see.
@@ -46,11 +121,17 @@ export function Composer({
   readonly paused: boolean;
   readonly onDraft: (text: string) => void;
   readonly onTarget: (action: TargetAction) => void;
-  readonly onSend: (body: string, audience: Audience | undefined) => void;
+  readonly onSend: (body: string, audience: Audience | undefined, attachments?: readonly DraftAttachment[]) => void;
   // Called when a send starts, so the log follows the new message.
   readonly atBottom: () => void;
 }) {
   const select = useRef<HTMLSelectElement>(null);
+  const picker = useRef<HTMLInputElement>(null);
+  const fileDraft = useContext(ComposerAttachmentContext);
+  const attachments = fileDraft.attachments;
+  const [inputError, setInputError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const validationGeneration = useRef(0);
   const whispering = target.whisper !== null;
   const chosen = target.whisper ?? [];
 
@@ -72,7 +153,6 @@ export function Composer({
       : `Message #${channel}`;
 
   const value = whispering ? whisperValue : target.net !== null ? netValue(target.net) : channelValue;
-  const canSend = enabled && draft.trim() !== '' && (!whispering || chosen.length > 0);
 
   function audience(): Audience | undefined {
     if (whispering) return { kind: 'principals', principal_ids: [...chosen] };
@@ -80,10 +160,30 @@ export function Composer({
     return undefined;
   }
 
+  const scope = `${channel}/${audienceScope(audience())}`;
+  const scopeNow = useRef(scope);
+  scopeNow.current = scope;
+  useEffect(() => {
+    setInputError(null);
+    setSending(false);
+  }, [scope]);
+  useEffect(() => {
+    if (attachments.length === 0 || attachments.some((a) => a.status === 'failed' || a.status === 'cancelled')) setSending(false);
+  }, [attachments]);
+  useEffect(() => () => {
+    validationGeneration.current++;
+  }, []);
+
+  const uploading = attachments.some((a) => a.status === 'uploading');
+  const busy = sending || uploading;
+  const canSend = enabled && !busy && (draft.trim() !== '' || attachments.length > 0) && (!whispering || chosen.length > 0);
+
   function submit() {
     if (!canSend) return;
     atBottom();
-    onSend(draft, audience());
+    const body = draft.trim() === '' && attachments.length > 0 ? attachments.map((a) => a.filename).join(', ') : draft;
+    if (attachments.length > 0) setSending(true);
+    onSend(body, audience(), attachments);
   }
 
   function key(event: KeyboardEvent) {
@@ -103,9 +203,55 @@ export function Composer({
     }
   }
 
+  async function addFiles(incoming: readonly File[]): Promise<void> {
+    if (!enabled || busy || incoming.length === 0) return;
+    const generation = ++validationGeneration.current;
+    const frozenScope = scope;
+    const slots = Math.max(0, maxDraftAttachments - attachments.length);
+    const accepted = incoming.slice(0, slots);
+    const countError = incoming.length > slots ? `Only ${String(maxDraftAttachments)} images can be attached to one message.` : null;
+    if (accepted.length === 0) {
+      setInputError(countError);
+      return;
+    }
+    const checked = await Promise.all(accepted.map(async (file) => ({ file, result: await validateImage(file) })));
+    if (generation !== validationGeneration.current || scopeNow.current !== frozenScope) return;
+    const valid: NewDraftAttachment[] = [];
+    const errors: string[] = countError === null ? [] : [countError];
+    for (const { file, result } of checked) {
+      const line = validationLine(file, result);
+      if (line !== null) errors.push(line);
+      else if (result.ok) valid.push({
+        filename: file.name === '' ? `image.${result.value.format === 'png' ? 'png' : 'jpg'}` : file.name,
+        mediaType: result.value.format === 'png' ? 'image/png' : 'image/jpeg',
+        bytes: file,
+      });
+    }
+    if (valid.length > 0) fileDraft.add(valid);
+    setInputError(errors.length === 0 ? null : errors.join(' '));
+  }
+
+  function paste(event: React.ClipboardEvent<HTMLTextAreaElement>): void {
+    const files = Array.from(event.clipboardData.files);
+    if (files.length === 0) return;
+    event.preventDefault();
+    void addFiles(files);
+  }
+
+  function drop(event: DragEvent<HTMLFormElement>): void {
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length === 0 || !enabled) return;
+    event.preventDefault();
+    void addFiles(files);
+  }
+
   return (
     <form
       className={value === channelValue ? 'composer' : 'composer narrowed'}
+      onDragOver={(event) => {
+        if (enabled && event.dataTransfer.types.includes('Files')) event.preventDefault();
+      }}
+      onDrop={drop}
       onSubmit={(event) => {
         event.preventDefault();
         submit();
@@ -117,7 +263,7 @@ export function Composer({
           id="composer-to"
           ref={select}
           value={value}
-          disabled={!enabled}
+          disabled={!enabled || busy}
           aria-describedby={paused ? pausedId : undefined}
           onChange={(event) => {
             choose(event.target.value);
@@ -138,6 +284,7 @@ export function Composer({
       {whispering ? (
         <fieldset
           className="whisper-picker"
+          disabled={busy}
           onKeyDown={(event) => {
             if (event.key !== 'Escape') return;
             event.preventDefault();
@@ -163,16 +310,53 @@ export function Composer({
           ))}
         </fieldset>
       ) : null}
+      {attachments.length > 0 ? (
+        <ul className="draft-attachments" aria-label="Images to send" aria-busy={uploading}>
+          {attachments.map((attachment) => (
+            <DraftPreview
+              key={attachment.clientId}
+              attachment={attachment}
+              busy={busy}
+              onRemove={() => { fileDraft.remove(attachment.clientId); }}
+              onCancel={() => { fileDraft.cancel(attachment.clientId); }}
+              onRetry={() => { fileDraft.retry(attachment.clientId); }}
+            />
+          ))}
+        </ul>
+      ) : null}
+      {inputError === null ? null : <p role="alert" className="notice">{inputError}</p>}
       <div className={paused ? 'composer-box paused' : 'composer-box'}>
+      <input
+        ref={picker}
+        type="file"
+        accept="image/png,image/jpeg"
+        multiple
+        className="image-file-input"
+        aria-label="Choose images"
+        tabIndex={-1}
+        onChange={(event) => {
+          const input = event.currentTarget;
+          const files = Array.from(input.files ?? []);
+          void addFiles(files).finally(() => {
+            input.value = '';
+          });
+        }}
+      />
+      <button type="button" className="attach-image" aria-label="Attach images" disabled={!enabled || busy} onClick={() => { picker.current?.click(); }}>
+        <Glyph name="image" />
+        <span className="label">Attach images</span>
+      </button>
       <textarea
         id="composer-text"
         rows={2}
         value={draft}
         disabled={!enabled}
+        readOnly={busy}
         aria-describedby={paused ? pausedId : undefined}
         onChange={(event) => {
           onDraft(event.target.value);
         }}
+        onPaste={paste}
         onKeyDown={(event) => {
           if (event.key === 'Escape' && whispering) {
             event.preventDefault();

@@ -2,9 +2,10 @@
 // it. The shapes are the web client's own schema modules, which are checked
 // against pkg/schema's golden fixtures.
 import { listActivityResponseV1, type AgentActivityV1 } from '../src/schema/activity';
+import { fileAttachmentPayloadSchema, fileV1, type FileAttachmentV1, type FileV1 } from '../src/schema/file';
 import { listInterventionsResponseV1, type InterventionV1 } from '../src/schema/intervention';
 import { createInviteResponseV1, listInvitesResponseV1, type CreateInviteRequestV1, type CreateInviteResponseV1, type InviteV1 } from '../src/schema/invite';
-import { listMessagesResponseV2, postMessageResponseV2, type MessageV2 } from '../src/schema/message';
+import { listMessagesResponseV2, postMessageResponseV2, type Audience, type MessageV2, type PostMessageRequestV2 } from '../src/schema/message';
 import { listReadStateResponseV1, type ReadStateV1 } from '../src/schema/readstate';
 import { listRunsResponseV1, runV1, type RunV1 } from '../src/schema/run';
 import { sessionRosterV1, sessionV1, type SessionV1 } from '../src/schema/session';
@@ -27,6 +28,39 @@ export async function history(world: World, token: string, channel: string): Pro
 
 export async function post(world: World, token: string, channel: string, body: string): Promise<MessageV2> {
   const reply = await ok(world, token, 'POST', `/v2/channels/${encodeURIComponent(channel)}/messages`, postMessageResponseV2, { body });
+  return reply.message;
+}
+
+export async function upload(world: World, token: string, channel: string, filename: string, mediaType: string, bytes: Uint8Array<ArrayBuffer>): Promise<FileV1> {
+  const reply = await fetch(`${world.origin}/v2/channels/${encodeURIComponent(channel)}/files?filename=${encodeURIComponent(filename)}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': mediaType },
+    body: bytes,
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!reply.ok) throw new Error(`upload ${filename}: status ${String(reply.status)}`);
+  const body: unknown = await reply.json();
+  const problems = fileV1(body);
+  if (problems.length > 0) throw new Error(`upload ${filename}: ${problems.join('; ')}`);
+  return body as FileV1;
+}
+
+export interface AttachmentSeed {
+  readonly filename: string;
+  readonly mediaType: string;
+  readonly bytes: Uint8Array<ArrayBuffer>;
+}
+
+export async function attach(world: World, token: string, channel: string, body: string, files: readonly AttachmentSeed[], audience?: Audience): Promise<MessageV2> {
+  const uploaded: FileV1[] = [];
+  for (const file of files) uploaded.push(await upload(world, token, channel, file.filename, file.mediaType, file.bytes));
+  const data: FileAttachmentV1 = { file_ids: uploaded.map((file) => file.id) };
+  const request: PostMessageRequestV2 = {
+    body,
+    payload: { schema: fileAttachmentPayloadSchema, data },
+    ...(audience === undefined ? {} : { audience }),
+  };
+  const reply = await ok(world, token, 'POST', `/v2/channels/${encodeURIComponent(channel)}/messages`, postMessageResponseV2, request);
   return reply.message;
 }
 

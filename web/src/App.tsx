@@ -28,10 +28,21 @@ import { Setup } from './Setup';
 import { authReducer, initialAuth, keptAcross, operatorSession } from './state/auth';
 import { channelsReducer, initialChannels, type ChannelsAction } from './state/channels';
 import { connectionReducer } from './state/connection';
-import { whisperNotice } from './Composer';
-import { draftFor, draftsReducer, initialDrafts, initialTargets, targetFor, targetsReducer, type Drafts } from './state/drafts';
-import type { Audience } from './schema/message';
-import { canLoadOlder, chatFor, chatReducer, initialChat, lastId, oldestId, ordered, type ChatAction } from './state/messages';
+import { ComposerAttachmentProvider, whisperNotice, type ComposerAttachmentContextValue } from './Composer';
+import { draftFor, draftsReducer, initialDrafts, initialTargets, targetFor, targetsReducer, type Drafts, type Target } from './state/drafts';
+import type { Audience, MessageV2 } from './schema/message';
+import {
+  attachmentDraftsReducer,
+  attachmentPayload,
+  attachmentsFor,
+  initialAttachmentDrafts,
+  normalizeAudience,
+  type AttachmentDraftAction,
+  type AttachmentDrafts,
+  type DraftAttachment,
+  type NewDraftAttachment,
+} from './state/attachments';
+import { canLoadOlder, chatFor, chatReducer, initialChat, lastId, oldestId, ordered, sameSend, type ChatAction, type PendingSend } from './state/messages';
 import { useLiveChannel } from './useLiveChannel';
 import { useReadState } from './useReadState';
 import { MembersPanel } from './agents/MembersPanel';
@@ -61,6 +72,25 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const [chat, dispatchRaw] = useReducer(chatReducer, initialChat);
   const [drafts, dispatchDrafts] = useReducer(draftsReducer, initialDrafts);
   const [targets, dispatchTargets] = useReducer(targetsReducer, initialTargets);
+  const [attachmentDrafts, dispatchAttachmentsRaw] = useReducer(attachmentDraftsReducer, initialAttachmentDrafts);
+  const attachmentsNow = useRef(attachmentDrafts);
+  const dispatchAttachments = useCallback((action: AttachmentDraftAction) => {
+    attachmentsNow.current = attachmentDraftsReducer(attachmentsNow.current, action);
+    dispatchAttachmentsRaw(action);
+  }, []);
+  const uploadControllers = useRef(new Map<string, { readonly controller: AbortController; readonly channelId: number }>());
+  const channelEpochs = useRef(new Map<number, number>());
+  const originNow = useRef(origin);
+  originNow.current = origin;
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      for (const upload of uploadControllers.current.values()) upload.controller.abort();
+      uploadControllers.current.clear();
+    };
+  }, []);
   // Whether this tab has shown the audit-log notice: once per tab.
   const whisperNoted = useRef(false);
   const [attempt, setAttempt] = useState(0);
@@ -141,7 +171,12 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // credential is revoked mid-sentence), kept in memory for the same person
   // signing back in, and for nobody else. A sign-out the person chose
   // forgets it.
-  const kept = useRef<{ readonly principal: number; readonly drafts: Drafts } | null>(null);
+  const kept = useRef<{
+    readonly principal: number;
+    readonly drafts: Drafts;
+    readonly attachments: AttachmentDrafts;
+    readonly pending: Readonly<Record<string, readonly PendingSend[]>>;
+  } | null>(null);
   const draftsNow = useRef(drafts);
   useEffect(() => {
     draftsNow.current = drafts;
@@ -154,18 +189,33 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       // Once, as the sign-in ends; the notice is the one it ended with.
       if (lastSignedIn.current !== null) {
         const typed = draftsNow.current;
-        kept.current = keptAcross(endedNotice) && Object.keys(typed).length > 0 ? { principal: lastSignedIn.current, drafts: typed } : null;
+        const files = attachmentsNow.current;
+        const pending: Record<string, readonly PendingSend[]> = {};
+        if (keptAcross(endedNotice)) {
+          for (const [channel, chat] of Object.entries(chatNow.current.channels)) {
+            if (chat.pending.length === 0) continue;
+            pending[channel] = chat.pending.map((p): PendingSend =>
+              p.phase === 'posting' || p.phase === 'reconciling' ? { ...p, status: 'unconfirmed', phase: 'unconfirmed' } : p,
+            );
+          }
+        }
+        kept.current = keptAcross(endedNotice) && (Object.keys(typed).length > 0 || Object.keys(files.channels).length > 0 || Object.keys(pending).length > 0)
+          ? { principal: lastSignedIn.current, drafts: typed, attachments: files, pending }
+          : null;
         lastSignedIn.current = null;
       }
+      for (const upload of uploadControllers.current.values()) upload.controller.abort();
+      uploadControllers.current.clear();
       dispatchConnection({ type: 'closed' });
       dispatchChannels({ type: 'reset' });
       dispatchChat({ type: 'reset' });
       dispatchDrafts({ type: 'reset' });
       dispatchTargets({ type: 'reset' });
+      dispatchAttachments({ type: 'reset' });
       setAttempt(0);
       setEverywhereFailed(null);
     }
-  }, [auth.phase, dispatchChannels, dispatchChat]);
+  }, [auth.phase, dispatchChannels, dispatchChat, dispatchAttachments]);
 
   // Signing out forgets the invite a person signed in instead of using: the
   // next person here did not open it.
@@ -202,17 +252,59 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // operator's own answer, the events socket, or the list read again. The
   // list, the open channel and everything kept by its name move to the new
   // one; nothing is reloaded and no socket is reopened.
+  const invalidateChannel = useCallback((id: number) => {
+    channelEpochs.current.set(id, (channelEpochs.current.get(id) ?? 0) + 1);
+    for (const [key, upload] of uploadControllers.current) {
+      if (upload.channelId !== id) continue;
+      upload.controller.abort();
+      uploadControllers.current.delete(key);
+    }
+  }, []);
+
   const renamed = useCallback(
     (id: number, name: string) => {
       const was = channelsNow.current.channels.find((c) => c.id === id);
       if (was === undefined || was.name === name) return;
+      const pending = chatFor(chatNow.current, was.name).pending.filter((p) => p.phase === 'posting' || p.phase === 'reconciling');
+      const uploading = Object.entries(attachmentsNow.current.channels[was.name] ?? {}).flatMap(([scope, attachments]) =>
+        attachments.filter((attachment) => attachment.status === 'uploading').map((attachment) => ({ scope, attachment })),
+      );
+      invalidateChannel(id);
       dispatchChannels({ type: 'renamed', id, name });
       dispatchChat({ type: 'renamed', from: was.name, to: name });
+      for (const send of pending) {
+        dispatchChat({
+          type: 'sendFailed',
+          channel: name,
+          localId: send.localId,
+          outcome: 'unconfirmed',
+          ...(send.requestId === undefined ? {} : { requestId: send.requestId }),
+        });
+      }
       dispatchDrafts({ type: 'renamed', from: was.name, to: name });
       dispatchTargets({ type: 'renamed', from: was.name, to: name });
+      dispatchAttachments({ type: 'renamed', from: was.name, to: name });
+      for (const { scope, attachment } of uploading) {
+        dispatchAttachments({
+          type: 'cancelled',
+          channel: name,
+          audience: audienceForScope(scope),
+          clientId: attachment.clientId,
+          generation: attachmentsNow.current.generation,
+          attempt: attachment.attempt,
+        });
+      }
     },
-    [dispatchChannels, dispatchChat],
+    [invalidateChannel, dispatchChannels, dispatchChat, dispatchAttachments],
   );
+
+  const loseChannel = useCallback((id: number, name: string) => {
+    invalidateChannel(id);
+    dispatchChannels({ type: 'lost', name });
+    for (const scope of Object.keys(attachmentsNow.current.channels[name] ?? {})) {
+      dispatchAttachments({ type: 'clear', channel: name, audience: audienceForScope(scope) });
+    }
+  }, [invalidateChannel, dispatchChannels, dispatchAttachments]);
 
   // The slow way (issue #728): a call for a channel answered
   // channel_not_found. The list is read again and the channel found by its
@@ -233,7 +325,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         const found = result.value.find((c) => c.id === id);
         const was = channelsNow.current.channels.find((c) => c.id === id);
         if (found === undefined) {
-          if (was !== undefined) dispatchChannels({ type: 'lost', name: was.name });
+          if (was !== undefined) loseChannel(id, was.name);
           return null;
         }
         renamed(id, found.name);
@@ -242,7 +334,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       refinding.current.set(id, reading);
       return reading;
     },
-    [dispatchChannels, renamed],
+    [loseChannel, renamed],
   );
   const onMissing = useCallback(
     (id: number) => {
@@ -268,9 +360,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   }, []);
   const onLost = useCallback(
     (name: string) => {
-      dispatchChannels({ type: 'lost', name });
+      const channel = channelsNow.current.channels.find((c) => c.name === name);
+      if (channel !== undefined) loseChannel(channel.id, name);
     },
-    [dispatchChannels],
+    [loseChannel],
   );
   // The one way a channel is opened: from the list, or from the voice strip.
   const onOpen = useCallback(
@@ -386,37 +479,207 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     el.focus({ preventScroll: true });
   }, [scrollTo, detailOpen]);
 
+  const principalId = principal?.id ?? null;
+  const principalNow = useRef(principalId);
+  principalNow.current = principalId;
+  const nextRequest = useRef(1);
+
+  const activeSend = useCallback((send: FrozenSend): boolean => {
+    return mounted.current && originNow.current === send.origin && principalNow.current === send.principal &&
+      attachmentsNow.current.generation === send.generation &&
+      (channelEpochs.current.get(send.channelId) ?? 0) === send.channelEpoch &&
+      channelsNow.current.channels.some((channel) => channel.id === send.channelId && channel.name === send.channel);
+  }, []);
+
+  const freezeSend = useCallback((channelId: number, channel: string, body: string, audience: Audience | undefined, attachments: readonly DraftAttachment[]): FrozenSend | null => {
+    if (principalId === null) return null;
+    const normalized = normalizeAudience(audience);
+    const frozen = [...attachments];
+    return {
+      origin,
+      principal: principalId,
+      channelId,
+      channel,
+      channelEpoch: channelEpochs.current.get(channelId) ?? 0,
+      generation: attachmentsNow.current.generation,
+      requestId: `browser-send-${String(nextRequest.current++)}`,
+      body,
+      ...(normalized === undefined ? {} : { audience: normalized }),
+      attachments: frozen,
+      ...(frozen.length === 0 ? {} : { payload: attachmentPayload(frozen) }),
+    };
+  }, [principalId, origin]);
+
+  const markSent = useCallback((send: FrozenSend, localId: number, message: MessageV2) => {
+    const name = nameOf(send.channelId) ?? send.channel;
+    dispatchChat({ type: 'sent', channel: name, localId, message, requestId: send.requestId });
+    if (send.audience?.kind === 'principals') {
+      const note = whisperNoted.current ? null : whisperNotice;
+      whisperNoted.current = true;
+      dispatchTargets({ type: 'whispered', channel: name, sent: send.audience.principal_ids, note });
+    }
+  }, [nameOf, dispatchChat]);
+
   // One POST per click. Nothing here sends a message a second time on its own.
-  // The answer goes under the channel's name when it comes: renamed meanwhile
-  // (issue #728), the new one.
-  const post = useCallback(
-    (id: number, sent: string, localId: number, body: string, audience?: Audience) => {
-      void api.postMessage(sent, body, audience).then((result) => {
-        const name = nameOf(id) ?? sent;
-        if (result.ok) {
-          dispatchChat({ type: 'sent', channel: name, localId, message: result.message });
-          if (audience?.kind === 'principals') {
-            const note = whisperNoted.current ? null : whisperNotice;
-            whisperNoted.current = true;
-            dispatchTargets({ type: 'whispered', channel: name, sent: audience.principal_ids, note });
-          }
-        } else if (result.outcome === 'unauthorized') {
-          // The sign-in ended under the message, which was not stored: it
-          // goes back into the draft, kept for the same person signing in
-          // again (issue #714), unless something else was typed since.
-          if ((draftsNow.current[name] ?? '') === '') dispatchDrafts({ type: 'edit', channel: name, text: body });
-          dispatchAuth({ type: 'unauthorized' });
+  const post = useCallback((send: FrozenSend, localId: number) => {
+    if (!activeSend(send)) return;
+    void api.postMessage(send.channel, send.body, send.audience, send.payload).then((result) => {
+      if (!activeSend(send)) return;
+      const name = nameOf(send.channelId) ?? send.channel;
+      if (result.ok) {
+        markSent(send, localId, result.message);
+      } else if (result.outcome === 'unauthorized') {
+        if (send.attachments.length === 0) {
+          // Text alone returns to the composer; attachments stay in the pending
+          // line so their bytes and uploaded file ids survive the sign-in.
+          if ((draftsNow.current[name] ?? '') === '') dispatchDrafts({ type: 'edit', channel: name, text: send.body });
+          dispatchChat({ type: 'discard', channel: name, localId, requestId: send.requestId });
         } else {
-          // A refusal stays as a Failed line with Retry and Dismiss, so the text
-          // is never lost; the server's own line is shown beside the composer.
-          if (result.outcome === 'refused') dispatchTargets({ type: 'refused', channel: name, line: result.reason });
-          if (result.outcome === 'refused' && result.code === api.channelNotFound) onMissing(id);
-          dispatchChat({ type: 'sendFailed', channel: name, localId, outcome: result.outcome === 'refused' ? 'failed' : 'unconfirmed' });
+          dispatchChat({ type: 'sendFailed', channel: name, localId, outcome: 'failed', requestId: send.requestId });
         }
-      });
-    },
-    [nameOf, dispatchChat, onMissing],
-  );
+        dispatchAuth({ type: 'unauthorized' });
+      } else {
+        // A refusal stays as a Failed line with Retry and Dismiss, so the text
+        // is never lost; the server's own line is shown beside the composer.
+        if (result.outcome === 'refused') dispatchTargets({ type: 'refused', channel: name, line: result.reason });
+        if (result.outcome === 'refused' && result.code === api.channelNotFound) onMissing(send.channelId);
+        const uncertainAttachment = result.outcome === 'refused' && result.code === 'invalid_file_attachment';
+        dispatchChat({
+          type: 'sendFailed',
+          channel: name,
+          localId,
+          outcome: result.outcome === 'refused' && !uncertainAttachment ? 'failed' : 'unconfirmed',
+          requestId: send.requestId,
+        });
+      }
+    });
+  }, [activeSend, nameOf, markSent, dispatchChat, onMissing]);
+
+  const uploadOne = useCallback(async (send: FrozenSend, attachment: DraftAttachment): Promise<DraftAttachment> => {
+    if (attachment.status === 'ready') return attachment;
+    if (!activeSend(send)) return { ...attachment, status: 'cancelled' };
+    const channel = nameOf(send.channelId) ?? send.channel;
+    dispatchAttachments({ type: 'uploading', channel, ...(send.audience === undefined ? {} : { audience: send.audience }), clientId: attachment.clientId, generation: send.generation });
+    const attempt = attachment.attempt + 1;
+    const controller = new AbortController();
+    const key = `${String(send.generation)}:${String(attachment.clientId)}`;
+    uploadControllers.current.set(key, { controller, channelId: send.channelId });
+    const result = await api.uploadFile(send.channel, attachment.filename, attachment.mediaType, attachment.bytes, controller.signal);
+    if (uploadControllers.current.get(key)?.controller === controller) uploadControllers.current.delete(key);
+    if (!activeSend(send)) return { ...attachment, status: 'cancelled', attempt };
+    const currentChannel = nameOf(send.channelId) ?? send.channel;
+    const action = { channel: currentChannel, ...(send.audience === undefined ? {} : { audience: send.audience }), clientId: attachment.clientId, generation: send.generation, attempt };
+    if (result.ok) {
+      dispatchAttachments({ ...action, type: 'uploaded', fileId: result.file.id });
+      return { ...attachment, status: 'ready', attempt, fileId: result.file.id, error: undefined };
+    }
+    if (result.outcome === 'cancelled') {
+      dispatchAttachments({ ...action, type: 'cancelled' });
+      return { ...attachment, status: 'cancelled', attempt, error: undefined };
+    }
+    if (result.outcome === 'unauthorized') {
+      dispatchAuth({ type: 'unauthorized' });
+      return { ...attachment, status: 'failed', attempt, error: 'Your sign-in ended before the upload finished.' };
+    }
+    if (result.outcome === 'network') {
+      const error = 'Cannot reach the server. The image is still here; try again.';
+      dispatchAttachments({ ...action, type: 'uploadFailed', error });
+      return { ...attachment, status: 'failed', attempt, error };
+    }
+    const error = 'reason' in result ? result.reason : 'The server refused the upload';
+    dispatchAttachments({ ...action, type: 'uploadFailed', error });
+    return { ...attachment, status: 'failed', attempt, error };
+  }, [activeSend, nameOf, dispatchAttachments]);
+
+  const beginSend = useCallback((send: FrozenSend) => {
+    const name = nameOf(send.channelId) ?? send.channel;
+    const localId = chatFor(chatNow.current, name).nextLocalId;
+    dispatchTargets({ type: 'posting', channel: name });
+    dispatchChat({
+      type: 'sending',
+      channel: name,
+      channelId: send.channelId,
+      authorId: send.principal,
+      body: send.body,
+      at: Date.now(),
+      attachments: send.attachments,
+      requestId: send.requestId,
+      ...(send.audience === undefined ? {} : { audience: send.audience }),
+    });
+    dispatchDrafts({ type: 'edit', channel: name, text: '' });
+    post(send, localId);
+  }, [nameOf, dispatchChat, post]);
+
+  const send = useCallback((channelId: number, channel: string, body: string, audience: Audience | undefined, files: readonly DraftAttachment[]) => {
+    const frozen = freezeSend(channelId, channel, body, audience, files);
+    if (frozen === null) return;
+    if (files.length === 0) {
+      beginSend(frozen);
+      return;
+    }
+    void (async () => {
+      let attachments = [...frozen.attachments];
+      for (let index = 0; index < attachments.length; index++) {
+        const attachment = attachments[index];
+        if (attachment === undefined || attachment.status === 'ready') continue;
+        const uploaded = await uploadOne(frozen, attachment);
+        attachments = [...attachments.slice(0, index), uploaded, ...attachments.slice(index + 1)];
+        if (uploaded.status !== 'ready') return;
+      }
+      if (!activeSend(frozen) || attachments.some((attachment) => attachment.status !== 'ready')) return;
+      const ready = { ...frozen, attachments, payload: attachmentPayload(attachments) };
+      const name = nameOf(channelId) ?? channel;
+      dispatchAttachments({ type: 'clear', channel: name, ...(frozen.audience === undefined ? {} : { audience: frozen.audience }) });
+      beginSend(ready);
+    })();
+  }, [freezeSend, beginSend, uploadOne, activeSend, nameOf, dispatchAttachments]);
+
+  const reconcile = useCallback((send: FrozenSend, localId: number, after: number) => {
+    if (!activeSend(send)) return;
+    const name = nameOf(send.channelId) ?? send.channel;
+    dispatchChat({ type: 'reconciling', channel: name, localId, requestId: send.requestId });
+    void api.loadMessagesAscending(send.channel, after).then((result) => {
+      if (!activeSend(send)) return;
+      const currentName = nameOf(send.channelId) ?? send.channel;
+      const held = chatFor(chatNow.current, currentName);
+      const pending = held.pending.find((p) => p.localId === localId && p.requestId === send.requestId);
+      if (pending === undefined || pending.channelId !== send.channelId) return;
+      if (!result.ok) {
+        if (result.failure === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
+        else dispatchChat({ type: 'reconciliationFailed', channel: currentName, localId, requestId: send.requestId });
+        return;
+      }
+      const found = result.value.find((message) =>
+        !held.sentIds.has(message.id) && message.channel_id === send.channelId && message.author_id === send.principal && message.id > after && sameSend(pending, message),
+      );
+      if (found !== undefined) {
+        markSent(send, localId, found);
+        return;
+      }
+      if (!result.complete) {
+        dispatchChat({ type: 'reconciliationFailed', channel: currentName, localId, requestId: send.requestId });
+        return;
+      }
+      dispatchChat({ type: 'retrying', channel: currentName, localId, requestId: send.requestId });
+      post(send, localId);
+    });
+  }, [activeSend, nameOf, dispatchChat, markSent, post]);
+
+  const retrySend = useCallback((channelId: number, channel: string, localId: number) => {
+    const pending = chatFor(chatNow.current, channel).pending.find((p) => p.localId === localId);
+    if (pending === undefined || pending.status === 'sending' || pending.channelId !== channelId) return;
+    const current = channelsNow.current.channels.find((c) => c.id === pending.channelId);
+    if (current === undefined || current.name !== channel) return;
+    const frozen = freezeSend(pending.channelId, current.name, pending.body, pending.audience, pending.attachments);
+    if (frozen === null) return;
+    const send = { ...frozen, requestId: pending.requestId ?? frozen.requestId, ...(pending.payload === undefined ? {} : { payload: pending.payload }) };
+    dispatchTargets({ type: 'posting', channel: current.name });
+    if (pending.phase === 'unconfirmed') reconcile(send, localId, pending.reconcileAfter);
+    else {
+      dispatchChat({ type: 'retrying', channel: current.name, localId, requestId: send.requestId });
+      post(send, localId);
+    }
+  }, [freezeSend, reconcile, dispatchChat, post]);
 
   const releaseSession = agents.release;
   // One sign-out at a time: a second click while the first is with the server
@@ -440,7 +703,6 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // does not do it, the person stays signed in here and is told, so they can
   // try again: dropping the credential would leave the others alive with no
   // way left to end them from this browser.
-  const principalId = principal?.id ?? null;
   const signOutEverywhere = useCallback(() => {
     if (signingOut.current || principalId === null) return;
     signingOut.current = true;
@@ -486,15 +748,28 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     };
   }, [visitEnds]);
 
-  // Signed in (issue #714): drafts kept from this person's last sign-in,
-  // which ended by itself, come back; anyone else's are dropped.
+  // Signed in (issue #714): drafts and pending sends kept from this person's
+  // last sign-in come back; anyone else's are dropped. An interrupted POST is
+  // unconfirmed, so its first retry reconciles before posting again. Pending
+  // sends wait for the channel list and follow their frozen ids across renames.
   useEffect(() => {
-    if (principalId === null) return;
+    if (principalId === null || !channels.loaded) return;
     lastSignedIn.current = principalId;
     const was = kept.current;
     kept.current = null;
-    if (was !== null && was.principal === principalId) dispatchDrafts({ type: 'restore', drafts: was.drafts });
-  }, [principalId]);
+    if (was !== null && was.principal === principalId) {
+      const pending: Record<string, PendingSend[]> = {};
+      for (const [channel, sends] of Object.entries(was.pending)) {
+        for (const send of sends) {
+          const name = channelsNow.current.channels.find((c) => c.id === send.channelId)?.name ?? channel;
+          pending[name] = [...(pending[name] ?? []), send];
+        }
+      }
+      dispatchDrafts({ type: 'restore', drafts: was.drafts });
+      dispatchAttachments({ type: 'restore', drafts: was.attachments });
+      dispatchChat({ type: 'restored', pending });
+    }
+  }, [principalId, channels.loaded, dispatchAttachments, dispatchChat]);
 
   // An operator's session ends at its twelve hours (issue #714, design
   // §5.3): when it comes, the page asks who it is, and the server's 401
@@ -747,6 +1022,50 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     });
   }, []);
 
+  const previousOrigin = useRef(origin);
+  useEffect(() => {
+    if (previousOrigin.current === origin) return;
+    previousOrigin.current = origin;
+    for (const upload of uploadControllers.current.values()) upload.controller.abort();
+    uploadControllers.current.clear();
+    dispatchAttachments({ type: 'reset' });
+  }, [origin, dispatchAttachments]);
+
+  const composerTarget: Target | null = selected === null ? null : targetFor(targets, selected);
+  const composerAudience = composerTarget === null ? undefined : audienceForTarget(composerTarget);
+  const composerAttachments: ComposerAttachmentContextValue = {
+    attachments: selected === null ? [] : attachmentsFor(attachmentDrafts, selected, composerAudience),
+    add: (files: readonly NewDraftAttachment[]) => {
+      if (selected === null || channelId === null) return;
+      dispatchAttachments({ type: 'add', channel: selected, ...(composerAudience === undefined ? {} : { audience: composerAudience }), files });
+    },
+    remove: (clientId: number) => {
+      if (selected === null) return;
+      dispatchAttachments({ type: 'remove', channel: selected, ...(composerAudience === undefined ? {} : { audience: composerAudience }), clientId });
+    },
+    cancel: (clientId: number) => {
+      if (selected === null) return;
+      const attachment = attachmentsFor(attachmentsNow.current, selected, composerAudience).find((a) => a.clientId === clientId);
+      if (attachment === undefined) return;
+      uploadControllers.current.get(`${String(attachmentsNow.current.generation)}:${String(clientId)}`)?.controller.abort();
+      dispatchAttachments({
+        type: 'cancelled',
+        channel: selected,
+        ...(composerAudience === undefined ? {} : { audience: composerAudience }),
+        clientId,
+        generation: attachmentsNow.current.generation,
+        attempt: attachment.attempt,
+      });
+    },
+    retry: (clientId: number) => {
+      if (selected === null || channelId === null) return;
+      const attachment = attachmentsFor(attachmentsNow.current, selected, composerAudience).find((a) => a.clientId === clientId);
+      if (attachment === undefined || attachment.status === 'ready' || attachment.status === 'uploading') return;
+      const frozen = freezeSend(channelId, selected, draftFor(draftsNow.current, selected), composerAudience, [attachment]);
+      if (frozen !== null) void uploadOne(frozen, attachment);
+    },
+  };
+
   // An invite link is answered before anything else, once a stored sign-in
   // has been checked, so the page can say who is signed in already.
   if (inviteCode !== null && auth.phase !== 'restoring') {
@@ -862,6 +1181,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       );
     case 'signedIn':
       return (
+        <ComposerAttachmentProvider value={composerAttachments}>
         <Lobby
           origin={origin}
           name={shownName}
@@ -1040,25 +1360,19 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                   dispatchDrafts({ type: 'edit', channel: selected, text });
                 }}
                 onTarget={dispatchTargets}
-                onSend={(body, audience) => {
-                  const localId = chatFor(chat, selected).nextLocalId;
-                  dispatchTargets({ type: 'posting', channel: selected });
-                  dispatchChat({ type: 'sending', channel: selected, body, at: Date.now(), ...(audience === undefined ? {} : { audience }) });
-                  dispatchDrafts({ type: 'edit', channel: selected, text: '' });
-                  post(channelId, selected, localId, body, audience);
+                onSend={(body, audience, files?: readonly DraftAttachment[]) => {
+                  send(channelId, selected, body, audience, files ?? []);
                 }}
                 onRetrySend={(localId) => {
-                  const send = chatFor(chat, selected).pending.find((p) => p.localId === localId);
-                  if (send === undefined || send.status === 'sending') return;
-                  dispatchTargets({ type: 'posting', channel: selected });
-                  dispatchChat({ type: 'retrying', channel: selected, localId });
-                  post(channelId, selected, localId, send.body, send.audience);
+                  retrySend(channelId, selected, localId);
                 }}
                 onDismissSend={(localId) => {
-                  dispatchChat({ type: 'discard', channel: selected, localId });
+                  const pending = chatFor(chatNow.current, selected).pending.find((p) => p.localId === localId);
+                  dispatchChat({ type: 'discard', channel: selected, localId, ...(pending?.requestId === undefined ? {} : { requestId: pending.requestId }) });
                 }}
                 onLoadOlder={live.loadOlder}
                 onReload={live.retry}
+                onUnauthorized={onUnauthorized}
                 onBottom={(atBottom) => {
                   setBottom((prev) => (prev.channel === channelId && prev.atBottom === atBottom ? prev : { channel: channelId, atBottom }));
                 }}
@@ -1075,8 +1389,35 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           onSignOutEverywhere={signOutEverywhere}
           signOutProblem={everywhereFailed}
         />
+        </ComposerAttachmentProvider>
       );
   }
+}
+
+function audienceForTarget(target: Target): Audience | undefined {
+  if (target.whisper !== null) return { kind: 'principals', principal_ids: [...target.whisper] };
+  if (target.net !== null) return { kind: 'net', net_id: target.net };
+  return undefined;
+}
+
+function audienceForScope(scope: string): Audience | undefined {
+  if (scope === 'channel') return undefined;
+  if (scope.startsWith('net:')) return { kind: 'net', net_id: Number(scope.slice(4)) };
+  return { kind: 'principals', principal_ids: scope.slice(11).split(',').map(Number) };
+}
+
+interface FrozenSend {
+  readonly origin: string;
+  readonly principal: number;
+  readonly channelId: number;
+  readonly channel: string;
+  readonly channelEpoch: number;
+  readonly generation: number;
+  readonly requestId: string;
+  readonly body: string;
+  readonly audience?: Audience;
+  readonly attachments: readonly DraftAttachment[];
+  readonly payload?: ReturnType<typeof attachmentPayload>;
 }
 
 function administrationLine(who: WhoAmIResponseV1, channels: readonly { readonly name: string; readonly manages?: boolean }[], guest: boolean): string {

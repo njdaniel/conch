@@ -57,6 +57,13 @@ const paths = {
   leave: <path d="M3 15.5c5-4.7 13-4.7 18 0l-2.3 2.3-3.2-1.6v-2.5a9 9 0 0 0-7 0v2.5l-3.2 1.6z" />,
   speaker: <path d="M4 9h4l5-4v14l-5-4H4zM16.5 8.5a5 5 0 0 1 0 7" />,
   send:<path d="M4 12 20 4l-4 16-4-7zM12 13l8-9" />,
+  image: (
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <circle cx="8" cy="9" r="1.5" />
+      <path d="m3 17 5-5 4 4 3-3 6 6" />
+    </>
+  ),
   close: <path d="M6 6l12 12M18 6 6 18" />,
   fullscreen: <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />,
   options: <path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 5v4M8 15v4" />,

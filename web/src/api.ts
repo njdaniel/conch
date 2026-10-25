@@ -84,7 +84,8 @@ import {
   type PutChannelMemberRequestV1,
   type RenameChannelRequestV1,
 } from './schema/channel';
-import { listMessagesResponseV2, postMessageResponseV2, type Audience, type MessageV2, type PostMessageRequestV2 } from './schema/message';
+import { fileAttachmentPayloadSchema, fileV1, type FileAttachmentV1, type FileV1 } from './schema/file';
+import { listMessagesResponseV2, postMessageResponseV2, type Audience, type MessageV2, type Payload, type PostMessageRequestV2 } from './schema/message';
 import { listNetsResponseV1, type NetV1 } from './schema/net';
 import {
   createSignInLinkResponseV1,
@@ -1477,6 +1478,7 @@ const channelPath = (channel: string) => `/v1/channels/${encodeURIComponent(chan
 // A page of history is the most the server returns for one call, and the
 // size the client asks for. A page that comes back shorter is the last one.
 export const historyLimit = 100;
+const maxHistoryPages = 100;
 
 // loadMessages reads one page of a channel's history: the newest page, or with
 // `before` the page just below that id. The server answers newest first
@@ -1488,6 +1490,33 @@ export async function loadMessages(channel: string, before?: number): Promise<Ap
   const result = await authed(path, listMessagesResponseV2);
   if (!result.ok) return result;
   return { ok: true, value: [...result.value.messages].reverse() };
+}
+
+export type AscendingMessagesResult =
+  | { readonly ok: true; readonly complete: boolean; readonly value: MessageV2[] }
+  | { readonly ok: false; readonly failure: ApiFailure; readonly code?: string };
+
+// loadMessagesAscending follows the server's after cursor from after. It is
+// the reconciliation read after an uncertain post: match the frozen body,
+// audience and attachment ids before deciding whether a retry is safe. An
+// incomplete result is partial evidence only: absence from value is not proof
+// that a retry is safe. The walk is complete only at a cursor-less final page.
+export async function loadMessagesAscending(channel: string, after = 0): Promise<AscendingMessagesResult> {
+  const all: MessageV2[] = [];
+  let from = after;
+  for (let page = 0; page < maxHistoryPages; page++) {
+    const path = `/v2/channels/${encodeURIComponent(channel)}/messages?order=asc&limit=${String(historyLimit)}&after=${String(from)}`;
+    const result = await authed(path, listMessagesResponseV2);
+    if (!result.ok) return result;
+    all.push(...result.value.messages);
+    const next = result.value.next_after;
+    if (next === undefined) return { ok: true, complete: true, value: all };
+    if (!Number.isSafeInteger(next) || next <= from || result.value.messages.length === 0) {
+      return { ok: true, complete: false, value: all };
+    }
+    from = next;
+  }
+  return { ok: true, complete: false, value: all };
 }
 
 export async function listMembers(channel: string): Promise<ApiResult<ChannelMemberV1[]>> {
@@ -1524,28 +1553,35 @@ export type PostResult =
   // one.
   | { readonly ok: false; readonly outcome: 'refused'; readonly reason: string; readonly code?: string };
 
-// postRefusal is the line and the code of the error document a refusal
-// carries, the line on one line, or a fallback.
-async function postRefusal(res: Response): Promise<{ readonly reason: string; readonly code?: string }> {
+// requestRefusal is the line and code of an error document, or a fallback
+// specific to the request when there is no usable document.
+async function requestRefusal(res: Response, fallback: string): Promise<{ readonly reason: string; readonly code?: string }> {
   try {
     const body: unknown = await res.json();
     if (errorV0(body).length === 0) {
       const doc = body as ErrorV0;
       const line = doc.message.replace(/\s+/g, ' ').trim();
-      const reason = line === '' ? 'The server refused the message' : line.length > 300 ? `${line.slice(0, 299)}…` : line;
+      const reason = line === '' ? fallback : line.length > 300 ? `${line.slice(0, 299)}…` : line;
       return { reason, code: doc.code };
     }
   } catch {
     // No document, or not one.
   }
-  return { reason: 'The server refused the message' };
+  return { reason: fallback };
 }
 
+const postRefusal = (res: Response) => requestRefusal(res, 'The server refused the message');
+
 // postMessage sends one message, to the whole channel or, with an audience, to
-// a net or a list of principals. It is never repeated here: sending again is
-// the caller's, on a click.
-export async function postMessage(channel: string, body: string, audience?: Audience): Promise<PostResult> {
-  const request: PostMessageRequestV2 = audience === undefined ? { body } : { body, audience };
+// a net or a list of principals, with a payload (an attachment's file ids, say)
+// when it carries one. It is never repeated here: sending again is the
+// caller's, on a click.
+export async function postMessage(channel: string, body: string, audience?: Audience, payload?: Payload): Promise<PostResult> {
+  const request: PostMessageRequestV2 = {
+    body,
+    ...(audience === undefined ? {} : { audience }),
+    ...(payload === undefined ? {} : { payload }),
+  };
   const reply = await authedPost(`/v2/channels/${encodeURIComponent(channel)}/messages`, request);
   if (reply.kind === 'none') return { ok: false, outcome: 'unconfirmed' };
   if (reply.kind === 'unauthorized') return { ok: false, outcome: 'unauthorized' };
@@ -1560,6 +1596,124 @@ export async function postMessage(channel: string, body: string, audience?: Audi
     // Fall through: the body was cut off.
   }
   return { ok: false, outcome: 'unconfirmed' };
+}
+
+// File attachments (issue #762): the browser face of the routes of issue #23.
+
+// fileAttachmentPayload builds the registered payload from generated types.
+// The server enforces ownership, channel, count and single-use attachment.
+export function fileAttachmentPayload(fileIds: readonly number[]): Payload {
+  const data: FileAttachmentV1 = { file_ids: [...fileIds] };
+  return { schema: fileAttachmentPayloadSchema, data };
+}
+
+// What an upload came to. cancelled is the person's own Cancel; refused is the
+// server's no, with its code (uploads_disabled, file_too_large, …) and its own
+// line; network is no answer at all, which for an upload is safe to try again:
+// the bytes are content-addressed and no message attached them. A retry makes
+// another row. Completed rows and bytes have no automatic retention cleanup,
+// whether or not the client learns their ids.
+export type UploadResult =
+  | { readonly ok: true; readonly file: FileV1 }
+  | { readonly ok: false; readonly outcome: 'cancelled' | 'unauthorized' | 'network' }
+  | { readonly ok: false; readonly outcome: 'refused'; readonly reason: string; readonly code?: string };
+
+// uploadFile stores one file in a channel (POST /v2/channels/{channel}/files):
+// the bytes are the request body itself (not JSON, not multipart), and the
+// declared media type goes as the Content-Type, which the server reduces to
+// type/subtype, records, and never serves back. Progress is an honest
+// indeterminate state, with Cancel through signal: fetch cannot stream a
+// request body portably (Chrome-only, and a streamed body would defeat the
+// server's early 413, which answers before reading), so a byte counter would
+// be a lie. A 401 signs out, as everywhere.
+export async function uploadFile(channel: string, name: string, mediaType: string, bytes: Blob, signal: AbortSignal): Promise<UploadResult> {
+  const held = current();
+  if (held === null) return { ok: false, outcome: 'unauthorized' };
+  const path = `/v2/channels/${encodeURIComponent(channel)}/files?filename=${encodeURIComponent(name)}`;
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${held.token}`,
+        Accept: 'application/json',
+        ...(mediaType === '' ? {} : { 'Content-Type': mediaType }),
+      },
+      body: bytes,
+      cache: 'no-store',
+      credentials: 'omit',
+      signal,
+    });
+  } catch {
+    if (signal.aborted) return { ok: false, outcome: 'cancelled' };
+    noteNoAnswer();
+    return { ok: false, outcome: 'network' };
+  }
+  if (!res.ok) await noteRefusal(res);
+  if (res.status === 401) {
+    forget(held);
+    return { ok: false, outcome: 'unauthorized' };
+  }
+  if (!res.ok) return { ok: false, outcome: 'refused', ...(await requestRefusal(res, 'The server refused the upload')) };
+  try {
+    const parsed: unknown = await res.json();
+    if (fileV1(parsed).length === 0) return { ok: true, file: parsed as FileV1 };
+  } catch {
+    // Fall through: the body was cut off.
+  }
+  // The created row and bytes persist even when their id is lost here.
+  return { ok: false, outcome: 'refused', reason: 'The server’s answer was not readable' };
+}
+
+// What reading a file gave. unavailable is the server's one 404 (file_not_found),
+// which covers "no such file", "not your channel" and "not a message you may
+// see" alike: it is quiet, and never a sign-out.
+export type FileResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly failure: 'unavailable' | ApiFailure };
+
+// getFileMeta reads a file's metadata (GET /v2/files/{id}/meta).
+export async function getFileMeta(id: number): Promise<FileResult<FileV1>> {
+  const result = await authed(`/v2/files/${String(id)}/meta`, fileV1);
+  if (!result.ok && result.failure === 'invalid' && result.code === 'file_not_found') return { ok: false, failure: 'unavailable' };
+  return result;
+}
+
+// fetchFileBytes reads a file's bytes (GET /v2/files/{id}). The download is
+// always application/octet-stream with nosniff: the caller that renders them
+// must validate the content itself, and never trust the stored media type.
+export async function fetchFileBytes(id: number): Promise<FileResult<Blob>> {
+  const held = current();
+  if (held === null) return { ok: false, failure: 'unauthorized' };
+  let res: Response;
+  try {
+    res = await fetch(`/v2/files/${String(id)}`, {
+      headers: { Authorization: `Bearer ${held.token}` },
+      cache: 'no-store',
+      credentials: 'omit',
+    });
+  } catch {
+    noteNoAnswer();
+    return { ok: false, failure: 'network' };
+  }
+  if (!res.ok) await noteRefusal(res);
+  if (res.status === 401) {
+    forget(held);
+    return { ok: false, failure: 'unauthorized' };
+  }
+  if (res.status === 404) {
+    await discard(res);
+    return { ok: false, failure: 'unavailable' };
+  }
+  if (!res.ok) {
+    await discard(res);
+    return { ok: false, failure: 'invalid' };
+  }
+  try {
+    return { ok: true, value: await res.blob() };
+  } catch {
+    return { ok: false, failure: 'network' };
+  }
 }
 
 // Read state (UX-02). Both calls are for people: an agent credential, or

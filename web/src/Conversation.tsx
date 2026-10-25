@@ -2,7 +2,9 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 're
 import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar } from './Icons';
+import { ImageAttachment } from './ImageAttachment';
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
+import { fileAttachmentPayloadSchema, fileAttachmentV1, type FileAttachmentV1 } from './schema/file';
 import type { Audience, MessageV2 } from './schema/message';
 import type { Target, TargetAction } from './state/drafts';
 import type { ChannelChat, PendingSend } from './state/messages';
@@ -100,23 +102,34 @@ export function authorOf(message: MessageV2, people: ReadonlyMap<number, Person>
   return message.guest_author === undefined ? nameOf(people, message.author_id) : guestName(message.guest_author);
 }
 
+function attachmentsOf(message: MessageV2): FileAttachmentV1 | null {
+  const payload = message.payload;
+  if (payload?.schema !== fileAttachmentPayloadSchema || fileAttachmentV1(payload.data).length > 0) return null;
+  return payload.data as FileAttachmentV1;
+}
+
 function Message({
   message,
   people,
   nets,
   viewer,
+  channel,
   sent,
   cont,
+  onUnauthorized,
 }: {
   readonly message: MessageV2;
   readonly people: ReadonlyMap<number, Person>;
   readonly nets: ReadonlyMap<number, string>;
   readonly viewer: number;
+  readonly channel: string;
   readonly sent: boolean;
   // Drawn under the author's message before it, without the header again.
   readonly cont: boolean;
+  readonly onUnauthorized?: () => void;
 }) {
   const approval = approvalOf(message);
+  const attachments = attachmentsOf(message);
   return (
     <li className={cont ? 'message cont' : 'message'} data-message-id={message.id} tabIndex={-1}>
       <Line
@@ -128,6 +141,13 @@ function Message({
         tag={sent ? 'Sent' : null}
       >
         {approval === null ? message.body : <ApprovalCard approval={approval} people={people} />}
+        {attachments === null ? null : (
+          <span className="attachments">
+            {attachments.file_ids.map((fileId) => (
+              <ImageAttachment key={fileId} fileId={fileId} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} />
+            ))}
+          </span>
+        )}
       </Line>
     </li>
   );
@@ -234,6 +254,7 @@ export function Conversation({
   onLoadOlder,
   onReload,
   onBottom,
+  onUnauthorized,
 }: {
   readonly channel: string;
   readonly chat: ChannelChat;
@@ -253,6 +274,7 @@ export function Conversation({
   readonly onReload: () => void;
   // Told whether the reader is at the newest message, whenever that changes.
   readonly onBottom: (atBottom: boolean) => void;
+  readonly onUnauthorized?: () => void;
 }) {
   const log = useRef<HTMLDivElement>(null);
   // Whether the reader is at the bottom, so new messages follow them.
@@ -386,8 +408,10 @@ export function Conversation({
               people={people}
               nets={nets}
               viewer={viewer}
+              channel={channel}
               sent={chat.sentIds.has(message.id)}
               cont={continues(shown[i - 1], message)}
+              onUnauthorized={onUnauthorized}
             />
           ))}
           {chat.pending.map((send) => (

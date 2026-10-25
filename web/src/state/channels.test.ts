@@ -95,7 +95,7 @@ describe('what is kept by name moves with a rename', () => {
 
   it('chat: history and pending sends go under the new name, and the old name holds nothing', () => {
     let chat = chatReducer(initialChat, { type: 'historyLoaded', channel: 'ops', messages: [message(1), message(2)], more: false });
-    chat = chatReducer(chat, { type: 'sending', channel: 'ops', body: 'hello', at: 1 });
+    chat = chatReducer(chat, { type: 'sending', channelId: 2, authorId: 3, channel: 'ops', body: 'hello', at: 1 });
     chat = chatReducer(chat, { type: 'historyLoaded', channel: 'general', messages: [message(5)], more: false });
     const renamed = chatReducer(chat, { type: 'renamed', from: 'ops', to: 'ops-room' });
     expect(chatFor(renamed, 'ops-room')).toBe(chatFor(chat, 'ops'));
