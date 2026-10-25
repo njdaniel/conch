@@ -181,6 +181,9 @@ func walkCases(t *testing.T) []walkCase {
 		}},
 		{key: "admin principal disable|enable", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "principal", "disable", "--server", u, "9"} }},
 		{key: "admin principal rename", args: func(u, _ string) []string { return []string{"admin", "principal", "rename", "--server", u, "9", "bob"} }},
+		{key: "admin principal role", args: func(u, _ string) []string {
+			return []string{"admin", "principal", "role", "--server", u, "9", "operator"}
+		}},
 		{key: "admin principal list", args: func(u, _ string) []string { return []string{"admin", "principal", "list", "--server", u} }},
 		{key: "admin principal hide", args: func(u, _ string) []string { return []string{"admin", "principal", "hide", "--server", u, "9"} }},
 		{key: "admin principal hide", args: func(u, _ string) []string {
@@ -191,7 +194,16 @@ func walkCases(t *testing.T) []walkCase {
 		}},
 		{key: "admin credential list", args: func(u, _ string) []string { return []string{"admin", "credential", "list", "--server", u, "9"} }},
 		{key: "admin credential revoke", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "credential", "revoke", "--server", u, "9"} }},
-		{key: "admin member add|remove", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "member", "add", "--server", u, "general", "9"} }},
+		{key: "admin member add", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "member", "add", "--server", u, "general", "9"} }},
+		{key: "admin member add", quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "member", "add", "--server", u, "general", "--name", "bob"}
+		}},
+		{key: "admin member manage|decide", quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "member", "manage", "--server", u, "general", "9"}
+		}},
+		{key: "admin member remove", quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "member", "remove", "--server", u, "general", "9"}
+		}},
 		{key: "admin manifest put", quietWhenOK: true, stdin: testManifest, args: func(u, _ string) []string { return []string{"admin", "manifest", "put", "--server", u, "9"} }},
 		{key: "admin manifest get", args: func(u, _ string) []string { return []string{"admin", "manifest", "get", "--server", u, "9"} }},
 		{key: "admin invite create", args: func(u, _ string) []string {
@@ -376,14 +388,20 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.ListPrincipalsResponseV1{Principals: []schema.PrincipalAdminV1{{
 				ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), CreatedAt: ts, InviteID: &invite,
 			}}})
+		case "PUT /v1/principals/9/role":
+			write(w, http.StatusOK, schema.RoleChangeResponseV1{Principal: schema.PrincipalAdminV1{
+				ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), Owner: true, CreatedAt: ts,
+			}, Manages: []int64{1}, InvitesClosed: 1, CredentialsRevoked: 2, HooksRevoked: 3, LiveCredentials: 4, HooksBound: 5})
 		case "POST /v1/principals/9/hide":
 			write(w, http.StatusOK, schema.HidePrincipalResponseV1{Principal: schema.PrincipalAdminV1{
 				ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), CreatedAt: ts, HiddenAt: &ts, DisabledAt: &ts,
 			}})
 		case "POST /v1/principals/hide":
 			write(w, http.StatusOK, schema.HidePrincipalsResponseV1{DryRun: true, Count: 1, Principals: []schema.HiddenPrincipalV1{{ID: 9, Name: hostile}}, Remaining: 2})
-		case "POST /v1/principals/9/disable", "DELETE /v1/credentials/9", "PUT /v1/channels/general/members/9":
+		case "POST /v1/principals/9/disable", "DELETE /v1/credentials/9", "PUT /v1/channels/general/members/9", "DELETE /v1/channels/general/members/9":
 			w.WriteHeader(http.StatusNoContent)
+		case "POST /v1/channels/general/members":
+			write(w, http.StatusCreated, schema.ChannelMemberV1{PrincipalID: 9, Name: hostile, Kind: schema.PrincipalKind(hostile), CreatedAt: ts})
 		case "POST /v1/principals/9/credentials":
 			write(w, http.StatusCreated, schema.CreateCredentialResponseV1{
 				Credential: schema.CredentialV1{ID: 5, PrincipalID: 9, Label: hostile, CreatedAt: ts},
