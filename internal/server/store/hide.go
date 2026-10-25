@@ -54,6 +54,9 @@ type HideOptions struct {
 	// RefuseOperator makes an operator target ErrHideOperator. A bulk hide
 	// sets it; an operator hiding one other operator by id does not.
 	RefuseOperator bool
+	// ForbidOwner makes an owner target ErrOwnerProtected, rechecked in the
+	// hide's transaction.
+	ForbidOwner bool
 }
 
 // HideResult is what a hide did.
@@ -98,6 +101,9 @@ func (s *Store) HidePrincipal(ctx context.Context, actor string, id int64, opts 
 		if err != nil {
 			return err
 		}
+		if err := ownerProtectedTx(ctx, tx, id, opts.ForbidOwner); err != nil {
+			return err
+		}
 		// A guest's name is its handle and is never replaced (issue #705,
 		// review F10): End visit is the lever, and its posts keep their
 		// attribution whatever happens to it.
@@ -112,7 +118,7 @@ func (s *Store) HidePrincipal(ctx context.Context, actor string, id int64, opts 
 			return ErrHideOperator
 		}
 		now := credentialNow().Truncate(time.Millisecond)
-		if _, err := disablePrincipalTx(ctx, tx, actor, id, now, &runs); err != nil {
+		if _, err := disablePrincipalTx(ctx, tx, actor, id, now, &runs, opts.ForbidOwner); err != nil {
 			return err
 		}
 		if err := removeAllMembershipsTx(ctx, tx, actor, id, now); err != nil {

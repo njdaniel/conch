@@ -294,13 +294,16 @@ type RenameResult struct {
 // nothing and is never refused by a limit.
 //
 // An unknown principal is ErrPrincipalNotFound.
-func (s *Store) RenamePrincipal(ctx context.Context, actor string, id int64, name string, lim RenameLimits, now time.Time) (RenameResult, error) {
+func (s *Store) RenamePrincipal(ctx context.Context, actor string, id int64, name string, lim RenameLimits, now time.Time, forbidOwner ...bool) (RenameResult, error) {
 	now = now.Truncate(time.Millisecond)
 	var out RenameResult
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		out = RenameResult{}
 		p, err := principalByIDTx(ctx, tx, id)
 		if err != nil {
+			return err
+		}
+		if err := ownerProtectedTx(ctx, tx, id, len(forbidOwner) > 0 && forbidOwner[0]); err != nil {
 			return err
 		}
 		out.From = p.Name

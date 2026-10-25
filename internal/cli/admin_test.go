@@ -299,6 +299,7 @@ func TestAdminJSON(t *testing.T) {
 
 // TestAdminMemberRefused: the CLI makes no authorization decision, so every
 // operator command run by a member is refused by the server, with its code.
+// Membership administration hides channels from non-members (ADR-010).
 func TestAdminMemberRefused(t *testing.T) {
 	e := newAdminEnv(t)
 	if _, _, err := e.admin(t, e.operatorToken, "", "channel", "create", "ops"); err != nil {
@@ -308,22 +309,23 @@ func TestAdminMemberRefused(t *testing.T) {
 		name  string
 		args  []string
 		stdin string
+		code  string
 	}{
-		{"channel create", []string{"channel", "create", "x"}, ""},
-		{"principal create", []string{"principal", "create", "--kind", "human", "x"}, ""},
-		{"principal disable", []string{"principal", "disable", "2"}, ""},
-		{"principal enable", []string{"principal", "enable", "2"}, ""},
-		{"principal rename", []string{"principal", "rename", "1", "x"}, ""},
-		{"credential issue", []string{"credential", "issue", "2", "--label", "x"}, ""},
-		{"credential list", []string{"credential", "list", "2"}, ""},
-		{"credential revoke", []string{"credential", "revoke", "1"}, ""},
-		{"member add", []string{"member", "add", "ops", "2"}, ""},
-		{"member remove", []string{"member", "remove", "ops", "2"}, ""},
-		{"manifest put", []string{"manifest", "put", "2"}, testManifest},
-		{"manifest get", []string{"manifest", "get", "1"}, ""},
-		{"principal list", []string{"principal", "list"}, ""},
-		{"principal hide", []string{"principal", "hide", "2"}, ""},
-		{"principal hide by prefix", []string{"principal", "hide", "--prefix", "mal", "--yes"}, ""},
+		{"channel create", []string{"channel", "create", "x"}, "", "forbidden"},
+		{"principal create", []string{"principal", "create", "--kind", "human", "x"}, "", "forbidden"},
+		{"principal disable", []string{"principal", "disable", "2"}, "", "forbidden"},
+		{"principal enable", []string{"principal", "enable", "2"}, "", "forbidden"},
+		{"principal rename", []string{"principal", "rename", "1", "x"}, "", "forbidden"},
+		{"credential issue", []string{"credential", "issue", "2", "--label", "x"}, "", "forbidden"},
+		{"credential list", []string{"credential", "list", "2"}, "", "forbidden"},
+		{"credential revoke", []string{"credential", "revoke", "1"}, "", "forbidden"},
+		{"member add", []string{"member", "add", "ops", "2"}, "", "channel_not_found"},
+		{"member remove", []string{"member", "remove", "ops", "2"}, "", "channel_not_found"},
+		{"manifest put", []string{"manifest", "put", "2"}, testManifest, "forbidden"},
+		{"manifest get", []string{"manifest", "get", "1"}, "", "forbidden"},
+		{"principal list", []string{"principal", "list"}, "", "forbidden"},
+		{"principal hide", []string{"principal", "hide", "2"}, "", "forbidden"},
+		{"principal hide by prefix", []string{"principal", "hide", "--prefix", "mal", "--yes"}, "", "forbidden"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -331,8 +333,8 @@ func TestAdminMemberRefused(t *testing.T) {
 			if err == nil {
 				t.Fatalf("a member ran %v without error", tt.args)
 			}
-			if !strings.Contains(err.Error(), "forbidden") {
-				t.Errorf("error = %q, want the server's forbidden code", err)
+			if !strings.Contains(err.Error(), tt.code) {
+				t.Errorf("error = %q, want the server's %s code", err, tt.code)
 			}
 			if strings.Contains(ErrorLine(err), "\n") {
 				t.Errorf("error is not one line: %q", err)

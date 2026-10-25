@@ -40,6 +40,9 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	if s.ownerProtected(w, r, principalID) {
+		return
+	}
 	var req schema.CreateCredentialRequestV1
 	if err := decodeJSONBody(w, r, &req); err != nil {
 		var tooLarge *http.MaxBytesError
@@ -59,20 +62,25 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 		token string
 		err   error
 	)
+	caller, authed := callerFrom(ctx)
+	forbidOwner := authed && !isOwner(caller)
 	if req.RenewLifetimeSeconds != nil {
 		// A renewable credential (issue #439). Validate has refused one that
 		// also names expires_at.
 		lifetime := time.Duration(*req.RenewLifetimeSeconds) * time.Second
-		cred, token, err = s.store.CreateRenewableCredential(ctx, auditActor(ctx), principalID, req.Label, lifetime)
+		cred, token, err = s.store.CreateRenewableCredential(ctx, auditActor(ctx), principalID, req.Label, lifetime, forbidOwner)
 	} else {
 		var expiresAt *time.Time
 		if req.ExpiresAt != nil {
 			t := req.ExpiresAt.Time()
 			expiresAt = &t
 		}
-		cred, token, err = s.store.CreateCredential(ctx, auditActor(ctx), principalID, req.Label, expiresAt)
+		cred, token, err = s.store.CreateCredential(ctx, auditActor(ctx), principalID, req.Label, expiresAt, forbidOwner)
 	}
 	switch {
+	case errors.Is(err, store.ErrOwnerProtected):
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
+		return
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
 		return
@@ -99,6 +107,9 @@ func (s *Server) handleListCredentials(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if s.ownerProtected(w, r, principalID) {
+		return
+	}
 	creds, err := s.store.ListCredentials(ctx, principalID)
 	switch {
 	case errors.Is(err, store.ErrPrincipalNotFound):
@@ -118,7 +129,8 @@ func (s *Server) handleRotateCredential(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	cred, token, err := s.store.RotateCredential(ctx, auditActor(ctx), id)
+	caller, authed := callerFrom(ctx)
+	cred, token, err := s.store.RotateCredential(ctx, auditActor(ctx), id, authed && !isOwner(caller))
 	switch {
 	case errors.Is(err, store.ErrCredentialNotFound):
 		writeError(w, http.StatusNotFound, "credential_not_found", "credential not found")
@@ -152,7 +164,8 @@ func (s *Server) handleRevokeCredential(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	err := s.store.RevokeCredential(ctx, auditActor(ctx), id)
+	caller, authed := callerFrom(ctx)
+	err := s.store.RevokeCredential(ctx, auditActor(ctx), id, authed && !isOwner(caller))
 	switch {
 	case errors.Is(err, store.ErrCredentialNotFound):
 		writeError(w, http.StatusNotFound, "credential_not_found", "credential not found")

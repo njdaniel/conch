@@ -79,6 +79,26 @@ type Principal struct {
 // docs/design/delegated-administration.md §1).
 func (p Principal) IsOwner() bool { return p.Role == RoleOperator && p.Owner }
 
+// ownerProtectedTx rechecks the target inside a write transaction. A missing
+// principal is left to the caller's usual not-found or idempotent path.
+func ownerProtectedTx(ctx context.Context, tx execer, principalID int64, forbidOwner bool) error {
+	if !forbidOwner {
+		return nil
+	}
+	var role string
+	var owner bool
+	switch err := tx.QueryRowContext(ctx, "SELECT role, owner FROM principals WHERE id = ?", principalID).Scan(&role, &owner); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("store: recheck owner %d: %w", principalID, err)
+	}
+	if Role(role) == RoleOperator && owner {
+		return ErrOwnerProtected
+	}
+	return nil
+}
+
 // IsGuest reports whether p is a guest now: its visit is active. A converted
 // guest is a member; an ended one can no longer authenticate.
 func (p Principal) IsGuest() bool { return p.GuestState == schema.GuestStateActive }

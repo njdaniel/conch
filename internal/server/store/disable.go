@@ -147,13 +147,13 @@ func principalState(ctx context.Context, tx execer, principalID int64) (role Rol
 // nothing, if the target is the only enabled operator. The guard runs inside
 // the same BEGIN IMMEDIATE transaction as the update, so two concurrent
 // disables of the last two operators serialize and exactly one succeeds.
-func (s *Store) DisablePrincipal(ctx context.Context, actor string, principalID int64) (changed bool, err error) {
+func (s *Store) DisablePrincipal(ctx context.Context, actor string, principalID int64, forbidOwner ...bool) (changed bool, err error) {
 	var runs []EndedRun
 	var guests []EndedGuest
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		runs, guests = nil, nil
 		now := credentialNow().Truncate(time.Millisecond)
-		if changed, err = disablePrincipalTx(ctx, tx, actor, principalID, now, &runs); err != nil {
+		if changed, err = disablePrincipalTx(ctx, tx, actor, principalID, now, &runs, len(forbidOwner) > 0 && forbidOwner[0]); err != nil {
 			return err
 		}
 		// Disabling a guest ends its visit for good (issue #705): enabling
@@ -172,9 +172,12 @@ func (s *Store) DisablePrincipal(ctx context.Context, actor string, principalID 
 // transaction: hiding a principal (issue #445) disables it this way first, in
 // its own transaction. The runs its ended sessions failed are added to runs,
 // for the caller to announce after the commit.
-func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalID int64, now time.Time, runs *[]EndedRun) (bool, error) {
+func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalID int64, now time.Time, runs *[]EndedRun, forbidOwner bool) (bool, error) {
 	role, owner, disabled, err := principalState(ctx, tx, principalID)
 	if err != nil {
+		return false, err
+	}
+	if err := ownerProtectedTx(ctx, tx, principalID, forbidOwner); err != nil {
 		return false, err
 	}
 	if disabled {
@@ -239,10 +242,13 @@ func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalI
 // its memberships are not restored. Idempotent: enabling an enabled principal
 // writes nothing and reports changed == false. It returns
 // ErrPrincipalNotFound for an unknown id.
-func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID int64) (changed bool, err error) {
+func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID int64, forbidOwner ...bool) (changed bool, err error) {
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		p, err := principalByIDTx(ctx, tx, principalID)
 		if err != nil {
+			return err
+		}
+		if err := ownerProtectedTx(ctx, tx, principalID, len(forbidOwner) > 0 && forbidOwner[0]); err != nil {
 			return err
 		}
 		if p.DisabledAt == nil {
@@ -286,7 +292,7 @@ func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID i
 // nothing, when the target is an enabled operator and no other enabled
 // operator holds a live credential, and no operator, the target included,
 // holds a password and a confirmed TOTP.
-func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principalID int64) (int, error) {
+func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principalID int64, forbidOwner ...bool) (int, error) {
 	var n int
 	var runs []EndedRun
 	var guests []EndedGuest
@@ -294,6 +300,9 @@ func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principa
 		runs, guests = nil, nil
 		role, owner, disabled, err := principalState(ctx, tx, principalID)
 		if err != nil {
+			return err
+		}
+		if err := ownerProtectedTx(ctx, tx, principalID, len(forbidOwner) > 0 && forbidOwner[0]); err != nil {
 			return err
 		}
 		now := credentialNow().Truncate(time.Millisecond)

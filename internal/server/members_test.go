@@ -150,6 +150,14 @@ func TestChannelContentLeak(t *testing.T) {
 		{"v2 websocket", "GET", "/v2/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
 		// Listing members is allowed to members and to operators only.
 		{"member list", "GET", "/v1/channels/%s/members", "", false, [4]int{ok, notFound, notFound, ok}},
+		// The membership writes (issue #790) are an operator's or a manager's:
+		// an agent is refused before any lookup (the same 403 for an unknown
+		// channel), a member who does not manage gets 403, and a non-member
+		// the unknown channel's 404. The operator's malformed request is a 400,
+		// so nothing is written.
+		{"member put", "PUT", "/v1/channels/%s/members/9999", `{"bogus":true}`, false, [4]int{http.StatusForbidden, notFound, http.StatusForbidden, http.StatusBadRequest}},
+		{"member delete", "DELETE", "/v1/channels/%s/members/0", "", false, [4]int{http.StatusForbidden, notFound, http.StatusForbidden, http.StatusBadRequest}},
+		{"member add by name", "POST", "/v1/channels/%s/members", `{}`, false, [4]int{http.StatusForbidden, notFound, http.StatusForbidden, http.StatusBadRequest}},
 		// Listing nets: members see their own nets, operators all of them.
 		{"net list", "GET", "/v1/channels/%s/nets", "", false, [4]int{ok, notFound, notFound, ok}},
 		// Voice (issue #126): this fixture does not configure voice, so a member
@@ -177,13 +185,13 @@ func TestChannelContentLeak(t *testing.T) {
 	// a row above or be listed here with the reason it is not a content path.
 	// A new channel route added without a decision fails this test.
 	notContent := map[string]string{
-		"PUT /v1/channels/{channel}/members/{principal_id}":               "operator-only membership write; covered by the role matrix",
-		"DELETE /v1/channels/{channel}/members/{principal_id}":            "operator-only membership write; covered by the role matrix",
 		"POST /v2/channels/{channel}/files":                               "humans-only upload: an agent is refused before the channel is looked up; covered by TestFileUploadRefusals and the file visibility matrix",
 		"POST /v1/channels/{channel}/nets":                                "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"PUT /v1/channels/{channel}/read-state":                           "humans-only: an agent is refused 403 before the channel is looked up, whichever channel it names, and a human non-member gets the unknown-channel 404; covered by TestReadStatePut",
 		"POST /v1/ws-tickets":                                             "names no channel (it only matches the \"/ws\" test above by its spelling); a ticket opens the same v2 socket, which is checked per channel at the upgrade by the row above and by TestWSTicketOpensSocket",
 		"DELETE /v1/channels/{channel}/nets/{net}":                        "operator-only net write; covered by the role matrix and TestNetEndpoints",
+		"PUT /v1/channels/{channel}/members/{principal_id}":               "a membership write (operator or manager, issue #790); covered by the \"member put\" row above, whose path names a principal id",
+		"DELETE /v1/channels/{channel}/members/{principal_id}":            "a membership write (operator or manager, issue #790); covered by the \"member delete\" row above, whose path names a principal id",
 		"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"GET /v1/voice/occupancy/ws":                                      "names no channel (it matches the \"/ws\" test above by its spelling): it carries counts for the caller's own channels only, a non-member's channel absent; covered by TestVoiceOccupancyEndpoint, TestVoiceOccupancySocketRemovalDropsTheRow and e2e/isolation",
@@ -311,7 +319,9 @@ func TestMembershipEndpoints(t *testing.T) {
 	}{
 		{"unauthenticated put", "PUT", carolPath, "", 401, "unauthenticated", 0, 0},
 		{"member put is forbidden", "PUT", carolPath, f.aliceTok, 403, "forbidden", 0, 0},
-		{"non-member put is forbidden", "PUT", carolPath, f.carolTok, 403, "forbidden", 0, 0},
+		// Since issue #790 the route is a manager's too, so a non-member is
+		// told only what an unknown channel would tell them.
+		{"non-member put is not found", "PUT", carolPath, f.carolTok, 404, "channel_not_found", 0, 0},
 		{"member delete is forbidden", "DELETE", carolPath, f.aliceTok, 403, "forbidden", 0, 0},
 		{"operator put adds", "PUT", carolPath, f.rootTok, 204, "", 1, 0},
 		{"operator put again is idempotent", "PUT", carolPath, f.rootTok, 204, "", 1, 0},
@@ -856,7 +866,8 @@ func TestListChannelMembersNameAndKind(t *testing.T) {
 				for k := range m {
 					switch k {
 					// can_decide is a person's right to decide approvals (#450).
-					case "principal_id", "added_by", "created_at", "name", "kind", "can_decide":
+					// manages and role are shown per viewer (#790).
+					case "principal_id", "added_by", "created_at", "name", "kind", "can_decide", "manages", "role":
 					default:
 						t.Errorf("unexpected key %q in member entry", k)
 					}

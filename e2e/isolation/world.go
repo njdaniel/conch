@@ -228,6 +228,12 @@ func (w *world) buildGroups() error {
 	}
 	w.b.people = append(w.b.people, ola)
 
+	// Bea manages B's first channel, for the manager isolation rows.
+	manages := true
+	if err := w.op.call(http.MethodPut, fmt.Sprintf("/v1/channels/%s/members/%d", w.b.main(), bea.id), schema.PutChannelMemberRequestV1{Manages: &manages}, nil); err != nil {
+		return err
+	}
+
 	// A spare credential for each member the matrix runs as, for the
 	// sign-out row.
 	w.spares = map[int64]api{}

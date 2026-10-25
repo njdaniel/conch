@@ -130,12 +130,19 @@ func (s *Server) handleHidePrincipal(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if caller, authed := callerFrom(ctx); authed && caller.ID == id {
+	caller, authed := callerFrom(ctx)
+	if authed && caller.ID == id {
 		writeError(w, http.StatusBadRequest, "invalid_request", "an operator cannot hide themselves")
 		return
 	}
-	_, err := s.store.HidePrincipal(ctx, auditActor(ctx), id, store.HideOptions{})
+	if s.ownerProtected(w, r, id) {
+		return
+	}
+	_, err := s.store.HidePrincipal(ctx, auditActor(ctx), id, store.HideOptions{ForbidOwner: authed && !isOwner(caller)})
 	switch {
+	case errors.Is(err, store.ErrOwnerProtected):
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
+		return
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
 		return
@@ -207,7 +214,7 @@ func (s *Server) handleHidePrincipals(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, schema.HidePrincipalsResponseV1{DryRun: true, Count: len(found), Principals: found, Remaining: remaining})
 		return
 	}
-	done, hideErr := s.hidePrincipals(ctx, targets)
+	done, hideErr := s.hidePrincipals(ctx, targets, !isOwner(caller))
 
 	// The client may be gone; what was done must still be recorded.
 	ctx = context.WithoutCancel(ctx)
@@ -215,7 +222,11 @@ func (s *Server) handleHidePrincipals(w http.ResponseWriter, r *http.Request) {
 		bulkHideDetail(req, len(done), remaining))
 	if hideErr != nil || auditErr != nil {
 		slog.ErrorContext(ctx, "principals: bulk hide failed", "hidden", len(done), "error", errors.Join(hideErr, auditErr))
-		writeInternalError(w)
+		if errors.Is(hideErr, store.ErrOwnerProtected) && auditErr == nil {
+			s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
+		} else {
+			writeInternalError(w)
+		}
 		return
 	}
 	slog.InfoContext(ctx, "principals: bulk hide", "hidden", len(done), "remaining", remaining)
@@ -230,12 +241,12 @@ func (s *Server) handleHidePrincipals(w http.ResponseWriter, r *http.Request) {
 //
 // It does not stop when the operator's client goes away, as the bulk disable
 // does not: a cleanup cut short would leave the rest in place, unseen.
-func (s *Server) hidePrincipals(ctx context.Context, targets []store.Principal) ([]schema.HiddenPrincipalV1, error) {
+func (s *Server) hidePrincipals(ctx context.Context, targets []store.Principal, forbidOwner bool) ([]schema.HiddenPrincipalV1, error) {
 	ctx = context.WithoutCancel(ctx)
 	actor := auditActor(ctx)
 	done := []schema.HiddenPrincipalV1{}
 	for _, p := range targets {
-		res, err := s.store.HidePrincipal(ctx, actor, p.ID, store.HideOptions{RefuseOperator: true})
+		res, err := s.store.HidePrincipal(ctx, actor, p.ID, store.HideOptions{RefuseOperator: true, ForbidOwner: forbidOwner})
 		switch {
 		case errors.Is(err, store.ErrPrincipalNotFound), errors.Is(err, store.ErrHideOperator), errors.Is(err, store.ErrLastOperator),
 			errors.Is(err, store.ErrGuestNotHideable):

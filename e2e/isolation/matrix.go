@@ -18,12 +18,12 @@ import (
 // against what group A made, and what the answer must be.
 //
 // The matrix runs twice, as two members of B (w.prober): bea, who joined
-// through the operator's invite, may invite, holds voice and is in both of
-// B's channels, so she holds every right a tester can; and ola, whom the
-// operator made by hand, in B's first channel only. The rows an agent's
-// credential reaches differently run a third time as B's agent (agentRows).
-// Each row names one of A's objects (by name or id) or, for a route that
-// only ever answers about the caller, nothing of A at all.
+// through the operator's invite, may invite, holds voice, manages B's first
+// channel and is in both of B's channels, so she holds every right a tester
+// can; and ola, whom the operator made by hand, in B's first channel only.
+// The rows an agent's credential reaches differently run a third time as B's
+// agent (agentRows). Each row names one of A's objects (by name or id) or, for
+// a route that only ever answers about the caller, nothing of A at all.
 //
 // Every answer is checked three ways:
 //
@@ -89,6 +89,8 @@ type row struct {
 	own bool
 	// spare sends the request with B's spare credential (it signs out).
 	spare bool
+	// manager sends the request as B's manager rather than the current prober.
+	manager bool
 	// noGhost says why a row that names A's object has no ghost
 	// comparison: the route never looks the thing up.
 	noGhost string
@@ -212,6 +214,9 @@ func matrixRows() []row {
 		}),
 		operator("PUT /v1/principals/{id}/name", "renames an A member", aMember, func(_ *world, s subject) probe {
 			return put("/v1/principals/"+id(s.id)+"/name", schema.RenamePrincipalRequestV1{Name: "renamed"})
+		}),
+		operator("PUT /v1/principals/{id}/role", "changes an A member's role", aMember, func(_ *world, s subject) probe {
+			return put("/v1/principals/"+id(s.id)+"/role", schema.RoleChangeRequestV1{Role: schema.RoleOperator})
 		}),
 		// Password sign-in (issue #707): B tries an A member's name with a
 		// password of her own. The answer is the one auth_failed, and the
@@ -348,12 +353,20 @@ func matrixRows() []row {
 
 		// Members and nets.
 		byChannel("GET /v1/channels/{channel}/members", "lists A's channel's members", func(_ *world, s subject) probe { return get(ch(s) + "/members") }),
-		operator("PUT /v1/channels/{channel}/members/{principal_id}", "adds herself to A's channel", aChannel, func(w *world, s subject) probe {
+		byChannel("POST /v1/channels/{channel}/members", "adds an A member by name to A's channel", func(w *world, s subject) probe {
+			return post(ch(s)+"/members", schema.AddChannelMemberRequestV1{Name: w.a.people[0].name})
+		}),
+		byChannel("PUT /v1/channels/{channel}/members/{principal_id}", "adds herself to A's channel", func(w *world, s subject) probe {
 			return put(ch(s)+"/members/"+id(w.prober.id), nil)
 		}),
-		operator("DELETE /v1/channels/{channel}/members/{principal_id}", "removes an A member from A's channel", aChannel, func(w *world, s subject) probe {
+		byChannel("DELETE /v1/channels/{channel}/members/{principal_id}", "removes an A member from A's channel", func(w *world, s subject) probe {
 			return del(ch(s) + "/members/" + id(w.a.people[0].id))
 		}),
+		{route: "PUT /v1/channels/{channel}/members/{principal_id}", what: "has B's manager add an A tester by id to B's channel", pick: aMember, manager: true,
+			want: answer{http.StatusNotFound, "principal_not_found"},
+			probe: func(w *world, s subject) probe {
+				return put("/v1/channels/"+bChannel(w)+"/members/"+id(s.id), nil)
+			}},
 		operator("POST /v1/channels/{channel}/nets", "makes a net in A's channel", aChannel, func(_ *world, s subject) probe {
 			return post(ch(s)+"/nets", schema.CreateNetRequestV1{Name: "b-net"})
 		}),
@@ -735,6 +748,9 @@ func (w *world) runMatrix(prober *member, rows []row) (int, error) {
 // runRow runs one row and its ghost.
 func (w *world) runRow(r row) (int, error) {
 	as := w.prober.api
+	if r.manager {
+		as = w.b.people[0].api
+	}
 	if r.spare {
 		spare, ok := w.spares[w.prober.id]
 		if !ok {

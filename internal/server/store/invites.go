@@ -1115,10 +1115,13 @@ func (s *Store) SetInvitesPaused(ctx context.Context, actor string, paused bool)
 // they left open, in the same transaction, each audited as invite_closed with
 // reason=permission_revoked (issue #438): giving the right back does not
 // revive them. It returns ErrPrincipalNotFound for an unknown id.
-func (s *Store) SetMayInvite(ctx context.Context, actor string, principalID int64, may bool) (changed bool, err error) {
+func (s *Store) SetMayInvite(ctx context.Context, actor string, principalID int64, may bool, forbidOwner ...bool) (changed bool, err error) {
 	now := time.Now().Truncate(time.Millisecond)
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		changed = false
+		if err := ownerProtectedTx(ctx, tx, principalID, len(forbidOwner) > 0 && forbidOwner[0]); err != nil {
+			return err
+		}
 		var (
 			kind, role string
 			cur        bool

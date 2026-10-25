@@ -252,7 +252,16 @@ func (s *Server) handleDeleteNetMember(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	_, err := s.store.RemoveNetMember(ctx, auditActor(ctx), channel.ID, name, principalID)
+	if _, err := s.store.NetByName(ctx, channel.ID, name); err != nil {
+		if s.writeNetError(w, r, err) {
+			return
+		}
+	}
+	if s.ownerProtected(w, r, principalID) {
+		return
+	}
+	caller, authed := callerFrom(ctx)
+	_, err := s.store.RemoveNetMember(ctx, auditActor(ctx), channel.ID, name, principalID, authed && !isOwner(caller))
 	if s.writeNetError(w, r, err) {
 		return
 	}
@@ -268,6 +277,9 @@ func (s *Server) writeNetError(w http.ResponseWriter, r *http.Request, err error
 		return false
 	case errors.Is(err, store.ErrNotFound):
 		writeNetNotFound(w)
+	case errors.Is(err, store.ErrOwnerProtected):
+		caller, _ := callerFrom(r.Context())
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
 	case errors.Is(err, store.ErrNotChannelMember):
 		writeError(w, http.StatusBadRequest, "not_a_channel_member", "the principal is not a member of the channel")
 	default:

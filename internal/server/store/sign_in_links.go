@@ -189,7 +189,7 @@ func signInLinkTargetTx(ctx context.Context, tx execer, principalID int64) (Prin
 // enrollment_issued for an enrollment one) is audited in the same
 // transaction, attributed to actor, with the person as its subject. The code
 // is not.
-func (s *Store) CreateSignInLink(ctx context.Context, actor string, creatorID, principalID int64, req schema.CreateSignInLinkRequestV1, now time.Time) (schema.CreateSignInLinkResponseV1, error) {
+func (s *Store) CreateSignInLink(ctx context.Context, actor string, creatorID, principalID int64, req schema.CreateSignInLinkRequestV1, now time.Time, forbidOwner ...bool) (schema.CreateSignInLinkResponseV1, error) {
 	now = now.Truncate(time.Millisecond)
 	if err := req.Validate(now); err != nil {
 		return schema.CreateSignInLinkResponseV1{}, fmt.Errorf("%w: %w", ErrSignInLinkRequestInvalid, err)
@@ -210,6 +210,9 @@ func (s *Store) CreateSignInLink(ctx context.Context, actor string, creatorID, p
 		}
 		if creator.DisabledAt != nil || creator.Kind != PrincipalHuman || creator.Role != RoleOperator {
 			return ErrSignInLinkNotAllowed
+		}
+		if err := ownerProtectedTx(ctx, tx, principalID, len(forbidOwner) > 0 && forbidOwner[0]); err != nil {
+			return err
 		}
 		if _, err := signInLinkTargetTx(ctx, tx, principalID); err != nil {
 			return err
@@ -472,21 +475,30 @@ func (s *Store) RedeemSignInLink(ctx context.Context, codeHash string, now time.
 
 // CloseSignInLink closes one sign-in link so it can no longer be used: how an
 // operator stops a link that leaked without disabling the person it is for.
-// The store does not check who acts; the route is operator-only. Closing a
-// link that is already closed or used changes nothing and writes no audit
-// row (changed is false); an expired one is closed like an open one. An
-// unknown id is ErrNotFound. sign_in_link_closed (reason=operator) is
-// audited in the same transaction.
-func (s *Store) CloseSignInLink(ctx context.Context, actor string, id int64, now time.Time) (changed bool, err error) {
+// Closing a link that is already closed or used changes nothing and writes no
+// audit row (changed is false); an expired one is closed like an open one. An
+// unknown id is ErrNotFound, as is a link whose principal is an owner when
+// forbidOwner is true (issue #790, ADR-010 §4.1). sign_in_link_closed
+// (reason=operator) is audited in the same transaction.
+func (s *Store) CloseSignInLink(ctx context.Context, actor string, id int64, now time.Time, forbidOwner ...bool) (changed bool, err error) {
+	hideOwner := len(forbidOwner) > 0 && forbidOwner[0]
 	now = now.Truncate(time.Millisecond)
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		changed = false
 		var principalID int64
-		switch err := tx.QueryRowContext(ctx, "SELECT principal_id FROM sign_in_links WHERE id = ?", id).Scan(&principalID); {
+		var role string
+		var targetOwner bool
+		switch err := tx.QueryRowContext(ctx,
+			`SELECT l.principal_id, p.role, p.owner
+			 FROM sign_in_links l JOIN principals p ON p.id = l.principal_id WHERE l.id = ?`, id,
+		).Scan(&principalID, &role, &targetOwner); {
 		case errors.Is(err, sql.ErrNoRows):
 			return fmt.Errorf("store: close sign-in link %d: %w", id, ErrNotFound)
 		case err != nil:
 			return fmt.Errorf("store: close sign-in link: find: %w", err)
+		}
+		if hideOwner && Role(role) == RoleOperator && targetOwner {
+			return fmt.Errorf("store: close sign-in link %d: %w", id, ErrNotFound)
 		}
 		// The guard, not the read, decides: a use that won the write lock
 		// first leaves nothing to close.
