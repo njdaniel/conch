@@ -1018,6 +1018,64 @@ label {
   font-size: 1.3rem;
 }
 
+.conv-head > button {
+  margin-left: auto;
+  flex: none;
+}
+
+.search-panel,
+.search-results-view,
+.search-context {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.search-results-view[hidden] {
+  display: none;
+}
+
+.search-form {
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s3) var(--s4);
+}
+
+.search-query {
+  display: flex;
+  gap: var(--s2);
+}
+
+.search-query input {
+  flex: 1;
+  min-width: 0;
+}
+
+.search-results {
+  min-height: 4rem;
+}
+
+.search-open {
+  grid-column: 2;
+  justify-self: start;
+  padding: 0;
+  color: var(--accent);
+  font-size: var(--small);
+  background: transparent;
+  border: 0;
+}
+
+.search-context > button,
+.search-context > h3 {
+  margin: var(--s3) var(--s4) 0;
+}
+
+.search-context > button {
+  align-self: flex-start;
+}
+
 .log-wrap {
   position: relative;
   display: flex;
@@ -2556,7 +2614,7 @@ button.link {
   /* While a share is watched on a phone, the picture, a few lines of the
      conversation and the composer share the column: the channel's name is
      already in the row above, so its heading is only read out. */
-  .centre:has(> .stage:not(:empty)) .conv-head {
+  .centre:has(> .stage:not(:empty)) .conversation-body > .conv-head {
     position: absolute;
     width: 1px;
     height: 1px;

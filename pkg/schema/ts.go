@@ -70,6 +70,7 @@ var TSTypes = []TSType{
 	{Value: PostMessageRequestV2{}, Family: "post-message-request-v2"},
 	{Value: PostMessageResponseV2{}, Family: "post-message-response-v2"},
 	{Value: ListMessagesResponseV2{}, Family: "list-messages-response-v2"},
+	{Value: SearchMessagesResponseV2{}, Family: "search-messages-response-v2"},
 	{Value: WSTicketV1{}, Family: "ws-ticket-v1"},
 
 	// An approval, as a message carries it in its payload.

@@ -1,2 +1,2 @@
 // The wire types of pkg/schema/message_v2.go and payload.go, generated into generated.ts.
-export { audience, listMessagesResponseV2, messageV2, payload, postMessageRequestV2, postMessageResponseV2, type Audience, type ListMessagesResponseV2, type MessageV2, type NetAudience, type Payload, type PostMessageRequestV2, type PostMessageResponseV2, type PrincipalsAudience } from './generated';
+export { audience, listMessagesResponseV2, messageV2, payload, postMessageRequestV2, postMessageResponseV2, searchMessagesResponseV2, type Audience, type ListMessagesResponseV2, type MessageV2, type NetAudience, type Payload, type PostMessageRequestV2, type PostMessageResponseV2, type PrincipalsAudience, type SearchMessagesResponseV2 } from './generated';

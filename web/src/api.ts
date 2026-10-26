@@ -85,7 +85,7 @@ import {
   type RenameChannelRequestV1,
 } from './schema/channel';
 import { fileAttachmentPayloadSchema, fileV1, type FileAttachmentV1, type FileV1 } from './schema/file';
-import { listMessagesResponseV2, postMessageResponseV2, type Audience, type MessageV2, type Payload, type PostMessageRequestV2 } from './schema/message';
+import { listMessagesResponseV2, postMessageResponseV2, searchMessagesResponseV2, type Audience, type MessageV2, type Payload, type PostMessageRequestV2, type SearchMessagesResponseV2 } from './schema/message';
 import { listNetsResponseV1, type NetV1 } from './schema/net';
 import {
   createSignInLinkResponseV1,
@@ -1490,6 +1490,17 @@ export async function loadMessages(channel: string, before?: number): Promise<Ap
   const result = await authed(path, listMessagesResponseV2);
   if (!result.ok) return result;
   return { ok: true, value: [...result.value.messages].reverse() };
+}
+
+export async function loadMessagesAfter(channel: string, after: number): Promise<ApiResult<MessageV2[]>> {
+  const result = await authed(`/v2/channels/${encodeURIComponent(channel)}/messages?order=asc&limit=${String(historyLimit)}&after=${String(after)}`, listMessagesResponseV2);
+  return result.ok ? { ok: true, value: result.value.messages } : result;
+}
+
+export async function searchMessages(channel: string, words: string, before?: number): Promise<ApiResult<SearchMessagesResponseV2>> {
+  const query = new URLSearchParams({ q: words, limit: String(historyLimit) });
+  if (before !== undefined) query.set('before', String(before));
+  return authed(`/v2/channels/${encodeURIComponent(channel)}/messages/search?${query.toString()}`, searchMessagesResponseV2);
 }
 
 export type AscendingMessagesResult =

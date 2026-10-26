@@ -48,6 +48,7 @@ import { useLiveChannel } from './useLiveChannel';
 import { useNotifications } from './useNotifications';
 import { NotificationCenter } from './NotificationCenter';
 import { NotificationSettings } from './NotificationSettings';
+import { SearchPanel } from './SearchPanel';
 import { useReadState } from './useReadState';
 import { MembersPanel } from './agents/MembersPanel';
 import { RunDetail } from './agents/RunDetail';
@@ -369,9 +370,21 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     },
     [loseChannel],
   );
+  const [searchOpen, setSearchOpen] = useState(false);
+  const restoreSearchFocus = useRef(false);
+  useEffect(() => {
+    if (searchOpen) {
+      restoreSearchFocus.current = true;
+      return;
+    }
+    if (!restoreSearchFocus.current) return;
+    restoreSearchFocus.current = false;
+    document.getElementById('channel-search-open')?.focus();
+  }, [searchOpen]);
   // The one way a channel is opened: from the list, or from the voice strip.
   const onOpen = useCallback(
     (name: string) => {
+      setSearchOpen(false);
       dispatchChannels({ type: 'select', name });
     },
     [dispatchChannels],
@@ -485,6 +498,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const closeRun = agents.closeRun;
   const goToMessage = useCallback(
     (id: number) => {
+      setSearchOpen(false);
       if (selected !== null && ordered(chatFor(chatNow.current, selected)).some((m) => m.id === id)) {
         closeRun(`Run answers message #${String(id)}`);
         setScrollTo(id);
@@ -496,13 +510,13 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   );
   const detailOpen = agents.state.detail !== null;
   useEffect(() => {
-    if (scrollTo === null || detailOpen) return;
+    if (scrollTo === null || detailOpen || searchOpen) return;
     setScrollTo(null);
-    const el = document.querySelector<HTMLElement>(`[data-message-id="${String(scrollTo)}"]`);
+    const el = document.querySelector<HTMLElement>(`.conversation-body [data-message-id="${String(scrollTo)}"]`);
     if (el === null) return;
     el.scrollIntoView({ block: 'center' });
     el.focus({ preventScroll: true });
-  }, [scrollTo, detailOpen]);
+  }, [scrollTo, detailOpen, searchOpen]);
 
   const principalId = principal?.id ?? null;
   const principalNow = useRef(principalId);
@@ -1383,7 +1397,23 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             selected === null || channelId === null ? null : (
               <>
                 {agents.state.detail === null ? null : <RunDetail agents={agents} now={now} onGoToMessage={goToMessage} />}
-                <div className="conversation-body" hidden={agents.state.detail !== null}>
+                {!searchOpen ? null : (
+                  <SearchPanel
+                    key={channelId}
+                    channelId={channelId}
+                    channel={selected}
+                    live={live.status}
+                    people={live.people}
+                    nets={live.nets}
+                    viewer={auth.principal.id}
+                    onMissing={onMissing}
+                    onUnauthorized={onUnauthorized}
+                    onClose={() => {
+                      setSearchOpen(false);
+                    }}
+                  />
+                )}
+                <div className="conversation-body" hidden={agents.state.detail !== null || searchOpen}>
               <Conversation
                 key={channelId}
                 channel={selected}
@@ -1411,6 +1441,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 }}
                 onLoadOlder={live.loadOlder}
                 onReload={live.retry}
+                onSearch={() => {
+                  setSearchOpen(true);
+                }}
                 onUnauthorized={onUnauthorized}
                 onBottom={(atBottom) => {
                   setBottom((prev) => (prev.channel === channelId && prev.atBottom === atBottom ? prev : { channel: channelId, atBottom }));

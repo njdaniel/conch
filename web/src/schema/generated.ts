@@ -403,6 +403,17 @@ export const listMessagesResponseV2 = object<ListMessagesResponseV2>({
   next_after: optional(int),
 });
 
+// schema.SearchMessagesResponseV2
+export interface SearchMessagesResponseV2 {
+  messages: MessageV2[];
+  next_before?: number;
+}
+
+export const searchMessagesResponseV2 = object<SearchMessagesResponseV2>({
+  messages: array(messageV2),
+  next_before: optional(int),
+});
+
 // schema.WSTicketV1
 export interface WSTicketV1 {
   ticket: string;
