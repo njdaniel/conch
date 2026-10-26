@@ -444,15 +444,23 @@ func joinedThePlaza(w *world, a api, body []byte) error {
 }
 
 // visibleAfter is how many messages of channel after id a sees in its v2
-// history: what an unread count after a mark at id must be.
+// history, excluding a's own posts: what an unread count after a mark at id must be.
 func visibleAfter(a api, channel string, after int64) (int, error) {
+	var who schema.WhoAmIResponseV1
+	if err := a.call(http.MethodGet, "/v1/whoami", nil, &who); err != nil {
+		return 0, err
+	}
 	n := 0
 	for {
 		var page schema.ListMessagesResponseV2
 		if err := a.call(http.MethodGet, fmt.Sprintf("/v2/channels/%s/messages?after=%d&limit=100", url.PathEscape(channel), after), nil, &page); err != nil {
 			return 0, err
 		}
-		n += len(page.Messages)
+		for _, message := range page.Messages {
+			if message.AuthorID != who.ID {
+				n++
+			}
+		}
 		if page.NextAfter <= after {
 			return n, nil
 		}

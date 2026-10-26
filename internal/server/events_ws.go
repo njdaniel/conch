@@ -23,9 +23,10 @@ import (
 // the documents a client needs to follow a channel's agents live: the roster
 // of its members' sessions on connect and whenever it changes, the member
 // list whenever it changes (issue #515), the channel itself when it is
-// renamed (issue #727; never on connect), and the runs, activity and
-// interventions of runs in the channel that the reader may see. Each frame is
-// one pkg/schema document, told apart by its schema field.
+// renamed (issue #727; never on connect), the runs, activity and interventions
+// of runs in the channel that the reader may see, and the reader's unread state
+// wherever a post or shared read mark changes it. Each frame is one pkg/schema
+// document, told apart by its schema field.
 //
 // This file holds no visibility rule and no SQL. A change commits, and the
 // handler that made it enqueues a reference ("the roster changed", "run 41
@@ -60,6 +61,8 @@ const (
 	// goroutine reading. Owed rosters coalesce: one is sent when the floor
 	// has passed, and it is the whole state then.
 	defaultEventsRosterFloor = 250 * time.Millisecond
+	// eventsReadStateFloor bounds whole read-state rebuilds per human socket.
+	eventsReadStateFloor = 250 * time.Millisecond
 )
 
 type eventKind uint8
@@ -102,9 +105,16 @@ type eventsSub struct {
 	wake    chan struct{}
 	dropped chan struct{}
 
-	roster bool // a roster is owed: one is enough, it is the whole state
-	refs   []eventRef
-	gone   bool
+	roster          bool // a roster is owed: one is enough, it is the whole state
+	readState       bool // read-state changes coalesce into one refresh
+	readStateAll    bool
+	readStateDirty  map[int64]struct{}
+	memberships     map[int64]struct{}
+	membershipDirty bool
+	readStateEpoch  uint64
+	human           bool
+	refs            []eventRef
+	gone            bool
 }
 
 // subscribe registers a subscriber, owed its first roster: that roster goes
@@ -112,7 +122,11 @@ type eventsSub struct {
 // committed meanwhile has been seen and membership and the manifest have been
 // asked again. After closeAll it returns one that is already dropped.
 func (h *eventsHub) subscribe(channelID, principalID, credentialID int64) *eventsSub {
-	sub := &eventsSub{hub: h, channelID: channelID, principalID: principalID, credentialID: credentialID, wake: make(chan struct{}, 1), dropped: make(chan struct{}), roster: true}
+	return h.subscribeKind(channelID, principalID, credentialID, true)
+}
+
+func (h *eventsHub) subscribeKind(channelID, principalID, credentialID int64, human bool) *eventsSub {
+	sub := &eventsSub{hub: h, channelID: channelID, principalID: principalID, credentialID: credentialID, wake: make(chan struct{}, 1), dropped: make(chan struct{}), roster: true, readState: human, readStateAll: human, readStateDirty: map[int64]struct{}{}, memberships: map[int64]struct{}{}, human: human, readStateEpoch: 1}
 	sub.signal()
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -133,15 +147,15 @@ func (sub *eventsSub) cancel() {
 
 // take returns what is waiting and empties it, or live=false when the
 // subscription was dropped.
-func (sub *eventsSub) take() (roster bool, refs []eventRef, live bool) {
+func (sub *eventsSub) take() (roster, readState bool, refs []eventRef, live bool) {
 	sub.hub.mu.Lock()
 	defer sub.hub.mu.Unlock()
 	if sub.gone {
-		return false, nil, false
+		return false, false, nil, false
 	}
-	roster, refs = sub.roster, sub.refs
-	sub.roster, sub.refs = false, nil
-	return roster, refs, true
+	roster, readState, refs = sub.roster, sub.readState, sub.refs
+	sub.roster, sub.readState, sub.refs = false, false, nil
+	return roster, readState, refs, true
 }
 
 func (sub *eventsSub) signal() {
@@ -149,6 +163,50 @@ func (sub *eventsSub) signal() {
 	case sub.wake <- struct{}{}:
 	default: // one signal is already queued
 	}
+}
+
+func (sub *eventsSub) readStateVersion() uint64 {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	return sub.readStateEpoch
+}
+
+// invalidateReadState discards an in-flight build and owes a fresh one. The
+// hub lock is already held by a membership or credential change.
+func (sub *eventsSub) invalidateReadState() {
+	sub.readStateEpoch++
+	sub.readStateAll = true
+	sub.readState = true
+	sub.signal()
+}
+
+func (sub *eventsSub) setMemberships(channels []store.Channel) {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	sub.memberships = make(map[int64]struct{}, len(channels))
+	for _, channel := range channels {
+		sub.memberships[channel.ID] = struct{}{}
+	}
+}
+
+func (sub *eventsSub) hasMembership(channelID int64) bool {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	_, ok := sub.memberships[channelID]
+	return ok
+}
+
+func (sub *eventsSub) readStateTargets() (all bool, ids []int64) {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	all = sub.readStateAll || sub.membershipDirty
+	for id := range sub.readStateDirty {
+		ids = append(ids, id)
+	}
+	sub.readStateAll = false
+	sub.membershipDirty = false
+	sub.readStateDirty = map[int64]struct{}{}
+	return all, ids
 }
 
 // push queues ref, unless the same document is already waiting (a run or an
@@ -200,10 +258,14 @@ func (h *eventsHub) notifyChannelRoster(channelID int64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for sub := range h.subs {
+		if sub.human {
+			sub.membershipDirty = true
+			sub.readState = true
+		}
 		if sub.channelID == channelID {
 			sub.roster = true
-			sub.signal()
 		}
+		sub.signal()
 	}
 }
 
@@ -242,6 +304,35 @@ func (h *eventsHub) notifyChannel(channelID int64, ref eventRef) {
 	}
 }
 
+// notifyReadState owes every other reader the count in a channel with a new
+// message. The subscriber checks membership and scoped visibility when sending.
+func (h *eventsHub) notifyReadState(channelID int64, authorID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		_, member := sub.memberships[channelID]
+		if sub.human && member && sub.principalID != authorID {
+			sub.readStateDirty[channelID] = struct{}{}
+			sub.readState = true
+			sub.signal()
+		}
+	}
+}
+
+// notifyReadMarked owes all of one reader's sockets their shared mark and count.
+func (h *eventsHub) notifyReadMarked(channelID int64, principalID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		_, member := sub.memberships[channelID]
+		if sub.human && member && sub.principalID == principalID {
+			sub.readStateDirty[channelID] = struct{}{}
+			sub.readState = true
+			sub.signal()
+		}
+	}
+}
+
 // dropPrincipal closes principalID's events sockets on channelID. A zero
 // principal matches nothing.
 func (h *eventsHub) dropPrincipal(channelID, principalID int64) {
@@ -251,8 +342,13 @@ func (h *eventsHub) dropPrincipal(channelID, principalID int64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for sub := range h.subs {
-		if sub.principalID == principalID && sub.channelID == channelID {
-			h.dropLocked(sub)
+		if sub.principalID == principalID {
+			delete(sub.memberships, channelID)
+			sub.readStateDirty[channelID] = struct{}{}
+			sub.invalidateReadState()
+			if sub.channelID == channelID {
+				h.dropLocked(sub)
+			}
 		}
 	}
 }
@@ -266,6 +362,7 @@ func (h *eventsHub) dropPrincipalAll(principalID int64) {
 	defer h.mu.Unlock()
 	for sub := range h.subs {
 		if sub.principalID == principalID {
+			sub.invalidateReadState()
 			h.dropLocked(sub)
 		}
 	}
@@ -359,8 +456,15 @@ func (s *Server) handleEventsWS(w http.ResponseWriter, r *http.Request) {
 	// what is registered, so a removal, a disable or a revoke of this
 	// credential that committed after the checks above has either been seen
 	// below or closes this subscription.
-	sub := s.events.subscribe(channel.ID, caller.ID, credID)
+	sub := s.events.subscribeKind(channel.ID, caller.ID, credID, caller.Kind == store.PrincipalHuman)
 	defer sub.cancel()
+	memberships, err := s.store.ListChannelsForPrincipal(ctx, caller.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "events ws: list memberships failed", "error", err)
+		writeInternalError(w)
+		return
+	}
+	sub.setMemberships(memberships)
 	live, err := s.store.CredentialLive(ctx, credID)
 	if err != nil {
 		slog.ErrorContext(ctx, "events ws: check credential failed", "error", err)
@@ -411,8 +515,12 @@ type eventsStream struct {
 	// rosterBuilt is when a roster was last built, for the roster floor;
 	// rosterLater fires when one owed meanwhile may be built, and is nil
 	// while none is owed.
-	rosterBuilt time.Time
-	rosterLater <-chan time.Time
+	rosterBuilt      time.Time
+	rosterLater      <-chan time.Time
+	readStateBuilt   time.Time
+	readStateLater   <-chan time.Time
+	lastReadStates   map[int64][]byte
+	readStateWriting uint64
 }
 
 // run sends frames until the peer leaves, the subscription is dropped, or the
@@ -470,6 +578,17 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 			default:
 			}
 			if !e.stillMember(ctx) || !e.sendRoster(ctx) {
+				return
+			}
+		case <-e.readStateLater:
+			e.readStateLater = nil
+			select {
+			case <-e.sub.dropped:
+				e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+				return
+			default:
+			}
+			if !e.stillMember(ctx) || !e.sendReadStates(ctx) {
 				return
 			}
 		case <-e.sub.dropped:
@@ -558,7 +677,7 @@ func (e *eventsStream) stillMember(ctx context.Context) bool {
 
 // flush sends what is waiting. It reports false when the socket is closed.
 func (e *eventsStream) flush(ctx context.Context) bool {
-	roster, refs, live := e.sub.take()
+	roster, readState, refs, live := e.sub.take()
 	if !live {
 		e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
 		return false
@@ -569,12 +688,97 @@ func (e *eventsStream) flush(ctx context.Context) bool {
 	if roster && !e.rosterNowOrLater(ctx) {
 		return false
 	}
+	if readState && !e.readStateNowOrLater(ctx) {
+		return false
+	}
 	for _, ref := range refs {
 		if !e.sendRef(ctx, ref) {
 			return false
 		}
 	}
 	return true
+}
+
+func (e *eventsStream) readStateNowOrLater(ctx context.Context) bool {
+	if e.readStateLater != nil {
+		return true
+	}
+	if wait := eventsReadStateFloor - time.Since(e.readStateBuilt); !e.readStateBuilt.IsZero() && wait > 0 {
+		e.readStateLater = time.After(wait)
+		return true
+	}
+	return e.sendReadStates(ctx)
+}
+
+// sendReadStates refreshes only dirty channels, or every current membership on
+// connect and membership changes. The final write is held to the build's epoch.
+func (e *eventsStream) sendReadStates(ctx context.Context) bool {
+	e.readStateBuilt = time.Now()
+	epoch := e.sub.readStateVersion()
+	viewer, err := e.s.store.PrincipalByID(ctx, e.principalID)
+	if err != nil {
+		return e.failed(ctx, "read the read-state viewer", err)
+	}
+	if viewer.Kind != store.PrincipalHuman {
+		return true
+	}
+	all, ids := e.sub.readStateTargets()
+	if all {
+		channels, err := e.s.store.ListChannelsForPrincipal(ctx, e.principalID)
+		if err != nil {
+			return e.failed(ctx, "list read-state channels", err)
+		}
+		e.sub.setMemberships(channels)
+		ids = ids[:0]
+		for _, channel := range channels {
+			ids = append(ids, channel.ID)
+		}
+	}
+	var marks map[int64]store.ReadMark
+	if len(ids) > 0 {
+		marks, err = e.s.store.ReadMarksFor(ctx, e.principalID)
+		if err != nil {
+			return e.failed(ctx, "list read marks", err)
+		}
+	}
+	next := make(map[int64][]byte, len(e.lastReadStates))
+	if !all {
+		for id, raw := range e.lastReadStates {
+			next[id] = raw
+		}
+	}
+	for _, id := range ids {
+		if !all && !e.sub.hasMembership(id) {
+			delete(next, id)
+			continue
+		}
+		doc, err := e.s.readStateDoc(e.r, id, marks[id])
+		if err != nil {
+			return e.failed(ctx, "count unread messages", err)
+		}
+		raw, ok := e.encode(ctx, doc)
+		if !ok {
+			return false
+		}
+		next[id] = raw
+		previous, existed := e.lastReadStates[id]
+		if existed && !bytes.Equal(previous, raw) || !existed && doc.Unread > 0 {
+			if !e.writeReadState(ctx, epoch, raw) {
+				return false
+			}
+			if e.sub.readStateVersion() != epoch {
+				return true
+			}
+		}
+	}
+	e.lastReadStates = next
+	return true
+}
+
+func (e *eventsStream) writeReadState(ctx context.Context, epoch uint64, raw []byte) bool {
+	e.readStateWriting = epoch
+	defer func() { e.readStateWriting = 0 }()
+	return e.write(ctx, raw)
 }
 
 // rosterNowOrLater sends the owed roster now, or, when one was built less
@@ -746,6 +950,10 @@ func (e *eventsStream) encode(ctx context.Context, doc validated) ([]byte, bool)
 func (e *eventsStream) write(ctx context.Context, raw []byte) bool {
 	if hook := e.s.eventsBeforeWrite; hook != nil {
 		hook()
+	}
+	if e.readStateWriting != 0 && e.sub.readStateVersion() != e.readStateWriting {
+		e.readStateLater = time.After(0)
+		return true
 	}
 	// The last point a drop can stop a frame (issue #519): one that was
 	// being built when a revoke, a disable or a removal dropped the

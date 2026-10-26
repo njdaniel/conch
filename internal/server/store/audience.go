@@ -144,8 +144,8 @@ func (s *Store) ListVisibleMessagesPage(ctx context.Context, channelID int64, re
 
 // CountVisibleMessagesAfter returns how many messages in channelID with ID
 // greater than afterID reader may see, counting no further than limit (so a
-// result equal to limit means "at least that many"). It is the unread count of
-// a read mark (issue #351). It embeds the same visibility condition as
+// result equal to limit means "at least that many"). It embeds the same
+// visibility condition as
 // ListVisibleMessages, in the same statement, so a message the reader cannot
 // see is not counted, and a count is never a way to learn that a hidden
 // message exists. The cap is applied inside the statement, so the work is
@@ -163,6 +163,26 @@ func (s *Store) CountVisibleMessagesAfter(ctx context.Context, channelID int64, 
 		append(append([]any{channelID, afterID}, predArgs...), limit)...).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("store: count messages in channel %d: %w", channelID, err)
+	}
+	return n, nil
+}
+
+// CountVisibleUnreadMessagesAfter is CountVisibleMessagesAfter for an unread badge:
+// the reader's own posts are not unread to them, while every other visibility
+// and history-bound rule is identical.
+func (s *Store) CountVisibleUnreadMessagesAfter(ctx context.Context, channelID int64, reader Reader, afterID int64, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, fmt.Errorf("store: count messages: limit must be positive, got %d", limit)
+	}
+	if afterID < 0 {
+		return 0, errors.New("store: count messages: a cursor is never negative")
+	}
+	scoped, predArgs := visibilityArgs(reader)
+	var n int
+	err := s.db.QueryRowContext(ctx, unreadSQL(scoped),
+		append(append([]any{channelID, afterID, reader.PrincipalID}, predArgs...), limit)...).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count unread messages in channel %d: %w", channelID, err)
 	}
 	return n, nil
 }
@@ -305,6 +325,10 @@ func listSQL(scoped, newestFirst bool) string {
 
 func countSQL(scoped bool) string {
 	return countHead + messageVisible(scoped) + countTail
+}
+
+func unreadSQL(scoped bool) string {
+	return countHead + `m.author_id <> ? AND ` + messageVisible(scoped) + countTail
 }
 
 func newestSQL(scoped bool) string {

@@ -141,6 +141,7 @@ func (s *Server) postMessage(
 	messageV0 := messageV0FromStore(stored)
 	s.hub.BroadcastMessage(ctx, messageV0)
 	s.broadcaster.BroadcastMessage(ctx, messageV0)
+	s.events.notifyReadState(channel.ID, authorID)
 	switch version {
 	case apiV2:
 		writeJSON(w, http.StatusCreated, schema.PostMessageResponseV2{Message: messageV2})
@@ -574,6 +575,7 @@ func (s *Server) storeScopedPost(ctx context.Context, post store.ScopedPost, age
 		return schema.MessageV2{}, nil, serr
 	}
 	s.countScopedPost(agentSubject)
+	s.events.notifyReadState(post.ChannelID, post.AuthorID)
 	return messageV2FromStore(stored), recipients, nil
 }
 
@@ -740,6 +742,7 @@ func (s *Server) postReply(w http.ResponseWriter, r *http.Request, req schema.Po
 		s.hub.BroadcastReply(ctx, messageV1FromStore(stored), message)
 		s.broadcaster.BroadcastMessage(ctx, messageV0)
 	}
+	s.events.notifyReadState(channel.ID, req.AuthorID)
 	writeJSON(w, http.StatusCreated, schema.PostMessageResponseV2{Message: message})
 }
 
