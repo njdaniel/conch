@@ -5,6 +5,7 @@
 import { activitySchema, agentActivityV1, type AgentActivityV1 } from '../schema/activity';
 import { channelDocSchema, channelDocV1, channelMembersSchema, channelMembersV1, type ChannelDocV1, type ChannelMembersV1 } from '../schema/channel';
 import { interventionSchema, interventionV1, type InterventionV1 } from '../schema/intervention';
+import { readStateV1, readStateV1Schema, type ReadStateV1 } from '../schema/generated';
 import { runSchema, runV1, type RunV1 } from '../schema/run';
 import { sessionRosterSchema, sessionRosterV1, type SessionRosterV1 } from '../schema/session';
 
@@ -15,7 +16,8 @@ export type EventFrame =
   | { readonly kind: 'activity'; readonly entry: AgentActivityV1 }
   | { readonly kind: 'intervention'; readonly intervention: InterventionV1 }
   // The channel as it now is, sent when it is renamed (issue #728).
-  | { readonly kind: 'channel'; readonly channel: ChannelDocV1 };
+  | { readonly kind: 'channel'; readonly channel: ChannelDocV1 }
+  | { readonly kind: 'readState'; readonly state: ReadStateV1 };
 
 export function parseEventFrame(data: unknown): EventFrame | null {
   if (typeof data !== 'string') return null;
@@ -39,6 +41,8 @@ export function parseEventFrame(data: unknown): EventFrame | null {
       return interventionV1(doc).length === 0 ? { kind: 'intervention', intervention: doc as InterventionV1 } : null;
     case channelDocSchema:
       return channelDocV1(doc).length === 0 ? { kind: 'channel', channel: doc as ChannelDocV1 } : null;
+    case readStateV1Schema:
+      return readStateV1(doc).length === 0 ? { kind: 'readState', state: doc as ReadStateV1 } : null;
     default:
       return null;
   }

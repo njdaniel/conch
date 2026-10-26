@@ -47,14 +47,14 @@ func TestSweepEndsSessionsOfExpiredCredential(t *testing.T) {
 	if rows := f.auditRows(t, store.AuditSessionEnded); len(rows) != 1 || !strings.Contains(rows[0].Detail, "cause=credential_expired") {
 		t.Errorf("session_ended rows = %+v, want one with cause credential_expired", rows)
 	}
-	if roster, _, _ := sub.take(); !roster {
+	if roster, _, _, _ := sub.take(); !roster {
 		t.Error("the sweep that ended a session did not notify rosters")
 	}
 	f.srv.sweepSessions(ctx)
 	if rows := f.auditRows(t, store.AuditSessionEnded); len(rows) != 1 {
 		t.Errorf("a second sweep wrote more: %+v", rows)
 	}
-	if roster, _, _ := sub.take(); roster {
+	if roster, _, _, _ := sub.take(); roster {
 		t.Error("a sweep that changed nothing notified rosters")
 	}
 }

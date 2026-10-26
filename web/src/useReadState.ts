@@ -1,11 +1,12 @@
 // The person's read state (UX-02): the unread count of each channel in the list,
 // and the mark that says how far they have read. The server keeps one mark per
-// person, shared by all their clients; the counts here are its last answer plus
-// a local +1 for each message that arrives unseen in the open channel. The rules
-// are the terminal client's.
+// person, shared by all their clients; the counts here are its last answer and
+// live events, plus a local +1 for each message that arrives unseen in the open
+// channel. The rules are the terminal client's.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as api from './api';
 import type { ChannelV0 } from './schema/channel';
+import type { ReadStateV1 } from './schema/readstate';
 import type { LiveStatus } from './useLiveChannel';
 
 // The least time between two mark requests for one channel; the newest id wins
@@ -45,9 +46,12 @@ interface Marks {
   // is over, for opening channels quickly one after another.
   readAt: number;
   readTimer: number | null;
+  // Live events win over HTTP responses that started before them.
+  version: number;
+  changed: Map<number, number>;
 }
 
-const newMarks = (): Marks => ({ marked: new Map(), acked: new Map(), markedAt: new Map(), pending: new Map(), timers: new Map(), readAt: 0, readTimer: null });
+const newMarks = (): Marks => ({ marked: new Map(), acked: new Map(), markedAt: new Map(), pending: new Map(), timers: new Map(), readAt: 0, readTimer: null, version: 0, changed: new Map() });
 
 const none: ReadonlyMap<string, number> = new Map();
 
@@ -63,6 +67,8 @@ export function useReadState({
   newest,
   atBottom,
   status,
+  eventsLive,
+  event,
   me,
   onUnauthorized,
   onMissing,
@@ -78,6 +84,8 @@ export function useReadState({
   // Whether the reader is at the newest message of the open channel.
   readonly atBottom: boolean;
   readonly status: LiveStatus;
+  readonly eventsLive: boolean;
+  readonly event: ReadStateV1 | null;
   readonly me: number;
   readonly onUnauthorized: () => void;
   // A mark refused with channel_not_found (issue #728): the channel, by id,
@@ -92,6 +100,7 @@ export function useReadState({
   const reading = atBottom && visible;
 
   const marks = useRef(newMarks());
+  const consumed = useRef<ReadStateV1 | null>(null);
   // Set when the server says it holds no read state for this credential (an
   // agent, or authentication off): from then on nothing is asked or shown.
   const off = useRef(false);
@@ -125,6 +134,7 @@ export function useReadState({
     if (off.current) return;
     marks.current.readAt = Date.now();
     const asked = epoch.current;
+    const version = marks.current.version;
     void api.listReadState().then((result) => {
       if (epoch.current !== asked || off.current) return;
       if (!result.ok) {
@@ -149,7 +159,12 @@ export function useReadState({
       // reader is scrolled up, say), the count comes back only with the next
       // read.
       if (current !== null && !held) next.delete(current);
-      setCounts(next);
+      setCounts((prev) => {
+        for (const [id, count] of prev) {
+          if (ids.has(id) && (marks.current.changed.get(id) ?? 0) > version) next.set(id, count);
+        }
+        return next;
+      });
     });
   }, [failed]);
 
@@ -180,6 +195,7 @@ export function useReadState({
       m.markedAt.set(channel, Date.now());
       m.pending.delete(channel);
       const asked = epoch.current;
+      const version = m.version;
       void api.markRead(name, id).then((result) => {
         if (epoch.current !== asked || off.current) return;
         if (!result.ok) {
@@ -199,11 +215,29 @@ export function useReadState({
         // A newer message is on screen and its mark is on the way: this count is
         // already out of date.
         if (channel === current && now && (head?.id ?? 0) > result.value.last_read_id) return;
+        if ((m.changed.get(channel) ?? 0) > version) return;
         setCount(channel, result.value.unread);
       });
     },
     [failed, setCount],
   );
+
+  // The events socket carries the server's count for every visible channel,
+  // not only the open one. A frame older than our acknowledged mark cannot
+  // resurrect a badge; a newer mark from another client clears it.
+  useEffect(() => {
+    if (event === null || consumed.current === event) return;
+    consumed.current = event;
+    if (!signedIn || !loaded || off.current) return;
+    if (!channels.some((channel) => channel.id === event.channel_id)) return;
+    const m = marks.current;
+    if (event.last_read_id < (m.acked.get(event.channel_id) ?? 0)) return;
+    m.version++;
+    m.changed.set(event.channel_id, m.version);
+    m.acked.set(event.channel_id, Math.max(m.acked.get(event.channel_id) ?? 0, event.last_read_id));
+    if (event.channel_id === openId && (!ready || reading)) setCount(event.channel_id, 0);
+    else setCount(event.channel_id, event.unread);
+  }, [signedIn, loaded, channels, event, openId, ready, reading, setCount]);
 
   // Whether the tab can be seen.
   useEffect(() => {
@@ -229,25 +263,24 @@ export function useReadState({
     };
   }, [signedIn]);
 
-  // The counts are read once the channels are known, again after a reconnect,
-  // and when another channel is opened (the page has no socket for the others,
-  // so this is when it can learn what came in there).
+  // The counts are read once the channels are known, after either socket
+  // reconnects, and when another channel is opened.
   useEffect(() => {
     if (signedIn && loaded) read();
   }, [signedIn, loaded, read]);
   // By id: the open channel renamed is not another channel opened.
-  const was = useRef<{ status: LiveStatus; open: number | null }>({ status, open: openId });
+  const was = useRef<{ status: LiveStatus; open: number | null; eventsLive: boolean }>({ status, open: openId, eventsLive });
   useEffect(() => {
     const before = was.current;
-    was.current = { status, open: openId };
+    was.current = { status, open: openId, eventsLive };
     if (!signedIn || !loaded) return;
-    if (status === 'open' && before.status === 'reconnecting') {
+    if (status === 'open' && before.status === 'reconnecting' || eventsLive && !before.eventsLive) {
       read();
     } else if (openId !== null && before.open !== null && openId !== before.open) readSoon();
-  }, [signedIn, loaded, status, openId, read, readSoon]);
+  }, [signedIn, loaded, status, eventsLive, openId, read, readSoon]);
 
-  // A message that arrives while it is not being read is a local +1. Your own
-  // messages are not unread.
+  // While the events socket is down, a message that arrives unseen in the open
+  // channel is a local +1. Live read-state frames are already absolute counts.
   const seen = useRef<{ readonly channel: number; readonly id: number } | null>(null);
   const newestId = newest?.id ?? 0;
   const newestAuthor = newest?.author ?? 0;
@@ -256,9 +289,9 @@ export function useReadState({
     const before = seen.current;
     seen.current = { channel: openId, id: newestId };
     if (before === null || before.channel !== openId || newestId <= before.id) return;
-    if (reading || newestAuthor === me || off.current) return;
+    if (eventsLive || newestId <= (marks.current.acked.get(openId) ?? 0) || reading || newestAuthor === me || off.current) return;
     setCounts((prev) => new Map(prev).set(openId, Math.min((prev.get(openId) ?? 0) + 1, cap)));
-  }, [signedIn, openId, ready, newestId, newestAuthor, reading, me]);
+  }, [signedIn, openId, ready, newestId, newestAuthor, eventsLive, reading, me]);
 
   // The mark moves to the newest message shown: when a channel is opened, when
   // a message arrives at the bottom, and when the newest comes back into view.

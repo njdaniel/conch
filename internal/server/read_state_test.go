@@ -96,13 +96,13 @@ func TestReadStateCountsOnlyWhatTheReaderMaySee(t *testing.T) {
 		olga int
 		nina int
 	}{
-		{"start", func() {}, 5, 3, 6},
+		{"start", func() {}, 5, 0, 4},
 		{"whisper ann is not in", func() {
 			f.mustPost(t, "nina", `{"body":"psst",`+whisperAudience(f.p("wes").ID)+`}`)
-		}, 5, 3, 7},
+		}, 5, 0, 4},
 		{"whisper ann is in", func() {
 			f.mustPost(t, "nina", `{"body":"psst",`+whisperAudience(f.p("ann").ID)+`}`)
-		}, 6, 3, 8},
+		}, 6, 0, 4},
 	}
 	for _, s := range steps {
 		s.do()
@@ -141,7 +141,7 @@ func TestReadStateMarkMovesTheCount(t *testing.T) {
 	if got := f.readStates(t, secondTok)[f.ops.ID]; got.LastReadID != ids[1] || got.Unread != 2 {
 		t.Errorf("second credential sees %+v, want the shared mark", got)
 	}
-	if got := f.readStates(t, f.p("olga").token)[f.ops.ID]; got.LastReadID != 0 || got.Unread != 3 {
+	if got := f.readStates(t, f.p("olga").token)[f.ops.ID]; got.LastReadID != 0 || got.Unread != 0 {
 		t.Errorf("olga sees %+v, want her own untouched state", got)
 	}
 	// Marking from the second credential moves the first credential's view.
@@ -241,8 +241,8 @@ func TestReadStateList(t *testing.T) {
 	}
 
 	got := f.readStates(t, f.p("olga").token)
-	if len(got) != 2 || got[f.ops.ID].Unread != 1 || got[side.ID].Unread != 1 {
-		t.Errorf("olga's states = %+v, want ops and side with one each", got)
+	if len(got) != 2 || got[f.ops.ID].Unread != 1 || got[side.ID].Unread != 0 {
+		t.Errorf("olga's states = %+v, want one in ops and none for her own post in side", got)
 	}
 	// ann is only in ops: side is absent, not zero.
 	if _, ok := f.readStates(t, f.p("ann").token)[side.ID]; ok {
@@ -369,7 +369,7 @@ func TestReadStateHandlersCountThroughTheStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	code := string(src)
-	for _, want := range []string{"CountVisibleMessagesAfter(", "readerFor(r, apiV2)", "MarkRead("} {
+	for _, want := range []string{"CountVisibleUnreadMessagesAfter(", "readerFor(r, apiV2)", "MarkRead("} {
 		if !strings.Contains(code, want) {
 			t.Errorf("read_state.go does not call %s", want)
 		}

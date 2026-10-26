@@ -92,6 +92,16 @@ func TestCountVisibleMessagesAfter(t *testing.T) {
 	})
 }
 
+func TestCountVisibleUnreadMessagesAfterSkipsTheReadersOwnPosts(t *testing.T) {
+	f := newAudienceFixture(t)
+	f.wide(t, f.frank, "mine")
+	f.wide(t, f.alice, "someone else's")
+	n, err := f.s.CountVisibleUnreadMessagesAfter(context.Background(), f.ch.ID, Reader{PrincipalID: f.frank.ID, Scoped: true}, 0, 1000)
+	if err != nil || n != 1 {
+		t.Fatalf("unread = %d, %v; want only the other author's post", n, err)
+	}
+}
+
 func TestMarkRead(t *testing.T) {
 	ctx := context.Background()
 	f := newAudienceFixture(t)

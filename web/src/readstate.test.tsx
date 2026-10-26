@@ -63,6 +63,8 @@ const state = (channel_id: number, unread: number, last_read_id = 0) => ({
 });
 
 interface Server {
+  events: boolean;
+  readDelay: Promise<void> | null;
   history: unknown[];
   // What GET /v1/read-state answers; null is the refusal below.
   read: () => unknown[];
@@ -76,7 +78,7 @@ interface Server {
 let server: Server;
 
 function install() {
-  server = { history: [], read: () => [], refusal: null, gets: 0, putsDown: false, puts: [] };
+  server = { events: false, readDelay: null, history: [], read: () => [], refusal: null, gets: 0, putsDown: false, puts: [] };
   vi.stubGlobal('WebSocket', FakeSocket);
   vi.stubGlobal(
     'fetch',
@@ -89,10 +91,13 @@ function install() {
       if (path === '/v1/whoami') return Promise.resolve(json({ id: 2, kind: 'human', name: 'ada', role: 'member', voice_allowed: false }));
       if (path === '/v1/channels') return Promise.resolve(json({ channels }));
       if (path === '/v1/ws-tickets') return Promise.resolve(json({ ticket: ticketValue, expires_at: at }, 201));
+      if (server.events && path === '/v1/sessions' && init?.method === 'POST') {
+        return Promise.resolve(json({ schema: 'conch.session.v1', id: 100, principal_id: 2, kind: 'human', name: 'ada', client: 'browser', state: 'online', status: 'online', started_at: at, last_seen_at: at, interventions: [], outcome_unknown: false }, 201));
+      }
       if (path === '/v1/read-state') {
         server.gets++;
         if (server.refusal !== null) return Promise.resolve(json({ code: server.refusal.code, message: 'no' }, server.refusal.status));
-        return Promise.resolve(json({ read_state: server.read() }));
+        return (server.readDelay ?? Promise.resolve()).then(() => json({ read_state: server.read() }));
       }
       const put = /^\/v1\/channels\/([^/]+)\/read-state$/.exec(path);
       if (put?.[1] !== undefined && init?.method === 'PUT') {
@@ -118,10 +123,12 @@ async function openChat() {
   render(<App origin={origin} />);
   await screen.findByRole('log', { name: 'Messages' });
   await waitFor(() => {
-    expect(FakeSocket.all.length).toBeGreaterThan(0);
+    expect(FakeSocket.all.some((socket) => socket.url.includes('/v2/ws?'))).toBe(true);
+    if (server.events) expect(FakeSocket.all.some((socket) => socket.url.includes('/v1/events/ws?'))).toBe(true);
   });
-  const socket = FakeSocket.all[FakeSocket.all.length - 1] as FakeSocket;
-  socket.open();
+  for (const socket of FakeSocket.all) socket.open();
+  const socket = FakeSocket.all.find((candidate) => candidate.url.includes('/v2/ws?'));
+  if (socket === undefined) throw new Error('no message socket');
   await waitFor(() => {
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').disabled).toBe(false);
   });
@@ -342,6 +349,147 @@ describe('the mark', () => {
     socket.send(message(2, 'mine', 2));
     await screen.findByText('mine');
     expect(noBadges()).toHaveLength(0);
+  });
+});
+
+describe('live counts from the events socket', () => {
+  async function liveChat() {
+    server.events = true;
+    await openChat();
+    await waitFor(() => {
+      expect(FakeSocket.all.some((socket) => socket.url.includes('/v1/events/ws?'))).toBe(true);
+    });
+    const socket = FakeSocket.all.find((candidate) => candidate.url.includes('/v1/events/ws?'));
+    if (socket === undefined) throw new Error('no events socket');
+    return socket;
+  }
+
+  it('updates a non-open channel without another read, and a shared mark clears it', async () => {
+    const socket = await liveChat();
+    expect(server.gets).toBe(1);
+    socket.send(state(8, 1));
+    expect(await badge('1 unread')).toBeDefined();
+    socket.send(state(8, 2));
+    expect(await badge('2 unread')).toBeDefined();
+    expect(server.gets).toBe(1);
+    socket.send(state(8, 0, 10));
+    await waitFor(() => {
+      expect(noBadges()).toHaveLength(0);
+    });
+    socket.send(state(8, 5, 9));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(noBadges()).toHaveLength(0);
+  });
+
+  it('ignores a channel the client may no longer see', async () => {
+    const socket = await liveChat();
+    socket.send(state(42, 3));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(noBadges()).toHaveLength(0);
+  });
+
+  it('applies an event only once across unrelated UI changes', async () => {
+    server.history = [message(1)];
+    const socket = await liveChat();
+    const messages = FakeSocket.all.find((candidate) => candidate.url.includes('/v2/ws?'));
+    if (messages === undefined) throw new Error('no message socket');
+    scrollTo(400);
+    socket.send(state(7, 1, 1));
+    expect(await badge('1 unread')).toBeDefined();
+    messages.send(message(2));
+    expect(await badge('2 unread')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+    expect(screen.getByRole('img', { name: '2 unread' })).toBeDefined();
+  });
+
+  it('does not replay a retained event after signing in again', async () => {
+    const socket = await liveChat();
+    socket.send(state(8, 0, 100));
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, sign out' }));
+    await screen.findByLabelText('Credential');
+    server.read = () => [state(8, 2)];
+    fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
+    await screen.findByLabelText('Message #general');
+    expect(await badge('2 unread')).toBeDefined();
+  });
+
+  it('does not add a message again after its absolute event count', async () => {
+    server.history = [message(1)];
+    const socket = await liveChat();
+    const messages = FakeSocket.all.find((candidate) => candidate.url.includes('/v2/ws?'));
+    if (messages === undefined) throw new Error('no message socket');
+    scrollTo(400);
+    server.read = () => [state(7, 1, 1)];
+    socket.send({ schema: 'conch.session_roster.v1', channel_id: 7, sessions: [] });
+    await waitFor(() => {
+      expect(server.gets).toBe(2);
+    });
+    socket.send(state(7, 1, 1));
+    expect(await badge('1 unread')).toBeDefined();
+    messages.send(message(2));
+    await screen.findByText('m2');
+    expect(screen.getByRole('img', { name: '1 unread' })).toBeDefined();
+  });
+
+  it('does not resurrect a delayed message after a shared mark', async () => {
+    server.history = [message(1)];
+    const socket = await liveChat();
+    const messages = FakeSocket.all.find((candidate) => candidate.url.includes('/v2/ws?'));
+    if (messages === undefined) throw new Error('no message socket');
+    scrollTo(400);
+    socket.send(state(7, 0, 2));
+    await waitFor(() => {
+      expect(noBadges()).toHaveLength(0);
+    });
+    messages.send(message(2));
+    await screen.findByText('m2');
+    expect(noBadges()).toHaveLength(0);
+  });
+
+  it('reads again when only the events socket reconnects', async () => {
+    const socket = await liveChat();
+    server.read = () => [state(8, 2)];
+    socket.drop(1006);
+    await waitFor(() => {
+      expect(FakeSocket.all).toHaveLength(3);
+    }, { timeout: 3000 });
+    const reconnected = FakeSocket.all[2] as FakeSocket;
+    reconnected.open();
+    reconnected.send({ schema: 'conch.session_roster.v1', channel_id: 7, sessions: [] });
+    expect(await badge('2 unread')).toBeDefined();
+    expect(server.gets).toBe(2);
+  });
+
+  it('does not let an older reconnect response erase a newer event', async () => {
+    const socket = await liveChat();
+    let release = () => {};
+    server.readDelay = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const messages = FakeSocket.all.find((candidate) => candidate.url.includes('/v2/ws?'));
+    if (messages === undefined) throw new Error('no message socket');
+    messages.drop(1006);
+    await waitFor(() => {
+      expect(FakeSocket.all).toHaveLength(3);
+    }, { timeout: 3000 });
+    (FakeSocket.all[2] as FakeSocket).open();
+    await waitFor(() => {
+      expect(server.gets).toBe(2);
+    });
+    socket.send(state(8, 2));
+    expect(await badge('2 unread')).toBeDefined();
+    release();
+    await act(async () => {
+      await server.readDelay;
+    });
+    expect(screen.getByRole('img', { name: '2 unread' })).toBeDefined();
   });
 });
 

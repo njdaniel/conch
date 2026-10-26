@@ -204,7 +204,7 @@ func TestEventsHub(t *testing.T) {
 	)
 	pending := func(t *testing.T, sub *eventsSub) (bool, []eventRef) {
 		t.Helper()
-		roster, refs, live := sub.take()
+		roster, _, refs, live := sub.take()
 		if !live {
 			t.Fatal("the subscription was dropped")
 		}

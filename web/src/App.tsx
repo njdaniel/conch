@@ -17,6 +17,7 @@ import { RenameChannel } from './RenameChannel';
 import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeLinkFromAddress } from './route';
 import type { ChannelDocV1 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
+import type { ReadStateV1 } from './schema/readstate';
 import { SignIn } from './SignIn';
 import { YourSignIns } from './SignIns';
 import { SignInLink } from './SignInLink';
@@ -390,6 +391,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // The browser's own session, the events socket and what the panel and run
   // detail show from them. The member list it keeps current also names the
   // authors in the conversation.
+  const [readStateEvent, setReadStateEvent] = useState<ReadStateV1 | null>(null);
+  useEffect(() => {
+    setReadStateEvent(null);
+  }, [signedIn, principal?.id]);
   const agents = useAgents({
     signedIn,
     channel: channelId === null ? null : selected,
@@ -400,6 +405,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onChannel,
     onManages,
     onMissing,
+    onReadState: setReadStateEvent,
   });
   const live = useLiveChannel({
     channel: channelId === null ? null : selected,
@@ -438,6 +444,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     newest: head === undefined ? null : { id: head.id, author: head.author_id },
     atBottom: bottom.channel === channelId ? bottom.atBottom : true,
     status: live.status,
+    eventsLive: agents.state.link === 'live',
+    event: readStateEvent,
     me: principal?.id ?? 0,
     onUnauthorized,
     onMissing,
