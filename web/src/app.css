@@ -427,6 +427,41 @@ label {
   flex: none;
 }
 
+.notification-center {
+  position: relative;
+}
+
+.notification-panel {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + var(--s2));
+  right: 0;
+  width: min(24rem, calc(100vw - 2rem));
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.notification-panel ul {
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.notification-panel li button {
+  display: grid;
+  width: 100%;
+  gap: var(--s1);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
 .areas {
   display: grid;
   grid-template-columns: 15rem minmax(0, 1fr) 17rem;

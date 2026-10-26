@@ -338,6 +338,7 @@ func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload
 		// A grant is only ever an agent's.
 		g.scope.s.metrics.messagePosted(store.PrincipalAgent)
 		g.scope.s.events.notifyReadState(g.channel.ID, g.scope.identity.principalID)
+		g.scope.s.events.notifyMessage(g.channel.ID, msg.ID, g.scope.identity.principalID)
 	}
 	return msg, err
 }

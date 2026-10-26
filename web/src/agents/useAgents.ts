@@ -7,6 +7,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import * as api from '../api';
 import type { ChannelDocV1, ChannelMemberV1 } from '../schema/channel';
 import type { CreateInterventionRequestV1 } from '../schema/intervention';
+import type { MessageV2 } from '../schema/message';
 import type { ReadStateV1 } from '../schema/readstate';
 import type { RunV1 } from '../schema/run';
 import { Feed, firstDelay, maxDelay, type FeedStatus } from '../state/feed';
@@ -214,6 +215,7 @@ export function useAgents({
   onManages,
   onMissing,
   onReadState,
+  onMessage,
 }: {
   readonly signedIn: boolean;
   readonly channel: string | null;
@@ -232,6 +234,7 @@ export function useAgents({
   // renamed under this page.
   readonly onMissing: (channelId: number) => void;
   readonly onReadState: (state: ReadStateV1) => void;
+  readonly onMessage: (message: MessageV2) => void;
 }): Agents {
   const [state, dispatch] = useReducer(agentsReducer, initialAgents);
   const [members, setMembers] = useState<readonly ChannelMemberV1[]>([]);
@@ -403,6 +406,9 @@ export function useAgents({
           case 'readState':
             onReadState(frame.state);
             break;
+          case 'message':
+            onMessage(frame.message);
+            break;
         }
       },
       onStatus,
@@ -413,7 +419,7 @@ export function useAgents({
       if (retry !== null) realClock.clearTimeout(retry);
       feed.stop();
     };
-  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, replace, healthy]);
+  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, replace, healthy]);
 
   // The members line is read again each time the socket comes back.
   useEffect(() => {

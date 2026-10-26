@@ -65,6 +65,7 @@ const paths = {
     </>
   ),
   close: <path d="M6 6l12 12M18 6 6 18" />,
+  bell: <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />,
   fullscreen: <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />,
   options: <path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 5v4M8 15v4" />,
 } as const;

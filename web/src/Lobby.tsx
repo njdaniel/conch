@@ -58,6 +58,7 @@ export function Lobby({
   channels,
   unread,
   occupancy,
+  notificationCenter,
   connection,
   conversation,
   panel,
@@ -87,6 +88,7 @@ export function Lobby({
   readonly unread: ReadonlyMap<string, number>;
   // How many are in each channel's voice (issue #596), shown in the list.
   readonly occupancy?: InVoice;
+  readonly notificationCenter?: ReactNode;
   readonly connection: ConnectionState;
   readonly conversation: ReactNode;
   readonly panel: ReactNode;
@@ -229,6 +231,7 @@ export function Lobby({
           <span className={`conn conn-${connection}`}>{connectionLabel(connection)}</span>
         </div>
         <div className="topbar-actions">
+          {notificationCenter}
           {invites}
           <button
             ref={membersButton}

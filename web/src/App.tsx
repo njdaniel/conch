@@ -45,6 +45,9 @@ import {
 } from './state/attachments';
 import { canLoadOlder, chatFor, chatReducer, initialChat, lastId, oldestId, ordered, sameSend, type ChatAction, type PendingSend } from './state/messages';
 import { useLiveChannel } from './useLiveChannel';
+import { useNotifications } from './useNotifications';
+import { NotificationCenter } from './NotificationCenter';
+import { NotificationSettings } from './NotificationSettings';
 import { useReadState } from './useReadState';
 import { MembersPanel } from './agents/MembersPanel';
 import { RunDetail } from './agents/RunDetail';
@@ -392,8 +395,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // detail show from them. The member list it keeps current also names the
   // authors in the conversation.
   const [readStateEvent, setReadStateEvent] = useState<ReadStateV1 | null>(null);
+  const [messageEvent, setMessageEvent] = useState<MessageV2 | null>(null);
   useEffect(() => {
     setReadStateEvent(null);
+    setMessageEvent(null);
   }, [signedIn, principal?.id]);
   const agents = useAgents({
     signedIn,
@@ -406,6 +411,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onManages,
     onMissing,
     onReadState: setReadStateEvent,
+    onMessage: setMessageEvent,
   });
   const live = useLiveChannel({
     channel: channelId === null ? null : selected,
@@ -449,6 +455,17 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     me: principal?.id ?? 0,
     onUnauthorized,
     onMissing,
+  });
+  const notifications = useNotifications({
+    signedIn,
+    origin,
+    principal: principal === null ? null : { id: principal.id, name: shownName },
+    channels: channels.channels,
+    loaded: channels.loaded,
+    eventsLive: agents.state.link === 'live',
+    event: messageEvent,
+    readStateEvent,
+    onOpen,
   });
 
   const now = useNow(signedIn);
@@ -1229,6 +1246,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           channels={channels}
           unread={unread}
           occupancy={occupancy}
+          notificationCenter={<NotificationCenter alerts={notifications.alerts} onOpen={notifications.openAlert} onClear={notifications.clearAlerts} />}
           connection={connection}
           panel={
             <MembersPanel
@@ -1252,6 +1270,19 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 <h3>Who can administer</h3>
                 <p>{administrationLine(auth.principal, channels.channels, visit !== null)}</p>
               </div>
+              <NotificationSettings
+                policy={notifications.policy}
+                native={notifications.native}
+                permission={notifications.browserPermission}
+                supported={notifications.browserSupported}
+                channels={channels.channels}
+                muted={notifications.muted}
+                onToggleMute={notifications.toggleMute}
+                onPolicy={notifications.setPolicy}
+                onEnable={() => {
+                  void notifications.enableNative();
+                }}
+              />
               {/* A person renames themselves; an agent's name is an operator's to
                   set, and a guest's is its handle (issue #713). */}
               {auth.principal.kind === 'human' && visit === null ? (

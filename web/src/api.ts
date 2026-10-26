@@ -1746,6 +1746,39 @@ export async function markRead(channel: string, id: number): Promise<ApiResult<R
   return { ok: false, failure: 'invalid' };
 }
 
+export type NotificationPolicy = 'off' | 'mentions' | 'all';
+export interface NotificationPreferences {
+  readonly policy: NotificationPolicy;
+  readonly muted: readonly number[];
+  readonly native: boolean;
+}
+
+const emptyNotificationPreferences: NotificationPreferences = { policy: 'off', muted: [], native: false };
+const notificationPreferencesKey = (origin: string, account: number) => `conch.web.notifications.v1.${origin}.${String(account)}`;
+
+export function readNotificationPreferences(origin: string, account: number): NotificationPreferences {
+  try {
+    const raw: unknown = JSON.parse(storageAt('lasting').getItem(notificationPreferencesKey(origin, account)) ?? 'null');
+    if (typeof raw !== 'object' || raw === null) return emptyNotificationPreferences;
+    const value = raw as { policy?: unknown; muted?: unknown; native?: unknown };
+    return {
+      policy: value.policy === 'mentions' || value.policy === 'all' ? value.policy : 'off',
+      muted: Array.isArray(value.muted) ? value.muted.filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0) : [],
+      native: value.native === true,
+    };
+  } catch {
+    return emptyNotificationPreferences;
+  }
+}
+
+export function writeNotificationPreferences(origin: string, account: number, preferences: NotificationPreferences): void {
+  try {
+    storageAt('lasting').setItem(notificationPreferencesKey(origin, account), JSON.stringify(preferences));
+  } catch {
+    // Storage can be unavailable; the in-memory preference still applies.
+  }
+}
+
 // requestTicket asks for a single-use ticket to open a socket with.
 async function requestTicket(): Promise<ApiResult<WSTicketV1>> {
   const reply = await authedPost('/v1/ws-tickets');
