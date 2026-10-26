@@ -162,6 +162,11 @@ describe('parseEventFrame', () => {
     expect(parseEventFrame(JSON.stringify({ schema: 'conch.session_roster.v1', channel_id: 7, sessions: [] }))?.kind).toBe('roster');
   });
 
+  it('reads a notification message', () => {
+    const doc = { schema: 'conch.message.v2', id: 9, channel_id: 7, author_id: 3, created_at: '2026-10-21T00:00:00Z', body: 'hello @ada' };
+    expect(parseEventFrame(JSON.stringify(doc))).toEqual({ kind: 'message', message: doc });
+  });
+
   // Issue #728: the channel as it now is, sent when it is renamed.
   it('reads the channel document, the whole of it', () => {
     const doc = { schema: 'conch.channel.v1', channel_id: 7, name: 'ops-room', created_at: '2026-10-21T00:00:00Z' };

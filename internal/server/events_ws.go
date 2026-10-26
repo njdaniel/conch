@@ -73,13 +73,16 @@ const (
 	eventIntervention
 	// eventChannel is the channel itself (issue #727): today, its name.
 	eventChannel
+	// eventMessage is a newly committed message for the notification client.
+	eventMessage
 )
 
 // eventRef names a document that changed. It carries no content.
 type eventRef struct {
-	kind  eventKind
-	runID int64 // the run an activity entry belongs to
-	id    int64 // the run, activity entry, intervention or channel
+	kind      eventKind
+	runID     int64 // the run an activity entry belongs to
+	id        int64 // the run, activity entry, intervention, message or channel
+	channelID int64 // the channel of a message
 }
 
 // eventsHub is the registry of events sockets.
@@ -105,16 +108,17 @@ type eventsSub struct {
 	wake    chan struct{}
 	dropped chan struct{}
 
-	roster          bool // a roster is owed: one is enough, it is the whole state
-	readState       bool // read-state changes coalesce into one refresh
-	readStateAll    bool
-	readStateDirty  map[int64]struct{}
-	memberships     map[int64]struct{}
-	membershipDirty bool
-	readStateEpoch  uint64
-	human           bool
-	refs            []eventRef
-	gone            bool
+	roster           bool // a roster is owed: one is enough, it is the whole state
+	readState        bool // read-state changes coalesce into one refresh
+	readStateAll     bool
+	readStateDirty   map[int64]struct{}
+	readStateRemoved map[int64]struct{}
+	memberships      map[int64]struct{}
+	membershipDirty  bool
+	readStateEpoch   uint64
+	human            bool
+	refs             []eventRef
+	gone             bool
 }
 
 // subscribe registers a subscriber, owed its first roster: that roster goes
@@ -126,7 +130,7 @@ func (h *eventsHub) subscribe(channelID, principalID, credentialID int64) *event
 }
 
 func (h *eventsHub) subscribeKind(channelID, principalID, credentialID int64, human bool) *eventsSub {
-	sub := &eventsSub{hub: h, channelID: channelID, principalID: principalID, credentialID: credentialID, wake: make(chan struct{}, 1), dropped: make(chan struct{}), roster: true, readState: human, readStateAll: human, readStateDirty: map[int64]struct{}{}, memberships: map[int64]struct{}{}, human: human, readStateEpoch: 1}
+	sub := &eventsSub{hub: h, channelID: channelID, principalID: principalID, credentialID: credentialID, wake: make(chan struct{}, 1), dropped: make(chan struct{}), roster: true, readState: human, readStateAll: human, readStateDirty: map[int64]struct{}{}, readStateRemoved: map[int64]struct{}{}, memberships: map[int64]struct{}{}, human: human, readStateEpoch: 1}
 	sub.signal()
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -189,6 +193,19 @@ func (sub *eventsSub) setMemberships(channels []store.Channel) {
 	}
 }
 
+func (sub *eventsSub) setMembershipsIfCurrent(channels []store.Channel, epoch uint64) bool {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	if sub.readStateEpoch != epoch {
+		return false
+	}
+	sub.memberships = make(map[int64]struct{}, len(channels))
+	for _, channel := range channels {
+		sub.memberships[channel.ID] = struct{}{}
+	}
+	return true
+}
+
 func (sub *eventsSub) hasMembership(channelID int64) bool {
 	sub.hub.mu.Lock()
 	defer sub.hub.mu.Unlock()
@@ -196,17 +213,21 @@ func (sub *eventsSub) hasMembership(channelID int64) bool {
 	return ok
 }
 
-func (sub *eventsSub) readStateTargets() (all bool, ids []int64) {
+func (sub *eventsSub) readStateTargets() (all bool, ids, removed []int64) {
 	sub.hub.mu.Lock()
 	defer sub.hub.mu.Unlock()
 	all = sub.readStateAll || sub.membershipDirty
 	for id := range sub.readStateDirty {
 		ids = append(ids, id)
 	}
+	for id := range sub.readStateRemoved {
+		removed = append(removed, id)
+	}
 	sub.readStateAll = false
 	sub.membershipDirty = false
 	sub.readStateDirty = map[int64]struct{}{}
-	return all, ids
+	sub.readStateRemoved = map[int64]struct{}{}
+	return all, ids, removed
 }
 
 // push queues ref, unless the same document is already waiting (a run or an
@@ -304,6 +325,19 @@ func (h *eventsHub) notifyChannel(channelID int64, ref eventRef) {
 	}
 }
 
+// notifyMessage queues a new message for each human who may read the channel,
+// except its author. Visibility is checked again with the subscriber's reader.
+func (h *eventsHub) notifyMessage(channelID, messageID, authorID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		_, member := sub.memberships[channelID]
+		if sub.human && member && sub.principalID != authorID {
+			sub.push(eventRef{kind: eventMessage, id: messageID, channelID: channelID})
+		}
+	}
+}
+
 // notifyReadState owes every other reader the count in a channel with a new
 // message. The subscriber checks membership and scoped visibility when sending.
 func (h *eventsHub) notifyReadState(channelID int64, authorID int64) {
@@ -345,6 +379,7 @@ func (h *eventsHub) dropPrincipal(channelID, principalID int64) {
 		if sub.principalID == principalID {
 			delete(sub.memberships, channelID)
 			sub.readStateDirty[channelID] = struct{}{}
+			sub.readStateRemoved[channelID] = struct{}{}
 			sub.invalidateReadState()
 			if sub.channelID == channelID {
 				h.dropLocked(sub)
@@ -722,13 +757,15 @@ func (e *eventsStream) sendReadStates(ctx context.Context) bool {
 	if viewer.Kind != store.PrincipalHuman {
 		return true
 	}
-	all, ids := e.sub.readStateTargets()
+	all, ids, removed := e.sub.readStateTargets()
 	if all {
 		channels, err := e.s.store.ListChannelsForPrincipal(ctx, e.principalID)
 		if err != nil {
 			return e.failed(ctx, "list read-state channels", err)
 		}
-		e.sub.setMemberships(channels)
+		if !e.sub.setMembershipsIfCurrent(channels, epoch) {
+			return true
+		}
 		ids = ids[:0]
 		for _, channel := range channels {
 			ids = append(ids, channel.ID)
@@ -769,6 +806,19 @@ func (e *eventsStream) sendReadStates(ctx context.Context) bool {
 			if e.sub.readStateVersion() != epoch {
 				return true
 			}
+		}
+	}
+	for _, id := range removed {
+		delete(next, id)
+		raw, ok := e.encode(ctx, schema.ReadStateV1{Schema: schema.ReadStateSchemaV1, ChannelID: id})
+		if !ok {
+			return false
+		}
+		if !e.writeReadState(ctx, epoch, raw) {
+			return false
+		}
+		if e.sub.readStateVersion() != epoch {
+			return true
 		}
 	}
 	e.lastReadStates = next
@@ -901,6 +951,20 @@ func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
 			return e.failed(ctx, "read an intervention", err)
 		}
 		return e.sendDoc(ctx, interventionDoc(iv))
+	case eventMessage:
+		if !e.sub.hasMembership(ref.channelID) {
+			return true
+		}
+		epoch := e.sub.readStateVersion()
+		messages, err := s.store.ListVisibleMessages(ctx, ref.channelID, readerFor(e.r, apiV2), ref.id-1, 1)
+		if err != nil {
+			return e.failed(ctx, "read a notification message", err)
+		}
+		if len(messages) != 1 || messages[0].ID != ref.id || !e.sub.hasMembership(ref.channelID) {
+			return true
+		}
+		raw, ok := e.encode(ctx, messageV2FromStore(messages[0]))
+		return ok && e.writeReadState(ctx, epoch, raw)
 	case eventChannel:
 		// The channel as it is now, read by the id the socket is bound to:
 		// flush has just checked that this reader is still a member. Two

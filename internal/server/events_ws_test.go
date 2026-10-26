@@ -34,6 +34,7 @@ type eventFrame struct {
 	members      schema.ChannelMembersV1
 	channel      schema.ChannelDocV1
 	readState    schema.ReadStateV1
+	message      schema.MessageV2
 }
 
 func (fr eventFrame) String() string {
@@ -131,6 +132,10 @@ func (c *eventsClient) next() eventFrame {
 	case schema.ReadStateSchemaV1:
 		if err = json.Unmarshal(raw, &fr.readState); err == nil {
 			verr = fr.readState.Validate()
+		}
+	case schema.MessageSchemaV2:
+		if err = json.Unmarshal(raw, &fr.message); err == nil {
+			verr = fr.message.Validate()
 		}
 	default:
 		c.t.Fatalf("a frame of schema %q, which the events socket does not send:\n%s", head.Schema, raw)

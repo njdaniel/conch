@@ -60,9 +60,10 @@ describe('credential handling', () => {
   });
 });
 
-// localStorage (issue #439, decision O1): a member's credential lasts there,
-// and nothing else of ours does. Comments are left out: saying where the SDK
-// keeps its log level is not using the storage.
+// localStorage (issue #439, decision O1): a member's credential lasts there.
+// Issue #840 also keeps non-sensitive, per-account notification preferences.
+// Comments are left out: saying where the SDK keeps its log level is not using
+// the storage.
 describe('local storage', () => {
   it('is named in src/api.ts alone', () => {
     const naming = Object.entries(sources)
@@ -71,14 +72,13 @@ describe('local storage', () => {
     expect(naming).toEqual(['./api.ts']);
   });
 
-  it('is used in src/api.ts only for the token key', () => {
+  it('is used in src/api.ts only for credential and notification keys', () => {
     const code = withoutComments(sources['./api.ts'] ?? '');
-    // Named twice: where a lasting credential is kept, and the storage
-    // event's check that the change was there. Never read from directly.
+    // Credential storage and the storage event both go through storageAt.
     expect(code.match(/localStorage/g)?.length).toBe(2);
     expect(code).not.toMatch(/localStorage\s*(\.|\[)/);
-    // Every storage call in the module names the token key, and nothing
-    // lists, counts or clears a storage.
+    // Every storage call names an allowed key; nothing lists, counts or clears
+    // a storage.
     expect(code.match(storageCall)?.length).toBeGreaterThan(0);
     expect(code).not.toMatch(storageCallOtherKey);
     expect(code).not.toMatch(/\.(key|clear)\(|[sS]torage\.length/);
@@ -95,11 +95,12 @@ describe('local storage', () => {
     }
     expect(storageCallOtherKey.test('storage.getItem(tokenKey)')).toBe(false);
     expect(storageCallOtherKey.test('storage.setItem(tokenKey, token)')).toBe(false);
+    expect(storageCallOtherKey.test('storage.getItem(notificationPreferencesKey(origin, account))')).toBe(false);
   });
 });
 
 const storageCall = /\.(getItem|setItem|removeItem)\(/g;
-const storageCallOtherKey = /\.(getItem|setItem|removeItem)\(\s*(?!tokenKey\b)/;
+const storageCallOtherKey = /\.(getItem|setItem|removeItem)\(\s*(?!tokenKey\b|notificationPreferencesKey\b)/;
 
 // withoutComments drops whole-line // comments and /* */ blocks. A // after
 // code on a line is kept, so that a // in a string cannot hide what follows it.
@@ -520,7 +521,8 @@ describe('the built bundle', () => {
 
 // Where the built bundle may name localStorage, and how many times.
 //
-// src/api.ts keeps a member's credential there (issue #439, decision O1).
+// src/api.ts keeps a member's credential there (issue #439, decision O1), and
+// per-account notification preferences (issue #840).
 //
 // The LiveKit SDK (livekit-client 2.22.3) bundles its logger, loglevel, into
 // its own ESM build, so loglevel's mentions are counted under the SDK's file.
