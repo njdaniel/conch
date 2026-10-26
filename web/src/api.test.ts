@@ -15,6 +15,7 @@ import {
   listChannels,
   listInvites,
   listSignIns,
+  loadMessagesAfter,
   loadMessagesAscending,
   onSignedOutElsewhere,
   openSocket,
@@ -23,6 +24,7 @@ import {
   redeemInvite,
   reportVoiceTransmit,
   restore,
+  searchMessages,
   signIn,
   signOut,
   signOutEverywhere,
@@ -914,6 +916,28 @@ describe('file attachments', () => {
     serve(() => json({}, 401));
     expect(await run()).toMatchObject({ ok: false });
     expect(window.localStorage.getItem(key)).toBeNull();
+  });
+
+  it('reads one forward page for result context', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const found = message(9);
+    const calls = serve(() => json({ messages: [found] }));
+    expect(await loadMessagesAfter('red team', 8)).toEqual({ ok: true, value: [found] });
+    expect(calls).toEqual([{ path: '/v2/channels/red%20team/messages?order=asc&limit=100&after=8', method: 'GET', auth: `Bearer ${memberToken}` }]);
+  });
+
+  it('searches with an encoded query and an exclusive cursor', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const found = message(9);
+    const calls = serve(() => json({ messages: [found], next_before: 9 }));
+    expect(await searchMessages('red team', 'alpha & beta', 10)).toEqual({ ok: true, value: { messages: [found], next_before: 9 } });
+    expect(calls).toEqual([{ path: '/v2/channels/red%20team/messages/search?q=alpha+%26+beta&limit=100&before=10', method: 'GET', auth: `Bearer ${memberToken}` }]);
+  });
+
+  it('rejects a malformed search response', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ messages: [{ id: 9 }] }));
+    expect(await searchMessages('red', 'alpha')).toEqual({ ok: false, failure: 'invalid' });
   });
 
   it('follows ascending history cursors for uncertain-send reconciliation', async () => {

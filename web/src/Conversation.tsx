@@ -108,7 +108,7 @@ function attachmentsOf(message: MessageV2): FileAttachmentV1 | null {
   return payload.data as FileAttachmentV1;
 }
 
-function Message({
+export function Message({
   message,
   people,
   nets,
@@ -117,6 +117,7 @@ function Message({
   sent,
   cont,
   onUnauthorized,
+  onOpen,
 }: {
   readonly message: MessageV2;
   readonly people: ReadonlyMap<number, Person>;
@@ -127,6 +128,7 @@ function Message({
   // Drawn under the author's message before it, without the header again.
   readonly cont: boolean;
   readonly onUnauthorized?: () => void;
+  readonly onOpen?: (id: number) => void;
 }) {
   const approval = approvalOf(message);
   const attachments = attachmentsOf(message);
@@ -149,6 +151,9 @@ function Message({
           </span>
         )}
       </Line>
+      {onOpen === undefined ? null : <button type="button" className="search-open" aria-label={`Open context for message ${String(message.id)}`} onClick={() => {
+        onOpen(message.id);
+      }}>Open context</button>}
     </li>
   );
 }
@@ -255,6 +260,7 @@ export function Conversation({
   onReload,
   onBottom,
   onUnauthorized,
+  onSearch,
 }: {
   readonly channel: string;
   readonly chat: ChannelChat;
@@ -275,6 +281,7 @@ export function Conversation({
   // Told whether the reader is at the newest message, whenever that changes.
   readonly onBottom: (atBottom: boolean) => void;
   readonly onUnauthorized?: () => void;
+  readonly onSearch?: () => void;
 }) {
   const log = useRef<HTMLDivElement>(null);
   // Whether the reader is at the bottom, so new messages follow them.
@@ -357,6 +364,7 @@ export function Conversation({
         <h2 id={headingId} tabIndex={-1}>
           {channel}
         </h2>
+        {onSearch === undefined ? null : <button id="channel-search-open" type="button" onClick={onSearch}>Search</button>}
       </header>
       {live === 'reconnecting' ? <p className="stale banner">This conversation may be out of date</p> : null}
       {chat.history === 'error' ? (
