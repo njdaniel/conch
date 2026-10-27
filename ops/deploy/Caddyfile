@@ -14,7 +14,9 @@
 # unix socket below, which only a Caddy started from this file listens on.
 
 {
-	# Where Let's Encrypt writes if a certificate cannot be renewed.
+	# Optional: the contact address of the ACME (Let's Encrypt) account. Delete
+	# this line to register without one; certificates are issued and renewed the
+	# same way.
 	email admin@example.com
 
 	# Caddy's admin API has no authentication. On its default address
