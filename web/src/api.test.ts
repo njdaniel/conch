@@ -17,6 +17,7 @@ import {
   listSignIns,
   loadMessagesAfter,
   loadMessagesAscending,
+  loadThread,
   onSignedOutElsewhere,
   openSocket,
   postMessage,
@@ -872,6 +873,17 @@ describe('file attachments', () => {
     expect(init?.body).toBe(JSON.stringify({ body: 'caption', payload }));
   });
 
+  it('posts a reply with a root and no audience override', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const answer = { ...message(20), thread_root_id: 7 };
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockResolvedValue(json({ message: answer }, 201));
+    vi.stubGlobal('fetch', request);
+    expect(await postMessage('red team', 'reply', undefined, undefined, 7)).toEqual({ ok: true, message: answer });
+    const [path, init] = request.mock.calls[0] ?? [];
+    expect(path).toBe('/v2/channels/red%20team/messages');
+    expect(init?.body).toBe(JSON.stringify({ body: 'reply', thread_root_id: 7 }));
+  });
+
   it("passes through an upload refusal's code and line", async () => {
     await signedInFrom(window.localStorage, memberToken);
     serve(() => json({ code: 'file_too_large', message: 'a file may be at most 10 bytes' }, 413));
@@ -916,6 +928,14 @@ describe('file attachments', () => {
     serve(() => json({}, 401));
     expect(await run()).toMatchObject({ ok: false });
     expect(window.localStorage.getItem(key)).toBeNull();
+  });
+
+  it('reads an ascending thread page with its cursor', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const found = message(9);
+    const calls = serve(() => json({ messages: [found], next_after: 9 }));
+    expect(await loadThread('red team', 7, 8)).toEqual({ ok: true, value: { messages: [found], next_after: 9 } });
+    expect(calls).toEqual([{ path: '/v2/channels/red%20team/messages?thread=7&after=8&limit=100', method: 'GET', auth: `Bearer ${memberToken}` }]);
   });
 
   it('reads one forward page for result context', async () => {
