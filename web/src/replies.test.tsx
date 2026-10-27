@@ -156,4 +156,30 @@ describe('one-level replies', () => {
     fireEvent.click(within(thread).getByRole('button', { name: 'Close thread' }));
     expect(document.activeElement).toBe(opener);
   });
+
+  it('keeps loaded pages and does not refetch when an unrelated message arrives', async () => {
+    const load = vi.spyOn(api, 'loadThread')
+      .mockResolvedValueOnce({ ok: true, value: { messages: [root(), reply(2)], next_after: 2 } })
+      .mockResolvedValueOnce({ ok: true, value: { messages: [reply(3)] } });
+    const { rerender } = view([root(), reply(2)]);
+    fireEvent.click(screen.getByRole('button', { name: 'Open thread for message 1' }));
+    const thread = await screen.findByRole('region', { name: 'Thread around message 1' });
+    fireEvent.click(await within(thread).findByRole('button', { name: 'Load more replies' }));
+    await within(thread).findByText('reply 3');
+    const other: MessageV2 = { ...root(), id: 9, body: 'elsewhere' };
+    rerender(conversation([root(), reply(2), other]));
+    expect(within(thread).getByText('reply 3')).toBeTruthy();
+    expect(within(thread).getByText('reply 2')).toBeTruthy();
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the reply draft when loading older history moves the thread anchor', async () => {
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root(), reply(2), reply(3)] } });
+    const { rerender } = view([reply(3)]);
+    fireEvent.click(screen.getByRole('button', { name: 'Open thread for message 1' }));
+    const box = await screen.findByRole('textbox', { name: 'Reply to message #1' });
+    fireEvent.change(box, { target: { value: 'half written' } });
+    rerender(conversation([root(), reply(2), reply(3)]));
+    expect(screen.getByRole('textbox', { name: 'Reply to message #1' })).toHaveProperty('value', 'half written');
+  });
 });

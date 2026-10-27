@@ -246,7 +246,7 @@ function continues(before: MessageV2 | undefined, message: MessageV2): boolean {
   return Date.parse(message.created_at) - Date.parse(before.created_at) < sameRun;
 }
 
-function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized }: {
+function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized }: {
   readonly rootId: number;
   readonly root: MessageV2 | undefined;
   readonly chat: ChannelChat;
@@ -255,6 +255,8 @@ function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, o
   readonly people: ReadonlyMap<number, Person>;
   readonly nets: ReadonlyMap<number, string>;
   readonly viewer: number;
+  readonly draft: string;
+  readonly onDraft: (text: string) => void;
   readonly onClose: () => void;
   readonly onReplySend: (body: string, root: number, audience: Audience | undefined) => void;
   readonly onRetrySend: (localId: number) => void;
@@ -264,8 +266,11 @@ function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, o
   const [fetched, setFetched] = useState<readonly MessageV2[]>([]);
   const [nextAfter, setNextAfter] = useState<number | undefined>();
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
-  const [draft, setDraft] = useState('');
   const request = useRef(0);
+  const closeNow = useRef(onClose);
+  const unauthorizedNow = useRef(onUnauthorized);
+  closeNow.current = onClose;
+  unauthorizedNow.current = onUnauthorized;
   const load = useCallback(async (after: number, append: boolean) => {
     const current = ++request.current;
     setStatus('loading');
@@ -273,15 +278,15 @@ function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, o
     if (current !== request.current) return;
     if (!result.ok) {
       if (result.failure === 'unauthorized' || result.code === 'thread_not_found') {
-        onClose();
-        if (result.failure === 'unauthorized') onUnauthorized?.();
+        closeNow.current();
+        if (result.failure === 'unauthorized') unauthorizedNow.current?.();
       } else setStatus('error');
       return;
     }
     setFetched((previous) => append ? [...previous, ...result.value.messages] : result.value.messages);
     setNextAfter(result.value.next_after);
     setStatus('ready');
-  }, [channel, rootId, onClose, onUnauthorized]);
+  }, [channel, rootId]);
 
   useEffect(() => {
     setFetched([]);
@@ -330,19 +335,19 @@ function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, o
           event.preventDefault();
           if (live !== 'open' || draft.trim() === '') return;
           onReplySend(draft, rootId, rootMessage.audience);
-          setDraft('');
+          onDraft('');
         }}>
           <p className="hint">Replying to {rootMessage.audience === undefined ? `#${channel}` : audienceLabel(rootMessage.audience, viewer, nets)}; the audience cannot be changed.</p>
           <label htmlFor={`reply-${String(rootId)}`}>Reply to message #{rootId}</label>
           <div className="reply-box">
             <textarea id={`reply-${String(rootId)}`} autoFocus rows={2} value={draft} disabled={live !== 'open'} onChange={(event) => {
-              setDraft(event.target.value);
+              onDraft(event.target.value);
             }} onKeyDown={(event) => {
               if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return;
               event.preventDefault();
               if (live !== 'open' || draft.trim() === '') return;
               onReplySend(draft, rootId, rootMessage.audience);
-              setDraft('');
+              onDraft('');
             }} />
             <button type="submit" disabled={live !== 'open' || draft.trim() === ''}>Send reply</button>
           </div>
@@ -425,14 +430,25 @@ export function Conversation({
     opener.current = from;
     setOpenThread(id);
   }, []);
+  const [replyDrafts, setReplyDrafts] = useState<ReadonlyMap<number, string>>(new Map());
+  const openNow = useRef(openThread);
+  const chatNow = useRef(chat);
+  openNow.current = openThread;
+  chatNow.current = chat;
   const closeThread = useCallback(() => {
-    if (openThread !== null) {
-      const loaded = ordered(chat);
-      const anchor = loaded.some((message) => message.id === openThread) ? openThread : loaded.find((message) => message.thread_root_id === openThread)?.id ?? null;
-      threadReturn.current = { root: openThread, anchor, opener: opener.current };
+    const open = openNow.current;
+    if (open !== null) {
+      const loaded = ordered(chatNow.current);
+      const anchor = loaded.some((message) => message.id === open) ? open : loaded.find((message) => message.thread_root_id === open)?.id ?? null;
+      threadReturn.current = { root: open, anchor, opener: opener.current };
+      setReplyDrafts((previous) => {
+        const next = new Map(previous);
+        next.delete(open);
+        return next;
+      });
     }
     setOpenThread(null);
-  }, [openThread, chat]);
+  }, []);
   useEffect(() => {
     if (openThread !== null || threadReturn.current === null) return;
     const back = threadReturn.current;
@@ -583,6 +599,10 @@ export function Conversation({
                   people={people}
                   nets={nets}
                   viewer={viewer}
+                  draft={replyDrafts.get(openThread as number) ?? ''}
+                  onDraft={(text) => {
+                    setReplyDrafts((previous) => new Map(previous).set(openThread as number, text));
+                  }}
                   onClose={closeThread}
                   onReplySend={onReplySend}
                   onRetrySend={onRetrySend}
