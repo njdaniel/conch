@@ -12,6 +12,14 @@ Everything is parameterised by an **instance name** (`alpha` below) and a **doma
 
 **Status.** The scripts, the units and the backup, restore, upgrade and rollback paths are exercised by `scripts/deploy-scripts-test.sh` (run by `make deploy-test` and in CI) against a real `conchd`, with a stand-in for `systemctl`. That test runs as one ordinary user, so the split between root, the instance users and `conch-backup` described below (`runuser`, `setpriv`, the cleared environment) is not part of it; the parsing of the rollback record, the check of the archive path, the refusal of a symlinked archive, the stripping of control characters and `setsid` are. The Caddyfile, LiveKit's TURN/TLS settings, the firewall and the units under a real systemd were **not** run on a droplet when this was written: the first run on the real droplet (issues A15 and A16) is where they are proved, and this page should be corrected from what that finds.
 
+**First real run (2026-10-27, `v0.1.0-alpha.1`, #567).** Steps 1–7 were followed on a real droplet (Ubuntu 24.04.5, Caddy 2.11.7, Docker 29.1.3, LiveKit 1.13.7) and are corrected below where they were wrong. Proved there:
+- Caddy obtained and serves certificates for all three names;
+- LiveKit runs from the pinned digest under the unit, finds its public IPv4 and IPv6, and serves TURN/TLS on 5349 with Caddy's certificate;
+- `/healthz` reports the tag, `db: ok` and `voice: ok`;
+- `ufw` and a matching Cloud Firewall leave only Caddy (80, 443), LiveKit (7881/tcp, 3478/udp, 5349/tcp, the UDP media range) and SSH listening publicly.
+
+Not yet proved on the droplet: voice through TURN from a network that blocks UDP, steps 8 and 9 (off-site backup and the restore drill), and upgrade and rollback.
+
 ## Users and who can read what
 
 | User | Runs | Can read |
@@ -25,10 +33,11 @@ So a compromised `conchd` cannot read another instance, the backups or the off-s
 
 ## What you need
 
-- A DigitalOcean droplet, Ubuntu 24.04, **4 GB RAM / 2 vCPU to start** (decision O7; the final size follows the measurement in A15), with IPv4.
+- A DigitalOcean droplet, Ubuntu 24.04, **4 GB RAM / 2 vCPU to start** (decision O7; the final size follows the measurement in A15), with IPv4 (and IPv6 if you want it). Sizes differ by region and change over time: check with `doctl compute region list -o json` before choosing. On 2026-10-27, nyc3 offered no 4 GB size at all, and the alpha droplet is `s-2vcpu-4gb` in nyc1.
 - A domain you control, and permission to add DNS records.
 - A DigitalOcean Space (or any S3-compatible bucket) for off-site backups, with **versioning** turned on (step 8), and two access keys: a full-access one that stays on your workstation, and a limited one for that bucket only, for the droplet.
-- A workstation with `ssh`, and somewhere safe (a password manager) for the operator token and the backup encryption passwords.
+- A workstation with `ssh`, and somewhere safe (a password manager, for example Bitwarden or KeePassXC) for the operator token, `CONCHD_TOTP_KEY` (step 5), your operator password, and the backup encryption passwords. If they are lost, the backups cannot be decrypted, so keep them somewhere that survives the workstation.
+- An authenticator app on your phone (any TOTP app, for example 2FAS, Aegis or Google Authenticator) for the operator's browser sign-in (step 6).
 
 ## 1. DNS
 
@@ -40,11 +49,27 @@ Create `A` records (and `AAAA` if the droplet has IPv6) pointing at the droplet 
 | `livekit.example.com` | LiveKit signalling (WebSocket over TLS) |
 | `turn.example.com` | LiveKit's TURN/TLS fallback (UDP-blocked networks) |
 
-Caddy cannot get a certificate for a name that does not resolve yet, so wait for the records before step 7.
+Caddy cannot get a certificate for a name that does not resolve yet, so wait for the records before step 7. With the domain on DigitalOcean's nameservers:
+
+```sh
+for n in alpha livekit turn; do
+  doctl compute domain records create your.domain --record-type A    --record-name $n --record-data <droplet IPv4> --record-ttl 300
+  doctl compute domain records create your.domain --record-type AAAA --record-name $n --record-data <droplet IPv6> --record-ttl 300
+done
+```
+
+**Don't look a name up before its record exists.** A resolver that has answered "no such name" keeps that answer for the zone's negative TTL (30 minutes on DigitalOcean), so a name you checked too early can stay missing on that resolver after the record is made. Check with a resolver you haven't asked yet, for example `https://cloudflare-dns.com/dns-query?name=alpha.your.domain&type=A` with `accept: application/dns-json`.
 
 ## 2. The host
 
 As root on the droplet:
+
+On a fresh droplet, cloud-init and the first unattended upgrade hold the package lock for a few minutes. Wait for them first, or `apt` fails with "Could not get lock":
+
+```sh
+cloud-init status --wait
+while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 5; done
+```
 
 ```sh
 apt update && apt install -y sqlite3 curl ufw docker.io
@@ -170,6 +195,19 @@ sudo -u conch-alpha /opt/conch/current/conchd operator setup --data /var/lib/con
 
 `1` is the operator's principal id (`conch admin principal list` shows ids). It prints a **setup token** once on stdout and revokes nothing. The token works once, within ten minutes, over HTTPS only: open the server's address, choose **Set up an operator account** under "Operators and scripts", and paste it there (or use `conch setup`, or `POST /v1/setup/redeem` with `{"token": "..."}`); the page takes the password, then shows the authenticator's key behind **Show the key**, and not while that tab shares its screen. What it answers is a setup credential that lives fifteen minutes and can do three things and nothing else: show who you are, set your password (`POST /v1/password/mine`) and enrol the authenticator (`POST /v1/totp/enroll`, then `POST /v1/totp/confirm` with a code from the app). **The enrolment shows the authenticator's secret once**, as text and as an `otpauth://` link: type it into the app (or let a QR code made from the link on your own machine be scanned), on a screen nobody else is watching and that you are not sharing, and do not keep a copy of it anywhere else. The server never shows it again, and keeps it only encrypted under `CONCHD_TOTP_KEY`. Confirming completes the setup and ends the setup credential. From then on the browser signs you in with your name, your password and a current code; that session lasts twelve hours at most and ends after an hour without use. Actions that create or grant access, or end someone's (making a credential, a link, a hook or a principal, membership, disabling, hiding), ask for your password and a code again if you last gave them more than ten minutes ago. Script credentials are not asked: that is why they must be guarded.
 
+**Two different tokens.** `bootstrap-operator` prints the **operator token**, a lasting script credential: keep it. `conchd operator setup` prints a **setup token**, for one use within ten minutes: redeem it under **Set up an operator account**, never in the Credential box, which refuses it. Setup isn't finished until the authenticator is confirmed: with only a password set, browser sign-in is refused as incomplete.
+
+**No QR code yet** (#862): the page shows the authenticator's key as text. To scan it instead of typing it, run this on your own workstation (not the droplet). It needs `qrencode` (`apt install qrencode`), runs in `bash` whatever your shell is, asks for the key without echoing it, and keeps the key out of your shell history. Paste the key at the `key:` prompt, then scan the code it draws:
+
+```sh
+bash -c 'command -v qrencode >/dev/null || { echo "install qrencode first" >&2; exit 1; }
+read -rsp "key: " k || exit 1; echo
+[ -n "$k" ] || { echo "no key given" >&2; exit 1; }
+printf "otpauth://totp/Conch:your-name?secret=%s&issuer=Conch" "$(printf %s "$k" | tr -d " ")" | qrencode -t ansiutf8'
+```
+
+If it prints an error instead of a `key:` prompt, don't paste the key. Afterwards, `clear` the terminal.
+
 `conchd operator bootstrap --data /var/lib/conch/alpha your-name` makes the first operator with a setup token instead of a script credential, if you want no script credential at all; it refuses when an operator exists, as `bootstrap-operator` does.
 
 ### An operator who lost their password or authenticator
@@ -225,7 +263,12 @@ timeout 300 sh -c 'until [ -f "$1" ]; do sleep 5; done' sh "$crt" &&
 
 `livekit.service` also refuses to start while that file is missing, rather than letting Docker create the directory.
 
-Open `https://alpha.your.domain/app/`, sign in with the operator token, and create the first channel. Then check voice from a second device on a different network, and once from a network that blocks UDP if you have one.
+Open `https://alpha.your.domain/app/` and sign in. There are two ways:
+
+- **With the operator token** from step 6: under **Operators and scripts**, paste it into **Credential**. It works at once, needs no authenticator, and isn't asked to re-authenticate. But it never expires, and the page keeps it for that tab only, so you paste it again in a new tab.
+- **With your name, password and a code**, once you've finished `conchd operator setup` (step 6). This is the everyday way: the session ends after twelve hours, or one hour unused.
+
+Then create the first channel. Then check voice from a second device on a different network, and once from a network that blocks UDP if you have one.
 
 ## 8. Backups
 

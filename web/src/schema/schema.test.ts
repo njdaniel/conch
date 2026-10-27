@@ -9,6 +9,7 @@ import {
   channelMemberV1,
   channelV0,
   escalationTarget,
+  health,
   interventionV1,
   listChannelsResponse,
   listMessagesResponseV2,
@@ -113,6 +114,10 @@ describe('validators refuse', () => {
     { name: 'an intervention state outside the vocabulary', check: interventionV1, value: { schema: 'conch.intervention.v1', id: 1, run_id: 1, kind: 'cancel', state: 'done', requested_by: 1, requested_at: '2026-10-13T09:01:00Z' }, want: '$.state: want one of requested' },
     { name: 'an activity kind outside the vocabulary', check: agentActivityV1, value: { schema: 'conch.agent.activity.v1', id: 1, run_id: 1, principal_id: 1, kind: 'dance', summary: 's', at: '2026-10-13T09:01:00Z' }, want: '$.kind: want one of run_started' },
     { name: 'a page with a bad message', check: listMessagesResponseV2, value: { messages: [{ ...message, id: 'x' }] }, want: '$.messages[0].id: want an integer' },
+    // server_mode (ADR-011, issue #865): normal mode omits the field, so
+    // "normal" is never a wire value and only "temporary" is one.
+    { name: 'a server mode that is said by omission', check: whoAmIResponseV1, value: { ...whoami, server_mode: 'normal' }, want: '$.server_mode: want one of temporary' },
+    { name: 'a health answer with a server mode that is not one', check: health, value: { status: 'ok', version: 'v1', db: 'ok', voice: 'not_configured', server_mode: 'normal' }, want: '$.server_mode: want one of temporary' },
   ];
 
   it.each(refusals)('$name', ({ check, value, want }) => {

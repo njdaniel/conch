@@ -1,0 +1,20 @@
+{
+  "id": 1,
+  "kind": "human",
+  "name": "nick",
+  "role": "operator",
+  "server_version": "v0.1.0-alpha.2",
+  "may_invite": true,
+  "voice_allowed": true,
+  "identity_class": "operator",
+  "auth": {
+    "scope": "full",
+    "password_set": true,
+    "setup_complete": true,
+    "expires_at": "2026-10-28T00:00:00.000Z",
+    "idle_expires_at": "2026-10-27T13:00:00.000Z",
+    "recent_auth_until": "2026-10-27T12:10:00.000Z"
+  },
+  "owner": true,
+  "server_mode": "temporary"
+}

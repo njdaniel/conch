@@ -79,6 +79,7 @@ var Vocabularies = map[string][]string{
 		RunStateQueued, RunStateStarting, RunStateRunning, RunStateBlocked,
 		RunStateWaiting, RunStateCompleted, RunStateFailed, RunStateCancelled,
 	),
+	"ServerMode":   values(ServerModeTemporary),
 	"SessionState": values(SessionStateOnline, SessionStateStale, SessionStateOffline),
 	"SessionStatus": values(
 		SessionStatusOnline, SessionStatusIdle, SessionStatusRunning, SessionStatusBlocked,

@@ -23,6 +23,9 @@ func TestWhoAmIGoldenFixtures(t *testing.T) {
 		{"whoami-response-v1-setup.json", func() any { return new(WhoAmIResponseV1) }},
 		{"whoami-response-v1-operator-auth.json", func() any { return new(WhoAmIResponseV1) }},
 		{"whoami-response-v1-owner.json", func() any { return new(WhoAmIResponseV1) }},
+		// A server in temporary mode says so (ADR-011, issue #865); every
+		// fixture above is a normal-mode answer and omits the field.
+		{"whoami-response-v1-temporary.json", func() any { return new(WhoAmIResponseV1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
@@ -122,6 +125,52 @@ func TestWhoAmIResponseV1OwnerKey(t *testing.T) {
 			got, has := keys["owner"]
 			if has != tt.wantKey || got != tt.wantValue {
 				t.Errorf("owner = %v (present %v), want %v (present %v) in %s", got, has, tt.wantValue, tt.wantKey, raw)
+			}
+		})
+	}
+}
+
+// TestWhoAmIResponseV1ServerMode checks the wire rule of ADR-011 item 2.3
+// (issue #865): a normal-mode answer omits server_mode, a temporary-mode
+// answer carries "temporary", and nothing else is a mode on the wire,
+// "normal" included.
+func TestWhoAmIResponseV1ServerMode(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		want    ServerMode
+		wantKey bool
+		wantErr bool
+	}{
+		{"absent is normal mode", `{"id":1,"kind":"human","name":"nick","role":"operator"}`, "", false, false},
+		{"empty is normal mode", `{"id":1,"kind":"human","name":"nick","role":"operator","server_mode":""}`, "", false, false},
+		{"temporary", `{"id":1,"kind":"human","name":"nick","role":"operator","server_mode":"temporary"}`, ServerModeTemporary, true, false},
+		{"normal is never sent", `{"id":1,"kind":"human","name":"nick","role":"operator","server_mode":"normal"}`, "normal", true, true},
+		{"unknown mode", `{"id":1,"kind":"human","name":"nick","role":"operator","server_mode":"ephemeral"}`, "ephemeral", true, true},
+		{"wrong case", `{"id":1,"kind":"human","name":"nick","role":"operator","server_mode":"Temporary"}`, "Temporary", true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var resp WhoAmIResponseV1
+			if err := json.Unmarshal([]byte(tt.raw), &resp); err != nil {
+				t.Fatal(err)
+			}
+			if resp.ServerMode != tt.want {
+				t.Errorf("ServerMode = %q, want %q", resp.ServerMode, tt.want)
+			}
+			if err := resp.Validate(); (err != nil) != tt.wantErr {
+				t.Errorf("Validate() = %v, want error %v", err, tt.wantErr)
+			}
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var keys map[string]any
+			if err := json.Unmarshal(raw, &keys); err != nil {
+				t.Fatal(err)
+			}
+			if _, has := keys["server_mode"]; has != tt.wantKey {
+				t.Errorf("server_mode present = %v, want %v in %s", has, tt.wantKey, raw)
 			}
 		})
 	}
