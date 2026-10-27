@@ -197,13 +197,16 @@ sudo -u conch-alpha /opt/conch/current/conchd operator setup --data /var/lib/con
 
 **Two different tokens.** `bootstrap-operator` prints the **operator token**, a lasting script credential: keep it. `conchd operator setup` prints a **setup token**, for one use within ten minutes: redeem it under **Set up an operator account**, never in the Credential box, which refuses it. Setup isn't finished until the authenticator is confirmed: with only a password set, browser sign-in is refused as incomplete.
 
-**No QR code yet** (#862): the page shows the authenticator's key as text. To scan it instead of typing it, paste the key into this on your own workstation (not the droplet), which keeps it out of your shell history, and scan the code it draws:
+**No QR code yet** (#862): the page shows the authenticator's key as text. To scan it instead of typing it, run this on your own workstation (not the droplet). It needs `qrencode` (`apt install qrencode`), runs in `bash` whatever your shell is, asks for the key without echoing it, and keeps the key out of your shell history. Paste the key at the `key:` prompt, then scan the code it draws:
 
 ```sh
-read -rsp 'key: ' k; echo; printf 'otpauth://totp/Conch:your-name?secret=%s&issuer=Conch' "$(printf %s "$k" | tr -d ' ')" | qrencode -t ansiutf8; unset k
+bash -c 'command -v qrencode >/dev/null || { echo "install qrencode first" >&2; exit 1; }
+read -rsp "key: " k || exit 1; echo
+[ -n "$k" ] || { echo "no key given" >&2; exit 1; }
+printf "otpauth://totp/Conch:your-name?secret=%s&issuer=Conch" "$(printf %s "$k" | tr -d " ")" | qrencode -t ansiutf8'
 ```
 
-Then `clear` the terminal.
+If it prints an error instead of a `key:` prompt, don't paste the key. Afterwards, `clear` the terminal.
 
 `conchd operator bootstrap --data /var/lib/conch/alpha your-name` makes the first operator with a setup token instead of a script credential, if you want no script credential at all; it refuses when an operator exists, as `bootstrap-operator` does.
 
