@@ -155,10 +155,13 @@ describe('media devices', () => {
     const naming = Object.entries(sources)
       .filter(([, code]) => screenApi.test(code))
       .map(([path]) => path);
-    // src/voice/sdk.ts also names it, for the device-change listener of the
-    // private microphone test (issue #846); it never calls the screen API.
+    // src/voice/sdk.ts also names mediaDevices, for the device-change
+    // listener of the private microphone test (issue #846). It may not
+    // mention the screen API at all, not even outside a call (a bound or
+    // aliased reference would escape screenCall): share.ts stays its only
+    // checker.
     expect(naming).toEqual(['./voice/sdk.ts', screenChecker]);
-    expect(sources['./voice/sdk.ts'] ?? '').not.toMatch(screenCall);
+    expect(withoutComments(sources['./voice/sdk.ts'] ?? '')).not.toMatch(/getDisplayMedia/);
     const code = sources[screenChecker] ?? '';
     expect(code).not.toMatch(screenCall);
     // It only looks the API up: a type of what it looks for, and the look.
