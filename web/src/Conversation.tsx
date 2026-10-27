@@ -133,8 +133,8 @@ export function Message({
   readonly cont: boolean;
   readonly onUnauthorized?: () => void;
   readonly onOpen?: (id: number) => void;
-  readonly onReply?: (id: number) => void;
-  readonly onOpenThread?: (id: number) => void;
+  readonly onReply?: (id: number, opener: HTMLElement) => void;
+  readonly onOpenThread?: (id: number, opener: HTMLElement) => void;
   readonly thread?: ReactNode;
 }) {
   const approval = approvalOf(message);
@@ -161,11 +161,11 @@ export function Message({
       {onOpen === undefined ? null : <button type="button" className="search-open" aria-label={`Open context for message ${String(message.id)}`} onClick={() => {
         onOpen(message.id);
       }}>Open context</button>}
-      {onReply === undefined || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to message ${String(message.id)}`} onClick={() => {
-        onReply(message.id);
+      {onReply === undefined || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to message ${String(message.id)}`} onClick={(event) => {
+        onReply(message.id, event.currentTarget);
       }}>Reply</button>}
-      {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for message ${String(message.thread_root_id)}`} onClick={() => {
-        onOpenThread(message.thread_root_id as number);
+      {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for message ${String(message.thread_root_id)}`} onClick={(event) => {
+        onOpenThread(message.thread_root_id as number, event.currentTarget);
       }}>Open thread</button>}
       {thread}
     </li>
@@ -419,16 +419,30 @@ export function Conversation({
   const sized = useRef<number | null>(null);
   const [unseen, setUnseen] = useState(false);
   const [openThread, setOpenThread] = useState<number | null>(null);
-  const threadReturn = useRef<number | null>(null);
+  const opener = useRef<HTMLElement | null>(null);
+  const threadReturn = useRef<{ readonly root: number; readonly anchor: number | null; readonly opener: HTMLElement | null } | null>(null);
+  const openFrom = useCallback((id: number, from: HTMLElement) => {
+    opener.current = from;
+    setOpenThread(id);
+  }, []);
   const closeThread = useCallback(() => {
-    threadReturn.current = openThread;
+    if (openThread !== null) {
+      const loaded = ordered(chat);
+      const anchor = loaded.some((message) => message.id === openThread) ? openThread : loaded.find((message) => message.thread_root_id === openThread)?.id ?? null;
+      threadReturn.current = { root: openThread, anchor, opener: opener.current };
+    }
     setOpenThread(null);
-  }, [openThread]);
+  }, [openThread, chat]);
   useEffect(() => {
     if (openThread !== null || threadReturn.current === null) return;
-    const id = threadReturn.current;
+    const back = threadReturn.current;
     threadReturn.current = null;
-    log.current?.querySelector<HTMLElement>(`[data-message-id="${String(id)}"] .reply-action`)?.focus();
+    const list = log.current;
+    const target = back.opener?.isConnected === true ? back.opener
+      : list?.querySelector<HTMLElement>(`[data-message-id="${String(back.root)}"] .reply-action`)
+        ?? list?.querySelector<HTMLElement>(`[data-message-id="${String(back.root)}"]`)
+        ?? list?.querySelector<HTMLElement>(`[data-message-id="${String(back.anchor)}"]`);
+    target?.focus();
   }, [openThread]);
 
   const shown = ordered(chat);
@@ -556,13 +570,13 @@ export function Conversation({
               sent={chat.sentIds.has(message.id)}
               cont={continues(shown[i - 1], message)}
               onUnauthorized={onUnauthorized}
-              onReply={setOpenThread}
-              onOpenThread={setOpenThread}
+              onReply={openFrom}
+              onOpenThread={openFrom}
               thread={threadAnchor === null || message.id !== threadAnchor ? null : (
                 <ThreadView
-                  key={threadAnchor}
-                  rootId={threadAnchor}
-                  root={chat.byId.get(threadAnchor)}
+                  key={openThread}
+                  rootId={openThread as number}
+                  root={chat.byId.get(openThread as number)}
                   chat={chat}
                   channel={channel}
                   live={live}

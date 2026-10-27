@@ -378,6 +378,10 @@ export function parseFrame(data: unknown, channelId: number): MessageV2 | null {
 export function sameSend(pending: PendingSend, message: MessageV2): boolean {
   if ((pending.threadRootId ?? 0) !== (message.thread_root_id ?? 0)) return false;
   if (pending.body !== message.body || !samePayload(pending.payload, message.payload)) return false;
+  // A reply's audience is the root's, narrowed by the server to whoever is still
+  // entitled (a whisper recipient who left, a net member taken off): it may be
+  // smaller than what the pending send held, so it is not compared.
+  if (pending.threadRootId !== undefined) return true;
   const a = pending.audience;
   const b = message.audience;
   if (a === undefined || b === undefined) return a === b;

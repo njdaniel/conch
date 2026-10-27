@@ -134,4 +134,26 @@ describe('one-level replies', () => {
     expect(screen.getAllByRole('button', { name: /^Reply to message/ })).toHaveLength(1);
     expect(screen.getByRole('button', { name: 'Open thread for message 1' })).toBeTruthy();
   });
+
+  it('opens the thread of a reply whose root is not loaded, by the root id', async () => {
+    const load = vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root(), reply(2)] } });
+    view([reply(2)]);
+    fireEvent.click(screen.getByRole('button', { name: 'Open thread for message 1' }));
+    const thread = await screen.findByRole('region', { name: 'Thread around message 1' });
+    expect(load).toHaveBeenCalledWith('general', 1, 0);
+    expect(within(thread).getByText('root')).toBeTruthy();
+    expect(within(thread).getByRole('textbox', { name: 'Reply to message #1' })).toBeTruthy();
+    fireEvent.click(within(thread).getByRole('button', { name: 'Close thread' }));
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Open thread for message 1' }));
+  });
+
+  it('returns focus to Open thread when it opened the thread', async () => {
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root(), reply(2)] } });
+    view([root(), reply(2)]);
+    const opener = screen.getByRole('button', { name: 'Open thread for message 1' });
+    fireEvent.click(opener);
+    const thread = await screen.findByRole('region', { name: 'Thread around message 1' });
+    fireEvent.click(within(thread).getByRole('button', { name: 'Close thread' }));
+    expect(document.activeElement).toBe(opener);
+  });
 });

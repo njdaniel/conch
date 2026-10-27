@@ -136,6 +136,15 @@ describe('the message store', () => {
       expect(chatFor(state, 'ops').pending).toEqual([]);
     });
 
+    it('reconciles a reply whose delivered audience is narrower than the root audience it held', () => {
+      let state = run({ type: 'sending', channelId: 7, authorId: 3, channel: 'ops', body: 'psst', at: 1, threadRootId: 10, audience: { kind: 'principals', principal_ids: [4, 5] } });
+      state = chatReducer(state, { type: 'sendFailed', channel: 'ops', localId: 1, outcome: 'unconfirmed' });
+      const delivered: MessageV2 = { ...msg(8, 'psst'), thread_root_id: 10, audience: { kind: 'principals', principal_ids: [4] } };
+      state = chatReducer(state, { type: 'received', channel: 'ops', message: delivered, own: true });
+      expect(chatFor(state, 'ops').pending).toEqual([]);
+      expect([...chatFor(state, 'ops').byId.keys()]).toContain(8);
+    });
+
     it('leaves a failed send in place: it was not delivered, whatever arrives', () => {
       let state = run({ type: 'sending', channelId: 7, authorId: 3, channel: 'ops', body: 'hi', at: 1 }, { type: 'sendFailed', channel: 'ops', localId: 1, outcome: 'failed' });
       state = chatReducer(state, { type: 'received', channel: 'ops', message: msg(8, 'hi'), own: true });
