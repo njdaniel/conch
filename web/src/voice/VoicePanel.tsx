@@ -22,6 +22,10 @@
 // use selected. A choice the browser refuses, and speakers that went, are
 // said in the notes.
 //
+// Before joining there is a private microphone test (issue #846): a level
+// meter, and the person's own voice played back if they ask, with nothing
+// sent. Joining voice ends it.
+//
 // And a volume for each other person in voice (issue #661), on this page
 // only: a slider each, under Voice options, and on a person's chip in the
 // roster how loud they are played while it is not 100%.
@@ -30,6 +34,7 @@ import { createPortal } from 'react-dom';
 import { Avatar, Glyph } from '../Icons';
 import type { ChannelV0 } from '../schema/channel';
 import { StageHost } from '../stage';
+import { MicTest } from './MicTest';
 import type { Person } from '../useLiveChannel';
 import type { Phase, Processing } from './connection';
 import { keyLabel } from './keys';
@@ -490,6 +495,9 @@ export function VoicePanel({
             ) : snapshot.kind === 'gone' ? (
               <p className="hint">Voice status could not be read.</p>
             ) : null}
+            {/* Private, and only while not in voice: joining takes this
+                out of the tree, which releases the microphone first. */}
+            {voice.secure ? <MicTest /> : null}
           </>
         )}
       </div>

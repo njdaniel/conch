@@ -84,6 +84,15 @@ afterEach(() => {
   cleanup();
 });
 
+describe('the private microphone test (issue #846)', () => {
+  it('is offered before joining, and joining voice takes it away', () => {
+    const { voice, redraw } = panel(initialVoice, 'general');
+    expect(within(voice).getByRole('button', { name: 'Test microphone' })).toBeTruthy();
+    redraw(inVoice('connecting', 'general'));
+    expect(within(voice).queryByRole('button', { name: /test microphone|stop test/i })).toBeNull();
+  });
+});
+
 describe('Join voice and Watch only', () => {
   it('name the channel on screen, which is the room they join', () => {
     const { voice, calls } = panel(initialVoice, 'general');
