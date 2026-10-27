@@ -169,7 +169,12 @@ async function connect(socket: FakeSocket) {
   });
 }
 
-const lines = () => within(screen.getByRole('log', { name: 'Messages' })).queryAllByRole('listitem').map((li) => li.textContent);
+const lines = () => within(screen.getByRole('log', { name: 'Messages' })).queryAllByRole('listitem').map((li) => {
+  const copy = li.cloneNode(true) as HTMLElement;
+  // The Reply and Open thread buttons are controls, not message text.
+  copy.querySelectorAll('button').forEach((button) => { button.remove(); });
+  return copy.textContent;
+});
 
 beforeEach(() => {
   window.sessionStorage.clear();

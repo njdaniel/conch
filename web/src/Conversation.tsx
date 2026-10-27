@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import * as api from './api';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar } from './Icons';
@@ -118,6 +119,9 @@ export function Message({
   cont,
   onUnauthorized,
   onOpen,
+  onReply,
+  onOpenThread,
+  thread,
 }: {
   readonly message: MessageV2;
   readonly people: ReadonlyMap<number, Person>;
@@ -129,6 +133,9 @@ export function Message({
   readonly cont: boolean;
   readonly onUnauthorized?: () => void;
   readonly onOpen?: (id: number) => void;
+  readonly onReply?: (id: number) => void;
+  readonly onOpenThread?: (id: number) => void;
+  readonly thread?: ReactNode;
 }) {
   const approval = approvalOf(message);
   const attachments = attachmentsOf(message);
@@ -154,6 +161,13 @@ export function Message({
       {onOpen === undefined ? null : <button type="button" className="search-open" aria-label={`Open context for message ${String(message.id)}`} onClick={() => {
         onOpen(message.id);
       }}>Open context</button>}
+      {onReply === undefined || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to message ${String(message.id)}`} onClick={() => {
+        onReply(message.id);
+      }}>Reply</button>}
+      {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for message ${String(message.thread_root_id)}`} onClick={() => {
+        onOpenThread(message.thread_root_id as number);
+      }}>Open thread</button>}
+      {thread}
     </li>
   );
 }
@@ -232,6 +246,113 @@ function continues(before: MessageV2 | undefined, message: MessageV2): boolean {
   return Date.parse(message.created_at) - Date.parse(before.created_at) < sameRun;
 }
 
+function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized }: {
+  readonly rootId: number;
+  readonly root: MessageV2 | undefined;
+  readonly chat: ChannelChat;
+  readonly channel: string;
+  readonly live: LiveStatus;
+  readonly people: ReadonlyMap<number, Person>;
+  readonly nets: ReadonlyMap<number, string>;
+  readonly viewer: number;
+  readonly onClose: () => void;
+  readonly onReplySend: (body: string, root: number, audience: Audience | undefined) => void;
+  readonly onRetrySend: (localId: number) => void;
+  readonly onDismissSend: (localId: number) => void;
+  readonly onUnauthorized?: () => void;
+}) {
+  const [fetched, setFetched] = useState<readonly MessageV2[]>([]);
+  const [nextAfter, setNextAfter] = useState<number | undefined>();
+  const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [draft, setDraft] = useState('');
+  const request = useRef(0);
+  const load = useCallback(async (after: number, append: boolean) => {
+    const current = ++request.current;
+    setStatus('loading');
+    const result = await api.loadThread(channel, rootId, after);
+    if (current !== request.current) return;
+    if (!result.ok) {
+      if (result.failure === 'unauthorized' || result.code === 'thread_not_found') {
+        onClose();
+        if (result.failure === 'unauthorized') onUnauthorized?.();
+      } else setStatus('error');
+      return;
+    }
+    setFetched((previous) => append ? [...previous, ...result.value.messages] : result.value.messages);
+    setNextAfter(result.value.next_after);
+    setStatus('ready');
+  }, [channel, rootId, onClose, onUnauthorized]);
+
+  useEffect(() => {
+    setFetched([]);
+    setNextAfter(undefined);
+    void load(0, false);
+    return () => {
+      request.current++;
+    };
+  }, [load]);
+
+  const byId = new Map<number, MessageV2>();
+  if (root !== undefined) byId.set(root.id, root);
+  for (const message of [...fetched, ...ordered(chat)]) {
+    if (message.id === rootId || message.thread_root_id === rootId) byId.set(message.id, message);
+  }
+  const messages = [...byId.values()].sort((a, b) => a.id - b.id);
+  const rootMessage = byId.get(rootId);
+  const me = people.get(viewer) ?? { name: `#${String(viewer)}`, kind: null };
+  const pending = chat.pending.filter((send) => send.threadRootId === rootId);
+  return (
+    <section className="thread-view" aria-label={`Thread around message ${String(rootId)}`}>
+      <div className="thread-head">
+        <h3>Thread</h3>
+        <button type="button" onClick={onClose}>Close thread</button>
+      </div>
+      {status === 'loading' && fetched.length === 0 ? <p role="status">Loading thread…</p> : null}
+      {status === 'error' ? (
+        <div role="alert" className="banner problem">
+          <p>Cannot load this thread.</p>
+          <button type="button" onClick={() => {
+            void load(nextAfter ?? 0, nextAfter !== undefined);
+          }}>Try again</button>
+        </div>
+      ) : null}
+      <ol className="messages" aria-label="Root and replies">
+        {messages.map((message) => <Message key={message.id} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={chat.sentIds.has(message.id)} cont={false} onUnauthorized={onUnauthorized} />)}
+        {pending.map((send) => <Pending key={`local-${String(send.localId)}`} send={send} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />)}
+      </ol>
+      {nextAfter === undefined ? null : (
+        <button type="button" disabled={status === 'loading'} onClick={() => {
+          void load(nextAfter, true);
+        }}>Load more replies</button>
+      )}
+      {rootMessage === undefined ? null : (
+        <form className="reply-composer" onSubmit={(event) => {
+          event.preventDefault();
+          if (live !== 'open' || draft.trim() === '') return;
+          onReplySend(draft, rootId, rootMessage.audience);
+          setDraft('');
+        }}>
+          <p className="hint">Replying to {rootMessage.audience === undefined ? `#${channel}` : audienceLabel(rootMessage.audience, viewer, nets)}; the audience cannot be changed.</p>
+          <label htmlFor={`reply-${String(rootId)}`}>Reply to message #{rootId}</label>
+          <div className="reply-box">
+            <textarea id={`reply-${String(rootId)}`} autoFocus rows={2} value={draft} disabled={live !== 'open'} onChange={(event) => {
+              setDraft(event.target.value);
+            }} onKeyDown={(event) => {
+              if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return;
+              event.preventDefault();
+              if (live !== 'open' || draft.trim() === '') return;
+              onReplySend(draft, rootId, rootMessage.audience);
+              setDraft('');
+            }} />
+            <button type="submit" disabled={live !== 'open' || draft.trim() === ''}>Send reply</button>
+          </div>
+          {live === 'reconnecting' ? <p className="hint">Reconnecting; replies cannot be sent.</p> : null}
+        </form>
+      )}
+    </section>
+  );
+}
+
 // The open channel's heading, where focus goes on arriving in the lobby
 // (issue #590). It is not the composer: on a phone that would open the
 // keyboard over the page.
@@ -254,6 +375,7 @@ export function Conversation({
   onDraft,
   onTarget,
   onSend,
+  onReplySend,
   onRetrySend,
   onDismissSend,
   onLoadOlder,
@@ -274,6 +396,7 @@ export function Conversation({
   readonly onDraft: (text: string) => void;
   readonly onTarget: (action: TargetAction) => void;
   readonly onSend: (body: string, audience: Audience | undefined) => void;
+  readonly onReplySend: (body: string, root: number, audience: Audience | undefined) => void;
   readonly onRetrySend: (localId: number) => void;
   readonly onDismissSend: (localId: number) => void;
   readonly onLoadOlder: () => void;
@@ -295,8 +418,21 @@ export function Conversation({
   // has, or without one.
   const sized = useRef<number | null>(null);
   const [unseen, setUnseen] = useState(false);
+  const [openThread, setOpenThread] = useState<number | null>(null);
+  const threadReturn = useRef<number | null>(null);
+  const closeThread = useCallback(() => {
+    threadReturn.current = openThread;
+    setOpenThread(null);
+  }, [openThread]);
+  useEffect(() => {
+    if (openThread !== null || threadReturn.current === null) return;
+    const id = threadReturn.current;
+    threadReturn.current = null;
+    log.current?.querySelector<HTMLElement>(`[data-message-id="${String(id)}"] .reply-action`)?.focus();
+  }, [openThread]);
 
   const shown = ordered(chat);
+  const threadAnchor = openThread === null ? null : shown.some((message) => message.id === openThread) ? openThread : shown.find((message) => message.thread_root_id === openThread)?.id ?? null;
   const hasOlder = canLoadOlder(chat);
   const loadingOlder = chat.older === 'loading';
   const me = people.get(viewer) ?? { name: `#${String(viewer)}`, kind: null };
@@ -420,9 +556,29 @@ export function Conversation({
               sent={chat.sentIds.has(message.id)}
               cont={continues(shown[i - 1], message)}
               onUnauthorized={onUnauthorized}
+              onReply={setOpenThread}
+              onOpenThread={setOpenThread}
+              thread={threadAnchor === null || message.id !== threadAnchor ? null : (
+                <ThreadView
+                  key={threadAnchor}
+                  rootId={threadAnchor}
+                  root={chat.byId.get(threadAnchor)}
+                  chat={chat}
+                  channel={channel}
+                  live={live}
+                  people={people}
+                  nets={nets}
+                  viewer={viewer}
+                  onClose={closeThread}
+                  onReplySend={onReplySend}
+                  onRetrySend={onRetrySend}
+                  onDismissSend={onDismissSend}
+                  onUnauthorized={onUnauthorized}
+                />
+              )}
             />
           ))}
-          {chat.pending.map((send) => (
+          {chat.pending.filter((send) => send.threadRootId === undefined).map((send) => (
             <Pending key={`local-${String(send.localId)}`} send={send} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />
           ))}
         </ol>

@@ -123,6 +123,19 @@ describe('the message store', () => {
       expect(chatFor(state, 'ops').pending).toEqual([]);
     });
 
+    it('matches the thread root as well as the body and audience', () => {
+      let state = run(
+        { type: 'sending', channelId: 7, authorId: 3, channel: 'ops', body: 'hi', at: 1, threadRootId: 10 },
+        { type: 'sending', channelId: 7, authorId: 3, channel: 'ops', body: 'hi', at: 2, threadRootId: 11 },
+      );
+      state = chatReducer(state, { type: 'received', channel: 'ops', message: msg(7, 'hi'), own: true });
+      expect(chatFor(state, 'ops').pending).toHaveLength(2);
+      state = chatReducer(state, { type: 'received', channel: 'ops', message: { ...msg(8, 'hi'), thread_root_id: 11 }, own: true });
+      expect(chatFor(state, 'ops').pending.map((pending) => [pending.localId, pending.threadRootId])).toEqual([[1, 10]]);
+      state = chatReducer(state, { type: 'received', channel: 'ops', message: { ...msg(9, 'hi'), thread_root_id: 10 }, own: true });
+      expect(chatFor(state, 'ops').pending).toEqual([]);
+    });
+
     it('leaves a failed send in place: it was not delivered, whatever arrives', () => {
       let state = run({ type: 'sending', channelId: 7, authorId: 3, channel: 'ops', body: 'hi', at: 1 }, { type: 'sendFailed', channel: 'ops', localId: 1, outcome: 'failed' });
       state = chatReducer(state, { type: 'received', channel: 'ops', message: msg(8, 'hi'), own: true });

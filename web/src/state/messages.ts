@@ -34,6 +34,7 @@ export interface PendingSend {
   readonly phase: SendPhase;
   // Who it goes to when not the whole channel; kept so a Retry goes to the same.
   readonly audience?: Audience;
+  readonly threadRootId?: number;
   // A frozen composer-order snapshot. Ready fileIds and payload survive a
   // failed POST and are reused by Retry; local bytes remain available too.
   readonly attachments: readonly DraftAttachment[];
@@ -106,6 +107,7 @@ export type ChatAction =
       readonly body: string;
       readonly at: number;
       readonly audience?: Audience;
+      readonly threadRootId?: number;
       readonly attachments?: readonly DraftAttachment[];
       readonly payload?: Payload;
       readonly requestId?: string;
@@ -235,6 +237,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
               reconcileAfter: lastId(c),
               ...(payload === undefined ? {} : { payload }),
               ...(action.audience === undefined ? {} : { audience: action.audience }),
+              ...(action.threadRootId === undefined ? {} : { threadRootId: action.threadRootId }),
               ...(action.requestId === undefined ? {} : { requestId: action.requestId }),
             },
           ],
@@ -373,6 +376,7 @@ export function parseFrame(data: unknown, channelId: number): MessageV2 | null {
 // to the same audience (the whole channel, a net, or the same people in any
 // order). Payload array order is significant, including attachment file_ids.
 export function sameSend(pending: PendingSend, message: MessageV2): boolean {
+  if ((pending.threadRootId ?? 0) !== (message.thread_root_id ?? 0)) return false;
   if (pending.body !== message.body || !samePayload(pending.payload, message.payload)) return false;
   const a = pending.audience;
   const b = message.audience;
