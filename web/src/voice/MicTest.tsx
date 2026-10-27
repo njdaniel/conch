@@ -96,6 +96,8 @@ export function MicTest({ deps = browser }: { readonly deps?: MicTestDeps }) {
     let source: MediaStreamAudioSourceNode | null = null;
     let timer: number | undefined;
     let unwatch: (() => void) | null = null;
+    let ended: (() => void) | null = null;
+    let endedOn: MediaStreamTrack | null = null;
 
     const release = () => {
       if (timer !== undefined) window.clearInterval(timer);
@@ -105,6 +107,9 @@ export function MicTest({ deps = browser }: { readonly deps?: MicTestDeps }) {
       source?.disconnect();
       source = null;
       gain.current = null;
+      if (ended !== null) endedOn?.removeEventListener('ended', ended);
+      ended = null;
+      endedOn = null;
       capture?.stop();
       capture = null;
       if (context !== null) void context.close().catch(() => undefined);
@@ -170,9 +175,11 @@ export function MicTest({ deps = browser }: { readonly deps?: MicTestDeps }) {
           setLevel(levelOf(samples));
         }, meterEvery);
         void ctx.resume().catch(() => undefined);
-        opened.track.addEventListener('ended', () => {
+        ended = () => {
           lose('lost');
-        });
+        };
+        endedOn = opened.track;
+        endedOn.addEventListener('ended', ended);
         unwatch = deps.watch(() => {
           void refresh(opened);
         });

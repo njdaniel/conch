@@ -9,6 +9,15 @@ import type { TestCapture } from './sdk';
 
 class FakeTrack extends EventTarget {
   stopped = false;
+  endedListeners = 0;
+  override addEventListener(type: string, cb: EventListenerOrEventListenerObject | null, o?: AddEventListenerOptions | boolean) {
+    if (type === 'ended') this.endedListeners++;
+    super.addEventListener(type, cb, o);
+  }
+  override removeEventListener(type: string, cb: EventListenerOrEventListenerObject | null, o?: EventListenerOptions | boolean) {
+    if (type === 'ended') this.endedListeners--;
+    super.removeEventListener(type, cb, o);
+  }
   getSettings() {
     return {};
   }
@@ -143,6 +152,8 @@ function released(h: Harness, n = h.captures.length) {
   for (const c of h.captures) expect(c.track.stopped).toBe(true);
   for (const c of h.contexts) expect(c.closed).toBe(true);
   expect(h.watchers.size).toBe(0);
+  // The ended listener is gone from every track, whichever way it ended.
+  for (const c of h.captures) expect(c.track.endedListeners).toBe(0);
 }
 
 describe('starting and stopping', () => {
@@ -224,6 +235,8 @@ describe('changing the microphone', () => {
     });
     expect(h.asked).toEqual([null, 'b']);
     expect(h.captures[0]?.track.stopped).toBe(true);
+    expect(h.captures[0]?.track.endedListeners).toBe(0);
+    expect(h.captures[1]?.track.endedListeners).toBe(1);
     expect(h.contexts[0]?.closed).toBe(true);
     expect(h.captures[1]?.track.stopped).toBe(false);
     expect(h.contexts[1]?.closed).toBe(false);

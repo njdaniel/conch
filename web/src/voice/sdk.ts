@@ -231,14 +231,15 @@ export async function testMicrophones(): Promise<readonly Microphone[] | null> {
 }
 
 // watchMicrophones calls back when the browser's devices change, until the
-// returned function is called. The SDK follows the browser's devices from a
-// room's construction, connected or not; this room never connects.
+// returned function is called, which removes exactly the listener added. It
+// listens itself rather than through a room: a room that never connected
+// does not remove its own listener when disconnected.
 export function watchMicrophones(onChange: () => void): () => void {
-  const room = new LiveKitRoom(roomOptions);
-  room.on(RoomEvent.MediaDevicesChanged, onChange);
+  const devices = (navigator as { readonly mediaDevices?: MediaDevices }).mediaDevices;
+  if (devices === undefined) return () => undefined;
+  devices.addEventListener('devicechange', onChange);
   return () => {
-    room.off(RoomEvent.MediaDevicesChanged, onChange);
-    void room.disconnect();
+    devices.removeEventListener('devicechange', onChange);
   };
 }
 

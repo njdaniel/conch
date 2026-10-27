@@ -155,7 +155,10 @@ describe('media devices', () => {
     const naming = Object.entries(sources)
       .filter(([, code]) => screenApi.test(code))
       .map(([path]) => path);
-    expect(naming).toEqual([screenChecker]);
+    // src/voice/sdk.ts also names it, for the device-change listener of the
+    // private microphone test (issue #846); it never calls the screen API.
+    expect(naming).toEqual(['./voice/sdk.ts', screenChecker]);
+    expect(sources['./voice/sdk.ts'] ?? '').not.toMatch(screenCall);
     const code = sources[screenChecker] ?? '';
     expect(code).not.toMatch(screenCall);
     // It only looks the API up: a type of what it looks for, and the look.
