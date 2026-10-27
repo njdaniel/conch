@@ -1,13 +1,11 @@
 import type { Page } from '@playwright/test';
-import { spawn } from 'node:child_process';
-import { closeSync, openSync } from 'node:fs';
-import { join } from 'node:path';
+import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { joinSettingsResponseV1, type PutJoinSettingsRequestV1 } from '../src/schema/guest';
 import { postMessageResponseV2 } from '../src/schema/message';
 import { listNetsResponseV1 } from '../src/schema/net';
 import { history, post, reply } from './api';
 import { channelButton, expect, expectFits, phones, signIn, statusLine, test } from './fixtures';
-import { call, ok, principalId, repoRoot, safePath, type World } from './world';
+import { call, ok, principalId, type World } from './world';
 
 let next = 0;
 const unique = (label: string) => `r842-${label}-${Date.now().toString(36)}-${String(++next)}`;
@@ -16,33 +14,13 @@ async function joining(world: World, request: PutJoinSettingsRequestV1) {
   await ok(world, world.tokens.operator, 'PUT', '/v1/join/settings', joinSettingsResponseV1, request);
 }
 
-async function healthy(world: World): Promise<boolean> {
-  try {
-    return (await fetch(`${world.origin}/healthz`, { signal: AbortSignal.timeout(2000) })).ok;
-  } catch {
-    return false;
-  }
-}
-
-function restart(world: World): void {
-  const log = openSync(join(world.root, 'logs', 'conchd-restart.log'), 'a');
-  const home = join(world.root, 'home');
-  const server = spawn(join(world.root, 'bin', 'conchd'), ['serve', '--listen', new URL(world.origin).host, '--web-dir', join(repoRoot, 'web', 'dist'), '--data', join(world.root, 'data'), '--test-relax-invite-limits'], {
-    cwd: world.root,
-    env: { PATH: safePath(), HOME: home, TMPDIR: join(world.root, 'tmp'), XDG_CONFIG_HOME: join(home, 'config'), XDG_DATA_HOME: join(home, 'data'), XDG_STATE_HOME: join(home, 'state'), XDG_CACHE_HOME: join(home, 'cache') },
-    stdio: ['ignore', log, log],
-    detached: true,
-  });
-  closeSync(log);
-  server.unref();
-}
 
 async function openThread(page: Page, root: number) {
   await page.getByRole('button', { name: `Reply to message ${String(root)}`, exact: true }).click();
   return page.getByRole('region', { name: `Thread around message ${String(root)}` });
 }
 
-test('desktop reply, history, and reconnect use the same one-level thread', async ({ meet, world }) => {
+test('desktop reply and history use the same one-level thread', async ({ meet, world }) => {
   const { page } = await meet();
   await signIn(page, world, world.tokens.browser, 'browser-test');
   const root = await post(world, world.tokens.browser, 'general', unique('root'));
@@ -58,14 +36,10 @@ test('desktop reply, history, and reconnect use the same one-level thread', asyn
   await page.reload();
   thread = await openThread(page, root.id);
   await expect(thread.getByText(body, { exact: true })).toBeVisible();
-  process.kill(world.serverPid(), 'SIGTERM');
-  await expect.poll(() => healthy(world), { timeout: 30_000 }).toBe(false);
-  await expect(statusLine(page)).toContainText('Reconnecting', { timeout: 30_000 });
-  await expect(page.getByText('This conversation may be out of date')).toBeVisible();
-  await expect(thread.getByRole('textbox', { name: `Reply to message #${String(root.id)}` })).toBeDisabled();
-  restart(world);
-  await expect.poll(() => healthy(world), { timeout: 30_000 }).toBe(true);
-  await expect(statusLine(page)).toContainText('Connected', { timeout: 30_000 });
+  // After a reload the thread holds the reply once. A server restart is not
+  // done here: the shared server is restarted only by 09-restart.spec.ts, and
+  // a reply surviving a reconnect and refetch once is a unit test
+  // (replies.test.tsx).
   await expect(thread.getByText(body, { exact: true })).toHaveCount(1);
 });
 
@@ -85,7 +59,7 @@ for (const [size, options] of phones) {
   });
 }
 
-test('net and whisper replies keep their authorized audience', async ({ meet, world }) => {
+test('net and whisper replies keep their authorized audience', async ({ meet, secrets, world }) => {
   const guest = await principalId(world, world.tokens.guest);
   for (const path of [`/v1/channels/nets-demo/members/${String(guest)}`, `/v1/channels/nets-demo/nets/blue/members/${String(guest)}`]) {
     const restored = await call(world, world.tokens.operator, 'PUT', path, path.includes('/nets/') ? { role: 'member' } : undefined);
@@ -115,7 +89,19 @@ test('net and whisper replies keep their authorized audience', async ({ meet, wo
   await expect(whisperThread.getByText(whisperReply.body, { exact: true })).toBeVisible();
   await expect(whisperThread.getByText(/Replying to → whisper to 1; the audience cannot be changed/)).toBeVisible();
 
-  const outsider = await history(world, world.tokens.nick, 'nets-demo');
+  // An outsider of a person of its own, a member of the channel but on no
+  // net and in no whisper: the fixture people's credentials may have been
+  // revoked by the specs before this one.
+  const op = world.tokens.operator;
+  const name = unique('outsider').toLowerCase();
+  const person: CreatePrincipalRequest = { kind: 'human', name };
+  const outsiderId = (await ok(world, op, 'POST', '/v0/principals', createPrincipalResponse, person)).principal.id;
+  const label: CreateCredentialRequestV1 = { label: name };
+  const { token: outsiderToken } = await ok(world, op, 'POST', `/v1/principals/${String(outsiderId)}/credentials`, createCredentialResponseV1, label);
+  secrets.push(outsiderToken);
+  const joined = await call(world, op, 'PUT', `/v1/channels/nets-demo/members/${String(outsiderId)}`);
+  expect(joined.status).toBe(204);
+  const outsider = await history(world, outsiderToken, 'nets-demo');
   expect(outsider.some((message) => [netRoot.id, netReply.id, whisperRoot.id, whisperReply.id].includes(message.id))).toBe(false);
 });
 
