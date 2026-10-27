@@ -96,4 +96,15 @@ type WhoAmIResponseV1 struct {
 	// #697). Omitted when false, so every non-owner response is
 	// byte-for-byte unchanged.
 	Owner bool `json:"owner,omitempty"`
+	// ServerMode is "temporary" when the conchd that answered runs in
+	// temporary mode, the same value /healthz reports (ADR-011 item 2.3,
+	// issue #865). Omitted in normal mode, and by a server that predates
+	// the field, so every normal-mode response is byte-for-byte unchanged.
+	ServerMode ServerMode `json:"server_mode,omitempty"`
+}
+
+// Validate reports whether r is a well-formed whoami response: server_mode,
+// when present, is a recognized mode.
+func (r WhoAmIResponseV1) Validate() error {
+	return validateServerMode(r.ServerMode)
 }

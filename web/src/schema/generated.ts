@@ -103,6 +103,11 @@ export const authStateV1 = object<AuthStateV1>({
   recent_auth_until: optional(timestamp),
 });
 
+// schema.ServerMode
+export type ServerMode = 'temporary';
+
+export const serverMode = vocab<ServerMode>({ temporary: true });
+
 // schema.WhoAmIResponseV1
 export interface WhoAmIResponseV1 {
   id: number;
@@ -117,6 +122,7 @@ export interface WhoAmIResponseV1 {
   guest?: GuestV1;
   auth?: AuthStateV1;
   owner?: boolean;
+  server_mode?: ServerMode;
 }
 
 export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
@@ -132,6 +138,7 @@ export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
   guest: optional(guestV1),
   auth: optional(authStateV1),
   owner: optional(bool),
+  server_mode: optional(serverMode),
 });
 
 // schema.ChannelV0
@@ -2220,6 +2227,7 @@ export interface Health {
   version: string;
   db: string;
   voice: HealthVoice;
+  server_mode?: ServerMode;
 }
 
 export const health = object<Health>({
@@ -2227,6 +2235,7 @@ export const health = object<Health>({
   version: str,
   db: str,
   voice: healthVoice,
+  server_mode: optional(serverMode),
 });
 
 // schema.ProblemReportClientV1
