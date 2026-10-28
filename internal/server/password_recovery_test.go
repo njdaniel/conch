@@ -228,7 +228,7 @@ func TestEnrollRefusals(t *testing.T) {
 	}{
 		{"no proof", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			return f.enroll(t, f.wrenTok, wrenPassword, "")
-		}, http.StatusForbidden, schema.ErrorCodeReauthRequired},
+		}, http.StatusForbidden, schema.ErrorCodeEnrollmentProofRequired},
 		{"a proof made for another member", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			kit, err := f.srv.store.CreatePrincipal(context.Background(), store.PrincipalHuman, "kit")
 			if err != nil {
