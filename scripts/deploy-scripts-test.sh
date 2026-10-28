@@ -76,6 +76,8 @@ for tool in sqlite3 curl tar sha256sum script setsid; do
 done
 
 work=$(mktemp -d)
+# The sourcing canaries below name $work unquoted, so it must be a plain path.
+case "$work" in *[[:space:]*?[]*) fail "the test's work directory must be a plain path: $work" ;; esac
 pids=()
 cleanup() {
     local p
@@ -265,7 +267,7 @@ for mode_line in 'CONCHD_MODE=temporary' missing unreadable \
         case "$out" in *'NO OFF-SITE COPY WAS MADE'*) ;; *) fail "$mode_line backup lost the off-site warning: $out" ;; esac
         case "$out" in *'temporary instance:'*) fail "$mode_line was treated as temporary: $out" ;; esac
     fi
-    ok "$mode_line: archive and checksum written, exit $want, no env secrets printed or sourced"
+    ok "${mode_line//$'\n'/\\n}: archive and checksum written, exit $want, no env secrets printed or sourced"
     rm -rf "$work/mode-backups"
 done
 rm "$CONCH_ETC/alpha.env"
