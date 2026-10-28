@@ -8,6 +8,53 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] - 2026-10-28
+
+The second alpha build. Operators can sign in with a password alone, and
+short-lived test servers have their own mode. Upgrade with
+`conch-upgrade.sh` (docs/deploy.md step 11). Migration 36 adds the server's
+mode record; a rollback to `alpha.1` restores the pre-upgrade backup.
+
+### Added
+
+- **Password-only operator sign-in** (ADR-012). With
+  `CONCHD_OPERATOR_TOTP=optional` in the instance's env file, an operator who
+  has not enrolled an authenticator signs in, re-authenticates and changes
+  their password with the password alone. An operator who enrolled one is
+  always asked for its code. The default stays `required`. Switching back to
+  `required` signs operators' browser sessions out and logs how many
+  operators still have no authenticator.
+- **Temporary servers** (ADR-011). `CONCHD_MODE=temporary` makes a
+  short-lived server:
+  - password-only operators, as above;
+  - every user sees "Temporary server: no backups, and it may be removed";
+  - backups are local only, with no off-site copy.
+- **Setup without an authenticator.** Where the server allows it, the
+  browser's setup page offers **Skip** after the password, and `conch setup`
+  asks "Set up an authenticator now? [y/N]".
+- **Setup links.** `conchd operator setup --link --origin https://<host>`
+  prints a link that opens the setup page with the token filled in; nothing
+  is spent until you press Continue.
+- **Replies in the browser**: one-level threads, with the audience inherited
+  from the message replied to.
+- **A private microphone test** in the voice panel: a level meter, and your
+  own voice played back only if you ask, with nothing sent anywhere.
+
+### Changed
+
+- The browser and `conch` ask an operator for an authenticator code at
+  re-authentication and password change only when one is enrolled.
+
+### Fixed
+
+- **Security:** rotating a browser session
+  (`POST /v1/credentials/{id}/rotate`) produced a credential that was no
+  longer treated as a session, so it skipped recent re-authentication for up
+  to its 12-hour expiry. A rotated session now stays a session.
+- A password-only operator's browser sign-in is kept for that tab instead of
+  being revoked straight after.
+- The deployment runbook now matches the first real droplet run.
+
 ## [0.1.0-alpha.1] - 2026-10-27
 
 The first tagged build: the private communications alpha (ADR-008), deployed
