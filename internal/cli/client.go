@@ -975,6 +975,12 @@ func (c *Client) RevokeCredential(ctx context.Context, credentialID int64) error
 	return c.roundTrip(ctx, "revoke credential", http.MethodDelete, endpoint, nil, nil)
 }
 
+// RevokeCurrentCredential ends the credential this client is using, including
+// a setup credential whose operator chose to skip authenticator enrolment.
+func (c *Client) RevokeCurrentCredential(ctx context.Context) error {
+	return c.roundTrip(ctx, "revoke current credential", http.MethodDelete, c.resolve("v1", "credentials", "current"), nil, nil)
+}
+
 // PutChannelMember adds principalID to channel. It is idempotent.
 func (c *Client) PutChannelMember(ctx context.Context, channel string, principalID int64) error {
 	endpoint := c.resolve("v1", "channels", channel, "members", strconv.FormatInt(principalID, 10))

@@ -567,6 +567,10 @@ func TestWhoAmIPrintsServerFields(t *testing.T) {
 	}{
 		{"server reports its version", schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "nick", Role: schema.RoleOperator, ServerVersion: "v0.1.0-alpha.1"},
 			"id: 42\nkind: human\nname: nick\nrole: operator\nserver: v0.1.0-alpha.1\n"},
+		{"a temporary server", schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "nick", Role: schema.RoleOperator, ServerVersion: "vtest", ServerMode: schema.ServerModeTemporary},
+			"id: 42\nkind: human\nname: nick\nrole: operator\nserver: vtest\nTemporary server: no backups, and it may be removed. Don't keep anything here you need.\n"},
+		{"temporary without a version", schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "nick", Role: schema.RoleOperator, ServerMode: schema.ServerModeTemporary},
+			"id: 42\nkind: human\nname: nick\nrole: operator\nTemporary server: no backups, and it may be removed. Don't keep anything here you need.\n"},
 		{"an older server says nothing", schema.WhoAmIResponseV1{ID: 42, Kind: "human", Name: "nick", Role: schema.RoleOperator},
 			"id: 42\nkind: human\nname: nick\nrole: operator\n"},
 		{"an owner", schema.WhoAmIResponseV1{ID: 1, Kind: "human", Name: "root", Role: schema.RoleOperator, Owner: true},
