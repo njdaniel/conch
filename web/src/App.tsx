@@ -922,6 +922,25 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // hashchange, no reload). The newest link wins.
   const [inviteCode, setInviteCode] = useState<string | null>(null);
   const [signInCode, setSignInCode] = useState<string | null>(null);
+  // An operator's setup from a host-made token (issue #714) is a page of its
+  // own, reached from the sign-in page, or from a setup link (ADR-011), whose
+  // token waits in a ref (never in state) until Setup puts it in its field.
+  const [settingUp, setSettingUp] = useState(false);
+  const setupLink = useRef<string | null>(null);
+  // Counts the setup links taken (a number, not a secret): Setup is keyed by
+  // it, so each link gets a fresh page with its own token in the field.
+  const [setupGeneration, setSetupGeneration] = useState(0);
+  // Whether someone is signed in, for take() below, which outlives renders.
+  const signedInNow = useRef(false);
+  signedInNow.current = auth.phase === 'signedIn' || auth.phase === 'operatorWarning';
+  // A setup link is for a signed-out browser. One that waits while someone
+  // is signed in (or that sign-in restored under) is dropped, so a stale
+  // token is never pre-filled after they sign out.
+  useEffect(() => {
+    if (auth.phase !== 'signedIn' && auth.phase !== 'operatorWarning') return;
+    setupLink.current = null;
+    setSettingUp(false);
+  }, [auth.phase]);
   useLayoutEffect(() => {
     function take() {
       const found = takeLinkFromAddress();
@@ -931,6 +950,17 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       } else if (found?.kind === 'signin') {
         setInviteCode(null);
         setSignInCode(found.signInCode);
+      } else if (found?.kind === 'setup') {
+        setInviteCode(null);
+        setSignInCode(null);
+        if (signedInNow.current) {
+          // Not used: sign out first, then open the link again.
+          setupLink.current = null;
+          return;
+        }
+        setupLink.current = found.setupToken;
+        setSetupGeneration((n) => n + 1);
+        setSettingUp(true);
       }
     }
     take();
@@ -984,7 +1014,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     dispatchAuth({ type: 'submit' });
     void api.signInWithPassword(name, password).then((result) => {
       if (result.ok) {
-        dispatchAuth({ type: 'verified', principal: result.value });
+        dispatchAuth({ type: 'verified', principal: result.value, own: true });
         return;
       }
       switch (result.failure) {
@@ -996,7 +1026,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           return;
         case 'unchecked':
           void api.whoAmI().then((who) => {
-            if (who.ok) dispatchAuth({ type: 'verified', principal: who.value });
+            if (who.ok) dispatchAuth({ type: 'verified', principal: who.value, own: true });
             else dispatchAuth({ type: 'failed', failure: who.failure });
           });
           return;
@@ -1033,7 +1063,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           return;
         case 'unchecked':
           void api.whoAmI().then((who) => {
-            if (who.ok) dispatchAuth({ type: 'verified', principal: who.value });
+            if (who.ok) dispatchAuth({ type: 'verified', principal: who.value, own: true });
             else dispatchAuth({ type: 'failed', failure: who.failure });
           });
           return;
@@ -1050,10 +1080,6 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     api.cancelCodeSignIn();
     dispatchAuth({ type: 'signOut', notice: over ? 'codeOver' : null });
   }, []);
-
-  // An operator's setup from a host-made token (issue #714) is a page of its
-  // own, reached from the sign-in page.
-  const [settingUp, setSettingUp] = useState(false);
 
   // Forgetting a stored sign-in that could not be checked (issue #469): it is
   // revoked if the server answers, then dropped, and signing in is open again.
@@ -1153,10 +1179,12 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   if (settingUp && (auth.phase === 'signedOut' || auth.phase === 'checking')) {
     return (
       <Setup
+        key={setupGeneration}
         origin={origin}
-        onDone={() => {
+        link={setupLink}
+        onDone={(skipped) => {
           setSettingUp(false);
-          dispatchAuth({ type: 'signOut', notice: 'setupDone' });
+          dispatchAuth({ type: 'signOut', notice: skipped ? 'setupSkipped' : 'setupDone' });
         }}
         onBack={() => {
           setSettingUp(false);
@@ -1227,6 +1255,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           origin={origin}
           name={shownName}
           me={auth.principal.id}
+          temporary={auth.principal.server_mode === 'temporary'}
           passwordSet={auth.principal.auth?.password_set === true}
           banner={
             <>
@@ -1345,7 +1374,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           admin={auth.principal.role === 'operator' ? <GuestSettings channels={channels.channels} onUnauthorized={onUnauthorized} /> : null}
           overlay={
             asking ? (
-              <Reauth operator={auth.principal.role === 'operator'} insecure={needsHttps(origin)} onDone={finishReauth} onUnauthorized={onUnauthorized} />
+              <Reauth operator={auth.principal.role === 'operator' && auth.principal.auth?.totp_enrolled === true} insecure={needsHttps(origin)} onDone={finishReauth} onUnauthorized={onUnauthorized} />
             ) : null
           }
           report={<ReportProblem onUnauthorized={onUnauthorized} />}

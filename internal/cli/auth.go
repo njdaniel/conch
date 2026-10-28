@@ -224,9 +224,9 @@ func loginWithLink(ctx context.Context, server string, yes bool, stdin io.Reader
 // runSetup is an operator's setup after a host command (`conchd operator
 // bootstrap|setup|recover`) printed a setup token: the token is spent for a
 // short-lived credential that reaches only setup (POST /v1/setup/redeem), a
-// new password is set with it, and an authenticator app is enrolled and
-// proved. The credential is used here and never stored: when this ends,
-// whatever was left unfinished needs a new token from the host.
+// new password is set with it, and an authenticator app is offered or required
+// as whoami's setup state says. The credential is used here and never stored:
+// when this ends, whatever was left unfinished needs a new token from the host.
 func runSetup(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	const command = "setup"
 	if err := refuseSecretArgs(command, args); err != nil {
@@ -272,13 +272,33 @@ func runSetup(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 	}
 	setup.WithToken(resp.Token)
 	name := safeLine(resp.Principal.Name)
-	_, _ = fmt.Fprintf(stderr, "Setting up %s: a new password, then an authenticator app.\n", name)
+	_, _ = fmt.Fprintf(stderr, "Setting up %s: a new password, then an authenticator app where the server asks for one.\n", name)
 	password, err := p.newPassword("New password: ")
 	if err != nil {
 		return err
 	}
 	if _, err := setup.SetPassword(ctx, schema.SetPasswordRequestV1{Password: password}); err != nil {
 		return err
+	}
+	who, err := setup.WhoAmI(ctx)
+	if err != nil {
+		return err
+	}
+	if a := who.Auth; a != nil && a.SetupComplete && !a.TOTPEnrolled && a.Scope == schema.CredentialScopeSetup {
+		enroll := false
+		if p.interactive() {
+			enroll, err = p.confirm("Set up an authenticator now?")
+			if err != nil {
+				return err
+			}
+		}
+		if !enroll {
+			if err := setup.RevokeCurrentCredential(ctx); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(stdout, "setup complete for %s; %s --server %s\n", name, signInHint(resp.Principal.Name), safeLine(client.Server()))
+			return err
+		}
 	}
 	enrol, err := setup.EnrollTOTP(ctx)
 	if err != nil {
@@ -427,7 +447,7 @@ func runPasswordSet(ctx context.Context, args []string, stdin io.Reader, stdout,
 }
 
 // runPasswordChange replaces the caller's password with the current one
-// (PUT /v1/password/mine), and an operator's authenticator code.
+// (PUT /v1/password/mine), and an operator's authenticator code when enrolled.
 func runPasswordChange(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	const command = "password change"
 	client, source, _, err := passwordClient(command, args)
@@ -448,7 +468,7 @@ func runPasswordChange(ctx context.Context, args []string, stdin io.Reader, stdo
 		return err
 	}
 	req := schema.ChangePasswordRequestV1{Current: current, Password: password}
-	if isOperatorWho(who) {
+	if isOperatorWho(who) && who.Auth != nil && who.Auth.TOTPEnrolled {
 		if req.Code, err = p.totpCode("Authenticator code: "); err != nil {
 			return err
 		}
@@ -518,7 +538,7 @@ func runPasswordReset(ctx context.Context, args []string, stdin io.Reader, stdou
 }
 
 // reauthenticate proves the person's password again (POST /v1/reauth), and an
-// operator's authenticator code, for the actions that need a recent proof.
+// operator's authenticator code when enrolled, for actions needing a recent proof.
 //
 // Nothing is asked before the transport is checked: anyone answering on a
 // plain-http address could otherwise forge reauth_required and be sent the
@@ -531,9 +551,9 @@ func reauthenticate(ctx context.Context, client *Client, p *prompter, stderr io.
 	if err != nil {
 		return schema.ReauthResponseV1{}, err
 	}
-	operator := isOperatorWho(who)
+	needsCode := isOperatorWho(who) && who.Auth != nil && who.Auth.TOTPEnrolled
 	what := "your password"
-	if operator {
+	if needsCode {
 		what += " and an authenticator code"
 	}
 	_, _ = fmt.Fprintf(stderr, "This needs a recent proof that it is you: %s.\n", what)
@@ -541,7 +561,7 @@ func reauthenticate(ctx context.Context, client *Client, p *prompter, stderr io.
 	if req.Password, err = p.secret("Password: ", "password"); err != nil {
 		return schema.ReauthResponseV1{}, err
 	}
-	if operator {
+	if needsCode {
 		if req.Code, err = p.totpCode("Authenticator code: "); err != nil {
 			return schema.ReauthResponseV1{}, err
 		}

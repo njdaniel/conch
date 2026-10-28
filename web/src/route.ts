@@ -1,7 +1,8 @@
 // Hash routing by hand: #/c/<channel> names the open channel. The hash is per
 // tab and survives a reload, and a link to it carries no credential.
-// #/invite/<code> is an invite link and #/signin/<code> a sign-in link, each
-// taken out of the address as soon as the page reads it.
+// #/invite/<code> is an invite link, #/signin/<code> a sign-in link and
+// #/setup/<token> a setup link, each taken out of the address as soon as the
+// page reads it.
 
 export function channelFromHash(hash: string): string | null {
   const match = /^#\/c\/(.+)$/.exec(hash);
@@ -64,8 +65,26 @@ export function signInFromHash(hash: string): string | null {
   }
 }
 
-// A code found in the address: an invite's, or a sign-in link's.
-export type LinkInAddress = { readonly kind: 'invite'; readonly inviteCode: string } | { readonly kind: 'signin'; readonly signInCode: string };
+// Setup links (ADR-011 item 3): <origin>/app/#/setup/<token>, printed by
+// `conchd operator setup --link --origin`. The token is a setup token, handled
+// as a credential: read into memory, taken out of the address at once, never
+// stored, logged or put in the DOM, and spent only when the person clicks.
+export function setupFromHash(hash: string): string | null {
+  const match = /^#\/setup\/([^/]+)$/.exec(hash);
+  if (match?.[1] === undefined) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
+// A code found in the address: an invite's, a sign-in link's, or a setup
+// link's token.
+export type LinkInAddress =
+  | { readonly kind: 'invite'; readonly inviteCode: string }
+  | { readonly kind: 'signin'; readonly signInCode: string }
+  | { readonly kind: 'setup'; readonly setupToken: string };
 
 // addressWithoutFragment is the page's address with no fragment at all, so
 // writing it over the history entry leaves nothing of the hash behind.
@@ -94,12 +113,16 @@ export function addressWithoutFragment(location: Pick<Location, 'origin' | 'path
 export function takeLinkFromAddress(): LinkInAddress | null {
   const hash = window.location.hash;
   const invite = hash.startsWith('#/invite/');
-  if (!invite && !hash.startsWith('#/signin/')) return null;
+  const signIn = hash.startsWith('#/signin/');
+  const setup = hash.startsWith('#/setup/');
+  if (!invite && !signIn && !setup) return null;
   const inviteCode = invite ? inviteFromHash(hash) : null;
-  const signInCode = invite ? null : signInFromHash(hash);
+  const signInCode = signIn ? signInFromHash(hash) : null;
+  const setupToken = setup ? setupFromHash(hash) : null;
   window.history.replaceState(null, '', addressWithoutFragment(window.location));
   if (inviteCode !== null) return { kind: 'invite', inviteCode };
   if (signInCode !== null) return { kind: 'signin', signInCode };
+  if (setupToken !== null) return { kind: 'setup', setupToken };
   return null;
 }
 

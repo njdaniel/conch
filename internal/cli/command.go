@@ -1104,6 +1104,11 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			return err
 		}
 	}
+	if who.ServerMode == schema.ServerModeTemporary {
+		if _, err := fmt.Fprintln(stdout, "Temporary server: no backups, and it may be removed. Don't keep anything here you need."); err != nil {
+			return err
+		}
+	}
 	return writeIdentity(stdout, who)
 }
 

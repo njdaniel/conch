@@ -450,13 +450,26 @@ let pageVersion: string | null = null;
 // answer with a health document. A degraded server (503) still names its
 // version, so the status is not looked at.
 export async function serverVersion(): Promise<string | null> {
+  return (await serverHealth())?.version ?? null;
+}
+
+// What /healthz says that the page shows: the version, and whether this is a
+// temporary server (ADR-011). Only a temporary server carries server_mode.
+export interface ServerHealth {
+  readonly version: string;
+  readonly temporary: boolean;
+}
+
+// serverHealth reads GET /healthz; null when the server cannot be reached or
+// does not answer with a health document.
+export async function serverHealth(): Promise<ServerHealth | null> {
   try {
     const res = await fetch('/healthz', { headers: { Accept: 'application/json' }, cache: 'no-store', credentials: 'omit' });
     const body: unknown = await res.json();
     if (health(body).length > 0) return null;
-    const version = (body as { version: string }).version;
+    const { version, server_mode: mode } = body as { version: string; server_mode?: string };
     pageVersion ??= version;
-    return version;
+    return { version, temporary: mode === 'temporary' };
   } catch {
     return null;
   }
@@ -738,6 +751,11 @@ export async function resetPassword(signInCode: string, password: string): Promi
 // in memory only, never stored and never pinned: it signs nobody in, and a
 // reload drops it (a new token is made on the host).
 let setupHeld: Held | null = null;
+// The setup run in force: a number, not a secret. Starting a setup (a token
+// redeemed) and ending one (endSetup) each begin a new run, and a redemption
+// that answers after its run has ended is discarded, and its credential
+// revoked, so a late answer never replaces the credential of the run in force.
+let setupRun = 0;
 
 // What the setup credential says of its holder.
 export interface SetupState {
@@ -749,14 +767,23 @@ export interface SetupState {
 // goes in the body alone and is kept nowhere.
 export async function redeemSetupToken(token: string): Promise<InviteResult<SetupState>> {
   setupHeld = null;
+  const run = ++setupRun;
   const request: RedeemSetupTokenRequestV1 = { token };
   const res = await sendOpen('/v1/setup/redeem', request);
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   const redeemed = await readBody(res, redeemSetupTokenResponseV1);
   if (!redeemed.ok) return redeemed;
+  const held: Held = { token: redeemed.value.token, place: 'tab' };
+  if (run !== setupRun) {
+    // Answered after its setup ended or another began: nothing here uses
+    // this credential, so it is ended on the server (best effort) and
+    // forgotten.
+    await sendAs(held, 'DELETE', '/v1/credentials/current');
+    return { ok: false, failure: 'unauthorized' };
+  }
   const { principal, auth } = redeemed.value;
-  setupHeld = { token: redeemed.value.token, place: 'tab' };
+  setupHeld = held;
   return { ok: true, value: { name: principal.name, auth } };
 }
 
@@ -766,7 +793,7 @@ export async function setupState(): Promise<InviteResult<SetupState>> {
   if (held === null) return { ok: false, failure: 'unauthorized' };
   const who = await get('/v1/whoami', held.token, whoAmIResponseV1);
   if (!who.ok) {
-    if (who.failure === 'unauthorized') setupHeld = null;
+    if (who.failure === 'unauthorized' && setupHeld === held) setupHeld = null;
     return who;
   }
   if (who.value.auth === undefined) return { ok: false, failure: 'invalid' };
@@ -779,7 +806,7 @@ async function sendSetup(path: string, body?: unknown): Promise<PostReply> {
   const held = setupHeld;
   if (held === null) return { kind: 'unauthorized' };
   const reply = await sendAs(held, 'POST', path, body);
-  if (reply.kind === 'unauthorized') setupHeld = null;
+  if (reply.kind === 'unauthorized' && setupHeld === held) setupHeld = null;
   return reply;
 }
 
@@ -805,9 +832,24 @@ export async function confirmAuthenticator(code: string): Promise<InviteResult<n
   return readDone(await sendSetup('/v1/totp/confirm', request));
 }
 
+// skipAuthenticator ends the setup credential with the authenticator left
+// unset (DELETE /v1/credentials/current, which a setup credential may call):
+// ADR-012's Skip, offered only where whoami says setup is complete without
+// one. The credential is forgotten here once the server has confirmed it
+// ended (a 2xx) or says it has ended already (a 401); after a network error
+// or any other refusal it is kept, so the person can try again.
+export async function skipAuthenticator(): Promise<InviteResult<null>> {
+  const held = setupHeld;
+  if (held === null) return { ok: false, failure: 'unauthorized' };
+  const reply = await sendAs(held, 'DELETE', '/v1/credentials/current');
+  if ((reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok)) && setupHeld === held) setupHeld = null;
+  return readDone(reply);
+}
+
 // endSetup forgets the setup credential here. The server ends it at its
 // fifteen minutes, or once setup is complete; it can revoke nothing itself.
 export function endSetup(): void {
+  setupRun++;
   setupHeld = null;
 }
 
@@ -1147,7 +1189,18 @@ export async function signInWithPassword(name: string, password: string): Promis
     pendingLogin = { challenge: answer.value.challenge, expiresAt: until, tries: 0 };
     return { ok: false, failure: 'totp', expiresAt: answer.value.challenge_expires_at };
   }
-  return keepRedeemed(answer.value.token, answer.value.principal.id, 'lasting');
+  // A session straight from the password is a member's, or an operator's on
+  // a server that lets an operator sign in with a password alone (ADR-012).
+  // Which one decides where it is kept: an operator's is for this tab alone.
+  // So whoami is asked with it before it is stored anywhere; nothing is kept
+  // on a refusal, and the credential is then revoked, best effort.
+  const token = answer.value.token;
+  const who = await get('/v1/whoami', token, whoAmIResponseV1);
+  if (!who.ok) {
+    await sendAs({ token, place: 'tab' }, 'DELETE', '/v1/credentials/current');
+    return { ok: false, failure: who.failure === 'network' ? 'network' : 'invalid' };
+  }
+  return keepRedeemed(token, answer.value.principal.id, 'lasting', who.value.role === 'operator');
 }
 
 // What the code's step gave besides an answer: over is a sign-in that has

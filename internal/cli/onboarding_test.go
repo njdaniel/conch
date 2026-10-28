@@ -426,7 +426,7 @@ func (e *onboardEnv) setupOperator(t *testing.T) []byte {
 	if want := "setup complete for root; sign in with: conch login --password --name 'root' --server " + e.url + "\n"; !strings.HasSuffix(d.String(), want) {
 		t.Errorf("setup stdout = %q, want it to end %q", d.String(), want)
 	}
-	if !strings.HasPrefix(stderr.String(), "Setting up root: a new password, then an authenticator app.\n") {
+	if !strings.HasPrefix(stderr.String(), "Setting up root: a new password, then an authenticator app where the server asks for one.\n") {
 		t.Errorf("setup stderr = %q", stderr.String())
 	}
 	e.assertNoSecrets(t, []string{stderr.String()}, tok.Token, operatorPassword)
