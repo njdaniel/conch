@@ -66,6 +66,9 @@ pub struct KeysConfig {
     pub deafen: Option<KeyCode>,
 }
 
+/// Why a device name that is empty or padded with white space is refused.
+const DEVICE_NAME_MUST_BE: &str = "must be the exact name of a device, or `default`, with no white space around it: an empty or padded name would be read as the default device";
+
 /// `[audio]`: devices and the transmit gate's timing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioConfig {
@@ -255,6 +258,21 @@ impl Config {
             key: key.to_owned(),
             message,
         };
+        // dmn-audio trims a device name and reads an empty one as PipeWire's default, so a
+        // name that is empty or has white space around it would open another device than
+        // the one written, the default among them. Refused, as an unknown key is: the
+        // exact `default`, and no key, are the ways to ask for the default.
+        for (key, name) in [
+            ("audio.input", &self.audio.input),
+            ("audio.output", &self.audio.output),
+        ] {
+            if name
+                .as_deref()
+                .is_some_and(|name| name.is_empty() || name.trim() != name)
+            {
+                return Err(invalid(key, DEVICE_NAME_MUST_BE.to_owned()));
+            }
+        }
         if self.audio.release_tail_ms > MAX_RELEASE_TAIL_MS {
             return Err(invalid(
                 "audio.release_tail_ms",
@@ -523,11 +541,12 @@ pub fn set_audio_value(
     match key {
         AudioKey::Input | AudioKey::Output => {
             if value.is_empty()
+                || value.trim() != value
                 || value.contains(['"', '\\'])
                 || value.chars().any(char::is_control)
             {
                 return Err(refuse(
-                    "a device name must not be empty, and must hold no quotation mark, backslash or control character",
+                    "a device name must not be empty or have white space around it, and must hold no quotation mark, backslash or control character",
                 ));
             }
             let device = if key == AudioKey::Input {
@@ -960,6 +979,41 @@ open_hang_ms = 650
                 "{text}"
             );
             assert_eq!(error.to_string(), format!("{FILE}: unknown key `{key}`"));
+        }
+    }
+
+    #[test]
+    fn an_empty_or_padded_device_name_is_refused_naming_the_key() {
+        for name in ["", " ", "\\t", " mic", "mic ", "  default"] {
+            for key in ["input", "output"] {
+                let text = format!("[audio]\n{key} = \"{name}\"\n");
+                let error = Config::parse(&text, FILE).unwrap_err();
+                assert!(
+                    matches!(&error, Error::InvalidConfigValue { key: k, .. } if *k == format!("audio.{key}")),
+                    "{name:?}: {error}"
+                );
+            }
+        }
+        for (text, want) in [
+            ("[audio]\ninput = \"default\"\n", Some("default")),
+            ("[audio]\ninput = \"mic\"\n", Some("mic")),
+            ("[audio]\n", None),
+        ] {
+            let config = Config::parse(text, FILE).unwrap();
+            assert_eq!(config.audio.input.as_deref(), want);
+        }
+    }
+
+    #[test]
+    fn config_set_refuses_an_empty_or_padded_device_name() {
+        for key in [AudioKey::Input, AudioKey::Output] {
+            for value in ["", " ", "  ", " mic", "mic "] {
+                let error = set_audio_value("", FILE, key, value).unwrap_err();
+                assert!(
+                    matches!(&error, Error::InvalidConfigValue { key: k, .. } if k == key.dotted()),
+                    "{value:?}: {error}"
+                );
+            }
         }
     }
 
