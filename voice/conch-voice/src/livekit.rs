@@ -31,8 +31,8 @@ use futures_util::StreamExt;
 use livekit::DisconnectReason as LkReason;
 use livekit::options::TrackPublishOptions;
 use livekit::prelude::{
-    LocalAudioTrack, LocalTrack, LocalTrackPublication, RemoteAudioTrack, RemoteTrack, Room,
-    RoomEvent, RoomOptions, TrackSource,
+    LocalAudioTrack, LocalTrack, LocalTrackPublication, RemoteAudioTrack, RemoteTrack,
+    RemoteTrackPublication, Room, RoomEvent, RoomOptions, TrackKind, TrackSource,
 };
 use livekit::webrtc::audio_frame::AudioFrame;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
@@ -64,17 +64,123 @@ const RECEIVE_QUEUE_FRAMES: usize = 64;
 /// Full scale of the SDK's 16-bit samples.
 const I16_SCALE: f32 = 32768.0;
 
+/// The companion a desktop session may have: a second LiveKit participant of the same
+/// person that publishes the screen (`docs/design/windows-desktop.md` §7.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Companion {
+    identity: String,
+    owns_share_playback: bool,
+}
+
+impl Companion {
+    /// A companion with this LiveKit identity. `owns_share_playback` is true when the
+    /// companion plays other participants' share audio itself (B2), false when it receives
+    /// nothing and the helper plays it (B1).
+    #[must_use]
+    pub fn new(identity: impl Into<String>, owns_share_playback: bool) -> Self {
+        Self {
+            identity: identity.into(),
+            owns_share_playback,
+        }
+    }
+}
+
+/// Which of the remote tracks in a room this helper subscribes to: one playback owner per
+/// audio source. With no companion every remote audio track is played, as it always was.
+/// With one, its own tracks never are (that sound is the person's own application), and,
+/// when it owns share playback, neither is other participants' share audio.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Subscription {
+    companion: Option<Companion>,
+}
+
+impl Subscription {
+    /// The rule for a session with this companion, or none.
+    #[must_use]
+    pub fn new(companion: Option<Companion>) -> Self {
+        Self { companion }
+    }
+
+    /// Whether the helper subscribes to a track of `identity` of this kind and source.
+    /// Video is never wanted: the helper plays voice and share audio, and shows nothing.
+    fn wants(&self, identity: &str, kind: TrackKind, source: TrackSource) -> bool {
+        if kind != TrackKind::Audio {
+            return false;
+        }
+        match &self.companion {
+            None => true,
+            Some(companion) if companion.identity == identity => false,
+            Some(companion) => {
+                !(companion.owns_share_playback && source != TrackSource::Microphone)
+            }
+        }
+    }
+}
+
+/// A remote publication as the subscription rule sees it. The SDK's is one; a test's is
+/// another, since the SDK's cannot be made without a room.
+trait Offered {
+    fn identity(&self) -> String;
+    fn kind(&self) -> TrackKind;
+    fn source(&self) -> TrackSource;
+    fn set_subscribed(&self, subscribed: bool);
+}
+
+/// A publication together with the identity of the participant that owns it.
+struct SdkOffer<'a> {
+    identity: String,
+    publication: &'a RemoteTrackPublication,
+}
+
+impl Offered for SdkOffer<'_> {
+    fn identity(&self) -> String {
+        self.identity.clone()
+    }
+
+    fn kind(&self) -> TrackKind {
+        self.publication.kind()
+    }
+
+    fn source(&self) -> TrackSource {
+        self.publication.source()
+    }
+
+    fn set_subscribed(&self, subscribed: bool) {
+        self.publication.set_subscribed(subscribed);
+    }
+}
+
+/// Subscribes to the publication if the rule wants it. Used for the publications present at
+/// join and for those published later alike, so that the two cannot differ.
+fn offer(rule: &Subscription, offered: &impl Offered) {
+    if rule.wants(&offered.identity(), offered.kind(), offered.source()) {
+        offered.set_subscribed(true);
+    }
+}
+
 /// LiveKit's SDK as a [`Transport`].
 #[derive(Debug)]
 pub struct LiveKit {
     scrubber: Arc<Scrubber>,
+    subscription: Subscription,
 }
 
 impl LiveKit {
-    /// A transport whose errors are scrubbed with `scrubber`.
+    /// A transport whose errors are scrubbed with `scrubber`, for a session with no
+    /// companion.
     #[must_use]
     pub fn new(scrubber: Arc<Scrubber>) -> Self {
-        Self { scrubber }
+        Self {
+            scrubber,
+            subscription: Subscription::default(),
+        }
+    }
+
+    /// The same transport for a session whose subscriptions follow `subscription`.
+    #[must_use]
+    pub fn with_subscription(mut self, subscription: Subscription) -> Self {
+        self.subscription = subscription;
+        self
     }
 }
 
@@ -126,14 +232,20 @@ impl Transport for LiveKit {
 
     async fn connect(&self, url: &str, token: &Secret) -> Result<Joined<LiveKitRoom>, SdkError> {
         let mut options = RoomOptions::default();
-        options.auto_subscribe = true;
+        // Nothing is subscribed to unless `Subscription` wants it (`offer`).
+        options.auto_subscribe = false;
         // The token's one use. The SDK keeps its own copy for as long as the room lives.
         let (room, events) = Room::connect(url, token.expose(), options)
             .await
             .map_err(|error| scrubbed(&self.scrubber, "could not join the voice room", &error))?;
         let publication = Publication::default();
         let (forward, forwarded) = mpsc::unbounded_channel();
-        tokio::spawn(pump(events, forward, Arc::clone(&publication)));
+        tokio::spawn(pump(
+            events,
+            forward,
+            Arc::clone(&publication),
+            self.subscription.clone(),
+        ));
         let room = LiveKitRoom {
             room,
             publication,
@@ -148,9 +260,41 @@ async fn pump(
     mut events: mpsc::UnboundedReceiver<RoomEvent>,
     forward: mpsc::UnboundedSender<SdkEvent>,
     publication: Publication,
+    rule: Subscription,
 ) {
     while let Some(event) = events.recv().await {
         let translated = match event {
+            RoomEvent::Connected {
+                participants_with_tracks,
+            } => {
+                for (participant, publications) in &participants_with_tracks {
+                    for publication in publications {
+                        let identity = participant.identity().to_string();
+                        offer(
+                            &rule,
+                            &SdkOffer {
+                                identity,
+                                publication,
+                            },
+                        );
+                    }
+                }
+                continue;
+            }
+            RoomEvent::TrackPublished {
+                publication,
+                participant,
+            } => {
+                let identity = participant.identity().to_string();
+                offer(
+                    &rule,
+                    &SdkOffer {
+                        identity,
+                        publication: &publication,
+                    },
+                );
+                continue;
+            }
             RoomEvent::TrackSubscribed {
                 track: RemoteTrack::Audio(audio),
                 publication,
@@ -488,5 +632,95 @@ mod tests {
         );
         ours.disable();
         assert!(!track.is_enabled());
+    }
+
+    /// A publication that records whether it was subscribed to.
+    struct Fake {
+        identity: &'static str,
+        kind: TrackKind,
+        source: TrackSource,
+        subscribed: std::cell::Cell<bool>,
+    }
+
+    impl Fake {
+        fn new(identity: &'static str, kind: TrackKind, source: TrackSource) -> Self {
+            Self {
+                identity,
+                kind,
+                source,
+                subscribed: std::cell::Cell::new(false),
+            }
+        }
+    }
+
+    impl Offered for Fake {
+        fn identity(&self) -> String {
+            self.identity.to_owned()
+        }
+        fn kind(&self) -> TrackKind {
+            self.kind
+        }
+        fn source(&self) -> TrackSource {
+            self.source
+        }
+        fn set_subscribed(&self, subscribed: bool) {
+            self.subscribed.set(subscribed);
+        }
+    }
+
+    /// The room: another's voice, another's share audio, the companion's share audio and
+    /// microphone, and another's screen video.
+    fn room() -> [Fake; 5] {
+        [
+            Fake::new("bob", TrackKind::Audio, TrackSource::Microphone),
+            Fake::new("bob", TrackKind::Audio, TrackSource::ScreenshareAudio),
+            Fake::new(
+                "alice~screen",
+                TrackKind::Audio,
+                TrackSource::ScreenshareAudio,
+            ),
+            Fake::new("alice~screen", TrackKind::Audio, TrackSource::Microphone),
+            Fake::new("bob", TrackKind::Video, TrackSource::Screenshare),
+        ]
+    }
+
+    /// Which of the room's publications are subscribed to when all are present at join, and
+    /// when each is published later: both go through `offer`, one at a time as the events
+    /// arrive, and must agree.
+    fn played(rule: &Subscription) -> [bool; 5] {
+        let at_join = room();
+        at_join
+            .iter()
+            .for_each(|publication| offer(rule, publication));
+        let later = room();
+        for publication in &later {
+            offer(rule, publication);
+        }
+        let join: Vec<bool> = at_join.iter().map(|f| f.subscribed.get()).collect();
+        let after: Vec<bool> = later.iter().map(|f| f.subscribed.get()).collect();
+        assert_eq!(join, after);
+        let mut out = [false; 5];
+        out.copy_from_slice(&join);
+        out
+    }
+
+    #[test]
+    fn with_no_companion_every_remote_audio_track_is_played() {
+        assert_eq!(
+            played(&Subscription::default()),
+            [true, true, true, true, false]
+        );
+    }
+
+    #[test]
+    fn under_b1_the_companions_tracks_are_never_played_and_share_audio_is() {
+        let rule = Subscription::new(Some(Companion::new("alice~screen", false)));
+        assert_eq!(played(&rule), [true, true, false, false, false]);
+    }
+
+    #[test]
+    fn under_b2_only_microphones_of_others_are_played() {
+        let rule = Subscription::new(Some(Companion::new("alice~screen", true)));
+        assert_eq!(played(&rule), [true, false, false, false, false]);
     }
 }
