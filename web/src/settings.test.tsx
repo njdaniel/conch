@@ -218,6 +218,23 @@ describe('changing a password', () => {
 });
 
 describe('a member from before passwords', () => {
+  it('asks for the enrollment code, not the password, when the server wants one (issue #815)', async () => {
+    const calls = serve({
+      ...people({ [memberToken]: legacyWho }),
+      'POST /v1/password/mine': () => refusal(403, 'enrollment_proof_required'),
+    });
+    await signedIn(memberToken);
+    const region = await openPassword();
+    fill(region, 'Enrollment code from an operator', proofCode);
+    fill(region, 'Choose a password', newPassword);
+    fill(region, 'Type it again', newPassword);
+    fireEvent.click(within(region).getByRole('button', { name: 'Set password' }));
+    expect(await within(region).findByText(/needs the enrollment code an operator gave you/)).toBeDefined();
+    expect(screen.queryByText('Confirm it is you')).toBeNull();
+    expect(calls.filter((c) => c.path === '/v1/password/mine')).toHaveLength(1);
+    expect(calls.some((c) => c.path === '/v1/reauth')).toBe(false);
+  });
+
   it('sets a first password with an operator’s enrollment code, and says when the code does not work', async () => {
     let tries = 0;
     const calls = serve({

@@ -181,6 +181,20 @@ impl Helper {
         stdin.flush().unwrap();
     }
 
+    /// Like `send`, for a helper that may already have exited: a write that
+    /// fails with `BrokenPipe` (the helper is gone) is not an error. Any other
+    /// failure still panics.
+    fn send_to_a_helper_that_may_have_exited(&mut self, line: &str) {
+        let stdin = self.stdin.as_mut().unwrap();
+        let written = stdin
+            .write_all(line.as_bytes())
+            .and_then(|()| stdin.write_all(b"\n"))
+            .and_then(|()| stdin.flush());
+        if let Err(error) = written {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+        }
+    }
+
     fn close(&mut self) {
         self.stdin = None;
     }
@@ -288,7 +302,8 @@ fn without_its_event_pipe_it_exits_2_having_done_nothing() {
     std::fs::write(&file, b"").unwrap();
     for fd3 in [Fd3::Closed, Fd3::File(file.clone())] {
         let mut helper = spawn(&private, fd3, &NO_DEVICES, false);
-        helper.send("{}");
+        // The helper exits 2 at once, so it may be gone before this write.
+        helper.send_to_a_helper_that_may_have_exited("{}");
         assert_eq!(helper.exit_within(Duration::from_secs(10)), Some(2));
         let stderr = helper.stderr();
         assert_eq!(stderr.lines().count(), 1, "{stderr}");
