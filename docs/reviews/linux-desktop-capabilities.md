@@ -148,7 +148,7 @@ every 250 ms). These bounds do not describe a silently missed release. Configura
 are a 100 ms release tail and 120 s maximum continuous transmit, configurable up to 600 s.
 
 **Action:** the design carries the draft's **30 s** desktop cap as a **shared default on both
-platforms for Nick to decide** (design §7.1, L-F9); shorter configured values still win; a lost
+platforms, decided by Nick on 2026-10-28** (design §7.1, L-F9); shorter configured values still win; a lost
 input session or device closes the gate with no tail; repeats never renew a deadline. The new
 backends' bounds and the second-listener measurement remain hardware work (L-P4, L-P6).
 
