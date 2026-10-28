@@ -16,10 +16,11 @@
 // guests, or without a choice, admits accounts only. The bare address admits
 // guests only when its own mode says so, and only to the channels chosen
 // here. Turning guests off ends no visit already live.
-import { useCallback, useEffect, useId, useState, type SyntheticEvent } from 'react';
+import { useCallback, useContext, useEffect, useId, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { guestName } from './guestName';
 import { InviteSettings } from './InviteSettings';
+import { JoiningSettings } from './joiningSettings';
 import { serverLine } from './Invite';
 import type { ChannelV0 } from './schema/channel';
 import type { EndGuestsResponseV1, GuestAdminV1, JoinSettingsResponseV1, JoinWarning, OpenJoiningMode, PutJoinSettingsRequestV1 } from './schema/guest';
@@ -65,6 +66,15 @@ type EndAll =
 export function GuestSettings({ channels, onUnauthorized }: { readonly channels: readonly ChannelV0[]; readonly onUnauthorized: () => void }) {
   const id = useId();
   const [open, setOpen] = useState(false);
+  // Expanded when the invite panel sends an operator here (issue #909).
+  // It takes focus, which scrolls it into view with the switch below it.
+  const sentHere = useContext(JoiningSettings)?.count ?? 0;
+  const toggle = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (sentHere === 0) return;
+    setOpen(true);
+    toggle.current?.focus();
+  }, [sentHere]);
   const [loaded, setLoaded] = useState<JoinSettingsResponseV1 | null>(null);
   const [loadLine, setLoadLine] = useState<string | null>(null);
   // What is chosen here, not yet saved.
@@ -186,6 +196,7 @@ export function GuestSettings({ channels, onUnauthorized }: { readonly channels:
   return (
     <div className="guest-settings">
       <button
+        ref={toggle}
         type="button"
         aria-expanded={open}
         aria-controls={`${id}-panel`}
@@ -204,7 +215,7 @@ export function GuestSettings({ channels, onUnauthorized }: { readonly channels:
             {loadLine}
           </p>
         )}
-        <InviteSettings open={open} onUnauthorized={onUnauthorized} />
+        <InviteSettings open={open} asked={sentHere} onUnauthorized={onUnauthorized} />
         {loaded === null ? (
           loadLine === null ? (
             <p className="hint">Loading…</p>
