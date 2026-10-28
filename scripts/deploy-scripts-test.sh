@@ -92,7 +92,9 @@ if command -v systemd-analyze >/dev/null; then
     # which says nothing about Conch's units (#870). So verify reads only this
     # directory, which holds stand-ins for docker.service and caddy.service,
     # then the distribution's own units (for sysinit.target and the like),
-    # never /etc/systemd/system, where a host's drop-ins live.
+    # never /etc/systemd/system, where a host's drop-ins live. (A drop-in the
+    # distribution itself shipped for docker.service would still apply: stock
+    # packages ship none.)
     printf '[Unit]\nDescription=stand-in for verify\n[Service]\nType=oneshot\nExecStart=/bin/true\n' >"$units/docker.service"
     cp "$units/docker.service" "$units/caddy.service"
     vendor=/usr/lib/systemd/system
