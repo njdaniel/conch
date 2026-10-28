@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,13 +23,20 @@ import (
 // Each prints a setup token, alone on stdout so a script can capture it, and
 // what to do with it on stderr. The token is good once, for ten minutes, and
 // only for the restricted setup flow: POST /v1/setup/redeem answers a
-// fifteen-minute credential that reaches whoami, the password enrolment and
-// the TOTP enrolment, and nothing else. There is no route that does what
-// these do: an operator's authentication is reset only on the host.
+// fifteen-minute credential that reaches whoami, the password enrolment,
+// the TOTP enrolment and its own sign-out, and nothing else. There is no
+// route that does what these do: an operator's authentication is reset only
+// on the host.
 //
-//	conchd operator bootstrap --data <dir> [--keep-existing-credentials] [--server-name <name>] <name>
-//	conchd operator setup     --data <dir> <principal id>
+//	conchd operator bootstrap --data <dir> [--keep-existing-credentials] [--server-name <name>] [--link --origin https://<host>] <name>
+//	conchd operator setup     --data <dir> [--link --origin https://<host>] <principal id>
 //	conchd operator recover   --data <dir> <principal id>
+//
+// With --link, bootstrap and setup print a setup link,
+// https://<host>/app/#/setup/<token>, in place of the bare token (ADR-011
+// item 3): once, on stdout, as the token would be. --origin names the
+// server's public address, which conchd is never told otherwise. recover
+// refuses --link: it is the command that revokes, and its token is typed.
 //
 // bootstrap makes the first operator as bootstrap-operator does, with a setup
 // token in place of a script credential, and like it refuses the server's
@@ -43,9 +51,14 @@ import (
 
 func operatorUsage(w io.Writer) {
 	_, _ = fmt.Fprint(w, `Usage:
-  conchd operator bootstrap --data <dir> [--keep-existing-credentials] [--server-name <name>] <name>
-  conchd operator setup     --data <dir> <principal id>
+  conchd operator bootstrap --data <dir> [--keep-existing-credentials] [--server-name <name>] [--link --origin https://<host>] <name>
+  conchd operator setup     --data <dir> [--link --origin https://<host>] <principal id>
   conchd operator recover   --data <dir> <principal id>
+
+--link prints https://<host>/app/#/setup/<token> in place of the bare token,
+once, on stdout; --origin, required with it, is the server's public HTTPS
+address. recover does not take --link. The link needs a web client from
+v0.1.0-alpha.2 or later; with an older one, give the bare token on the setup page.
 `)
 }
 
@@ -98,12 +111,81 @@ func openExisting(ctx context.Context, cmd, dataDir string) (*store.Store, error
 }
 
 // printSetupToken writes the token alone on stdout and what to do with it on
-// stderr. The token appears nowhere else.
-func printSetupToken(stdout, stderr io.Writer, name string, t store.SetupToken) {
-	_, _ = fmt.Fprintln(stdout, t.Token)
-	_, _ = fmt.Fprintf(stderr, "setup token for operator %q (principal %d) printed on stdout; it will not be shown again.\n", name, t.PrincipalID)
-	_, _ = fmt.Fprintf(stderr, "It works once, until %s (%d minutes), over HTTPS only: redeem it on the server's setup page, or with POST /v1/setup/redeem, then set a password and enrol an authenticator app.\n",
-		t.ExpiresAt.UTC().Format(time.RFC3339), schema.SetupTokenLifetimeSeconds/60)
+// stderr. The token appears nowhere else. With an origin (--link) it writes
+// the setup link in its place, once, the same way (ADR-011 item 3). Whether
+// the authenticator is needed is the server's setting, which these offline
+// commands are not told, so the text says both (ADR-012).
+func printSetupToken(stdout, stderr io.Writer, name string, t store.SetupToken, origin string) {
+	if origin != "" {
+		_, _ = fmt.Fprintln(stdout, setupLink(origin, t.Token))
+		_, _ = fmt.Fprintf(stderr, "setup link for operator %q (principal %d) printed on stdout; it will not be shown again.\n", name, t.PrincipalID)
+		_, _ = fmt.Fprintf(stderr, "It works once, until %s (%d minutes), over HTTPS only: open it in a browser and press the button to redeem it, then set a password and enrol an authenticator app.\n",
+			t.ExpiresAt.UTC().Format(time.RFC3339), schema.SetupTokenLifetimeSeconds/60)
+		_, _ = fmt.Fprintln(stderr, "The link needs a web client from v0.1.0-alpha.2 or later; with an older one, paste the part after #/setup/ on the setup page as the token.")
+	} else {
+		_, _ = fmt.Fprintln(stdout, t.Token)
+		_, _ = fmt.Fprintf(stderr, "setup token for operator %q (principal %d) printed on stdout; it will not be shown again.\n", name, t.PrincipalID)
+		_, _ = fmt.Fprintf(stderr, "It works once, until %s (%d minutes), over HTTPS only: redeem it on the server's setup page, or with POST /v1/setup/redeem, then set a password and enrol an authenticator app.\n",
+			t.ExpiresAt.UTC().Format(time.RFC3339), schema.SetupTokenLifetimeSeconds/60)
+	}
+	_, _ = fmt.Fprintln(stderr, "The authenticator is required unless serve runs with CONCHD_OPERATOR_TOTP=optional or CONCHD_MODE=temporary; there the password completes setup, and the authenticator step may be skipped.")
+}
+
+// setupLink is the web client's setup address for token at origin. The token
+// is in the fragment, which a browser never sends to a server, and the page
+// takes it from the address and clears it at once (ADR-011 item 3).
+func setupLink(origin, token string) string { return origin + "/app/#/setup/" + token }
+
+// linkFlags are --link and --origin, for the commands that offer a link.
+type linkFlags struct {
+	link   *bool
+	origin *string
+}
+
+func addLinkFlags(fs *flag.FlagSet) linkFlags {
+	return linkFlags{
+		link:   fs.Bool("link", false, "print a setup link (https://<host>/app/#/setup/<token>) in place of the bare token; needs --origin and a web client from v0.1.0-alpha.2 or later"),
+		origin: fs.String("origin", "", "the server's public address for --link, https://<host>[:port]"),
+	}
+}
+
+// resolve is the origin the link is printed at, "" for no link. --origin
+// without --link, or --link without --origin, is refused: conchd has no
+// public address of its own to fall back on, and CONCHD_LISTEN is where it
+// binds, not where people reach it.
+func (l linkFlags) resolve(cmd string) (string, error) {
+	switch {
+	case !*l.link && *l.origin == "":
+		return "", nil
+	case !*l.link:
+		return "", fmt.Errorf("%s: --origin is only for --link; nothing changed", cmd)
+	case *l.origin == "":
+		return "", fmt.Errorf("%s: --link needs --origin https://<host>, the server's public address; nothing changed", cmd)
+	}
+	origin, err := parseSetupOrigin(*l.origin)
+	if err != nil {
+		return "", fmt.Errorf("%s: --origin: %w; nothing changed", cmd, err)
+	}
+	return origin, nil
+}
+
+// parseSetupOrigin checks an --origin: https, a host, an optional port, and
+// nothing else (no user, path, query or fragment; one trailing slash is
+// dropped). A setup token is accepted over HTTPS only, so a link to plain
+// HTTP would only fail later.
+func parseSetupOrigin(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSuffix(raw, "/"))
+	switch {
+	case err != nil:
+		return "", errors.New("not an address")
+	case u.Scheme != "https":
+		return "", errors.New("must start with https://")
+	case u.Host == "" || u.Hostname() == "":
+		return "", errors.New("names no host")
+	case u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || strings.ContainsAny(raw, "?#"):
+		return "", errors.New("must be https://<host>[:port] and nothing more")
+	}
+	return "https://" + u.Host, nil
 }
 
 func runOperatorBootstrap(args []string, stdout, stderr io.Writer) error {
@@ -112,12 +194,17 @@ func runOperatorBootstrap(args []string, stdout, stderr io.Writer) error {
 	dataDir := fs.String("data", os.Getenv("CONCHD_DATA"), "directory for the SQLite database")
 	keep := fs.Bool("keep-existing-credentials", false, "do not revoke credentials or delete webhook hooks that already exist")
 	serverNameFlag := fs.String("server-name", os.Getenv("CONCHD_SERVER_NAME"), "the server's name, which the operator may not take (default "+server.DefaultServerName+")")
+	linkOpts := addLinkFlags(fs)
 	positional, err := parseInterleaved(fs, args)
 	if err != nil {
 		return err
 	}
 	if *dataDir == "" {
 		return errors.New("operator bootstrap: --data (or CONCHD_DATA) is required")
+	}
+	origin, err := linkOpts.resolve("operator bootstrap")
+	if err != nil {
+		return err
 	}
 	serverName, err := offlineServerName("operator bootstrap", *serverNameFlag)
 	if err != nil {
@@ -163,7 +250,7 @@ func runOperatorBootstrap(args []string, stdout, stderr io.Writer) error {
 		_, _ = fmt.Fprintf(stderr, "note: %d agent manifest(s) already exist and were kept; they were writable by anyone until now, so review them\n", res.Manifests)
 	}
 	_, _ = fmt.Fprintf(stderr, "operator %q (principal %d) created, with no credential yet\n", res.Principal.Name, res.Principal.ID)
-	printSetupToken(stdout, stderr, res.Principal.Name, res.SetupToken)
+	printSetupToken(stdout, stderr, res.Principal.Name, res.SetupToken, origin)
 	return nil
 }
 
@@ -196,7 +283,17 @@ func runOperatorSetup(cmd string, args []string, stdout, stderr io.Writer) error
 	fs := flag.NewFlagSet(label, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dataDir := fs.String("data", os.Getenv("CONCHD_DATA"), "directory for the SQLite database")
+	linkOpts := addLinkFlags(fs)
 	positional, err := parseInterleaved(fs, args)
+	if err != nil {
+		return err
+	}
+	// Refused before the store is opened: recover revokes, and a refusal
+	// must leave everything as it was.
+	if cmd == "recover" && (*linkOpts.link || *linkOpts.origin != "") {
+		return fmt.Errorf("%s: --link is not offered for recover; run it without --link and give the printed token on the setup page; nothing changed", label)
+	}
+	origin, err := linkOpts.resolve(label)
 	if err != nil {
 		return err
 	}
@@ -253,7 +350,7 @@ func runOperatorSetup(cmd string, args []string, stdout, stderr io.Writer) error
 	if cmd == "recover" {
 		_, _ = fmt.Fprintf(stderr, "operator %q (principal %d) recovered: %d credential(s) revoked, the authenticator removed, every pending sign-in and link ended\n", p.Name, id, revoked)
 	}
-	printSetupToken(stdout, stderr, p.Name, token)
+	printSetupToken(stdout, stderr, p.Name, token, origin)
 	if cmd == "setup" {
 		_, _ = fmt.Fprintln(stderr, "If a setup token was already spent and setup finished, conchd operator setup refuses: conchd operator recover is the command then.")
 	}

@@ -625,8 +625,21 @@ func (w *world) operatorAuth() (timing, error) {
 	}
 	// Until setup is done again, the password signs nobody in (design §9.8:
 	// an operator with a password but no confirmed second factor is
-	// auth_failed): recovery removed the second factor.
-	if err := refusedAs(w.newcomer("someone with the operator's password, after the recovery"), http.MethodPost, "/v1/login",
+	// auth_failed): recovery removed the second factor. Where password-only
+	// is allowed (a temporary server, or CONCHD_OPERATOR_TOTP=optional) the
+	// recovered operator is password-only, and the password alone signs them
+	// in (ADR-011 item 2.1, ADR-012 item 3); everything else here is the same.
+	if passwordOnlyAllowed() {
+		var in schema.LoginResponseV1
+		if err := w.newcomer("the operator's password, after the recovery, where password-only is allowed").call(http.MethodPost, "/v1/login",
+			schema.LoginRequestV1{Name: opName, Password: operatorPassword}, &in); err != nil {
+			return t, err
+		}
+		w.h.secret("a browser session", in.Token)
+		if in.Next != schema.LoginNextSignedIn || in.Token == "" {
+			return t, fmt.Errorf("the recovered operator's password where password-only is allowed answered %s, want signed in", in.Next)
+		}
+	} else if err := refusedAs(w.newcomer("someone with the operator's password, after the recovery"), http.MethodPost, "/v1/login",
 		schema.LoginRequestV1{Name: opName, Password: operatorPassword}, answer{http.StatusUnauthorized, schema.ErrorCodeAuthFailed},
 		"the operator's password between the recovery and the new setup"); err != nil {
 		return t, err

@@ -25,7 +25,10 @@ import (
 // §7.2). POST /v1/login is open to anyone. A member's right password earns
 // a member credential; an operator's earns only a pending-login challenge,
 // which the second factor completes, and an operator whose setup is
-// incomplete earns nothing. Every other outcome is one answer, 401
+// incomplete earns nothing. Where password-only is allowed (ADR-011 item
+// 2.1, ADR-012) the second factor is asked for only when one is enrolled: an
+// operator with none earns the operator's browser session from the password
+// alone. Every other outcome is one answer, 401
 // auth_failed, after comparable work: an unknown name, a wrong password, a
 // disabled, hidden or agent principal and one with no password all cost one
 // Argon2id verification (a dummy one where there is no record).
@@ -462,9 +465,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		slog.ErrorContext(ctx, "login: a stored password record cannot be verified; the person cannot sign in until it is set again", "principal", p.ID)
 	case !res.ok:
 		reason = loginReasonWrongPassword
-	case p.Role == store.RoleOperator && !cand.TOTPEnrolled:
+	case p.Role == store.RoleOperator && !cand.TOTPEnrolled && !s.cfg.passwordOnlyAllowed():
 		// Never signed in and never a challenge: an operator's browser
-		// sign-in needs both factors, set up through a host-made token.
+		// sign-in needs both factors, set up through a host-made token. On
+		// a server that allows password-only the second factor is asked for only when one
+		// is enrolled (ADR-011 item 2.1), so this operator goes on below.
 		reason = loginReasonSetupIncomplete
 	}
 	if reason != "" {
@@ -476,7 +481,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		s.beforeLoginIssue()
 	}
 	issue := store.LoginIssue{PrincipalID: p.ID, AuthGeneration: cand.AuthGeneration, Record: cand.Record, Rehash: res.rehash}
-	if p.Role == store.RoleOperator {
+	if p.Role == store.RoleOperator && cand.TOTPEnrolled {
 		pending, err := s.store.CreatePendingLogin(ctx, issue, s.pendingAddressKey(addr), s.now())
 		switch {
 		case errors.Is(err, store.ErrLoginStale):
@@ -496,7 +501,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	issued, err := s.store.IssueLoginCredential(ctx, issue, s.now())
+	// A member, or (only where password-only is allowed, by the check above) an
+	// operator with no authenticator, who gets the operator's browser
+	// session straight away, as a member gets theirs. The store re-checks
+	// the mode and the enrolment in the issuing transaction.
+	issueCredential := s.store.IssueLoginCredential
+	if p.Role == store.RoleOperator {
+		issueCredential = s.store.IssuePasswordOnlyOperatorSession
+	}
+	issued, err := issueCredential(ctx, issue, s.now())
 	switch {
 	case errors.Is(err, store.ErrLoginStale):
 		s.loginFailed(w, r, key, true, loginReasonStale)

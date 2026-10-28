@@ -29,9 +29,20 @@ var ErrLastOperator = errors.New("store: this would leave no owner able to sign 
 // ends a principal (a disable or role/mark removal) leaves its factors out;
 // one that ends only credentials (a revoke, a sign-out everywhere) keeps
 // them, since a password and a code still sign that owner in afterwards.
+//
+// Where password-only is allowed (the flag StartMode recorded, read in the
+// same transaction) a password alone signs an owner in (ADR-011 item 2.1,
+// ADR-012 item 3), so an owner with a password counts, with or without a
+// confirmed TOTP: the guard counts what the server really allows. Otherwise
+// it is as it always was, and either way an owner with no password, holding
+// only a setup credential, is not counted.
 func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID, exceptCredentialID, factorsExceptPrincipalID int64, now time.Time) (int, error) {
+	passwordOnly, err := storedPasswordOnlyTx(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
 	var n int
-	err := tx.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`SELECT (SELECT COUNT(*) FROM credentials c JOIN principals p ON p.id = c.principal_id
 		         WHERE p.role = 'operator' AND p.owner = 1 AND p.disabled_at IS NULL
 		           AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
@@ -41,8 +52,8 @@ func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID
 		         WHERE p.role = 'operator' AND p.owner = 1 AND p.kind = 'human' AND p.disabled_at IS NULL AND p.hidden_at IS NULL
 		           AND p.id <> ?
 		           AND EXISTS (SELECT 1 FROM passwords pw WHERE pw.principal_id = p.id)
-		           AND EXISTS (SELECT 1 FROM totp t WHERE t.principal_id = p.id AND t.secret IS NOT NULL AND t.enrolled_at IS NOT NULL))`,
-		now.UnixMilli(), exceptPrincipalID, exceptCredentialID, factorsExceptPrincipalID,
+		           AND (? OR EXISTS (SELECT 1 FROM totp t WHERE t.principal_id = p.id AND t.secret IS NOT NULL AND t.enrolled_at IS NOT NULL)))`,
+		now.UnixMilli(), exceptPrincipalID, exceptCredentialID, factorsExceptPrincipalID, passwordOnly,
 	).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("store: count live operator credentials: %w", err)
