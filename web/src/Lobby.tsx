@@ -55,6 +55,7 @@ export function Lobby({
   origin,
   name,
   me = 0,
+  temporary,
   channels,
   unread,
   occupancy,
@@ -84,6 +85,8 @@ export function Lobby({
   readonly name: string;
   // The signed-in principal's id, for the colour of their initial.
   readonly me?: number;
+  // Whoami said this is a temporary server (ADR-011): the banner shows.
+  readonly temporary?: boolean;
   readonly channels: ChannelsState;
   readonly unread: ReadonlyMap<string, number>;
   // How many are in each channel's voice (issue #596), shown in the list.
@@ -429,7 +432,7 @@ export function Lobby({
         </section>
         <section aria-label="Help" className="drawer-section">
           {report}
-          <ServerVersion className="hint" />
+          <ServerVersion className="hint" temporary={temporary === true} />
         </section>
       </div>
       {overlay}

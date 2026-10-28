@@ -2737,3 +2737,10 @@ button.link {
     box-shadow: 0 0 0 2px var(--surface), 0 0 0 6px var(--accent);
   }
 }
+
+/* ADR-011: the fixed line a temporary server shows beside its version. */
+.temporary-banner {
+  color: var(--muted);
+  min-height: 0;
+  margin: 0.25rem 0;
+}

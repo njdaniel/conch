@@ -920,6 +920,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // hashchange, no reload). The newest link wins.
   const [inviteCode, setInviteCode] = useState<string | null>(null);
   const [signInCode, setSignInCode] = useState<string | null>(null);
+  // An operator's setup from a host-made token (issue #714) is a page of its
+  // own, reached from the sign-in page, or from a setup link (ADR-011), whose
+  // token waits in a ref (never in state) until Setup puts it in its field.
+  const [settingUp, setSettingUp] = useState(false);
+  const setupLink = useRef<string | null>(null);
   useLayoutEffect(() => {
     function take() {
       const found = takeLinkFromAddress();
@@ -929,6 +934,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       } else if (found?.kind === 'signin') {
         setInviteCode(null);
         setSignInCode(found.signInCode);
+      } else if (found?.kind === 'setup') {
+        setInviteCode(null);
+        setSignInCode(null);
+        setupLink.current = found.setupToken;
+        setSettingUp(true);
       }
     }
     take();
@@ -1049,10 +1059,6 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     dispatchAuth({ type: 'signOut', notice: over ? 'codeOver' : null });
   }, []);
 
-  // An operator's setup from a host-made token (issue #714) is a page of its
-  // own, reached from the sign-in page.
-  const [settingUp, setSettingUp] = useState(false);
-
   // Forgetting a stored sign-in that could not be checked (issue #469): it is
   // revoked if the server answers, then dropped, and signing in is open again.
   const forgetStored = useCallback(() => {
@@ -1152,6 +1158,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     return (
       <Setup
         origin={origin}
+        link={setupLink}
         onDone={() => {
           setSettingUp(false);
           dispatchAuth({ type: 'signOut', notice: 'setupDone' });
@@ -1225,6 +1232,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           origin={origin}
           name={shownName}
           me={auth.principal.id}
+          temporary={auth.principal.server_mode === 'temporary'}
           passwordSet={auth.principal.auth?.password_set === true}
           banner={
             <>
@@ -1343,7 +1351,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           admin={auth.principal.role === 'operator' ? <GuestSettings channels={channels.channels} onUnauthorized={onUnauthorized} /> : null}
           overlay={
             asking ? (
-              <Reauth operator={auth.principal.role === 'operator'} insecure={needsHttps(origin)} onDone={finishReauth} onUnauthorized={onUnauthorized} />
+              <Reauth operator={auth.principal.role === 'operator' && auth.principal.auth?.totp_enrolled === true} insecure={needsHttps(origin)} onDone={finishReauth} onUnauthorized={onUnauthorized} />
             ) : null
           }
           report={<ReportProblem onUnauthorized={onUnauthorized} />}

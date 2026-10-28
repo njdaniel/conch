@@ -450,13 +450,26 @@ let pageVersion: string | null = null;
 // answer with a health document. A degraded server (503) still names its
 // version, so the status is not looked at.
 export async function serverVersion(): Promise<string | null> {
+  return (await serverHealth())?.version ?? null;
+}
+
+// What /healthz says that the page shows: the version, and whether this is a
+// temporary server (ADR-011). Only a temporary server carries server_mode.
+export interface ServerHealth {
+  readonly version: string;
+  readonly temporary: boolean;
+}
+
+// serverHealth reads GET /healthz; null when the server cannot be reached or
+// does not answer with a health document.
+export async function serverHealth(): Promise<ServerHealth | null> {
   try {
     const res = await fetch('/healthz', { headers: { Accept: 'application/json' }, cache: 'no-store', credentials: 'omit' });
     const body: unknown = await res.json();
     if (health(body).length > 0) return null;
-    const version = (body as { version: string }).version;
+    const { version, server_mode: mode } = body as { version: string; server_mode?: string };
     pageVersion ??= version;
-    return version;
+    return { version, temporary: mode === 'temporary' };
   } catch {
     return null;
   }
@@ -805,6 +818,18 @@ export async function confirmAuthenticator(code: string): Promise<InviteResult<n
   return readDone(await sendSetup('/v1/totp/confirm', request));
 }
 
+// skipAuthenticator ends the setup credential with the authenticator left
+// unset (DELETE /v1/credentials/current, which a setup credential may call):
+// ADR-012's Skip, offered only where whoami says setup is complete without
+// one. The credential is forgotten here whatever the answer.
+export async function skipAuthenticator(): Promise<InviteResult<null>> {
+  const held = setupHeld;
+  if (held === null) return { ok: false, failure: 'unauthorized' };
+  const reply = await sendAs(held, 'DELETE', '/v1/credentials/current');
+  setupHeld = null;
+  return readDone(reply);
+}
+
 // endSetup forgets the setup credential here. The server ends it at its
 // fifteen minutes, or once setup is complete; it can revoke nothing itself.
 export function endSetup(): void {
@@ -1147,7 +1172,18 @@ export async function signInWithPassword(name: string, password: string): Promis
     pendingLogin = { challenge: answer.value.challenge, expiresAt: until, tries: 0 };
     return { ok: false, failure: 'totp', expiresAt: answer.value.challenge_expires_at };
   }
-  return keepRedeemed(answer.value.token, answer.value.principal.id, 'lasting');
+  // A session straight from the password is a member's, or an operator's on
+  // a server that lets an operator sign in with a password alone (ADR-012).
+  // Which one decides where it is kept: an operator's is for this tab alone.
+  // So whoami is asked with it before it is stored anywhere; nothing is kept
+  // on a refusal, and the credential is then revoked, best effort.
+  const token = answer.value.token;
+  const who = await get('/v1/whoami', token, whoAmIResponseV1);
+  if (!who.ok) {
+    await sendAs({ token, place: 'tab' }, 'DELETE', '/v1/credentials/current');
+    return { ok: false, failure: 'unchecked' };
+  }
+  return keepRedeemed(token, answer.value.principal.id, 'lasting', who.value.role === 'operator');
 }
 
 // What the code's step gave besides an answer: over is a sign-in that has

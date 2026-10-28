@@ -91,8 +91,11 @@ export function authReducer(state: AuthState, action: AuthAction): AuthState {
       if (state.phase === 'code' && state.checking) return { phase: 'signedIn', principal: action.principal };
       if (state.phase === 'checking') {
         // A new sign-in as an operator is warned about; a stored credential
-        // that was already accepted past the warning is not asked again.
-        return action.principal.role === 'operator'
+        // that was already accepted past the warning is not asked again. An
+        // operator's own session, which a password alone gives on a server
+        // that allows it (ADR-012, issue #867), is not a script's credential:
+        // no warning.
+        return action.principal.role === 'operator' && !operatorSession(action.principal)
           ? { phase: 'operatorWarning', principal: action.principal }
           : { phase: 'signedIn', principal: action.principal };
       }
