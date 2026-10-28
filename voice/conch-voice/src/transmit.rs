@@ -455,12 +455,22 @@ impl Listen {
         self.tail_from = Some(Instant::now());
     }
 
-    /// Whether the release tail has run for as long as it lasts, by the clock.
+    /// Whether the release tail has run for as long as it lasts, by the clock, plus
+    /// [`TAIL_SLACK`]: a microphone that delivers on time but a quantum at a time has sent
+    /// the whole tail by then, so only one that has stopped delivering is cut.
     fn tail_over(&self) -> bool {
         self.tail_from
-            .is_some_and(|from| from.elapsed() >= self.tail)
+            .is_some_and(|from| from.elapsed() >= self.tail + TAIL_SLACK)
     }
 }
+
+/// How long past its length the release tail may run, by the clock, before a microphone
+/// that delivers nothing is taken to have stalled and the gate is cut. PipeWire hands the
+/// microphone over a quantum at a time (21 ms by default, 43 ms for a graph of 2048
+/// samples), so a tail's last frames can arrive that long after the tail's length has
+/// passed; cutting at the length itself would drop them on an ordinary release (#686's
+/// review). The cut only ever ends a transmission sooner than the frame count would.
+const TAIL_SLACK: Duration = Duration::from_millis(50);
 
 /// Whether the transmit task puts the level detector back in its sounding state on this
 /// command: when a reason ends (but the transmit limit, which in open mode ends with quiet),
@@ -771,6 +781,36 @@ mod tests {
     /// level and hang.
     fn push_to_talk() -> Listen {
         Listen::new(level_config(-40, 400), Duration::ZERO).unwrap()
+    }
+
+    /// The tail is over by the clock only once its length and TAIL_SLACK have passed (#686's
+    /// review): a microphone that hands over a quantum at a time sends its last tail frames
+    /// up to a quantum after the length, and they must not be cut. Checked against the
+    /// clock as it is read, so a slow machine cannot make it fail.
+    #[test]
+    fn the_tail_is_over_only_after_its_length_and_the_slack() {
+        let tail = Duration::from_millis(20);
+        let mut listen = Listen::new(level_config(-40, 400), tail).unwrap();
+        assert!(!listen.tail_over(), "no tail has begun");
+        listen.tail_began();
+        let began = Instant::now();
+        loop {
+            let over = listen.tail_over();
+            let elapsed = began.elapsed();
+            // At least a quantum of a 2048-sample graph (43 ms) past the length, whatever
+            // TAIL_SLACK is set to.
+            if elapsed < tail + Duration::from_millis(43) {
+                assert!(
+                    !over,
+                    "over after {elapsed:?}, within a quantum of the length"
+                );
+            }
+            if over {
+                break;
+            }
+            assert!(elapsed < Duration::from_secs(5), "never over");
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     fn open(commands: &mpsc::UnboundedSender<TxCommand<Record>>) {
@@ -1307,15 +1347,16 @@ mod tests {
             assert_eq!(quiet, [sound(false)]);
 
             // The machine shuts the gate. Its tail of 50 ms, which the gate counts in frames,
-            // would never run out with none coming: it is cut once it has run for 50 ms by
-            // the clock, and not before.
+            // would never run out with none coming: it is cut once it has run for 50 ms and
+            // TAIL_SLACK by the clock, and not before.
             task.obey(TxCommand::Gate(GateCommand::Shut));
             assert_eq!(reported(&mut said), []);
             let mut shut = Vec::new();
             for _ in 0..3 {
                 read_all(&mut task).await;
                 shut.extend(reported(&mut said));
-                if task.listen.tail_from.unwrap().elapsed() < Duration::from_millis(50) {
+                if task.listen.tail_from.unwrap().elapsed() < Duration::from_millis(50) + TAIL_SLACK
+                {
                     assert_eq!(shut, [], "the tail was cut short");
                 }
                 std::thread::sleep(Duration::from_millis(10));
