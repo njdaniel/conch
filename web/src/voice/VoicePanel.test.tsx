@@ -91,6 +91,18 @@ describe('the private microphone test (issue #846)', () => {
     redraw(inVoice('connecting', 'general'));
     expect(within(voice).queryByRole('button', { name: /test microphone|stop test/i })).toBeNull();
   });
+
+  it('is offered only when Join is: not while voice is down or the server is gone', () => {
+    const { voice, redraw } = panel(initialVoice, 'general');
+    const test = () => within(voice).queryByRole('button', { name: /test microphone|stop test/i });
+    expect(test()).not.toBeNull();
+    redraw(initialVoice, { kind: 'presence', presence: { ...presence, available: false } });
+    expect(test()).toBeNull();
+    redraw(initialVoice, { kind: 'gone' });
+    expect(test()).toBeNull();
+    redraw(initialVoice, { kind: 'presence', presence });
+    expect(test()).not.toBeNull();
+  });
 });
 
 describe('Join voice and Watch only', () => {

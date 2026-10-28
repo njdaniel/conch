@@ -496,8 +496,10 @@ export function VoicePanel({
               <p className="hint">Voice status could not be read.</p>
             ) : null}
             {/* Private, and only while not in voice: joining takes this
-                out of the tree, which releases the microphone first. */}
-            {voice.secure ? <MicTest /> : null}
+                out of the tree, which releases the microphone first. Offered
+                only when Join is (a live connection, voice up), so a page
+                that lost the server offers nothing to press here (P3-09). */}
+            {canJoin ? <MicTest /> : null}
           </>
         )}
       </div>
