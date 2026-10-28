@@ -1,0 +1,180 @@
+# Windows desktop capability matrix and security review (issue #775)
+
+- **Reviewed:** the proposed design [docs/design/windows-desktop.md](../design/windows-desktop.md), against the sources it cites, on 2026-10-28.
+- **Reviewer:** protocol-designer agent (Claude Fable 5.1), desk research only. **No Windows machine was available.** Nothing in this document was run on Windows. Every row whose evidence needs native Windows is **pending-hardware** and names the experiment that would settle it; a row is **verified-by-docs** only when a cited official page states the mechanism, which is a statement about the API, not about a pinned Conch build on a real machine.
+- **How to read the status column.** `proposed`: the design says how, nothing checked yet. `verified-by-docs`: the mechanism is documented as stated, by the cited page. `pending-hardware`: needs a Windows 11 x64 machine, a headset, a second listener, or a game. `unsupported`: the design says it will not be offered. The hardware run that fills this matrix is follow-up F14 in the design note.
+- **Versions to record with every hardware result:** Windows version and OS build (`winver`), Electron and Chromium (`process.versions`), `conch-voice` version and hello line, GPU and driver, audio devices (endpoint IDs and friendly names), keyboard and mouse models, the game and its anti-cheat, and the commit of this repository.
+
+## 1. Capability matrix
+
+### Target and toolchain
+
+| Id | Capability | Mechanism | Evidence | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| T1 | Supported OS: Windows 11 x64 25H2 (26200) on every edition; 24H2 (26100) only on still-serviced editions (Enterprise, Education, LTSC 2024) | lifecycle table | [Windows 11 release information](https://learn.microsoft.com/en-us/windows/release-health/windows11-release-information), 2026-10-26: 25H2 serviced to 2027-10-12 (Home/Pro) and 2028-10-10 (Enterprise/Education); 24H2 Home/Pro "End of updates", Enterprise/Education to 2027-10-12; 23H2 Enterprise/Education ends 2026-11-10 | verified-by-docs | Home/Pro: 25H2 only. 23H2, Windows 10, ARM64, WSL: out of target (design §1) |
+| T2 | Rust builds for `x86_64-pc-windows-msvc` | Tier 1 target | [rustc platform support](https://doc.rust-lang.org/rustc/platform-support.html) | verified-by-docs | the toolchain pin 1.96.1 is unchanged |
+| T3 | `livekit` 0.9.4 and `webrtc-sys` build on Windows with the pinned libwebrtc | `webrtc-win-x64-release.zip` exists for tag `webrtc-89d790b` | [release assets](https://api.github.com/repos/livekit/rust-sdks/releases/tags/webrtc-89d790b), published 2026-08-19; the README states no Windows build requirement ([rust-sdks](https://github.com/livekit/rust-sdks)) | **pending: experiment E1** | compiler (MSVC `cl`, clang-cl, both), Windows SDK version and the archive's SHA-256 are E1's outputs |
+| T4 | Electron pinned at a supported major | current stable 45.1.0 (Chromium 156.0.8078.49, Node 24.22.1, 2026-10-27); three majors supported | [releases.json](https://releases.electronjs.org/releases.json); [timelines](https://www.electronjs.org/docs/latest/tutorial/electron-timelines) | proposed | pinned by #770 when `desktop/` exists; the version here is a reading, not a pin |
+
+### Audio
+
+| Id | Capability | Mechanism | Evidence | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| A1 | Microphone capture, 48 kHz mono f32, 10 ms frames, into the capture ring | WASAPI shared-mode event-driven capture through `wasapi` 0.26.0; engine-side conversion if exposed | [About WASAPI](https://learn.microsoft.com/en-us/windows/win32/coreaudio/wasapi); [`wasapi` docs](https://docs.rs/wasapi/latest/wasapi/) (shared/exclusive, event-driven, "all safe Rust") | **pending: E3** | whether 48 kHz mono can be requested or must be converted by us is E3's first finding; a resampler would be a new crate |
+| A2 | Playback of the mix, from the playback ring | WASAPI shared-mode event-driven render | same | **pending: E3** | glitch-free at 10 ms periods with the SDK's runtime sharing the process is the measurement |
+| A3 | Device enumeration with stable identifiers and friendly names | endpoint ID strings (opaque, unique per system) plus the friendly-name property | [IMMNotificationClient](https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nn-mmdeviceapi-immnotificationclient) ("uniquely identifies the device"); `wasapi` enumerates devices and defaults | verified-by-docs for existence; **pending: E4** for stability across replug, USB and Bluetooth | names fit the `set_devices` rule (1–255 bytes, no `"` or `\`), so `conch.voice_control.v2` is reused unchanged; the device list needs `conch.voice_devices.v2` (design §2.6) |
+| A4 | Device removed while in use closes transmission and shows `capture: unavailable`; no substitution | `AUDCLNT_E_DEVICE_INVALIDATED` on the stream; `OnDeviceRemoved` | [About WASAPI](https://learn.microsoft.com/en-us/windows/win32/coreaudio/wasapi); [IMMNotificationClient](https://learn.microsoft.com/en-us/windows/win32/api/mmdeviceapi/nn-mmdeviceapi-immnotificationclient); `wasapi` exposes device-change notifications | **pending: E4** | the gate shuts with no tail, as for `set_devices` during a transmission |
+| A5 | Following `default` when the default changes | `OnDefaultDeviceChanged`, stream moved; a transmission under way ends first | same | **pending: E4** | Windows changes the default when a headset is plugged in; the test is a press held across that |
+| A6 | Denied microphone (privacy toggle off) reported truthfully | "Let desktop apps access your microphone" applies to all desktop apps; Microsoft says desktop apps "might still be able to access" | [Windows camera, microphone and privacy](https://support.microsoft.com/en-us/windows/windows-camera-microphone-and-privacy-a83257bc-e990-d54a-d212-b5e41beba857) | **pending: E4** | whether `Initialize` fails or capture is silent decides whether the state says `no_microphone` or the start fails `audio_unavailable` |
+| A7 | Echo cancellation | `IAcousticEchoCancellationControl` exists in WASAPI | [About WASAPI](https://learn.microsoft.com/en-us/windows/win32/coreaudio/wasapi) | proposed, not promised (F10) | until measured, the Windows client says what Linux says: headphones |
+
+### Transport, process ownership and owner death
+
+| Id | Capability | Mechanism | Evidence | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| X1 | Commands reach the helper on a private channel | standard input: libuv anonymous pipe pair, child end synchronous and inherited | [libuv `pipe.c`](https://raw.githubusercontent.com/libuv/libuv/v1.x/src/win/pipe.c) (`uv__create_stdio_pipe_pair`) | verified-by-docs (source) | the same channel as Linux; `read_bounded` unchanged |
+| X2 | Events on a channel nothing else writes to | owner-created named pipe `\\.\pipe\conch-voice-<128-bit>`; helper opens it by name with `std::fs::OpenOptions` | [CreateNamedPipeW](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew) ("A client process connects to a named pipe by using the CreateFile ... function"); Rust `std` opening a pipe path is standard practice but not in its docs | **pending: E2** | fd 3 is impossible: Node's extra pipes are "not actual Unix pipes" and a Rust child cannot take a handle by number without `unsafe`; Go says "ExtraFiles is not supported on Windows" ([os/exec](https://pkg.go.dev/os/exec#Cmd)) |
+| X3 | The owner knows the connection is its helper | one-line `conch.voice_control_pipe.v1` `attached` with a nonce from the helper's environment, within the hello timeout; other connections closed unread beyond one line | design §3.4; default pipe DACL grants Everyone read ([CreateNamedPipeW](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew)) | proposed; schema needs sign-off; security-reviewer pass required | see §2.1 below for the threat model |
+| X4 | No localhost listener, no secret in argv | named pipe, not TCP; argv is `conch-voice.exe managed --events-pipe <name>`; the nonce and the token are in the environment only | design §3.3, §3.4, §3.7 | proposed | remote SMB clients are not rejected by libuv's pipe (no `PIPE_REJECT_REMOTE_CLIENTS`): residual in §2.1 |
+| X5 | Owner death (crash, kill, power) stops capture and ends the helper within the contract's bounds | EOF on standard input; EOF or write error on the events pipe (read by its own thread); the helper's watchdog | design §3.6; kernel closes a dead process's handles | **pending: E6** | `VoiceControlGateShutMS` 100, `VoiceControlCaptureStopMS` 500, `VoiceControlOwnerLossExitMS` 3000; measure with a key held and while transmitting |
+| X6 | No stray handle keeps the helper alive | libuv does not mark the listener inheritable; standard-input leak through Electron's other children is the open question | design §3.6; `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` is the Win32 means to scope inheritance ([UpdateProcThreadAttribute](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)) but Node does not expose it | **pending: E6** | if a leak is found, the events-pipe EOF is the backstop; Job Objects with `KILL_ON_JOB_CLOSE` ([Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)) are the hardening a Win32-capable owner could add |
+| X7 | Bounded stop from the owner; only its own process is ever killed | `leave`, close stdin and the events server, `child.kill()` at `VoiceControlStopKillAfterMS`; no graceful signal exists ("terminate the process forcefully and abruptly") | [Node child_process](https://nodejs.org/api/child_process.html) | verified-by-docs for the mechanism; **pending: E6** for the measured bound | never `taskkill`, never by name; `windowsHide: true` so no console flashes |
+| X8 | No press or release on the control channel; v1/v2 byte-identical | input stays in the helper; bindings are `voice.toml` | [pkg/schema/voice_control.go](../../pkg/schema/voice_control.go) ("nothing on this channel can open the transmit gate") | verified (repository) | a `conch.voice_input.v1` would be needed only under media model C (design §6, §7) |
+
+### Push-to-talk (keyboard and Mouse 4; each cell is press AND release, with a second listener)
+
+| Id | Capability | Mechanism | Evidence | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| P1 | Keyboard press and release, Conch window focused | Raw Input `RI_KEY_MAKE`/`RI_KEY_BREAK` by scan code | [RAWKEYBOARD](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-rawkeyboard) | verified-by-docs; **pending: E7** | — |
+| P2 | Keyboard, another window focused (desktop app, browser) | `RIDEV_INPUTSINK`: "when it is in the background" | [Raw Input Overview](https://learn.microsoft.com/en-us/windows/win32/inputdev/about-raw-input) | verified-by-docs; **pending: E7** | the background case is the product's reason to exist |
+| P3 | Keyboard, windowed and borderless-fullscreen game focused | same | same | **pending: E7** | per game; record the title |
+| P4 | Keyboard, exclusive-fullscreen game focused | same; exclusive fullscreen changes the display mode, not input routing | no page read states the exclusive-fullscreen case | **pending: E7** | — |
+| P5 | Keyboard, **elevated** game in the foreground | Raw Input delivery across integrity levels is not stated on the pages read | [Mandatory Integrity Control](https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control) describes levels; UIPI's blocked-operation list is from memory | **pending: E8** | if not delivered: **unsupported**, labelled; Conch is never run elevated to compensate |
+| P6 | Keyboard, secure desktop shown (UAC, lock screen, Ctrl+Alt+Del) while held | no input reaches the default desktop; release may be missed | design §4.4, §5 | **pending: E8**; the bound is `max_transmit_secs`, owner `set_mute` on lock | whether the `BREAK` is delivered on return is the question |
+| P7 | Mouse 4 press and release, Conch focused | `RI_MOUSE_BUTTON_4_DOWN` 0x0040 / `_UP` 0x0080 ("XBUTTON1 changed to down/up") | [RAWMOUSE](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-rawmouse) | verified-by-docs; **pending: E7** | Mouse 5: 0x0100/0x0200 |
+| P8 | Mouse 4, another window or game focused (windowed, borderless, exclusive) | `RIDEV_INPUTSINK` applies to the mouse collection too | [Raw Input Overview](https://learn.microsoft.com/en-us/windows/win32/inputdev/about-raw-input) | **pending: E7** | games that use Raw Input themselves still receive the button: registration is not exclusive (no `RIDEV_NOLEGACY`, no capture) |
+| P9 | Mouse 4, elevated foreground and secure desktop | as P5, P6 | — | **pending: E8** | — |
+| P10 | Auto-repeat never holds or reopens the gate | a `MAKE` for a key already held is ignored; only `BREAK` releases | design §4.4; the push-to-talk machine already ignores evdev repeats | proposed; **pending: E7** (hold 10 s, count transmissions = 1) | — |
+| P11 | Device unplugged while held: gate shuts, `ptt: lost`, presses refused until a device returns | `RIDEV_DEVNOTIFY` → `WM_INPUT_DEVICE_CHANGE` removal | [Raw Input Overview](https://learn.microsoft.com/en-us/windows/win32/inputdev/about-raw-input) (device-change delivery); `GIDC_REMOVAL` from memory | **pending: E7** | Bluetooth keyboards and mice sleep: test that too |
+| P12 | Input conflicts: the bound key still reaches the game; a game's own raw-input use does not starve Conch | Raw Input is observational; no `RegisterHotKey`, no hook, no `RIDEV_NOLEGACY` | design §4.2 | **pending: E7** | — |
+
+### Lock, suspend and lifecycle
+
+| Id | Capability | Mechanism | Evidence | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| L1 | Lock closes transmission; unlock does not reopen it | owner sends `set_mute true` on `lock-screen`; a fresh press and a deliberate unmute are needed | [powerMonitor](https://www.electronjs.org/docs/latest/api/power-monitor): `lock-screen`/`unlock-screen` on Windows | verified-by-docs; **pending: E12** | the helper cannot see the lock itself without Win32 (`WTSRegisterSessionNotification`, [Microsoft Learn](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/nf-wtsapi32-wtsregistersessionnotification)) |
+| L2 | Suspend ends the session; resume does not rejoin | owner sends `leave` on `suspend`; nothing on `resume` | same page (`suspend`/`resume`) | **pending: E12** | the network dies anyway; `leave` makes the state honest |
+| L3 | Close quits and stops media; tray is opt-in; Quit always stops the helper | #773 rules on the shared shell | design §9.2 | proposed | W5 (#779) |
+| L4 | Missed release bounded in every case | `max_transmit_secs` (120 default, 600 max); L1/L2; `transmitting` shown in tray and window | [conch-voice.md §3](../design/conch-voice.md) | verified (repository) for the bound; **pending: E8** for the cases | — |
+| L5 | Invite links cannot join voice or retarget audio | strict parse, destination shown, click to join; URL from `second-instance`/`process.argv` | [launch app from URL](https://www.electronjs.org/docs/latest/tutorial/launch-app-from-url-in-another-app) | proposed | W5 |
+| L6 | Profile-aware single instance; isolated test instance | `app.requestSingleInstanceLock()` scoped by `userData` | same page | proposed | W5 |
+
+### Privilege
+
+| Id | Capability | Mechanism | Evidence | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| G1 | Runs as an ordinary user: no admin, driver, service, hook or injection | user-mode APIs only (WASAPI, Raw Input, named pipes) | design §5 | proposed; **pending: E12** (clean standard-user account) | anti-cheat per title: E9, one row per title when run |
+
+### Media ownership (with #769)
+
+| Id | Capability | Mechanism | Evidence | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| M1 | One microphone publisher, one voice playback path with native voice and Electron screen | model B: helper is the voice participant; Electron is a conchd-issued companion for video | design §7 | proposed; decision with #769 | model C (Chromium media, helper as input) is the documented alternative |
+| M2 | Two connections for one person do not trip duplicate-identity or session policy | companion grant with its own identity, folded into the person by conchd | design §7.3 | **pending: E10** (and conchd work F8) | the test is against the current conchd and LiveKit first, to record what breaks |
+| M3 | Watching a share from the desktop app | the companion subscribes to video only | design §7 | proposed | without F8, phase one (model D) watches shares in a browser tab |
+
+### Screen share and scoped audio
+
+| Id | Capability | Mechanism | Evidence | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| S1 | Screen or window picker, preview, cancel, denial, source closure | Chromium `desktopCapturer` via `setDisplayMediaRequestHandler` | [session](https://www.electronjs.org/docs/latest/api/session) | proposed; **pending: E11** | W4 |
+| S2 | Audio **off** by default | design §8 | — | proposed | — |
+| S3 | **This application's** audio only | process-tree loopback, include mode, build 20348+ | [ApplicationLoopback sample](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/) | verified-by-docs for the API; **pending: E5** for `wasapi`'s exposure of it and for Chromium's `windowAudio` | if unavailable: "sound from this application is not available here", picture only; never widened |
+| S4 | **Everything but the call** | process-tree loopback, exclude mode on our own tree | same page ("all system audio except those from the specified process") | **pending: E5** | the only form of system audio offered |
+| S5 | Whole output through Chromium (`audio: 'loopback'` / `'loopbackWithMute'`) | endpoint loopback, Windows only | [session](https://www.electronjs.org/docs/latest/api/session) | verified-by-docs; **unsupported as "system audio"** | rebroadcasts the call's own playback; `loopbackWithMute`'s meaning is undefined on the page (memory: mutes local playback) |
+| S6 | Minimised, closed, exclusive-fullscreen, protected content, multi-monitor and DPI changes handled honestly | capture-side facts per configuration | — | **pending: E11** | "unsupported" is an allowed answer; no 1080p60 promise without measurement |
+
+### Credentials
+
+| Id | Capability | Mechanism | Evidence | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| C1 | Tokens protected at rest, per profile | `safeStorage`: Windows keys "generated via DPAPI"; protects from other users "but not from other apps running in the same userspace" | [safeStorage](https://www.electronjs.org/docs/latest/api/safe-storage) | verified-by-docs; **pending: E12** on the pinned Electron | the limitation is stated to the user |
+| C2 | Session-only fallback when encryption is unavailable | `isAsyncEncryptionAvailable()` false → no persistence, explicit label | same page (synchronous API removed in Electron 46) | proposed | — |
+| C3 | Token to the helper without argv, logs or renderer | `credential: env`, `CONCH_TOKEN`; `stored` refused as `not_signed_in` on Windows | design §3.7 | proposed (F13) | the Unix-mode check of `credentials.json` has no NTFS meaning |
+
+### Distribution
+
+| Id | Capability | Mechanism | Evidence | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| D1 | Per-user installer, no admin, bundles `conch-voice.exe` | electron-builder NSIS target (assisted, per-user, no elevation) | tool docs could not be fetched this session; defaults from memory (`oneClick: true`, `perMachine: false`) | proposed; **confirm against the tool's docs at #780** | Forge + Squirrel.Windows ("no-prompt, no-hassle, no-admin", [Forge maker](https://www.electronforge.io/config/makers/squirrel.windows)) is the alternative |
+| D2 | Stable application identity for taskbar and notifications | `app.setAppUserModelId` matched by the installer's shortcut | [notifications](https://www.electronjs.org/docs/latest/tutorial/notifications); [autoUpdater](https://www.electronjs.org/docs/latest/api/auto-updater) | verified-by-docs | — |
+| D3 | Signed installer, app and helper | Azure Artifact Signing ("cheapest", "limited to developers in certain countries") or EV with cloud HSM | [Electron code signing](https://www.electronjs.org/docs/latest/tutorial/code-signing); [Artifact Signing overview](https://learn.microsoft.com/en-us/azure/artifact-signing/overview) | proposed; owner decision (F12) | signing is not a SmartScreen guarantee; unsigned previews labelled |
+| D4 | Manual verified updates; no restart during a call | release feed, signed installer, published SHA-256, helper hello compatibility | design §9.5 | proposed | automatic updates deferred (#756) |
+| D5 | Clean-machine install, upgrade, uninstall; two independent profiles | — | — | **pending: E12** | W6 acceptance |
+
+## 2. Security review
+
+This is a design review; no code exists. Each item is a threat, who can mount it, the design's answer, what remains, and the status.
+
+### 2.1 Managed transport threat model
+
+| Threat | Who | Design's answer | Residual | Status |
+| --- | --- | --- | --- | --- |
+| A process connects to the events pipe and **reads** the helper's events | any local user (default DACL: "read access to members of the Everyone group and the anonymous account", [CreateNamedPipeW](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-createnamedpipew)); possibly a remote SMB client, since libuv does not set `PIPE_REJECT_REMOTE_CLIENTS` ([libuv `pipe.c`](https://raw.githubusercontent.com/libuv/libuv/v1.x/src/win/pipe.c)) | the owner writes **nothing** on the events pipe, to anyone, ever; each connection is its own instance; the helper writes only to the instance it opened | the pipe's existence and name reveal that Conch is installed and a voice session may be running | pending E2 for libuv's exact flags in the pinned Electron; otherwise accepted with that residual |
+| A process connects **first** and pretends to be the helper | any local user; same-user processes trivially | attach line with a 256-bit nonce from the helper's environment, within the hello timeout; a connection without it gets one bounded line read and is closed; `PIPE_UNLIMITED_INSTANCES` means the real helper still connects | same-user processes can read the environment and so the nonce: **same-user is not a boundary**, on Windows as on Linux (they could also read `CONCH_TOKEN`, or the helper's memory) | proposed; needs the `security-reviewer` pass F4 asks for |
+| A process **squats the name** before the owner listens | any local user | `FILE_FLAG_FIRST_PIPE_INSTANCE` on the first instance makes the owner's `listen` fail ("creation of the next instance fails with ERROR_ACCESS_DENIED"); the owner draws a new random name | an attacker racing every name costs the owner retries; bounded by the hello timeout, after which the join fails closed | verified-by-docs for the flag |
+| Connection exhaustion against the attach | any local user | bounded: one line, 4096 bytes, closed; accepting stops once the helper attached | a flood before the helper attaches can delay it past the hello timeout: denial of a join, never an open microphone | accepted |
+| **Handle inheritance** leaks the owner's pipe ends into another process, so the helper outlives its owner | Electron spawns many children concurrently | the events-pipe EOF is a second, independent owner-loss signal; the listener is not inheritable; the Win32 means to scope inheritance (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`: "a list of handles to be inherited by the child process", [UpdateProcThreadAttribute](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)) is not reachable from Node | a leaked stdin end alone no longer keeps the helper alive, because the events pipe ends; a leak of both is not possible for the listener | pending E6 (measure owner-crash exit time with Chromium children alive) |
+| **No localhost listener** | — | named pipes, no TCP; a browser cannot open `\\.\pipe\` | none | by design |
+| **Secrets in argv** | any local user reading command lines | argv holds the executable, `managed`, and a pipe name that carries no authority; token and nonce are in the environment, as `CONCH_TOKEN` already is on Linux | environment is readable by the same user and administrators (as on Linux) | by design |
+| Owner cannot verify the **client's pid**; helper cannot verify the **server's** | — | not available to Node or to safe Rust; the nonce stands in | a Win32-capable owner (the Go TUI) could add a user-SID DACL, `PIPE_REJECT_REMOTE_CLIENTS` and `GetNamedPipeClientProcessId` | noted as hardening, not required for the bounds |
+| **Process ownership**: killing the wrong process | — | `child.kill()` acts on the process libuv spawned; never by name or by pid lookup; no new helper until the old one is reaped | — | by design |
+| A secret on the channel | — | the attach nonce is a one-time proof, spent on acceptance; no login token, join token or room name ever crosses; `sensitive.json` for the new shape asserts it | a transcript shows a dead nonce | proposed; reviewer to confirm the framing |
+
+### 2.2 Input risks
+
+| Risk | Design's answer | Residual | Status |
+| --- | --- | --- | --- |
+| **Keylogging surface.** Raw Input delivers every keyboard and mouse transition on the desktop to the registered window | only bound transitions leave the input module (`KeyEvent`, `DeviceState`); no scan code, count or time is kept, logged or sent; same discipline as `keydev.rs`; no exclusive grab, no cross-session reach (Raw Input is per desktop session) | any same-user process can register for Raw Input itself; Conch adds no capability it did not have | by design; the README states it as the Linux one does |
+| **Hooks.** `WH_KEYBOARD_LL`/`WH_MOUSE_LL` would be silently removed after a 1000 ms stall ("There is no way for the application to know whether the hook is removed", [LowLevelKeyboardProc](https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc)), are "a shared resource" affecting every application ([SetWindowsHookExW](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowshookexw)), and are the pattern anti-cheat looks for (memory) | not used | none | by design |
+| **Anti-cheat.** A background raw-input listener next to a protected game | passive, documented, user-mode API; no DLL, no hook, no handle to the game; per-title testing with versions recorded; incompatible titles labelled, never worked around | vendors do not document what they tolerate; a title that flags any background input listener is **unsupported** for PTT and said so | pending E9, one row per title |
+| **Elevated foreground / secure desktop.** A release delivered nowhere | `max_transmit_secs`; owner `set_mute` on lock, `leave` on suspend; `transmitting` visible; device-removal handling | a held key across a UAC prompt may transmit up to `max_transmit_secs` if the `BREAK` is lost | pending E8 |
+| **Injected input.** Another process synthesising a `MAKE` for the talk key (`SendInput`) opens the gate | Raw Input reports injected input as input (it is what the keyboard driver or `SendInput` produced) | a same-user process that can inject input can also read the token; not a new boundary | accepted, stated |
+| **Binding capture.** Reading keys to configure the binding | done in the focused Electron window during configuration, by the renderer's own key events; the helper's raw-input stream never leaves it | none beyond the renderer's normal input | by design |
+| **A dependency's own behaviour.** `winit` (or another crate) is in the helper's process | pinned, licence-checked, `cargo deny`; `default-features = false`; its raw-input registration read in source for the pinned version ([`raw_input.rs`](https://raw.githubusercontent.com/rust-windowing/winit/v0.30.13/src/platform_impl/windows/raw_input.rs)) | a windowing framework's surface in an audio helper; 0.31's API churn | pending F6's decision |
+
+### 2.3 Other review notes
+
+- **Credentials:** DPAPI protects against other users, not same-user malware; the design says so to the user rather than implying more ([safeStorage](https://www.electronjs.org/docs/latest/api/safe-storage)). The synchronous API is going away; the asynchronous one is specified.
+- **Microphone privacy toggle:** honoured by reporting, never by bypass; Microsoft's own note that desktop apps "might still be able to access" the microphone means the toggle is not a guarantee Conch can rely on either way.
+- **Companion participant (model B):** a second grant for one person is new server surface; F8 carries its own security review (identity derivation, no privilege beyond the parent session, teardown on revocation, folded presence so that occupancy and moderation see one person).
+- **Installer and updates:** per-user install writes nothing outside the user's profile; manual updates verify signature and digest; previews are labelled unsigned and come with no instruction to lower protections.
+
+## 3. Experiments that fill the matrix (F14)
+
+Each names what to run, what to record, and which rows it settles. All on a Windows 11 x64 machine at build 26100 or 26200, as a **standard user**, with versions recorded as in the preamble.
+
+| Id | Experiment | Settles |
+| --- | --- | --- |
+| E1 | Fetch `webrtc-win-x64-release.zip` for `webrtc-89d790b`, record its SHA-256; `cargo build --release` of `conch-voice` with `dmn-audio` behind `cfg(linux)` and a stub Windows backend; record the compiler `webrtc-sys` needs, the Windows SDK, build time, binary size and linked DLLs; `cargo deny check` with `x86_64-pc-windows-msvc` in `targets` | T3, licences of Windows-only crates |
+| E2 | A test owner (Node script and, separately, a Go program) creates a named pipe and spawns a Rust client that opens it with `OpenOptions`, writes a line, and blocks on read until the owner exits; record libuv's `CreateNamedPipeW` flags from the pinned Electron's libuv source; run the SDK's room join with stdout captured to see whether libwebrtc writes there on Windows | X2, X3, the stdout question of design §3.2 option A |
+| E3 | With `wasapi`: open the default capture and render endpoints in shared event-driven mode, request 48 kHz mono f32 at 10 ms; record what the engine grants, whether `AUTOCONVERTPCM` is exposed and works, glitches over ten minutes with the LiveKit runtime active, and ring fill behaviour | A1, A2, the resampler question |
+| E4 | Enumerate devices; unplug and replug USB and Bluetooth headsets; change the default in Settings while a press is held; turn the microphone privacy toggle off and on; record endpoint IDs before and after, the error codes seen, and the state lines the helper writes | A3–A6 |
+| E5 | With `wasapi`: process-tree loopback include and exclude modes on a game and on our own tree; with the pinned Electron: `getDisplayMedia` on a window and whether per-window audio (`windowAudio`) is offered; `loopbackWithMute`'s actual effect | S3, S4, S5 |
+| E6 | Owner-death matrix: kill Electron main with the key held and transmitting; kill it while Chromium children are alive; pull power on the owner's VM; measure gate shut, capture stop and helper exit against the contract's bounds; stop escalation timing with a hung helper | X5, X6, X7 |
+| E7 | Raw Input through `winit` (and a short survey of alternatives): keyboard and Mouse 4/5 press and release with a second listener in another client, in: Conch focused; a browser focused; a windowed, a borderless and an exclusive-fullscreen game; holding across Alt-Tab; holding 10 s (one transmission); unplugging the device while held; a Bluetooth device sleeping. Record the `winit` version and whether `MAKE`/`BREAK` map as expected | P1–P4, P7, P8, P10–P12 |
+| E8 | Hold the key, trigger a UAC prompt, release on the secure desktop, dismiss; hold and lock; hold with an elevated game focused; record whether presses and releases arrive and when the gate shut | P5, P6, P9, L4 |
+| E9 | Per title with anti-cheat (list chosen by the owner): run the game with the helper registered for Raw Input; record the title, anti-cheat and version, and whether the game launches, warns or exits | G1 anti-cheat rows |
+| E10 | Against current conchd and LiveKit: connect the helper as the person, then a browser as the same person; record what conchd refuses and what LiveKit does to the first connection; then with a prototype companion grant | M2 |
+| E11 | Share picker, cancel, denial, source closed, minimised, exclusive fullscreen, protected content, two monitors with different DPI; measure resolution, FPS, latency, CPU and GPU on named hardware | S1, S6 |
+| E12 | Clean standard-user account: install, run, two server profiles, lock, suspend, resume, close, tray, Quit, upgrade, uninstall; record what is left in the profile; `safeStorage` backend and availability on the pinned Electron | C1, C2, D1, D5, G1, L1–L3 |
+
+## 4. Verdict
+
+The design is **ready for review as a proposal**, not for acceptance: three decisions block implementation children becoming Ready, and none can be settled from documentation alone.
+
+1. **Dependencies:** `wasapi` and the Raw Input route (`winit`, another crate, or a reviewed `unsafe` leaf with an ADR-006 amendment). Owner's sign-off.
+2. **Media ownership** with #769: model B (companion participant) or model C (Chromium media, helper as input). The conchd follow-up F8 exists only under B.
+3. **Hardware evidence** E1–E12: every push-to-talk, audio, transport-bound and lifecycle row is pending until a Windows machine runs them.
+
+Nothing in the proposal weakens the published contracts or the fail-closed rules; the two new wire shapes are additive and versioned; Linux behaviour and `forbid(unsafe_code)` are unchanged.
