@@ -155,7 +155,13 @@ describe('media devices', () => {
     const naming = Object.entries(sources)
       .filter(([, code]) => screenApi.test(code))
       .map(([path]) => path);
-    expect(naming).toEqual([screenChecker]);
+    // src/voice/sdk.ts also names mediaDevices, for the device-change
+    // listener of the private microphone test (issue #846). It may not
+    // mention the screen API at all, not even outside a call (a bound or
+    // aliased reference would escape screenCall): share.ts stays its only
+    // checker.
+    expect(naming).toEqual(['./voice/sdk.ts', screenChecker]);
+    expect(withoutComments(sources['./voice/sdk.ts'] ?? '')).not.toMatch(/getDisplayMedia/);
     const code = sources[screenChecker] ?? '';
     expect(code).not.toMatch(screenCall);
     // It only looks the API up: a type of what it looks for, and the look.
@@ -420,6 +426,45 @@ describe('the sign-in link code', () => {
     for (const example of ['<SignInLink signInCode={signInCode} />', 'if (signInCode !== null) {']) {
       expect(signInRendered.test(example), example).toBe(false);
     }
+  });
+});
+
+// A setup link's token (ADR-011 item 3) is held under the name setupToken by
+// route.ts, which takes it out of the address, and App.tsx, which hands it to
+// the setup page in a ref and never in state; the page puts it in its field.
+// It is never stored, put in a URL or rendered, and not held in state.
+const setupHolders = ['./App.tsx', './route.ts'];
+const setupStored = /(setItem|getItem|removeItem)\([^)]*\bsetupToken\b/;
+const setupInTemplate = /\$\{[^}]*\bsetupToken\b[^}]*\}/g;
+const setupRendered = /(?<!=)>\s*\{[^}]*\bsetupToken\b|\b(?!setupToken=)[\w-]+=\{[^}]*\bsetupToken\b/;
+const setupInState = /useState[^;]*\bsetupToken\b|\[setupToken,/;
+
+describe('the setup link token', () => {
+  it('is held only by src/route.ts and App', () => {
+    const holding = Object.entries(sources)
+      .filter(([, code]) => /\bsetupToken\b/.test(code))
+      .map(([path]) => path)
+      .sort();
+    expect(holding).toEqual(setupHolders);
+  });
+
+  it('is never stored, put in a URL, rendered, or kept in state', () => {
+    for (const [path, code] of Object.entries(sources)) {
+      expect(setupStored.test(code), path).toBe(false);
+      if (path.endsWith('.tsx')) expect(setupRendered.test(code), path).toBe(false);
+      expect(code.match(setupInTemplate) ?? [], path).toEqual([]);
+      expect(setupInState.test(code), path).toBe(false);
+    }
+  });
+
+  it('is not missed by the rules: a bare test of each', () => {
+    expect(setupStored.test('localStorage.setItem(key, setupToken)')).toBe(true);
+    for (const example of ['<p>{setupToken}</p>', '<input value={setupToken} />']) {
+      expect(setupRendered.test(example), example).toBe(true);
+    }
+    expect('fetch(`/v1/x/${setupToken}`)'.match(setupInTemplate)).toHaveLength(1);
+    expect(setupInState.test('const [setupToken, setSetupToken] = useState(null);')).toBe(true);
+    expect(setupRendered.test('if (setupToken !== null) {')).toBe(false);
   });
 });
 

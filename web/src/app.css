@@ -1067,6 +1067,54 @@ label {
   border: 0;
 }
 
+.message-action {
+  grid-column: 2;
+  justify-self: start;
+  min-height: 2.75rem;
+  padding: 0.35rem 0;
+  color: var(--accent);
+  font-size: var(--small);
+  background: transparent;
+  border: 0;
+}
+
+.thread-view {
+  grid-column: 1 / -1;
+  margin: var(--s2) 0 var(--s3) 2.25rem;
+  padding: var(--s2) var(--s3);
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.thread-head,
+.reply-box {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.thread-head {
+  justify-content: space-between;
+}
+
+.thread-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.reply-composer {
+  display: grid;
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+
+.reply-box textarea {
+  flex: 1;
+  min-width: 0;
+}
+
 .search-context > button,
 .search-context > h3 {
   margin: var(--s3) var(--s4) 0;
@@ -2736,4 +2784,45 @@ button.link {
   50% {
     box-shadow: 0 0 0 2px var(--surface), 0 0 0 6px var(--accent);
   }
+}
+
+/* The private microphone test (issue #846): a level meter and a switch, drawn
+   with classes and the meter element, no inline style. */
+.mic-test {
+  display: grid;
+  gap: var(--s1);
+  margin-top: var(--s2);
+}
+
+.mic-test-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+.mic-test-row select {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.mic-meter {
+  flex: 1 1 8rem;
+  min-width: 6rem;
+  max-width: 20rem;
+  height: 1rem;
+}
+
+@media (max-width: 480px) {
+  .mic-test-row > button,
+  .mic-test-row select {
+    flex: 1 1 100%;
+  }
+}
+
+/* ADR-011: the fixed line a temporary server shows beside its version. */
+.temporary-banner {
+  color: var(--muted);
+  min-height: 0;
+  margin: 0.25rem 0;
 }

@@ -169,7 +169,12 @@ async function connect(socket: FakeSocket) {
   });
 }
 
-const lines = () => within(screen.getByRole('log', { name: 'Messages' })).queryAllByRole('listitem').map((li) => li.textContent);
+const lines = () => within(screen.getByRole('log', { name: 'Messages' })).queryAllByRole('listitem').map((li) => {
+  const copy = li.cloneNode(true) as HTMLElement;
+  // The Reply and Open thread buttons are controls, not message text.
+  copy.querySelectorAll('button').forEach((button) => { button.remove(); });
+  return copy.textContent;
+});
 
 beforeEach(() => {
   window.sessionStorage.clear();
@@ -1201,10 +1206,16 @@ describe('a long channel', () => {
     server.firstPage = maxHeld - 2 * pageSize;
     await openChat();
     await screen.findByText(`m${String(maxHeld + 100)}`);
+    // Counted, not read: lines() copies every row to drop its buttons, and a
+    // role query walks every message's Reply button, both slow at maxHeld rows
+    // in jsdom (issue #842 added the buttons).
+    const rows = () => screen.getByRole('log', { name: 'Messages' }).querySelectorAll('li[data-message-id]').length;
     for (const held of [maxHeld - pageSize, maxHeld]) {
-      fireEvent.click(await screen.findByRole('button', { name: 'Load older messages' }));
+      const older = screen.queryByText('Load older messages', { selector: 'button' });
+      if (older === null) throw new Error('no Load older messages button');
+      fireEvent.click(older);
       await waitFor(() => {
-        expect(lines()).toHaveLength(held);
+        expect(rows()).toBe(held);
       });
     }
     expect(olderButton()).toBeNull();
