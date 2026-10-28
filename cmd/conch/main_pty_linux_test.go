@@ -77,15 +77,17 @@ func conchBinary(t *testing.T) string {
 		}
 		buildDir = dir
 		bin := filepath.Join(dir, "conch")
-		out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput() // #nosec G204 -- fixed arguments
+		out, err := buildCLI(bin)
 		if err != nil {
-			buildErr = err.Error() + "\n" + string(out)
+			buildErr = err.Error() + "\n" + out
 			return
 		}
 		builtBin = bin
 	})
 	if buildErr != "" {
-		t.Fatalf("go build: %s", buildErr)
+		// The build runs once per test binary, so every test using it fails
+		// with this same original error.
+		t.Fatalf("shared conch test build failed (same error for every test that needs the binary): go build: %s", buildErr)
 	}
 	return builtBin
 }

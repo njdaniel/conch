@@ -412,7 +412,7 @@ describe('the recent proof', () => {
     fireEvent.change(within(dialog).getByLabelText('Your password'), { target: { value: password } });
     fireEvent.change(within(dialog).getByLabelText('Code from your authenticator app'), { target: { value: '654321' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm' }));
-    expect(await within(region).findByText('It needs your password and a code first. Nothing was changed.')).toBeDefined();
+    expect(await within(region).findByText('It needs your password first. Nothing was changed.')).toBeDefined();
     expect(screen.queryByRole('dialog', { name: 'Confirm it is you' })).toBeNull();
     expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(2);
     expect(calls.filter((c) => c.path === '/v1/reauth')).toHaveLength(1);
@@ -450,7 +450,7 @@ describe('the recent proof', () => {
     const region = await joining();
     const dialog = await screen.findByRole('dialog', { name: 'Confirm it is you' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
-    expect(await within(region).findByText('It needs your password and a code first. Nothing was changed.')).toBeDefined();
+    expect(await within(region).findByText('It needs your password first. Nothing was changed.')).toBeDefined();
     expect(within(region).getByLabelText<HTMLInputElement>('Allow guest visits').checked).toBe(true);
     expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(1);
     expect(calls.filter((c) => c.path === '/v1/reauth')).toEqual([]);

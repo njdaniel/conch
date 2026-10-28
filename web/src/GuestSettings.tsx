@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useId, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { guestName } from './guestName';
+import { InviteSettings } from './InviteSettings';
 import { serverLine } from './Invite';
 import type { ChannelV0 } from './schema/channel';
 import type { EndGuestsResponseV1, GuestAdminV1, JoinSettingsResponseV1, JoinWarning, OpenJoiningMode, PutJoinSettingsRequestV1 } from './schema/guest';
@@ -51,7 +52,7 @@ export function warningLine(warning: JoinWarning, live: number): string {
 function refusalOf(result: { readonly failure: api.ApiFailure; readonly code?: string; readonly message?: string }, nothing: string): string {
   if (result.failure === 'network') return `Cannot reach the server. ${nothing}`;
   if (result.code === 'join_policy_conflict' || result.code === 'invalid_request') return serverLine(result.message, `The server refused. ${nothing}`);
-  if (result.code === 'reauth_required') return `It needs your password and a code first. ${nothing}`;
+  if (result.code === 'reauth_required') return `It needs your password first. ${nothing}`;
   return `The server refused. ${nothing}`;
 }
 
@@ -203,6 +204,7 @@ export function GuestSettings({ channels, onUnauthorized }: { readonly channels:
             {loadLine}
           </p>
         )}
+        <InviteSettings open={open} onUnauthorized={onUnauthorized} />
         {loaded === null ? (
           loadLine === null ? (
             <p className="hint">Loading…</p>

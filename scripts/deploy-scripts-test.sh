@@ -104,13 +104,34 @@ if command -v systemd-analyze >/dev/null; then
         cp "$deploy/$f" "$units/${f/@/@alpha}"
     done
     cp "$deploy"/livekit.service "$deploy"/livekit-cert.service "$deploy"/livekit-cert.path "$units/"
-    # The units name binaries that exist only on the droplet; that is the one
-    # complaint allowed.
-    out=$(systemd-analyze verify "$units"/* 2>&1 || true)
-    out=$(printf '%s\n' "$out" | grep -v 'is not executable' || true)
+    # verify loads the units ours name (livekit.service Requires=docker.service,
+    # and orders after caddy.service). Loaded from this host, they bring the
+    # host's own drop-ins with them: a workstation whose docker.service.d adds
+    # RequiresMountsFor=/home fails here with "Unit home.mount not found",
+    # which says nothing about Conch's units (#870). So verify reads only this
+    # directory, which holds stand-ins for docker.service and caddy.service,
+    # then the distribution's own units (for sysinit.target and the like),
+    # never /etc/systemd/system, where a host's drop-ins live. (A drop-in the
+    # distribution itself shipped for docker.service would still apply: stock
+    # packages ship none.)
+    printf '[Unit]\nDescription=stand-in for verify\n[Service]\nType=oneshot\nExecStart=/bin/true\n' >"$units/docker.service"
+    cp "$units/docker.service" "$units/caddy.service"
+    vendor=/usr/lib/systemd/system
+    [ -d "$vendor" ] || vendor=/lib/systemd/system
+    verify() {
+        # The units name binaries that exist only on the droplet; that is the
+        # one complaint allowed.
+        SYSTEMD_UNIT_PATH="$1:$vendor" systemd-analyze verify "$1"/conch* "$1"/livekit* 2>&1 | grep -v 'is not executable' || true
+    }
+    out=$(verify "$units")
     [ -z "$out" ] || fail "systemd-analyze verify:
 $out"
-    ok "systemd-analyze verify"
+    # And it still sees a real error in one of ours: a misspelt key.
+    cp -r "$units" "$work/units-broken"
+    sed -i 's/^ExecStart=/ExecStrat=/' "$work/units-broken/conchd@alpha.service"
+    out=$(verify "$work/units-broken")
+    printf '%s\n' "$out" | grep -q 'conchd@alpha.service' || fail "systemd-analyze verify did not see a misspelt key in conchd@alpha.service"
+    ok "systemd-analyze verify (and it sees a misspelt key)"
 else
     skip systemd-analyze
 fi
