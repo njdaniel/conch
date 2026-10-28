@@ -8,9 +8,9 @@ One droplet runs three things:
 - Caddy, which holds the public names, gets and renews their certificates, and proxies to `conchd` and to LiveKit's signalling port;
 - LiveKit, in Docker from the digest-pinned image the README uses, for the audio.
 
-Everything is parameterised by an **instance name** (`alpha` below) and a **domain** (`example.com` below, a placeholder: replace it everywhere). A second server is the steps in [A second instance](#a-second-instance), not a new design.
+Everything is parameterised by an **instance name** (`alpha` below) and a **domain** (`example.com` below, a placeholder: replace it everywhere). A second server is one command, [`conch-server new`](#a-second-instance), not a new design, and [`conch-server rm`](#removing-a-server) removes it.
 
-**Status.** The scripts, the units and the backup, restore, upgrade and rollback paths are exercised by `scripts/deploy-scripts-test.sh` (run by `make deploy-test` and in CI) against a real `conchd`, with a stand-in for `systemctl`. That test runs as one ordinary user, so the split between root, the instance users and `conch-backup` described below (`runuser`, `setpriv`, the cleared environment) is not part of it; the parsing of the rollback record, the check of the archive path, the refusal of a symlinked archive, the stripping of control characters and `setsid` are. The Caddyfile, LiveKit's TURN/TLS settings, the firewall and the units under a real systemd were **not** run on a droplet when this was written: the first run on the real droplet (issues A15 and A16) is where they are proved, and this page should be corrected from what that finds.
+**Status.** The scripts, the units and the backup, restore, upgrade and rollback paths are exercised by `scripts/deploy-scripts-test.sh` (run by `make deploy-test` and in CI) against a real `conchd`, with a stand-in for `systemctl`. That test runs as one ordinary user, so the split between root, the instance users and `conch-backup` described below (`runuser`, `setpriv`, the cleared environment) is not part of it; the parsing of the rollback record, the check of the archive path, the refusal of a symlinked archive, the stripping of control characters and `setsid` are. The Caddyfile, LiveKit's TURN/TLS settings, the firewall and the units under a real systemd were **not** run on a droplet when this was written: the first run on the real droplet (issues A15 and A16) is where they are proved, and this page should be corrected from what that finds. `add-instance.sh`, `remove-instance.sh`, `list-instances.sh` and `ops/conch-server` (#861) are exercised by the same test, against a real `conchd`, with stand-ins for `caddy`, `useradd`, `userdel`, `getent`, `ss`, `ssh` and `doctl`; their first run on the droplet is the check of the real ones.
 
 **First real run (2026-10-27, `v0.1.0-alpha.1`, #567).** Steps 1–7 were followed on a real droplet (Ubuntu 24.04.5, Caddy 2.11.7, Docker 29.1.3, LiveKit 1.13.7) and are corrected below where they were wrong. Proved there:
 - Caddy obtained and serves certificates for all three names;
@@ -90,7 +90,10 @@ Get the scripts and unit files at the tag you are installing. They are not in th
 git clone --depth 1 --branch v0.1.0 https://github.com/njdaniel/conch.git /root/conch-src   # your tag
 cd /root/conch-src/ops/deploy
 install -m 0755 conch-backup.sh conch-restore.sh conch-upgrade.sh firewall.sh /opt/conch/bin/
+install -m 0755 add-instance.sh remove-instance.sh list-instances.sh /opt/conch/bin/   # tags that have them
 ```
+
+Later, `conch-server` keeps `/opt/conch/bin` matched to the tag the droplet runs ([A second instance](#a-second-instance)).
 
 ## 3. Install conchd
 
@@ -461,7 +464,7 @@ After the start:
 
 ## 11. Upgrading and rolling back
 
-Releases are tagged, built by `.github/workflows/release.yml`, and name themselves: `conchd version` and `/healthz` report the tag. `conch-upgrade.sh <tag> <instance>...`, as root (name **every** instance on the droplet: they share one binary):
+Releases are tagged, built by `.github/workflows/release.yml`, and name themselves: `conchd version` and `/healthz` report the tag. `conch-upgrade.sh <tag> <instance>...`, as root (name **every** instance on the droplet: they share one binary, so one left out would start on the new release at its next restart, with no pre-upgrade backup; `conch-server upgrade <tag>` on your workstation names them all):
 
 1. downloads `conchd_<tag>_linux_<arch>` and `checksums.txt`, and refuses unless they match (the same limit as step 3: corruption, not tampering);
 2. unpacks it to `/opt/conch/releases/<tag>/`;
@@ -485,21 +488,89 @@ A release you installed stays in `/opt/conch/releases/`; remove old ones by hand
 
 ## A second instance
 
-A second server on the same droplet (plan §3) is these steps, with `beta` as the name:
+Every further server on the droplet (plan §3) is one command on your workstation, `ops/conch-server` in a checkout of this repository, with `beta` as the name:
 
-1. DNS: an `A` record for `beta.your.domain`.
-2. A user: `useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin conch-beta`.
-3. A LiveKit key: add a line to `/etc/conch/livekit-keys` (`beta-<hex>: <secret>`, mode stays 0600) and `systemctl restart livekit`.
-4. An env file: `install -m 0600 -o root -g root ops/deploy/instance.env.example /etc/conch/beta.env`, then set `CONCHD_DATA=/var/lib/conch/beta`, a **new port** (`CONCHD_LISTEN=127.0.0.1:8081`), `CONCHD_LIVEKIT_ROOM_PREFIX=beta-`, and the new key pair.
-5. A Caddy block: `beta.your.domain { header Strict-Transport-Security "max-age=31536000"; reverse_proxy 127.0.0.1:8081 }` (on separate lines, as in the Caddyfile), then `caddy validate` and `systemctl reload caddy`.
-6. The first operator, as in step 6, with `conch-beta` and `--data /var/lib/conch/beta`.
-7. `systemctl enable --now conchd@beta conch-backup@beta.timer`.
+```sh
+ops/conch-server new beta                 # a normal, long-lived server
+ops/conch-server new demo --temporary     # a short-lived one (Temporary servers, below)
+```
 
-From now on name `beta` in `conch-upgrade.sh` too.
+On the workstation it needs `ssh` with the droplet's root key, `doctl` signed in to the account that holds the domain (`doctl auth init --context conch`), `curl`, and this repository's tags (`git fetch --tags`). Its settings are in `~/.config/conch/server.env`, which holds no secret. Make it mode 0600: `conch-server` refuses a file anyone else can write. It is read line by line, never sourced, and each value is checked:
+
+```sh
+# root@ and the droplet's IPv4 (203.0.113.7 stands for it here)
+CONCH_SERVER_HOST=root@203.0.113.7
+CONCH_SERVER_DOMAIN=your.domain
+CONCH_SERVER_SSH_KEY=~/.ssh/conch-alpha
+CONCH_SERVER_DOCTL_CONTEXT=conch
+# Optional: the first operator's name
+CONCH_SERVER_OPERATOR=your-name
+```
+
+Comments go on lines of their own: a value runs to the end of its line, so anything after it would be part of it.
+
+`conch-server new <name>` does this, in order:
+
+1. **The droplet's scripts.** It reads the tag the droplet runs (where `/opt/conch/current` points) and installs that tag's `ops/deploy/*.sh` in `/opt/conch/bin` (0755, root) with `git show <tag>:...`, replacing only a file whose SHA-256 differs, so the scripts match the binary. A tag you have not fetched stops it, and says so. A release from before these scripts has no `add-instance.sh`: `--scripts-ref <ref>` takes the scripts from a newer commit instead, and says that they may not match the binary. `conch-server sync` does this step alone.
+2. **DNS.** It reads the droplet's public IPv4 and IPv6 from DigitalOcean's metadata service and creates the `A` and `AAAA` records for `beta.your.domain` (TTL 300) with `doctl`. A record that already points at the droplet is kept, and one that points anywhere else stops it before anything is made. Then it waits, up to 15 minutes, until Cloudflare's and Google's resolvers (over HTTPS) both return them; [DNS](#1-dns) explains why a name is not looked up before its record exists.
+3. **`add-instance.sh`** on the droplet, over `ssh -t`, so its question and the setup link reach your terminal only. It checks everything first and changes nothing until every check passes:
+   - the name: lower-case letters, digits and `-`, starting with a letter, not ending in `-`, at most 26 characters (so `conch-<name>` is a valid user name and `<name>-` a valid room prefix), and none of the names the droplet's shared parts use: `livekit`, `turn`, `backup`, `drill`, `www`, `removed`;
+   - that nothing of that name exists: no `conch-<name>` user, env file, data or backup directory, rollback record, LiveKit key or Caddy block;
+   - a free port: the first from 8081 that no env file names and nothing listens on (`--port` chooses one);
+   - that the name resolves to the droplet's addresses, and only to them. If not, it prints the records to create.
+
+   Then it makes, each step undone if a later one fails: the `conch-<name>` user and `/var/lib/conch/<name>` (0700); a new LiveKit key pair (`<name>-<8 hex>: <secret>`, as in step 4), appended to `/etc/conch/livekit-keys`; `/etc/conch/<name>.env` (0600, root), with every setting of step 5, `CONCHD_TRUSTED_PROXIES` and a fresh `CONCHD_TOTP_KEY` included; the systemd-tmpfiles rule for [removed servers](#removing-a-server); and a Caddy block for `beta.your.domain` between `# conch-instance beta begin` and `# conch-instance beta end` lines, checked with `caddy validate` before it replaces the Caddyfile, then `systemctl reload caddy`. Then it restarts LiveKit, makes the first operator, starts `conchd@beta` and `conch-backup@beta.timer`, and waits for `/healthz` to answer `ok` on loopback and then through Caddy. If a step fails, it undoes what this run made, newest first, and says what it undid, and `conch-server` deletes the DNS records it made. The undo first stops `conchd@beta` and its backup timer and unit, and deletes nothing while anything of `conch-beta` may still run: if that cannot be shown, or an undo step itself fails, it names what is left and exits 5, and the records are kept. Once `conchd` answers on loopback the server is kept: if only the check through Caddy fails (a certificate not issued yet, say), or the run is interrupted then, the server is left running, nothing is undone, the records are kept, and both commands exit 4. An interrupted run, or a lost connection, also keeps the records, since what the droplet holds is then not known. `add-instance.sh` needs a terminal for its output, since the setup link is printed there (`ssh -t` gives it one).
+4. It prints the server's address.
+
+**No secret leaves the droplet.** The LiveKit secret and the TOTP key are made on the droplet from `/dev/urandom` and written into the env file (and the secret into LiveKit's key file) only: never printed, logged or put on a command line. Keep a copy of `CONCHD_TOTP_KEY` as step 5 says, if the server is one you will keep.
+
+**Restarting LiveKit drops every server's voice calls** for a few seconds, since LiveKit reads its keys only at start. `add-instance.sh` names the servers whose calls drop and asks first. `--yes` answers for it, and with no terminal and no `--yes` it refuses.
+
+**The first operator.** It runs `conchd operator bootstrap --link` (step 6) as `conch-beta`, which prints a **setup link** once, on your terminal and nowhere else: not in a file or the journal. Open it in a browser within ten minutes, press the button, and choose a password. That is the only step left. The operator is named by `--operator`, else `CONCH_SERVER_OPERATOR`, else `operator`. No script credential is made; make one in the browser afterwards if you want `conch admin` from your workstation.
+
+**The authenticator.** A normal server asks every operator for an authenticator code (`CONCHD_OPERATOR_TOTP` unset, which is `required`; step 5). `conch-server new beta --operator-totp optional` makes one whose operators may sign in with a password alone, as alpha's do, without the temporary banner and with off-site backups still required ([ADR-012](adr/ADR-012-optional-operator-totp.md)). A temporary server is `optional` already, and `--temporary --operator-totp required` is refused, since `conchd` would not start it.
+
+**Then, for a normal server,** set up its off-site backup and do the restore drill before anyone joins (steps 8 and 9). Its timer is enabled already, and fails loudly until there is an off-site copy.
+
+The other commands:
+
+- `conch-server list`: every server's name, port, mode, operator setting, whether `conchd@<name>` is active, and what its `/healthz` answers.
+- `conch-server upgrade <tag>`: `conch-upgrade.sh <tag>` with every instance on the droplet named, since they share one binary (step 11).
+- `conch-server rm <name>`: [Removing a server](#removing-a-server).
+
+On the droplet, as root, once the records resolve, the same is:
+
+```sh
+/opt/conch/bin/add-instance.sh beta your.domain [--port N] [--temporary] [--operator-totp optional|required] [--operator <name>] [--yes] [--dry-run]
+/opt/conch/bin/list-instances.sh
+```
+
+`--dry-run` runs every check, prints what it would do, and changes nothing.
+
+## Removing a server
+
+```sh
+ops/conch-server rm demo                    # a temporary server
+ops/conch-server rm beta --force-normal     # a normal one, and everything its people keep there
+```
+
+It runs `remove-instance.sh` on the droplet over `ssh -t`, then deletes the server's `A` and `AAAA` records that point at the droplet (one that points elsewhere is left, and named). `remove-instance.sh <name> [--force-normal] [--no-backup] [--purge-backups]` follows [ADR-011](adr/ADR-011-temporary-servers.md) item 2.4:
+
+- `conch-server rm` refuses a name the droplet does not list, unless `--force-normal` is given (a half-removed server may have lost its env file), and `remove-instance.sh` refuses a name of which nothing is on the droplet, with exit 2, so a typo never deletes the DNS records of that name.
+- Before anything changes, it checks the name against the rule above and refuses a data directory, env file, backup directory or rollback record that is a symlink. It reads the mode from the env file only: it is a temporary server only if every line that names `CONCHD_MODE` is exactly `CONCHD_MODE=temporary`. Any other form systemd might read, such as an indented line, spaces around `=` or quotes, and a missing or unreadable file, make it a normal one. A normal server is refused without `--force-normal`. It works out the Caddyfile and LiveKit's key file without the server and checks the Caddyfile with `caddy validate`.
+- It lists what it will delete and asks you to **type the name** back, every time. There is no `--yes`, and with no terminal it refuses.
+- It stops and disables `conchd@<name>` and its backup timer, and checks that nothing of that server still runs, before it deletes anything.
+- It takes a final local archive (`conch-backup.sh <name> --local-only`) unless `--no-backup`. If that fails, it stops there, with the server stopped and nothing deleted.
+- It removes the server's Caddy block and reloads Caddy, then its LiveKit key and restarts LiveKit (the other servers' calls drop for a few seconds). Either file is put back, and reloaded or restarted again, if that fails, so no other server is taken down.
+- It deletes the env file, the data directory (and any `<data>.rolled-back-*` beside it), the rollback record and the user `conch-<name>`. It never touches the shared `conch-backup` and `conch-drill` users.
+- It moves `/var/backups/conch/<name>`, holding the final archive and the pre-upgrade ones, to `/var/backups/conch/removed/<name>-<time>/`, as `conch-backup`. There the rule `add-instance.sh` installed, `/etc/tmpfiles.d/conch-removed.conf`, has systemd-tmpfiles delete it after 14 days. `--purge-backups` deletes it at once. Until then it can be restored as in [Restoring for real](#10-restoring-for-real), with the server's `CONCHD_TOTP_KEY` if you kept one.
+- Last, it prints the DNS records to delete (`conch-server rm` deletes them).
+
+**alpha, and any server set up by hand,** has a Caddy block without the `# conch-instance <name> begin` and `end` lines. `remove-instance.sh` does not guess where such a block ends. If any line that is not a comment still names `<name>.` after the marked block is taken out, it refuses before changing anything and says so. Remove that block by hand (or put the two marker lines around it), run `caddy validate` and `systemctl reload caddy`, and run the removal again.
 
 ## Temporary servers
 
-For a short-lived server holding nothing anyone needs to keep, set `CONCHD_MODE=temporary` in its env file and restart `conchd@<name>` ([ADR-011](adr/ADR-011-temporary-servers.md), items 2 and 4). Operators without an enrolled authenticator may sign in with a password alone; those who enrolled still need a code. The sign-in page and lobby show "Temporary server: no backups, and it may be removed. Don't keep anything here you need." Leave `conch-backup@<name>.timer` disabled (omit it from step 7 above). If run, backups make a local archive only, even with an off-site destination configured; pre-upgrade backups are unchanged. No restore drill is needed before testers join. Guest policy, invites, channel isolation, approvals, rate limits, password rules, script credentials and auditing keep their usual rules; members and guests sign in as usual.
+For a short-lived server holding nothing anyone needs to keep, `conch-server new <name> --temporary` ([A second instance](#a-second-instance)) makes one: its env file says `CONCHD_MODE=temporary`, and it gets no backup timer ([ADR-011](adr/ADR-011-temporary-servers.md), items 2 and 4). To make an existing server temporary, set `CONCHD_MODE=temporary` in its env file, restart `conchd@<name>`, and disable `conch-backup@<name>.timer`. Operators without an enrolled authenticator may sign in with a password alone; those who enrolled still need a code. The sign-in page and lobby show "Temporary server: no backups, and it may be removed. Don't keep anything here you need." If run, backups make a local archive only, even with an off-site destination configured; pre-upgrade backups are unchanged. No restore drill is needed before testers join. `conch-server rm <name>` removes it ([Removing a server](#removing-a-server)). Guest policy, invites, channel isolation, approvals, rate limits, password rules, script credentials and auditing keep their usual rules; members and guests sign in as usual.
 
 For password-only operators on a normal server, use `CONCHD_OPERATOR_TOTP=optional` instead ([ADR-012](adr/ADR-012-optional-operator-totp.md)). It adds no temporary banner and **keeps off-site backups required**.
 
@@ -550,4 +621,6 @@ The audit log records each step, never a password or a code: `password_reset_iss
 | `ops/deploy/conch-backup.sh`, `conch-backup@.service`, `conch-backup@.timer` | the nightly backup |
 | `ops/deploy/conch-restore.sh` | the restore drill |
 | `ops/deploy/conch-upgrade.sh` | upgrade and rollback |
+| `ops/deploy/add-instance.sh`, `remove-instance.sh`, `list-instances.sh` | add, remove and list the servers on the droplet |
+| `ops/conch-server` | the workstation command: `new`, `rm`, `list`, `upgrade`, `sync` |
 | `scripts/deploy-scripts-test.sh` | the test of all of the above that needs no droplet |
