@@ -57,7 +57,8 @@ func operatorUsage(w io.Writer) {
 
 --link prints https://<host>/app/#/setup/<token> in place of the bare token,
 once, on stdout; --origin, required with it, is the server's public HTTPS
-address. recover does not take --link.
+address. recover does not take --link. The link needs a web client from
+v0.1.0-alpha.2 or later; with an older one, give the bare token on the setup page.
 `)
 }
 
@@ -120,6 +121,7 @@ func printSetupToken(stdout, stderr io.Writer, name string, t store.SetupToken, 
 		_, _ = fmt.Fprintf(stderr, "setup link for operator %q (principal %d) printed on stdout; it will not be shown again.\n", name, t.PrincipalID)
 		_, _ = fmt.Fprintf(stderr, "It works once, until %s (%d minutes), over HTTPS only: open it in a browser and press the button to redeem it, then set a password and enrol an authenticator app.\n",
 			t.ExpiresAt.UTC().Format(time.RFC3339), schema.SetupTokenLifetimeSeconds/60)
+		_, _ = fmt.Fprintln(stderr, "The link needs a web client from v0.1.0-alpha.2 or later; with an older one, paste the part after #/setup/ on the setup page as the token.")
 	} else {
 		_, _ = fmt.Fprintln(stdout, t.Token)
 		_, _ = fmt.Fprintf(stderr, "setup token for operator %q (principal %d) printed on stdout; it will not be shown again.\n", name, t.PrincipalID)
@@ -142,7 +144,7 @@ type linkFlags struct {
 
 func addLinkFlags(fs *flag.FlagSet) linkFlags {
 	return linkFlags{
-		link:   fs.Bool("link", false, "print a setup link (https://<host>/app/#/setup/<token>) in place of the bare token; needs --origin"),
+		link:   fs.Bool("link", false, "print a setup link (https://<host>/app/#/setup/<token>) in place of the bare token; needs --origin and a web client from v0.1.0-alpha.2 or later"),
 		origin: fs.String("origin", "", "the server's public address for --link, https://<host>[:port]"),
 	}
 }

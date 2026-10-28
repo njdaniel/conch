@@ -511,6 +511,12 @@ type PasswordSubject struct {
 	AuthGeneration int64
 	// TOTPEnrolled says the principal has a confirmed second factor.
 	TOTPEnrolled bool
+	// PasswordOnlyAllowed is the stored flag (storedPasswordOnlyTx): the
+	// server's last start allowed password-only operators (ADR-012 item 3).
+	// What a client is told, whoami's setup_complete above all, reads it, so
+	// a server whose configuration and store disagree never tells a setup
+	// page "complete" while the store would refuse the operator.
+	PasswordOnlyAllowed bool
 	// ExpiresAt and IdleExpiresAt bound the credential, when it has those
 	// bounds; RecentAuthUntil is its recent-password proof, when one stands
 	// at the instant asked about.
@@ -553,6 +559,9 @@ func (s *Store) PasswordSubject(ctx context.Context, principalID, credentialID i
 		 FROM principals p LEFT JOIN passwords pw ON pw.principal_id = p.id WHERE p.id = ?`, principalID,
 	).Scan(&out.AuthGeneration, &record, &out.TOTPEnrolled); err != nil {
 		return PasswordSubject{}, fmt.Errorf("store: password subject: %w", err)
+	}
+	if out.PasswordOnlyAllowed, err = storedPasswordOnlyTx(ctx, s.db); err != nil {
+		return PasswordSubject{}, err
 	}
 	out.Principal, out.Scope, out.Record = p, schema.CredentialScope(scope), record.String
 	out.ExpiresAt, out.IdleExpiresAt = millisPtr(expiresAt), millisPtr(idleExpires)
@@ -668,16 +677,8 @@ func rotateSessionTx(ctx context.Context, tx execer, actor string, credentialID 
 	if err != nil {
 		return schema.CredentialV1{}, err
 	}
-	if idle.Valid {
-		if _, err := tx.ExecContext(ctx, "UPDATE credentials SET idle_ms = ? WHERE id = ?", idle.Int64, c.ID); err != nil {
-			return schema.CredentialV1{}, fmt.Errorf("store: rotate session: idle bound: %w", err)
-		}
-		at := now.Add(time.Duration(idle.Int64) * time.Millisecond)
-		if expiresAt.Valid && at.UnixMilli() > expiresAt.Int64 {
-			at = time.UnixMilli(expiresAt.Int64)
-		}
-		ts := schema.NewTimestamp(at)
-		c.IdleExpiresAt = &ts
+	if err := carryIdleBoundTx(ctx, tx, &c, idle, expiresAt, now); err != nil {
+		return schema.CredentialV1{}, err
 	}
 	if err := appendAuditEventTx(ctx, tx, actor, "credential_rotated", principalActor(principalID),
 		credentialDetail(c.ID, c.Label)+fmt.Sprintf(" replaces=%d", credentialID), now); err != nil {
@@ -687,6 +688,32 @@ func rotateSessionTx(ctx context.Context, tx execer, actor string, credentialID 
 		return schema.CredentialV1{}, err
 	}
 	return c, nil
+}
+
+// carryIdleBoundTx gives c, a credential just inserted to replace another,
+// the replaced one's idle bound idle, when it had one, so the replacement is
+// a sign-in session exactly when the old one was (signInSessionSQL: renewal,
+// which insertCredentialTx carries, or an idle bound). Without it a rotated
+// operator browser session would become a script credential to every check
+// that tells the two apart: the recent-auth gate, and the revocation when
+// password-only stops being allowed (issue #866). The idle clock starts
+// again at the rotation (last_used_at stays NULL, so it counts from
+// created_at, now): the rotation is a use, as any REST request is, and the
+// bound is never later than the kept expiry, which never moves.
+func carryIdleBoundTx(ctx context.Context, tx execer, c *schema.CredentialV1, idle, expiresAt sql.NullInt64, now time.Time) error {
+	if !idle.Valid {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE credentials SET idle_ms = ? WHERE id = ?", idle.Int64, c.ID); err != nil {
+		return fmt.Errorf("store: rotate: idle bound: %w", err)
+	}
+	at := now.Add(time.Duration(idle.Int64) * time.Millisecond)
+	if expiresAt.Valid && at.UnixMilli() > expiresAt.Int64 {
+		at = time.UnixMilli(expiresAt.Int64)
+	}
+	ts := schema.NewTimestamp(at)
+	c.IdleExpiresAt = &ts
+	return nil
 }
 
 // spendPasswordLinkTx spends a reset or an enrollment link, once: the guarded

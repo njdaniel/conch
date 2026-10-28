@@ -184,6 +184,11 @@ func TestStartModeTransitions(t *testing.T) {
 				if res.Ended || res.SessionsRevoked+res.ProofsCleared+res.PendingLoginsSpent+res.SetupCredentialsRevoked != 0 {
 					t.Errorf("start %d (%s) ended something: %+v", i, st, res)
 				}
+				// olga has a password and no authenticator: counted on every
+				// start that requires one, changed or not, and on no other.
+				if want := map[bool]int64{false: 1, true: 0}[st.passwordOnly]; res.OperatorsWithoutAuthenticator != want {
+					t.Errorf("start %d (%s): %d operators without an authenticator, want %d", i, st, res.OperatorsWithoutAuthenticator, want)
+				}
 				if i > 0 && (res.Previous != tt.starts[i-1].mode || res.PreviousPasswordOnly != tt.starts[i-1].passwordOnly) {
 					t.Errorf("start %d (%s): previous = %s/%t", i, st, res.Previous, res.PreviousPasswordOnly)
 				}

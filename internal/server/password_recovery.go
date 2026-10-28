@@ -646,10 +646,19 @@ func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) {
 // passwordOnlyOperator reports whether caller is an operator who, on a
 // server that allows password-only, proves themself with a password alone:
 // one with no confirmed authenticator as subj read it (ADR-011 item 2.1,
-// ADR-012). The store reads the stored flag and the enrolment again in the
-// transaction that writes, and asks for the code if either says so.
+// ADR-012). Both the configuration and the stored flag, as subj read it,
+// must allow it, so the two cannot disagree into a weaker answer; the store
+// reads the flag and the enrolment again in the transaction that writes, and
+// asks for the code if either says so.
 func (s *Server) passwordOnlyOperator(caller store.Principal, subj store.PasswordSubject) bool {
-	return isOperator(caller) && s.cfg.passwordOnlyAllowed() && !subj.TOTPEnrolled
+	return isOperator(caller) && s.passwordOnlyAllowedFor(subj) && !subj.TOTPEnrolled
+}
+
+// passwordOnlyAllowedFor reports whether password-only is allowed for what a
+// route tells the caller: the configuration says so and the store's flag,
+// read with subj, agrees (ADR-012 item 3). Either saying no is no.
+func (s *Server) passwordOnlyAllowedFor(subj store.PasswordSubject) bool {
+	return s.cfg.passwordOnlyAllowed() && subj.PasswordOnlyAllowed
 }
 
 func writeNotASession(w http.ResponseWriter) {
@@ -686,7 +695,7 @@ func (s *Server) authWhoAmI(ctx context.Context, caller store.Principal, credID 
 		// An authenticator is part of setup only where the mode asks for
 		// one (ADR-011 item 2.1): where password-only is allowed the password
 		// completes it, and the web Setup page and conch setup stop waiting.
-		auth.SetupComplete = auth.PasswordSet && (subj.TOTPEnrolled || s.cfg.passwordOnlyAllowed())
+		auth.SetupComplete = auth.PasswordSet && (subj.TOTPEnrolled || s.passwordOnlyAllowedFor(subj))
 	}
 	resp.Auth = &auth
 	return nil

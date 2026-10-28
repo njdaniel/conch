@@ -124,13 +124,15 @@ type ModeStart struct {
 	// SessionsRevoked are operators' browser sessions, ProofsCleared
 	// credentials whose recent-authentication proof was cleared,
 	// PendingLoginsSpent pending logins and SetupCredentialsRevoked setup
-	// credentials. OperatorsWithoutAuthenticator are the enabled, unhidden
-	// operators (owners among them) left with a password and no confirmed
-	// authenticator, who cannot sign in to the browser until they are set up
-	// again on the host (ADR-012 item 4).
+	// credentials.
 	Ended                                                                       bool
 	SessionsRevoked, ProofsCleared, PendingLoginsSpent, SetupCredentialsRevoked int64
-	OperatorsWithoutAuthenticator                                               int64
+	// OperatorsWithoutAuthenticator are, on every start that does not allow
+	// password-only, the enabled, unhidden operators (owners among them)
+	// with a password and no confirmed authenticator, who cannot sign in to
+	// the browser until they are set up again on the host (ADR-012 item 4);
+	// zero on a start that allows it. conchd warns while it is above zero.
+	OperatorsWithoutAuthenticator int64
 }
 
 // modeRevokedReason is the reason of the credential_revoked rows written
@@ -150,13 +152,16 @@ const modeRevokedReason = "password_only_ended"
 //     it also revokes every browser session (a sign-in session,
 //     signInSessionSQL) of every operator, whether or not they have since
 //     enrolled an authenticator; clears every recent-authentication proof;
-//     spends every pending login; revokes every setup credential still live;
-//     and counts the operators left with a password and no authenticator.
-//     Each revocation is audited credential_revoked with reason
+//     spends every pending login; and revokes every setup credential still
+//     live. Each revocation is audited credential_revoked with reason
 //     password_only_ended and ends the credential's sessions, as any
 //     revocation does. Script credentials are untouched, and no
-//     authentication generation moves. The count is not a refusal: the host
-//     re-enrols each of them with conchd operator setup.
+//     authentication generation moves;
+//   - on every start that does not allow password-only, whether anything
+//     changed or not, it counts the operators with a password and no
+//     authenticator (ModeStart.OperatorsWithoutAuthenticator), and the
+//     switch's audit row carries the count. The count is not a refusal: the
+//     host re-enrols each of them with conchd operator setup.
 //
 // Either all of it commits or none of it does. A mode that is not one of the
 // two, or temporary mode with password-only off, is refused before anything
@@ -175,6 +180,18 @@ func (s *Store) StartMode(ctx context.Context, mode Mode, passwordOnly bool, now
 	)
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		out, runs = ModeStart{}, nil
+		// Counted on every start that requires the authenticator, not only
+		// at the switch, so the warning repeats until each is set up again.
+		if !passwordOnly {
+			if err := tx.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM principals p
+				 WHERE p.role = 'operator' AND p.kind = 'human' AND p.disabled_at IS NULL AND p.hidden_at IS NULL
+				   AND EXISTS (SELECT 1 FROM passwords pw WHERE pw.principal_id = p.id)
+				   AND NOT EXISTS (SELECT 1 FROM totp t WHERE t.principal_id = p.id AND t.secret IS NOT NULL AND t.enrolled_at IS NOT NULL)`,
+			).Scan(&out.OperatorsWithoutAuthenticator); err != nil {
+				return fmt.Errorf("store: start mode: count operators without an authenticator: %w", err)
+			}
+		}
 		var stored string
 		switch err := tx.QueryRowContext(ctx, "SELECT mode, password_only FROM server_mode WHERE id = 1").Scan(&stored, &out.PreviousPasswordOnly); {
 		case errors.Is(err, sql.ErrNoRows):
@@ -250,19 +267,9 @@ func endPasswordOnlyTx(ctx context.Context, tx execer, out *ModeStart, now time.
 	// may one that set none; either would finish a setup by the
 	// password-only rule. The operator starts again with a token made on
 	// the host.
-	if out.SetupCredentialsRevoked, err = revokeMatchingTx(ctx, tx,
-		"SELECT id, principal_id, label FROM credentials WHERE scope = 'setup' AND revoked_at IS NULL ORDER BY id", now, runs); err != nil {
-		return err
-	}
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM principals p
-		 WHERE p.role = 'operator' AND p.kind = 'human' AND p.disabled_at IS NULL AND p.hidden_at IS NULL
-		   AND EXISTS (SELECT 1 FROM passwords pw WHERE pw.principal_id = p.id)
-		   AND NOT EXISTS (SELECT 1 FROM totp t WHERE t.principal_id = p.id AND t.secret IS NOT NULL AND t.enrolled_at IS NOT NULL)`,
-	).Scan(&out.OperatorsWithoutAuthenticator); err != nil {
-		return fmt.Errorf("store: start mode: count operators without an authenticator: %w", err)
-	}
-	return nil
+	out.SetupCredentialsRevoked, err = revokeMatchingTx(ctx, tx,
+		"SELECT id, principal_id, label FROM credentials WHERE scope = 'setup' AND revoked_at IS NULL ORDER BY id", now, runs)
+	return err
 }
 
 // revokeMatchingTx revokes every credential query selects (id, principal_id,

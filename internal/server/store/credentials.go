@@ -312,15 +312,16 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 			label, role                   string
 			targetOwner                   bool
 			expiresAt, revokedAt, renewMs sql.NullInt64
+			idleMs                        sql.NullInt64
 			// current is currentAuthSQL (issue #707): a credential that
 			// no longer resolves is dead, and rotating it must not make a
 			// live one.
 			current bool
 		)
 		switch err := tx.QueryRowContext(ctx,
-			`SELECT c.principal_id, c.label, p.role, p.owner, c.expires_at, c.revoked_at, c.renew_ms, `+currentAuthSQL+`
+			`SELECT c.principal_id, c.label, p.role, p.owner, c.expires_at, c.revoked_at, c.renew_ms, c.idle_ms, `+currentAuthSQL+`
 			 FROM credentials c JOIN principals p ON p.id = c.principal_id WHERE c.id = ?`, credentialID,
-		).Scan(&principalID, &label, &role, &targetOwner, &expiresAt, &revokedAt, &renewMs, &current); {
+		).Scan(&principalID, &label, &role, &targetOwner, &expiresAt, &revokedAt, &renewMs, &idleMs, &current); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrCredentialNotFound
 		case err != nil:
@@ -371,6 +372,12 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 		}
 		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, time.Duration(renewMs.Int64)*time.Millisecond)
 		if err != nil {
+			return err
+		}
+		// The replacement keeps the old one's idle bound, so a rotated
+		// browser session is still a session (issue #866): still gated by
+		// recent auth and still ended when password-only stops.
+		if err := carryIdleBoundTx(ctx, tx, &c, idleMs, expiresAt, now); err != nil {
 			return err
 		}
 		out = c

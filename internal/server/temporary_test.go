@@ -207,6 +207,67 @@ func TestTemporaryConfigOverNormalStoreFailsClosed(t *testing.T) {
 			if rows := loginFailedRows(t, f.authFixture); len(rows) != 1 || !strings.Contains(rows[0], "reason="+loginReasonStale) {
 				t.Errorf("login_failed rows %q, want one stale", rows)
 			}
+			// What a client is told follows the store too: root's setup is
+			// not complete, on a full credential or on a setup credential
+			// that has set the password, so no setup page stops waiting
+			// while the store would refuse the operator.
+			if a := f.whoamiAuth(t, f.rootTok); a == nil || a.SetupComplete {
+				t.Errorf("whoami of root's script credential = %+v, want setup incomplete", a)
+			}
+			setup := f.redeemSetup(t, f.hostSetupToken(t, f.root.ID))
+			if rec := f.send(t, "POST", "/v1/password/mine", setup.Token,
+				inviteJSON(t, schema.SetPasswordRequestV1{Password: "a replacement and private passphrase"}), ""); rec.Code != http.StatusOK {
+				t.Fatalf("set password = %d %s", rec.Code, rec.Body)
+			}
+			if a := f.whoamiAuth(t, setup.Token); a == nil || a.SetupComplete {
+				t.Errorf("whoami of the setup credential after the password = %+v, want setup incomplete", a)
+			}
+			// And the store did not restrict it: it may still set a password.
+			if rec := f.send(t, "POST", "/v1/password/mine", setup.Token,
+				inviteJSON(t, schema.SetPasswordRequestV1{Password: "a second replacement passphrase"}), ""); rec.Code != http.StatusOK {
+				t.Errorf("a second password = %d %s, want it set as on any normal server", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+// Rotating an operator's browser session keeps it a session (issue #866
+// review): the rotated credential still has an idle bound, holds no
+// recent-auth proof, and is still stopped by the recent-auth gate, where
+// before the fix it slipped past the gate as if it were a script credential.
+func TestRotatedOperatorSessionIsStillGated(t *testing.T) {
+	for name, settings := range map[string]serverSettings{"normal+optional": normalOptional, "normal, enrolled": normalRequired} {
+		t.Run(name, func(t *testing.T) {
+			f := newModeFixture(t, settings)
+			enrolled := !settings.allowed(t)
+			tok, secret := rootSession(t, f, settings, enrolled)
+			code := ""
+			if enrolled {
+				code = f.code(secret)
+			}
+			if rec := f.reauthOp(t, tok, rootPassword, code); rec.Code != http.StatusOK {
+				t.Fatalf("reauth = %d %s", rec.Code, rec.Body)
+			}
+			var current int64
+			for _, c := range decodeBody[schema.ListOwnCredentialsResponseV1](t, f.send(t, "GET", "/v1/credentials/mine", tok, "", "")).Credentials {
+				if c.Current {
+					current = c.ID
+				}
+			}
+			rec := f.send(t, "POST", fmt.Sprintf("/v1/credentials/%d/rotate", current), tok, "", "")
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("rotate = %d %s", rec.Code, rec.Body)
+			}
+			rotated := decodeBody[schema.RotateCredentialResponseV1](t, rec)
+			if rotated.Credential.IdleExpiresAt == nil {
+				t.Errorf("the rotated session has no idle bound: %+v", rotated.Credential)
+			}
+			if a := f.whoamiAuth(t, rotated.Token); a == nil || a.IdleExpiresAt == nil || a.RecentAuthUntil != nil {
+				t.Errorf("whoami of the rotated session = %+v, want an idle bound and no proof", a)
+			}
+			rec = f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/credentials", f.root.ID), rotated.Token,
+				inviteJSON(t, schema.CreateCredentialRequestV1{Label: "cli"}), "")
+			assertErrorBody(t, rec, http.StatusForbidden, schema.ErrorCodeReauthRequired)
 		})
 	}
 }
