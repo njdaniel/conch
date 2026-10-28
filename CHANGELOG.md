@@ -8,6 +8,24 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] - 2026-10-28
+
+A small build so an operator can resume invites from the browser. Upgrade
+with `conch-upgrade.sh` (docs/deploy.md step 11). There is no migration, so a
+rollback to `alpha.2` keeps the data as it is.
+
+### Added
+
+- **Pause and resume invites in the browser** (#882): a "Pause all invites" switch
+  in Settings → Joining, beside the guest-joining pause. It does what
+  `conch admin invite pause|resume` does. Restoring a backup pauses both, on
+  purpose, and until now invites could only be resumed with the CLI.
+
+### Fixed
+
+- After a cancelled re-authentication, Settings → Joining no longer says it
+  needs "a code" from an operator who has no authenticator.
+
 ## [0.1.0-alpha.2] - 2026-10-28
 
 The second alpha build. Operators can sign in with a password alone, and
