@@ -7,8 +7,11 @@
 // and nothing until it has said: a change is sent, and the page then shows
 // the answer. Every read and change is numbered, and only the newest one's
 // answer is shown. A read wanted while a change is in flight waits for it,
-// since it could see the server from before the change. A change whose answer was lost (a network failure) may or may not have
-// happened, so the switch goes back to unknown and is read again.
+// since it could see the server from before the change. Only a refusal the
+// server named (an error code) proves a change was not made: any other
+// failure (no answer, or an answer cut off or unreadable) may have followed
+// a change that was made, so the switch goes back to unknown and is read
+// again.
 //
 // The change needs a recent proof of the operator's password (and code, if
 // enrolled), which authedSend asks for over this page (Reauth.tsx) and then
@@ -99,13 +102,20 @@ export function InviteSettings({ open, onUnauthorized }: { readonly open: boolea
         onUnauthorized();
         return;
       }
-      if (result.failure === 'network') {
-        // The change may have reached the server: ask it, not the click.
+      if (result.code === undefined) {
+        // No refusal the server named: the change may have been made. Ask
+        // the server, not the click.
         setPaused(null);
-        read({ text: 'The server could not be reached, so it may not have changed. This is what it holds now.', refused: true });
+        read({
+          text:
+            result.failure === 'network'
+              ? 'The server could not be reached, so it is not known whether invites changed. This is what it holds now.'
+              : 'The server’s answer could not be read, so it is not known whether invites changed. This is what it holds now.',
+          refused: true,
+        });
         return;
       }
-      // Refused: the switch keeps what the server last reported.
+      // Refused, with the server's code: the switch keeps what it last reported.
       setLine({ text: refusalLine(result), refused: true });
     });
   }

@@ -213,10 +213,36 @@ describe('Settings → Joining: pause all invites', () => {
     });
     const { region, box } = await opened();
     fireEvent.click(box);
-    await within(region).findByText(/could not be reached, so it may not have changed/);
+    await within(region).findByText(/could not be reached, so it is not known whether invites changed/);
     const again = await within(region).findByLabelText<HTMLInputElement>('Pause all invites');
     expect(again.checked).toBe(false);
     expect(within(region).getByText(/Invites are on/)).toBeDefined();
+  });
+
+  it('a change answered 200 whose body is cut off is read again, not called a refusal', async () => {
+    let held = true;
+    const cut = () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new TypeError('connection dropped'));
+          },
+        }),
+        { status: 200 },
+      );
+    serve({
+      'GET /v1/invites/settings': () => json({ paused: held }),
+      'PUT /v1/invites/settings': (call) => {
+        held = (call.body as { paused: boolean }).paused;
+        return cut();
+      },
+    });
+    const { region, box } = await opened();
+    fireEvent.click(box);
+    await within(region).findByText(/answer could not be read, so it is not known whether invites changed/);
+    expect(within(region).queryByText(/Invites were not changed/)).toBeNull();
+    const again = await within(region).findByLabelText<HTMLInputElement>('Pause all invites');
+    expect(again.checked).toBe(false);
   });
 
   it('a change whose answer is lost, with the server still unreachable, shows no state', async () => {
