@@ -750,6 +750,12 @@ func TestLastOwnerGuardByMode(t *testing.T) {
 				_, err := w.s.HidePrincipal(ctx, "system", root.ID, HideOptions{})
 				return err
 			}, true},
+			// Unmarking (ADR-010's owner mark) the only owner leaves their
+			// factors out too, so it is refused under every setting.
+			{"unmarking the only owner", func(w *modeWorld, root Principal, _ int64) error {
+				_, err := w.s.SetRole(ctx, "system", root.ID, root.ID, RoleOperator, &noOwnerMark)
+				return err
+			}, true},
 		} {
 			t.Run(mode.String()+"/a password-only owner/"+op.name, func(t *testing.T) {
 				w, root := newGuardWorld(t, mode)
@@ -785,9 +791,10 @@ func TestLastOwnerGuardByMode(t *testing.T) {
 		})
 		// root holds both factors and a session; olga, another owner, has a
 		// password alone and no credential. Disabling, hiding, demoting or
-		// signing root out everywhere (and so ending root's session) leaves
-		// only olga: allowed exactly where a password alone signs her in.
-		for _, op := range []string{"disable", "hide", "demote", "revoke-all"} {
+		// unmarking root, or signing root out everywhere (and so ending
+		// root's session), leaves only olga: allowed exactly where a password
+		// alone signs her in.
+		for _, op := range []string{"disable", "hide", "demote", "unmark", "revoke-all"} {
 			t.Run(mode.String()+"/another password-only owner/"+op, func(t *testing.T) {
 				w, root := newGuardWorld(t, mode)
 				w.password(t, root.ID)
@@ -806,6 +813,8 @@ func TestLastOwnerGuardByMode(t *testing.T) {
 					_, err = w.s.HidePrincipal(ctx, "system", root.ID, HideOptions{})
 				case "demote":
 					_, err = w.s.SetRole(ctx, "system", olga.ID, root.ID, RoleMember, nil)
+				case "unmark":
+					_, err = w.s.SetRole(ctx, "system", olga.ID, root.ID, RoleOperator, &noOwnerMark)
 				case "revoke-all":
 					// root's own factors still count after a sign-out
 					// everywhere, in either mode.
@@ -823,5 +832,112 @@ func TestLastOwnerGuardByMode(t *testing.T) {
 			sess, _ := w.session(t, root.ID)
 			wantLastOperator(t, "signing the last session out", w.s.RevokeOwnCredential(ctx, "system", sess), false)
 		})
+	}
+}
+
+// noOwnerMark is SetRole's owner argument that clears the mark.
+var noOwnerMark = false
+
+// guardState is everything a guarded operation could change, as one string:
+// both owners' role, mark, disabled and hidden state, every credential and
+// whether it is revoked, and the server_mode row.
+func (w *modeWorld) guardState(t *testing.T) string {
+	t.Helper()
+	var principals, creds, mode string
+	if err := w.s.db.QueryRow(`SELECT group_concat(id || ':' || role || ':' || owner || ':' || COALESCE(disabled_at, '-') || ':' || COALESCE(hidden_at, '-'), ',')
+		FROM (SELECT * FROM principals ORDER BY id)`).Scan(&principals); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.s.db.QueryRow(`SELECT COALESCE(group_concat(id || ':' || COALESCE(revoked_at, '-'), ','), '')
+		FROM (SELECT * FROM credentials ORDER BY id)`).Scan(&creds); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.s.db.QueryRow(`SELECT mode || ':' || password_only FROM server_mode`).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	return principals + " | " + creds + " | " + mode
+}
+
+// When password-only stops being allowed (ADR-012 items 3 and 4), the guard
+// goes back to the strict rule at once: two owners with a password and no
+// authenticator, root holding (after the restart) only a script credential or
+// only a fresh session, olga nothing. Every guarded operation that would
+// leave no owner with both factors or a live credential is refused, and
+// writes nothing: the principals, the credentials and the stored settings
+// are as they were. Under password-only the same operations are allowed
+// (TestLastOwnerGuardByMode), so this is the flag, read back, doing it.
+func TestLastOwnerGuardAfterPasswordOnlyEnds(t *testing.T) {
+	ctx := context.Background()
+	for _, from := range []setting{temporary, normalOptional} {
+		for _, op := range []struct {
+			name string
+			// script says root keeps a script credential through the
+			// restart; otherwise root gets a fresh session after it.
+			script bool
+			do     func(w *modeWorld, root, olga Principal, cred int64) error
+		}{
+			{"revoking the last credential", true, func(w *modeWorld, _, _ Principal, cred int64) error {
+				return w.s.RevokeCredential(ctx, "system", cred)
+			}},
+			{"signing out of the last session", false, func(w *modeWorld, _, _ Principal, cred int64) error {
+				return w.s.RevokeOwnCredential(ctx, "system", cred)
+			}},
+			{"signing out everywhere", true, func(w *modeWorld, root, _ Principal, _ int64) error {
+				_, err := w.s.RevokeAllCredentials(ctx, "system", root.ID)
+				return err
+			}},
+			{"disabling", true, func(w *modeWorld, root, _ Principal, _ int64) error {
+				_, err := w.s.DisablePrincipal(ctx, "system", root.ID)
+				return err
+			}},
+			{"hiding", true, func(w *modeWorld, root, _ Principal, _ int64) error {
+				_, err := w.s.HidePrincipal(ctx, "system", root.ID, HideOptions{})
+				return err
+			}},
+			{"demoting", true, func(w *modeWorld, root, olga Principal, _ int64) error {
+				_, err := w.s.SetRole(ctx, "system", olga.ID, root.ID, RoleMember, nil)
+				return err
+			}},
+			{"unmarking", true, func(w *modeWorld, root, olga Principal, _ int64) error {
+				_, err := w.s.SetRole(ctx, "system", olga.ID, root.ID, RoleOperator, &noOwnerMark)
+				return err
+			}},
+		} {
+			t.Run(from.String()+"/"+op.name, func(t *testing.T) {
+				w, root := newGuardWorld(t, from)
+				w.password(t, root.ID)
+				olga, err := w.s.CreatePrincipal(ctx, PrincipalHuman, "olga")
+				if err != nil {
+					t.Fatal(err)
+				}
+				w.exec(t, "UPDATE principals SET role = 'operator', owner = 1 WHERE id = ?", olga.ID)
+				w.password(t, olga.ID)
+				// A password-only session, which the restart ends.
+				_, sessTok := w.session(t, root.ID)
+				var cred int64
+				if op.script {
+					c, _, err := w.s.CreateCredential(ctx, "system", root.ID, "cli", nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					cred = c.ID
+				}
+				res := w.start(t, normalRequired)
+				if !res.Ended || res.OperatorsWithoutAuthenticator != 2 {
+					t.Fatalf("the restart = %+v, want password-only ended and two operators counted", res)
+				}
+				if w.live(t, sessTok) {
+					t.Fatal("the password-only session survived the restart")
+				}
+				if !op.script {
+					cred, _ = w.session(t, root.ID)
+				}
+				before := w.guardState(t)
+				wantLastOperator(t, op.name, op.do(w, root, olga, cred), true)
+				if after := w.guardState(t); after != before {
+					t.Errorf("a refused %s changed the store:\n before %s\n after  %s", op.name, before, after)
+				}
+			})
+		}
 	}
 }
