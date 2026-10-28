@@ -31,6 +31,11 @@ export async function post(world: World, token: string, channel: string, body: s
   return reply.message;
 }
 
+export async function reply(world: World, token: string, channel: string, root: number, body: string): Promise<MessageV2> {
+  const answer = await ok(world, token, 'POST', `/v2/channels/${encodeURIComponent(channel)}/messages`, postMessageResponseV2, { body, thread_root_id: root });
+  return answer.message;
+}
+
 export async function upload(world: World, token: string, channel: string, filename: string, mediaType: string, bytes: Uint8Array<ArrayBuffer>): Promise<FileV1> {
   const reply = await fetch(`${world.origin}/v2/channels/${encodeURIComponent(channel)}/files?filename=${encodeURIComponent(filename)}`, {
     method: 'POST',
