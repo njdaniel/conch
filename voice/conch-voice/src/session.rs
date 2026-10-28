@@ -177,10 +177,13 @@ enum Device {
 }
 
 impl Device {
-    /// A device the configuration names: as before switches existed.
+    /// A device the configuration names. The configuration refuses a name that is empty or
+    /// has white space around it (`Config::validate`), so one reaching here was built by
+    /// hand; it is unusable, as a switched one is, and never the default in its place.
     fn configured(name: Option<&str>) -> Self {
         match configured_name(name) {
             None => Device::Default,
+            Some(name) if switched_name(&name).is_none() => Device::Unusable(name),
             Some(name) => Device::Named(name),
         }
     }
@@ -2352,6 +2355,18 @@ mod tests {
         assert_eq!(configured_name(Some("mic")), Some("mic".to_owned()));
         assert!(Device::switched(" ").opened_as().is_none());
         assert_eq!(Device::switched("default").opened_as(), Some(None));
+        for name in ["", " ", " mic", "mic "] {
+            assert!(
+                Device::configured(Some(name)).opened_as().is_none(),
+                "{name:?}"
+            );
+        }
+        assert_eq!(Device::configured(Some("default")).opened_as(), Some(None));
+        assert_eq!(Device::configured(None).opened_as(), Some(None));
+        assert_eq!(
+            Device::configured(Some("mic")).opened_as(),
+            Some(Some("mic"))
+        );
         assert!(Device::switched(" ") != Device::switched("  "));
         assert!(Device::switched(" ") == Device::switched(" "));
     }
