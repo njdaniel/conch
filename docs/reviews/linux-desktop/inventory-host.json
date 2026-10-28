@@ -1,0 +1,172 @@
+{
+  "architecture": "x86_64",
+  "chromium": {
+    "status": "not_measured"
+  },
+  "display_environment_present": {
+    "DISPLAY": true,
+    "WAYLAND_DISPLAY": true
+  },
+  "electron": {
+    "proposed_version": "45.1.0",
+    "status": "not_measured"
+  },
+  "evidence": "inventory_only_no_input_or_media_trial",
+  "execution_context": "host",
+  "helper": {
+    "status": "missing_tool"
+  },
+  "input_device_visibility": {
+    "event_nodes": 21,
+    "note": "No device opened; visibility and access may be sandbox-restricted.",
+    "readable_by_this_process": 0
+  },
+  "kernel": "7.0.11-76070011-generic",
+  "os": {
+    "ID": "pop",
+    "PRETTY_NAME": "Pop!_OS 24.04 LTS",
+    "VERSION_ID": "24.04"
+  },
+  "packages": {
+    "cosmic-comp": "0.1~1782837583~24.04~bb584aa",
+    "cosmic-session": "1.0.0~1782340586~24.04~308c9d3",
+    "gnome-keyring": "46.1-2ubuntu0.2",
+    "libsecret-1-0": "0.21.4-1build3",
+    "pipewire": "1.6.8-1pop1~1787688714~24.04~fdff050",
+    "wireplumber": "0.5.12-2pop1~1766191027~24.04~d4bf441",
+    "xdg-desktop-portal": "1.18.4-1ubuntu2.24.04.2",
+    "xdg-desktop-portal-cosmic": "0.1.0pop1~1782500323~24.04~2948dd4",
+    "xdg-desktop-portal-gtk": "1.15.1-1build2",
+    "xserver-xorg-core": "2:21.1.12-1ubuntu1.6"
+  },
+  "pipewire_connection": "observed",
+  "portal": {
+    "interfaces": {
+      "org.freedesktop.DBus.Introspectable": [],
+      "org.freedesktop.DBus.Peer": [],
+      "org.freedesktop.DBus.Properties": [],
+      "org.freedesktop.portal.Account": [
+        "version"
+      ],
+      "org.freedesktop.portal.Camera": [
+        "IsCameraPresent",
+        "version"
+      ],
+      "org.freedesktop.portal.Device": [
+        "version"
+      ],
+      "org.freedesktop.portal.DynamicLauncher": [
+        "SupportedLauncherTypes",
+        "version"
+      ],
+      "org.freedesktop.portal.Email": [
+        "version"
+      ],
+      "org.freedesktop.portal.FileChooser": [
+        "version"
+      ],
+      "org.freedesktop.portal.GameMode": [
+        "Active",
+        "version"
+      ],
+      "org.freedesktop.portal.Inhibit": [
+        "version"
+      ],
+      "org.freedesktop.portal.Location": [
+        "version"
+      ],
+      "org.freedesktop.portal.MemoryMonitor": [
+        "version"
+      ],
+      "org.freedesktop.portal.NetworkMonitor": [
+        "version"
+      ],
+      "org.freedesktop.portal.Notification": [
+        "version"
+      ],
+      "org.freedesktop.portal.OpenURI": [
+        "version"
+      ],
+      "org.freedesktop.portal.PowerProfileMonitor": [
+        "power-saver-enabled",
+        "version"
+      ],
+      "org.freedesktop.portal.Print": [
+        "version"
+      ],
+      "org.freedesktop.portal.ProxyResolver": [
+        "version"
+      ],
+      "org.freedesktop.portal.Realtime": [
+        "MaxRealtimePriority",
+        "MinNiceLevel",
+        "RTTimeUSecMax",
+        "version"
+      ],
+      "org.freedesktop.portal.ScreenCast": [
+        "AvailableCursorModes",
+        "AvailableSourceTypes",
+        "version"
+      ],
+      "org.freedesktop.portal.Screenshot": [
+        "version"
+      ],
+      "org.freedesktop.portal.Secret": [
+        "version"
+      ],
+      "org.freedesktop.portal.Settings": [
+        "version"
+      ],
+      "org.freedesktop.portal.Trash": [
+        "version"
+      ],
+      "org.freedesktop.portal.WebExtensions": [
+        "version"
+      ]
+    },
+    "status": "observed"
+  },
+  "portal_properties": {
+    "GlobalShortcuts": {
+      "status": "not_advertised"
+    },
+    "ScreenCast": {
+      "AvailableCursorModes": {
+        "status": "observed",
+        "value": "(<uint32 3>,)"
+      },
+      "AvailableSourceTypes": {
+        "status": "observed",
+        "value": "(<uint32 3>,)"
+      },
+      "version": {
+        "status": "observed",
+        "value": "(<uint32 5>,)"
+      }
+    },
+    "Secret": {
+      "version": {
+        "status": "observed",
+        "value": "(<uint32 1>,)"
+      }
+    }
+  },
+  "recorded_at_utc": "2026-10-28T13:44:49.024718+00:00",
+  "secret_service": {
+    "interfaces": {
+      "org.freedesktop.DBus.Introspectable": [],
+      "org.freedesktop.DBus.Peer": [],
+      "org.freedesktop.DBus.Properties": [],
+      "org.freedesktop.Secret.Service": [
+        "Collections"
+      ],
+      "org.gnome.keyring.InternalUnsupportedGuiltRiddenInterface": []
+    },
+    "status": "observed"
+  },
+  "session": {
+    "XDG_CURRENT_DESKTOP": "COSMIC",
+    "XDG_SESSION_TYPE": "wayland"
+  },
+  "wireplumber_connection": "observed"
+}
