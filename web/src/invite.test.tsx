@@ -558,6 +558,50 @@ describe('invite someone', () => {
     expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).toBeNull();
   });
 
+  // Issue #909: an operator is told where the resume switch is, and the button
+  // opens Settings with Joining and guests expanded; a member gets the plain line.
+  it('tells an operator whose invite is refused as paused where to resume, and the button opens the switch', async () => {
+    serve({
+      ...as(operatorToken, operator, channelList('general')),
+      'POST /v1/invites': () => refusal(503, 'invites_paused'),
+      'GET /v1/invites': () => json({ invites: [] }),
+      'GET /v1/invites/settings': () => json({ paused: true }),
+    });
+    window.sessionStorage.setItem(key, operatorToken);
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+    expect(await within(panel).findByText('Invites are paused on this server. Resume them in Settings → Joining and guests.')).toBeDefined();
+    expect(screen.queryByRole('region', { name: 'Joining and guests' })?.hasAttribute('hidden') ?? true).toBe(true);
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Open Settings → Joining and guests' }));
+    const region = screen.getByRole('region', { name: 'Joining and guests' });
+    expect(region.hasAttribute('hidden')).toBe(false);
+    const toggle = screen.getByRole('button', { name: 'Joining and guests' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    // The section has focus, not the Settings heading, so it is scrolled to.
+    expect(document.activeElement).toBe(toggle);
+    const box = await within(region).findByLabelText<HTMLInputElement>('Pause all invites');
+    expect(box.checked).toBe(true);
+  });
+
+  it('gives a member whose invite is refused as paused only the plain line, and no button', async () => {
+    serve({
+      ...as(memberToken, inviter, channelList('general')),
+      'POST /v1/invites': () => refusal(503, 'invites_paused'),
+      'GET /v1/invites': () => json({ invites: [] }),
+    });
+    window.localStorage.setItem(key, memberToken);
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+    expect(await within(panel).findByText('Invites are paused on this server for now.')).toBeDefined();
+    expect(within(panel).queryByText(/Joining and guests/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Joining and guests/ })).toBeNull();
+  });
+
   it("gives an operator an open link with its defaults, and lists only the operator's own invites", async () => {
     const calls = serve({
       ...as(operatorToken, operator, channelList('general')),
