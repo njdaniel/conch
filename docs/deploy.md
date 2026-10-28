@@ -27,7 +27,7 @@ Not yet proved on the droplet: voice through TURN from a network that blocks UDP
 | `conch-<instance>` (one per instance) | `conchd@<instance>`, and the snapshot step of that instance's backup | its own data directory, `/var/lib/conch/<instance>`, only. `conchd` keeps its database and uploads at mode 0600, and the unit hides `/etc/conch`, `/var/backups/conch`, Caddy's state and every other instance's directory from it. |
 | `conch-backup` | the archive, retention and off-site steps of every backup | `/var/backups/conch`, and the off-site settings and credentials (`/etc/conch/backup.env`, `/etc/conch/rclone.conf`), which it alone owns. It cannot read any instance's live data. |
 | `conch-drill` | the restore drill (step 9), in a scratch directory of its own | only what it is handed for one drill. It owns no other file and holds no credential. |
-| root | the backup unit (only to hand the snapshot from the instance user to `conch-backup`), the upgrade script, the steps below | everything, but the scripts and the steps below never open a file `conch-backup` owns: the archives are checked and read as `conch-backup`, and handed on as a stream. The env files (`/etc/conch/<instance>.env`) and LiveKit's keys are root's, mode 0600. |
+| root | the backup unit (reads the instance's mode, then hands the snapshot from the instance user to `conch-backup`), the upgrade script, the steps below | everything, but the scripts and the steps below never open a file `conch-backup` owns: the archives are checked and read as `conch-backup`, and handed on as a stream. The env files (`/etc/conch/<instance>.env`) and LiveKit's keys are root's, mode 0600. |
 
 So a compromised `conchd` cannot read another instance, the backups or the off-site credentials, and a leaked off-site credential does not open the live data. Every step the scripts run as one of these users runs in its own session, so it never has root's terminal as its controlling terminal, with none of root's environment, and what it prints is stripped of control characters before it reaches root's terminal.
 
@@ -159,7 +159,7 @@ Each instance runs as its own system user, `conch-<instance>`:
 useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin conch-alpha
 ```
 
-One env file per instance, mode 0600, root-owned (systemd reads it as root, before it hides `/etc/conch` from the service). It holds the LiveKit secret, so never put its values in a unit file, a Caddyfile, a command line or the repository:
+One env file per instance, mode 0600, root-owned (systemd reads it as root, before it hides `/etc/conch` from the service). The format is `KEY=value`, one per line, no quotes or trailing spaces. It holds the LiveKit secret, so never put its values in a unit file, a Caddyfile, a command line or the repository:
 
 ```sh
 install -m 0600 -o root -g root /root/conch-src/ops/deploy/instance.env.example /etc/conch/alpha.env
@@ -496,6 +496,14 @@ A second server on the same droplet (plan §3) is these steps, with `beta` as th
 7. `systemctl enable --now conchd@beta conch-backup@beta.timer`.
 
 From now on name `beta` in `conch-upgrade.sh` too.
+
+## Temporary servers
+
+For a short-lived server holding nothing anyone needs to keep, set `CONCHD_MODE=temporary` in its env file and restart `conchd@<name>` ([ADR-011](adr/ADR-011-temporary-servers.md), items 2 and 4). Operators without an enrolled authenticator may sign in with a password alone; those who enrolled still need a code. The sign-in page and lobby show "Temporary server: no backups, and it may be removed. Don't keep anything here you need." Leave `conch-backup@<name>.timer` disabled (omit it from step 7 above). If run, backups make a local archive only, even with an off-site destination configured; pre-upgrade backups are unchanged. No restore drill is needed before testers join. Guest policy, invites, channel isolation, approvals, rate limits, password rules, script credentials and auditing keep their usual rules; members and guests sign in as usual.
+
+For password-only operators on a normal server, use `CONCHD_OPERATOR_TOTP=optional` instead ([ADR-012](adr/ADR-012-optional-operator-totp.md)). It adds no temporary banner and **keeps off-site backups required**.
+
+To switch back, set `CONCHD_MODE=normal` and restart; configure off-site backups and complete the restore drill (steps 8 and 9), then enable the backup timer. Under [ADR-012 item 4](adr/ADR-012-optional-operator-totp.md#decision), revocation happens only when password-only operator sign-in stops being allowed: normal mode with `CONCHD_OPERATOR_TOTP=required` (or unset). At that start, every operator browser session is revoked, all recent-authentication proofs are cleared, and every pending login and unfinished setup credential is spent. Operators without authenticators must finish setup with a host-issued token. Switching to normal with `optional` keeps sessions and proofs. Script credentials survive either switch.
 
 ## A member who forgot their password
 
