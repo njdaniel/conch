@@ -569,6 +569,10 @@ func TestVoiceControlLoneSurrogateEscape(t *testing.T) {
 		{`{"a":"\"\ud800"}`, true},
 		{`{"\ud800":1}`, true},
 		{`{"a":"� é \u001b"}`, false},
+		{`{"a":"\ud800","b":"\udc00"}`, true},
+		{`{"\ud800":"\udc00"}`, true},
+		{`{"a":"\ud800\ud800"}`, true},
+		{`"\`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.text, func(t *testing.T) {

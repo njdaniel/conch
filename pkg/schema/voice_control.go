@@ -1427,7 +1427,11 @@ func hasLoneSurrogateEscape(text []byte) bool {
 			i++
 		case c != '\\':
 			i++
-		case i+1 < len(text) && text[i+1] != 'u':
+		case i+1 >= len(text):
+			// A backslash that ends the text: no escape, nothing to find (and never
+			// after a JSON parse; the case keeps this total, as the Rust twin is).
+			i += 2
+		case text[i+1] != 'u':
 			// An escape of one character: \" \\ \/ \b \f \n \r \t.
 			i += 2
 		default:

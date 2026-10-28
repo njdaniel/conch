@@ -2181,7 +2181,7 @@ mod tests {
     /// as Go's `TestVoiceControlLoneSurrogateEscape`.
     #[test]
     fn a_lone_surrogate_escape_is_found_wherever_it_is_and_a_pair_is_not() {
-        let cases: [(&str, bool); 14] = [
+        let cases: [(&str, bool); 18] = [
             (r#"{"a":"plain"}"#, false),
             (r#"{"a":"\ud800"}"#, true),
             (r#"{"a":"\uD800"}"#, true),
@@ -2196,6 +2196,10 @@ mod tests {
             (r#"{"a":"\"\ud800"}"#, true),
             (r#"{"\ud800":1}"#, true),
             (r#"{"a":"� é \u001b"}"#, false),
+            (r#"{"a":"\ud800","b":"\udc00"}"#, true),
+            (r#"{"\ud800":"\udc00"}"#, true),
+            (r#"{"a":"\ud800\ud800"}"#, true),
+            (r#""\"#, false),
         ];
         for (text, want) in cases {
             assert_eq!(has_lone_surrogate_escape(text), want, "{text}");
