@@ -443,13 +443,15 @@ keys_orig="" caddy_orig=""
 
 # guarded <command>...: run it holding no terminal (as in conch-upgrade.sh).
 guarded() {
+    # Each return names its status: a bare return in an EXIT trap (the undo)
+    # would return the status that set off the trap instead.
     if [ -t 0 ]; then
         guarded "$@" </dev/null
-        return
+        return "$?"
     fi
     if [ -t 1 ]; then
         guarded "$@" | clean
-        return
+        return "$?"
     fi
     { setsid -w "$@" 2>&1 1>&3 3>&- | clean >&2; } 3>&1
 }
@@ -470,7 +472,7 @@ as_instance() { as_user "conch-$name" "$@"; }
 # running: does anything of this instance still run? Its units, and, as root,
 # any process of conch-<name>.
 running() {
-    if sysctl is-active --quiet "conchd@$name" || sysctl is-active --quiet "conch-backup@$name.service"; then return 0; fi
+    if sysctl is-active --quiet "conchd@$name" || sysctl is-active --quiet "conch-backup@$name.timer" || sysctl is-active --quiet "conch-backup@$name.service"; then return 0; fi
     if [ "$(id -u)" = 0 ] && "$getent" passwd "conch-$name" >/dev/null 2>&1 && pgrep -u "conch-$name" >/dev/null; then return 0; fi
     return 1
 }
@@ -532,12 +534,14 @@ on_exit() {
     if [ "$committed" = 0 ] && [ "${#undo[@]}" -gt 0 ]; then
         say "FAILED; undoing what this run made, newest first:" >&2
         i=$((${#undo[@]} - 1))
+        local unit_stopped=0
         if [ "${undo[i]}" = unit ]; then
-            undo_step unit >&2
+            undo_step unit >&2 || unit_stopped=1
             i=$((i - 1))
         fi
-        # Nothing is deleted while anything of the instance may still run.
-        if ! stopped_for_sure; then
+        # Nothing is deleted while anything of the instance may still run, or
+        # when stopping one of its units failed.
+        if [ "$unit_stopped" = 1 ] || ! stopped_for_sure; then
             blocked=1
         else
             if ! undo_backups >&2; then
@@ -564,7 +568,7 @@ on_exit() {
                 step=$(undo_text "${undo[i]}")
                 left+=", $step"
             done
-            say "ROLLBACK INCOMPLETE: conchd@$name, or a process of conch-$name, may still run, so nothing more was undone. Left in place: ${left:2}. Stop it (systemctl stop conchd@$name), then remove what is left with remove-instance.sh $name (temporary) or remove-instance.sh $name --force-normal." >&2
+            say "ROLLBACK INCOMPLETE: conchd@$name, its backup timer or unit, or a process of conch-$name, may still run, or would not stop, so nothing more was undone. Left in place: ${left:2}. Stop it (systemctl stop conchd@$name), then remove what is left with remove-instance.sh $name (temporary) or remove-instance.sh $name --force-normal." >&2
             status=5
         fi
     elif [ "$committed" = 0 ] && [ "$status" != 0 ] && [ "$status" != 2 ] && [ "$status" != 130 ]; then

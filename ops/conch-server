@@ -356,6 +356,11 @@ cmd_new() {
     operator=${operator:-$default_operator}
     fqdn=$name.$domain
 
+    # The setup link reaches only this terminal. ssh -t gives the droplet a
+    # terminal of its own whatever this one's output is, so add-instance's own
+    # check cannot see a redirect here: refuse it before anything is made.
+    [ -t 1 ] || die "the setup link is printed to a terminal only: run conch-server new with its output on a terminal, not a file or a pipe. Nothing was changed." 2
+
     sync_scripts
     droplet_addresses
     droplet_names

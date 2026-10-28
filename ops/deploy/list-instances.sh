@@ -113,6 +113,11 @@ env_mode() {
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in *\\) echo normal; return ;; esac
         case "$line" in '#'* | ';'*) continue ;; esac
+        # A quote may open a value that runs over several lines, in which a
+        # line that reads CONCHD_MODE=temporary is not an assignment at all.
+        # The env files this repository writes hold no quotes, so any quote
+        # makes the file ambiguous: normal.
+        case "$line" in *\'* | *\"*) echo normal; return ;; esac
         case "$line" in *CONCHD_MODE*) ;; *) continue ;; esac
         if [ "$line" != CONCHD_MODE=temporary ]; then echo normal; return; fi
         n=$((n + 1))

@@ -1075,6 +1075,24 @@ d=$(diff <(grep -vF -e "$work/upbackups/removed" -e "$work/tmpfiles/conch-remove
 $d"
 ok "add-instance: when conchd will not stop, the undo deletes nothing more, names what is left and exits 5; remove-instance then clears it"
 
+# The same when stopping the backup timer fails, though conchd stops: a
+# failed stop blocks every delete too, exit 5; remove-instance then clears it.
+printf '14 A tau 203.0.113.7\n15 AAAA tau 2001:db8::7\n' >>"$work/dns-records"
+touch "$work/fail-start-conchd@tau" "$work/fail-stop-conch-backup@tau.timer"
+status=0
+onpty env CONCH_LOOPBACK_TIMEOUT=2 "$work/add-instance" tau example.test --temporary --port "$gport" --yes >"$work/undo-tau.out" 2>&1 || status=$?
+rm -f "$work/fail-stop-conch-backup@tau.timer"
+[ "$status" = 5 ] && grep -q 'ROLLBACK INCOMPLETE' "$work/undo-tau.out" && grep -q 'systemctl stop conch-backup@tau.timer failed' "$work/undo-tau.out" ||
+    fail "a backup timer that will not stop: exit $status, want 5: $(cat "$work/undo-tau.out")"
+[ -f "$etc/tau.env" ] && [ -d "$up_data/tau" ] && grep -q '^conch-tau:' "$work/passwd" ||
+    fail "the undo deleted tau's files though its backup timer would not stop"
+typed tau "$work/remove-instance" tau >"$work/rm-tau.out" 2>&1 || fail "removing what tau's incomplete undo left failed: $(cat "$work/rm-tau.out")"
+d=$(diff <(grep -vF -e "$work/upbackups/removed" -e "$work/tmpfiles/conch-removed.conf" "$work/t0") \
+    <(tree | grep -vF -e "$work/upbackups/removed" -e "$work/tmpfiles/conch-removed.conf") || true)
+[ -z "$d" ] || fail "remove-instance did not clear what tau's incomplete undo left:
+$d"
+ok "add-instance: when the backup timer will not stop, the undo deletes nothing more and exits 5; remove-instance then clears it"
+
 # Success: a temporary server with password-only operators.
 : >"$work/systemctl.calls"
 ONPTY_ERR=$work/add.err onpty "$work/add-instance" gamma example.test --temporary --operator-totp optional --operator "Nick O'Brien" \
@@ -1173,7 +1191,8 @@ ok "remove-instance: a normal server without --force-normal, a bad or shared nam
 # CONCHD_MODE=temporary. systemd also reads an indented line, blanks around
 # '=', export and quotes, so each of these is a normal server, refused
 # without --force-normal; so is a continued line that may swallow the
-# assignment, and a carriage return.
+# assignment, and a carriage return; and a quoted value running over
+# several lines, inside which CONCHD_MODE=temporary is no assignment at all.
 mode_cases=(
     $'CONCHD_MODE=temporary\n CONCHD_MODE=normal'
     $'CONCHD_MODE=temporary\n\tCONCHD_MODE=normal'
@@ -1183,6 +1202,8 @@ mode_cases=(
     $'CONCHD_LISTEN=127.0.0.1:1 \\\nCONCHD_MODE=temporary'
     $'CONCHD_MODE=temporary\r'
     $' # CONCHD_MODE=temporary'
+    $'OTHER=\'\nCONCHD_MODE=temporary\n\''
+    $'OTHER="\nCONCHD_MODE=temporary\n"'
 )
 for m in "${mode_cases[@]}"; do
     printf '%s\n' "$m" >"$etc/omicron.env"
@@ -1462,16 +1483,27 @@ grep -qF 'conch-upgrade.sh v0.0.9 alpha beta kappa' "$work/ssh.calls" || fail "c
 grep -q 'does not match checksums.txt' "$work/cs-up.out" && [ "$(version)" = v0.0.1 ] || fail "conch-server upgrade v0.0.9: $(cat "$work/cs-up.out")"
 ok "conch-server list shows every instance with its mode and health; upgrade names every instance"
 
+# With its output not on a terminal, new is refused before ssh or doctl run:
+# ssh -t would give the droplet a terminal anyway, and the setup link would
+# land in the file.
+ssh_before=$(wc -l <"$work/ssh.calls") doctl_before=$(wc -l <"$work/doctl.calls")
+status=0
+cs new nu --temporary --yes >"$work/cs-notty.out" 2>&1 || status=$?
+[ "$status" = 2 ] && grep -q 'printed to a terminal only' "$work/cs-notty.out" || fail "conch-server new to a file: exit $status: $(cat "$work/cs-notty.out")"
+[ "$(wc -l <"$work/ssh.calls")" = "$ssh_before" ] && [ "$(wc -l <"$work/doctl.calls")" = "$doctl_before" ] ||
+    fail "conch-server new to a file ran ssh or doctl"
+ok "conch-server new: with its output on a file, it refuses before ssh or doctl runs"
+
 # A name with a record pointing elsewhere is refused before anything is
 # made; an add-instance that refuses has its new records deleted again.
 printf '50 A lambda 198.51.100.9\n' >>"$work/dns-records"
 doctl_before=$(wc -l <"$work/doctl.calls")
-if cs new lambda --temporary --yes >"$work/cs-lambda.out" 2>&1; then fail "conch-server new lambda went ahead"; fi
+if onpty "$work/cs" new lambda --temporary --yes >"$work/cs-lambda.out" 2>&1; then fail "conch-server new lambda went ahead"; fi
 grep -q 'not this droplet' "$work/cs-lambda.out" || fail "conch-server new lambda: $(cat "$work/cs-lambda.out")"
 if tail -n +"$((doctl_before + 1))" "$work/doctl.calls" | grep -q create; then fail "conch-server new lambda created a record"; fi
 sed -i '/ lambda /d' "$work/dns-records"
 cp "$work/dns-records" "$work/dns-before-mu"
-if cs new mu --temporary --port 8081 --yes >"$work/cs-mu.out" 2>&1; then fail "conch-server new mu went ahead on a taken port"; fi
+if onpty "$work/cs" new mu --temporary --port 8081 --yes >"$work/cs-mu.out" 2>&1; then fail "conch-server new mu went ahead on a taken port"; fi
 grep -q 'port 8081 is taken' "$work/cs-mu.out" && grep -q 'deleted the record' "$work/cs-mu.out" || fail "conch-server new mu: $(cat "$work/cs-mu.out")"
 cmp -s "$work/dns-records" "$work/dns-before-mu" || fail "the records conch-server new mu made were not deleted"
 ok "conch-server new: a record pointing elsewhere is refused before any change; records made for a refused add are deleted"
