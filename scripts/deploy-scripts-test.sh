@@ -76,6 +76,8 @@ for tool in sqlite3 curl tar sha256sum script setsid; do
 done
 
 work=$(mktemp -d)
+# The sourcing canaries below name $work unquoted, so it must be a plain path.
+case "$work" in *[[:space:]*?[]*) fail "the test's work directory must be a plain path: $work" ;; esac
 pids=()
 cleanup() {
     local p
@@ -245,17 +247,24 @@ sleep 1 # the archive name carries the second
 grep -q 'no off-site copy was made' "$work/b2.out" || fail "--local-only did not say what it did"
 ok "--local-only exits 0"
 
-# Only an exact mode assignment enables temporary backups. Each row gets a
+# Only an exact mode assignment enables temporary backups, read by the same
+# conservative rule as remove-instance.sh (#885): a later or indented
+# CONCHD_MODE line, one with blanks around '=', export, a quoted value over
+# several lines, or a continued line all mean normal. Each row gets a
 # fresh archive directory, so an earlier backup cannot hide a missing one.
 # The secret canaries and shell expression must never be printed or sourced.
 for mode_line in 'CONCHD_MODE=temporary' missing unreadable \
     'CONCHD_MODE=normal' 'CONCHD_MODE=Temporary' 'CONCHD_MODE=temporary # comment' \
     'CONCHD_MODE="temporary"' 'CONCHD_MODE=temporary ' $'CONCHD_MODE=temporary\r' \
-    '# CONCHD_MODE=temporary' 'OTHER_CONCHD_MODE=temporary' 'CONCHD_OPERATOR_TOTP=optional'; do
+    '# CONCHD_MODE=temporary' 'OTHER_CONCHD_MODE=temporary' 'CONCHD_OPERATOR_TOTP=optional' \
+    $'CONCHD_MODE=temporary\nCONCHD_MODE=normal' $'CONCHD_MODE=temporary\n CONCHD_MODE=normal' \
+    $'CONCHD_MODE=temporary\n\tCONCHD_MODE=normal' $'CONCHD_MODE=temporary\nCONCHD_MODE = normal' \
+    $'CONCHD_MODE=temporary\nexport CONCHD_MODE=normal' $'OTHER=\'\nCONCHD_MODE=temporary\n\'' \
+    $'OTHER="\nCONCHD_MODE=temporary\n"' $'CONCHD_LISTEN=127.0.0.1:1 \\\nCONCHD_MODE=temporary'; do
     printf '%s\n' "$mode_line" \
         'CONCHD_LIVEKIT_API_SECRET=instance-env-secret-livekit' \
         'CONCHD_TOTP_KEY=instance-env-secret-totp' \
-        "UNUSED=\$(touch '$work/env-sourced')" >"$CONCH_ETC/alpha.env"
+        "UNUSED=\$(touch $work/env-sourced)" >"$CONCH_ETC/alpha.env"
     want=3
     case "$mode_line" in
         CONCHD_MODE=temporary) want=0 ;;
@@ -279,10 +288,20 @@ for mode_line in 'CONCHD_MODE=temporary' missing unreadable \
         case "$out" in *'NO OFF-SITE COPY WAS MADE'*) ;; *) fail "$mode_line backup lost the off-site warning: $out" ;; esac
         case "$out" in *'temporary instance:'*) fail "$mode_line was treated as temporary: $out" ;; esac
     fi
-    ok "$mode_line: archive and checksum written, exit $want, no env secrets printed or sourced"
+    ok "${mode_line//$'\n'/\\n}: archive and checksum written, exit $want, no env secrets printed or sourced"
     rm -rf "$work/mode-backups"
 done
 rm "$CONCH_ETC/alpha.env"
+
+# The three scripts that read the mode share one rule: their env_mode
+# functions are the same, comments aside, so they cannot drift apart.
+mode_reader() { sed -n '/^env_mode() {$/,/^}$/p' "$1" | grep -v '^[[:space:]]*#'; }
+mode_reader "$deploy/remove-instance.sh" >"$work/env_mode.remove"
+[ -s "$work/env_mode.remove" ] || fail "remove-instance.sh has no env_mode function"
+for f in conch-backup.sh list-instances.sh; do
+    mode_reader "$deploy/$f" | cmp -s - "$work/env_mode.remove" || fail "$f's env_mode differs from remove-instance.sh's"
+done
+ok "conch-backup.sh, list-instances.sh and remove-instance.sh read the mode by one rule"
 
 printf 'CONCH_BACKUP_KEEP_DAYS=14\n' >"$work/loose.env"
 chmod 0644 "$work/loose.env"
