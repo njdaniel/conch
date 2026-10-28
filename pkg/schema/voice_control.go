@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -1140,7 +1141,9 @@ type VoiceControlEvent struct {
 //
 //   - too_long: more than VoiceControlMaxLineBytes bytes;
 //   - malformed: not valid UTF-8, a line feed inside, not exactly one JSON
-//     object (white space around it is allowed), or a key given twice;
+//     object (white space around it is allowed), a key given twice, or a \u
+//     escape of a surrogate that is not half of a pair, wherever it is
+//     (hasLoneSurrogateEscape);
 //   - unknown_schema: schema missing, not a string, or not
 //     VoiceControlSchemaV1;
 //   - invalid with no ID: id missing or not an integer from 1 to
@@ -1288,12 +1291,12 @@ func ParseVoiceControlEvent(line []byte) (VoiceControlEvent, error) {
 		a := &VoiceControlAckV1{Schema: VoiceControlSchemaV1, Kind: kind, Seq: seq}
 		a.ID = r.int("id")
 		a.OK = r.bool("ok")
-		a.Error = VoiceControlErrorCode(r.optStr("error"))
+		a.Error = VoiceControlErrorCode(r.optWord("error"))
 		ev.Ack, msg = a, a
 	case VoiceControlEventState:
 		s := &VoiceControlStateV1{Schema: VoiceControlSchemaV1, Kind: kind, Seq: seq}
 		s.Phase = VoiceControlPhase(r.str("phase"))
-		s.Reason = VoiceControlReason(r.optStr("reason"))
+		s.Reason = VoiceControlReason(r.optWord("reason"))
 		s.RetryInMS = r.optInt("retry_in_ms")
 		s.Capture = VoiceControlCapture(r.str("capture"))
 		s.Transmitting = r.bool("transmitting")
@@ -1306,7 +1309,7 @@ func ParseVoiceControlEvent(line []byte) (VoiceControlEvent, error) {
 			s.Blocked = []VoiceControlBlock{}
 		}
 		s.PTT = VoiceControlPTT(r.str("ptt"))
-		s.PTTProblem = VoiceControlPTTProblem(r.optStr("ptt_problem"))
+		s.PTTProblem = VoiceControlPTTProblem(r.optWord("ptt_problem"))
 		ev.State, msg = s, s
 	case VoiceControlEventProtocolError:
 		e := &VoiceControlProtocolErrorV1{Schema: VoiceControlSchemaV1, Kind: kind, Seq: seq}
@@ -1387,7 +1390,80 @@ func decodeVoiceControlObject(line []byte) (map[string]json.RawMessage, error) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, voiceControlErr(VoiceControlErrorMalformed, 0, "more than one JSON value")
 	}
+	if hasLoneSurrogateEscape(line) {
+		return nil, voiceControlErr(VoiceControlErrorMalformed, 0, "a lone surrogate escape")
+	}
 	return fields, nil
+}
+
+// hasLoneSurrogateEscape reports whether a JSON text holds, in one of its
+// strings, a \u escape of a surrogate that is not half of a pair: a high
+// surrogate (\uD800 to \uDBFF) not followed at once by a low one (\uDC00 to
+// \uDFFF), or a low one on its own. Such an escape names no character:
+// encoding/json reads it as U+FFFD and serde_json refuses it, so the two
+// readers would disagree on the line (#690). Both refuse it as malformed, as
+// they do bytes that are not UTF-8, wherever it is: a key, a field the kind
+// declares, or one it ignores. A surrogate pair, and the character U+FFFD
+// itself, are left alone.
+//
+// The text has been read as one JSON object already, so every backslash in a
+// string starts a whole escape; a text that is not JSON is the decoder's to
+// refuse, and comes back false here.
+func hasLoneSurrogateEscape(text []byte) bool {
+	const (
+		highSurrogateMin = 0xD800
+		lowSurrogateMin  = 0xDC00
+		surrogateMax     = 0xDFFF
+	)
+	inString := false
+	for i := 0; i < len(text); {
+		c := text[i]
+		switch {
+		case !inString:
+			inString = c == '"'
+			i++
+		case c == '"':
+			inString = false
+			i++
+		case c != '\\':
+			i++
+		case i+1 < len(text) && text[i+1] != 'u':
+			// An escape of one character: \" \\ \/ \b \f \n \r \t.
+			i += 2
+		default:
+			r, ok := hex4(text[i+2:])
+			if !ok {
+				return false
+			}
+			i += 6
+			switch {
+			case r >= lowSurrogateMin && r <= surrogateMax:
+				return true
+			case r >= highSurrogateMin && r < lowSurrogateMin:
+				if i+1 >= len(text) || text[i] != '\\' || text[i+1] != 'u' {
+					return true
+				}
+				low, ok := hex4(text[i+2:])
+				if !ok || low < lowSurrogateMin || low > surrogateMax {
+					return true
+				}
+				i += 6
+			}
+		}
+	}
+	return false
+}
+
+// hex4 reads the four hexadecimal digits of a \u escape.
+func hex4(b []byte) (rune, bool) {
+	if len(b) < 4 {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(string(b[:4]), 16, 16)
+	if err != nil {
+		return 0, false
+	}
+	return rune(n), true
 }
 
 func checkVoiceControlSchema(fields map[string]json.RawMessage) error {
@@ -1470,6 +1546,20 @@ func (r *fieldReader) str(key string) string {
 func (r *fieldReader) optStr(key string) string {
 	var s string
 	r.take(key, &s, false)
+	return s
+}
+
+// optWord reads an optional string that, when present, must not be empty: a
+// word of a vocabulary (an ack's error, a state's reason or ptt_problem) or a
+// device name, whose absence means none, where an empty string could be
+// mistaken for the same. A writer says none by leaving the field out; an
+// empty word is a broken writer, and the Rust reader refuses it, so this one
+// does too (#690).
+func (r *fieldReader) optWord(key string) string {
+	s := r.optStr(key)
+	if _, present := r.fields[key]; present && s == "" && r.missing == "" {
+		r.missing = key
+	}
 	return s
 }
 

@@ -166,12 +166,28 @@ type voiceControlCase struct {
 	} `json:"want"`
 }
 
+// voiceControlCaseFiles are the conformance documents of the v1 readers, read
+// as one: cases.json is published and does not change
+// (scripts/schema-compat.sh), so the cases pinned after it are in the files
+// beside it.
+var voiceControlCaseFiles = []string{"cases.json", "cases-strings.json"}
+
 func loadVoiceControlCases(t *testing.T) []voiceControlCase {
+	t.Helper()
+	var cases []voiceControlCase
+	for _, file := range voiceControlCaseFiles {
+		cases = append(cases, loadVoiceControlCasesFrom(t, file)...)
+	}
+	return cases
+}
+
+// loadVoiceControlCasesFrom reads the cases of one document.
+func loadVoiceControlCasesFrom(t *testing.T, file string) []voiceControlCase {
 	t.Helper()
 	var doc struct {
 		Cases []voiceControlCase `json:"cases"`
 	}
-	dec := json.NewDecoder(bytes.NewReader(readVoiceControlFixture(t, "cases.json")))
+	dec := json.NewDecoder(bytes.NewReader(readVoiceControlFixture(t, file)))
 	if err := dec.Decode(&doc); err != nil {
 		t.Fatal(err)
 	}
@@ -531,10 +547,45 @@ func checkVoiceControlEffect(t *testing.T, step int, cmd VoiceControlCommand, st
 	}
 }
 
+// TestVoiceControlLoneSurrogateEscape pins the scan both readers apply to a
+// line's strings (#690): the same table as the Rust side's
+// a_lone_surrogate_escape_is_found_wherever_it_is_and_a_pair_is_not.
+func TestVoiceControlLoneSurrogateEscape(t *testing.T) {
+	tests := []struct {
+		text string
+		want bool
+	}{
+		{`{"a":"plain"}`, false},
+		{`{"a":"\ud800"}`, true},
+		{`{"a":"\uD800"}`, true},
+		{`{"a":"\udc00"}`, true},
+		{`{"a":"\udfff"}`, true},
+		{`{"a":"x\ud800"}`, true},
+		{`{"a":"\ud800A"}`, true},
+		{`{"a":"\ud800\\"}`, true},
+		{`{"a":"😀"}`, false},
+		{`{"a":"😀A"}`, false},
+		{`{"a":"\\ud800"}`, false},
+		{`{"a":"\"\ud800"}`, true},
+		{`{"\ud800":1}`, true},
+		{`{"a":"� é \u001b"}`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.text, func(t *testing.T) {
+			if got := hasLoneSurrogateEscape([]byte(tt.text)); got != tt.want {
+				t.Errorf("hasLoneSurrogateEscape(%s) = %v, want %v", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestVoiceControlFixturesAreAllClaimed fails on a file in the fixture
 // directory that no test reads, so nothing there goes unchecked.
 func TestVoiceControlFixturesAreAllClaimed(t *testing.T) {
-	claimed := map[string]bool{"cases.json": true, "sensitive.json": true}
+	claimed := map[string]bool{"sensitive.json": true}
+	for _, file := range voiceControlCaseFiles {
+		claimed[file] = true
+	}
 	for _, g := range voiceControlGolden {
 		claimed[g.file] = true
 	}
@@ -635,8 +686,8 @@ func TestVoiceControlCarriesNoSecrets(t *testing.T) {
 			continue
 		}
 		data := readVoiceControlFixture(t, name)
-		if name == "cases.json" {
-			for _, c := range loadVoiceControlCases(t) {
+		if slices.Contains(voiceControlCaseFiles, name) {
+			for _, c := range loadVoiceControlCasesFrom(t, name) {
 				if c.Name == exempt {
 					continue
 				}

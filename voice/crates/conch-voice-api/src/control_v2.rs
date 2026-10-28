@@ -992,9 +992,9 @@ mod tests {
             .map(|name| (*name).to_owned())
             .collect();
         claimed.insert(HELLO.into());
-        // cases.json and lines/ below; sensitive.json and the transcripts by the
+        // The case files and lines/ below; sensitive.json and the transcripts by the
         // helper's own tests (conch-voice's tests/managed.rs).
-        claimed.insert("cases.json".into());
+        claimed.extend(CASE_FILES.iter().map(|name| (*name).to_owned()));
         claimed.insert("lines".into());
         let mut unclaimed = Vec::new();
         for entry in std::fs::read_dir(fixtures()).unwrap() {
@@ -1006,6 +1006,10 @@ mod tests {
         }
         assert!(unclaimed.is_empty(), "no test reads {unclaimed:?}");
     }
+
+    /// The conformance documents of the v2 readers, read as one, for the reason
+    /// `control.rs` gives for v1's.
+    const CASE_FILES: [&str; 2] = ["cases.json", "cases-strings.json"];
 
     #[derive(Deserialize)]
     struct Cases {
@@ -1048,9 +1052,16 @@ mod tests {
     /// the commands by the helper's v2 reader, the events by the owner's.
     #[test]
     fn every_conformance_case_is_read_as_go_reads_it() {
-        let cases: Cases = serde_json::from_str(&fixture_text("cases.json")).unwrap();
+        let cases: Vec<Case> = CASE_FILES
+            .iter()
+            .flat_map(|file| {
+                serde_json::from_str::<Cases>(&fixture_text(file))
+                    .unwrap()
+                    .cases
+            })
+            .collect();
         let (mut commands, mut events) = (0, 0);
-        for case in &cases.cases {
+        for case in &cases {
             let line = case.line();
             let name = format!("{}: {}", case.direction, case.name);
             let (kind, refusal) = match case.direction.as_str() {

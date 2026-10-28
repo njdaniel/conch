@@ -21,7 +21,8 @@
 //!
 //! - **too_long**: more than [`VOICE_CONTROL_MAX_LINE_BYTES`] bytes.
 //! - **malformed**: not UTF-8, a line feed inside, not exactly one JSON object (white space
-//!   around it is allowed), or a key given twice.
+//!   around it is allowed), a key given twice, or a `\u` escape of a surrogate that is not
+//!   half of a pair, wherever it is ([`has_lone_surrogate_escape`]).
 //! - **unknown_schema**: `schema` missing, not a string, or not this version.
 //! - **invalid** without an id: `id` (for an event, `seq`) missing or not a whole number
 //!   from 1 to [`VOICE_CONTROL_MAX_ID`]; for an event also `kind` missing or empty.
@@ -34,10 +35,14 @@
 //! is ignored. The typed decoding is `wire_object!`'s, as for the REST types.
 //!
 //! Where serde's JSON reader is stricter than Go's, a line Go would accept is refused here
-//! as malformed or invalid; no line Go refuses is accepted. Two such corners are known, and
-//! no owner writes either: a number too large for a float (`1e400`) in `schema`, `kind`,
-//! `id` or `seq`, and a string holding half of a surrogate pair (`"\ud800"`), which Go reads
-//! as U+FFFD.
+//! as malformed or invalid; no line Go refuses is accepted. One such corner is known, and
+//! no owner writes it: a number too large for a float (`1e400`) in `schema`, `kind`, `id`
+//! or `seq`. The other one there was, a string holding half of a surrogate pair
+//! (`"\ud800"`), which Go read as U+FFFD and serde refused or skipped by where it stood, is
+//! now a rule of both readers: malformed, wherever it is (#690). An optional word that is
+//! present and empty (`"error":""`, `"reason":""`, `"ptt_problem":""`) is invalid in both
+//! readers too, as an empty device name is in v2: absence is written by leaving the field
+//! out.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -1031,7 +1036,73 @@ pub(crate) fn frame(line: &[u8]) -> Result<(&str, Head), VoiceControlRefusal> {
         return Err(malformed);
     }
     let head: Head = serde_json::from_str(text).map_err(|_| malformed)?;
+    if has_lone_surrogate_escape(text) {
+        return Err(malformed);
+    }
     Ok((text, head))
+}
+
+/// Whether a JSON text holds, in one of its strings, a `\u` escape of a surrogate that is
+/// not half of a pair: a high surrogate (`\uD800` to `\uDBFF`) not followed at once by a
+/// low one (`\uDC00` to `\uDFFF`), or a low one on its own. Such an escape names no
+/// character: Go's `encoding/json` reads it as U+FFFD and serde_json refuses it where it
+/// decodes a `String` and skips it where it ignores a value, so the two readers would
+/// disagree on the line (#690). Both refuse it as malformed, as they do bytes that are not
+/// UTF-8, wherever it is: a key, a field the kind declares, or one it ignores. A surrogate
+/// pair, and the character U+FFFD itself, are left alone.
+///
+/// The text has been read as one JSON object already, so every backslash in a string
+/// starts a whole escape; a text that is not JSON is serde's to refuse, and comes back
+/// `false` here.
+pub(crate) fn has_lone_surrogate_escape(text: &str) -> bool {
+    const HIGH_SURROGATE_MIN: u32 = 0xD800;
+    const LOW_SURROGATE_MIN: u32 = 0xDC00;
+    const SURROGATE_MAX: u32 = 0xDFFF;
+    let bytes = text.as_bytes();
+    // The four hexadecimal digits of a `\u` escape beginning at `at`.
+    let hex4 = |at: usize| -> Option<u32> {
+        let digits = bytes.get(at..at + 4)?;
+        if !digits.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        u32::from_str_radix(std::str::from_utf8(digits).ok()?, 16).ok()
+    };
+    let is_low = |n: u32| (LOW_SURROGATE_MIN..=SURROGATE_MAX).contains(&n);
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if !in_string {
+            in_string = c == b'"';
+            i += 1;
+        } else if c == b'"' {
+            in_string = false;
+            i += 1;
+        } else if c != b'\\' {
+            i += 1;
+        } else if bytes.get(i + 1) != Some(&b'u') {
+            // An escape of one character: \" \\ \/ \b \f \n \r \t.
+            i += 2;
+        } else {
+            let Some(n) = hex4(i + 2) else {
+                return false;
+            };
+            i += 6;
+            if is_low(n) {
+                return true;
+            }
+            if (HIGH_SURROGATE_MIN..LOW_SURROGATE_MIN).contains(&n) {
+                if bytes.get(i..i + 2) != Some(b"\\u".as_slice()) {
+                    return true;
+                }
+                match hex4(i + 2) {
+                    Some(low) if is_low(low) => i += 6,
+                    _ => return true,
+                }
+            }
+        }
+    }
+    false
 }
 
 /// The second, typed reading of a line whose framing and head were accepted: every field
@@ -1982,9 +2053,9 @@ mod tests {
             .chain(EVENTS.iter())
             .map(|name| (*name).to_owned())
             .collect();
-        // cases.json and lines/ below; sensitive.json and the transcripts by the
+        // The case files and lines/ below; sensitive.json and the transcripts by the
         // helper's own tests (conch-voice's tests/managed.rs).
-        claimed.insert("cases.json".into());
+        claimed.extend(CASE_FILES.iter().map(|name| (*name).to_owned()));
         claimed.insert("lines".into());
         let mut unclaimed = Vec::new();
         for entry in std::fs::read_dir(fixtures()).unwrap() {
@@ -1996,6 +2067,11 @@ mod tests {
         }
         assert!(unclaimed.is_empty(), "no test reads {unclaimed:?}");
     }
+
+    /// The conformance documents of the v1 readers, read as one: `cases.json` is
+    /// published and does not change (`scripts/schema-compat.sh`), so the cases pinned
+    /// after it are in the files beside it.
+    const CASE_FILES: [&str; 2] = ["cases.json", "cases-strings.json"];
 
     #[derive(Deserialize)]
     struct Cases {
@@ -2040,9 +2116,16 @@ mod tests {
     /// the commands by the helper's reader, the events by the owner's.
     #[test]
     fn every_conformance_case_is_read_as_go_reads_it() {
-        let cases: Cases = serde_json::from_str(&fixture_text("cases.json")).unwrap();
+        let cases: Vec<Case> = CASE_FILES
+            .iter()
+            .flat_map(|file| {
+                serde_json::from_str::<Cases>(&fixture_text(file))
+                    .unwrap()
+                    .cases
+            })
+            .collect();
         let mut commands = 0;
-        for case in &cases.cases {
+        for case in &cases {
             let line = case.line();
             let name = format!("{}: {}", case.direction, case.name);
             let (kind, refusal, offers_v1) = match case.direction.as_str() {
@@ -2092,6 +2175,31 @@ mod tests {
             }
         }
         assert!(commands >= 40, "only {commands} command cases");
+    }
+
+    /// The scan for a lone surrogate escape, on the strings of a JSON text: the same table
+    /// as Go's `TestVoiceControlLoneSurrogateEscape`.
+    #[test]
+    fn a_lone_surrogate_escape_is_found_wherever_it_is_and_a_pair_is_not() {
+        let cases: [(&str, bool); 14] = [
+            (r#"{"a":"plain"}"#, false),
+            (r#"{"a":"\ud800"}"#, true),
+            (r#"{"a":"\uD800"}"#, true),
+            (r#"{"a":"\udc00"}"#, true),
+            (r#"{"a":"\udfff"}"#, true),
+            (r#"{"a":"x\ud800"}"#, true),
+            (r#"{"a":"\ud800A"}"#, true),
+            (r#"{"a":"\ud800\\"}"#, true),
+            (r#"{"a":"😀"}"#, false),
+            (r#"{"a":"😀A"}"#, false),
+            (r#"{"a":"\\ud800"}"#, false),
+            (r#"{"a":"\"\ud800"}"#, true),
+            (r#"{"\ud800":1}"#, true),
+            (r#"{"a":"� é \u001b"}"#, false),
+        ];
+        for (text, want) in cases {
+            assert_eq!(has_lone_surrogate_escape(text), want, "{text}");
+        }
     }
 
     /// The numbers both sides are held to are the Go constants' values.
