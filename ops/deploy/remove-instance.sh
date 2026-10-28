@@ -10,10 +10,14 @@
 #     touched;
 #   - a data directory, env file, backup directory or rollback record that is
 #     a symlink is refused;
-#   - the mode is read from the env file only, the last CONCHD_MODE line, as
-#     systemd reads it. Only exactly "temporary" is a temporary server; a
-#     missing or unreadable file, or any other value, is a normal one, and a
-#     normal server is refused without --force-normal;
+#   - a name of which nothing is on this droplet (no env file, data, user,
+#     LiveKit key, Caddy block, backups or rollback record) is refused, exit 2;
+#   - the mode is read from the env file only, conservatively: it is a
+#     temporary server only if every line that names CONCHD_MODE is exactly
+#     CONCHD_MODE=temporary (and one does). Any other form systemd might read
+#     (leading blanks, blanks around '=', quotes, a continued line), and a
+#     missing or unreadable file, is a normal one, and a normal server is
+#     refused without --force-normal;
 #   - the Caddyfile without the instance's block is worked out and checked
 #     with `caddy validate`. Only a block between "# conch-instance <name>
 #     begin" and "# conch-instance <name> end" lines (which add-instance.sh
@@ -126,14 +130,29 @@ sysctl() { "$systemctl" "$@" 9<&-; }
 
 env_value() { sed -n "s/^$2=//p" "$1" | tail -n 1; }
 
-# The mode, from the env file only. Missing or unreadable is normal.
-mode=normal
-if [ -f "$env_file" ] && [ -r "$env_file" ] && [ "$(env_value "$env_file" CONCHD_MODE 2>/dev/null || true)" = temporary ]; then
-    mode=temporary
-fi
-if [ "$mode" = normal ] && [ "$force_normal" = 0 ]; then
-    die "$name is a normal server (its env file does not say CONCHD_MODE=temporary, or is missing or unreadable). Removing it deletes what its people keep there; if you mean it, give --force-normal. Nothing was changed."
-fi
+# env_mode <file>: "temporary" only when the file can be read, no line is
+# continued with a trailing backslash (which could make one line part of
+# another's value), at least one line names CONCHD_MODE, and every line that
+# names it (other than a comment starting in the first column) is exactly
+# CONCHD_MODE=temporary. Anything else is "normal", the side that asks for
+# more: systemd also reads " CONCHD_MODE=normal", "CONCHD_MODE = normal" and
+# quoted values, so no other form is trusted to mean temporary.
+env_mode() {
+    local line n=0
+    if [ ! -f "$1" ] || [ ! -r "$1" ]; then echo normal; return; fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in *\\) echo normal; return ;; esac
+        case "$line" in '#'* | ';'*) continue ;; esac
+        case "$line" in *CONCHD_MODE*) ;; *) continue ;; esac
+        if [ "$line" != CONCHD_MODE=temporary ]; then echo normal; return; fi
+        n=$((n + 1))
+    done <"$1"
+    if [ "$n" -gt 0 ]; then echo temporary; else echo normal; fi
+}
+
+# The mode, from the env file only. Missing or unreadable is normal. A normal
+# server is refused below, once it is known that the name is on this droplet.
+mode=$(env_mode "$env_file")
 
 # The domain, for the DNS records to delete: from the env file's LiveKit
 # address, which add-instance.sh writes as wss://livekit.<domain>.
@@ -235,6 +254,17 @@ if [ -f "$env_file" ] && [ -r "$env_file" ]; then env_key=$(env_value "$env_file
 
 user_exists=0
 if "$getent" passwd "$user" >/dev/null 2>&1; then user_exists=1; fi
+
+# A name with nothing on this droplet is a typo (or "ssh"), not a server to
+# remove: saying it was removed would let conch-server rm delete the DNS
+# records of that name.
+if [ ! -e "$env_file" ] && [ ! -e "$data" ] && [ "$user_exists" = 0 ] && [ "$key_change" = 0 ] &&
+    [ "$caddy_change" = 0 ] && [ ! -e "$backups" ] && [ ! -e "$state_file" ] && [ "${#rolled[@]}" -eq 0 ]; then
+    die "nothing of $name is on this droplet: no env file, data, user, LiveKit key, Caddy block, backups or rollback record. Check the name (list-instances.sh). Nothing was changed." 2
+fi
+if [ "$mode" = normal ] && [ "$force_normal" = 0 ]; then
+    die "$name is a normal server (its env file does not say exactly CONCHD_MODE=temporary, or is missing or unreadable). Removing it deletes what its people keep there; if you mean it, give --force-normal. Nothing was changed."
+fi
 
 # The other instances, whose voice calls drop when LiveKit restarts.
 others=()

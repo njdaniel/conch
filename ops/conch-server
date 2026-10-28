@@ -16,11 +16,15 @@
 # that already points at the droplet, and refuses one that points elsewhere;
 # waits until two public resolvers (Cloudflare's and Google's, over HTTPS)
 # return them; then runs add-instance.sh over `ssh -t`, so its question and
-# the setup link reach this terminal only. If add-instance.sh fails and
-# undoes its work, the records this run created are deleted again.
-# rm: remove-instance.sh over `ssh -t` (the name is typed back there; there
-# is no --yes), then deletes the A and AAAA records of <name> that point at
-# the droplet. list: list-instances.sh. upgrade: conch-upgrade.sh <tag> with
+# the setup link reach this terminal only. The records this run created are
+# deleted again only when add-instance.sh says nothing of the server is left
+# (it refused, exit 1 or 2, or failed and undid everything, exit 1); on any
+# other status (4 kept, 5 undo incomplete, 130 interrupted, 255 connection)
+# they are kept.
+# rm: refuses a name the droplet does not list, unless --force-normal (a
+# half-removed server may have lost its env file); then remove-instance.sh
+# over `ssh -t` (the name is typed back there; there is no --yes), then
+# deletes the A and AAAA records of <name> that point at the droplet. list: list-instances.sh. upgrade: conch-upgrade.sh <tag> with
 # every instance the droplet has, since they share one binary.
 # sync: the droplet's scripts in /opt/conch/bin are made those of the tag the
 # droplet runs (where /opt/conch/current points), from this checkout with
@@ -405,13 +409,9 @@ cmd_new() {
         0)
             say "$name is at https://$fqdn/app/. Next: open the setup link above (once, within ten minutes) in a browser and finish the operator's setup."
             say "See it with conch-server list; remove it with conch-server rm $name." ;;
-        4)
-            warn "$name runs, but its HTTPS check did not pass yet (see above). The DNS records are kept."
-            exit 4 ;;
-        255)
-            warn "the connection to the droplet failed while adding $name, so what it did is not known. The DNS records are kept; look with conch-server list."
-            exit 255 ;;
-        *)
+        1 | 2)
+            # Refused before any change, or failed and undone completely:
+            # nothing of the server is on the droplet, so the records go too.
             for id in "${created[@]}"; do
                 if doctl_records delete "$domain" "$id" --force; then
                     warn "deleted the record $id this run made"
@@ -420,6 +420,17 @@ cmd_new() {
                 fi
             done
             die "add-instance.sh on the droplet exited $status (see above)" "$status" ;;
+        4)
+            warn "$name runs and is kept, but it did not pass its check through Caddy, or was interrupted after it started (see above). The DNS records are kept."
+            exit 4 ;;
+        5)
+            warn "add-instance.sh failed and could not undo all it made (see above). The DNS records are kept; remove what is left with conch-server rm $name --force-normal."
+            exit 5 ;;
+        *)
+            # 130 (interrupted), 255 (the connection) or anything else: what
+            # is on the droplet is not known, so nothing here is deleted.
+            warn "add-instance.sh on the droplet exited $status, so what it left there is not known. The DNS records are kept; look with conch-server list."
+            exit "$status" ;;
     esac
 }
 
@@ -443,6 +454,12 @@ cmd_rm() {
     fqdn=$name.$domain
     sync_scripts
     droplet_addresses
+    # A name the droplet does not list is a typo unless it is a half-removed
+    # server whose env file is gone; only --force-normal goes on then.
+    droplet_names
+    if ! in_list "$name" "${names[@]}" && ! in_list --force-normal "${args[@]}"; then
+        die "the droplet lists no server named $name (conch-server list). If it is a half-removed one whose env file is gone, give --force-normal. Nothing was changed."
+    fi
 
     status=0
     remote -t "$remote_bin/remove-instance.sh" "$name" "${args[@]}" || status=$?

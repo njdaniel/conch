@@ -498,12 +498,16 @@ ops/conch-server new demo --temporary     # a short-lived one (Temporary servers
 On the workstation it needs `ssh` with the droplet's root key, `doctl` signed in to the account that holds the domain (`doctl auth init --context conch`), `curl`, and this repository's tags (`git fetch --tags`). Its settings are in `~/.config/conch/server.env`, which holds no secret. Make it mode 0600: `conch-server` refuses a file anyone else can write. It is read line by line, never sourced, and each value is checked:
 
 ```sh
-CONCH_SERVER_HOST=root@<droplet IPv4>
+# root@ and the droplet's IPv4 (203.0.113.7 stands for it here)
+CONCH_SERVER_HOST=root@203.0.113.7
 CONCH_SERVER_DOMAIN=your.domain
 CONCH_SERVER_SSH_KEY=~/.ssh/conch-alpha
 CONCH_SERVER_DOCTL_CONTEXT=conch
-CONCH_SERVER_OPERATOR=your-name           # optional: the first operator's name
+# Optional: the first operator's name
+CONCH_SERVER_OPERATOR=your-name
 ```
+
+Comments go on lines of their own: a value runs to the end of its line, so anything after it would be part of it.
 
 `conch-server new <name>` does this, in order:
 
@@ -515,7 +519,7 @@ CONCH_SERVER_OPERATOR=your-name           # optional: the first operator's name
    - a free port: the first from 8081 that no env file names and nothing listens on (`--port` chooses one);
    - that the name resolves to the droplet's addresses, and only to them. If not, it prints the records to create.
 
-   Then it makes, each step undone if a later one fails: the `conch-<name>` user and `/var/lib/conch/<name>` (0700); a new LiveKit key pair (`<name>-<8 hex>: <secret>`, as in step 4), appended to `/etc/conch/livekit-keys`; `/etc/conch/<name>.env` (0600, root), with every setting of step 5, `CONCHD_TRUSTED_PROXIES` and a fresh `CONCHD_TOTP_KEY` included; the systemd-tmpfiles rule for [removed servers](#removing-a-server); and a Caddy block for `beta.your.domain` between `# conch-instance beta begin` and `# conch-instance beta end` lines, checked with `caddy validate` before it replaces the Caddyfile, then `systemctl reload caddy`. Then it restarts LiveKit, makes the first operator, starts `conchd@beta` and `conch-backup@beta.timer`, and waits for `/healthz` to answer `ok` on loopback and then through Caddy. If a step fails, it undoes what this run made, newest first, and says what it undid, and `conch-server` deletes the DNS records it made. If only the check through Caddy fails (a certificate not issued yet, say), the server is left running, nothing is undone, and both commands exit 4.
+   Then it makes, each step undone if a later one fails: the `conch-<name>` user and `/var/lib/conch/<name>` (0700); a new LiveKit key pair (`<name>-<8 hex>: <secret>`, as in step 4), appended to `/etc/conch/livekit-keys`; `/etc/conch/<name>.env` (0600, root), with every setting of step 5, `CONCHD_TRUSTED_PROXIES` and a fresh `CONCHD_TOTP_KEY` included; the systemd-tmpfiles rule for [removed servers](#removing-a-server); and a Caddy block for `beta.your.domain` between `# conch-instance beta begin` and `# conch-instance beta end` lines, checked with `caddy validate` before it replaces the Caddyfile, then `systemctl reload caddy`. Then it restarts LiveKit, makes the first operator, starts `conchd@beta` and `conch-backup@beta.timer`, and waits for `/healthz` to answer `ok` on loopback and then through Caddy. If a step fails, it undoes what this run made, newest first, and says what it undid, and `conch-server` deletes the DNS records it made. The undo first stops `conchd@beta` and its backup timer and unit, and deletes nothing while anything of `conch-beta` may still run: if that cannot be shown, it names what is left and exits 5, and the records are kept. Once `conchd` answers on loopback the server is kept: if only the check through Caddy fails (a certificate not issued yet, say), or the run is interrupted then, the server is left running, nothing is undone, the records are kept, and both commands exit 4. An interrupted run, or a lost connection, also keeps the records, since what the droplet holds is then not known. `add-instance.sh` needs a terminal for its output, since the setup link is printed there (`ssh -t` gives it one).
 4. It prints the server's address.
 
 **No secret leaves the droplet.** The LiveKit secret and the TOTP key are made on the droplet from `/dev/urandom` and written into the env file (and the secret into LiveKit's key file) only: never printed, logged or put on a command line. Keep a copy of `CONCHD_TOTP_KEY` as step 5 says, if the server is one you will keep.
@@ -552,7 +556,8 @@ ops/conch-server rm beta --force-normal     # a normal one, and everything its p
 
 It runs `remove-instance.sh` on the droplet over `ssh -t`, then deletes the server's `A` and `AAAA` records that point at the droplet (one that points elsewhere is left, and named). `remove-instance.sh <name> [--force-normal] [--no-backup] [--purge-backups]` follows [ADR-011](adr/ADR-011-temporary-servers.md) item 2.4:
 
-- Before anything changes, it checks the name against the rule above and refuses a data directory, env file, backup directory or rollback record that is a symlink. It reads the mode from the env file only (the last `CONCHD_MODE` line). Only exactly `temporary` is a temporary server, and a missing or unreadable file is a normal one. A normal server is refused without `--force-normal`. It works out the Caddyfile and LiveKit's key file without the server and checks the Caddyfile with `caddy validate`.
+- `conch-server rm` refuses a name the droplet does not list, unless `--force-normal` is given (a half-removed server may have lost its env file), and `remove-instance.sh` refuses a name of which nothing is on the droplet, with exit 2, so a typo never deletes the DNS records of that name.
+- Before anything changes, it checks the name against the rule above and refuses a data directory, env file, backup directory or rollback record that is a symlink. It reads the mode from the env file only: it is a temporary server only if every line that names `CONCHD_MODE` is exactly `CONCHD_MODE=temporary`. Any other form systemd might read, such as an indented line, spaces around `=` or quotes, and a missing or unreadable file, make it a normal one. A normal server is refused without `--force-normal`. It works out the Caddyfile and LiveKit's key file without the server and checks the Caddyfile with `caddy validate`.
 - It lists what it will delete and asks you to **type the name** back, every time. There is no `--yes`, and with no terminal it refuses.
 - It stops and disables `conchd@<name>` and its backup timer, and checks that nothing of that server still runs, before it deletes anything.
 - It takes a final local archive (`conch-backup.sh <name> --local-only`) unless `--no-backup`. If that fails, it stops there, with the server stopped and nothing deleted.

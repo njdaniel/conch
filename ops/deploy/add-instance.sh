@@ -34,9 +34,14 @@
 # bootstrap --link` as conch-<name>, starts conchd@<name> (and
 # conch-backup@<name>.timer, unless --temporary), and waits for /healthz on
 # loopback and then through Caddy. If any step fails, it undoes what this run
-# made, newest first, and says what it undid. If only the check through Caddy
-# fails (a certificate not issued yet, say), the server is left running and
-# it exits 4.
+# made, newest first, and says what it undid, after stopping the instance's
+# units and making sure nothing of conch-<name> still runs; if that cannot be
+# shown, it deletes nothing more, names what is left, and exits 5. A backup
+# directory a backup made during the run is removed too, as conch-backup. Once
+# conchd answers on loopback the server is kept: if only the check through
+# Caddy fails (a certificate not issued yet, say), or the run is interrupted
+# then, it is left running and it exits 4. Standard output must be a
+# terminal (ssh -t), since the setup link is printed there.
 #
 # Secrets. The LiveKit secret and the TOTP key are read from /dev/urandom
 # through pipes and written by bash's printf into the env file and the key
@@ -58,6 +63,7 @@
 #   SYSTEMCTL (systemctl)  CADDY (caddy)  USERADD (useradd)  USERDEL (userdel)
 #   GETENT (getent)  SS (ss)  CONCH_PUBLIC_CURL (curl, for the check through Caddy)
 #   CONCH_HEALTH_TIMEOUT (120 seconds for the check through Caddy)
+#   CONCH_LOOPBACK_TIMEOUT (30 seconds for conchd's own /healthz)
 set -euo pipefail
 # Character classes such as [0-9] mean ASCII only in the C locale.
 export LC_ALL=C
@@ -77,6 +83,7 @@ getent=${GETENT:-getent}
 ss=${SS:-ss}
 public_curl=${CONCH_PUBLIC_CURL:-curl}
 health_timeout=${CONCH_HEALTH_TIMEOUT:-120}
+loopback_timeout=${CONCH_LOOPBACK_TIMEOUT:-30}
 safe_path=/usr/sbin:/usr/bin:/sbin:/bin
 # The users below may not be able to enter the directory this was started in.
 cd /
@@ -214,6 +221,10 @@ if [ -n "$port" ]; then
     fi
     port=$((10#$port))
 fi
+
+for t in "$health_timeout" "$loopback_timeout"; do
+    [[ $t =~ ^[0-9]{1,5}$ ]] || die "CONCH_HEALTH_TIMEOUT and CONCH_LOOPBACK_TIMEOUT are whole seconds" 2
+done
 
 host=$name.$domain
 env_file=$etc/$name.env
@@ -397,6 +408,12 @@ if [ "$dry_run" = 1 ]; then
     exit 0
 fi
 
+# The setup link is printed to standard output, once: it must reach a person,
+# not a file or a pipe.
+if [ ! -t 1 ]; then
+    die "standard output is not a terminal, and the first operator's setup link would be printed to it. Run this on a terminal (conch-server uses ssh -t). Nothing was changed."
+fi
+
 if [ "${#others[@]}" -gt 0 ] && [ "$yes" = 0 ]; then
     if ! { exec 8<>/dev/tty; } 2>/dev/null; then
         die "restarting LiveKit drops voice calls on $drop_list; there is no terminal to ask on, so give --yes to go ahead. Nothing was changed."
@@ -409,6 +426,13 @@ if [ "${#others[@]}" -gt 0 ] && [ "$yes" = 0 ]; then
 fi
 
 # --- the changes, each one undone if a later one fails -----------------------
+#
+# Exit status: 0 done; 1 refused before any change, or failed and undone
+# completely (nothing of <name> is left); 2 a bad argument; 4 the server was
+# made and runs, and is kept (the check through Caddy did not pass in time, or
+# this was interrupted after conchd answered); 5 failed, and the undo stopped
+# short because conch-<name> could not be shown to be stopped: what is left
+# is named; 130 interrupted before that, and undone.
 
 umask 077
 undo=()
@@ -416,42 +440,6 @@ tmps=()
 committed=0
 livekit_restarted=0
 keys_orig="" caddy_orig=""
-
-undo_step() {
-    case "$1" in
-        user) "$userdel" "conch-$name" && say "undone: removed the user conch-$name" ;;
-        data) rm -rf -- "$data" && say "undone: removed $data" ;;
-        key)
-            mv -f -- "$keys_orig" "$keys" && say "undone: removed $name's key from $keys"
-            if [ "$livekit_restarted" = 1 ]; then
-                sysctl restart livekit && say "undone: restarted LiveKit without that key"
-            fi ;;
-        env) rm -f -- "$env_file" && say "undone: removed $env_file" ;;
-        tmpfiles) rm -f -- "$tmpfiles_conf" && say "undone: removed $tmpfiles_conf" ;;
-        caddy) mv -f -- "$caddy_orig" "$caddyfile" && sysctl reload caddy && say "undone: restored $caddyfile and reloaded Caddy" ;;
-        unit)
-            sysctl stop "conchd@$name" || true
-            sysctl disable "conchd@$name" || true
-            sysctl stop "conch-backup@$name.timer" || true
-            sysctl disable "conch-backup@$name.timer" || true
-            say "undone: stopped and disabled conchd@$name and conch-backup@$name.timer" ;;
-    esac
-}
-on_exit() {
-    local status=$? i
-    set +e
-    trap - EXIT
-    if [ "$committed" = 0 ] && [ "${#undo[@]}" -gt 0 ]; then
-        say "FAILED; undoing what this run made, newest first:" >&2
-        for ((i = ${#undo[@]} - 1; i >= 0; i--)); do
-            undo_step "${undo[i]}" >&2 || say "could not undo '${undo[i]}': see above, and fix it by hand" >&2
-        done
-    fi
-    [ "${#tmps[@]}" -eq 0 ] || rm -f -- "${tmps[@]}"
-    exit "$status"
-}
-trap on_exit EXIT
-trap 'exit 130' INT TERM HUP
 
 # guarded <command>...: run it holding no terminal (as in conch-upgrade.sh).
 guarded() {
@@ -465,15 +453,116 @@ guarded() {
     fi
     { setsid -w "$@" 2>&1 1>&3 3>&- | clean >&2; } 3>&1
 }
-# as_instance <command>...: as root, run it as conch-<name> with none of
-# root's environment; otherwise (the tests) as whoever this is.
-as_instance() {
+# as_user <user> <command>...: as root, run it as that user with none of
+# root's environment and without the lock's descriptor; otherwise (the tests)
+# as whoever this is.
+as_user() {
+    local u=$1
+    shift
     if [ "$(id -u)" = 0 ]; then
-        guarded runuser -u "conch-$name" -- env -i "PATH=$safe_path" "$@"
+        guarded runuser -u "$u" -- env -i "PATH=$safe_path" "$@" 9<&-
     else
-        guarded "$@"
+        guarded "$@" 9<&-
     fi
 }
+as_instance() { as_user "conch-$name" "$@"; }
+
+# running: does anything of this instance still run? Its units, and, as root,
+# any process of conch-<name>.
+running() {
+    if sysctl is-active --quiet "conchd@$name" || sysctl is-active --quiet "conch-backup@$name.service"; then return 0; fi
+    if [ "$(id -u)" = 0 ] && "$getent" passwd "conch-$name" >/dev/null 2>&1 && pgrep -u "conch-$name" >/dev/null; then return 0; fi
+    return 1
+}
+stopped_for_sure() {
+    for _ in $(seq 1 50); do
+        if ! running; then return 0; fi
+        sleep 0.2
+    done
+    return 1
+}
+
+undo_text() {
+    case "$1" in
+        user) echo "the user conch-$name" ;;
+        data) echo "$data" ;;
+        key) echo "$name's key in $keys" ;;
+        env) echo "$env_file" ;;
+        tmpfiles) echo "$tmpfiles_conf" ;;
+        caddy) echo "$name's block in $caddyfile" ;;
+        unit) echo "conchd@$name and its backup timer" ;;
+    esac
+}
+undo_step() {
+    case "$1" in
+        user) "$userdel" "conch-$name" && say "undone: removed the user conch-$name" ;;
+        data) rm -rf -- "$data" && say "undone: removed $data" ;;
+        key)
+            mv -f -- "$keys_orig" "$keys" && say "undone: removed $name's key from $keys"
+            if [ "$livekit_restarted" = 1 ]; then
+                sysctl restart livekit && say "undone: restarted LiveKit without that key"
+            fi ;;
+        env) rm -f -- "$env_file" && say "undone: removed $env_file" ;;
+        tmpfiles) rm -f -- "$tmpfiles_conf" && say "undone: removed $tmpfiles_conf" ;;
+        caddy) mv -f -- "$caddy_orig" "$caddyfile" && sysctl reload caddy && say "undone: restored $caddyfile and reloaded Caddy" ;;
+        unit)
+            local u ok=0
+            for u in "conchd@$name" "conch-backup@$name.timer" "conch-backup@$name.service"; do
+                sysctl stop "$u" || { ok=1; say "systemctl stop $u failed"; }
+                sysctl disable "$u" >/dev/null 2>&1 || true
+            done
+            [ "$ok" = 1 ] || say "undone: stopped and disabled conchd@$name, conch-backup@$name.timer and conch-backup@$name.service"
+            return "$ok" ;;
+    esac
+}
+# The backup directory a backup made during this run (it did not exist when
+# the checks ran), removed as conch-backup, which owns it.
+undo_backups() {
+    [ -e "$backup_dir/$name" ] || [ -L "$backup_dir/$name" ] || return 0
+    # shellcheck disable=SC2016 # expanded by the inner bash
+    as_user conch-backup bash -c '[ -d "$1" ] && [ ! -L "$1" ] && rm -rf --one-file-system -- "$1"' undo-backups "$backup_dir/$name" || true
+    if [ -e "$backup_dir/$name" ] || [ -L "$backup_dir/$name" ]; then return 1; fi
+    say "undone: removed $backup_dir/$name, which a backup made during this run"
+}
+on_exit() {
+    local status=$? i step blocked=0 left=""
+    set +e
+    trap - EXIT
+    trap '' INT TERM HUP
+    if [ "$committed" = 0 ] && [ "${#undo[@]}" -gt 0 ]; then
+        say "FAILED; undoing what this run made, newest first:" >&2
+        i=$((${#undo[@]} - 1))
+        if [ "${undo[i]}" = unit ]; then
+            undo_step unit >&2
+            i=$((i - 1))
+        fi
+        # Nothing is deleted while anything of the instance may still run.
+        if ! stopped_for_sure; then
+            blocked=1
+        else
+            undo_backups >&2 || say "could not remove $backup_dir/$name: remove it by hand" >&2
+        fi
+        if [ "$blocked" = 0 ]; then
+            for ((; i >= 0; i--)); do
+                undo_step "${undo[i]}" >&2 || say "could not undo '${undo[i]}': see above, and fix it by hand" >&2
+            done
+            [ "$status" = 130 ] || status=1
+        else
+            for ((; i >= 0; i--)); do
+                step=$(undo_text "${undo[i]}")
+                left+=", $step"
+            done
+            say "ROLLBACK INCOMPLETE: conchd@$name, or a process of conch-$name, may still run, so nothing more was undone. Left in place: ${left:2}. Stop it (systemctl stop conchd@$name), then remove what is left with remove-instance.sh $name (temporary) or remove-instance.sh $name --force-normal." >&2
+            status=5
+        fi
+    elif [ "$committed" = 0 ] && [ "$status" != 0 ] && [ "$status" != 2 ] && [ "$status" != 130 ]; then
+        status=1
+    fi
+    [ "${#tmps[@]}" -eq 0 ] || rm -f -- "${tmps[@]}"
+    exit "$status"
+}
+trap on_exit EXIT
+trap 'exit 130' INT TERM HUP
 
 # The secrets, from /dev/urandom through pipes into variables: none is an
 # argument of any command. The formats are those of docs/deploy.md steps 4
@@ -595,16 +684,19 @@ fi
 
 ok_health() { case "$1" in *'"status":"ok"'*) return 0 ;; esac; return 1; }
 up=0
-for _ in $(seq 1 100); do
+deadline=$((SECONDS + loopback_timeout))
+while :; do
     if out=$(curl -fsS --max-time 2 "http://127.0.0.1:$port/healthz" 2>/dev/null) && ok_health "$out"; then up=1; break; fi
+    [ "$SECONDS" -lt "$deadline" ] || break
     sleep 0.3
 done
-[ "$up" = 1 ] || die "conchd@$name did not answer /healthz on 127.0.0.1:$port (journalctl -u conchd@$name)"
+[ "$up" = 1 ] || die "conchd@$name did not answer /healthz on 127.0.0.1:$port within ${loopback_timeout}s (journalctl -u conchd@$name)"
 say "conchd@$name answers on 127.0.0.1:$port"
 
 # From here the server exists and works; a slow certificate is not a reason
-# to take it down again.
+# to take it down again, and neither is an interruption: it is kept (exit 4).
 committed=1
+trap 'say "interrupted after conchd@$name answered: the server is kept and runs. Check https://$host/healthz later; to remove it: remove-instance.sh $name" >&2; exit 4' INT TERM HUP
 public=0
 deadline=$((SECONDS + health_timeout))
 while :; do

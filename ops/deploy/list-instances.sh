@@ -104,6 +104,21 @@ if [ "$what" = addresses ]; then
 fi
 
 env_value() { sed -n "s/^$2=//p" "$1" | tail -n 1; }
+# env_mode <file>: as in remove-instance.sh, "temporary" only when every line
+# that names CONCHD_MODE is exactly CONCHD_MODE=temporary (and one does), and
+# no line is continued with a backslash; otherwise "normal".
+env_mode() {
+    local line n=0
+    if [ ! -f "$1" ] || [ ! -r "$1" ]; then echo normal; return; fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in *\\) echo normal; return ;; esac
+        case "$line" in '#'* | ';'*) continue ;; esac
+        case "$line" in *CONCHD_MODE*) ;; *) continue ;; esac
+        if [ "$line" != CONCHD_MODE=temporary ]; then echo normal; return; fi
+        n=$((n + 1))
+    done <"$1"
+    if [ "$n" -gt 0 ]; then echo temporary; else echo normal; fi
+}
 
 names=()
 for f in "$etc"/*.env; do
@@ -125,8 +140,7 @@ for n in "${names[@]}"; do
     listen=$(env_value "$f" CONCHD_LISTEN)
     port=${listen##*:}
     [[ $listen =~ ^(127\.0\.0\.1|\[::1\]|localhost):[0-9]{1,5}$ ]] || { listen="" port="?"; }
-    mode=$(env_value "$f" CONCHD_MODE)
-    case "$mode" in '' | normal) mode=normal ;; temporary) ;; *) mode=invalid ;; esac
+    mode=$(env_mode "$f")
     totp=$(env_value "$f" CONCHD_OPERATOR_TOTP)
     case "$totp" in
         optional | required) ;;

@@ -425,7 +425,10 @@ cp "$work/bin/conchd-v0.0.2" "$rel/v0.0.2/conchd_v0.0.2_linux_$arch"
 # A stand-in for systemctl that runs the instance as a child of this test.
 # Every call is logged, so a test can say nothing was stopped. Units other
 # than conchd@<instance> are only logged; reload or restart of one fails
-# once if $work/fail-reload-<unit> or $work/fail-restart-<unit> exists.
+# once if $work/fail-reload-<unit> or $work/fail-restart-<unit> exists. Once
+# each: $work/fail-start-conchd@<i> starts a process that never answers, and
+# $work/fail-stop-conchd@<i> makes a stop fail and leave it running. Starting
+# conch-backup@<i>.timer makes $work/upbackups/<i>, as a backup at once would.
 cat >"$work/systemctl" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -439,6 +442,7 @@ case "\$unit" in conchd@*) inst=\${unit#conchd@} ;; esac
 pidfile=$work/pids/\$inst
 case "\$verb" in
 stop)
+    if [ -e "$work/fail-stop-\$unit" ]; then rm -f "$work/fail-stop-\$unit"; exit 1; fi
     if [ -n "\$inst" ] && [ -f "\$pidfile" ]; then
         pid=\$(cat "\$pidfile")
         kill "\$pid" 2>/dev/null || true
@@ -446,10 +450,21 @@ stop)
         rm -f "\$pidfile"
     fi ;;
 start)
-    if [ -n "\$inst" ]; then
-        set -a; . "$etc/\$inst.env"; set +a
-        "$opt/current/conchd" serve --no-web >>"$work/\$inst.log" 2>&1 &
+    if [ -n "\$inst" ] && [ -e "$work/fail-start-\$unit" ]; then
+        rm -f "$work/fail-start-\$unit"
+        nohup sleep 300 </dev/null >/dev/null 2>&1 &
         echo \$! >"\$pidfile"
+    elif [ -n "\$inst" ]; then
+        set -a; . "$etc/\$inst.env"; set +a
+        # nohup: a stand-in for a unit, so the end of a test terminal (script) does not hang it up
+        nohup "$opt/current/conchd" serve --no-web </dev/null >>"$work/\$inst.log" 2>&1 &
+        echo \$! >"\$pidfile"
+    else
+        case "\$unit" in
+        conch-backup@*.timer)
+            b=\${unit#conch-backup@}
+            mkdir -p "$work/upbackups/\${b%.timer}" ;;
+        esac
     fi ;;
 is-active) [ -n "\$inst" ] && [ -f "\$pidfile" ] && kill -0 "\$(cat "\$pidfile")" 2>/dev/null ;;
 reload) if [ -e "$work/fail-reload-\$unit" ]; then rm -f "$work/fail-reload-\$unit"; exit 1; fi ;;
@@ -855,18 +870,28 @@ cat >"$work/droplet.env" <<EOF
 export CONCH_OPT=$opt CONCH_ETC=$etc CONCH_DATA_ROOT=$up_data CONCH_BACKUP_DIR=$work/upbackups
 export CONCH_CADDYFILE=$caddyfile CONCH_TMPFILES_DIR=$work/tmpfiles CONCH_METADATA_URL=file://$work/metadata
 export SYSTEMCTL=$work/systemctl CADDY=$sb/caddy USERADD=$sb/useradd USERDEL=$sb/userdel GETENT=$sb/getent SS=$sb/ss
-export CONCH_PUBLIC_CURL=$sb/public-curl CONCH_HEALTH_TIMEOUT=10 CONCH_RELEASE_URL=file://$rel
+export CONCH_PUBLIC_CURL=$sb/public-curl CONCH_RELEASE_URL=file://$rel
+export CONCH_HEALTH_TIMEOUT=\${CONCH_HEALTH_TIMEOUT:-10} CONCH_LOOPBACK_TIMEOUT=\${CONCH_LOOPBACK_TIMEOUT:-30}
 EOF
 for s in add-instance remove-instance list-instances; do
     printf '#!/usr/bin/env bash\n. %q\nexec %q "$@"\n' "$work/droplet.env" "$deploy/$s.sh" >"$work/$s"
     chmod 0755 "$work/$s"
 done
 ai() { "$work/add-instance" "$@"; }
-# typed <answer> <command>...: run it on a terminal (script(1)), typing answer.
+# onpty <command>...: run it on a terminal (script(1)), as ssh -t would,
+# carriage returns dropped from what it prints. With ONPTY_ERR=<file> its
+# standard error goes to that file instead, so the two can be told apart.
+onpty() {
+    local cmd
+    cmd=$(printf '%q ' "$@")
+    [ -z "${ONPTY_ERR:-}" ] || cmd+=" 2>$(printf '%q' "$ONPTY_ERR")"
+    SHELL=/bin/bash script -qec "$cmd" /dev/null </dev/null | tr -d '\r'
+}
+# typed <answer> <command>...: run it on a terminal, typing answer.
 typed() {
     local a=$1
     shift
-    printf '%s\n' "$a" | SHELL=/bin/bash script -qec "$(printf '%q ' "$@")" /dev/null
+    printf '%s\n' "$a" | SHELL=/bin/bash script -qec "$(printf '%q ' "$@")" /dev/null | tr -d '\r'
 }
 
 # tree: every path under the droplet's locations with its type, mode and
@@ -945,9 +970,21 @@ unchanged "$work/t0" "dry run"
 [ "$(calls)" = "$c0" ] || fail "dry run: called systemctl, caddy or useradd"
 ok "add-instance --dry-run: prints the plan, changes nothing, runs nothing"
 
-# No terminal and no --yes: LiveKit's restart is not agreed to.
+# The setup link is printed to standard output: a file there is refused
+# before any change, so the link can never land in one.
 status=0
-setsid -w "$work/add-instance" gamma example.test --temporary </dev/null >"$work/notty.out" 2>&1 || status=$?
+ai gamma example.test --temporary --yes >"$work/nostdout.out" 2>&1 || status=$?
+[ "$status" = 1 ] && grep -q 'standard output is not a terminal' "$work/nostdout.out" ||
+    fail "standard output not a terminal: exit $status: $(cat "$work/nostdout.out")"
+unchanged "$work/t0" "standard output not a terminal"
+[ "$(calls)" = "$c0" ] || fail "standard output not a terminal: called systemctl, caddy or useradd"
+ok "add-instance: standard output that is not a terminal is refused before any change"
+
+# No terminal to ask on and no --yes: LiveKit's restart is not agreed to.
+# (setsid on the pty: its standard output is a terminal, but it has none to
+# open as /dev/tty.)
+status=0
+onpty setsid -w "$work/add-instance" gamma example.test --temporary >"$work/notty.out" 2>&1 || status=$?
 [ "$status" = 1 ] && grep -q 'no terminal to ask on' "$work/notty.out" || fail "no terminal, no --yes: $(cat "$work/notty.out")"
 unchanged "$work/t0" "no terminal, no --yes"
 ok "add-instance: with no terminal and no --yes it refuses, before any change"
@@ -966,10 +1003,10 @@ for f in datadir caddy reload-caddy restart-livekit bootstrap; do
         *) touch "$work/fail-$f" ;;
     esac
     status=0
-    ai gamma example.test --temporary --port "$gport" --yes "${extra[@]}" >"$work/undo-$f.out" 2>&1 || status=$?
+    onpty "$work/add-instance" gamma example.test --temporary --port "$gport" --yes "${extra[@]}" >"$work/undo-$f.out" 2>&1 || status=$?
     rm -f "$work/fail-caddy" "$work/fail-reload-caddy" "$work/fail-restart-livekit"
     chmod "$up_mode" "$up_data"
-    [ "$status" != 0 ] || fail "$f failure: add-instance succeeded"
+    [ "$status" = 1 ] || fail "$f failure: add-instance exited $status, want 1 (undone): $(cat "$work/undo-$f.out")"
     unchanged "$work/t0" "$f failure"
     cmp -s "$caddyfile" "$work/Caddyfile.as-deployed" || fail "$f failure: the Caddyfile is not as it was"
     for t in "$work"/caddy/.[!.]* "$etc"/.[!.]*; do
@@ -986,10 +1023,47 @@ for f in datadir caddy reload-caddy restart-livekit bootstrap; do
 done
 ok "add-instance: a failure making the data directory, in caddy validate, Caddy's reload, LiveKit's restart or the operator bootstrap is undone back to the same bytes, and says what it undid"
 
+# A failure after conchd started (it never answers): the undo stops conchd,
+# the backup timer and the backup unit, removes the backup directory a backup
+# made during the run, and then the rest, back to the same bytes.
+printf '10 A pi 203.0.113.7\n11 AAAA pi 2001:db8::7\n' >>"$work/dns-records"
+touch "$work/fail-start-conchd@pi"
+: >"$work/systemctl.calls"
+status=0
+onpty env CONCH_LOOPBACK_TIMEOUT=2 "$work/add-instance" pi example.test --port "$gport" --yes >"$work/undo-pi.out" 2>&1 || status=$?
+[ "$status" = 1 ] || fail "a normal server whose conchd never answers: exit $status, want 1: $(cat "$work/undo-pi.out")"
+grep -qx 'start conch-backup@pi.timer' "$work/systemctl.calls" && grep -qx 'stop conch-backup@pi.timer' "$work/systemctl.calls" &&
+    grep -qx 'stop conch-backup@pi.service' "$work/systemctl.calls" && grep -qx 'stop conchd@pi' "$work/systemctl.calls" ||
+    fail "the undo did not stop conchd, the backup timer and the backup unit: $(cat "$work/systemctl.calls")"
+grep -q "undone: removed $work/upbackups/pi, which a backup made during this run" "$work/undo-pi.out" ||
+    fail "the undo does not say it removed the backup directory: $(cat "$work/undo-pi.out")"
+[ ! -e "$work/upbackups/pi" ] && [ ! -e "$work/pids/pi" ] || fail "the undo left pi's backup directory or its process"
+unchanged "$work/t0" "a failure after conchd started"
+ok "add-instance: a failure after start stops conchd, the backup timer and unit, removes the backup directory the run made, and undoes the rest to the same bytes"
+
+# The same, but conchd will not stop: nothing more is deleted while it may
+# run, what is left is named, exit 5; remove-instance takes it all once it
+# stops.
+printf '12 A sigma 203.0.113.7\n13 AAAA sigma 2001:db8::7\n' >>"$work/dns-records"
+touch "$work/fail-start-conchd@sigma" "$work/fail-stop-conchd@sigma"
+status=0
+onpty env CONCH_LOOPBACK_TIMEOUT=2 "$work/add-instance" sigma example.test --temporary --port "$gport" --yes >"$work/undo-sigma.out" 2>&1 || status=$?
+[ "$status" = 5 ] && grep -q 'ROLLBACK INCOMPLETE' "$work/undo-sigma.out" && grep -q "Left in place.*$etc/sigma.env" "$work/undo-sigma.out" ||
+    fail "a conchd that will not stop: exit $status, want 5 and what is left: $(cat "$work/undo-sigma.out")"
+[ -f "$etc/sigma.env" ] && [ -d "$up_data/sigma" ] && grep -q '^conch-sigma:' "$work/passwd" && grep -q '^sigma-' "$etc/livekit-keys" ||
+    fail "the undo deleted sigma's files while its conchd may still run"
+kill -0 "$(cat "$work/pids/sigma")" || fail "sigma's process is gone, so the test proves nothing"
+typed sigma "$work/remove-instance" sigma >"$work/rm-sigma.out" 2>&1 || fail "removing what the incomplete undo left failed: $(cat "$work/rm-sigma.out")"
+d=$(diff <(grep -vF -e "$work/upbackups/removed" -e "$work/tmpfiles/conch-removed.conf" "$work/t0") \
+    <(tree | grep -vF -e "$work/upbackups/removed" -e "$work/tmpfiles/conch-removed.conf") || true)
+[ -z "$d" ] || fail "remove-instance did not clear what the incomplete undo left:
+$d"
+ok "add-instance: when conchd will not stop, the undo deletes nothing more, names what is left and exits 5; remove-instance then clears it"
+
 # Success: a temporary server with password-only operators.
 : >"$work/systemctl.calls"
-ai gamma example.test --temporary --operator-totp optional --operator "Nick O'Brien" --port "$gport" --yes \
-    >"$work/add.out" 2>"$work/add.err" || fail "add-instance gamma failed: $(cat "$work/add.out" "$work/add.err")"
+ONPTY_ERR=$work/add.err onpty "$work/add-instance" gamma example.test --temporary --operator-totp optional --operator "Nick O'Brien" \
+    --port "$gport" --yes >"$work/add.out" || fail "add-instance gamma failed: $(cat "$work/add.out" "$work/add.err")"
 genv=$etc/gamma.env
 [ "$(stat -c %a "$genv")" = 600 ] || fail "gamma.env is mode $(stat -c %a "$genv")"
 while read -r k; do
@@ -1080,6 +1154,42 @@ rm -rf "${work:?}/elsewhere-data"
 kill -0 "$(cat "$work/pids/gamma")" || fail "a refused removal stopped gamma"
 ok "remove-instance: a normal server without --force-normal, a bad or shared name, alpha's unmarked Caddy block, no terminal, a wrongly typed name and a symlinked data directory or env file are refused before any change"
 
+# The mode: temporary only when every line naming CONCHD_MODE is exactly
+# CONCHD_MODE=temporary. systemd also reads an indented line, blanks around
+# '=', export and quotes, so each of these is a normal server, refused
+# without --force-normal; so is a continued line that may swallow the
+# assignment, and a carriage return.
+mode_cases=(
+    $'CONCHD_MODE=temporary\n CONCHD_MODE=normal'
+    $'CONCHD_MODE=temporary\n\tCONCHD_MODE=normal'
+    $'CONCHD_MODE=temporary\nCONCHD_MODE = normal'
+    $'CONCHD_MODE=temporary\nexport CONCHD_MODE=normal'
+    $'CONCHD_MODE="temporary"'
+    $'CONCHD_LISTEN=127.0.0.1:1 \\\nCONCHD_MODE=temporary'
+    $'CONCHD_MODE=temporary\r'
+    $' # CONCHD_MODE=temporary'
+)
+for m in "${mode_cases[@]}"; do
+    printf '%s\n' "$m" >"$etc/omicron.env"
+    tree >"$work/t1"
+    ri_refuse 'is a normal server' typed omicron "$work/remove-instance" omicron
+    "$work/list-instances" | grep -Eq '^omicron +\? +normal ' || fail "list-instances shows omicron as temporary for: $m"
+done
+printf '# a comment that names CONCHD_MODE=normal\nCONCHD_MODE=temporary\nCONCHD_MODE=temporary\n' >"$etc/omicron.env"
+"$work/list-instances" | grep -Eq '^omicron +\? +temporary ' || fail "list-instances: a plain temporary env file is not temporary"
+rm "$etc/omicron.env"
+ok "remove-instance and list-instances: CONCHD_MODE is temporary only when every line naming it is exactly CONCHD_MODE=temporary"
+
+# A name of which nothing is on this droplet is refused, exit 2.
+tree >"$work/t1"
+for n in zz ssh; do
+    status=0
+    typed "$n" "$work/remove-instance" "$n" --force-normal >"$work/ri.out" 2>&1 || status=$?
+    [ "$status" = 2 ] && grep -q "nothing of $n is on this droplet" "$work/ri.out" || fail "remove-instance $n: exit $status: $(cat "$work/ri.out")"
+    unchanged "$work/t1" "remove-instance $n"
+done
+ok "remove-instance: a name with nothing on the droplet is refused with exit 2"
+
 # Removal: exactly what add-instance made goes, after a final archive, which
 # waits in removed/ for the tmpfiles rule.
 gpid=$(cat "$work/pids/gamma")
@@ -1106,8 +1216,21 @@ ok "remove-instance gamma: typed confirmation, stopped, final archive moved to r
 dport=$((gport + 1))
 : >"$work/systemctl.calls"
 printf '8 A delta 203.0.113.7\n9 AAAA delta 2001:db8::7\n' >>"$work/dns-records"
-ai delta example.test --operator-totp optional --port "$dport" --yes >"$work/add-delta.out" 2>&1 ||
-    fail "add-instance delta failed: $(cat "$work/add-delta.out")"
+# The conchd the instance's steps run (the bootstrap) must not hold the
+# descriptor of the lock on the env directory: this one refuses to run if it does.
+# (Swapped by rename: beta runs from that file, which cannot be written.)
+lock_release=$(readlink -f "$opt/current")
+mv "$lock_release/conchd" "$work/conchd-unwrapped"
+# shellcheck disable=SC2016 # expanded by the wrapper
+printf '#!/bin/sh\nif [ -e /proc/$$/fd/9 ]; then echo "conchd: started holding the lock descriptor 9" >&2; exit 9; fi\nexec %s "$@"\n' \
+    "'$work/conchd-unwrapped'" >"$work/conchd-wrapper"
+chmod 0755 "$work/conchd-wrapper"
+mv "$work/conchd-wrapper" "$lock_release/conchd"
+status=0
+onpty "$work/add-instance" delta example.test --operator-totp optional --port "$dport" --yes >"$work/add-delta.out" 2>&1 || status=$?
+mv -f "$work/conchd-unwrapped" "$lock_release/conchd"
+[ "$status" = 0 ] || fail "add-instance delta failed: $(cat "$work/add-delta.out")"
+if grep -q 'holding the lock descriptor' "$work/add-delta.out"; then fail "the bootstrap ran holding the lock's descriptor"; fi
 grep -qx 'enable conch-backup@delta.timer' "$work/systemctl.calls" || fail "a normal server got no backup timer"
 if grep -q '^CONCHD_MODE=' "$etc/delta.env"; then fail "a normal server's env file sets CONCHD_MODE"; fi
 dversion() { curl -fsS "http://127.0.0.1:$dport/healthz" | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'; }
@@ -1128,6 +1251,28 @@ for t in "$work"/upbackups/removed/delta-*; do
 done
 grep -qx 'stop conch-backup@delta.timer' "$work/systemctl.calls" || fail "delta's timer was not stopped"
 ok "remove-instance delta --force-normal --purge-backups: a normal server with a timer, a rollback record and pre-upgrade archives is gone entirely"
+
+# Interrupted once conchd answers (here while the check through Caddy is
+# still failing): the server is kept, running, exit 4.
+printf '14 A rho 203.0.113.7\n15 AAAA rho 2001:db8::7\n' >>"$work/dns-records"
+touch "$work/fail-public"
+: >"$work/public-curl.calls"
+onpty env CONCH_HEALTH_TIMEOUT=60 "$work/add-instance" rho example.test --temporary --port "$((gport + 3))" --yes >"$work/rho.out" 2>&1 &
+rpid=$!
+for _ in $(seq 1 150); do
+    if grep -q 'rho.example.test' "$work/public-curl.calls"; then break; fi
+    sleep 0.2
+done
+grep -q 'rho.example.test' "$work/public-curl.calls" || fail "add-instance rho never reached the check through Caddy: $(cat "$work/rho.out")"
+pkill -TERM -f "^bash $deploy/add-instance.sh rho " || fail "no add-instance rho to interrupt"
+status=0
+wait "$rpid" || status=$?
+rm -f "$work/fail-public"
+[ "$status" = 4 ] && grep -q 'the server is kept and runs' "$work/rho.out" || fail "an interrupted add after commit: exit $status, want 4: $(cat "$work/rho.out")"
+[ -f "$etc/rho.env" ] && kill -0 "$(cat "$work/pids/rho")" || fail "an interruption after commit undid rho"
+typed rho "$work/remove-instance" rho >"$work/rm-rho.out" 2>&1 || fail "removing rho failed: $(cat "$work/rm-rho.out")"
+sed -i '/ rho /d' "$work/dns-records"
+ok "add-instance: interrupted after conchd answered, the server is kept and it exits 4"
 
 # --- conch-server, against an ssh that runs the droplet's side here ---------
 #
@@ -1217,12 +1362,18 @@ CONCH_SERVER_DOCTL_CONTEXT=conch
 CONCH_SERVER_OPERATOR=Nick O'Brien
 EOF
 chmod 0600 "$work/server.env"
-cs() {
-    CONCH_SERVER_CONFIG=${CS_CONFIG:-$work/server.env} SSH=$sb/ssh DOCTL=$sb/doctl CURL=$sb/doh CONCH_SERVER_REPO=$repo \
-        CONCH_SERVER_REMOTE_OPT=$(readlink -f "$opt") CONCH_SERVER_REMOTE_BIN=$work/remote-bin \
-        CONCH_SERVER_DOH='https://one.test/dns-query https://two.test/resolve' CONCH_SERVER_DNS_TIMEOUT=5 CONCH_SERVER_DNS_INTERVAL=0 \
-        PATH=$sb/never:$PATH "$PWD/ops/conch-server" "$@"
-}
+# $work/cs: conch-server with the stand-ins, as one command (so it can run
+# under script(1)); CS_CONFIG names other settings.
+cat >"$work/cs" <<EOF
+#!/usr/bin/env bash
+export CONCH_SERVER_CONFIG=\${CS_CONFIG:-$work/server.env} SSH=$sb/ssh DOCTL=$sb/doctl CURL=$sb/doh CONCH_SERVER_REPO=$repo
+export CONCH_SERVER_REMOTE_OPT=$(readlink -f "$opt") CONCH_SERVER_REMOTE_BIN=$work/remote-bin
+export CONCH_SERVER_DOH='https://one.test/dns-query https://two.test/resolve' CONCH_SERVER_DNS_TIMEOUT=5 CONCH_SERVER_DNS_INTERVAL=0
+export PATH=$sb/never:\$PATH
+exec $(printf %q "$PWD/ops/conch-server") "\$@"
+EOF
+chmod 0755 "$work/cs"
+cs() { CS_CONFIG=${CS_CONFIG:-} "$work/cs" "$@"; }
 
 # Settings that are not exactly what they should be are refused before
 # anything runs.
@@ -1247,10 +1398,24 @@ fi
 [ ! -e "$work/ssh.calls" ] || fail "conch-server new ran ssh with a bad name or operator"
 ok "conch-server: bad settings (a host or domain with shell characters, an unknown or repeated key, a file others can write), a bad name or operator are refused before ssh or doctl run"
 
+# The settings example in docs/deploy.md, verbatim, is accepted.
+awk '/Its settings are in `~\/.config\/conch\/server.env`/ { f = 1; next }
+    f && /^```sh$/ { c = 1; next }
+    c && /^```$/ { exit }
+    c { print }' docs/deploy.md >"$work/doc-server.env"
+grep -qx 'CONCH_SERVER_OPERATOR=your-name' "$work/doc-server.env" || fail "the settings example was not found in docs/deploy.md: $(cat "$work/doc-server.env")"
+chmod 0600 "$work/doc-server.env"
+mkdir -p "$work/home/.ssh"
+touch "$work/home/.ssh/conch-alpha"
+HOME=$work/home CS_CONFIG=$work/doc-server.env cs sync >"$work/cs-doc.out" 2>&1 ||
+    fail "conch-server refuses the settings example in docs/deploy.md: $(cat "$work/cs-doc.out")"
+rm -f "$work/ssh.calls"
+ok "conch-server: the settings example in docs/deploy.md parses as it is written"
+
 # new: scripts copied, DNS made and waited for, add-instance run with every
 # argument quoted, the setup link on this terminal only.
 kport=$((gport + 2))
-cs new kappa --temporary --port "$kport" --yes >"$work/cs-new.out" 2>&1 || fail "conch-server new kappa failed: $(cat "$work/cs-new.out")"
+onpty "$work/cs" new kappa --temporary --port "$kport" --yes >"$work/cs-new.out" 2>&1 || fail "conch-server new kappa failed: $(cat "$work/cs-new.out")"
 for s in add-instance.sh remove-instance.sh list-instances.sh conch-backup.sh conch-upgrade.sh; do
     cmp -s "$deploy/$s" "$work/remote-bin/$s" && [ "$(stat -c %a "$work/remote-bin/$s")" = 755 ] ||
         fail "conch-server new did not install $s 0755 from the tag"
@@ -1296,10 +1461,41 @@ grep -q 'port 8081 is taken' "$work/cs-mu.out" && grep -q 'deleted the record' "
 cmp -s "$work/dns-records" "$work/dns-before-mu" || fail "the records conch-server new mu made were not deleted"
 ok "conch-server new: a record pointing elsewhere is refused before any change; records made for a refused add are deleted"
 
+# An add interrupted after it committed keeps the server, and conch-server
+# keeps its DNS records.
+touch "$work/fail-public"
+: >"$work/public-curl.calls"
+onpty "$work/cs" new xi --temporary --port "$((kport + 1))" --yes >"$work/cs-xi.out" 2>&1 &
+xpid=$!
+for _ in $(seq 1 150); do
+    if grep -q 'xi.example.test' "$work/public-curl.calls"; then break; fi
+    sleep 0.2
+done
+pkill -TERM -f "^bash $work/remote-bin/add-instance.sh xi " || fail "no add-instance xi to interrupt: $(cat "$work/cs-xi.out")"
+status=0
+wait "$xpid" || status=$?
+rm -f "$work/fail-public"
+[ "$status" = 4 ] && grep -q 'The DNS records are kept' "$work/cs-xi.out" || fail "conch-server new xi, interrupted: exit $status: $(cat "$work/cs-xi.out")"
+[ "$(awk '$3 == "xi"' "$work/dns-records" | wc -l)" = 2 ] && kill -0 "$(cat "$work/pids/xi")" ||
+    fail "conch-server deleted the records of a server it kept, or the server is gone"
+typed xi "$work/cs" rm xi >"$work/cs-rm-xi.out" 2>&1 || fail "conch-server rm xi failed: $(cat "$work/cs-rm-xi.out")"
+ok "conch-server new: an add interrupted after it committed keeps the server and its DNS records (exit 4)"
+
+# rm of a name the droplet does not list: refused, unless --force-normal, and
+# then remove-instance refuses it (nothing there) and the records stay.
+printf '60 A nu 203.0.113.7\n' >>"$work/dns-records"
+if cs rm nu >"$work/cs-nu.out" 2>&1; then fail "conch-server rm nu went ahead"; fi
+grep -q 'lists no server named nu' "$work/cs-nu.out" || fail "conch-server rm nu: $(cat "$work/cs-nu.out")"
+if grep -q 'remove-instance.sh nu' "$work/ssh.calls"; then fail "conch-server rm nu ran remove-instance"; fi
+status=0
+typed nu "$work/cs" rm nu --force-normal >"$work/cs-nu2.out" 2>&1 || status=$?
+[ "$status" = 2 ] && grep -q 'nothing of nu is on this droplet' "$work/cs-nu2.out" || fail "conch-server rm nu --force-normal: exit $status: $(cat "$work/cs-nu2.out")"
+grep -q '^60 A nu ' "$work/dns-records" || fail "conch-server rm deleted the records of a name with nothing on the droplet"
+sed -i '/ nu /d' "$work/dns-records"
+ok "conch-server rm: a name the droplet does not list is refused; with --force-normal, nothing there is refused too, and the records stay"
+
 # rm: typed on the droplet's terminal, then the DNS records go.
-typed kappa env CONCH_SERVER_CONFIG="$work/server.env" SSH="$sb/ssh" DOCTL="$sb/doctl" CURL="$sb/doh" CONCH_SERVER_REPO="$repo" \
-    CONCH_SERVER_REMOTE_OPT="$(readlink -f "$opt")" CONCH_SERVER_REMOTE_BIN="$work/remote-bin" PATH="$sb/never:$PATH" \
-    "$PWD/ops/conch-server" rm kappa >"$work/cs-rm.out" 2>&1 || fail "conch-server rm kappa failed: $(cat "$work/cs-rm.out")"
+typed kappa "$work/cs" rm kappa >"$work/cs-rm.out" 2>&1 || fail "conch-server rm kappa failed: $(cat "$work/cs-rm.out")"
 grep -q "^-t .*remove-instance.sh kappa$" "$work/ssh.calls" || fail "remove-instance did not run with ssh -t: $(tail -n 3 "$work/ssh.calls")"
 if grep -q ' kappa ' "$work/dns-records"; then fail "kappa's DNS records were not deleted: $(cat "$work/dns-records")"; fi
 [ ! -e "$etc/kappa.env" ] && ! grep -q '^conch-kappa:' "$work/passwd" || fail "conch-server rm left kappa on the droplet"
