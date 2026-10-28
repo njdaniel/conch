@@ -469,7 +469,13 @@ start)
 is-active) [ -n "\$inst" ] && [ -f "\$pidfile" ] && kill -0 "\$(cat "\$pidfile")" 2>/dev/null ;;
 reload) if [ -e "$work/fail-reload-\$unit" ]; then rm -f "$work/fail-reload-\$unit"; exit 1; fi ;;
 restart) if [ -e "$work/fail-restart-\$unit" ]; then rm -f "$work/fail-restart-\$unit"; exit 1; fi ;;
-enable | disable) ;;
+enable) mkdir -p "$work/enabled" && touch "$work/enabled/\$unit" ;;
+disable)
+    if [ -e "$work/fail-disable-\$unit" ]; then rm -f "$work/fail-disable-\$unit"; exit 1; fi
+    rm -f "$work/enabled/\$unit" ;;
+is-enabled)
+    case "\$unit" in conch-backup@*.service) echo static; exit 0 ;; esac
+    if [ -e "$work/enabled/\$unit" ]; then echo enabled; else echo disabled; exit 1; fi ;;
 *) exit 2 ;;
 esac
 EOF
@@ -1106,6 +1112,33 @@ d=$(diff <(grep -vF -e "$work/upbackups/removed" -e "$work/tmpfiles/conch-remove
 [ -z "$d" ] || fail "remove-instance did not clear what tau's incomplete undo left:
 $d"
 ok "add-instance: when the backup timer will not stop, the undo deletes nothing more and exits 5; remove-instance then clears it"
+
+# A unit that stays enabled after its disable failed would start again at
+# boot: add's undo deletes nothing and exits 5, and remove refuses before
+# deleting anything; a second remove, once disabling works, clears it.
+printf '16 A phi 203.0.113.7\n17 AAAA phi 2001:db8::7\n' >>"$work/dns-records"
+touch "$work/fail-start-conchd@phi" "$work/fail-disable-conchd@phi"
+status=0
+onpty env CONCH_LOOPBACK_TIMEOUT=2 "$work/add-instance" phi example.test --temporary --port "$gport" --yes >"$work/undo-phi.out" 2>&1 || status=$?
+rm -f "$work/fail-disable-conchd@phi"
+[ "$status" = 5 ] && grep -q 'systemctl disable conchd@phi failed: it is still enabled' "$work/undo-phi.out" ||
+    fail "a unit that stays enabled: add-instance exited $status, want 5: $(cat "$work/undo-phi.out")"
+[ -f "$etc/phi.env" ] && [ -d "$up_data/phi" ] && [ -e "$work/enabled/conchd@phi" ] ||
+    fail "the undo deleted phi's files though conchd@phi is still enabled"
+touch "$work/fail-disable-conchd@phi"
+status=0
+typed phi "$work/remove-instance" phi >"$work/rm-phi.out" 2>&1 || status=$?
+rm -f "$work/fail-disable-conchd@phi"
+[ "$status" != 0 ] && grep -q 'still enabled, so it would start again at boot. Nothing was deleted' "$work/rm-phi.out" ||
+    fail "remove-instance went ahead with conchd@phi still enabled: exit $status: $(cat "$work/rm-phi.out")"
+[ -f "$etc/phi.env" ] && [ -d "$up_data/phi" ] || fail "remove-instance deleted phi's files though conchd@phi is still enabled"
+typed phi "$work/remove-instance" phi >"$work/rm-phi2.out" 2>&1 || fail "removing phi once disabling works failed: $(cat "$work/rm-phi2.out")"
+[ ! -e "$work/enabled/conchd@phi" ] || fail "conchd@phi is still enabled after its removal"
+d=$(diff <(grep -vF -e "$work/upbackups/removed" -e "$work/tmpfiles/conch-removed.conf" "$work/t0") \
+    <(tree | grep -vF -e "$work/upbackups/removed" -e "$work/tmpfiles/conch-removed.conf") || true)
+[ -z "$d" ] || fail "remove-instance did not clear phi:
+$d"
+ok "add-instance and remove-instance: a unit still enabled after a failed disable stops the undo (exit 5) and the removal before any delete"
 
 # Success: a temporary server with password-only operators.
 : >"$work/systemctl.calls"

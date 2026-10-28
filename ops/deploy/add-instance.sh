@@ -246,6 +246,14 @@ exec 9<"$etc"
 flock -n 9 || die "another add-instance.sh or remove-instance.sh is running"
 # sysctl: systemctl without the lock's descriptor, so nothing it starts holds it.
 sysctl() { "$systemctl" "$@" 9<&-; }
+# still_enabled <unit>: is it enabled after a disable? is-enabled exits 0 for
+# a static unit too (conch-backup@.service has no [Install]), so its answer
+# is read, not its status.
+still_enabled() {
+    local state
+    state=$(sysctl is-enabled "$1" 2>/dev/null) || true
+    case "$state" in enabled | enabled-runtime) return 0 ;; *) return 1 ;; esac
+}
 
 # env_value <file> <key>: the last assignment of key, as systemd reads it.
 # The file is never sourced; the caller checks the value.
@@ -513,6 +521,7 @@ undo_step() {
             for u in "conchd@$name" "conch-backup@$name.timer" "conch-backup@$name.service"; do
                 sysctl stop "$u" || { ok=1; say "systemctl stop $u failed"; }
                 sysctl disable "$u" >/dev/null 2>&1 || true
+                if still_enabled "$u"; then ok=1; say "systemctl disable $u failed: it is still enabled"; fi
             done
             [ "$ok" = 1 ] || say "undone: stopped and disabled conchd@$name, conch-backup@$name.timer and conch-backup@$name.service"
             return "$ok" ;;
