@@ -7,8 +7,9 @@
 #
 #   conch-backup.sh   an archive with a SHA-256; exit 3 and a plain message
 #                     without an off-site destination; the off-site path with a
-#                     stand-in rclone; --local-only; a backup.env that is not
-#                     0600 is refused; retention by age for nightly archives
+#                     stand-in rclone; --local-only and temporary mode (only
+#                     an exact env-file line, no secrets exposed); a backup.env
+#                     that is not 0600 is refused; retention by age for nightly archives
 #                     and by count for pre-upgrade ones
 #   conch-restore.sh  the drill: the message and the file are back and /healthz
 #                     answers ok; the backup's operator token is refused by
@@ -181,6 +182,9 @@ ok "instance running with a message and file $file_id"
 # --- backup -----------------------------------------------------------------
 
 export CONCH_DATA_ROOT=$data_root CONCH_BACKUP_DIR=$backups CONCH_BACKUP_ENV=$work/absent.env
+export CONCH_ETC=$work/instance-env
+mkdir "$CONCH_ETC"
+printf 'CONCHD_MODE=normal\n' >"$CONCH_ETC/alpha.env"
 
 status=0
 out=$("$deploy/conch-backup.sh" alpha 2>&1) || status=$?
@@ -189,7 +193,7 @@ case "$out" in *"NO OFF-SITE COPY WAS MADE"*) ;; *) fail "backup did not say the
 archive=$(ls -1 "$backups"/alpha/conch-alpha-*.tar.gz | head -n 1)
 [ -f "$archive" ] && [ -f "$archive.sha256" ] || fail "no archive and checksum after the first backup"
 (cd "$backups/alpha" && sha256sum -c "$(basename "$archive").sha256" >/dev/null) || fail "the checksum file does not verify"
-ok "no off-site destination: said so, exit 3, archive still written"
+ok "normal instance, no off-site destination: said so, exit 3, archive still written"
 # Every archive carries an empty restore-pending (issue #716), so whatever
 # unpacks it gets data conchd serve refuses until conchd restore has run.
 tar -tzf "$archive" | grep -qx restore-pending || fail "the archive holds no restore-pending"
@@ -200,6 +204,45 @@ sleep 1 # the archive name carries the second
 "$deploy/conch-backup.sh" alpha --local-only >"$work/b2.out" 2>&1 || { cat "$work/b2.out" >&2; fail "--local-only exited non-zero"; }
 grep -q 'no off-site copy was made' "$work/b2.out" || fail "--local-only did not say what it did"
 ok "--local-only exits 0"
+
+# Only an exact mode assignment enables temporary backups. Each row gets a
+# fresh archive directory, so an earlier backup cannot hide a missing one.
+# The secret canaries and shell expression must never be printed or sourced.
+for mode_line in 'CONCHD_MODE=temporary' missing unreadable \
+    'CONCHD_MODE=normal' 'CONCHD_MODE=Temporary' 'CONCHD_MODE=temporary # comment' \
+    'CONCHD_MODE="temporary"' 'CONCHD_MODE=temporary ' $'CONCHD_MODE=temporary\r' \
+    '# CONCHD_MODE=temporary' 'OTHER_CONCHD_MODE=temporary' 'CONCHD_OPERATOR_TOTP=optional'; do
+    printf '%s\n' "$mode_line" \
+        'CONCHD_LIVEKIT_API_SECRET=instance-env-secret-livekit' \
+        'CONCHD_TOTP_KEY=instance-env-secret-totp' \
+        "UNUSED=\$(touch '$work/env-sourced')" >"$CONCH_ETC/alpha.env"
+    want=3
+    case "$mode_line" in
+        CONCHD_MODE=temporary) want=0 ;;
+        missing) rm "$CONCH_ETC/alpha.env" ;;
+        unreadable)
+            printf 'CONCHD_MODE=temporary\n' >>"$CONCH_ETC/alpha.env"
+            chmod 000 "$CONCH_ETC/alpha.env" ;;
+    esac
+    status=0
+    out=$(CONCH_BACKUP_DIR=$work/mode-backups "$deploy/conch-backup.sh" alpha 2>&1) || status=$?
+    chmod 0600 "$CONCH_ETC/alpha.env" 2>/dev/null || true
+    case "$out" in *instance-env-secret-*) fail "instance env secret appeared in backup output" ;; esac
+    [ ! -e "$work/env-sourced" ] || fail "the instance env file was sourced"
+    [ "$status" -eq "$want" ] || fail "$mode_line backup exited $status, want $want: $out"
+    mode_archive=$(ls -1 "$work/mode-backups/alpha"/conch-alpha-*.tar.gz | head -n 1)
+    [ -f "$mode_archive" ] && [ -f "$mode_archive.sha256" ] || fail "$mode_line backup wrote no archive and checksum"
+    if [ "$want" -eq 0 ]; then
+        [ "$(printf '%s\n' "$out" | grep -Fc 'temporary instance: local-only backup, by ADR-011 item 2.2')" -eq 1 ] ||
+            fail "temporary backup did not explain its mode exactly once: $out"
+    else
+        case "$out" in *'NO OFF-SITE COPY WAS MADE'*) ;; *) fail "$mode_line backup lost the off-site warning: $out" ;; esac
+        case "$out" in *'temporary instance:'*) fail "$mode_line was treated as temporary: $out" ;; esac
+    fi
+    ok "$mode_line: archive and checksum written, exit $want, no env secrets printed or sourced"
+    rm -rf "$work/mode-backups"
+done
+rm "$CONCH_ETC/alpha.env"
 
 printf 'CONCH_BACKUP_KEEP_DAYS=14\n' >"$work/loose.env"
 chmod 0644 "$work/loose.env"
@@ -222,6 +265,33 @@ PATH=$work/fakebin:$PATH CONCH_BACKUP_RCLONE_DEST=$work/offsite "$deploy/conch-b
     { cat "$work/b3.out" >&2; fail "backup with an off-site destination exited non-zero"; }
 [ "$(ls "$work/offsite/alpha" | wc -l)" -eq 2 ] || fail "off-site copy did not receive the archive and its checksum"
 ok "off-site destination: archive and checksum copied, exit 0"
+
+# Local-only must skip even configured destinations, including the shared
+# backup.env used by normal instances. Neither off-site tool may be called.
+cat >"$work/fakebin/s3cmd" <<EOF
+#!/bin/sh
+touch "$work/s3cmd-called"
+exit 1
+EOF
+chmod +x "$work/fakebin/s3cmd"
+printf 'CONCH_BACKUP_RCLONE_DEST=%s\nCONCH_BACKUP_S3CMD_DEST=%s\n' \
+    "$work/local-only-offsite" s3://unused >"$work/local-only.env"
+for backup_kind in explicit temporary; do
+    backup_args=(alpha)
+    if [ "$backup_kind" = temporary ]; then
+        printf 'CONCHD_MODE=temporary\n' >"$CONCH_ETC/alpha.env"
+    else
+        backup_args+=(--local-only)
+    fi
+    status=0
+    out=$(PATH=$work/fakebin:$PATH CONCH_BACKUP_ENV=$work/local-only.env \
+        "$deploy/conch-backup.sh" "${backup_args[@]}" 2>&1) || status=$?
+    [ "$status" -eq 0 ] || fail "$backup_kind local-only with configured destinations exited $status: $out"
+    [ ! -e "$work/local-only-offsite" ] && [ ! -e "$work/s3cmd-called" ] ||
+        fail "$backup_kind local-only backup called an off-site tool"
+    ok "$backup_kind local-only skips configured off-site destinations, exit 0"
+done
+rm "$CONCH_ETC/alpha.env"
 
 # Retention removes only old archives of this instance.
 old=$backups/alpha/conch-alpha-19990101T000000Z.tar.gz

@@ -231,6 +231,11 @@ your device and browser.
 
 ## 10. What is known not to work yet
 
+If you see "Temporary server: no backups, and it may be removed. Don't keep
+anything here you need.", this server is for short-lived tests. Its messages and
+uploads may disappear when it is removed, and there is no off-site backup to
+recover them from. Keep anything you need somewhere else.
+
 - **The talk key works only while the Conch tab is in front.** A key that works while
   a game or another app is in front needs a desktop app, which comes after the alpha.
 - **On a phone, voice and watching stop when the page leaves the screen** (the phone

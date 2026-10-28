@@ -25,7 +25,8 @@
 #   conch-backup      writes the archive, keeps it, and copies it off-site. It
 #                     alone holds the off-site settings and credentials
 #                     (backup.env, rclone.conf) and never reads the live data.
-#   root              only hands the snapshot from one to the other, and reads
+#   root              reads only the mode from its instance env file, then
+#                     hands the snapshot from one to the other, and reads
 #                     no file either of them owns.
 # Each step runs in its own session with no terminal and none of root's
 # environment (only PATH, CONCH_DATA_ROOT, CONCH_BACKUP_DIR and
@@ -35,7 +36,8 @@
 #
 # Without an off-site destination the archive is still made, but the script
 # says that no off-site copy exists and exits 3, so a timer shows as failed.
-# --local-only says that is intended (the tests use it).
+# --local-only says that is intended and skips the off-site copy. Temporary
+# instances use that path automatically (ADR-011 item 2.2).
 #
 # --pre-upgrade <tag> is for conch-upgrade.sh: a local-only archive named
 # pre-upgrade-<tag>-<instance>-<time>.tar.gz, which the nightly retention
@@ -54,6 +56,8 @@
 # rclone and s3cmd read their own credentials (RCLONE_CONFIG, ~/.s3cfg); keep
 # those in files of mode 0600 too, never in this repository.
 # CONCH_DATA_ROOT (default /var/lib/conch) comes from the environment only.
+# CONCH_ETC (default /etc/conch) locates the instance env file for the root
+# step only; neither it nor the file's contents are passed to either user.
 set -euo pipefail
 # Character classes such as [0-9] mean ASCII only in the C locale.
 export LC_ALL=C
@@ -177,6 +181,8 @@ store() {
 
     if [ -n "$pre_upgrade" ]; then
         echo "conch-backup: pre-upgrade backup, kept on this host only"
+    elif [ "$local_only" = 1 ]; then
+        echo "conch-backup: local only, as asked (--local-only); no off-site copy was made"
     elif [ -n "${CONCH_BACKUP_RCLONE_DEST:-}" ]; then
         command -v rclone >/dev/null || die "CONCH_BACKUP_RCLONE_DEST is set but rclone is not installed"
         rclone copy "$archive" "$CONCH_BACKUP_RCLONE_DEST/$instance/"
@@ -186,8 +192,6 @@ store() {
         command -v s3cmd >/dev/null || die "CONCH_BACKUP_S3CMD_DEST is set but s3cmd is not installed"
         s3cmd put "$archive" "$archive.sha256" "$CONCH_BACKUP_S3CMD_DEST/$instance/"
         echo "conch-backup: copied off-site with s3cmd to $CONCH_BACKUP_S3CMD_DEST/$instance/"
-    elif [ "$local_only" = 1 ]; then
-        echo "conch-backup: local only, as asked (--local-only); no off-site copy was made"
     else
         echo "conch-backup: NO OFF-SITE COPY WAS MADE: set CONCH_BACKUP_RCLONE_DEST or CONCH_BACKUP_S3CMD_DEST (docs/deploy.md). The archive is on this host only." >&2
         exit 3
@@ -198,6 +202,17 @@ case "$step" in
     snapshot) snapshot; exit 0 ;;
     store) store; exit 0 ;;
 esac
+
+# Only the coordinating step (root in the unit, the invoking user in tests)
+# reads the root-owned instance env file, before handing off either step.
+# Its format is unquoted KEY=value, one per line. Never source it or expose
+# its secrets: only an exact line opts out of the required off-site copy.
+# A missing or unreadable file leaves the normal backup requirement intact.
+instance_env=${CONCH_ETC:-/etc/conch}/$instance.env
+if [ -r "$instance_env" ] && grep -Fxq 'CONCHD_MODE=temporary' "$instance_env" 2>/dev/null; then
+    local_only=1
+    echo "conch-backup: temporary instance: local-only backup, by ADR-011 item 2.2"
+fi
 
 # The whole backup: the snapshot into a file only this process can read, then
 # the store step reading it on stdin.
