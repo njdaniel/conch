@@ -26,7 +26,8 @@
 //!   comes once the hang has passed with no frame, or since the last frame at or above the
 //!   level, so a source that stops delivering, or trickles, does not hold the gate open;
 //!   and a release tail, which the gate counts in frames, is cut once it has run for its
-//!   length by the clock.
+//!   length by the clock, in push-to-talk as well (issue #686): a source that stops
+//!   delivering cannot keep a released press in its tail.
 //! - Every report of the detector's says how many times the detector had been restarted
 //!   when it was made. A report made before the last restart the session asked for is
 //!   stale, and the session does not pass it on ([`Transmitter::is_current`]): quiet and an
@@ -642,15 +643,13 @@ impl<F: MicFeed> Task<F> {
     }
 
     /// The task looked and the microphone had no frame. In open mode that time counts as
-    /// quiet, so a source that stops delivering does not hold the gate open. And a release
-    /// tail, which the gate counts in frames, would last for as long as frames take to come,
+    /// quiet, so a source that stops delivering does not hold the gate open (in push-to-talk
+    /// the detector says nothing, and only the key ends a press). And a release tail, in
+    /// either mode (issue #686), which the gate counts in frames, would last for as long as frames take to come,
     /// for ever with none coming: once it has run for its length by the clock, it is cut. A
     /// source that delivers on time has sent the whole tail by then; one that is a few
     /// milliseconds late can lose the tail's last frame.
     fn no_frame(&mut self) {
-        if !self.listen.is_open() {
-            return;
-        }
         if let Some(said) = self.listen.no_frame() {
             self.report(said);
         }
