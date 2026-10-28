@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
+import { JoiningSettings, type JoiningRequest } from './joiningSettings';
 import { StageHost } from './stage';
 import type { ChannelsState } from './state/channels';
 import { connectionLabel, type ConnectionState } from './state/connection';
@@ -148,6 +149,23 @@ export function Lobby({
     if (!wideNow) setPanelOpen(false);
   }
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Settings with Joining and guests expanded, asked for from the invite panel
+  // (issue #909).
+  const [joiningAsks, setJoiningAsks] = useState(0);
+  // Opened from there, the section takes focus, not the heading, so the
+  // switch is in view.
+  const toJoining = useRef(false);
+  const joining = useMemo<JoiningRequest>(
+    () => ({
+      count: joiningAsks,
+      open: () => {
+        toJoining.current = true;
+        setJoiningAsks((n) => n + 1);
+        setSettingsOpen(true);
+      },
+    }),
+    [joiningAsks],
+  );
   const asking = overlay !== undefined && overlay !== null;
   // Which sign-out is waiting for its yes, if one is.
   const [confirming, setConfirming] = useState<'here' | 'everywhere' | null>(null);
@@ -182,8 +200,10 @@ export function Lobby({
   // button is inert behind it, and cannot take focus.
   const settingsClosed = useRef(false);
   useEffect(() => {
-    if (settingsOpen) settingsHeading.current?.focus();
-    else if (settingsClosed.current) {
+    if (settingsOpen) {
+      if (toJoining.current) toJoining.current = false;
+      else settingsHeading.current?.focus();
+    } else if (settingsClosed.current) {
       settingsClosed.current = false;
       settingsButton.current?.focus();
     }
@@ -222,221 +242,223 @@ export function Lobby({
   };
 
   return (
-    <div className="lobby">
-      {/* While Settings is open the rest of the page is inert: the panel is
-          modal, and focus cannot wander behind its backdrop. */}
-      <header className="topbar" inert={settingsOpen || asking}>
-        <h1 className="brand">Conch</h1>
-        <div role="status" aria-label="Status" className="status">
-          <Avatar id={me} name={name} />
-          <span className="status-who">{name}</span>
-          <span className="status-server">{origin}</span>
-          <span className={`conn conn-${connection}`}>{connectionLabel(connection)}</span>
-        </div>
-        <div className="topbar-actions">
-          {notificationCenter}
-          {invites}
-          <button
-            ref={membersButton}
-            type="button"
-            className="icon-button"
-            aria-expanded={panelOpen}
-            aria-controls="members-body"
-            onClick={() => {
-              setPanelOpen(!panelOpen);
-            }}
-          >
-            <Glyph name="members" />
-            <span className="label">Members</span>
-          </button>
-          <button
-            ref={settingsButton}
-            type="button"
-            className="icon-button"
-            aria-expanded={settingsOpen}
-            aria-controls="settings-panel"
-            onClick={() => {
-              if (settingsOpen) closeSettings();
-              else setSettingsOpen(true);
-            }}
-          >
-            <Glyph name="settings" />
-            <span className="label">Settings</span>
-          </button>
-        </div>
-      </header>
-      <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
-        <nav aria-label="Channels" className="channels">
-          <h2>Channels</h2>
-          {channels.loaded ? (
-            <>
-              <ChannelList
-                channels={channels.channels}
-                selected={channels.selected}
-                unread={unread}
-                occupancy={occupancy}
-                empty={newChannel === null || newChannel === undefined ? undefined : 'No channels yet'}
-                rename={renameChannel}
-                onOpen={onOpen}
-              />
-              {newChannel}
-            </>
-          ) : connection === 'reconnecting' ? (
-            <div className="problem">
-              <p className="empty">Cannot reach the server</p>
-              <button type="button" onClick={onRetry}>
-                Try again
-              </button>
-              {report}
+    <JoiningSettings.Provider value={joining}>
+      <div className="lobby">
+        {/* While Settings is open the rest of the page is inert: the panel is
+            modal, and focus cannot wander behind its backdrop. */}
+        <header className="topbar" inert={settingsOpen || asking}>
+          <h1 className="brand">Conch</h1>
+          <div role="status" aria-label="Status" className="status">
+            <Avatar id={me} name={name} />
+            <span className="status-who">{name}</span>
+            <span className="status-server">{origin}</span>
+            <span className={`conn conn-${connection}`}>{connectionLabel(connection)}</span>
+          </div>
+          <div className="topbar-actions">
+            {notificationCenter}
+            {invites}
+            <button
+              ref={membersButton}
+              type="button"
+              className="icon-button"
+              aria-expanded={panelOpen}
+              aria-controls="members-body"
+              onClick={() => {
+                setPanelOpen(!panelOpen);
+              }}
+            >
+              <Glyph name="members" />
+              <span className="label">Members</span>
+            </button>
+            <button
+              ref={settingsButton}
+              type="button"
+              className="icon-button"
+              aria-expanded={settingsOpen}
+              aria-controls="settings-panel"
+              onClick={() => {
+                if (settingsOpen) closeSettings();
+                else setSettingsOpen(true);
+              }}
+            >
+              <Glyph name="settings" />
+              <span className="label">Settings</span>
+            </button>
+          </div>
+        </header>
+        <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
+          <nav aria-label="Channels" className="channels">
+            <h2>Channels</h2>
+            {channels.loaded ? (
+              <>
+                <ChannelList
+                  channels={channels.channels}
+                  selected={channels.selected}
+                  unread={unread}
+                  occupancy={occupancy}
+                  empty={newChannel === null || newChannel === undefined ? undefined : 'No channels yet'}
+                  rename={renameChannel}
+                  onOpen={onOpen}
+                />
+                {newChannel}
+              </>
+            ) : connection === 'reconnecting' ? (
+              <div className="problem">
+                <p className="empty">Cannot reach the server</p>
+                <button type="button" onClick={onRetry}>
+                  Try again
+                </button>
+                {report}
+              </div>
+            ) : (
+              <p className="empty">Loading channels…</p>
+            )}
+          </nav>
+          <main className="centre">
+            <div ref={setStage} className="stage" />
+            <section aria-label="Conversation" className="conversation">
+              {temporary === true ? <TemporaryBanner /> : null}
+              {banner}
+              {channels.lost === undefined ? null : (
+                <p role="alert" className="banner">
+                  You no longer have access to #{channels.lost}
+                </p>
+              )}
+              {conversation}
+            </section>
+          </main>
+          <aside aria-label="Members panel" className="panel">
+            <div
+              ref={membersBody}
+              id="members-body"
+              hidden={!panelOpen}
+              tabIndex={panelOpen ? 0 : undefined}
+              aria-label="Members list"
+              role="region"
+              onKeyDown={membersOver ? onEscape(closeMembers) : undefined}
+            >
+              {membersOver ? (
+                <button type="button" className="icon-button close" onClick={closeMembers}>
+                  <Glyph name="close" />
+                  <span className="label">Close</span>
+                </button>
+              ) : null}
+              {panel}
             </div>
-          ) : (
-            <p className="empty">Loading channels…</p>
+          </aside>
+          {membersOver ? <div className="backdrop" onClick={closeMembers} /> : null}
+        </div>
+        <div className="dock" inert={settingsOpen || asking}>
+          <StageHost.Provider value={stage}>{voice}</StageHost.Provider>
+        </div>
+        {settingsOpen && !asking ? <div className="backdrop" onClick={closeSettings} /> : null}
+        <div
+          id="settings-panel"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="settings-heading"
+          className="drawer" hidden={!settingsOpen} inert={asking} onKeyDown={onEscape(closeSettings)}>
+          <div className="drawer-head">
+            <h2 id="settings-heading" ref={settingsHeading} tabIndex={-1}>
+              Settings
+            </h2>
+            <button type="button" className="icon-button close" onClick={closeSettings}>
+              <Glyph name="close" />
+              <span className="label">Close</span>
+            </button>
+          </div>
+          <section aria-label="Account" className="drawer-section">
+            <p className="who">
+              <Avatar id={me} name={name} />
+              <span>
+                Signed in as <strong>{name}</strong>
+                <br />
+                <span className="hint">{origin}</span>
+              </span>
+            </p>
+            {account}
+            {signIns?.(() => {
+              setConfirming('here');
+            })}
+          </section>
+          {admin === undefined || admin === null ? null : (
+            <section aria-label="Server" className="drawer-section">
+              {admin}
+            </section>
           )}
-        </nav>
-        <main className="centre">
-          <div ref={setStage} className="stage" />
-          <section aria-label="Conversation" className="conversation">
-            {temporary === true ? <TemporaryBanner /> : null}
-            {banner}
-            {channels.lost === undefined ? null : (
-              <p role="alert" className="banner">
-                You no longer have access to #{channels.lost}
+          <section aria-label="Sign out" className="drawer-section signout">
+            {visit !== undefined ? (
+              visit
+            ) : confirming === null ? (
+              <>
+                <div className="actions">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirming('here');
+                    }}
+                    aria-describedby="signout-note"
+                  >
+                    Sign out
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirming('everywhere');
+                    }}
+                    aria-describedby="signout-note"
+                  >
+                    Sign out everywhere
+                  </button>
+                </div>
+                <p id="signout-note" className="hint">
+                  Sign out ends this sign-in, in every tab of this browser. Sign out everywhere ends all of yours, on every device.
+                  {passwordSet
+                    ? ' Either way, you sign in again with your name and password.'
+                    : ' Either way, you will need a new link from an operator to come back into this account.'}
+                </p>
+              </>
+            ) : (
+              <div role="group" aria-labelledby="signout-question" className="signout-confirm">
+                <p id="signout-question">{signOutQuestion(confirming, passwordSet)}</p>
+                <div className="actions">
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => {
+                      const which = confirming;
+                      setConfirming(null);
+                      if (which === 'here') onSignOut();
+                      else onSignOutEverywhere();
+                    }}
+                  >
+                    {confirming === 'here' ? 'Yes, sign out' : 'Yes, sign out everywhere'}
+                  </button>
+                  <button
+                    ref={cancel}
+                    type="button"
+                    onClick={() => {
+                      setConfirming(null);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+            {signOutProblem === null ? null : (
+              <p role="alert" className="notice">
+                {signOutProblem}
               </p>
             )}
-            {conversation}
           </section>
-        </main>
-        <aside aria-label="Members panel" className="panel">
-          <div
-            ref={membersBody}
-            id="members-body"
-            hidden={!panelOpen}
-            tabIndex={panelOpen ? 0 : undefined}
-            aria-label="Members list"
-            role="region"
-            onKeyDown={membersOver ? onEscape(closeMembers) : undefined}
-          >
-            {membersOver ? (
-              <button type="button" className="icon-button close" onClick={closeMembers}>
-                <Glyph name="close" />
-                <span className="label">Close</span>
-              </button>
-            ) : null}
-            {panel}
-          </div>
-        </aside>
-        {membersOver ? <div className="backdrop" onClick={closeMembers} /> : null}
-      </div>
-      <div className="dock" inert={settingsOpen || asking}>
-        <StageHost.Provider value={stage}>{voice}</StageHost.Provider>
-      </div>
-      {settingsOpen && !asking ? <div className="backdrop" onClick={closeSettings} /> : null}
-      <div
-        id="settings-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="settings-heading"
-        className="drawer" hidden={!settingsOpen} inert={asking} onKeyDown={onEscape(closeSettings)}>
-        <div className="drawer-head">
-          <h2 id="settings-heading" ref={settingsHeading} tabIndex={-1}>
-            Settings
-          </h2>
-          <button type="button" className="icon-button close" onClick={closeSettings}>
-            <Glyph name="close" />
-            <span className="label">Close</span>
-          </button>
+          <section aria-label="Help" className="drawer-section">
+            {report}
+            <ServerVersion className="hint" quiet />
+          </section>
         </div>
-        <section aria-label="Account" className="drawer-section">
-          <p className="who">
-            <Avatar id={me} name={name} />
-            <span>
-              Signed in as <strong>{name}</strong>
-              <br />
-              <span className="hint">{origin}</span>
-            </span>
-          </p>
-          {account}
-          {signIns?.(() => {
-            setConfirming('here');
-          })}
-        </section>
-        {admin === undefined || admin === null ? null : (
-          <section aria-label="Server" className="drawer-section">
-            {admin}
-          </section>
-        )}
-        <section aria-label="Sign out" className="drawer-section signout">
-          {visit !== undefined ? (
-            visit
-          ) : confirming === null ? (
-            <>
-              <div className="actions">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setConfirming('here');
-                  }}
-                  aria-describedby="signout-note"
-                >
-                  Sign out
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setConfirming('everywhere');
-                  }}
-                  aria-describedby="signout-note"
-                >
-                  Sign out everywhere
-                </button>
-              </div>
-              <p id="signout-note" className="hint">
-                Sign out ends this sign-in, in every tab of this browser. Sign out everywhere ends all of yours, on every device.
-                {passwordSet
-                  ? ' Either way, you sign in again with your name and password.'
-                  : ' Either way, you will need a new link from an operator to come back into this account.'}
-              </p>
-            </>
-          ) : (
-            <div role="group" aria-labelledby="signout-question" className="signout-confirm">
-              <p id="signout-question">{signOutQuestion(confirming, passwordSet)}</p>
-              <div className="actions">
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={() => {
-                    const which = confirming;
-                    setConfirming(null);
-                    if (which === 'here') onSignOut();
-                    else onSignOutEverywhere();
-                  }}
-                >
-                  {confirming === 'here' ? 'Yes, sign out' : 'Yes, sign out everywhere'}
-                </button>
-                <button
-                  ref={cancel}
-                  type="button"
-                  onClick={() => {
-                    setConfirming(null);
-                  }}
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-          {signOutProblem === null ? null : (
-            <p role="alert" className="notice">
-              {signOutProblem}
-            </p>
-          )}
-        </section>
-        <section aria-label="Help" className="drawer-section">
-          {report}
-          <ServerVersion className="hint" quiet />
-        </section>
+        {overlay}
       </div>
-      {overlay}
-    </div>
+    </JoiningSettings.Provider>
   );
 }

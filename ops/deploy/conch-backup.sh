@@ -205,11 +205,29 @@ esac
 
 # Only the coordinating step (root in the unit, the invoking user in tests)
 # reads the root-owned instance env file, before handing off either step.
-# Its format is unquoted KEY=value, one per line. Never source it or expose
-# its secrets: only an exact line opts out of the required off-site copy.
-# A missing or unreadable file leaves the normal backup requirement intact.
+# Never source it or expose its secrets. The mode is read conservatively, by
+# the same rule as remove-instance.sh and list-instances.sh (#885): the
+# instance is temporary only when at least one line names CONCHD_MODE and
+# every such line is exactly CONCHD_MODE=temporary, with no quote and no
+# continued line anywhere outside a comment. systemd reads indented lines,
+# blanks around '=', quotes and the last assignment, so any other form could
+# run conchd as a normal server, and a normal server must not lose its
+# required off-site copy. A missing or unreadable file is normal too.
+env_mode() {
+    local line n=0
+    if [ ! -f "$1" ] || [ ! -r "$1" ]; then echo normal; return; fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in *\\) echo normal; return ;; esac
+        case "$line" in '#'* | ';'*) continue ;; esac
+        case "$line" in *\'* | *\"*) echo normal; return ;; esac
+        case "$line" in *CONCHD_MODE*) ;; *) continue ;; esac
+        if [ "$line" != CONCHD_MODE=temporary ]; then echo normal; return; fi
+        n=$((n + 1))
+    done <"$1"
+    if [ "$n" -gt 0 ]; then echo temporary; else echo normal; fi
+}
 instance_env=${CONCH_ETC:-/etc/conch}/$instance.env
-if [ -r "$instance_env" ] && grep -Fxq 'CONCHD_MODE=temporary' "$instance_env" 2>/dev/null; then
+if [ "$(env_mode "$instance_env")" = temporary ]; then
     local_only=1
     echo "conch-backup: temporary instance: local-only backup, by ADR-011 item 2.2"
 fi
