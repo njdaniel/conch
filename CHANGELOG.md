@@ -8,6 +8,38 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.4] - 2026-10-28
+
+Upgrade with `conch-upgrade.sh` (docs/deploy.md step 11). There is no
+migration, so a rollback to `alpha.3` keeps the data as it is.
+
+### Added
+
+- **The Conch icon in the browser tab** (#917): the app icon's dark tile, in
+  place of a blank tab.
+
+### Changed
+
+- **A first password set without its enrolment code** now answers 403
+  `enrollment_proof_required` instead of `reauth_required` (#815). The
+  browser points at the enrolment-code field, and `conch password set` asks
+  for `--proof`, instead of asking a member with no password to confirm
+  their password.
+- **`conch-voice` refuses an empty or space-padded `audio.input` or
+  `audio.output`** in `voice.toml` as a bad configuration naming the key
+  (#691). It used to silently mean the default device. Use `default`, or
+  remove the key.
+
+### Fixed
+
+- **Push-to-talk always ends when the microphone stalls** (#686). If the
+  microphone stopped delivering during the release tail, the transmission
+  never ended and the status kept saying "transmitting". It now ends within
+  the tail plus 50 ms.
+- **The voice helper and the TUI agree on every control line** (#690). Both
+  readers refuse a `\u` escape of an unpaired surrogate as malformed, and
+  both refuse an empty `error`, `reason` or `ptt_problem`.
+
 ## [0.1.0-alpha.3] - 2026-10-28
 
 A small build so an operator can resume invites from the browser. Upgrade
