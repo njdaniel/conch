@@ -190,6 +190,14 @@ export function PasswordSettings({
         setLine({ text: 'That enrollment code does not work. Each works once, for a short time: ask an operator for a new one.', refused: true });
         return;
       }
+      if (!result.ok && result.failure !== 'unkept' && result.failure !== 'network' && result.code === 'enrollment_proof_required') {
+        // Not a recent-proof question: there is no password to prove. The
+        // code field is what is missing (issue #815).
+        setBusy(false);
+        setLine({ text: 'Setting a first password needs the enrollment code an operator gave you. Paste it above.', refused: true });
+        proofField.current?.focus();
+        return;
+      }
       settle(result, 'Your password is set. From now on you sign in with your name and this password.', 'The server refused.');
     });
   }
