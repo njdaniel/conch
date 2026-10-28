@@ -85,7 +85,7 @@ import {
   type RenameChannelRequestV1,
 } from './schema/channel';
 import { fileAttachmentPayloadSchema, fileV1, type FileAttachmentV1, type FileV1 } from './schema/file';
-import { listMessagesResponseV2, postMessageResponseV2, searchMessagesResponseV2, type Audience, type MessageV2, type Payload, type PostMessageRequestV2, type SearchMessagesResponseV2 } from './schema/message';
+import { listMessagesResponseV2, postMessageResponseV2, searchMessagesResponseV2, type Audience, type ListMessagesResponseV2, type MessageV2, type Payload, type PostMessageRequestV2, type SearchMessagesResponseV2 } from './schema/message';
 import { listNetsResponseV1, type NetV1 } from './schema/net';
 import {
   createSignInLinkResponseV1,
@@ -1550,6 +1550,10 @@ export async function loadMessagesAfter(channel: string, after: number): Promise
   return result.ok ? { ok: true, value: result.value.messages } : result;
 }
 
+export async function loadThread(channel: string, root: number, after = 0): Promise<ApiResult<ListMessagesResponseV2>> {
+  return authed(`/v2/channels/${encodeURIComponent(channel)}/messages?thread=${String(root)}&after=${String(after)}&limit=${String(historyLimit)}`, listMessagesResponseV2);
+}
+
 export async function searchMessages(channel: string, words: string, before?: number): Promise<ApiResult<SearchMessagesResponseV2>> {
   const query = new URLSearchParams({ q: words, limit: String(historyLimit) });
   if (before !== undefined) query.set('before', String(before));
@@ -1640,11 +1644,12 @@ const postRefusal = (res: Response) => requestRefusal(res, 'The server refused t
 // a net or a list of principals, with a payload (an attachment's file ids, say)
 // when it carries one. It is never repeated here: sending again is the
 // caller's, on a click.
-export async function postMessage(channel: string, body: string, audience?: Audience, payload?: Payload): Promise<PostResult> {
+export async function postMessage(channel: string, body: string, audience?: Audience, payload?: Payload, threadRootId?: number): Promise<PostResult> {
   const request: PostMessageRequestV2 = {
     body,
     ...(audience === undefined ? {} : { audience }),
     ...(payload === undefined ? {} : { payload }),
+    ...(threadRootId === undefined ? {} : { thread_root_id: threadRootId }),
   };
   const reply = await authedPost(`/v2/channels/${encodeURIComponent(channel)}/messages`, request);
   if (reply.kind === 'none') return { ok: false, outcome: 'unconfirmed' };
