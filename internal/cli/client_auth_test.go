@@ -149,6 +149,31 @@ func TestRoundTripReauthOnce(t *testing.T) {
 	}
 }
 
+// enrollment_proof_required is not a recent-proof prompt: the caller has no
+// password to prove, so the reauth hook is never run and the code is the
+// answer, sent once.
+func TestRoundTripEnrollmentProofRequiredSkipsReauth(t *testing.T) {
+	sends := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sends++
+		writeAPIError(w, http.StatusForbidden, schema.ErrorCodeEnrollmentProofRequired)
+	}))
+	defer ts.Close()
+	client, err := NewClient(ts.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofs := 0
+	client.reauth = func(context.Context) error { proofs++; return nil }
+	_, err = client.SetPassword(context.Background(), schema.SetPasswordRequestV1{Password: memberPassword})
+	if !IsServerCode(err, schema.ErrorCodeEnrollmentProofRequired) {
+		t.Fatalf("err = %v, want enrollment_proof_required", err)
+	}
+	if proofs != 0 || sends != 1 {
+		t.Errorf("%d proofs, %d sends; want no proof and one send", proofs, sends)
+	}
+}
+
 // A server without the new routes is an older one, said so, and nothing is
 // assumed about what it would have done.
 func TestOlderServer(t *testing.T) {

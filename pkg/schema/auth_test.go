@@ -41,6 +41,7 @@ func TestAuthGoldenFixtures(t *testing.T) {
 		{"error-auth-failed.json", func() any { return new(Error) }},
 		{"error-reauth-required.json", func() any { return new(Error) }},
 		{"error-password-required.json", func() any { return new(Error) }},
+		{"error-enrollment-proof-required.json", func() any { return new(Error) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {
@@ -331,7 +332,8 @@ func TestAuthConstants(t *testing.T) {
 	if MinPasswordLength != 15 || MaxPasswordLength != 128 || MaxPasswordBytes != 512 || MaxOpenDeviceLinks != 3 {
 		t.Errorf("password %d to %d, %d bytes; %d device links", MinPasswordLength, MaxPasswordLength, MaxPasswordBytes, MaxOpenDeviceLinks)
 	}
-	if ErrorCodeAuthFailed != "auth_failed" || ErrorCodeReauthRequired != "reauth_required" || ErrorCodeSetupOnHost != "setup_on_host" ||
+	if ErrorCodeAuthFailed != "auth_failed" || ErrorCodeReauthRequired != "reauth_required" ||
+		ErrorCodeEnrollmentProofRequired != "enrollment_proof_required" || ErrorCodeSetupOnHost != "setup_on_host" ||
 		ErrorCodePasswordRequired != "password_required" || ErrorCodeAccountsRequireAuth != "accounts_require_auth" {
 		t.Error("an authentication error code changed")
 	}
