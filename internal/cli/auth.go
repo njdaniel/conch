@@ -436,7 +436,10 @@ func runPasswordSet(ctx context.Context, args []string, stdin io.Reader, stdout,
 	switch {
 	case IsServerCode(err, schema.ErrorCodeSetupOnHost):
 		return errors.New("cli: password set: an operator's password is set up from the host: run 'conchd operator setup <id>' there, then 'conch setup'")
-	case IsServerCode(err, schema.ErrorCodeEnrollmentProofRequired):
+	case IsServerCode(err, schema.ErrorCodeEnrollmentProofRequired),
+		// A conchd from before #815 answers a missing proof with reauth_required; this
+		// route sends no other reason for it.
+		IsServerCode(err, schema.ErrorCodeReauthRequired):
 		return errors.New("cli: password set: setting a first password needs an enrollment code from an operator ('conch admin principal sign-in-link --purpose enrollment <id>'); run this again with --proof")
 	case IsServerCode(err, schema.ErrorCodePasswordAlreadySet):
 		return errors.New("cli: password set: you have a password already; change it with 'conch password change'")
