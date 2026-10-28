@@ -186,13 +186,14 @@ never inferred from this COSMIC session. `I` = inventory only, `U` = unavailable
 
 | Id | Capability | Mechanism | Pop!_OS COSMIC Wayland (above) | GNOME Wayland | KDE Wayland | Native X11 | Experiment |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| L-X1 | Electron owner drives the helper: command channel on stdin, events on a Unix socket in `$XDG_RUNTIME_DIR` with the attach line | design §5.2 | D (socketpair refusal; `UnixStream::connect`; 0700 runtime dir) / P | P | P | P | LE1 |
-| L-X2 | Owner loss by EOF on stdin, EOF on the events socket, or parent change; bounds met | design §5.3 | D / P | P | P | P | LE1 |
+| L-X1 | Electron owner drives the helper: command channel on stdin, events on an absolute-path Unix socket under a verified `$XDG_RUNTIME_DIR` (lstat: directory, own uid, `mode & 0o077 == 0`; 0o700 profile directory; abstract names refused; `sun_path` budget) with the attach line | design §5.2 | D (socketpair refusal; `UnixStream::connect`; 0700 runtime dir by specification) / P | P | P | P | LE1 |
+| L-X2 | Owner loss by EOF on stdin, EOF or **any received byte** on the events socket, or parent change; bounds met. **Stdin is a libuv socketpair whose write end lives in Electron main beside many Chromium children**: measured for a leak that would keep the helper's stdin open after main dies | design §5.3 | D / P | P | P | P | LE1 |
 | L-X3 | Owner stop: `leave`, close, `SIGTERM`, `SIGKILL`, reap; no `detached`; nothing killed by name | design §5.3 | D / P | P | P | P | LE1 |
 | L-X4 | Child environment from an allowlist; no token in argv, logs or renderer | design §4.1 | D / P | P | P | P | LE1 |
 | L-M1 | Second connection as the person displaces the first | F1 | **Synthetic: 507 ms, n=1** | — | — | — | done (reproduce with LE2) |
 | L-M2 | Companion under a derived identity stays up beside the helper; folded into the person by conchd | design §6, #897 | P (needs #897 prototype) | — | — | — | LE2 |
 | L-M3 | One voice playback: the companion receives no voice (B1 enforced by grant; B2 by `autoSubscribe: false`) | design §6, #906 | P | — | — | — | LE2 |
+| L-M5 | The companion grant is `["screen_share"]` only, 15 s, `canPublishData: false`; `screen_share_audio` arrives only by permission update on main's request and leaves on stop; a second companion request answers 409; an orphaned companion is removed after the poller's grace; the renderer holds nothing but this grant | design §6.4, #897 | P (needs #897 prototype) | — | — | — | LE2 |
 | L-M4 | One share-audio playback: a remote share's sound heard once; the helper never plays its own companion | design §6, #906 | P | — | — | — | LE2 |
 | L-P1 | Keyboard PTT press and release, another app focused, evdev backend | design §7 | U portal; P selected-device (0 readable nodes) | P | P | P | LE3 |
 | L-P2 | Mouse 4 PTT press and release, another app focused, evdev backend | design §7 | U portal; P selected-device | P | P | P | LE3 |
@@ -212,7 +213,7 @@ never inferred from this COSMIC session. `I` = inventory only, `U` = unavailable
 | L-S5 | Selected-application audio with remote-speech exclusion | design §8 | P; not offered until demonstrated | P | P | P | LE8 |
 | L-S6 | Everything-but-the-call audio; a bare output monitor is **unsupported by policy** | design §8 | P; feedback test with a measurement listener | P | P | P | LE8 |
 | L-C1 | Protected credential storage: the pinned Electron's actual provider; session-only fallback on `basic_text`, locked or denied | design §4.1 | I (Secret Service, Secret portal v1) / P | P | P | P | LE7 |
-| L-C2 | Trusted IPC: subframe, foreign window, stale generation and malicious link rejected; two-server stale responses fenced | design §3, §4 | P (packaged negative tests) | — | — | — | LE7 |
+| L-C2 | Trusted IPC: subframe, foreign window, stale generation and malicious link rejected; two-server stale responses fenced; the share/watch methods return the companion grant and nothing else; `connect-src` is exactly the profile's LiveKit origin per load | design §3, §4 | P (packaged negative tests) | — | — | — | LE7 |
 | L-C3 | No disabled `webSecurity`, CORS or certificate validation; private CA through trust stores | design §3 | D / P | P | P | P | LE7 |
 | L-D1 | x86_64 `.deb` install, upgrade, removal on a clean machine; portal identity; sandbox on | design §9 | I (glibc and package inventory) / P | P | P | P | LE9 |
 | L-D2 | Microphone and output switch, USB and Bluetooth changes, under the helper | existing v2 rules | I / P | P | P | P | LE3 |
@@ -231,8 +232,8 @@ keyboard or a second listener.
 
 | Id | Experiment | Settles |
 | --- | --- | --- |
-| LE1 | A Node script spawns today's helper with a fourth `'pipe'` stdio entry and records the `EventPipe("is not a pipe")` exit (the finding of F5); then, with the `--events-pipe` helper, a Unix socket under `$XDG_RUNTIME_DIR`: attach line, hello, one state line every 100 ms for a minute while the EOF read is pending, then owner exit; measure gate shut, capture stop and exit against the bounds; stop escalation with a hung helper; the allowlisted environment; from a second user, connect to the socket path (expected: refused by the directory mode) | L-X1 to L-X4, L-L3 |
-| LE2 | Against current conchd and LiveKit with the draft's probe harness: reproduce L-M1; then, with a prototype companion grant (#897) and the subscription rule (#906): both connections stay up; the companion receives no voice; a remote share's sound is heard once; the helper does not play its own companion; share claims and stops resolve to the person; `hidden` participant tracks subscribable or not | L-M1 to L-M4, L-S3 |
+| LE1 | A Node script spawns today's helper with a fourth `'pipe'` stdio entry and records the `EventPipe("is not a pipe")` exit (the finding of F5); then, with the `--events-pipe` helper, a Unix socket under a verified `$XDG_RUNTIME_DIR`: attach line, hello, one state line every 100 ms for a minute while the EOF read is pending, then owner exit; a byte written to the helper by a stand-in owner (expected: owner loss); an abstract-namespace name and a relative path (expected: refused); a symlink at the socket path (expected: refused by `symlink_metadata`); measure gate shut, capture stop and exit against the bounds; stop escalation with a hung helper; the allowlisted environment; from a second user, connect to the socket path (expected: refused by the directory mode); **kill main while Chromium children are alive and record whether the helper's stdin stays open** (the socketpair leak) | L-X1 to L-X4, L-L3 |
+| LE2 | Against current conchd and LiveKit with the draft's probe harness: reproduce L-M1; then, with a prototype companion grant (#897) and the subscription rule (#906): both connections stay up; the companion receives no voice; a remote share's sound is heard once; the helper does not play its own companion; share claims and stops resolve to the person; the companion token carries `["screen_share"]` only and `canPublishData: false`; a publish of a synthesised audio track from the companion is **refused by LiveKit** until main's permission request, and refused again after stop; a second companion request answers 409; an orphaned companion disappears within the poller's grace; `hidden` participant tracks subscribable or not | L-M1 to L-M5, L-S3 |
 | LE3 | With Nick at the keyboard and a second listener, evdev backend after a one-device udev grant: keyboard and Mouse 4 press and release in an editor, another app, a fullscreen app and a game; grabs; unplug while held; repeat storms; helper started with the key held; hold past the desktop default; USB and Bluetooth device changes | L-P1 to L-P6, L-D2 |
 | LE4 | On a desktop that advertises GlobalShortcuts (GNOME or KDE machine): whether the helper, windowless, can create the session; `Activated` and `Deactivated` for a key and for Mouse 4; denied binding; conflict; session closure and compositor restart | L-P7 |
 | LE5 | On a genuine X11 session: press and release, grabs, lock, fullscreen | L-P8 |
@@ -246,11 +247,18 @@ keyboard or a second listener.
 The security-reviewer agent reviewed the draft, the inventory and the retained identity
 receipts on 2026-10-28: **PASS for the draft planning/spike change**, with no blocking findings.
 That pass predates this revision's changes to the media model (§6) and the transport (§5); both
-reuse contracts whose own reviews are owed under #893 and #897, and the revised threat table
-(design §10) names the new rows (events channel observed or hijacked; a second connection as the
-person; share audio returning the room). A fresh pass on the revised design is requested before
-acceptance. It remains no approval of dependency choices, new wire contracts or implementation
-readiness.
+reuse contracts whose own reviews are owed under #893 and #897. The security review of the
+revised design (2026-10-28, request changes) found two false authority statements, both fixed:
+the renderer does hold a LiveKit credential under model B, the companion grant, and nothing else
+(design D1-2, §4, §6); and share audio must never be in that grant, only added by conchd's
+permission update on main's request after consent (design §6.4, a requirement on #897). The
+threat table (design §10) now names: a compromised renderer publishing synthetic media as the
+person's screen; a compromised renderer subscribing to voice under B2; share audio published
+without a press; the events channel observed or hijacked; a second connection as the person;
+share audio returning the room. The transport gained verified runtime-directory checks, abstract
+sockets forbidden, bind-then-retry instead of unlink-then-bind, and received bytes as owner loss.
+A re-check of the amended text is requested before acceptance. None of this is approval of
+dependency choices, new wire contracts or implementation readiness.
 
 ## Actionable blockers and handoff
 
