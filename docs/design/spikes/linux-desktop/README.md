@@ -30,7 +30,8 @@ lines; retained duplicate receipts therefore use `.log` extensions.
 
 See the [design](../../linux-desktop.md) and
 [capability report](../../../reviews/linux-desktop-capabilities.md) for exact
-versions, results, limitations and the human hardware procedure. The single-
-participant native media bridge and portal backend need approved versioned
-contracts/dependencies before proof code is added. No Electron runtime or
+versions, results, limitations and the human hardware procedure. The companion
+participant (#897), the helper's subscription rule (#906), the Linux events
+endpoint (#893) and the portal backend each need approved versioned
+contracts or dependencies before proof code is added. No Electron runtime or
 new protocol/dependency is installed by this research tooling.
