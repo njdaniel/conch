@@ -272,7 +272,7 @@ func runSetup(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 	}
 	setup.WithToken(resp.Token)
 	name := safeLine(resp.Principal.Name)
-	_, _ = fmt.Fprintf(stderr, "Setting up %s: a new password, then an authenticator app.\n", name)
+	_, _ = fmt.Fprintf(stderr, "Setting up %s: a new password, then an authenticator app where the server asks for one.\n", name)
 	password, err := p.newPassword("New password: ")
 	if err != nil {
 		return err
