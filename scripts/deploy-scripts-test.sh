@@ -794,6 +794,7 @@ cat >"$sb/caddy" <<'STANDIN'
 w=$CONCH_TEST_WORK
 printf '%s\n' "$*" >>"$w/caddy.calls"
 [ "$1" = validate ] && [ "$2" = --config ] && [ "$4 $5" = "--adapter caddyfile" ] || exit 2
+if [ -e "$w/lose-keys-orig" ]; then rm -f "$CONCH_ETC"/.livekit-keys.orig.*; fi
 if [ -e "$w/fail-caddy" ]; then echo "Error: adapting config using caddyfile: stand-in failure" >&2; exit 1; fi
 o=$(grep -v '^[[:space:]]*#' "$3" | tr -cd '{' | wc -c) c=$(grep -v '^[[:space:]]*#' "$3" | tr -cd '}' | wc -c)
 [ "$o" = "$c" ] || { echo "Error: unbalanced braces" >&2; exit 1; }
@@ -1037,6 +1038,19 @@ grep -q '^conch-gamma:' "$work/passwd" || fail "a failed undo step: the user sho
 sed -i '/^conch-gamma:/d' "$work/passwd"
 unchanged "$work/t0" "a failed undo step, once its user is removed by hand"
 ok "add-instance: an undo step that fails is exit 5 and names what is left, so the DNS records are kept"
+
+# The same when the LiveKit key file cannot be put back (its saved copy is
+# gone): exit 5 and the new key named as left, not exit 1.
+touch "$work/fail-caddy" "$work/lose-keys-orig"
+status=0
+onpty "$work/add-instance" gamma example.test --temporary --port "$gport" --yes >"$work/undo-keys.out" 2>&1 || status=$?
+rm -f "$work/fail-caddy" "$work/lose-keys-orig"
+[ "$status" = 5 ] && grep -q "could not undo 'key'" "$work/undo-keys.out" ||
+    fail "a key file that cannot be put back: add-instance exited $status, want 5: $(cat "$work/undo-keys.out")"
+grep -q '^gamma-' "$etc/livekit-keys" || fail "a key file that cannot be put back: the test proves nothing, gamma's key is not there"
+sed -i '/^gamma-/d' "$etc/livekit-keys"
+unchanged "$work/t0" "a key file that cannot be put back, once the key line is removed by hand"
+ok "add-instance: a LiveKit key file that cannot be put back is exit 5, so the DNS records are kept"
 
 # A failure after conchd started (it never answers): the undo stops conchd,
 # the backup timer and the backup unit, removes the backup directory a backup

@@ -500,7 +500,8 @@ undo_step() {
         user) "$userdel" "conch-$name" && say "undone: removed the user conch-$name" ;;
         data) rm -rf -- "$data" && say "undone: removed $data" ;;
         key)
-            mv -f -- "$keys_orig" "$keys" && say "undone: removed $name's key from $keys"
+            mv -f -- "$keys_orig" "$keys" || return 1
+            say "undone: removed $name's key from $keys"
             if [ "$livekit_restarted" = 1 ]; then
                 sysctl restart livekit && say "undone: restarted LiveKit without that key"
             fi ;;
