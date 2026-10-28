@@ -215,7 +215,7 @@ export function GuestSettings({ channels, onUnauthorized }: { readonly channels:
             {loadLine}
           </p>
         )}
-        <InviteSettings open={open} onUnauthorized={onUnauthorized} />
+        <InviteSettings open={open} asked={sentHere} onUnauthorized={onUnauthorized} />
         {loaded === null ? (
           loadLine === null ? (
             <p className="hint">Loading…</p>
