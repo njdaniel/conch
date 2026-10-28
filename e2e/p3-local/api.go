@@ -349,6 +349,13 @@ func (f *eventFeed) close() {
 	<-f.done
 }
 
+// rostersSeen is a copy of every roster frame so far, in order.
+func (f *eventFeed) rostersSeen() []schema.SessionRosterV1 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]schema.SessionRosterV1(nil), f.rosters...)
+}
+
 // runsSeen is a copy of every run frame so far.
 func (f *eventFeed) runsSeen() []schema.RunV1 {
 	f.mu.Lock()

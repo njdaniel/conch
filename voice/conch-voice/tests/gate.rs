@@ -185,6 +185,42 @@ async fn the_release_tail_is_sent_and_then_the_track_is_muted() {
     assert_frames_only_while_unmuted(&rig.sdk.calls());
 }
 
+/// Issue #686: in push-to-talk, a microphone that stops delivering frames during the release
+/// tail, which the gate counts in frames, does not keep the person transmitting: the tail is
+/// cut once it has run for its length by the clock, and the track is muted.
+#[tokio::test]
+async fn a_microphone_that_stalls_in_the_release_tail_ends_the_transmission() {
+    const TAIL_MS: u32 = 100;
+    let (mic, source) = support::script::Switch::make();
+    let setup = Setup {
+        release_tail_ms: TAIL_MS,
+        microphone: Some(mic),
+        ..Setup::default()
+    };
+    let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
+    rig.ready().await;
+    rig.line(Down);
+    rig.talking().await;
+    rig.frames_beyond(2).await;
+    let mutes = rig.sdk.count(Call::Mute);
+    rig.line(Up);
+    // The source stalls as the key is let go: none of the tail's frames can arrive.
+    source.stall(true);
+    let stalled_at = std::time::Instant::now();
+    rig.not_talking().await;
+    let took = stalled_at.elapsed();
+    assert!(
+        took <= Duration::from_millis(u64::from(TAIL_MS) + 300),
+        "stopped {took:?} after the stall, tail {TAIL_MS} ms"
+    );
+    rig.reported(2).await;
+    assert_eq!(rig.conchd.reported(), ["started", "stopped"]);
+    assert_eq!(rig.sdk.count(Call::Mute), mutes + 1);
+    assert!(rig.sdk.is_muted());
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+    assert_frames_only_while_unmuted(&rig.sdk.calls());
+}
+
 #[tokio::test]
 async fn no_frame_is_sent_in_any_state_where_the_gate_must_be_shut() {
     let rig = Rig::start().await;

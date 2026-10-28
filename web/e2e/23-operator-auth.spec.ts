@@ -276,7 +276,7 @@ test('G7a a replayed code is refused, and an action that needs a recent proof as
   await expect(region.getByLabel('Allow guest visits')).toBeChecked();
   // Cancel first: nothing changes, and the choice is still there.
   await dialog.getByRole('button', { name: 'Cancel' }).click();
-  await expect(region.getByText('It needs your password and a code first. Nothing was changed.')).toBeVisible();
+  await expect(region.getByText('It needs your password first. Nothing was changed.')).toBeVisible();
   await expect(region.getByLabel('Allow guest visits')).toBeChecked();
   expect(await guestsAllowed(origin, token)).toBe(false);
 
