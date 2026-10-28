@@ -525,7 +525,7 @@ undo_backups() {
     say "undone: removed $backup_dir/$name, which a backup made during this run"
 }
 on_exit() {
-    local status=$? i step blocked=0 left=""
+    local status=$? i step blocked=0 failed=0 left=""
     set +e
     trap - EXIT
     trap '' INT TERM HUP
@@ -540,13 +540,25 @@ on_exit() {
         if ! stopped_for_sure; then
             blocked=1
         else
-            undo_backups >&2 || say "could not remove $backup_dir/$name: remove it by hand" >&2
+            if ! undo_backups >&2; then
+                say "could not remove $backup_dir/$name: remove it by hand" >&2
+                failed=1
+            fi
         fi
         if [ "$blocked" = 0 ]; then
             for ((; i >= 0; i--)); do
-                undo_step "${undo[i]}" >&2 || say "could not undo '${undo[i]}': see above, and fix it by hand" >&2
+                if ! undo_step "${undo[i]}" >&2; then
+                    say "could not undo '${undo[i]}': see above, and fix it by hand" >&2
+                    failed=1
+                fi
             done
-            [ "$status" = 130 ] || status=1
+            if [ "$failed" = 1 ]; then
+                # Something of the server is left: status 5, so conch-server keeps its DNS records.
+                say "ROLLBACK INCOMPLETE: fix what is named above by hand, then remove what is left with remove-instance.sh $name (temporary) or remove-instance.sh $name --force-normal." >&2
+                status=5
+            elif [ "$status" != 130 ]; then
+                status=1
+            fi
         else
             for ((; i >= 0; i--)); do
                 step=$(undo_text "${undo[i]}")

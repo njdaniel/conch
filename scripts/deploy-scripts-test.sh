@@ -814,6 +814,7 @@ cat >"$sb/userdel" <<'STANDIN'
 w=$CONCH_TEST_WORK
 printf '%s\n' "$*" >>"$w/useradd.calls"
 case "$1" in conch-backup | conch-drill) touch "$w/shared-user-touched"; exit 9 ;; esac
+[ ! -e "$w/fail-userdel" ] || { echo "userdel: stand-in failure" >&2; exit 1; }
 grep -q "^$1:" "$w/passwd" || exit 6
 sed -i "/^$1:/d" "$w/passwd"
 STANDIN
@@ -1022,6 +1023,20 @@ for f in datadir caddy reload-caddy restart-livekit bootstrap; do
         fail "$f failure: does not say what it undid: $(cat "$work/undo-$f.out")"
 done
 ok "add-instance: a failure making the data directory, in caddy validate, Caddy's reload, LiveKit's restart or the operator bootstrap is undone back to the same bytes, and says what it undid"
+
+# An undo step that itself fails (here userdel, after caddy validate failed)
+# is exit 5, not 1, so conch-server keeps the DNS records of what is left.
+touch "$work/fail-caddy" "$work/fail-userdel"
+status=0
+onpty "$work/add-instance" gamma example.test --temporary --port "$gport" --yes >"$work/undo-fail.out" 2>&1 || status=$?
+rm -f "$work/fail-caddy" "$work/fail-userdel"
+[ "$status" = 5 ] || fail "a failed undo step: add-instance exited $status, want 5: $(cat "$work/undo-fail.out")"
+grep -q "could not undo 'user'" "$work/undo-fail.out" && grep -q 'ROLLBACK INCOMPLETE' "$work/undo-fail.out" ||
+    fail "a failed undo step: does not say what is left: $(cat "$work/undo-fail.out")"
+grep -q '^conch-gamma:' "$work/passwd" || fail "a failed undo step: the user should be left in place"
+sed -i '/^conch-gamma:/d' "$work/passwd"
+unchanged "$work/t0" "a failed undo step, once its user is removed by hand"
+ok "add-instance: an undo step that fails is exit 5 and names what is left, so the DNS records are kept"
 
 # A failure after conchd started (it never answers): the undo stops conchd,
 # the backup timer and the backup unit, removes the backup directory a backup
