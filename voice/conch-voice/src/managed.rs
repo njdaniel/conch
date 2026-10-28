@@ -479,10 +479,19 @@ struct Watched {
     lost: bool,
 }
 
+/// Whether a failed write says the owner is gone. An interrupted write is retried by
+/// `write_all`, and a write that would block is an owner that is behind, not gone: neither
+/// says anything of the owner's presence.
+fn is_loss(error: &std::io::Error) -> bool {
+    !matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+    )
+}
+
 impl Watched {
     fn check<T>(&mut self, result: std::io::Result<T>) -> std::io::Result<T> {
-        // An interrupted write is retried by `write_all`; it says nothing about the owner.
-        let failed = matches!(&result, Err(e) if e.kind() != std::io::ErrorKind::Interrupted);
+        let failed = matches!(&result, Err(error) if is_loss(error));
         if failed && !self.lost {
             self.lost = true;
             log::warn!("managed: the events cannot be written; the owner is gone");
@@ -2464,10 +2473,12 @@ mod tests {
     }
 
     /// A pipe nobody reads: every write to it fails.
-    struct Broken;
+    #[derive(Clone, Default)]
+    struct Broken(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
     impl Write for Broken {
         fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(std::io::ErrorKind::BrokenPipe.into())
         }
 
@@ -2476,9 +2487,13 @@ mod tests {
         }
     }
 
-    /// What `inputs` holds once the events have had time to be written.
-    fn lost_after(inputs: &mut mpsc::UnboundedReceiver<Input>) -> usize {
-        std::thread::sleep(Duration::from_millis(300));
+    /// What `inputs` holds once the writer has dealt with everything queued so far: the
+    /// queue is flushed (and that is asserted), not waited out.
+    fn lost_after(events: &Events, inputs: &mut mpsc::UnboundedReceiver<Input>) -> usize {
+        assert!(
+            events.queue.flush_blocking(Duration::from_secs(10)),
+            "the writer did not get through its queue"
+        );
         let mut lost = 0;
         while let Ok(input) = inputs.try_recv() {
             assert!(matches!(input, Input::OwnerLost), "only the loss is sent");
@@ -2492,12 +2507,15 @@ mod tests {
     #[test]
     fn a_failed_write_on_the_events_is_the_owner_lost_once() {
         let (inputs, mut received) = mpsc::unbounded_channel();
-        let mut events = Events::spawn(Box::new(Broken), inputs, Watchdog::off());
+        let writer = Broken::default();
+        let mut events = Events::spawn(Box::new(writer.clone()), inputs, Watchdog::off());
         events.hello();
         for _ in 0..5 {
             events.state(&starting(), Keep::IfThereIsRoom);
         }
-        assert_eq!(lost_after(&mut received), 1);
+        // Every line was attempted and failed, and still the loss is said once.
+        assert_eq!(lost_after(&events, &mut received), 1);
+        assert_eq!(writer.0.load(std::sync::atomic::Ordering::SeqCst), 6);
     }
 
     /// The case the issue names: the descriptor's other end is closed, as when the owner
@@ -2509,20 +2527,39 @@ mod tests {
         let (inputs, mut received) = mpsc::unbounded_channel();
         let mut events = Events::spawn(Box::new(writer), inputs, Watchdog::off());
         events.hello();
-        assert_eq!(lost_after(&mut received), 1);
+        assert_eq!(lost_after(&events, &mut received), 1);
     }
 
-    /// Interrupted once, then written: what `write_all` retries is not the owner's loss.
-    #[derive(Clone, Default)]
-    struct InterruptedOnce(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    /// Fails its first write with `kind`, then takes everything and keeps it.
+    #[derive(Clone)]
+    struct FailsOnce {
+        kind: std::io::ErrorKind,
+        state: std::sync::Arc<Mutex<(bool, Vec<u8>)>>,
+    }
 
-    impl Write for InterruptedOnce {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            if self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                Ok(buf.len())
-            } else {
-                Err(std::io::ErrorKind::Interrupted.into())
+    impl FailsOnce {
+        fn new(kind: std::io::ErrorKind) -> Self {
+            Self {
+                kind,
+                state: Arc::default(),
             }
+        }
+
+        fn text(&self) -> String {
+            let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            String::from_utf8_lossy(&state.1).into_owned()
+        }
+    }
+
+    impl Write for FailsOnce {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if !state.0 {
+                state.0 = true;
+                return Err(self.kind.into());
+            }
+            state.1.extend_from_slice(buf);
+            Ok(buf.len())
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
@@ -2530,17 +2567,34 @@ mod tests {
         }
     }
 
+    /// An interrupted write is retried by `write_all` and arrives: not the owner's loss.
     #[test]
     fn an_interrupted_write_is_not_the_owner_lost() {
-        let writer = InterruptedOnce::default();
+        let writer = FailsOnce::new(std::io::ErrorKind::Interrupted);
         let (inputs, mut received) = mpsc::unbounded_channel();
         let mut events = Events::spawn(Box::new(writer.clone()), inputs, Watchdog::off());
         events.hello();
-        assert_eq!(lost_after(&mut received), 0);
+        assert_eq!(lost_after(&events, &mut received), 0);
         assert!(
-            writer.0.load(std::sync::atomic::Ordering::SeqCst),
-            "the write was interrupted"
+            writer.text().contains("hello"),
+            "the retry arrived: {}",
+            writer.text()
         );
+    }
+
+    /// A write that would block is an owner that is behind. The line it met is lost, as
+    /// any line a full pipe does not take, and the next is written: the session goes on.
+    #[test]
+    fn a_write_that_would_block_is_not_the_owner_lost() {
+        let writer = FailsOnce::new(std::io::ErrorKind::WouldBlock);
+        let (inputs, mut received) = mpsc::unbounded_channel();
+        let mut events = Events::spawn(Box::new(writer.clone()), inputs, Watchdog::off());
+        events.hello();
+        events.state(&starting(), Keep::IfThereIsRoom);
+        assert_eq!(lost_after(&events, &mut received), 0);
+        let text = writer.text();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("state"), "{text}");
     }
 
     #[test]
@@ -2552,7 +2606,7 @@ mod tests {
         events.hello();
         events.state(&starting(), Keep::IfThereIsRoom);
         writer.until_lines(2);
-        assert_eq!(lost_after(&mut received), 0);
+        assert_eq!(lost_after(&events, &mut received), 0);
     }
 
     fn starting() -> Snapshot {
@@ -2700,19 +2754,52 @@ mod tests {
         }
     }
 
+    /// Not a test of its own: run as a process by the test below, it has the events fail to
+    /// be written with nobody handling input (the receiver is held, unread), and then
+    /// hangs. Only the watchdog the failed write armed can end it.
+    #[test]
+    fn child_process_whose_events_cannot_be_written() {
+        if std::env::var("CONCH_VOICE_WATCHDOG_CHILD").is_err() {
+            return;
+        }
+        let (inputs, _received) = mpsc::unbounded_channel();
+        let mut events = Events::spawn(Box::new(Broken::default()), inputs, Watchdog::process());
+        events.hello();
+        loop {
+            std::thread::park();
+        }
+    }
+
+    /// A failed write on the events arms the real watchdog, so the process is gone within
+    /// the owner-loss bound even when nothing handles the `OwnerLost` it sent (#894).
+    #[test]
+    fn a_failed_events_write_gets_the_process_ended_within_the_owner_loss_bound() {
+        let bound = Duration::from_millis(VOICE_CONTROL_OWNER_LOSS_EXIT_MS);
+        let (status, took) = watched_child_of(
+            "managed::tests::child_process_whose_events_cannot_be_written",
+            "stopped",
+        );
+        assert_eq!(status, Some(0));
+        assert!(took >= bound - EXIT_GRACE, "{took:?}");
+        assert!(took < bound + Duration::from_secs(10), "{took:?}");
+    }
+
     /// Runs the child above, armed after `how` ("stopped" or "failed"). Its exit code
     /// and how long it took.
     fn watched_child(how: &str) -> (Option<i32>, Duration) {
+        watched_child_of(
+            "managed::tests::child_process_hangs_with_the_watchdog_armed",
+            how,
+        )
+    }
+
+    /// As [`watched_child`], for the child test `name`.
+    fn watched_child_of(name: &str, how: &str) -> (Option<i32>, Duration) {
         use std::process::{Command, Stdio};
         use std::time::Instant;
         let began = Instant::now();
         let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "managed::tests::child_process_hangs_with_the_watchdog_armed",
-                "--nocapture",
-                "--test-threads=1",
-            ])
+            .args(["--exact", name, "--nocapture", "--test-threads=1"])
             .env("CONCH_VOICE_WATCHDOG_CHILD", how)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
