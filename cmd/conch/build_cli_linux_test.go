@@ -34,7 +34,7 @@ func buildCLIWith(bin string, run func(name string, args ...string) (string, err
 }
 
 func runCmd(name string, args ...string) (string, error) {
-	out, err := exec.Command(name, args...).CombinedOutput() // #nosec G204 -- fixed arguments
+	out, err := exec.Command(name, args...).CombinedOutput() // #nosec G204 -- every caller passes a literal command
 	return string(out), err
 }
 
