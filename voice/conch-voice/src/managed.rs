@@ -468,6 +468,44 @@ enum Keep {
     Answer,
 }
 
+/// The events' pipe, as the owner's presence is read from it: a write or flush that fails
+/// is the owner gone, whatever the platform's error for it is (a broken pipe, a closed
+/// descriptor). It says so once, as the end of the control pipe does, and the error goes on
+/// to the writer thread as before, which loses that line and empties the queue.
+struct Watched {
+    out: Box<dyn Write + Send>,
+    inputs: mpsc::UnboundedSender<Input>,
+    watchdog: Watchdog,
+    lost: bool,
+}
+
+impl Watched {
+    fn check<T>(&mut self, result: std::io::Result<T>) -> std::io::Result<T> {
+        // An interrupted write is retried by `write_all`; it says nothing about the owner.
+        let failed = matches!(&result, Err(e) if e.kind() != std::io::ErrorKind::Interrupted);
+        if failed && !self.lost {
+            self.lost = true;
+            log::warn!("managed: the events cannot be written; the owner is gone");
+            self.watchdog
+                .arm(Duration::from_millis(VOICE_CONTROL_OWNER_LOSS_EXIT_MS));
+            let _ = self.inputs.send(Input::OwnerLost);
+        }
+        result
+    }
+}
+
+impl Write for Watched {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let result = self.out.write(buf);
+        self.check(result)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let result = self.out.flush();
+        self.check(result)
+    }
+}
+
 /// The writer of the events: the only thing that writes to file descriptor 3. Each event
 /// gets the next seq whether or not it is written, so a drop shows as a gap. Nothing here
 /// waits for the owner but [`Events::flush`], up to its limit.
@@ -487,8 +525,22 @@ pub struct Events {
 impl Events {
     /// A writer of events to `out`, on a thread of its own, with at most
     /// [`VOICE_CONTROL_EVENT_QUEUE_LINES`] waiting, and [`ANSWER_LINES`] more for answers.
+    ///
+    /// A write to `out` that fails is the owner gone, as the end of the control pipe is:
+    /// the watchdog is armed for the owner-loss bound and `inputs` is told
+    /// [`Input::OwnerLost`], once (#894).
     #[must_use]
-    pub fn spawn(out: Box<dyn Write + Send>) -> Self {
+    pub fn spawn(
+        out: Box<dyn Write + Send>,
+        inputs: mpsc::UnboundedSender<Input>,
+        watchdog: Watchdog,
+    ) -> Self {
+        let out = Box::new(Watched {
+            out,
+            inputs,
+            watchdog,
+            lost: false,
+        });
         Self {
             queue: LineQueue::spawn_unmarked(out, VOICE_CONTROL_EVENT_QUEUE_LINES, ANSWER_LINES),
             next: 1,
@@ -1235,7 +1287,7 @@ pub async fn run<T: Transport>(
     inputs: mpsc::UnboundedSender<Input>,
     mut received: mpsc::UnboundedReceiver<Input>,
 ) -> Result<(), Error> {
-    let mut events = Events::spawn(out);
+    let mut events = Events::spawn(out, inputs.clone(), host.watchdog.clone());
     // Before anything is read, opened or asked.
     events.hello();
     let (first, first_read) = oneshot::channel();
@@ -2361,7 +2413,7 @@ mod tests {
         );
         for (version, written) in [(Version::V1, 1), (Version::V2, 3)] {
             let writer = Stallable::default();
-            let mut events = Events::spawn(Box::new(writer.clone()));
+            let mut events = quiet_events(Box::new(writer.clone()));
             events.speak(version);
             let mut owner = Owner::new(events, Watchdog::off());
             for playback in [
@@ -2405,6 +2457,104 @@ mod tests {
         assert_eq!(snapshot.retry_in_ms, Some(VOICE_CONTROL_MAX_RETRY_IN_MS));
     }
 
+    /// Events to `out` for a test that does not look for the owner's loss.
+    fn quiet_events(out: Box<dyn Write + Send>) -> Events {
+        let (inputs, _received) = mpsc::unbounded_channel();
+        Events::spawn(out, inputs, Watchdog::off())
+    }
+
+    /// A pipe nobody reads: every write to it fails.
+    struct Broken;
+
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    /// What `inputs` holds once the events have had time to be written.
+    fn lost_after(inputs: &mut mpsc::UnboundedReceiver<Input>) -> usize {
+        std::thread::sleep(Duration::from_millis(300));
+        let mut lost = 0;
+        while let Ok(input) = inputs.try_recv() {
+            assert!(matches!(input, Input::OwnerLost), "only the loss is sent");
+            lost += 1;
+        }
+        lost
+    }
+
+    /// A failed write on the events channel is owner loss on every platform (#894), and it
+    /// is said once however many lines then fail.
+    #[test]
+    fn a_failed_write_on_the_events_is_the_owner_lost_once() {
+        let (inputs, mut received) = mpsc::unbounded_channel();
+        let mut events = Events::spawn(Box::new(Broken), inputs, Watchdog::off());
+        events.hello();
+        for _ in 0..5 {
+            events.state(&starting(), Keep::IfThereIsRoom);
+        }
+        assert_eq!(lost_after(&mut received), 1);
+    }
+
+    /// The case the issue names: the descriptor's other end is closed, as when the owner
+    /// has gone. A real pipe stands in for file descriptor 3.
+    #[test]
+    fn a_pipe_whose_reader_has_gone_is_the_owner_lost() {
+        let (reader, writer) = std::io::pipe().expect("a pipe");
+        drop(reader);
+        let (inputs, mut received) = mpsc::unbounded_channel();
+        let mut events = Events::spawn(Box::new(writer), inputs, Watchdog::off());
+        events.hello();
+        assert_eq!(lost_after(&mut received), 1);
+    }
+
+    /// Interrupted once, then written: what `write_all` retries is not the owner's loss.
+    #[derive(Clone, Default)]
+    struct InterruptedOnce(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Write for InterruptedOnce {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                Ok(buf.len())
+            } else {
+                Err(std::io::ErrorKind::Interrupted.into())
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_interrupted_write_is_not_the_owner_lost() {
+        let writer = InterruptedOnce::default();
+        let (inputs, mut received) = mpsc::unbounded_channel();
+        let mut events = Events::spawn(Box::new(writer.clone()), inputs, Watchdog::off());
+        events.hello();
+        assert_eq!(lost_after(&mut received), 0);
+        assert!(
+            writer.0.load(std::sync::atomic::Ordering::SeqCst),
+            "the write was interrupted"
+        );
+    }
+
+    #[test]
+    fn events_that_are_written_are_not_the_owner_lost() {
+        use crate::lines::tests::Stallable;
+        let writer = Stallable::default();
+        let (inputs, mut received) = mpsc::unbounded_channel();
+        let mut events = Events::spawn(Box::new(writer.clone()), inputs, Watchdog::off());
+        events.hello();
+        events.state(&starting(), Keep::IfThereIsRoom);
+        writer.until_lines(2);
+        assert_eq!(lost_after(&mut received), 0);
+    }
+
     fn starting() -> Snapshot {
         Snapshot::new(
             VoiceControlPhase::Starting,
@@ -2427,7 +2577,7 @@ mod tests {
     fn events_are_numbered_and_a_dropped_one_leaves_a_gap() {
         use crate::lines::tests::Stallable;
         let writer = Stallable::stalled();
-        let mut events = Events::spawn(Box::new(writer.clone()));
+        let mut events = quiet_events(Box::new(writer.clone()));
         events.hello();
         writer.until_waiting();
         // The hello is in the writer's hands; this many more fit; the rest are dropped.
@@ -2465,7 +2615,7 @@ mod tests {
         use conch_voice_api::VoiceControlEvent;
         let writer = Stallable::stalled();
         let watchdog = Watchdog::off();
-        let mut owner = Owner::new(Events::spawn(Box::new(writer.clone())), watchdog);
+        let mut owner = Owner::new(quiet_events(Box::new(writer.clone())), watchdog);
         owner.events.hello();
         writer.until_waiting();
         let full = VOICE_CONTROL_EVENT_QUEUE_LINES + 10;
@@ -2635,7 +2785,7 @@ mod tests {
         for state in &stop {
             let watchdog = Watchdog::off();
             let mut owner = Owner::new(
-                Events::spawn(Box::new(Stallable::default())),
+                quiet_events(Box::new(Stallable::default())),
                 watchdog.clone(),
             );
             owner.state(state, false);
@@ -2644,7 +2794,7 @@ mod tests {
         for state in &failure {
             let watchdog = Watchdog::off();
             let mut owner = Owner::new(
-                Events::spawn(Box::new(Stallable::default())),
+                quiet_events(Box::new(Stallable::default())),
                 watchdog.clone(),
             );
             owner.state(state, false);
@@ -2652,7 +2802,7 @@ mod tests {
         }
         let watchdog = Watchdog::off();
         let mut owner = Owner::new(
-            Events::spawn(Box::new(Stallable::default())),
+            quiet_events(Box::new(Stallable::default())),
             watchdog.clone(),
         );
         owner.protocol_error(VoiceControlErrorCode::Malformed);
