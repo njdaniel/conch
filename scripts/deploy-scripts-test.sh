@@ -1428,7 +1428,12 @@ printf '%s\n' "$*" >>"$w/ssh.calls"
 while [ $# -gt 0 ]; do
     case "$1" in
         -t | -T) shift ;;
-        -i | -o) shift 2 ;;
+        -o)
+            # The shared connection's control directory, as each call sees it.
+            case "$2" in ControlPath=*) d=${2#ControlPath=}; stat -c '%a %n' "${d%/*}" >>"$w/ssh.ctl" ;; esac
+            shift 2
+            ;;
+        -i) shift 2 ;;
         --) shift; break ;;
         *) echo "stand-in ssh: unexpected $1" >&2; exit 255 ;;
     esac
@@ -1569,6 +1574,16 @@ if cs upgrade v0.0.9 >"$work/cs-up.out" 2>&1; then fail "an upgrade to a release
 grep -qF 'conch-upgrade.sh v0.0.9 alpha beta kappa' "$work/ssh.calls" || fail "conch-server upgrade did not name every instance: $(tail -n 2 "$work/ssh.calls")"
 grep -q 'does not match checksums.txt' "$work/cs-up.out" && [ "$(version)" = v0.0.1 ] || fail "conch-server upgrade v0.0.9: $(cat "$work/cs-up.out")"
 ok "conch-server list shows every instance with its mode and health; upgrade names every instance"
+
+# One SSH connection per run (issue #927): every call shares a master through
+# a control socket in a private directory, which is gone once the run ends.
+rm -f "$work/ssh.ctl"
+cs list >"$work/cs-list2.out" 2>&1 || fail "conch-server list failed: $(cat "$work/cs-list2.out")"
+tail -n 1 "$work/ssh.calls" | grep -qE -- '-o ControlMaster=auto -o ControlPath=[^ ]+/m -o ControlPersist=[0-9]+ ' ||
+    fail "conch-server's ssh does not share one connection: $(tail -n 1 "$work/ssh.calls")"
+[ -s "$work/ssh.ctl" ] && ! grep -qv '^700 ' "$work/ssh.ctl" || fail "the SSH control directory is not private: $(cat "$work/ssh.ctl" 2>/dev/null)"
+while read -r _ d; do [ ! -e "$d" ] || fail "the SSH control directory $d was left behind"; done <"$work/ssh.ctl"
+ok "conch-server: every ssh call shares one connection through a private control directory, removed when the run ends"
 
 # With its output not on a terminal, new is refused before ssh or doctl run:
 # ssh -t would give the droplet a terminal anyway, and the setup link would
