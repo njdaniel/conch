@@ -61,7 +61,9 @@ func staleBeforeOffline(frames []schema.SessionRosterV1, session int64) error {
 	case offline < 0:
 		return fmt.Errorf("session #%d was never shown offline", session)
 	case stale < 0 || stale > offline:
-		return fmt.Errorf("the session went offline without being seen stale")
+		// The states seen tell a server that skipped stale from a freeze that came
+		// too late for the stale sweep.
+		return fmt.Errorf("the session went offline without being seen stale (states seen, in order: %v)", sessionStatesSeen(frames, session))
 	}
 	return nil
 }
