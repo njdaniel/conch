@@ -155,7 +155,7 @@ func writeSetupScopeRefused(w http.ResponseWriter) {
 // checks that cost nothing come first, so a refused request does no Argon2
 // work: the body; the caller; on a full-scope credential an operator (403
 // setup_on_host), a password already set (409 password_already_set) and no
-// proof (403 reauth_required); then the proof, which must be a usable
+// proof (403 enrollment_proof_required); then the proof, which must be a usable
 // enrollment link made for the caller (else 404 sign_in_link_invalid, the
 // answer for any code that does not work); the policy; the hash; and the
 // store, which re-checks all of it in the transaction that writes.
@@ -263,7 +263,7 @@ func writePasswordAlreadySet(w http.ResponseWriter) {
 }
 
 func writeEnrollmentProofRequired(w http.ResponseWriter) {
-	writeError(w, http.StatusForbidden, schema.ErrorCodeReauthRequired,
+	writeError(w, http.StatusForbidden, schema.ErrorCodeEnrollmentProofRequired,
 		"setting a first password needs an enrollment link from an operator")
 }
 
