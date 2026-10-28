@@ -201,18 +201,90 @@ describe('Settings → Joining: pause all invites', () => {
     expect(calls.filter((c) => c.path === '/v1/reauth')).toEqual([]);
   });
 
-  it('a network failure keeps the old value and says so', async () => {
+  it('a change whose answer is lost is read again, not assumed', async () => {
+    // The write reaches the server, then the connection drops before the answer.
+    let held = true;
     serve({
-      'GET /v1/invites/settings': () => json({ paused: true }),
+      'GET /v1/invites/settings': () => json({ paused: held }),
+      'PUT /v1/invites/settings': (call) => {
+        held = (call.body as { paused: boolean }).paused;
+        throw new TypeError('network down');
+      },
+    });
+    const { region, box } = await opened();
+    fireEvent.click(box);
+    await within(region).findByText(/could not be reached, so it may not have changed/);
+    const again = await within(region).findByLabelText<HTMLInputElement>('Pause all invites');
+    expect(again.checked).toBe(false);
+    expect(within(region).getByText(/Invites are on/)).toBeDefined();
+  });
+
+  it('a change whose answer is lost, with the server still unreachable, shows no state', async () => {
+    let reads = 0;
+    serve({
+      'GET /v1/invites/settings': () => {
+        reads++;
+        if (reads > 1) throw new TypeError('network down');
+        return json({ paused: true });
+      },
       'PUT /v1/invites/settings': () => {
         throw new TypeError('network down');
       },
     });
     const { region, box } = await opened();
     fireEvent.click(box);
-    await within(region).findByText('Cannot reach the server. Invites were not changed.');
-    expect(box.checked).toBe(true);
-    expect(within(region).getByText(pausedLine)).toBeDefined();
+    await within(region).findByText('Cannot reach the server.');
+    expect(within(region).queryByLabelText('Pause all invites')).toBeNull();
+    expect(within(region).getByText('Whether invites are paused is not known.')).toBeDefined();
+  });
+
+  it('shows no switch until the server has answered, nor when the read fails', async () => {
+    let answer: (r: Response) => void = () => undefined;
+    serve({ 'GET /v1/invites/settings': () => new Promise<Response>((resolve) => (answer = resolve)) });
+    window.sessionStorage.setItem(key, token);
+    render(<App origin={origin} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Joining and guests' }));
+    const region = screen.getByRole('region', { name: 'Joining and guests' });
+    await within(region).findByText('Loading whether invites are paused…');
+    expect(within(region).queryByLabelText('Pause all invites')).toBeNull();
+    answer(refusal(500, 'internal'));
+    await within(region).findByText('Could not read whether invites are paused.');
+    expect(within(region).queryByLabelText('Pause all invites')).toBeNull();
+  });
+
+  it('a read wanted while a change is in flight waits for it, and shows what it left', async () => {
+    let held = true;
+    let finish: () => void = () => undefined;
+    const calls = serve({
+      'GET /v1/invites/settings': () => json({ paused: held }),
+      'PUT /v1/invites/settings': (call) =>
+        new Promise<Response>((resolve) => {
+          finish = () => {
+            held = (call.body as { paused: boolean }).paused;
+            resolve(json({ paused: held }));
+          };
+        }),
+    });
+    const { region, box } = await opened();
+    fireEvent.click(box);
+    await waitFor(() => {
+      expect(puts(calls)).toHaveLength(1);
+    });
+    // Close and open the section while the change is in flight.
+    const toggle = screen.getByRole('button', { name: 'Joining and guests' });
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    const reads = () => calls.filter((c) => c.method === 'GET' && c.path === '/v1/invites/settings').length;
+    expect(reads()).toBe(1);
+    finish();
+    await waitFor(() => {
+      expect(reads()).toBe(2);
+    });
+    const again = await within(region).findByLabelText<HTMLInputElement>('Pause all invites');
+    await waitFor(() => {
+      expect(again.checked).toBe(false);
+    });
   });
 
   it('another refusal keeps the old value and says so', async () => {

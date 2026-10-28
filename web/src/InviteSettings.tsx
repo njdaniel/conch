@@ -3,19 +3,23 @@
 // (the invite settings route). A paused server lets no one make, preview or
 // use an invite. Restoring a backup pauses them on purpose.
 //
-// The switch shows what the server last said, never what was clicked: a
-// change is sent, and the page then shows the answer. The change needs a
-// recent proof of the operator's password (and code, if enrolled), which
-// authedSend asks for over this page (Reauth.tsx) and then sends the same
-// change again; a cancel leaves the switch as it was.
-import { useEffect, useId, useState } from 'react';
+// The switch shows only what the server last said, never what was clicked,
+// and nothing until it has said: a change is sent, and the page then shows
+// the answer. Every read and change is numbered, and only the newest one's
+// answer is shown. A read wanted while a change is in flight waits for it,
+// since it could see the server from before the change. A change whose answer was lost (a network failure) may or may not have
+// happened, so the switch goes back to unknown and is read again.
+//
+// The change needs a recent proof of the operator's password (and code, if
+// enrolled), which authedSend asks for over this page (Reauth.tsx) and then
+// sends the same change again; a cancel leaves the switch as it was.
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import * as api from './api';
 import { serverLine } from './Invite';
 
 type Line = { readonly text: string; readonly refused: boolean };
 
 function refusalLine(result: { readonly failure: api.ApiFailure; readonly code?: string; readonly message?: string }): string {
-  if (result.failure === 'network') return 'Cannot reach the server. Invites were not changed.';
   if (result.code === 'reauth_required') return 'It needs your password first. Invites were not changed.';
   if (result.code === 'invalid_request') return serverLine(result.message, 'The server refused. Invites were not changed.');
   return 'The server refused. Invites were not changed.';
@@ -23,34 +27,70 @@ function refusalLine(result: { readonly failure: api.ApiFailure; readonly code?:
 
 export function InviteSettings({ open, onUnauthorized }: { readonly open: boolean; readonly onUnauthorized: () => void }) {
   const id = useId();
-  // What the server last reported; null until it has.
+  // What the server last reported; null while it is not known.
   const [paused, setPaused] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [line, setLine] = useState<Line | null>(null);
+  // The number of the newest read or change; an older one's answer is dropped.
+  const latest = useRef(0);
+  // A change in flight, and whether a read waits for it to answer.
+  const writing = useRef(false);
+  const readAfterWrite = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
-  // Read afresh each time the section opens.
+  const read = useCallback(
+    (after: Line | null) => {
+      const n = ++latest.current;
+      void api.inviteSettings().then((result) => {
+        if (!mounted.current || n !== latest.current) return;
+        if (result.ok) {
+          setPaused(result.value.paused);
+          setLine(after);
+        } else if (result.failure === 'unauthorized') onUnauthorized();
+        else {
+          setPaused(null);
+          setLine({ text: result.failure === 'network' ? 'Cannot reach the server.' : 'Could not read whether invites are paused.', refused: true });
+        }
+      });
+    },
+    [onUnauthorized],
+  );
+
+  // Read afresh each time the section opens; closing drops any read in flight.
   useEffect(() => {
     if (!open) return;
-    let current = true;
-    void api.inviteSettings().then((result) => {
-      if (!current) return;
-      if (result.ok) {
-        setPaused(result.value.paused);
-        setLine(null);
-      } else if (result.failure === 'unauthorized') onUnauthorized();
-      else setLine({ text: result.failure === 'network' ? 'Cannot reach the server.' : 'Could not read whether invites are paused.', refused: true });
-    });
+    setPaused(null);
+    setLine(null);
+    if (writing.current) readAfterWrite.current = true;
+    else read(null);
     return () => {
-      current = false;
+      latest.current++;
     };
-  }, [open, onUnauthorized]);
+  }, [open, read]);
 
   function change(want: boolean) {
     if (busy || paused === null) return;
+    const n = ++latest.current;
+    writing.current = true;
     setBusy(true);
     setLine(null);
     void api.putInviteSettings({ paused: want }).then((result) => {
+      writing.current = false;
+      if (!mounted.current) return;
       setBusy(false);
+      if (readAfterWrite.current) {
+        // The section was opened again meanwhile: read what the change left.
+        readAfterWrite.current = false;
+        read(null);
+        return;
+      }
+      if (n !== latest.current) return;
       if (result.ok) {
         setPaused(result.value.paused);
         return;
@@ -59,32 +99,42 @@ export function InviteSettings({ open, onUnauthorized }: { readonly open: boolea
         onUnauthorized();
         return;
       }
-      // The switch keeps what the server last reported.
+      if (result.failure === 'network') {
+        // The change may have reached the server: ask it, not the click.
+        setPaused(null);
+        read({ text: 'The server could not be reached, so it may not have changed. This is what it holds now.', refused: true });
+        return;
+      }
+      // Refused: the switch keeps what the server last reported.
       setLine({ text: refusalLine(result), refused: true });
     });
   }
 
   return (
     <div className="invite-settings">
-      <label>
-        <input
-          type="checkbox"
-          checked={paused === true}
-          disabled={paused === null || busy}
-          aria-describedby={`${id}-state`}
-          onChange={(event) => {
-            change(event.target.checked);
-          }}
-        />{' '}
-        Pause all invites
-      </label>
-      <p id={`${id}-state`} className="hint">
-        {paused === null
-          ? 'Loading…'
-          : paused
-            ? 'Invites are paused: no one can make, preview or use an invite.'
-            : 'Invites are on. Pausing stops every invite: making, previewing and using one.'}
-      </p>
+      {paused === null ? (
+        <p className="hint">{line === null ? 'Loading whether invites are paused…' : 'Whether invites are paused is not known.'}</p>
+      ) : (
+        <>
+          <label>
+            <input
+              type="checkbox"
+              checked={paused}
+              disabled={busy}
+              aria-describedby={`${id}-state`}
+              onChange={(event) => {
+                change(event.target.checked);
+              }}
+            />{' '}
+            Pause all invites
+          </label>
+          <p id={`${id}-state`} className="hint">
+            {paused
+              ? 'Invites are paused: no one can make, preview or use an invite.'
+              : 'Invites are on. Pausing stops every invite: making, previewing and using one.'}
+          </p>
+        </>
+      )}
       <p role="status" className={line?.refused === true ? 'notice' : 'hint'}>
         {line?.text ?? ''}
       </p>
