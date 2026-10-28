@@ -1,0 +1,140 @@
+{
+  "description": "Conformance cases for the two v1 readers, in the form of cases.json, pinning what a string may hold (#690). cases.json is published and does not change (scripts/schema-compat.sh), so the cases added after it live here. Two rules: a \\u escape of a surrogate that is not half of a pair (a high surrogate, \\uD800 to \\uDBFF, not followed at once by a low one, \\uDC00 to \\uDFFF, or a low one on its own) makes the line malformed wherever it is, a key or an ignored field included, because Go's JSON reader would read it as U+FFFD and serde's would refuse it, and the two readers must agree; a surrogate pair, and the character U+FFFD itself, are fine. And an optional word (an ack's error, a state's reason or ptt_problem) that is present and empty is invalid, as an empty device name is in v2: absence is written by leaving the field out, and an empty word is a broken writer, not none.",
+  "cases": [
+    {
+      "name": "start with a channel holding a lone high surrogate escape: malformed, as not UTF-8 is",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"\\ud800\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "start with a channel holding a lone low surrogate escape",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"\\udc00\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "start with a channel holding a high surrogate escape followed by an escape that is not a low one",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"\\ud800\\u0041\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "start with a channel holding a high surrogate escape at the end of the string",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"general\\uD83D\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "start with a channel holding a surrogate pair escape: a character outside the BMP, accepted",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"\\ud83d\\ude00\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "start with a channel holding the character U+FFFD itself: the rule is about the escape, not the character",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"\ufffd\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "start with a channel holding an escaped backslash before the letters ud800: not an escape, accepted",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"start\",\"id\":1,\"server\":\"https://conch.example.org\",\"channel\":\"\\\\ud800\",\"principal_id\":7,\"credential\":\"stored\",\"muted\":false,\"deafened\":false}",
+      "want": {
+        "result": "accept",
+        "kind": "start"
+      }
+    },
+    {
+      "name": "get_state with a lone surrogate escape in a key the kind does not declare: malformed, not ignored",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"get_state\",\"id\":3,\"\\ud800\":true}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "get_state with a lone surrogate escape in a field the kind does not declare: malformed, not ignored",
+      "direction": "command",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"get_state\",\"id\":3,\"note\":\"\\udc00\"}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "a lone surrogate escape in the schema: malformed comes before unknown_schema",
+      "direction": "command",
+      "line": "{\"schema\":\"\\ud800\",\"kind\":\"get_state\",\"id\":3}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "state with a reason holding a lone surrogate escape",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"reason\":\"\\ud800\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "ack with a lone surrogate escape in a field the kind does not declare: malformed, not ignored",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"ack\",\"seq\":3,\"id\":1,\"ok\":true,\"detail\":\"\\udfff\"}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed"
+      }
+    },
+    {
+      "name": "ack with ok and an empty error: an empty word is not absence",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"ack\",\"seq\":3,\"id\":1,\"ok\":true,\"error\":\"\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state with an empty reason: an empty word is not absence",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"reason\":\"\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    },
+    {
+      "name": "state with an empty ptt_problem: an empty word is not absence",
+      "direction": "event",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"state\",\"seq\":5,\"phase\":\"connected\",\"capture\":\"on\",\"transmitting\":false,\"muted\":false,\"deafened\":false,\"blocked\":[],\"ptt\":\"ready\",\"ptt_problem\":\"\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid"
+      }
+    }
+  ]
+}

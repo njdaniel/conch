@@ -104,6 +104,13 @@ const (
 	// that is still good; the client proves it with POST /v1/reauth and
 	// repeats the action.
 	ErrorCodeReauthRequired = "reauth_required"
+	// ErrorCodeEnrollmentProofRequired (HTTP 403): POST /v1/password/mine
+	// set a first password with no enrollment proof. It is not a recent-auth
+	// prompt: the caller has no password to prove, so POST /v1/reauth cannot
+	// help (it answers password_not_set). The client asks for the one-use
+	// enrollment code an operator made, and repeats the request with it as
+	// the proof.
+	ErrorCodeEnrollmentProofRequired = "enrollment_proof_required"
 	// ErrorCodeSetupOnHost (HTTP 403): an operator's first password and TOTP
 	// enrolment happen only through a host-made setup token, never on an
 	// ordinary bearer credential (security review F7).

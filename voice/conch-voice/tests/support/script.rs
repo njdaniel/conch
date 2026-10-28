@@ -126,9 +126,15 @@ pub struct Switch(Arc<Switched>);
 pub struct Switched {
     loud: AtomicBool,
     frames: AtomicU64,
+    stalled: AtomicBool,
 }
 
 impl Switched {
+    /// From the next read the microphone delivers no frame (a stalled device), or again does.
+    pub fn stall(&self, stalled: bool) {
+        self.stalled.store(stalled, Ordering::SeqCst);
+    }
+
     /// Loud from the next frame, or quiet.
     pub fn set(&self, loud: bool) {
         self.loud.store(loud, Ordering::SeqCst);
@@ -160,6 +166,9 @@ impl Switch {
 
 impl MicSource for Switch {
     fn read(&mut self, frame: &mut Frame) -> MicRead {
+        if self.0.stalled.load(Ordering::SeqCst) {
+            return MicRead::NotYet;
+        }
         let n = self.0.frames.load(Ordering::SeqCst);
         *frame = numbered(n, self.0.loud.load(Ordering::SeqCst));
         self.0.frames.store(n + 1, Ordering::SeqCst);
