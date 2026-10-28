@@ -48,6 +48,7 @@ The owner wants the first half without the rest, on the long-lived alpha server 
 
 5. **The browser and the CLI key on setup state, not on the banner.**
    - The setup page's **Skip** and `conch setup`'s "Set up an authenticator now? [y/N]" appear when whoami says, for an operator, that `setup_complete` is true, `totp_enrolled` is false, and `auth.scope` is `setup`. A full session cannot enrol, so it is never offered there. Since `setup_complete` already follows the server's rule (ADR-011 item 2.1), the clients need no new field.
+   - **Re-authentication and password change ask for a code only when one is enrolled.** Today the browser (`web/src/Reauth.tsx`, `web/src/Settings.tsx`) and the CLI (`conch reauth` and the password change in `internal/cli/auth.go`) ask every operator for an authenticator code. They must ask an operator for one only when whoami's `auth.totp_enrolled` is true, and otherwise send the password alone. The server still decides: it ignores a code from a password-only operator, and refuses a missing one from an enrolled operator. Browser sign-in needs no client change, because the server answers a password-only operator with a session rather than a code step.
    - The temporary banner still keys on `server_mode`.
 
 ## Alternatives
@@ -61,7 +62,7 @@ The owner wants the first half without the rest, on the long-lived alpha server 
 
 ## Consequences
 
-- **Security review:** the draft's review passed, with four wording fixes (empty means `optional` under temporary mode; revocation only when password-only stops; the owner warning; Skip only on a setup session) and three notes (store checks read the stored flag; turning it on is audited; the members-can't-tell trade-off). All are adopted above.
+- **Security review:** the draft's review passed, with four wording fixes (empty means `optional` under temporary mode; revocation only when password-only stops; the owner warning; Skip only on a setup session) and three notes (store checks read the stored flag; turning it on is audited; the members-can't-tell trade-off). All are adopted above. A second review (Kimi) then found that the clients' re-authentication and password-change forms ask every operator for a code (now in item 5), and that the guard needed its own test table (now in the test list).
 - **Security:** on a server with `optional`, an operator's password alone controls the server, including the private conversations of every group on it. Guessing is bounded by the existing per-name and per-address limits and by Argon2id's cost, but a reused or phished password is enough. The owner accepted this for the alpha server (2026-10-27). The setting is on the host only, so an attacker with the password cannot turn the authenticator requirement off, but also cannot be stopped by it. An operator who wants a second factor can still enrol one, and is then always asked for it.
 - **Tests:**
   - the implementation runs ADR-011's tests for both ways of allowing password-only;
@@ -69,10 +70,12 @@ The owner wants the first half without the rest, on the long-lived alpha server 
   - `CONCHD_MODE=temporary` with an explicit `CONCHD_OPERATOR_TOTP=required` stops start, and with it unset starts as optional;
   - temporary → normal with `optional` revokes nothing;
   - the switch to not-allowed logs and audits the count of owners with no authenticator;
+  - **the lock-out guard**, table-driven, for every path that uses it (single-credential revocation, sign out everywhere, disable, hide, owner demotion and unmarking), with password-only allowed and not allowed, including an `optional` → `required` restart that proves the stored flag puts the strict rule back;
+  - **the clients**, for a password-only operator and an enrolled one, under both temporary mode and `optional`: browser and CLI re-authentication and password change, asked for a code only when enrolled;
   - with `optional` alone, `/healthz` and whoami carry no `server_mode`.
 - **Work:**
   - #866 implements both settings before it merges, its migration not yet released;
-  - #867 and #868 key Skip on `setup_complete` and `totp_enrolled`;
+  - #867 (browser) and #868 (CLI) key Skip on `setup_complete`, `totp_enrolled` and `scope`, and ask for a code at re-authentication and password change only when `totp_enrolled` is true;
   - `docs/deploy.md` gets the setting in step 5;
   - `conchd serve`'s help, and the `operator setup` and `bootstrap` stderr text (which today say "and enrol an authenticator app"), describe the setting.
 - **The alpha server** gets `CONCHD_OPERATOR_TOTP=optional` in its env file at the `v0.1.0-alpha.2` upgrade.
