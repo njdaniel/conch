@@ -96,13 +96,40 @@ func timeClosed(t *timing, feeds []*feed, from time.Time, bound time.Duration, s
 // occupancy ones: each closed with 1008 and "credential no longer valid",
 // the close of a credential that went.
 func closedAllRevoked(feeds []*feed) error {
+	return closedWith(feeds, func(*feed) []string { return []string{credentialGone} })
+}
+
+// The two reasons a socket closes with 1008 for a guest whose visit ended.
+const (
+	credentialGone = "credential no longer valid" //nolint:gosec // close-frame reason text, not a credential
+	membershipGone = "no longer a member of this channel"
+)
+
+// closedAllExpired is closedAllRevoked for a guest whose visit expired.
+// Expiry both invalidates the credential and removes the guest from its
+// channels, so its events socket is closed by whichever path runs first:
+// both reasons are valid there (both 1008). Every other socket keeps the
+// single reason.
+func closedAllExpired(feeds []*feed) error {
+	return closedWith(feeds, func(f *feed) []string {
+		if strings.Contains(f.what, "/v1/events/ws") {
+			return []string{credentialGone, membershipGone}
+		}
+		return []string{credentialGone}
+	})
+}
+
+// closedWith requires that each socket closed with 1008 and one of the
+// reasons that reasons gives for it.
+func closedWith(feeds []*feed, reasons func(*feed) []string) error {
 	for _, f := range feeds {
 		f.mu.Lock()
 		err := f.err
 		f.mu.Unlock()
+		want := reasons(f)
 		var ce websocket.CloseError
-		if !errors.As(err, &ce) || ce.Code != websocket.StatusPolicyViolation || ce.Reason != "credential no longer valid" {
-			return fmt.Errorf("%s ended with %w, want 1008 \"credential no longer valid\"", f.what, err)
+		if !errors.As(err, &ce) || ce.Code != websocket.StatusPolicyViolation || !slices.Contains(want, ce.Reason) {
+			return fmt.Errorf("%s ended with %w, want 1008 %q", f.what, err, want)
 		}
 	}
 	return nil
