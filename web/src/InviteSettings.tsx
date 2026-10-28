@@ -28,7 +28,10 @@ function refusalLine(result: { readonly failure: api.ApiFailure; readonly code?:
   return 'The server refused. Invites were not changed.';
 }
 
-export function InviteSettings({ open, onUnauthorized }: { readonly open: boolean; readonly onUnauthorized: () => void }) {
+// asked counts the times an operator was sent here from a refused invite
+// (issue #909): each is read afresh, as an opening is, since the section may
+// have stayed open on an older answer.
+export function InviteSettings({ open, asked = 0, onUnauthorized }: { readonly open: boolean; readonly asked?: number; readonly onUnauthorized: () => void }) {
   const id = useId();
   // What the server last reported; null while it is not known.
   const [paused, setPaused] = useState<boolean | null>(null);
@@ -65,7 +68,8 @@ export function InviteSettings({ open, onUnauthorized }: { readonly open: boolea
     [onUnauthorized],
   );
 
-  // Read afresh each time the section opens; closing drops any read in flight.
+  // Read afresh each time the section opens or an operator is sent here;
+  // closing drops any read in flight.
   useEffect(() => {
     if (!open) return;
     setPaused(null);
@@ -75,7 +79,7 @@ export function InviteSettings({ open, onUnauthorized }: { readonly open: boolea
     return () => {
       latest.current++;
     };
-  }, [open, read]);
+  }, [open, asked, read]);
 
   function change(want: boolean) {
     if (busy || paused === null) return;

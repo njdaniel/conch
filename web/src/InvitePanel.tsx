@@ -11,11 +11,12 @@
 // only while the joining settings allow guests; without it an invite admits
 // accounts alone, and a member's always does here. Guests are still subject
 // to the server's switch when the invite is used.
-import { useCallback, useEffect, useRef, useState, type SyntheticEvent } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { clock } from './Conversation';
 import { Glyph } from './Icons';
 import { serverLine, waitWords } from './Invite';
+import { JoiningSettings } from './joiningSettings';
 import { inviteLink } from './route';
 import type { ChannelV0 } from './schema/channel';
 import type { CreateInviteRequestV1, InviteJoinMode, InviteKind, InviteV1 } from './schema/invite';
@@ -51,6 +52,9 @@ const createRefusals: Readonly<Record<string, string>> = {
   channel_not_found: 'One of those channels does not exist any more.',
   human_required: 'Only people make invites.',
 };
+
+// An operator can lift the pause, so is told where (issue #909).
+const pausedForOperator = 'Invites are paused on this server. Resume them in Settings → Joining and guests.';
 
 // createLine is the plain words for an invite the server would not make.
 function createLine(result: { readonly failure: api.ApiFailure; readonly code?: string; readonly message?: string; readonly retryAfter?: number }): string {
@@ -100,6 +104,9 @@ export function InvitePanel({
   const [guestsAllowed, setGuestsAllowed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
+  // Whether the problem is a pause an operator can lift (issue #909).
+  const [resume, setResume] = useState(false);
+  const joining = useContext(JoiningSettings);
   // The link of the invite just made, and its kind, which says who it lets
   // in: shown until Done, and never again.
   const [link, setLink] = useState<{ readonly url: string; readonly kind: InviteKind } | null>(null);
@@ -196,6 +203,7 @@ export function InvitePanel({
     };
     setBusy(true);
     setProblem(null);
+    setResume(false);
     setLink(null);
     void api.createInvite(request).then((result) => {
       setBusy(false);
@@ -204,7 +212,11 @@ export function InvitePanel({
         setCopied('no');
         refresh();
       } else if (result.failure === 'unauthorized') onUnauthorized();
-      else setProblem(createLine(result));
+      else {
+        const paused = operator && result.code === 'invites_paused';
+        setProblem(paused ? pausedForOperator : createLine(result));
+        setResume(paused);
+      }
     });
   }
 
@@ -448,6 +460,11 @@ export function InvitePanel({
           <p role="alert" className="notice">
             {problem ?? ''}
           </p>
+          {resume && joining !== null ? (
+            <button type="button" onClick={joining.open}>
+              Open Settings → Joining and guests
+            </button>
+          ) : null}
         </form>
         <h3>Your invites</h3>
         {listProblem === null ? null : <p className="notice">{listProblem}</p>}
