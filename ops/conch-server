@@ -1,0 +1,508 @@
+#!/usr/bin/env bash
+# conch-server — create, list and remove Conch servers on the droplet, from
+# the owner's workstation (issue #861; docs/deploy.md, "A second instance").
+#
+#   conch-server new <name> [--temporary] [--operator-totp optional|required]
+#                    [--operator <name>] [--port N] [--yes] [--scripts-ref <ref>]
+#   conch-server rm <name> [--force-normal] [--no-backup] [--purge-backups]
+#                    [--scripts-ref <ref>]
+#   conch-server list
+#   conch-server upgrade <tag>
+#   conch-server sync [--scripts-ref <ref>]
+#
+# new: copies the droplet's scripts (sync, below); reads the droplet's public
+# addresses from it; refuses a name the droplet already has; creates the A
+# (and, with IPv6, AAAA) record for <name>.<domain> with doctl, or keeps one
+# that already points at the droplet, and refuses one that points elsewhere;
+# waits until two public resolvers (Cloudflare's and Google's, over HTTPS)
+# return them; then runs add-instance.sh over `ssh -t`, so its question and
+# the setup link reach this terminal only. If add-instance.sh fails and
+# undoes its work, the records this run created are deleted again.
+# rm: remove-instance.sh over `ssh -t` (the name is typed back there; there
+# is no --yes), then deletes the A and AAAA records of <name> that point at
+# the droplet. list: list-instances.sh. upgrade: conch-upgrade.sh <tag> with
+# every instance the droplet has, since they share one binary.
+# sync: the droplet's scripts in /opt/conch/bin are made those of the tag the
+# droplet runs (where /opt/conch/current points), from this checkout with
+# `git show <tag>:ops/deploy/<file>`, so they match the binary. A file is
+# replaced only when its SHA-256 differs, and is installed 0755, root.
+# --scripts-ref takes them from another ref instead (for a droplet whose tag
+# predates these scripts), and says so.
+#
+# Settings: ~/.config/conch/server.env (CONCH_SERVER_CONFIG moves it), which
+# holds no secret. KEY=value lines, # comments:
+#   CONCH_SERVER_HOST=root@203.0.113.7        where ssh goes
+#   CONCH_SERVER_DOMAIN=example.com           the DNS zone, on DigitalOcean
+#   CONCH_SERVER_SSH_KEY=~/.ssh/conch-alpha   the key ssh uses
+#   CONCH_SERVER_DOCTL_CONTEXT=conch          the doctl auth context
+#   CONCH_SERVER_OPERATOR=nick                optional: the first operator's name
+# The file is parsed, never sourced: only these keys, each once, and each
+# value checked (no spaces or shell metacharacters in the host, domain, key
+# path or context). It must not be writable by anyone else.
+#
+# Every argument for the droplet is checked here first and quoted with
+# printf %q for the remote shell. No secret passes through this script: the
+# droplet makes them, and the setup link is printed by conchd straight to
+# this terminal through ssh.
+#
+# For tests, the commands and the droplet's paths can be moved:
+#   SSH (ssh)  DOCTL (doctl)  CURL (curl, for the DNS-over-HTTPS checks)
+#   CONCH_SERVER_REPO (the checkout this script is in)
+#   CONCH_SERVER_REMOTE_OPT (/opt/conch)  CONCH_SERVER_REMOTE_BIN (/opt/conch/bin)
+#   CONCH_SERVER_DOH (the resolvers, space-separated URLs)
+#   CONCH_SERVER_DNS_TIMEOUT (900 seconds)  CONCH_SERVER_DNS_INTERVAL (10 seconds)
+set -euo pipefail
+# Character classes such as [0-9] mean ASCII only in the C locale.
+export LC_ALL=C
+
+here=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+config=${CONCH_SERVER_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/conch/server.env}
+ssh_cmd=${SSH:-ssh}
+doctl_cmd=${DOCTL:-doctl}
+curl_cmd=${CURL:-curl}
+repo=${CONCH_SERVER_REPO:-$here/..}
+remote_opt=${CONCH_SERVER_REMOTE_OPT:-/opt/conch}
+remote_bin=${CONCH_SERVER_REMOTE_BIN:-$remote_opt/bin}
+read -r -a doh_urls <<<"${CONCH_SERVER_DOH:-https://cloudflare-dns.com/dns-query https://dns.google/resolve}"
+dns_timeout=${CONCH_SERVER_DNS_TIMEOUT:-900}
+dns_interval=${CONCH_SERVER_DNS_INTERVAL:-10}
+
+clean() { LC_ALL=C tr -cd '\011\012\040-\176'; }
+say() { printf 'conch-server: %s\n' "$*" | clean; }
+warn() { printf 'conch-server: %s\n' "$*" | clean >&2; }
+die() { printf 'conch-server: %s\n' "$1" | clean >&2; exit "${2:-1}"; }
+usage() {
+    cat >&2 <<EOF
+usage: conch-server new <name> [--temporary] [--operator-totp optional|required] [--operator <name>] [--port N] [--yes] [--scripts-ref <ref>]
+       conch-server rm <name> [--force-normal] [--no-backup] [--purge-backups] [--scripts-ref <ref>]
+       conch-server list
+       conch-server upgrade <tag>
+       conch-server sync [--scripts-ref <ref>]
+EOF
+    exit 2
+}
+
+# --- the rules, the same as the droplet's scripts ------------------------------
+
+valid_name() { [[ $1 =~ ^[a-z][a-z0-9-]{0,25}$ ]] && [[ $1 != *- ]]; }
+reserved() { case "$1" in livekit | turn | backup | drill | www | removed) return 0 ;; esac; return 1; }
+valid_domain() {
+    [ "${#1}" -le 200 ] && [[ $1 =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]
+}
+valid_operator() { [[ $1 =~ ^[A-Za-z0-9]([A-Za-z0-9\ ._\'-]{0,62}[A-Za-z0-9._\'-])?$ ]]; }
+valid_tag() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && [ "$1" != . ] && [ "$1" != .. ]; }
+valid_path() { [[ $1 =~ ^/[A-Za-z0-9._/-]*$ ]]; }
+valid_ipv4() {
+    local o
+    [[ $1 =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    for o in ${1//./ }; do [ "$((10#$o))" -le 255 ] || return 1; done
+}
+# ip6_expand: as in add-instance.sh, the full lower-case form, so addresses
+# written differently compare equal.
+ip6_expand() {
+    local a=${1,,} h t g i out=""
+    local -a hg=() tg=() all=()
+    [[ $a =~ ^[0-9a-f:]{2,39}$ ]] || return 1
+    if [[ $a == *::* ]]; then
+        h=${a%%::*} t=${a#*::}
+        [[ $t != *::* ]] || return 1
+        [[ $h != :* && $h != *: && $t != :* && $t != *: ]] || return 1
+        [ -z "$h" ] || IFS=: read -ra hg <<<"$h"
+        [ -z "$t" ] || IFS=: read -ra tg <<<"$t"
+        [ $((${#hg[@]} + ${#tg[@]})) -le 7 ] || return 1
+        all=("${hg[@]}")
+        for ((i = ${#hg[@]} + ${#tg[@]}; i < 8; i++)); do all+=(0); done
+        all+=("${tg[@]}")
+    else
+        [[ $a != :* && $a != *: ]] || return 1
+        IFS=: read -ra all <<<"$a"
+        [ "${#all[@]}" -eq 8 ] || return 1
+    fi
+    for g in "${all[@]}"; do
+        [[ $g =~ ^[0-9a-f]{1,4}$ ]] || return 1
+        printf -v g '%04x' "$((16#$g))"
+        out+=$g:
+    done
+    printf '%s\n' "${out%:}"
+}
+# same_address <type> <a> <b>
+same_address() {
+    if [ "$1" = AAAA ]; then
+        local x y
+        x=$(ip6_expand "$2") && y=$(ip6_expand "$3") && [ "$x" = "$y" ]
+    else
+        [ "$2" = "$3" ]
+    fi
+}
+
+for p in "$remote_opt" "$remote_bin"; do valid_path "$p" || die "$p: only an absolute path of letters, digits, '.', '_', '-' and '/'" 2; done
+if ! [[ $dns_timeout =~ ^[0-9]+$ && $dns_interval =~ ^[0-9]+$ ]]; then
+    die "CONCH_SERVER_DNS_TIMEOUT and CONCH_SERVER_DNS_INTERVAL are whole seconds" 2
+fi
+
+# --- the settings ------------------------------------------------------------
+
+declare -A cfg=()
+read_config() {
+    local line key value mode
+    if [ ! -f "$config" ] || [ -L "$config" ]; then
+        die "no settings file $config: write it with CONCH_SERVER_HOST, CONCH_SERVER_DOMAIN, CONCH_SERVER_SSH_KEY and CONCH_SERVER_DOCTL_CONTEXT (docs/deploy.md, \"A second instance\")"
+    fi
+    [ "$(stat -c %u "$config")" = "$(id -u)" ] || die "$config is not yours; refusing it"
+    mode=$(stat -c %a "$config")
+    if [ $((8#$mode & 8#022)) -ne 0 ]; then die "$config is writable by others (mode $mode); chmod 0600 it"; fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in '' | '#'*) continue ;; esac
+        key=${line%%=*}
+        value=${line#*=}
+        case "$key" in
+            CONCH_SERVER_HOST | CONCH_SERVER_DOMAIN | CONCH_SERVER_SSH_KEY | CONCH_SERVER_DOCTL_CONTEXT | CONCH_SERVER_OPERATOR) ;;
+            *) die "$config: a line that is not one of its keys; refusing it" ;;
+        esac
+        if [ "$key" = "$line" ] || [ -n "${cfg[$key]:-}" ]; then die "$config: $key without a value, or twice; refusing it"; fi
+        cfg[$key]=$value
+    done <"$config"
+    for key in CONCH_SERVER_HOST CONCH_SERVER_DOMAIN CONCH_SERVER_SSH_KEY CONCH_SERVER_DOCTL_CONTEXT; do
+        [ -n "${cfg[$key]:-}" ] || die "$config has no $key"
+    done
+    host=${cfg[CONCH_SERVER_HOST]}
+    [[ $host =~ ^([a-z_][a-z0-9_-]*@)?[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] ||
+        die "$config: CONCH_SERVER_HOST must be [user@]host, letters, digits, '.', ':' and '-' only"
+    domain=${cfg[CONCH_SERVER_DOMAIN]}
+    valid_domain "$domain" || die "$config: CONCH_SERVER_DOMAIN must be a lower-case DNS name"
+    ssh_key=${cfg[CONCH_SERVER_SSH_KEY]}
+    if ! [[ $ssh_key =~ ^(~/)?[A-Za-z0-9._/-]+$ ]] || [[ $ssh_key == -* ]]; then
+        die "$config: CONCH_SERVER_SSH_KEY must be a path of letters, digits, '.', '_', '-' and '/' (~/ allowed at the start)"
+    fi
+    # A literal ~/ at the start means the home directory, as in a shell.
+    # shellcheck disable=SC2088
+    case "$ssh_key" in "~/"*) ssh_key=$HOME/${ssh_key#"~/"} ;; esac
+    if [ ! -f "$ssh_key" ] || [ ! -r "$ssh_key" ]; then die "$config: CONCH_SERVER_SSH_KEY: no readable file $ssh_key"; fi
+    context=${cfg[CONCH_SERVER_DOCTL_CONTEXT]}
+    [[ $context =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "$config: CONCH_SERVER_DOCTL_CONTEXT must be letters, digits, '.', '_' and '-'"
+    default_operator=${cfg[CONCH_SERVER_OPERATOR]:-}
+    if [ -n "$default_operator" ]; then
+        valid_operator "$default_operator" || die "$config: CONCH_SERVER_OPERATOR: letters, digits, space and . _ ' -, at most 64 characters"
+    fi
+}
+
+# --- the droplet ---------------------------------------------------------------
+
+# rq <word>...: the words quoted for the remote shell, each with printf %q.
+# Every word has been checked already, so none needs more than backslashes.
+rq() {
+    local out="" w
+    for w in "$@"; do
+        printf -v w '%q' "$w"
+        out+="$w "
+    done
+    printf '%s' "${out% }"
+}
+# remote <-t|-T> <word>...: run the words on the droplet, quoted.
+remote() {
+    local tty=$1
+    shift
+    "$ssh_cmd" "$tty" -i "$ssh_key" -o IdentitiesOnly=yes -- "$host" "$(rq "$@")"
+}
+
+# The remote side of sync: replace <dir>/<file> with stdin, 0755, root,
+# through a temporary file beside it.
+# shellcheck disable=SC2016 # expanded by the remote shell
+install_script='set -e; umask 022; t=$(mktemp "$1/.conch-sync.XXXXXX"); trap '"'"'rm -f "$t"'"'"' EXIT; cat >"$t"; chmod 0755 "$t"; if [ "$(id -u)" = 0 ]; then chown root:root "$t"; fi; mv -f "$t" "$1/$2"; trap - EXIT'
+# shellcheck disable=SC2016 # expanded by the remote shell
+hash_scripts='cd "$1" 2>/dev/null && sha256sum -- *.sh 2>/dev/null; true'
+
+remote_hashes() {
+    declare -gA have=()
+    local h f
+    while read -r h f; do
+        if ! [[ $h =~ ^[0-9a-f]{64}$ && $f =~ ^[A-Za-z0-9._-]+\.sh$ ]]; then continue; fi
+        have[$f]=$h
+    done < <(remote -T sh -c "$hash_scripts" sh "$remote_bin" | clean)
+}
+
+# in_list <word> <word>...: is the first among the others?
+in_list() {
+    local w=$1 x
+    shift
+    for x in "$@"; do [ "$x" != "$w" ] || return 0; done
+    return 1
+}
+
+scripts_ref=""
+sync_scripts() {
+    local target tag ref f want n=0
+    local -a files=()
+    target=$(remote -T readlink -f -- "$remote_opt/current" | clean) || die "could not read $remote_opt/current on the droplet"
+    tag=${target#"$remote_opt/releases/"}
+    if [ "$target" != "$remote_opt/releases/$tag" ] || ! valid_tag "$tag"; then
+        die "$remote_opt/current on the droplet points at '$target', not a release in $remote_opt/releases"
+    fi
+    if [ -n "$scripts_ref" ]; then
+        ref=$(git -C "$repo" rev-parse -q --verify "$scripts_ref^{commit}") || die "$scripts_ref is not a commit in $repo"
+        warn "taking the droplet's scripts from $scripts_ref, not from $tag, which the droplet runs: they may not match its binary"
+    else
+        ref=$(git -C "$repo" rev-parse -q --verify "refs/tags/$tag^{commit}") ||
+            die "the droplet runs $tag, which $repo does not have: run git fetch --tags, then this again"
+    fi
+    mapfile -t files < <(git -C "$repo" ls-tree --name-only "$ref" ops/deploy/ | sed -n 's|^ops/deploy/\([A-Za-z0-9._-]*\.sh\)$|\1|p')
+    for f in add-instance.sh remove-instance.sh list-instances.sh conch-backup.sh; do
+        in_list "$f" "${files[@]}" ||
+            die "${scripts_ref:-$tag} has no ops/deploy/$f: the droplet's release predates conch-server. Upgrade it (conch-server upgrade <tag>), or give --scripts-ref <ref> to take the scripts from a newer commit."
+    done
+    remote_hashes
+    for f in "${files[@]}"; do
+        want=$(git -C "$repo" show "$ref:ops/deploy/$f" | sha256sum | cut -d' ' -f1)
+        [ "${have[$f]:-}" != "$want" ] || continue
+        git -C "$repo" show "$ref:ops/deploy/$f" | remote -T sh -c "$install_script" sh "$remote_bin" "$f" ||
+            die "could not install $f in $remote_bin on the droplet"
+        n=$((n + 1))
+        say "installed $remote_bin/$f from ${scripts_ref:-$tag}"
+    done
+    if [ "$n" -gt 0 ]; then
+        remote_hashes
+        for f in "${files[@]}"; do
+            want=$(git -C "$repo" show "$ref:ops/deploy/$f" | sha256sum | cut -d' ' -f1)
+            [ "${have[$f]:-}" = "$want" ] || die "$remote_bin/$f on the droplet does not match ${scripts_ref:-$tag} after copying it"
+        done
+    fi
+    say "the droplet's scripts match ${scripts_ref:-$tag}"
+}
+
+ipv4="" ipv6=""
+droplet_addresses() {
+    local kind a
+    while read -r kind a; do
+        case "$kind" in
+            ipv4) valid_ipv4 "$a" || die "the droplet gave an IPv4 address that is not one"; ipv4=$a ;;
+            ipv6) ip6_expand "$a" >/dev/null || die "the droplet gave an IPv6 address that is not one"; ipv6=$a ;;
+        esac
+    done < <(remote -T "$remote_bin/list-instances.sh" --addresses | clean)
+    [ -n "$ipv4" ] || die "could not read the droplet's public IPv4"
+}
+
+# droplet_names: sets names to the droplet's instances.
+names=()
+droplet_names() {
+    local out n
+    out=$(remote -T "$remote_bin/list-instances.sh" --names | clean) || die "could not list the droplet's instances"
+    names=()
+    while read -r n; do
+        [ -n "$n" ] || continue
+        valid_name "$n" || die "the droplet listed an instance name that is not one"
+        names+=("$n")
+    done <<<"$out"
+}
+
+# --- DNS ---------------------------------------------------------------------
+
+doctl_records() { "$doctl_cmd" --context "$context" compute domain records "$@"; }
+# records_of <name>: "<id> <type> <data>" for each A and AAAA record of it.
+records_of() {
+    doctl_records list "$domain" --format ID,Type,Name,Data --no-header |
+        awk -v n="$1" '($2 == "A" || $2 == "AAAA") && $3 == n { print $1, $2, $4 }' | clean
+}
+
+# doh <url> <type>: the addresses that resolver gives for host, one per line.
+doh() {
+    local code=1
+    [ "$2" = A ] || code=28
+    "$curl_cmd" -fsS --max-time 10 -H 'accept: application/dns-json' "$1?name=$fqdn&type=$2" 2>/dev/null |
+        tr '{' '\n' | sed -n "s/.*\"type\": *$code,.*\"data\": *\"\([^\"]*\)\".*/\1/p" | clean
+}
+# resolves_everywhere <type> <address>: every resolver gives exactly it.
+resolves_everywhere() {
+    local u got
+    for u in "${doh_urls[@]}"; do
+        got=$(doh "$u" "$1" | sort -u)
+        if [ -z "$got" ] || [ "$(printf '%s\n' "$got" | wc -l)" != 1 ] || ! same_address "$1" "$got" "$2"; then return 1; fi
+    done
+}
+
+# --- the commands --------------------------------------------------------------
+
+cmd_new() {
+    local name="" temporary=0 operator_totp="" operator="" port="" yes=0 status
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --temporary) temporary=1 ;;
+            --operator-totp) [ $# -ge 2 ] || usage; operator_totp=$2; shift ;;
+            --operator) [ $# -ge 2 ] || usage; operator=$2; shift ;;
+            --port) [ $# -ge 2 ] || usage; port=$2; shift ;;
+            --yes) yes=1 ;;
+            --scripts-ref) [ $# -ge 2 ] || usage; scripts_ref=$2; shift ;;
+            -*) usage ;;
+            *) [ -z "$name" ] || usage; name=$1 ;;
+        esac
+        shift
+    done
+    [ -n "$name" ] || usage
+    valid_name "$name" || die "bad name '$name': lower-case letters, digits and '-', starting with a letter, not ending in '-', at most 26 characters" 2
+    ! reserved "$name" || die "'$name' is reserved for the droplet's shared parts (livekit, turn, backup, drill, www, removed)" 2
+    case "$operator_totp" in '' | optional | required) ;; *) die "--operator-totp must be optional or required" 2 ;; esac
+    if [ "$temporary" = 1 ] && [ "$operator_totp" = required ]; then
+        die "--temporary with --operator-totp required is refused: conchd will not start a temporary server that requires the authenticator (ADR-012 item 2)" 2
+    fi
+    if [ -n "$port" ] && ! [[ $port =~ ^[0-9]{4,5}$ ]]; then die "bad port '$port'" 2; fi
+    if [ -n "$operator" ] && ! valid_operator "$operator"; then
+        die "bad operator name: letters, digits, space and . _ ' -, starting with a letter or digit, at most 64 characters" 2
+    fi
+    [ -z "$scripts_ref" ] || [[ $scripts_ref =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || die "bad --scripts-ref" 2
+    read_config
+    operator=${operator:-$default_operator}
+    fqdn=$name.$domain
+
+    sync_scripts
+    droplet_addresses
+    droplet_names
+    if in_list "$name" "${names[@]}"; then die "the droplet already has a server named $name. Nothing was changed."; fi
+
+    # The records: kept if they already point at the droplet, refused if they
+    # point anywhere else, made otherwise.
+    local records type want id rid rtype rdata
+    local -a todo=() created=()
+    records=$(records_of "$name") || die "could not list the DNS records of $domain with doctl. Nothing was changed."
+    for type in A AAAA; do
+        want=$ipv4
+        [ "$type" = A ] || want=$ipv6
+        local have_one=0
+        while read -r rid rtype rdata; do
+            [ "$rtype" = "$type" ] || continue
+            if [ -z "$want" ] || ! same_address "$type" "$rdata" "$want"; then
+                die "$fqdn already has an $type record ($rdata) that is not this droplet's address; remove it first. Nothing was changed."
+            fi
+            have_one=1
+        done <<<"$records"
+        if [ -n "$want" ] && [ "$have_one" = 0 ]; then todo+=("$type $want"); fi
+    done
+    local t
+    for t in "${todo[@]}"; do
+        id=$(doctl_records create "$domain" --record-type "${t% *}" --record-name "$name" --record-data "${t#* }" --record-ttl 300 --format ID --no-header | clean | tr -d ' \n')
+        [[ $id =~ ^[0-9]+$ ]] || die "doctl did not return the new ${t% *} record's id"
+        created+=("$id")
+        say "created the ${t% *} record $fqdn -> ${t#* } (id $id)"
+    done
+
+    say "waiting for public resolvers to return $fqdn (up to ${dns_timeout}s)"
+    local deadline=$((SECONDS + dns_timeout))
+    until resolves_everywhere A "$ipv4" && { [ -z "$ipv6" ] || resolves_everywhere AAAA "$ipv6"; }; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            die "public resolvers do not return $fqdn yet. The records are made; run this again later (it keeps them)."
+        fi
+        sleep "$dns_interval"
+    done
+    say "$fqdn resolves to the droplet"
+
+    local -a args=("$remote_bin/add-instance.sh" "$name" "$domain")
+    [ "$temporary" = 0 ] || args+=(--temporary)
+    [ -z "$operator_totp" ] || args+=(--operator-totp "$operator_totp")
+    [ -z "$operator" ] || args+=(--operator "$operator")
+    [ -z "$port" ] || args+=(--port "$port")
+    [ "$yes" = 0 ] || args+=(--yes)
+    status=0
+    remote -t "${args[@]}" || status=$?
+    case "$status" in
+        0)
+            say "$name is at https://$fqdn/app/. Next: open the setup link above (once, within ten minutes) in a browser and finish the operator's setup."
+            say "See it with conch-server list; remove it with conch-server rm $name." ;;
+        4)
+            warn "$name runs, but its HTTPS check did not pass yet (see above). The DNS records are kept."
+            exit 4 ;;
+        255)
+            warn "the connection to the droplet failed while adding $name, so what it did is not known. The DNS records are kept; look with conch-server list."
+            exit 255 ;;
+        *)
+            for id in "${created[@]}"; do
+                if doctl_records delete "$domain" "$id" --force; then
+                    warn "deleted the record $id this run made"
+                else
+                    warn "could not delete the record $id this run made; delete it by hand"
+                fi
+            done
+            die "add-instance.sh on the droplet exited $status (see above)" "$status" ;;
+    esac
+}
+
+cmd_rm() {
+    local name="" status rid rtype rdata want
+    local -a args=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force-normal | --no-backup | --purge-backups) args+=("$1") ;;
+            --scripts-ref) [ $# -ge 2 ] || usage; scripts_ref=$2; shift ;;
+            -*) usage ;;
+            *) [ -z "$name" ] || usage; name=$1 ;;
+        esac
+        shift
+    done
+    [ -n "$name" ] || usage
+    valid_name "$name" || die "bad name '$name'" 2
+    ! reserved "$name" || die "'$name' is one of the droplet's shared names, not a server" 2
+    [ -z "$scripts_ref" ] || [[ $scripts_ref =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || die "bad --scripts-ref" 2
+    read_config
+    fqdn=$name.$domain
+    sync_scripts
+    droplet_addresses
+
+    status=0
+    remote -t "$remote_bin/remove-instance.sh" "$name" "${args[@]}" || status=$?
+    [ "$status" = 0 ] || die "remove-instance.sh on the droplet exited $status (see above); the DNS records are kept" "$status"
+
+    local records
+    records=$(records_of "$name") || die "could not list the DNS records of $domain with doctl; delete those of $fqdn by hand"
+    while read -r rid rtype rdata; do
+        [ -n "$rid" ] || continue
+        want=$ipv4
+        [ "$rtype" = A ] || want=$ipv6
+        if [ -n "$want" ] && same_address "$rtype" "$rdata" "$want"; then
+            doctl_records delete "$domain" "$rid" --force || die "could not delete the $rtype record $rid of $fqdn; delete it by hand"
+            say "deleted the $rtype record $fqdn -> $rdata (id $rid)"
+        else
+            warn "left the $rtype record $fqdn -> $rdata (id $rid): it does not point at this droplet"
+        fi
+    done <<<"$records"
+    say "$name is removed, DNS included"
+}
+
+cmd_list() {
+    [ $# -eq 0 ] || usage
+    read_config
+    remote -T "$remote_bin/list-instances.sh" | clean
+}
+
+cmd_upgrade() {
+    [ $# -eq 1 ] || usage
+    local tag=$1
+    valid_tag "$tag" || die "bad tag '$tag'" 2
+    read_config
+    droplet_names
+    [ "${#names[@]}" -gt 0 ] || die "the droplet lists no instances"
+    say "upgrading every instance to $tag, since they share one binary: ${names[*]}"
+    remote -t "$remote_bin/conch-upgrade.sh" "$tag" "${names[@]}"
+}
+
+cmd_sync() {
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --scripts-ref) [ $# -ge 2 ] || usage; scripts_ref=$2; shift ;;
+            *) usage ;;
+        esac
+        shift
+    done
+    [ -z "$scripts_ref" ] || [[ $scripts_ref =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || die "bad --scripts-ref" 2
+    read_config
+    sync_scripts
+}
+
+[ $# -ge 1 ] || usage
+command=$1
+shift
+case "$command" in
+    new) cmd_new "$@" ;;
+    rm) cmd_rm "$@" ;;
+    list) cmd_list "$@" ;;
+    upgrade) cmd_upgrade "$@" ;;
+    sync) cmd_sync "$@" ;;
+    -h | --help | help) usage ;;
+    *) usage ;;
+esac
