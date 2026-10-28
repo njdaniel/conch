@@ -312,15 +312,16 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 			label, role                   string
 			targetOwner                   bool
 			expiresAt, revokedAt, renewMs sql.NullInt64
+			idleMs                        sql.NullInt64
 			// current is currentAuthSQL (issue #707): a credential that
 			// no longer resolves is dead, and rotating it must not make a
 			// live one.
 			current bool
 		)
 		switch err := tx.QueryRowContext(ctx,
-			`SELECT c.principal_id, c.label, p.role, p.owner, c.expires_at, c.revoked_at, c.renew_ms, `+currentAuthSQL+`
+			`SELECT c.principal_id, c.label, p.role, p.owner, c.expires_at, c.revoked_at, c.renew_ms, c.idle_ms, `+currentAuthSQL+`
 			 FROM credentials c JOIN principals p ON p.id = c.principal_id WHERE c.id = ?`, credentialID,
-		).Scan(&principalID, &label, &role, &targetOwner, &expiresAt, &revokedAt, &renewMs, &current); {
+		).Scan(&principalID, &label, &role, &targetOwner, &expiresAt, &revokedAt, &renewMs, &idleMs, &current); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrCredentialNotFound
 		case err != nil:
@@ -371,6 +372,12 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 		}
 		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, time.Duration(renewMs.Int64)*time.Millisecond)
 		if err != nil {
+			return err
+		}
+		// The replacement keeps the old one's idle bound, so a rotated
+		// browser session is still a session (issue #866): still gated by
+		// recent auth and still ended when password-only stops.
+		if err := carryIdleBoundTx(ctx, tx, &c, idleMs, expiresAt, now); err != nil {
 			return err
 		}
 		out = c
@@ -445,16 +452,16 @@ func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		runs, guests = nil, nil
 		var (
-			principalID int64
-			label, role string
-			targetOwner bool
-			revokedAt   sql.NullInt64
-			disabledAt  sql.NullInt64
+			principalID        int64
+			label, role, scope string
+			targetOwner        bool
+			revokedAt          sql.NullInt64
+			disabledAt         sql.NullInt64
 		)
 		switch err := tx.QueryRowContext(ctx,
-			`SELECT c.principal_id, c.label, c.revoked_at, p.role, p.owner, p.disabled_at
+			`SELECT c.principal_id, c.label, c.revoked_at, p.role, p.owner, p.disabled_at, c.scope
 			 FROM credentials c JOIN principals p ON p.id = c.principal_id WHERE c.id = ?`, credentialID,
-		).Scan(&principalID, &label, &revokedAt, &role, &targetOwner, &disabledAt); {
+		).Scan(&principalID, &label, &revokedAt, &role, &targetOwner, &disabledAt, &scope); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrCredentialNotFound
 		case err != nil:
@@ -471,8 +478,12 @@ func (s *Store) revokeCredential(ctx context.Context, actor string, credentialID
 		}
 		now := credentialNow().Truncate(time.Millisecond)
 		// Refuse to revoke the last live credential any enabled owner
-		// holds: nobody could sign in afterwards (see ErrLastOperator).
-		if Role(role) == RoleOperator && targetOwner && !disabledAt.Valid {
+		// holds: nobody could sign in afterwards (see ErrLastOperator). A
+		// setup credential is no sign-in and the guard never counts one
+		// (liveOperatorCredentialsTx), so ending it, by Skip on the setup
+		// page say (ADR-011 item 2.1), leaves the count as it was and is
+		// not refused.
+		if Role(role) == RoleOperator && targetOwner && !disabledAt.Valid && schema.CredentialScope(scope) != schema.CredentialScopeSetup {
 			others, err := liveOperatorCredentialsTx(ctx, tx, 0, credentialID, 0, now)
 			if err != nil {
 				return err

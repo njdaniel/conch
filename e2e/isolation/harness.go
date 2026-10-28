@@ -254,10 +254,19 @@ func (h *harness) build() error {
 }
 
 // cleanEnv is the caller's environment without anything that would change who
-// conchd is or which LiveKit it talks to.
+// conchd is or which LiveKit it talks to. CONCHD_MODE and
+// CONCHD_OPERATOR_TOTP alone are kept, so the whole run can be made against a
+// temporary server (CONCHD_MODE=temporary go run ./e2e/isolation, ADR-011)
+// or one whose operators may sign in with a password alone
+// (CONCHD_OPERATOR_TOTP=optional, ADR-012): the approval chain and every
+// isolation row must hold there unchanged. recordBuild says which ran.
 func cleanEnv() []string {
 	var env []string
 	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "CONCHD_MODE=") || strings.HasPrefix(kv, "CONCHD_OPERATOR_TOTP=") {
+			env = append(env, kv)
+			continue
+		}
 		if strings.HasPrefix(kv, "CONCH_") || strings.HasPrefix(kv, "CONCHD_") ||
 			strings.HasPrefix(kv, "LIVEKIT_") || strings.HasPrefix(kv, "XDG_") || strings.HasPrefix(kv, "HOME=") {
 			continue
@@ -382,6 +391,9 @@ func (h *harness) recordBuild(d *conchdProc) error {
 	if err := (api{h: h, base: d.baseURL, who: "anyone"}).call(http.MethodGet, "/healthz", nil, &health); err != nil {
 		return err
 	}
+	if (health.ServerMode == schema.ServerModeTemporary) != temporaryMode() {
+		return fmt.Errorf("conchd reports server mode %s, but this run was asked for %q", serverMode(health), os.Getenv("CONCHD_MODE"))
+	}
 	commit, reports := "unknown (not a git checkout)", "conchd reports "+health.Version
 	if h.commit != "" {
 		commit = h.commit
@@ -395,8 +407,30 @@ func (h *harness) recordBuild(d *conchdProc) error {
 		}
 		reports += ", the version the build stamped from it"
 	}
-	h.say("ok   build: git HEAD %s; %s; built with %s by go build ./cmd/conchd; run as go run ./e2e/isolation (CI %v)", commit, reports, runtime.Version(), inCI())
+	h.say("ok   build: git HEAD %s; %s; built with %s by go build ./cmd/conchd; run as go run ./e2e/isolation (CI %v); server mode %s; password-only operators %s",
+		commit, reports, runtime.Version(), inCI(), serverMode(health), map[bool]string{true: "allowed", false: "not allowed"}[passwordOnlyAllowed()])
 	return nil
+}
+
+// temporaryMode reports whether this run's conchd is a temporary server:
+// CONCHD_MODE is the one variable cleanEnv passes through, so conchd sees
+// what this process sees, and recordBuild checks /healthz agrees.
+func temporaryMode() bool { return os.Getenv("CONCHD_MODE") == "temporary" }
+
+// passwordOnlyAllowed reports whether this run's conchd lets an operator
+// with no authenticator sign in with a password alone (ADR-012 item 2): a
+// temporary server, or CONCHD_OPERATOR_TOTP=optional, both passed through
+// by cleanEnv.
+func passwordOnlyAllowed() bool {
+	return temporaryMode() || os.Getenv("CONCHD_OPERATOR_TOTP") == "optional"
+}
+
+// serverMode is the mode /healthz reported: normal when it says none.
+func serverMode(h schema.Health) string {
+	if h.ServerMode == "" {
+		return "normal"
+	}
+	return string(h.ServerMode)
 }
 
 // hostCommand runs a conchd host command on the server's data directory, as

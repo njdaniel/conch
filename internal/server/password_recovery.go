@@ -36,7 +36,8 @@ import (
 // any password work, and the code is checked in the transaction that writes,
 // which records its step, so it cannot be used twice. Every missing, wrong
 // or replayed code answers auth_failed and counts in the name's window, as a
-// wrong password does (review F2).
+// wrong password does (review F2). Where password-only is allowed (ADR-011 item 2.1, ADR-012)
+// the code is asked for only when the operator has enrolled one.
 //
 // Every route here takes a password, so each checks what passwordRoute
 // checks first: authentication on and HTTPS (or loopback). Hashes and
@@ -234,6 +235,11 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrSetupOnHost):
 		writeError(w, http.StatusForbidden, schema.ErrorCodeSetupOnHost,
 			"an operator's password is set through a setup token made on the host (conchd), not on this credential")
+	case errors.Is(err, store.ErrSetupCredentialRestricted):
+		// Another request on this credential set the password first, on a
+		// server that allows password-only: it now reaches only the
+		// authenticator routes, as the middleware answers (ADR-011 item 2.1).
+		writeSetupScopeRefused(w)
 	case errors.Is(err, store.ErrLoginStale), errors.Is(err, store.ErrPrincipalDisabled), errors.Is(err, store.ErrPrincipalHidden),
 		errors.Is(err, store.ErrPrincipalNotFound):
 		// The credential or the person was ended while the password was
@@ -363,12 +369,20 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if isOperator(caller) && req.Code == "" {
+	if isOperator(caller) && req.Code == "" && !s.cfg.passwordOnlyAllowed() {
 		s.secondFactorMissing(w, r, caller, passwordFailureViaChange)
 		return
 	}
 	subj, ok := s.passwordSubject(w, r, caller, credID)
 	if !ok {
+		return
+	}
+	// Where password-only is allowed the code is asked for only when one is enrolled
+	// (ADR-011 item 2.1); a code sent by an operator who has none is not
+	// looked at.
+	passwordOnly := s.passwordOnlyOperator(caller, subj)
+	if isOperator(caller) && req.Code == "" && !passwordOnly {
+		s.secondFactorMissing(w, r, caller, passwordFailureViaChange)
 		return
 	}
 	if subj.Scope != schema.CredentialScopeFull {
@@ -401,7 +415,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		PrincipalID: caller.ID, CredentialID: credID, AuthGeneration: subj.AuthGeneration,
 		Record: subj.Record, NewRecord: record,
 	}
-	if isOperator(caller) {
+	if isOperator(caller) && !passwordOnly {
 		change.SecondFactor = s.totpCheck(caller.ID, req.Code)
 	}
 	res, err := s.store.ChangePassword(ctx, auditActor(ctx), change, s.now())
@@ -551,12 +565,20 @@ func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "the password or code is malformed")
 		return
 	}
-	if isOperator(caller) && req.Code == "" {
+	if isOperator(caller) && req.Code == "" && !s.cfg.passwordOnlyAllowed() {
 		s.secondFactorMissing(w, r, caller, passwordFailureViaReauth)
 		return
 	}
 	subj, ok := s.passwordSubject(w, r, caller, credID)
 	if !ok {
+		return
+	}
+	// As for a change: where password-only is allowed, an operator with no
+	// authenticator proves the password alone (ADR-011 item 2.1), which
+	// covers ADR-010's role route and owner mark too.
+	passwordOnly := s.passwordOnlyOperator(caller, subj)
+	if isOperator(caller) && req.Code == "" && !passwordOnly {
+		s.secondFactorMissing(w, r, caller, passwordFailureViaReauth)
 		return
 	}
 	switch {
@@ -584,9 +606,12 @@ func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) {
 		until time.Time
 		err   error
 	)
-	if isOperator(caller) {
+	switch {
+	case passwordOnly:
+		until, err = s.store.RecordPasswordOnlyOperatorRecentAuth(ctx, issue, credID, s.now())
+	case isOperator(caller):
 		until, err = s.store.RecordOperatorRecentAuth(ctx, issue, credID, s.totpCheck(caller.ID, req.Code), s.now())
-	} else {
+	default:
 		until, err = s.store.RecordRecentAuth(ctx, issue, credID, s.now())
 	}
 	if errors.Is(err, store.ErrSecondFactorWrong) {
@@ -597,6 +622,11 @@ func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case totpUnavailable(err):
 		logTOTPUnavailable(ctx, caller.ID, err)
+		writeSecondFactorRequired(w)
+	case errors.Is(err, store.ErrSecondFactorRequired):
+		// Only a password-only proof gets this: the operator enrolled while
+		// the password was verified, or the store does not allow password-only.
+		// No code was looked at, so nothing counts.
 		writeSecondFactorRequired(w)
 	case errors.Is(err, store.ErrNotASession):
 		writeNotASession(w)
@@ -611,6 +641,24 @@ func (s *Server) handleReauth(w http.ResponseWriter, r *http.Request) {
 		slog.InfoContext(ctx, "passwords: re-authenticated", "principal", caller.ID, "credential", credID)
 		writeJSON(w, http.StatusOK, schema.ReauthResponseV1{Until: schema.NewTimestamp(until)})
 	}
+}
+
+// passwordOnlyOperator reports whether caller is an operator who, on a
+// server that allows password-only, proves themself with a password alone:
+// one with no confirmed authenticator as subj read it (ADR-011 item 2.1,
+// ADR-012). Both the configuration and the stored flag, as subj read it,
+// must allow it, so the two cannot disagree into a weaker answer; the store
+// reads the flag and the enrolment again in the transaction that writes, and
+// asks for the code if either says so.
+func (s *Server) passwordOnlyOperator(caller store.Principal, subj store.PasswordSubject) bool {
+	return isOperator(caller) && s.passwordOnlyAllowedFor(subj) && !subj.TOTPEnrolled
+}
+
+// passwordOnlyAllowedFor reports whether password-only is allowed for what a
+// route tells the caller: the configuration says so and the store's flag,
+// read with subj, agrees (ADR-012 item 3). Either saying no is no.
+func (s *Server) passwordOnlyAllowedFor(subj store.PasswordSubject) bool {
+	return s.cfg.passwordOnlyAllowed() && subj.PasswordOnlyAllowed
 }
 
 func writeNotASession(w http.ResponseWriter) {
@@ -644,7 +692,10 @@ func (s *Server) authWhoAmI(ctx context.Context, caller store.Principal, credID 
 	auth.SetupComplete = auth.PasswordSet
 	if isOperator(caller) {
 		auth.TOTPEnrolled = subj.TOTPEnrolled
-		auth.SetupComplete = auth.PasswordSet && subj.TOTPEnrolled
+		// An authenticator is part of setup only where the mode asks for
+		// one (ADR-011 item 2.1): where password-only is allowed the password
+		// completes it, and the web Setup page and conch setup stop waiting.
+		auth.SetupComplete = auth.PasswordSet && (subj.TOTPEnrolled || s.passwordOnlyAllowedFor(subj))
 	}
 	resp.Auth = &auth
 	return nil

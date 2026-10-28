@@ -103,6 +103,32 @@ type Config struct {
 	// or sign in with a password, and every TOTP check fails closed;
 	// everything else works. conchd reads it from CONCHD_TOTP_KEY only.
 	TOTPKey *TOTPKey
+	// Mode is the server's mode (ADR-011, issue #866). Empty or
+	// store.ModeNormal is normal; store.ModeTemporary makes /healthz and
+	// whoami say the server is temporary, and allows password-only
+	// operators. conchd reads it from CONCHD_MODE only.
+	Mode store.Mode
+	// OperatorTOTP is whether an operator needs an authenticator to sign in
+	// to the browser (ADR-012, issue #875). store.OperatorTOTPOptional
+	// allows password-only operators on any server; empty or required
+	// allows them only in temporary mode. conchd reads it from
+	// CONCHD_OPERATOR_TOTP only. conchd records what the two settings allow
+	// with store.StartMode before New, and the store's own checks read what
+	// was recorded, so a Config that allows password-only over a store that
+	// does not still asks for the code.
+	OperatorTOTP store.OperatorTOTP
+}
+
+// temporary reports whether the server runs in temporary mode. It decides
+// the banner (server_mode on /healthz and whoami) and nothing else.
+func (c Config) temporary() bool { return c.Mode == store.ModeTemporary }
+
+// passwordOnlyAllowed reports whether an operator with no authenticator
+// signs in, re-authenticates, changes their password and completes setup
+// with a password alone (ADR-011 item 2.1, ADR-012 item 2): the server is
+// temporary or its operator TOTP is optional.
+func (c Config) passwordOnlyAllowed() bool {
+	return store.PasswordOnlyAllowed(c.Mode, c.OperatorTOTP)
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -524,6 +550,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Version: s.cfg.Version,
 		DB:      schema.HealthOK,
 		Voice:   s.voice.health(),
+	}
+	// Public on purpose (ADR-011 item 2.3): the sign-in page shows the
+	// banner before anyone signs in. Normal mode says nothing.
+	if s.cfg.temporary() {
+		h.ServerMode = schema.ServerModeTemporary
 	}
 	code := http.StatusOK
 

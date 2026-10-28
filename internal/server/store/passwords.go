@@ -481,6 +481,11 @@ var (
 	// credential: the proof is for sign-in sessions only (design §7.2, the
 	// S15 boundary).
 	ErrNotASession = errors.New("store: a recent-password proof is kept on a sign-in session only")
+	// ErrSetupCredentialRestricted is a password sent on a setup credential
+	// that has already set one where password-only is allowed: it keeps only the
+	// authenticator routes and its own end (ADR-011 item 2.1), so nothing
+	// left behind can replace the password.
+	ErrSetupCredentialRestricted = errors.New("store: this setup credential has set the password and may only enrol an authenticator")
 )
 
 // signInSessionSQL is the condition, over a credential's bare columns,
@@ -506,6 +511,12 @@ type PasswordSubject struct {
 	AuthGeneration int64
 	// TOTPEnrolled says the principal has a confirmed second factor.
 	TOTPEnrolled bool
+	// PasswordOnlyAllowed is the stored flag (storedPasswordOnlyTx): the
+	// server's last start allowed password-only operators (ADR-012 item 3).
+	// What a client is told, whoami's setup_complete above all, reads it, so
+	// a server whose configuration and store disagree never tells a setup
+	// page "complete" while the store would refuse the operator.
+	PasswordOnlyAllowed bool
 	// ExpiresAt and IdleExpiresAt bound the credential, when it has those
 	// bounds; RecentAuthUntil is its recent-password proof, when one stands
 	// at the instant asked about.
@@ -548,6 +559,9 @@ func (s *Store) PasswordSubject(ctx context.Context, principalID, credentialID i
 		 FROM principals p LEFT JOIN passwords pw ON pw.principal_id = p.id WHERE p.id = ?`, principalID,
 	).Scan(&out.AuthGeneration, &record, &out.TOTPEnrolled); err != nil {
 		return PasswordSubject{}, fmt.Errorf("store: password subject: %w", err)
+	}
+	if out.PasswordOnlyAllowed, err = storedPasswordOnlyTx(ctx, s.db); err != nil {
+		return PasswordSubject{}, err
 	}
 	out.Principal, out.Scope, out.Record = p, schema.CredentialScope(scope), record.String
 	out.ExpiresAt, out.IdleExpiresAt = millisPtr(expiresAt), millisPtr(idleExpires)
@@ -593,6 +607,10 @@ func passwordPrincipalTx(ctx context.Context, tx execer, principalID int64) (Pri
 type callerCredential struct {
 	scope   schema.CredentialScope
 	session bool
+	// totpOnly says a setup credential has set its operator's password on a
+	// server that allows password-only and keeps only the authenticator routes (ADR-011
+	// item 2.1, migration 36).
+	totpOnly bool
 }
 
 // callerCredentialTx re-reads the credential a request came with: it must be
@@ -601,19 +619,20 @@ type callerCredential struct {
 // credential was ended while the server verified or hashed.
 func callerCredentialTx(ctx context.Context, tx execer, principalID, credentialID int64, now time.Time) (callerCredential, error) {
 	var (
-		owner   int64
-		scope   string
-		session bool
-		live    bool
+		owner    int64
+		scope    string
+		session  bool
+		totpOnly bool
+		live     bool
 	)
 	switch err := tx.QueryRowContext(ctx,
-		`SELECT c.principal_id, c.scope, (c.renew_ms IS NOT NULL OR c.idle_ms IS NOT NULL),
+		`SELECT c.principal_id, c.scope, (c.renew_ms IS NOT NULL OR c.idle_ms IS NOT NULL), c.setup_totp_only,
 		        c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
 		        AND (c.idle_ms IS NULL OR COALESCE(c.last_used_at, c.created_at) + c.idle_ms > ?)
 		        AND c.auth_generation = p.auth_generation
 		 FROM credentials c JOIN principals p ON p.id = c.principal_id WHERE c.id = ?`,
 		now.UnixMilli(), now.UnixMilli(), credentialID,
-	).Scan(&owner, &scope, &session, &live); {
+	).Scan(&owner, &scope, &session, &totpOnly, &live); {
 	case errors.Is(err, sql.ErrNoRows):
 		return callerCredential{}, ErrLoginStale
 	case err != nil:
@@ -622,7 +641,7 @@ func callerCredentialTx(ctx context.Context, tx execer, principalID, credentialI
 	if owner != principalID || !live {
 		return callerCredential{}, ErrLoginStale
 	}
-	return callerCredential{scope: schema.CredentialScope(scope), session: session}, nil
+	return callerCredential{scope: schema.CredentialScope(scope), session: session, totpOnly: totpOnly}, nil
 }
 
 // rotateSessionTx revokes credentialID and issues its principal a new one
@@ -658,16 +677,8 @@ func rotateSessionTx(ctx context.Context, tx execer, actor string, credentialID 
 	if err != nil {
 		return schema.CredentialV1{}, err
 	}
-	if idle.Valid {
-		if _, err := tx.ExecContext(ctx, "UPDATE credentials SET idle_ms = ? WHERE id = ?", idle.Int64, c.ID); err != nil {
-			return schema.CredentialV1{}, fmt.Errorf("store: rotate session: idle bound: %w", err)
-		}
-		at := now.Add(time.Duration(idle.Int64) * time.Millisecond)
-		if expiresAt.Valid && at.UnixMilli() > expiresAt.Int64 {
-			at = time.UnixMilli(expiresAt.Int64)
-		}
-		ts := schema.NewTimestamp(at)
-		c.IdleExpiresAt = &ts
+	if err := carryIdleBoundTx(ctx, tx, &c, idle, expiresAt, now); err != nil {
+		return schema.CredentialV1{}, err
 	}
 	if err := appendAuditEventTx(ctx, tx, actor, "credential_rotated", principalActor(principalID),
 		credentialDetail(c.ID, c.Label)+fmt.Sprintf(" replaces=%d", credentialID), now); err != nil {
@@ -677,6 +688,32 @@ func rotateSessionTx(ctx context.Context, tx execer, actor string, credentialID 
 		return schema.CredentialV1{}, err
 	}
 	return c, nil
+}
+
+// carryIdleBoundTx gives c, a credential just inserted to replace another,
+// the replaced one's idle bound idle, when it had one, so the replacement is
+// a sign-in session exactly when the old one was (signInSessionSQL: renewal,
+// which insertCredentialTx carries, or an idle bound). Without it a rotated
+// operator browser session would become a script credential to every check
+// that tells the two apart: the recent-auth gate, and the revocation when
+// password-only stops being allowed (issue #866). The idle clock starts
+// again at the rotation (last_used_at stays NULL, so it counts from
+// created_at, now): the rotation is a use, as any REST request is, and the
+// bound is never later than the kept expiry, which never moves.
+func carryIdleBoundTx(ctx context.Context, tx execer, c *schema.CredentialV1, idle, expiresAt sql.NullInt64, now time.Time) error {
+	if !idle.Valid {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE credentials SET idle_ms = ? WHERE id = ?", idle.Int64, c.ID); err != nil {
+		return fmt.Errorf("store: rotate: idle bound: %w", err)
+	}
+	at := now.Add(time.Duration(idle.Int64) * time.Millisecond)
+	if expiresAt.Valid && at.UnixMilli() > expiresAt.Int64 {
+		at = time.UnixMilli(expiresAt.Int64)
+	}
+	ts := schema.NewTimestamp(at)
+	c.IdleExpiresAt = &ts
+	return nil
 }
 
 // spendPasswordLinkTx spends a reset or an enrollment link, once: the guarded
@@ -728,6 +765,11 @@ type PasswordUpdate struct {
 	// SetupEnded is the setup credential the write revoked because the
 	// operator's setup is now complete (issue #709), 0 when none.
 	SetupEnded int64
+	// SetupRestricted is the setup credential that, where password-only is allowed,
+	// completed its operator's setup with the password and now reaches only
+	// the authenticator routes and its own end (ADR-011 item 2.1), 0 when
+	// none.
+	SetupRestricted int64
 }
 
 // EnrollPassword stores in.Record as the caller's password, by the rules of
@@ -751,8 +793,12 @@ type PasswordUpdate struct {
 // does; the setup credential moves to the new generation with its
 // principal, so the setup it is for can finish. When the operator already
 // has a confirmed second factor, the password completes the setup and the
-// setup credential is revoked (PasswordUpdate.SetupEnded). A proof sent on
-// it is held to the same rule as above.
+// setup credential is revoked (PasswordUpdate.SetupEnded). Where password-only
+// is allowed (ADR-011 item 2.1, ADR-012) the password alone completes it: in the same
+// transaction the setup credential is restricted to the authenticator routes
+// and its own end (PasswordUpdate.SetupRestricted), and one already
+// restricted is ErrSetupCredentialRestricted. A proof sent on it is held to
+// the same rule as above.
 //
 // password_set is audited (via=enrollment or via=setup), with
 // credential_rotated, or the bump and revocations, in the same transaction.
@@ -780,6 +826,11 @@ func (s *Store) EnrollPassword(ctx context.Context, actor string, in PasswordEnr
 			return err
 		}
 		setup := cred.scope == schema.CredentialScopeSetup
+		if setup && cred.totpOnly {
+			// Checked again here, beside the middleware's route check, so two
+			// requests in flight on one credential cannot both set it.
+			return ErrSetupCredentialRestricted
+		}
 		if !setup {
 			var has bool
 			if err := tx.QueryRowContext(ctx,
@@ -850,13 +901,29 @@ func (s *Store) EnrollPassword(ctx context.Context, actor string, in PasswordEnr
 		// setup: the setup credential has done its work and ends here, so
 		// it cannot replace the password again (issue #709).
 		enrolled, err := totpEnrolledTx(ctx, tx, in.PrincipalID)
-		if err != nil || !enrolled {
+		if err != nil {
 			return err
 		}
-		if err := endSetupCredentialTx(ctx, tx, actor, in.PrincipalID, in.CredentialID, now, &runs); err != nil {
+		if enrolled {
+			if err := endSetupCredentialTx(ctx, tx, actor, in.PrincipalID, in.CredentialID, now, &runs); err != nil {
+				return err
+			}
+			out.SetupEnded = in.CredentialID
+			return nil
+		}
+		// Where password-only is allowed the password alone completes it
+		// (ADR-011 item 2.1, ADR-012 item 3, read from the stored flag). The
+		// credential stays, so the authenticator step stays on offer, but
+		// loses the right to set a password, in this transaction: nothing
+		// left behind can replace it.
+		allowed, err := storedPasswordOnlyTx(ctx, tx)
+		if err != nil || !allowed {
 			return err
 		}
-		out.SetupEnded = in.CredentialID
+		if _, err := tx.ExecContext(ctx, "UPDATE credentials SET setup_totp_only = 1 WHERE id = ? AND scope = 'setup'", in.CredentialID); err != nil {
+			return fmt.Errorf("store: enroll password: restrict the setup credential: %w", err)
+		}
+		out.SetupRestricted = in.CredentialID
 		return nil
 	})
 	if err != nil {
@@ -894,7 +961,8 @@ type PasswordChange struct {
 	Record, NewRecord         string
 	// SecondFactor checks an operator's TOTP code (issue #709); a member's
 	// change has none. An operator's change without it is
-	// ErrSecondFactorRequired.
+	// ErrSecondFactorRequired, unless the stored flag allows password-only and the
+	// operator has no confirmed second factor (ADR-011 item 2.1).
 	SecondFactor TOTPCheck
 }
 
@@ -905,7 +973,9 @@ type PasswordChange struct {
 // change needs a TOTP code as well (design §5.2): without in.SecondFactor it
 // is ErrSecondFactorRequired, and a wrong or replayed code is
 // ErrSecondFactorWrong; either writes nothing. An accepted code's step is
-// recorded with the change.
+// recorded with the change. Where password-only is allowed an operator with no
+// confirmed second factor changes it with the password alone
+// (passwordOnlyOperatorTx, read in this transaction; ADR-011 item 2.1).
 //
 // The new password is stored and password_changed audited; the
 // authentication generation moves on, which ends every pending login, link
@@ -929,11 +999,15 @@ func (s *Store) ChangePassword(ctx context.Context, actor string, in PasswordCha
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		out, runs = PasswordUpdate{PrincipalID: in.PrincipalID}, nil
 		p, err := passwordPrincipalTx(ctx, tx, in.PrincipalID)
-		switch {
-		case err != nil:
+		if err != nil {
 			return err
-		case p.Role == RoleOperator && in.SecondFactor == nil:
-			return ErrSecondFactorRequired
+		}
+		if p.Role == RoleOperator && in.SecondFactor == nil {
+			if ok, err := passwordOnlyOperatorTx(ctx, tx, in.PrincipalID); err != nil {
+				return err
+			} else if !ok {
+				return ErrSecondFactorRequired
+			}
 		}
 		if _, err := recheckLoginTx(ctx, tx, LoginIssue{PrincipalID: in.PrincipalID, AuthGeneration: in.AuthGeneration, Record: in.Record},
 			p.Role, now); err != nil {
@@ -946,7 +1020,7 @@ func (s *Store) ChangePassword(ctx context.Context, actor string, in PasswordCha
 		if cred.scope != schema.CredentialScopeFull {
 			return ErrLoginStale
 		}
-		if p.Role == RoleOperator {
+		if p.Role == RoleOperator && in.SecondFactor != nil {
 			if err := consumeTOTPTx(ctx, tx, in.PrincipalID, in.SecondFactor); err != nil {
 				return err
 			}
@@ -1065,7 +1139,10 @@ func (s *Store) RecordRecentAuth(ctx context.Context, in LoginIssue, credentialI
 
 // recordRecentAuth is RecordRecentAuth for a principal of role; with a
 // check, the second factor is consumed (consumeTOTPTx) after the credential
-// is re-read, in the same transaction (RecordOperatorRecentAuth).
+// is re-read, in the same transaction (RecordOperatorRecentAuth). An
+// operator with no check is let through only by passwordOnlyOperatorTx, read
+// in the same transaction (RecordPasswordOnlyOperatorRecentAuth), and is
+// ErrSecondFactorRequired otherwise.
 func (s *Store) recordRecentAuth(ctx context.Context, in LoginIssue, credentialID int64, role Role, check TOTPCheck, now time.Time) (time.Time, error) {
 	now = now.Truncate(time.Millisecond)
 	until := now.Add(schema.RecentAuthLifetimeSeconds * time.Second)
@@ -1082,9 +1159,16 @@ func (s *Store) recordRecentAuth(ctx context.Context, in LoginIssue, credentialI
 		case !cred.session:
 			return ErrNotASession
 		}
-		if check != nil {
+		switch {
+		case check != nil:
 			if err := consumeTOTPTx(ctx, tx, in.PrincipalID, check); err != nil {
 				return err
+			}
+		case role == RoleOperator:
+			if ok, err := passwordOnlyOperatorTx(ctx, tx, in.PrincipalID); err != nil {
+				return err
+			} else if !ok {
+				return ErrSecondFactorRequired
 			}
 		}
 		if _, err := tx.ExecContext(ctx, "UPDATE credentials SET recent_auth_until = ? WHERE id = ?", until.UnixMilli(), credentialID); err != nil {

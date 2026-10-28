@@ -230,6 +230,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeSetupScopeRefused(w)
 			return
 		}
+		// One that set the password where password-only is allowed keeps only the
+		// authenticator routes and its own end (ADR-011 item 2.1), so it can
+		// no longer replace the password.
+		if cred.SetupTOTPOnly && (!matched || !setupTOTPOnlyRoutes[pattern]) {
+			writeSetupScopeRefused(w)
+			return
+		}
 		// A REST request moves an idle-bounded credential's idle expiry (a
 		// guest's, an operator's browser session); opening a socket does
 		// not, and nothing on an open socket does (issue #705, review F5),
@@ -422,6 +429,10 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		ServerVersion: s.cfg.Version,
 		MayInvite:     mayInvite(caller),
 		VoiceAllowed:  &voice,
+	}
+	// ADR-011 item 2.3: everyone is told, absent in normal mode.
+	if s.cfg.temporary() {
+		resp.ServerMode = schema.ServerModeTemporary
 	}
 	// What the caller is, and a guest's visit (issue #705). Only with
 	// authentication on, where there is a caller to classify.

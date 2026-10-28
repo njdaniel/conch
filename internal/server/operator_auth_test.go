@@ -237,9 +237,10 @@ func TestOperatorSetupAndSignIn(t *testing.T) {
 	}
 }
 
-// A setup-scoped credential reaches whoami, the password enrolment and the
-// TOTP enrolment, and every other route of the table answers 403
-// setup_incomplete (review F6), before and after the password it replaced.
+// A setup-scoped credential reaches whoami, the password enrolment, the
+// TOTP enrolment and its own sign-out (ADR-011 item 2.1), and every other
+// route of the table answers 403 setup_incomplete (review F6), before and
+// after the password it replaced.
 func TestSetupScopeReachesOnlySetupRoutes(t *testing.T) {
 	f := newOperatorFixture(t)
 	setup := f.redeemSetup(t, f.hostSetupToken(t, f.root.ID))
@@ -253,7 +254,7 @@ func TestSetupScopeReachesOnlySetupRoutes(t *testing.T) {
 			if !ok {
 				t.Fatalf("no expectation for %s", rt.pattern)
 			}
-			if rt.pattern == "POST /v1/totp/enroll" || rt.pattern == "POST /v1/password/mine" {
+			if rt.pattern == "POST /v1/totp/enroll" || rt.pattern == "POST /v1/password/mine" || rt.pattern == "DELETE /v1/credentials/current" {
 				continue // these write; they are run on their own below
 			}
 			rec := f.send(t, routeMethod(rt.pattern), exp.path, setup.Token, exp.body, "")
@@ -283,6 +284,13 @@ func TestSetupScopeReachesOnlySetupRoutes(t *testing.T) {
 	t.Run("after the password was replaced", check)
 	if rec := f.send(t, "POST", "/v1/totp/enroll", setup.Token, "", ""); rec.Code != http.StatusOK {
 		t.Errorf("enroll = %d %s", rec.Code, rec.Body)
+	}
+	// Skip: the setup credential ends itself, and is gone.
+	if rec := f.send(t, "DELETE", "/v1/credentials/current", setup.Token, "", ""); rec.Code != http.StatusNoContent {
+		t.Errorf("sign out = %d %s", rec.Code, rec.Body)
+	}
+	if code := f.status(t, setup.Token); code != http.StatusUnauthorized {
+		t.Errorf("whoami after the sign-out = %d, want 401", code)
 	}
 }
 

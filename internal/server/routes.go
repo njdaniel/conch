@@ -269,15 +269,29 @@ func (s *Server) routeTable() []route {
 }
 
 // setupScopeRoutes are the only routes a setup-scoped credential reaches
-// (design §5.3, review F6): whoami, the password enrolment and the TOTP
-// enrolment. The authentication middleware checks it for every request, so
-// a route added later is closed to such a credential unless it is named
-// here.
+// (design §5.3, review F6): whoami, the password enrolment, the TOTP
+// enrolment and signing itself out, which is how the setup page's Skip ends
+// it (ADR-011 item 2.1). The authentication middleware checks it for every
+// request, so a route added later is closed to such a credential unless it
+// is named here.
 var setupScopeRoutes = map[string]bool{
-	"GET /v1/whoami":         true,
-	"POST /v1/password/mine": true,
-	"POST /v1/totp/enroll":   true,
-	"POST /v1/totp/confirm":  true,
+	"GET /v1/whoami":                 true,
+	"POST /v1/password/mine":         true,
+	"POST /v1/totp/enroll":           true,
+	"POST /v1/totp/confirm":          true,
+	"DELETE /v1/credentials/current": true,
+}
+
+// setupTOTPOnlyRoutes are what a setup credential keeps once it has set its
+// operator's password where password-only is allowed (ADR-011 item 2.1,
+// store.RequestCredential.SetupTOTPOnly): setupScopeRoutes without the
+// password enrolment. It ends on Skip (its own sign-out), on a confirmed
+// enrolment, or at its expiry.
+var setupTOTPOnlyRoutes = map[string]bool{
+	"GET /v1/whoami":                 true,
+	"POST /v1/totp/enroll":           true,
+	"POST /v1/totp/confirm":          true,
+	"DELETE /v1/credentials/current": true,
 }
 
 // recentAuthRoutes is the re-authentication class (design §5.3, §7.2,
