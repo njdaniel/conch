@@ -207,7 +207,10 @@ describe('an operator’s setup: Skip', () => {
     expect(screen.getByText(/Sign in with your name and your password\./)).toBeDefined();
     expect(screen.queryByText(/a code from the app/)).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Go to sign-in' }));
-    expect(await screen.findByText(noticeText('setupDone'))).toBeDefined();
+    // A skipped setup says to sign in with name and password: no code.
+    expect(await screen.findByText(noticeText('setupSkipped'))).toBeDefined();
+    expect(noticeText('setupSkipped')).not.toMatch(/code|authenticator/);
+    expect(screen.queryByText(noticeText('setupDone'))).toBeNull();
     expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
     expect(container.innerHTML).not.toContain(setupCredential);
   });
@@ -415,5 +418,84 @@ describe('a pasted operator session', () => {
     });
     expect(window.sessionStorage.getItem(key)).toBe(sessionToken);
     expect(window.localStorage.getItem(key)).toBeNull();
+  });
+});
+
+describe('setup runs that overlap', () => {
+  const second = `conch_setup_${'T'.repeat(43)}`;
+  const credA = 'conch_setup_credential_A';
+  const credB = 'conch_setup_credential_B';
+  const grant = (token: string) => ({
+    principal,
+    credential: { id: 9, principal_id: 1, label: 'setup', created_at: at, scope: 'setup' },
+    token,
+    auth: { scope: 'setup', password_set: false, setup_complete: false },
+  });
+
+  it('a redemption that answers late is discarded and revoked: the new link’s page keeps its own credential', async () => {
+    let answerA: (r: Response) => void = () => {};
+    const slowA = new Promise<Response>((resolve) => {
+      answerA = resolve;
+    });
+    const calls = serve({
+      'GET /v1/join': () => json(frontDoor),
+      'POST /v1/setup/redeem': (c) => ((c.body as { token: string }).token === setupToken ? slowA : json(grant(credB), 201)),
+      'GET /v1/whoami': (c) => (c.auth === `Bearer ${credB}` ? json({ ...operatorWho, auth: { scope: 'setup', password_set: true, setup_complete: false } }) : json({}, 401)),
+      'POST /v1/password/mine': (c) => (c.auth === `Bearer ${credB}` ? json({ revoked: 0 }) : json({}, 401)),
+      'DELETE /v1/credentials/current': () => new Response(null, { status: 204 }),
+    });
+    window.location.hash = `#/setup/${setupToken}`;
+    render(<App origin={origin} />);
+    await screen.findByLabelText('Setup token');
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await waitFor(() => {
+      expect(calls.filter((c) => c.path === '/v1/setup/redeem')).toHaveLength(1);
+    });
+    // Link B arrives while A's redemption is still pending, and is redeemed.
+    window.location.hash = `#/setup/${second}`;
+    fireEvent(window, new HashChangeEvent('hashchange'));
+    await waitFor(() => {
+      expect(screen.getByLabelText<HTMLInputElement>('Setup token').value).toBe(second);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByLabelText('Choose a password');
+    // A answers last.
+    answerA(json(grant(credA), 201));
+    await waitFor(() => {
+      expect(calls.some((c) => c.method === 'DELETE' && c.auth === `Bearer ${credA}`)).toBe(true);
+    });
+    // B's page still sets its password with B's credential, never A's.
+    fireEvent.change(screen.getByLabelText('Choose a password'), { target: { value: password } });
+    fireEvent.change(screen.getByLabelText('Type it again'), { target: { value: password } });
+    fireEvent.click(screen.getByRole('button', { name: 'Set password' }));
+    await waitFor(() => {
+      expect(calls.some((c) => c.path === '/v1/password/mine')).toBe(true);
+    });
+    expect(calls.filter((c) => c.path === '/v1/password/mine').map((c) => c.auth)).toEqual([`Bearer ${credB}`]);
+    expect(calls.filter((c) => c.auth === `Bearer ${credA}`).map((c) => c.method)).toEqual(['DELETE']);
+  });
+});
+
+describe('a password login whose first check fails in passing', () => {
+  it('recovers signed in, with no operator warning', async () => {
+    let whoamis = 0;
+    serve({
+      'GET /v1/join': () => json(frontDoor),
+      'POST /v1/login': () => json(signedIn),
+      'GET /v1/channels': () => json(channelList),
+      // 1: the check before keeping; 2: the one after keeping fails; 3: App's retry.
+      'GET /v1/whoami': () => (++whoamis === 2 ? json({}, 500) : json(passwordOnlyWho)),
+    });
+    render(<App origin={origin} />);
+    await screen.findByRole('heading', { name: 'Sign in' });
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'root' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: password } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('status', { name: 'Status' })?.textContent).toContain('root');
+    });
+    expect(whoamis).toBeGreaterThanOrEqual(3);
+    expect(screen.queryByRole('heading', { name: 'This is an operator credential' })).toBeNull();
+    expect(window.sessionStorage.getItem(key)).toBe(sessionToken);
   });
 });

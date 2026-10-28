@@ -72,7 +72,8 @@ export function Setup({
   // A setup link's token (ADR-011), waiting in a ref for the field: put in
   // it once, and spent only when the person clicks Continue.
   readonly link?: { current: string | null };
-  readonly onDone: () => void;
+  // skipped: the authenticator was left unset.
+  readonly onDone: (skipped: boolean) => void;
   readonly onBack: () => void;
 }) {
   const id = useId();
@@ -406,7 +407,12 @@ export function Setup({
             </p>
           )}
           <div className="actions">
-            <button type="button" onClick={onDone}>
+            <button
+              type="button"
+              onClick={() => {
+                onDone(step.skipped === true);
+              }}
+            >
               Go to sign-in
             </button>
           </div>

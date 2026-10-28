@@ -17,11 +17,12 @@ import type { WhoAmIResponseV1 } from '../schema/principal';
 // its twelve hours, an hour without use or a revoke; codeOver is a sign-in
 // whose second step ran out of time or of tries, so the password comes
 // first again; setupDone is an operator's setup complete, which signs nobody
-// in.
+// in; setupSkipped is the same with no authenticator (ADR-012).
 export type AuthNotice =
   | 'sessionEnded'
   | 'codeOver'
   | 'setupDone'
+  | 'setupSkipped'
   | 'rejected'
   | 'network'
   | 'invalid'
@@ -145,6 +146,7 @@ const lines: Record<AuthNotice, string> = {
     'Your operator sign-in has ended. It lasts twelve hours at most, and ends after an hour without use. Sign in again with your password and a code. Anything you were typing is kept for when you are back.',
   codeOver: 'That sign-in took too long, or had too many codes that were not right. Sign in again with your name and password.',
   setupDone: 'Setup is complete. Sign in with your name, your password and a code from your authenticator app.',
+  setupSkipped: 'Setup is complete. Sign in with your name and your password.',
   rejected: 'That credential was not accepted',
   network: 'Cannot reach the server',
   invalid: 'The server gave an unexpected reply',

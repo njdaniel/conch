@@ -1024,7 +1024,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           return;
         case 'unchecked':
           void api.whoAmI().then((who) => {
-            if (who.ok) dispatchAuth({ type: 'verified', principal: who.value });
+            if (who.ok) dispatchAuth({ type: 'verified', principal: who.value, own: true });
             else dispatchAuth({ type: 'failed', failure: who.failure });
           });
           return;
@@ -1061,7 +1061,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           return;
         case 'unchecked':
           void api.whoAmI().then((who) => {
-            if (who.ok) dispatchAuth({ type: 'verified', principal: who.value });
+            if (who.ok) dispatchAuth({ type: 'verified', principal: who.value, own: true });
             else dispatchAuth({ type: 'failed', failure: who.failure });
           });
           return;
@@ -1180,9 +1180,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         key={setupGeneration}
         origin={origin}
         link={setupLink}
-        onDone={() => {
+        onDone={(skipped) => {
           setSettingUp(false);
-          dispatchAuth({ type: 'signOut', notice: 'setupDone' });
+          dispatchAuth({ type: 'signOut', notice: skipped ? 'setupSkipped' : 'setupDone' });
         }}
         onBack={() => {
           setSettingUp(false);

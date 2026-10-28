@@ -751,6 +751,11 @@ export async function resetPassword(signInCode: string, password: string): Promi
 // in memory only, never stored and never pinned: it signs nobody in, and a
 // reload drops it (a new token is made on the host).
 let setupHeld: Held | null = null;
+// The setup run in force: a number, not a secret. Starting a setup (a token
+// redeemed) and ending one (endSetup) each begin a new run, and a redemption
+// that answers after its run has ended is discarded, and its credential
+// revoked, so a late answer never replaces the credential of the run in force.
+let setupRun = 0;
 
 // What the setup credential says of its holder.
 export interface SetupState {
@@ -762,14 +767,23 @@ export interface SetupState {
 // goes in the body alone and is kept nowhere.
 export async function redeemSetupToken(token: string): Promise<InviteResult<SetupState>> {
   setupHeld = null;
+  const run = ++setupRun;
   const request: RedeemSetupTokenRequestV1 = { token };
   const res = await sendOpen('/v1/setup/redeem', request);
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   const redeemed = await readBody(res, redeemSetupTokenResponseV1);
   if (!redeemed.ok) return redeemed;
+  const held: Held = { token: redeemed.value.token, place: 'tab' };
+  if (run !== setupRun) {
+    // Answered after its setup ended or another began: nothing here uses
+    // this credential, so it is ended on the server (best effort) and
+    // forgotten.
+    await sendAs(held, 'DELETE', '/v1/credentials/current');
+    return { ok: false, failure: 'unauthorized' };
+  }
   const { principal, auth } = redeemed.value;
-  setupHeld = { token: redeemed.value.token, place: 'tab' };
+  setupHeld = held;
   return { ok: true, value: { name: principal.name, auth } };
 }
 
@@ -779,7 +793,7 @@ export async function setupState(): Promise<InviteResult<SetupState>> {
   if (held === null) return { ok: false, failure: 'unauthorized' };
   const who = await get('/v1/whoami', held.token, whoAmIResponseV1);
   if (!who.ok) {
-    if (who.failure === 'unauthorized') setupHeld = null;
+    if (who.failure === 'unauthorized' && setupHeld === held) setupHeld = null;
     return who;
   }
   if (who.value.auth === undefined) return { ok: false, failure: 'invalid' };
@@ -792,7 +806,7 @@ async function sendSetup(path: string, body?: unknown): Promise<PostReply> {
   const held = setupHeld;
   if (held === null) return { kind: 'unauthorized' };
   const reply = await sendAs(held, 'POST', path, body);
-  if (reply.kind === 'unauthorized') setupHeld = null;
+  if (reply.kind === 'unauthorized' && setupHeld === held) setupHeld = null;
   return reply;
 }
 
@@ -828,13 +842,14 @@ export async function skipAuthenticator(): Promise<InviteResult<null>> {
   const held = setupHeld;
   if (held === null) return { ok: false, failure: 'unauthorized' };
   const reply = await sendAs(held, 'DELETE', '/v1/credentials/current');
-  if (reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok)) setupHeld = null;
+  if ((reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok)) && setupHeld === held) setupHeld = null;
   return readDone(reply);
 }
 
 // endSetup forgets the setup credential here. The server ends it at its
 // fifteen minutes, or once setup is complete; it can revoke nothing itself.
 export function endSetup(): void {
+  setupRun++;
   setupHeld = null;
 }
 
@@ -1183,7 +1198,7 @@ export async function signInWithPassword(name: string, password: string): Promis
   const who = await get('/v1/whoami', token, whoAmIResponseV1);
   if (!who.ok) {
     await sendAs({ token, place: 'tab' }, 'DELETE', '/v1/credentials/current');
-    return { ok: false, failure: 'unchecked' };
+    return { ok: false, failure: who.failure === 'network' ? 'network' : 'invalid' };
   }
   return keepRedeemed(token, answer.value.principal.id, 'lasting', who.value.role === 'operator');
 }
