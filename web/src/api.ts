@@ -57,6 +57,7 @@ import {
 import { health } from './schema/health';
 import {
   createInviteResponseV1,
+  inviteSettingsV1,
   invitePreviewV1,
   listInvitesResponseV1,
   redeemInviteResponseV1,
@@ -64,6 +65,7 @@ import {
   type CreateInviteResponseV1,
   type InvitePreviewRequestV1,
   type InvitePreviewV1,
+  type InviteSettingsV1,
   type InviteV1,
   type RedeemInviteGuestRequestV1,
   type RedeemInviteRequestV2,
@@ -900,6 +902,19 @@ export function joinSettings(): Promise<ApiResult<JoinSettingsResponseV1>> {
 // stand together.
 export async function putJoinSettings(request: PutJoinSettingsRequestV1): Promise<InviteResult<JoinSettingsResponseV1>> {
   return readSent(await authedSend('PUT', '/v1/join/settings', request), joinSettingsResponseV1);
+}
+
+// inviteSettings reads whether every invite is paused (GET /v1/invites/settings).
+export function inviteSettings(): Promise<ApiResult<InviteSettingsV1>> {
+  return authed('/v1/invites/settings', inviteSettingsV1);
+}
+
+// putInviteSettings pauses or resumes every invite (PUT /v1/invites/settings),
+// as `conch admin invite pause|resume` does, and answers with what the server
+// now holds. It needs a recent proof (reauth_required), as authedSend asks
+// for; a refusal carries the server's code.
+export async function putInviteSettings(request: InviteSettingsV1): Promise<InviteResult<InviteSettingsV1>> {
+  return readSent(await authedSend('PUT', '/v1/invites/settings', request), inviteSettingsV1);
 }
 
 // listGuests reads the live guest visits, newest first: one page.
