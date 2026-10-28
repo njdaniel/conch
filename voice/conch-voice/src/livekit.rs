@@ -31,8 +31,8 @@ use futures_util::StreamExt;
 use livekit::DisconnectReason as LkReason;
 use livekit::options::TrackPublishOptions;
 use livekit::prelude::{
-    LocalAudioTrack, LocalTrack, LocalTrackPublication, RemoteAudioTrack, RemoteTrack, Room,
-    RoomEvent, RoomOptions, TrackSource,
+    LocalAudioTrack, LocalTrack, LocalTrackPublication, RemoteAudioTrack, RemoteTrack,
+    RemoteTrackPublication, Room, RoomEvent, RoomOptions, TrackKind, TrackSource,
 };
 use livekit::webrtc::audio_frame::AudioFrame;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
@@ -64,17 +64,172 @@ const RECEIVE_QUEUE_FRAMES: usize = 64;
 /// Full scale of the SDK's 16-bit samples.
 const I16_SCALE: f32 = 32768.0;
 
+/// The companion a desktop session may have: a second LiveKit participant of the same
+/// person that publishes the screen (`docs/design/windows-desktop.md` §7.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Companion {
+    identity: String,
+    owns_share_playback: bool,
+}
+
+impl Companion {
+    /// A companion with this LiveKit identity. `owns_share_playback` is true when the
+    /// companion plays other participants' share audio itself (B2), false when it receives
+    /// nothing and the helper plays it (B1).
+    #[must_use]
+    pub fn new(identity: impl Into<String>, owns_share_playback: bool) -> Self {
+        Self {
+            identity: identity.into(),
+            owns_share_playback,
+        }
+    }
+}
+
+/// Which of the remote tracks in a room this helper subscribes to: one playback owner per
+/// audio source. With no companion every remote audio track is played, as it always was.
+/// With one, its own tracks never are (that sound is the person's own application), and,
+/// when it owns share playback, neither is other participants' share audio.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Subscription {
+    companion: Option<Companion>,
+}
+
+impl Subscription {
+    /// The rule for a session with this companion, or none.
+    #[must_use]
+    pub fn new(companion: Option<Companion>) -> Self {
+        Self { companion }
+    }
+
+    /// Whether the helper subscribes to a track of `identity` of this kind and source.
+    /// Video is never wanted: the helper plays voice and share audio, and shows nothing.
+    fn wants(&self, identity: &str, kind: TrackKind, source: TrackSource) -> bool {
+        if kind != TrackKind::Audio {
+            return false;
+        }
+        match &self.companion {
+            None => true,
+            Some(companion) if companion.identity == identity => false,
+            Some(companion) => {
+                !(companion.owns_share_playback && source != TrackSource::Microphone)
+            }
+        }
+    }
+}
+
+/// A remote publication as the subscription rule sees it. The SDK's is one; a test's is
+/// another, since the SDK's cannot be made without a room.
+trait Offered {
+    fn identity(&self) -> String;
+    fn kind(&self) -> TrackKind;
+    fn source(&self) -> TrackSource;
+    fn set_subscribed(&self, subscribed: bool);
+}
+
+/// A publication together with the identity of the participant that owns it.
+struct SdkOffer {
+    identity: String,
+    publication: RemoteTrackPublication,
+}
+
+impl Offered for SdkOffer {
+    fn identity(&self) -> String {
+        self.identity.clone()
+    }
+
+    fn kind(&self) -> TrackKind {
+        self.publication.kind()
+    }
+
+    fn source(&self) -> TrackSource {
+        self.publication.source()
+    }
+
+    fn set_subscribed(&self, subscribed: bool) {
+        self.publication.set_subscribed(subscribed);
+    }
+}
+
+/// Subscribes to the publication if the rule wants it. Used for the publications present at
+/// join and for those published later alike, so that the two cannot differ.
+fn offer(rule: &Subscription, offered: &impl Offered) {
+    if rule.wants(&offered.identity(), offered.kind(), offered.source()) {
+        offered.set_subscribed(true);
+    }
+}
+
+/// What the subscription rule needs to hear of a room, apart from the SDK's own types.
+enum Seen<O> {
+    /// The room is joined; these publications were already in it.
+    Connected(Vec<O>),
+    /// One more publication appeared.
+    Published(O),
+    /// The SDK restarted its session.
+    Reconnected,
+}
+
+/// What the rule does for one thing seen in the room. `current` lists the publications the
+/// room has now; it is asked for only on a reconnect.
+///
+/// After a full restart the SDK rebuilds the participants and announces their tracks
+/// (`TrackPublished`) before the replacement session is installed (livekit 0.9.4,
+/// `handle_signal_restarted` and `handle_restarted`), so a subscription made then can go to
+/// the session that is gone; and with `auto_subscribe` off the new join subscribes to
+/// nothing. Once it is `Reconnected` the rule is therefore applied to every publication
+/// again, and `set_subscribed(true)` is sent again even to one already subscribed: the SDK
+/// sends the update whatever the flag was.
+fn subscribe_on<O: Offered>(rule: &Subscription, seen: Seen<O>, current: impl FnOnce() -> Vec<O>) {
+    match seen {
+        Seen::Connected(present) => present.iter().for_each(|o| offer(rule, o)),
+        Seen::Published(published) => offer(rule, &published),
+        Seen::Reconnected => current().iter().for_each(|o| offer(rule, o)),
+    }
+}
+
+/// Every remote publication the room has now.
+fn current_publications(room: &Room) -> Vec<SdkOffer> {
+    room.remote_participants()
+        .into_values()
+        .flat_map(|participant| {
+            let identity = participant.identity().to_string();
+            participant
+                .track_publications()
+                .into_values()
+                .map(move |publication| SdkOffer {
+                    identity: identity.clone(),
+                    publication,
+                })
+        })
+        .collect()
+}
+
 /// LiveKit's SDK as a [`Transport`].
 #[derive(Debug)]
 pub struct LiveKit {
     scrubber: Arc<Scrubber>,
+    subscription: Subscription,
 }
 
 impl LiveKit {
-    /// A transport whose errors are scrubbed with `scrubber`.
+    /// A transport whose errors are scrubbed with `scrubber`, for a session with no
+    /// companion.
     #[must_use]
     pub fn new(scrubber: Arc<Scrubber>) -> Self {
-        Self { scrubber }
+        Self {
+            scrubber,
+            subscription: Subscription::default(),
+        }
+    }
+
+    /// The same transport for a session whose subscriptions follow `subscription`.
+    ///
+    /// Nothing calls this yet, so every session plays every remote audio track, as before.
+    /// No companion exists until #897 defines its identity, and how the owner tells the
+    /// helper about it (a launch option) is part of that work, not of the rule itself.
+    #[must_use]
+    pub fn with_subscription(mut self, subscription: Subscription) -> Self {
+        self.subscription = subscription;
+        self
     }
 }
 
@@ -126,14 +281,22 @@ impl Transport for LiveKit {
 
     async fn connect(&self, url: &str, token: &Secret) -> Result<Joined<LiveKitRoom>, SdkError> {
         let mut options = RoomOptions::default();
-        options.auto_subscribe = true;
+        // Nothing is subscribed to unless `Subscription` wants it (`offer`).
+        options.auto_subscribe = false;
         // The token's one use. The SDK keeps its own copy for as long as the room lives.
         let (room, events) = Room::connect(url, token.expose(), options)
             .await
             .map_err(|error| scrubbed(&self.scrubber, "could not join the voice room", &error))?;
+        let room = Arc::new(room);
         let publication = Publication::default();
         let (forward, forwarded) = mpsc::unbounded_channel();
-        tokio::spawn(pump(events, forward, Arc::clone(&publication)));
+        tokio::spawn(pump(
+            Arc::clone(&room),
+            events,
+            forward,
+            Arc::clone(&publication),
+            self.subscription.clone(),
+        ));
         let room = LiveKitRoom {
             room,
             publication,
@@ -143,14 +306,51 @@ impl Transport for LiveKit {
     }
 }
 
-/// Translates the SDK's events until the room has no more to say.
+/// Translates the SDK's events until the room has no more to say, or nobody listens. The
+/// pump holds the room only to list its publications after a restart, so it lets go as soon
+/// as the receiver of `forward` is gone.
 async fn pump(
+    room: Arc<Room>,
     mut events: mpsc::UnboundedReceiver<RoomEvent>,
     forward: mpsc::UnboundedSender<SdkEvent>,
     publication: Publication,
+    rule: Subscription,
 ) {
-    while let Some(event) = events.recv().await {
+    loop {
+        let event = tokio::select! {
+            event = events.recv() => event,
+            () = forward.closed() => return,
+        };
+        let Some(event) = event else { return };
         let translated = match event {
+            RoomEvent::Connected {
+                participants_with_tracks,
+            } => {
+                let present = participants_with_tracks
+                    .into_iter()
+                    .flat_map(|(participant, publications)| {
+                        let identity = participant.identity().to_string();
+                        publications.into_iter().map(move |publication| SdkOffer {
+                            identity: identity.clone(),
+                            publication,
+                        })
+                    })
+                    .collect();
+                subscribe_on(&rule, Seen::Connected(present), Vec::new);
+                continue;
+            }
+            RoomEvent::TrackPublished {
+                publication,
+                participant,
+            } => {
+                let identity = participant.identity().to_string();
+                let published = SdkOffer {
+                    identity,
+                    publication,
+                };
+                subscribe_on(&rule, Seen::Published(published), Vec::new);
+                continue;
+            }
             RoomEvent::TrackSubscribed {
                 track: RemoteTrack::Audio(audio),
                 publication,
@@ -168,7 +368,10 @@ async fn pump(
                 track: publication.sid().to_string(),
             },
             RoomEvent::Reconnecting => SdkEvent::Reconnecting,
-            RoomEvent::Reconnected => SdkEvent::Reconnected,
+            RoomEvent::Reconnected => {
+                subscribe_on(&rule, Seen::Reconnected, || current_publications(&room));
+                SdkEvent::Reconnected
+            }
             RoomEvent::LocalTrackRepublished {
                 publication: republished,
                 ..
@@ -215,7 +418,7 @@ async fn receive(track: RemoteAudioTrack, frames: mpsc::Sender<Frame>) {
 
 /// A joined LiveKit room.
 pub struct LiveKitRoom {
-    room: Room,
+    room: Arc<Room>,
     publication: Publication,
     scrubber: Arc<Scrubber>,
 }
@@ -488,5 +691,109 @@ mod tests {
         );
         ours.disable();
         assert!(!track.is_enabled());
+    }
+
+    /// A publication that counts how often it was told to subscribe.
+    #[derive(Clone)]
+    struct Fake {
+        identity: &'static str,
+        kind: TrackKind,
+        source: TrackSource,
+        told: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl Fake {
+        fn new(identity: &'static str, kind: TrackKind, source: TrackSource) -> Self {
+            Self {
+                identity,
+                kind,
+                source,
+                told: std::rc::Rc::default(),
+            }
+        }
+    }
+
+    impl Offered for Fake {
+        fn identity(&self) -> String {
+            self.identity.to_owned()
+        }
+        fn kind(&self) -> TrackKind {
+            self.kind
+        }
+        fn source(&self) -> TrackSource {
+            self.source
+        }
+        fn set_subscribed(&self, subscribed: bool) {
+            assert!(subscribed, "the rule only ever subscribes");
+            self.told.set(self.told.get() + 1);
+        }
+    }
+
+    /// The room: another's voice, another's share audio, the companion's share audio and
+    /// microphone, and another's screen video.
+    fn room() -> Vec<Fake> {
+        vec![
+            Fake::new("bob", TrackKind::Audio, TrackSource::Microphone),
+            Fake::new("bob", TrackKind::Audio, TrackSource::ScreenshareAudio),
+            Fake::new(
+                "alice~screen",
+                TrackKind::Audio,
+                TrackSource::ScreenshareAudio,
+            ),
+            Fake::new("alice~screen", TrackKind::Audio, TrackSource::Microphone),
+            Fake::new("bob", TrackKind::Video, TrackSource::Screenshare),
+        ]
+    }
+
+    /// How often each of the room's publications was told to subscribe.
+    fn told(room: &[Fake]) -> Vec<u32> {
+        room.iter().map(|f| f.told.get()).collect()
+    }
+
+    fn arrangements() -> [Subscription; 3] {
+        [
+            Subscription::default(),
+            Subscription::new(Some(Companion::new("alice~screen", false))),
+            Subscription::new(Some(Companion::new("alice~screen", true))),
+        ]
+    }
+
+    /// For no companion, B1 and B2: how often each of the room's publications is wanted.
+    const WANTED: [[u32; 5]; 3] = [[1, 1, 1, 1, 0], [1, 1, 0, 0, 0], [1, 0, 0, 0, 0]];
+
+    #[test]
+    fn publications_present_at_join_are_subscribed_to_as_the_arrangement_says() {
+        for (rule, wanted) in arrangements().iter().zip(WANTED) {
+            let present = room();
+            subscribe_on(rule, Seen::Connected(present.clone()), || {
+                panic!("a join does not list the room")
+            });
+            assert_eq!(told(&present), wanted, "{rule:?}");
+        }
+    }
+
+    #[test]
+    fn a_publication_published_later_is_subscribed_to_as_the_arrangement_says() {
+        for (rule, wanted) in arrangements().iter().zip(WANTED) {
+            let later = room();
+            for publication in &later {
+                subscribe_on(rule, Seen::Published(publication.clone()), || {
+                    panic!("a publication does not list the room")
+                });
+            }
+            assert_eq!(told(&later), wanted, "{rule:?}");
+        }
+    }
+
+    /// After a restart every wanted publication is told again, even one that was already
+    /// subscribed to, and an unwanted one still is not.
+    #[test]
+    fn a_reconnect_subscribes_again_to_every_wanted_publication() {
+        for (rule, wanted) in arrangements().iter().zip(WANTED) {
+            let current = room();
+            subscribe_on(rule, Seen::Connected(current.clone()), Vec::new);
+            subscribe_on(rule, Seen::Reconnected, || current.clone());
+            assert_eq!(told(&current), wanted.map(|n| n * 2), "{rule:?}");
+        }
     }
 }
