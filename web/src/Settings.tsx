@@ -100,6 +100,10 @@ export function PasswordSettings({
   const chosen = useRef<HTMLInputElement>(null);
   const again = useRef<HTMLInputElement>(null);
   const operator = who.role === 'operator';
+  // An operator is asked for a code only with an authenticator enrolled
+  // (ADR-012); one without, on a server that allows it, sends the password
+  // alone.
+  const coded = operator && who.auth?.totp_enrolled === true;
   const hasPassword = who.auth?.password_set === true;
 
   // Closing the section forgets whatever was typed in it.
@@ -144,7 +148,7 @@ export function PasswordSettings({
       return;
     }
     let code: string | undefined;
-    if (operator) {
+    if (coded) {
       const typed = typedCode(codeField.current?.value ?? '');
       if (typed === null) {
         setLine({ text: `Type the ${String(api.codeDigits)} digits your authenticator app shows.`, refused: true });
@@ -161,7 +165,7 @@ export function PasswordSettings({
       settle(
         result,
         'Your password is changed. Every other sign-in of yours has ended; this one goes on.',
-        operator ? 'The current password or the code is not right.' : 'The current password is not right.',
+        coded ? 'The current password or the code is not right.' : 'The current password is not right.',
       );
     });
   }
@@ -198,7 +202,7 @@ export function PasswordSettings({
       <form aria-label="Change your password" onSubmit={change}>
         <label htmlFor={`${id}-current`}>Current password</label>
         <input id={`${id}-current`} ref={currentField} type="password" autoComplete="current-password" />
-        {operator ? (
+        {coded ? (
           <>
             <label htmlFor={`${id}-code`}>Code from your authenticator app</label>
             <input

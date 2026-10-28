@@ -2819,3 +2819,10 @@ button.link {
     flex: 1 1 100%;
   }
 }
+
+/* ADR-011: the fixed line a temporary server shows beside its version. */
+.temporary-banner {
+  color: var(--muted);
+  min-height: 0;
+  margin: 0.25rem 0;
+}

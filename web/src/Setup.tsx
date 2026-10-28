@@ -12,7 +12,7 @@
 // in this view only, behind Reveal, and never while this tab shares its
 // screen (Reveal.tsx). No QR code is drawn (that would be a new dependency,
 // design §5.3): the key is typed into the app.
-import { useEffect, useId, useRef, useState, type SyntheticEvent } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { waitWords } from './Invite';
 import { revealLimits, sharingLine, useTabSharing } from './Reveal';
@@ -26,8 +26,10 @@ import { insecureLine, needsHttps } from './transport';
 type Step =
   | { readonly step: 'token' }
   | { readonly step: 'password'; readonly name: string; readonly hasPassword: boolean }
-  | { readonly step: 'authenticator'; readonly name: string }
-  | { readonly step: 'done'; readonly name: string }
+  // skippable: whoami says setup is complete without an authenticator
+  // (ADR-012: a server that lets an operator sign in with a password alone).
+  | { readonly step: 'authenticator'; readonly name: string; readonly skippable: boolean }
+  | { readonly step: 'done'; readonly name: string; readonly skipped?: boolean }
   // The setup credential has ended (its fifteen minutes, or the host
   // recovered the operator again): a new token is needed.
   | { readonly step: 'ended' };
@@ -60,7 +62,20 @@ function grouped(secret: string): string {
   return secret.replace(/(.{4})/g, '$1 ').trim();
 }
 
-export function Setup({ origin, onDone, onBack }: { readonly origin: string; readonly onDone: () => void; readonly onBack: () => void }) {
+export function Setup({
+  origin,
+  link,
+  onDone,
+  onBack,
+}: {
+  readonly origin: string;
+  // A setup link's token (ADR-011), waiting in a ref for the field: put in
+  // it once, and spent only when the person clicks Continue.
+  readonly link?: { current: string | null };
+  // skipped: the authenticator was left unset.
+  readonly onDone: (skipped: boolean) => void;
+  readonly onBack: () => void;
+}) {
   const id = useId();
   const insecure = needsHttps(origin);
   const sharing = useTabSharing();
@@ -76,6 +91,19 @@ export function Setup({ origin, onDone, onBack }: { readonly origin: string; rea
   const enrollment = useRef<TOTPEnrollmentV1 | null>(null);
   const [enrolled, setEnrolled] = useState(false);
   const [revealed, setRevealed] = useState(false);
+  // Only that the field came filled from a link, never what is in it.
+  const [fromLink, setFromLink] = useState(false);
+
+  // A setup link fills the token field and spends nothing: redeem runs on the
+  // click alone. The token moves from the ref to the field and is gone from
+  // the ref.
+  useLayoutEffect(() => {
+    const token = link?.current ?? null;
+    if (token === null || tokenField.current === null) return;
+    tokenField.current.value = token;
+    if (link !== undefined) link.current = null;
+    setFromLink(true);
+  }, [link]);
 
   useEffect(() => {
     heading.current?.focus();
@@ -110,7 +138,31 @@ export function Setup({ origin, onDone, onBack }: { readonly origin: string; rea
       return;
     }
     if (state.value.auth.totp_enrolled === true) setStep({ step: 'done', name: state.value.name });
-    else setStep({ step: 'authenticator', name: state.value.name });
+    else
+      setStep({
+        step: 'authenticator',
+        name: state.value.name,
+        skippable: state.value.auth.setup_complete && state.value.auth.scope === 'setup',
+      });
+  }
+
+  // skip ends the setup credential with no authenticator (ADR-012 item 5):
+  // the operator then signs in with the name and password alone.
+  function skip() {
+    if (busy || step.step !== 'authenticator') return;
+    const name = step.name;
+    setBusy(true);
+    setLine(null);
+    enrollment.current = null;
+    setRevealed(false);
+    void api.skipAuthenticator().then((result) => {
+      setBusy(false);
+      if (!result.ok && !ended(result)) {
+        setLine(refusalLine(result));
+        return;
+      }
+      if (result.ok) setStep({ step: 'done', name, skipped: true });
+    });
   }
 
   function redeem(event: SyntheticEvent) {
@@ -230,6 +282,7 @@ export function Setup({ origin, onDone, onBack }: { readonly origin: string; rea
             Paste the setup token that conchd operator bootstrap, setup or recover printed on the server’s host. It works once,
             for ten minutes. Then you choose a password and set up an authenticator app.
           </p>
+          {fromLink ? <p className="hint">The setup token from your link is filled in. Nothing has been used yet: click Continue.</p> : null}
           <label htmlFor={`${id}-token`}>Setup token</label>
           <input id={`${id}-token`} ref={tokenField} type="password" autoComplete="off" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
           <button type="submit" aria-busy={busy}>
@@ -256,7 +309,7 @@ export function Setup({ origin, onDone, onBack }: { readonly origin: string; rea
               type="button"
               onClick={() => {
                 setLine(null);
-                setStep({ step: 'authenticator', name: step.name });
+                void next();
               }}
             >
               Keep my password
@@ -326,15 +379,40 @@ export function Setup({ origin, onDone, onBack }: { readonly origin: string; rea
               </button>
             </form>
           ) : null}
+          {step.skippable ? (
+            <>
+              <p className="hint">
+                This server lets an operator sign in with a name and password alone. You can skip the authenticator now: you will
+                not be asked for a code.
+              </p>
+              <div className="actions">
+                <button type="button" onClick={skip} aria-busy={busy}>
+                  Skip
+                </button>
+              </div>
+            </>
+          ) : null}
         </section>
       ) : step.step === 'done' ? (
         <>
-          <p>
-            {step.name === '' ? 'Your' : `${step.name}’s`} password and authenticator are set. Sign in with your name, your
-            password and a code from the app. Keep the app’s device safe: without it, only the server’s host can let you back in.
-          </p>
+          {step.skipped === true ? (
+            <p>
+              {step.name === '' ? 'Your' : `${step.name}’s`} password is set, with no authenticator. Sign in with your name and
+              your password.
+            </p>
+          ) : (
+            <p>
+              {step.name === '' ? 'Your' : `${step.name}’s`} password and authenticator are set. Sign in with your name, your
+              password and a code from the app. Keep the app’s device safe: without it, only the server’s host can let you back in.
+            </p>
+          )}
           <div className="actions">
-            <button type="button" onClick={onDone}>
+            <button
+              type="button"
+              onClick={() => {
+                onDone(step.skipped === true);
+              }}
+            >
               Go to sign-in
             </button>
           </div>

@@ -3,7 +3,7 @@ import { ChannelList } from './ChannelList';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
-import { ServerVersion } from './ServerVersion';
+import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { StageHost } from './stage';
 import type { ChannelsState } from './state/channels';
 import { connectionLabel, type ConnectionState } from './state/connection';
@@ -55,6 +55,7 @@ export function Lobby({
   origin,
   name,
   me = 0,
+  temporary,
   channels,
   unread,
   occupancy,
@@ -84,6 +85,8 @@ export function Lobby({
   readonly name: string;
   // The signed-in principal's id, for the colour of their initial.
   readonly me?: number;
+  // Whoami said this is a temporary server (ADR-011): the banner shows.
+  readonly temporary?: boolean;
   readonly channels: ChannelsState;
   readonly unread: ReadonlyMap<string, number>;
   // How many are in each channel's voice (issue #596), shown in the list.
@@ -293,6 +296,7 @@ export function Lobby({
         <main className="centre">
           <div ref={setStage} className="stage" />
           <section aria-label="Conversation" className="conversation">
+            {temporary === true ? <TemporaryBanner /> : null}
             {banner}
             {channels.lost === undefined ? null : (
               <p role="alert" className="banner">
@@ -429,7 +433,7 @@ export function Lobby({
         </section>
         <section aria-label="Help" className="drawer-section">
           {report}
-          <ServerVersion className="hint" />
+          <ServerVersion className="hint" quiet />
         </section>
       </div>
       {overlay}
