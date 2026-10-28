@@ -167,7 +167,7 @@ test('G30b with CONCHD_MODE=temporary the same path shows the banner on the sign
     await setUpFromLink(page, server);
     await skipAndSignIn(page);
     secrets.push((await tabToken(page)) ?? '');
-    await page.getByRole('button', { name: 'Settings' }).click();
+    // In the lobby itself, with Settings still closed.
     await expect(page.getByText(banner)).toBeVisible();
     // Fixed: nothing on it dismisses it.
     await expect(page.getByText(banner).getByRole('button')).toHaveCount(0);

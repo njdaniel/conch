@@ -925,6 +925,20 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // token waits in a ref (never in state) until Setup puts it in its field.
   const [settingUp, setSettingUp] = useState(false);
   const setupLink = useRef<string | null>(null);
+  // Counts the setup links taken (a number, not a secret): Setup is keyed by
+  // it, so each link gets a fresh page with its own token in the field.
+  const [setupGeneration, setSetupGeneration] = useState(0);
+  // Whether someone is signed in, for take() below, which outlives renders.
+  const signedInNow = useRef(false);
+  signedInNow.current = auth.phase === 'signedIn' || auth.phase === 'operatorWarning';
+  // A setup link is for a signed-out browser. One that waits while someone
+  // is signed in (or that sign-in restored under) is dropped, so a stale
+  // token is never pre-filled after they sign out.
+  useEffect(() => {
+    if (auth.phase !== 'signedIn' && auth.phase !== 'operatorWarning') return;
+    setupLink.current = null;
+    setSettingUp(false);
+  }, [auth.phase]);
   useLayoutEffect(() => {
     function take() {
       const found = takeLinkFromAddress();
@@ -937,7 +951,13 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       } else if (found?.kind === 'setup') {
         setInviteCode(null);
         setSignInCode(null);
+        if (signedInNow.current) {
+          // Not used: sign out first, then open the link again.
+          setupLink.current = null;
+          return;
+        }
         setupLink.current = found.setupToken;
+        setSetupGeneration((n) => n + 1);
         setSettingUp(true);
       }
     }
@@ -992,7 +1012,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     dispatchAuth({ type: 'submit' });
     void api.signInWithPassword(name, password).then((result) => {
       if (result.ok) {
-        dispatchAuth({ type: 'verified', principal: result.value });
+        dispatchAuth({ type: 'verified', principal: result.value, own: true });
         return;
       }
       switch (result.failure) {
@@ -1157,6 +1177,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   if (settingUp && (auth.phase === 'signedOut' || auth.phase === 'checking')) {
     return (
       <Setup
+        key={setupGeneration}
         origin={origin}
         link={setupLink}
         onDone={() => {

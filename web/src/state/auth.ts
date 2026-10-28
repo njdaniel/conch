@@ -51,7 +51,7 @@ export type AuthState =
 
 export type AuthAction =
   | { readonly type: 'submit' }
-  | { readonly type: 'verified'; readonly principal: WhoAmIResponseV1 }
+  | { readonly type: 'verified'; readonly principal: WhoAmIResponseV1; readonly own?: boolean }
   // held: on restore, an operator credential found kept to last, taken out of
   // storage and held back for the warning (issue #439).
   | { readonly type: 'held'; readonly principal: WhoAmIResponseV1 }
@@ -94,8 +94,9 @@ export function authReducer(state: AuthState, action: AuthAction): AuthState {
         // that was already accepted past the warning is not asked again. An
         // operator's own session, which a password alone gives on a server
         // that allows it (ADR-012, issue #867), is not a script's credential:
-        // no warning.
-        return action.principal.role === 'operator' && !operatorSession(action.principal)
+        // no warning. A pasted credential is warned about whatever it is:
+        // only the warning's Continue stores and pins an operator's.
+        return action.principal.role === 'operator' && !(action.own === true && operatorSession(action.principal))
           ? { phase: 'operatorWarning', principal: action.principal }
           : { phase: 'signedIn', principal: action.principal };
       }

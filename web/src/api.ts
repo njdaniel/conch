@@ -821,12 +821,14 @@ export async function confirmAuthenticator(code: string): Promise<InviteResult<n
 // skipAuthenticator ends the setup credential with the authenticator left
 // unset (DELETE /v1/credentials/current, which a setup credential may call):
 // ADR-012's Skip, offered only where whoami says setup is complete without
-// one. The credential is forgotten here whatever the answer.
+// one. The credential is forgotten here once the server has confirmed it
+// ended (a 2xx) or says it has ended already (a 401); after a network error
+// or any other refusal it is kept, so the person can try again.
 export async function skipAuthenticator(): Promise<InviteResult<null>> {
   const held = setupHeld;
   if (held === null) return { ok: false, failure: 'unauthorized' };
   const reply = await sendAs(held, 'DELETE', '/v1/credentials/current');
-  setupHeld = null;
+  if (reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok)) setupHeld = null;
   return readDone(reply);
 }
 

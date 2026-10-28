@@ -3,7 +3,7 @@ import { ChannelList } from './ChannelList';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
-import { ServerVersion } from './ServerVersion';
+import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { StageHost } from './stage';
 import type { ChannelsState } from './state/channels';
 import { connectionLabel, type ConnectionState } from './state/connection';
@@ -296,6 +296,7 @@ export function Lobby({
         <main className="centre">
           <div ref={setStage} className="stage" />
           <section aria-label="Conversation" className="conversation">
+            {temporary === true ? <TemporaryBanner /> : null}
             {banner}
             {channels.lost === undefined ? null : (
               <p role="alert" className="banner">
@@ -432,7 +433,7 @@ export function Lobby({
         </section>
         <section aria-label="Help" className="drawer-section">
           {report}
-          <ServerVersion className="hint" temporary={temporary === true} />
+          <ServerVersion className="hint" quiet />
         </section>
       </div>
       {overlay}

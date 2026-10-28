@@ -115,7 +115,13 @@ describe('the temporary-server banner', () => {
     window.sessionStorage.setItem(key, sessionToken);
     serve({ ...people({ [sessionToken]: { ...passwordOnlyWho, server_mode: 'temporary' } }), 'GET /healthz': () => json(healthy) });
     render(<App origin={origin} />);
-    expect(await screen.findByText(temporaryLine)).toBeDefined();
+    const line = await screen.findByText(temporaryLine);
+    // In the lobby itself, visible on arrival: not in the Settings drawer,
+    // which starts closed.
+    expect(line.closest('.drawer-section')).toBeNull();
+    expect(line.closest('[hidden], [inert]')).toBeNull();
+    expect(within(screen.getByRole('region', { name: 'Conversation' })).getByText(temporaryLine)).toBe(line);
+    expect(screen.getAllByText(temporaryLine)).toHaveLength(1);
     cleanup();
 
     window.sessionStorage.setItem(key, sessionToken);
@@ -296,5 +302,118 @@ describe('the code field of Reauth and the password change', () => {
     const region = screen.getByRole('region', { name: 'Password' });
     expect(within(region).getByLabelText('Current password')).toBeDefined();
     expect(within(region).queryByLabelText('Code from your authenticator app')).toBeNull();
+  });
+});
+
+describe('Skip that fails', () => {
+  it('keeps the setup credential: a network or server failure leaves Try again working', async () => {
+    let deletes = 0;
+    const state = { password_set: false };
+    const auth = () => ({ scope: 'setup', password_set: state.password_set, totp_enrolled: false, setup_complete: state.password_set });
+    serve({
+      'GET /v1/join': () => json(frontDoor),
+      'POST /v1/setup/redeem': () =>
+        json({ principal, credential: { id: 9, principal_id: 1, label: 'setup', created_at: at, scope: 'setup' }, token: setupCredential, auth: auth() }, 201),
+      'GET /v1/whoami': (c) => (c.auth === `Bearer ${setupCredential}` ? json({ ...operatorWho, auth: auth() }) : json({}, 401)),
+      'POST /v1/password/mine': () => {
+        state.password_set = true;
+        return json({ revoked: 0 });
+      },
+      'DELETE /v1/credentials/current': (c) => {
+        deletes++;
+        if (c.auth !== `Bearer ${setupCredential}`) return json({}, 401);
+        return deletes === 1 ? json({ code: 'internal', message: 'oops' }, 500) : new Response(null, { status: 204 });
+      },
+    });
+    render(<App origin={origin} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Set up an operator account' }));
+    fireEvent.change(screen.getByLabelText('Setup token'), { target: { value: setupToken } });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    fireEvent.change(await screen.findByLabelText('Choose a password'), { target: { value: password } });
+    fireEvent.change(screen.getByLabelText('Type it again'), { target: { value: password } });
+    fireEvent.click(screen.getByRole('button', { name: 'Set password' }));
+    await screen.findByRole('heading', { name: 'Your authenticator app' });
+    fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+    await screen.findByText(/The server refused/);
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Skip' }));
+    await screen.findByRole('heading', { name: 'Setup is complete' });
+    expect(deletes).toBe(2);
+  });
+});
+
+describe('setup links in one tab', () => {
+  const second = `conch_setup_${'T'.repeat(43)}`;
+
+  function redeemServer() {
+    return serve({
+      'GET /v1/join': () => json(frontDoor),
+      'POST /v1/setup/redeem': () =>
+        json({ principal, credential: { id: 9, principal_id: 1, label: 'setup', created_at: at, scope: 'setup' }, token: setupCredential, auth: { scope: 'setup', password_set: false, setup_complete: false } }, 201),
+    });
+  }
+
+  it('a second link replaces the first: Continue redeems the second token', async () => {
+    const calls = redeemServer();
+    window.location.hash = `#/setup/${setupToken}`;
+    render(<App origin={origin} />);
+    expect((await screen.findByLabelText<HTMLInputElement>('Setup token')).value).toBe(setupToken);
+    window.location.hash = `#/setup/${second}`;
+    fireEvent(window, new HashChangeEvent('hashchange'));
+    await waitFor(() => {
+      expect(screen.getByLabelText<HTMLInputElement>('Setup token').value).toBe(second);
+    });
+    expect(window.location.hash).toBe('');
+    fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+    await screen.findByLabelText('Choose a password');
+    expect(calls.filter((c) => c.path === '/v1/setup/redeem').map((c) => c.body)).toEqual([{ token: second }]);
+  });
+
+  it('a link opened while signed in is dropped: nothing is pre-filled after sign-out', async () => {
+    window.sessionStorage.setItem(key, sessionToken);
+    const calls = serve({
+      'GET /v1/join': () => json(frontDoor),
+      'DELETE /v1/credentials/current': () => new Response(null, { status: 204 }),
+      ...people({ [sessionToken]: passwordOnlyWho }),
+    });
+    render(<App origin={origin} />);
+    await waitFor(() => {
+      expect(screen.queryByRole('status', { name: 'Status' })?.textContent).toContain('root');
+    });
+    window.location.hash = `#/setup/${setupToken}`;
+    fireEvent(window, new HashChangeEvent('hashchange'));
+    await waitFor(() => {
+      expect(window.location.hash).not.toContain('setup');
+    });
+    // No setup page over the lobby.
+    expect(screen.queryByLabelText('Setup token')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, sign out' }));
+    await screen.findByRole('heading', { name: 'Sign in' });
+    fireEvent.click(screen.getByRole('button', { name: 'Set up an operator account' }));
+    expect(screen.getByLabelText<HTMLInputElement>('Setup token').value).toBe('');
+    expect(calls.filter((c) => c.path === '/v1/setup/redeem')).toEqual([]);
+  });
+});
+
+describe('a pasted operator session', () => {
+  it('is warned about, and Continue keeps it for this tab and pins it: the next calls succeed', async () => {
+    const calls = serve({ 'GET /v1/join': () => json(frontDoor), ...people({ [sessionToken]: passwordOnlyWho }) });
+    render(<App origin={origin} />);
+    fireEvent.change(await screen.findByLabelText('Credential'), { target: { value: sessionToken } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
+    await screen.findByRole('heading', { name: 'This is an operator credential' });
+    // Nothing is kept before Continue.
+    expect(window.sessionStorage.getItem(key)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Continue anyway' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('status', { name: 'Status' })?.textContent).toContain('root');
+    });
+    await waitFor(() => {
+      expect(calls.some((c) => c.path === '/v1/channels' && c.auth === `Bearer ${sessionToken}`)).toBe(true);
+    });
+    expect(window.sessionStorage.getItem(key)).toBe(sessionToken);
+    expect(window.localStorage.getItem(key)).toBeNull();
   });
 });
