@@ -836,6 +836,28 @@ END`,
 	{
 		`ALTER TABLE channel_members ADD COLUMN manages INTEGER NOT NULL DEFAULT 0 CHECK (manages IN (0, 1))`,
 	},
+	// 36: Temporary servers and password-only operators (issues #866 and
+	// #875, ADR-011 items 1, 2.1 and 5, ADR-012 items 3 and 4). server_mode
+	// is one row: the mode conchd last started in and whether it allowed
+	// password-only operators (StartMode), kept so the next start can tell
+	// when password-only stops and end what it made, and read by every
+	// store-side check that lets a password-only operator through. No row
+	// means no server has started since this migration: the next start
+	// writes it. setup_totp_only marks a setup credential that has set its
+	// operator's password where password-only is allowed: it keeps only the
+	// authenticator routes and its own end (setupTOTPOnlyRoutes), so it
+	// cannot replace the password again. It is on setup credentials only. Every existing credential starts without it,
+	// so nothing changes for them.
+	{
+		`CREATE TABLE server_mode (
+	id            INTEGER PRIMARY KEY CHECK (id = 1),
+	mode          TEXT    NOT NULL CHECK (mode IN ('normal', 'temporary')),
+	password_only INTEGER NOT NULL CHECK (password_only IN (0, 1) AND (password_only = 1 OR mode = 'normal')),
+	updated_at    INTEGER NOT NULL
+)`,
+		`ALTER TABLE credentials ADD COLUMN setup_totp_only INTEGER NOT NULL DEFAULT 0
+			CHECK (setup_totp_only IN (0, 1) AND (setup_totp_only = 0 OR scope = 'setup'))`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

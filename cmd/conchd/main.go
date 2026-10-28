@@ -204,6 +204,24 @@ backup of the data directory alone cannot sign an operator in. Without it
 serve starts, operators cannot enrol or sign in with a password, and every
 code is refused; a value that is not such a key stops serve.
 
+CONCHD_MODE=temporary, also read only from the environment, makes a
+temporary server (docs/adr/ADR-011-temporary-servers.md): /healthz and whoami
+say the server is temporary, and operators may sign in with a password alone,
+as with CONCHD_OPERATOR_TOTP=optional. Unset, empty or normal is a normal
+server; any other value stops serve.
+
+CONCHD_OPERATOR_TOTP, read only from the environment, says whether an
+operator needs an authenticator app to sign in to the browser
+(docs/adr/ADR-012-optional-operator-totp.md). required, the default on a
+normal server, asks every operator for a code. optional, the default on a
+temporary server, lets an operator with no authenticator sign in,
+re-authenticate and change their password with the password alone; one who
+has enrolled is still asked for the code. required with CONCHD_MODE=temporary,
+or any other value, stops serve. Starting with operators' password-only
+sign-in no longer allowed signs out every operator's browser session and ends
+every recent re-authentication, pending sign-in and unfinished setup; script
+credentials keep working.
+
 Voice (LiveKit) is all or nothing: set none of the LiveKit settings and voice is
 off; set some but not all and serve refuses to start. The signing key pair is
 read only from the environment, never a flag: CONCHD_LIVEKIT_API_KEY and
@@ -236,6 +254,8 @@ type serveOptions struct {
 	metricsRemote     bool
 	relaxInviteLimits bool
 	serverName        string
+	mode              store.Mode
+	operatorTOTP      store.OperatorTOTP
 }
 
 // parseServeArgs resolves the serve flags and their environment fallbacks.
@@ -352,6 +372,19 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	if _, err := totpKeyFromEnv(); err != nil {
 		return serveOptions{}, err
 	}
+	// The mode has no flag either: it changes only by editing the env file
+	// on the host and restarting (ADR-011 item 1), and anything but the two
+	// values stops serve here.
+	mode, err := store.ParseMode(os.Getenv("CONCHD_MODE"))
+	if err != nil {
+		return serveOptions{}, fmt.Errorf("serve: CONCHD_MODE: %w", err)
+	}
+	// The same for the operator's authenticator (ADR-012 item 1); its
+	// default follows the mode, and temporary with required is refused.
+	operatorTOTP, err := store.ParseOperatorTOTP(os.Getenv("CONCHD_OPERATOR_TOTP"), mode)
+	if err != nil {
+		return serveOptions{}, fmt.Errorf("serve: CONCHD_OPERATOR_TOTP: %w", err)
+	}
 	if err := store.ValidateVoiceRoomPrefix(*livekitRoomPrefix); err != nil {
 		return serveOptions{}, fmt.Errorf("serve: --livekit-room-prefix: %w", err)
 	}
@@ -377,8 +410,8 @@ func parseServeArgs(args []string) (serveOptions, error) {
 		sessionStale: *sessionStale, sessionOffline: *sessionOffline,
 		trustedProxies: trustedProxies, inviteAllowance: *inviteAllowance,
 		metricsListen: *metricsListen, metricsRemote: *metricsRemote, relaxInviteLimits: *relaxInviteLimits,
-		serverName: *serverName,
-		dataDir:    *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
+		serverName: *serverName, mode: mode, operatorTOTP: operatorTOTP,
+		dataDir: *dataDir, listen: *listen, authMode: authMode, mcpTokens: mcpTokens,
 		ntfyServer: *ntfyServer, ntfyTopic: *ntfyTopic, ntfyUrgentTopic: *ntfyUrgentTopic,
 	}, nil
 }
@@ -480,6 +513,14 @@ func runServe(args []string) error {
 	if err := st.SetVoiceRoomPrefix(opts.livekitRoomPrefix); err != nil {
 		return err
 	}
+	// The mode is recorded before anything is served: a switch back to
+	// normal ends, in the same transaction, what temporary mode made
+	// (ADR-011 item 5).
+	started, err := st.StartMode(ctx, opts.mode, store.PasswordOnlyAllowed(opts.mode, opts.operatorTOTP), time.Now())
+	if err != nil {
+		return err
+	}
+	logServerMode(opts.mode, opts.operatorTOTP, started)
 
 	srv := server.New(server.Config{
 		DataDir:               opts.dataDir,
@@ -501,6 +542,8 @@ func runServe(args []string) error {
 		TestRelaxInviteLimits: opts.relaxInviteLimits,
 		ServerName:            opts.serverName,
 		TOTPKey:               totpKey,
+		Mode:                  opts.mode,
+		OperatorTOTP:          opts.operatorTOTP,
 		Ntfy: approvals.NtfyConfig{
 			Server:         opts.ntfyServer,
 			ApprovalsTopic: opts.ntfyTopic,
@@ -523,6 +566,33 @@ func runServe(args []string) error {
 		fmt.Println("conchd metrics: off")
 	}
 	return srv.Serve(ctx)
+}
+
+// logServerMode says which mode the server starts in (ADR-011 item 1) and,
+// in a line of its own, whether operators need an authenticator (ADR-012
+// item 1); and when password-only sign-in stopped being allowed, what that
+// ended and how many operators are left with no authenticator. It does not
+// refuse the start: the host re-enrols them with conchd operator setup.
+func logServerMode(mode store.Mode, operatorTOTP store.OperatorTOTP, started store.ModeStart) {
+	if mode == store.ModeTemporary {
+		slog.Warn("mode: temporary: the server says so to everyone; keep nothing here you need", "mode", mode)
+	} else {
+		slog.Info("mode: normal", "mode", mode)
+	}
+	if store.PasswordOnlyAllowed(mode, operatorTOTP) {
+		slog.Warn("operator totp: optional: an operator with no authenticator signs in with a password alone", "operator_totp", operatorTOTP)
+	} else {
+		slog.Info("operator totp: required", "operator_totp", operatorTOTP)
+	}
+	if started.Ended {
+		slog.Warn("operator totp: password-only sign-in is no longer allowed; operators' browser sessions, recent re-authentication, pending sign-ins and unfinished setups were ended",
+			"sessions_revoked", started.SessionsRevoked, "proofs_cleared", started.ProofsCleared,
+			"pending_logins_spent", started.PendingLoginsSpent, "setup_credentials_revoked", started.SetupCredentialsRevoked)
+	}
+	if started.OperatorsWithoutAuthenticator > 0 {
+		slog.Warn("operator totp: operators with a password and no authenticator cannot sign in to the browser until each is set up again with conchd operator setup",
+			"operators_without_authenticator", started.OperatorsWithoutAuthenticator)
+	}
 }
 
 // clearRestoredVoice ends, before the first start on restored data accepts
