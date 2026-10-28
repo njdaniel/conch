@@ -71,6 +71,7 @@ function conversation(messages: readonly MessageV2[], onUnauthorized?: () => voi
       onDraft={() => {}}
       onTarget={() => {}}
       onSend={() => {}}
+      onReplySend={() => {}}
       onRetrySend={() => {}}
       onDismissSend={() => {}}
       onLoadOlder={() => {}}
