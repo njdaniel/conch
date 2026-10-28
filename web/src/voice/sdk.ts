@@ -198,6 +198,51 @@ export async function captureMicrophone(choice: string | null, processing = true
   return track;
 }
 
+// ---- the private microphone test (issue #846)
+//
+// A capture that belongs to no room: nothing here connects, publishes or
+// records. The page's test reads the track into a local audio graph and stops
+// it. It is here because this file alone reaches for the devices.
+
+// TestCapture is a microphone captured for the test, asked for as a call asks
+// for it (the same constraints), and the way to release it.
+export interface TestCapture {
+  readonly track: MediaStreamTrack;
+  stop(): void;
+}
+
+export async function captureTest(choice: string | null, processing = true): Promise<TestCapture> {
+  const captured = await createLocalAudioTrack(microphoneOptions(choice, processing));
+  return {
+    track: captured.mediaStreamTrack,
+    stop: () => {
+      captured.stop();
+    },
+  };
+}
+
+// testMicrophones lists the microphones without capturing any. A browser that
+// has not been allowed one lists them without names: then null, as the call's
+// list is.
+export async function testMicrophones(): Promise<readonly Microphone[] | null> {
+  const inputs = await LiveKitRoom.getLocalDevices('audioinput', false);
+  if (inputs.some((d) => d.label === '')) return null;
+  return inputs.map((d) => ({ id: d.deviceId, label: d.label }));
+}
+
+// watchMicrophones calls back when the browser's devices change, until the
+// returned function is called, which removes exactly the listener added. It
+// listens itself rather than through a room: a room that never connected
+// does not remove its own listener when disconnected.
+export function watchMicrophones(onChange: () => void): () => void {
+  const devices = (navigator as { readonly mediaDevices?: MediaDevices }).mediaDevices;
+  if (devices === undefined) return () => undefined;
+  devices.addEventListener('devicechange', onChange);
+  return () => {
+    devices.removeEventListener('devicechange', onChange);
+  };
+}
+
 // ---- the share's sizes and bitrates
 //
 // Every size and bitrate a share uses is here (issue #565, which replaced

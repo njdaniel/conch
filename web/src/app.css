@@ -2785,3 +2785,37 @@ button.link {
     box-shadow: 0 0 0 2px var(--surface), 0 0 0 6px var(--accent);
   }
 }
+
+/* The private microphone test (issue #846): a level meter and a switch, drawn
+   with classes and the meter element, no inline style. */
+.mic-test {
+  display: grid;
+  gap: var(--s1);
+  margin-top: var(--s2);
+}
+
+.mic-test-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+.mic-test-row select {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.mic-meter {
+  flex: 1 1 8rem;
+  min-width: 6rem;
+  max-width: 20rem;
+  height: 1rem;
+}
+
+@media (max-width: 480px) {
+  .mic-test-row > button,
+  .mic-test-row select {
+    flex: 1 1 100%;
+  }
+}
