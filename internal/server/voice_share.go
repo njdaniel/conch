@@ -111,6 +111,18 @@ var (
 	errVoiceShareNotChannelRoom = errors.New("voice: only a channel-wide room has a share")
 )
 
+// voiceScreenKey is the key of a person's companion in a room's withdrawing
+// map: the negative of the principal, which no person's own key can be. A
+// companion's sources are withdrawn, and owed, apart from the person's.
+func voiceScreenKey(principalID int64) int64 { return -principalID }
+
+// owe marks every participant of principalID as owing a withdrawal: the person
+// and their companion. The caller holds voicePoller.mu.
+func (r *voiceRoomState) owe(principalID int64) {
+	r.withdrawing[principalID] = 0
+	r.withdrawing[voiceScreenKey(principalID)] = 0
+}
+
 // voiceRoomPublishes is whether every participant of room may publish a
 // microphone: what its join grant is, and so what withdrawing a share leaves
 // them. It is voiceAudiences' answer: a member may publish into the
@@ -362,6 +374,7 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 		mine = &voiceShare{principalID: principalID, startedAt: p.now().Truncate(time.Millisecond), pending: true}
 		r.share = mine
 		delete(r.withdrawing, principalID)
+		delete(r.withdrawing, voiceScreenKey(principalID))
 		// A new share makes the end of the last one old news.
 		delete(p.shareEnded, voiceShareEndKey{channelID: room.ChannelID, principalID: principalID})
 	}
@@ -384,6 +397,7 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 		}
 		return schema.VoiceShareV1{}, errVoiceShareNotConnected
 	}
+	p.grantCompanion(lctx, r, room, principalID)
 	if held != nil {
 		p.mu.Lock()
 		ended := r.retired || r.share != held
@@ -419,7 +433,7 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 		p.mu.Lock()
 		if r.share == mine {
 			r.share = nil
-			r.withdrawing[principalID] = 0
+			r.owe(principalID)
 		}
 		p.mu.Unlock()
 		r.order.Unlock()
@@ -454,6 +468,45 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	return schema.VoiceShareV1{PrincipalID: principalID, StartedAt: schema.NewTimestamp(mine.startedAt), Audio: true}, nil
 }
 
+// grantCompanion lets principalID's companion, p<id>.screen, publish the
+// screen as well, if the last pass listed one in the room: the claim is the
+// person's, and the companion is where the screen comes from. Its grant is the
+// per-source form, the screen and nothing else (its sound is another step). A
+// failure does not undo the claim: it is logged, and the companion is restored
+// by the next claim or reconnects on a token that already names the screen. A
+// companion the pass has not listed yet is not called for; it connects with
+// its own grant, and while the person holds the share the passes leave it
+// alone. The caller holds the room's claims. Nothing it logs is a token or a
+// room name.
+func (p *voicePoller) grantCompanion(ctx context.Context, r *voiceRoomState, room store.VoiceRoom, principalID int64) {
+	p.mu.Lock()
+	listed := r.companions[principalID].screen
+	p.mu.Unlock()
+	if !listed {
+		return
+	}
+	identity := voiceParticipantIdentity(principalID, voiceRoleScreen)
+	if _, err := p.s.lk.UpdateParticipant(ctx, room.RoomName, identity, livekit.SourcePermission(true, livekit.SourceScreenShare)); err != nil {
+		slog.WarnContext(ctx, "voice: granting the screen to a companion failed; the next claim restores it", "channel", room.ChannelID, "principal", principalID, "error", err)
+	}
+}
+
+// withdrawCompanion takes everything away from principalID's participant in
+// role (a companion or a viewer): canPublish off and no sources. It is not the
+// microphone-only bundle withdrawLocked leaves a person, which would let the
+// companion publish a microphone. The caller holds the room's claims. It
+// reports whether LiveKit answered.
+func (p *voicePoller) withdrawCompanion(ctx context.Context, roomName string, channelID, principalID int64, role voiceRole) bool {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
+	defer cancel()
+	identity := voiceParticipantIdentity(principalID, role)
+	if _, err := p.s.lk.UpdateParticipant(ctx, roomName, identity, livekit.SourcePermission(false)); err != nil {
+		slog.WarnContext(ctx, "voice: withdrawing a companion's screen-share sources failed; passes retry", "channel", channelID, "principal", principalID, "participant", role.label(), "error", err)
+		return false
+	}
+	return true
+}
+
 // undoClaim takes back a claim that was never granted. Whatever LiveKit may
 // have granted before failing to say so is left for the passes, which
 // withdraw it without auditing it (withdrawing).
@@ -462,7 +515,7 @@ func (p *voicePoller) undoClaim(r *voiceRoomState, mine *voiceShare) {
 	p.mu.Lock()
 	if r.share == mine {
 		r.share = nil
-		r.withdrawing[mine.principalID] = 0
+		r.owe(mine.principalID)
 	}
 	p.mu.Unlock()
 	r.order.Unlock()
@@ -510,7 +563,7 @@ func (p *voicePoller) stopShare(ctx context.Context, room store.VoiceRoom, calle
 		reason, actor = voiceShareStopOperator, callerID
 	}
 	r.share = nil
-	r.withdrawing[c.principalID] = 0
+	r.owe(c.principalID)
 	stopped := p.shareStoppedLocked(r.channelID, c, actor, reason)
 	p.mu.Unlock()
 	p.writeEvents(ctx, stopped)
@@ -555,7 +608,7 @@ func (p *voicePoller) endShareLocked(r *voiceRoomState, principalID int64, reaso
 		return nil
 	}
 	r.share = nil
-	r.withdrawing[principalID] = 0
+	r.owe(principalID)
 	return []voiceEvent{p.shareStoppedLocked(r.channelID, c, principalID, reason)}
 }
 
@@ -578,19 +631,19 @@ func (p *voicePoller) withdrawLocked(ctx context.Context, roomName string, chann
 	return true
 }
 
-// withdrawConfirmed records that LiveKit has taken principalID's screen-share
-// sources away, if a withdrawal of theirs was still owed: the entry is stamped
+// withdrawConfirmed records that LiveKit has taken the screen-share sources of
+// principalID (or, given voiceScreenKey of one, of their companion) away, if a withdrawal of theirs was still owed: the entry is stamped
 // with the room's eviction count (voiceRoomState.seq), bumped for it. A pass
 // that listed the room before that moment may still have seen the share's
 // tracks and says nothing of them; one that listed it after and sees a share
 // published again (a client rejoining on a token LiveKit sent it during the
 // share) audits it as unclaimed.
-func (p *voicePoller) withdrawConfirmed(r *voiceRoomState, principalID int64) {
+func (p *voicePoller) withdrawConfirmed(r *voiceRoomState, key int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if _, owed := r.withdrawing[principalID]; owed {
+	if _, owed := r.withdrawing[key]; owed {
 		r.seq++
-		r.withdrawing[principalID] = r.seq
+		r.withdrawing[key] = r.seq
 	}
 }
 
@@ -601,10 +654,13 @@ func (p *voicePoller) withdrawConfirmed(r *voiceRoomState, principalID int64) {
 // what LiveKit reported they may publish, which the withdrawal leaves them.
 type shareWithdrawal struct {
 	principalID int64
-	joinedAt    time.Time
-	sharing     bool
-	unclaimed   bool
-	canPublish  bool
+	// role is which of the person's participants it is: the person, their
+	// companion (whose sources are withdrawn to nothing), or a viewer.
+	role       voiceRole
+	joinedAt   time.Time
+	sharing    bool
+	unclaimed  bool
+	canPublish bool
 }
 
 // judgeShareLocked is a pass's part in the screen share, under r.order and
@@ -615,12 +671,19 @@ type shareWithdrawal struct {
 // source granted or published: their sources are to be withdrawn, and a
 // published one is audited as unclaimed, once until it is gone. It returns the
 // rows to write, the withdrawals to make, and whether presence changed.
-func (p *voicePoller) judgeShareLocked(r *voiceRoomState, now time.Time, seen map[int64]livekit.Participant, keep map[int64]struct{}, lost map[int64]bool, since uint64) ([]voiceEvent, []shareWithdrawal, bool) {
+//
+// A share is its holder's, whichever of their participants publishes it: p<id>
+// (the browser) or p<id>.screen (the desktop's companion), and it is judged
+// published, with or without sound, by the tracks of either. It ends left only
+// when p<id> itself is gone: a viewer does not keep it alive.
+func (p *voicePoller) judgeShareLocked(r *voiceRoomState, now time.Time, seen map[int64]livekit.Participant, fold voiceFold, keep map[int64]struct{}, lost map[int64]bool, since uint64) ([]voiceEvent, []shareWithdrawal, bool) {
 	var events []voiceEvent
 	changed := false
 	if c := r.share; c != nil && !c.pending {
 		pid := c.principalID
 		part, here := seen[pid]
+		here = here && fold.direct[pid]
+		screen := fold.screens[pid] // zero when the person has no companion
 		_, undecided := keep[pid]
 		switch {
 		case undecided:
@@ -630,15 +693,17 @@ func (p *voicePoller) judgeShareLocked(r *voiceRoomState, now time.Time, seen ma
 		case !here:
 			events = append(events, p.endShareLocked(r, pid, voiceShareStopLeft)...)
 		default:
-			if part.Sharing() {
+			sharing := part.Sharing() || screen.Sharing()
+			audio := part.ScreenShareAudioPublished || screen.ScreenShareAudioPublished
+			if sharing {
 				c.published, c.lastTrack = true, now
 			}
-			if c.audio != part.ScreenShareAudioPublished {
-				c.audio = part.ScreenShareAudioPublished
+			if c.audio != audio {
+				c.audio = audio
 				changed = true
 			}
 			if (!c.published && now.Sub(c.startedAt) >= voiceShareFirstTrack) ||
-				(c.published && !part.Sharing() && now.Sub(c.lastTrack) >= voiceShareTrackGone) {
+				(c.published && !sharing && now.Sub(c.lastTrack) >= voiceShareTrackGone) {
 				events = append(events, p.endShareLocked(r, pid, voiceShareStopIdle)...)
 			}
 		}
@@ -647,53 +712,82 @@ func (p *voicePoller) judgeShareLocked(r *voiceRoomState, now time.Time, seen ma
 		}
 	}
 
-	pids := make([]int64, 0, len(seen))
-	for pid := range seen {
-		pids = append(pids, pid)
-	}
-	slices.Sort(pids)
 	var withdraw []shareWithdrawal
-	for _, pid := range pids {
-		part := seen[pid]
+	// consider notes one participant (key is its entry in r.withdrawing) with
+	// screen-share sources granted or published that its person does not hold
+	// the share for.
+	consider := func(key, pid int64, role voiceRole, part livekit.Participant) {
 		if r.share != nil && r.share.principalID == pid {
-			continue // the holder, pending or not
+			return // the holder, pending or not
 		}
-		stamp, owed := r.withdrawing[pid]
+		stamp, owed := r.withdrawing[key]
 		// Still owed, or confirmed after this pass listed the room: what it
 		// saw is the share being taken away, not a new one.
 		quiet := owed && (stamp == 0 || stamp > since)
 		if !part.Sharing() && !part.ShareSourcesGranted {
 			if !quiet || stamp == 0 {
-				delete(r.withdrawing, pid) // nothing left to withdraw
+				delete(r.withdrawing, key) // nothing left to withdraw
 			}
-			continue
+			return
 		}
-		w := shareWithdrawal{principalID: pid, joinedAt: part.JoinedAt, sharing: part.Sharing(), canPublish: part.CanPublish}
+		w := shareWithdrawal{principalID: pid, role: role, joinedAt: part.JoinedAt, sharing: part.Sharing(), canPublish: part.CanPublish}
 		if part.Sharing() && !quiet {
 			// A share nobody granted: impossible through conchd, unless a
 			// restart dropped the claim or the client rejoined on a token
-			// LiveKit sent it while it held one, after the share ended.
+			// LiveKit sent it while it held one, after the share ended. A
+			// companion's grant names the screen, so it is also what a
+			// companion does before its person has claimed.
 			w.unclaimed = true
+			detail := fmt.Sprintf("channel=%d sources=%s", r.channelID, shareSources(part))
+			if role != voiceRolePerson {
+				detail += " participant=" + role.label()
+			}
 			events = append(events, voiceEvent{
 				actor: fmt.Sprintf("principal:%d", pid), action: store.AuditVoiceShareUnclaimed, channelID: r.channelID,
-				detail: fmt.Sprintf("channel=%d sources=%s source=observed", r.channelID, shareSources(part)),
+				detail: detail + " source=observed",
 			})
 		}
 		if !quiet || stamp == 0 {
 			// Owed again until LiveKit confirms. A stamp later than this
 			// pass's listing stands: that confirmation is newer than what
 			// this pass saw.
-			r.withdrawing[pid] = 0
+			r.withdrawing[key] = 0
 		}
 		withdraw = append(withdraw, w)
 	}
+	pids := make([]int64, 0, len(seen))
+	for pid := range seen {
+		pids = append(pids, pid)
+	}
+	slices.Sort(pids)
+	for _, pid := range pids {
+		role := voiceRolePerson
+		if fold.viaViewer[pid] {
+			role = voiceRoleView
+		}
+		consider(pid, pid, role, seen[pid])
+	}
+	screens := make([]int64, 0, len(fold.screens))
+	for pid := range fold.screens {
+		screens = append(screens, pid)
+	}
+	slices.Sort(screens)
+	for _, pid := range screens {
+		consider(voiceScreenKey(pid), pid, voiceRoleScreen, fold.screens[pid])
+	}
 	// Whoever is gone from the room has nothing left to withdraw; whoever
 	// could not be read is looked at again next pass.
-	for pid := range r.withdrawing {
-		_, here := seen[pid]
+	for key := range r.withdrawing {
+		pid, here := key, false
+		if key < 0 {
+			pid = -key
+			_, here = fold.screens[pid]
+		} else {
+			_, here = seen[pid]
+		}
 		_, undecided := keep[pid]
 		if !here && !undecided {
-			delete(r.withdrawing, pid)
+			delete(r.withdrawing, key)
 		}
 	}
 	return events, withdraw, changed
@@ -734,8 +828,17 @@ func (p *voicePoller) withdrawShares(ctx context.Context, r *voiceRoomState, lis
 		if holds || gone {
 			continue
 		}
-		if p.withdrawLocked(ctx, r.name, r.channelID, w.principalID, w.canPublish) {
-			p.withdrawConfirmed(r, w.principalID)
+		key, done := w.principalID, false
+		if w.role == voiceRolePerson {
+			done = p.withdrawLocked(ctx, r.name, r.channelID, w.principalID, w.canPublish)
+		} else {
+			if w.role == voiceRoleScreen {
+				key = voiceScreenKey(w.principalID)
+			}
+			done = p.withdrawCompanion(ctx, r.name, r.channelID, w.principalID, w.role)
+		}
+		if done {
+			p.withdrawConfirmed(r, key)
 			continue
 		}
 		again = true
@@ -746,7 +849,7 @@ func (p *voicePoller) withdrawShares(ctx context.Context, r *voiceRoomState, lis
 		if w.unclaimed {
 			reason = voiceReasonShareUnclaimed
 		}
-		part := livekit.Participant{Identity: voiceIdentity(w.principalID), JoinedAt: w.joinedAt}
+		part := livekit.Participant{Identity: voiceParticipantIdentity(w.principalID, w.role), JoinedAt: w.joinedAt}
 		p.removeObserved(ctx, r, part, w.principalID, reason)
 	}
 	return again

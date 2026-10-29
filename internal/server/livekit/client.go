@@ -305,10 +305,45 @@ type Permission struct {
 	// ScreenShare adds the screen-share sources to the microphone: a screen
 	// and its sound. It means nothing without CanPublish.
 	ScreenShare bool
+
+	// explicit, with sources, is the per-source form (SourcePermission): the
+	// list of sources is exactly sources, and CanPublish and ScreenShare are
+	// not consulted for it. The bundled form above is what every other
+	// Permission is, and its requests are unchanged.
+	explicit bool
+	listed   []Source
 }
 
-// sources lists the sources p allows, in LiveKit's room-API names.
+// Source is a track source a permission may name, as LiveKit's room API
+// writes it.
+type Source string
+
+// The sources a per-source permission may name.
+const (
+	SourceScreenShare      Source = sourceScreenShare
+	SourceScreenShareAudio Source = sourceScreenShareAudio
+)
+
+// SourcePermission is the per-source form of Permission, for a participant
+// that is not a person's microphone connection (a companion, issue #932):
+// canPublish as given, and exactly the sources named, in order. No sources
+// with canPublish false is a participant that publishes nothing; LiveKit
+// reads an empty list with canPublish true as every source, so that
+// combination is refused by the caller, not here.
+func SourcePermission(canPublish bool, sources ...Source) Permission {
+	return Permission{CanPublish: canPublish, explicit: true, listed: append([]Source{}, sources...)}
+}
+
+// sources lists the sources p allows, in LiveKit's room-API names. The list is
+// never nil, so that an empty one is written as [] and not as null.
 func (p Permission) sources() []string {
+	if p.explicit {
+		out := make([]string, 0, len(p.listed))
+		for _, s := range p.listed {
+			out = append(out, string(s))
+		}
+		return out
+	}
 	if p.ScreenShare {
 		return []string{sourceMicrophone, sourceScreenShare, sourceScreenShareAudio}
 	}

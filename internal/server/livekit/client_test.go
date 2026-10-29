@@ -236,6 +236,57 @@ func TestRoomCalls(t *testing.T) {
 			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
 			want:      true,
 		},
+		{
+			// The per-source form (issue #932): a companion's grant, never the
+			// microphone-only bundle.
+			name: "UpdateParticipant per source, screen only", method: "UpdateParticipant",
+			response: `{"identity":"p7.screen"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7.screen", SourcePermission(true, SourceScreenShare))
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7.screen", "permission": map[string]any{
+				"can_subscribe": true, "can_publish": true, "can_publish_data": false,
+				"can_publish_sources": []any{"SCREEN_SHARE"},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
+		{
+			// The per-source form (issue #932): a companion's grant, never the
+			// microphone-only bundle.
+			name: "UpdateParticipant per source, screen and its sound", method: "UpdateParticipant",
+			response: `{"identity":"p7.screen"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7.screen", SourcePermission(true, SourceScreenShare, SourceScreenShareAudio))
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7.screen", "permission": map[string]any{
+				"can_subscribe": true, "can_publish": true, "can_publish_data": false,
+				"can_publish_sources": []any{"SCREEN_SHARE", "SCREEN_SHARE_AUDIO"},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
+		{
+			// The per-source form (issue #932): a companion's grant, never the
+			// microphone-only bundle.
+			name: "UpdateParticipant per source, nothing", method: "UpdateParticipant",
+			response: `{"identity":"p7.screen"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7.screen", SourcePermission(false))
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7.screen", "permission": map[string]any{
+				"can_subscribe": true, "can_publish": false, "can_publish_data": false,
+				"can_publish_sources": []any{},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

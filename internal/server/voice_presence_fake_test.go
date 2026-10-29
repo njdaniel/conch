@@ -134,6 +134,20 @@ type scriptedLiveKit struct {
 	// onUpdate runs while UpdateParticipant is being answered, before it
 	// takes effect: the moment between a claim's grant and its answer.
 	onUpdate func(room, identity string, share bool)
+	// updates is every UpdateParticipant request received, in order, with the
+	// permission it carried (issue #932). updateFail names identities whose
+	// UpdateParticipant fails while others succeed.
+	updates    []fakeUpdate
+	updateFail map[string]bool
+}
+
+// fakeUpdate is one UpdateParticipant request: who it was for and the
+// permission it set. sources is nil when the request carried none (null) and
+// empty when it carried [].
+type fakeUpdate struct {
+	room, identity string
+	canPublish     bool
+	sources        []string
 }
 
 func newScriptedLiveKit(t *testing.T) *scriptedLiveKit {
@@ -274,6 +288,10 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		f.record(method, req.Room, req.Identity)
 		share := slices.Contains(req.Permission.Sources, "SCREEN_SHARE")
 		status, hook := f.updateStatus, f.onUpdate
+		f.updates = append(f.updates, fakeUpdate{req.Room, req.Identity, req.Permission.CanPublish, req.Permission.Sources})
+		if f.updateFail[req.Identity] {
+			status = http.StatusInternalServerError
+		}
 		f.mu.Unlock()
 		if hook != nil {
 			hook(req.Room, req.Identity, share)
@@ -380,6 +398,28 @@ func (f *scriptedLiveKit) setOnRemove(fn func(room, identity string)) {
 func (f *scriptedLiveKit) setUpdateStatus(s int) {
 	f.config(func(l *scriptedLiveKit) { l.updateStatus = s })
 }
+func (f *scriptedLiveKit) setUpdateFail(identity string, fail bool) {
+	f.config(func(l *scriptedLiveKit) {
+		if l.updateFail == nil {
+			l.updateFail = map[string]bool{}
+		}
+		l.updateFail[identity] = fail
+	})
+}
+
+// updatesFor returns the UpdateParticipant requests made for identity.
+func (f *scriptedLiveKit) updatesFor(identity string) []fakeUpdate {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []fakeUpdate
+	for _, u := range f.updates {
+		if u.identity == identity {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
 func (f *scriptedLiveKit) setOnUpdate(fn func(room, identity string, share bool)) {
 	f.config(func(l *scriptedLiveKit) { l.onUpdate = fn })
 }
