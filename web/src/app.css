@@ -1453,6 +1453,7 @@ label {
 
 .composer {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.35rem;
   padding: var(--s2) var(--s4) var(--s3);
 }
@@ -1531,6 +1532,79 @@ label {
 
 .whisper-person {
   white-space: nowrap;
+}
+
+/* The emoji picker and the `:short` suggestions (issue #763). Eight columns at
+   every width: a 320 px phone has room (8 x 2.25 rem), and the arrow keys move
+   by that many. */
+.emoji-picker {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+  padding: var(--s2);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.emoji-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.emoji-controls input[type='search'] {
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+
+.emoji-controls select {
+  flex: 1 1 6rem;
+  min-width: 0;
+}
+
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 2px;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
+.emoji-cell {
+  min-width: 0;
+  min-height: 2.25rem;
+  padding: 0;
+  font-size: 1.35rem;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+
+.emoji-cell:hover,
+.emoji-cell:focus-visible {
+  background: var(--border);
+}
+
+.emoji-suggestions {
+  margin: 0;
+  padding: var(--s1);
+  list-style: none;
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.emoji-suggestions li {
+  padding: 0.25rem var(--s2);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.emoji-suggestions li[aria-selected='true'] {
+  background: var(--border);
 }
 
 /* ---------------------------------------------------------------- members */
@@ -2434,6 +2508,7 @@ button.link {
   .topbar .label,
   .send .label,
   .attach-image .label,
+  .emoji-trigger .label,
   .voice-controls button:not(.sharing) .label,
   .voice-controls .dest,
   .share-controls .label {
