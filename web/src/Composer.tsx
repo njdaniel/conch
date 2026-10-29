@@ -1,4 +1,6 @@
-import { createContext, useContext, useEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { EmojiPicker } from './EmojiPicker';
+import { completeShortcode, completionAt, insertAt, loadEmoji, type Emoji, type EmojiIndex } from './emoji/emoji';
 import { Glyph } from './Icons';
 import { validateImage, type ImageValidationResult } from './image';
 import type { Audience } from './schema/message';
@@ -127,6 +129,15 @@ export function Composer({
 }) {
   const select = useRef<HTMLSelectElement>(null);
   const picker = useRef<HTMLInputElement>(null);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const emojiButton = useRef<HTMLButtonElement>(null);
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const [caret, setCaret] = useState(0);
+  const [suggestion, setSuggestion] = useState(0);
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  const [emojiIndex, setEmojiIndex] = useState<EmojiIndex | null>(null);
+  // Where the caret goes once a chosen emoji is in the draft.
+  const caretAfter = useRef<number | null>(null);
   const fileDraft = useContext(ComposerAttachmentContext);
   const attachments = fileDraft.attachments;
   const [inputError, setInputError] = useState<string | null>(null);
@@ -173,6 +184,47 @@ export function Composer({
   useEffect(() => () => {
     validationGeneration.current++;
   }, []);
+
+  // `:short` at the caret opens the suggestions. The catalog is fetched only
+  // once something has been typed that could use it.
+  const completion = enabled && !emojiOpen ? completionAt(draft, caret) : null;
+  const completionKey = completion === null ? null : `${String(completion.start)}:${completion.query}`;
+  useEffect(() => {
+    if (completionKey === null || emojiIndex !== null) return;
+    let live = true;
+    loadEmoji().then((index) => { if (live) setEmojiIndex(index); }, () => undefined);
+    return () => { live = false; };
+  }, [completionKey, emojiIndex]);
+  const suggestions: readonly Emoji[] = completion !== null && emojiIndex !== null ? completeShortcode(emojiIndex, completion.query) : [];
+  const suggesting = completion !== null && suggestions.length > 0 && dismissed !== completionKey;
+  const activeSuggestion = Math.min(suggestion, Math.max(0, suggestions.length - 1));
+  const optionId = (i: number) => `composer-emoji-option-${String(i)}`;
+  useLayoutEffect(() => {
+    const at = caretAfter.current;
+    const box = textarea.current;
+    if (at === null || box === null) return;
+    caretAfter.current = null;
+    box.focus();
+    box.setSelectionRange(at, at);
+    setCaret(at);
+  }, [draft]);
+
+  // Put an emoji where the selection is (or in place of the typed `:short`).
+  function insertEmoji(key: string, from: number, to: number): void {
+    const done = insertAt(draft, from, to, key);
+    caretAfter.current = done.caret;
+    setSuggestion(0);
+    onDraft(done.text);
+  }
+  function pickEmoji(emoji: Emoji): void {
+    const box = textarea.current;
+    setEmojiOpen(false);
+    insertEmoji(emoji.key, box?.selectionStart ?? draft.length, box?.selectionEnd ?? draft.length);
+  }
+  function closePicker(): void {
+    setEmojiOpen(false);
+    emojiButton.current?.focus();
+  }
 
   const uploading = attachments.some((a) => a.status === 'uploading');
   const busy = sending || uploading;
@@ -325,6 +377,23 @@ export function Composer({
         </ul>
       ) : null}
       {inputError === null ? null : <p role="alert" className="notice">{inputError}</p>}
+      {emojiOpen ? <EmojiPicker onPick={pickEmoji} onClose={closePicker} /> : null}
+      {suggesting ? (
+        <ul id="composer-emoji-list" className="emoji-suggestions" role="listbox" aria-label="Emoji suggestions">
+          {suggestions.map((e, i) => (
+            <li
+              key={e.key}
+              id={optionId(i)}
+              role="option"
+              aria-selected={i === activeSuggestion}
+              onMouseDown={(event) => { event.preventDefault(); }}
+              onClick={() => { insertEmoji(e.key, completion.start, caret); }}
+            >
+              <span aria-hidden="true">{e.key}</span> :{e.shortcode}:
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <div className={paused ? 'composer-box paused' : 'composer-box'}>
       <input
         ref={picker}
@@ -348,16 +417,42 @@ export function Composer({
       </button>
       <textarea
         id="composer-text"
+        ref={textarea}
         rows={2}
         value={draft}
         disabled={!enabled}
         readOnly={busy}
         aria-describedby={paused ? pausedId : undefined}
+        aria-autocomplete="list"
+        aria-controls={suggesting ? 'composer-emoji-list' : undefined}
+        aria-activedescendant={suggesting ? optionId(activeSuggestion) : undefined}
         onChange={(event) => {
+          setCaret(event.target.selectionStart);
+          setSuggestion(0);
           onDraft(event.target.value);
         }}
+        onSelect={(event) => { setCaret(event.currentTarget.selectionStart); }}
         onPaste={paste}
         onKeyDown={(event) => {
+          if (suggesting && !event.nativeEvent.isComposing) {
+            const n = suggestions.length;
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault();
+              setSuggestion((activeSuggestion + (event.key === 'ArrowDown' ? 1 : n - 1)) % n);
+              return;
+            }
+            if (event.key === 'Enter' || event.key === 'Tab') {
+              event.preventDefault();
+              const chosen = suggestions[activeSuggestion];
+              if (chosen !== undefined) insertEmoji(chosen.key, completion.start, caret);
+              return;
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              setDismissed(completionKey);
+              return;
+            }
+          }
           if (event.key === 'Escape' && whispering) {
             event.preventDefault();
             onTarget({ type: 'closePicker', channel });
@@ -367,6 +462,19 @@ export function Composer({
           key(event);
         }}
       />
+      <button
+        ref={emojiButton}
+        type="button"
+        className="attach-image emoji-trigger"
+        aria-label="Add emoji"
+        aria-haspopup="dialog"
+        aria-expanded={emojiOpen}
+        disabled={!enabled || busy}
+        onClick={() => { setEmojiOpen(!emojiOpen); }}
+      >
+        <Glyph name="smile" />
+        <span className="label">Add emoji</span>
+      </button>
       <button type="submit" className="primary send" disabled={!canSend}>
         <Glyph name="send" />
         <span className="label">Send</span>
