@@ -23,6 +23,8 @@
 //	json:"-" or unexported         skipped
 //
 // Anything else is refused, with the field it is in, rather than guessed at.
+// The scalars in schema.TSConstants (a string or a signed integer each) are
+// written first, as exported constants (issue #953).
 package main
 
 import (
@@ -35,6 +37,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -55,7 +58,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: schema-ts -out <dir>")
 		os.Exit(2)
 	}
-	files, err := generate(schema.TSTypes, schema.TSUnions, schema.Vocabularies, payloadNames())
+	files, err := generate(schema.TSTypes, schema.TSUnions, schema.Vocabularies, payloadNames(), schema.TSConstants)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "schema-ts:", err)
 		os.Exit(1)
@@ -134,7 +137,8 @@ type generator struct {
 }
 
 // generate returns the content of each file this program writes, by name.
-func generate(types []schema.TSType, unions []schema.TSUnion, vocab map[string][]string, payloads map[reflect.Type]string) (map[string][]byte, error) {
+// consts are written first, before any type.
+func generate(types []schema.TSType, unions []schema.TSUnion, vocab map[string][]string, payloads map[reflect.Type]string, consts []schema.TSConstant) (map[string][]byte, error) {
 	g := &generator{
 		vocab:  vocab,
 		decls:  map[reflect.Type]*decl{},
@@ -145,7 +149,10 @@ func generate(types []schema.TSType, unions []schema.TSUnion, vocab map[string][
 	for _, c := range combinators {
 		g.names[c] = "validate.ts"
 	}
-	if err := plainTables(types, unions, vocab, payloads); err != nil {
+	if err := plainTables(types, unions, vocab, payloads, consts); err != nil {
+		return nil, err
+	}
+	if err := g.writeConstants(consts); err != nil {
 		return nil, err
 	}
 	var order []*decl
@@ -222,10 +229,43 @@ func familiesTS(order []*decl) []byte {
 	return []byte(b.String())
 }
 
+// writeConstants writes each TSConstants entry as an exported constant: a
+// string as a literal, a signed integer as a number. Anything else, a name
+// that is not a TypeScript identifier, or a name already taken is refused.
+func (g *generator) writeConstants(consts []schema.TSConstant) error {
+	if len(consts) == 0 {
+		return nil
+	}
+	b := &g.body
+	b.WriteString("\n// Constants of pkg/schema the client must agree with the server on.\n")
+	for _, c := range consts {
+		if err := g.claim(c.Name, "TSConstants"); err != nil {
+			return err
+		}
+		var value string
+		switch v := reflect.ValueOf(c.Value); v.Kind() {
+		case reflect.String:
+			value = quote(v.String())
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			value = strconv.FormatInt(v.Int(), 10)
+		default:
+			return fmt.Errorf("TSConstants %s: %T is not a string or a signed integer", c.Name, c.Value)
+		}
+		fmt.Fprintf(b, "export const %s = %s;\n", c.Name, value)
+	}
+	return nil
+}
+
 // plainTables refuses any string in the tables that is not printable ASCII,
 // before any of them is written into TypeScript.
-func plainTables(types []schema.TSType, unions []schema.TSUnion, vocab map[string][]string, payloads map[reflect.Type]string) error {
+func plainTables(types []schema.TSType, unions []schema.TSUnion, vocab map[string][]string, payloads map[reflect.Type]string, consts []schema.TSConstant) error {
 	var errs []error
+	for _, c := range consts {
+		errs = append(errs, plain(c.Name, "a TSConstants Name"))
+		if s, ok := c.Value.(string); ok {
+			errs = append(errs, plain(s, "TSConstants "+c.Name))
+		}
+	}
 	for _, t := range types {
 		errs = append(errs, plain(t.Family, "a TSTypes Family"), plain(t.Schema, "a TSTypes Schema"))
 	}
