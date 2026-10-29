@@ -427,7 +427,7 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 		// The person's grant went with the room, or is the sweep's to
 		// find; the companion was just granted the screen and is taken
 		// back at once.
-		p.withdrawListedCompanion(ctx, r, principalID)
+		p.withdrawCompanionNow(ctx, r, principalID)
 		return schema.VoiceShareV1{}, errVoiceShareRoomGone
 	}
 	p.mu.Unlock()
@@ -518,29 +518,57 @@ func (p *voicePoller) withdrawCompanion(ctx context.Context, roomName string, ch
 	return true
 }
 
-// withdrawListedCompanion withdraws principalID's companion if the last pass
-// listed one, and confirms it. A companion no pass has listed is the passes'.
-func (p *voicePoller) withdrawListedCompanion(ctx context.Context, r *voiceRoomState, principalID int64) {
-	p.mu.Lock()
-	c := r.companions[principalID]
-	p.mu.Unlock()
-	if !c.screen {
+// withdrawCompanionNow revokes principalID's companion, p<id>.screen, whether
+// or not any pass has listed it: one that connected and began publishing since
+// the last pass must not go on streaming after a stop has been answered. It
+// looks the one participant up first, so that the revocation leaves its
+// canSubscribe as it is (LiveKit replaces a permission whole):
+//
+//   - nobody by that name: nothing to revoke, and nothing is audited;
+//   - found: publishing is revoked with its current canSubscribe; a revoke
+//     LiveKit answers not_found counts as done;
+//   - the lookup failed: publishing is revoked with canSubscribe false, the
+//     conservative choice;
+//   - the revoke failed: if the companion is known to have published, or its
+//     state could not be learned, it is removed from the room (fail closed,
+//     as the passes do), and that is audited as a removal; otherwise the
+//     passes, which still owe the withdrawal, retry.
+//
+// The caller holds the room's claims.
+func (p *voicePoller) withdrawCompanionNow(ctx context.Context, r *voiceRoomState, principalID int64) {
+	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
+	defer cancel()
+	identity := voiceParticipantIdentity(principalID, voiceRoleScreen)
+	part, found, err := p.s.lk.GetParticipant(lctx, r.name, identity)
+	if err == nil && !found {
 		return
 	}
-	if p.withdrawCompanion(ctx, r.name, r.channelID, principalID, voiceRoleScreen, c.screenSubscribes) {
-		p.withdrawConfirmed(r, voiceWithdrawKey{principalID, voiceRoleScreen})
+	known := err == nil
+	if !known {
+		slog.WarnContext(lctx, "voice: looking up a companion to revoke it failed; revoking without its subscribe permission", "channel", r.channelID, "principal", principalID, "error", err)
 	}
+	if p.withdrawCompanion(ctx, r.name, r.channelID, principalID, voiceRoleScreen, known && part.CanSubscribe) {
+		p.withdrawConfirmed(r, voiceWithdrawKey{principalID, voiceRoleScreen})
+		return
+	}
+	if known && !part.Sharing() {
+		return // nothing is being streamed; the passes retry the withdrawal
+	}
+	if !known {
+		part = livekit.Participant{Identity: identity}
+	}
+	p.removeObserved(ctx, r, part, principalID, voiceReasonShareNotWithdrawn)
 }
 
 // withdrawAll is the one withdrawal every stop and rollback makes: the
-// person's own connection (withdrawLocked) and, if the last pass listed one,
-// their companion, so that none of them keeps a screen grant after the share
+// person's own connection (withdrawLocked) and
+// their companion (looked up, listed or not), so that none of them keeps a screen grant after the share
 // is gone, with or without a pass to follow. The caller holds the room's claims.
 func (p *voicePoller) withdrawAll(ctx context.Context, r *voiceRoomState, principalID int64, canPublish bool) {
 	if p.withdrawLocked(ctx, r.name, r.channelID, principalID, canPublish) {
 		p.withdrawConfirmed(r, voiceWithdrawKey{principalID, voiceRolePerson})
 	}
-	p.withdrawListedCompanion(ctx, r, principalID)
+	p.withdrawCompanionNow(ctx, r, principalID)
 }
 
 // undoClaim takes back a claim that was never granted. Whatever LiveKit may

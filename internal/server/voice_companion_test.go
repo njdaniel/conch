@@ -1060,19 +1060,19 @@ func TestVoiceCompanionKeepsItsSubscribe(t *testing.T) {
 			}
 			check(t, f, room, "after the pass")
 		})
-		t.Run(name+"/pass after a stop", func(t *testing.T) {
+		t.Run(name+"/stop whose revoke fails: removed", func(t *testing.T) {
 			f, room := setup(t)
 			f.mustClaim(t, "ann")
 			f.publishScreen(room, true, false)
 			f.lk.setUpdateFail(f.screenID("ann"), true)
-			f.mustStop(t, "ann") // the companion's withdrawal fails; the pass retries
-			f.lk.setUpdateFail(f.screenID("ann"), false)
-			f.at(500)
-			f.pass(t)
-			if p, _ := f.lk.participant(room, f.screenID("ann")); p.screen || p.shareGranted {
-				t.Errorf("the pass did not withdraw the companion: %+v", p)
+			f.mustStop(t, "ann")
+			if f.lk.in(room, f.screenID("ann")) {
+				t.Fatal("a companion still streaming after a stop whose revoke failed was left in the room")
 			}
-			check(t, f, room, "after the retry")
+			want := fmt.Sprintf("channel=%d audience=channel principal=%d reason=%s participant=screen source=observed", f.ops.ID, f.ids["ann"], voiceReasonShareNotWithdrawn)
+			if got := f.removedRows(t); !slices.Equal(got, []string{want}) {
+				t.Errorf("removal rows = %q, want %q", got, want)
+			}
 		})
 	}
 }
@@ -1156,6 +1156,106 @@ func TestVoiceShareRevocationReachesTheCompanion(t *testing.T) {
 			t.Errorf("DeleteRoom calls = %d; the test means the grant to be taken back without one", n)
 		}
 		requireWithdrawn(t, f, room, "after the claim in a rotated room")
+	})
+	// The companion connects and publishes after the last poll: no pass has
+	// listed it, and none runs before the response.
+	late := func(t *testing.T) (*presenceFixture, string) {
+		t.Helper()
+		f, room := newShareFixture(t)
+		f.lk.mu.Lock()
+		f.lk.rooms[room] = append(f.lk.rooms[room], fakeParticipant{identity: f.screenID("ann"), joinedMs: 3_000, shareGranted: true, screen: true, screenAudio: true})
+		f.lk.mu.Unlock()
+		f.srv.voice.mu.Lock()
+		listed := len(f.srv.voice.rooms[room].companions)
+		f.srv.voice.mu.Unlock()
+		if listed != 0 {
+			t.Fatal("a pass has listed the companion")
+		}
+		return f, room
+	}
+	t.Run("an unlisted companion: stop by the sharer", func(t *testing.T) {
+		f, room := newShareFixture(t)
+		f.mustClaim(t, "ann")
+		f.lk.mu.Lock()
+		f.lk.rooms[room] = append(f.lk.rooms[room], fakeParticipant{identity: f.screenID("ann"), joinedMs: 3_000, shareGranted: true, screen: true, screenAudio: true})
+		f.lk.mu.Unlock()
+		f.mustStop(t, "ann")
+		requireWithdrawn(t, f, room, "after the stop")
+	})
+	t.Run("an unlisted companion: stop by an operator", func(t *testing.T) {
+		f, room := newShareFixture(t)
+		f.mustClaim(t, "ann")
+		f.lk.mu.Lock()
+		f.lk.rooms[room] = append(f.lk.rooms[room], fakeParticipant{identity: f.screenID("ann"), joinedMs: 3_000, shareGranted: true, screen: true})
+		f.lk.mu.Unlock()
+		f.mustStop(t, "root")
+		requireWithdrawn(t, f, room, "after the operator's stop")
+	})
+	t.Run("an unlisted companion: the audit row cannot be written", func(t *testing.T) {
+		f, room := late(t)
+		write := f.srv.voice.appendAudit
+		f.srv.voice.appendAudit = func(context.Context, string, string, string, string, time.Time) (store.AuditEvent, error) {
+			return store.AuditEvent{}, errors.New("disk full")
+		}
+		res := f.claimShare(t, "ann", "ops")
+		f.srv.voice.appendAudit = write
+		if res.status != http.StatusInternalServerError {
+			t.Fatalf("claim = %d %s, want 500", res.status, res.body)
+		}
+		requireWithdrawn(t, f, room, "after the failed claim")
+	})
+	t.Run("an unlisted publish-only companion keeps its subscribe", func(t *testing.T) {
+		f, room := newShareFixture(t)
+		f.mustClaim(t, "ann")
+		f.lk.mu.Lock()
+		f.lk.rooms[room] = append(f.lk.rooms[room], fakeParticipant{identity: f.screenID("ann"), joinedMs: 3_000, shareGranted: true, screen: true, noSubscribe: true})
+		f.lk.mu.Unlock()
+		f.mustStop(t, "ann")
+		requireWithdrawn(t, f, room, "after the stop")
+		if p, _ := f.lk.participant(room, f.screenID("ann")); !p.noSubscribe {
+			t.Error("the withdrawal gave the publish-only companion the right to receive")
+		}
+	})
+	t.Run("a lookup that fails: revoked without subscribe", func(t *testing.T) {
+		f, room := newShareFixture(t)
+		f.mustClaim(t, "ann")
+		f.lk.mu.Lock()
+		f.lk.rooms[room] = append(f.lk.rooms[room], fakeParticipant{identity: f.screenID("ann"), joinedMs: 3_000, shareGranted: true, screen: true})
+		f.lk.mu.Unlock()
+		f.lk.setGetStatus(http.StatusInternalServerError)
+		f.mustStop(t, "ann")
+		requireWithdrawn(t, f, room, "after the stop")
+		if p, _ := f.lk.participant(room, f.screenID("ann")); !p.noSubscribe {
+			t.Error("a revoke after a failed lookup left the companion able to receive")
+		}
+	})
+	t.Run("a lookup and a revoke that fail: removed", func(t *testing.T) {
+		f, room := newShareFixture(t)
+		f.mustClaim(t, "ann")
+		f.lk.mu.Lock()
+		f.lk.rooms[room] = append(f.lk.rooms[room], fakeParticipant{identity: f.screenID("ann"), joinedMs: 3_000, shareGranted: true, screen: true})
+		f.lk.mu.Unlock()
+		f.lk.setGetStatus(http.StatusInternalServerError)
+		f.lk.setUpdateFail(f.screenID("ann"), true)
+		f.mustStop(t, "ann")
+		if f.lk.in(room, f.screenID("ann")) {
+			t.Fatal("the companion is still in the room")
+		}
+	})
+	t.Run("no companion at all: nothing revoked, nothing audited", func(t *testing.T) {
+		f, room := newShareFixture(t)
+		f.mustClaim(t, "ann")
+		f.mustStop(t, "ann")
+		if got := f.lk.updatesFor(f.screenID("ann")); len(got) != 0 {
+			t.Errorf("updates for a companion that is not there: %+v", got)
+		}
+		if n := f.lk.count("GetParticipant"); n == 0 {
+			t.Error("the companion was not looked for")
+		}
+		if got := f.removedRows(t); len(got) != 0 {
+			t.Errorf("removal rows = %q", got)
+		}
+		_ = room
 	})
 	t.Run("a repeated claim whose share ended meanwhile", func(t *testing.T) {
 		f, room := shareWithCompanion(t)

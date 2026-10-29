@@ -834,3 +834,42 @@ func TestUpdateParticipantRefusesWideSourcePermissions(t *testing.T) {
 		t.Errorf("a request was sent to %s", rec.path)
 	}
 }
+
+// TestGetParticipantAnswers: one participant looked up by name; nobody by that
+// name is not an error; an answer that is not LiveKit's, or names another, is.
+func TestGetParticipantAnswers(t *testing.T) {
+	for _, tt := range []struct {
+		name, body string
+		status     int
+		want       Participant
+		wantFound  bool
+		wantErr    bool
+	}{
+		{"publish-only companion", `{"identity":"p7.screen","permission":{"can_subscribe":false,"can_publish":true,"can_publish_sources":["SCREEN_SHARE"]},"tracks":[{"type":"VIDEO","source":"SCREEN_SHARE"}]}`, 200,
+			Participant{Identity: "p7.screen", ScreenSharePublished: true, ShareSourcesGranted: true, CanPublish: true}, true, false},
+		{"subscribing", `{"identity":"p7.screen","permission":{"can_subscribe":true}}`, 200, Participant{Identity: "p7.screen", CanSubscribe: true}, true, false},
+		{"not in the room", `{"code":"not_found","msg":"participant does not exist"}`, 404, Participant{}, false, false},
+		{"another participant named", `{"identity":"p8"}`, 200, Participant{}, false, true},
+		{"an empty object", `{}`, 200, Participant{}, false, true},
+		{"an HTML page", `<html>ok</html>`, 200, Participant{}, false, true},
+		{"unknown method", `{"code":"bad_route"}`, 404, Participant{}, false, true},
+		{"server error", `{"code":"internal","msg":"leaky detail"}`, 500, Participant{}, false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, rec := fakeLiveKit(t, tt.status, tt.body)
+			got, found, err := testClient(t, srv.URL).GetParticipant(context.Background(), "conch-a", "p7.screen")
+			if found != tt.wantFound || (err != nil) != tt.wantErr || !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("GetParticipant = %+v, %v, %v; want %+v, %v, error %v", got, found, err, tt.want, tt.wantFound, tt.wantErr)
+			}
+			if rec.path != "/twirp/livekit.RoomService/GetParticipant" {
+				t.Errorf("request path = %s", rec.path)
+			}
+			if err != nil && (!errors.Is(err, ErrUnavailable) || strings.Contains(err.Error(), "leaky") || strings.Contains(err.Error(), "conch-a")) {
+				t.Errorf("err = %v", err)
+			}
+		})
+	}
+	if _, found, err := testClient(t, "http://127.0.0.1:1").GetParticipant(context.Background(), "", "p7"); found || err == nil || errors.Is(err, ErrUnavailable) {
+		t.Errorf("no room: %v, %v; want a refusal that is not ErrUnavailable", found, err)
+	}
+}

@@ -165,23 +165,68 @@ func (c *Client) ListRooms(ctx context.Context) ([]Room, error) {
 	return rooms, nil
 }
 
+// wireParticipant is a participant as the room API writes it, in either of
+// the JSON spellings protojson may use.
+type wireParticipant struct {
+	Identity     string  `json:"identity"`
+	JoinedAt     flexInt `json:"joinedAt"`
+	SnakeJoined  flexInt `json:"joined_at"`
+	JoinedAtMs   flexInt `json:"joinedAtMs"`
+	SnakeJoinedM flexInt `json:"joined_at_ms"`
+	Tracks       []struct {
+		Type   flexEnum `json:"type"`
+		Source flexEnum `json:"source"`
+		Muted  bool     `json:"muted"`
+	} `json:"tracks"`
+	Permission *participantPermission `json:"permission"`
+}
+
+// participant reads what conchd needs of w.
+func (p wireParticipant) participant() Participant {
+	part := Participant{Identity: p.Identity}
+	switch ms, s := max(p.JoinedAtMs, p.SnakeJoinedM), max(p.JoinedAt, p.SnakeJoined); {
+	case ms > 0:
+		part.JoinedAt = time.UnixMilli(int64(ms)).UTC()
+	case s > 0:
+		part.JoinedAt = time.Unix(int64(s), 0).UTC()
+	}
+	mics, muted := 0, 0
+	for _, t := range p.Tracks {
+		// A screen share is recognised by its source alone, whatever
+		// its type: a source that is not allowed is refused by LiveKit
+		// whatever the type says, so a track of an unexpected type
+		// under a share source is still a share.
+		switch {
+		case t.Source.is(sourceScreenShare, 3):
+			part.ScreenSharePublished = true
+			continue
+		case t.Source.is(sourceScreenShareAudio, 4):
+			part.ScreenShareAudioPublished = true
+			continue
+		}
+		// protojson drops default values: an AUDIO type (0) is usually
+		// absent, so only an explicit non-audio type disqualifies a track.
+		if !t.Source.is(sourceMicrophone, 2) || (!t.Type.absent() && !t.Type.is("AUDIO", 0)) {
+			continue
+		}
+		mics++
+		if t.Muted {
+			muted++
+		}
+	}
+	part.MicrophonePublished = mics > 0
+	part.MicrophoneMuted = mics > 0 && muted == mics
+	part.ShareSourcesGranted = p.Permission.grantsShare()
+	part.CanPublish = p.Permission != nil && (p.Permission.CanPublish || p.Permission.SnakeCanPublish)
+	part.CanSubscribe = p.Permission != nil && (p.Permission.CanSubscribe || p.Permission.SnakeSubscribe)
+	return part
+}
+
 // ListParticipants returns the participants of room. A room LiveKit does not
 // have is an empty list, not an error (measured on 1.13.7).
 func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participant, error) {
 	var resp struct {
-		Participants []struct {
-			Identity     string  `json:"identity"`
-			JoinedAt     flexInt `json:"joinedAt"`
-			SnakeJoined  flexInt `json:"joined_at"`
-			JoinedAtMs   flexInt `json:"joinedAtMs"`
-			SnakeJoinedM flexInt `json:"joined_at_ms"`
-			Tracks       []struct {
-				Type   flexEnum `json:"type"`
-				Source flexEnum `json:"source"`
-				Muted  bool     `json:"muted"`
-			} `json:"tracks"`
-			Permission *participantPermission `json:"permission"`
-		} `json:"participants"`
+		Participants []wireParticipant `json:"participants"`
 	}
 	// An admin grant with no room named is wider than this call needs, so an
 	// empty room never reaches the signer.
@@ -194,45 +239,36 @@ func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participa
 	}
 	out := make([]Participant, 0, len(resp.Participants))
 	for _, p := range resp.Participants {
-		part := Participant{Identity: p.Identity}
-		switch ms, s := max(p.JoinedAtMs, p.SnakeJoinedM), max(p.JoinedAt, p.SnakeJoined); {
-		case ms > 0:
-			part.JoinedAt = time.UnixMilli(int64(ms)).UTC()
-		case s > 0:
-			part.JoinedAt = time.Unix(int64(s), 0).UTC()
-		}
-		mics, muted := 0, 0
-		for _, t := range p.Tracks {
-			// A screen share is recognised by its source alone, whatever
-			// its type: a source that is not allowed is refused by LiveKit
-			// whatever the type says, so a track of an unexpected type
-			// under a share source is still a share.
-			switch {
-			case t.Source.is(sourceScreenShare, 3):
-				part.ScreenSharePublished = true
-				continue
-			case t.Source.is(sourceScreenShareAudio, 4):
-				part.ScreenShareAudioPublished = true
-				continue
-			}
-			// protojson drops default values: an AUDIO type (0) is usually
-			// absent, so only an explicit non-audio type disqualifies a track.
-			if !t.Source.is(sourceMicrophone, 2) || (!t.Type.absent() && !t.Type.is("AUDIO", 0)) {
-				continue
-			}
-			mics++
-			if t.Muted {
-				muted++
-			}
-		}
-		part.MicrophonePublished = mics > 0
-		part.MicrophoneMuted = mics > 0 && muted == mics
-		part.ShareSourcesGranted = p.Permission.grantsShare()
-		part.CanPublish = p.Permission != nil && (p.Permission.CanPublish || p.Permission.SnakeCanPublish)
-		part.CanSubscribe = p.Permission != nil && (p.Permission.CanSubscribe || p.Permission.SnakeSubscribe)
-		out = append(out, part)
+		out = append(out, p.participant())
 	}
 	return out, nil
+}
+
+// GetParticipant returns identity's connection to room: the narrowest look
+// there is, for a caller that must know one participant's permission as it is
+// now (issue #932: a companion's canSubscribe, which a withdrawal must leave
+// as it finds it). found is false, with a nil error, when LiveKit has nobody
+// by that identity in the room, which it says with the Twirp answer not_found
+// and only that exact answer (see RemoveParticipant). A 200 must name the
+// identity back.
+func (c *Client) GetParticipant(ctx context.Context, room, identity string) (part Participant, found bool, err error) {
+	if room == "" || identity == "" {
+		return Participant{}, false, errors.New("livekit: GetParticipant needs a room name and an identity")
+	}
+	var resp wireParticipant
+	grant := adminGrant{RoomAdmin: true, Room: room}
+	err = c.call(ctx, "GetParticipant", grant, map[string]any{"room": room, "identity": identity}, &resp)
+	var status httpStatusError
+	if errors.As(err, &status) && status.status == http.StatusNotFound && status.twirpCode == "not_found" {
+		return Participant{}, false, nil
+	}
+	if err != nil {
+		return Participant{}, false, err
+	}
+	if resp.Identity != identity {
+		return Participant{}, false, fmt.Errorf("%w: GetParticipant: the answer does not name the participant", ErrUnavailable)
+	}
+	return resp.participant(), true, nil
 }
 
 // RemoveParticipant disconnects identity from room. It does not stop the

@@ -142,6 +142,9 @@ type scriptedLiveKit struct {
 	// UpdateParticipant fails while others succeed.
 	updates    []fakeUpdate
 	updateFail map[string]bool
+	// getStatus is the status of GetParticipant; 0 means 200, or 404
+	// not_found when the identity is not in the room.
+	getStatus int
 }
 
 // fakeUpdate is one UpdateParticipant request: who it was for and the
@@ -244,30 +247,37 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		parts := make([]map[string]any, 0)
 		for _, p := range f.rooms[req.Room] {
-			part := map[string]any{"identity": p.identity, "joined_at_ms": strconv.FormatInt(p.joinedMs, 10)}
-			// As LiveKit 1.13.7 lists it: the permission spelled out.
-			sources := []string{"MICROPHONE"}
-			if p.shareGranted {
-				sources = append(sources, "SCREEN_SHARE", "SCREEN_SHARE_AUDIO")
-			}
-			part["permission"] = map[string]any{"can_subscribe": !p.noSubscribe, "can_publish": !p.listenOnly, "can_publish_data": false, "can_publish_sources": sources}
-			var tracks []map[string]any
-			if p.published {
-				tracks = append(tracks, map[string]any{"type": "AUDIO", "source": "MICROPHONE", "muted": p.muted})
-			}
-			if p.screen {
-				tracks = append(tracks, map[string]any{"type": "VIDEO", "source": "SCREEN_SHARE", "muted": false})
-			}
-			if p.screenAudio {
-				tracks = append(tracks, map[string]any{"type": "AUDIO", "source": "SCREEN_SHARE_AUDIO", "muted": false})
-			}
-			if tracks != nil {
-				part["tracks"] = tracks
-			}
+			part := fakeParticipantJSON(p)
 			parts = append(parts, part)
 		}
 		f.mu.Unlock()
 		writeFakeJSON(w, http.StatusOK, map[string]any{"participants": parts})
+	case "GetParticipant":
+		f.record(method, req.Room, req.Identity)
+		status := f.getStatus
+		f.mu.Unlock()
+		if status != 0 {
+			writeFakeJSON(w, status, map[string]any{"code": "internal"})
+			return
+		}
+		f.mu.Lock()
+		var found *fakeParticipant
+		for _, p := range f.rooms[req.Room] {
+			if p.identity == req.Identity {
+				found = &p
+				break
+			}
+		}
+		var body map[string]any
+		if found != nil {
+			body = fakeParticipantJSON(*found)
+		}
+		f.mu.Unlock()
+		if body == nil {
+			writeFakeJSON(w, http.StatusNotFound, map[string]any{"code": "not_found", "msg": "participant does not exist"})
+			return
+		}
+		writeFakeJSON(w, http.StatusOK, body)
 	case "RemoveParticipant":
 		f.record(method, req.Room, req.Identity)
 		status, keep, hook := f.removeStatus, f.keepAfterRemove, f.onRemove
@@ -345,6 +355,31 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// fakeParticipantJSON is a participant as the room API lists it.
+func fakeParticipantJSON(p fakeParticipant) map[string]any {
+	part := map[string]any{"identity": p.identity, "joined_at_ms": strconv.FormatInt(p.joinedMs, 10)}
+	// As LiveKit 1.13.7 lists it: the permission spelled out.
+	sources := []string{"MICROPHONE"}
+	if p.shareGranted {
+		sources = append(sources, "SCREEN_SHARE", "SCREEN_SHARE_AUDIO")
+	}
+	part["permission"] = map[string]any{"can_subscribe": !p.noSubscribe, "can_publish": !p.listenOnly, "can_publish_data": false, "can_publish_sources": sources}
+	var tracks []map[string]any
+	if p.published {
+		tracks = append(tracks, map[string]any{"type": "AUDIO", "source": "MICROPHONE", "muted": p.muted})
+	}
+	if p.screen {
+		tracks = append(tracks, map[string]any{"type": "VIDEO", "source": "SCREEN_SHARE", "muted": false})
+	}
+	if p.screenAudio {
+		tracks = append(tracks, map[string]any{"type": "AUDIO", "source": "SCREEN_SHARE_AUDIO", "muted": false})
+	}
+	if tracks != nil {
+		part["tracks"] = tracks
+	}
+	return part
+}
+
 // wait blocks a held request until released or cancelled and reports whether
 // it was released.
 func (f *scriptedLiveKit) wait(r *http.Request, hold chan struct{}) bool {
@@ -403,6 +438,9 @@ func (f *scriptedLiveKit) setOnRemove(fn func(room, identity string)) {
 }
 func (f *scriptedLiveKit) setUpdateStatus(s int) {
 	f.config(func(l *scriptedLiveKit) { l.updateStatus = s })
+}
+func (f *scriptedLiveKit) setGetStatus(s int) {
+	f.config(func(l *scriptedLiveKit) { l.getStatus = s })
 }
 func (f *scriptedLiveKit) setUpdateFail(identity string, fail bool) {
 	f.config(func(l *scriptedLiveKit) {
