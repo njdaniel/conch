@@ -23,6 +23,15 @@ export function webPreferences(packaged: boolean, preload: string): WebPreferenc
     spellcheck: false,
     navigateOnDragDrop: false,
     safeDialogs: true,
+    // Electron's defaults for these are already the safe ones; they are written
+    // out so that a default changing, or a copy of this object elsewhere, is a
+    // diff to review.
+    nodeIntegrationInWorker: false,
+    nodeIntegrationInSubFrames: false,
+    allowRunningInsecureContent: false,
+    experimentalFeatures: false,
+    plugins: false,
+    enableBlinkFeatures: '',
     devTools: !packaged,
     preload,
     partition: PARTITION,

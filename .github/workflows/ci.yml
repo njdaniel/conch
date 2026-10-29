@@ -181,7 +181,7 @@ jobs:
       - name: electron cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/conch/electron-*
+          path: ~/.cache/conch/electron
           key: desktop-electron-${{ runner.os }}-${{ hashFiles('scripts/desktop-pins.sh') }}
 
       - name: virtual display

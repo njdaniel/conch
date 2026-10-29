@@ -44,7 +44,9 @@ export function launch(options: LaunchOptions = {}): Launched {
     ...(options.debugPort === true ? ['--remote-debugging-port=0'] : []),
     ...(options.args ?? []),
   ];
-  const env: NodeJS.ProcessEnv = { ...process.env, ...options.env };
+  // A packaged app refuses remote debugging unless told it is meant
+  // (main/debugging.ts); a test that asks for the port is telling it.
+  const env: NodeJS.ProcessEnv = { ...process.env, ...(options.debugPort === true ? { CONCH_DESKTOP_ALLOW_CDP: '1' } : {}), ...options.env };
   if (headless) {
     delete env['DISPLAY'];
     delete env['WAYLAND_DISPLAY'];

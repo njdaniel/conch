@@ -7,7 +7,7 @@ An Electron app that opens the existing web client from packaged files at
 **What it does today:** one hardened window showing the React client. **What it
 does not do yet:** no network (the CSP says `connect-src 'none'`, so the client
 shows its "cannot reach the server" state), no sign-in, no profiles, no
-credentials, no IPC method (the preload exposes a frozen, empty `conchDesktop`),
+credentials, no IPC method (the preload exposes an empty `conchDesktop`),
 no voice, no tray, no installer. Later children of #770 add those.
 
 ## Layout
@@ -19,7 +19,7 @@ no voice, no tray, no installer. Later children of #770 add those.
 | `main/window.ts` | the one window and its `webPreferences` (pinned by a unit test) |
 | `main/guards.ts` | what a web contents may not do: navigate, open windows, attach webviews, download, ask for permissions, choose devices |
 | `main/app.ts`, `main/main.ts` | startup |
-| `preload/index.ts` | `window.conchDesktop`, frozen and empty |
+| `preload/index.ts` | `window.conchDesktop`, empty; the page-side copy is not frozen, so nothing may rely on that |
 | `build/manifest.ts` | writes `out/ui-manifest.json` (path, SHA-256, content type) |
 | `build/electron-builder.config.json` | the Linux `dir` target, asar and the fuses |
 | `tests/unit/` | Vitest, no Electron runtime, no display, no network |
@@ -41,7 +41,7 @@ make desktop-smoke   # drive that app; needs a display
 
 `desktop-check` downloads no Electron and needs no display. `desktop-build`
 fetches the pinned Electron with `scripts/desktop-electron.sh` into
-`~/.cache/conch/electron-<version>/` (`CONCH_CACHE` moves it), once. It does not
+`~/.cache/conch/electron/` (a directory of its own that the script makes private, mode 700, and refuses if group or other can write to it) (`CONCH_CACHE` moves it), once. It does not
 use the `electron` package's `install-electron`: that extracts with a package
 that loads prebuilt native code, and `.npmrc` keeps install scripts off. The
 script downloads only from Electron's GitHub release and keeps the zip only if
@@ -65,6 +65,14 @@ build. So the test passes Chromium's `--remote-debugging-port=0` (an OS-chosen
 loopback port) itself; **the app never turns that port on**, and a launch
 without the flag has none. Playwright launches no browser here, so none is
 downloaded.
+
+A packaged app that is started with `--remote-debugging-port` or
+`--remote-debugging-pipe` prints `conch-desktop: remote debugging is ON` and
+exits 1 unless `CONCH_DESKTOP_ALLOW_CDP=1` is set (`main/debugging.ts`; the
+smoke test's launcher sets it, and a smoke test asserts the refusal). That gate
+catches launcher mistakes and keeps the choice explicit. It is not a defence
+against a same-user attacker, who can set the variable too, and Chromium may
+open the port for a moment before the gate runs.
 
 It checks the window, the response headers, the renderer's lack of Node, the
 refusals (navigation, windows, URLs outside the manifest, foreign requests),
@@ -91,8 +99,12 @@ The fuses are set by electron-builder (`electronFuses`): RunAsNode off,
 NODE_OPTIONS off, Node CLI inspect arguments off, embedded asar integrity
 validation on, only-load-app-from-asar on, file-protocol extra privileges off,
 cookie encryption on. Electron validates the asar's embedded hash on macOS and
-Windows only; on Linux that fuse is set but not what protects the files: the
-scheme handler's per-file SHA-256 check is.
+Windows only; on Linux that fuse is set and does nothing. The scheme handler's
+per-file SHA-256 check verifies that the UI files it serves are the ones the
+build listed; it is **not tamper protection**, because the manifest, `main.cjs`
+and the preload come from the same asar and nothing checks them. On Linux, what
+keeps the installed app from being modified is the install directory's
+ownership (a root-owned package directory, #774), not anything in the app.
 
 ## Dependencies
 

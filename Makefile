@@ -118,7 +118,7 @@ desktop-check: desktop-node
 	cd desktop && npm test
 
 # The unpacked Linux app, desktop/dist/linux-unpacked/. Fetches the pinned
-# Electron into ~/.cache/conch once (scripts/desktop-electron.sh checks its
+# Electron into ~/.cache/conch/electron once (scripts/desktop-electron.sh checks its
 # SHA-256 twice) and builds web/ for it without touching web/dist. Not part of
 # `make check`.
 desktop-build: desktop-node

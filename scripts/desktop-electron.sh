@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fetches the Electron the desktop shell is built with (desktop/, ADR-007) into
-# ~/.cache/conch/electron-<version>/, for electron-builder's `electronDist`.
+# ~/.cache/conch/electron/electron-<version>/, for electron-builder's `electronDist`.
 #
 # Why not `install-electron`, the bin of the electron package: it extracts with
 # a package that loads prebuilt native binaries, on the machine that runs it,
@@ -12,8 +12,11 @@
 #     publishes in its own npm package and which npm ci has verified against
 #     the integrity hash in desktop/package-lock.json.
 # A zip that matches only one of them, or neither, is removed and nothing is
-# unpacked. It then unpacks with the system `unzip` and does nothing on a second
-# run once the directory is in place.
+# unpacked. The verified zip stays in the cache (an owned directory that group
+# and other cannot write, or the script refuses). Every run checks that zip's
+# hash again and unpacks it afresh with the system `unzip`, with group and other
+# write removed from every file, so the directory electron-builder packs from
+# is never something a cache hit merely trusted. No download on a second run.
 #
 # So it needs desktop/node_modules (npm ci) first. `make desktop-build` does
 # both.
@@ -66,36 +69,62 @@ if [ "$want_npm" != "$want_pin" ]; then
     fail "scripts/desktop-pins.sh ($want_pin) and the electron package's checksums.json ($want_npm) disagree about $archive"
 fi
 
-cache="${CONCH_CACHE:-$HOME/.cache/conch}"
+cache="${CONCH_CACHE:-$HOME/.cache/conch}/electron"
 dir="$cache/electron-$version"
-mkdir -p "$cache"
+zip="$cache/$archive"
+
+# The cache is owned by this user and not writable by group or other, or
+# nothing in it can be trusted: a build input that someone else could have
+# changed is not one. A cache that does not exist yet is made private.
+if [ -e "$cache" ] || [ -L "$cache" ]; then
+    if [ -L "$cache" ] || [ ! -d "$cache" ]; then
+        fail "$cache is not a plain directory"
+    fi
+    read -r owner mode < <(stat -c '%u %a' "$cache")
+    [ "$owner" = "$(id -u)" ] || fail "$cache is owned by uid $owner, not by you"
+    if (((8#$mode & 8#022) != 0)); then
+        fail "$cache is writable by group or other (mode $mode); chmod go-w it"
+    fi
+else
+    mkdir -p -m 700 "$cache"
+fi
 
 # One run at a time (two worktrees, a hook and a shell).
 exec 9>"$cache/.electron.lock"
 flock 9
 
-if [ -x "$dir/electron" ] && [ "$(cat "$dir/.sha256" 2>/dev/null)" = "$want_pin" ]; then
-    echo "desktop-electron: Electron $version is already in $dir"
-    exit 0
-fi
-
 work=$(mktemp -d "$cache/.electron-fetch.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 
-echo "desktop-electron: downloading $url"
-curl --fail --silent --show-error --location --proto '=https,file' --proto-redir '=https' --output "$work/$archive" "$url" ||
-    fail "could not download $url"
-got=$(sha256sum "$work/$archive" | cut -d' ' -f1)
-if [ "$got" != "$want_pin" ] || [ "$got" != "$want_npm" ]; then
-    rm -f "$work/$archive"
-    fail "SHA-256 of $archive is $got, but the pin is $want_pin and checksums.json says $want_npm; nothing was unpacked"
+# The verified zip is what the cache holds. It is checked again on every run,
+# and the directory electron-builder packs from is extracted from it afresh
+# every run, so nothing that happened to the old directory (or to a library in
+# it) is carried forward.
+if [ -f "$zip" ]; then
+    got=$(sha256sum "$zip" | cut -d' ' -f1)
+    if [ "$got" != "$want_pin" ]; then
+        rm -f "$zip"
+        fail "the cached $zip has SHA-256 $got, not the pinned $want_pin; it was removed, run this again to download it"
+    fi
+else
+    echo "desktop-electron: downloading $url"
+    curl --fail --silent --show-error --location --proto '=https,file' --proto-redir '=https' --output "$work/$archive" "$url" ||
+        fail "could not download $url"
+    got=$(sha256sum "$work/$archive" | cut -d' ' -f1)
+    if [ "$got" != "$want_pin" ] || [ "$got" != "$want_npm" ]; then
+        rm -f "$work/$archive"
+        fail "SHA-256 of $archive is $got, but the pin is $want_pin and checksums.json says $want_npm; nothing was unpacked"
+    fi
+    chmod 600 "$work/$archive"
+    mv "$work/$archive" "$zip"
 fi
 
 mkdir "$work/electron"
-unzip -q "$work/$archive" -d "$work/electron"
-rm -f "$work/$archive"
+unzip -q "$zip" -d "$work/electron"
 [ -x "$work/electron/electron" ] || fail "$archive has no electron executable; nothing was put in place"
-echo "$want_pin" >"$work/electron/.sha256"
+# The zip carries mode 0777 on some files. Nothing here is writable by group
+# or other, before it is packed or run.
+chmod -R go-w "$work/electron"
 rm -rf "$dir"
 mv "$work/electron" "$dir" # the directory appears complete or not at all
-echo "desktop-electron: Electron $version unpacked into $dir"
+echo "desktop-electron: Electron $version unpacked from the verified $zip into $dir"

@@ -5,11 +5,19 @@
 // Needs a display (CI: xvfb-run) and the unpacked build in dist/. It proves
 // what ran here: this machine's Electron, sandbox and window; it does not
 // certify an installed package, a keyring or a picker (#774, #922).
-import { readlinkSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test';
 
 import { launch, type Launched } from './launch.ts';
+
+// The pid of a process in each pid namespace it is in, outermost first.
+function nspid(pid: number): string[] {
+  const status = readFileSync(`/proc/${String(pid)}/status`, 'utf8');
+  const line = /^NSpid:\s*(.+)$/m.exec(status)?.[1];
+  if (line === undefined) throw new Error(`/proc/${String(pid)}/status has no NSpid line`);
+  return line.trim().split(/\s+/);
+}
 
 async function attach(app: Launched): Promise<{ browser: Browser; page: Page }> {
   const browser = await chromium.connectOverCDP(await app.cdpUrl());
@@ -132,12 +140,49 @@ test.describe('the packaged shell', () => {
     const info = await session.send('SystemInfo.getProcessInfo');
     const renderers = info.processInfo.filter((p) => p.type === 'renderer');
     expect(renderers.length).toBeGreaterThan(0);
+    // /proc/<pid>/status is readable for any process; /proc/<pid>/ns/* is not
+    // for a non-dumpable one, which the setuid sandbox makes the renderer.
+    // Its NSpid line lists the pid in each pid namespace the process is in:
+    // one value outside a sandbox, more than one inside the sandbox's own.
     const pid = app.child.pid;
     if (pid === undefined) throw new Error('the app has no pid');
-    const main = readlinkSync(`/proc/${String(pid)}/ns/pid`);
+    expect(nspid(pid), 'main is not in a nested pid namespace').toHaveLength(1);
     for (const renderer of renderers) {
-      // The sandbox puts the renderer in a pid namespace of its own.
-      expect(readlinkSync(`/proc/${String(renderer.id)}/ns/pid`), `renderer ${String(renderer.id)}`).not.toBe(main);
+      expect(nspid(renderer.id).length, `renderer ${String(renderer.id)} is in no pid namespace of its own`).toBeGreaterThan(1);
+    }
+  });
+});
+
+test.describe('remote debugging', () => {
+  for (const flag of ['--remote-debugging-port=0', '--remote-debugging-pipe']) {
+    test(`${flag} is refused without CONCH_DESKTOP_ALLOW_CDP=1`, async () => {
+      const app = launch({ args: [flag], env: { CONCH_DESKTOP_ALLOW_CDP: '' } });
+      try {
+        const done = await Promise.race([app.exited, new Promise<null>((r) => {
+          setTimeout(() => {
+            r(null);
+          }, 15_000);
+        }),
+        ]);
+        expect(done, 'the app kept running').not.toBeNull();
+        expect(done?.code).toBe(1);
+        expect(app.output()).toContain('conch-desktop: remote debugging is ON');
+        expect(app.output()).toContain('refusing to start');
+      } finally {
+        await app.stop();
+      }
+    });
+  }
+
+  test('is announced when allowed', async () => {
+    const app = launch({ debugPort: true });
+    let browser: Browser | undefined;
+    try {
+      ({ browser } = await attach(app));
+      expect(app.output()).toContain('conch-desktop: remote debugging is ON');
+    } finally {
+      await browser?.close();
+      await app.stop();
     }
   });
 });

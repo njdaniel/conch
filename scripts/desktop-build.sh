@@ -23,7 +23,7 @@ root=$PWD
 ./scripts/desktop-electron.sh
 
 . ./scripts/desktop-pins.sh
-electron_dist="${CONCH_CACHE:-$HOME/.cache/conch}/electron-$CONCH_ELECTRON_VERSION"
+electron_dist="${CONCH_CACHE:-$HOME/.cache/conch}/electron/electron-$CONCH_ELECTRON_VERSION"
 
 rm -rf desktop/out desktop/dist
 (cd web && ./node_modules/.bin/vite build --base / --outDir "$root/desktop/out/ui" --emptyOutDir)
@@ -34,5 +34,17 @@ rm -rf desktop/out desktop/dist
 (cd desktop && CI=true ./node_modules/.bin/electron-builder --linux dir --publish never \
     --config build/electron-builder.config.json \
     "-c.electronDist=$electron_dist" "-c.electronVersion=$CONCH_ELECTRON_VERSION")
+
+# Nothing in the app may be writable by group or other. The zip said 0777 for
+# some files (desktop-electron.sh removes that), and electron-builder writes
+# its own files with the caller's umask, which is often 002: remove it here too,
+# and show that it held.
+chmod -R go-w desktop/dist/linux-unpacked
+writable=$(find desktop/dist/linux-unpacked ! -type l -perm /022)
+if [ -n "$writable" ]; then
+    echo "desktop-build: FAIL: group- or other-writable files in desktop/dist/linux-unpacked:" >&2
+    echo "$writable" >&2
+    exit 1
+fi
 
 echo "desktop-build: OK: desktop/dist/linux-unpacked/"

@@ -18,7 +18,11 @@ fail() {
 mkdir "$tmp/zipsrc"
 printf '#!/bin/sh\necho fixture\n' >"$tmp/zipsrc/electron"
 chmod +x "$tmp/zipsrc/electron"
-(cd "$tmp/zipsrc" && zip -q "$tmp/electron-v1.2.3-linux-x64.zip" electron)
+# The real zip carries 0777 on some files; so does this one.
+printf 'library\n' >"$tmp/zipsrc/libffmpeg.so"
+printf 'sandbox\n' >"$tmp/zipsrc/chrome-sandbox"
+chmod 777 "$tmp/zipsrc/libffmpeg.so" "$tmp/zipsrc/chrome-sandbox"
+(cd "$tmp/zipsrc" && zip -q "$tmp/electron-v1.2.3-linux-x64.zip" electron libffmpeg.so chrome-sandbox)
 good=$(sha256sum "$tmp/electron-v1.2.3-linux-x64.zip" | cut -d' ' -f1)
 bad=$(printf 'x' | sha256sum | cut -d' ' -f1)
 
@@ -49,8 +53,8 @@ refuses() {
     [ "$status" -ne 0 ] || fail "$name: succeeded, want a refusal: $out"
     lines=$(grep -c '^desktop-electron: FAIL:' <<<"$out" || true)
     [ "$lines" = 1 ] || fail "$name: want one FAIL line, got $lines: $out"
-    [ ! -e "$cache/electron-1.2.3" ] || fail "$name: left $cache/electron-1.2.3 behind"
-    ! compgen -G "$cache/.electron-fetch.*" >/dev/null || fail "$name: left a download behind"
+    [ ! -e "$cache/electron/electron-1.2.3" ] || fail "$name: left $cache/electron/electron-1.2.3 behind"
+    ! compgen -G "$cache/electron/.electron-fetch.*" >/dev/null || fail "$name: left a download behind"
 }
 
 # The good case, then the second run.
@@ -58,11 +62,50 @@ pins "$good"
 sums "$good"
 run "$tmp/c1"
 [ "$status" -eq 0 ] || fail "good zip refused: $out"
-[ -x "$tmp/c1/electron-1.2.3/electron" ] || fail "good zip was not unpacked"
+[ -x "$tmp/c1/electron/electron-1.2.3/electron" ] || fail "good zip was not unpacked"
 run "$tmp/c1"
 [ "$status" -eq 0 ] || fail "second run failed: $out"
-grep -q 'already in' <<<"$out" || fail "second run did not say it was a no-op: $out"
 ! grep -q 'downloading' <<<"$out" || fail "second run downloaded again: $out"
+
+# Permissions: the cache is private, the zip is 0600, and nothing unpacked is
+# writable by group or other, whatever the zip said (it said 0777).
+[ "$(stat -c %a "$tmp/c1/electron")" = 700 ] || fail "a new cache is mode $(stat -c %a "$tmp/c1/electron"), want 700"
+[ "$(stat -c %a "$tmp/c1/electron/electron-v1.2.3-linux-x64.zip")" = 600 ] || fail "the cached zip is not mode 600"
+[ -z "$(find "$tmp/c1/electron/electron-1.2.3" -perm /022)" ] || fail "unpacked files are group or other writable: $(find "$tmp/c1/electron/electron-1.2.3" -perm /022)"
+[ -x "$tmp/c1/electron/electron-1.2.3/electron" ] || fail "the executable lost its execute bit"
+
+# A cache hit trusts nothing it holds. Corrupt the unpacked executable and a
+# library and leave the marker alone: the next run unpacks them afresh from the
+# verified zip, and what is there afterwards is what the zip holds.
+echo 'tampered' >"$tmp/c1/electron/electron-1.2.3/electron"
+echo 'tampered' >"$tmp/c1/electron/electron-1.2.3/libffmpeg.so"
+run "$tmp/c1"
+[ "$status" -eq 0 ] || fail "run after tampering failed: $out"
+cmp -s "$tmp/zipsrc/electron" "$tmp/c1/electron/electron-1.2.3/electron" || fail "a tampered executable survived a run"
+cmp -s "$tmp/zipsrc/libffmpeg.so" "$tmp/c1/electron/electron-1.2.3/libffmpeg.so" || fail "a tampered library survived a run"
+
+# The cached zip itself is checked on every run: tampered, it is refused and
+# removed, and nothing is unpacked from it.
+echo 'tampered' >>"$tmp/c1/electron/electron-v1.2.3-linux-x64.zip"
+rm -rf "$tmp/c1/electron/electron-1.2.3"
+run "$tmp/c1"
+[ "$status" -ne 0 ] || fail "a tampered cached zip was accepted"
+[ "$(grep -c '^desktop-electron: FAIL:' <<<"$out")" = 1 ] || fail "want one FAIL line for a tampered cached zip: $out"
+[ ! -e "$tmp/c1/electron/electron-1.2.3" ] || fail "something was unpacked from a tampered zip"
+[ ! -e "$tmp/c1/electron/electron-v1.2.3-linux-x64.zip" ] || fail "the tampered zip was kept"
+run "$tmp/c1"
+[ "$status" -eq 0 ] || fail "the run after the refusal did not fetch afresh: $out"
+
+# A cache that group or other can write to is refused, with one FAIL line.
+mkdir -p "$tmp/c1w" && mkdir -m 775 "$tmp/c1w/electron"
+run "$tmp/c1w"
+[ "$status" -ne 0 ] || fail "a group-writable cache was accepted"
+[ "$(grep -c '^desktop-electron: FAIL:' <<<"$out")" = 1 ] || fail "want one FAIL line for a writable cache: $out"
+[ ! -e "$tmp/c1w/electron/electron-1.2.3" ] || fail "something was unpacked into a writable cache"
+mkdir -p "$tmp/c1link" "$tmp/c1t" && chmod 700 "$tmp/c1t"
+ln -s "$tmp/c1t" "$tmp/c1link/electron"
+run "$tmp/c1link"
+[ "$status" -ne 0 ] || fail "a symlinked cache was accepted"
 
 # A zip that differs from the pin (and so from nothing else either).
 pins "$bad"
@@ -95,7 +138,7 @@ pins "$good"
 rm "$tmp/pins.sh"
 run "$tmp/c6"
 [ "$status" -ne 0 ] || fail "a missing pin file was accepted"
-[ ! -e "$tmp/c6/electron-1.2.3" ] || fail "a missing pin file left a directory behind"
+[ ! -e "$tmp/c6/electron/electron-1.2.3" ] || fail "a missing pin file left a directory behind"
 
 # The package.json and the pin name different versions.
 pins "$good"

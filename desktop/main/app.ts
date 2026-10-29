@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import { app, protocol, session } from 'electron';
 
+import { debuggingVerdict } from './debugging.ts';
 import { installGuards, guardSession } from './guards.ts';
 import { handle, parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { createWindow, PARTITION } from './window.ts';
@@ -20,6 +21,10 @@ function log(line: string): void {
 }
 
 export async function start(): Promise<void> {
+  if (debuggingVerdict(app.isPackaged, (name) => app.commandLine.hasSwitch(name), process.env, log) === 'refused') {
+    app.exit(1);
+    return;
+  }
   app.enableSandbox();
   installGuards(app, { log });
   app.on('window-all-closed', () => {
