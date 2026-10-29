@@ -30,6 +30,33 @@ function profileDir(root: string, id: string): string {
   return join(root, 'profiles', id);
 }
 
+// checkRoot decides whether a pre-existing root may be trusted: a plain
+// directory (not a symlink), owned by this user and closed to group and
+// others. POSIX only; Windows has no such mode bits. Returns false when the
+// root does not exist.
+async function checkRoot(root: string): Promise<boolean> {
+  let st;
+  try {
+    st = await lstat(root);
+  } catch (err) {
+    if (isCode(err, 'ENOENT')) {
+      return false;
+    }
+    throw err;
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    throw new UnsafeRoot('vault root is not a plain directory');
+  }
+  if (typeof process.getuid === 'function') {
+    if (st.uid !== process.getuid() || (st.mode & 0o077) !== 0) {
+      throw new UnsafeRoot('vault root is not private to this user');
+    }
+  }
+  return true;
+}
+
+class UnsafeRoot extends Error {}
+
 // privateDir makes dir (and its missing parents) and leaves it 0700 whatever
 // the umask was, refusing a symlink or a non-directory in its place.
 async function privateDir(dir: string): Promise<void> {
@@ -50,10 +77,24 @@ async function syncDir(dir: string): Promise<void> {
   }
 }
 
+export interface WriteHooks {
+  // Test seam for the directory fsync.
+  readonly syncDir?: ((dir: string) => Promise<void>) | undefined;
+}
+
 // writeCredential replaces the profile's file with data. On any failure the
-// previous file is as it was and no temp file remains.
-export async function writeCredential(root: string, id: string, data: Uint8Array): Promise<void> {
+// previous file is as it was and no temp file remains. It does not guard
+// other processes: the single-instance lock of #945 does that.
+export async function writeCredential(
+  root: string,
+  id: string,
+  data: Uint8Array,
+  hooks: WriteHooks = {},
+): Promise<void> {
   const dir = profileDir(root, id);
+  // A root that exists must already be ours and private; one that does not is
+  // created 0700 below.
+  await checkRoot(root);
   await privateDir(root);
   await privateDir(join(root, 'profiles'));
   await privateDir(dir);
@@ -72,7 +113,16 @@ export async function writeCredential(root: string, id: string, data: Uint8Array
     await rm(tmp, { force: true });
     throw err;
   }
-  await syncDir(dir);
+  // The rename has happened: the credential is in place. The directory fsync
+  // only makes that survive a power cut, so its failure must not turn a
+  // success into an error. On Windows, fsync of a directory handle can throw
+  // EPERM; the error is ignored on every platform. The file's own fsync
+  // before the rename stays mandatory.
+  try {
+    await (hooks.syncDir ?? syncDir)(dir);
+  } catch {
+    // best-effort durability
+  }
 }
 
 export type ReadResult =
@@ -83,13 +133,24 @@ export type ReadResult =
 // readCredential reads the profile's file. A missing file is absent; an empty,
 // oversized or non-regular one is corrupt (and is left where it is).
 export async function readCredential(root: string, id: string): Promise<ReadResult> {
-  const file = join(profileDir(root, id), FILE_NAME);
+  const dir = profileDir(root, id);
+  const file = join(dir, FILE_NAME);
   let st;
   try {
+    if (!(await checkRoot(root))) {
+      return { kind: 'absent' };
+    }
+    const dirStat = await lstat(dir);
+    if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+      return { kind: 'corrupt' };
+    }
     st = await lstat(file);
   } catch (err) {
     if (isCode(err, 'ENOENT') || isCode(err, 'ENOTDIR')) {
       return { kind: 'absent' };
+    }
+    if (err instanceof UnsafeRoot) {
+      return { kind: 'corrupt' };
     }
     throw err;
   }

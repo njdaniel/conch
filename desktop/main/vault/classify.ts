@@ -57,11 +57,15 @@ export async function classify(deps: ClassifyDeps): Promise<Classification> {
   if (!available) {
     return { kind: 'sessionOnly', reason: 'unavailable' };
   }
-  if (deps.platform !== 'linux') {
+  if (deps.platform === 'win32' || deps.platform === 'darwin') {
     // Windows (DPAPI) and macOS (Keychain) have one provider each. DPAPI
     // protects from other users, not from other apps of the same user; the UI
     // says so in those words (windows-desktop.md §9.1).
     return { kind: 'protected' };
+  }
+  if (deps.platform !== 'linux') {
+    // Any other platform is not one this build has measured: fail closed.
+    return { kind: 'sessionOnly', reason: 'unknown-backend' };
   }
   let backend: string;
   try {

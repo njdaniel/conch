@@ -35,6 +35,9 @@ const cases: readonly Case[] = [
   { name: 'app not ready', platform: 'linux', ready: false, available: true, backend: 'gnome_libsecret', want: { kind: 'temporarilyUnavailable' } },
   // Other platforms: one provider each, so availability decides.
   { name: 'win32 available', platform: 'win32', available: true, backend: new Error('not asked'), want: { kind: 'protected' } },
+  { name: 'darwin available', platform: 'darwin', available: true, backend: new Error('not asked'), want: { kind: 'protected' } },
+  { name: 'freebsd available is not assumed protected', platform: 'freebsd', available: true, backend: 'gnome_libsecret', want: sessionOnly('unknown-backend') },
+  { name: 'sunos available', platform: 'sunos', available: true, backend: 'unknown', want: sessionOnly('unknown-backend') },
   { name: 'win32 unavailable', platform: 'win32', available: false, backend: 'unknown', want: sessionOnly('unavailable') },
 ];
 

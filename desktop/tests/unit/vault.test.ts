@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -223,10 +223,10 @@ describe('remove', () => {
   });
 
   it('missing files are not errors', async () => {
-    await expect(vault.remove('never-was')).resolves.toBeUndefined();
+    await expect(vault.remove('never-was')).resolves.toEqual({ kind: 'removed' });
     await vault.put('alpha', 'a');
     await vault.remove('alpha');
-    await expect(vault.remove('alpha')).resolves.toBeUndefined();
+    await expect(vault.remove('alpha')).resolves.toEqual({ kind: 'removed' });
   });
 
   it('removes a profile left with a stray temp file', async () => {
@@ -234,6 +234,109 @@ describe('remove', () => {
     await writeFile(join(root, 'profiles', 'alpha', 'credential.bin.dead.tmp'), 'x');
     await vault.remove('alpha');
     expect(await readdir(join(root, 'profiles'))).toEqual([]);
+  });
+});
+
+describe('remove failures', () => {
+  it('returns a fixed failure, not a raw fs error with a path', async () => {
+    await vault.put('alpha', 'a');
+    await chmod(join(root, 'profiles'), 0o500);
+    try {
+      const r = await vault.remove('alpha');
+      expect(r).toEqual({ kind: 'failed' });
+      expect(JSON.stringify(r)).not.toContain(root);
+    } finally {
+      await chmod(join(root, 'profiles'), 0o700);
+    }
+  });
+});
+
+describe('directory fsync', () => {
+  it('put is stored even when the directory fsync fails', async () => {
+    storage = new FakeStorage();
+    vault = createVault({
+      storage, root, platform: 'linux', isReady: () => true, log: (l) => logs.push(l),
+      syncDir: () => Promise.reject(new Error('EPERM')),
+    });
+    expect(await vault.put('alpha', SECRET)).toEqual({ kind: 'stored' });
+    expect(await vault.get('alpha')).toEqual({ kind: 'found', secret: SECRET });
+  });
+
+  it('get with shouldReEncrypt does not log a failure when only the directory fsync fails', async () => {
+    await vault.put('alpha', SECRET);
+    storage = new FakeStorage({ reEncrypt: true, gen: 2 });
+    vault = createVault({
+      storage, root, platform: 'linux', isReady: () => true, log: (l) => logs.push(l),
+      syncDir: () => Promise.reject(new Error('EPERM')),
+    });
+    expect(await vault.get('alpha')).toEqual({ kind: 'found', secret: SECRET });
+    expect(logs.filter((l) => l.includes('reencrypt-failed'))).toEqual([]);
+    expect((await readFile(credFile('alpha'), 'utf8')).startsWith(`${PREFIX}2:`)).toBe(true);
+  });
+});
+
+describe('one profile at a time', () => {
+  // A decrypt that waits until the test lets it go.
+  function gate(): { release: () => void; started: Promise<void> } {
+    let release!: () => void;
+    let started!: () => void;
+    const hold = new Promise<void>((r) => { release = r; });
+    const startedP = new Promise<void>((r) => { started = r; });
+    const real = storage.decryptStringAsync.bind(storage);
+    storage.decryptStringAsync = async (d) => {
+      started();
+      await hold;
+      return real(d);
+    };
+    return { release, started: startedP };
+  }
+
+  it('a get re-encrypting cannot write back a token that remove just discarded', async () => {
+    await vault.put('alpha', SECRET);
+    make({ reEncrypt: true, gen: 2 });
+    const g = gate();
+    const got = vault.get('alpha');
+    await g.started;
+    const removed = vault.remove('alpha');
+    await new Promise((r) => setTimeout(r, 50));
+    g.release();
+    await Promise.all([got, removed]);
+    expect(await readdir(join(root, 'profiles'))).toEqual([]);
+    expect(await vault.get('alpha')).toEqual({ kind: 'absent' });
+  });
+
+  it('a put during a re-encrypt of the old blob keeps the newer token', async () => {
+    await vault.put('alpha', 'old-token');
+    make({ reEncrypt: true, gen: 2 });
+    const g = gate();
+    const got = vault.get('alpha');
+    await g.started;
+    const put = vault.put('alpha', 'new-token');
+    await new Promise((r) => setTimeout(r, 50));
+    g.release();
+    expect(await got).toEqual({ kind: 'found', secret: 'old-token' });
+    expect(await put).toEqual({ kind: 'stored' });
+    expect(await vault.get('alpha')).toEqual({ kind: 'found', secret: 'new-token' });
+  });
+
+  it('different profiles do not wait for each other', async () => {
+    await vault.put('alpha', 'a');
+    await vault.put('beta', 'b');
+    const g = gate();
+    const slow = vault.get('alpha');
+    await g.started;
+    storage.decryptStringAsync = (d) => Promise.resolve({ result: d.toString().length > 0 ? 'b' : '', shouldReEncrypt: false });
+    expect(await vault.get('beta')).toEqual({ kind: 'found', secret: 'b' });
+    g.release();
+    await slow;
+  });
+
+  it('a failing operation does not wedge the queue', async () => {
+    await vault.put('alpha', 'a');
+    make({ decryptError: new Error('x') });
+    expect(await vault.get('alpha')).toEqual({ kind: 'unusable' });
+    make();
+    expect(await vault.get('alpha')).toEqual({ kind: 'found', secret: 'a' });
   });
 });
 

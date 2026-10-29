@@ -19,6 +19,10 @@ function sources(dir: string): string[] {
   return out;
 }
 
+function stripComments(t: string): string {
+  return t.replace(/^\s*\/\/.*$/gm, '');
+}
+
 const files = sources(MAIN).map((p) => ({
   rel: relative(MAIN, p),
   text: readFileSync(p, 'utf8'),
@@ -37,22 +41,43 @@ describe('secret handling in desktop/main', () => {
 
   it('never uses the synchronous safeStorage API (removed in Electron 46)', () => {
     const hits = files
-      .filter((f) => /\b(encryptString|decryptString|isEncryptionAvailable)\s*\(/.test(f.text))
+      .filter((f) => /\b(encryptString|decryptString|isEncryptionAvailable)\b/.test(f.text))
       .map((f) => f.rel);
     expect(hits).toEqual([]);
   });
 
-  it('only the vault names safeStorage, and only files.ts writes to disk', () => {
-    const names = files.filter((f) => /safeStorage/.test(f.text.replace(/^\s*\/\/.*$/gm, ''))).map((f) => f.rel);
+  it('only the vault names safeStorage', () => {
+    const names = files.filter((f) => /safeStorage/.test(stripComments(f.text))).map((f) => f.rel);
     expect(names.every((r) => r.startsWith('vault/'))).toBe(true);
-    const writers = files
-      .filter((f) =>
-        /\b(writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream|copyFile|rename|openSync)\b|\bopen\(/.test(
-          f.text.replace(/^\s*\/\/.*$/gm, ''),
-        ),
-      )
-      .map((f) => f.rel);
-    expect(writers).toEqual(['vault/files.ts']);
+  });
+
+  it('only vault/files.ts may import write-capable node:fs names; the rest are read-only', () => {
+    const readOnly = new Set(['readFile', 'readFileSync', 'readdir', 'readdirSync', 'stat', 'lstat', 'access', 'existsSync']);
+    const offenders: string[] = [];
+    for (const f of files) {
+      const text = stripComments(f.text);
+      // Any import of node:fs, node:fs/promises, fs or fs/promises, and a namespace import.
+      for (const m of text.matchAll(/import\s+([^;]*?)\s+from\s+'(?:node:)?fs(?:\/promises)?'/gs)) {
+        const clause = m[1] ?? '';
+        const named = /\{([^}]*)\}/.exec(clause)?.[1];
+        if (named === undefined) {
+          if (f.rel !== 'vault/files.ts') offenders.push(`${f.rel}: namespace or default import`);
+          continue;
+        }
+        for (const raw of named.split(',')) {
+          const name = raw.trim().split(/\s+as\s+/)[0] ?? '';
+          if (name !== '' && !readOnly.has(name) && f.rel !== 'vault/files.ts') {
+            offenders.push(`${f.rel}: ${name}`);
+          }
+        }
+      }
+      if (/\brequire\(\s*'(?:node:)?fs/.test(text) && f.rel !== 'vault/files.ts') {
+        offenders.push(`${f.rel}: require`);
+      }
+    }
+    expect(offenders).toEqual([]);
+    const filesTs = files.find((f) => f.rel === 'vault/files.ts');
+    expect(filesTs && /\bopen\b/.test(filesTs.text)).toBe(true); // not vacuous
   });
 
   it('the vault modules import no logger, console or IPC', () => {

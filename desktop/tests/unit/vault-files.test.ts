@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, stat, symlink, writeFile, mkdir, readFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readdir, rm, stat, symlink, writeFile, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -42,10 +42,13 @@ describe('modes', () => {
     expect(await mode(join(root, 'profiles', 'alpha', 'credential.bin'))).toBe(0o600);
   });
 
-  it('tightens a loose directory that already exists', async () => {
-    await mkdir(join(root, 'profiles', 'alpha'), { recursive: true, mode: 0o777 });
+  it('tightens loose directories inside a private root', async () => {
+    await mkdir(root, { mode: 0o700 });
+    await mkdir(join(root, 'profiles', 'alpha'), { recursive: true });
+    await chmod(join(root, 'profiles'), 0o777);
+    await chmod(join(root, 'profiles', 'alpha'), 0o777);
     await writeCredential(root, 'alpha', Buffer.from('x'));
-    expect(await mode(root)).toBe(0o700);
+    expect(await mode(join(root, 'profiles'))).toBe(0o700);
     expect(await mode(join(root, 'profiles', 'alpha'))).toBe(0o700);
   });
 });
@@ -93,5 +96,43 @@ describe('refusals', () => {
     await writeFile(target, 'secret elsewhere');
     await symlink(target, join(root, 'profiles', 'alpha', 'credential.bin'));
     expect(await readCredential(root, 'alpha')).toEqual({ kind: 'corrupt' });
+  });
+
+  it('refuses a pre-existing root that group or others can reach', async () => {
+    await mkdir(root, { mode: 0o755 });
+    await chmod(root, 0o755);
+    await expect(writeCredential(root, 'alpha', Buffer.from('x'))).rejects.toThrow();
+    expect(await readdir(root)).toEqual([]);
+    expect(await readCredential(root, 'alpha')).toEqual({ kind: 'corrupt' });
+  });
+
+  it('refuses a symlinked root', async () => {
+    const real = join(base, 'real');
+    await mkdir(real, { mode: 0o700 });
+    await symlink(real, root);
+    await expect(writeCredential(root, 'alpha', Buffer.from('x'))).rejects.toThrow();
+    expect(await readdir(real)).toEqual([]);
+  });
+
+  it('reads through a symlinked profile directory as corrupt', async () => {
+    await mkdir(join(root, 'profiles'), { recursive: true, mode: 0o700 });
+    const elsewhere = join(base, 'elsewhere');
+    await mkdir(elsewhere);
+    await writeFile(join(elsewhere, 'credential.bin'), 'planted');
+    await symlink(elsewhere, join(root, 'profiles', 'alpha'));
+    expect(await readCredential(root, 'alpha')).toEqual({ kind: 'corrupt' });
+  });
+
+  it('an absent root reads as absent', async () => {
+    expect(await readCredential(root, 'alpha')).toEqual({ kind: 'absent' });
+  });
+});
+
+describe('directory fsync', () => {
+  it('a failing directory fsync does not fail a write that has renamed', async () => {
+    await writeCredential(root, 'alpha', Buffer.from('x'), {
+      syncDir: () => Promise.reject(new Error('EPERM')),
+    });
+    expect(await readFile(join(root, 'profiles', 'alpha', 'credential.bin'), 'utf8')).toBe('x');
   });
 });
