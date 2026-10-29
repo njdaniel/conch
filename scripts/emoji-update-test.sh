@@ -53,18 +53,60 @@ status=0
 out=$("$UPDATE" --source "$WORK/other.txt" --dir "$WORK/unicode" --no-generate "$version" "$other" 2>&1) || status=$?
 [ "$status" -eq 1 ] || fail "a wrong version header: exit status $status, want 1; output: $out"
 case "$out" in
-    *"'# Version:' header is not $version"*) ;;
+    *"'# Version:' header is '0.1', not $version"*) ;;
     *) fail "a wrong version header: the output does not say so: $out" ;;
 esac
 unchanged "a wrong version header"
 
-# A malformed hash or version is refused before anything is read.
+# The header is compared as a string, not a pattern: a file whose header
+# says 18x0, with its own hash, is not the 18.0 asked for. Likewise a
+# header with the version as a prefix or a suffix.
+major=${version%%.*}
+minor=${version#*.}
+for bad in "${major}x${minor}" "${version}1" "1${version}" "${version}.0"; do
+    fresh
+    sed "s/^# Version: .*/# Version: $bad/" "$VENDORED/emoji-test.txt" > "$WORK/other.txt"
+    other=$(sha256sum "$WORK/other.txt" | cut -d' ' -f1)
+    status=0
+    out=$("$UPDATE" --source "$WORK/other.txt" --dir "$WORK/unicode" --no-generate "$version" "$other" 2>&1) || status=$?
+    [ "$status" -eq 1 ] || fail "header '$bad' asked for as $version: exit status $status, want 1; output: $out"
+    case "$out" in
+        *"'# Version:' header is '$bad', not $version"*) ;;
+        *) fail "header '$bad': the output does not say so: $out" ;;
+    esac
+    unchanged "header '$bad'"
+done
+
+# A file with no header at all is refused too.
 fresh
-for args in "$version abc" "x.y $hash" "$version"; do
+grep -v '^# Version:' "$VENDORED/emoji-test.txt" > "$WORK/other.txt"
+other=$(sha256sum "$WORK/other.txt" | cut -d' ' -f1)
+status=0
+out=$("$UPDATE" --source "$WORK/other.txt" --dir "$WORK/unicode" --no-generate "$version" "$other" 2>&1) || status=$?
+[ "$status" -eq 1 ] || fail "no header: exit status $status, want 1; output: $out"
+case "$out" in
+    *"header is 'missing'"*) ;;
+    *) fail "no header: the output does not say so: $out" ;;
+esac
+unchanged "no header"
+
+# A malformed hash or version is refused before anything is read: the
+# version must be exactly <digits>.<digits>, the hash 64 lower-case hex.
+fresh
+for args in "$version abc" "x.y $hash" "$version" "${version}junk $hash" "18 $hash" "18.0.0 $hash" ".0 $hash" "18. $hash" "v$version $hash" "$version ${hash}0" "$version ${hash^^}"; do
     status=0
     # shellcheck disable=SC2086  # the arguments are split on purpose
     out=$("$UPDATE" --source "$VENDORED/emoji-test.txt" --dir "$WORK/unicode" --no-generate $args 2>&1) || status=$?
     [ "$status" -ne 0 ] || fail "arguments '$args' were accepted: $out"
+    case "$args" in
+        "$version abc"|"$version ${hash}0"|"$version ${hash^^}") want="SHA-256 must be 64 lower-case hex digits" ;;
+        "$version") want="usage:" ;;
+        *) want="version must be <major>.<minor>" ;;
+    esac
+    case "$out" in
+        *"$want"*) ;;
+        *) fail "arguments '$args': the output does not say '$want': $out" ;;
+    esac
 done
 unchanged "malformed arguments"
 

@@ -48,14 +48,13 @@ want=$2
 
 fail() { echo "emoji-update: refused: $*" >&2; exit 1; }
 
-case "$version" in
-    [0-9]*.[0-9]*) ;;
-    *) fail "the version must be <major>.<minor>, got '$version'" ;;
-esac
-case "$want" in
-    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-    *) fail "the SHA-256 must be 64 lower-case hex digits" ;;
-esac
+# Exact forms, so nothing loose reaches the URL or the header comparison.
+if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+$'; then
+    fail "the version must be <major>.<minor>, got '$version'"
+fi
+if ! printf '%s\n' "$want" | grep -Eq '^[0-9a-f]{64}$'; then
+    fail "the SHA-256 must be 64 lower-case hex digits"
+fi
 [ -d "$dir" ] || fail "no directory $dir"
 
 tmp=$(mktemp -d)
@@ -75,8 +74,11 @@ got=$(sha256sum "$candidate" | cut -d' ' -f1)
 if [ "$got" != "$want" ]; then
     fail "SHA-256 mismatch: the file has $got, you gave $want; nothing was written"
 fi
-if ! grep -q "^# Version: ${version}\$" "$candidate"; then
-    fail "the file's '# Version:' header is not $version; nothing was written"
+# The header's version is read out and compared as a string, never as a
+# pattern: "18x0" is not "18.0".
+header=$(sed -n 's/^# Version: //p' "$candidate" | head -n 1 | tr -d '[:space:]')
+if [ "$header" != "$version" ]; then
+    fail "the file's '# Version:' header is '${header:-missing}', not $version; nothing was written"
 fi
 
 cp -- "$candidate" "$dir/emoji-test.txt"
