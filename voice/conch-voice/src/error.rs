@@ -165,6 +165,14 @@ pub enum Error {
     #[error("managed: file descriptor 3 {0}; conch-voice managed is started by conch, not by hand")]
     EventPipe(&'static str),
 
+    /// `managed --events-pipe` could not attach to its owner's endpoint: the path or the
+    /// nonce is not acceptable, the socket or its directory is not as it must be, or the
+    /// connection or the attach line failed (`docs/design/linux-desktop.md` §5.2). The
+    /// reason is one of this program's own words and holds nothing that was read, the nonce
+    /// least of all. Nothing else was done.
+    #[error("managed: events endpoint: {0}; conch-voice managed is started by conch, not by hand")]
+    Attach(&'static str),
+
     /// `managed` failed for a reason it told its owner, as a failed state, and that no
     /// other error here describes. The sentence is this program's own.
     #[error("managed: {0}")]
@@ -177,7 +185,11 @@ impl Error {
     #[must_use]
     pub fn exit_code(&self) -> u8 {
         match self {
-            Error::Usage(_) | Error::NoChannel | Error::NotATerminal | Error::EventPipe(_) => 2,
+            Error::Usage(_)
+            | Error::NoChannel
+            | Error::NotATerminal
+            | Error::EventPipe(_)
+            | Error::Attach(_) => 2,
             Error::Stopped { exit_code, .. } => *exit_code,
             _ => EXIT_STOPPED,
         }

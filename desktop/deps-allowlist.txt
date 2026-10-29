@@ -1,0 +1,23 @@
+# Direct dependencies of the desktop shell under desktop/ (ADR-007;
+# docs/design/linux-desktop.md §2). One package name per line; comments and
+# blank lines ignored. Adding a line here requires Nick's sign-off in the same PR.
+# Enforced by scripts/web-depgate.sh desktop; licences by scripts/web-licences.sh.
+# Every entry is a devDependency: nothing from node_modules ships in the app.
+# No `ws`, no keyring library and no @types/node as a direct dependency.
+
+# The desktop runtime and its packager: approved by Nick on 2026-10-28 (#769,
+# D1 sign-off), pinned at electron 44.10.0 and electron-builder 26.17.0 by Nick
+# on 2026-10-29 (#770, Q14).
+electron
+electron-builder
+
+# Reused from web/deps-allowlist.txt, where Nick approved them; their use in
+# desktop/, at web/'s exact versions, approved by Nick on 2026-10-29 (#770, Q2).
+# Vite bundles main and the preload.
+typescript
+vite
+vitest
+eslint
+typescript-eslint
+# The packaged smoke test: connects to the app over CDP, launches no browser.
+@playwright/test

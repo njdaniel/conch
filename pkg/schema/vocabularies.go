@@ -106,6 +106,7 @@ var Vocabularies = map[string][]string{
 	"VoiceControlEventKind": values(
 		VoiceControlEventHello, VoiceControlEventAck, VoiceControlEventState, VoiceControlEventProtocolError,
 	),
+	"VoiceControlPipeKind": values(VoiceControlPipeKindAttached),
 	"VoiceControlPlayback": values(VoiceControlPlaybackOff, VoiceControlPlaybackOn, VoiceControlPlaybackUnavailable),
 	"VoiceControlPhase": values(
 		VoiceControlPhaseStarting, VoiceControlPhaseConnecting, VoiceControlPhaseConnected,

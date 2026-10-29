@@ -976,7 +976,7 @@ func TestVoiceShareGrantIsNeverTakenBack(t *testing.T) {
 	waitUntil(t, "the pass to decide", func() bool {
 		f.srv.voice.mu.Lock()
 		defer f.srv.voice.mu.Unlock()
-		_, owed := r.withdrawing[f.ids["ann"]]
+		_, owed := r.withdrawing[voiceWithdrawKey{f.ids["ann"], voiceRolePerson}]
 		return owed
 	})
 	r.order.Lock()

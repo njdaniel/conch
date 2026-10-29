@@ -829,7 +829,7 @@ func TestEndAllGuestVisits(t *testing.T) {
 	}
 	var removed bool
 	for _, call := range f.lk.calls()[lkBefore:] {
-		if call.method == "RemoveParticipant" {
+		if call.method == "RemoveParticipant" && personIdentity(call.identity) {
 			// Each ended guest is removed by name from its channels' rooms,
 			// in case it is in one; nobody else is.
 			if !slices.ContainsFunc(guests, func(id int64) bool { return call.identity == voiceIdentity(id) }) {
