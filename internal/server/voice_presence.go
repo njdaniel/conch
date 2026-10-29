@@ -147,6 +147,10 @@ type voiceSeen struct {
 // p<id>.screen with no p<id> in the room, since which pass.
 type voiceCompanion struct {
 	screen, view bool
+	// screenSubscribes is whether the listed p<id>.screen may receive: a
+	// grant or a withdrawal leaves it exactly that (a publish-only companion
+	// stays publish-only).
+	screenSubscribes bool
 	// orphanSince is the first pass in an unbroken run of passes that listed
 	// the companion with no p<id>; zero when the person is there.
 	orphanSince time.Time
@@ -211,7 +215,7 @@ type voiceRoomState struct {
 	// share only if the withdrawal was confirmed before the pass listed the
 	// room, which makes it a new share. The entry goes once a pass finds
 	// nothing left to withdraw.
-	withdrawing map[int64]uint64
+	withdrawing map[voiceWithdrawKey]uint64
 	// companions is the person's suffixed participants as the last pass listed
 	// them, by principal (voice_presence.go, applyRoom). Guarded by
 	// voicePoller.mu.
@@ -671,7 +675,7 @@ func (p *voicePoller) noteSession(room store.VoiceRoom) {
 func (p *voicePoller) roomLocked(room store.VoiceRoom) *voiceRoomState {
 	r := p.rooms[room.RoomName]
 	if r == nil {
-		r = &voiceRoomState{name: room.RoomName, channelID: room.ChannelID, participants: map[int64]voiceSeen{}, evicted: map[int64]uint64{}, reports: make(chan struct{}, 1), withdrawing: map[int64]uint64{}}
+		r = &voiceRoomState{name: room.RoomName, channelID: room.ChannelID, participants: map[int64]voiceSeen{}, evicted: map[int64]uint64{}, reports: make(chan struct{}, 1), withdrawing: map[voiceWithdrawKey]uint64{}}
 		p.rooms[room.RoomName] = r
 	}
 	return r
@@ -1289,7 +1293,7 @@ func (p *voicePoller) foldCompanionsLocked(r *voiceRoomState, now time.Time, fol
 		}
 		screen, hasScreen := fold.screens[pid]
 		_, hasView := fold.views[pid]
-		c := voiceCompanion{screen: hasScreen, view: hasView}
+		c := voiceCompanion{screen: hasScreen, view: hasView, screenSubscribes: screen.CanSubscribe}
 		if hasScreen && !fold.direct[pid] {
 			c.orphanSince = old[pid].orphanSince
 			if c.orphanSince.IsZero() {
@@ -1463,7 +1467,6 @@ func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, p
 	// reason=left, and written at the moment they leave presence (forget):
 	// before LiveKit is asked, and so before their removal and their leaving
 	// are written.
-	known := p.knownCompanions(room.RoomName, principalID)
 	was, ok := p.forget(ctx, room.RoomName, principalID)
 	removed, err := p.s.lk.Evict(ctx, room.RoomName, identity)
 	var events []voiceEvent
@@ -1481,10 +1484,12 @@ func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, p
 			events = append(events, p.removedEvent(room.ChannelID, principalID, reason, voiceRolePerson))
 		}
 	}
-	// Their companion and viewer go with them, when the poller knows of them;
-	// one it has not yet listed is found by the next pass, which reads
-	// entitlement per identity. Each removal is its own row.
-	events = append(events, p.evictCompanions(ctx, room, principalID, reason, known)...)
+	// Their companion and viewer go with them, whether or not a pass has
+	// listed them: one that connected since the last pass would otherwise keep
+	// publishing until the next. LiveKit's not_found is removed=false, so a
+	// room with nobody by that identity writes no row. Each removal is its own
+	// row.
+	events = append(events, p.evictCompanions(ctx, room, principalID, reason)...)
 	if ok {
 		actor := fmt.Sprintf("principal:%d", principalID)
 		detail := fmt.Sprintf("channel=%d audience=channel source=observed", room.ChannelID)
@@ -1495,27 +1500,13 @@ func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, p
 	p.writeEvents(ctx, events...)
 }
 
-// knownCompanions is which of principalID's suffixed participants the last
-// pass listed in the room called name.
-func (p *voicePoller) knownCompanions(name string, principalID int64) voiceCompanion {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if r := p.rooms[name]; r != nil {
-		return r.companions[principalID]
-	}
-	return voiceCompanion{}
-}
-
-// evictCompanions removes the suffixed participants known listed (known) of
-// principalID from room, whose person lost their place for reason, and returns
-// the voice_participant_removed rows for those LiveKit disconnected. A failure
-// is logged and left to the passes.
-func (p *voicePoller) evictCompanions(ctx context.Context, room store.VoiceRoom, principalID int64, reason string, known voiceCompanion) []voiceEvent {
+// evictCompanions removes principalID's companion and viewer from room, whose
+// person lost their place for reason, and returns the voice_participant_removed
+// rows for those LiveKit disconnected. A failure is logged and left to the
+// passes.
+func (p *voicePoller) evictCompanions(ctx context.Context, room store.VoiceRoom, principalID int64, reason string) []voiceEvent {
 	var events []voiceEvent
 	for _, role := range []voiceRole{voiceRoleScreen, voiceRoleView} {
-		if (role == voiceRoleScreen && !known.screen) || (role == voiceRoleView && !known.view) {
-			continue
-		}
 		identity := voiceParticipantIdentity(principalID, role)
 		removed, err := p.s.lk.Evict(ctx, room.RoomName, identity)
 		if err != nil {

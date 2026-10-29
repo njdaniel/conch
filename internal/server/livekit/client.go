@@ -106,6 +106,10 @@ type Participant struct {
 	// as LiveKit reports it. It is false when LiveKit reported no permission,
 	// so a caller that restores a grant from it never widens one.
 	CanPublish bool
+	// CanSubscribe is the participant's current permission to receive, as
+	// LiveKit reports it; false when LiveKit reported no permission, so a
+	// caller that restores a grant from it never widens one.
+	CanSubscribe bool
 }
 
 // Sharing reports whether the participant has either screen-share source
@@ -225,6 +229,7 @@ func (c *Client) ListParticipants(ctx context.Context, room string) ([]Participa
 		part.MicrophoneMuted = mics > 0 && muted == mics
 		part.ShareSourcesGranted = p.Permission.grantsShare()
 		part.CanPublish = p.Permission != nil && (p.Permission.CanPublish || p.Permission.SnakeCanPublish)
+		part.CanSubscribe = p.Permission != nil && (p.Permission.CanSubscribe || p.Permission.SnakeSubscribe)
 		out = append(out, part)
 	}
 	return out, nil
@@ -310,9 +315,14 @@ type Permission struct {
 	// list of sources is exactly sources, and CanPublish and ScreenShare are
 	// not consulted for it. The bundled form above is what every other
 	// Permission is, and its requests are unchanged.
-	explicit bool
-	listed   []Source
+	explicit    bool
+	noSubscribe bool
+	listed      []Source
 }
+
+// subscribes is the can_subscribe a request for p carries: always true,
+// except for a per-source permission built to leave subscribing off.
+func (p Permission) subscribes() bool { return !p.noSubscribe }
 
 // Source is a track source a permission may name, as LiveKit's room API
 // writes it.
@@ -326,12 +336,33 @@ const (
 
 // SourcePermission is the per-source form of Permission, for a participant
 // that is not a person's microphone connection (a companion, issue #932):
-// canPublish as given, and exactly the sources named, in order. No sources
-// with canPublish false is a participant that publishes nothing; LiveKit
-// reads an empty list with canPublish true as every source, so that
-// combination is refused by the caller, not here.
-func SourcePermission(canPublish bool, sources ...Source) Permission {
-	return Permission{CanPublish: canPublish, explicit: true, listed: append([]Source{}, sources...)}
+// canSubscribe and canPublish as given, and exactly the sources named, in
+// order. LiveKit replaces a permission whole, so the caller passes the
+// participant's own canSubscribe: a companion issued publish-only must not
+// gain the right to receive by being granted or stripped of the screen.
+//
+// No sources with canPublish false is a participant that publishes nothing.
+// No sources with canPublish true would read as every source to LiveKit, and
+// a source other than the two exported is not a thing conchd grants:
+// UpdateParticipant refuses both before any request is made.
+func SourcePermission(canSubscribe, canPublish bool, sources ...Source) Permission {
+	return Permission{CanPublish: canPublish, explicit: true, noSubscribe: !canSubscribe, listed: append([]Source{}, sources...)}
+}
+
+// check refuses a per-source permission that would mean more than it says.
+func (p Permission) check() error {
+	if !p.explicit {
+		return nil
+	}
+	if p.CanPublish && len(p.listed) == 0 {
+		return errors.New("livekit: a permission that may publish must name its sources: none means every source")
+	}
+	for _, s := range p.listed {
+		if s != SourceScreenShare && s != SourceScreenShareAudio {
+			return errors.New("livekit: a per-source permission may name only the screen-share sources")
+		}
+	}
+	return nil
 }
 
 // sources lists the sources p allows, in LiveKit's room-API names. The list is
@@ -355,6 +386,8 @@ func (p Permission) sources() []string {
 type participantPermission struct {
 	CanPublish      bool       `json:"canPublish"`
 	SnakeCanPublish bool       `json:"can_publish"`
+	CanSubscribe    bool       `json:"canSubscribe"`
+	SnakeSubscribe  bool       `json:"can_subscribe"`
 	Sources         []flexEnum `json:"canPublishSources"`
 	SnakeSources    []flexEnum `json:"can_publish_sources"`
 }
@@ -398,6 +431,9 @@ func (c *Client) UpdateParticipant(ctx context.Context, room, identity string, p
 	if room == "" || identity == "" {
 		return false, errors.New("livekit: UpdateParticipant needs a room name and an identity")
 	}
+	if err := p.check(); err != nil {
+		return false, err
+	}
 	// Every field of the permission is written out: LiveKit replaces the
 	// permission as a whole, and protojson reads an absent bool as false,
 	// which for subscribing is not what the join token granted.
@@ -405,7 +441,7 @@ func (c *Client) UpdateParticipant(ctx context.Context, room, identity string, p
 		"room":     room,
 		"identity": identity,
 		"permission": map[string]any{
-			"can_subscribe":            true,
+			"can_subscribe":            p.subscribes(),
 			"can_publish":              p.CanPublish,
 			"can_publish_data":         false,
 			"can_publish_sources":      p.sources(),

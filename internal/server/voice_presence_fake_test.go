@@ -74,6 +74,9 @@ type fakeParticipant struct {
 	// listenOnly is a participant whose permission does not let it publish
 	// at all, as a net monitor's will (V5).
 	listenOnly bool
+	// noSubscribe is a participant whose permission does not let it receive,
+	// as a publish-only companion's does (issue #932).
+	noSubscribe bool
 }
 
 // lkCall is one request the scripted LiveKit received (or an "http-response"
@@ -147,6 +150,7 @@ type scriptedLiveKit struct {
 type fakeUpdate struct {
 	room, identity string
 	canPublish     bool
+	canSubscribe   bool
 	sources        []string
 }
 
@@ -170,8 +174,9 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		Room       string `json:"room"`
 		Identity   string `json:"identity"`
 		Permission struct {
-			CanPublish bool     `json:"can_publish"`
-			Sources    []string `json:"can_publish_sources"`
+			CanPublish   bool     `json:"can_publish"`
+			CanSubscribe bool     `json:"can_subscribe"`
+			Sources      []string `json:"can_publish_sources"`
 		} `json:"permission"`
 	}
 	_ = json.Unmarshal(raw, &req)
@@ -245,7 +250,7 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 			if p.shareGranted {
 				sources = append(sources, "SCREEN_SHARE", "SCREEN_SHARE_AUDIO")
 			}
-			part["permission"] = map[string]any{"can_subscribe": true, "can_publish": !p.listenOnly, "can_publish_data": false, "can_publish_sources": sources}
+			part["permission"] = map[string]any{"can_subscribe": !p.noSubscribe, "can_publish": !p.listenOnly, "can_publish_data": false, "can_publish_sources": sources}
 			var tracks []map[string]any
 			if p.published {
 				tracks = append(tracks, map[string]any{"type": "AUDIO", "source": "MICROPHONE", "muted": p.muted})
@@ -288,7 +293,7 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		f.record(method, req.Room, req.Identity)
 		share := slices.Contains(req.Permission.Sources, "SCREEN_SHARE")
 		status, hook := f.updateStatus, f.onUpdate
-		f.updates = append(f.updates, fakeUpdate{req.Room, req.Identity, req.Permission.CanPublish, req.Permission.Sources})
+		f.updates = append(f.updates, fakeUpdate{req.Room, req.Identity, req.Permission.CanPublish, req.Permission.CanSubscribe, req.Permission.Sources})
 		if f.updateFail[req.Identity] {
 			status = http.StatusInternalServerError
 		}
@@ -307,6 +312,7 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		f.update(req.Room, req.Identity, func(p *fakeParticipant) {
 			p.shareGranted = share
 			p.listenOnly = !req.Permission.CanPublish
+			p.noSubscribe = !req.Permission.CanSubscribe
 			if !share {
 				p.screen, p.screenAudio = false, false
 			}
@@ -492,6 +498,25 @@ func (f *scriptedLiveKit) callsFor(method, room string) int {
 	n := 0
 	for _, c := range f.calls() {
 		if c.method == method && c.room == room {
+			n++
+		}
+	}
+	return n
+}
+
+// personIdentity reports whether identity is a person's own, not a companion's
+// or a viewer's.
+func personIdentity(identity string) bool {
+	return !strings.HasSuffix(identity, ".screen") && !strings.HasSuffix(identity, ".view")
+}
+
+// personRemovals counts the RemoveParticipant calls aimed at a person's own
+// identity: the removals of their companion and viewer (issue #932) are asked
+// of LiveKit in every room regardless, and are counted by the tests of those.
+func (f *scriptedLiveKit) personRemovals() int {
+	n := 0
+	for _, c := range f.calls() {
+		if c.method == "RemoveParticipant" && personIdentity(c.identity) {
 			n++
 		}
 	}

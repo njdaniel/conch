@@ -1,10 +1,13 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -501,21 +504,32 @@ func TestVoiceCompanionRemovedByTheHooks(t *testing.T) {
 		method string
 		path   func(f *presenceFixture) string
 		reason string
+		// unlisted: the companion and viewer connected after the last pass,
+		// so the poller has never listed them.
+		unlisted bool
 	}{
-		{"member removed", http.MethodDelete, func(f *presenceFixture) string { return fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]) }, voiceReasonMemberRemoved},
-		{"principal disabled", http.MethodPost, func(f *presenceFixture) string { return fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]) }, voiceReasonPrincipalOff},
+		{"member removed", http.MethodDelete, func(f *presenceFixture) string { return fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]) }, voiceReasonMemberRemoved, false},
+		{"principal disabled", http.MethodPost, func(f *presenceFixture) string { return fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]) }, voiceReasonPrincipalOff, false},
+		{"member removed, companion and viewer unlisted", http.MethodDelete, func(f *presenceFixture) string { return fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]) }, voiceReasonMemberRemoved, true},
+		{"principal disabled, companion and viewer unlisted", http.MethodPost, func(f *presenceFixture) string { return fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]) }, voiceReasonPrincipalOff, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
 			room := f.inUse(t, f.ops)
-			f.lk.setRoom(room,
-				fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000, published: true, muted: true},
-				fakeParticipant{identity: f.screenID("ann"), joinedMs: 3_000},
-				fakeParticipant{identity: f.viewID("ann"), joinedMs: 4_000},
-				fakeParticipant{identity: f.identity("ann2"), joinedMs: 5_000})
+			all := []fakeParticipant{
+				{identity: f.identity("ann"), joinedMs: 1_000, published: true, muted: true},
+				{identity: f.screenID("ann"), joinedMs: 3_000},
+				{identity: f.viewID("ann"), joinedMs: 4_000},
+				{identity: f.identity("ann2"), joinedMs: 5_000}}
+			if tt.unlisted {
+				f.lk.setRoom(room, all[0], all[3])
+			} else {
+				f.lk.setRoom(room, all...)
+			}
 			f.at(0)
 			f.pass(t)
+			f.lk.setRoom(room, all...)
 			if got := f.who(t, f.ops); got != "ann,ann2" {
 				t.Fatalf("before: %q", got)
 			}
@@ -954,4 +968,317 @@ func TestVoiceCompanionKeepsSecrets(t *testing.T) {
 			t.Errorf("the run did not exercise %q", exercised)
 		}
 	}
+}
+
+// TestVoiceCompanionHookWithNoCompanion: the hooks ask LiveKit to remove a
+// person's companion and viewer in every room, and LiveKit's not_found
+// (nobody by that identity) writes no row: a person with neither gets the one
+// row they always got.
+func TestVoiceCompanionHookWithNoCompanion(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	room := f.inUse(t, f.ops)
+	f.lk.setRoom(room, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000}, fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
+	f.at(0)
+	f.pass(t)
+	base := len(f.lk.calls())
+	if code := f.doOrdered(t, http.MethodDelete, fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]), f.rootTok); code != 204 {
+		t.Fatalf("removal = %d", code)
+	}
+	asked := map[string]bool{}
+	for _, c := range f.lk.calls()[base:] {
+		if c.method == "RemoveParticipant" {
+			asked[c.identity] = true
+		}
+	}
+	for _, identity := range []string{f.identity("ann"), f.screenID("ann"), f.viewID("ann")} {
+		if !asked[identity] {
+			t.Errorf("LiveKit was not asked to remove %s", identity)
+		}
+	}
+	want := fmt.Sprintf("channel=%d audience=channel principal=%d reason=%s source=observed", f.ops.ID, f.ids["ann"], voiceReasonMemberRemoved)
+	if got := f.removedRows(t); !slices.Equal(got, []string{want}) {
+		t.Errorf("removal rows = %q, want the person's alone", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A companion that may not subscribe
+
+// TestVoiceCompanionKeepsItsSubscribe: LiveKit replaces a permission whole, so
+// a grant or a withdrawal must carry the companion's own canSubscribe. A
+// publish-only companion (B1) is never handed the right to receive everyone's
+// voice by a claim, a stop, an unclaimed screen or a rollback; a receiving
+// one (B2) keeps it.
+func TestVoiceCompanionKeepsItsSubscribe(t *testing.T) {
+	for _, subscribes := range []bool{false, true} {
+		name := map[bool]string{false: "publish-only", true: "subscribing"}[subscribes]
+		setup := func(t *testing.T) (*presenceFixture, string) {
+			t.Helper()
+			f, room := newShareFixture(t)
+			f.lk.setRoom(room, mustParticipant(t, f, room, "ann"), mustParticipant(t, f, room, "ann2"),
+				fakeParticipant{identity: f.screenID("ann"), joinedMs: 3_000, noSubscribe: !subscribes})
+			f.at(100)
+			f.pass(t)
+			return f, room
+		}
+		check := func(t *testing.T, f *presenceFixture, room, when string) {
+			t.Helper()
+			for _, u := range f.lk.updatesFor(f.screenID("ann")) {
+				if u.canSubscribe != subscribes {
+					t.Errorf("%s: an update for the companion set canSubscribe %v, want %v: %+v", when, u.canSubscribe, subscribes, u)
+				}
+			}
+			if p, _ := f.lk.participant(room, f.screenID("ann")); p.noSubscribe == subscribes {
+				t.Errorf("%s: the companion's canSubscribe is now %v, want %v", when, !p.noSubscribe, subscribes)
+			}
+		}
+		t.Run(name+"/claim", func(t *testing.T) {
+			f, room := setup(t)
+			f.mustClaim(t, "ann")
+			if n := len(f.lk.updatesFor(f.screenID("ann"))); n != 1 {
+				t.Fatalf("companion updates = %d, want the grant", n)
+			}
+			check(t, f, room, "after the claim")
+		})
+		t.Run(name+"/stop", func(t *testing.T) {
+			f, room := setup(t)
+			f.mustClaim(t, "ann")
+			f.publishScreen(room, true, false)
+			f.mustStop(t, "ann")
+			if n := len(f.lk.updatesFor(f.screenID("ann"))); n != 2 {
+				t.Fatalf("companion updates = %d, want the grant and the withdrawal", n)
+			}
+			check(t, f, room, "after the stop")
+		})
+		t.Run(name+"/unclaimed", func(t *testing.T) {
+			f, room := setup(t)
+			f.publishScreen(room, true, false)
+			f.at(500)
+			f.pass(t)
+			if n := len(f.lk.updatesFor(f.screenID("ann"))); n != 1 {
+				t.Fatalf("companion updates = %d, want the withdrawal", n)
+			}
+			check(t, f, room, "after the pass")
+		})
+		t.Run(name+"/pass after a stop", func(t *testing.T) {
+			f, room := setup(t)
+			f.mustClaim(t, "ann")
+			f.publishScreen(room, true, false)
+			f.lk.setUpdateFail(f.screenID("ann"), true)
+			f.mustStop(t, "ann") // the companion's withdrawal fails; the pass retries
+			f.lk.setUpdateFail(f.screenID("ann"), false)
+			f.at(500)
+			f.pass(t)
+			if p, _ := f.lk.participant(room, f.screenID("ann")); p.screen || p.shareGranted {
+				t.Errorf("the pass did not withdraw the companion: %+v", p)
+			}
+			check(t, f, room, "after the retry")
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Revocation is synchronous
+
+// requireWithdrawn fails unless ann's companion has neither a screen grant nor
+// a published screen in LiveKit, and its last update took everything away.
+func requireWithdrawn(t *testing.T, f *presenceFixture, room, when string) {
+	t.Helper()
+	p, ok := f.lk.participant(room, f.screenID("ann"))
+	if !ok {
+		t.Fatalf("%s: the companion is not in the room", when)
+	}
+	if p.shareGranted || p.screen || p.screenAudio {
+		t.Errorf("%s: the companion still has %+v", when, p)
+	}
+	ups := f.lk.updatesFor(f.screenID("ann"))
+	if len(ups) == 0 || ups[len(ups)-1].canPublish || len(ups[len(ups)-1].sources) != 0 {
+		t.Errorf("%s: the companion's last update = %+v, want canPublish false and no sources", when, ups)
+	}
+}
+
+// TestVoiceShareRevocationReachesTheCompanion: every way a claim is revoked
+// withdraws the companion's grant before the request is answered, with no pass
+// in between: a stop (by the sharer and by an operator), a claim whose audit
+// row cannot be written, a claim that finds its room retired, and a repeated
+// claim whose share ended meanwhile.
+func TestVoiceShareRevocationReachesTheCompanion(t *testing.T) {
+	t.Run("stop by the sharer", func(t *testing.T) {
+		f, room := shareWithCompanion(t)
+		f.mustClaim(t, "ann")
+		f.publishScreen(room, true, true)
+		f.mustStop(t, "ann")
+		requireWithdrawn(t, f, room, "after the stop")
+	})
+	t.Run("stop by an operator", func(t *testing.T) {
+		f, room := shareWithCompanion(t)
+		f.mustClaim(t, "ann")
+		f.publishScreen(room, true, false)
+		f.mustStop(t, "root")
+		requireWithdrawn(t, f, room, "after the operator's stop")
+	})
+	t.Run("the audit row cannot be written", func(t *testing.T) {
+		f, room := shareWithCompanion(t)
+		f.publishScreen(room, true, false)
+		write := f.srv.voice.appendAudit
+		f.srv.voice.appendAudit = func(context.Context, string, string, string, string, time.Time) (store.AuditEvent, error) {
+			return store.AuditEvent{}, errors.New("disk full")
+		}
+		res := f.claimShare(t, "ann", "ops")
+		f.srv.voice.appendAudit = write
+		if res.status != http.StatusInternalServerError {
+			t.Fatalf("claim = %d %s, want 500", res.status, res.body)
+		}
+		requireWithdrawn(t, f, room, "after the failed claim")
+	})
+	t.Run("the room is rotated during the claim", func(t *testing.T) {
+		f, room := shareWithCompanion(t)
+		f.publishScreen(room, true, false)
+		stored, err := f.srv.store.ChannelVoiceRoom(context.Background(), f.ops.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var once sync.Once
+		f.lk.setOnUpdate(func(_, _ string, share bool) {
+			if share {
+				once.Do(func() {
+					if _, _, err := f.srv.store.RotateVoiceRoom(context.Background(), stored.ID, store.VoiceRotateMemberRemoved); err != nil {
+						t.Error(err)
+					}
+				})
+			}
+		})
+		res := f.claimShare(t, "ann", "ops")
+		if res.status != http.StatusConflict {
+			t.Fatalf("claim = %d %s, want 409", res.status, res.body)
+		}
+		if n := f.lk.callsFor("DeleteRoom", room); n != 0 {
+			t.Errorf("DeleteRoom calls = %d; the test means the grant to be taken back without one", n)
+		}
+		requireWithdrawn(t, f, room, "after the claim in a rotated room")
+	})
+	t.Run("a repeated claim whose share ended meanwhile", func(t *testing.T) {
+		f, room := shareWithCompanion(t)
+		f.mustClaim(t, "ann")
+		f.publishScreen(room, true, false)
+		var once sync.Once
+		f.lk.setOnUpdate(func(_, identity string, share bool) {
+			if share && identity == f.identity("ann") {
+				once.Do(func() { // a pass ended the share while it was granted again
+					f.srv.voice.mu.Lock()
+					f.srv.voice.rooms[room].share = nil
+					f.srv.voice.mu.Unlock()
+				})
+			}
+		})
+		if res := f.claimShare(t, "ann", "ops"); res.status != http.StatusConflict {
+			t.Fatalf("claim = %d %s, want 409", res.status, res.body)
+		}
+		requireWithdrawn(t, f, room, "after the repeated claim")
+	})
+}
+
+// ---------------------------------------------------------------------------
+// The viewer
+
+// TestVoiceShareUnclaimedViewer: a viewer beside its person is judged like
+// the rest. Nothing it holds is a share, so a screen it publishes is
+// unclaimed even while its person holds the share, and it is withdrawn to
+// nothing (never the person's microphone bundle) or removed.
+func TestVoiceShareUnclaimedViewer(t *testing.T) {
+	viewer := func(f *presenceFixture) fakeParticipant {
+		return fakeParticipant{identity: f.viewID("ann"), joinedMs: 3_000, listenOnly: true, screen: true}
+	}
+	setup := func(t *testing.T) (*presenceFixture, string) {
+		t.Helper()
+		f, room := newShareFixture(t)
+		f.lk.setRoom(room, mustParticipant(t, f, room, "ann"), mustParticipant(t, f, room, "ann2"), viewer(f))
+		return f, room
+	}
+	for _, holds := range []bool{false, true} {
+		name := map[bool]string{false: "no claim", true: "its person holds the share"}[holds]
+		t.Run(name+"/withdrawn", func(t *testing.T) {
+			f, room := setup(t)
+			if holds {
+				f.mustClaim(t, "ann")
+			}
+			f.at(500)
+			f.pass(t)
+			ups := f.lk.updatesFor(f.viewID("ann"))
+			if len(ups) != 1 || ups[0].canPublish || !ups[0].canSubscribe || ups[0].sources == nil || len(ups[0].sources) != 0 {
+				t.Fatalf("viewer updates = %+v, want one: canSubscribe, no publish, sources []", ups)
+			}
+			if p, _ := f.lk.participant(room, f.viewID("ann")); p.screen {
+				t.Error("the viewer still publishes a screen")
+			}
+			rows := f.audits(t, store.AuditVoiceShareUnclaimed)
+			wantDetail := fmt.Sprintf("channel=%d sources=screen_share participant=view source=observed", f.ops.ID)
+			if len(rows) != 1 || rows[0].Actor != f.actor("ann") || rows[0].Detail != wantDetail {
+				t.Fatalf("unclaimed rows = %+v, want one by ann with detail %q", rows, wantDetail)
+			}
+			// Once, and the person's own participant and share are not touched.
+			f.at(1_000)
+			f.pass(t)
+			if n := len(f.audits(t, store.AuditVoiceShareUnclaimed)); n != 1 {
+				t.Errorf("unclaimed rows after another pass = %d, want 1", n)
+			}
+			if got := f.lk.updatesFor(f.identity("ann")); len(got) != btoi(holds) {
+				t.Errorf("ann's own participant was updated %d times: %+v", len(got), got)
+			}
+			if holds && f.shareState(room) != f.ids["ann"] {
+				t.Error("the viewer's screen ended its person's share")
+			}
+		})
+		t.Run(name+"/not withdrawn: removed", func(t *testing.T) {
+			f, room := setup(t)
+			if holds {
+				f.mustClaim(t, "ann")
+			}
+			f.lk.setUpdateFail(f.viewID("ann"), true)
+			f.at(500)
+			f.pass(t)
+			if f.lk.in(room, f.viewID("ann")) {
+				t.Fatal("the viewer is still connected with a screen")
+			}
+			if !f.lk.in(room, f.identity("ann")) {
+				t.Error("ann herself was removed")
+			}
+			want := fmt.Sprintf("channel=%d audience=channel principal=%d reason=%s participant=view source=observed", f.ops.ID, f.ids["ann"], voiceReasonShareUnclaimed)
+			if got := f.removedRows(t); !slices.Equal(got, []string{want}) {
+				t.Errorf("removal rows = %q, want %q", got, want)
+			}
+		})
+	}
+	t.Run("a viewer with a source grant and no track", func(t *testing.T) {
+		f, room := newShareFixture(t)
+		f.lk.setRoom(room, mustParticipant(t, f, room, "ann"), mustParticipant(t, f, room, "ann2"),
+			fakeParticipant{identity: f.viewID("ann"), joinedMs: 3_000, shareGranted: true})
+		f.at(500)
+		f.pass(t)
+		if p, _ := f.lk.participant(room, f.viewID("ann")); p.shareGranted {
+			t.Error("the viewer still holds a source grant")
+		}
+		if n := len(f.audits(t, store.AuditVoiceShareUnclaimed)); n != 0 {
+			t.Errorf("unclaimed rows = %d: nothing was published", n)
+		}
+	})
+	t.Run("a viewer alone, standing in for the person, is judged too", func(t *testing.T) {
+		f, room := newShareFixture(t)
+		f.lk.setRoom(room, mustParticipant(t, f, room, "ann2"), viewer(f))
+		f.at(500)
+		f.pass(t)
+		if p, _ := f.lk.participant(room, f.viewID("ann")); p.screen {
+			t.Error("the viewer still publishes a screen")
+		}
+		if ups := f.lk.updatesFor(f.identity("ann")); len(ups) != 0 {
+			t.Errorf("an update was sent to p<id>, which is not in the room: %+v", ups)
+		}
+	})
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

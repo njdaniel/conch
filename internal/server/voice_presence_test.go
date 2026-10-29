@@ -697,6 +697,9 @@ func TestVoiceImmediateRemoval(t *testing.T) {
 				for _, c := range f.lk.calls()[base:] {
 					switch c.method {
 					case "RemoveParticipant":
+						if !personIdentity(c.identity) {
+							continue // their companion and viewer go with them
+						}
 						if c.identity != ann {
 							t.Errorf("removed %q, want ann only", c.identity)
 						}
@@ -1701,7 +1704,7 @@ func TestVoiceRemovalHookReadIsBounded(t *testing.T) {
 				}
 				read := &stalledRead{stall: stall, giveUp: giveUp}
 				tt.seam(f, read)
-				before := f.lk.count("RemoveParticipant")
+				before := f.lk.personRemovals()
 
 				code := f.doOrdered(t, tt.method, tt.path(f), f.rootTok)
 
@@ -1734,7 +1737,7 @@ func TestVoiceRemovalHookReadIsBounded(t *testing.T) {
 						failed = append(failed, line)
 					}
 				}
-				removals := f.lk.count("RemoveParticipant") - before
+				removals := f.lk.personRemovals() - before
 
 				if !stall {
 					// The store answered: nothing has changed for the hook.
@@ -1929,8 +1932,8 @@ func TestVoiceImmediateRemovalIsAuditedWhenLiveKitHadThem(t *testing.T) {
 			if code := f.doOrdered(t, "DELETE", fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]), f.rootTok); code != 204 {
 				t.Fatalf("removal = %d", code)
 			}
-			if f.lk.count("RemoveParticipant") != 1 {
-				t.Fatalf("RemoveParticipant calls = %d, want 1", f.lk.count("RemoveParticipant"))
+			if f.lk.personRemovals() != 1 {
+				t.Fatalf("RemoveParticipant calls = %d, want 1", f.lk.personRemovals())
 			}
 			want := 0
 			if connected {
