@@ -434,6 +434,8 @@ Ordering, as whole sessions of steps (an owner or helper message, the owner clos
 
 Secrets: `sensitive.json` lists the fake secrets the tests use and the fragments no field name may contain. `TestVoiceControlCarriesNoSecrets` checks the Go types and every fixture against it; the Rust tests check the helper's real output against it.
 
+The attach line (`conch.voice_control_pipe.v1`, #893), written first when the events channel is an endpoint the helper connects to rather than fd 3, has a directory of its own, `pkg/schema/testdata/voice-control-pipe/` (`attached.json`, `cases.json`, `lines/attached-at-limit.txt`, `lines/attached-too-long.txt`, `sensitive.json`, `transcript-attach-then-hello.json`), read by `pkg/schema/voice_control_pipe_test.go` and by `conch-voice-api`'s `control_pipe.rs`; the endpoint itself, and the owner's rules, are specified in [windows-desktop.md §3.3 to §3.6](windows-desktop.md) and [linux-desktop.md §5](linux-desktop.md).
+
 ## 17. Security and parity
 
 - **Nothing secret on the channel, by construction**: no field could carry a token (the field lists are pinned by `TestVoiceControlFieldsAreAnExactList`), events carry no free text, and the login travels as it already does (§9). Join tokens and room names never leave the helper, as today.

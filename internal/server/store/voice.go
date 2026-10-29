@@ -74,6 +74,14 @@ const (
 	AuditVoiceShareUnclaimed = "voice_share_unclaimed"
 )
 
+// AuditVoiceCompanionRemoved is written by the poller (issue #932) when
+// LiveKit actually removed a companion participant (p<id>.screen) because the
+// person's own connection had been gone for longer than the grace. Its actor
+// is "system", its subject "channel:<id>" and its detail "channel=<id>
+// principal=<id> participant=screen reason=orphaned". It never carries a
+// token or a room name.
+const AuditVoiceCompanionRemoved = "voice_companion_removed"
+
 // AuditVoiceRoomRotated is written, by the store and in the transaction that
 // rotates the room, once per rotation (issue #161). Its actor is "system",
 // its subject "channel:<id>" and its detail "reason=<reason>"; it never
