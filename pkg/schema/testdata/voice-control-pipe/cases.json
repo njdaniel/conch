@@ -38,6 +38,138 @@
       }
     },
     {
+      "name": "an undeclared field holding a number too large for a float: not converted, ignored",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pid\":1e999}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field named id holding such a number: this line has no id",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"id\":1e999}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field named seq holding such a number: this line has no seq",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"seq\":1e999}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field holding a negative number too large for a float",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pid\":-1e999}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field holding a number too small for a float",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pid\":1e-999}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field holding negative zero",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pid\":-0}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field holding an integer too large for 64 bits",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pid\":99999999999999999999999999}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field holding such numbers nested in an array and an object",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pid\":{\"deep\":[1e999,-0,1e-999,99999999999999999999999999]}}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "schema as a number too large for a float",
+      "direction": "attached",
+      "line": "{\"schema\":1e999,\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema",
+        "id": 0
+      }
+    },
+    {
+      "name": "schema as negative zero",
+      "direction": "attached",
+      "line": "{\"schema\":-0,\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema",
+        "id": 0
+      }
+    },
+    {
+      "name": "kind as a number too large for a float",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":1e999,\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "nonce as a number too large for a float",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":1e999}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "nonce as a number too small for a float",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":1e-999}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "nonce as an integer too large for 64 bits",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":99999999999999999999999999}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
       "name": "exactly the longest line",
       "direction": "attached",
       "line_file": "lines/attached-at-limit.txt",

@@ -44,8 +44,10 @@ import (
 // is one-time: drawn for one spawn, written once, never reused. It is spent
 // when read: the owner compares it and closes its listener, and the helper
 // forgets it once the line is written. And it is redacted from every
-// diagnostic by both sides: no error of this file repeats it, no status view
-// or stderr tail shows it, and no field of any later event may carry it
+// diagnostic by both sides: no error of this file repeats it, this type's
+// String and GoString print it as <redacted> (so %v, %+v, %#v, %s and the log
+// package never show it), the owner must never show it in a status view or a
+// stderr tail, and no field of any later event may carry it
 // (testdata/voice-control-pipe/sensitive.json pins the names). Everything
 // else the control protocol's contract says still holds: no login token,
 // join token or room name is ever on the channel.
@@ -130,6 +132,22 @@ type VoiceControlPipeAttachedV1 struct {
 }
 
 func (VoiceControlPipeAttachedV1) voiceControlMessage() {}
+
+// voiceControlPipeRedacted stands for the nonce wherever the value is printed.
+const voiceControlPipeRedacted = "<redacted>"
+
+// String renders the line for %v, %+v, %s, %q, fmt.Sprint and the log package
+// with the nonce as <redacted>, in the shape fmt would otherwise give a struct
+// ({schema kind nonce}). fmt consults it for a value, a pointer, and either
+// nested in another value; encoding/json does not, so the wire is unchanged.
+func (a VoiceControlPipeAttachedV1) String() string {
+	return "{" + a.Schema + " " + string(a.Kind) + " " + voiceControlPipeRedacted + "}"
+}
+
+// GoString renders the line for %#v as Go syntax with the nonce as <redacted>.
+func (a VoiceControlPipeAttachedV1) GoString() string {
+	return fmt.Sprintf("schema.VoiceControlPipeAttachedV1{Schema:%q, Kind:%q, Nonce:%q}", a.Schema, string(a.Kind), voiceControlPipeRedacted)
+}
 
 // Validate reports whether the line is well-formed: the schema, the kind, and
 // a nonce ValidateVoiceControlPipeNonce accepts. It says nothing about

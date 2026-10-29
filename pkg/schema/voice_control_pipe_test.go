@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -552,6 +554,75 @@ func TestVoiceControlPipeMatches(t *testing.T) {
 	}
 }
 
+// TestVoiceControlPipeFormattersRedactTheNonce mirrors the Rust twin's Debug
+// test: every way fmt and log render the value (the four verbs, %s and %q, a
+// value, a pointer, and either nested in another struct) prints the nonce as
+// <redacted> and the rest as it is; and encoding/json, which ignores Stringer,
+// still writes the golden line byte for byte.
+func TestVoiceControlPipeFormattersRedactTheNonce(t *testing.T) {
+	value := VoiceControlPipeAttachedV1{Schema: VoiceControlPipeSchemaV1, Kind: VoiceControlPipeKindAttached, Nonce: voiceControlPipeGoldenNonce}
+	type holder struct {
+		Line    VoiceControlPipeAttachedV1
+		Pointer *VoiceControlPipeAttachedV1
+	}
+	nested := holder{Line: value, Pointer: &value}
+	var logged bytes.Buffer
+	log.New(&logged, "", 0).Printf("attach %v %+v %#v %s", value, &value, nested, value)
+
+	shown := map[string]string{
+		"%v value":             fmt.Sprintf("%v", value),
+		"%+v value":            fmt.Sprintf("%+v", value),
+		"%#v value":            fmt.Sprintf("%#v", value),
+		"%s value and pointer": fmt.Sprintf("%s %s", value, &value),
+		"%q value":             fmt.Sprintf("%q", value),
+		"%v pointer":           fmt.Sprintf("%v", &value),
+		"%+v pointer":          fmt.Sprintf("%+v", &value),
+		"%#v pointer":          fmt.Sprintf("%#v", &value),
+		"Sprint":               fmt.Sprint(value, &value),
+		"Sprintln":             fmt.Sprintln(value),
+		"%v nested":            fmt.Sprintf("%v", nested),
+		"%+v nested":           fmt.Sprintf("%+v", nested),
+		"%#v nested":           fmt.Sprintf("%#v", nested),
+		"log.Printf":           logged.String(),
+		"String":               value.String(),
+		"GoString":             value.GoString(),
+	}
+	for name, text := range shown {
+		if strings.Contains(text, voiceControlPipeGoldenNonce) || strings.Contains(text, "FAKE") {
+			t.Errorf("%s shows the nonce: %s", name, text)
+		}
+		if !strings.Contains(text, "<redacted>") {
+			t.Errorf("%s shows no placeholder: %s", name, text)
+		}
+		if !strings.Contains(text, VoiceControlPipeSchemaV1) || !strings.Contains(text, string(VoiceControlPipeKindAttached)) {
+			t.Errorf("%s hides more than the nonce: %s", name, text)
+		}
+	}
+	if got, want := fmt.Sprintf("%#v", value), `schema.VoiceControlPipeAttachedV1{Schema:"conch.voice_control_pipe.v1", Kind:"attached", Nonce:"<redacted>"}`; got != want {
+		t.Errorf("%%#v = %s, want %s", got, want)
+	}
+	if got, want := fmt.Sprintf("%v", value), "{conch.voice_control_pipe.v1 attached <redacted>}"; got != want {
+		t.Errorf("%%v = %s, want %s", got, want)
+	}
+	// The zero value and a refused line render without panicking or lying.
+	if got := fmt.Sprintf("%v %#v", VoiceControlPipeAttachedV1{}, (*VoiceControlPipeAttachedV1)(nil)); !strings.Contains(got, "<redacted>") || !strings.Contains(got, "nil") {
+		t.Errorf("zero and nil: %s", got)
+	}
+
+	// encoding/json does not consult String or GoString: the wire is unchanged.
+	line, err := MarshalVoiceControlLine(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := append(goldenAttachedLine(t), '\n'); !bytes.Equal(line, want) {
+		t.Errorf("the formatters changed the wire:\n%s\nwant\n%s", line, want)
+	}
+	if !bytes.Contains(line, []byte(voiceControlPipeGoldenNonce)) {
+		t.Error("the wire does not carry the nonce")
+	}
+	assertGoldenFixture(t, voiceControlPipeDir+"/attached.json", func() any { return new(VoiceControlPipeAttachedV1) })
+}
+
 // TestMarshalVoiceControlPipeLine checks that the writer refuses what a reader
 // must refuse: a wrong schema or kind, and every malformed nonce of the table.
 func TestMarshalVoiceControlPipeLine(t *testing.T) {
@@ -624,6 +695,7 @@ func TestVoiceControlPipeDoc(t *testing.T) {
 		"one-time",
 		"spent when read",
 		"redacted from every diagnostic",
+		"must never show it",
 	} {
 		if !strings.Contains(prose, phrase) {
 			t.Errorf("the doc comment does not say %q", phrase)

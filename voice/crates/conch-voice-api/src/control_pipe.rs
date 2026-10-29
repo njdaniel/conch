@@ -28,12 +28,15 @@
 //! owner's reader, here for parity with Go's `ParseVoiceControlPipeAttached` and held to the
 //! same conformance cases.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde::de::{self, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, Visitor};
 
 use crate::control::{
-    Loose, VoiceControlErrorCode, VoiceControlRefusal, frame, message, refused, vocabulary,
+    VOICE_CONTROL_MAX_LINE_BYTES, VoiceControlErrorCode, VoiceControlRefusal,
+    has_lone_surrogate_escape, message, refused, vocabulary,
 };
 use crate::error::Error;
 use crate::types::wire_object;
@@ -68,6 +71,10 @@ vocabulary!(
 ///
 /// `Debug` prints the nonce as a placeholder, as [`Secret`](crate::Secret) does; the field is
 /// a plain `String` because the helper copies it onto the line and then forgets it.
+///
+/// The derived `==` compares the nonce with an early exit and is for tests only: an owner
+/// compares the nonce it generated with [`VoiceControlPipeAttachedV1::matches`], which takes
+/// the same time whatever the two values are.
 #[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct VoiceControlPipeAttachedV1 {
     /// Always [`VOICE_CONTROL_PIPE_SCHEMA_V1`].
@@ -109,6 +116,30 @@ impl VoiceControlPipeAttachedV1 {
             kind: VoiceControlPipeKind::Attached,
             nonce: nonce.to_owned(),
         })
+    }
+
+    /// Whether the line's nonce is `nonce`, the value the owner generated: Go's `Matches`.
+    /// The comparison is a fold over every byte of both values, at least
+    /// [`VOICE_CONTROL_PIPE_NONCE_CHARS`] of them, that never returns early, so the time it
+    /// takes does not depend on where the two first differ; the lengths are not secret and
+    /// are folded in. A line with no nonce never matches. No new crate: the fold is a dozen
+    /// lines, and `std::hint::black_box` keeps it from being shortened.
+    pub fn matches(&self, nonce: &str) -> bool {
+        let (ours, theirs) = (self.nonce.as_bytes(), nonce.as_bytes());
+        if ours.is_empty() {
+            return false;
+        }
+        let span = ours
+            .len()
+            .max(theirs.len())
+            .max(VOICE_CONTROL_PIPE_NONCE_CHARS);
+        let mut diff = u8::from(ours.len() != theirs.len());
+        for at in 0..span {
+            let a = ours.get(at).copied().unwrap_or(0);
+            let b = theirs.get(at).copied().unwrap_or(0);
+            diff = std::hint::black_box(diff | (a ^ b));
+        }
+        diff == 0
     }
 
     fn check(&self) -> Result<(), String> {
@@ -169,10 +200,111 @@ fn is_base64url(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
 }
 
-/// The `nonce` field of a line, seen only to learn whether it is a string.
-#[derive(Deserialize)]
-struct NonceField {
-    nonce: Option<Loose>,
+/// The framing rules of the control protocol (`control::frame`), applied without reading
+/// any value as a number: the length, UTF-8, one line, one JSON object with no key twice,
+/// no lone surrogate escape. The control readers' `Head` reads `schema`, `kind`, `id` and
+/// `seq` through a numeric visitor, and `serde_json` refuses a number it cannot hold
+/// (`1e999`) while Go keeps every value as raw bytes and only asks whether it is a string.
+/// The attach line has no `id` or `seq`, so here every value is skipped unread and the
+/// three fields are read afterwards, each on its own ([`field`]), which gives Go's answer:
+/// an undeclared field is ignored whatever it holds, and a declared one that is not a
+/// string is `unknown_schema` or `invalid`, never `malformed`.
+fn frame_attached(line: &[u8]) -> Result<&str, VoiceControlRefusal> {
+    let malformed = refused(VoiceControlErrorCode::Malformed, None);
+    if line.len() > VOICE_CONTROL_MAX_LINE_BYTES {
+        return Err(refused(VoiceControlErrorCode::TooLong, None));
+    }
+    let text = std::str::from_utf8(line).map_err(|_| malformed)?;
+    if text.contains('\n') {
+        return Err(malformed);
+    }
+    serde_json::from_str::<Object>(text).map_err(|_| malformed)?;
+    if has_lone_surrogate_escape(text) {
+        return Err(malformed);
+    }
+    Ok(text)
+}
+
+/// One JSON object with no key given twice, every value skipped unread.
+struct Object;
+
+impl<'de> serde::Deserialize<'de> for Object {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Keys;
+        impl<'de> Visitor<'de> for Keys {
+            type Value = Object;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Object, A::Error> {
+                let mut keys = BTreeSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if !keys.insert(key) {
+                        return Err(de::Error::custom("a key given twice"));
+                    }
+                    map.next_value::<IgnoredAny>()?;
+                }
+                Ok(Object)
+            }
+        }
+        deserializer.deserialize_map(Keys)
+    }
+}
+
+/// What a top-level field of a framed line holds, as far as the reader looks.
+enum Field {
+    /// A string.
+    Text(String),
+    /// No such field.
+    Absent,
+    /// Something other than a string, of which nothing was read: `null`, a number of any
+    /// size, an array or an object. Go's `fieldString` says "not ok" of all of these.
+    Other,
+}
+
+/// The field `key` of the object `text`, which [`frame_attached`] has accepted. Only that
+/// field's value is decoded, and only as a string; every other value is skipped unread.
+fn field(text: &str, key: &str) -> Field {
+    struct Lookup<'k>(&'k str);
+    impl<'de> DeserializeSeed<'de> for Lookup<'_> {
+        type Value = Option<String>;
+
+        fn deserialize<D: Deserializer<'de>>(
+            self,
+            deserializer: D,
+        ) -> Result<Option<String>, D::Error> {
+            deserializer.deserialize_map(self)
+        }
+    }
+    impl<'de> Visitor<'de> for Lookup<'_> {
+        type Value = Option<String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a JSON object")
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Option<String>, A::Error> {
+            let mut found = None;
+            while let Some(key) = map.next_key::<String>()? {
+                if key == self.0 {
+                    // A value that is not a string fails here, whatever it is, before any
+                    // of it is converted: serde_json reads a string and nothing else.
+                    found = Some(map.next_value::<String>()?);
+                } else {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+            Ok(found)
+        }
+    }
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    match Lookup(key).deserialize(&mut deserializer) {
+        Ok(Some(text)) => Field::Text(text),
+        Ok(None) => Field::Absent,
+        Err(_) => Field::Other,
+    }
 }
 
 /// Reads the first line of an events endpoint, without its line feed: the owner's reader,
@@ -189,14 +321,17 @@ struct NonceField {
 /// The [`VoiceControlRefusal`] for a line that is not an attach line; its id is always `None`.
 pub fn parse_attached(line: &[u8]) -> Result<VoiceControlPipeAttachedV1, VoiceControlRefusal> {
     let invalid = refused(VoiceControlErrorCode::Invalid, None);
-    let (text, head) = frame(line)?;
-    head.check_schema_is(VOICE_CONTROL_PIPE_SCHEMA_V1)?;
-    let Some(word) = head.event_kind() else {
-        return Err(invalid);
+    let text = frame_attached(line)?;
+    match field(text, "schema") {
+        Field::Text(schema) if schema == VOICE_CONTROL_PIPE_SCHEMA_V1 => {}
+        _ => return Err(refused(VoiceControlErrorCode::UnknownSchema, None)),
+    }
+    let word = match field(text, "kind") {
+        Field::Text(word) if !word.is_empty() => word,
+        _ => return Err(invalid),
     };
-    let field: NonceField = serde_json::from_str(text).map_err(|_| invalid)?;
-    let nonce = match field.nonce {
-        Some(Loose::Text(nonce)) => nonce,
+    let nonce = match field(text, "nonce") {
+        Field::Text(nonce) => nonce,
         _ => return Err(invalid),
     };
     check_nonce(&nonce).map_err(|_| invalid)?;
@@ -217,6 +352,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::{Path, PathBuf};
 
+    use serde::Deserialize;
     use serde_json::Value;
 
     use super::*;
@@ -649,5 +785,56 @@ mod tests {
             ))
             .is_ok()
         );
+    }
+
+    /// `matches` by the same table as Go's `TestVoiceControlPipeMatches`: equal nonces
+    /// match; one differing only in its last byte, and one of another length, do not; a
+    /// line with no nonce never matches; and the answer is the one `==` on the nonce gives,
+    /// which is the whole point of having a second way to ask.
+    #[test]
+    fn matches_mirrors_go_and_agrees_with_equality() {
+        let short = &GOLDEN_NONCE[..42];
+        let attached = golden();
+        let cases: [(&str, String, bool); 9] = [
+            ("the same nonce", GOLDEN_NONCE.to_owned(), true),
+            (
+                "the last byte differs, still canonical",
+                format!("{short}E"),
+                false,
+            ),
+            (
+                "the first byte differs",
+                format!("G{}", &GOLDEN_NONCE[1..]),
+                false,
+            ),
+            ("one byte shorter", short.to_owned(), false),
+            ("one byte longer", format!("{GOLDEN_NONCE}A"), false),
+            (
+                "twice as long, the nonce as a prefix",
+                format!("{GOLDEN_NONCE}{GOLDEN_NONCE}"),
+                false,
+            ),
+            ("empty", String::new(), false),
+            ("the other fake nonce", OTHER_NONCE.to_owned(), false),
+            (
+                "a byte past the fixed length differs",
+                format!("{GOLDEN_NONCE}\u{0}"),
+                false,
+            ),
+        ];
+        for (name, nonce, want) in &cases {
+            assert_eq!(attached.matches(nonce), *want, "{name}");
+            assert_eq!(attached.nonce == *nonce, *want, "{name}: == disagrees");
+        }
+        // Two values longer than the fixed length that differ only past it do not match.
+        let mut long = golden();
+        long.nonce = format!("{GOLDEN_NONCE}AB");
+        assert!(!long.matches(&format!("{GOLDEN_NONCE}AC")));
+        assert!(long.matches(&format!("{GOLDEN_NONCE}AB")));
+        // A line with no nonce never matches, not even an empty one.
+        let mut none = golden();
+        none.nonce.clear();
+        assert!(!none.matches(""));
+        assert!(!none.matches(GOLDEN_NONCE));
     }
 }
