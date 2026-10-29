@@ -206,7 +206,7 @@ rq() {
 remote() {
     local tty=$1
     shift
-    "$ssh_cmd" "$tty" -i "$ssh_key" -o IdentitiesOnly=yes -- "$host" "$(rq "$@")"
+    "$ssh_cmd" "$tty" "${ssh_mux[@]}" -i "$ssh_key" -o IdentitiesOnly=yes -- "$host" "$(rq "$@")"
 }
 
 # The remote side of sync: replace <dir>/<file> with stdin, 0755, root,
@@ -519,6 +519,15 @@ cmd_sync() {
 [ $# -ge 1 ] || usage
 command=$1
 shift
+
+# One SSH connection for the whole run (issue #927): the droplet's firewall
+# limits ssh (ufw LIMIT refuses a sixth connection within 30 seconds), and a
+# run makes many calls. The control socket lives in a private directory,
+# removed on exit; the master closes itself once idle.
+ssh_ctl=$(mktemp -d "${TMPDIR:-/tmp}/conch-server-ssh.XXXXXX") || die "could not make a private directory for the SSH connection"
+chmod 0700 "$ssh_ctl"
+trap 'rm -rf -- "$ssh_ctl"' EXIT
+ssh_mux=(-o ControlMaster=auto -o "ControlPath=$ssh_ctl/m" -o ControlPersist=15)
 case "$command" in
     new) cmd_new "$@" ;;
     rm) cmd_rm "$@" ;;
