@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Fetches the Electron the desktop shell is built with (desktop/, ADR-007) into
-# ~/.cache/conch/electron/electron-<version>/, for electron-builder's `electronDist`.
+# Fetches and verifies the Electron the desktop shell is built with (desktop/, ADR-007),
+# and unpacks it into a directory of the caller, for electron-builder's `electronDist`.
 #
 # Why not `install-electron`, the bin of the electron package: it extracts with
 # a package that loads prebuilt native binaries, on the machine that runs it,
@@ -21,7 +21,15 @@
 # So it needs desktop/node_modules (npm ci) first. `make desktop-build` does
 # both.
 #
-# usage: desktop-electron.sh
+# usage: desktop-electron.sh <directory>
+#
+# The directory is the caller's own, per build (desktop-build.sh uses
+# desktop/out/electron-dist); it is emptied and filled. Only the verified zip
+# lives in the shared cache, so two builds never share an extracted tree.
+#
+# The cache's parent, ~/.cache/conch, is assumed not writable by other users
+# (the default home directory layout); only the electron/ directory in it is
+# checked.
 #
 # For the script's own test (scripts/desktop-electron-test.sh), and for a
 # mirror: CONCH_CACHE moves the cache (default ~/.cache/conch);
@@ -69,8 +77,10 @@ if [ "$want_npm" != "$want_pin" ]; then
     fail "scripts/desktop-pins.sh ($want_pin) and the electron package's checksums.json ($want_npm) disagree about $archive"
 fi
 
+dest=${1:-}
+[ -n "$dest" ] || fail "usage: desktop-electron.sh <directory to unpack Electron into>"
+
 cache="${CONCH_CACHE:-$HOME/.cache/conch}/electron"
-dir="$cache/electron-$version"
 zip="$cache/$archive"
 
 # The cache is owned by this user and not writable by group or other, or
@@ -92,6 +102,10 @@ fi
 # One run at a time (two worktrees, a hook and a shell).
 exec 9>"$cache/.electron.lock"
 flock 9
+
+# A download directory left by a run that was killed hard (the trap did not
+# run) is stale: nothing else holds the lock.
+rm -rf "$cache"/.electron-fetch.*
 
 work=$(mktemp -d "$cache/.electron-fetch.XXXXXX")
 trap 'rm -rf "$work"' EXIT
@@ -119,12 +133,11 @@ else
     mv "$work/$archive" "$zip"
 fi
 
-mkdir "$work/electron"
-unzip -q "$zip" -d "$work/electron"
-[ -x "$work/electron/electron" ] || fail "$archive has no electron executable; nothing was put in place"
+rm -rf "$dest"
+mkdir -p "$dest"
+unzip -q "$zip" -d "$dest"
+[ -x "$dest/electron" ] || fail "$archive has no electron executable; $dest is not usable"
 # The zip carries mode 0777 on some files. Nothing here is writable by group
 # or other, before it is packed or run.
-chmod -R go-w "$work/electron"
-rm -rf "$dir"
-mv "$work/electron" "$dir" # the directory appears complete or not at all
-echo "desktop-electron: Electron $version unpacked from the verified $zip into $dir"
+chmod -R go-w "$dest"
+echo "desktop-electron: Electron $version unpacked from the verified $zip into $dest"

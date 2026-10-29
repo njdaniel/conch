@@ -20,12 +20,15 @@ root=$PWD
 
 (cd web && npm ci --no-audit)
 (cd desktop && npm ci --no-audit)
-./scripts/desktop-electron.sh
 
 . ./scripts/desktop-pins.sh
-electron_dist="${CONCH_CACHE:-$HOME/.cache/conch}/electron/electron-$CONCH_ELECTRON_VERSION"
 
+# Electron is unpacked into this build's own tree, from the verified zip in the
+# shared cache, so another worktree's build can never change it under this one.
 rm -rf desktop/out desktop/dist
+electron_dist="$root/desktop/out/electron-dist"
+./scripts/desktop-electron.sh "$electron_dist"
+
 (cd web && ./node_modules/.bin/vite build --base / --outDir "$root/desktop/out/ui" --emptyOutDir)
 (cd desktop && npm run bundle && node build/manifest.ts)
 

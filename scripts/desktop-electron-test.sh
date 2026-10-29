@@ -43,7 +43,7 @@ export CONCH_ELECTRON_URL="file://$tmp/electron-v1.2.3-linux-x64.zip"
 # run <cache dir>: output and status into $out and $status.
 run() {
     status=0
-    out=$(CONCH_CACHE="$1" ./scripts/desktop-electron.sh 2>&1) || status=$?
+    out=$(CONCH_CACHE="$1" ./scripts/desktop-electron.sh "$1.dest" 2>&1) || status=$?
 }
 
 # refuses <name> <cache>: failed, said so on one FAIL line, left no download or
@@ -53,7 +53,7 @@ refuses() {
     [ "$status" -ne 0 ] || fail "$name: succeeded, want a refusal: $out"
     lines=$(grep -c '^desktop-electron: FAIL:' <<<"$out" || true)
     [ "$lines" = 1 ] || fail "$name: want one FAIL line, got $lines: $out"
-    [ ! -e "$cache/electron/electron-1.2.3" ] || fail "$name: left $cache/electron/electron-1.2.3 behind"
+    [ ! -e "$cache.dest" ] || fail "$name: left $cache.dest behind"
     ! compgen -G "$cache/electron/.electron-fetch.*" >/dev/null || fail "$name: left a download behind"
 }
 
@@ -62,7 +62,7 @@ pins "$good"
 sums "$good"
 run "$tmp/c1"
 [ "$status" -eq 0 ] || fail "good zip refused: $out"
-[ -x "$tmp/c1/electron/electron-1.2.3/electron" ] || fail "good zip was not unpacked"
+[ -x "$tmp/c1.dest/electron" ] || fail "good zip was not unpacked"
 run "$tmp/c1"
 [ "$status" -eq 0 ] || fail "second run failed: $out"
 ! grep -q 'downloading' <<<"$out" || fail "second run downloaded again: $out"
@@ -71,27 +71,27 @@ run "$tmp/c1"
 # writable by group or other, whatever the zip said (it said 0777).
 [ "$(stat -c %a "$tmp/c1/electron")" = 700 ] || fail "a new cache is mode $(stat -c %a "$tmp/c1/electron"), want 700"
 [ "$(stat -c %a "$tmp/c1/electron/electron-v1.2.3-linux-x64.zip")" = 600 ] || fail "the cached zip is not mode 600"
-[ -z "$(find "$tmp/c1/electron/electron-1.2.3" -perm /022)" ] || fail "unpacked files are group or other writable: $(find "$tmp/c1/electron/electron-1.2.3" -perm /022)"
-[ -x "$tmp/c1/electron/electron-1.2.3/electron" ] || fail "the executable lost its execute bit"
+[ -z "$(find "$tmp/c1.dest" -perm /022)" ] || fail "unpacked files are group or other writable: $(find "$tmp/c1.dest" -perm /022)"
+[ -x "$tmp/c1.dest/electron" ] || fail "the executable lost its execute bit"
 
 # A cache hit trusts nothing it holds. Corrupt the unpacked executable and a
 # library and leave the marker alone: the next run unpacks them afresh from the
 # verified zip, and what is there afterwards is what the zip holds.
-echo 'tampered' >"$tmp/c1/electron/electron-1.2.3/electron"
-echo 'tampered' >"$tmp/c1/electron/electron-1.2.3/libffmpeg.so"
+echo 'tampered' >"$tmp/c1.dest/electron"
+echo 'tampered' >"$tmp/c1.dest/libffmpeg.so"
 run "$tmp/c1"
 [ "$status" -eq 0 ] || fail "run after tampering failed: $out"
-cmp -s "$tmp/zipsrc/electron" "$tmp/c1/electron/electron-1.2.3/electron" || fail "a tampered executable survived a run"
-cmp -s "$tmp/zipsrc/libffmpeg.so" "$tmp/c1/electron/electron-1.2.3/libffmpeg.so" || fail "a tampered library survived a run"
+cmp -s "$tmp/zipsrc/electron" "$tmp/c1.dest/electron" || fail "a tampered executable survived a run"
+cmp -s "$tmp/zipsrc/libffmpeg.so" "$tmp/c1.dest/libffmpeg.so" || fail "a tampered library survived a run"
 
 # The cached zip itself is checked on every run: tampered, it is refused and
 # removed, and nothing is unpacked from it.
 echo 'tampered' >>"$tmp/c1/electron/electron-v1.2.3-linux-x64.zip"
-rm -rf "$tmp/c1/electron/electron-1.2.3"
+rm -rf "$tmp/c1.dest"
 run "$tmp/c1"
 [ "$status" -ne 0 ] || fail "a tampered cached zip was accepted"
 [ "$(grep -c '^desktop-electron: FAIL:' <<<"$out")" = 1 ] || fail "want one FAIL line for a tampered cached zip: $out"
-[ ! -e "$tmp/c1/electron/electron-1.2.3" ] || fail "something was unpacked from a tampered zip"
+[ ! -e "$tmp/c1.dest" ] || fail "something was unpacked from a tampered zip"
 [ ! -e "$tmp/c1/electron/electron-v1.2.3-linux-x64.zip" ] || fail "the tampered zip was kept"
 run "$tmp/c1"
 [ "$status" -eq 0 ] || fail "the run after the refusal did not fetch afresh: $out"
@@ -101,11 +101,35 @@ mkdir -p "$tmp/c1w" && mkdir -m 775 "$tmp/c1w/electron"
 run "$tmp/c1w"
 [ "$status" -ne 0 ] || fail "a group-writable cache was accepted"
 [ "$(grep -c '^desktop-electron: FAIL:' <<<"$out")" = 1 ] || fail "want one FAIL line for a writable cache: $out"
-[ ! -e "$tmp/c1w/electron/electron-1.2.3" ] || fail "something was unpacked into a writable cache"
+[ ! -e "$tmp/c1w.dest" ] || fail "something was unpacked into a writable cache"
 mkdir -p "$tmp/c1link" "$tmp/c1t" && chmod 700 "$tmp/c1t"
 ln -s "$tmp/c1t" "$tmp/c1link/electron"
 run "$tmp/c1link"
 [ "$status" -ne 0 ] || fail "a symlinked cache was accepted"
+
+# No extracted tree is shared: the cache holds the zip only.
+[ -z "$(find "$tmp/c1/electron" -mindepth 1 -type d ! -name '.electron-fetch.*')" ] || fail "the shared cache holds an unpacked directory: $(find "$tmp/c1/electron" -mindepth 1 -type d)"
+
+# Two builds at once, each into its own directory, against a cold cache and
+# then a warm one: both must succeed and end with a complete tree.
+for cache in "$tmp/cc1" "$tmp/c1"; do
+    for i in a b c; do
+        (CONCH_CACHE="$cache" ./scripts/desktop-electron.sh "$tmp/par-$i" >"$tmp/par-$i.log" 2>&1; echo $? >"$tmp/par-$i.status") &
+    done
+    wait
+    for i in a b c; do
+        [ "$(cat "$tmp/par-$i.status")" = 0 ] || fail "concurrent run $i failed: $(cat "$tmp/par-$i.log")"
+        for f in electron libffmpeg.so chrome-sandbox; do
+            cmp -s "$tmp/zipsrc/$f" "$tmp/par-$i/$f" || fail "concurrent run $i has an incomplete tree ($f)"
+        done
+    done
+done
+
+# A download directory left by a run that was killed hard is removed.
+mkdir "$tmp/c1/electron/.electron-fetch.stale"
+run "$tmp/c1"
+[ "$status" -eq 0 ] || fail "run beside a stale download directory failed: $out"
+[ ! -e "$tmp/c1/electron/.electron-fetch.stale" ] || fail "a stale download directory survived"
 
 # A zip that differs from the pin (and so from nothing else either).
 pins "$bad"
@@ -138,7 +162,7 @@ pins "$good"
 rm "$tmp/pins.sh"
 run "$tmp/c6"
 [ "$status" -ne 0 ] || fail "a missing pin file was accepted"
-[ ! -e "$tmp/c6/electron/electron-1.2.3" ] || fail "a missing pin file left a directory behind"
+[ ! -e "$tmp/c6.dest" ] || fail "a missing pin file left a directory behind"
 
 # The package.json and the pin name different versions.
 pins "$good"
@@ -155,7 +179,7 @@ sums "$good"
 
 # Only Electron's GitHub release may be fetched over the network.
 status=0
-out=$(CONCH_CACHE="$tmp/c9" CONCH_ELECTRON_URL="https://example.com/e.zip" ./scripts/desktop-electron.sh 2>&1) || status=$?
+out=$(CONCH_CACHE="$tmp/c9" CONCH_ELECTRON_URL="https://example.com/e.zip" ./scripts/desktop-electron.sh "$tmp/c9.dest" 2>&1) || status=$?
 refuses "a foreign address" "$tmp/c9"
 
 # The address the script uses without an override is Electron's release.

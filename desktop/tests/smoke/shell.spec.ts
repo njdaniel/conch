@@ -168,6 +168,9 @@ test.describe('remote debugging', () => {
         expect(done?.code).toBe(1);
         expect(app.output()).toContain('conch-desktop: remote debugging is ON');
         expect(app.output()).toContain('refusing to start');
+        // A refused launch never opens the port (the main script runs before
+        // Chromium's DevTools handler starts).
+        expect(app.output()).not.toContain('DevTools listening on');
       } finally {
         await app.stop();
       }

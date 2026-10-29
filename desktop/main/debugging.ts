@@ -6,8 +6,8 @@
 //
 // It catches launcher mistakes (a wrapper script, a stale desktop entry) and
 // keeps the choice visible. It is not a defence against a same-user attacker,
-// who can set the variable too. Chromium may open the port before this runs,
-// so a refused launch can have had it open for a moment.
+// who can set the variable too. The port is not opened on a refused launch
+// (checked by the smoke test).
 export const REMOTE_DEBUGGING_SWITCHES = ['remote-debugging-port', 'remote-debugging-pipe'] as const;
 
 export const ON_LINE = 'conch-desktop: remote debugging is ON';

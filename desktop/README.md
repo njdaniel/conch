@@ -46,8 +46,11 @@ use the `electron` package's `install-electron`: that extracts with a package
 that loads prebuilt native code, and `.npmrc` keeps install scripts off. The
 script downloads only from Electron's GitHub release and keeps the zip only if
 its SHA-256 equals both the pin in `scripts/desktop-pins.sh` and the hash in the
-`electron` npm package's `checksums.json`. electron-builder then packs around
-that directory (`electronDist`) and downloads nothing.
+`electron` npm package's `checksums.json`. Only that verified zip is shared
+(re-hashed on every build); each build unpacks a fresh copy into its own
+`out/electron-dist/`, so builds in two worktrees never touch each other's tree.
+electron-builder then packs around that directory (`electronDist`) and
+downloads nothing.
 
 The web client is built by web's own Vite with `--base /` into `out/ui`; no
 file under `web/` changes and `web/dist` is not touched. `scripts/desktop-web-dist-check.sh` and the
@@ -71,8 +74,8 @@ A packaged app that is started with `--remote-debugging-port` or
 exits 1 unless `CONCH_DESKTOP_ALLOW_CDP=1` is set (`main/debugging.ts`; the
 smoke test's launcher sets it, and a smoke test asserts the refusal). That gate
 catches launcher mistakes and keeps the choice explicit. It is not a defence
-against a same-user attacker, who can set the variable too, and Chromium may
-open the port for a moment before the gate runs.
+against a same-user attacker, who can set the variable too. The port is not
+opened on a refused launch (checked by the smoke test).
 
 It checks the window, the response headers, the renderer's lack of Node, the
 refusals (navigation, windows, URLs outside the manifest, foreign requests),
