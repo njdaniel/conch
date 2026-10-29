@@ -12,7 +12,7 @@
 //
 // The token is a private field and has no getter that returns it other than
 // capture(), which only the request executor calls.
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 
 export interface Capture {
   readonly generation: number;
@@ -30,12 +30,22 @@ interface PendingChallenge {
 
 const MAX_PENDING = 4;
 
+// A pasted credential that whoami accepted but that is not yet in force: it is
+// put in force only when the page keeps it (keepCredential), which an operator's
+// waits for until the person has passed the operator warning. Declined, or never
+// kept, it does nothing and lapses.
+interface Pasted {
+  readonly token: string;
+  readonly expiresAt: number;
+}
+
 export class Session {
   #generation = 0;
   #origin: string | null = null;
   #token: string | null = null;
   #controller = new AbortController();
   readonly #challenges = new Map<string, PendingChallenge>();
+  #pasted: Pasted | null = null;
 
   get generation(): number {
     return this.#generation;
@@ -50,12 +60,13 @@ export class Session {
   }
 
   // bump ends the current identity: in-flight requests are aborted and the
-  // challenges of the old one are forgotten.
+  // challenges and the pasted credential of the old one are forgotten.
   #bump(): void {
     this.#generation++;
     this.#controller.abort();
     this.#controller = new AbortController();
     this.#challenges.clear();
+    this.#pasted = null;
   }
 
   // setOrigin selects the server. Changing it is a change of identity; setting
@@ -80,6 +91,24 @@ export class Session {
     this.#bump();
     this.#token = null;
     return token;
+  }
+
+  // holdPasted sets a checked, pasted credential aside, not in force. A later
+  // paste replaces it.
+  holdPasted(token: string, expiresAt: number): void {
+    this.#pasted = { token, expiresAt };
+  }
+
+  // takePasted says whether token is the credential holdPasted set aside, still
+  // within its time, and consumes it either way it matches. The caller adopts it.
+  takePasted(token: string, now: number): boolean {
+    const pasted = this.#pasted;
+    if (pasted === null) return false;
+    const a = Buffer.from(pasted.token);
+    const b = Buffer.from(token);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
+    this.#pasted = null;
+    return now < pasted.expiresAt;
   }
 
   capture(): Capture {

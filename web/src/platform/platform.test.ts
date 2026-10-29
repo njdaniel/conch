@@ -16,8 +16,8 @@ describe('the platform', () => {
     window.localStorage.clear();
     const store = platform.credentials;
     expect(store.read()).toBeNull();
-    expect(store.write('member', 'lasting')).toBe(true);
-    expect(store.write('operator', 'tab')).toBe(true);
+    expect(store.write('member', 'lasting')).toEqual({ token: 'member', place: 'lasting' });
+    expect(store.write('operator', 'tab')).toEqual({ token: 'operator', place: 'tab' });
     // The tab's own comes first.
     expect(store.read()).toEqual({ token: 'operator', place: 'tab' });
     expect(store.isStored({ token: 'member', place: 'lasting' })).toBe(true);
@@ -52,6 +52,7 @@ describe('the desktop bridge type', () => {
       subscribe: true,
       restore: true,
       signInWithCredential: true,
+      keepCredential: true,
       signInWithPassword: true,
       signInWithCode: true,
       redeemInvite: true,
@@ -63,6 +64,6 @@ describe('the desktop bridge type', () => {
       createAccount: true,
       signOut: true,
     };
-    expect(Object.keys(named)).toHaveLength(16);
+    expect(Object.keys(named)).toHaveLength(17);
   });
 });

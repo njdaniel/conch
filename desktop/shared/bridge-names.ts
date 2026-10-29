@@ -14,6 +14,7 @@ export const BRIDGE_FUNCTIONS = [
   'subscribe',
   'restore',
   'signInWithCredential',
+  'keepCredential',
   'signInWithPassword',
   'signInWithCode',
   'redeemInvite',

@@ -42,6 +42,20 @@ async function renderer(page: Page): Promise<string> {
 
 // invoke calls a function of the bridge as the page does, and gives what the
 // renderer received, or "rejected: <message>".
+// heap is a snapshot of the page's JavaScript heap, taken over the debugging
+// connection (it collects garbage first): what a script in the page could
+// still reach, which the DOM and storage scans do not see.
+async function heap(page: Page): Promise<string> {
+  const cdp = await page.context().newCDPSession(page);
+  const chunks: string[] = [];
+  cdp.on('HeapProfiler.addHeapSnapshotChunk', ({ chunk }) => chunks.push(chunk));
+  await cdp.send('HeapProfiler.enable');
+  await cdp.send('HeapProfiler.collectGarbage');
+  await cdp.send('HeapProfiler.takeHeapSnapshot', { reportProgress: false });
+  await cdp.detach();
+  return chunks.join('');
+}
+
 async function invoke(page: Page, name: string, ...args: unknown[]): Promise<unknown> {
   return page.evaluate(
     async ({ name: fn, args: list }) => {
@@ -161,13 +175,56 @@ test.describe('the packaged app against a real conchd', () => {
     expect(await invoke(page, 'request', { operation: 'listChannels' })).toEqual({ kind: 'unauthorized' });
   });
 
-  test('signs in with a pasted credential, which main keeps and the page does not', async () => {
+  test('signs in with a pasted credential, which main keeps and the page does not, in its DOM, storage or memory', async () => {
     await page.getByLabel('Credential').fill(server.member.token);
     await page.getByRole('button', { name: 'Use credential' }).click();
     await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
     const seen = await renderer(page);
     expect(seen).not.toContain(server.member.token);
     expect(app.output()).not.toContain(server.member.token);
+    // Nor in the page's memory: the client pinned the stand-in.
+    expect(await heap(page)).not.toContain(server.member.token);
+    await signOutThroughSettings(page);
+  });
+
+  // An operator's pasted credential is checked, then waits behind the
+  // operator warning. Declined, it was never in force: nothing runs as the
+  // operator, and a reload does not sign the window in.
+  async function pasteOperator(): Promise<void> {
+    await page.getByLabel('Credential').fill(server.operatorToken);
+    await page.getByRole('button', { name: 'Use credential' }).click();
+    await expect(page.getByRole('heading', { name: 'This is an operator credential' })).toBeVisible();
+    expect(await invoke(page, 'restore')).toMatchObject({ ok: false, kind: 'unauthorized' });
+    expect(await invoke(page, 'request', { operation: 'listChannels' })).toEqual({ kind: 'unauthorized' });
+  }
+
+  test('an operator credential declined at the warning is never in force, and a reload does not find it', async () => {
+    await pasteOperator();
+    await page.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await expect(page.getByLabel('Credential')).toBeVisible();
+    expect(await invoke(page, 'restore')).toMatchObject({ ok: false, kind: 'unauthorized' });
+    expect(await invoke(page, 'request', { operation: 'listChannels' })).toEqual({ kind: 'unauthorized' });
+    // (Main still has it set aside until it lapses: keeping it needs the
+    // credential itself, which a script in the page could as well paste anew.)
+    await page.reload();
+    await expect(page.getByLabel('Credential')).toBeVisible();
+    expect(await invoke(page, 'restore')).toMatchObject({ ok: false, kind: 'unauthorized' });
+  });
+
+  test('a reload while the operator warning is showing signs nobody in', async () => {
+    await pasteOperator();
+    await page.reload();
+    await expect(page.getByLabel('Credential')).toBeVisible();
+    expect(await invoke(page, 'restore')).toMatchObject({ ok: false, kind: 'unauthorized' });
+  });
+
+  test('an operator credential is in force once the person continues past the warning, and the page holds only the stand-in', async () => {
+    await pasteOperator();
+    await page.getByRole('button', { name: 'Continue anyway' }).click();
+    await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
+    expect(await invoke(page, 'restore')).toMatchObject({ ok: true });
+    expect(await renderer(page)).not.toContain(server.operatorToken);
+    expect(await heap(page)).not.toContain(server.operatorToken);
     await signOutThroughSettings(page);
   });
 });

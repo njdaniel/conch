@@ -46,6 +46,7 @@ export function createBridge(invoke: Invoke): Readonly<ConchDesktopBridge> {
     subscribe,
     restore: call('restore'),
     signInWithCredential: call('signInWithCredential'),
+    keepCredential: call('keepCredential'),
     signInWithPassword: call('signInWithPassword'),
     signInWithCode: call('signInWithCode'),
     redeemInvite: call('redeemInvite'),

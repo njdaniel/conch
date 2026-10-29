@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { isCertificateFailure } from '../../main/api/trust.ts';
+import { isCertificateFailure, NO_CHECK_VARIABLE, PROXY_VARIABLE, transportVerdict } from '../../main/api/trust.ts';
 import { makePki, sendJson, startHttps, who, type Fake, type Pki } from './support.ts';
 
 const child = resolve(import.meta.dirname, 'trust-child.ts');
@@ -55,6 +55,32 @@ describe('trusting a private CA', () => {
     expect(isCertificateFailure(new TypeError('fetch failed', { cause: Object.assign(new Error('x'), { code: 'ECONNREFUSED' }) }))).toBe(false);
     expect(isCertificateFailure('x')).toBe(false);
     expect(isCertificateFailure(null)).toBe(false);
+  });
+});
+
+describe('transportVerdict', () => {
+  function run(env: Record<string, string>): { verdict: string; logs: string[] } {
+    const logs: string[] = [];
+    return { verdict: transportVerdict(env, (l) => logs.push(l)), logs };
+  }
+
+  it('refuses an environment that turns certificate checks off', () => {
+    const { verdict, logs } = run({ [NO_CHECK_VARIABLE]: '0' });
+    expect(verdict).toBe('refused');
+    expect(logs).toHaveLength(1);
+  });
+
+  it.each(['1', 'on'])('refuses %j for the proxy switch', (value) => {
+    expect(run({ [PROXY_VARIABLE]: value }).verdict).toBe('refused');
+  });
+
+  it.each([{}, { [NO_CHECK_VARIABLE]: '1' }, { [PROXY_VARIABLE]: '0' }, { [PROXY_VARIABLE]: '' }])('lets %j start, saying nothing', (env) => {
+    expect(run(env)).toEqual({ verdict: 'ok', logs: [] });
+  });
+
+  it('names the variables Node reads', () => {
+    expect(NO_CHECK_VARIABLE).toBe(['NODE_TLS', 'REJECT_UNAUTHORIZED'].join('_'));
+    expect(PROXY_VARIABLE).toBe(['NODE_USE', 'ENV_PROXY'].join('_'));
   });
 });
 

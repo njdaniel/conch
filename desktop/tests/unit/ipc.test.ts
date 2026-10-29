@@ -106,6 +106,9 @@ describe('arguments', () => {
     ['signInWithCredential', ['has space']],
     ['signInWithCredential', ['']],
     ['signInWithCredential', ['x'.repeat(5000)]],
+    ['keepCredential', ['has space']],
+    ['keepCredential', ['']],
+    ['keepCredential', [7]],
     ['signInWithPassword', [{ name: 'a' }]],
     ['signInWithPassword', [{ name: 'a', password: 1 }]],
     ['signInWithPassword', ['a']],
@@ -215,7 +218,7 @@ describe('the registry', () => {
     const channels: string[] = [];
     f.ipc.register({ handle: (channel) => void channels.push(channel) });
     expect(channels.sort()).toEqual(INVOKED_FUNCTIONS.map((n) => `conch:${n}`).sort());
-    expect(channels).toHaveLength(15);
+    expect(channels).toHaveLength(16);
   });
 
   it('parses a request the way the table says', () => {

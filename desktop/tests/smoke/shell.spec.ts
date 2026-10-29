@@ -69,7 +69,7 @@ test.describe('the packaged shell', () => {
     expect(await page.evaluate('[typeof conchDesktop, Object.keys(conchDesktop).sort(), Object.values(conchDesktop).every((v) => typeof v === "function")]')).toEqual([
       'object',
       [
-        'createAccount', 'joinAsGuest', 'redeemInvite', 'redeemInviteAsGuest', 'redeemSetupToken', 'redeemSignInLink', 'request', 'restore', 'resetPassword',
+        'createAccount', 'joinAsGuest', 'keepCredential', 'redeemInvite', 'redeemInviteAsGuest', 'redeemSetupToken', 'redeemSignInLink', 'request', 'restore', 'resetPassword',
         'serverAddress', 'setServerAddress', 'signInWithCode', 'signInWithCredential', 'signInWithPassword', 'signOut', 'subscribe',
       ].sort(),
       true,

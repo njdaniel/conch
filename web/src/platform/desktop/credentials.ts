@@ -5,25 +5,35 @@
 // is a fixed word, not a secret, and means "main's session".
 //
 // The one real credential that passes through is a pasted one (Sign in with a
-// credential): the person typed it into this page, main takes it on that
-// call, and the client holds it as it always has until it is dropped. It is
-// never written anywhere by this store but this module's memory, which is
-// emptied by drop.
+// credential). Main checks it and sets it aside; when the client keeps it
+// (write), this store hands it to main to put in force (keepCredential) and
+// keeps the stand-in, which is what the client pins. So the pasted credential
+// is not held here, and an operator's that the person declined at the warning
+// is never put in force: a reload does not find it.
 //
 // Nothing here touches web storage. Preferences are kept in memory for the
 // session: saved profiles scope them in #945.
 import type { CredentialStore, Held, Place } from '../types';
+import { bridge } from './access';
 
 export const STAND_IN = 'conch-desktop-session';
 
 let held: Held | null = null;
 const preferences = new Map<string, string>();
+// The last hand-over of a pasted credential to main, which every call through
+// the bridge waits for, so that none runs before it is in force.
+let keeping: Promise<unknown> = Promise.resolve();
 
-// isSessionToken says whether a token the client passes is main's session: the
-// stand-in, or the pasted credential this store is holding. Anything else is a
-// candidate that main has not seen.
+// isSessionToken says whether a token the client passes is main's session (the
+// stand-in). Anything else is a candidate that main has not seen.
 export function isSessionToken(token: string): boolean {
-  return token === STAND_IN || (held !== null && held.token === token);
+  return token === STAND_IN;
+}
+
+// kept resolves once a pasted credential the client kept is in force in main
+// (or was refused there, and the next call is unauthorized).
+export function kept(): Promise<unknown> {
+  return keeping;
 }
 
 // signedIn records that main holds a session, for a client that has just
@@ -37,8 +47,13 @@ export const credentials: CredentialStore = {
   read: () => held,
   isStored: (candidate: Held) => held !== null && held.token === candidate.token && held.place === candidate.place,
   write(token: string, place: Place) {
-    held = { token, place };
-    return true;
+    if (token !== STAND_IN) {
+      const b = bridge();
+      if (b === undefined) return null;
+      keeping = b.keepCredential(token).catch(() => false);
+    }
+    held = { token: STAND_IN, place };
+    return held;
   },
   drop(candidate: Held) {
     if (held !== null && held.token === candidate.token && held.place === candidate.place) held = null;

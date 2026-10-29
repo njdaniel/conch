@@ -180,6 +180,12 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     parse: (args) => (args.length === 1 && typeof args[0] === 'string' && /^\S{1,4096}$/u.test(args[0]) ? args : null),
     run: (service, [credential]) => service.signInWithCredential(credential as string),
   },
+  keepCredential: {
+    limit: 30,
+    maxBytes: 8 * 1024,
+    parse: (args) => (args.length === 1 && typeof args[0] === 'string' && /^\S{1,4096}$/u.test(args[0]) ? args : null),
+    run: (service, [credential]) => service.keepCredential(credential as string),
+  },
   signInWithPassword: signIn('login'),
   signInWithCode: signIn('loginTotp'),
   redeemInvite: signIn('redeemInvite'),

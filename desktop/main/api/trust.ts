@@ -8,14 +8,42 @@
 // system documents (update-ca-certificates, SSL_CERT_FILE, SSL_CERT_DIR) is
 // trusted, and NODE_EXTRA_CA_CERTS, which Node reads itself, keeps working.
 //
-// Input: the node:tls functions. Output: whether the system roots were added.
-// It owns the root set and nothing else; a failed certificate check is never
-// overridden here or anywhere (desktop/tests/unit/no-tls-override.test.ts).
+// Input: the node:tls functions, and the environment. Output: whether the
+// system roots were added, and whether the environment lets main's requests
+// run. It owns the root set and nothing else; a failed certificate check is
+// never overridden here or anywhere (the source scan "no TLS override anywhere
+// in the shell", desktop/tests/unit/trust.test.ts).
 import type * as TlsModule from 'node:tls';
 
 type TlsApi = Pick<typeof TlsModule, 'getCACertificates' | 'setDefaultCACertificates'>;
 
 export type TrustResult = { readonly ok: true; readonly added: number } | { readonly ok: false };
+
+// Node reads these from the environment on every connection, and fetch obeys
+// them: the first, set to 0, accepts any certificate at all; the second sends
+// every request through the proxy the environment names. Main allows neither
+// (linux-desktop.md §3: never override certificate failures; no proxy). The
+// names are assembled so that the source scan finds no override written whole.
+export const NO_CHECK_VARIABLE = ['NODE', 'TLS', 'REJECT', 'UNAUTHORIZED'].join('_');
+export const PROXY_VARIABLE = ['NODE', 'USE', 'ENV', 'PROXY'].join('_');
+
+// transportVerdict refuses to start main's client in an environment that would
+// turn certificate checks off or route it through a proxy. It catches a
+// developer shell or a launcher that exported one; like the debugging gate, it
+// is not a defence against a same-user attacker.
+export function transportVerdict(env: Readonly<Record<string, string | undefined>>, log: (line: string) => void): 'ok' | 'refused' {
+  const noCheck = env[NO_CHECK_VARIABLE];
+  const proxy = env[PROXY_VARIABLE];
+  if (noCheck === '0') {
+    log(`conch-desktop: refusing to start: ${NO_CHECK_VARIABLE}=0 would accept any certificate`);
+    return 'refused';
+  }
+  if (proxy !== undefined && proxy !== '' && proxy !== '0') {
+    log(`conch-desktop: refusing to start: ${PROXY_VARIABLE} would send every request through a proxy`);
+    return 'refused';
+  }
+  return 'ok';
+}
 
 export function trustSystemRoots(tls: TlsApi): TrustResult {
   try {

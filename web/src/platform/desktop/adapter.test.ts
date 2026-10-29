@@ -16,6 +16,7 @@ function fakeBridge(overrides: Partial<ConchDesktopBridge>): ConchDesktopBridge 
     subscribe: () => () => undefined,
     restore: unexpected('restore'),
     signInWithCredential: unexpected('signInWithCredential'),
+    keepCredential: unexpected('keepCredential'),
     signInWithPassword: unexpected('signInWithPassword'),
     signInWithCode: unexpected('signInWithCode'),
     redeemInvite: unexpected('redeemInvite'),
@@ -183,22 +184,41 @@ describe('the desktop transport: sign-in', () => {
 });
 
 describe('the desktop transport: a pasted credential', () => {
-  it('goes to main to be checked and kept there, and what comes back is the account', async () => {
+  it('goes to main to be checked, and what comes back is the account', async () => {
     const signInWithCredential = vi.fn((): Promise<SignInOutcome> => Promise.resolve({ ok: true, who, answer: {} }));
-    const request = vi.fn((): Promise<BridgeReply> => Promise.resolve({ kind: 'reply', status: 200, body: who }));
-    install(fakeBridge({ signInWithCredential, request }));
+    install(fakeBridge({ signInWithCredential }));
     const res = await http.get(call('whoami'), 'conch_pasted_secret');
     expect(signInWithCredential).toHaveBeenCalledWith('conch_pasted_secret');
     expect(whoAmIResponseV1(await res.json())).toEqual([]);
-    // Once the client has kept it, it is main's session, not a new candidate.
-    credentials.write('conch_pasted_secret', 'lasting');
-    expect(isSessionToken('conch_pasted_secret')).toBe(true);
-    await http.get(call('whoami'), 'conch_pasted_secret');
-    expect(signInWithCredential).toHaveBeenCalledTimes(1);
+  });
+
+  it('is put in force in main only when the client keeps it, and the store keeps the stand-in', async () => {
+    let release: (value: boolean) => void = () => undefined;
+    const keepCredential = vi.fn((): Promise<boolean> => new Promise<boolean>((r) => { release = r; }));
+    const request = vi.fn((): Promise<BridgeReply> => Promise.resolve({ kind: 'reply', status: 200, body: who }));
+    install(fakeBridge({ keepCredential, request }));
+    const kept = credentials.write('conch_pasted_secret', 'lasting');
+    expect(keepCredential).toHaveBeenCalledWith('conch_pasted_secret');
+    // What the client pins is the stand-in: the page no longer holds the paste.
+    expect(kept).toEqual({ token: STAND_IN, place: 'lasting' });
+    expect(credentials.read()).toEqual({ token: STAND_IN, place: 'lasting' });
+    expect(isSessionToken('conch_pasted_secret')).toBe(false);
+    // No call goes ahead of the hand-over.
+    const next = http.get(call('whoami'), STAND_IN);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(request).not.toHaveBeenCalled();
+    release(true);
+    await next;
     expect(request).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(request.mock.calls)).not.toContain('conch_pasted_secret');
-    credentials.drop({ token: 'conch_pasted_secret', place: 'lasting' });
-    expect(isSessionToken('conch_pasted_secret')).toBe(false);
+  });
+
+  it('is never put in force when the client does not keep it (an operator declining the warning)', async () => {
+    const keepCredential = vi.fn((): Promise<boolean> => Promise.resolve(true));
+    install(fakeBridge({ signInWithCredential: () => Promise.resolve({ ok: true, who, answer: {} }), keepCredential }));
+    await http.get(call('whoami'), 'conch_pasted_secret');
+    expect(keepCredential).not.toHaveBeenCalled();
+    expect(credentials.read()).toBeNull();
   });
 
   it('is a 401 when main refuses it', async () => {
@@ -232,7 +252,7 @@ describe('the desktop credential store', () => {
     window.localStorage.clear();
     window.sessionStorage.clear();
     expect(credentials.read()).toBeNull();
-    expect(credentials.write(STAND_IN, 'lasting')).toBe(true);
+    expect(credentials.write(STAND_IN, 'lasting')).toEqual({ token: STAND_IN, place: 'lasting' });
     expect(credentials.read()).toEqual({ token: STAND_IN, place: 'lasting' });
     expect(credentials.isStored({ token: STAND_IN, place: 'lasting' })).toBe(true);
     expect(credentials.isStored({ token: STAND_IN, place: 'tab' })).toBe(false);

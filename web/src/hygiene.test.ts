@@ -59,8 +59,9 @@ describe('credential handling', () => {
     // and convertGuest (issue #713), which keeps the member's credential a
     // guest's Create an account gives, and keepRotated (issue #714), which
     // keeps the credential a password change rotates this page's into, in
-    // the place of the one the server revoked.
-    expect(code.match(/\bpinned = \{|\bpinned = held\b/g)?.length ?? 0).toBe(6);
+    // the place of the one the server revoked. Each pins what the store says
+    // it kept (kept, or held), which for the desktop's is its stand-in.
+    expect(code.match(/\bpinned = \{|\bpinned = (held|kept)\b/g)?.length ?? 0).toBe(6);
   });
 
   it('is not placed in a URL: the only fetch sends it as a header', () => {

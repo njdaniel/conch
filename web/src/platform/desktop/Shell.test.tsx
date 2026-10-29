@@ -14,6 +14,7 @@ function install(overrides: Partial<ConchDesktopBridge>): void {
     subscribe: () => () => undefined,
     restore: () => Promise.resolve({ ok: false, kind: 'unauthorized', status: 401 }),
     signInWithCredential: never,
+    keepCredential: never,
     signInWithPassword: never,
     signInWithCode: never,
     redeemInvite: never,

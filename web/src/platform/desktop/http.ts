@@ -15,7 +15,7 @@ import { operations, type Call, type OperationId } from '../operations';
 import type { HttpTransport } from '../types';
 import type { BridgeReply, BridgeRequest, ConchDesktopBridge, NoAnswerReason, SignInOutcome } from './bridge';
 import { bridge } from './access';
-import { isSessionToken, STAND_IN } from './credentials';
+import { isSessionToken, kept, STAND_IN } from './credentials';
 
 const json = 'application/json';
 
@@ -132,9 +132,13 @@ function withSignal<T>(wait: Promise<T>, signal: AbortSignal | undefined): Promi
   });
 }
 
-function need(): Promise<ConchDesktopBridge> {
+// need is the bridge, once a pasted credential the client just kept is in
+// force in main.
+async function need(): Promise<ConchDesktopBridge> {
+  await kept();
   const b = bridge();
-  return b === undefined ? Promise.reject(new TypeError('the desktop bridge is missing')) : Promise.resolve(b);
+  if (b === undefined) throw new TypeError('the desktop bridge is missing');
+  return b;
 }
 
 const later = (what: string) => (): Promise<never> => Promise.reject(new TypeError(`${what} is not available in the desktop app yet`));

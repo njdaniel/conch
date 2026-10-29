@@ -130,8 +130,12 @@ export interface ConchDesktopBridge {
   // accepted for its operation alone; main consumes the token the answer holds.
   restore(): Promise<SignInOutcome>;
   // A credential the person pasted (an operator's or a script's): main checks
-  // it with whoami and keeps it, so the renderer need not.
+  // it with whoami and sets it aside, not yet in force.
   signInWithCredential(credential: string): Promise<SignInOutcome>;
+  // Puts in force the credential signInWithCredential set aside, when the page
+  // keeps it (for an operator's, once the person passed the warning). false
+  // when it is not the one set aside, or it lapsed.
+  keepCredential(credential: string): Promise<boolean>;
   signInWithPassword(request: LoginRequestV1): Promise<SignInOutcome>;
   signInWithCode(request: TOTPLoginRequestV1): Promise<SignInOutcome>;
   redeemInvite(request: RedeemInviteRequestV2): Promise<SignInOutcome>;

@@ -26,6 +26,10 @@ import type { Session } from './session.ts';
 
 export const REVOKE_TIMEOUT_MS = 5_000;
 
+// How long a checked, pasted credential waits to be kept: long enough for a
+// person to read the operator warning.
+export const PASTED_TTL_MS = 10 * 60_000;
+
 export interface ServiceDeps {
   readonly client: Client;
   readonly session: Session;
@@ -110,7 +114,11 @@ export class Service {
   setServerAddress(input: string): SetServerAddressResult {
     const parsed = parseServerAddress(input);
     if (!parsed.ok) return parsed;
-    this.#deps.session.setOrigin(parsed.origin);
+    const { session } = this.#deps;
+    const before = session.capture();
+    session.setOrigin(parsed.origin);
+    // A sign-in the change ended is revoked at the server that issued it.
+    if (before.token !== null && !session.signedIn) void this.#revoke(before.origin, before.token);
     return { ok: true, origin: parsed.origin };
   }
 
@@ -164,16 +172,38 @@ export class Service {
     return 'who' in checked ? { ok: true, who: checked.who, answer: {} } : checked.outcome;
   }
 
-  // A pasted credential: checked with whoami before it is kept, and kept in
-  // main alone.
+  // A pasted credential: checked with whoami, then set aside in main, not in
+  // force. It is put in force only by keepCredential, which the page calls
+  // when it keeps the credential: at once for a member's, and for an
+  // operator's only once the person has passed the operator warning. One the
+  // person declines is never in force, so a reload does not find it.
   async signInWithCredential(credential: string): Promise<SignInOutcome> {
     const { session } = this.#deps;
     const capture = session.capture();
     const exchange = await this.#deps.client.send({ op: 'whoami', token: credential, capture });
     if (exchange.kind !== 'answer' || !exchange.ok || whoAmIResponseV1(exchange.body).length > 0) return failed(exchange);
     if (!session.current(capture)) return { ok: false, kind: 'network', reason: 'stale' };
-    session.adopt(credential);
+    session.holdPasted(credential, this.#deps.now() + PASTED_TTL_MS);
     return { ok: true, who: exchange.body as WhoAmIResponseV1, answer: {} };
+  }
+
+  // keepCredential puts in force the credential signInWithCredential set
+  // aside. The page must present it again: one that was not just pasted and
+  // checked, or has lapsed, is refused and nothing changes.
+  keepCredential(credential: string): boolean {
+    const { session } = this.#deps;
+    if (!session.takePasted(credential, this.#deps.now())) return false;
+    this.#adopt(credential);
+    return true;
+  }
+
+  // adopt puts token in force. A credential it replaces is revoked (best
+  // effort), not left valid at the server and held nowhere.
+  #adopt(token: string): void {
+    const { session } = this.#deps;
+    const before = session.capture();
+    session.adopt(token);
+    if (before.token !== null && before.token !== token) void this.#revoke(before.origin, before.token);
   }
 
   // The steps that give a credential. request is already validated against the
@@ -225,7 +255,7 @@ export class Service {
       await this.#revoke(capture.origin, token);
       return { ok: false, kind: 'network', reason: 'stale' };
     }
-    session.adopt(token);
+    this.#adopt(token);
     const checked = await this.#whoami();
     if ('outcome' in checked) {
       // The credential works or it does not; either way it is not kept.

@@ -64,8 +64,10 @@ export interface CredentialStore {
   read(): Held | null;
   // Whether held is still the credential stored at its place.
   isStored(held: Held): boolean;
-  // false when the storage refused the write.
-  write(token: string, place: Place): boolean;
+  // Stores token at place and returns what is now stored there, which the
+  // client pins; null when the storage refused the write. A store may keep a
+  // stand-in in token's place (the desktop's keeps no credential at all).
+  write(token: string, place: Place): Held | null;
   // Forgets held, but only if it is still the one stored there.
   drop(held: Held): void;
   // Calls back when another tab removes or replaces the lasting credential

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { Client } from '../../main/api/client.ts';
+import { PASTED_TTL_MS, Service } from '../../main/api/service.ts';
+import { Session } from '../../main/api/session.ts';
 import { credential, principal, sendJson, startHttp, stack, who, type Fake, type Handler } from './support.ts';
 
 const CANARY_TOKEN = 'conch_canary_token_9f3a';
@@ -59,6 +62,12 @@ const conchd: Handler = (request, res) => {
       sendJson(res, 404, { code: 'not_found', message: 'no such route' });
   }
 };
+
+// A pasted credential, checked and kept, as the page does for a member's.
+async function paste(service: Service): Promise<void> {
+  expect(await service.signInWithCredential(CANARY_TOKEN)).toMatchObject({ ok: true });
+  expect(service.keepCredential(CANARY_TOKEN)).toBe(true);
+}
 
 async function ready(handler: Handler = conchd) {
   const fake = await startHttp(handler);
@@ -156,18 +165,66 @@ describe('sign-in', () => {
     expect(session.signedIn).toBe(false);
   });
 
-  it('checks a pasted credential before keeping it', async () => {
+  it('checks a pasted credential, and puts it in force only when the page keeps it', async () => {
     const { service, session } = await ready();
     expect(await service.signInWithCredential('not-the-token')).toMatchObject({ ok: false, kind: 'unauthorized' });
     expect(session.signedIn).toBe(false);
+    expect(service.keepCredential('not-the-token')).toBe(false);
     expect(await service.signInWithCredential(CANARY_TOKEN)).toEqual({ ok: true, who, answer: {} });
+    // Checked, set aside, not in force: nothing runs as it, and a reload finds nothing.
+    expect(session.signedIn).toBe(false);
+    expect(await service.request({ operation: 'listChannels' })).toEqual({ kind: 'unauthorized' });
+    expect(await service.restore()).toMatchObject({ ok: false, kind: 'unauthorized' });
+    // Kept with some other credential: refused, and the one set aside is gone too.
+    expect(service.keepCredential(`${CANARY_TOKEN}x`)).toBe(false);
+    expect(service.keepCredential(CANARY_TOKEN)).toBe(true);
     expect(session.signedIn).toBe(true);
+    // Once only.
+    expect(service.keepCredential(CANARY_TOKEN)).toBe(false);
+  });
+
+  it('lets a pasted credential lapse, and drops it with any change of identity', async () => {
+    const { fake } = await ready();
+    let now = 1_000;
+    const session = new Session();
+    const service = new Service({ client: new Client({ fetch: globalThis.fetch, session }), session, now: () => now, log: () => undefined });
+    service.setServerAddress(fake.origin);
+    await service.signInWithCredential(CANARY_TOKEN);
+    now += PASTED_TTL_MS;
+    expect(service.keepCredential(CANARY_TOKEN)).toBe(false);
+    expect(session.signedIn).toBe(false);
+    await service.signInWithCredential(CANARY_TOKEN);
+    expect(await service.signOut()).toBe('ended');
+    expect(service.keepCredential(CANARY_TOKEN)).toBe(false);
+  });
+
+  it('revokes the credential a change of server ends, and not one a sign-in only repeats', async () => {
+    let revoked = 0;
+    const { service } = await ready((request, res) => {
+      if (request.method === 'DELETE') {
+        revoked++;
+        res.writeHead(204);
+        res.end();
+      } else conchd(request, res);
+    });
+    await paste(service);
+    await paste(service);
+    await new Promise((r) => setTimeout(r, 50));
+    // The same credential again replaces nothing.
+    expect(revoked).toBe(0);
+    // A password sign-in that gives the credential in force replaces nothing either.
+    await service.signIn('login', { name: 'ada', password: CANARY_PASSWORD });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(revoked).toBe(0);
+    expect(service.setServerAddress('http://127.0.0.1:1')).toMatchObject({ ok: true });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(revoked).toBe(1);
   });
 
   it('restores a sign-in main holds, and says unauthorized when it holds none', async () => {
     const { service } = await ready();
     expect(await service.restore()).toMatchObject({ ok: false, kind: 'unauthorized' });
-    await service.signInWithCredential(CANARY_TOKEN);
+    await paste(service);
     expect(await service.restore()).toEqual({ ok: true, who, answer: {} });
   });
 });
@@ -184,7 +241,7 @@ describe('sign-out', () => {
       });
       else conchd(request, res);
     });
-    await service.signInWithCredential(CANARY_TOKEN);
+    await paste(service);
     const inFlight = service.request({ operation: 'listChannels' });
     await new Promise((r) => setTimeout(r, 50));
     expect(await service.signOut()).toBe('ended');
@@ -198,7 +255,7 @@ describe('sign-out', () => {
 
   it('forgets locally even when the server cannot be reached, and says it did not tell it', async () => {
     const { service, session, fake } = await ready();
-    await service.signInWithCredential(CANARY_TOKEN);
+    await paste(service);
     await fake.close();
     servers.length = 0;
     expect(await service.signOut()).toBe('unsent');
@@ -210,7 +267,7 @@ describe('sign-out', () => {
       if (request.method === 'DELETE') sendJson(res, 500, { code: 'internal', message: 'x' });
       else conchd(request, res);
     });
-    await service.signInWithCredential(CANARY_TOKEN);
+    await paste(service);
     expect(await service.signOut()).toBe('unconfirmed');
   });
 
@@ -231,7 +288,7 @@ describe('the request function', () => {
 
   it('changes server only through the address rules, and a change ends the sign-in', async () => {
     const { service, session } = await ready();
-    await service.signInWithCredential(CANARY_TOKEN);
+    await paste(service);
     expect(service.setServerAddress('http://example.org')).toEqual({ ok: false, refusal: 'scheme' });
     expect(session.signedIn).toBe(true);
     expect(service.setServerAddress('http://127.0.0.1:1')).toMatchObject({ ok: true });

@@ -44,9 +44,9 @@ export const credentials: CredentialStore = {
   write(token, place) {
     try {
       storageAt(place).setItem(tokenKey, token);
-      return true;
+      return { token, place };
     } catch {
-      return false;
+      return null;
     }
   },
 
