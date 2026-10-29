@@ -64,6 +64,12 @@ const paths = {
       <path d="m3 17 5-5 4 4 3-3 6 6" />
     </>
   ),
+  smile: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01" />
+    </>
+  ),
   close: <path d="M6 6l12 12M18 6 6 18" />,
   bell: <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />,
   fullscreen: <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />,
