@@ -200,7 +200,7 @@ describe('media devices', () => {
       .filter(([, code]) => tokenRead.test(code))
       .map(([path]) => path)
       .filter((path) => path !== './api.ts' && notVoice(path));
-    expect(touching).toEqual(['./platform/browser/credentials.ts']);
+    expect(touching).toEqual(['./platform/browser/credentials.ts', './platform/desktop/credentials.ts']);
   });
 
   it('are not mentioned by a pattern the rule would miss: a bare test of each rule', () => {
@@ -600,7 +600,7 @@ describe('the built bundle', () => {
 
 // A string only the desktop stub holds, so that a bundle that holds it holds
 // the desktop adapter.
-const desktopMarker = 'cannot be reached from the desktop shell yet';
+const desktopMarker = 'the desktop bridge is missing';
 
 // Where the built bundle may name localStorage, and how many times.
 //
@@ -716,7 +716,7 @@ describe('the platform seam', () => {
       .filter(([, code]) => /from\s+['"](\.\.?\/)+(platform\/)?operations['"]/.test(code))
       .map(([path]) => path)
       .sort();
-    expect(reading).toEqual(['./api.ts', './platform/browser/http.ts', './platform/browser/sockets.ts', './platform/desktop/bridge.ts', './platform/types.ts']);
+    expect(reading).toEqual(['./api.ts', './platform/browser/http.ts', './platform/browser/sockets.ts', './platform/desktop/bridge.ts', './platform/desktop/http.ts', './platform/types.ts']);
   });
 
   it('keeps the desktop adapter out of the browser graph', () => {

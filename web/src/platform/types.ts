@@ -7,6 +7,7 @@
 // (D2-3 and later). Outside ./browser nothing calls fetch, WebSocket, the
 // clipboard or the Notification API, and nothing but browser/credentials.ts
 // touches the credential's storage.
+import type { ComponentType, ReactNode } from 'react';
 import type { Call, OperationId } from './operations';
 
 // HttpTransport makes the requests of conchd that the operation table names.
@@ -106,6 +107,10 @@ export interface Services {
 
 export interface Platform {
   readonly name: 'browser' | 'desktop';
+  // What the client is rendered inside, when the place needs a step before the
+  // client can run: the desktop shell asks which server to talk to. The
+  // browser has none; it is served from its server.
+  readonly Shell?: ComponentType<{ readonly children: ReactNode }>;
   readonly http: HttpTransport;
   readonly sockets: SocketTransport;
   readonly credentials: CredentialStore;

@@ -17,6 +17,6 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["main", "preload", "build", "tests/unit", "*.config.ts"],
+  "include": ["main", "preload", "shared", "build", "tests/unit", "*.config.ts"],
   "exclude": ["out", "dist", "node_modules"]
 }

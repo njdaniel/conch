@@ -4,7 +4,7 @@
 #
 #   1. npm ci in web/ and desktop/ (the lockfiles, nothing else installs);
 #   2. the Electron binary, fetched and verified by scripts/desktop-electron.sh;
-#   3. web's own Vite build, at base "/", into desktop/out/ui. No file under
+#   3. web's own Vite build, in desktop mode (the desktop platform adapter), at base "/", into desktop/out/ui. No file under
 #      web/ is edited and web/dist is not touched, so the browser build stays
 #      what it was;
 #   4. main and the preload, bundled into desktop/out/;
@@ -29,7 +29,7 @@ rm -rf desktop/out desktop/dist
 electron_dist="$root/desktop/out/electron-dist"
 ./scripts/desktop-electron.sh "$electron_dist"
 
-(cd web && ./node_modules/.bin/vite build --base / --outDir "$root/desktop/out/ui" --emptyOutDir)
+(cd web && ./node_modules/.bin/vite build --mode desktop --base / --outDir "$root/desktop/out/ui" --emptyOutDir)
 (cd desktop && npm run bundle && node build/manifest.ts)
 
 # CI=true keeps electron-builder from asking the registry for a newer
