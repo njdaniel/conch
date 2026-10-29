@@ -255,7 +255,7 @@ func (w *world) finishExpiry(e *expiring, bounds voiceBounds) ([]timing, error) 
 			}
 			t.sockets = append(t.sockets, at.Sub(c.deadline))
 		}
-		if err := closedAllRevoked(c.h.sockets); err != nil {
+		if err := closedAllExpired(c.h.sockets); err != nil {
 			return nil, err
 		}
 		if w.lk != nil {
