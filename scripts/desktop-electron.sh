@@ -79,6 +79,12 @@ fi
 
 dest=${1:-}
 [ -n "$dest" ] || fail "usage: desktop-electron.sh <directory to unpack Electron into>"
+# The destination is removed and recreated, so refuse anything a slip could
+# make destructive: a relative path, /, $HOME, or an existing non-directory.
+case "$dest" in /*) ;; *) fail "the destination must be an absolute path: $dest" ;; esac
+dest=${dest%/}
+if [ -z "$dest" ] || [ "$dest" = "${HOME%/}" ]; then fail "refusing to unpack Electron into $1"; fi
+if [ -L "$dest" ] || { [ -e "$dest" ] && [ ! -d "$dest" ]; }; then fail "the destination is not a plain directory: $dest"; fi
 
 cache="${CONCH_CACHE:-$HOME/.cache/conch}/electron"
 zip="$cache/$archive"
