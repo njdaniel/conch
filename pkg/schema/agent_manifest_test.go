@@ -460,12 +460,16 @@ var currentMCPTools = []string{
 	"check_decision",
 	"end_session",
 	"heartbeat",
+	"list_reactors",
 	"poll_interventions",
 	"post_activity",
 	"post_message",
 	"read_channel",
+	"read_reactions",
 	"register_session",
+	"remove_reaction",
 	"request_approval",
+	"set_reaction",
 	"start_run",
 	"update_run",
 }
@@ -497,6 +501,10 @@ func TestMCPToolCapability(t *testing.T) {
 	}{
 		{"post_message", CapabilityMessagesPost, true},
 		{"read_channel", CapabilityMessagesRead, true},
+		{"set_reaction", CapabilityMessagesPost, true},
+		{"remove_reaction", CapabilityMessagesPost, true},
+		{"read_reactions", CapabilityMessagesRead, true},
+		{"list_reactors", CapabilityMessagesRead, true},
 		{"request_approval", CapabilityApprovalsRequest, true},
 		{"await_decision", CapabilityApprovalsAwait, true},
 		{"check_decision", CapabilityApprovalsCheck, true},
@@ -520,16 +528,47 @@ func TestMCPToolCapability(t *testing.T) {
 // couple them. The session and run tools (#267) are the exception, on
 // purpose: decision D9 gives an agent's own sessions one capability and its
 // runs another, and TestSessionAndRunCapabilities pins which tools have them.
+// The reaction tools (issue #765, message-reactions.md §4.2 and §16.4) are the
+// other: they add no capability, so reacting is governed by the grants that
+// govern posting and reading, and TestReactionToolCapabilities pins them.
 func TestMCPToolCapabilitiesAreDistinct(t *testing.T) {
 	seen := map[Capability]string{}
 	for tool, c := range MCPToolCapabilities() {
-		if c == CapabilitySessionsManage || c == CapabilityRunsManage {
+		if c == CapabilitySessionsManage || c == CapabilityRunsManage || reactionTools[tool] {
 			continue
 		}
 		if other, dup := seen[c]; dup {
 			t.Errorf("tools %q and %q share capability %q", tool, other, c)
 		}
 		seen[c] = tool
+	}
+}
+
+// reactionTools are the four reaction tools and the capability each needs.
+var reactionTools = map[string]bool{"set_reaction": true, "remove_reaction": true, "read_reactions": true, "list_reactors": true}
+
+// A reaction is a small post and a read of reactions is a read: the writes
+// need messages.post and the reads messages.read, and nothing else maps to
+// either of those through a reaction tool.
+func TestReactionToolCapabilities(t *testing.T) {
+	want := map[string]Capability{
+		"set_reaction":    CapabilityMessagesPost,
+		"remove_reaction": CapabilityMessagesPost,
+		"read_reactions":  CapabilityMessagesRead,
+		"list_reactors":   CapabilityMessagesRead,
+	}
+	for tool, c := range want {
+		if got, ok := MCPToolCapability(tool); !ok || got != c {
+			t.Errorf("MCPToolCapability(%q) = %q, %v; want %q", tool, got, ok, c)
+		}
+	}
+	for tool := range reactionTools {
+		if _, ok := want[tool]; !ok {
+			t.Errorf("reactionTools names %q, which this test does not pin", tool)
+		}
+	}
+	if len(reactionTools) != len(want) {
+		t.Errorf("reactionTools has %d tools, want %d", len(reactionTools), len(want))
 	}
 }
 

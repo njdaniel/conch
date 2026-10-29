@@ -39,7 +39,9 @@ func pch(w *world) string { return url.PathEscape(w.p.channel) }
 
 // historyRows are what a guest's bound means on every read route, and what
 // the member a guest became keeps.
-func historyRows() []row {
+func historyRows() []row { return append(coreHistoryRows(), reactionHistoryRows()...) }
+
+func coreHistoryRows() []row {
 	own := func(route, what string, inspect func(*world, api, []byte) error, p func(w *world) probe) row {
 		return row{route: route, what: what, own: true, inspect: inspect, probe: func(w *world, _ subject) probe { return p(w) }}
 	}

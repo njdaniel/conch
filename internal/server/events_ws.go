@@ -75,6 +75,9 @@ const (
 	eventChannel
 	// eventMessage is a newly committed message for the notification client.
 	eventMessage
+	// eventReactions is one message whose reactions changed (issue #765): id
+	// is the message and channelID its channel.
+	eventReactions
 )
 
 // eventRef names a document that changed. It carries no content.
@@ -336,6 +339,19 @@ func (h *eventsHub) notifyMessage(channelID, messageID, authorID int64) {
 			sub.push(eventRef{kind: eventMessage, id: messageID, channelID: channelID})
 		}
 	}
+}
+
+// notifyReactions queues, for every subscriber of channelID, the re-reading of
+// one message's reactions after a committed change to them (issue #765,
+// message-reactions.md §8.1). Humans and agents alike, and the actor's own
+// other sockets too. The reference names the message and nothing more: each
+// subscriber's goroutine reads the summary, at the moment it sends, with its
+// own reader and the explicit member-and-enabled clause, so a subscriber who
+// cannot see the message, or has just been removed from the channel, is sent
+// nothing. References for one message coalesce in a queue (push), so a burst of
+// reactions costs one read when the socket drains.
+func (h *eventsHub) notifyReactions(channelID, messageID int64) {
+	h.notifyChannel(channelID, eventRef{kind: eventReactions, id: messageID, channelID: channelID})
 }
 
 // notifyReadState owes every other reader the count in a channel with a new
@@ -965,6 +981,26 @@ func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
 		}
 		raw, ok := e.encode(ctx, messageV2FromStore(messages[0]))
 		return ok && e.writeReadState(ctx, epoch, raw)
+	case eventReactions:
+		// The message's whole reaction state for this reader, or nothing: no
+		// row when the message is not visible to the reader, or when the reader
+		// is no longer a current, enabled member (the store's explicit clause,
+		// for a channel-wide message as for a scoped one). A frame is never
+		// computed once and fanned out.
+		if ref.channelID != e.channel.ID || !e.sub.hasMembership(ref.channelID) {
+			return true
+		}
+		if hook := s.reactionBeforeRead; hook != nil {
+			hook()
+		}
+		sum, err := s.store.ReactionSummaryOf(ctx, ref.channelID, readerFor(e.r, apiV2), ref.id, s.reactionClock)
+		if errors.Is(err, store.ErrMessageNotFound) || errors.Is(err, store.ErrNotChannelMember) {
+			return true
+		}
+		if err != nil {
+			return e.failed(ctx, "read reactions", err)
+		}
+		return e.sendDoc(ctx, reactionSummaryDoc(sum))
 	case eventChannel:
 		// The channel as it is now, read by the id the socket is bound to:
 		// flush has just checked that this reader is still a member. Two

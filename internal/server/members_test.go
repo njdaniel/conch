@@ -194,7 +194,18 @@ func TestChannelContentLeak(t *testing.T) {
 		"DELETE /v1/channels/{channel}/members/{principal_id}":            "a membership write (operator or manager, issue #790); covered by the \"member delete\" row above, whose path names a principal id",
 		"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": "operator-only net write; covered by the role matrix and TestNetEndpoints",
-		"GET /v1/voice/occupancy/ws":                                      "names no channel (it matches the \"/ws\" test above by its spelling): it carries counts for the caller's own channels only, a non-member's channel absent; covered by TestVoiceOccupancyEndpoint, TestVoiceOccupancySocketRemovalDropsTheRow and e2e/isolation",
+		// Reactions (issue #765) need a real message id for a member's row to
+		// mean anything, which this table's rows do not have: TestReactionChannelGate
+		// runs all seven routes as these four callers and requires the
+		// non-members' responses to be byte-identical to an unknown channel's.
+		"PUT /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                   "covered by TestReactionChannelGate",
+		"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                "covered by TestReactionChannelGate",
+		"GET /v2/channels/{channel}/messages/{message_id}/reactions":                           "covered by TestReactionChannelGate",
+		"GET /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                   "covered by TestReactionChannelGate",
+		"GET /v2/channels/{channel}/reactions":                                                 "covered by TestReactionChannelGate",
+		"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}": "covered by TestReactionChannelGate",
+		"DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}":          "covered by TestReactionChannelGate",
+		"GET /v1/voice/occupancy/ws":                                                           "names no channel (it matches the \"/ws\" test above by its spelling): it carries counts for the caller's own channels only, a non-member's channel absent; covered by TestVoiceOccupancyEndpoint, TestVoiceOccupancySocketRemovalDropsTheRow and e2e/isolation",
 	}
 	covered := make(map[string]bool, len(rows))
 	for _, row := range rows {

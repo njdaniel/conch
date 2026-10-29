@@ -858,6 +858,31 @@ END`,
 		`ALTER TABLE credentials ADD COLUMN setup_totp_only INTEGER NOT NULL DEFAULT 0
 			CHECK (setup_totp_only IN (0, 1) AND (setup_totp_only = 0 OR scope = 'setup'))`,
 	},
+	// Message reactions (issue #765, docs/design/message-reactions.md §7.1). A
+	// reaction is one durable record (message, principal, emoji): one principal
+	// has reacted to one message with one canonical emoji key. The primary key
+	// is that uniqueness rule, in the order the summary (group by emoji within
+	// a message) and the reactor list (range over one emoji by principal) read
+	// it. channel_id is the message's channel, checked in the write
+	// transaction. guest_handle and guest_label are filled when the reactor is
+	// in an active guest visit at write time and never updated, as
+	// message_guest_attribution is for a message. Rows are never updated: only
+	// the owner's own removal or a moderator's deletes one. They outlive the
+	// reactor's access (leaving, disabling, hiding, ending a guest visit,
+	// conversion) on purpose, as messages do. Nothing is backfilled.
+	{
+		`CREATE TABLE message_reactions (
+	message_id   INTEGER NOT NULL REFERENCES messages (id),
+	emoji        TEXT    NOT NULL,
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	channel_id   INTEGER NOT NULL REFERENCES channels (id),
+	created_at   INTEGER NOT NULL,
+	guest_handle TEXT,
+	guest_label  TEXT,
+	PRIMARY KEY (message_id, emoji, principal_id)
+) WITHOUT ROWID`,
+		`CREATE INDEX message_reactions_by_principal ON message_reactions (message_id, principal_id)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

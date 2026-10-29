@@ -105,6 +105,15 @@ var mcpToolCapabilities = map[string]Capability{
 	"await_decision":   CapabilityApprovalsAwait,
 	"check_decision":   CapabilityApprovalsCheck,
 
+	// Message reactions (issue #765, docs/design/message-reactions.md §4.2):
+	// setting and removing one's own mark is a small post, reading them is a
+	// read. The audience permission a write also needs (post, post_net or
+	// whisper) is decided by the server from the message's audience.
+	"set_reaction":    CapabilityMessagesPost,
+	"remove_reaction": CapabilityMessagesPost,
+	"read_reactions":  CapabilityMessagesRead,
+	"list_reactors":   CapabilityMessagesRead,
+
 	"register_session":   CapabilitySessionsManage,
 	"heartbeat":          CapabilitySessionsManage,
 	"end_session":        CapabilitySessionsManage,

@@ -169,7 +169,9 @@ func ch(s subject) string { return "/v1/channels/" + url.PathEscape(s.name) }
 func id(n int64) string   { return itoa(n) }
 
 // matrixRows is the matrix.
-func matrixRows() []row {
+func matrixRows() []row { return append(coreMatrixRows(), reactionMatrixRows()...) }
+
+func coreMatrixRows() []row {
 	byChannel := func(route, what string, p func(w *world, s subject) probe) row {
 		return row{route: route, what: what, pick: aChannel, probe: p, want: channelNotFound}
 	}

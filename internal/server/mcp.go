@@ -201,6 +201,41 @@ func (s *Server) mcpServerFor(identity mcpIdentity) *mcp.Server {
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("approval %d is %s", in.ApprovalID, out.State)}}}, projected, nil
 		})
+	// Reactions (issue #765). Plain mirrors of the REST routes, over the same
+	// functions (reactions.go). They post nothing, notify no one and mark
+	// nothing read; the people who can see the message see the reaction.
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "set_reaction", Description: "React to a message in a Conch channel with one emoji, as the authenticated agent. Setting a reaction already held changes nothing. The agent needs the permission it would need to reply in the message's audience (post, post_net or whisper). Reacting does not post a message, does not notify anyone and does not mark anything read; the people who can see the message see the reaction."},
+		func(ctx context.Context, scope *agentScope, in mcpReactionInput) (*mcp.CallToolResult, mcpReactionSummary, error) {
+			out, serr := s.reactMCP(ctx, scope, in, true)
+			if serr != nil {
+				return mcpToolError(serr), mcpReactionSummary{}, nil
+			}
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("message %d has %d kinds of reaction", out.MessageID, len(out.Reactions))}}}, out, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "remove_reaction", Description: "Remove the authenticated agent's own reaction from a message. Removing one that is not held changes nothing. Removing does not post a message, notify anyone or mark anything read."},
+		func(ctx context.Context, scope *agentScope, in mcpReactionInput) (*mcp.CallToolResult, mcpReactionSummary, error) {
+			out, serr := s.reactMCP(ctx, scope, in, false)
+			if serr != nil {
+				return mcpToolError(serr), mcpReactionSummary{}, nil
+			}
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("message %d has %d kinds of reaction", out.MessageID, len(out.Reactions))}}}, out, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "read_reactions", Description: "Read the reactions on up to 100 messages of a Conch channel: one summary of emoji and counts for each listed message the agent can see that has any. A message that is missing from the answer has none, or is not one the agent can see."},
+		func(ctx context.Context, scope *agentScope, in mcpReadReactionsInput) (*mcp.CallToolResult, mcpReactionSummaries, error) {
+			out, serr := s.readReactionsMCP(ctx, scope, in)
+			if serr != nil {
+				return mcpToolError(serr), mcpReactionSummaries{}, nil
+			}
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("read reactions on %d messages", len(out.Summaries))}}}, out, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "list_reactors", Description: "List, one page at a time, who reacted to a message with one emoji: principal ids in ascending order. A reactor is named by id, as a message's author is."},
+		func(ctx context.Context, scope *agentScope, in mcpListReactorsInput) (*mcp.CallToolResult, mcpReactorList, error) {
+			out, serr := s.listReactorsMCP(ctx, scope, in)
+			if serr != nil {
+				return mcpToolError(serr), mcpReactorList{}, nil
+			}
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("listed %d reactors", len(out.Reactors))}}}, out, nil
+		})
 	s.addSessionTools(server, identity)
 	return server
 }

@@ -1852,3 +1852,137 @@ func requestedInterventionsTx(ctx context.Context, tx execer, runID int64) (int,
 	}
 	return n, nil
 }
+
+// Reactions (issue #765, docs/design/message-reactions.md §6.1). A reaction
+// is read and written only through the message it is on, so the statements
+// that name the messages table live here, in this file, and reactions.go holds
+// the ones over message_reactions alone. Every one of them embeds two
+// conditions for the caller, in the statement that selects the message:
+//
+//   - messageVisible(scoped = true): the audience rule and the history bound.
+//     For a channel-wide message it checks neither membership nor that the
+//     reader is enabled, because the handlers' gate does;
+//   - the explicit clause below: the reader is, now, a member of the
+//     message's channel and an enabled principal, in the form runVisibleHead
+//     uses. The gate cannot be relied on for this: a reader removed between
+//     the gate and the statement, or a subscriber whose reference was flushed
+//     after a removal committed and before its socket was dropped, would
+//     otherwise read a channel-wide message's reactions.
+//
+// A reader that is not Scoped, or has no verified principal, sees no message
+// here: reactions exist on v2 routes only, for a verified caller, so there is
+// nothing to read for anyone else and the answer fails closed.
+//
+// Removed messages (docs/design/moderation.md §7, not yet implemented) will
+// add AND NOT EXISTS (SELECT 1 FROM message_removals x WHERE x.message_id =
+// m.id) to reactionMessageCond, and reactionTargetTx will report the removal,
+// so every statement below picks it up at once. Until that table exists no
+// message is removed and the behaviour is identical.
+
+// ErrMessageNotFound is the one error for a message a reaction call cannot
+// use: it does not exist, is in another channel, or the reader cannot see it.
+// Message ids are sequential, so any difference between those would let a
+// reader probe for messages scoped away from them.
+var ErrMessageNotFound = errors.New("store: message not found")
+
+// reactionMemberCond takes the reader's principal id twice.
+const reactionMemberCond = `EXISTS (SELECT 1 FROM channel_members rc
+	                   WHERE rc.channel_id = m.channel_id AND rc.principal_id = ?)
+	     AND EXISTS (SELECT 1 FROM principals rp WHERE rp.id = ? AND rp.disabled_at IS NULL)`
+
+// reactionMessageCond is the whole condition a reaction statement puts on a
+// message aliased m: the message rule and the member-and-enabled clause. Its
+// arguments are reactionArgs(reader).
+var reactionMessageCond = messageVisible(true) + ` AND ` + reactionMemberCond
+
+// reactionArgs is the arguments of reactionMessageCond for reader, and false
+// when the reader may see no message at all.
+func reactionArgs(reader Reader) ([]any, bool) {
+	if !reader.Scoped || reader.PrincipalID <= 0 {
+		return nil, false
+	}
+	_, args := visibilityArgs(reader)
+	return append(args, reader.PrincipalID, reader.PrincipalID), true
+}
+
+// ReactionTarget is what a reaction needs to know of the message it is on.
+type ReactionTarget struct {
+	// Audience is nil for a channel-wide message, the net for a net message,
+	// and a principals audience (without its ids) for a whisper.
+	Audience *schema.Audience
+}
+
+// reactionTargetTx reads the audience of message messageID of channelID for
+// reader, or ErrMessageNotFound. It is the probe of §6.1: one statement, with
+// the reader's conditions in it.
+func reactionTargetTx(ctx context.Context, tx execer, channelID int64, reader Reader, messageID int64) (ReactionTarget, error) {
+	args, ok := reactionArgs(reader)
+	if !ok {
+		return ReactionTarget{}, ErrMessageNotFound
+	}
+	var kind sql.NullString
+	var net sql.NullInt64
+	switch err := tx.QueryRowContext(ctx,
+		`SELECT m.audience_kind, m.net_id FROM messages m
+		 WHERE m.id = ? AND m.channel_id = ? AND `+reactionMessageCond,
+		append([]any{messageID, channelID}, args...)...).Scan(&kind, &net); {
+	case errors.Is(err, sql.ErrNoRows):
+		return ReactionTarget{}, ErrMessageNotFound
+	case err != nil:
+		return ReactionTarget{}, fmt.Errorf("store: read message %d for a reaction: %w", messageID, err)
+	}
+	switch {
+	case !kind.Valid:
+		return ReactionTarget{}, nil
+	case schema.AudienceKind(kind.String) == schema.AudienceKindNet && net.Valid:
+		return ReactionTarget{Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: net.Int64}}, nil
+	case schema.AudienceKind(kind.String) == schema.AudienceKindPrincipals:
+		return ReactionTarget{Audience: &schema.Audience{Kind: schema.AudienceKindPrincipals}}, nil
+	default:
+		// Never read an audience we do not understand as something wider.
+		return ReactionTarget{}, fmt.Errorf("store: message %d has an unreadable audience %q", messageID, kind.String)
+	}
+}
+
+// ReactionTargetOf is reactionTargetTx outside a transaction: the handler's
+// probe, which an agent's audience permission is decided from. The write
+// transaction reads the row again, so what is stored is what was authorized.
+func (s *Store) ReactionTargetOf(ctx context.Context, channelID int64, reader Reader, messageID int64) (ReactionTarget, error) {
+	return reactionTargetTx(ctx, s.db, channelID, reader, messageID)
+}
+
+// reactableMessagesTx returns which of ids are messages of channelID that
+// reader may see, ascending: the batch read's probe, one statement for every
+// requested id. ids are bound as one JSON array, so the statement does not
+// change with how many there are.
+func reactableMessagesTx(ctx context.Context, tx execer, channelID int64, reader Reader, ids []int64) ([]int64, error) {
+	args, ok := reactionArgs(reader)
+	if !ok || len(ids) == 0 {
+		return nil, nil
+	}
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return nil, fmt.Errorf("store: encode message ids: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT m.id FROM messages m
+		 WHERE m.channel_id = ? AND m.id IN (SELECT value FROM json_each(?)) AND `+reactionMessageCond+`
+		 ORDER BY m.id ASC`,
+		append([]any{channelID, string(list)}, args...)...)
+	if err != nil {
+		return nil, fmt.Errorf("store: read messages for reactions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var visible []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: read messages for reactions: %w", err)
+		}
+		visible = append(visible, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read messages for reactions: %w", err)
+	}
+	return visible, nil
+}

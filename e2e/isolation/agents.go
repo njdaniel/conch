@@ -20,7 +20,9 @@ import (
 // through the matrix's own runner) and over MCP (mcpProbes).
 
 // agentRows are the rows an agent reaches differently from a person.
-func agentRows() []row {
+func agentRows() []row { return append(coreAgentRows(), reactionAgentRows()...) }
+
+func coreAgentRows() []row {
 	byChannel := func(route, what string, p func(w *world, s subject) probe) row {
 		return row{route: route, what: what, pick: aChannel, probe: p, want: channelNotFound}
 	}
