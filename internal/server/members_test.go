@@ -173,6 +173,12 @@ func TestChannelContentLeak(t *testing.T) {
 		// non-member is told nothing.
 		{"voice share claim", "POST", "/v1/channels/%s/voice/share", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		{"voice share stop", "DELETE", "/v1/channels/%s/voice/share", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, http.StatusServiceUnavailable}},
+		// Companion and viewer participants (issue #933): answered as the
+		// session endpoint is. The body is read after membership, so a
+		// non-member gets the 404 with a valid body, a malformed one and none.
+		{"voice companion", "POST", "/v1/channels/%s/voice/companion", `{"publish":"screen","subscribe":true}`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		{"voice companion, malformed body", "POST", "/v1/channels/%s/voice/companion", `{"publish":`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		{"voice companion removal", "DELETE", "/v1/channels/%s/voice/companion", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		// Voice presence (issue #127): who is connected and who is talking is
 		// channel content. Not configured is still a snapshot for a member
 		// (200, configured false); everyone else gets the unknown-channel 404.

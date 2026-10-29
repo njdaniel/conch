@@ -1013,6 +1013,9 @@ func TestVoiceNotAllowed(t *testing.T) {
 	}{
 		{"session", http.MethodPost, "/v1/channels/%s/voice/session", ""},
 		{"transmit", http.MethodPost, "/v1/channels/%s/voice/transmit", `{"state":"started"}`},
+		// A malformed body: the refusal comes before the body is read (issue #933).
+		{"companion", http.MethodPost, "/v1/channels/%s/voice/companion", `{`},
+		{"companion removal", http.MethodDelete, "/v1/channels/%s/voice/companion?publish=bogus", ""},
 		{"presence", http.MethodGet, "/v1/channels/%s/voice", ""},
 		{"socket", http.MethodGet, "/v1/voice/ws?channel=%s", ""},
 	}

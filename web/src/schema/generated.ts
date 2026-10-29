@@ -976,12 +976,14 @@ export interface VoiceSessionResponseV1 {
   livekit_url: string;
   identity: string;
   rooms: VoiceRoomGrant[];
+  companion_identity?: string;
 }
 
 export const voiceSessionResponseV1 = object<VoiceSessionResponseV1>({
   livekit_url: str,
   identity: str,
   rooms: array(voiceRoomGrant),
+  companion_identity: optional(str),
 });
 
 // schema.VoiceParticipant
@@ -1074,6 +1076,43 @@ export interface VoiceTransmitReportV1 {
 export const voiceTransmitReportV1 = object<VoiceTransmitReportV1>({
   state: voiceTransmitState,
   audience: optional(audience),
+});
+
+// schema.VoiceCompanionPublish
+export type VoiceCompanionPublish = 'screen' | 'none';
+
+export const voiceCompanionPublish = vocab<VoiceCompanionPublish>({ screen: true, none: true });
+
+// schema.VoiceCompanionRequestV1
+export interface VoiceCompanionRequestV1 {
+  publish: VoiceCompanionPublish;
+  subscribe: boolean;
+}
+
+export const voiceCompanionRequestV1 = object<VoiceCompanionRequestV1>({
+  publish: voiceCompanionPublish,
+  subscribe: bool,
+});
+
+// schema.VoiceCompanionResponseV1
+export interface VoiceCompanionResponseV1 {
+  livekit_url: string;
+  identity: string;
+  room: string;
+  token: string;
+  publish: VoiceCompanionPublish;
+  subscribe: boolean;
+  expires_at: string;
+}
+
+export const voiceCompanionResponseV1 = object<VoiceCompanionResponseV1>({
+  livekit_url: str,
+  identity: str,
+  room: str,
+  token: str,
+  publish: voiceCompanionPublish,
+  subscribe: bool,
+  expires_at: timestamp,
 });
 
 // schema.VoiceShareV1

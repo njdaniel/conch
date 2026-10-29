@@ -145,6 +145,8 @@ type scriptedLiveKit struct {
 	// getStatus is the status of GetParticipant; 0 means 200, or 404
 	// not_found when the identity is not in the room.
 	getStatus int
+	// createStatus is the status of CreateRoom; 0 means 200 (issue #933).
+	createStatus int
 }
 
 // fakeUpdate is one UpdateParticipant request: who it was for and the
@@ -192,10 +194,14 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		if _, ok := f.rooms[req.Name]; !ok {
 			f.rooms[req.Name] = nil
 		}
-		hook := f.onCreate
+		hook, status := f.onCreate, f.createStatus
 		f.mu.Unlock()
 		if hook != nil {
 			hook(req.Name)
+		}
+		if status != 0 {
+			writeFakeJSON(w, status, map[string]any{"code": "internal", "msg": "scripted failure"})
+			return
 		}
 		writeFakeJSON(w, http.StatusOK, map[string]any{"sid": "RM_test", "name": req.Name})
 	case "ListRooms":
@@ -438,6 +444,9 @@ func (f *scriptedLiveKit) setOnRemove(fn func(room, identity string)) {
 }
 func (f *scriptedLiveKit) setUpdateStatus(s int) {
 	f.config(func(l *scriptedLiveKit) { l.updateStatus = s })
+}
+func (f *scriptedLiveKit) setCreateStatus(s int) {
+	f.config(func(l *scriptedLiveKit) { l.createStatus = s })
 }
 func (f *scriptedLiveKit) setGetStatus(s int) {
 	f.config(func(l *scriptedLiveKit) { l.getStatus = s })
