@@ -1,0 +1,26 @@
+{
+  "appId": "chat.conch.desktop",
+  "productName": "Conch",
+  "copyright": "AGPL-3.0-only",
+  "directories": { "output": "dist" },
+  "files": ["package.json", "out/main/**", "out/preload/**", "out/ui/**", "out/ui-manifest.json"],
+  "asar": true,
+  "npmRebuild": false,
+  "nodeGypRebuild": false,
+  "buildDependenciesFromSource": false,
+  "electronFuses": {
+    "runAsNode": false,
+    "enableCookieEncryption": true,
+    "enableNodeOptionsEnvironmentVariable": false,
+    "enableNodeCliInspectArguments": false,
+    "enableEmbeddedAsarIntegrityValidation": true,
+    "onlyLoadAppFromAsar": true,
+    "loadBrowserProcessSpecificV8Snapshot": false,
+    "grantFileProtocolExtraPrivileges": false
+  },
+  "linux": {
+    "target": [{ "target": "dir", "arch": ["x64"] }],
+    "executableName": "conch",
+    "category": "Network"
+  }
+}

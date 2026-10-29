@@ -74,6 +74,9 @@ type fakeParticipant struct {
 	// listenOnly is a participant whose permission does not let it publish
 	// at all, as a net monitor's will (V5).
 	listenOnly bool
+	// noSubscribe is a participant whose permission does not let it receive,
+	// as a publish-only companion's does (issue #932).
+	noSubscribe bool
 }
 
 // lkCall is one request the scripted LiveKit received (or an "http-response"
@@ -134,6 +137,24 @@ type scriptedLiveKit struct {
 	// onUpdate runs while UpdateParticipant is being answered, before it
 	// takes effect: the moment between a claim's grant and its answer.
 	onUpdate func(room, identity string, share bool)
+	// updates is every UpdateParticipant request received, in order, with the
+	// permission it carried (issue #932). updateFail names identities whose
+	// UpdateParticipant fails while others succeed.
+	updates    []fakeUpdate
+	updateFail map[string]bool
+	// getStatus is the status of GetParticipant; 0 means 200, or 404
+	// not_found when the identity is not in the room.
+	getStatus int
+}
+
+// fakeUpdate is one UpdateParticipant request: who it was for and the
+// permission it set. sources is nil when the request carried none (null) and
+// empty when it carried [].
+type fakeUpdate struct {
+	room, identity string
+	canPublish     bool
+	canSubscribe   bool
+	sources        []string
 }
 
 func newScriptedLiveKit(t *testing.T) *scriptedLiveKit {
@@ -156,8 +177,9 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		Room       string `json:"room"`
 		Identity   string `json:"identity"`
 		Permission struct {
-			CanPublish bool     `json:"can_publish"`
-			Sources    []string `json:"can_publish_sources"`
+			CanPublish   bool     `json:"can_publish"`
+			CanSubscribe bool     `json:"can_subscribe"`
+			Sources      []string `json:"can_publish_sources"`
 		} `json:"permission"`
 	}
 	_ = json.Unmarshal(raw, &req)
@@ -225,30 +247,37 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		parts := make([]map[string]any, 0)
 		for _, p := range f.rooms[req.Room] {
-			part := map[string]any{"identity": p.identity, "joined_at_ms": strconv.FormatInt(p.joinedMs, 10)}
-			// As LiveKit 1.13.7 lists it: the permission spelled out.
-			sources := []string{"MICROPHONE"}
-			if p.shareGranted {
-				sources = append(sources, "SCREEN_SHARE", "SCREEN_SHARE_AUDIO")
-			}
-			part["permission"] = map[string]any{"can_subscribe": true, "can_publish": !p.listenOnly, "can_publish_data": false, "can_publish_sources": sources}
-			var tracks []map[string]any
-			if p.published {
-				tracks = append(tracks, map[string]any{"type": "AUDIO", "source": "MICROPHONE", "muted": p.muted})
-			}
-			if p.screen {
-				tracks = append(tracks, map[string]any{"type": "VIDEO", "source": "SCREEN_SHARE", "muted": false})
-			}
-			if p.screenAudio {
-				tracks = append(tracks, map[string]any{"type": "AUDIO", "source": "SCREEN_SHARE_AUDIO", "muted": false})
-			}
-			if tracks != nil {
-				part["tracks"] = tracks
-			}
+			part := fakeParticipantJSON(p)
 			parts = append(parts, part)
 		}
 		f.mu.Unlock()
 		writeFakeJSON(w, http.StatusOK, map[string]any{"participants": parts})
+	case "GetParticipant":
+		f.record(method, req.Room, req.Identity)
+		status := f.getStatus
+		f.mu.Unlock()
+		if status != 0 {
+			writeFakeJSON(w, status, map[string]any{"code": "internal"})
+			return
+		}
+		f.mu.Lock()
+		var found *fakeParticipant
+		for _, p := range f.rooms[req.Room] {
+			if p.identity == req.Identity {
+				found = &p
+				break
+			}
+		}
+		var body map[string]any
+		if found != nil {
+			body = fakeParticipantJSON(*found)
+		}
+		f.mu.Unlock()
+		if body == nil {
+			writeFakeJSON(w, http.StatusNotFound, map[string]any{"code": "not_found", "msg": "participant does not exist"})
+			return
+		}
+		writeFakeJSON(w, http.StatusOK, body)
 	case "RemoveParticipant":
 		f.record(method, req.Room, req.Identity)
 		status, keep, hook := f.removeStatus, f.keepAfterRemove, f.onRemove
@@ -274,6 +303,10 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		f.record(method, req.Room, req.Identity)
 		share := slices.Contains(req.Permission.Sources, "SCREEN_SHARE")
 		status, hook := f.updateStatus, f.onUpdate
+		f.updates = append(f.updates, fakeUpdate{req.Room, req.Identity, req.Permission.CanPublish, req.Permission.CanSubscribe, req.Permission.Sources})
+		if f.updateFail[req.Identity] {
+			status = http.StatusInternalServerError
+		}
 		f.mu.Unlock()
 		if hook != nil {
 			hook(req.Room, req.Identity, share)
@@ -289,6 +322,7 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		f.update(req.Room, req.Identity, func(p *fakeParticipant) {
 			p.shareGranted = share
 			p.listenOnly = !req.Permission.CanPublish
+			p.noSubscribe = !req.Permission.CanSubscribe
 			if !share {
 				p.screen, p.screenAudio = false, false
 			}
@@ -319,6 +353,31 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		writeFakeJSON(w, http.StatusNotFound, map[string]any{"code": "bad_route"})
 	}
+}
+
+// fakeParticipantJSON is a participant as the room API lists it.
+func fakeParticipantJSON(p fakeParticipant) map[string]any {
+	part := map[string]any{"identity": p.identity, "joined_at_ms": strconv.FormatInt(p.joinedMs, 10)}
+	// As LiveKit 1.13.7 lists it: the permission spelled out.
+	sources := []string{"MICROPHONE"}
+	if p.shareGranted {
+		sources = append(sources, "SCREEN_SHARE", "SCREEN_SHARE_AUDIO")
+	}
+	part["permission"] = map[string]any{"can_subscribe": !p.noSubscribe, "can_publish": !p.listenOnly, "can_publish_data": false, "can_publish_sources": sources}
+	var tracks []map[string]any
+	if p.published {
+		tracks = append(tracks, map[string]any{"type": "AUDIO", "source": "MICROPHONE", "muted": p.muted})
+	}
+	if p.screen {
+		tracks = append(tracks, map[string]any{"type": "VIDEO", "source": "SCREEN_SHARE", "muted": false})
+	}
+	if p.screenAudio {
+		tracks = append(tracks, map[string]any{"type": "AUDIO", "source": "SCREEN_SHARE_AUDIO", "muted": false})
+	}
+	if tracks != nil {
+		part["tracks"] = tracks
+	}
+	return part
 }
 
 // wait blocks a held request until released or cancelled and reports whether
@@ -380,6 +439,31 @@ func (f *scriptedLiveKit) setOnRemove(fn func(room, identity string)) {
 func (f *scriptedLiveKit) setUpdateStatus(s int) {
 	f.config(func(l *scriptedLiveKit) { l.updateStatus = s })
 }
+func (f *scriptedLiveKit) setGetStatus(s int) {
+	f.config(func(l *scriptedLiveKit) { l.getStatus = s })
+}
+func (f *scriptedLiveKit) setUpdateFail(identity string, fail bool) {
+	f.config(func(l *scriptedLiveKit) {
+		if l.updateFail == nil {
+			l.updateFail = map[string]bool{}
+		}
+		l.updateFail[identity] = fail
+	})
+}
+
+// updatesFor returns the UpdateParticipant requests made for identity.
+func (f *scriptedLiveKit) updatesFor(identity string) []fakeUpdate {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []fakeUpdate
+	for _, u := range f.updates {
+		if u.identity == identity {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
 func (f *scriptedLiveKit) setOnUpdate(fn func(room, identity string, share bool)) {
 	f.config(func(l *scriptedLiveKit) { l.onUpdate = fn })
 }
@@ -452,6 +536,25 @@ func (f *scriptedLiveKit) callsFor(method, room string) int {
 	n := 0
 	for _, c := range f.calls() {
 		if c.method == method && c.room == room {
+			n++
+		}
+	}
+	return n
+}
+
+// personIdentity reports whether identity is a person's own, not a companion's
+// or a viewer's.
+func personIdentity(identity string) bool {
+	return !strings.HasSuffix(identity, ".screen") && !strings.HasSuffix(identity, ".view")
+}
+
+// personRemovals counts the RemoveParticipant calls aimed at a person's own
+// identity: the removals of their companion and viewer (issue #932) are asked
+// of LiveKit in every room regardless, and are counted by the tests of those.
+func (f *scriptedLiveKit) personRemovals() int {
+	n := 0
+	for _, c := range f.calls() {
+		if c.method == "RemoveParticipant" && personIdentity(c.identity) {
 			n++
 		}
 	}

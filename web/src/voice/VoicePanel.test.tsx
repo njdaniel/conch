@@ -10,6 +10,7 @@ import type { Person } from '../useLiveChannel';
 import { initialVoice, VoiceClient, type Phase, type Processing, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
 import { ownPageNote, soundNote, type ShareFeatures } from './share';
+import { MicTestShown, VoiceLive } from '../phone';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { followsNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
 
@@ -1293,5 +1294,42 @@ describe('the strip while joined and voice is unreachable', () => {
     const { voice } = panel(initialVoice, 'c', down);
     expect(voice.textContent).not.toContain(note);
     expect(voice.textContent).toContain('Voice is unavailable right now; chat still works.');
+  });
+});
+
+describe('what the strip reports to the phone layout (issue #929)', () => {
+  const mount = (phase: Phase, shown = true) => {
+    const seen: boolean[] = [];
+    render(
+      <VoiceLive.Provider
+        value={(live) => {
+          seen.push(live);
+        }}
+      >
+        <MicTestShown.Provider value={shown}>
+          <VoicePanel voice={control(inVoice(phase, 'general'), [], { kind: 'presence', presence })} viewer={7} people={new Map()} viewed="general" onOpen={() => undefined} />
+        </MicTestShown.Provider>
+      </VoiceLive.Provider>,
+    );
+    return seen;
+  };
+
+  it.each([
+    ['connecting', true],
+    ['connected', true],
+    ['reconnecting', true],
+    ['unavailable', true],
+    ['idle', false],
+    ['stopped', false],
+  ] as const)('%s is reported as in voice: %s', (phase, live) => {
+    expect(mount(phase).at(-1)).toBe(live);
+  });
+
+  it('draws the microphone test only where the layout shows it: the phone layout hides it outside the Voice view, which ends a running test', () => {
+    mount('idle', false);
+    expect(screen.queryByRole('button', { name: /test microphone|stop test/i })).toBeNull();
+    cleanup();
+    mount('idle', true);
+    expect(screen.getByRole('button', { name: 'Test microphone' })).toBeTruthy();
   });
 });

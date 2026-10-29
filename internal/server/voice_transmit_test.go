@@ -453,7 +453,7 @@ func TestVoiceTransmitRotation(t *testing.T) {
 	// the test stops the poller removing him so that his transmission is
 	// open when the room is rotated.
 	f.srv.voice.entitle = func(_ context.Context, identity string, _ int64) (int64, string, error) {
-		id, _ := parseVoiceIdentity(identity)
+		id, _, _ := parseVoiceParticipant(identity)
 		return id, "", nil
 	}
 	f.at(0)
@@ -2053,7 +2053,7 @@ func TestVoiceTransmitTimesAreReadUnderTheLock(t *testing.T) {
 	state = p.roomNamed(room)
 	ann, ann2, bob := f.identity("ann"), f.identity("ann2"), f.identity("bob")
 	p.entitle = func(_ context.Context, identity string, _ int64) (int64, string, error) {
-		id, _ := parseVoiceIdentity(identity)
+		id, _, _ := parseVoiceParticipant(identity)
 		return id, "", nil
 	}
 	f.lk.setRoom(room,

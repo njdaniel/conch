@@ -171,8 +171,27 @@ func TestRoomCalls(t *testing.T) {
 			want: []Participant{{
 				Identity: "p1", JoinedAt: time.UnixMilli(1792188148934).UTC(),
 				MicrophonePublished: true, MicrophoneMuted: true,
-				ScreenSharePublished: true, ScreenShareAudioPublished: true, ShareSourcesGranted: true, CanPublish: true,
+				ScreenSharePublished: true, ScreenShareAudioPublished: true, ShareSourcesGranted: true, CanPublish: true, CanSubscribe: true,
 			}},
+		},
+		{
+			// Whether a participant may receive, in either spelling; false
+			// when it does not or when no permission is reported.
+			name: "ListParticipants subscribe permission", method: "ListParticipants",
+			response: `{"participants":[
+				{"identity":"p1.screen","permission":{"can_subscribe":false,"can_publish":true}},
+				{"identity":"p2.screen","permission":{"can_subscribe":true,"can_publish":true}},
+				{"identity":"p3.screen","permission":{"canSubscribe":true}},
+				{"identity":"p4.screen"}]}`,
+			call:      func(c *Client) (any, error) { return c.ListParticipants(context.Background(), "conch-a") },
+			wantBody:  map[string]any{"room": "conch-a"},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want: []Participant{
+				{Identity: "p1.screen", ShareSourcesGranted: true, CanPublish: true},
+				{Identity: "p2.screen", ShareSourcesGranted: true, CanPublish: true, CanSubscribe: true},
+				{Identity: "p3.screen", CanSubscribe: true},
+				{Identity: "p4.screen"},
+			},
 		},
 		{
 			// What a share's permission can look like: granted by name, by
@@ -230,6 +249,89 @@ func TestRoomCalls(t *testing.T) {
 			wantBody: map[string]any{"room": "conch-a", "identity": "p7", "permission": map[string]any{
 				"can_subscribe": true, "can_publish": true, "can_publish_data": false,
 				"can_publish_sources": []any{"MICROPHONE"},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
+		{
+			// The per-source form (issue #932): a companion's grant, never the
+			// microphone-only bundle.
+			name: "UpdateParticipant per source, screen only", method: "UpdateParticipant",
+			response: `{"identity":"p7.screen"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7.screen", SourcePermission(true, true, SourceScreenShare))
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7.screen", "permission": map[string]any{
+				"can_subscribe": true, "can_publish": true, "can_publish_data": false,
+				"can_publish_sources": []any{"SCREEN_SHARE"},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
+		{
+			// The per-source form (issue #932): a companion's grant, never the
+			// microphone-only bundle.
+			name: "UpdateParticipant per source, screen and its sound", method: "UpdateParticipant",
+			response: `{"identity":"p7.screen"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7.screen", SourcePermission(true, true, SourceScreenShare, SourceScreenShareAudio))
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7.screen", "permission": map[string]any{
+				"can_subscribe": true, "can_publish": true, "can_publish_data": false,
+				"can_publish_sources": []any{"SCREEN_SHARE", "SCREEN_SHARE_AUDIO"},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
+		{
+			// The per-source form (issue #932): a companion's grant, never the
+			// microphone-only bundle.
+			name: "UpdateParticipant per source, nothing", method: "UpdateParticipant",
+			response: `{"identity":"p7.screen"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7.screen", SourcePermission(true, false))
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7.screen", "permission": map[string]any{
+				"can_subscribe": true, "can_publish": false, "can_publish_data": false,
+				"can_publish_sources": []any{},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
+		{
+			// A publish-only companion stays publish-only: the grant writes
+			// can_subscribe false, not the person's true.
+			name: "UpdateParticipant per source, not subscribing", method: "UpdateParticipant",
+			response: `{"identity":"p7.screen"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7.screen", SourcePermission(false, true, SourceScreenShare))
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7.screen", "permission": map[string]any{
+				"can_subscribe": false, "can_publish": true, "can_publish_data": false,
+				"can_publish_sources": []any{"SCREEN_SHARE"},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
+		{
+			name: "UpdateParticipant per source, withdrawing a publish-only companion", method: "UpdateParticipant",
+			response: `{"identity":"p7.screen"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7.screen", SourcePermission(false, false))
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7.screen", "permission": map[string]any{
+				"can_subscribe": false, "can_publish": false, "can_publish_data": false,
+				"can_publish_sources": []any{},
 				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
 				"can_subscribe_metrics": false, "can_manage_agent_session": false,
 			}},
@@ -704,5 +806,70 @@ func TestDeleteRoomTreatsNotFoundAsDone(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestUpdateParticipantRefusesWideSourcePermissions: a per-source permission
+// that may publish with no sources (LiveKit reads that as every source), or
+// that names anything but the screen-share sources, is refused before any
+// request is made.
+func TestUpdateParticipantRefusesWideSourcePermissions(t *testing.T) {
+	srv, rec := fakeLiveKit(t, 200, `{"identity":"p7.screen"}`)
+	c := testClient(t, srv.URL)
+	for name, perm := range map[string]Permission{
+		"publish with no sources":         SourcePermission(true, true),
+		"publish with no sources, no sub": SourcePermission(false, true),
+		"the microphone":                  SourcePermission(true, true, Source("MICROPHONE")),
+		"an empty source":                 SourcePermission(true, true, Source("")),
+		"a lower-case source":             SourcePermission(true, true, Source("screen_share")),
+		"a good source beside a bad one":  SourcePermission(true, true, SourceScreenShare, Source("CAMERA")),
+		"a bad source, not publishing":    SourcePermission(true, false, Source("CAMERA")),
+	} {
+		found, err := c.UpdateParticipant(context.Background(), "conch-a", "p7.screen", perm)
+		if found || err == nil || errors.Is(err, ErrUnavailable) {
+			t.Errorf("%s: %v, %v; want a refusal that is not ErrUnavailable", name, found, err)
+		}
+	}
+	if rec.path != "" {
+		t.Errorf("a request was sent to %s", rec.path)
+	}
+}
+
+// TestGetParticipantAnswers: one participant looked up by name; nobody by that
+// name is not an error; an answer that is not LiveKit's, or names another, is.
+func TestGetParticipantAnswers(t *testing.T) {
+	for _, tt := range []struct {
+		name, body string
+		status     int
+		want       Participant
+		wantFound  bool
+		wantErr    bool
+	}{
+		{"publish-only companion", `{"identity":"p7.screen","permission":{"can_subscribe":false,"can_publish":true,"can_publish_sources":["SCREEN_SHARE"]},"tracks":[{"type":"VIDEO","source":"SCREEN_SHARE"}]}`, 200,
+			Participant{Identity: "p7.screen", ScreenSharePublished: true, ShareSourcesGranted: true, CanPublish: true}, true, false},
+		{"subscribing", `{"identity":"p7.screen","permission":{"can_subscribe":true}}`, 200, Participant{Identity: "p7.screen", CanSubscribe: true}, true, false},
+		{"not in the room", `{"code":"not_found","msg":"participant does not exist"}`, 404, Participant{}, false, false},
+		{"another participant named", `{"identity":"p8"}`, 200, Participant{}, false, true},
+		{"an empty object", `{}`, 200, Participant{}, false, true},
+		{"an HTML page", `<html>ok</html>`, 200, Participant{}, false, true},
+		{"unknown method", `{"code":"bad_route"}`, 404, Participant{}, false, true},
+		{"server error", `{"code":"internal","msg":"leaky detail"}`, 500, Participant{}, false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, rec := fakeLiveKit(t, tt.status, tt.body)
+			got, found, err := testClient(t, srv.URL).GetParticipant(context.Background(), "conch-a", "p7.screen")
+			if found != tt.wantFound || (err != nil) != tt.wantErr || !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("GetParticipant = %+v, %v, %v; want %+v, %v, error %v", got, found, err, tt.want, tt.wantFound, tt.wantErr)
+			}
+			if rec.path != "/twirp/livekit.RoomService/GetParticipant" {
+				t.Errorf("request path = %s", rec.path)
+			}
+			if err != nil && (!errors.Is(err, ErrUnavailable) || strings.Contains(err.Error(), "leaky") || strings.Contains(err.Error(), "conch-a")) {
+				t.Errorf("err = %v", err)
+			}
+		})
+	}
+	if _, found, err := testClient(t, "http://127.0.0.1:1").GetParticipant(context.Background(), "", "p7"); found || err == nil || errors.Is(err, ErrUnavailable) {
+		t.Errorf("no room: %v, %v; want a refusal that is not ErrUnavailable", found, err)
 	}
 }

@@ -16,12 +16,12 @@ use std::time::Duration;
 use conch_voice_api::{
     Audience, AudienceKind, Client, Error, ErrorBody, PresenceEvent, Refusal, Secret,
     ServerAddress, StreamEnd, Timestamp, VoiceControlAckV1, VoiceControlAckV2, VoiceControlCommand,
-    VoiceControlErrorCode, VoiceControlHelloV1, VoiceControlPlayback, VoiceControlProtocolErrorV1,
-    VoiceControlProtocolErrorV2, VoiceControlRefusal, VoiceControlTalkMode, VoiceDevice,
-    VoiceDevicesConfig, VoiceDevicesPipeWire, VoiceDevicesV1, VoiceParticipant, VoicePresenceRoom,
-    VoicePresenceV1, VoiceRoomGrant, VoiceSessionResponseV1, VoiceTransmitReportV1,
-    VoiceTransmitState, WhoAmIResponseV1, parse_command, parse_command_v2, parse_event,
-    parse_event_v2,
+    VoiceControlErrorCode, VoiceControlHelloV1, VoiceControlPipeAttachedV1, VoiceControlPlayback,
+    VoiceControlProtocolErrorV1, VoiceControlProtocolErrorV2, VoiceControlRefusal,
+    VoiceControlTalkMode, VoiceDevice, VoiceDevicesConfig, VoiceDevicesPipeWire, VoiceDevicesV1,
+    VoiceParticipant, VoicePresenceRoom, VoicePresenceV1, VoiceRoomGrant, VoiceSessionResponseV1,
+    VoiceTransmitReportV1, VoiceTransmitState, WhoAmIResponseV1, parse_command, parse_command_v2,
+    parse_event, parse_event_v2,
 };
 use serde_json::json;
 use support::{FAKE_TOKEN, Reply, Request, Step, Stub, client_for, closed_port};
@@ -31,14 +31,18 @@ const FAKE_NET_ROOM: &str = "conch-FAKENETROOM-7h2k-do-not-print";
 const FAKE_JOIN: &str = "FAKEJOIN.eyJ2aWRlbyI6e319.do-not-print";
 const FAKE_NET_JOIN: &str = "FAKENETJOIN.eyJ2aWRlbyI6e319.do-not-print";
 const FAKE_PASSWORD: &str = "FAKEPASSWORD-hunter2-do-not-print";
+/// The attach nonce: the golden fixture's, which is `voice-control-pipe/sensitive.json`'s
+/// fake secret. It is the one secret-shaped value on a control channel (issue #893).
+const FAKE_NONCE: &str = "FAKE_nonce_do_not_print_0123456789abcdefghA";
 
-const SECRETS: [&str; 6] = [
+const SECRETS: [&str; 7] = [
     FAKE_TOKEN,
     FAKE_ROOM,
     FAKE_NET_ROOM,
     FAKE_JOIN,
     FAKE_NET_JOIN,
     FAKE_PASSWORD,
+    FAKE_NONCE,
 ];
 
 /// Every way a value can be formatted for output.
@@ -259,6 +263,12 @@ async fn every_public_type_can_be_printed_without_showing_a_secret() {
         ),
         debug("VoiceControlTalkMode", &VoiceControlTalkMode::Open),
         debug("VoiceControlPlayback", &VoiceControlPlayback::Unavailable),
+        // The attach line holds the one secret-shaped value of any control channel: the
+        // nonce, which its Debug prints as a placeholder.
+        debug(
+            "VoiceControlPipeAttachedV1",
+            &VoiceControlPipeAttachedV1::new(FAKE_NONCE).unwrap(),
+        ),
     ];
     for shown in &all {
         assert!(!shown.text.is_empty(), "{}", shown.name);

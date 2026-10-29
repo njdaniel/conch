@@ -14,6 +14,14 @@
 /web/node_modules/
 /web/dist/
 
+# Desktop shell (desktop/). node_modules is installed by npm ci; out/ is what
+# `make desktop-build` bundles (main, preload, the web client, the asset
+# manifest) and dist/ the unpacked app electron-builder makes from it.
+/desktop/node_modules/
+/desktop/out/
+/desktop/dist/
+/desktop/test-results/
+
 # The copy of web/dist that conchd embeds (-tags conchweb); `make web-embed`
 # makes it.
 /internal/web/dist/

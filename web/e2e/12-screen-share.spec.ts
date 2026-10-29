@@ -19,7 +19,7 @@
 // person with the devices (#474).
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { VoicePresenceV1 } from '../src/schema/voice';
-import { channelButton, expect, expectFits, phones, signIn, test } from './fixtures';
+import { expect, expectFits, openChannel, phones, showView, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -233,11 +233,12 @@ test.describe('screen share with LiveKit', () => {
     if (crowd > 0) await addToRoom(page, crowd);
     const member = typeof who === 'string' ? vw[who] : who;
     await signIn(page, vw, member.token, member.name);
-    await channelButton(page, vw.channel).click();
+    await openChannel(page, vw.channel);
     return { page, watch, member, close: () => context.close() };
   }
 
   async function join(p: Someone, how: 'Join voice' | 'Watch only'): Promise<void> {
+    await showView(p.page, 'Voice');
     await voiceRegion(p.page).getByRole('button', { name: how }).click();
     await expect(voiceRegion(p.page)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
   }
@@ -687,6 +688,8 @@ test.describe('screen share with LiveKit', () => {
     // Eight, or a ninth if an earlier page of bob's has not yet left the room on the server.
     const count = voice.getByRole('heading', { name: /^[89] in voice$/ });
     await expect(count).toBeVisible();
+    // The compact strip is under Chat (issue #929); Join voice was in Voice.
+    await showView(b.page, 'Chat');
     // Nobody shares (the earlier size's share has ended on the server too).
     await expect(voice.getByRole('listitem').filter({ hasText: 'sharing' })).toHaveCount(0, { timeout: 15_000 });
     const box = async (el: Locator, what: string) => {
