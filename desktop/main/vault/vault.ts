@@ -13,7 +13,13 @@
 // retryable state, never an erase. Plain-text mode is never switched on, and
 // nothing here logs a secret, ciphertext or a path.
 import { classify, type Classification, type SafeStorageProbe } from './classify.ts';
-import { readCredential, removeProfile, validProfileId, writeCredential } from './files.ts';
+import {
+  readCredential,
+  removeProfile,
+  UnsafeRoot,
+  validProfileId,
+  writeCredential,
+} from './files.ts';
 
 export type { Classification, SessionOnlyReason } from './classify.ts';
 
@@ -94,7 +100,13 @@ export function createVault(deps: VaultDeps): Vault {
     }
     try {
       await write(profileId, await deps.storage.encryptStringAsync(secret));
-    } catch {
+    } catch (err) {
+      if (err instanceof UnsafeRoot) {
+        // Not a transient failure: the user must fix the directory. Reported as
+        // session-only with its own reason so #945 can say so; nothing written.
+        event('unsafe-root', profileId);
+        return { kind: 'sessionOnly', reason: 'unsafe-root' };
+      }
       event('put-failed', profileId);
       return { kind: 'failed' };
     }
@@ -111,6 +123,11 @@ export function createVault(deps: VaultDeps): Vault {
     }
     if (read.kind === 'absent') {
       return read;
+    }
+    if (read.kind === 'unsafe-root') {
+      // Never decrypt from a directory others may have written to.
+      event('unsafe-root', profileId);
+      return { kind: 'sessionOnly', reason: 'unsafe-root' };
     }
     if (read.kind === 'corrupt') {
       event('corrupt', profileId);

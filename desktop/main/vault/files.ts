@@ -55,7 +55,9 @@ async function checkRoot(root: string): Promise<boolean> {
   return true;
 }
 
-class UnsafeRoot extends Error {}
+// Thrown for a root that is not private to this user; the vault turns it into
+// the session-only reason 'unsafe-root'.
+export class UnsafeRoot extends Error {}
 
 // privateDir makes dir (and its missing parents) and leaves it 0700 whatever
 // the umask was, refusing a symlink or a non-directory in its place.
@@ -128,7 +130,9 @@ export async function writeCredential(
 export type ReadResult =
   | { readonly kind: 'absent' }
   | { readonly kind: 'bytes'; readonly data: Buffer }
-  | { readonly kind: 'corrupt' };
+  | { readonly kind: 'corrupt' }
+  // The root exists but is not ours, private and plain: nothing is read from it.
+  | { readonly kind: 'unsafe-root' };
 
 // readCredential reads the profile's file. A missing file is absent; an empty,
 // oversized or non-regular one is corrupt (and is left where it is).
@@ -150,7 +154,7 @@ export async function readCredential(root: string, id: string): Promise<ReadResu
       return { kind: 'absent' };
     }
     if (err instanceof UnsafeRoot) {
-      return { kind: 'corrupt' };
+      return { kind: 'unsafe-root' };
     }
     throw err;
   }

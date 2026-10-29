@@ -91,6 +91,7 @@ describe('refusals', () => {
   });
 
   it('reads a symlinked credential file as corrupt, not through the link', async () => {
+    await mkdir(root, { mode: 0o700 });
     await mkdir(join(root, 'profiles', 'alpha'), { recursive: true });
     const target = join(base, 'target');
     await writeFile(target, 'secret elsewhere');
@@ -103,7 +104,7 @@ describe('refusals', () => {
     await chmod(root, 0o755);
     await expect(writeCredential(root, 'alpha', Buffer.from('x'))).rejects.toThrow();
     expect(await readdir(root)).toEqual([]);
-    expect(await readCredential(root, 'alpha')).toEqual({ kind: 'corrupt' });
+    expect(await readCredential(root, 'alpha')).toEqual({ kind: 'unsafe-root' });
   });
 
   it('refuses a symlinked root', async () => {

@@ -237,6 +237,28 @@ describe('remove', () => {
   });
 });
 
+describe('unsafe root', () => {
+  async function loosen(): Promise<void> {
+    await chmod(root, 0o755);
+  }
+
+  it('put reports session-only unsafe-root, writes nothing', async () => {
+    await loosen();
+    expect(await vault.put('alpha', SECRET)).toEqual({ kind: 'sessionOnly', reason: 'unsafe-root' });
+    expect(await readdir(root)).toEqual([]);
+  });
+
+  it('get reports session-only unsafe-root and never decrypts', async () => {
+    await vault.put('alpha', SECRET);
+    await chmod(root, 0o755);
+    storage.calls = [];
+    expect(await vault.get('alpha')).toEqual({ kind: 'sessionOnly', reason: 'unsafe-root' });
+    expect(storage.calls).toEqual([]);
+    await chmod(root, 0o700);
+    expect(await vault.get('alpha')).toEqual({ kind: 'found', secret: SECRET });
+  });
+});
+
 describe('remove failures', () => {
   it('returns a fixed failure, not a raw fs error with a path', async () => {
     await vault.put('alpha', 'a');

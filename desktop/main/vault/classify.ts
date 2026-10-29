@@ -21,7 +21,8 @@ export interface SafeStorageProbe {
 export type SessionOnlyReason =
   | 'unavailable' // the asynchronous API says encryption is not available
   | 'insecure-backend' // basic_text: encrypted with a hardcoded key
-  | 'unknown-backend'; // unknown, or a name this build does not recognise
+  | 'unknown-backend' // unknown, or a name this build does not recognise
+  | 'unsafe-root'; // the data directory is not private to this user
 
 export type Classification =
   | { readonly kind: 'protected' }

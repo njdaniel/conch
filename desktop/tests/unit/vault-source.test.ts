@@ -71,6 +71,9 @@ describe('secret handling in desktop/main', () => {
           }
         }
       }
+      if (/\b(?:import|require)\(\s*['"`](?:node:)?fs/.test(text) && f.rel !== 'vault/files.ts') {
+        offenders.push(`${f.rel}: dynamic import`);
+      }
       if (/\brequire\(\s*'(?:node:)?fs/.test(text) && f.rel !== 'vault/files.ts') {
         offenders.push(`${f.rel}: require`);
       }
