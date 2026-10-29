@@ -3,11 +3,12 @@
 //
 // A Supervisor owns at most one helper process at a time, started by Join for
 // one voice session and stopped by Leave or Close. It speaks
-// conch.voice_control.v1 over two private pipes: commands to the helper's
-// standard input, events from its file descriptor 3. Its standard output is
-// drained unread and its standard error kept as a short, sanitized tail
-// (Diagnostics). Status reports only what the helper confirmed and what the
-// supervisor saw itself, never what was asked for.
+// conch.voice_control.v2 with a helper that offers it, and
+// conch.voice_control.v1 otherwise (§20.2), over two private pipes: commands
+// to the helper's standard input, events from its file descriptor 3. Its
+// standard output is drained unread and its standard error kept as a short,
+// sanitized tail (Diagnostics). Status reports only what the helper confirmed
+// and what the supervisor saw itself, never what was asked for.
 //
 // The process rules are the security core: no shell, the discovery and trust
 // checks of §10, the environment of §9 (the token never in argv, Status,
@@ -110,6 +111,10 @@ var (
 	ErrNoRetry = errors.New("voicehelper: there is no failed voice session to retry")
 	// ErrStopped: Leave stopped the helper before Join finished.
 	ErrStopped = errors.New("voicehelper: voice was left before it had started")
+	// ErrNeedsNewerHelper: the helper running speaks only
+	// conch.voice_control.v1, which cannot switch devices live or open the
+	// microphone. Nothing was sent to it.
+	ErrNeedsNewerHelper = errors.New("voicehelper: this needs a newer conch-voice: install the one from the same release as conch")
 )
 
 // Error is a failure with the reason a Status reports for it: one of the
@@ -210,7 +215,14 @@ func (s *Supervisor) Join(ctx context.Context, channel string) error {
 		return err
 	}
 	muted, deafened := s.muted, s.deafened
-	start := func(id int64) schema.VoiceControlMessage {
+	start := func(version string, id int64) schema.VoiceControlMessage {
+		if version == schema.VoiceControlSchemaV2 {
+			return schema.VoiceControlStartV2{
+				Schema: version, Kind: schema.VoiceControlCommandStart, ID: id,
+				Server: s.profile.Server, Channel: channel, PrincipalID: s.profile.PrincipalID,
+				Credential: s.profile.Credential, Muted: muted, Deafened: deafened,
+			}
+		}
 		return schema.VoiceControlStartV1{
 			Schema: schema.VoiceControlSchemaV1, Kind: schema.VoiceControlCommandStart, ID: id,
 			Server: s.profile.Server, Channel: channel, PrincipalID: s.profile.PrincipalID,
@@ -218,7 +230,8 @@ func (s *Supervisor) Join(ctx context.Context, channel string) error {
 		}
 	}
 	// A start the schema refuses is a caller's mistake: nothing is started.
-	if _, err := schema.MarshalVoiceControlLine(start(1)); err != nil {
+	// Both versions hold a start to the same rules.
+	if _, err := schema.MarshalVoiceControlLine(start(schema.VoiceControlSchemaV1, 1)); err != nil {
 		s.mu.Unlock()
 		return fmt.Errorf("voicehelper: cannot ask for voice: %w", err)
 	}
@@ -256,12 +269,24 @@ func (s *Supervisor) Join(ctx context.Context, channel string) error {
 	}
 	if !r.tr.hello.Offers(schema.VoiceControlSchemaV1) {
 		// Write nothing and close standard input: the helper, told
-		// nothing, exits without opening anything.
+		// nothing, exits without opening anything. Every helper offers v1,
+		// whatever else it speaks (§5, §20.2), so one that does not is
+		// not one of ours.
 		s.noteLocked(r, "the helper does not offer "+schema.VoiceControlSchemaV1)
 		s.failLocked(r, ReasonHelperIncompatible)
 		s.stopLocked(r, false)
 		s.mu.Unlock()
 		return reasonError(ReasonHelperIncompatible)
+	}
+	// The version is chosen here, by the schema the start is written in,
+	// and fixed for the session (§20.2): v2 when the helper offers it.
+	version := schema.VoiceControlSchemaV1
+	if r.tr.hello.Offers(schema.VoiceControlSchemaV2) {
+		version = schema.VoiceControlSchemaV2
+	}
+	r.version, r.tr.version = version, version
+	if s.cur == r {
+		s.status.Protocol = version
 	}
 	s.mu.Unlock()
 
@@ -464,30 +489,74 @@ func (s *Supervisor) Close(ctx context.Context) error {
 // SetMute asks the helper to set mute to on, and returns after its ack; the
 // latest Status then shows the result.
 func (s *Supervisor) SetMute(ctx context.Context, on bool) error {
-	return s.command(ctx, schema.VoiceControlCommandSetMute, func(id int64) schema.VoiceControlMessage {
+	return s.command(ctx, schema.VoiceControlCommandSetMute, false, func(version string, id int64) schema.VoiceControlMessage {
+		if version == schema.VoiceControlSchemaV2 {
+			return schema.VoiceControlSetMuteV2{Schema: version, Kind: schema.VoiceControlCommandSetMute, ID: id, Muted: on}
+		}
 		return schema.VoiceControlSetMuteV1{Schema: schema.VoiceControlSchemaV1, Kind: schema.VoiceControlCommandSetMute, ID: id, Muted: on}
 	})
 }
 
 // SetDeafen asks the helper to set deafen to on, and returns after its ack.
 func (s *Supervisor) SetDeafen(ctx context.Context, on bool) error {
-	return s.command(ctx, schema.VoiceControlCommandSetDeafen, func(id int64) schema.VoiceControlMessage {
+	return s.command(ctx, schema.VoiceControlCommandSetDeafen, false, func(version string, id int64) schema.VoiceControlMessage {
+		if version == schema.VoiceControlSchemaV2 {
+			return schema.VoiceControlSetDeafenV2{Schema: version, Kind: schema.VoiceControlCommandSetDeafen, ID: id, Deafened: on}
+		}
 		return schema.VoiceControlSetDeafenV1{Schema: schema.VoiceControlSchemaV1, Kind: schema.VoiceControlCommandSetDeafen, ID: id, Deafened: on}
+	})
+}
+
+// SetDevices asks the helper to use the microphone input and the speakers
+// output from now on, without leaving voice, and returns after its ack. Each
+// is a PipeWire node name or "default"; "" leaves that side alone, and at
+// least one is named. The latest Status then shows whether the device is
+// there (Capture, Playback): the helper names no device, and none takes the
+// place of one that is missing. It needs a v2 session: in a v1 session it is
+// ErrNeedsNewerHelper, and nothing is written.
+func (s *Supervisor) SetDevices(ctx context.Context, input, output string) error {
+	return s.command(ctx, schema.VoiceControlCommandSetDevices, true, func(version string, id int64) schema.VoiceControlMessage {
+		return schema.VoiceControlSetDevicesV2{Schema: version, Kind: schema.VoiceControlCommandSetDevices, ID: id, Input: input, Output: output}
+	})
+}
+
+// SetTalkMode asks the helper to use mode from now on, and returns after its
+// ack; the latest Status then shows the mode in force. Nothing here opens the
+// transmit gate: a switch shuts it, and only a press, or in open mode the
+// microphone's own sound after quiet, opens it again (§20.6). It needs a v2
+// session: in a v1 session, which is always push-to-talk, it is
+// ErrNeedsNewerHelper, and nothing is written.
+func (s *Supervisor) SetTalkMode(ctx context.Context, mode schema.VoiceControlTalkMode) error {
+	return s.command(ctx, schema.VoiceControlCommandSetTalkMode, true, func(version string, id int64) schema.VoiceControlMessage {
+		return schema.VoiceControlSetTalkModeV2{Schema: version, Kind: schema.VoiceControlCommandSetTalkMode, ID: id, TalkMode: mode}
 	})
 }
 
 // Refresh asks the helper for a state snapshot, and returns after its ack.
 func (s *Supervisor) Refresh(ctx context.Context) error {
-	return s.command(ctx, schema.VoiceControlCommandGetState, getState)
+	return s.command(ctx, schema.VoiceControlCommandGetState, false, getState)
 }
 
-func getState(id int64) schema.VoiceControlMessage {
+func getState(version string, id int64) schema.VoiceControlMessage {
+	if version == schema.VoiceControlSchemaV2 {
+		return schema.VoiceControlGetStateV2{Schema: version, Kind: schema.VoiceControlCommandGetState, ID: id}
+	}
 	return schema.VoiceControlGetStateV1{Schema: schema.VoiceControlSchemaV1, Kind: schema.VoiceControlCommandGetState, ID: id}
 }
 
+// leaveCommand is leave in version.
+func leaveCommand(version string, id int64) schema.VoiceControlMessage {
+	if version == schema.VoiceControlSchemaV2 {
+		return schema.VoiceControlLeaveV2{Schema: version, Kind: schema.VoiceControlCommandLeave, ID: id}
+	}
+	return schema.VoiceControlLeaveV1{Schema: schema.VoiceControlSchemaV1, Kind: schema.VoiceControlCommandLeave, ID: id}
+}
+
 // command sends one command to a helper that has accepted its start and is
-// not stopping.
-func (s *Supervisor) command(ctx context.Context, kind schema.VoiceControlCommandKind, build func(int64) schema.VoiceControlMessage) error {
+// not stopping. build makes it in the session's version. A command only v2
+// has (needsV2) is refused in a v1 session before anything is written: a v1
+// helper would refuse it, and a refusal stops the helper (§7).
+func (s *Supervisor) command(ctx context.Context, kind schema.VoiceControlCommandKind, needsV2 bool, build func(version string, id int64) schema.VoiceControlMessage) error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -497,6 +566,10 @@ func (s *Supervisor) command(ctx context.Context, kind schema.VoiceControlComman
 	if r == nil || !r.ready || r.stopping || r.broken || s.status.Phase == PhaseStopping {
 		s.mu.Unlock()
 		return ErrNotRunning
+	}
+	if needsV2 && r.version != schema.VoiceControlSchemaV2 {
+		s.mu.Unlock()
+		return ErrNeedsNewerHelper
 	}
 	s.mu.Unlock()
 	return s.exchange(ctx, r, kind, build)

@@ -32,6 +32,9 @@ type voiceController interface {
 	Retry(ctx context.Context) error
 	SetMute(ctx context.Context, on bool) error
 	SetDeafen(ctx context.Context, on bool) error
+	SetDevices(ctx context.Context, input, output string) error
+	SetTalkMode(ctx context.Context, mode schema.VoiceControlTalkMode) error
+	Refresh(ctx context.Context) error
 	Status() voicehelper.Status
 	Updates() <-chan voicehelper.Status
 	Diagnostics() []string
@@ -41,11 +44,21 @@ type voiceController interface {
 
 // voiceDevices is the part of voicehelper.OneShot the TUI uses: the one-shot
 // runs of conch-voice that list the microphones and speakers and save a
-// choice. Tests stand in for it.
+// choice of device or talk mode. Tests stand in for it.
 type voiceDevices interface {
 	Devices(ctx context.Context) (voicehelper.DeviceList, error)
 	SetDevice(ctx context.Context, key voicehelper.DeviceKey, name string) error
+	SetTalkMode(ctx context.Context, mode schema.VoiceControlTalkMode) error
 }
+
+// voiceEchoWarning is said in the status line on every switch to the open
+// microphone, and on /voice help. Echo cancellation does not work yet (design
+// note §20.6).
+const voiceEchoWarning = "Open microphone: whatever your microphone hears loudly enough is sent. On speakers, others will hear themselves: use headphones (echo cancellation is not available yet). A virtual microphone fed by a program does not pick up your speakers."
+
+// voiceNeedsV2 is said when /voice mode open is typed in voice with a helper
+// that speaks only conch.voice_control.v1, which is always push-to-talk.
+const voiceNeedsV2 = "open microphone needs a newer conch-voice: install the one from the same release"
 
 // voiceCloseTimeout bounds closing the supervisor: its own stop ends in
 // SIGKILL at StopKill and a reap, and a second more covers that (§8.5).
@@ -304,6 +317,9 @@ type voiceCtl struct {
 	// /voice leave typed meanwhile calls it, so that the rejoin never joins
 	// after the person asked to leave.
 	rejoinCancel context.CancelFunc
+	// echoWarned is whether the echo warning has been shown for the open
+	// microphone now in force: it is shown once per switch to open.
+	echoWarned bool
 }
 
 // voiceLeft is a session this TUI left: the channel, the account, and the
@@ -368,16 +384,18 @@ type voiceStatusMsg struct {
 }
 
 // voiceDone is the end of one call to the supervisor numbered serial, or of
-// one one-shot run of conch-voice (opDevices, opSaveMic, opSaveSpeakers), which
-// belongs to no supervisor.
+// one one-shot run of conch-voice (opDevices, opSaveMic, opSaveSpeakers,
+// opSaveMode), which belongs to no supervisor.
 type voiceDone struct {
 	serial  int
 	op      voiceOp
 	channel string
 	err     error
-	// list is what opDevices read; name is what a save saved.
+	// list is what opDevices read; name is what a device save saved, and
+	// mode what a talk-mode save saved.
 	list voicehelper.DeviceList
 	name string
+	mode schema.VoiceControlTalkMode
 }
 
 // voicePage is what /voice status read from the supervisor.
@@ -402,6 +420,13 @@ const (
 	opSaveMic
 	opSaveSpeakers
 	opRejoin
+	// The talk mode saved in voice.toml (a one-shot run), and the live
+	// changes of a v2 helper: the microphone, the speakers, the talk mode.
+	opSaveMode
+	opSwitchMic
+	opSwitchSpeakers
+	opModeOpen
+	opModePTT
 )
 
 // asked is how a command in flight is shown: what was asked, with an
@@ -412,6 +437,8 @@ func (op voiceOp) asked(channel string) string {
 		opMuteOn: "muting", opMuteOff: "unmuting", opDeafenOn: "deafening", opDeafenOff: "undeafening",
 		opClose: "stopping voice", opDevices: "listing devices", opSaveMic: "saving the microphone",
 		opSaveSpeakers: "saving the speakers", opRejoin: "rejoining #" + sanitize(channel),
+		opSaveMode: "saving the talk mode", opSwitchMic: "switching microphone", opSwitchSpeakers: "switching speakers",
+		opModeOpen: "switching to the open microphone", opModePTT: "switching to push-to-talk",
 	}[op]
 }
 
@@ -439,8 +466,26 @@ func (m Model) voiceStatus(msg voiceStatusMsg) (tea.Model, tea.Cmd) {
 	if ctl == nil || serial != msg.serial {
 		return m, nil
 	}
+	prev := m.vc.status
 	m.vc.status = msg.st
+	// The open microphone came into force, as the helper confirms it: from
+	// voice.toml as a session starts, or a switch this TUI asked for, whose
+	// ack may come first (voiceApplied). Each switch to open is warned of
+	// once; a state in push-to-talk ends the switch.
+	switch {
+	case msg.st.TalkMode != schema.VoiceControlTalkModeOpen:
+		m.vc.echoWarned = false
+	case !m.vc.echoWarned || prev.Gen != msg.st.Gen:
+		m = m.warnEcho()
+	}
 	return m, m.waitVoice(ctl, serial, done)
+}
+
+// warnEcho shows the echo warning for a switch to the open microphone.
+func (m Model) warnEcho() Model {
+	m.vc.echoWarned = true
+	m.setStatus(modeChannels, voiceEchoWarning)
+	return m
 }
 
 // voiceCall runs one call to supervisor serial in a tea.Cmd and reports its
@@ -465,6 +510,35 @@ func (m Model) voiceCall(ctl voiceController, serial int, op voiceOp, channel st
 	}
 }
 
+// voiceApply runs one live change of a v2 helper in a tea.Cmd: name is the
+// device for opSwitchMic and opSwitchSpeakers, the other side left alone.
+func (m Model) voiceApply(ctl voiceController, serial int, op voiceOp, name string) tea.Cmd {
+	ctx := m.ctx
+	return func() tea.Msg {
+		var err error
+		switch op {
+		case opSwitchMic:
+			err = ctl.SetDevices(ctx, name, "")
+		case opSwitchSpeakers:
+			err = ctl.SetDevices(ctx, "", name)
+		case opModeOpen, opModePTT:
+			mode := schema.VoiceControlTalkModePushToTalk
+			if op == opModeOpen {
+				mode = schema.VoiceControlTalkModeOpen
+			}
+			err = ctl.SetTalkMode(ctx, mode)
+			// The state that says the new mode comes before its ack (§20.3).
+			// If the status does not say it yet, a snapshot is asked for, so
+			// the strip is put right from the helper's own word instead of
+			// showing the old mode until some later state.
+			if err == nil && ctl.Status().TalkMode != mode {
+				err = ctl.Refresh(ctx)
+			}
+		}
+		return voiceDone{serial: serial, op: op, err: err}
+	}
+}
+
 // voiceClosing closes a dropped supervisor in a tea.Cmd, bounded, and then
 // says so to the owner.
 func voiceClosing(ctl voiceController, closed func()) tea.Cmd {
@@ -481,13 +555,17 @@ func (m Model) voiceDone(msg voiceDone) (tea.Model, tea.Cmd) {
 	switch msg.op {
 	case opClose:
 		return m, nil
-	case opDevices, opSaveMic, opSaveSpeakers:
+	case opDevices, opSaveMic, opSaveSpeakers, opSaveMode:
 		return m.deviceDone(msg)
 	}
 	// The answer of a supervisor dropped since (sign-out, another account)
 	// is about nothing on screen any more.
 	if _, serial, _ := m.vc.owner.current(); serial != msg.serial {
 		return m, nil
+	}
+	switch msg.op {
+	case opSwitchMic, opSwitchSpeakers, opModeOpen, opModePTT:
+		return m.voiceApplied(msg)
 	}
 	if msg.op == opRejoin {
 		m.vc.rejoinCancel = nil
@@ -525,6 +603,39 @@ func (m Model) voiceDone(msg voiceDone) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// voiceApplied is the ack of a live change. The strip already shows what the
+// helper confirmed (its state comes before the ack), so the status line says
+// only that it was taken, never which device is in use: whether the device is
+// there is the strip's to say, from the state. A /voice leave typed meanwhile
+// has put its own words there, and they stay.
+func (m Model) voiceApplied(msg voiceDone) (tea.Model, tea.Cmd) {
+	if m.vc.busy != msg.op.asked("") {
+		return m, nil
+	}
+	m.vc.busy = ""
+	switch {
+	case msg.err != nil:
+		m.setStatus(modeChannels, voiceErrText(msg.err))
+	case msg.op == opSwitchMic:
+		m.setStatus(modeChannels, "voice: microphone switched; the strip shows whether it is there")
+	case msg.op == opSwitchSpeakers:
+		m.setStatus(modeChannels, "voice: speakers switched; the strip shows whether they are there")
+	case msg.op == opModeOpen:
+		switch {
+		case !m.vc.echoWarned:
+			m = m.warnEcho()
+		case m.channelStatus == voiceEchoWarning:
+			// The state that confirmed the switch came first and warned.
+		default:
+			// The open microphone was in force already: no switch.
+			m.setStatus(modeChannels, "voice: open microphone; the strip shows its state")
+		}
+	case msg.op == opModePTT:
+		m.setStatus(modeChannels, "voice: push-to-talk; the strip shows its state")
+	}
+	return m, nil
+}
+
 // voiceSignedOut stops voice for good: the TUI's login no longer works, or
 // it is ending. The helper is stopped in a tea.Cmd.
 func (m Model) voiceSignedOut() (Model, tea.Cmd) {
@@ -556,7 +667,7 @@ func (m Model) voiceIdentity(principal int64) (Model, tea.Cmd) {
 	return m, voiceClosing(c, closed)
 }
 
-const voiceUsage = "usage: /voice join [channel] | leave | mute on|off | deafen on|off | retry | devices | mic <n>|<name>|default | speakers <n>|<name>|default | status | help"
+const voiceUsage = "usage: /voice join [channel] | leave | mute on|off | deafen on|off | retry | devices | mic <n>|<name>|default | speakers <n>|<name>|default | mode ptt|open | status | help"
 
 // voiceCommand handles "/voice ...". Every refusal leaves the input as typed;
 // a command that goes ahead clears it.
@@ -617,6 +728,8 @@ func (m Model) voiceCommand(rest string) (tea.Model, tea.Cmd) {
 		return m.voiceSaveDevice(opSaveMic, afterWord(rest))
 	case "speakers":
 		return m.voiceSaveDevice(opSaveSpeakers, afterWord(rest))
+	case "mode":
+		return m.voiceSaveMode(args)
 	case "status":
 		ctl, _, _ := m.vc.owner.current()
 		m.input = ""
@@ -874,9 +987,80 @@ func (m Model) voiceSaveDevice(op voiceOp, arg string) (tea.Model, tea.Cmd) {
 	}
 }
 
+// voiceSaveMode saves the talk mode in voice.toml with `conch-voice config
+// set`, in a command: push-to-talk, or the open microphone. Its answer applies
+// it to the voice running, if any (modeSaved).
+func (m Model) voiceSaveMode(args []string) (tea.Model, tea.Cmd) {
+	modes := map[string]schema.VoiceControlTalkMode{"ptt": schema.VoiceControlTalkModePushToTalk, "open": schema.VoiceControlTalkModeOpen}
+	run := m.vc.owner.devices
+	var mode schema.VoiceControlTalkMode
+	if len(args) == 1 {
+		mode = modes[args[0]]
+	}
+	switch {
+	case mode == "":
+		m.setStatus(modeChannels, "usage: /voice mode ptt|open")
+		return m, nil
+	case run == nil:
+		m.setStatus(modeChannels, m.vc.owner.noDevicesText())
+		return m, nil
+	case m.vc.busy != "":
+		m.setStatus(modeChannels, "voice: still "+m.vc.busy+"…; wait for it")
+		return m, nil
+	}
+	m.input = ""
+	m.vc.busy = opSaveMode.asked("")
+	m.setStatus(modeChannels, "voice: "+opSaveMode.asked("")+"…")
+	ctx := m.ctx
+	return m, func() tea.Msg {
+		return voiceDone{op: opSaveMode, mode: mode, err: run.SetTalkMode(ctx, mode)}
+	}
+}
+
+// inVoice reports whether the helper is in, or on its way to, voice: where a
+// saved choice is applied to it rather than kept for the next join.
+func inVoice(phase voicehelper.Phase) bool {
+	switch phase {
+	case voicehelper.PhaseStarting, voicehelper.PhaseConnecting, voicehelper.PhaseConnected, voicehelper.PhaseReconnecting:
+		return true
+	}
+	return false
+}
+
+// modeSaved applies a saved talk mode: to a v2 helper in voice, live; to a v1
+// one, not at all (a v1 session is always push-to-talk), saying so for the
+// open microphone; with no voice, it is used from the next join. The strip
+// shows the open microphone only once the helper's state says so.
+func (m Model) modeSaved(mode schema.VoiceControlTalkMode) (tea.Model, tea.Cmd) {
+	words := map[schema.VoiceControlTalkMode]string{
+		schema.VoiceControlTalkModePushToTalk: "push-to-talk", schema.VoiceControlTalkModeOpen: "open microphone",
+	}[mode]
+	ctl, serial, _ := m.vc.owner.current()
+	st := m.vc.status
+	if ctl == nil || !inVoice(st.Phase) || m.vc.busy != "" {
+		m.setStatus(modeChannels, "voice: "+words+" saved: used from the next /voice join")
+		return m, nil
+	}
+	if st.Protocol != schema.VoiceControlSchemaV2 {
+		if mode == schema.VoiceControlTalkModeOpen {
+			m.setStatus(modeChannels, "voice: "+voiceNeedsV2+" (saved in voice.toml for it)")
+		} else {
+			m.setStatus(modeChannels, "voice: push-to-talk saved; this conch-voice is always push-to-talk")
+		}
+		return m, nil
+	}
+	op := opModePTT
+	if mode == schema.VoiceControlTalkModeOpen {
+		op = opModeOpen
+	}
+	m.vc.busy = op.asked("")
+	m.setStatus(modeChannels, "voice: "+words+" saved: "+op.asked("")+"…")
+	return m, m.voiceApply(ctl, serial, op, "")
+}
+
 // deviceDone is the end of a one-shot run: the devices page for a list, and
-// for a save the status line and, with voice joined, the rejoin that applies
-// it.
+// for a save the status line and, with voice joined, what applies it: a live
+// switch with a v2 helper, a rejoin with a v1 one.
 func (m Model) deviceDone(msg voiceDone) (tea.Model, tea.Cmd) {
 	// A /voice leave typed meanwhile put its own words there; they stay.
 	if m.vc.busy == msg.op.asked("") {
@@ -885,6 +1069,9 @@ func (m Model) deviceDone(msg voiceDone) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		m.setStatus(modeChannels, voiceDeviceErrText(msg.op, msg.err))
 		return m, nil
+	}
+	if msg.op == opSaveMode {
+		return m.modeSaved(msg.mode)
 	}
 	if msg.op == opDevices {
 		doc := msg.list.Devices
@@ -914,21 +1101,28 @@ func (m Model) deviceDone(msg voiceDone) (tea.Model, tea.Cmd) {
 	}
 	ctl, serial, _ := m.vc.owner.current()
 	st := m.vc.status
-	switch st.Phase {
-	case voicehelper.PhaseStarting, voicehelper.PhaseConnecting, voicehelper.PhaseConnected, voicehelper.PhaseReconnecting:
-		if ctl == nil || m.vc.busy != "" {
-			break
+	switch {
+	case ctl == nil || !inVoice(st.Phase) || m.vc.busy != "":
+		m.setStatus(modeChannels, "voice: "+k.saved+" saved: "+saved)
+		return m, nil
+	case st.Protocol == schema.VoiceControlSchemaV2:
+		// A v2 helper switches without leaving voice (§20.5); the strip
+		// shows the result from its state.
+		op := opSwitchMic
+		if !k.mic {
+			op = opSwitchSpeakers
 		}
-		// The helper reads [audio] only as it starts (§9): it is left and
-		// joined again to use the choice.
-		ctx, cancel := context.WithCancel(m.ctx)
-		m.vc.rejoinCancel = cancel
-		m.vc.busy = opRejoin.asked(st.Channel)
-		m.setStatus(modeChannels, "voice: "+k.saved+" saved: rejoining #"+sanitize(st.Channel)+"'s voice…")
-		return m, voiceRejoin(ctx, cancel, ctl, serial, st.Channel)
+		m.vc.busy = op.asked("")
+		m.setStatus(modeChannels, "voice: "+k.saved+" saved: "+op.asked("")+"…")
+		return m, m.voiceApply(ctl, serial, op, msg.name)
 	}
-	m.setStatus(modeChannels, "voice: "+k.saved+" saved: "+saved)
-	return m, nil
+	// A v1 helper reads [audio] only as it starts (§9): it is left and joined
+	// again to use the choice.
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.vc.rejoinCancel = cancel
+	m.vc.busy = opRejoin.asked(st.Channel)
+	m.setStatus(modeChannels, "voice: "+k.saved+" saved: rejoining #"+sanitize(st.Channel)+"'s voice…")
+	return m, voiceRejoin(ctx, cancel, ctl, serial, st.Channel)
 }
 
 // voiceRejoin applies a saved device to the voice running: leave, then join
@@ -1001,15 +1195,21 @@ func voiceDeviceErrText(op voiceOp, err error) string {
 	case errors.As(err, &re):
 		switch re.Reason {
 		case voicehelper.RunUnsupported:
-			if save {
+			switch {
+			case op == opSaveMode:
+				text = "voice: not saved: this conch-voice cannot save the talk mode: install the conch-voice from the same release as conch"
+			case save:
 				text = "voice: not saved: this conch-voice cannot save devices: install the conch-voice from the same release as conch"
-			} else {
+			default:
 				text = "voice: this conch-voice cannot list devices: install the conch-voice from the same release as conch"
 			}
 		case voicehelper.RunTimedOut:
-			if save {
+			switch {
+			case op == opSaveMode:
+				text = "voice: conch-voice did not finish saving within 10 s and was stopped"
+			case save:
 				text = "voice: conch-voice did not finish saving within 10 s and was stopped; /voice devices shows what voice.toml names"
-			} else {
+			default:
 				text = "voice: conch-voice did not list the devices within 10 s and was stopped"
 			}
 		case voicehelper.RunTooMuchOutput:
@@ -1191,7 +1391,9 @@ func (m Model) voiceSelf() string {
 
 // connectedParts are the strip's words for a connected helper: capture and
 // transmission apart (a joined person with the gate shut is "mic on"), mute
-// and deafen, and the talk key.
+// and deafen, missing speakers, and the talk key, or in open mode the open
+// microphone instead of it. Every word comes from the helper's state: a v1
+// helper reports neither talk mode nor speakers, and is push-to-talk.
 func connectedParts(st voicehelper.Status) []string {
 	var parts []string
 	switch {
@@ -1212,6 +1414,22 @@ func connectedParts(st voicehelper.Status) []string {
 	if st.Deafened {
 		parts = append(parts, "deafened")
 	}
+	if st.Playback == schema.VoiceControlPlaybackUnavailable {
+		parts = append(parts, "no speakers")
+	}
+	if st.TalkMode == schema.VoiceControlTalkModeOpen {
+		// The talk key is ignored in open mode, so its words are not shown;
+		// "open mic" says sound would be sent, and only while nothing blocks
+		// it.
+		switch {
+		case st.Transmitting:
+		case len(st.Blocked) == 0:
+			parts = append(parts, "open mic")
+		case slices.Contains(st.Blocked, schema.VoiceControlBlockMaxTransmit):
+			parts = append(parts, openMaxTransmitWords)
+		}
+		return parts
+	}
 	switch st.PTT {
 	case schema.VoiceControlPTTReady:
 		if len(st.Blocked) == 0 && !st.Transmitting {
@@ -1229,6 +1447,10 @@ func connectedParts(st voicehelper.Status) []string {
 	}
 	return parts
 }
+
+// openMaxTransmitWords is max_transmit in open mode, where it stands until
+// quiet rather than until a release (§20.6).
+const openMaxTransmitWords = "open mic paused: limit reached, waiting for quiet"
 
 // flags is mute and deafen, for the phases that keep them while not
 // connected.
@@ -1269,9 +1491,31 @@ func (m Model) voiceStatusLines(cols int) []string {
 			schema.VoiceControlCaptureOff:         "off",
 			schema.VoiceControlCaptureUnavailable: "unavailable",
 		}, st.Capture))
+		add("speakers", wordOr(map[schema.VoiceControlPlayback]string{
+			schema.VoiceControlPlaybackOn:          "on",
+			schema.VoiceControlPlaybackOff:         "off",
+			schema.VoiceControlPlaybackUnavailable: "unavailable: nothing is played until they are back",
+			"":                                     "not reported by this conch-voice",
+		}, st.Playback))
 		add("transmitting", yesNo[st.Transmitting])
 		add("muted", yesNo[st.Muted])
 		add("deafened", yesNo[st.Deafened])
+		open := st.TalkMode == schema.VoiceControlTalkModeOpen
+		add("talk mode", wordOr(map[schema.VoiceControlTalkMode]string{
+			schema.VoiceControlTalkModePushToTalk: "push-to-talk",
+			schema.VoiceControlTalkModeOpen:       "open microphone: its own sound is sent, the talk key is ignored",
+			"":                                    "push-to-talk (this conch-voice has no open microphone)",
+		}, st.TalkMode))
+		protocol := sanitize(st.Protocol)
+		switch st.Protocol {
+		case schema.VoiceControlSchemaV2:
+			protocol += " (devices switch live; open microphone)"
+		case schema.VoiceControlSchemaV1:
+			protocol += " (devices change by rejoining; push-to-talk only)"
+		case "":
+			protocol = "not chosen yet"
+		}
+		add("protocol", protocol)
 		key := wordOr(map[schema.VoiceControlPTT]string{
 			schema.VoiceControlPTTReady:         "ready",
 			schema.VoiceControlPTTNotConfigured: "not configured: set [keys] in voice.toml (conch-voice devices)",
@@ -1282,16 +1526,27 @@ func (m Model) voiceStatusLines(cols int) []string {
 		if st.PTTProblem != "" {
 			key += " (" + wordOr(pttProblemWords, st.PTTProblem) + ")"
 		}
+		if open {
+			key += " (ignored for talking; the mute and deafen keys work)"
+		}
 		add("talk key", key)
 		press := "would transmit"
 		if len(st.Blocked) > 0 {
 			var why []string
 			for _, b := range st.Blocked {
-				why = append(why, wordOr(blockWords, b))
+				w := wordOr(blockWords, b)
+				if open && b == schema.VoiceControlBlockMaxTransmit {
+					w = "limit reached, waiting for quiet"
+				}
+				why = append(why, w)
 			}
 			press = "would do nothing: " + strings.Join(why, ", ")
 		}
-		add("a press now", press)
+		if open {
+			add("a sound now", press)
+		} else {
+			add("a press now", press)
+		}
 		if st.Reason != "" {
 			add("reason", voiceReasonWords(st.Reason)+" ("+sanitize(st.Reason)+")")
 		}
@@ -1451,7 +1706,7 @@ func (m Model) voiceDevicesLines(cols int) []string {
 	case schema.VoiceDevicesConfigNone:
 		note("There is no configuration directory, so nothing can be saved: set CONCH_CONFIG_DIR, XDG_CONFIG_HOME or HOME.")
 	}
-	note("Choose with /voice mic <n>|<name>|default and /voice speakers <n>|<name>|default. In voice, saving rejoins to use it.")
+	note("Choose with /voice mic <n>|<name>|default and /voice speakers <n>|<name>|default. In voice, the choice is used at once: live with a newer conch-voice, by rejoining with an older one.")
 	if len(m.vc.devDiag) > 0 {
 		lines = append(lines, "", " "+titleStyle.Render("conch-voice said"))
 		for _, l := range m.vc.devDiag {
@@ -1470,9 +1725,10 @@ func voiceHelpEntries() []helpEntry {
 		{"/voice deafen on|off", "stop or start hearing others; undeafening leaves mute as it was"},
 		{"/voice retry", "try again after a failure that a new attempt could fix"},
 		{"/voice devices", "list the microphones and speakers, numbered, with PipeWire's default and the ones chosen in voice.toml"},
-		{"/voice mic n|name|default", "save the microphone in voice.toml: number n of the last list, a device name, or PipeWire's default; in voice, voice rejoins to use it"},
+		{"/voice mic n|name|default", "save the microphone in voice.toml: number n of the last list, a device name, or PipeWire's default; in voice, a newer conch-voice switches to it live, an older one rejoins to use it"},
 		{"/voice speakers n|name|default", "save the speakers the same way"},
-		{"/voice status", "everything voice is doing, the chosen devices, conch-voice's version and path, and its log"},
+		{"/voice mode ptt|open", "push-to-talk, or the open microphone, where what the microphone hears loudly enough is sent without the talk key; saved in voice.toml, and in voice switched live by a newer conch-voice"},
+		{"/voice status", "everything voice is doing, the talk mode, the speakers, the chosen devices, conch-voice's version and path, and its log"},
 		{"/voice help", "this page"},
 	}
 }
@@ -1480,9 +1736,10 @@ func voiceHelpEntries() []helpEntry {
 func voiceHelpNotes() []string {
 	return []string{
 		"Talking: hold the talk key that conch-voice reads from your keyboard, set under [keys] in voice.toml (conch-voice devices lists keyboards; conch-voice keys shows key codes). Nothing typed here transmits.",
-		"The microphone is open while you are in voice (\"mic on\"); audio leaves only while the talk key is held (\"TALKING\").",
+		"The microphone is open while you are in voice (\"mic on\"); audio leaves only while the talk key is held, or with the open microphone while it hears sound (\"TALKING\").",
+		voiceEchoWarning,
 		"Over SSH: conch-voice runs on the machine where conch runs and uses that machine's microphone, speakers and keyboard, not those of the computer you connect from. No audio is carried over SSH.",
-		"Devices: the names are PipeWire's, and the devices are those of the machine conch runs on. A virtual microphone that another program makes is listed as a microphone while that program is running. Rejoining to use a new device ends any transmission; press the talk key again.",
+		"Devices: the names are PipeWire's, and the devices are those of the machine conch runs on. A virtual microphone that another program makes is listed as a microphone while that program is running. Changing the microphone in voice, live or by rejoining, ends any transmission: press the talk key again, or with the open microphone, sound is sent again after a quiet moment. A device that is missing is shown as \"no microphone\" or \"no speakers\"; nothing takes its place.",
 		"conch-voice is found through CONCH_VOICE_HELPER (an absolute path), then beside conch, then in PATH; conch and conch-voice must come from the same release. Voice needs Linux with PipeWire.",
 	}
 }
