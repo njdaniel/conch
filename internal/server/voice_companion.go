@@ -237,6 +237,7 @@ func (s *Server) handleVoiceCompanion(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := resp.Validate(); err != nil {
 		slog.ErrorContext(ctx, "voice: built an invalid companion response", "channel", channel.ID, "error", err)
+		s.voice.companionIssuedClear(room.RoomName, caller.ID)
 		writeInternalError(w)
 		return
 	}
