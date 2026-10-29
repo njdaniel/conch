@@ -76,3 +76,12 @@ in this set.
 
 Implement these references through the existing public APIs and project review
 process. They do not select a desktop framework, add dependencies, or amend ADRs.
+
+## Phone browser layout
+
+[`phone-browser-layout.html`](phone-browser-layout.html) is the interactive concept
+Nick approved on 2026-10-28 for the browser below 700 px (issue #929): Chat /
+Channels / Voice navigation. Open it in a browser. Its people, messages and
+"Mic idle" text are sample content and it captures no audio; the mapping to
+the real components, and what is and is not built, is in
+[mobile-browser-layout.md](../mobile-browser-layout.md).

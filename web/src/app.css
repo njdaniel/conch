@@ -2402,14 +2402,15 @@ button.link {
   }
 }
 
-/* A phone (issue #467): one column. The channels are one row that scrolls
-   sideways within itself; the top bar's buttons show their icons, their
-   names hidden but still read out; the voice strip wraps. */
+/* A phone (issue #467, revised by #929): one column, and one of three views
+   drawn at a time (Chat, Channels, Voice: see the block after this one); the
+   top bar's buttons show their icons, their names hidden but still read out;
+   the voice strip wraps. */
 @media (max-width: 699px) {
   .areas,
   .areas.side-closed {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .topbar {
@@ -2425,7 +2426,6 @@ button.link {
   .status .avatar,
   .status-server,
   .topbar .label,
-  .channels h2,
   .send .label,
   .attach-image .label,
   .voice-controls button:not(.sharing) .label,
@@ -2437,90 +2437,6 @@ button.link {
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
-  }
-
-  .channels {
-    padding: var(--s2) var(--s3);
-    overflow: visible;
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .channel-list {
-    --fade: 2rem;
-    display: flex;
-    gap: var(--s1);
-    overflow-x: auto;
-  }
-
-  /* The fade at an edge the row has more beyond (issue #601). Each sticks to
-     its edge as the row scrolls and takes no room in it: its negative margin
-     gives back its width and the gap before or after it. Taps go through. */
-  .channel-list::before,
-  .channel-list::after {
-    content: '';
-    position: sticky;
-    z-index: 1;
-    flex: none;
-    width: var(--fade);
-    pointer-events: none;
-    opacity: 0;
-  }
-
-  .channel-list::before {
-    left: 0;
-    margin-right: calc(-1 * (var(--fade) + var(--s1)));
-    background: linear-gradient(to right, var(--surface), transparent);
-  }
-
-  .channel-list::after {
-    right: 0;
-    margin-left: calc(-1 * (var(--fade) + var(--s1)));
-    background: linear-gradient(to left, var(--surface), transparent);
-  }
-
-  .channel-list.more-before::before,
-  .channel-list.more-after::after {
-    opacity: 1;
-  }
-
-  /* A channel and its unread count read as one pill. The count stays outside
-     the button in the page, so the button's name is still the channel's
-     alone; only the drawing joins them. */
-  .channel-list li {
-    flex: none;
-    gap: 0;
-    background: var(--raised);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-  }
-
-  .channel-list li:has(> button[aria-current='true']) {
-    background: var(--accent-bg);
-    border-color: var(--accent);
-  }
-
-  .channel-list button {
-    max-width: 14rem;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    background: transparent;
-    border-left: 0;
-    border-radius: 999px;
-  }
-
-  .channel-list button[aria-current='true'] {
-    background: transparent;
-  }
-
-  .channel-list .unread,
-  .channel-list .in-voice:last-child {
-    margin-right: var(--s2);
-  }
-
-  .channel-list .in-voice:not(:last-child) {
-    margin-right: var(--s1);
   }
 
   .conv-head {
@@ -2725,6 +2641,243 @@ button.link {
 
   .audience-row select {
     min-height: 2.75rem;
+  }
+}
+
+/* The phone layout (issue #929, docs/design/mobile-browser-layout.md): below
+   700 px the lobby draws one view at a time, chosen with the bottom
+   navigation. Every view stays mounted and laid out; the others are only
+   hidden (visibility), so the log keeps its place, the draft its text and the
+   call its element. Above 700 px none of this applies: the lobby has no
+   .phone class. */
+@media (max-width: 699px) {
+  .lobby.phone {
+    position: relative;
+    height: 100vh;
+    height: var(--app-height, 100dvh);
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    padding-inline: env(safe-area-inset-left) env(safe-area-inset-right);
+    box-sizing: border-box;
+    /* The hidden conversation is laid out behind the Voice view at the
+       lobby's size; whatever its parts measure, it must not widen the page. */
+    overflow-x: clip;
+  }
+
+  /* The channel list and the conversation share one cell. */
+  .lobby.phone .areas > .channels,
+  .lobby.phone .areas > .centre {
+    grid-area: 1 / 1;
+  }
+
+  .lobby.phone.view-chat .channels,
+  .lobby.phone.view-voice .channels,
+  .lobby.phone.view-channels .centre {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  /* Channels: a list of full-width rows. */
+  .lobby.phone .channels {
+    padding: var(--s3);
+    overflow-y: auto;
+    border-right: 0;
+  }
+
+  .lobby.phone .channels h2 {
+    margin: var(--s1) var(--s1) var(--s3);
+    color: var(--text);
+    font-size: 1.15rem;
+    letter-spacing: normal;
+    text-transform: none;
+  }
+
+  .lobby.phone .channel-list {
+    gap: var(--s2);
+  }
+
+  .lobby.phone .channel-list li {
+    gap: var(--s2);
+    padding-right: var(--s3);
+    background: var(--raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  .lobby.phone .channel-list li:has(> button[aria-current='true']) {
+    background: var(--accent-bg);
+    border-color: var(--accent);
+  }
+
+  .lobby.phone .channel-list button {
+    min-height: 3rem;
+    padding: var(--s2) var(--s3);
+    color: var(--text);
+    font-size: 1rem;
+    background: transparent;
+    border-left: 0;
+  }
+
+  .lobby.phone .channel-list button[aria-current='true'] {
+    background: transparent;
+  }
+
+  /* The strip: compact under Chat and Channels, and only while in voice
+     (Join voice and Watch only are in the Voice view). */
+  .lobby.phone:not(.in-voice):not(.view-voice) .dock {
+    display: none;
+  }
+
+  /* Voice: the stage (a watched share) on top, then the voice section filling
+     the page and scrolling inside itself. The conversation is laid out behind
+     it, hidden, so the log is where it was when Chat is back. */
+  .lobby.phone.view-voice {
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+  }
+
+  .lobby.phone.view-voice .areas {
+    grid-template-rows: auto;
+  }
+
+  .lobby.phone.view-voice .channels,
+  .lobby.phone.view-voice .conversation {
+    position: absolute;
+    inset: 0;
+  }
+
+  .lobby.phone.view-voice .centre {
+    display: block;
+    overflow: visible;
+  }
+
+  .lobby.phone.view-voice .conversation {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .lobby.phone.view-voice .stage {
+    max-height: 45dvh;
+  }
+
+  .lobby.phone.view-voice .dock {
+    max-height: none;
+    padding: var(--s3);
+    overflow-y: auto;
+  }
+
+  /* The roster shows everyone, with names; the controls have their words. */
+  .lobby.phone.view-voice .voice-roster.capped li.beyond {
+    display: flex;
+  }
+
+  .lobby.phone.view-voice .voice-more {
+    display: none;
+  }
+
+  .lobby.phone.view-voice .voice-who:has(> .voice-roster.capped),
+  .lobby.phone.view-voice .voice-roster.capped {
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+
+  .lobby.phone.view-voice .voice-roster.capped li:not(.me) .who,
+  .lobby.phone.view-voice .voice-roster.capped .tag,
+  .lobby.phone.view-voice .voice-controls button:not(.sharing) .label,
+  .lobby.phone.view-voice .voice-controls .dest {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+    white-space: normal;
+  }
+
+  .lobby.phone.view-voice .voice-roster.capped li:not(.me) {
+    padding-right: 0.5rem;
+  }
+
+  .lobby.phone.view-voice .voice:has(.voice-roster.capped) .share-line {
+    font-size: inherit;
+  }
+
+  .lobby.phone.view-voice .voice-controls {
+    gap: var(--s2);
+  }
+
+  .lobby.phone.view-voice .voice-controls button {
+    flex: 1 1 calc(50% - var(--s2));
+    min-width: 0;
+  }
+
+  .lobby.phone.view-voice .voice-controls .talk {
+    flex-basis: 100%;
+    min-height: 4rem;
+    font-size: 1.1rem;
+  }
+
+  /* The bottom navigation. */
+  .phone-nav {
+    display: flex;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+  }
+
+  .phone-nav button {
+    position: relative;
+    display: flex;
+    flex: 1 1 0;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.1rem;
+    min-width: 0;
+    min-height: 3.25rem;
+    padding: var(--s1) var(--s2);
+    color: var(--muted);
+    font-size: var(--small);
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    border-top: 3px solid transparent;
+  }
+
+  .phone-nav button[aria-current='page'] {
+    color: var(--text);
+    font-weight: 600;
+    background: var(--accent-bg);
+    border-top-color: var(--accent);
+  }
+
+  .phone-nav .nav-live {
+    position: absolute;
+    top: 0.5rem;
+    left: calc(50% + 0.6rem);
+    width: 0.6rem;
+    height: 0.6rem;
+    background: var(--accent);
+    border: 2px solid var(--surface);
+    border-radius: 50%;
+  }
+}
+
+/* A phone on its side (a window under 560 px tall): the page scrolls as a
+   document, as the rule below says, and the navigation stays at the bottom
+   edge of what is shown. */
+@media (max-width: 699px) and (max-height: 560px) {
+  .lobby.phone {
+    height: auto;
+    min-height: 100vh;
+    min-height: var(--app-height, 100dvh);
+  }
+
+  .lobby.phone .phone-nav {
+    position: sticky;
+    bottom: 0;
+    z-index: 20;
+  }
+
+  .lobby.phone.view-voice .dock {
+    overflow-y: visible;
   }
 }
 

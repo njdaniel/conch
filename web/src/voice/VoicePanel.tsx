@@ -33,6 +33,7 @@ import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent
 import { createPortal } from 'react-dom';
 import { Avatar, Glyph } from '../Icons';
 import type { ChannelV0 } from '../schema/channel';
+import { VoiceLive } from '../phone';
 import { StageHost } from '../stage';
 import { MicTest } from './MicTest';
 import type { Person } from '../useLiveChannel';
@@ -131,6 +132,14 @@ export function VoicePanel({
   const about = useRef<HTMLElement>(null);
   const [toAbout, setToAbout] = useState(false);
   const inVoice = state.phase !== 'idle' && state.phase !== 'stopped';
+  // The phone layout's Voice button and strip follow it (issue #929).
+  const reportLive = useContext(VoiceLive);
+  useEffect(() => {
+    reportLive(inVoice);
+    return () => {
+      reportLive(false);
+    };
+  }, [inVoice, reportLive]);
   const presence = snapshot.kind === 'presence' ? snapshot.presence : null;
   // Leave voice takes itself away once the client has drained (up to a
   // second): if it had focus then, focus goes to Join voice rather than to

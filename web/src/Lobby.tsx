@@ -5,6 +5,7 @@ import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { JoiningSettings, type JoiningRequest } from './joiningSettings';
+import { phoneViews, useAppHeight, usePhone, VoiceLive, type PhoneView } from './phone';
 import { StageHost } from './stage';
 import type { ChannelsState } from './state/channels';
 import { connectionLabel, type ConnectionState } from './state/connection';
@@ -148,6 +149,24 @@ export function Lobby({
     setWasWide(wideNow);
     if (!wideNow) setPanelOpen(false);
   }
+  // The phone layout (issue #929): below 700 px one of three views is drawn at
+  // a time. All of them stay mounted, so a switch only changes what is shown:
+  // the draft, the log's place and the call are untouched.
+  const phone = usePhone();
+  useAppHeight(phone);
+  // Until a view is chosen: Chat once a channel is open, Channels while the
+  // list is loading, failed to load, or has nothing open to chat in.
+  const [chosen, setView] = useState<PhoneView | null>(null);
+  const view: PhoneView = chosen ?? (channels.loaded && channels.selected !== null ? 'chat' : 'channels');
+  const [live, setLive] = useState(false);
+  // Choosing a channel on a phone returns to Chat, and focus follows the page
+  // to the conversation's heading (the list it was on is no longer shown).
+  const toHeading = useRef(false);
+  useEffect(() => {
+    if (view !== 'chat' || !toHeading.current) return;
+    toHeading.current = false;
+    document.getElementById(headingId)?.focus();
+  }, [view]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Settings with Joining and guests expanded, asked for from the invite panel
   // (issue #909).
@@ -243,7 +262,7 @@ export function Lobby({
 
   return (
     <JoiningSettings.Provider value={joining}>
-      <div className="lobby">
+      <div className={phone ? `lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}>
         {/* While Settings is open the rest of the page is inert: the panel is
             modal, and focus cannot wander behind its backdrop. */}
         <header className="topbar" inert={settingsOpen || asking}>
@@ -298,7 +317,13 @@ export function Lobby({
                   occupancy={occupancy}
                   empty={newChannel === null || newChannel === undefined ? undefined : 'No channels yet'}
                   rename={renameChannel}
-                  onOpen={onOpen}
+                  onOpen={(name) => {
+                    onOpen(name);
+                    if (phone) {
+                      toHeading.current = true;
+                      setView('chat');
+                    }
+                  }}
                 />
                 {newChannel}
               </>
@@ -349,8 +374,35 @@ export function Lobby({
           {membersOver ? <div className="backdrop" onClick={closeMembers} /> : null}
         </div>
         <div className="dock" inert={settingsOpen || asking}>
-          <StageHost.Provider value={stage}>{voice}</StageHost.Provider>
+          <VoiceLive.Provider value={setLive}>
+            <StageHost.Provider value={stage}>{voice}</StageHost.Provider>
+          </VoiceLive.Provider>
         </div>
+        {phone ? (
+          <nav aria-label="Main navigation" className="phone-nav" inert={settingsOpen || asking}>
+            {phoneViews.map(({ view: v, label }) => (
+              <button
+                key={v}
+                type="button"
+                aria-current={view === v ? 'page' : undefined}
+                aria-describedby={v === 'voice' && live ? 'nav-voice-live' : undefined}
+                onClick={() => {
+                  setView(v);
+                }}
+              >
+                <Glyph name={v === 'chat' ? 'chat' : v === 'channels' ? 'channels' : 'headphones'} />
+                <span className="nav-label">{label}</span>
+                {v === 'voice' && live ? <span className="nav-live" aria-hidden="true" /> : null}
+              </button>
+            ))}
+            {/* Outside the button, so the button's name stays Voice. */}
+            {live ? (
+              <span id="nav-voice-live" className="vh">
+                You are in voice
+              </span>
+            ) : null}
+          </nav>
+        ) : null}
         {settingsOpen && !asking ? <div className="backdrop" onClick={closeSettings} /> : null}
         <div
           id="settings-panel"
