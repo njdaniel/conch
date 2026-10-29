@@ -188,9 +188,18 @@ export function Composer({
     validationGeneration.current++;
   }, []);
 
+  const uploading = attachments.some((a) => a.status === 'uploading');
+  const busy = sending || uploading;
+  // The draft may be edited: the box is not read-only. An emoji is an edit, so
+  // neither the picker nor the suggestions work (or stay open) when it is.
+  const editable = enabled && !busy;
+  useEffect(() => {
+    if (!editable) setEmojiOpen(false);
+  }, [editable]);
+
   // `:short` at the caret opens the suggestions. The catalog is fetched only
   // once something has been typed that could use it.
-  const completion = enabled && !emojiOpen ? completionAt(draft, caret) : null;
+  const completion = editable && !emojiOpen ? completionAt(draft, caret) : null;
   const completionKey = completion === null ? null : `${String(completion.start)}:${completion.query}`;
   useEffect(() => {
     if (completionKey === null || emojiIndex !== null) return;
@@ -214,6 +223,7 @@ export function Composer({
 
   // Put an emoji where the selection is (or in place of the typed `:short`).
   function insertEmoji(key: string, from: number, to: number): void {
+    if (!editable) return;
     const done = insertAt(draft, from, to, key);
     caretAfter.current = done.caret;
     setSuggestion(0);
@@ -230,8 +240,6 @@ export function Composer({
     emojiButton.current?.focus();
   }
 
-  const uploading = attachments.some((a) => a.status === 'uploading');
-  const busy = sending || uploading;
   const canSend = enabled && !busy && (draft.trim() !== '' || attachments.length > 0) && (!whispering || chosen.length > 0);
 
   function submit() {
@@ -381,7 +389,7 @@ export function Composer({
         </ul>
       ) : null}
       {inputError === null ? null : <p role="alert" className="notice">{inputError}</p>}
-      {emojiOpen ? <EmojiPicker onPick={pickEmoji} onClose={closePicker} /> : null}
+      {emojiOpen && editable ? <EmojiPicker onPick={pickEmoji} onClose={closePicker} /> : null}
       {suggesting ? (
         <ul id="composer-emoji-list" className="emoji-suggestions" role="listbox" aria-label="Emoji suggestions">
           {suggestions.map((e, i) => (
@@ -472,7 +480,7 @@ export function Composer({
         className="attach-image emoji-trigger"
         aria-label="Add emoji"
         aria-haspopup="dialog"
-        aria-expanded={emojiOpen}
+        aria-expanded={emojiOpen && editable}
         disabled={!enabled || busy}
         onClick={() => { setEmojiOpen(!emojiOpen); }}
       >

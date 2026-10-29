@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { Composer } from './Composer';
+import { Composer, ComposerAttachmentProvider } from './Composer';
+import type { DraftAttachment } from './state/attachments';
 
 afterEach(cleanup);
 
@@ -271,5 +272,45 @@ describe('shortcode completion', () => {
     // The composer's own handler took it (it prevents default to send).
     expect(fireEvent.keyDown(box(), { key: 'Enter' })).toBe(false);
     expect(box().getAttribute('aria-controls')).toBeNull();
+  });
+});
+
+// While a send with images is under way the box is read-only, and so is
+// everything that would edit the draft the send was made from.
+describe('a send in progress', () => {
+  const image = (status: DraftAttachment['status']): DraftAttachment => ({ clientId: 1, filename: 'a.png', mediaType: 'image/png', size: 1, bytes: new Blob(['x']), status, attempt: 1 });
+  function WithImage({ status }: { readonly status: DraftAttachment['status'] }) {
+    const [draft, setDraft] = useState('caption :fire');
+    return (
+      <ComposerAttachmentProvider value={{ attachments: [image(status)], add: () => undefined, remove: () => undefined, cancel: () => undefined, retry: () => undefined }}>
+        <Composer channel="general" target={target} nets={new Map()} monitored={new Set()} people={new Map()} viewer={2} draft={draft} enabled paused={false} onDraft={setDraft} onTarget={() => undefined} onSend={() => undefined} atBottom={() => undefined} />
+      </ComposerAttachmentProvider>
+    );
+  }
+
+  it('offers no suggestions, and takes the open ones away, while the images upload', async () => {
+    const { rerender } = render(<WithImage status="ready" />);
+    box().focus();
+    box().setSelectionRange(13, 13);
+    fireEvent.select(box());
+    expect(await screen.findByRole('listbox', { name: 'Emoji suggestions' })).not.toBeNull();
+    rerender(<WithImage status="uploading" />);
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(box().value).toBe('caption :fire');
+    // Enter is not taken for a completion either.
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(box().value).toBe('caption :fire');
+  });
+
+  it('closes an open picker and disables its button while the images upload', async () => {
+    const { rerender } = render(<WithImage status="ready" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
+    await screen.findByRole('button', { name: 'grinning face' });
+    rerender(<WithImage status="uploading" />);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Add emoji' }).disabled).toBe(true);
+    // Once the send is over the picker is closed, not reopened under the user.
+    rerender(<WithImage status="ready" />);
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });
