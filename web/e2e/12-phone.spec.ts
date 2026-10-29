@@ -6,7 +6,7 @@
 // person it adds to the fixture channels touches no other spec.
 import type { Locator, Page } from '@playwright/test';
 import { makeInvite, post } from './api';
-import { accountPassword, channelButton, conversation, expect, expectFits, messages, phones, signIn, statusLine, test } from './fixtures';
+import { accountPassword, channelButton, conversation, expect, expectFits, mainNav, messages, phones, showView, signIn, statusLine, test } from './fixtures';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import type { InvitePermissionRequestV1 } from '../src/schema/generated';
 import { call, inviteUrl, ok, type World } from './world';
@@ -28,9 +28,16 @@ for (const [size, options] of phones) {
     await expect(messages(page).getByText(longWord(size))).toBeVisible();
     await expect(messages(page).getByText(longAddress(size))).toBeVisible();
     await expect(statusLine(page)).toContainText(world.origin);
-    // On the shared server the voice section says voice is not set up.
-    await expect(page.getByRole('region', { name: 'Voice' })).toContainText('Voice is not set up on this server');
     await expectFits(page, 'the lobby with general open');
+    // On the shared server the voice section says voice is not set up. It is
+    // the Voice view's; not in voice, the strip is not under Chat.
+    await expect(page.getByRole('region', { name: 'Voice' })).toBeHidden();
+    await showView(page, 'Voice');
+    await expect(page.getByRole('region', { name: 'Voice' })).toContainText('Voice is not set up on this server');
+    await expectFits(page, 'the Voice view');
+    await showView(page, 'Channels');
+    await expectFits(page, 'the Channels view');
+    await showView(page, 'Chat');
 
     // The whisper picker lays its people out in the composer.
     await page.getByLabel('To:').selectOption({ label: 'Whisper to…' });
@@ -127,10 +134,11 @@ for (const [size, options] of phones) {
     await keepToken(page, secrets);
     await expectFits(page, 'the lobby of a new member');
 
-    // Open a channel and back again, then post in it.
-    await channelButton(page, 'nets-demo').tap();
+    // Open a channel and back again, then post in it: each channel is chosen
+    // in Channels, which returns to Chat.
+    await tapChannel(page, 'nets-demo');
     await expect(page.getByRole('heading', { name: 'nets-demo' })).toBeVisible();
-    await channelButton(page, 'general').tap();
+    await tapChannel(page, 'general');
     await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
     const body = `${name} posted by tapping`;
     const box = page.getByLabel('Message #general');
@@ -163,7 +171,7 @@ for (const [size, options] of phones) {
   // invite (redeeming counts against the network's tries, which 13-sign-in-
   // link needs), in channels of their own, so the shared fixture people's
   // lists are left as they are. They may invite, so Invite someone is shown.
-  test(`P601 at ${size} the channel row shows there is more, and the top bar's buttons and the audience select are finger-sized`, async ({ meet, secrets, world }) => {
+  test(`P601 at ${size} the navigation, the top bar's buttons and the audience select are finger-sized, and more channels than fit are a column to scroll`, async ({ meet, secrets, world }) => {
     const tag = `p601-${size.slice(0, 3)}-${String(Date.now())}`;
     const op = world.tokens.operator;
     const person: CreatePrincipalRequest = { kind: 'human', name: tag };
@@ -180,7 +188,6 @@ for (const [size, options] of phones) {
     }
     const { page } = await meet(options);
     await signIn(page, world, token, tag);
-    await expect(channelButton(page, names[names.length - 1] ?? '')).toBeAttached();
     await expect(page.getByLabel('To:')).toBeVisible();
 
     for (const [what, target] of [
@@ -197,24 +204,41 @@ for (const [size, options] of phones) {
     }
     await expectFits(page, 'the lobby with more channels than fit');
 
-    // At the start the fade is on the right edge only; at the end, the left.
-    const row = page.getByRole('navigation', { name: 'Channels' }).getByRole('list');
-    const fades = () =>
-      row.evaluate((el) => ({ before: getComputedStyle(el, '::before').opacity, after: getComputedStyle(el, '::after').opacity }));
-    await row.evaluate((el) => {
-      el.scrollLeft = 0;
-    });
-    await expect(row).toHaveClass(/\bmore-after\b/);
-    await expect(row).not.toHaveClass(/\bmore-before\b/);
-    expect(await fades()).toEqual({ before: '0', after: '1' });
-    await row.evaluate((el) => {
-      el.scrollLeft = el.scrollWidth;
-    });
-    await expect(row).toHaveClass(/\bmore-before\b/);
-    await expect(row).not.toHaveClass(/\bmore-after\b/);
-    expect(await fades()).toEqual({ before: '1', after: '0' });
-    await expectFits(page, 'the lobby with the channel row scrolled to its end');
+    // The navigation's three buttons are finger-sized too, and the channels
+    // are the Channels view: a column of full-width rows (issue #929, which
+    // replaced the sideways row and its fade), none beyond the screen's edge,
+    // each reachable by scrolling the view.
+    for (const view of ['Chat', 'Channels', 'Voice'] as const) {
+      const box = await mainNav(page).getByRole('button', { name: view, exact: true }).boundingBox();
+      if (box === null) throw new Error(`${view} has no box on the screen`);
+      expect(box.width, `${view} is ${String(box.width)}×${String(box.height)}`).toBeGreaterThanOrEqual(44);
+      expect(box.height, `${view} is ${String(box.width)}×${String(box.height)}`).toBeGreaterThanOrEqual(44);
+    }
+    await showView(page, 'Channels');
+    const screen = page.viewportSize()?.width ?? 0;
+    let left: number | null = null;
+    for (const name of names) {
+      const row = channelButton(page, name);
+      await row.scrollIntoViewIfNeeded();
+      await expect(row).toBeInViewport();
+      const box = await row.boundingBox();
+      if (box === null) throw new Error(`${name} has no box on the screen`);
+      const where = `${name} is at x ${String(box.x)}, ${String(box.width)}×${String(box.height)}`;
+      expect(box.height, where).toBeGreaterThanOrEqual(44);
+      expect(box.x + box.width, where).toBeLessThanOrEqual(screen);
+      left ??= box.x;
+      expect(Math.abs(box.x - left), `${where}: the rows are one column`).toBeLessThanOrEqual(1);
+    }
+    await expectFits(page, 'the Channels view with more channels than fit');
   });
+}
+
+// tapChannel opens a channel with touch, as a phone does: Channels, the
+// channel, and Chat is back.
+async function tapChannel(page: Page, name: string): Promise<void> {
+  await mainNav(page).getByRole('button', { name: 'Channels', exact: true }).tap();
+  await channelButton(page, name).tap();
+  await expect(mainNav(page).getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-current', 'page');
 }
 
 // expectOnScreen checks that an element, scrolled into view, lies wholly

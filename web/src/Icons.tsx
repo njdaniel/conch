@@ -68,6 +68,8 @@ const paths = {
   bell: <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />,
   fullscreen: <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />,
   options: <path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 5v4M8 15v4" />,
+  chat: <path d="M4 5h16v11H9.5L5 20v-4H4z" />,
+  channels: <path d="M9.5 4 7.5 20M16.5 4l-2 16M4 9h16M4 15h16" />,
 } as const;
 
 export type IconName = keyof typeof paths;

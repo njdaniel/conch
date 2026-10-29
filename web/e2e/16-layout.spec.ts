@@ -7,11 +7,11 @@
 // 12-screen-share, which has LiveKit.
 import type { BrowserContextOptions, Locator, Page, WebSocketRoute } from '@playwright/test';
 import { voicePresenceV1, type VoicePresenceV1 } from '../src/schema/voice';
-import { channelButton, expect, expectFits, messages, phones, signIn, test } from './fixtures';
+import { channelButton, expect, expectFits, mainNav, messages, openChannel, phoneSizes, showView, signIn, test } from './fixtures';
 import { call, ok, type World } from './world';
 
 const sizes: readonly (readonly [string, BrowserContextOptions])[] = [
-  ...phones,
+  ...phoneSizes,
   ['768×1024', { viewport: { width: 768, height: 1024 }, hasTouch: true }],
   ['1440×900', { viewport: { width: 1440, height: 900 } }],
   ['1440×900 at 200%', { viewport: { width: 720, height: 450 }, deviceScaleFactor: 2 }],
@@ -71,11 +71,25 @@ test('P536 at every size the lobby fits, its composer and voice strip are uncove
   for (const [size, options] of sizes) {
     const { page } = await meet(options);
     await signIn(page, world, me.token, me.name);
-    await channelButton(page, channel).click();
+    await openChannel(page, channel);
     await expect(messages(page).getByText(longWord)).toBeVisible();
     await expectFits(page, `${size}: the lobby`);
     await expectUncovered(page, page.getByLabel(`Message #${channel}`), `${size}: the composer`);
-    await expectUncovered(page, page.getByRole('region', { name: 'Voice' }), `${size}: the voice strip`);
+    if ((options.viewport?.width ?? 1000) < 700) {
+      // A phone: the voice section is the Voice view's (not in voice, there
+      // is no strip under Chat), and the navigation is on the screen's
+      // bottom edge, uncovered, under every view.
+      await expectUncovered(page, mainNav(page), `${size}: the navigation`);
+      await showView(page, 'Voice');
+      await expectUncovered(page, page.getByRole('region', { name: 'Voice' }), `${size}: the voice section`);
+      await expectFits(page, `${size}: the Voice view`);
+      await showView(page, 'Channels');
+      await expectUncovered(page, channelButton(page, channel), `${size}: the long channel's row`);
+      await expectFits(page, `${size}: the Channels view with a long channel name`);
+      await showView(page, 'Chat');
+    } else {
+      await expectUncovered(page, page.getByRole('region', { name: 'Voice' }), `${size}: the voice strip`);
+    }
 
     // Members: a column on a wide window, a panel over the page otherwise.
     const members = page.getByRole('button', { name: 'Members' });
@@ -176,7 +190,7 @@ const rosterSizes: readonly (readonly [string, BrowserContextOptions, boolean])[
   ['1440×900', { viewport: { width: 1440, height: 900 } }, false],
   ['1280×720', { viewport: { width: 1280, height: 720 } }, false],
   ['768×1024', { viewport: { width: 768, height: 1024 }, hasTouch: true }, false],
-  [phones[0][0], phones[0][1], true],
+  ...phoneSizes.map(([size, options]) => [size, options, true] as const),
 ];
 
 test("P587 the voice roster shows everyone and how many, and the strip's controls stay put as it grows", async ({ meet, secrets, world }) => {
@@ -196,7 +210,9 @@ test("P587 the voice roster shows everyone and how many, and the strip's control
     const { page } = await meet(options);
     const presence = await servePresence(page, world, me.token, channel, [me.id]);
     await signIn(page, world, me.token, me.name);
-    await channelButton(page, channel).click();
+    await openChannel(page, channel);
+    // On a phone the voice section is the Voice view's.
+    if (phone) await showView(page, 'Voice');
     const strip = page.getByRole('region', { name: 'Voice' });
     const roster = strip.getByRole('list', { name: /in voice$/ });
     await expect(strip.getByRole('heading', { name: '1 in voice' })).toBeVisible();
@@ -217,16 +233,14 @@ test("P587 the voice roster shows everyone and how many, and the strip's control
     await expect(chips).toHaveCount(8);
 
     if (phone) {
-      // Three chips, then "+5 more" for the rest.
-      const more = strip.getByRole('button', { name: '+5 more' });
-      await expect(more).toBeVisible();
-      await expect(more).toHaveAttribute('aria-expanded', 'false');
+      // The Voice view shows everyone, by name (issue #929): the compact
+      // strip's three chips and "+5 more" are for the strip under Chat and
+      // Channels, once joined.
+      await expect(strip.getByRole('button', { name: /more$/ })).toBeHidden();
       for (let i = 0; i < 8; i++) {
-        if (i < 3) await expect(chips.nth(i)).toBeVisible();
-        else await expect(chips.nth(i)).toBeHidden();
+        await expect(chips.nth(i)).toBeVisible();
+        await expect(chips.nth(i).locator('.who')).toBeVisible();
       }
-      await more.click();
-      await expect(strip.getByRole('button', { name: 'Show fewer' })).toHaveAttribute('aria-expanded', 'true');
     } else {
       await expect(strip.getByRole('button', { name: /more$/ })).toBeHidden();
       // With everyone shown, the controls are where they were with one.
@@ -244,80 +258,140 @@ test("P587 the voice roster shows everyone and how many, and the strip's control
       await expectInside(page, chip, await boxOf(strip, `${size}: the voice strip`), `${size}: ${names[i] ?? ''}'s chip`);
     }
     await expectFits(page, `${size}: the lobby with eight in voice`);
+    if (phone) await showView(page, 'Chat');
     await expectUncovered(page, page.getByLabel(`Message #${channel}`), `${size}: the composer`);
   }
 });
 
-// ---------------------------------------------------------------- issue #641
 
-// On a phone, with eight in voice and nobody sharing, the roster is one row
-// (the count, three chips with the viewer's own among them, and "+5 more")
-// and the dock is at most 200 px: #600's bound, which four or more in voice
-// broke by wrapping the chips into a column. With someone sharing the dock
-// says so and still leaves the composer on screen. Watching a share with this
-// many in voice is in 12-screen-share, which has LiveKit.
-test('P641 a phone keeps the voice strip compact with eight in voice, the viewer among those shown', async ({ meet, secrets, world }) => {
-  const tag = `p641-${String(Date.now())}`;
-  const channel = `${tag}-voice`;
-  await must(world, world.tokens.operator, 'POST', '/v0/channels', { name: channel });
-  // The viewer is made last, so has the highest principal id among the eight.
-  const others: Member[] = [];
-  for (let i = 0; i < 7; i++) others.push(await member(world, channel, `${tag}-in-voice-${String(i)}`));
-  const me = await member(world, channel, `${tag}-me`);
-  secrets.push(me.token);
-  for (const o of others) secrets.push(o.token);
-  const everyone = [...others.map((o) => o.id), me.id];
+// ---------------------------------------------------------------- issue #929
 
-  for (const [size, options] of phones) {
-    const { page } = await meet(options);
-    const presence = await servePresence(page, world, me.token, channel, [me.id]);
-    await signIn(page, world, me.token, me.name);
-    await channelButton(page, channel).click();
-    const strip = page.getByRole('region', { name: 'Voice' });
-    await expect(strip.getByRole('heading', { name: '1 in voice' })).toBeVisible();
-    const dock = page.locator('.dock');
-    // Not in voice (nothing here can join: the server has no LiveKit) the
-    // strip's notes are longer than #600's 200 px allows for, so the bound
-    // here is that eight are no taller than one; the 200 px itself is in
-    // 12-screen-share, joined.
-    const alone = (await boxOf(dock, `${size}: the dock with one in voice`)).height;
-
-    presence.show(everyone);
-    await expect(strip.getByRole('heading', { name: '8 in voice' })).toBeVisible();
-    const chips = strip.getByRole('list', { name: '8 in voice' }).locator('li');
-    await expect(chips).toHaveCount(8);
-
-    // Three chips show, and the viewer's is one of them.
-    const shown: Box[] = [];
-    let mine = false;
-    for (let i = 0; i < 8; i++) {
-      if (!(await chips.nth(i).isVisible())) continue;
-      shown.push(await boxOf(chips.nth(i), `${size}: chip ${String(i)}`));
-      if ((await chips.nth(i).locator('.who').textContent())?.startsWith('You') === true) mine = true;
+// The phone layout, at the four phone sizes: Chat, Channels and Voice, one at a
+// time, under a bottom navigation. Nothing here has LiveKit, so nobody can join:
+// the strip is served a presence document (as for #587) and the test asserts
+// that no view, channel or panel asked for a voice session. A call carried
+// through the views is in 12-screen-share and 10-voice, which have LiveKit.
+for (const [size, options] of phoneSizes) {
+  test(`P929 at ${size} the views fit, keep drafts and the log's place, join nothing, and survive a rotation`, async ({ meet, secrets, world }) => {
+    const tag = `p929-${size.slice(0, 3)}-${String(Date.now())}`;
+    const first = `${tag}-a-channel-with-a-rather-long-name`;
+    const second = `${tag}-second`;
+    const op = world.tokens.operator;
+    await must(world, op, 'POST', '/v0/channels', { name: first });
+    await must(world, op, 'POST', '/v0/channels', { name: second });
+    const me = await member(world, first, `${tag}-someone-whose-display-name-is-long`);
+    secrets.push(me.token);
+    await must(world, op, 'PUT', `/v1/channels/${encodeURIComponent(second)}/members/${String(me.id)}`);
+    const others: Member[] = [];
+    for (let i = 0; i < 7; i++) others.push(await member(world, first, `${tag}-in-voice-${String(i)}`));
+    for (const o of others) secrets.push(o.token);
+    for (let i = 0; i < 40; i++) {
+      await must(world, me.token, 'POST', `/v2/channels/${encodeURIComponent(first)}/messages`, { body: `${tag} line ${String(i + 1)} ${'and on it goes '.repeat(i % 5)}` });
     }
-    expect(shown.length, `${size}: chips shown`).toBe(3);
-    expect(mine, `${size}: the viewer's own chip is shown`).toBe(true);
 
-    // One row: the count, the chips and "+5 more" lie on one line.
-    const row = [
-      await boxOf(strip.getByRole('heading', { name: '8 in voice' }), `${size}: the count`),
-      ...shown,
-      await boxOf(strip.getByRole('button', { name: '+5 more' }), `${size}: +5 more`),
-    ];
-    const tops = row.map((b) => b.y + b.height / 2);
-    expect(Math.max(...tops) - Math.min(...tops), `${size}: the roster is one row, centres at ${tops.join(', ')}`).toBeLessThanOrEqual(8);
-    const edge = page.viewportSize()?.width ?? 0;
-    for (const b of row) expect(b.x + b.width, `${size}: the roster fits the screen`).toBeLessThanOrEqual(edge);
+    const { page } = await meet(options);
+    let sessions = 0;
+    page.on('request', (r) => {
+      if (r.method() === 'POST' && r.url().endsWith('/voice/session')) sessions++;
+    });
+    await servePresence(page, world, me.token, first, [me.id, ...others.map((o) => o.id)]);
+    await signIn(page, world, me.token, me.name);
+    await openChannel(page, first);
+    const nav = mainNav(page);
+    const log = messages(page);
+    const composer = page.getByLabel(`Message #${first}`);
 
-    const height = (await boxOf(dock, `${size}: the dock`)).height;
-    expect(height, `${size}: the dock is ${String(height)} px with eight in voice, ${String(alone)} px with one`).toBeLessThanOrEqual(alone + 6);
-    await expectFits(page, `${size}: eight in voice`);
-    await expectUncovered(page, page.getByLabel(`Message #${channel}`), `${size}: the composer`);
+    // Three labelled buttons, finger-sized, the current one marked.
+    await expect(nav.getByRole('button')).toHaveText(['Chat', 'Channels', 'Voice']);
+    for (const name of ['Chat', 'Channels', 'Voice']) {
+      const box = await boxOf(nav.getByRole('button', { name, exact: true }), `${size}: ${name}`);
+      expect(box.width, `${size}: ${name} is ${String(box.width)}×${String(box.height)}`).toBeGreaterThanOrEqual(44);
+      expect(box.height, `${size}: ${name} is ${String(box.width)}×${String(box.height)}`).toBeGreaterThanOrEqual(44);
+    }
+    await expectUncovered(page, nav, `${size}: the navigation`);
 
-    // Someone else shares: the strip says so, and the composer is still there.
-    presence.show(everyone, others[0]?.id);
-    await expect(strip).toContainText('is sharing a screen');
-    await expectFits(page, `${size}: eight in voice, one sharing`);
-    await expectUncovered(page, page.getByLabel(`Message #${channel}`), `${size}: the composer, one sharing`);
-  }
-});
+    // A draft, and the log scrolled up from its end.
+    await composer.fill(`${tag} half a thought`);
+    await log.evaluate((el) => {
+      el.scrollTop = el.scrollHeight - el.clientHeight - 300;
+    });
+    const placed = await log.evaluate((el) => el.scrollTop);
+    expect(placed, `${size}: the log is scrolled up from its end`).toBeGreaterThan(0);
+
+    for (const view of ['Channels', 'Voice', 'Chat'] as const) {
+      await showView(page, view);
+      await expectFits(page, `${size}: the ${view} view`);
+      if (view === 'Voice') {
+        const strip = page.getByRole('region', { name: 'Voice' });
+        await expect(strip.getByRole('heading', { name: '8 in voice' })).toBeVisible();
+        await expect(composer, `${size}: the composer is not drawn in the Voice view`).toBeHidden();
+        await expectUncovered(page, strip.getByRole('button', { name: /^Watch only/ }), `${size}: Watch only`);
+        await expectUncovered(page, nav.getByRole('button', { name: 'Chat', exact: true }), `${size}: the way back to Chat`);
+      }
+    }
+    await expect(composer).toHaveValue(`${tag} half a thought`);
+    expect(Math.abs((await log.evaluate((el) => el.scrollTop)) - placed), `${size}: the log kept its place through Channels and Voice`).toBeLessThanOrEqual(2);
+
+    // Scrolled up by only a little (40 px, more than the 24 px that still
+    // counts as the end): not snapped back to the newest message either, by
+    // the log being resized behind the Voice view and back.
+    await log.evaluate((el) => {
+      el.scrollTop = el.scrollHeight - el.clientHeight - 40;
+    });
+    const near = await log.evaluate((el) => el.scrollTop);
+    for (const view of ['Voice', 'Channels', 'Chat'] as const) await showView(page, view);
+    await expect(composer).toHaveValue(`${tag} half a thought`);
+    expect(Math.abs((await log.evaluate((el) => el.scrollTop)) - near), `${size}: the log kept a place 40 px from its end`).toBeLessThanOrEqual(2);
+
+    // Another channel, chosen in Channels: Chat is back, with the other
+    // channel's own (empty) box; this one's draft is there on return.
+    await showView(page, 'Channels');
+    await expect(channelButton(page, first)).toHaveAttribute('aria-current', 'true');
+    await channelButton(page, second).click();
+    await expect(mainNav(page).getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-current', 'page');
+    await expect(page.getByRole('heading', { name: second })).toBeFocused();
+    await expect(page.getByLabel(`Message #${second}`)).toHaveValue('');
+    await page.getByLabel(`Message #${second}`).fill(`${tag} for the second`);
+    await openChannel(page, first);
+    await expect(composer).toHaveValue(`${tag} half a thought`);
+
+    // Settings from the Voice view, and back: the view and the focus.
+    await showView(page, 'Voice');
+    const settings = page.getByRole('button', { name: 'Settings' });
+    await settings.click();
+    await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
+    await expectFits(page, `${size}: Settings over the Voice view`);
+    await page.keyboard.press('Escape');
+    await expect(settings).toBeFocused();
+    await expect(nav.getByRole('button', { name: 'Voice', exact: true })).toHaveAttribute('aria-current', 'page');
+    await showView(page, 'Chat');
+
+    // The on-screen keyboard shortens the window. This is a resize, which is
+    // not a keyboard: it checks the layout gives the composer and the
+    // navigation the room that is left, not what a real keyboard does.
+    const full = options.viewport;
+    await composer.focus();
+    await page.setViewportSize({ width: full.width, height: Math.round(full.height * 0.55) });
+    await expectUncovered(page, composer, `${size}: the composer with a short window`);
+    await expectUncovered(page, page.getByRole('button', { name: 'Send' }), `${size}: Send with a short window`);
+    await expectFits(page, `${size}: a short window`);
+    await page.setViewportSize(full);
+    await expect(composer).toHaveValue(`${tag} half a thought`);
+
+    // Turned on its side the window is wider than a phone: the tablet layout,
+    // with no navigation; turned back, the phone layout and the same page.
+    await page.setViewportSize({ width: full.height, height: full.width });
+    // (Landscape is 700 px or wider for all but the 320 px phone, whose 640 px
+    // is still a phone's width.)
+    if (full.height >= 700) await expect(nav).toHaveCount(0);
+    else await expect(nav).toBeVisible();
+    await expectFits(page, `${size}: on its side`);
+    await expectUncovered(page, composer, `${size}: the composer on its side`);
+    await page.setViewportSize(full);
+    await expect(nav).toBeVisible();
+    await expect(composer).toHaveValue(`${tag} half a thought`);
+    await expectFits(page, `${size}: turned back`);
+
+    expect(sessions, `${size}: nothing asked for a voice session`).toBe(0);
+  });
+}

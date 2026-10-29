@@ -5,6 +5,7 @@ import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { JoiningSettings, type JoiningRequest } from './joiningSettings';
+import { MicTestShown, phoneViews, useAppHeight, usePhone, VoiceLive, type PhoneView } from './phone';
 import { StageHost } from './stage';
 import type { ChannelsState } from './state/channels';
 import { connectionLabel, type ConnectionState } from './state/connection';
@@ -148,6 +149,61 @@ export function Lobby({
     setWasWide(wideNow);
     if (!wideNow) setPanelOpen(false);
   }
+  // The phone layout (issue #929): below 700 px one of three views is drawn at
+  // a time. All of them stay mounted, so a switch only changes what is shown:
+  // the draft, the log's place and the call are untouched.
+  const phone = usePhone();
+  useAppHeight(phone);
+  // Until a view is chosen: Chat once a channel is open, Channels while the
+  // list is loading, failed to load, or has nothing open to chat in.
+  const [chosen, setView] = useState<PhoneView | null>(null);
+  // Chat with nothing open (the channel was lost or closed on this tab) is
+  // Channels.
+  const chatOpen = channels.loaded && channels.selected !== null;
+  const wanted: PhoneView = chosen ?? 'chat';
+  const view: PhoneView = wanted === 'chat' && !chatOpen ? 'channels' : wanted;
+  const [live, setLive] = useState(false);
+  // Leaving voice under Chat or Channels takes the strip off the screen
+  // (Join voice was focused in it): focus goes to the Voice button, where Join
+  // voice now is, rather than to the page's top. Only focus that was in the
+  // strip, or nowhere.
+  const dock = useRef<HTMLDivElement>(null);
+  const voiceTab = useRef<HTMLButtonElement>(null);
+  // The conversation's height while a view that shows it (or leaves it laid out
+  // at the same size) is current, kept as --chat-height on the lobby for the
+  // Voice view, which lays it out hidden behind. Resizing it there would clamp
+  // the log's scroll position, and a reader a few pixels above the end would
+  // come back to somewhere else. Set through the CSSOM (no inline style).
+  const lobbyEl = useRef<HTMLDivElement>(null);
+  const conversationEl = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const box = lobbyEl.current;
+    const el = conversationEl.current;
+    if (!phone || view === 'voice' || box === null || el === null || typeof ResizeObserver !== 'function') return;
+    const watch = new ResizeObserver(() => {
+      box.style.setProperty('--chat-height', `${String(el.getBoundingClientRect().height)}px`);
+    });
+    watch.observe(el);
+    return () => {
+      watch.disconnect();
+    };
+  }, [phone, view]);
+  const wasLive = useRef(false);
+  useEffect(() => {
+    const left = wasLive.current && !live;
+    wasLive.current = live;
+    if (!left || !phone || view === 'voice') return;
+    const at = document.activeElement;
+    if (at === null || at === document.body || dock.current?.contains(at) === true) voiceTab.current?.focus();
+  }, [phone, live, view]);
+  // Choosing a channel on a phone returns to Chat, and focus follows the page
+  // to the conversation's heading (the list it was on is no longer shown).
+  const toHeading = useRef(false);
+  useEffect(() => {
+    if (view !== 'chat' || !toHeading.current) return;
+    toHeading.current = false;
+    document.getElementById(headingId)?.focus();
+  }, [view]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Settings with Joining and guests expanded, asked for from the invite panel
   // (issue #909).
@@ -243,7 +299,7 @@ export function Lobby({
 
   return (
     <JoiningSettings.Provider value={joining}>
-      <div className="lobby">
+      <div ref={lobbyEl} className={phone ?`lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}>
         {/* While Settings is open the rest of the page is inert: the panel is
             modal, and focus cannot wander behind its backdrop. */}
         <header className="topbar" inert={settingsOpen || asking}>
@@ -298,7 +354,13 @@ export function Lobby({
                   occupancy={occupancy}
                   empty={newChannel === null || newChannel === undefined ? undefined : 'No channels yet'}
                   rename={renameChannel}
-                  onOpen={onOpen}
+                  onOpen={(name) => {
+                    onOpen(name);
+                    if (phone) {
+                      toHeading.current = true;
+                      setView('chat');
+                    }
+                  }}
                 />
                 {newChannel}
               </>
@@ -316,7 +378,7 @@ export function Lobby({
           </nav>
           <main className="centre">
             <div ref={setStage} className="stage" />
-            <section aria-label="Conversation" className="conversation">
+            <section ref={conversationEl} aria-label="Conversation" className="conversation">
               {temporary === true ? <TemporaryBanner /> : null}
               {banner}
               {channels.lost === undefined ? null : (
@@ -348,9 +410,39 @@ export function Lobby({
           </aside>
           {membersOver ? <div className="backdrop" onClick={closeMembers} /> : null}
         </div>
-        <div className="dock" inert={settingsOpen || asking}>
-          <StageHost.Provider value={stage}>{voice}</StageHost.Provider>
+        <div ref={dock} className="dock" inert={settingsOpen || asking}>
+          <VoiceLive.Provider value={setLive}>
+            <MicTestShown.Provider value={!phone || view === 'voice'}>
+              <StageHost.Provider value={stage}>{voice}</StageHost.Provider>
+            </MicTestShown.Provider>
+          </VoiceLive.Provider>
         </div>
+        {phone ? (
+          <nav aria-label="Main navigation" className="phone-nav" inert={settingsOpen || asking}>
+            {phoneViews.map(({ view: v, label }) => (
+              <button
+                key={v}
+                ref={v === 'voice' ? voiceTab : undefined}
+                type="button"
+                aria-current={view === v ? 'page' : undefined}
+                aria-describedby={v === 'voice' && live ? 'nav-voice-live' : undefined}
+                onClick={() => {
+                  setView(v);
+                }}
+              >
+                <Glyph name={v === 'chat' ? 'chat' : v === 'channels' ? 'channels' : 'headphones'} />
+                <span className="nav-label">{label}</span>
+                {v === 'voice' && live ? <span className="nav-live" aria-hidden="true" /> : null}
+              </button>
+            ))}
+            {/* Outside the button, so the button's name stays Voice. */}
+            {live ? (
+              <span id="nav-voice-live" className="vh">
+                You are in voice
+              </span>
+            ) : null}
+          </nav>
+        ) : null}
         {settingsOpen && !asking ? <div className="backdrop" onClick={closeSettings} /> : null}
         <div
           id="settings-panel"

@@ -11,7 +11,7 @@
 // test runs against a conchd with LiveKit of its own (voice-world.ts):
 // without Docker it fails when CI is set and is skipped otherwise.
 import type { BrowserContextOptions, Page } from '@playwright/test';
-import { channelButton, expect, expectFits, messages, phones, signIn, statusLine, test } from './fixtures';
+import { channelButton, expect, expectFits, messages, openChannel, phones, showView, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { call, type World } from './world';
 
@@ -218,9 +218,10 @@ sizes.forEach(([size, options], n) => {
     const traffic = watchTraffic(page);
     await signIn(page, world, bea.token, bea.name);
     // B's one channel, and nothing else.
+    await showView(page, 'Channels');
     await expect(channelButton(page, bChannel)).toBeVisible();
     await expect(channelButtons(page)).toHaveCount(1);
-    await channelButton(page, bChannel).click();
+    await openChannel(page, bChannel);
     await expect(messages(page).getByText(`${tag} bravo before`)).toBeVisible();
     const members = await openMembers(page);
     await expect(members).toContainText(bea.name);
@@ -230,8 +231,9 @@ sizes.forEach(([size, options], n) => {
     // A full load.
     await page.reload();
     await expect(statusLine(page)).toContainText('Connected');
+    await showView(page, 'Channels');
     await expect(channelButtons(page)).toHaveCount(1);
-    await channelButton(page, bChannel).click();
+    await openChannel(page, bChannel);
     await expect(messages(page).getByText(`${tag} bravo before`)).toBeVisible();
     await expect(await openMembers(page)).toContainText(bea.name);
     await expectNothingOf(page, traffic, markersOfA, 'after a full load');
@@ -242,6 +244,7 @@ sizes.forEach(([size, options], n) => {
     await say(ann, aChannel, `${tag} alpha after`);
     await say(bea, bChannel, `${tag} bravo after`);
     await expect(messages(page).getByText(`${tag} bravo after`)).toBeVisible();
+    await showView(page, 'Channels');
     await expect(channelButtons(page)).toHaveCount(1);
     await expect(await openMembers(page)).toContainText(bea.name);
     await expectFits(page, `${size}: B's lobby after a reconnect`);
@@ -333,16 +336,20 @@ test.describe('with LiveKit', () => {
     const traffic = watchTraffic(b.page);
     const occupancy = watchOccupancy(b.page);
     await signIn(b.page, vw, bea.token, bea.name);
+    await showView(b.page, 'Channels');
     await expect(channelButtons(b.page)).toHaveCount(1);
-    await channelButton(b.page, bChannel).click();
+    await openChannel(b.page, bChannel);
+    await showView(b.page, 'Voice');
     await voiceRegion(b.page).getByRole('button', { name: 'Join voice' }).tap();
     await expect(voiceRegion(b.page)).toContainText(`Connected in #${bChannel}`, { timeout: 30_000 });
     const inVoice = voiceRegion(b.page).getByRole('list', { name: 'In voice' });
     await expect(inVoice).toContainText('You', { timeout: 15_000 });
     // B's own count rises when B's person joins, so the silence about A
     // below means something.
+    await showView(b.page, 'Channels');
     await expect(voiceMarks(b.page)).toHaveText(['1'], { timeout: 15_000 });
     await expect(voiceMarks(b.page).first()).toHaveAccessibleName('1 in voice');
+    await showView(b.page, 'Voice');
 
     // The roster calls its reader "You". alice is in A's room all the while,
     // as the operator reads it: what B does not see is there to be seen.
@@ -357,16 +364,20 @@ test.describe('with LiveKit', () => {
 
     await b.page.reload();
     await expect(statusLine(b.page)).toContainText('Connected');
+    await showView(b.page, 'Channels');
     await expect(channelButtons(b.page)).toHaveCount(1);
-    await channelButton(b.page, bChannel).click();
+    await openChannel(b.page, bChannel);
+    await showView(b.page, 'Voice');
     await expect(voiceRegion(b.page).getByRole('button', { name: 'Join voice' })).toBeVisible();
     // Not in voice, with alice in A's room: no line says anyone is in voice
     // anywhere else, and the only mark there could be is B's own channel's.
     await expect(voiceRegion(b.page).locator('.voice-elsewhere')).toHaveCount(0);
+    await showView(b.page, 'Channels');
     expect(await voiceMarks(b.page).count()).toBeLessThanOrEqual(1);
     await expectNothingOf(b.page, traffic, markersOfA, 'after a full load');
     expectOnlyOwn(occupancy, bIds, aIds, 'after a full load');
 
+    await showView(b.page, 'Voice');
     await voiceRegion(b.page).getByRole('button', { name: 'Join voice' }).tap();
     await expect(voiceRegion(b.page).getByRole('list', { name: 'In voice' })).toContainText('You', { timeout: 15_000 });
     await dropSockets(b.page);
