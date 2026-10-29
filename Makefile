@@ -11,7 +11,7 @@ LINT    = golangci-lint
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS  = -X main.version=$(VERSION)
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts depgate deploy-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts depgate deploy-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-smoke p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -36,7 +36,7 @@ fmt:
 fmt-check:
 	@out=$$(gofmt -l $$(git ls-files -co --exclude-standard '*.go')); if [ -n "$$out" ]; then echo "gofmt needed on:"; echo "$$out"; exit 1; fi
 
-check: fmt-check invisible-check vet lint test schema-compat schema-ts depgate deploy-test rust-check web-check
+check: fmt-check invisible-check vet lint test schema-compat schema-ts depgate deploy-test rust-check web-check desktop-check
 
 # No tracked text file may hold a bidi control, a line or paragraph separator
 # or a control character other than tab, LF and CR (issue #244). The script's
@@ -90,6 +90,47 @@ web-e2e: web-node
 	cd web && npm ci --no-audit
 	@cd web && node --input-type=module -e "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; if (!existsSync(chromium.executablePath())) { console.error('web-e2e: FAIL: the browser Playwright pins is not installed; run: cd web && npx playwright install chromium'); process.exit(1); }"
 	cd web && npm run e2e
+
+# The desktop shell under desktop/ (issue #940, ADR-007, linux-desktop.md): an
+# Electron app that serves the web client from packaged files. desktop-check
+# runs the repository's gates for it (the fetch script's test, the lint rules,
+# the dependency and licence gates), then npm ci, typecheck, lint and unit
+# tests. It downloads no Electron binary and needs no display. Only `npm ci`
+# installs, from the committed lockfile. It needs the Node desktop/.nvmrc pins;
+# without it this fails and names that version, it does not skip.
+DESKTOP_NODE = $(shell cat desktop/.nvmrc)
+DESKTOP_NODE_BIN = $(HOME)/.nvm/versions/node/v$(DESKTOP_NODE)/bin
+desktop-node desktop-check desktop-build desktop-smoke: export PATH := $(if $(wildcard $(DESKTOP_NODE_BIN)/node),$(DESKTOP_NODE_BIN):)$(PATH)
+
+desktop-node:
+	@v=$$(node --version 2>/dev/null) || { echo "desktop: FAIL: Node.js is not installed; install Node $(DESKTOP_NODE) (desktop/.nvmrc)"; exit 1; }; \
+	if [ "$$v" != "v$(DESKTOP_NODE)" ]; then echo "desktop: FAIL: Node $$v is installed; install Node $(DESKTOP_NODE) (desktop/.nvmrc)"; exit 1; fi
+
+desktop-check: desktop-node
+	./scripts/desktop-electron-test.sh
+	./scripts/desktop-lint-test.sh
+	./scripts/desktop-lint.sh
+	./scripts/web-depgate.sh desktop
+	./scripts/web-licences.sh desktop/package-lock.json desktop/licences-allowlist.txt
+	cd desktop && npm ci --no-audit
+	cd desktop && npm run typecheck
+	cd desktop && npm run lint
+	cd desktop && npm test
+
+# The unpacked Linux app, desktop/dist/linux-unpacked/. Fetches the pinned
+# Electron into ~/.cache/conch/electron once (scripts/desktop-electron.sh checks its
+# SHA-256 twice) and builds web/ for it without touching web/dist. Not part of
+# `make check`.
+desktop-build: desktop-node
+	./scripts/desktop-build.sh
+
+# The packaged smoke test: drives the built app over Chromium's remote-debugging
+# port (desktop/tests/smoke/launch.ts says why). Needs a display: CI runs it
+# under xvfb-run; CONCH_SMOKE_HEADLESS=1 uses Chromium's headless Ozone
+# platform where there is no X server. Not part of `make check`.
+desktop-smoke: desktop-node
+	cd desktop && npm ci --no-audit
+	cd desktop && npm run smoke
 
 # The P3 local prototype (issue #283, docs/p3-walkthrough.md): p3-local builds
 # the binaries and the web client, starts a disposable conchd, creates the test
