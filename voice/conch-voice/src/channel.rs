@@ -55,7 +55,7 @@ use std::time::Duration;
 
 use conch_voice_api::{
     Secret, VOICE_CONTROL_HELLO_TIMEOUT_MS, VOICE_CONTROL_OWNER_LOSS_EXIT_MS,
-    VoiceControlPipeAttachedV1, to_line, validate_nonce,
+    VOICE_CONTROL_PIPE_NONCE_CHARS, VoiceControlPipeAttachedV1, to_line, validate_nonce,
 };
 use tokio::sync::mpsc;
 
@@ -91,8 +91,10 @@ pub fn require_absolute(path: &Path) -> Result<(), Error> {
 }
 
 /// The nonce `environment` holds, if it is one: 43 characters of canonical unpadded
-/// base64url. It is registered with `scrubber` as soon as it is seen, valid or not, so that
-/// no text this process writes can repeat it. The reason for a refusal never repeats it.
+/// base64url. A value of the right length is registered with `scrubber` before its shape is
+/// judged, valid or not, so that no text this process writes can repeat it. One of another
+/// length is not: it is no nonce, and a short one (`e`) would scrub every such letter from
+/// the one line that says why it was refused. The reason for a refusal never repeats it.
 ///
 /// # Errors
 ///
@@ -103,7 +105,9 @@ pub fn nonce<'a>(environment: &'a Environment, scrubber: &Scrubber) -> Result<&'
         .as_ref()
         .filter(|secret| !secret.is_empty())
         .ok_or(Error::Attach("no attach nonce"))?;
-    scrubber.always(secret);
+    if secret.expose().len() == VOICE_CONTROL_PIPE_NONCE_CHARS {
+        scrubber.always(secret);
+    }
     validate_nonce(secret.expose()).map_err(|_| Error::Attach("attach nonce malformed"))?;
     Ok(secret)
 }
@@ -334,7 +338,13 @@ mod tests {
             if let Some(value) = value.filter(|value| !value.is_empty()) {
                 assert!(!error.to_string().contains(value), "{error}");
                 assert!(!format!("{error:?}").contains(value), "{error:?}");
-                assert_eq!(scrubber.scrub(value), crate::secrets::REDACTED);
+                // Only a value of a nonce's length is scrubbed; a short one is no nonce.
+                let scrubbed = scrubber.scrub(value);
+                if value.len() == VOICE_CONTROL_PIPE_NONCE_CHARS {
+                    assert_eq!(scrubbed, crate::secrets::REDACTED);
+                } else {
+                    assert_eq!(scrubbed, value);
+                }
             }
         }
         let good = environment(Some(FAKE));

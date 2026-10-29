@@ -903,6 +903,11 @@ async fn the_attach_line_comes_first_then_the_hello_and_the_nonce_is_on_the_wire
         });
         helper.close();
         let code = helper.exit_within(Duration::from_secs(10));
+        // The connection reached its end: what the scan below reads includes the final
+        // stopping and stopped lines.
+        helper.until("the events to end", |helper| {
+            helper.events_ended.lock().unwrap().is_some()
+        });
         (code, helper, wire)
     })
     .await
@@ -1098,6 +1103,89 @@ fn each_precondition_failure_is_exit_2_with_its_own_reason_and_nothing_connected
             case.name
         );
     }
+}
+
+/// A one-character value is no nonce and is not scrubbed as one: the single refusal line
+/// stays readable and says what is wrong with it.
+#[test]
+fn a_one_character_nonce_is_refused_in_one_readable_line() {
+    let private = Private::new(None);
+    let owner = listening(&private);
+    let mut helper = spawn_endpoint(
+        &private,
+        &owner.run,
+        &socket_str(&owner.socket),
+        Some("e"),
+        Fd3::Closed,
+        &NO_DEVICES,
+    );
+    helper.send_to_a_helper_that_may_have_exited("{}");
+    assert_eq!(helper.exit_within(Duration::from_secs(10)), Some(2));
+    let stderr = helper.stderr();
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("nonce"), "{stderr}");
+    assert!(stderr.contains("events endpoint"), "{stderr}");
+    assert!(!stderr.contains("[redacted]"), "{stderr}");
+}
+
+/// The owner reads nothing: it accepts, shuts down its reading half and keeps the
+/// descriptor open, so the helper's write fails with EPIPE. The helper's write can come
+/// before the owner's shutdown (the connection is queued before it is accepted), so the
+/// owner spins on a non-blocking accept to be first, and a run in which the write won is
+/// tried again: the helper is exit 2 in the run that loses it, having done nothing else.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attach_line_that_cannot_be_written_is_exit_2_having_done_nothing_else() {
+    for attempt in 1..=40 {
+        let conchd = refusing_stub().await;
+        let line = start(&conchd);
+        let (code, helper) = tokio::task::spawn_blocking(move || {
+            let private = Private::new(None);
+            let owner = listening(&private);
+            owner.listener.set_nonblocking(true).unwrap();
+            let mut helper = spawn_endpoint(
+                &private,
+                &owner.run,
+                &socket_str(&owner.socket),
+                Some(FAKE_NONCE),
+                Fd3::Closed,
+                &NO_DEVICES,
+            );
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let _held = loop {
+                match owner.listener.accept() {
+                    Ok((stream, _)) => {
+                        stream.shutdown(Shutdown::Read).unwrap();
+                        break stream;
+                    }
+                    Err(_) if Instant::now() < deadline => std::hint::spin_loop(),
+                    Err(error) => panic!("the helper never connected: {error}"),
+                }
+            };
+            helper.send_to_a_helper_that_may_have_exited(&line);
+            // A run that lost the race has a session going: its owner ends it.
+            std::thread::sleep(Duration::from_millis(300));
+            if helper.child.try_wait().unwrap().is_none() {
+                helper.close();
+            }
+            let code = helper.exit_within(Duration::from_secs(10));
+            (code, helper)
+        })
+        .await
+        .unwrap();
+        if code != Some(2) {
+            eprintln!("attempt {attempt}: the write won the race; trying again");
+            continue;
+        }
+        let stderr = helper.stderr();
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        assert!(stderr.contains("attach not written"), "{stderr}");
+        assert!(!stderr.contains(FAKE_NONCE), "{stderr}");
+        assert_eq!(conchd.whoami_requests(), 0, "no request to conchd");
+        assert_eq!(conchd.session_requests(), 0, "no request to conchd");
+        eprintln!("the attach write failed on attempt {attempt}");
+        return;
+    }
+    panic!("the helper's attach write never failed in 40 tries");
 }
 
 #[test]
