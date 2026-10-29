@@ -7,7 +7,7 @@ afterEach(cleanup);
 
 const target = { net: null, whisper: null, refusal: null, note: null };
 
-function Harness({ initial = '', enabled = true }: { readonly initial?: string; readonly enabled?: boolean }) {
+function Harness({ initial = '', enabled = true, onSend = () => undefined }: { readonly initial?: string; readonly enabled?: boolean; readonly onSend?: () => void }) {
   const [draft, setDraft] = useState(initial);
   return (
     <Composer
@@ -22,7 +22,7 @@ function Harness({ initial = '', enabled = true }: { readonly initial?: string; 
       paused={false}
       onDraft={setDraft}
       onTarget={() => undefined}
-      onSend={() => undefined}
+      onSend={onSend}
       atBottom={() => undefined}
     />
   );
@@ -121,6 +121,64 @@ describe('the emoji picker', () => {
     focused(screen.getByRole('button', { name: 'Add emoji' }));
   });
 
+  it('does not send the draft on Enter in the search box: it picks the first result', async () => {
+    let sent = 0;
+    render(<Harness initial="draft " onSend={() => { sent++; }} />);
+    box().setSelectionRange(6, 6);
+    fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
+    const search = screen.getByRole('searchbox');
+    fireEvent.change(search, { target: { value: 'red heart' } });
+    await screen.findByRole('button', { name: 'red heart' });
+    // Prevented, so the browser does not submit the form around the box.
+    expect(fireEvent.keyDown(search, { key: 'Enter' })).toBe(false);
+    expect(box().value).toBe('draft ❤️');
+    expect(sent).toBe(0);
+  });
+
+  it('does nothing on Enter in the search box when nothing matches', async () => {
+    render(<Harness initial="draft" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
+    const search = screen.getByRole('searchbox');
+    fireEvent.change(search, { target: { value: 'zzzzqq' } });
+    await screen.findByText('No emoji match.');
+    expect(fireEvent.keyDown(search, { key: 'Enter' })).toBe(false);
+    expect(box().value).toBe('draft');
+    expect(screen.getByRole('dialog', { name: 'Emoji' })).not.toBeNull();
+  });
+
+  it('ignores navigation, dismissal and Enter while an input method is composing', async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
+    const search = screen.getByRole('searchbox');
+    const first = await screen.findByRole('button', { name: 'grinning face' });
+    fireEvent.keyDown(search, { key: 'ArrowDown', isComposing: true });
+    expect(document.activeElement).toBe(search);
+    expect(fireEvent.keyDown(search, { key: 'Enter', isComposing: true })).toBe(true);
+    expect(box().value).toBe('');
+    fireEvent.keyDown(search, { key: 'Escape', isComposing: true });
+    expect(screen.getByRole('dialog', { name: 'Emoji' })).not.toBeNull();
+    fireEvent.keyDown(first, { key: 'ArrowRight', isComposing: true });
+    expect(document.activeElement).not.toBe(first.nextElementSibling);
+    fireEvent.keyDown(search, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('puts the same emoji back over a selected one: focus returns and the caret follows it', async () => {
+    render(<Harness initial="a😀b" />);
+    const el = box();
+    el.setSelectionRange(1, 3);
+    fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'grinning face' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'grinning face', hidden: false }));
+    expect(el.value).toBe('a😀b');
+    expect(document.activeElement).toBe(el);
+    expect([el.selectionStart, el.selectionEnd]).toEqual([3, 3]);
+    // The caret is not pulled back by a later edit.
+    el.setSelectionRange(0, 0);
+    fireEvent.change(el, { target: { value: 'xa😀b', selectionStart: 1, selectionEnd: 1 } });
+    expect(el.selectionStart).toBe(1);
+  });
+
   it('chooses the focused button', async () => {
     render(<Harness />);
     fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
@@ -179,6 +237,23 @@ describe('shortcode completion', () => {
     type(':smiling_face_with_he');
     fireEvent.click(await screen.findByRole('option', { name: /smiling_face_with_heart_eyes/ }));
     await waitFor(() => { expect(box().value).toBe('😍'); });
+  });
+
+  it.each([
+    ['Shift+Enter', { key: 'Enter', shiftKey: true }],
+    ['Shift+Tab', { key: 'Tab', shiftKey: true }],
+    ['Ctrl+Enter', { key: 'Enter', ctrlKey: true }],
+    ['Alt+Tab', { key: 'Tab', altKey: true }],
+    ['Meta+Enter', { key: 'Enter', metaKey: true }],
+  ])('leaves %s alone while suggestions are open', async (_name, init) => {
+    render(<Harness />);
+    type('go :fire');
+    await screen.findByRole('listbox');
+    fireEvent.keyDown(box(), init);
+    // Not accepted: the text is as typed (Shift+Enter and Shift+Tab are left
+    // to the browser; Ctrl/Meta+Enter are the composer's own).
+    expect(box().value).toBe('go :fire');
+    if ('shiftKey' in init) expect(fireEvent.keyDown(box(), init)).toBe(true);
   });
 
   it('is not offered for a time, a link, one letter, or when nothing matches', async () => {

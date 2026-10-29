@@ -142,10 +142,11 @@ export function completeShortcode(index: EmojiIndex, query: string, limit = comp
   const prefix: Emoji[] = [];
   const inside: Emoji[] = [];
   for (const e of index.all) {
+    // Scan it all: the exact match may come after more than `limit` longer ones.
     if (e.shortcode === query) exact.push(e);
-    else if (e.shortcode.startsWith(query)) prefix.push(e);
-    else if (e.shortcode.includes(query)) inside.push(e);
-    if (prefix.length >= limit) break;
+    else if (e.shortcode.startsWith(query)) {
+      if (prefix.length < limit) prefix.push(e);
+    } else if (e.shortcode.includes(query) && inside.length < limit) inside.push(e);
   }
   return [...exact, ...prefix, ...inside].slice(0, limit);
 }

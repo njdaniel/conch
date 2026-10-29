@@ -106,6 +106,22 @@ describe('completeShortcode', () => {
     expect(completeShortcode(index, 'fire')[0]?.key).toBe('🔥');
   });
 
+  it.each([
+    ['family', '👪'],
+    ['woman', '👩'],
+    ['man', '👨'],
+    ['kiss', '💏'],
+    ['dog', '🐕'],
+  ])('puts the exact :%s: first even when longer ones come earlier in the catalog', (query, key) => {
+    expect(completeShortcode(index, query)[0]?.key).toBe(key);
+  });
+
+  it('lists prefix matches when there is no exact one', () => {
+    const found = completeShortcode(index, 'heart');
+    expect(found).toHaveLength(8);
+    expect(found.every((e) => e.shortcode.startsWith('heart'))).toBe(true);
+  });
+
   it('finds nothing for nonsense', () => {
     expect(completeShortcode(index, 'zzzzqq')).toEqual([]);
   });

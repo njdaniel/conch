@@ -54,6 +54,7 @@ export function EmojiPicker({ onPick, onClose }: { readonly onPick: (emoji: Emoj
   }
 
   function gridKey(event: KeyboardEvent, i: number): void {
+    if (composing(event)) return;
     let to: number | null = null;
     switch (event.key) {
       case 'ArrowRight': to = i + 1; break;
@@ -75,8 +76,11 @@ export function EmojiPicker({ onPick, onClose }: { readonly onPick: (emoji: Emoj
     focusCell(to);
   }
 
+  // A key that an input method is using is the method's, not the picker's.
+  const composing = (event: KeyboardEvent) => event.nativeEvent.isComposing;
+
   function dialogKey(event: KeyboardEvent): void {
-    if (event.key !== 'Escape') return;
+    if (event.key !== 'Escape' || composing(event)) return;
     event.preventDefault();
     event.stopPropagation();
     onClose();
@@ -99,9 +103,16 @@ export function EmojiPicker({ onPick, onClose }: { readonly onPick: (emoji: Emoj
             setActive(0);
           }}
           onKeyDown={(event) => {
+            if (composing(event)) return;
             if (event.key === 'ArrowDown' && shown.length > 0) {
               event.preventDefault();
               focusCell(active);
+            } else if (event.key === 'Enter') {
+              // Not a submit of the composer's form around the picker: it
+              // picks the first result, or does nothing.
+              event.preventDefault();
+              const first = shown[0];
+              if (first !== undefined) onPick(first);
             }
           }}
         />

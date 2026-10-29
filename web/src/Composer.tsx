@@ -138,6 +138,9 @@ export function Composer({
   const [emojiIndex, setEmojiIndex] = useState<EmojiIndex | null>(null);
   // Where the caret goes once a chosen emoji is in the draft.
   const caretAfter = useRef<number | null>(null);
+  // Counted on each insertion, so the caret and focus are put back even when
+  // the text did not change (an emoji replaced by itself).
+  const [insertions, setInsertions] = useState(0);
   const fileDraft = useContext(ComposerAttachmentContext);
   const attachments = fileDraft.attachments;
   const [inputError, setInputError] = useState<string | null>(null);
@@ -207,7 +210,7 @@ export function Composer({
     box.focus();
     box.setSelectionRange(at, at);
     setCaret(at);
-  }, [draft]);
+  }, [insertions]);
 
   // Put an emoji where the selection is (or in place of the typed `:short`).
   function insertEmoji(key: string, from: number, to: number): void {
@@ -215,6 +218,7 @@ export function Composer({
     caretAfter.current = done.caret;
     setSuggestion(0);
     onDraft(done.text);
+    setInsertions((n) => n + 1);
   }
   function pickEmoji(emoji: Emoji): void {
     const box = textarea.current;
@@ -441,7 +445,7 @@ export function Composer({
               setSuggestion((activeSuggestion + (event.key === 'ArrowDown' ? 1 : n - 1)) % n);
               return;
             }
-            if (event.key === 'Enter' || event.key === 'Tab') {
+            if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
               event.preventDefault();
               const chosen = suggestions[activeSuggestion];
               if (chosen !== undefined) insertEmoji(chosen.key, completion.start, caret);

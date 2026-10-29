@@ -45,6 +45,29 @@ test('desktop: the picker inserts at the caret, and :short completes by keyboard
   await expect(messages(page).getByText(`${tag} go 🔥`, { exact: true })).toBeVisible();
 });
 
+test('desktop: Enter in the picker search box picks, and never sends the draft', async ({ meet, world }) => {
+  const { page } = await meet();
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  const tag = unique('enter');
+  const box = composer(page);
+  await box.fill(`${tag} unfinished `);
+  await page.getByRole('button', { name: 'Add emoji' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Emoji' });
+  const search = dialog.getByRole('searchbox');
+  // No match: Enter does nothing at all.
+  await search.fill('zzzzqq');
+  await search.press('Enter');
+  await expect(dialog).toBeVisible();
+  await expect(box).toHaveValue(`${tag} unfinished `);
+  // A match: Enter picks the first result.
+  await search.fill('red heart');
+  await search.press('Enter');
+  await expect(dialog).toBeHidden();
+  await expect(box).toHaveValue(`${tag} unfinished ❤️`);
+  // Nothing was sent: the draft is still in the box and not in the log.
+  await expect(messages(page).getByText(tag)).toHaveCount(0);
+});
+
 for (const [size, options] of phoneSizes) {
   test(`the picker fits and works by touch at ${size}`, async ({ meet, world }) => {
     const { page } = await meet(options);
