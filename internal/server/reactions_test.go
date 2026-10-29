@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -150,11 +151,16 @@ func TestReactionRESTLifecycle(t *testing.T) {
 	}
 }
 
-// V1 and V2: a stranger to the channel gets exactly an unknown channel's
-// answer on all seven routes, and a message that is not theirs is exactly a
-// ghost's, for the whisper they are not in.
+// V1 and V2: a stranger to the channel (a person, an agent, and an operator
+// who is not a member) gets exactly an unknown channel's answer on all seven
+// routes, and a message that is not theirs is exactly a ghost's, for the
+// whisper they are not in.
 func TestReactionChannelGate(t *testing.T) {
 	w := newReactionWorld(t)
+	w.add(t, "op2", store.PrincipalHuman, false)
+	if _, err := w.srv.store.SetRole(context.Background(), "system", w.root.ID, w.p("op2").ID, store.RoleOperator, nil); err != nil {
+		t.Fatal(err)
+	}
 	w.react(t, "PUT", "wes", "ops", w.whisper, thumbsUp)
 	routes := func(ch string, msg int64) []struct{ method, path string } {
 		return []struct{ method, path string }{
@@ -167,10 +173,7 @@ func TestReactionChannelGate(t *testing.T) {
 			{"DELETE", fmt.Sprintf("/v2/channels/%s/messages/%d/reactors/%d", ch, msg, w.p("wes").ID)},
 		}
 	}
-	for _, who := range []string{"nora", "nomad", "root"} {
-		if who == "root" {
-			continue // an operator who is a member: covered by the moderation test
-		}
+	for _, who := range []string{"nora", "nomad", "op2"} {
 		for i, r := range routes("ops", w.wide) {
 			got := w.callREST(t, r.method, r.path, w.p(who).token, "")
 			want := w.callREST(t, r.method, routes("nosuch", w.wide)[i].path, w.p(who).token, "")
@@ -798,5 +801,230 @@ func TestReactionReconnectRehydrates(t *testing.T) {
 	}
 	if n := countReactionRows(t, w.srv); n != 2 {
 		t.Errorf("%d rows", n)
+	}
+}
+
+// V7b, a whisper whose audience holds another agent: the reacting agent needs
+// whisper_agent as well as whisper, as a reply there does
+// (authorizeScopedPostGates). The probe must carry the whisper's recipients,
+// or the check has nobody to look at.
+func TestReactionWhisperToAgentsNeedsWhisperAgent(t *testing.T) {
+	w := newReactionWorld(t)
+	read, whisper, whisperAgent := schema.ChannelPermissionRead, schema.ChannelPermissionWhisper, schema.ChannelPermissionWhisperAgent
+	msg := w.mustPost(t, "ann", `{"body":"SECRET-agents",`+whisperAudience(w.p("aria").ID, w.p("arlo").ID)+`}`)
+	token := w.p("aria").token
+	args := map[string]any{"channel": "ops", "message_id": msg, "emoji": thumbsUp}
+
+	w.manifest(t, "aria", nil, read, whisper)
+	for _, tt := range []struct{ method, tool string }{{"PUT", "set_reaction"}, {"DELETE", "remove_reaction"}} {
+		rows := countReactionRows(t, w.srv)
+		before := len(w.auditDetails(t, "access_denied"))
+		if res := w.callREST(t, tt.method, rpath("ops", msg, thumbsUp), token, ""); res.status != 403 || reactErrCode(res) != "forbidden" {
+			t.Errorf("%s without whisper_agent = %d %s, want 403 forbidden", tt.method, res.status, res.body)
+		}
+		if got := w.mcpCall(t, token, tt.tool, args).result(); got != "forbidden" {
+			t.Errorf("%s without whisper_agent = %s, want forbidden", tt.tool, got)
+		}
+		denials := w.auditDetails(t, "access_denied")
+		if len(denials) != before+2 || strings.Count(strings.Join(denials[before:], "\n"), "reason="+denyAudienceGrant) != 2 {
+			t.Errorf("%s: the refusals were not audited once each as %s: %v", tt.method, denyAudienceGrant, denials[before:])
+		}
+		if got := countReactionRows(t, w.srv); got != rows {
+			t.Errorf("%s: a refusal changed the rows %d -> %d", tt.method, rows, got)
+		}
+	}
+
+	w.manifest(t, "aria", nil, read, whisper, whisperAgent)
+	if res := w.callREST(t, "PUT", rpath("ops", msg, thumbsUp), token, ""); res.status != 200 || countReactionRows(t, w.srv) != 1 {
+		t.Errorf("PUT with whisper_agent = %d %s", res.status, res.body)
+	}
+	if res := w.callREST(t, "DELETE", rpath("ops", msg, thumbsUp), token, ""); res.status != 200 || countReactionRows(t, w.srv) != 0 {
+		t.Errorf("DELETE with whisper_agent = %d %s", res.status, res.body)
+	}
+	for _, tool := range []string{"set_reaction", "remove_reaction"} {
+		if got := w.mcpCall(t, token, tool, args).result(); got != "ok" {
+			t.Errorf("%s with whisper_agent = %s", tool, got)
+		}
+	}
+}
+
+// An agent's write answers the message's whole summary, so it needs the read
+// grant too: an agent that may post but not read gets the GET's own 403, byte
+// for byte, on both writes and both tools, audited, and nothing is stored.
+func TestReactionWriteNeedsRead(t *testing.T) {
+	w := newReactionWorld(t)
+	w.react(t, "PUT", "ann", "ops", w.wide, thumbsUp)
+	token := w.p("arlo").token // post, not read
+	get := w.callREST(t, "GET", fmt.Sprintf("/v2/channels/ops/messages/%d/reactions", w.wide), token, "")
+	if get.status != 403 || reactErrCode(get) != "forbidden" {
+		t.Fatalf("the write-only agent's GET = %d %s", get.status, get.body)
+	}
+	rows := countReactionRows(t, w.srv)
+	for _, method := range []string{"PUT", "DELETE"} {
+		before := len(w.auditDetails(t, "access_denied"))
+		if res := w.callREST(t, method, rpath("ops", w.wide, partyKey), token, ""); res != get {
+			t.Errorf("%s = %+v, the GET gave %+v", method, res, get)
+		}
+		denials := w.auditDetails(t, "access_denied")
+		if len(denials) != before+1 || !strings.Contains(denials[len(denials)-1], "capability=messages.read") {
+			t.Errorf("%s: the refusal was not audited once as a read refusal: %v", method, denials[before:])
+		}
+	}
+	for _, tool := range []string{"set_reaction", "remove_reaction"} {
+		out := w.mcpCall(t, token, tool, map[string]any{"channel": "ops", "message_id": w.wide, "emoji": partyKey})
+		if out.result() != "forbidden" || strings.Contains(out.body, `count`) {
+			t.Errorf("%s = %s %s, want forbidden", tool, out.result(), out.body)
+		}
+	}
+	if got := countReactionRows(t, w.srv); got != rows {
+		t.Errorf("refused writes changed the rows %d -> %d", rows, got)
+	}
+}
+
+// execOnDB runs a statement on the server's database file, underneath the
+// store, to seed rows the store would refuse to write.
+func execOnDB(t *testing.T, srv *Server, query string, args ...any) {
+	t.Helper()
+	path, ok := testDBPaths.Load(srv)
+	if !ok {
+		t.Fatal("the fixture's database path is not recorded")
+	}
+	db, err := sql.Open("sqlite", "file:"+path.(string)+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.ExecContext(context.Background(), query, args...); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A stored key that is not canonical (an older catalog, a hand edit) is left
+// out of every summary the server builds, so REST, MCP and the events socket
+// all serve a valid document, and the socket is not closed for it. The drop
+// is logged once per summary, without the key.
+func TestReactionNonCanonicalStoredKey(t *testing.T) {
+	logs := captureLogsLocked(t) // the events goroutines log too
+	w := newReactionWorld(t)
+	w.manifest(t, "aria", nil, schema.ChannelPermissionRead, schema.ChannelPermissionPost)
+	w.react(t, "PUT", "ann", "ops", w.wide, thumbsUp)
+	const unknownKey, unqualified = "old-key-x", "❤" // a heart without its selector
+	for _, key := range []string{unknownKey, unqualified} {
+		execOnDB(t, w.srv, `INSERT INTO message_reactions (message_id, emoji, principal_id, channel_id, created_at) VALUES (?, ?, ?, ?, ?)`,
+			w.wide, key, w.p("nina").ID, w.ops.ID, int64(1))
+	}
+	s := openSocket(t, w.base, "/v1/events/ws?channel=ops", w.p("olga").token)
+	time.Sleep(300 * time.Millisecond) // the first rosters
+	reactionFrames(t, s, 200*time.Millisecond)
+	onlyThumbs := func(where string, sum schema.ReactionSummaryV1) {
+		t.Helper()
+		if err := sum.Validate(); err != nil {
+			t.Errorf("%s: invalid summary: %v", where, err)
+		}
+		for _, c := range sum.Reactions {
+			if c.Emoji == unknownKey || c.Emoji == unqualified {
+				t.Errorf("%s served the stored key %q", where, c.Emoji)
+			}
+		}
+	}
+
+	logStart := len(logs.String())
+	get := w.callREST(t, "GET", fmt.Sprintf("/v2/channels/ops/messages/%d/reactions", w.wide), w.p("olga").token, "")
+	if get.status != 200 {
+		t.Fatalf("GET = %d %s", get.status, get.body)
+	}
+	sum := decodeSummary(t, get)
+	onlyThumbs("GET", sum)
+	if len(sum.Reactions) != 1 || sum.Reactions[0].Emoji != thumbsUp {
+		t.Errorf("GET = %+v, want the thumbs up alone", sum)
+	}
+	if got := logs.String()[logStart:]; strings.Count(got, "dropped stored keys") != 1 {
+		t.Errorf("one summary logged %d drop lines, want 1: %s", strings.Count(got, "dropped stored keys"), got)
+	}
+
+	batch := w.callREST(t, "GET", fmt.Sprintf("/v2/channels/ops/reactions?messages=%d", w.wide), w.p("olga").token, "")
+	var br schema.ReactionSummariesResponseV1
+	if err := json.Unmarshal([]byte(batch.body), &br); err != nil || br.Validate() != nil || len(br.Summaries) != 1 {
+		t.Errorf("batch = %d %s", batch.status, batch.body)
+	} else {
+		onlyThumbs("batch", br.Summaries[0])
+	}
+	put := w.react(t, "PUT", "olga", "ops", w.wide, partyKey)
+	onlyThumbs("PUT", decodeSummary(t, put))
+
+	mcp := w.mcpCall(t, w.p("aria").token, "read_reactions", map[string]any{"channel": "ops", "message_ids": []int64{w.wide}})
+	if mcp.result() != "ok" || strings.Contains(mcp.body, unknownKey) || strings.Contains(mcp.body, unqualified) || !strings.Contains(mcp.body, partyKey) {
+		t.Errorf("read_reactions = %s %s", mcp.result(), mcp.body)
+	}
+	if out := w.mcpCall(t, w.p("aria").token, "set_reaction", map[string]any{"channel": "ops", "message_id": w.wide, "emoji": thumbsUp}); out.result() != "ok" || strings.Contains(out.body, unknownKey) {
+		t.Errorf("set_reaction = %s %s", out.result(), out.body)
+	}
+
+	// The events socket: a frame for each change, every one valid, and the
+	// socket still open after them.
+	fr := reactionFrames(t, s, 800*time.Millisecond)
+	if len(fr) == 0 {
+		t.Fatal("the events socket sent no frame for a message holding a non-canonical key")
+	}
+	for _, f := range fr {
+		onlyThumbs("events", f)
+	}
+	w.react(t, "DELETE", "olga", "ops", w.wide, partyKey)
+	if fr := reactionFrames(t, s, 800*time.Millisecond); len(fr) == 0 {
+		t.Error("no frame after the next change: the socket was closed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.conn.Ping(ctx); err != nil {
+		t.Errorf("the events socket is closed: %v", err)
+	}
+	if all := logs.String(); strings.Contains(all, unknownKey) || strings.Contains(all, unqualified) {
+		t.Errorf("the log names a stored key: %s", all)
+	}
+	// The rows are still stored: only the wire leaves them out.
+	if n := countReactionRows(t, w.srv); n != 4 {
+		t.Errorf("%d rows, want 4", n)
+	}
+}
+
+// W6, with a clock: a 409 too_many_reactions takes a token like any refusal,
+// and after a 429 one token's time buys exactly one write.
+func TestReactionRateLimitRefill(t *testing.T) {
+	w := newReactionWorld(t)
+	clock := newManualClock()
+	w.srv.now = clock.Now
+	// ann holds the most reactions one person may on one message.
+	held := []string{"😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "😊", "😇"}
+	if len(held) != schema.MaxReactionsPerPrincipalPerMessage {
+		t.Fatalf("seed %d reactions, the limit is %d", len(held), schema.MaxReactionsPerPrincipalPerMessage)
+	}
+	for _, e := range held {
+		if res := w.react(t, "PUT", "ann", "ops", w.wide, e); res.status != 200 {
+			t.Fatalf("seed %s = %d %s", e, res.status, res.body)
+		}
+	}
+	// Two tokens, one a minute.
+	w.srv.setReactionLimit(inviteLimit{name: "test", burst: 2, window: 2 * time.Minute})
+	if res := w.react(t, "PUT", "ann", "ops", w.wide, thumbsUp); res.status != 409 || reactErrCode(res) != "too_many_reactions" {
+		t.Fatalf("one too many = %d %s", res.status, res.body)
+	}
+	// The 409 took exactly one: one more write passes, the next is limited.
+	if res := w.react(t, "DELETE", "ann", "ops", w.wide, held[0]); res.status != 200 {
+		t.Fatalf("the second write = %d %s; the 409 took more than one token", res.status, res.body)
+	}
+	res := w.react(t, "PUT", "ann", "ops", w.wide, held[0])
+	if res.status != 429 {
+		t.Fatalf("the third write = %d %s; the 409 took no token", res.status, res.body)
+	}
+	var limited schema.Error
+	if err := json.Unmarshal([]byte(res.body), &limited); err != nil || limited.RetryAfterSeconds != 60 {
+		t.Errorf("retry_after_seconds = %d (%v), want 60", limited.RetryAfterSeconds, err)
+	}
+	clock.Advance(time.Minute)
+	if res := w.react(t, "PUT", "ann", "ops", w.wide, held[0]); res.status != 200 {
+		t.Errorf("the write after one token's time = %d %s", res.status, res.body)
+	}
+	if res := w.react(t, "DELETE", "ann", "ops", w.wide, held[1]); res.status != 429 {
+		t.Errorf("a second write after one token's time = %d %s, want 429", res.status, res.body)
 	}
 }

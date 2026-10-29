@@ -319,17 +319,23 @@ func TestEveryMessageReadPathIsInTheLeakTest(t *testing.T) {
 	for _, p := range scopedReadPaths {
 		covered[p] = true
 	}
+	// The reaction reads (issue #765) carry counts, emoji and reactor ids of a
+	// message, never its body, and only for a message the reader can see; they
+	// have their own leak tests (reactions_test.go) and rows in the isolation
+	// matrix. Exactly these three patterns are exempt: a new route whose path
+	// merely mentions reactions is held to the rule like any other.
+	reactionReads := map[string]bool{
+		"GET /v2/channels/{channel}/messages/{message_id}/reactions":         true,
+		"GET /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}": true,
+		"GET /v2/channels/{channel}/reactions":                               true,
+	}
 	for _, rt := range f.srv.routes {
 		// The voice presence socket (issue #127) ends in /ws but carries
 		// presence documents, never messages; it has its own leak-table row
 		// in TestChannelContentLeak. The occupancy socket (issue #596)
 		// carries counts, never messages, and names no channel to leak; its
 		// isolation tests are in voice_occupancy_test.go.
-		// The reaction reads (issue #765) carry counts, emoji and reactor ids
-		// of a message, never its body, and only for a message the reader can
-		// see; they have their own leak tests (reactions_test.go) and rows in
-		// the isolation matrix.
-		isRead := strings.HasPrefix(rt.pattern, "GET ") && !isReactionRoute(rt.pattern) && rt.pattern != "GET /v1/voice/ws" && rt.pattern != "GET /v1/voice/occupancy/ws" && rt.pattern != "GET /v1/events/ws" &&
+		isRead := strings.HasPrefix(rt.pattern, "GET ") && !reactionReads[rt.pattern] && rt.pattern != "GET /v1/voice/ws" && rt.pattern != "GET /v1/voice/occupancy/ws" && rt.pattern != "GET /v1/events/ws" &&
 			(strings.Contains(rt.pattern, "/messages") || strings.HasSuffix(rt.pattern, "/ws"))
 		if isRead && !covered[rt.pattern] {
 			t.Errorf("route %q reads messages but is not in scopedReadPaths and TestScopedMessagesExactSets: add a column there", rt.pattern)

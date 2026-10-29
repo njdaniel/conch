@@ -204,7 +204,7 @@ func (s *Server) mcpServerFor(identity mcpIdentity) *mcp.Server {
 	// Reactions (issue #765). Plain mirrors of the REST routes, over the same
 	// functions (reactions.go). They post nothing, notify no one and mark
 	// nothing read; the people who can see the message see the reaction.
-	addAgentTool(s, server, identity, &mcp.Tool{Name: "set_reaction", Description: "React to a message in a Conch channel with one emoji, as the authenticated agent. Setting a reaction already held changes nothing. The agent needs the permission it would need to reply in the message's audience (post, post_net or whisper). Reacting does not post a message, does not notify anyone and does not mark anything read; the people who can see the message see the reaction."},
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "set_reaction", Description: "React to a message in a Conch channel with one emoji, as the authenticated agent. Setting a reaction already held changes nothing. The agent needs read in the channel, since the answer is the message's whole summary, and the permission it would need to reply in the message's audience (post, post_net or whisper). Reacting does not post a message, does not notify anyone and does not mark anything read; the people who can see the message see the reaction."},
 		func(ctx context.Context, scope *agentScope, in mcpReactionInput) (*mcp.CallToolResult, mcpReactionSummary, error) {
 			out, serr := s.reactMCP(ctx, scope, in, true)
 			if serr != nil {

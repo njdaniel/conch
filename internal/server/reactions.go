@@ -26,9 +26,11 @@ import (
 //
 //  1. May the caller use this channel? Unknown channel and non-member are the
 //     one channel_not_found. For an agent's write the gate is membership only
-//     (as a scoped post's is): its manifest is decided in step 4 from the
-//     message's audience, and its budget is spent once, there. For an agent's
-//     read the gate is the read permission, and spends there.
+//     (as a scoped post's is), then the read grant, since a write answers the
+//     message's whole summary (the GET's own 403, audited, spending nothing);
+//     its post permission is decided in step 4 from the message's audience,
+//     and its budget is spent once, there. For an agent's read the gate is the
+//     read permission, and spends there.
 //  2. A human's write takes a token of the reaction bucket, whether or not
 //     the rest of the request is well formed. Nothing refunds it, so probing
 //     message ids or keys costs what reacting costs. Only a 429 spends none.
@@ -134,11 +136,26 @@ func reactionStoreError(ctx context.Context, err error) *schema.Error {
 	}
 }
 
-// reactionSummaryDoc is the wire form of a stored summary.
-func reactionSummaryDoc(sum store.ReactionSummary) schema.ReactionSummaryV1 {
-	counts := make([]schema.ReactionCountV1, len(sum.Reactions))
-	for i, c := range sum.Reactions {
-		counts[i] = schema.ReactionCountV1{Emoji: c.Emoji, Count: c.Count, Me: c.Me}
+// reactionSummaryDoc is the wire form of a stored summary, the one builder
+// every front uses (REST, MCP, the events socket). The store serves every row
+// it holds, but a key that is not canonical in this server's catalog (an
+// older catalog, a hand edit) would make the document invalid: a client
+// would refuse it, and the events socket would close rather than send it. So
+// such a count is left out, and the drop is logged once per summary, without
+// the key (stored text is not for the log).
+func reactionSummaryDoc(ctx context.Context, sum store.ReactionSummary) schema.ReactionSummaryV1 {
+	counts := make([]schema.ReactionCountV1, 0, len(sum.Reactions))
+	dropped := 0
+	for _, c := range sum.Reactions {
+		if schema.ValidateReactionKey(c.Emoji) != nil {
+			dropped++
+			continue
+		}
+		counts = append(counts, schema.ReactionCountV1{Emoji: c.Emoji, Count: c.Count, Me: c.Me})
+	}
+	if dropped > 0 {
+		slog.WarnContext(ctx, "reactions: dropped stored keys that are not canonical from a summary",
+			"channel", sum.ChannelID, "message", sum.MessageID, "dropped", dropped)
 	}
 	return schema.ReactionSummaryV1{
 		Schema:    schema.ReactionSummarySchemaV1,
@@ -167,6 +184,25 @@ func (s *Server) takeReactionToken(c reactionCall) *schema.Error {
 	}
 	if ok, retry := s.reactionLimits.take(c.principal.ID, s.now()); !ok {
 		return (&rateLimitedError{retryAfter: retry}).schemaError()
+	}
+	return nil
+}
+
+// agentReactionReadGate is the read half of an agent's write gate (step 1):
+// a write answers the message's whole summary, which is a read, so an agent
+// that may post but not read would otherwise read summaries through it. It is
+// the check the GET's gate makes (agentReadAllowed's capability and
+// permission, through agentManifestCheck, so the refusal is audited alike and
+// answered with the same 403), and it spends no budget: the write's is spent
+// once, in the audience step.
+func (s *Server) agentReactionReadGate(ctx context.Context, c reactionCall, channelID int64) *schema.Error {
+	_, allowed, err := s.agentManifestCheck(ctx, c.principal.ID, c.subject, schema.CapabilityMessagesRead, channelID, schema.ChannelPermissionRead)
+	if err != nil {
+		slog.ErrorContext(ctx, "reactions: load manifest failed", "principal", c.principal.ID, "error", err)
+		return errInternal
+	}
+	if !allowed {
+		return errForbidden
 	}
 	return nil
 }
@@ -210,6 +246,11 @@ func (s *Server) agentReactionGate(ctx context.Context, c reactionCall, channelI
 // channel gate (step 1) has passed. It answers the message's summary after the
 // write.
 func (s *Server) writeReaction(ctx context.Context, c reactionCall, channel store.Channel, rawMessageID, rawKey string, set bool) (schema.ReactionSummaryV1, *schema.Error) {
+	if c.isAgent() {
+		if serr := s.agentReactionReadGate(ctx, c, channel.ID); serr != nil {
+			return schema.ReactionSummaryV1{}, serr
+		}
+	}
 	if serr := s.takeReactionToken(c); serr != nil {
 		return schema.ReactionSummaryV1{}, serr
 	}
@@ -242,7 +283,7 @@ func (s *Server) writeReaction(ctx context.Context, c reactionCall, channel stor
 	if change.Changed {
 		s.events.notifyReactions(channel.ID, messageID)
 	}
-	return reactionSummaryDoc(change.Summary), nil
+	return reactionSummaryDoc(ctx, change.Summary), nil
 }
 
 // moderateReactions is a manager's or operator's removal (§11.5) of one
@@ -274,7 +315,7 @@ func (s *Server) moderateReactions(ctx context.Context, c reactionCall, channel 
 	if change.Changed {
 		s.events.notifyReactions(channel.ID, messageID)
 	}
-	return reactionSummaryDoc(change.Summary), nil
+	return reactionSummaryDoc(ctx, change.Summary), nil
 }
 
 // readReaction is the single-message summary read. The channel gate has
@@ -288,7 +329,7 @@ func (s *Server) readReaction(ctx context.Context, c reactionCall, channel store
 	if serr := reactionStoreError(ctx, err); serr != nil {
 		return schema.ReactionSummaryV1{}, serr
 	}
-	return reactionSummaryDoc(sum), nil
+	return reactionSummaryDoc(ctx, sum), nil
 }
 
 // checkReactionBatch refuses a batch that names none, too many, a non-positive
@@ -324,9 +365,13 @@ func (s *Server) readReactionBatch(ctx context.Context, c reactionCall, channel 
 	if serr := reactionStoreError(ctx, err); serr != nil {
 		return schema.ReactionSummariesResponseV1{}, serr
 	}
-	out := schema.ReactionSummariesResponseV1{Summaries: make([]schema.ReactionSummaryV1, len(sums))}
-	for i, sum := range sums {
-		out.Summaries[i] = reactionSummaryDoc(sum)
+	out := schema.ReactionSummariesResponseV1{Summaries: make([]schema.ReactionSummaryV1, 0, len(sums))}
+	for _, sum := range sums {
+		// A message whose every stored key was left out has no reaction to
+		// serve, and the batch lists only messages that have one.
+		if doc := reactionSummaryDoc(ctx, sum); len(doc.Reactions) > 0 {
+			out.Summaries = append(out.Summaries, doc)
+		}
 	}
 	return out, nil
 }

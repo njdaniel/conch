@@ -1908,7 +1908,10 @@ func reactionArgs(reader Reader) ([]any, bool) {
 // ReactionTarget is what a reaction needs to know of the message it is on.
 type ReactionTarget struct {
 	// Audience is nil for a channel-wide message, the net for a net message,
-	// and a principals audience (without its ids) for a whisper.
+	// and for a whisper a principals audience with every recipient id stored
+	// for it (the author among them), ascending: an agent's audience check
+	// (whisper_agent when another recipient is an agent) needs the ids, as a
+	// reply's does.
 	Audience *schema.Audience
 }
 
@@ -1937,7 +1940,13 @@ func reactionTargetTx(ctx context.Context, tx execer, channelID int64, reader Re
 	case schema.AudienceKind(kind.String) == schema.AudienceKindNet && net.Valid:
 		return ReactionTarget{Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: net.Int64}}, nil
 	case schema.AudienceKind(kind.String) == schema.AudienceKindPrincipals:
-		return ReactionTarget{Audience: &schema.Audience{Kind: schema.AudienceKindPrincipals}}, nil
+		// The recipients were decided at post time and are never changed, so
+		// these are the ids the message was said to.
+		ids, err := messageRecipientsTx(ctx, tx, messageID)
+		if err != nil {
+			return ReactionTarget{}, err
+		}
+		return ReactionTarget{Audience: &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: ids}}, nil
 	default:
 		// Never read an audience we do not understand as something wider.
 		return ReactionTarget{}, fmt.Errorf("store: message %d has an unreadable audience %q", messageID, kind.String)

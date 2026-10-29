@@ -196,15 +196,16 @@ func TestChannelContentLeak(t *testing.T) {
 		"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		// Reactions (issue #765) need a real message id for a member's row to
 		// mean anything, which this table's rows do not have: TestReactionChannelGate
-		// runs all seven routes as these four callers and requires the
-		// non-members' responses to be byte-identical to an unknown channel's.
-		"PUT /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                   "covered by TestReactionChannelGate",
-		"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                "covered by TestReactionChannelGate",
-		"GET /v2/channels/{channel}/messages/{message_id}/reactions":                           "covered by TestReactionChannelGate",
-		"GET /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                   "covered by TestReactionChannelGate",
-		"GET /v2/channels/{channel}/reactions":                                                 "covered by TestReactionChannelGate",
-		"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}": "covered by TestReactionChannelGate",
-		"DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}":          "covered by TestReactionChannelGate",
+		// runs all seven routes as three non-members (a person, an agent and an
+		// operator) and requires each response to be byte-identical to an
+		// unknown channel's.
+		"PUT /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                   "covered by TestReactionChannelGate (a non-member person, agent and operator, byte-identical to an unknown channel)",
+		"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                "covered by TestReactionChannelGate (a non-member person, agent and operator, byte-identical to an unknown channel)",
+		"GET /v2/channels/{channel}/messages/{message_id}/reactions":                           "covered by TestReactionChannelGate (a non-member person, agent and operator, byte-identical to an unknown channel)",
+		"GET /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                   "covered by TestReactionChannelGate (a non-member person, agent and operator, byte-identical to an unknown channel)",
+		"GET /v2/channels/{channel}/reactions":                                                 "covered by TestReactionChannelGate (a non-member person, agent and operator, byte-identical to an unknown channel)",
+		"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}": "covered by TestReactionChannelGate (a non-member person, agent and operator, byte-identical to an unknown channel)",
+		"DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}":          "covered by TestReactionChannelGate (a non-member person, agent and operator, byte-identical to an unknown channel)",
 		"GET /v1/voice/occupancy/ws":                                                           "names no channel (it matches the \"/ws\" test above by its spelling): it carries counts for the caller's own channels only, a non-member's channel absent; covered by TestVoiceOccupancyEndpoint, TestVoiceOccupancySocketRemovalDropsTheRow and e2e/isolation",
 	}
 	covered := make(map[string]bool, len(rows))

@@ -1000,7 +1000,7 @@ func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
 		if err != nil {
 			return e.failed(ctx, "read reactions", err)
 		}
-		return e.sendDoc(ctx, reactionSummaryDoc(sum))
+		return e.sendDoc(ctx, reactionSummaryDoc(ctx, sum))
 	case eventChannel:
 		// The channel as it is now, read by the id the socket is bound to:
 		// flush has just checked that this reader is still a member. Two
