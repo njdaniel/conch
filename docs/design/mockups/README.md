@@ -85,3 +85,8 @@ Channels / Voice navigation. Open it in a browser. Its people, messages and
 "Mic idle" text are sample content and it captures no audio; the mapping to
 the real components, and what is and is not built, is in
 [mobile-browser-layout.md](../mobile-browser-layout.md).
+
+Opened in a browser, the preserved mockup loads scripts from unpkg (the Lucide
+icon runtime and Floating UI), and its own content policy also allows
+jsDelivr and others. That is the mockup only: the application loads nothing
+from outside its own origin.

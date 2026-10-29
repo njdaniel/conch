@@ -7,7 +7,7 @@ import { useContext, useEffect, useState, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { headingId } from './Conversation';
 import { Lobby } from './Lobby';
-import { VoiceLive } from './phone';
+import { MicTestShown, useAppHeight, VoiceLive } from './phone';
 import type { ChannelV0 } from './schema/channel';
 import type { ChannelsState } from './state/channels';
 
@@ -42,12 +42,14 @@ function Conversation() {
 // has a button that would join, to see that no view change presses it.
 function Voice({ live, joined }: { readonly live: boolean; readonly joined: () => void }) {
   const report = useContext(VoiceLive);
+  const micTest = useContext(MicTestShown);
   useEffect(() => {
     report(live);
   }, [live, report]);
   return (
     <section aria-label="Voice">
       <Probe name="voice" />
+      {micTest ? <p>microphone test offered</p> : null}
       <button type="button" onClick={joined}>
         Join voice
       </button>
@@ -96,12 +98,12 @@ function lobby({
   onOpen = () => undefined,
   joined = () => undefined,
 }: { channels?: ChannelsState; live?: boolean; onOpen?: (name: string) => void; joined?: () => void } = {}) {
-  const page = (voice: ReactNode) => (
+  const page = (voice: ReactNode, shown: ChannelsState = channels) => (
     <Lobby
       origin="http://127.0.0.1:8080"
       name="ada"
       me={2}
-      channels={channels}
+      channels={shown}
       unread={new Map()}
       connection="connected"
       conversation={<Conversation />}
@@ -116,7 +118,15 @@ function lobby({
     />
   );
   const view = render(page(<Voice live={live} joined={joined} />));
-  return { ...view, setLive: (next: boolean) => { view.rerender(page(<Voice live={next} joined={joined} />)); } };
+  return {
+    ...view,
+    setLive: (next: boolean) => {
+      view.rerender(page(<Voice live={next} joined={joined} />));
+    },
+    setChannels: (next: ChannelsState) => {
+      view.rerender(page(<Voice live={live} joined={joined} />, next));
+    },
+  };
 }
 
 const nav = () => screen.getByRole('navigation', { name: 'Main navigation' });
@@ -252,5 +262,148 @@ describe('being in voice', () => {
     expect(screen.getByRole('button', { name: 'Voice' })).toBe(tab('Voice'));
     setLive(false);
     expect(root(container)?.classList.contains('in-voice')).toBe(false);
+  });
+});
+
+describe('focus when the strip goes (leaving voice under Chat or Channels)', () => {
+  it('goes to the Voice button when focus was in the strip that is no longer drawn', () => {
+    windowOf(true);
+    const { setLive } = lobby({ live: true });
+    const join = screen.getByRole('button', { name: 'Join voice' });
+    join.focus();
+    expect(document.activeElement).toBe(join);
+    setLive(false);
+    expect(document.activeElement).toBe(tab('Voice'));
+  });
+
+  it('goes to the Voice button when it was lost to the page body', () => {
+    windowOf(true);
+    const { setLive } = lobby({ live: true });
+    (document.activeElement as HTMLElement | null)?.blur();
+    setLive(false);
+    expect(document.activeElement).toBe(tab('Voice'));
+  });
+
+  it('leaves focus alone elsewhere: in the conversation, in the Voice view, or on a wide window', () => {
+    windowOf(true);
+    const first = lobby({ live: true });
+    const box = screen.getByLabelText('Message #general');
+    box.focus();
+    first.setLive(false);
+    expect(document.activeElement).toBe(box);
+    cleanup();
+
+    const second = lobby({ live: true });
+    fireEvent.click(tab('Voice'));
+    const join = screen.getByRole('button', { name: 'Join voice' });
+    join.focus();
+    second.setLive(false);
+    expect(document.activeElement).toBe(join);
+    cleanup();
+
+    windowOf(false);
+    const third = lobby({ live: true });
+    const wideJoin = screen.getByRole('button', { name: 'Join voice' });
+    wideJoin.focus();
+    third.setLive(false);
+    expect(document.activeElement).toBe(wideJoin);
+  });
+});
+
+describe('the microphone test', () => {
+  it('is offered in the Voice view and, on a phone, in no other: leaving it ends a running test', () => {
+    windowOf(true);
+    lobby();
+    expect(screen.queryByText('microphone test offered')).toBeNull();
+    fireEvent.click(tab('Voice'));
+    expect(screen.getByText('microphone test offered')).toBeTruthy();
+    fireEvent.click(tab('Channels'));
+    expect(screen.queryByText('microphone test offered')).toBeNull();
+    fireEvent.click(tab('Chat'));
+    expect(screen.queryByText('microphone test offered')).toBeNull();
+  });
+
+  it('is offered on a wide window, where the strip is always drawn', () => {
+    windowOf(false);
+    lobby();
+    expect(screen.getByText('microphone test offered')).toBeTruthy();
+  });
+});
+
+describe('Chat with nothing open', () => {
+  it('falls back to Channels when the open channel goes, and Chat is back when one opens', () => {
+    windowOf(true);
+    const { setChannels } = lobby();
+    expect(tab('Chat').getAttribute('aria-current')).toBe('page');
+    fireEvent.click(tab('Chat'));
+    setChannels({ ...loaded, selected: null });
+    expect(tab('Channels').getAttribute('aria-current')).toBe('page');
+    expect(tab('Chat').getAttribute('aria-current')).toBeNull();
+    setChannels(loaded);
+    expect(tab('Chat').getAttribute('aria-current')).toBe('page');
+  });
+});
+
+describe('the height follows the visual viewport', () => {
+  function Height({ on = true }: { readonly on?: boolean }) {
+    useAppHeight(on);
+    return null;
+  }
+  // A visual viewport of this height at this pinch-zoom scale.
+  function viewport(height: number, scale: number) {
+    const listeners = new Set<() => void>();
+    const box = { height, scale };
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: {
+        get height() {
+          return box.height;
+        },
+        get scale() {
+          return box.scale;
+        },
+        addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+        removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+      },
+    });
+    return {
+      change(next: { height?: number; scale?: number }) {
+        box.height = next.height ?? box.height;
+        box.scale = next.scale ?? box.scale;
+        act(() => {
+          for (const listener of listeners) listener();
+        });
+      },
+    };
+  }
+  const height = () => document.documentElement.style.getPropertyValue('--app-height');
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'visualViewport');
+  });
+
+  it('is the visual viewport as the layout sees it: shorter with the keyboard up', () => {
+    const vv = viewport(844, 1);
+    render(<Height />);
+    expect(height()).toBe('844px');
+    vv.change({ height: 480 });
+    expect(height()).toBe('480px');
+  });
+
+  it('is not made half the screen by pinch zoom: at 2x the visual viewport is half the layout viewport, so its height is scaled back', () => {
+    const vv = viewport(422, 2);
+    render(<Height />);
+    expect(height()).toBe('844px');
+    vv.change({ height: 400, scale: 2.5 });
+    expect(height()).toBe('1000px');
+  });
+
+  it('is not set off a phone layout, and is removed with it', () => {
+    viewport(844, 1);
+    const view = render(<Height on={false} />);
+    expect(height()).toBe('');
+    view.rerender(<Height />);
+    expect(height()).toBe('844px');
+    view.unmount();
+    expect(height()).toBe('');
   });
 });

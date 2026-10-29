@@ -332,6 +332,17 @@ for (const [size, options] of phoneSizes) {
     await expect(composer).toHaveValue(`${tag} half a thought`);
     expect(Math.abs((await log.evaluate((el) => el.scrollTop)) - placed), `${size}: the log kept its place through Channels and Voice`).toBeLessThanOrEqual(2);
 
+    // Scrolled up by only a little (40 px, more than the 24 px that still
+    // counts as the end): not snapped back to the newest message either, by
+    // the log being resized behind the Voice view and back.
+    await log.evaluate((el) => {
+      el.scrollTop = el.scrollHeight - el.clientHeight - 40;
+    });
+    const near = await log.evaluate((el) => el.scrollTop);
+    for (const view of ['Voice', 'Channels', 'Chat'] as const) await showView(page, view);
+    await expect(composer).toHaveValue(`${tag} half a thought`);
+    expect(Math.abs((await log.evaluate((el) => el.scrollTop)) - near), `${size}: the log kept a place 40 px from its end`).toBeLessThanOrEqual(2);
+
     // Another channel, chosen in Channels: Chat is back, with the other
     // channel's own (empty) box; this one's draft is there on return.
     await showView(page, 'Channels');

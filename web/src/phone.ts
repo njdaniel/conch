@@ -7,6 +7,14 @@ import { createContext, useEffect, useState } from 'react';
 // anything with it.
 export const VoiceLive = createContext<(live: boolean) => void>(() => undefined);
 
+// Whether the voice section draws the private microphone test. On a phone the
+// section is hidden outside the Voice view (and the strip only while in voice),
+// so a test left running there would capture with no indicator and no Stop. The
+// lobby says no outside the Voice view: the test is unmounted, and its cleanup
+// (the same as Stop's) releases the microphone. It is a private check, not call
+// capture, so nothing about voice changes. True everywhere else.
+export const MicTestShown = createContext(true);
+
 // The phone layout (issue #929): below this width the lobby shows one of
 // three views at a time, with a bottom navigation. The same width is in
 // app.css; at and above it nothing here applies.
@@ -60,8 +68,13 @@ export function useAppHeight(on: boolean): void {
     const viewport = window.visualViewport;
     if (viewport === null) return;
     const root = document.documentElement;
+    // Pinch zoom shrinks the visual viewport in CSS pixels (at 2x it is half the
+    // layout viewport) without the layout viewport changing: the height is
+    // scaled back, so a zoomed page keeps its layout and the keyboard (which
+    // shrinks the viewport at whatever scale) still shortens it. Skipping the
+    // update while zoomed would instead leave a stale keyboard height.
     const set = () => {
-      root.style.setProperty('--app-height', `${String(Math.round(viewport.height))}px`);
+      root.style.setProperty('--app-height', `${String(Math.round(viewport.height * viewport.scale))}px`);
     };
     set();
     viewport.addEventListener('resize', set);

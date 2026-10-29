@@ -327,6 +327,9 @@ label {
   grid-template-rows: auto minmax(0, 1fr) auto;
   height: 100vh;
   height: 100dvh;
+  /* viewport-fit=cover draws the page under a notch and the home indicator:
+     pad for them at every width (zero where there are none, issue #929). */
+  padding-inline: env(safe-area-inset-left) env(safe-area-inset-right);
 }
 
 .topbar {
@@ -632,6 +635,9 @@ label {
   max-height: 50vh;
   overflow-y: auto;
   padding: var(--s2) var(--s4);
+  /* The bottom row clears the home indicator (the phone layout's navigation
+     is the bottom row there, and pads for it). */
+  padding-bottom: calc(var(--s2) + env(safe-area-inset-bottom));
   background: var(--surface);
   border-top: 1px solid var(--border);
 }
@@ -2656,7 +2662,6 @@ button.link {
     height: 100vh;
     height: var(--app-height, 100dvh);
     grid-template-rows: auto minmax(0, 1fr) auto auto;
-    padding-inline: env(safe-area-inset-left) env(safe-area-inset-right);
     box-sizing: border-box;
     /* The hidden conversation is laid out behind the Voice view at the
        lobby's size; whatever its parts measure, it must not widen the page. */
@@ -2738,10 +2743,20 @@ button.link {
     grid-template-rows: auto;
   }
 
-  .lobby.phone.view-voice .channels,
-  .lobby.phone.view-voice .conversation {
+  .lobby.phone.view-voice .channels {
     position: absolute;
     inset: 0;
+  }
+
+  /* At the height it had under Chat (the lobby measures it while a view that
+     shows it is current), so that hiding it resizes nothing and the log keeps
+     its place, even a few pixels from its end. */
+  .lobby.phone.view-voice .conversation {
+    position: absolute;
+    top: 0;
+    left: env(safe-area-inset-left);
+    right: env(safe-area-inset-right);
+    height: var(--chat-height, 100%);
   }
 
   .lobby.phone.view-voice .centre {

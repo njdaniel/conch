@@ -39,7 +39,7 @@ away.
 | Concept element | Built as | Notes |
 | --- | --- | --- |
 | Header: server button, avatar | The existing top bar (`Lobby`): who, the address, the connection word, Invite, Members, Settings | Kept. Conch has no server display name or picture (API), so the address stands in; the account and audio settings are the existing **Settings** panel, reached from the top bar as the concept's avatar is. |
-| Bottom navigation: Chat, Channels, Voice | `Lobby` phone navigation: three buttons, `aria-current="page"` on the current one, 44 px high at least, safe-area padding | Shown only below 700 px. A dot and the words "In voice" on **Voice** while this page is in voice (CSS `:has()` on the strip's phase class, no state passed down). |
+| Bottom navigation: Chat, Channels, Voice | `Lobby` phone navigation: three buttons, `aria-current="page"` on the current one, 44 px high at least, safe-area padding | Shown only below 700 px. A dot on **Voice**, and the words "You are in voice" as its description, while this page is in voice: `VoicePanel` reports whether it is in voice (joined, connecting, reconnecting or unavailable) through the `VoiceLive` context, and the lobby uses that only to draw (never to start or stop anything). |
 | **Chat**: channel heading, messages, composer | The existing `Conversation` and `Composer` | Unchanged components. Heading, audience line, per-channel drafts, Sending / Failed / Not confirmed with Retry, Jump to latest, and the attachment button (which exists: #25-attachments) are as on main. The concept's "+" is the real **Add image** button, not a menu. |
 | Chat: members count button | The top bar's **Members** (a panel over the page, as at 700 to 1099 px) | The concept's Members page is not a view: the existing panel (who is here, agents and runs) is kept. |
 | **Channels**: Text list, unread | The existing `ChannelList`, full width, one channel a row, with its unread pill, "manages" badge and in-voice count | Replaces the sideways-scrolling row of #601 (the revision recorded in browser-ui-polish section 2). Choosing a channel opens it and returns to Chat. Rename and New channel stay under the list. |
@@ -75,7 +75,7 @@ returning finds the log where it was and the draft in the box.
 
 - **Browsing never joins.** Choosing a channel, a view, Members or Settings calls
   only what it called before. The Join and Watch only buttons are the only way
-  in (`VoicePanel`, unchanged). The test in `lobby.test.tsx` that no control
+  in (`VoicePanel`, unchanged). The test in `App.test.tsx` (line 310) that no control
   outside the voice section is named for joining holds.
 - **Truthful destination.** The strip's text names the voice channel, as a button
   to it when another is on screen; in the Voice view the channel Join would use
