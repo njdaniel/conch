@@ -658,12 +658,14 @@ function allIndexes(code: string, needle: string): number[] {
 // browser's implementation, in src/platform/browser, is the only code that
 // calls the APIs below.
 const platformBrowser = './platform/browser/';
+// The global object, however it is named.
+const globalObject = '(?:window|globalThis|self)';
 const seamForbidden: readonly (readonly [string, RegExp])[] = [
-  ['fetch', /(?<![\w.])fetch\s*\(|\bwindow\.fetch\b/],
-  ['new WebSocket', /\bnew\s+WebSocket\b/],
-  ['the clipboard', /navigator\.clipboard/],
-  ['a Notification', /\bnew\s+(window\.)?Notification\b|\bwindow\.Notification\b/],
-  ['window.open', /\bwindow\.open\s*\(/],
+  ['fetch', new RegExp(`(?<![\\w.])fetch\\s*\\(|\\b${globalObject}\\s*(\\.\\s*fetch\\b|\\[\\s*['"\`]fetch)`)],
+  ['new WebSocket', new RegExp(`\\bnew\\s+(${globalObject}\\s*\\.\\s*)?WebSocket\\b|\\b${globalObject}\\s*(\\.\\s*WebSocket\\b|\\[\\s*['"\`]WebSocket)`)],
+  ['the clipboard', /\bnavigator\s*(\.\s*clipboard\b|\[\s*['"`]clipboard)/],
+  ['a Notification', new RegExp(`\\bnew\\s+(${globalObject}\\s*\\.\\s*)?Notification\\b|\\b${globalObject}\\s*(\\.\\s*Notification\\b|\\[\\s*['"\`]Notification)`)],
+  ['window.open', new RegExp(`\\b${globalObject}\\s*(\\.\\s*open\\s*\\(|\\[\\s*['"\`]open)`)],
   ['the page origin or protocol', /\b(window\.)?location\.(origin|protocol)\b/],
 ];
 // route.ts alone reads location.origin: it builds the address without its
@@ -685,19 +687,24 @@ describe('the platform seam', () => {
     }
   });
 
-  it('is still catching each: a failing example of each rule', () => {
-    const examples: Record<string, string> = {
-      fetch: 'const r = await fetch(path);',
-      'new WebSocket': 'const s = new WebSocket(url);',
-      'the clipboard': 'navigator.clipboard.writeText(t);',
-      'a Notification': "const n = new window.Notification('x');",
-      window_open: "window.open('https://example.com');",
-      'the page origin or protocol': 'const o = window.location.origin;',
+  it('is still catching each: failing examples of each rule, through window, globalThis and self', () => {
+    const examples: Record<string, readonly string[]> = {
+      fetch: ['const r = await fetch(path);', 'globalThis.fetch(path)', 'self.fetch(path)', 'window.fetch(path)', "globalThis['fetch'](path)", 'const f = self.fetch;'],
+      'new WebSocket': ['new WebSocket(url)', 'new globalThis.WebSocket(url)', 'new self.WebSocket(url)', 'const W = window.WebSocket;', "self['WebSocket']"],
+      'the clipboard': ['navigator.clipboard.writeText(t)', 'globalThis.navigator.clipboard.readText()', 'self.navigator.clipboard', "navigator['clipboard']"],
+      'a Notification': ["new window.Notification('x')", "new Notification('x')", "new globalThis.Notification('x')", 'self.Notification.requestPermission()', 'const N = globalThis.Notification;'],
+      'window.open': ["window.open('https://example.com')", "globalThis.open('x')", "self.open ('x')"],
+      'the page origin or protocol': ['const o = window.location.origin;', 'globalThis.location.protocol', 'self.location.origin'],
     };
-    expect(seamForbidden.filter(([name, rule]) => rule.test(examples[name] ?? examples.window_open ?? '')).length).toBe(seamForbidden.length);
+    for (const [name, rule] of seamForbidden) {
+      const fixtures = examples[name] ?? [];
+      expect(fixtures.length, name).toBeGreaterThan(0);
+      for (const fixture of fixtures) expect(rule.test(fixture), `${name}: ${fixture}`).toBe(true);
+    }
     // Not fetch: a name that ends in it, or a method of that name.
     expect(seamForbidden[0]?.[1].test('fetchFileBytes(id)')).toBe(false);
     expect(seamForbidden[0]?.[1].test('platform.http.fetch(x)')).toBe(false);
+    expect(seamForbidden[4]?.[1].test('dialog.open(x)')).toBe(false);
   });
 
   it('names no route in src/api.ts: every request is an operation of the table', () => {

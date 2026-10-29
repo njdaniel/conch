@@ -1,10 +1,13 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { call, fileQuery, operations, pathOf, queryOf, type OperationId } from './operations';
 
 // internal/server/routes.go is the server's route table. Every entry of the
 // operation table must be a route it serves, so the table cannot name a
 // request conchd would answer 404.
-const routesSource = Object.values(import.meta.glob<string>('../../../internal/server/routes.go', { eager: true, query: '?raw', import: 'default' }))[0] ?? '';
+// Read through Node's fs (vitest runs in Node, from web/), so the dev server
+// needs no widened file access.
+const routesSource = readFileSync('../internal/server/routes.go', 'utf8');
 
 // A pattern is "METHOD /path" in a Go string; {name} wildcards are compared
 // without their names (the server calls a principal {principal_id}, the table
@@ -49,6 +52,8 @@ describe('the operation table', () => {
       [
         'changePassword',
         'convertGuest',
+        'createInvite',
+        'createSignInLink',
         'joinAccount',
         'joinGuest',
         'login',
@@ -60,6 +65,7 @@ describe('the operation table', () => {
         'resetPassword',
         'setPassword',
         'setupRedeem',
+        'totpEnroll',
         'voiceSession',
         'wsTicket',
       ].sort(),
@@ -70,6 +76,34 @@ describe('the operation table', () => {
     expect(operations.voiceSession.renderer).toBe(false);
     for (const [id, entry] of entries) {
       if (entry.credentials?.includes('token') === true) expect(entry.renderer, id).toBe(false);
+    }
+  });
+
+  // Every response field that is a token, a code, a ticket or a secret: the
+  // operation that returns it is the main process's, with the field named.
+  it('blocks, and names the field of, every operation whose answer carries a secret', () => {
+    const carrying: Partial<Record<OperationId, string>> = {
+      login: 'token',
+      loginTotp: 'token',
+      changePassword: 'token',
+      setPassword: 'token',
+      resetPassword: 'token',
+      setupRedeem: 'token',
+      redeemInvite: 'token',
+      redeemInviteGuest: 'token',
+      redeemSignInLink: 'token',
+      joinGuest: 'token',
+      joinAccount: 'token',
+      convertGuest: 'token',
+      wsTicket: 'ticket',
+      voiceSession: 'rooms',
+      createSignInLink: 'code',
+      createInvite: 'code',
+      totpEnroll: 'secret',
+    };
+    for (const [id, field] of Object.entries(carrying) as [OperationId, string][]) {
+      expect(operations[id].renderer, id).toBe(false);
+      expect(operations[id].credentials, id).toContain(field);
     }
   });
 

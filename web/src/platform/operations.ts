@@ -146,7 +146,7 @@ export const operations = {
   revokeAll: op('POST', '/v1/principals/{principal}/credentials/revoke-all', 'bearer', { response: check(revokeAllCredentialsResponseV1) }),
   listOwnCredentials: op('GET', '/v1/credentials/mine', 'bearer', { response: check(listOwnCredentialsResponseV1) }),
   endOwnCredential: op('DELETE', '/v1/credentials/mine/{id}', 'bearer'),
-  reauth: op('POST', '/v1/reauth', 'bearer', { request: check(reauthRequestV1), response: check(reauthResponseV1), secret: true, renderer: false, credentials: ['proof'] }),
+  reauth: op('POST', '/v1/reauth', 'bearer', { request: check(reauthRequestV1), response: check(reauthResponseV1), secret: true, renderer: false }),
   changePassword: op('PUT', '/v1/password/mine', 'bearer', {
     request: check(changePasswordRequestV1),
     response: check(passwordUpdatedResponseV1),
@@ -163,11 +163,18 @@ export const operations = {
   }),
   resetPassword: op('POST', '/v1/password/reset', 'none', { request: check(resetPasswordRequestV1), response: check(passwordUpdatedResponseV1), renderer: false, credentials: token }),
   setupRedeem: op('POST', '/v1/setup/redeem', 'none', { request: check(redeemSetupTokenRequestV1), response: check(redeemSetupTokenResponseV1), renderer: false, credentials: token }),
-  totpEnroll: op('POST', '/v1/totp/enroll', 'bearer', { response: check(totpEnrollmentV1) }),
+  // The authenticator's seed and its otpauth URI: a second factor in the clear.
+  totpEnroll: op('POST', '/v1/totp/enroll', 'bearer', { response: check(totpEnrollmentV1), renderer: false, credentials: ['secret', 'uri'] }),
   totpConfirm: op('POST', '/v1/totp/confirm', 'bearer', { request: check(confirmTOTPRequestV1), secret: true }),
 
   // Devices.
-  createSignInLink: op('POST', '/v1/sign-in-links/mine', 'bearer', { request: check(createDeviceLinkRequestV1), response: check(createSignInLinkResponseV1) }),
+  createSignInLink: op('POST', '/v1/sign-in-links/mine', 'bearer', {
+    request: check(createDeviceLinkRequestV1),
+    // The one-use link's code signs an account in on another device.
+    response: check(createSignInLinkResponseV1),
+    renderer: false,
+    credentials: ['code'],
+  }),
   listSignInLinks: op('GET', '/v1/sign-in-links/mine', 'bearer', { response: check(listOwnSignInLinksResponseV1) }),
   closeSignInLink: op('DELETE', '/v1/sign-in-links/mine/{id}', 'bearer'),
   previewSignInLink: op('POST', '/v1/sign-in-links/preview', 'none', { request: check(signInLinkPreviewRequestV1), response: check(signInLinkPreviewV1) }),
@@ -195,7 +202,8 @@ export const operations = {
     renderer: false,
     credentials: token,
   }),
-  createInvite: op('POST', '/v1/invites', 'bearer', { request: check(createInviteRequestV1), response: check(createInviteResponseV1) }),
+  // The invite's code grants an account, once, to whoever holds it.
+  createInvite: op('POST', '/v1/invites', 'bearer', { request: check(createInviteRequestV1), response: check(createInviteResponseV1), renderer: false, credentials: ['code'] }),
   listInvites: op('GET', '/v1/invites', 'bearer', { response: check(listInvitesResponseV1) }),
   closeInvite: op('DELETE', '/v1/invites/{id}', 'bearer'),
   previewInvite: op('POST', '/v1/invites/preview', 'none', { request: check(invitePreviewRequestV1), response: check(invitePreviewV1) }),

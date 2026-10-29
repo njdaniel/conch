@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 
@@ -14,12 +15,9 @@ export default defineConfig(({ mode }) => ({
   base: '/app/',
   resolve: {
     alias: {
-      '#platform-selected': decodeURIComponent(new URL(`./src/platform/${mode === 'desktop' ? 'desktop' : 'browser'}/index.ts`, import.meta.url).pathname),
+      '#platform-selected': fileURLToPath(new URL(`./src/platform/${mode === 'desktop' ? 'desktop' : 'browser'}/index.ts`, import.meta.url)),
     },
   },
-  // A test reads internal/server/routes.go, one directory up, to check the
-  // operation table against the server's routes (src/platform/operations.test.ts).
-  server: { fs: { allow: ['..'] } },
   plugins: [react()],
   build: {
     outDir: 'dist',
