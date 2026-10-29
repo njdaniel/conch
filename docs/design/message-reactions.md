@@ -678,4 +678,12 @@ Precedent: guests-and-accounts.md §11. This section says what each review round
 - The catalog-and-schema issue (§13 item 0) filed by the principal and landed, since #763 and #765 both build on its generated table, types and fixtures.
 - Whichever of this design and moderation.md lands first defines `message_not_found` and takes the next migration number; the other adapts (§2, §4.3, §11.2).
 
+
+**Round 2 (security re-review, 2026-10-29): APPROVE.** Four pins for #765 to implement as stated here:
+
+1. **Moderation route order.** The handler checks membership first (`callerIsMember`, a non-member operator gets `channel_not_found`), then runs the §6.1 probe (`message_not_found`), as `channelForCaller` does. That way MD2's non-member operator case holds.
+2. **Agents spend their budget once.** For an agent's write, the channel gate is membership-only (as `channelForScopedPost` is, `messages.go:782`), and the budget is spent once in the audience step: `agentCallerAllowed` for channel-wide, `authorizeScopedPost` for net and whisper. An agent holding `post_net` but not `post` may therefore react on a net message, as it may reply there.
+3. **Moderation writes take the same per-principal `reactionWriteLimit` token as other writes.** This bounds a compromised manager credential.
+4. **§14 V1 covers all seven routes**, including the two moderation routes. MD2 adds the manager-specific cases.
+
 Nothing in this revision has been exercised as software: no generator, store, route or client exists yet, and the behaviour stated here is a contract for #765–#767 to prove with the matrix of §14.
