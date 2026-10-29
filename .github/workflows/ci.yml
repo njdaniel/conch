@@ -144,10 +144,85 @@ jobs:
         with:
           node-version-file: web/.nvmrc
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
 
       - name: web check
         run: make web-check
+
+      # The desktop shell under desktop/ (#940): the fetch script's test, the
+      # repository rules, the dependency and licence gates, then npm ci,
+      # typecheck, lint and unit tests. It downloads no Electron binary and
+      # needs no display; the packaged app is the desktop-smoke job's.
+      # desktop/.nvmrc names the same Node as web/.nvmrc (make desktop-check
+      # fails if the installed Node is not the one it names).
+      - name: desktop check
+        run: make desktop-check
+
+  desktop-smoke:
+    # The packaged desktop shell (#940): make desktop-build fetches the pinned
+    # Electron (scripts/desktop-electron.sh checks its SHA-256 twice), builds
+    # the web client for it and packs the unpacked Linux app with its fuses;
+    # the smoke test then starts that app under a virtual display and drives it
+    # over Chromium's remote-debugging port (desktop/tests/smoke/launch.ts says
+    # why not Playwright's Electron launcher). It prints the app's
+    # process.versions into this log. A job of its own: it needs a display and
+    # a 100 MB download, and `make check` needs neither.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      # The unpacked Electron, keyed by the pin file that names its version
+      # and hash. Without a hit the build downloads it and checks it.
+      - name: electron cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch/electron
+          key: desktop-electron-${{ runner.os }}-${{ hashFiles('scripts/desktop-pins.sh') }}
+
+      - name: virtual display
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb
+
+      # The browser build must not change because the desktop shell exists:
+      # web/dist is hashed before and after the desktop build, and holds no
+      # desktop code.
+      - name: browser build before
+        run: |
+          make web-build
+          ./scripts/desktop-web-dist-check.sh
+          (cd web/dist && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$RUNNER_TEMP/web-dist.before"
+
+      - name: build the unpacked app
+        run: make desktop-build
+
+      - name: browser build after
+        run: |
+          (cd web/dist && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$RUNNER_TEMP/web-dist.after"
+          diff "$RUNNER_TEMP/web-dist.before" "$RUNNER_TEMP/web-dist.after"
+
+      # The Chromium sandbox stays on. This runner's kernel may restrict
+      # unprivileged user namespaces (Ubuntu 24.04's AppArmor), which the
+      # sandbox's namespace mode needs; the setuid helper is the other mode,
+      # and it is what the .deb package installs (#774). Here it is made so on
+      # the throwaway runner. Not verified before this job's first CI run: if
+      # the sandbox will not start, this step is where to look.
+      - name: sandbox helper
+        run: |
+          sudo chown root:root desktop/dist/linux-unpacked/chrome-sandbox
+          sudo chmod 4755 desktop/dist/linux-unpacked/chrome-sandbox
+
+      - name: smoke test
+        run: xvfb-run -a make desktop-smoke
 
   web-embedded:
     # The web client built into conchd (issue #347): make build-web-embedded

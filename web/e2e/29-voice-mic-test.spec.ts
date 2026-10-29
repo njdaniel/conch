@@ -13,7 +13,7 @@
 // only where voice is set up: without Docker it fails when CI is set and is
 // skipped otherwise.
 import type { Page } from '@playwright/test';
-import { channelButton, expect, signIn, test } from './fixtures';
+import { expect, openChannel, showView, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -87,7 +87,8 @@ test.describe('the private microphone test', () => {
         await watchPage(page, vw);
         await page.addInitScript(devices);
         await signIn(page, vw, vw.alice.token, vw.alice.name);
-        await channelButton(page, vw.channel).click();
+        await openChannel(page, vw.channel);
+        await showView(page, 'Voice');
         const voice = voiceRegion(page);
         const start = voice.getByRole('button', { name: 'Test microphone' });
         await expect(start).toBeVisible();

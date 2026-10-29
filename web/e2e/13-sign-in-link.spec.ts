@@ -5,7 +5,7 @@
 // people it adds to general touch no other spec.
 import type { BrowserContextOptions, Page } from '@playwright/test';
 import { makeInvite } from './api';
-import { accountPassword, channelButton, expect, fillAccount, signInWithPassword, statusLine, test } from './fixtures';
+import { accountPassword, channelButton, expect, fillAccount, showView, signInWithPassword, statusLine, test } from './fixtures';
 import { createSignInLinkResponseV1, type CreateSignInLinkRequestV1, type CreateSignInLinkResponseV1 } from '../src/schema/signin';
 import { createPrincipalResponse, type CreatePrincipalRequest } from '../src/schema/credential';
 import { call, inviteUrl, ok, principalId, type World } from './world';
@@ -86,6 +86,7 @@ test('B493 a joiner signs out, is warned first, and comes back into the same acc
   await handset.page.getByRole('button', { name: `Sign in as ${name}` }).click();
   await expect(statusLine(handset.page)).toContainText(name);
   await expect(statusLine(handset.page)).toContainText('Connected');
+  await showView(handset.page, 'Channels');
   await expect(channelButton(handset.page, 'general')).toBeVisible();
 
   // The same account, on a new credential that lasts.

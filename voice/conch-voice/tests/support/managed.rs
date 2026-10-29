@@ -343,6 +343,7 @@ impl ManagedRig {
             home: None,
             server: None,
             token,
+            ..Environment::default()
         };
 
         // The keyboard's end is opened to read and write, so that it does not wait for the

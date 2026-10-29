@@ -67,6 +67,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod audio;
+pub mod channel;
 pub mod cli;
 pub mod config_cmd;
 pub mod devices;
@@ -89,7 +90,8 @@ pub mod session;
 pub mod status;
 pub mod transmit;
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -287,6 +289,8 @@ pub fn join(
 /// # Errors
 ///
 /// [`Error::EventPipe`] if file descriptor 3 is not a pipe that can be written, before
+/// anything else is done; with `--events-pipe`, which file descriptor 3 is not consulted
+/// for, [`Error::Attach`] if the endpoint cannot be attached to ([`channel::attach`]), before
 /// anything else is done; otherwise what the owner was told in a failed state.
 pub fn managed(
     args: &ManagedArgs,
@@ -294,7 +298,20 @@ pub fn managed(
     scrubber: Arc<Scrubber>,
     parent: u32,
 ) -> Result<(), Error> {
-    let events = managed::open_event_pipe()?;
+    // Where the events go: the endpoint the owner listens on, with the attach line already
+    // written, or file descriptor 3. Exactly one is looked at.
+    let (events, end): (Box<dyn Write + Send>, Option<UnixStream>) = match &args.events_pipe {
+        Some(path) => {
+            let endpoint = channel::attach(path, environment, &scrubber)?;
+            (Box::new(endpoint.events), Some(endpoint.end))
+        }
+        None => (Box::new(managed::open_event_pipe()?), None),
+    };
+    // The nonce was spent on the attach line: the session is given an environment without it.
+    let environment = Environment {
+        conch_voice_attach: None,
+        ..environment.clone()
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -306,7 +323,7 @@ pub fn managed(
     let result = runtime.block_on(async {
         let (inputs, received) = mpsc::unbounded_channel();
         let host = managed::Host::new(
-            environment.clone(),
+            environment,
             LiveKit::new(Arc::clone(&scrubber)),
             scrubber,
             managed::Devices::Choices {
@@ -317,7 +334,10 @@ pub fn managed(
         );
         managed::signals(inputs.clone(), host.watchdog.clone()).map_err(Error::Runtime)?;
         managed::watch_parent(parent, inputs.clone(), host.watchdog.clone());
-        managed::run(host, std::io::stdin(), Box::new(events), inputs, received).await
+        if let Some(end) = end {
+            channel::watch_end(end, inputs.clone(), host.watchdog.clone());
+        }
+        managed::run(host, std::io::stdin(), events, inputs, received).await
     });
     // As for `join`: the SDK's tasks are not cancelled under it.
     std::mem::forget(runtime);
@@ -459,6 +479,7 @@ mod tests {
             home: None,
             server: None,
             token: Some(Secret::new(FAKE_LOGIN)),
+            ..Environment::default()
         };
         let args = match cli::parse(["conch-voice", "join", "ops"]).unwrap() {
             cli::Invocation::Join(args) => args,
