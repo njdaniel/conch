@@ -21,6 +21,10 @@
 //     and the adapter's answer.
 //   - ReadStateV1 (conch.read_state.v1), how far a person has read a channel
 //     and how many messages they may see past it.
+//   - ReactionSummaryV1 (conch.reaction_summary.v1), every reaction on one
+//     message as one reader may see it (issue #953). A reaction key is one
+//     emoji of the generated catalog (emoji_catalog_gen.go, EmojiVersion),
+//     canonical per CanonicalReactionKey.
 //
 // Their request and response bodies (CreateSessionRequestV1,
 // CreateRunRequestV1, SetRunStateRequestV1, ListRunsResponseV1,
@@ -36,4 +40,7 @@
 // type; scripts/schema-ts-check.sh fails while the committed file is stale.
 package schema
 
+// The emoji catalog comes first: schema-ts reads EmojiVersion from the file
+// it writes (issue #953; go generate runs a file's directives in order).
+//go:generate go run ../../cmd/emoji-gen -data ../../third_party/unicode/emoji-test.txt -sha256 ../../third_party/unicode/emoji-test.sha256 -go emoji_catalog_gen.go -json ../../web/src/emoji/catalog.json
 //go:generate go run ../../cmd/schema-ts -out ../../web/src/schema

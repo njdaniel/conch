@@ -107,6 +107,33 @@ export async function signInWithPassword(page: Page, name: string, password = ac
 
 export const statusLine = (page: Page) => page.getByRole('status', { name: 'Status' });
 export const channelButton = (page: Page, name: string) => page.getByRole('navigation', { name: 'Channels' }).getByRole('button', { name, exact: true });
+// The phone layout's bottom navigation (issue #929), present only below 700 px.
+export const mainNav = (page: Page) => page.getByRole('navigation', { name: 'Main navigation' });
+
+// showView taps the phone navigation's Chat, Channels or Voice. Where there is
+// none (700 px and wider) every view is already on screen and it does nothing.
+export async function showView(page: Page, view: 'Chat' | 'Channels' | 'Voice'): Promise<void> {
+  const nav = mainNav(page);
+  if ((await nav.count()) === 0) return;
+  // The members panel is drawn over the page, the navigation's right end
+  // included; a person closes it before moving on, as Escape does.
+  const members = page.getByRole('region', { name: 'Members list' });
+  if (await members.isVisible()) {
+    await page.keyboard.press('Escape');
+    await expect(members).toBeHidden();
+  }
+  await nav.getByRole('button', { name: view, exact: true }).click();
+  await expect(nav.getByRole('button', { name: view, exact: true })).toHaveAttribute('aria-current', 'page');
+}
+
+// openChannel opens a channel from the channel list, which on a phone is the
+// Channels view; the phone then shows its chat.
+export async function openChannel(page: Page, name: string): Promise<void> {
+  await showView(page, 'Channels');
+  await channelButton(page, name).click();
+  await showView(page, 'Chat');
+}
+
 export const messages = (page: Page) => page.getByRole('log', { name: 'Messages' });
 export const conversation = (page: Page) => page.getByRole('region', { name: 'Conversation' });
 
@@ -115,6 +142,16 @@ export const conversation = (page: Page) => page.getByRole('region', { name: 'Co
 export const phones = [
   ['390×844', { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
   ['360×740', { viewport: { width: 360, height: 740 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
+] as const satisfies readonly (readonly [string, BrowserContextOptions])[];
+
+// The four phone sizes of the phone layout (issue #929): the narrowest still
+// in use, two common ones and a large one. A portrait phone is under 700 px
+// wide; turned on its side it is wider, and has the tablet layout.
+export const phoneSizes = [
+  ['320×640', { viewport: { width: 320, height: 640 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true }],
+  ['360×740', { viewport: { width: 360, height: 740 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
+  ['390×844', { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
+  ['430×932', { viewport: { width: 430, height: 932 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
 ] as const satisfies readonly (readonly [string, BrowserContextOptions])[];
 
 // expectFits checks that the page is no wider than the window: nothing scrolls

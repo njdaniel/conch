@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
+import { platform } from './platform';
 import './app.css';
 
 const root = document.getElementById('root');
@@ -12,6 +13,6 @@ if (root === null) {
 // server's.
 createRoot(root).render(
   <StrictMode>
-    <App origin={window.location.origin} />
+    <App origin={platform.services.origin()} />
   </StrictMode>,
 );

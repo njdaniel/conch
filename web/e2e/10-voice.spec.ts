@@ -8,7 +8,7 @@
 // page says voice is not set up and asks for no device.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { PostMessageRequestV2 } from '../src/schema/generated';
-import { channelButton, conversation, expect, expectFits, messages, phones, signIn, statusLine, test } from './fixtures';
+import { channelButton, conversation, expect, expectFits, messages, openChannel, phones, showView, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -97,7 +97,7 @@ test.describe('with LiveKit', () => {
     await page.addInitScript(countBytes);
     const m = typeof who === 'string' ? vw[who] : who;
     await signIn(page, vw, m.token, m.name);
-    await channelButton(page, vw.channel).click();
+    await openChannel(page, vw.channel);
     return { context, page, watch, member: m };
   }
 
@@ -601,10 +601,21 @@ test.describe('with LiveKit', () => {
       expect(await log.evaluate((el) => el.scrollHeight > el.clientHeight), `${size}: the conversation is longer than the log`).toBe(true);
       await expectInside(newest, log, `${size}: the newest message before joining voice`);
       await expectFits(a.page, `${size}: the lobby before joining voice`);
+      // Not in voice there is no strip under Chat: Join voice is in the Voice
+      // view (issue #929), and joining there changes neither the chat nor the
+      // log's place.
+      await expect(voice, `${size}: no strip under Chat before joining`).toBeHidden();
+      await showView(a.page, 'Voice');
+      await expectFits(a.page, `${size}: the Voice view before joining`);
       await voice.getByRole('button', { name: 'Join voice' }).tap();
       await expect(voice).toContainText('Connected in', { timeout: 30_000 });
       await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
       await expect(voice.getByRole('list', { name: 'In voice' }).getByRole('listitem')).toHaveCount(3, { timeout: 15_000 });
+      await expectFits(a.page, `${size}: the Voice view, joined`);
+      // Back under Chat the compact strip stays, with the controls.
+      await showView(a.page, 'Chat');
+      await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
+      await expect(voice.getByRole('button', { name: 'Leave voice' })).toBeVisible();
       await expect(voice.getByRole('button', { name: 'More about sharing' }), `${size}: the line about sharing shows`).toBeVisible();
       await expectFits(a.page, `${size}: the voice panel, push to talk`);
       await expectInside(newest, log, `${size}: the newest message after joining voice`);
@@ -628,6 +639,7 @@ test.describe('with LiveKit', () => {
       await expectFits(a.page, `${size}: the voice panel, open microphone`);
       await voice.getByLabel('Push to talk').tap();
       await voice.getByRole('button', { name: 'Leave voice' }).tap();
+      await showView(a.page, 'Voice');
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
     } finally {
       await a.context.close();
@@ -666,19 +678,20 @@ test.describe('with LiveKit', () => {
           if (r.method() === 'POST' && r.url().endsWith('/voice/session')) sessions++;
         });
 
+        // On a phone Join voice is in the Voice view.
+        await showView(a.page, 'Voice');
         const join = voice.getByRole('button', { name: 'Join voice in #voice-room', exact: true });
         const watch = voice.getByRole('button', { name: 'Watch only in #voice-room', exact: true });
         await expect(join, size).toBeEnabled();
         await expect(watch, size).toHaveAccessibleDescription('Microphone off. You hear the room and can watch a share.');
         await expect(voice.getByText('Microphone off. You hear the room and can watch a share.'), size).toBeVisible();
-        // The verbs are always on screen; the room's name is on a desktop,
-        // and only read out on a phone.
+        // The verbs are always on screen, and so is the room's name: on a
+        // phone, in the Voice view, which has the room for it (issue #929).
         for (const [button, verb] of [[join, 'Join voice'], [watch, 'Watch only']] as const) {
           await expect(button, size).toBeVisible();
           await expect(button, size).toContainText(verb);
           const box = await button.getByText('in #voice-room', { exact: true }).boundingBox();
-          if (phone) expect(box?.width ?? 0, `${size}: the room's name is hidden on screen`).toBeLessThanOrEqual(1);
-          else expect(box?.width ?? 0, `${size}: the room's name is shown`).toBeGreaterThan(40);
+          expect(box?.width ?? 0, `${size}: the room's name is shown`).toBeGreaterThan(40);
         }
         await expectFits(a.page, `${size}: the strip before joining`);
 
@@ -688,24 +701,22 @@ test.describe('with LiveKit', () => {
         await expect(voice.getByRole('button', { name: '#voice-room', exact: true })).toHaveCount(0);
         expect(sessions, `${size}: one voice session for the join`).toBe(1);
 
-        // Browsing never moves voice; the strip offers the way back.
+        // Browsing never moves voice; the strip offers the way back. On a
+        // phone the channel is chosen in Channels, which returns to Chat, and
+        // the strip under Chat names the voice channel.
+        if (phone) await showView(a.page, 'Channels');
         await press(channelButton(a.page, last));
+        if (phone) await showView(a.page, 'Chat');
         await expect(conversation(a.page).getByRole('heading', { name: last })).toBeVisible();
         const back = voice.getByRole('button', { name: '#voice-room', exact: true });
         await expect(back).toBeVisible();
         await expect(voice).toContainText('Connected in #voice-room');
-        if (phone) {
-          // The voice channel scrolled out of the row.
-          await a.page.getByRole('navigation', { name: 'Channels' }).getByRole('list').evaluate((row) => {
-            row.scrollLeft = row.scrollWidth;
-          });
-          await expect(channelButton(a.page, vw.channel), `${size}: #voice-room is off screen`).not.toBeInViewport();
-        }
 
         await press(back);
+        if (phone) await showView(a.page, 'Channels');
         await expect(channelButton(a.page, vw.channel)).toHaveAttribute('aria-current', 'true');
+        if (phone) await showView(a.page, 'Chat');
         await expect(conversation(a.page).getByRole('heading', { name: vw.channel })).toBeVisible();
-        if (phone) await expect(channelButton(a.page, vw.channel), `${size}: #voice-room is back on screen`).toBeInViewport();
         // Still the same connection: connected all along, and no new session.
         await expect(voice).toContainText('Connected in #voice-room');
         await expect(voice).not.toContainText('Reconnecting');
@@ -715,6 +726,7 @@ test.describe('with LiveKit', () => {
         await expectFits(a.page, `${size}: the strip after going back`);
 
         await press(voice.getByRole('button', { name: 'Leave voice' }));
+        await showView(a.page, 'Voice');
         await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
       } finally {
         await a.context.close();

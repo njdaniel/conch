@@ -7,6 +7,14 @@
 // differs from what that writes.
 import { array, bool, int, json, object, optional, str, tagged, timestamp, vocab } from './validate';
 
+// Constants of pkg/schema the client must agree with the server on.
+export const EMOJI_VERSION = '18.0';
+export const MAX_REACTION_KEY_BYTES = 64;
+export const MAX_REACTION_KEY_CODE_POINTS = 16;
+export const MAX_REACTION_BATCH_MESSAGES = 100;
+export const DEFAULT_REACTOR_LIMIT = 50;
+export const MAX_REACTOR_LIMIT = 100;
+
 // schema.PrincipalKind
 export type PrincipalKind = 'human' | 'agent';
 
@@ -2405,6 +2413,73 @@ export interface CreateProblemReportResponseV1 {
 export const createProblemReportResponseV1 = object<CreateProblemReportResponseV1>({
   id: int,
   created_at: timestamp,
+});
+
+// schema.ReactionCountV1
+export interface ReactionCountV1 {
+  emoji: string;
+  count: number;
+  me?: boolean;
+}
+
+export const reactionCountV1 = object<ReactionCountV1>({
+  emoji: str,
+  count: int,
+  me: optional(bool),
+});
+
+// schema.ReactionSummaryV1
+export const reactionSummaryV1Schema = 'conch.reaction_summary.v1';
+
+export interface ReactionSummaryV1 {
+  schema: typeof reactionSummaryV1Schema;
+  channel_id: number;
+  message_id: number;
+  reactions: ReactionCountV1[];
+  as_of: string;
+}
+
+export const reactionSummaryV1 = object<ReactionSummaryV1>({
+  schema: vocab<typeof reactionSummaryV1Schema>({ [reactionSummaryV1Schema]: true }),
+  channel_id: int,
+  message_id: int,
+  reactions: array(reactionCountV1),
+  as_of: timestamp,
+});
+
+// schema.ReactionSummariesResponseV1
+export interface ReactionSummariesResponseV1 {
+  summaries: ReactionSummaryV1[];
+}
+
+export const reactionSummariesResponseV1 = object<ReactionSummariesResponseV1>({
+  summaries: array(reactionSummaryV1),
+});
+
+// schema.ReactionV1
+export interface ReactionV1 {
+  principal_id: number;
+  emoji: string;
+  created_at: string;
+  guest_reactor?: GuestAttributionV1;
+}
+
+export const reactionV1 = object<ReactionV1>({
+  principal_id: int,
+  emoji: str,
+  created_at: timestamp,
+  guest_reactor: optional(guestAttributionV1),
+});
+
+// schema.ListReactorsResponseV1
+export interface ListReactorsResponseV1 {
+  reactors: ReactionV1[];
+  next_after?: number;
+}
+
+export const listReactorsResponseV1 = object<ListReactorsResponseV1>({
+  reactors: array(reactionV1),
+  next_after: optional(int),
 });
 
 // schema.Error

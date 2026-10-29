@@ -12,6 +12,18 @@
 //! [`Events`] and by nothing else: a hello first, offering v1 and v2, then states, acks and
 //! protocol errors in the session's version. Nothing else this process writes is read as
 //! the protocol.
+//! With `--events-pipe <path>` the events go instead to a Unix socket the desktop owner
+//! listens on, which [`crate::channel`] connects to, after checking the socket and its
+//! directory, and on which it writes one attach line (`conch.voice_control_pipe.v1`, the
+//! nonce of `CONCH_VOICE_ATTACH`) before the hello; the hello and everything after it are
+//! unchanged, and so is standard input, the one channel with authority. The connection is
+//! read on a thread of its own only to see its end: the end, an error or any byte received
+//! is the owner gone, as the end of standard input is. The attach line is a spawn-to-pipe
+//! binding and **not authentication**: a process of the same user that unlinks the socket
+//! and binds its own before the helper connects receives the attach line and every event,
+//! and that same-user unlink-and-rebind is out of scope by design
+//! (`docs/design/linux-desktop.md` §5.2). Without the option nothing here changes and
+//! `CONCH_VOICE_ATTACH` is not read.
 //! Owns: the event writer and its numbering; the thread that reads standard input; the
 //! watch on the parent; and the watchdog that ends the process when it does not end by
 //! itself in time after its owner has gone or asked it to leave. The voice session itself

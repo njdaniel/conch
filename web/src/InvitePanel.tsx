@@ -17,6 +17,7 @@ import { clock } from './Conversation';
 import { Glyph } from './Icons';
 import { serverLine, waitWords } from './Invite';
 import { JoiningSettings } from './joiningSettings';
+import { platform } from './platform';
 import { inviteLink } from './route';
 import type { ChannelV0 } from './schema/channel';
 import type { CreateInviteRequestV1, InviteJoinMode, InviteKind, InviteV1 } from './schema/invite';
@@ -223,7 +224,7 @@ export function InvitePanel({
   function copy() {
     if (link === null) return;
     try {
-      void navigator.clipboard.writeText(link.url).then(
+      void platform.services.copyText(link.url).then(
         () => {
           setCopied('yes');
         },

@@ -5,7 +5,7 @@
 // touch no other spec.
 import type { BrowserContextOptions, Page } from '@playwright/test';
 import { invitesOf, makeInvite } from './api';
-import { channelButton, expect, expectFits, fillAccount, statusLine, test } from './fixtures';
+import { channelButton, expect, expectFits, fillAccount, showView, statusLine, test } from './fixtures';
 import { call, inviteUrl, principalId, type World } from './world';
 
 const desktop: BrowserContextOptions = { viewport: { width: 1280, height: 800 } };
@@ -93,8 +93,10 @@ for (const [size, options] of sizes) {
     expect(await page.evaluate(() => window.innerWidth)).toBe(options.viewport?.width);
 
     await join(page, name);
+    await showView(page, 'Channels');
     await expect(channelButton(page, 'general')).toBeVisible();
     await expect(channelButtons(page)).toHaveCount(1);
+    await showView(page, 'Chat');
     await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
     // A joiner the operator did not let invite sees no invite controls.
     await expect(page.getByRole('button', { name: 'Invite someone' })).toHaveCount(0);
@@ -194,6 +196,7 @@ test('A8 a joiner who may invite makes a link that another browser redeems, then
   await expect(joiner.page.getByRole('alert')).toHaveText('That name is taken. Choose another.');
   await expect(joiner.page.getByLabel('Your name')).toHaveValue(inviterName);
   await join(joiner.page, unique('joiner'));
+  await showView(joiner.page, 'Channels');
   await expect(channelButton(joiner.page, 'general')).toBeVisible();
   await expect(channelButtons(joiner.page)).toHaveCount(1);
   const inviteCode = decodeURIComponent(link.slice(link.indexOf('#/invite/') + '#/invite/'.length));

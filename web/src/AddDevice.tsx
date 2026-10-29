@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { waitWords } from './Invite';
+import { platform } from './platform';
 import { revealLimits, sharingLine, useTabSharing } from './Reveal';
 import { deviceLink } from './route';
 import type { SignInLinkV1 } from './schema/signin';
@@ -114,7 +115,7 @@ export function AddDevice({ origin, insecure, onUnauthorized }: { readonly origi
     const link = address.current;
     if (link === null) return;
     try {
-      void navigator.clipboard.writeText(link).then(
+      void platform.services.copyText(link).then(
         () => {
           setCopied('yes');
         },

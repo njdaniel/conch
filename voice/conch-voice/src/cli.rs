@@ -166,6 +166,10 @@ pub struct ManagedArgs {
     /// `--test-key-device`, test only: a named pipe of `input_event` records read instead
     /// of the key device `voice.toml` names, with the keys it binds.
     pub test_key_device: Option<PathBuf>,
+    /// `--events-pipe`: a Unix-socket path to connect to for events instead of file
+    /// descriptor 3. Not secret. The desktop owner passes it; nobody types it
+    /// (`docs/design/linux-desktop.md` §5.2). Checked by [`crate::channel`], not here.
+    pub events_pipe: Option<PathBuf>,
 }
 
 /// What the command line asked for.
@@ -273,8 +277,10 @@ pub fn command() -> Command {
         .long_about(
             "Runs one voice session for the conch TUI, which starts this as its own child \
              process and drives it over its standard input and file descriptor 3 \
-             (docs/design/tui-voice.md). It is not for running by hand: without file \
-             descriptor 3 it exits at once. The channel, the server and the login come from \
+             (docs/design/tui-voice.md), or, with --events-pipe, over its standard input and \
+             a Unix socket the desktop owner listens on (docs/design/linux-desktop.md). It \
+             is not for running by hand: without file descriptor 3 or an endpoint it exits \
+             at once. The channel, the server and the login come from \
              conch; the key device and the audio devices from voice.toml, as for join.",
         )
         .arg(
@@ -308,6 +314,14 @@ pub fn command() -> Command {
                 .value_parser(clap::value_parser!(PathBuf))
                 .hide(true)
                 .help("Test only: read key records from this named pipe instead of the key device voice.toml names"),
+        )
+        .arg(
+            Arg::new("events-pipe")
+                .long("events-pipe")
+                .value_name("PATH")
+                // Any text, the empty one included: `channel` refuses it with a reason of its own.
+                .value_parser(clap::value_parser!(OsString))
+                .help("connect to this endpoint for events instead of file descriptor 3; conch passes a Unix-socket path, the desktop owner's, never typed by hand"),
         );
     let devices = Command::new("devices")
         .about("List microphones and speakers by the names the configuration takes, and keyboards")
@@ -507,6 +521,9 @@ where
                     .cloned()
                     .map_or(SinkChoice::PipeWire, SinkChoice::Count),
                 test_key_device: managed.get_one::<PathBuf>("test-key-device").cloned(),
+                events_pipe: managed
+                    .get_one::<OsString>("events-pipe")
+                    .map(PathBuf::from),
             }));
         }
         Some(("devices", devices)) => {
@@ -567,6 +584,10 @@ pub struct Environment {
     pub server: Option<String>,
     /// `CONCH_TOKEN`. Held as a secret: its `Debug` is a placeholder.
     pub token: Option<Secret>,
+    /// `CONCH_VOICE_ATTACH`, the attach nonce: read only for `managed --events-pipe`
+    /// ([`Environment::with_attach_from_process`]), never by [`Environment::from_process`].
+    /// Held as a secret: its `Debug` is a placeholder.
+    pub conch_voice_attach: Option<Secret>,
 }
 
 impl Environment {
@@ -580,7 +601,20 @@ impl Environment {
             home: std::env::var_os("HOME"),
             server: text(SERVER_ENV),
             token: text(TOKEN_ENV).map(Secret::new),
+            conch_voice_attach: None,
         }
+    }
+
+    /// This environment with `CONCH_VOICE_ATTACH` read from the process's: called by `main`
+    /// for `managed --events-pipe` and for nothing else, so that without that option the
+    /// variable is never read. An empty value is no value.
+    #[must_use]
+    pub fn with_attach_from_process(mut self) -> Self {
+        self.conch_voice_attach = std::env::var(conch_voice_api::VOICE_CONTROL_PIPE_NONCE_ENV)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(Secret::new);
+        self
     }
 }
 
@@ -800,6 +834,7 @@ mod tests {
             home: None,
             server: None,
             token: Some(Secret::new(FAKE_LOGIN)),
+            conch_voice_attach: None,
         }
     }
 
@@ -1014,6 +1049,7 @@ mod tests {
                 mic: MicChoice::PipeWire,
                 sink: SinkChoice::PipeWire,
                 test_key_device: None,
+                events_pipe: None,
             })
         );
         assert_eq!(
@@ -1035,6 +1071,7 @@ mod tests {
                 mic: MicChoice::Tone(440.0),
                 sink: SinkChoice::Count(vec![440.0]),
                 test_key_device: Some(PathBuf::from("/tmp/FAKE-pipe")),
+                events_pipe: None,
             })
         );
         // Nothing that names what to join, or where, or as whom.
@@ -1058,6 +1095,50 @@ mod tests {
         for hidden in ["--mic", "--sink", "--test-key-device"] {
             assert!(!help.contains(hidden), "{hidden} is shown: {help}");
         }
+    }
+
+    #[test]
+    fn managed_takes_an_events_pipe_of_any_text_and_documents_it() {
+        for value in [
+            "/run/user/1000/conch/FAKE/e.sock",
+            "relative",
+            "@abstract",
+            "",
+        ] {
+            match parse(["conch-voice", "managed", "--events-pipe", value]).unwrap() {
+                Invocation::Managed(args) => {
+                    assert_eq!(args.events_pipe, Some(PathBuf::from(value)), "{value:?}");
+                }
+                other => panic!("not managed: {other:?}"),
+            }
+        }
+        // It is the endpoint's path and nothing else: no value is an error.
+        assert_eq!(
+            parse(["conch-voice", "managed", "--events-pipe"])
+                .unwrap_err()
+                .exit_code(),
+            2
+        );
+        let help = command()
+            .find_subcommand_mut("managed")
+            .unwrap()
+            .render_help()
+            .to_string();
+        assert!(
+            help.contains(
+                "connect to this endpoint for events instead of file descriptor 3; conch passes \
+                 a Unix-socket path, the desktop owner's, never typed by hand"
+            ),
+            "{help}"
+        );
+    }
+
+    #[test]
+    fn the_attach_variable_is_read_only_when_asked_for() {
+        // `from_process` never reads it, whatever the process's environment holds.
+        assert!(Environment::from_process().conch_voice_attach.is_none());
+        let shown = format!("{:?}", Environment::default());
+        assert!(shown.contains("conch_voice_attach: None"), "{shown}");
     }
 
     #[test]

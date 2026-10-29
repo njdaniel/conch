@@ -42,6 +42,32 @@ type TSUnion struct {
 	Variants map[string][]string
 }
 
+// TSConstant is a scalar of this package the web client must agree with the
+// server on: a version string or a bound. It is written as
+// `export const <Name> = <value>;` so a page cannot carry its own copy of a
+// number the server enforces.
+type TSConstant struct {
+	// Name is the TypeScript name, in the SCREAMING_SNAKE_CASE of a TypeScript
+	// constant.
+	Name string
+	// Value is the constant: a string or a signed integer.
+	Value any
+}
+
+// TSConstants is every scalar the web client reads from this package. The
+// emoji catalog version and the reaction bounds (issue #953): the browser
+// refuses the same keys the server refuses, and cannot ship a catalog of
+// another version than the server validates against without
+// scripts/schema-ts-check.sh noticing.
+var TSConstants = []TSConstant{
+	{Name: "EMOJI_VERSION", Value: EmojiVersion},
+	{Name: "MAX_REACTION_KEY_BYTES", Value: MaxReactionKeyBytes},
+	{Name: "MAX_REACTION_KEY_CODE_POINTS", Value: MaxReactionKeyCodePoints},
+	{Name: "MAX_REACTION_BATCH_MESSAGES", Value: MaxReactionBatchMessages},
+	{Name: "DEFAULT_REACTOR_LIMIT", Value: DefaultReactorLimit},
+	{Name: "MAX_REACTOR_LIMIT", Value: MaxReactorLimit},
+}
+
 // TSTypes is every struct the web client reads or sends, and the refusal
 // body. A struct a listed one contains must be listed too, here or in
 // TSUnions.
@@ -242,6 +268,15 @@ var TSTypes = []TSType{
 	{Value: DiagnosticEventV1{}},
 	{Value: CreateProblemReportRequestV1{}, Family: "create-problem-report-request-v1"},
 	{Value: CreateProblemReportResponseV1{}, Family: "create-problem-report-response-v1"},
+
+	// Message reactions (issue #953, docs/design/message-reactions.md §5):
+	// a message's summary, which the events socket also sends, the batch
+	// read, and one page of the principals holding one emoji.
+	{Value: ReactionCountV1{}},
+	{Value: ReactionSummaryV1{}, Family: "reaction-summary-v1", Schema: ReactionSummarySchemaV1},
+	{Value: ReactionSummariesResponseV1{}, Family: "reaction-summaries-response-v1"},
+	{Value: ReactionV1{}, Family: "reaction-v1"},
+	{Value: ListReactorsResponseV1{}, Family: "list-reactors-response-v1"},
 
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},

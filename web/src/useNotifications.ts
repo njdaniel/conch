@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from './api';
 import type { NotificationPolicy } from './api';
+import { platform } from './platform';
+import type { NativeNotification } from './platform/types';
 import type { ChannelV0 } from './schema/channel';
 import type { MessageV2 } from './schema/message';
 import type { ReadStateV1 } from './schema/readstate';
@@ -36,11 +38,11 @@ function snippet(body: string): string {
 }
 
 function supported(): boolean {
-  return typeof window.Notification === 'function';
+  return platform.services.notifications.supported();
 }
 
 function permission(): BrowserPermission {
-  return supported() ? window.Notification.permission : 'unsupported';
+  return platform.services.notifications.permission();
 }
 
 export function useNotifications({
@@ -68,7 +70,7 @@ export function useNotifications({
   const [preferences, setPreferences] = useState<Preferences>(initial);
   const [alerts, setAlerts] = useState<readonly NotificationAlert[]>([]);
   const [browserPermission, setBrowserPermission] = useState<BrowserPermission>(permission);
-  const natives = useRef(new Map<string, Notification>());
+  const natives = useRef(new Map<string, NativeNotification>());
   const consumed = useRef<MessageV2 | null>(null);
   const delivered = useRef(new Set<string>());
   const lastSeen = useRef(new Map<number, number>());
@@ -161,7 +163,7 @@ export function useNotifications({
     });
     if (preferences.native && browserPermission === 'granted' && document.visibilityState === 'hidden' && supported()) {
       const title = mention ? `Mention in #${channel.name}` : `New message in #${channel.name}`;
-      const notification = new window.Notification(title, { body: snippet(message.body), tag: id });
+      const notification = platform.services.notifications.show(title, snippet(message.body), id);
       natives.current.set(id, notification);
       notification.onclick = () => {
         window.focus();
@@ -229,7 +231,7 @@ export function useNotifications({
       setBrowserPermission('unsupported');
       return;
     }
-    const answer = await window.Notification.requestPermission();
+    const answer = await platform.services.notifications.request();
     setBrowserPermission(answer);
     setPreferences((previous) => ({ ...previous, native: answer === 'granted' }));
     if (answer !== 'granted') for (const notification of natives.current.values()) notification.close();

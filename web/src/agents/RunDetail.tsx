@@ -5,6 +5,7 @@
 // RunV1 says. Every field is another person's or an agent's text.
 import { useState } from 'react';
 import type { InterventionKind } from '../schema/intervention';
+import { platform } from '../platform';
 import { runEnded } from '../schema/run';
 import { ago, clockSeconds, dataBody, askText, runSpan, spanText, timeline, type TimelineItem } from './format';
 import { safeLink } from './links';
@@ -268,7 +269,7 @@ export function RunDetail({ agents, now, onGoToMessage }: { readonly agents: Age
                 {href === null ? (
                   run.link
                 ) : (
-                  <a href={href} target="_blank" rel="noopener noreferrer">
+                  <a href={href} {...platform.services.externalLink}>
                     {run.link}
                   </a>
                 )}
