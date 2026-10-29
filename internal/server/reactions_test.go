@@ -95,7 +95,15 @@ func TestReactionRESTLifecycle(t *testing.T) {
 	// The unqualified spelling of a heart is the same key as the qualified one.
 	h1 := decodeSummary(t, w.react(t, "PUT", "ann", "ops", w.wide, "❤"))
 	h2 := decodeSummary(t, w.react(t, "PUT", "nina", "ops", w.wide, "❤️"))
-	if got := h2.Reactions[len(h2.Reactions)-1]; got.Count != 2 || got.Emoji != "❤️" || len(h1.Reactions) != 2 {
+	// Found by key, not position: two reactions made in the same millisecond
+	// are ordered by their keys, and U+2764 sorts before U+1F44D.
+	var heart *schema.ReactionCountV1
+	for i := range h2.Reactions {
+		if h2.Reactions[i].Emoji == "❤️" {
+			heart = &h2.Reactions[i]
+		}
+	}
+	if heart == nil || heart.Count != 2 || len(h2.Reactions) != 2 || len(h1.Reactions) != 2 {
 		t.Errorf("hearts = %+v after %+v", h2, h1)
 	}
 	// The batch read and the reactor list.
