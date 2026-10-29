@@ -10,9 +10,11 @@ release that Nick publishes.
 
 ## [0.1.0-alpha.5] - 2026-10-29
 
-Upgrade with `conch-upgrade.sh` (docs/deploy.md step 11), or `conch-server
-upgrade v0.1.0-alpha.5`. There is no migration, so a rollback to `alpha.4`
-keeps the data as it is.
+Upgrade with `conch-upgrade.sh` (docs/deploy.md step 11). Once the droplet
+has the `conch-server` scripts, `conch-server upgrade v0.1.0-alpha.5` does it
+from your workstation; on a droplet installed from an earlier release, run
+`conch-server sync --scripts-ref v0.1.0-alpha.5` first. There is no
+migration, so a rollback to `alpha.4` keeps the data as it is.
 
 ### Added
 
@@ -54,16 +56,19 @@ keeps the data as it is.
   line (#885). systemd uses the last one, so such a server was running as
   normal while its backups stayed local-only. Anything ambiguous now backs
   up as normal, and asks for an off-site destination.
-- **`conch-server` uses one SSH connection per run** (#927). The droplet's
-  firewall refuses a sixth SSH connection within 30 seconds, and `new` opened
-  one per step, so it failed partway through installing the scripts.
+- **`conch-server` reuses one SSH connection across its steps** (#927).
+  The droplet's firewall refuses a sixth SSH connection within 30 seconds,
+  and `new` opened one per step, so it failed partway through installing the
+  scripts. The shared connection closes after 15 idle seconds, so a long
+  wait for DNS can mean one more.
 
 ### Internal
 
 - The voice helper's audio backend is chosen per platform (#892), ready for
   a Windows backend. There is no change on Linux.
-- Four flaky tests were fixed (#632, #689, #886, #920), and the Linux desktop
-  design is recorded (docs/design/linux-desktop.md, #769).
+- Three flaky tests were fixed (#632, #689, #920), and the CLI test build
+  now explains a failure to read its version-control status (#886). The Linux
+  desktop design is recorded (docs/design/linux-desktop.md, #769).
 
 ## [0.1.0-alpha.4] - 2026-10-28
 
