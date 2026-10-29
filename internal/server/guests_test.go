@@ -371,6 +371,9 @@ func TestGuestMediaTeardown(t *testing.T) {
 		for _, c := range f.lk.calls()[base:] {
 			switch c.method {
 			case "RemoveParticipant":
+				if !personIdentity(c.identity) {
+					continue // the guest's companion and viewer go with them
+				}
 				if c.identity != identity {
 					t.Errorf("removed %q, want the guest only", c.identity)
 				}
