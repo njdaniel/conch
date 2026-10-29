@@ -11,7 +11,7 @@ LINT    = golangci-lint
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS  = -X main.version=$(VERSION)
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts depgate deploy-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate deploy-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -36,7 +36,7 @@ fmt:
 fmt-check:
 	@out=$$(gofmt -l $$(git ls-files -co --exclude-standard '*.go')); if [ -n "$$out" ]; then echo "gofmt needed on:"; echo "$$out"; exit 1; fi
 
-check: fmt-check invisible-check vet lint test schema-compat schema-ts depgate deploy-test rust-check web-check
+check: fmt-check invisible-check vet lint test schema-compat schema-ts emoji-catalog depgate deploy-test rust-check web-check
 
 # No tracked text file may hold a bidi control, a line or paragraph separator
 # or a control character other than tab, LF and CR (issue #244). The script's
@@ -131,6 +131,14 @@ schema-compat:
 schema-ts:
 	./scripts/schema-ts-check-test.sh
 	./scripts/schema-ts-check.sh
+
+# The emoji catalog is generated from the vendored third_party/unicode/
+# emoji-test.txt by `go generate ./pkg/schema` (issue #953): the vendored file
+# must match its pinned hash, and scripts/emoji-update.sh, the one way it
+# changes, must refuse a hash mismatch. Drift of the generated outputs fails
+# in `go test ./cmd/emoji-gen`, which `test` runs.
+emoji-catalog:
+	./scripts/emoji-update-test.sh
 
 depgate:
 	./scripts/depgate.sh

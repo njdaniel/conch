@@ -91,11 +91,56 @@ func generateDoc(t *testing.T) string {
 	t.Helper()
 	files, err := generate(docTypes(), []schema.TSUnion{shapeUnion()}, testVocab, map[reflect.Type]string{
 		reflect.TypeFor[Doc](): "test.doc_payload.v1",
-	})
+	}, testConstants())
 	if err != nil {
 		t.Fatal(err)
 	}
 	return string(files[typesFile])
+}
+
+// testConstants is one scalar of each kind the constants table takes.
+func testConstants() []schema.TSConstant {
+	return []schema.TSConstant{
+		{Name: "DATA_VERSION", Value: "9.0"},
+		{Name: "MAX_THINGS", Value: 64},
+		{Name: "WIDE_LIMIT", Value: int64(1 << 40)},
+	}
+}
+
+// The constants are written before every type, each as its literal, and are
+// refused when they would not be a constant TypeScript accepts.
+func TestConstants(t *testing.T) {
+	out := generateDoc(t)
+	want := "\n// Constants of pkg/schema the client must agree with the server on.\nexport const DATA_VERSION = '9.0';\nexport const MAX_THINGS = 64;\nexport const WIDE_LIMIT = 1099511627776;\n"
+	if !strings.Contains(out, want) {
+		t.Errorf("output lacks\n%s\nin\n%s", want, out)
+	}
+	if strings.Index(out, "export const DATA_VERSION") > strings.Index(out, "export const ") {
+		t.Error("the constants are not the first declarations")
+	}
+	refused := []struct {
+		name   string
+		consts []schema.TSConstant
+		want   string
+	}{
+		{"a float", []schema.TSConstant{{Name: "RATIO", Value: 0.5}}, "float64 is not a string or a signed integer"},
+		{"a bool", []schema.TSConstant{{Name: "ON", Value: true}}, "bool is not a string or a signed integer"},
+		{"an unsigned integer", []schema.TSConstant{{Name: "N", Value: uint(1)}}, "uint is not a string or a signed integer"},
+		{"a name that is not an identifier", []schema.TSConstant{{Name: "MAX-THINGS", Value: 1}}, `"MAX-THINGS" is not a TypeScript identifier`},
+		{"a reserved word", []schema.TSConstant{{Name: "default", Value: 1}}, `"default" is a reserved word`},
+		{"a combinator's name", []schema.TSConstant{{Name: "str", Value: 1}}, "the name str is already validate.ts's"},
+		{"a name listed twice", []schema.TSConstant{{Name: "N", Value: 1}, {Name: "N", Value: 2}}, "the name N is already TSConstants's"},
+		{"a type's name", []schema.TSConstant{{Name: "Doc", Value: 1}}, "the name Doc is already TSConstants's"},
+		{"a non-ASCII value", []schema.TSConstant{{Name: "V", Value: "café"}}, "TSConstants V: \"café\" is not printable ASCII"},
+	}
+	for _, tt := range refused {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := generate(docTypes(), []schema.TSUnion{shapeUnion()}, testVocab, nil, tt.consts)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("err = %v, want one containing %q", err, tt.want)
+			}
+		})
+	}
 }
 
 func TestMapping(t *testing.T) {
@@ -244,7 +289,7 @@ func TestImportsOnlyWhatIsUsed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			files, err := generate(tt.types, nil, nil, nil)
+			files, err := generate(tt.types, nil, nil, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -256,7 +301,7 @@ func TestImportsOnlyWhatIsUsed(t *testing.T) {
 }
 
 func TestFamilies(t *testing.T) {
-	files, err := generate(docTypes(), []schema.TSUnion{shapeUnion()}, testVocab, nil)
+	files, err := generate(docTypes(), []schema.TSUnion{shapeUnion()}, testVocab, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +338,7 @@ func TestDeterministic(t *testing.T) {
 // The real tables generate, so a broken row fails go test as well as the
 // drift gate.
 func TestRealTables(t *testing.T) {
-	files, err := generate(schema.TSTypes, schema.TSUnions, schema.Vocabularies, payloadNames())
+	files, err := generate(schema.TSTypes, schema.TSUnions, schema.Vocabularies, payloadNames(), schema.TSConstants)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,6 +349,14 @@ func TestRealTables(t *testing.T) {
 		"export interface ErrorV0 {",
 		"export type Audience = NetAudience | PrincipalsAudience;",
 		"export type EscalationTarget = PrincipalEscalationTarget | NtfyTopicEscalationTarget;",
+		// The emoji catalog version and the reaction bounds (issue #953).
+		"export const EMOJI_VERSION = '" + schema.EmojiVersion + "';",
+		"export const MAX_REACTION_KEY_BYTES = 64;",
+		"export const MAX_REACTION_KEY_CODE_POINTS = 16;",
+		"export const MAX_REACTION_BATCH_MESSAGES = 100;",
+		"export const DEFAULT_REACTOR_LIMIT = 50;",
+		"export const MAX_REACTOR_LIMIT = 100;",
+		"export const reactionSummaryV1Schema = 'conch.reaction_summary.v1';",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q", want)
@@ -422,7 +475,7 @@ func TestRefused(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := generate(tt.types, tt.unions, testVocab, nil)
+			_, err := generate(tt.types, tt.unions, testVocab, nil, nil)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("err = %v, want one containing %q", err, tt.want)
 			}
@@ -436,7 +489,7 @@ func TestRefusedVocabulary(t *testing.T) {
 	type Leveled struct {
 		L Level `json:"l"`
 	}
-	_, err := generate([]schema.TSType{{Value: Leveled{}}}, nil, map[string][]string{"Level": {"low", "__proto__"}}, nil)
+	_, err := generate([]schema.TSType{{Value: Leveled{}}}, nil, map[string][]string{"Level": {"low", "__proto__"}}, nil, nil)
 	if want := "Vocabularies[Level]: __proto__ cannot be an object key"; err == nil || !strings.Contains(err.Error(), want) {
 		t.Errorf("err = %v, want one containing %q", err, want)
 	}
