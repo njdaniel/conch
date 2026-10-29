@@ -8,6 +8,63 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5] - 2026-10-29
+
+Upgrade with `conch-upgrade.sh` (docs/deploy.md step 11), or `conch-server
+upgrade v0.1.0-alpha.5`. There is no migration, so a rollback to `alpha.4`
+keeps the data as it is.
+
+### Added
+
+- **`conch-server`, to run more than one Conch server on the droplet from
+  your workstation** (#861): `new`, `list`, `upgrade`, `rm` and `sync`, in
+  `ops/conch-server` (docs/deploy.md, "A second instance").
+  - `new <name> [--temporary]` makes the server's DNS records, its own user,
+    data directory, LiveKit key, env file and Caddy block on the droplet,
+    starts it, and shows the first operator's setup link on your terminal
+    only.
+  - `rm <name>` takes a final backup, then removes the server and its DNS
+    records. It asks you to type the name, and refuses a normal (not
+    temporary) server without `--force-normal`.
+  - `list` shows every server with its port, mode and health. `upgrade <tag>`
+    upgrades them all.
+- **Paused invites point an operator at the switch** (#909). When an
+  operator's invite is refused because invites are paused, the invite panel
+  says the switch is in Settings → Joining and guests, with a button that
+  opens that section. A member still sees only "Invites are paused on this
+  server for now."
+
+### Changed
+
+- **The managed voice helper treats a failed write to its events channel as
+  the owner having gone** (#894), as it already treats the end of its input.
+  It stops within the owner-loss bound instead of running on unheard. A
+  write that is merely interrupted or would block doesn't count.
+- **The voice helper subscribes to the tracks it plays by rule** (#906),
+  ready for the desktop app's screen-share participant: never the person's
+  own companion, and only microphones when the companion plays shared
+  sound. With no companion, which is every session today, it plays every
+  remote audio track as before, and it subscribes again after a full
+  reconnect.
+
+### Fixed
+
+- **`conch-backup.sh` no longer treats a normal server as temporary** when
+  its env file has `CONCHD_MODE=temporary` followed by another `CONCHD_MODE`
+  line (#885). systemd uses the last one, so such a server was running as
+  normal while its backups stayed local-only. Anything ambiguous now backs
+  up as normal, and asks for an off-site destination.
+- **`conch-server` uses one SSH connection per run** (#927). The droplet's
+  firewall refuses a sixth SSH connection within 30 seconds, and `new` opened
+  one per step, so it failed partway through installing the scripts.
+
+### Internal
+
+- The voice helper's audio backend is chosen per platform (#892), ready for
+  a Windows backend. There is no change on Linux.
+- Four flaky tests were fixed (#632, #689, #886, #920), and the Linux desktop
+  design is recorded (docs/design/linux-desktop.md, #769).
+
 ## [0.1.0-alpha.4] - 2026-10-28
 
 Upgrade with `conch-upgrade.sh` (docs/deploy.md step 11). There is no
