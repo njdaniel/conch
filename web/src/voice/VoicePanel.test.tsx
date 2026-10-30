@@ -41,6 +41,9 @@ function control(state: VoiceState, calls: string[], snapshot: Snapshot): VoiceC
     features: chrome,
     client,
     setTalkKey: () => undefined,
+    setReleaseDelay: (ms: number) => {
+      calls.push(`release ${String(ms)}`);
+    },
     capture: () => undefined,
     join: () => {
       calls.push('join');
@@ -430,6 +433,35 @@ describe('the strip in voice', () => {
     const { voice } = panel(joined(true), 'c', { kind: 'presence', presence: someone });
     expect(voice.querySelector('.voice-state')?.textContent).toContain('Deafened (you hear no one, and you are muted).');
     expect(shape(voice)).toEqual(before);
+  });
+});
+
+// Issue #965: the strip says Transmitting only while audio is sent; a press
+// that waits for conchd's answer says so, and Hold to talk shows pressed.
+// The release delay is set in Voice options.
+describe('what is sent, as the strip says it', () => {
+  it.each([
+    ['nothing held', { talking: false, transmitting: false }, 'Not transmitting', 'false'],
+    ['a press waiting for its answer', { talking: true, transmitting: false }, 'Waiting for the server', 'true'],
+    ['a press sending', { talking: true, transmitting: true }, 'Transmitting', 'true'],
+  ] as const)('%s', (_what, patch, said, pressed) => {
+    const { voice } = panel({ ...inVoice('connected', 'c'), ...patch }, 'c');
+    const line = voice.querySelector('.voice-tx')?.textContent ?? '';
+    expect(line.endsWith(said)).toBe(true);
+    if (said !== 'Transmitting') expect(line.endsWith('Transmitting') && !line.endsWith('Not transmitting')).toBe(false);
+    expect(within(voice).getByRole('button', { name: 'Hold to talk' }).getAttribute('aria-pressed')).toBe(pressed);
+    expect(voice.classList.contains('sending')).toBe(patch.transmitting);
+  });
+
+  it('the release delay is under Voice options in push to talk, says its value, and is set by its slider', () => {
+    const { voice, calls, redraw } = panel({ ...inVoice('connected', 'c'), releaseDelay: 200 }, 'c');
+    fireEvent.click(within(voice).getByRole('button', { name: 'Voice options' }));
+    const slider = within(voice).getByRole('slider', { name: /Release delay/ });
+    expect(slider.getAttribute('aria-valuetext')).toBe('200 ms');
+    fireEvent.change(slider, { target: { value: '450' } });
+    expect(calls).toContain('release 450');
+    redraw({ ...inVoice('connected', 'c'), releaseDelay: 450, mode: 'open' });
+    expect(within(voice).queryByRole('slider', { name: /Release delay/ })).toBeNull();
   });
 });
 

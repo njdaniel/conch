@@ -29,6 +29,8 @@ export default defineConfig(({ mode }) => ({
   },
   test: {
     environment: 'jsdom',
-    include: ['src/**/*.test.{ts,tsx}'],
+    // The e2e helpers' own analysis is unit-tested too (e2e/onset.test.ts);
+    // Playwright runs only *.spec.ts.
+    include: ['src/**/*.test.{ts,tsx}', 'e2e/**/*.test.ts'],
   },
 }));

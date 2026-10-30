@@ -72,6 +72,11 @@ func (s *Server) routeTable() []route {
 		// it. Checked in the handlers; see voice_share.go.
 		rt("POST /v1/channels/{channel}/voice/share", accessAuthenticated, hf(s.handleVoiceShareStart)),
 		rt("DELETE /v1/channels/{channel}/voice/share", accessAuthenticated, hf(s.handleVoiceShareStop)),
+		// Companion and viewer participants (issue #933): the second
+		// participant of a person in voice. Human members who hold voice;
+		// checked in the handlers; see voice_companion.go.
+		rt("POST /v1/channels/{channel}/voice/companion", accessAuthenticated, hf(s.handleVoiceCompanion)),
+		rt("DELETE /v1/channels/{channel}/voice/companion", accessAuthenticated, hf(s.handleVoiceCompanionDelete)),
 		// Voice presence (issue #127): the snapshot and its socket.
 		rt("GET /v1/channels/{channel}/voice", accessAuthenticated, hf(s.handleVoicePresence)),
 		// Takes ?ticket= (issue #442): a browser cannot set a header on a

@@ -113,7 +113,12 @@ There are two ways to talk. Choose one under **Voice options**, **Microphone**:
   keyboards is just below Esc. **Change talk key**, under **Voice options**, sets another. On a phone or a touch
   screen, press and hold **Hold to talk** instead.
   - The talk key works only while the Conch tab is the one in front, and not while you
-    are typing in a box. Switching to another tab or app counts as letting go.
+    are typing in a box. Switching to another tab or app shuts the microphone at once, without the
+    release delay below; press the key again to talk.
+  - The microphone stays open a moment after you let go, so your last word is not cut:
+    **Release delay**, under **Voice options**, sets how long (200 ms at first).
+  - The strip says **Transmitting** while you are heard. Just after you press it may
+    say **Waiting for the server** for a moment: you are not heard yet.
 - **Open microphone.** Your microphone opens by itself when you speak. Use the slider
   under **Voice options** with the level meter in the strip: move it until the meter
   opens the microphone for your voice but not for the noise around you.

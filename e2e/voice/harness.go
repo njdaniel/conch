@@ -667,6 +667,9 @@ func (h *harness) session(p *person, channel string) (schema.VoiceSessionRespons
 	if resp.Identity != identity(p.id) {
 		return resp, fmt.Errorf("session for %s names identity %q, want %q", p.name, resp.Identity, identity(p.id))
 	}
+	if want := identity(p.id) + ".screen"; resp.CompanionIdentity != want {
+		return resp, fmt.Errorf("session for %s names companion identity %q, want %q", p.name, resp.CompanionIdentity, want)
+	}
 	if p.d.lk != nil {
 		for _, g := range resp.Rooms {
 			if err := h.checkJoinToken(g.Token, p.d.lk, identity(p.id), g.Room, g.CanPublish, g.ExpiresAt.Time()); err != nil {

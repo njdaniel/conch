@@ -439,13 +439,13 @@ export async function signIn(candidate: string): Promise<ApiResult<WhoAmIRespons
   const place: Place = visitOf(result.value) === null ? 'lasting' : 'tab';
   if (result.value.role === 'operator') {
     pending = candidate;
-  } else if (platform.credentials.write(candidate, place)) {
-    pinned = { token: candidate, place };
-  } else {
-    // localStorage is refused (blocked site data): signing in would not last
-    // a reload, and the lobby could not call the API either.
-    return { ok: false, failure: 'invalid' };
+    return result;
   }
+  const kept = platform.credentials.write(candidate, place);
+  // localStorage is refused (blocked site data): signing in would not last
+  // a reload, and the lobby could not call the API either.
+  if (kept === null) return { ok: false, failure: 'invalid' };
+  pinned = kept;
   return result;
 }
 
@@ -454,8 +454,9 @@ export async function signIn(candidate: string): Promise<ApiResult<WhoAmIRespons
 export function continueAsOperator(): boolean {
   const token = pending;
   pending = null;
-  if (token === null || !platform.credentials.write(token, 'tab')) return false;
-  pinned = { token, place: 'tab' };
+  const kept = token === null ? null : platform.credentials.write(token, 'tab');
+  if (kept === null) return false;
+  pinned = kept;
   return true;
 }
 
@@ -491,13 +492,15 @@ export async function restore(): Promise<ApiResult<Restored>> {
     // A visit is never kept to last: found there, it is moved to this tab,
     // and the other tabs of the origin no longer have it.
     platform.credentials.drop(held);
-    held = { token: held.token, place: 'tab' };
-    if (!platform.credentials.write(held.token, held.place)) {
+    const moved: Held = { token: held.token, place: 'tab' };
+    const kept = platform.credentials.write(moved.token, moved.place);
+    if (kept === null) {
       // This tab cannot keep it either: it is revoked (if the server
       // answers) rather than left alive and kept nowhere.
-      await sendAs(held, call('logout'));
+      await sendAs(moved, call('logout'));
       return { ok: false, failure: 'unauthorized' };
     }
+    held = kept;
   }
   pinned = held;
   return { ok: true, value: { principal: result.value, warn: false } };
@@ -651,12 +654,13 @@ async function keepRotated(before: Held | null, reply: PostReply): Promise<Passw
     await sendAs(next, call('logout'));
     return { ok: false, failure: 'unkept' };
   }
-  if (!platform.credentials.write(next.token, next.place)) {
+  const kept = platform.credentials.write(next.token, next.place);
+  if (kept === null) {
     await sendAs(next, call('logout'));
     forget(held);
     return { ok: false, failure: 'unkept' };
   }
-  pinned = { token: next.token, place: next.place };
+  pinned = kept;
   return result;
 }
 
@@ -1052,14 +1056,15 @@ export async function createAccount(name: string, password: string): Promise<Red
 // needs no warning, since it is the operator's sign-in rather than a script's
 // credential.
 async function keepRedeemed(token: string, principal: number, place: Place, operator = false): Promise<RedeemResult> {
-  const held: Held = { token, place: operator ? 'tab' : place };
-  if (!platform.credentials.write(held.token, held.place)) {
+  const made: Held = { token, place: operator ? 'tab' : place };
+  const held = platform.credentials.write(made.token, made.place);
+  if (held === null) {
     // The credential works, but cannot be kept here: it is revoked (if the
     // server answers) rather than left alive.
-    await sendAs(held, call('logout'));
+    await sendAs(made, call('logout'));
     return { ok: false, failure: 'unkept' };
   }
-  pinned = { token: held.token, place: held.place };
+  pinned = held;
   const who = await whoAmI();
   if (!who.ok) return { ok: false, failure: 'unchecked' };
   if ((who.value.role === 'operator') !== operator || who.value.id !== principal || (held.place === 'lasting' && visitOf(who.value) !== null)) {
@@ -1281,11 +1286,12 @@ export async function convertGuest(name: string, password: string): Promise<Conv
   // only that one): writing over it would leave it alive and unrevoked, so
   // this tab keeps the member's instead.
   const member: Held = { token: made.value.token, place: hasToken() ? 'tab' : 'lasting' };
-  if (!platform.credentials.write(member.token, member.place)) {
+  const kept = platform.credentials.write(member.token, member.place);
+  if (kept === null) {
     await sendAs(member, call('logout'));
     return { ok: false, failure: 'unkept' };
   }
-  pinned = { token: member.token, place: member.place };
+  pinned = kept;
   return { ok: true };
 }
 

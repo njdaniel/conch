@@ -75,6 +75,7 @@ One LiveKit room per audience. In V3 the only audience is the whole channel.
 - `room` and `token` are opaque strings: the schema requires them to be present and never inspects them. `can_publish` is always written out, so a reader never has to know that an omitted value means false.
 
 - **Identity** is `p<principal id>`. One principal holds one connection per room; LiveKit replaces an earlier connection with the same identity. That keeps presence unambiguous. A second device takes over from the first.
+  *Amended 2026-10-29 (#933): one principal holds one **own** connection per room. A companion (`p<id>.screen`) or a viewer (`p<id>.view`) is a second participant conchd issues under a derived identity and folds into the person (§13); the session response names the companion identity in an optional `companion_identity`.*
 - **Token grant:** join that one room; subscribe; publish a microphone track only if `can_publish`; no data publishing; no room administration.
 - **The token expires 15 seconds after it is issued, and can start a connection for about 75.** LiveKit checks a token when a client connects, not afterwards, and it allows 60 seconds of leeway on both the expiry and the not-before time (§10, finding 6). So the expiry `conchd` writes is deliberately short: the leeway cannot be turned off from `conchd`, and it is added on top. Clients ask for a session immediately before connecting and again before any reconnect. **This is true of the token `conchd` signs and of no other:** once a client has connected, LiveKit sends it a ten-minute token of its own and renews it (§10, finding 9), so a short lifetime here limits how long an *unused* token is good for, not how long a person who has connected can keep rejoining.
 - **Clock skew.** The same leeway means the two clocks may differ by up to about a minute in either direction before a fresh token is refused, so the not-before time is not backdated. `conchd` and LiveKit normally share a host; on separate hosts their clocks must be synchronised, and the deployment docs say so.
@@ -212,6 +213,7 @@ Canonical types live in `pkg/schema/voice.go` (#124; the transmit report was add
 | `VoiceParticipant` | element of `participants` | `principal_id`, `can_publish`, `transmitting`, `joined_at`; and, from #443, `sharing` and `sharing_audio`, optional and omitted when false (§12) |
 | `VoiceShareV1` | REST body, versioned by suffix | `POST /v1/channels/{channel}/voice/share` (§12): `principal_id`, `started_at`, `audio` |
 | `VoiceShareEnded` | optional `share_ended` of `VoicePresenceV1` | from #487, in the sharer's own presence alone: `reason` (`VoiceShareEndReason`: `self`, `operator`, `left`, `access_lost`, `rotated`, `idle`), `started_at`, `ended_at` (§12) |
+| `VoiceCompanionRequestV1`, `VoiceCompanionResponseV1` | REST bodies, versioned by suffix | `POST /v1/channels/{channel}/voice/companion` (§13; #933): the request is `publish` (`VoiceCompanionPublish`: `screen`, `none`) and `subscribe`, decoded strictly |
 | `VoiceTransmitReportV1` | REST request body, versioned by suffix | `POST /v1/channels/{channel}/voice/transmit` (V4; [conch-voice.md](conch-voice.md) §6): a `state` of `started` or `stopped`, optional `audience` |
 
 Every `audience` field reuses `Audience` from the V2 schema (#114); absent means the whole channel. The error codes `voice_not_configured`, `voice_unavailable` and `voice_requires_auth` are the constants `ErrorCodeVoiceNotConfigured`, `ErrorCodeVoiceUnavailable` and `ErrorCodeVoiceRequiresAuth`, carried in the existing `Error` body.
@@ -243,6 +245,7 @@ Nick delegated these to the principal engineer on 2026-10-09 ("use your best jud
 1. **Transmit audit: polling in V3, plus client reports from V4.** Polling alone can miss a press shorter than the interval, which is weaker than ADR-004's "audit records transmit start/stop" read strictly. V3 has no real client, only a headless test participant, so polling is all it can use and all it needs. From V4, `conch-voice` reports each press and release to `conchd`, which audits them with exact times. The poller keeps running as the check on the client: a transmission it observes with no matching report is audited as `voice_transmit_unreported`. The result is exact records for the official client, and detection at poll resolution of anything a modified client leaves out. What remains unrecorded is a burst shorter than the interval from a client that was altered not to report it. Granting and revoking publishing on every press was rejected: it would make `conchd` exact against any client, but it adds a round trip to every push-to-talk and clips speech. The report endpoint is designed with V4.
 2. **~~The rejoin window stays.~~ Reversed (#161): rooms are rotated.** The original decision was: a removed principal holding a token under 75 seconds old can rejoin for at most about a second before the poller removes them, and that removal is audited; rotating the room on every membership change would close the window by disconnecting everyone in the room each time, and a logged one-second window is consistent with ADR-005's view of scoped speech as discretion, not secrecy. It rested on the 75-second figure, which holds only for the token `conchd` signs. LiveKit sends every participant a renewable ten-minute token of its own (§10, finding 9), so the window does not close: a removed or disabled member can loop connect, hear up to a pass of audio, be removed, and reconnect indefinitely, and a connection made under a revoked or expired credential persists. Per-pass removal cannot fix that; only making the old tokens worthless can. So the room is rotated, but only when someone who may hold a token for it loses the right to be there (§5), not on every membership change, which keeps the cost the original decision objected to (everyone reconnecting) to the cases that need it.
 3. **One connection per principal per room.** A second device displaces the first. Presence stays unambiguous and nobody is listed twice. Listening on two devices at once can be added later with a per-device identity suffix without changing anything stored.
+   *Amended 2026-10-29 (#933): the suffix arrived, as roles rather than devices: `p<id>.screen` and `p<id>.view`, folded into the person (§13). A second device with its own connection still displaces the first.*
 
 ## 10. LiveKit behaviours this note relies on, as measured
 
@@ -358,3 +361,96 @@ Measured on 2026-10-16 against LiveKit server 1.13.7 (the release binary, which 
 | S7 | What `ListParticipants` says of the permission | Every participant carries `permission` with every field written out, snake case, sources as names: `{"can_subscribe":true,"can_publish":true,"can_publish_data":false,"can_publish_sources":["MICROPHONE"],"hidden":false,...}`. A token that names no sources is listed with `"can_publish_sources":[]`, which LiveKit reads as every source. A share's tracks are listed with `"source":"SCREEN_SHARE"` (type `VIDEO`) and `"source":"SCREEN_SHARE_AUDIO"` (type `AUDIO`), and `"stream":"screen"`. |
 
 `e2e/voice` repeats S1 to S4 on every run against the pinned image (`share.go`): the permission LiveKit reports and the token it sends are checked field by field against the join grant, with and without the share's sources.
+
+## 13. Companion participants
+
+*Issue #897; the poller's side is #932, the issuing side is #933 (2026-10-29). Model B was accepted by Nick on 2026-10-28 ([windows-desktop.md](windows-desktop.md) §7.2, [linux-desktop.md](linux-desktop.md) §6.4, the later word). Nothing published changed: the new types are new, the new field is optional and omitted when empty.*
+
+A person in voice is one LiveKit participant, `p<id>`, and a second connection under that identity displaces the first (§4, §9 decision 3). A desktop whose voice is in the Rust helper and whose screen is in Electron needs a second participant that `conchd` issues under a derived identity and recognises as the same person. There are two, and one route issues both.
+
+### Identities
+
+| Identity | Role | May publish | Needs |
+|---|---|---|---|
+| `p7` | the person's own connection (helper, TUI or browser) | a microphone, and the screen while the person holds the share | a session (§4), unchanged |
+| `p7.screen` | the **companion**: Electron's screen publisher | `screen_share` only | the bearer, and `p7` in the room |
+| `p7.view` | the **viewer**: a browser tab watching beside native voice | nothing | the bearer, a live voice entitlement, and a room someone holds a session for |
+
+`parseVoiceParticipant` is the one reader of identities. It accepts `p`, a positive decimal with no sign and no leading zero and at most 18 digits, then nothing, `.screen` or `.view`, exactly and in lower case. Anything else (`p7.`, `p7..screen`, `p7.Screen`, `p7.screen.screen`, `p07.screen`, `screen.p7`) names nobody and is removed by the poller as `bad_identity`. A client never chooses a suffix: the identity is the token's `sub`, and `conchd` signs it. The separator is `.`, not `:` (which already means kind-of-id in audit subjects) and not `~`. The identities are opaque to clients: the web client's `principalOf` (`^p(\d+)$`) does not match a suffixed identity, which is right, since a companion never speaks.
+
+`VoiceSessionResponseV1` gains an optional `companion_identity` (`p<id>.screen`), present on every issued session, so that a voice client that plays remote audio (the helper, #934) knows whose screen share is its own and never plays it back. It is not a credential and admits nobody to anything. `Validate` refuses one equal to `identity`.
+
+### The route
+
+`POST /v1/channels/{channel}/voice/companion`, authenticated, body `VoiceCompanionRequestV1` `{"publish": "screen"|"none", "subscribe": bool}`, decoded strictly (`DecodeVoiceCompanionRequestV1`: an unknown field at any depth, trailing content, `null`, a publish set outside the vocabulary, and `none` with `subscribe: false` are all 400 `invalid_request`). The grant is fixed from the validated request and nothing else. 200 `VoiceCompanionResponseV1` `{livekit_url, identity, room, token, publish, subscribe, expires_at}`, written with `Cache-Control: no-store`; the token lives 15 s as for a session.
+
+The checks, in this order. The order is the contract, so a non-member learns nothing, and a refusal at any step issues nothing: no holder row, no LiveKit call (except the idempotent `CreateRoom` at step 11), no audit row (an agent's denial is the one audit row, and it records the denial).
+
+| # | Check | Answer when it fails |
+|---|---|---|
+| 1 | a verified caller (auth on) | 400 `voice_requires_auth` |
+| 2 | the channel exists and the caller is a member (operators get no exemption; a non-member agent is audited) | 404 `channel_not_found` |
+| 3 | the caller is human | 403 `forbidden`, audited `access_denied` |
+| 4 | the caller holds voice | 403 `voice_not_allowed` |
+| 5 | voice is configured | 503 `voice_not_configured` |
+| 6 | the body is one JSON object of the declared fields, within 1 KiB, and valid | 400 `invalid_request` (413 `request_too_large`) |
+| 7 | the request carries a credential to record the holder under | 500 (an authenticated request always has one) |
+| 8 | the channel has a live channel-wide room that someone holds a session for (a companion joins a room, it never creates one) | 409 `voice_no_session` |
+| 9 | **screen only:** the caller's own `p<id>` is in that room, as the poller saw it on its last pass and not evicted since (a person present only as a viewer does not count) | 409 `voice_no_session` |
+| 10 | **screen only:** no `p<id>.screen` of the caller is in that room (poller state) | 409 `voice_companion_busy` |
+| 11 | the holder (room, principal, this credential) is recorded; `CreateRoom`; the caller is still entitled and the room still live, with the session route's start-over on a rotation, at most three times | 404 as if never a member; 503 `voice_unavailable`; 409 `voice_no_session` when a rotation left no room anyone holds |
+| 12 | the audit row is written before the body | 500, nothing issued |
+
+The body is read after step 5, so a non-member gets the unknown-channel 404 whatever it sends. Steps 9 and 10 read the poller's state rather than calling LiveKit, so the request costs no LiveKit round trip beyond `CreateRoom`; the state is at most one pass gap (1.5 s) old. To close the window in which a companion that has been issued a token but has not yet connected is not listed, signing a `.screen` token notes the issue time for the room and person, and for one pass gap the poller counts that companion as present: two quick requests get one token and one 409 `voice_companion_busy`. The note is cleared by DELETE (including when LiveKit says the participant is already gone), by a failure after signing that withholds the token (the audit write, or the response failing its own check: nothing was issued), and by the gap passing. What remains is a companion that connected and left within the gap. In the same way a client that asks at once after its own helper connected may be refused `voice_no_session` for up to a pass, and retries.
+
+Steps 9 and 10 are made against the room step 8 found. If that room is rotated while LiveKit is asked, the grant does not follow the channel to its successor, whoever holds a session there: those checks never ran in it, so the answer is 409 `voice_no_session` and nothing is signed; the client asks again.
+
+The viewer skips 9 and 10. A second viewer displaces the first at LiveKit, as a second browser tab does for the person's own identity, because a viewer holds nothing another could take. A second companion is refused, never displaced: a second device holding the same bearer must not take the share from under the first. Whoever wants to move it removes the first (below).
+
+`DELETE /v1/channels/{channel}/voice/companion[?publish=screen|none]` removes the caller's own companion, viewer or (without the parameter) both from the channel's room, by `RemoveParticipant` with the poller's removal timeout. Checks 1 to 5, then the parameter: any other value, or a repeated one, is 400 `invalid_request`. 204 with no body whether or not anyone was removed (idempotent: Electron's main calls it on a renderer crash without knowing what LiveKit still lists); 503 `voice_unavailable` when LiveKit cannot be asked (what it had already removed is audited all the same). It never touches `p<id>`, never another person's participants, and never ends the person's share claim: a share whose tracks have gone ends by the idle rule (§12), so a renderer that crashes and is relaunched can claim again.
+
+### Claims
+
+Signed by the same code as a session token (`livekit.Client.JoinToken`, whose `Companion` grant has no field for a microphone, share audio or data). The person's own token is unchanged claim for claim, and `e2e/voice` and `livekit/token_test.go` assert it.
+
+| | `p7.screen` | `p7.view` |
+|---|---|---|
+| `sub` | `p7.screen` | `p7.view` |
+| `roomJoin`, `room` | true, the channel-wide room | same |
+| `canSubscribe` | the request's `subscribe` | true |
+| `canPublish` | true | false |
+| `canPublishSources` | `["screen_share"]` | `[]` (an empty array, never `null`; `canPublish: false` is what withholds) |
+| `canPublishData` | false | false |
+| `hidden` | not set | not set |
+| `exp` | issue time + 15 s | same |
+| `jti` | random | same |
+
+Nothing in the companion's grant names a microphone or `screen_share_audio`, so LiveKit refuses either from it: server enforcement, not client honesty. **The sound of a share is not in this grant.** It is added to the connected companion by a permission update on the person's explicit request, and removed when the share ends (#898); this section does not issue it. `hidden` is not used: the companion's whole purpose is a track others subscribe to, and a viewer need not be hidden since presence folds it anyway.
+
+`subscribe: true` (sub-model B2) lets the companion receive; it must connect with `autoSubscribe` off and take only screen tracks, which is the client's honesty, not `conchd`'s enforcement. `subscribe: false` (B1) is enforced by LiveKit: the companion cannot receive voice and cannot watch. A permission update always passes the participant's own `canSubscribe` through, so a publish-only companion never gains the right to receive by being granted or stripped of its screen.
+
+### The companion's screen follows the claim
+
+The companion is the person's, and so is its screen. A companion is issued with `screen_share` in its token whether or not the person holds the room's share, because the token is signed before any claim and must work the moment the person claims. **A companion issued while nothing is claimed has its screen withdrawn on the next pass** (`canPublish` off, no sources, `canSubscribe` kept), and is not removed; it keeps its connection and is **given the screen back when the person claims** (`POST …/voice/share`, §12), which sets the permission of `p<id>` as today and then of the person's `p<id>.screen` to `screen_share` alone. A claim held by someone else never reaches the companion: it is withdrawn on its pass. If LiveKit will not take the withdrawal the companion is removed (fail closed, `voice_participant_removed` reason `share_unclaimed`, `participant=screen`). So the order for a desktop is: the person's own connection, the claim, the companion's publish. A companion that connects first is parked by the next pass until the claim, and a connection that arrives with the claim already held simply works.
+
+### Presence, occupancy and teardown
+
+The poller (#932) groups LiveKit's participants by the principal `parseVoiceParticipant` names, checks entitlement once per person, and shows one `VoiceParticipant` per principal: the join time, the microphone and `transmitting` come from `p<id>` alone; the screen-share flags are the OR over the person's participants, so a share published by the companion is the person's share (claims, stops, idle, `access_lost` and `left` apply to the person and so to both). A viewer alone in a room is the person in the room (it hears the room, so occupancy counts it, and it is audited as the person joining and leaving); a companion alone is not. Neither is audited as joining or leaving while `p<id>` is in the room.
+
+**Orphan grace.** A `p<id>.screen` whose `p<id>` has been absent on every pass for `voiceCompanionGrace` (one pass gap plus the removal timeout, 5.5 s) is removed. A viewer has no parent and is never orphaned. Entitlement loss removes `p<id>`, `p<id>.screen` and `p<id>.view` alike.
+
+### Audit
+
+- `voice_session_issued` is reused for a companion or viewer, one row per issuance, actor the person, subject `channel:<id>`, detail `channel=<id> identity=p7.screen grants=companion:screen:subscribe` (or `companion:screen:publish_only`, `companion:view`). The identity in the detail is `conchd`'s own derivation, never a token or room name. The action is reused to keep the audit vocabulary closed; the detail tells the rows apart.
+- `voice_companion_removed`, written when LiveKit actually removed one: actor the person for DELETE (`reason=requested`), `system` for the poller (`reason=orphaned`). Detail `channel=<id> principal=<id> participant=screen|view reason=<reason>`.
+- `voice_participant_removed` for a suffixed identity carries `participant=screen|view`.
+
+No response field but `token` and `room`, no log line, no audit row and no metric names a token, its signature or a room name on any of these paths; `e2e/voice` scans for them.
+
+### Amendments
+
+§4 says a principal holds one connection per room, and §9 decision 3 anticipated "a per-device identity suffix": both are amended in place (2026-10-29, #933). A principal holds one **own** connection per room (a second device displaces the first, unchanged); a companion or viewer under a derived identity is folded into the person on every wire document, so presence still lists a principal once and the one-participant-per-principal invariant of `VoicePresenceRoom.Validate` stands.
+
+### Verified against LiveKit
+
+`e2e/voice` scenario `companion` (live half, against the pinned LiveKit): the companion's token claims; both connections of a person stay listed; presence shows the person once; an unclaimed companion's screen is withdrawn and restored by the claim; the companion publishes a screen; a second companion is refused 409; a viewer publishes nothing and receives the share; a publish-only companion is delivered no track and its microphone is refused; share audio is refused; DELETE removes the companion and nothing else; the person leaving removes the companion within the grace and a pass.

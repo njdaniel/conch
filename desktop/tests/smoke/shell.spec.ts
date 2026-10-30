@@ -64,9 +64,18 @@ test.describe('the packaged shell', () => {
     await expect(page.locator('#root > *').first()).toBeAttached();
   });
 
-  test('gives the renderer no Node and an empty conchDesktop', async () => {
+  test('gives the renderer no Node and a conchDesktop of named functions only', async () => {
     expect(await page.evaluate('[typeof require, typeof process, typeof Buffer, typeof module]')).toEqual(['undefined', 'undefined', 'undefined', 'undefined']);
-    expect(await page.evaluate('[typeof conchDesktop, Object.keys(conchDesktop).length, Object.getOwnPropertyNames(conchDesktop).length]')).toEqual(['object', 0, 0]);
+    expect(await page.evaluate('[typeof conchDesktop, Object.keys(conchDesktop).sort(), Object.values(conchDesktop).every((v) => typeof v === "function")]')).toEqual([
+      'object',
+      [
+        'createAccount', 'joinAsGuest', 'keepCredential', 'redeemInvite', 'redeemInviteAsGuest', 'redeemSetupToken', 'redeemSignInLink', 'request', 'restore', 'resetPassword',
+        'serverAddress', 'setServerAddress', 'signInWithCode', 'signInWithCredential', 'signInWithPassword', 'signOut', 'subscribe',
+      ].sort(),
+      true,
+    ]);
+    // No ipcRenderer, no event object, no way to name a channel.
+    expect(await page.evaluate('[typeof ipcRenderer, typeof electron, typeof require, "send" in conchDesktop, "invoke" in conchDesktop]')).toEqual(['undefined', 'undefined', 'undefined', false, false]);
   });
 
   test('refuses to navigate away', async () => {
