@@ -85,14 +85,24 @@ func TestValidatePassword(t *testing.T) {
 		wantErr        string
 	}{
 		{"a passphrase", goodPass, ""},
-		{"the least", strings.Repeat("a", MinPasswordLength), ""},
-		{"one short", strings.Repeat("a", MinPasswordLength-1), "15 to 128"},
+		// There is no minimum length beyond one character (#975, the
+		// owner's decision of 2026-10-30): only empty is refused.
+		{"empty", "", "password is required"},
+		{"one character", "a", ""},
+		{"four characters", "frog", ""},
+		{"fourteen characters", strings.Repeat("a", 14), ""},
+		{"fifteen characters", strings.Repeat("a", 15), ""},
+		{"one space", " ", ""},
+		{"one four-byte character", "\U0001F41A", ""},
+		// The schema counts code points as given; the server composes to
+		// NFC first. A decomposed é is two code points, and one is fine.
+		{"one decomposed accent", "é", ""},
 		{"the most", strings.Repeat("a", MaxPasswordLength), ""},
-		{"one past the most", strings.Repeat("a", MaxPasswordLength+1), "15 to 128"},
-		{"empty", "", "15 to 128"},
+		{"one past the most", strings.Repeat("a", MaxPasswordLength+1), "at most 128 characters"},
 		{"spaces and another script", "山田 太郎 の 合言葉 は 長い です よ", ""},
 		{"the most in four-byte characters", strings.Repeat("\U0001F41A", MaxPasswordLength), ""},
 		{"past the byte bound", strings.Repeat("\U0001F41A", MaxPasswordLength+1), "512 bytes"},
+		{"past the byte bound in ASCII", strings.Repeat("a", MaxPasswordBytes+1), "512 bytes"},
 		{"invalid UTF-8", "correct horse\xff battery staple", "UTF-8"},
 		{"leading and trailing spaces are kept", "  correct horse battery  ", ""},
 	}
@@ -213,16 +223,20 @@ func TestAuthRequestsValidate(t *testing.T) {
 		{"set", SetPasswordRequestV1{Password: goodPass}, ""},
 		{"set with a proof", SetPasswordRequestV1{Password: goodPass, Proof: sil}, ""},
 		{"set with an invite code for a proof", SetPasswordRequestV1{Password: goodPass, Proof: inv}, "proof"},
-		{"set, short", SetPasswordRequestV1{Password: "short"}, "15 to 128"},
+		{"set, short", SetPasswordRequestV1{Password: "frog"}, ""},
+		{"set, empty", SetPasswordRequestV1{}, "password is required"},
 		{"change", ChangePasswordRequestV1{Current: goodPass, Password: newPass}, ""},
 		{"change with totp", ChangePasswordRequestV1{Current: goodPass, Password: newPass, Code: "123456"}, ""},
 		{"change, no current", ChangePasswordRequestV1{Password: newPass}, "current password is required"},
 		{"change, same", ChangePasswordRequestV1{Current: goodPass, Password: goodPass}, "differ"},
-		{"change, short new", ChangePasswordRequestV1{Current: goodPass, Password: "short"}, "15 to 128"},
+		{"change, short new", ChangePasswordRequestV1{Current: goodPass, Password: "frog"}, ""},
+		{"change, short current", ChangePasswordRequestV1{Current: "frog", Password: newPass}, ""},
+		{"change, empty new", ChangePasswordRequestV1{Current: goodPass}, "password is required"},
 		{"change, bad code", ChangePasswordRequestV1{Current: goodPass, Password: newPass, Code: "abc"}, "digits"},
 		{"reset", ResetPasswordRequestV1{Code: sil, Password: goodPass}, ""},
 		{"reset with an invite code", ResetPasswordRequestV1{Code: inv, Password: goodPass}, "sign-in link"},
-		{"reset, short", ResetPasswordRequestV1{Code: sil, Password: "short"}, "15 to 128"},
+		{"reset, short", ResetPasswordRequestV1{Code: sil, Password: "frog"}, ""},
+		{"reset, empty", ResetPasswordRequestV1{Code: sil}, "password is required"},
 		{"reauth", ReauthRequestV1{Password: goodPass}, ""},
 		{"reauth with totp", ReauthRequestV1{Password: goodPass, Code: "123456"}, ""},
 		{"reauth, no password", ReauthRequestV1{}, "password is required"},
@@ -329,8 +343,8 @@ func TestAuthConstants(t *testing.T) {
 	if TOTPSecretBytes != 20 || TOTPDigits != 6 || TOTPPeriodSeconds != 30 || TOTPWindowSteps != 1 || TOTPAlgorithm != "SHA1" {
 		t.Errorf("TOTP %d bytes, %d digits, %ds, window %d, %s", TOTPSecretBytes, TOTPDigits, TOTPPeriodSeconds, TOTPWindowSteps, TOTPAlgorithm)
 	}
-	if MinPasswordLength != 15 || MaxPasswordLength != 128 || MaxPasswordBytes != 512 || MaxOpenDeviceLinks != 3 {
-		t.Errorf("password %d to %d, %d bytes; %d device links", MinPasswordLength, MaxPasswordLength, MaxPasswordBytes, MaxOpenDeviceLinks)
+	if MaxPasswordLength != 128 || MaxPasswordBytes != 512 || MaxOpenDeviceLinks != 3 {
+		t.Errorf("password at most %d characters, %d bytes; %d device links", MaxPasswordLength, MaxPasswordBytes, MaxOpenDeviceLinks)
 	}
 	if ErrorCodeAuthFailed != "auth_failed" || ErrorCodeReauthRequired != "reauth_required" ||
 		ErrorCodeEnrollmentProofRequired != "enrollment_proof_required" || ErrorCodeSetupOnHost != "setup_on_host" ||

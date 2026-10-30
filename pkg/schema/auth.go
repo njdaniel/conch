@@ -18,11 +18,11 @@ import (
 // it. They are contracts for #707–#713; this file adds no behaviour.
 
 const (
-	// MinPasswordLength and MaxPasswordLength bound a password in Unicode
-	// code points (design §5.2; NIST SP 800-63B's direction). The server
-	// normalizes to NFC before hashing and applies the same bounds again,
-	// since composition can shorten a string in code points.
-	MinPasswordLength = 15
+	// MaxPasswordLength bounds a password in Unicode code points (design
+	// §5.2). There is no minimum beyond a non-empty password: the owner
+	// removed the 15-character one on 2026-10-30 (#975; ADR-009 as amended).
+	// The server normalizes to NFC before hashing and applies the same
+	// bounds again, since normalization can change a string's length.
 	MaxPasswordLength = 128
 	// MaxPasswordBytes bounds a password's UTF-8 independently of its
 	// length in characters, before and after normalization.
@@ -207,29 +207,33 @@ func (n LoginNext) Valid() bool {
 	}
 }
 
-// ValidatePassword reports whether password is acceptable to set: valid
-// UTF-8, MinPasswordLength to MaxPasswordLength characters and at most
-// MaxPasswordBytes. Spaces and any script are fine; there is no composition
-// rule. The server normalizes to NFC, checks the bounds again, and refuses
-// a common or name-derived password with ErrorCodePasswordUnacceptable.
+// ValidatePassword reports whether password is acceptable to set:
+// non-empty, valid UTF-8, at most MaxPasswordLength characters and at most
+// MaxPasswordBytes. There is no minimum length beyond one character (#975).
+// Spaces and any script are fine; there is no composition rule. The server
+// normalizes to NFC, checks the bounds again, and refuses a common,
+// repeated or name-derived password with ErrorCodePasswordUnacceptable.
 // Errors never echo the input.
 func ValidatePassword(password string) error {
+	if password == "" {
+		return errors.New("schema: password is required")
+	}
 	if !utf8.ValidString(password) {
 		return errors.New("schema: password must be valid UTF-8")
 	}
 	if len(password) > MaxPasswordBytes {
 		return fmt.Errorf("schema: password must be at most %d bytes", MaxPasswordBytes)
 	}
-	if n := utf8.RuneCountInString(password); n < MinPasswordLength || n > MaxPasswordLength {
-		return fmt.Errorf("schema: password must be %d to %d characters", MinPasswordLength, MaxPasswordLength)
+	if utf8.RuneCountInString(password) > MaxPasswordLength {
+		return fmt.Errorf("schema: password must be at most %d characters", MaxPasswordLength)
 	}
 	return nil
 }
 
 // validatePasswordBounds is the check on a password that is presented, not
 // set: non-empty, valid UTF-8 and at most MaxPasswordBytes. A presented
-// password that is too short for the policy is not refused here: no account
-// has one, so it fails with ErrorCodeAuthFailed like any wrong password.
+// password past the length bound is not refused here: no account has one,
+// so it fails with ErrorCodeAuthFailed like any wrong password.
 func validatePasswordBounds(field, password string) error {
 	if password == "" {
 		return fmt.Errorf("schema: %s is required", field)

@@ -134,7 +134,7 @@ func (w *world) convertSam() (*member, int64, error) {
 		{"under a member's name", schema.ConvertGuestRequestV1{Name: p.pia.name, Password: convertPassword}, answer{http.StatusConflict, schema.ErrorCodePrincipalExists}},
 		{"under the reserved guest prefix", schema.ConvertGuestRequestV1{Name: "guest-sam", Password: convertPassword}, answer{http.StatusBadRequest, "invalid_request"}},
 		{"under a name that only looks like a guest's", schema.ConvertGuestRequestV1{Name: "gue\u0455t-sam", Password: convertPassword}, answer{http.StatusConflict, schema.ErrorCodePrincipalExists}},
-		{"with a password too short", schema.ConvertGuestRequestV1{Name: name, Password: "too short"}, answer{http.StatusBadRequest, "invalid_request"}},
+		{"with no password", schema.ConvertGuestRequestV1{Name: name}, answer{http.StatusBadRequest, "invalid_request"}},
 		{"with a common password", schema.ConvertGuestRequestV1{Name: name, Password: commonPassword}, answer{http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable}},
 		{"with a password that holds the name", schema.ConvertGuestRequestV1{Name: name, Password: name + " is my password"}, answer{http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable}},
 	} {

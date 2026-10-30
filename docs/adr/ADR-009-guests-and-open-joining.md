@@ -5,6 +5,7 @@
 - **Decider:** Nick
 - **Proposal:** [#694](https://github.com/njdaniel/conch/issues/694)
 - **Design:** [guests-and-accounts.md](../design/guests-and-accounts.md)
+- **Amended:** 2026-10-30 ([#975](https://github.com/njdaniel/conch/issues/975)): the 15-character password minimum of the design (§5.2) is removed by Nick's decision. A password to be set must be non-empty, valid UTF-8 and within the 128-code-point and 512-byte bounds after NFC; no other minimum, per-role minimum or setting replaces it, for members and operators, on normal and temporary servers. The blocklist, name and repetition checks, hashing, rate limits, recovery and operator TOTP are unchanged, and existing passwords keep working.
 - **Amends:** ADR-008's invite-only/account model; ADR-000 and ROADMAP.md's placement of password login at P7; the member browser storage rule for temporary guests only. Operator browser sessions remain tab-scoped, with stronger authentication and bounded lifetime.
 
 ## Context

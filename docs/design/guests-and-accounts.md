@@ -335,16 +335,27 @@ hash work within the same limits. Test queue cancellation and memory bounds unde
 
 ### 5.2 Password and login rules
 
-Proposed password policy: 15–128 Unicode code points, valid UTF-8, no silent truncation,
-allow spaces and paste/password managers, no composition or periodic-change rules.
+Password policy: non-empty and at most 128 Unicode code points, valid UTF-8, no silent
+truncation, allow spaces and paste/password managers, no composition or periodic-change
+rules. There is no minimum length: the owner removed the 15-character minimum on
+2026-10-30 ([#975](https://github.com/njdaniel/conch/issues/975), recorded as an amendment
+of ADR-009), and nothing replaces it, for members and operators alike, on normal and
+temporary servers. Passwords set under the old minimum keep working unchanged.
 Normalize consistently to NFC before length checking and hashing and document that behavior.
 Use a bundled, bounded common-password blocklist plus server-name/username checks; no
 required online breach lookup. Bound request bodies independently (including a 512-byte
 UTF-8 password bound after normalization).
 
-This follows the length direction in
+The upper bound, the absence of composition rules and the blocklist follow
 [NIST SP 800-63B](https://pages.nist.gov/800-63-4/sp800-63b.html), without claiming NIST
-certification. Hashing guidance:
+certification; its minimum length is deliberately not applied (#975). The name checks
+and the repetition rule hold a short password to the same rules as a long one. The
+repetition rule refuses a unit of at most four characters written at least twice, so
+`aaaa` and `abab` are refused and an ordinary short word such as `test` is not; a
+password of nothing but spaces is refused. The bundled blocklist has no entry shorter
+than 13 characters, so in practice it does not apply to short passwords: `password` and
+`123456` are accepted. Sign-in rate limits are unchanged (five failures per name per ten
+minutes), and they are what stands between a short password and guessing. Hashing guidance:
 [OWASP Password Storage](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html).
 
 Login failures for unknown, wrong-password, disabled, hidden, guest or legacy-unset-password
@@ -516,7 +527,7 @@ session, and no principal ID in a request replaces the authenticated caller.
 | Identity | `WhoAmIResponseV1.identity_class` (`IdentityClass`), `.guest`, `.auth` (`AuthStateV1`); `PrincipalAdminV1.guest_state` | A server that predates guests omits all three; a client falls back to kind and role. |
 | History | `ChannelMemberV1.history_after` (message id watermark), `.guest`; `MessageV2.guest_author` | Immutable attribution on the message; the bound on the membership. |
 | Credentials | `CredentialV1.idle_expires_at`, `.scope` (`CredentialScope`: `full` default, `setup`); `OwnCredentialV1.idle_expires_at` | Idle bound only on guest and operator browser credentials (F5). |
-| Passwords | `ValidatePassword` (15–128 code points, ≤512 bytes), `LoginRequestV1`, `LoginResponseV1` (union by `next`: `signed_in` or `totp`), `TOTPLoginRequestV1`, `SetPasswordRequestV1` (optional enrolment proof), `ChangePasswordRequestV1` (current, new, optional TOTP), `ResetPasswordRequestV1`, `PasswordUpdatedResponseV1` | One failure code, `auth_failed`. |
+| Passwords | `ValidatePassword` (non-empty, ≤128 code points, ≤512 bytes), `LoginRequestV1`, `LoginResponseV1` (union by `next`: `signed_in` or `totp`), `TOTPLoginRequestV1`, `SetPasswordRequestV1` (optional enrolment proof), `ChangePasswordRequestV1` (current, new, optional TOTP), `ResetPasswordRequestV1`, `PasswordUpdatedResponseV1` | One failure code, `auth_failed`. |
 | Operator auth | `ReauthRequestV1`/`ReauthResponseV1`, `TOTPEnrollmentV1`, `ConfirmTOTPRequestV1`, `RedeemSetupTokenRequestV1`/`RedeemSetupTokenResponseV1`; constants for the challenge (5 min, 5 tries), session (12 h / 1 h idle), re-auth (10 min), setup token (10 min) and setup credential (15 min), RFC 6238 parameters | Challenge prefix `conch_chal_`, setup token prefix `conch_setup_`: every secret has its own prefix and every check refuses the others'. |
 | Links | `SignInLinkPurpose` (`sign_in` default, `device`, `reset`, `enrollment`, `conversion`) on `SignInLinkV1`, `CreateSignInLinkRequestV1`, `SignInLinkPreviewV1`; `CreateDeviceLinkRequestV1`, `ListOwnSignInLinksResponseV1` | Lifetimes per purpose: sign-in 24 h / 7 d as today; every other purpose 10 min / 1 h. Cross-purpose use is `sign_in_link_invalid`. |
 | Errors | `guests_disabled`, `joining_closed`, `joining_paused`, `guests_full`, `guest_not_allowed`, `guest_not_hideable`, `guest_ended`, `not_a_guest`, `conversion_not_allowed`, `conversion_permit_invalid`, `join_policy_conflict`; `auth_failed`, `reauth_required`, `enrollment_proof_required`, `setup_on_host`, `setup_incomplete`, `password_required`, `password_unacceptable`, `password_not_set`, `password_already_set`, `totp_already_enrolled`, `totp_not_enrolled`, `setup_token_invalid`, `too_many_device_links`, `https_required`, `accounts_require_auth` | HTTP statuses in the constants' comments. `decision_not_permitted` (§4.3) is defined by G2's approval-path PR in `approval_api.go`, which G1 does not touch. |
@@ -525,8 +536,8 @@ Compatibility rules the types state in their comments: a field a server predates
 omitted, never sent as a zero value that means something; `history_after` 0 is no bound;
 `join_as`, `purpose` and `scope` absent mean `account`, `sign_in` and `full`. The
 `password` on a presented credential (login, re-auth, current password) is bound-checked
-only; a short one fails as a wrong password, so the schema answers nothing the server
-would not.
+only; one past the length bound fails as a wrong password, so the schema answers nothing
+the server would not.
 
 ### 7.2 Route table
 
