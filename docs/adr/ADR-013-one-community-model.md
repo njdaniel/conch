@@ -1,6 +1,6 @@
 # ADR-013: One community with private channels
 
-- **Status:** Proposed — awaiting Nick's sign-off. Accepted only when Nick merges the PR that adds it; the implementation issues in the design stay blocked until then. Clauses marked "(O#)" depend on an open point in the design (§11); they carry the design's recommended reading, which both round-1 reviewers share, and are finalised from Nick's answers before acceptance.
+- **Status:** Proposed — awaiting Nick's sign-off. Accepted only when Nick merges the PR that adds it; the implementation issues in the design stay blocked until then. Clauses marked "(O#)" depend on an open point in the design (§11); they carry the design's recommended reading, which both round-1 reviewers share for O1–O13 (O14 came after round 1), and are finalised from Nick's answers before acceptance.
 - **Date:** 2026-10-29
 - **Decider:** Nick (Tier-H)
 - **Design:** [docs/design/community-model.md](../design/community-model.md)
@@ -50,6 +50,7 @@ Nick's decisions, made in session on 2026-10-29, verbatim in intent:
 6. **Guests are visitors through guest links** that only operators make, naming public channels and whether voice is included. Guests are never in private channels, never see the member list or the channel directory (O8), see history from their arrival, and their visits stay bounded as ADR-009 says. The server-wide `guests_enabled` switch stays, off by default.
 7. **Retired:** the four `open_joining` modes (replaced by `open_signup`), `join_voice`, the open-channel set (replaced by default channels), per-channel invites as the way in (existing ones keep working until they expire; new ones cannot be made), `may_invite` as a grant (it becomes a brake, on by default).
 8. **Existing servers convert automatically** by one migration: open channels become public default channels; every other channel becomes private with its current members, for the operator to make public where it should be (O6); every member joins the default channels; every member bound is cleared (recorded in a side table); voice and link-making are on for every member; settings are mapped.
+9. **Optional: hide members from each other** (issue #964). One server setting, `hide_members`, off by default so that decision 3 is the default, set by the class O1 settles. When it is on, an ordinary member may know only themself, the members of the channels both are in, and the people their own links brought in (O14). This is enforced in every server answer and live event, not only in clients, and an unknown principal gets the same answer as one that never existed (O14). Operators see everyone. Channel visibility and the guest rules apply unchanged, and the setting never widens access. A message's author stays named in its channel's history (O14). Everyone who shares a channel sees each other, so the setting's description says that a default or public channel exposes its participants; a default channel draws a warning, not a refusal (O14). The setting promises no anonymity and no isolation of processes.
 
 ## Consequences
 
@@ -64,7 +65,8 @@ Nick's decisions, made in session on 2026-10-29, verbatim in intent:
 - **ADR-009's guest machinery stays whole**; only its entry points narrow (guest links, not the bare address) and conversion stops carrying a bound (O7).
 - **Reactions, the desktop companion and moderation** need one-line amendments each (conversion widens reactions with messages; the voice route is an entitlement loss the companion design already handles; self-join runs the ban predicate). None waits on this ADR.
 - **The private alpha's onboarding is simpler:** one link, one sign-in page, one switch. The tester story of 2026-10-29 becomes an end-to-end scenario that must pass before this is called done.
-- The design lists thirteen open points (O1–O13), with both round-1 reviewers' recommendations beside each; the recommended reading of each is what the design implements and what the "(O#)" clauses above say until Nick answers. O6 departs from the brief's decision 7 ("other existing channels become public") and needs his explicit answer; no other point reopens a decision above.
+- **The optional `hide_members` setting (#964)** adds one store predicate that every member-facing read of principals goes through, two small routes (the directory settings and a channel's authors) and one content-free events document, with no version bump; the isolation check gains a phase with it on (design §13).
+- The design lists fourteen open points (O1–O14), with both round-1 reviewers' recommendations beside O1–O13; O14 (#964) came after round 1 and carries the design's recommendation only. The recommended reading of each is what the design implements and what the "(O#)" clauses above say until Nick answers. O6 departs from the brief's decision 7 ("other existing channels become public") and needs his explicit answer; no other point reopens a decision above.
 
 ## Alternatives considered
 

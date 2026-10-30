@@ -7,7 +7,8 @@ privacy model of each read path, the migration, what is retired, the impact on w
 flight, the implementation issues, the test plan, and the points Nick still has to settle.
 
 **Status: proposed, 2026-10-29; revised after review round 1 (security and general
-reviewers, PR #963).** Facts about main are as of `671a16e`. No code, schema file,
+reviewers, PR #963); issue #964 (an optional setting that hides members from each other)
+folded in as §13 the same day.** Facts about main are as of `671a16e`. No code, schema file,
 migration or issue exists for this yet. Nothing here is implemented behaviour.
 
 ## 0. Why
@@ -56,6 +57,10 @@ community with the same links, directory and channels; only its lifetime differs
 
 What goes: per-channel invites as the way in, the four `open_joining` modes, `join_voice`,
 `may_invite` as a grant (it becomes a brake), history bounds on members.
+
+One optional setting, off by default, narrows the member list: with **hide members from
+each other** on, an ordinary member sees only themself and the people they share a channel
+with (§13, issue #964).
 
 ### 1.1 Terms
 
@@ -193,6 +198,10 @@ The `schema-change` skill governs the PR.
 | `ChannelMemberV1.history_after` absent for every member | Within the documented meaning | No |
 | `JoinInfoV1.join.guest` always false; `.voice` always true | Within the documented meaning | No |
 | `can_decide` on the creator of a channel (`POST /v1/channels`) and `can_decide = 0` on self-join and redemption; conversion clearing `history_after` | Membership-write transactions: **approval-path** PRs, merged by Nick | Yes (merge) |
+| §13 (#964): `DirectorySettingsV1`, `PutDirectorySettingsRequestV1`, `DirectorySettingsResponseV1`, `DirectoryWarning`; routes `GET/PUT /v1/directory/settings` | New types, new closed client-tolerant vocabulary, new routes | No |
+| §13: `DirectoryScope` and `ServerMembersResponseV1.scope`; `ChannelSettingsResponseV1.warnings` | New in I1; additive optional fields if I1 has merged | No |
+| §13: `ChannelAuthorV1`, `ChannelAuthorsResponseV1`; route `GET /v1/channels/{channel}/authors` | New | No |
+| §13: `DirectoryChangedV1` (`conch.directory_changed.v1`) | New events document, in place of I10's unpublished `conch.directory_members.v1` | No |
 
 ### 3.2 Channels
 
@@ -567,9 +576,11 @@ func (d ServerMembersResponseV1) Validate() error // ids positive and distinct; 
 
 Whether `role` is shown to every member is O4 (designed: yes).
 
-A live `conch.directory_members.v1` events document (the whole list, like the roster) is a
-follow-up (issue I10), not required for the first slice: the browser re-reads the
-directory when it opens the panel and on every `whoami` refresh.
+A live events document is a follow-up (issue I10), not required for the first slice: the
+browser re-reads the directory when it opens the panel and on every `whoami` refresh.
+§13.6 makes that document a content-free signal, `conch.directory_changed.v1`, rather than
+the whole list first sketched here (`conch.directory_members.v1`, never published), and
+makes it required before the setting of §13 ships.
 
 ### 3.6 Voice permission
 
@@ -628,7 +639,8 @@ the stated code.
 | Turn on open sign-up, `guests_enabled`, guest bounds, default link expiry | no | **owner** (ADR-010; O1) | no | no | no |
 | Pause invites / joining; end guest visits | no | yes (brakes stay operator) | no | no | no |
 | Set a person's `may_invite` brake (closes their open member links) | no | yes, not on an owner | no | no | no |
-| Read the member directory | yes | yes, with `owner`, `voice_allowed`, `may_invite`, `invited_by` | as member | 403 `guest_not_allowed` | 403 |
+| Read the member directory | yes; while `hide_members` is on, only the people they may know (§13.2) | yes, everyone, with `owner`, `voice_allowed`, `may_invite`, `invited_by` | as member | 403 `guest_not_allowed` | 403 |
+| Turn `hide_members` on or off (§13) | no | **owner** (O1's class; recent authentication) | no | no | no |
 | Read the channel directory | public + own private | same; `?scope=all` lists every channel with counts | as member | 403 | 403 |
 | Join a public channel | yes | yes | as member | 403 `channel_not_joinable` | 403 |
 | Leave a channel | yes, unless last member of a private one (409) | yes, same rule | yes (loses the grant) | no (End visit) | no |
@@ -654,7 +666,9 @@ in, who is in voice, who is a guest, who is disabled or hidden, who invited whom
 excepted). Guests and agents are refused: a guest is a visitor and this is the community's
 list; an agent's view of people is channel content under its manifest, as today. This is
 the one deliberate change to ADR-003's rule that channel membership bounds what a person
-can learn: **people are community-wide, channels are not.**
+can learn: **people are community-wide, channels are not.** An operator can put the old
+rule back for people with the optional `hide_members` setting; §13 gives every read path
+under it.
 
 **The channel list** (`GET /v1/channels`, `GET /v1/directory/channels`). A member sees:
 every public channel by name, with whether they are in it and whether it is a default
@@ -828,6 +842,8 @@ remainder:
   limited, audited without the name.
 - *World.* A's group is a private channel plus one public channel; both groups join through
   member links; B's operator makes the guest link.
+- *Hide members (§13.9).* A second phase with `hide_members` on, in which a principal's name
+  and id become markers for every member who may not know it; its rows land with I14a.
 
 These rows and marker changes are **distributed into the slices that add the routes**
 (§9: I3a, I3b, I4, I5, I6a, I6b, I7), since `TestEveryRouteHasARow` gates every PR; the
@@ -874,15 +890,21 @@ ADR-013 is accepted and O13 is answered.
 | I9a | web: lobby, sign-in page and member links | Bare-address lobby is Sign in only; member-link creation for every member with expiry/uses; own links and joiners; preview v2 landing; phone layout (`web/src/phone.ts`, `12-phone.spec.ts`) required; Playwright; update `web/e2e/11-invites.spec.ts` and `web/e2e/api.ts` to v2. | M | | I1, I6a, I6b |
 | I9b | web: channel directory, channels and the member panel | Directory with Join/Leave, Create channel with visibility, community member panel (agents marked, guests only in channels), phone layout; Playwright; update `web/e2e/14-isolation.spec.ts`. | L | | I1, I3a, I3b, I4 |
 | I9c | web: operator controls and settings | Visibility/default per channel, voice toggle on the member list, open sign-up, default link expiry and guest links in Settings (replacing GuestSettings' open-channel set); phone layout; Playwright; update `web/e2e/30-temporary-servers.spec.ts`. | M | | I1, I5, I7 |
-| I10 | web and server: live directory | `conch.directory_members.v1` on the events socket when the member list changes; browser subscribes. Optional polish. | S | | I4, I9b |
+| I10 | web and server: live directory | The content-free `conch.directory_changed.v1` signal on the events socket to the viewers whose directory answer changed (§13.6); browser re-reads and replaces its people cache. Optional polish while `hide_members` does not exist; its server half is required by I14a, which builds it if I10 has not landed (I10 is then the browser half and follows I14a). | S | | I4, I9b |
 | I11a | cli: parity | `conch admin invite` on v2 (member, guest, joiners); new top-level `conch channels` (`list [--all]`, `join`, `leave`, `create [--private]`); `conch admin channel settings`; `conch admin principal voice`; `conch admin join` on the chosen option; `conch join account` unchanged; hostile-server tests. | M | | I3a–I7 |
 | I11b | tui: parity | A channel directory pane with join/leave, a community member pane, create-channel with visibility, operator voice toggle. | M | | I11a |
 | I12 | docs: community model shipped | README, docs/deploy.md, **docs/alpha-tester-guide.md**, private-alpha.md and guests-and-accounts.md dated supersession notes, e2e/isolation doc comment, ADR-013 status to Accepted. | S | | I8, I9a–c, I11a–b |
 | I13 | store: drop `open_channels` | Follow-up migration removing the unread table. Release condition: one tagged release after I2 has shipped and the upgrade notice has been out for a cycle. | S | | I2 shipped |
+| I14a | server: hide members from each other (#964) | `hide_members` and `GET/PUT /v1/directory/settings`; the `knows` predicate in the store and its guard test; directory, manager add and joiners through it, with the uniform 404; `GET /v1/channels/{channel}/authors`; the targeted `conch.directory_changed.v1` signal (I10's server half); `default_channel_shared` warnings; the isolation phase with the setting on. In full in §13.11. | M | security | I4, I3b, I6a, O14 |
+| I14b | web, cli and tui: hide members | The setting in Settings and `conch admin directory`, with §13.1's description and the warning; the member panel's scope line; caches replaced on the signal; departed authors named through the authors route. In full in §13.11. | S | | I14a, I9b, I9c, I11a |
 
 Parallel lanes once I2 lands: {I3a, I3b} (either order, one after the other, since both
-touch `channels.go` and `members.go`), {I4}, {I5}, {I6a → I6b after I3a}, {I7 after I3a}.
-I9a–c can start on mocked fetch from I1's generated types.
+touch `channels.go` and `members.go`), {I4}, {I5}, {I6a → I6b after I3a}, {I7 after I3a},
+{I14a after I4, I3b and I6a}. I9a–c can start on mocked fetch from I1's generated types.
+
+**Note on O10's manager-add change.** The table above names no slice for dropping the
+manager-add bound (§2.6, O10), though §10 tests it. This note assumes I4 carries it, as the
+slice that makes everyone visible; I14a then puts the predicate in front of it.
 
 ## 10. Test plan
 
@@ -949,6 +971,9 @@ Playwright for the tester story's browser half, phone layout included; `make web
 **CLI and TUI (I11a–b).** Hostile-server tests for every new command (as `hostile_test.go`
 does); parity test that every new REST route has a CLI verb; TUI pane tests.
 
+**Hide members (I14a, I14b).** §13.11 lists the required tests; the isolation rows are
+§13.9.
+
 ## 11. Open points for Nick
 
 Each is a consequence of a decision, or a gap the decision did not reach. The design above
@@ -1003,6 +1028,33 @@ security and general reviewers' recommendations (round 1) are recorded beside ea
   **optional**: §3.4 gives Option A (v2) and Option B (v1 additive with a mapping and two
   refused values). *Reviewers: the invite bump; join settings optional, the general
   reviewer leans B.*
+- **O14. Hide members from each other (#964, §13).** Added 2026-10-29, after round 1; no
+  reviewer has seen it yet. Four parts:
+  - *(a) Default channels while the setting is on: refuse or warn?* Everyone in a default
+    channel sees everyone in it, so a default channel undoes most of the setting.
+    Designed: **warn** (`default_channel_shared`) when the setting is turned on with a
+    default channel and when a channel is marked default while it is on; recommend zero
+    default channels in the description. Refusing would forbid open sign-up (it needs a
+    default channel, §2.1), would refuse on every migrated server (open channels become
+    default channels, §6), and would forbid a lobby the operator wants.
+  - *(b) Does a member know the people their own links brought in?* #964's predicate says
+    no: only self and shared channels. Decision 1 says a maker sees who they brought; and
+    with zero default channels a joiner shares no channel with anyone, so without this the
+    maker's joiner list is empty and the maker cannot add their joiner to a channel they
+    manage. Designed: **yes, one way** (the maker knows the joiner; the joiner knows the
+    maker only by the name the preview showed, and in the directory only through a shared
+    channel), §13.2 clause 5.
+  - *(c) Does the setting need O10's uniform 404?* Designed: **yes, whatever O10's answer**.
+    With the setting on, "exists but you may not know it" must answer exactly as "never
+    existed" on every id- or name-addressed member route (§13.4); if ADR-010's manager-add
+    bound is kept instead of dropped, the bound and the predicate coincide for managers and
+    the uniform body is still required.
+  - *(d) Historical identity.* Designed: a message's author stays named in its channel's
+    history for everyone who can read the message, through a new channel-scoped authors
+    route, under the author's current name (§13.5). The alternative is today's rendering
+    (`#<id>` once the author is no longer in a shared channel). Recommended as designed.
+
+  Who may set it follows O1 (owner class under its recommendation); it asks nothing new.
 
 **Residuals recorded, no decision asked:**
 
@@ -1013,6 +1065,13 @@ security and general reviewers' recommendations (round 1) are recorded beside ea
 - **R3.** Id gaps leak activity volume (#500).
 - **R4.** Operators learn every channel's existence, name and member count (`?scope=all`,
   settings, rename), and none of a private channel's content they are not a member of.
+- **R5.** With `hide_members` on, principal names stay unique, so a 409 `principal_exists`
+  on self-rename, member-link redemption or open sign-up tells the caller that some
+  principal's name reads like the one tried. Bounded by the existing rename and redemption
+  limits (§13.4).
+- **R6.** With `hide_members` on, the authors route shows a departed author's **current**
+  name on their old messages, renames included, to everyone who can read those messages
+  (§13.5).
 
 ## 12. What in the current design contradicts the decisions, or makes one costly
 
@@ -1037,3 +1096,387 @@ security and general reviewers' recommendations (round 1) are recorded beside ea
   of I9c/I11a; Option B's mapping keeps old clients working meanwhile.
 - **`invites.expires_at` is `NOT NULL`** and the published `InviteV1.expires_at` cannot be
   absent; "no expiry" needs a sentinel in the store and a pointer on the v2 wire.
+
+## 13. Optional: hide members from each other (#964)
+
+Added 2026-10-29 from issue #964, which Nick filed after §§0–12 were written. It changes
+none of his decisions: the setting is off by default, so decision 3 (the member list; #964
+calls it decision 4, counting the model as decision 1) is what a server does unless an
+operator turns this on. Where a behaviour waits on Nick it is marked "(O14)".
+
+### 13.1 The setting
+
+- **Name and default.** `hide_members`, a boolean, default `false`, stored as one
+  `server_settings` row. An absent row reads false, so no migration is needed and a server
+  that never touches it behaves exactly as §§1–12 say.
+- **Where it lives.** `GET /v1/directory/settings` (`accessOperator`) answers
+  `DirectorySettingsResponseV1{settings: DirectorySettingsV1{hide_members}, warnings}`.
+  `PUT /v1/directory/settings`, body `PutDirectorySettingsRequestV1{hide_members *bool}`,
+  is in the class O1 settles for server-wide policy (`accessOwner` under its
+  recommendation) and in `reauthAlways`, as `PUT /v1/join/settings` is. It is a route of its
+  own beside the member directory, not a field of the joining settings, so it does not wait
+  on O13 and is not read as joining policy.
+- **Audit.** `directory_settings_changed`, actor the caller, subject `server`, detail
+  `hide_members=<old>-><new>`. A PUT that changes nothing writes no row.
+- **What members learn of it.** Not the settings route: the directory's own answer says
+  which list it is (`ServerMembersResponseV1.scope`, §13.3).
+- **Description**, the text the browser's Settings, `conch admin directory` and
+  docs/deploy.md carry, in substance:
+
+  > Hide members from each other. Members see only themselves and the people they share a
+  > channel with. Operators always see everyone. Everyone in a channel sees everyone else in
+  > it, so a default channel, or a public channel two people both join, shows them to each
+  > other: this setting cannot keep apart one-on-one spaces whose people also share such a
+  > channel. It hides people in Conch's answers; it does not make anyone anonymous and does
+  > not separate anyone on the server.
+
+### 13.2 The predicate, defined once
+
+A viewer M **may know** a principal P when any of these holds:
+
+1. `hide_members` is off;
+2. M is an operator (the role as it is at the request);
+3. P is M;
+4. M and P each have a `channel_members` row in at least one common channel, public or
+   private;
+5. P joined through a link M made (`principals.invited_by = M`), while M is a member (O14b).
+
+It is written once in the store, beside `isMemberTx`, as one function and one SQL fragment
+(`knowsTx`, `knownPrincipalsSQL`), and every member-facing read of principals goes through
+it. A structural guard test in the style of `TestMessageReadsStayInTheVisibilityFunction`
+fails if a member-facing query over `principals` does not.
+
+On top of it:
+
+- **It narrows; it never widens.** Each route applies its own rule first (the directory: the
+  §1.1 members and the enabled, non-hidden agents, guests and agents refused as readers;
+  manager add: addable members only), then the predicate. Nothing a server with the setting
+  off refuses becomes reachable with it on.
+- **Guests.** As readers, unchanged: refused from the directory, bounded to the channels
+  they visit (R1). As targets, a guest is never in the directory and is known only to the
+  co-members of the channels it visits, which is today's rule.
+- **Agents.** As targets, listed only to members who share a channel with them. As readers,
+  unchanged: no directory (O11), channel content by manifest.
+- **Operators.** Clause 2: the full directory with its operator fields, `GET /v1/principals`,
+  `?scope=all`. The setting does not list operators to everyone; an operator who wants to be
+  found shares a channel with the members. O4's role display applies only to the principals
+  a member may know.
+- **Channel visibility** is untouched. The members of a private channel know each other
+  because they share it; to anyone else the channel is the same 404 as today.
+
+**The #964 example.** The owner is in private A and B, alice only in A, bob only in B, the
+setting on. alice may know {owner, alice}; bob {owner, bob}; the owner, an operator,
+everyone. If alice and bob both join public C, each may know the other.
+
+### 13.3 Every read path, with the setting on
+
+| Path | With `hide_members` on |
+| --- | --- |
+| `GET /v1/directory/members` | Rows are filtered by the predicate **before** paging. `after` is always the id of a returned row and is present only when another row the viewer may know follows, so a page's size and cursor are what they would be on a server where the unknown principals did not exist. No total is carried (none is designed). `ServerMembersResponseV1` gains `scope` (`DirectoryScope`): `everyone` (setting off, or an operator) or `shared_channels` (setting on, any other member), so a client says "you see the people you share a channel with" instead of implying the list is the server. |
+| Member panels, @mentions and autocomplete | No server route resolves a mention, completes a name or searches people (`routes.go` has none; `GET /v2/channels/{channel}/messages/search` is channel-scoped and matches message text). Clients draw candidates from the directory and the channel member lists, so they inherit the predicate. Any later route that looks up or searches principals goes through the predicate and answers an unknown one as §13.4 says; that is an acceptance criterion of that route. |
+| `GET /v1/channels/{channel}/members`, `conch.channel_members.v1` | Unchanged. Everyone on a channel's list shares that channel with the viewer, so every row passes the predicate; the channel gate (404 to a non-member) is what bounds it. |
+| Session rosters: `GET /v1/sessions?channel=`, `conch.session_roster.v1` | Unchanged, for the same reason: the roster is the sessions of the channel's members (`channelRoster`). |
+| Voice presence: `GET /v1/channels/{channel}/voice`, `GET /v1/voice/ws`, `conch.voice_presence.v1` | Unchanged: participants of the room of a channel the viewer is in, who are its members. |
+| Voice occupancy: `GET /v1/voice/occupancy`, `GET /v1/voice/occupancy/ws`, `conch.voice_occupancy.v1` | Unchanged: counts for the viewer's own channels only, a channel the viewer may not read absent rather than zero (`voice_occupancy.go`). |
+| Join and leave notices | No channel carries a join or leave message today; the notice is `conch.channel_members.v1` to the channel's own subscribers, its co-members, and the removed member's sockets closing. Unchanged. The setting adds the directory signal of §13.6, sent only to the viewers whose answer changed. |
+| Counts and pagination totals | No member-facing count of principals exists or is designed: the member view of `GET /v1/directory/channels` has none (§5), occupancy counts only the viewer's channels, the directory has no total. `?scope=all`'s `members` is operators'. `InviteV2.joiners` counts the joiners the maker may know (with O14b, all of them). `InviteV2.uses` stays: it counts redemptions of the maker's own link, which the maker needs to see a use cap being spent. |
+| `GET /v2/invites/{id}/joiners` | The maker sees their link's joiners (O14b; without it, the list and `InviteV2.joiners` are filtered by the predicate). Anyone else 404 `invite_not_found` (§3.3); operators everything. |
+| Invite previews, `POST /v2/invites/preview` | Unchanged: the inviter's name, the server name, the default channels. The inviter disclosed their own name by handing out the code; the preview names nobody else. |
+| Manager add: `PUT /v1/channels/{channel}/members/{principal_id}`, `POST /v1/channels/{channel}/members` | A manager adds a member it may know; anyone else, by id or by name, is the one 404 `principal_not_found` (§13.4). With the setting on this is ADR-010's old bound back, by the predicate rather than a rule of its own. |
+| `DELETE /v1/channels/{channel}/members/{principal_id}` | Unchanged: its targets are the channel's members, whom a manager knows. A non-member id answers the same whether or not the principal exists (tested in I14a). |
+| `PUT /v1/principals/{id}/name`, `GET /v1/principals/{id}/manifest`, `POST /v1/principals/{id}/credentials/revoke-all` | Unchanged: `accessOperatorOrSelf` handlers refuse any id but the caller's own with 403 before looking it up (`handleRenamePrincipal`, `handleGetManifest`), so they carry no existence signal. |
+| Whisper audiences on `POST /v2/channels/{channel}/messages` | Unchanged: an id that is not a member of the channel and one that does not exist both answer `invalid_audience` (`messages.go`). |
+| Messages, search, threads, files, reactions, approvals, runs | Unchanged: channel content through `messageVisible` and the channel gate. Naming departed authors: §13.5. |
+| `GET /v1/whoami` | The caller only. Unchanged. |
+| Operator routes: `GET /v1/principals`, `GET /v1/guests`, `GET /v1/invites/{id}/principals`, `GET /v1/audit`, `?scope=all` | Unchanged: operators are outside the predicate. |
+
+So the setting bites in few places. Almost every surface was already bounded by channel
+membership (ADR-003); the community-wide ones are the directory, manager add, the joiner
+list and, through §13.5, attribution.
+
+### 13.4 An unknown or hidden principal
+
+One answer for every principal a viewer may not know, whatever the reason: it never
+existed, is hidden or disabled, is an active or ended guest, is an operator or owner out of
+a manager's reach, or is unknown under this setting.
+
+- **Lists** (the directory, the joiner list) omit it and change nothing else on the page
+  (§13.3's cursor rule).
+- **Id- and name-addressed member routes** answer the byte-identical 404
+  `principal_not_found` body O10 recommends, which is what `AddChannelMemberByName`'s
+  `ErrNotAddable` answers today (`members.go`), for an id beyond the sequence too.
+- **The authors route** omits it (§13.5).
+
+This is O10's uniform 404, and the setting needs it whatever O10's answer (O14c).
+
+**Not closed, and recorded (R5).** Principal names are unique by `name_key` and `name_skel`,
+so a 409 `principal_exists` on self-rename (`PUT /v1/principals/{id}/name`, limited by
+`RenameLimits`), on member-link redemption (`POST /v2/invites/redeem`) or on open sign-up
+(`POST /v1/join/account`, rate-limited as today) tells the caller that a principal has a
+name that reads like the one tried. As for channel names (R2) it is bounded by the existing
+limits. Closing it would mean names that are not unique, which this setting does not ask.
+
+### 13.5 Historical identity
+
+**Decided: a message's author stays named in the history of the channel it was posted in,
+for everyone who can read the message, whatever the setting. Leaving the channel, or
+turning the setting on, rewrites nothing.**
+
+*Today.* `MessageV2` carries `author_id` only (and `guest_author` for a guest's message,
+stored with it). Clients name authors from the channel's member list; the browser's
+`nameOf` (`web/src/Conversation.tsx`) falls back to `#<id>`. So an author who has left the
+channel already shows as a number, unless the viewer meets them in another channel. With
+the setting off the directory would fill that gap; with it on, it would not.
+
+*The route.* `GET /v1/channels/{channel}/authors?ids=<id>,<id>…`, at most
+`MaxChannelAuthorIDs` (100) ids, behind the channel gate of `GET …/members` (404 to a
+non-member; an agent needs `messages.read` with read). It answers
+`ChannelAuthorsResponseV1{authors: []ChannelAuthorV1{principal_id, name, kind}}`, ordered by
+id, for each asked id that authored at least one message the caller may read in that
+channel, through `messageVisible` (history bound, audience, thread). Every other id, known
+or not, existing or not, is absent. Name and kind only: no role, no join date, no channels,
+no voice. The rule does not depend on the setting.
+
+*Why.*
+
+- Decision 4 gives members the full history of their channels, so a channel's history is a
+  record its members share, past and future, and who said what is part of it. A message
+  that reads "#41: approve the payment" to one member and "bob: approve the payment" to
+  another is a worse record, and approval and report context depend on it.
+- #964 asks that attribution and history stay intact. Ids alone keep it intact for
+  programs, not for people.
+- The route discloses only what the message disclosed to the channel: that this author
+  posted here.
+
+*What it leaks (R6).* The **current** name: a departed author's later renames show on their
+old messages. And to a member who joins later, the names of everyone who posted before
+them. Not leaked: whether the author is still on the server, disabled, in other channels or
+in voice. A hidden author's name is already a placeholder (`HiddenPrincipalNamePrefix`,
+`store/hide.go`). Storing a name with every message would close the rename leak, at the
+cost of a change to every message write and a backfill; the setting does not justify it.
+
+*Not covered.* Departed requesters and deciders of approvals, principals of runs and
+uploaders of files still show as ids, as today.
+
+### 13.6 Live refresh
+
+- **The document.** `conch.directory_changed.v1`, `DirectoryChangedV1{schema}`: no
+  principal, no count, no reason. It tells a client that its directory answer may have
+  changed and that it must re-read `GET /v1/directory/members` and **replace**, never
+  merge, its people cache and autocomplete candidates, dropping every name it holds that
+  the new list lacks and the authors route does not answer for that channel. A document
+  with no content cannot leak through a race, since the subscriber's goroutine reads
+  nothing to send it; and the directory is paged, so the whole-list document I10 first
+  sketched would not fit. I10 is amended to this signal.
+- **The channel.** It travels on the viewer's events sockets (`GET /v1/events/ws`), the way
+  read-state frames reach a principal across its memberships, coalesced under the roster's
+  floor (`defaultEventsRosterFloor`, 250 ms).
+- **Who gets it.** Only the viewers whose directory answer changes. A signal sent to
+  everyone would itself tell alice that something happened among people she cannot see.
+  - The setting toggled: every member's and operator's sockets.
+  - A membership added or removed (an add, a self-join, a leave, a removal, a redemption, a
+    conversion, the removal of guests from a channel turned private): with the setting on,
+    the subject, each member of the channel whose knowing of the subject changed (the
+    predicate after commit against before), and operators; with it off, nobody, since
+    membership does not change the directory then.
+  - A principal created, renamed, disabled, enabled, hidden, or its role changed: every
+    viewer who may know it (with the setting off, every member).
+- **No server cache to drop.** The directory is read per request, so the first answer after
+  a toggle is already filtered; a client without an events socket (the CLI) gets the new
+  list on its next read. Event subscriptions' membership sets are updated on removal as
+  today (`setMemberships`, `DropPrincipal`).
+- **The limit.** A client that ignores the signal keeps what it was sent. The server stops
+  serving; it cannot make a client forget (§13.8).
+
+### 13.7 Default and public channels
+
+A member is in every default channel they have not left, so with a default channel the
+setting hides almost nothing: everyone in #general sees everyone in #general. A public
+channel does the same for those who join it.
+
+- The setting's description says so (§13.1).
+- **Recommended configuration:** no default channel while the setting is on, and a private
+  channel for each space whose people should not see each other. Zero default channels is
+  allowed (§2.1: the joiner lands in no channel, and the joining settings warn
+  `no_default_channel`).
+- **Warn; do not refuse (O14a).** Turning the setting on while a default channel exists, and
+  marking a channel default while it is on, both succeed and answer the warning
+  `default_channel_shared` (a new `DirectoryWarning` vocabulary, closed and client-tolerant
+  as `JoinWarning` is), in `DirectorySettingsResponseV1.warnings` and in
+  `ChannelSettingsResponseV1.warnings`. Refusing would interlock with open sign-up, which
+  needs a default channel (§2.1); would refuse on every migrated server, whose open channels
+  became default channels (§6); and would forbid a lobby the operator wants everyone in. The
+  setting promises only the predicate, and the warning says what a default channel does to
+  it.
+- **Consequence.** With no default channel, a member-link joiner shares no channel with
+  anyone. An operator adds them, the link's maker adds them to a channel the maker manages
+  (O14b), or they join a public channel and are seen there.
+
+### 13.8 What it hides and what it does not
+
+**Hides**, from an ordinary member, while on: the existence, ids, names, roles, join dates
+and agent status of the principals who share no channel with them and whom their own links
+did not bring in; and, by the targeted signal, when those principals change.
+
+**Does not hide:**
+
+- anyone in a channel both are in, default and public channels included: joining a public
+  channel shows you to its members and them to you;
+- what is said in a shared channel, including about people the reader cannot see;
+- the authors of the messages the reader can read, under their current names (R6);
+- that a name is taken, through a collision (R5);
+- how many principals, messages and files exist: ids are global sequences (R3, #500);
+- the inviter's name, to anyone holding their code; how often one's own link was used;
+- anything from operators: they see every principal, every channel's name and count, and
+  (owners) the audit log;
+- the names of public channels, in the channel directory;
+- what a client was sent before a toggle or a removal.
+
+**Promises no anonymity**: operators and the server know who everyone is, and names are what
+people chose. **Promises no isolation**: one process, one database and one LiveKit serve
+everyone. Groups that must not learn of each other at all still need what ADR-008 gave
+them, separate private channels, and separate servers for anything stronger.
+
+### 13.9 Isolation-matrix rows
+
+`e2e/isolation` gains a phase with `hide_members` on. Its world: the owner (an operator) in
+private A and B; alice in A only, A's manager; bob in B only; carol, who joined through
+alice's member link and is in no channel; a guest visiting public C; an agent in A. With the
+setting on, **bob's name and id are markers in alice's register, and alice's in bob's**,
+except where a row below documents them. Every route in the table has a row in both phases
+(`TestEveryRouteHasARow`). A "ghost" is the matrix's id or name that never existed.
+
+| Row (route, what) | Viewer | Setting off | Setting on |
+| --- | --- | --- | --- |
+| `GET /v1/directory/members`, lists the directory | alice | owner, alice, bob, carol, agent; `scope: everyone` | owner, alice, carol (O14b), agent; `scope: shared_channels`; no bob marker |
+| `GET /v1/directory/members`, lists the directory | bob | everyone, as alice | owner, bob; no alice, carol or agent |
+| `GET /v1/directory/members`, lists the directory | owner | everyone, operator fields | the same, `scope: everyone` |
+| `GET /v1/directory/members`, lists the directory | guest, agent | 403 | 403, same bytes |
+| `GET /v1/directory/members?limit=1`, pages the directory | alice | one row a page | every `after` is a listed id; the last page has none; bob's id is in no cursor |
+| `PUT /v1/channels/{channel}/members/{principal_id}`, adds bob to A by id | alice | 200 (O10) | 404 `principal_not_found`, bytes identical to a ghost id |
+| `POST /v1/channels/{channel}/members`, adds bob to A by name | alice | 200 (O10) | 404, bytes identical to a ghost name |
+| `PUT /v1/channels/{channel}/members/{principal_id}`, adds carol to A | alice | 200 | 200 (O14b; the ghost's 404 without it) |
+| `GET /v2/invites/{id}/joiners`, alice's link | alice | carol | carol (O14b) |
+| `GET /v2/invites/{id}/joiners`, bob's link | alice | 404 `invite_not_found` | the same |
+| `GET /v1/channels/{channel}/authors`, a departed author of A, bob's id, a ghost id | alice | the departed author named; bob and the ghost absent | the same |
+| `GET /v1/channels/{channel}/members`, public C after alice and bob join it | alice | bob listed | bob listed: documented, a shared channel shows its people |
+| `GET /v1/voice/occupancy`, `GET /v1/channels/{channel}/voice` | alice | A only; B absent | the same; bob's id in no frame |
+| `GET /v1/events/ws`, bob joins B | alice; owner | no signal to either | no signal to alice; one to the owner |
+| `GET /v1/events/ws`, bob joins C, where alice is | alice | no signal | one signal; the re-read lists bob |
+| `GET /v1/events/ws`, the owner toggles the setting | alice, bob | one each | one each; alice's re-read has no bob |
+| `GET /v1/directory/settings`, `PUT /v1/directory/settings` | alice; a non-owner operator; owner | alice 403; operator GET 200, PUT per O1; owner 200 and one `directory_settings_changed` row | the same |
+| `PUT /v1/channels/{id}/settings`, the owner marks C default | owner | 200, no warning | 200 with `default_channel_shared` |
+| `PUT /v1/principals/{id}/name`, alice renames herself to bob's name | alice | 409 `principal_exists` | the same: documented oracle (R5), limited |
+| `POST /v2/invites/redeem`, alice's link redeemed with bob's name | unauthenticated | 409 `principal_exists` | the same: documented oracle (R5) |
+
+### 13.10 Schema
+
+**No version bump.** Everything is new or additive:
+
+- `DirectorySettingsV1`, `PutDirectorySettingsRequestV1`, `DirectorySettingsResponseV1`;
+  `DirectoryWarning` (closed, client-tolerant, one value `default_channel_shared`): new.
+- `DirectoryScope` (`everyone`, `shared_channels`) and `ServerMembersResponseV1.scope`;
+  `ChannelSettingsResponseV1.warnings`: new fields of types I1 introduces; additive optional
+  fields if I1 has merged.
+- `ChannelAuthorV1`, `ChannelAuthorsResponseV1`, `MaxChannelAuthorIDs`: new.
+- `DirectoryChangedV1`, `conch.directory_changed.v1`: a new events document, in place of
+  I10's unpublished `conch.directory_members.v1`.
+- No new error code.
+
+It rides I1 if I1 has not started when ADR-013 is accepted, so there is one schema PR;
+otherwise it is an additive schema commit inside I14a, under the `schema-change` skill.
+O13's question is unaffected either way.
+
+### 13.11 Issues
+
+**Existing issues it touches.**
+
+- **I1:** carries the §13.10 shapes if it has not started.
+- **I3a:** `PUT /v1/channels/{id}/settings` answers `default_channel_shared` while the
+  setting is on; channel creation's membership write emits the signal through I14a's hook.
+- **I3b:** self-join and leave emit the signal.
+- **I4:** the directory query goes through the predicate from its first version (true while
+  the setting does not exist) and fills `scope`; and, as §9's note assumes, it drops O10's
+  manager-add bound, behind which I14a puts the predicate.
+- **I6a:** the joiner list and `InviteV2.joiners` go through the predicate (O14b).
+- **I6b, I7:** redemption, open sign-up and conversion write memberships and emit the signal.
+- **I9b:** the member panel shows the scope line, replaces its people cache on the signal,
+  and names unnamed authors through the authors route.
+- **I9c:** the setting in Settings, with §13.1's description and the warning.
+- **I10:** amended to the content-free signal (§9).
+- **I11a:** `conch admin directory settings [--hide-members on|off]`, printing the warning.
+- **I12:** docs/deploy.md carries §13.1's description.
+
+**I14a. server: hide members from each other (#964).** Size M; labels `security` (it
+writes no membership, so it is not `approval-path`). Depends on ADR-013 accepted and O14
+answered, then I4 (the directory and the manager-add change), I3b (self-join and leave are
+the membership changes most likely to move a viewer's set) and I6a (the joiner list). It
+builds I10's server half if I10 has not landed.
+
+*Files:* `pkg/schema/directory.go`, a new `pkg/schema/channel_author.go`, `vocabularies.go`,
+`ts.go`, `pkg/schema/testdata/` (unless I1 carried them); `internal/server/store/` (the
+setting's reader and writer, `knowsTx` and `knownPrincipalsSQL` beside `isMemberTx`, the
+authors query); `internal/server/routes.go` (two directory-settings routes, the authors
+route, the reauth entry); `internal/server/directory.go` (I4's handler); `members.go`
+(manager add); the v2 invite handlers (joiners); `events_ws.go` (the `eventDirectory` kind
+and its targeting); `channels.go` (the warning); a new guard test beside
+`visibility_guard_test.go`; `e2e/isolation/world.go`, `markers.go`, `matrix.go`.
+
+*Acceptance criteria:*
+
+- `hide_members` defaults to false and an absent row reads false; with it off, every answer
+  is byte-identical to the server before I14a (the existing directory, members and invite
+  tests pass unchanged).
+- `GET /v1/directory/settings` is operators'; `PUT` is O1's class, needs recent
+  authentication, writes one `directory_settings_changed` row per change and none for a
+  no-op, and answers `default_channel_shared` when a default channel exists.
+- The predicate is one store function and one SQL fragment; the guard test fails on a
+  member-facing query over `principals` that bypasses it.
+- With it on, the directory, manager add and the joiner list answer exactly as §13.3 and
+  §13.4 say; `scope` is right for each viewer; every `after` is a listed id.
+- Unknown and not-known principals answer one byte-identical 404 on every id- and
+  name-addressed member route.
+- `GET /v1/channels/{channel}/authors` answers per §13.5 and goes through `messageVisible`.
+- `conch.directory_changed.v1` reaches exactly the viewers §13.6 lists, coalesced under the
+  floor, and never one whose answer did not change.
+- Marking a channel default while the setting is on answers `default_channel_shared`.
+- The isolation phase of §13.9 passes in CI with bob's name and id as markers for alice.
+
+*Required tests:*
+
+- Store, table-driven: every predicate clause alone and combined; setting off; an operator
+  viewer; a demoted operator (the role at the request); public and private shared channels;
+  the inviter clause (O14b); disabled, hidden and guest targets excluded by the base set
+  whatever the predicate says.
+- Directory: the #964 example (owner, alice, bob, plus carol and the agent); paging with
+  `limit=1` showing no cursor at an unlisted id; guest and agent 403; operator sees all.
+- Manager add by id and by name: bob, a ghost, a hidden principal and an ended guest answer
+  identical bytes; carol is added under O14b.
+- Remove: a non-member id that exists and one that does not answer the same.
+- Authors route: a departed author named; a whisper not to the caller does not count; a
+  guest's history bound is respected; ids over the cap 400 `invalid_request`; a non-member
+  gets the ghost channel's 404 bytes.
+- Signal: no frame to alice when bob joins B; one when bob joins C; one to everyone on a
+  toggle; frames coalesce under the floor; none with the setting off for a membership change.
+- Settings route: access per O1, recent authentication, audit, no-op, warning.
+- A toggle on then off returns every viewer's directory to the full list.
+- The isolation phase (§13.9).
+
+**I14b. web, cli and tui: hide members.** Size S; no special label. Depends on I14a, I9b,
+I9c, I11a.
+
+*Files:* the browser's Settings and member panel and `Conversation.tsx`'s author naming;
+the events socket client; `internal/cli` (`conch admin directory settings`, author naming
+in history); the TUI's member pane; their tests.
+
+*Acceptance criteria:* the setting can be read and set from the browser and the CLI with
+§13.1's description and the warning shown; the member panel says "You see the people you
+share a channel with" when `scope` is `shared_channels`; on `conch.directory_changed.v1`
+the browser re-reads and replaces its people cache and autocomplete candidates; departed
+authors are named through the authors route in the browser, the CLI and the TUI, and fall
+back to the id only when the route does not answer.
+
+*Required tests:* unit tests with mocked fetch for the toggle, the scope line, the cache
+replacement (a name no longer in the list is gone from the panel and from autocomplete)
+and author naming; one Playwright test of the toggle, phone layout included; CLI
+hostile-server tests for the new verb; a TUI pane test; `make web-check`.
