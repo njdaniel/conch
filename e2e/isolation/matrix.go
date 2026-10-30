@@ -181,6 +181,7 @@ func matrixRows() []row {
 	}
 	bChannel := func(w *world) string { return w.b.main() }
 	transmit := schema.VoiceTransmitReportV1{State: schema.VoiceTransmitStateStarted}
+	companion := schema.VoiceCompanionRequestV1{Publish: schema.VoiceCompanionPublishScreen, Subscribe: true}
 	return []row{
 		// Sockets: refused before the upgrade.
 		byChannel("GET /v0/ws", "opens the v0 message socket of A's channel", func(_ *world, s subject) probe { return sock("/v0/ws", s.name, nil, false) }),
@@ -386,6 +387,8 @@ func matrixRows() []row {
 		byChannel("POST /v1/channels/{channel}/voice/transmit", "reports transmitting in A's channel", func(_ *world, s subject) probe { return post(ch(s)+"/voice/transmit", transmit) }),
 		byChannel("POST /v1/channels/{channel}/voice/share", "claims A's room's share", func(_ *world, s subject) probe { return post(ch(s)+"/voice/share", nil) }),
 		byChannel("DELETE /v1/channels/{channel}/voice/share", "stops A's room's share", func(_ *world, s subject) probe { return del(ch(s) + "/voice/share") }),
+		byChannel("POST /v1/channels/{channel}/voice/companion", "asks for a screen companion in A's room", func(_ *world, s subject) probe { return post(ch(s)+"/voice/companion", companion) }),
+		byChannel("DELETE /v1/channels/{channel}/voice/companion", "removes a companion from A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/companion") }),
 		byChannel("GET /v1/channels/{channel}/voice", "reads A's voice presence", func(_ *world, s subject) probe { return get(ch(s) + "/voice") }),
 
 		// Sessions, runs and interventions.

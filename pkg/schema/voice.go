@@ -143,11 +143,22 @@ type VoiceSessionResponseV1 struct {
 	// returned exactly as configured.
 	LivekitURL string `json:"livekit_url"`
 	// Identity is the caller's LiveKit participant identity, the same in
-	// every room. One principal holds one connection per room; a second
-	// connection with the same identity displaces the first.
+	// every room. One principal holds one own connection per room; a second
+	// connection with the same identity displaces the first. A companion or
+	// viewer under a derived identity (VoiceCompanionResponseV1) is folded
+	// into the person, so the wire invariant of one participant entry per
+	// principal stands.
 	Identity string `json:"identity"`
 	// Rooms lists one grant per room the caller may join.
 	Rooms []VoiceRoomGrant `json:"rooms"`
+	// CompanionIdentity is the identity conchd would issue the caller's
+	// companion under in these rooms (p<id>.screen), present whenever a
+	// session is issued (issue #933). A voice client that plays remote audio
+	// never subscribes to a track of this participant: it is the person's own
+	// screen share, and playing it back would only duplicate it. It is not a
+	// credential and admits nobody to anything. Omitted by a server older than
+	// this field, so a client reading an absent value needs no rule for it.
+	CompanionIdentity string `json:"companion_identity,omitempty"`
 }
 
 // Validate reports whether the response is structurally well-formed: a
@@ -161,6 +172,9 @@ func (r VoiceSessionResponseV1) Validate() error {
 	}
 	if r.Identity == "" {
 		return errors.New("schema: voice session identity is required")
+	}
+	if r.CompanionIdentity != "" && r.CompanionIdentity == r.Identity {
+		return errors.New("schema: voice session companion_identity must differ from identity")
 	}
 	if len(r.Rooms) == 0 {
 		return errors.New("schema: voice session rooms must list at least one grant")
@@ -267,8 +281,9 @@ type VoicePresenceRoom struct {
 // Validate reports whether the room is structurally well-formed: a present
 // audience satisfies Audience.Validate, every participant is well-formed, no
 // principal is listed twice, and at most one participant is sharing. One
-// principal holds one connection per room (a second device displaces the
-// first), and a room has one screen share at a time, so either duplicate is a
+// principal holds one own connection per room (a second device displaces the
+// first; a companion or viewer under a derived identity is folded into the
+// person, issue #933), and a room has one screen share at a time, so either duplicate is a
 // conchd bug, not a state. Order is not checked.
 func (r VoicePresenceRoom) Validate() error {
 	if r.Audience != nil {

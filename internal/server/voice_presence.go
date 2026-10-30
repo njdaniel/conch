@@ -220,6 +220,11 @@ type voiceRoomState struct {
 	// them, by principal (voice_presence.go, applyRoom). Guarded by
 	// voicePoller.mu.
 	companions map[int64]voiceCompanion
+	// screenIssued is when a p<id>.screen token was last signed for the room,
+	// by principal (issue #933): until a pass can have listed the companion it
+	// counts as present, so two quick requests get one token. Guarded by
+	// voicePoller.mu.
+	screenIssued map[int64]time.Time
 	// claims puts the room's share claims, stops and withdrawals in one
 	// order, so that none takes away a grant another has just made. It is
 	// held across the LiveKit call that grants or withdraws, and is taken

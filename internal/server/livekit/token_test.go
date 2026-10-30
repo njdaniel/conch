@@ -176,3 +176,76 @@ func TestJoinTokensAreDistinct(t *testing.T) {
 		t.Errorf("an admin token carries jti %v", cl["jti"])
 	}
 }
+
+// The companion's and the viewer's grants (issue #933), decoded from the
+// signed token. The person's own token is asserted by TestJoinToken and does
+// not change.
+func TestJoinTokenCompanionGrants(t *testing.T) {
+	tests := []struct {
+		name      string
+		companion *CompanionJoin
+		identity  string
+		want      map[string]any
+	}{
+		{
+			name: "companion that subscribes", companion: &CompanionJoin{CanSubscribe: true, PublishScreen: true}, identity: "p7.screen",
+			want: map[string]any{
+				"roomJoin": true, "room": "conch-abc", "canSubscribe": true,
+				"canPublish": true, "canPublishData": false, "canPublishSources": []any{"screen_share"},
+			},
+		},
+		{
+			name: "publish-only companion", companion: &CompanionJoin{PublishScreen: true}, identity: "p7.screen",
+			want: map[string]any{
+				"roomJoin": true, "room": "conch-abc", "canSubscribe": false,
+				"canPublish": true, "canPublishData": false, "canPublishSources": []any{"screen_share"},
+			},
+		},
+		{
+			name: "viewer", companion: &CompanionJoin{CanSubscribe: true}, identity: "p7.view",
+			want: map[string]any{
+				"roomJoin": true, "room": "conch-abc", "canSubscribe": true,
+				"canPublish": false, "canPublishData": false, "canPublishSources": []any{},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testClient(t, "http://unused")
+			tok, err := c.JoinToken(JoinParams{Identity: tt.identity, Room: "conch-abc", Companion: tt.companion, Lifetime: 15 * time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, claims := decodeJWT(t, tok, "s3cret-value")
+			if claims["sub"] != tt.identity {
+				t.Errorf("sub = %v, want %s", claims["sub"], tt.identity)
+			}
+			if !reflect.DeepEqual(claims["video"], tt.want) {
+				t.Errorf("video = %v, want %v", claims["video"], tt.want)
+			}
+			if _, hidden := claims["video"].(map[string]any)["hidden"]; hidden {
+				t.Error("a companion grant sets hidden")
+			}
+			if got, want := claims["exp"], float64(testNow.Add(15*time.Second).Unix()); got != want {
+				t.Errorf("exp = %v, want %v", got, want)
+			}
+			// The empty list is an empty array on the wire, never null.
+			if raw := strings.Split(tok, ".")[1]; tt.name == "viewer" {
+				body, _ := base64.RawURLEncoding.DecodeString(raw)
+				if !strings.Contains(string(body), `"canPublishSources":[]`) {
+					t.Errorf("viewer claims %s do not carry an empty source array", body)
+				}
+			}
+		})
+	}
+}
+
+// A caller cannot combine the person's microphone right with a companion's
+// grant.
+func TestJoinTokenCompanionRefusesCanPublish(t *testing.T) {
+	c := testClient(t, "http://unused")
+	tok, err := c.JoinToken(JoinParams{Identity: "p7.screen", Room: "r", CanPublish: true, Companion: &CompanionJoin{PublishScreen: true}, Lifetime: time.Second})
+	if err == nil || tok != "" {
+		t.Fatalf("token %q, err %v; want an error", tok, err)
+	}
+}

@@ -1,0 +1,9 @@
+{
+  "livekit_url": "wss://voice.example",
+  "identity": "p7.screen",
+  "room": "conch-k3m7q2x9v4t1b8n6w5z0r2c4e6",
+  "token": "fixture-token-companion-7-not-a-real-credential",
+  "publish": "screen",
+  "subscribe": true,
+  "expires_at": "2026-10-09T12:00:45.000Z"
+}

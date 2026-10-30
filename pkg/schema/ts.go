@@ -141,6 +141,9 @@ var TSTypes = []TSType{
 	{Value: VoiceShareEnded{}},
 	{Value: VoicePresenceV1{}, Family: "voice-presence-v1", Schema: VoicePresenceSchemaV1},
 	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
+	// Companion and viewer participants (issue #933).
+	{Value: VoiceCompanionRequestV1{}, Family: "voice-companion-request-v1"},
+	{Value: VoiceCompanionResponseV1{}, Family: "voice-companion-response-v1"},
 	// Screen share (issue #443): the claim the page is given when the room's
 	// share is its own. Presence says who shares (VoiceParticipant above).
 	{Value: VoiceShareV1{}, Family: "voice-share-v1"},

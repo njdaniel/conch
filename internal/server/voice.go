@@ -235,6 +235,10 @@ type voiceAudience struct {
 	// label names the grant in the audit detail, e.g. "channel:publish".
 	label string
 	room  func(context.Context) (store.VoiceRoom, error)
+	// companion is nil for the person's own grant. Set, the token is the
+	// companion's or the viewer's (voice_companion.go) and canPublish stays
+	// false.
+	companion *livekit.CompanionJoin
 }
 
 // voiceAudiences lists the rooms principal p may join in channel ch. In V3
@@ -282,7 +286,12 @@ func (s *Server) voiceSession(ctx context.Context, p store.Principal, ch store.C
 	if !ok {
 		return schema.VoiceSessionResponseV1{}, nil, errors.New("voice: the request carries no credential to record")
 	}
-	resp := schema.VoiceSessionResponseV1{LivekitURL: s.cfg.LiveKit.URL, Identity: identity}
+	resp := schema.VoiceSessionResponseV1{
+		LivekitURL: s.cfg.LiveKit.URL, Identity: identity,
+		// Not a credential: tells a voice client whose screen share to leave
+		// unplayed (issue #933).
+		CompanionIdentity: voiceParticipantIdentity(p.ID, voiceRoleScreen),
+	}
 	var labels []string
 	for _, a := range s.voiceAudiences(p, ch) {
 		grant, err := s.voiceGrant(ctx, p, ch, credID, identity, a)
@@ -387,6 +396,7 @@ func (s *Server) voiceGrantOnce(ctx context.Context, p store.Principal, ch store
 		Identity:   identity,
 		Room:       room.RoomName,
 		CanPublish: a.canPublish,
+		Companion:  a.companion,
 		Lifetime:   voiceTokenLifetime,
 	})
 	if err != nil {
