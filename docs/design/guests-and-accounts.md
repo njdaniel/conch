@@ -348,9 +348,14 @@ UTF-8 password bound after normalization).
 
 The upper bound, the absence of composition rules and the blocklist follow
 [NIST SP 800-63B](https://pages.nist.gov/800-63-4/sp800-63b.html), without claiming NIST
-certification; its minimum length is deliberately not applied (#975). The blocklist,
-name checks and repetition rule still hold a short password to the same rules as a long
-one, and sign-in rate limits are unchanged. Hashing guidance:
+certification; its minimum length is deliberately not applied (#975). The name checks
+and the repetition rule hold a short password to the same rules as a long one. The
+repetition rule refuses a unit of at most four characters written at least twice, so
+`aaaa` and `abab` are refused and an ordinary short word such as `test` is not; a
+password of nothing but spaces is refused. The bundled blocklist has no entry shorter
+than 13 characters, so in practice it does not apply to short passwords: `password` and
+`123456` are accepted. Sign-in rate limits are unchanged (five failures per name per ten
+minutes), and they are what stands between a short password and guessing. Hashing guidance:
 [OWASP Password Storage](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html).
 
 Login failures for unknown, wrong-password, disabled, hidden, guest or legacy-unset-password

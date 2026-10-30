@@ -281,13 +281,27 @@ func TestCheckPasswordPolicy(t *testing.T) {
 		{"two of one letter", "zz", nil, false},
 		{"only the account's name", "Wren", []string{"wren"}, false},
 		{"a short name inside a short password", "beekeep", []string{"bee"}, true},
+		// Ordinary short words whose last letters restart them are not one
+		// unit repeated: a repetition is two whole copies or more.
+		{"test", "test", nil, true},
+		{"noon", "noon", nil, true},
+		{"tent", "tent", nil, true},
+		{"eve", "eve", nil, true},
+		{"salsa", "salsa", nil, true},
+		{"radar", "radar", nil, true},
+		{"three letters twice", "abcabc", nil, false},
+		{"one pair two and a half times", "ababa", nil, false},
+		// Nothing but spaces has no letter for any rule to see.
+		{"one space", " ", nil, false},
+		{"spaces", "    ", nil, false},
+		{"a tab", "\t", nil, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := checkPasswordPolicy(tt.password, tt.words...)
 			if (err == nil) != tt.ok {
 				t.Fatalf("checkPasswordPolicy = %v, want acceptable %v", err, tt.ok)
 			}
-			if err != nil && (!errors.Is(err, errPasswordUnacceptable) || strings.Contains(err.Error(), tt.password)) {
+			if err != nil && (!errors.Is(err, errPasswordUnacceptable) || (strings.TrimSpace(tt.password) != "" && strings.Contains(err.Error(), tt.password))) {
 				t.Errorf("error %q: want errPasswordUnacceptable, without the password", err)
 			}
 		})
