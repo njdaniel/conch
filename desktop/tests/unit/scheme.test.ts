@@ -30,6 +30,9 @@ describe('resolve', () => {
     ['conch-app://ui/index.html', '/index.html'],
     ['conch-app://ui/assets/app-AbC_1-2.js', '/assets/app-AbC_1-2.js'],
     ['conch-app://ui/favicon-32.png', '/favicon-32.png'],
+    // The client routes by fragment, and a reload hands it to the handler.
+    ['conch-app://ui/#/c/general', '/index.html'],
+    ['conch-app://ui/index.html#x', '/index.html'],
   ];
   it.each(served)('serves %s as %s', (url, path) => {
     const r = resolve(url, m);
@@ -46,7 +49,9 @@ describe('resolve', () => {
     ['a host that only starts with ui', 'conch-app://ui.evil/index.html'],
     ['a query', 'conch-app://ui/index.html?x=1'],
     ['an empty query', 'conch-app://ui/index.html?'],
-    ['a fragment', 'conch-app://ui/index.html#x'],
+    ['a query before a fragment', 'conch-app://ui/index.html?x=1#a'],
+    ['a fragment on a file the manifest lacks', 'conch-app://ui/nope.js#x'],
+    ['a fragment on another host', 'conch-app://other/#x'],
     ['a dot-dot segment', 'conch-app://ui/assets/../index.html'],
     ['a leading dot-dot', 'conch-app://ui/../index.html'],
     ['a dot segment', 'conch-app://ui/./index.html'],

@@ -77,7 +77,13 @@ export type Resolution =
 // the authority differ from "ui"), a query, a fragment, a dot segment, a
 // percent escape, a backslash, a control character, an empty segment, or a
 // path the manifest does not list.
-export function resolve(rawUrl: string, manifest: Manifest): Resolution {
+export function resolve(requested: string, manifest: Manifest): Resolution {
+  // A fragment names no file and is never part of what a document is fetched
+  // by, but Chromium hands it to the handler when a page that has one is
+  // reloaded (the client routes by "#/c/<channel>"), and refusing it made the
+  // reload of a signed-in window a 404 (found by the packaged REST smoke test,
+  // issue #942). So it is dropped here; a query is still refused.
+  const rawUrl = requested.replace(/#.*$/su, '');
   const m = URL_RE.exec(rawUrl);
   if (m === null) return { kind: 'missing' };
   const [, authority, rawPath = '', query, fragment] = m;

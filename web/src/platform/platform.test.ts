@@ -16,8 +16,8 @@ describe('the platform', () => {
     window.localStorage.clear();
     const store = platform.credentials;
     expect(store.read()).toBeNull();
-    expect(store.write('member', 'lasting')).toBe(true);
-    expect(store.write('operator', 'tab')).toBe(true);
+    expect(store.write('member', 'lasting')).toEqual({ token: 'member', place: 'lasting' });
+    expect(store.write('operator', 'tab')).toEqual({ token: 'operator', place: 'tab' });
     // The tab's own comes first.
     expect(store.read()).toEqual({ token: 'operator', place: 'tab' });
     expect(store.isStored({ token: 'member', place: 'lasting' })).toBe(true);
@@ -30,23 +30,13 @@ describe('the platform', () => {
   });
 });
 
-describe('the desktop stub', () => {
-  it('answers every operation as a server that cannot be reached', async () => {
+describe('the desktop platform', () => {
+  it('is the desktop’s, offers no browser voice and keeps no web storage', () => {
     expect(desktop.name).toBe('desktop');
-    const call = { op: 'whoami' } as const;
-    await expect(desktop.http.get(call, 't')).rejects.toBeInstanceOf(TypeError);
-    await expect(desktop.http.send(call, 't', { keepalive: false })).rejects.toBeInstanceOf(TypeError);
-    await expect(desktop.http.open(call)).rejects.toBeInstanceOf(TypeError);
-    await expect(desktop.http.health({ op: 'health' })).rejects.toBeInstanceOf(TypeError);
-    expect(() => desktop.sockets.open('messagesSocket', {})).toThrow(TypeError);
-  });
-
-  it('keeps no credential, offers no notification and no browser voice', () => {
-    expect(desktop.credentials.read()).toBeNull();
-    expect(desktop.credentials.write('t', 'lasting')).toBe(false);
-    expect(desktop.services.notifications.supported()).toBe(false);
-    expect(desktop.services.notifications.permission()).toBe('unsupported');
     expect(desktop.services.browserVoice).toBe(false);
+    expect(desktop.services.notifications.supported()).toBe(false);
+    expect(desktop.Shell).toBeDefined();
+    expect(browser.Shell).toBeUndefined();
   });
 });
 
@@ -61,6 +51,8 @@ describe('the desktop bridge type', () => {
       request: true,
       subscribe: true,
       restore: true,
+      signInWithCredential: true,
+      keepCredential: true,
       signInWithPassword: true,
       signInWithCode: true,
       redeemInvite: true,
@@ -72,6 +64,6 @@ describe('the desktop bridge type', () => {
       createAccount: true,
       signOut: true,
     };
-    expect(Object.keys(named)).toHaveLength(15);
+    expect(Object.keys(named)).toHaveLength(17);
   });
 });

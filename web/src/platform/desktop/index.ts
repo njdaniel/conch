@@ -1,43 +1,43 @@
-// The desktop shell's platform, selected only by vite build --mode desktop. In
-// this issue (D2-2) it is a stub: every operation answers as a server that
-// cannot be reached, the credential is kept nowhere, and no service is
-// offered. D2-3 and later replace it with the typed client of
-// window.conchDesktop (./bridge). The browser build never contains this file.
-import type { CredentialStore, FeedConnection, Platform } from '../types';
+// The desktop shell's platform, selected only by vite build --mode desktop.
+// Every request goes through window.conchDesktop to the main process, which
+// holds the bearer (issue #942, D2-3); the renderer holds a stand-in. The
+// browser build never contains this directory.
+//
+// Not yet here: live feeds (#943, so a view is not live until then), the
+// clipboard, notifications and external links (#947, #773), attachments
+// (#947), and the operations whose answers hold a credential the renderer may
+// not see (an operator's re-authentication, a password change, an invite
+// code, a device link, which main will carry in later children).
+import type { FeedConnection, Platform } from '../types';
+import { credentials } from './credentials';
+import { http } from './http';
+import { DesktopShell } from './Shell';
+import { serverOrigin } from './state';
 
-const unreachable = (): Promise<never> => Promise.reject(new TypeError('conchd cannot be reached from the desktop shell yet'));
-
-const credentials: CredentialStore = {
-  read: () => null,
-  isStored: () => false,
-  write: () => false,
-  drop: () => undefined,
-  onLastingChange: () => () => undefined,
-  readPreference: () => null,
-  writePreference: () => undefined,
-};
+const later = (what: string) => (): Promise<never> => Promise.reject(new TypeError(`${what} is not available in the desktop app yet`));
 
 export const platform: Platform = {
   name: 'desktop',
-  http: { get: unreachable, send: unreachable, open: unreachable, health: unreachable, upload: unreachable, download: unreachable },
+  http,
   sockets: {
     open(): FeedConnection {
-      throw new TypeError('conchd cannot be reached from the desktop shell yet');
+      throw new TypeError('live feeds are not available in the desktop app yet');
     },
   },
   credentials,
   services: {
-    origin: () => '',
-    copyText: unreachable,
+    origin: serverOrigin,
+    copyText: later('Copying'),
     notifications: {
       supported: () => false,
       permission: () => 'unsupported',
       request: () => Promise.resolve('unsupported'),
       show() {
-        throw new TypeError('no notifications in the desktop shell yet');
+        throw new TypeError('notifications are not available in the desktop app yet');
       },
     },
     externalLink: { rel: 'noopener noreferrer' },
     browserVoice: false,
   },
+  Shell: DesktopShell,
 };

@@ -59,8 +59,9 @@ describe('credential handling', () => {
     // and convertGuest (issue #713), which keeps the member's credential a
     // guest's Create an account gives, and keepRotated (issue #714), which
     // keeps the credential a password change rotates this page's into, in
-    // the place of the one the server revoked.
-    expect(code.match(/\bpinned = \{|\bpinned = held\b/g)?.length ?? 0).toBe(6);
+    // the place of the one the server revoked. Each pins what the store says
+    // it kept (kept, or held), which for the desktop's is its stand-in.
+    expect(code.match(/\bpinned = \{|\bpinned = (held|kept)\b/g)?.length ?? 0).toBe(6);
   });
 
   it('is not placed in a URL: the only fetch sends it as a header', () => {
@@ -200,7 +201,7 @@ describe('media devices', () => {
       .filter(([, code]) => tokenRead.test(code))
       .map(([path]) => path)
       .filter((path) => path !== './api.ts' && notVoice(path));
-    expect(touching).toEqual(['./platform/browser/credentials.ts']);
+    expect(touching).toEqual(['./platform/browser/credentials.ts', './platform/desktop/credentials.ts']);
   });
 
   it('are not mentioned by a pattern the rule would miss: a bare test of each rule', () => {
@@ -600,7 +601,7 @@ describe('the built bundle', () => {
 
 // A string only the desktop stub holds, so that a bundle that holds it holds
 // the desktop adapter.
-const desktopMarker = 'cannot be reached from the desktop shell yet';
+const desktopMarker = 'the desktop bridge is missing';
 
 // Where the built bundle may name localStorage, and how many times.
 //
@@ -716,7 +717,7 @@ describe('the platform seam', () => {
       .filter(([, code]) => /from\s+['"](\.\.?\/)+(platform\/)?operations['"]/.test(code))
       .map(([path]) => path)
       .sort();
-    expect(reading).toEqual(['./api.ts', './platform/browser/http.ts', './platform/browser/sockets.ts', './platform/desktop/bridge.ts', './platform/types.ts']);
+    expect(reading).toEqual(['./api.ts', './platform/browser/http.ts', './platform/browser/sockets.ts', './platform/desktop/bridge.ts', './platform/desktop/http.ts', './platform/types.ts']);
   });
 
   it('keeps the desktop adapter out of the browser graph', () => {

@@ -1,8 +1,8 @@
 // The type of window.conchDesktop: the narrow surface the desktop preload
 // (desktop/preload) exposes to the renderer, and that the desktop adapter in
 // this directory calls (issue #770; design docs/design/linux-desktop.md §4).
-// Types only. The preload implements it in D2-3 and D2-4; nothing here is
-// code that runs.
+// Types only. The preload implements it (desktop/preload, D2-3 and D2-4);
+// nothing here is code that runs.
 //
 // The rules the type holds to:
 //  - named functions only: no channel argument, no event object, no Electron
@@ -48,22 +48,49 @@ export interface BridgeRequest {
   readonly keepalive?: boolean;
 }
 
+// Why main had no answer to give (BridgeReply none). certificate is a server
+// whose TLS certificate this machine does not trust (never overridden);
+// redirect is an answer that tried to send the request elsewhere (refused, and
+// the credential was not sent there); oversize and invalid are an answer that
+// was too large or not the document the operation promises; stale is an answer
+// for an identity that has since ended; unsupported is an operation the
+// desktop shell cannot do yet; no-server is a request made before an address
+// was set.
+export type NoAnswerReason = 'certificate' | 'redirect' | 'oversize' | 'invalid' | 'stale' | 'unsupported' | 'no-server';
+
 // What main answers. A reply is the server's answer with its body already
 // validated against the operation's response validator (body is undefined for
-// an answer with no document); none is no answer at all; unauthorized is a 401
-// that signed this window out.
+// an answer with no document; a refusal's body is its error document). none is
+// no answer at all; unauthorized is a 401 that signed this window out.
+// retryAfter and requestId are the two response headers the client reads.
 export type BridgeReply =
-  | { readonly kind: 'reply'; readonly status: number; readonly body?: unknown }
-  | { readonly kind: 'none' }
+  | { readonly kind: 'reply'; readonly status: number; readonly body?: unknown; readonly retryAfter?: number; readonly requestId?: string }
+  | { readonly kind: 'none'; readonly reason?: NoAnswerReason }
   | { readonly kind: 'unauthorized' };
 
-// The sign-in family returns the signed-in account, never a credential. A
-// refusal is a kind; challenge is a right password for an account that also
-// needs a code, and expiresAt is when that challenge ends.
+// The server's refusal of a sign-in step, as the client reads it: the status,
+// the error document's code and message, and the Retry-After header.
+export interface SignInRefusal {
+  readonly status: number;
+  readonly code?: string;
+  readonly message?: string;
+  readonly retryAfter?: number;
+  readonly requestId?: string;
+}
+
+// The sign-in family returns the signed-in account, never a credential.
+// answer is the server's own answer with every credential field removed (the
+// client puts a stand-in where the token was; nothing in the renderer may hold
+// one); who is the account, null when the step signs nobody in (a reset
+// password). A refusal carries the server's refusal; challenge is a right
+// password for an account that also needs a code: the challenge is a handle
+// that only main can redeem, and expiresAt is when it ends.
 export type SignInOutcome =
-  | { readonly ok: true; readonly who: WhoAmIResponseV1 }
-  | { readonly ok: false; readonly kind: 'network' | 'unauthorized' | 'invalid' | 'unkept'; readonly code?: string }
-  | { readonly ok: false; readonly kind: 'challenge'; readonly expiresAt: string };
+  | { readonly ok: true; readonly who: WhoAmIResponseV1 | null; readonly answer: Readonly<Record<string, unknown>> }
+  | ({ readonly ok: false; readonly kind: 'unauthorized' | 'invalid' } & SignInRefusal)
+  | { readonly ok: false; readonly kind: 'network'; readonly reason?: NoAnswerReason }
+  | { readonly ok: false; readonly kind: 'unkept' }
+  | { readonly ok: false; readonly kind: 'challenge'; readonly challenge: string; readonly expiresAt: string };
 
 export type SignOutOutcome = 'ended' | 'unconfirmed' | 'unsent';
 
@@ -102,6 +129,13 @@ export interface ConchDesktopBridge {
   // Sign in, and the other operations that give a credential. The secret is
   // accepted for its operation alone; main consumes the token the answer holds.
   restore(): Promise<SignInOutcome>;
+  // A credential the person pasted (an operator's or a script's): main checks
+  // it with whoami and sets it aside, not yet in force.
+  signInWithCredential(credential: string): Promise<SignInOutcome>;
+  // Puts in force the credential signInWithCredential set aside, when the page
+  // keeps it (for an operator's, once the person passed the warning). false
+  // when it is not the one set aside, or it lapsed.
+  keepCredential(credential: string): Promise<boolean>;
   signInWithPassword(request: LoginRequestV1): Promise<SignInOutcome>;
   signInWithCode(request: TOTPLoginRequestV1): Promise<SignInOutcome>;
   redeemInvite(request: RedeemInviteRequestV2): Promise<SignInOutcome>;
