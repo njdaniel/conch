@@ -147,6 +147,8 @@ func TestMessageEditTriggers(t *testing.T) {
 		want       string
 	}{
 		{"id", "UPDATE messages SET id = 999999 WHERE id = ?", []any{msg}, "only a message body"},
+		// The rowid alias changes id without naming the column (security review).
+		{"rowid", "UPDATE messages SET rowid = 999999 WHERE id = ?", []any{msg}, "only a message body"},
 		{"channel_id", "UPDATE messages SET channel_id = ? WHERE id = ?", []any{f.other.ID, msg}, "only a message body"},
 		{"author_id", "UPDATE messages SET author_id = ? WHERE id = ?", []any{f.bob.ID, msg}, "only a message body"},
 		{"created_at", "UPDATE messages SET created_at = 1 WHERE id = ?", []any{msg}, "only a message body"},
@@ -401,7 +403,7 @@ func TestEditOwnMessageSearch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := f.s.db.Exec(`INSERT INTO messages_fts (messages_fts) VALUES ('integrity-check')`); err != nil {
+	if _, err := f.s.db.Exec(`INSERT INTO messages_fts (messages_fts, rank) VALUES ('integrity-check', 1)`); err != nil {
 		t.Errorf("FTS5 integrity-check after edits: %v", err)
 	}
 	if got := search(rdr(f.bob), "number8"); fmt.Sprint(got) != fmt.Sprint([]int64{msg}) {

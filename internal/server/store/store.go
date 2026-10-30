@@ -906,9 +906,14 @@ END`,
 BEGIN SELECT RAISE(ABORT, 'message revisions are append-only'); END`,
 		`CREATE TRIGGER message_revisions_no_delete BEFORE DELETE ON message_revisions
 BEGIN SELECT RAISE(ABORT, 'message revisions are append-only'); END`,
-		`CREATE TRIGGER messages_only_body_changes
-BEFORE UPDATE OF id, channel_id, author_id, created_at, payload_schema, payload_json,
-                 audience_kind, net_id, thread_root_id ON messages
+		// A value comparison, not "UPDATE OF <columns>": the column list does not
+		// fire for an update through the rowid alias, which would change id.
+		`CREATE TRIGGER messages_only_body_changes BEFORE UPDATE ON messages
+WHEN NEW.id IS NOT OLD.id OR NEW.channel_id IS NOT OLD.channel_id
+  OR NEW.author_id IS NOT OLD.author_id OR NEW.created_at IS NOT OLD.created_at
+  OR NEW.payload_schema IS NOT OLD.payload_schema OR NEW.payload_json IS NOT OLD.payload_json
+  OR NEW.audience_kind IS NOT OLD.audience_kind OR NEW.net_id IS NOT OLD.net_id
+  OR NEW.thread_root_id IS NOT OLD.thread_root_id
 BEGIN SELECT RAISE(ABORT, 'only a message body and edited_at may change'); END`,
 		`CREATE TRIGGER messages_edited_at_forward BEFORE UPDATE OF edited_at ON messages
 WHEN NEW.edited_at IS NULL OR NEW.edited_at <= COALESCE(OLD.edited_at, OLD.created_at)
