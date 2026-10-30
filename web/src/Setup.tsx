@@ -44,7 +44,7 @@ function refusalLine(result: Refusal): string {
     case 'auth_failed':
       return 'That code is not right. Check that the app’s clock is right, and try the next code it shows.';
     case 'password_unacceptable':
-      return 'That password is too common, or has your name in it. Choose another.';
+      return 'That password is too common, a repeated pattern such as aaaa, blank, or has your name in it. Choose another.';
     case 'rate_limited':
       return `Too many tries. Try again in ${waitWords(result.retryAfter)}.`;
     case 'totp_already_enrolled':

@@ -508,6 +508,19 @@ describe('Create an account during a visit', () => {
     expectNoSecret(container, guestToken, memberToken, password);
   });
 
+  it('sends a short password, as the server decides on the rest (issue #977)', async () => {
+    const calls = serve(converting(() => json(converted)));
+    render(<App origin={origin} />);
+    await joinAsGuest();
+    await openForm();
+    fillAccount('pat', 'tide', 'tide');
+    fireEvent.click(screen.getByRole('button', { name: 'Create my account' }));
+    await waitFor(() => {
+      expect(calls.find((c) => c.path === '/v1/guest/convert')).toMatchObject({ body: { name: 'pat', password: 'tide' } });
+    });
+    expect(screen.queryByText(/at least 15/)).toBeNull();
+  });
+
   it('changes nothing on cancel', async () => {
     const calls = serve(converting(() => json(converted)));
     render(<App origin={origin} />);
@@ -522,7 +535,7 @@ describe('Create an account during a visit', () => {
 
   it.each([
     { name: 'two passwords that differ', fill: ['pat', password, `${password}!`], line: 'The two passwords are not the same. Type them again.' },
-    { name: 'a short password', fill: ['pat', 'too short', 'too short'], line: 'Choose a password of at least 15 characters.' },
+    { name: 'no password', fill: ['pat', '', ''], line: 'Choose a password.' },
     { name: 'no name', fill: ['', password, password], line: 'Choose a name.' },
   ])('checks $name before sending anything', async ({ fill, line }) => {
     const calls = serve(converting(() => json(converted)));
@@ -537,7 +550,7 @@ describe('Create an account during a visit', () => {
 
   it.each([
     { code: 'principal_exists', status: 409, line: 'That name is taken. Choose another.' },
-    { code: 'password_unacceptable', status: 400, line: 'That password is too common, or it contains your name. Choose another.' },
+    { code: 'password_unacceptable', status: 400, line: 'That password is too common, a repeated pattern such as aaaa, blank, or has your name in it. Choose another.' },
     { code: 'conversion_not_allowed', status: 403, line: 'Accounts cannot be made from this visit now. An operator can allow it.' },
     { code: 'https_required', status: 403, line: httpsRequiredLine },
   ])('keeps the guest as it was when the server refuses: $code', async ({ code, status, line }) => {

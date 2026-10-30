@@ -126,7 +126,7 @@ export function SignInLink({
         return;
       }
       if (result.failure === 'network') setProblem('No answer from the server, so the page cannot tell whether the password changed. Try signing in with the new one; if that fails, ask an operator for a new link.');
-      else if (result.code === 'password_unacceptable') setProblem('That password is too common, or has your name in it. Choose another.');
+      else if (result.code === 'password_unacceptable') setProblem('That password is too common, a repeated pattern such as aaaa, blank, or has your name in it. Choose another.');
       else if (result.code === 'invalid_request') setProblem(serverLine(result.message, 'The server did not take that password.'));
       else if (result.code === 'https_required') setProblem(httpsRequiredLine);
       else setProblem(refusalLine(result));

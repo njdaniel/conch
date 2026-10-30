@@ -21,7 +21,8 @@ import { expect, statusLine, test } from './fixtures';
 import { loadWorld, repoRoot, safePath, type World } from './world';
 
 const operator = 'tmp-root';
-const password = 'the temporary operator passphrase of the browser suite';
+// Four letters (issue #977): setup takes a short password; 23-operator-auth keeps a long one.
+const password = 'qzxj';
 const banner = 'Temporary server: no backups, and it may be removed. Don’t keep anything here you need.';
 // The origin the host prints its link for; the page is opened at the real one.
 const printedOrigin = 'https://setup-link.invalid';

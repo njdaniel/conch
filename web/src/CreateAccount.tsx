@@ -7,10 +7,10 @@
 // never in the page's state, and the page sends them only in a request body.
 import { useEffect, useId, useRef, useState, type SyntheticEvent } from 'react';
 
-// The password rules the server holds (pkg/schema ValidatePassword), in
-// characters: said beside the field and checked before sending, so a person
-// learns of a short one without a round trip.
-export const minPassword = 15;
+// The password bound the server holds (pkg/schema ValidatePassword), in
+// characters: checked before sending, so a person learns of a long one
+// without a round trip. There is no minimum beyond a non-empty password
+// (issue #977); the server's other rules reach the page as its own answer.
 export const maxPassword = 128;
 
 // passwordProblem is what the page can say of a chosen password and its
@@ -19,7 +19,7 @@ export const maxPassword = 128;
 export function passwordProblem(chosen: string, repeated: string): string | null {
   // In code points after NFC, as the server counts (ValidatePassword).
   const length = Array.from(chosen.normalize('NFC')).length;
-  if (length < minPassword) return `Choose a password of at least ${String(minPassword)} characters.`;
+  if (length === 0) return 'Choose a password.';
   if (length > maxPassword) return `Choose a password of at most ${String(maxPassword)} characters.`;
   if (chosen !== repeated) return 'The two passwords are not the same. Type them again.';
   return null;
@@ -119,7 +119,7 @@ export function CreateAccount({
       />
       <label htmlFor={`${id}-password`}>Choose a password</label>
       <p id={`${id}-password-help`} className="hint">
-        At least {minPassword} characters; a few words with spaces between them work well. You cannot reset it yourself: if
+        A few words with spaces between them work well. You cannot reset it yourself: if
         you forget it, an operator can send you a link to choose a new one.
       </p>
       <input

@@ -174,15 +174,29 @@ describe('changing a password', () => {
     expect(calls.some((c) => c.auth === `Bearer ${rotatedToken}` && c.method !== 'DELETE')).toBe(false);
   });
 
+  it('sends a short new password (issue #977)', async () => {
+    const calls = serve({ ...people({ [memberToken]: memberWho, [rotatedToken]: memberWho }), 'PUT /v1/password/mine': () => json(rotated) });
+    await signedIn(memberToken);
+    const region = await openPassword();
+    fill(region, 'Current password', oldPassword);
+    fill(region, 'New password', 'tide');
+    fill(region, 'Type it again', 'tide');
+    fireEvent.click(within(region).getByRole('button', { name: 'Change password' }));
+    await waitFor(() => {
+      expect(calls.filter((c) => c.path === '/v1/password/mine').map((c) => c.body)).toEqual([{ current: oldPassword, password: 'tide' }]);
+    });
+    expect(within(region).queryByText(/at least 15/)).toBeNull();
+  });
+
   it('checks the new password before sending anything', async () => {
     const calls = serve(people({ [memberToken]: memberWho }));
     await signedIn(memberToken);
     const region = await openPassword();
     fill(region, 'Current password', oldPassword);
-    fill(region, 'New password', 'too short');
-    fill(region, 'Type it again', 'too short');
+    fill(region, 'New password', '');
+    fill(region, 'Type it again', '');
     fireEvent.click(within(region).getByRole('button', { name: 'Change password' }));
-    expect(await within(region).findByText('Choose a password of at least 15 characters.')).toBeDefined();
+    expect(await within(region).findByText('Choose a password.')).toBeDefined();
     fill(region, 'New password', newPassword);
     fill(region, 'Type it again', `${newPassword}!`);
     fireEvent.click(within(region).getByRole('button', { name: 'Change password' }));
