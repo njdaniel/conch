@@ -74,6 +74,19 @@ test('G977 a four-letter password creates an account, signs in, changes and rese
   await handset.page.getByLabel('Type it again').fill(third);
   await handset.page.getByRole('button', { name: 'Set the new password' }).click();
   await expect(handset.page.getByRole('heading', { name: 'Your password is changed' })).toBeVisible();
+  // The reset code is a credential: once spent it is gone from the address,
+  // the page, storage and the requests the page made. The navigation timing
+  // entry keeps the address the document loaded from, as 13-sign-in-link
+  // explains, so it is left out.
+  const where = await handset.page.evaluate(() =>
+    [
+      location.href,
+      document.documentElement.outerHTML,
+      JSON.stringify(performance.getEntries().filter((e) => e.entryType !== 'navigation').map((e) => e.name)),
+      ...[window.localStorage, window.sessionStorage].flatMap((st) => Object.keys(st).map((k) => `${k}=${st.getItem(k) ?? ''}`)),
+    ].join('\n'),
+  );
+  expect(where, 'the reset code in the address, the page, the storage or performance.getEntries()').not.toContain(link.code);
   await handset.page.getByRole('button', { name: 'Go to sign-in' }).click();
   await signInWithPassword(handset.page, name, third);
   await expect(statusLine(handset.page)).toContainText(name);

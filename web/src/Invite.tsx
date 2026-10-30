@@ -77,7 +77,7 @@ export function accountRefusal(result: Refusal): AccountProblem | null {
     case 'principal_exists':
       return { line: 'That name is taken. Choose another.', field: 'name' };
     case 'password_unacceptable':
-      return { line: 'That password is too common, or it contains your name. Choose another.', field: 'password' };
+      return { line: 'That password is too common, a repeated pattern such as aaaa, blank, or has your name in it. Choose another.', field: 'password' };
     case 'invalid_request':
       return { line: serverLine(result.message, 'The server did not accept that name or password. Check both and try again.'), field: 'name' };
     case 'joining_closed':

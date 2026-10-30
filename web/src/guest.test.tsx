@@ -550,7 +550,7 @@ describe('Create an account during a visit', () => {
 
   it.each([
     { code: 'principal_exists', status: 409, line: 'That name is taken. Choose another.' },
-    { code: 'password_unacceptable', status: 400, line: 'That password is too common, or it contains your name. Choose another.' },
+    { code: 'password_unacceptable', status: 400, line: 'That password is too common, a repeated pattern such as aaaa, blank, or has your name in it. Choose another.' },
     { code: 'conversion_not_allowed', status: 403, line: 'Accounts cannot be made from this visit now. An operator can allow it.' },
     { code: 'https_required', status: 403, line: httpsRequiredLine },
   ])('keeps the guest as it was when the server refuses: $code', async ({ code, status, line }) => {

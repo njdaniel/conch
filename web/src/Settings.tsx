@@ -36,7 +36,7 @@ function passwordRefusal(result: { readonly failure: api.ApiFailure; readonly co
     case 'auth_failed':
       return wrong;
     case 'password_unacceptable':
-      return 'That password is too common, or has your name in it. Choose another.';
+      return 'That password is too common, a repeated pattern such as aaaa, blank, or has your name in it. Choose another.';
     case 'invalid_request':
       return serverLine(result.message, 'The server did not take that password.');
     case 'rate_limited':
