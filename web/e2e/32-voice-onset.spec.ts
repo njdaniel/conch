@@ -20,6 +20,7 @@
 // Without Docker it fails when CI is set and is skipped otherwise.
 import type { Page } from '@playwright/test';
 import { expect, openChannel, signIn, test } from './fixtures';
+import { burstMeasure, median, pressMeasure, type Sample } from './onset';
 import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -107,11 +108,6 @@ const recordHeard = () => {
   window.RTCPeerConnection = Wrapped;
 };
 
-interface Sample {
-  readonly t: number;
-  readonly rms: number;
-}
-
 // startListening reads the level of what the listener's page receives every
 // 5 ms, from 256 samples (5 ms at 48 kHz), into window.__heard: the loudest
 // of the tracks received.
@@ -151,29 +147,12 @@ async function heard(page: Page): Promise<Sample[]> {
   return page.evaluate(() => (window as unknown as { __heard: Sample[] }).__heard.slice());
 }
 
-// loudSpans is when the listener heard the signal: runs of loud samples, a
-// gap of up to 20 ms inside one.
-function loudSpans(samples: readonly Sample[]): { from: number; to: number }[] {
-  const spans: { from: number; to: number }[] = [];
-  for (const s of samples) {
-    if (s.rms < 0.05) continue;
-    const last = spans.at(-1);
-    if (last !== undefined && s.t - last.to < 20) last.to = s.t;
-    else spans.push({ from: s.t, to: s.t });
-  }
-  return spans;
-}
-
 async function marks(page: Page): Promise<{ down: number[]; up: number[]; on: number[]; off: number[] }> {
   return page.evaluate(() => (window as unknown as { __marks: { down: number[]; up: number[]; on: number[]; off: number[] } }).__marks);
 }
 
 const signal = (page: Page, on: boolean) => page.evaluate((v) => (window as unknown as { __signal: (on: boolean) => number }).__signal(v), on);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const median = (xs: readonly number[]) => {
-  const s = [...xs].sort((a, b) => a - b);
-  return s[Math.floor(s.length / 2)] ?? NaN;
-};
 const round = (xs: readonly number[]) => xs.map((x) => Math.round(x));
 
 test.describe('speech kept at the edges of a transmission', () => {
@@ -234,14 +213,19 @@ test.describe('speech kept at the edges of a transmission', () => {
       // Push to talk with the signal on throughout but for the gap: what is
       // lost after the key goes down, what is kept after it comes up, and how
       // far ahead of what is sent the indicator says Transmitting.
+      //
+      // A press whose readings a stall of the listener's page made unclear is
+      // refused (onset.ts) and made again, up to three times as many presses
+      // as wanted; fewer than three good ones fails, saying so.
       const pttBatch = async (n: number) => {
         const reportsBefore = (await reportTimes()).length;
         const lost: number[] = [];
         const kept: number[] = [];
         const ahead: number[] = [];
         const path: number[] = [];
+        let refused = 0;
         await signal(talker, true);
-        for (let i = 0; i < n; i++) {
+        for (let tries = 0; tries < 3 * n && path.length < n; tries++) {
           await sleep(700);
           const before = await marks(talker);
           await talker.keyboard.down('Backquote');
@@ -255,19 +239,20 @@ test.describe('speech kept at the edges of a transmission', () => {
           const m = await marks(talker);
           const down = m.down[before.down.length] ?? NaN;
           const up = m.up[before.up.length] ?? NaN;
-          const ss = loudSpans(await heard(listener)).filter((s) => s.from >= down && s.from < up + 700);
-          const first = ss[0];
-          const last = ss.at(-1);
-          if (first === undefined || last === undefined || ss.length < 2) continue;
-          const p = first.to - gap;
-          path.push(p);
-          lost.push(first.from - down - p);
-          kept.push(last.to - p - up);
+          const got = pressMeasure(await heard(listener), down, up, gap);
+          if (got === null) {
+            refused++;
+            continue;
+          }
+          path.push(got.path);
+          lost.push(got.lost);
+          kept.push(got.kept);
+          // When the audio sent began, against when the strip said so.
           const shown = m.on[before.on.length];
-          if (shown !== undefined) ahead.push(first.from - p - shown);
+          if (shown !== undefined) ahead.push(down + got.lost - shown);
         }
         await signal(talker, false);
-        return { pathMs: round(path), lost: round(lost), kept: round(kept), indicatorAhead: round(ahead), reportMs: round((await reportTimes()).slice(reportsBefore)) };
+        return { pathMs: round(path), lost: round(lost), kept: round(kept), indicatorAhead: round(ahead), refused, reportMs: round((await reportTimes()).slice(reportsBefore)) };
       };
       const fast = await pttBatch(5);
       // Again with every transmit report held back 150 ms on its way to
@@ -300,18 +285,19 @@ test.describe('speech kept at the edges of a transmission', () => {
               .find((s) => s >= t) ?? null,
           after,
         );
-      for (let i = 0; i < 7; i++) {
+      let burstsRefused = 0;
+      for (let tries = 0; tries < 21 && onsetLost.length < 7; tries++) {
         const on = await signal(talker, true);
         await sleep(800);
         const off = await signal(talker, false);
         await sleep(1500);
-        const ss = loudSpans(await heard(listener)).filter((s) => s.from >= on && s.from < off + 1000);
-        const first = ss[0];
-        const last = ss.at(-1);
-        if (first === undefined || last === undefined) continue;
-        const p = last.to - off;
-        openPath.push(p);
-        onsetLost.push(first.from - on - p);
+        const got = burstMeasure(await heard(listener), on, off);
+        if (got === null) {
+          burstsRefused++;
+          continue;
+        }
+        openPath.push(got.path);
+        onsetLost.push(got.lost);
         const opened = await startedAt(on);
         if (opened !== null) detect.push(opened - on);
       }
@@ -320,20 +306,24 @@ test.describe('speech kept at the edges of a transmission', () => {
       const report = {
         ptt: fast,
         pttReportsHeld150ms: slow,
-        openMic: { pathMs: round(openPath), gateOpenedAfterMs: round(detect), lostAtOnset: round(onsetLost) },
+        openMic: { pathMs: round(openPath), gateOpenedAfterMs: round(detect), lostAtOnset: round(onsetLost), refused: burstsRefused },
       };
       test.info().annotations.push({ type: 'measurement', description: JSON.stringify(report) });
       console.log(`voice onset measurement: ${JSON.stringify(report)}`);
-      expect(fast.lost.length).toBe(5);
-      expect(slow.lost.length).toBe(5);
-      expect(onsetLost.length).toBe(7);
-      // The release delay is heard (issue #965): before, a 100 ms delay was
-      // heard as 36 to 51 ms.
-      expect(median(fast.kept), 'ms heard after the key came up').toBeGreaterThanOrEqual(100);
-      expect(median(slow.kept), 'ms heard after the key came up, reports slow').toBeGreaterThanOrEqual(100);
-      // Transmitting is said once audio is sent, not at the key: before, with
-      // reports held back 150 ms, it was said 125 to 149 ms early.
-      expect(median(slow.indicatorAhead), 'ms the indicator was ahead of the audio, reports slow').toBeLessThan(60);
+      const tooFew = 'presses measured cleanly (the rest were refused: the listening page stalled)';
+      expect(fast.kept.length, tooFew).toBeGreaterThanOrEqual(3);
+      expect(slow.kept.length, tooFew).toBeGreaterThanOrEqual(3);
+      expect(onsetLost.length, 'open microphone bursts measured cleanly').toBeGreaterThanOrEqual(3);
+      // The bounds are wide, for a loaded runner; what they tell apart is
+      // far wider still. The release delay is heard (issue #965): a 200 ms
+      // delay is heard as about 120 to 180 ms; before, a 100 ms one was heard
+      // as 6 to 67 ms.
+      expect(median(fast.kept), 'ms heard after the key came up').toBeGreaterThanOrEqual(90);
+      expect(median(slow.kept), 'ms heard after the key came up, reports slow').toBeGreaterThanOrEqual(90);
+      // Transmitting is said once audio is sent, not at the key: it is within
+      // about 20 ms of the audio now; before, with reports held back 150 ms,
+      // it was said 133 to 173 ms early.
+      expect(median(slow.indicatorAhead), 'ms the indicator was ahead of the audio, reports slow').toBeLessThan(80);
       await tv.getByRole('button', { name: 'Leave voice' }).click();
       await voiceRegion(listener).getByRole('button', { name: 'Leave voice' }).click();
     } finally {

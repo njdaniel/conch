@@ -864,9 +864,13 @@ export class VoiceClient {
     this.gate.release();
   }
 
-  // lost is losing focus or visibility: a release.
+  // lost is losing focus or visibility. In push to talk it shuts the gate at
+  // once, with no release delay (issue #965): the delay can be 2 s, and
+  // whoever switched window is not talking to the room any more. A press
+  // still waiting for its answer never opens the track. The open microphone
+  // goes on, as it does in a tab out of sight.
   lost(): void {
-    this.gate.release();
+    this.gate.lost();
   }
 
   dispose(): void {
@@ -906,7 +910,7 @@ export class VoiceClient {
   // opened reports `started` and opens the track once conchd has answered,
   // or after reportWait, unless the gate has changed since or the connection
   // has gone. A report that fails for good drops the connection first. Once
-  // the track is unmuted, and the gate has not changed meanwhile, the page
+  // the track is unmuted, if the gate has not changed meanwhile, the page
   // says it is transmitting.
   private async opened(talk: number, edge: number): Promise<void> {
     if (talk !== this.talk) return;
@@ -916,14 +920,15 @@ export class VoiceClient {
     await this.within(answered, reportWait);
     const room = this.room;
     if (talk !== this.talk || edge !== this.edge || room === null) return;
-    const unmute = { done: false };
+    // Said when the unmute lands, however late: past reportWait the steps go
+    // on without it, but the track is open once it does. Not if the gate has
+    // shut, or the connection gone, meanwhile.
     await this.within(
       room.setSending(true).then(() => {
-        unmute.done = true;
+        if (talk === this.talk && edge === this.edge && room === this.room) this.set({ transmitting: true });
       }),
       reportWait,
     );
-    if (unmute.done && talk === this.talk && edge === this.edge && room === this.room) this.set({ transmitting: true });
   }
 
   private async shut(talk: number, muted: Promise<void>): Promise<void> {

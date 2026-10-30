@@ -1,8 +1,9 @@
 // The transmit gate: the one place that decides whether the microphone track
 // is sending. Microphone audio leaves the page only while the gate is open.
 // It opens on a press (push-to-talk) or on speech (open microphone) and shuts
-// on a release after a short tail, on loss of focus, when blocked (muted,
-// deafened, not connected), or when a single press has lasted too long.
+// on a release after a short tail; at once on loss of focus, or when blocked
+// (muted, deafened, not connected); or when a single press has lasted too
+// long.
 //
 // It owns no timer of its own: the host gives it the clock, so the tests drive
 // it by hand.
@@ -105,6 +106,13 @@ export class TransmitGate {
       this.tailTimer = null;
       this.shut();
     }, this.tail);
+  }
+
+  // lost is losing focus or visibility: in push to talk the gate shuts at
+  // once, with no tail, and a held key needs a new press. The open
+  // microphone does not depend on focus.
+  lost(): void {
+    if (this.mode === 'ptt') this.shut();
   }
 
   // level is the microphone level, 0 to 1, in the open-microphone mode.

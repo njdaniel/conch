@@ -23,9 +23,12 @@ class StubRoom implements Room {
   levelNow = 0;
   // What happened, in order, across the room and the reports (issue #495).
   log: string[] | null = null;
-  // When set, a mute waits for the test to let it finish.
+  // When set, a mute waits for the test to let it finish; and so, apart, an
+  // unmute (issue #965).
   holdMute = false;
   heldMute: (() => void) | null = null;
+  holdUnmute = false;
+  heldUnmute: (() => void) | null = null;
   connect = (url: string, tok: string, name: string, publish: boolean, events: RoomEvents): Promise<void> => {
     this.connectArgs = { url, token: tok, roomName: name, publish };
     this.events = events;
@@ -35,6 +38,11 @@ class StubRoom implements Room {
   setSending = (on: boolean): Promise<void> => {
     this.sending.push(on);
     this.log?.push(on ? 'unmute' : 'mute');
+    if (on && this.holdUnmute) {
+      return new Promise((resolve) => {
+        this.heldUnmute = resolve;
+      });
+    }
     if (!on && this.holdMute) {
       return new Promise((resolve) => {
         this.heldMute = () => {
@@ -326,12 +334,54 @@ describe('talking', () => {
     expect(t.reports).toEqual(['started', 'stopped']);
   });
 
-  it('losing focus is a release', async () => {
+  // Issue #965: losing focus shuts at once, with no release delay, which can
+  // be 2 s; and a press waiting for its answer never opens the track after.
+  it('losing focus mutes at once, without the release delay, and reports stopped', async () => {
     const t = await joined();
+    t.client.setReleaseDelay(2000);
     t.client.press();
+    await settle();
+    expect(t.rooms[0]?.sending).toEqual([true]);
     t.client.lost();
-    t.clock.advance(defaultTail);
+    expect(t.rooms[0]?.sending).toEqual([true, false]);
+    expect(t.client.snapshot()).toMatchObject({ talking: false, transmitting: false });
+    await settle();
+    expect(t.reports).toEqual(['started', 'stopped']);
+    t.clock.advance(2000);
+    await settle();
+    expect(t.rooms[0]?.sending).toEqual([true, false]);
+  });
+
+  it('losing focus while a press waits for its answer: the track never opens', async () => {
+    const t = await joined(setup([okSession()], [], 0, true));
+    t.client.setReleaseDelay(2000);
+    t.client.press();
+    await settle();
+    t.client.lost();
+    t.clock.advance(100);
+    await t.answer('ok');
+    await settle();
+    t.clock.advance(reportWait + 2000);
+    await settle();
+    expect(t.rooms[0]?.sending).not.toContain(true);
     expect(t.client.snapshot().transmitting).toBe(false);
+    await t.answer('ok');
+    expect(t.reports).toEqual(['started', 'stopped']);
+  });
+
+  it('losing focus leaves the open microphone open', async () => {
+    const t = await joined();
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    t.client.setMode('open');
+    room.levelNow = 0.5;
+    t.clock.advance(levelEvery);
+    await settle();
+    t.client.lost();
+    t.clock.advance(levelEvery);
+    await settle();
+    expect(room.sending).toEqual([true]);
+    expect(t.client.snapshot().transmitting).toBe(true);
   });
 
   it('muting shuts the gate and refuses a press; so does deafening, which also mutes what is heard', async () => {
@@ -545,6 +595,56 @@ describe('what is sent, and when', () => {
     await settle();
     expect(t.rooms[0]?.sending).toEqual([true]);
     expect(t.client.snapshot().transmitting).toBe(true);
+  });
+
+  it('an unmute that lands after reportWait is still said, once it lands', async () => {
+    const t = await joined();
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.holdUnmute = true;
+    t.client.press();
+    await settle();
+    t.clock.advance(reportWait + 500);
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ talking: true, transmitting: false });
+    room.heldUnmute?.();
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ talking: true, transmitting: true });
+  });
+
+  it.each([
+    ['a release', (t: Awaited<ReturnType<typeof joined>>) => {
+      t.client.release();
+      t.clock.advance(defaultTail);
+    }],
+    ['a mute', (t: Awaited<ReturnType<typeof joined>>) => {
+      t.client.setMuted(true);
+    }],
+    ['a loss of focus', (t: Awaited<ReturnType<typeof joined>>) => {
+      t.client.lost();
+    }],
+    ['a drop', (t: Awaited<ReturnType<typeof joined>>) => {
+      t.rooms[0]?.events?.onDisconnected('room_deleted');
+    }],
+  ])('a late unmute after %s is never said to transmit', async (_what, end) => {
+    const t = await joined(setup([okSession(), okSession()]));
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.holdUnmute = true;
+    const said: boolean[] = [];
+    t.client.subscribe(() => {
+      said.push(t.client.snapshot().transmitting);
+    });
+    t.client.press();
+    await settle();
+    t.clock.advance(reportWait + 500);
+    await settle();
+    end(t);
+    await settle();
+    room.heldUnmute?.();
+    await settle();
+    expect(said).not.toContain(true);
+    expect(t.client.snapshot().transmitting).toBe(false);
   });
 
   it('a drop after the unmute ends transmitting with the connection', async () => {

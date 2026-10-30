@@ -113,7 +113,8 @@ There are two ways to talk. Choose one under **Voice options**, **Microphone**:
   keyboards is just below Esc. **Change talk key**, under **Voice options**, sets another. On a phone or a touch
   screen, press and hold **Hold to talk** instead.
   - The talk key works only while the Conch tab is the one in front, and not while you
-    are typing in a box. Switching to another tab or app counts as letting go.
+    are typing in a box. Switching to another tab or app shuts the microphone at once, without the
+    release delay below; press the key again to talk.
   - The microphone stays open a moment after you let go, so your last word is not cut:
     **Release delay**, under **Voice options**, sets how long (200 ms at first).
   - The strip says **Transmitting** while you are heard. Just after you press it may

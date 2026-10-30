@@ -99,12 +99,29 @@ describe('push to talk', () => {
     expect(changes).toEqual([true, false, true]);
   });
 
-  it('a release after loss of focus is the same as a release', () => {
-    const { clock, gate, changes } = setup();
+  // Issue #965: with a release delay of up to 2 s, a release would leave the
+  // microphone open that long after the person switched window.
+  it('loss of focus shuts at once, with no tail, in the delay too; a held key needs a new press', () => {
+    const { clock, gate, changes } = setup({ tail: maxTail });
     gate.press();
-    gate.release(); // what blur and hidden call
-    clock.advance(defaultTail);
+    gate.lost(); // what blur and hidden call
     expect(changes).toEqual([true, false]);
+    gate.press();
+    gate.release();
+    clock.advance(10);
+    gate.lost();
+    expect(changes).toEqual([true, false, true, false]);
+    clock.advance(maxTail);
+    expect(changes).toEqual([true, false, true, false]);
+    expect(clock.pending).toBe(0);
+  });
+
+  it('loss of focus leaves the open microphone open', () => {
+    const { gate, changes } = setup();
+    gate.setMode('open');
+    gate.level(0.5);
+    gate.lost();
+    expect(changes).toEqual([true]);
   });
 
   it('a change of mode shuts the gate', () => {
