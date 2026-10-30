@@ -212,6 +212,8 @@ func TestChannelContentLeak(t *testing.T) {
 		"GET /v2/channels/{channel}/reactions":                                                 "covered by TestReactionChannelGate (a non-member person, agent and operator, byte-identical to an unknown channel)",
 		"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}": "covered by TestReactionChannelGate (a non-member person, agent and operator, byte-identical to an unknown channel)",
 		"DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}":          "covered by TestReactionChannelGate (a non-member person, agent and operator, byte-identical to an unknown channel)",
+		"PUT /v2/channels/{channel}/messages/{message_id}/body":                                "covered by TestMessageEditChannelGate (issue #845: a non-member person and operator, byte-identical to an unknown channel; an agent refused before any lookup)",
+		"GET /v2/channels/{channel}/messages/{message_id}/revisions":                           "covered by TestMessageEditChannelGate (issue #845: a non-member person and operator, byte-identical to an unknown channel; an agent refused before any lookup)",
 		"GET /v1/voice/occupancy/ws":                                                           "names no channel (it matches the \"/ws\" test above by its spelling): it carries counts for the caller's own channels only, a non-member's channel absent; covered by TestVoiceOccupancyEndpoint, TestVoiceOccupancySocketRemovalDropsTheRow and e2e/isolation",
 	}
 	covered := make(map[string]bool, len(rows))

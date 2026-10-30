@@ -346,3 +346,42 @@ describe('browser permission and cleanup', () => {
     expect(onToggleMute).toHaveBeenCalledWith(7);
   });
 });
+
+// Issue #845 (docs/design/message-editing.md §7.2): the events socket's
+// conch.message_edited.v1 updates an alert's text in place. It never notifies,
+// never matches a mention and never adds an alert: an edit is not a new message.
+describe('an edited message', () => {
+  const edited = (id: number, body: string, at: string, author = 3): MessageV2 => ({ ...message(id, body, author), edited_at: at });
+
+  it('updates a held alert in place, and never notifies or counts', async () => {
+    visibility('hidden');
+    vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [] });
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
+    act(() => {
+      result.current.setPolicy('all');
+    });
+    await act(async () => {
+      await result.current.enableNative();
+    });
+    rerender({ ...props(), event: message(1, 'helo') });
+    expect(result.current.alerts).toHaveLength(1);
+    expect(FakeNotification.all).toHaveLength(1);
+    rerender({ ...props(), event: message(1, 'helo'), editEvent: edited(1, 'hello', '2026-10-26T00:01:00Z') });
+    expect(result.current.alerts).toHaveLength(1);
+    expect(result.current.alerts[0]?.message.body).toBe('hello');
+    expect(FakeNotification.all).toHaveLength(1);
+    // A stale copy (an earlier edit, late) never replaces a later one.
+    rerender({ ...props(), event: message(1, 'helo'), editEvent: edited(1, 'hel', '2026-10-26T00:00:30Z') });
+    expect(result.current.alerts[0]?.message.body).toBe('hello');
+  });
+
+  it('adds nothing for a message it holds no alert of, even one that now names the viewer', () => {
+    const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
+    act(() => {
+      result.current.setPolicy('mentions');
+    });
+    rerender({ ...props(), editEvent: edited(5, 'now with @ada', '2026-10-26T00:01:00Z') });
+    expect(result.current.alerts).toHaveLength(0);
+    expect(FakeNotification.all).toHaveLength(0);
+  });
+});

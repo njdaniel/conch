@@ -5,7 +5,7 @@
 import { activitySchema, agentActivityV1, type AgentActivityV1 } from '../schema/activity';
 import { channelDocSchema, channelDocV1, channelMembersSchema, channelMembersV1, type ChannelDocV1, type ChannelMembersV1 } from '../schema/channel';
 import { interventionSchema, interventionV1, type InterventionV1 } from '../schema/intervention';
-import { messageV2, type MessageV2 } from '../schema/message';
+import { messageEditedV1, messageEditedV1Schema, messageV2, type MessageEditedV1, type MessageV2 } from '../schema/message';
 import { messageV2Schema, readStateV1, readStateV1Schema, type ReadStateV1 } from '../schema/generated';
 import { runSchema, runV1, type RunV1 } from '../schema/run';
 import { sessionRosterSchema, sessionRosterV1, type SessionRosterV1 } from '../schema/session';
@@ -19,7 +19,9 @@ export type EventFrame =
   // The channel as it now is, sent when it is renamed (issue #728).
   | { readonly kind: 'channel'; readonly channel: ChannelDocV1 }
   | { readonly kind: 'readState'; readonly state: ReadStateV1 }
-  | { readonly kind: 'message'; readonly message: MessageV2 };
+  | { readonly kind: 'message'; readonly message: MessageV2 }
+  // A message edited (issue #845): never a new one, so it never notifies.
+  | { readonly kind: 'messageEdited'; readonly message: MessageV2 };
 
 export function parseEventFrame(data: unknown): EventFrame | null {
   if (typeof data !== 'string') return null;
@@ -47,6 +49,8 @@ export function parseEventFrame(data: unknown): EventFrame | null {
       return readStateV1(doc).length === 0 ? { kind: 'readState', state: doc as ReadStateV1 } : null;
     case messageV2Schema:
       return messageV2(doc).length === 0 ? { kind: 'message', message: doc as MessageV2 } : null;
+    case messageEditedV1Schema:
+      return messageEditedV1(doc).length === 0 ? { kind: 'messageEdited', message: (doc as MessageEditedV1).message } : null;
     default:
       return null;
   }

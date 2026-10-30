@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 // through the matrix's own runner) and over MCP (mcpProbes).
 
 // agentRows are the rows an agent reaches differently from a person.
-func agentRows() []row { return append(coreAgentRows(), reactionAgentRows()...) }
+func agentRows() []row { return slices.Concat(coreAgentRows(), reactionAgentRows(), editAgentRows()) }
 
 func coreAgentRows() []row {
 	byChannel := func(route, what string, p func(w *world, s subject) probe) row {

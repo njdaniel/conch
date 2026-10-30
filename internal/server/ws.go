@@ -358,8 +358,9 @@ func (s *Server) streamWSV1(ctx context.Context, conn *websocket.Conn, sub *hub.
 // two; a message committed during the replay is in both, in a replay page and
 // in the subscription's buffer, and must arrive once.
 //
-// So a live frame is dropped when its id is not greater than the last id the
-// replay sent. That is exact, not a guess: message ids are given out under
+// So a live frame that is an original post is dropped when its id is not
+// greater than the last id the replay sent; an edit's frame (edited_at set)
+// never is. That is exact, not a guess: message ids are given out under
 // SQLite's single write lock, so every message with an id at or below one the
 // replay read was already committed when it was read, and, being visible to
 // this reader (it was broadcast to them), was in that page.
@@ -392,7 +393,12 @@ func (s *Server) streamWSV2(ctx context.Context, conn *websocket.Conn, sub *hub.
 				s.closeDropped(ctx, conn, channelID, principalID, credID)
 				return
 			}
-			if replay != nil && msg.ID <= replayed {
+			// Only an original is dropped: an edit of a message the replay
+			// already sent (issue #845, message-editing.md §7.1) carries
+			// edited_at and goes through the gate as usual. If the replay
+			// read the edited text already, the copy is the same, and a
+			// client keeps the one with the later edited_at.
+			if replay != nil && msg.ID <= replayed && msg.EditedAt == nil {
 				continue
 			}
 			send, ok := s.gateFrame(ctx, conn, gate, msg.ID)

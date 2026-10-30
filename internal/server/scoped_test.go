@@ -329,6 +329,12 @@ func TestEveryMessageReadPathIsInTheLeakTest(t *testing.T) {
 		"GET /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}": true,
 		"GET /v2/channels/{channel}/reactions":                               true,
 	}
+	// The revision read (issue #845) answers earlier versions of one message
+	// to its author alone; a reader's set is "my own messages I can still
+	// see", not the channel's visible set. TestMessageRevisionsExactSets
+	// (message_edit_test.go) asks it for every reader of this fixture and
+	// every message of the corpus, and the isolation matrix has its rows.
+	reactionReads["GET /v2/channels/{channel}/messages/{message_id}/revisions"] = true
 	for _, rt := range f.srv.routes {
 		// The voice presence socket (issue #127) ends in /ws but carries
 		// presence documents, never messages; it has its own leak-table row
