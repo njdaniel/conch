@@ -883,6 +883,44 @@ END`,
 ) WITHOUT ROWID`,
 		`CREATE INDEX message_reactions_by_principal ON message_reactions (message_id, principal_id)`,
 	},
+	// 38: Message edits (issue #845, docs/design/message-editing.md §8). The
+	// first migration under which a messages row changes: body and edited_at
+	// only, and only by EditOwnMessage (audience.go). A trigger refuses an
+	// UPDATE that names any other column. message_revisions keeps every
+	// version of an edited message's text, append-only: revision 1 is the
+	// text as posted, written by the first edit, so a message never edited
+	// has no rows. messages_fts is external content: its entry is replaced by
+	// deleting it with the old values and inserting the new, so old words
+	// stop matching. This supersedes the "messages are never updated" of
+	// migrations 15 and 22. Nothing is backfilled.
+	{
+		`ALTER TABLE messages ADD COLUMN edited_at INTEGER`,
+		`CREATE TABLE message_revisions (
+	message_id INTEGER NOT NULL REFERENCES messages (id),
+	revision   INTEGER NOT NULL CHECK (revision >= 1),
+	body       TEXT    NOT NULL,
+	created_at INTEGER NOT NULL,
+	PRIMARY KEY (message_id, revision)
+)`,
+		`CREATE TRIGGER message_revisions_no_update BEFORE UPDATE ON message_revisions
+BEGIN SELECT RAISE(ABORT, 'message revisions are append-only'); END`,
+		`CREATE TRIGGER message_revisions_no_delete BEFORE DELETE ON message_revisions
+BEGIN SELECT RAISE(ABORT, 'message revisions are append-only'); END`,
+		`CREATE TRIGGER messages_only_body_changes
+BEFORE UPDATE OF id, channel_id, author_id, created_at, payload_schema, payload_json,
+                 audience_kind, net_id, thread_root_id ON messages
+BEGIN SELECT RAISE(ABORT, 'only a message body and edited_at may change'); END`,
+		`CREATE TRIGGER messages_edited_at_forward BEFORE UPDATE OF edited_at ON messages
+WHEN NEW.edited_at IS NULL OR NEW.edited_at <= COALESCE(OLD.edited_at, OLD.created_at)
+BEGIN SELECT RAISE(ABORT, 'edited_at must move forward'); END`,
+		`CREATE TRIGGER messages_fts_update AFTER UPDATE OF body ON messages
+BEGIN
+	INSERT INTO messages_fts (messages_fts, rowid, body, fts_channel)
+		VALUES ('delete', OLD.id, OLD.body, OLD.fts_channel);
+	INSERT INTO messages_fts (rowid, body, fts_channel)
+		VALUES (NEW.id, NEW.body, NEW.fts_channel);
+END`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

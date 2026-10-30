@@ -594,6 +594,7 @@ var reauthDecisions = map[string]reauthDecision{
 	"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                {reauthNone, "takes back the caller's own reaction"},
 	"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}": {reauthNone, "reduce-only: removes one reaction, grants nothing"},
 	"DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}":          {reauthNone, "reduce-only: removes a person's reactions on one message, grants nothing"},
+	"PUT /v2/channels/{channel}/messages/{message_id}/body":                                {reauthNone, "the caller's own message text (issue #845); grants nothing, and an operator has no exemption"},
 	"DELETE /v1/credentials/current":                                                       {reauthNone, "signs the caller out"},
 	"DELETE /v1/credentials/mine/{id}":                                                     {reauthNone, "ends one of the caller's own sign-ins"},
 	"POST /v1/sign-in-links/mine":                                                          {reauthNone, "a member's own device link: the handler refuses operators and asks its own recent password proof (#712)"},

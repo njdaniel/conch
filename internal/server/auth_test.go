@@ -251,6 +251,8 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v2/channels/{channel}/reactions":                                                 {classAuth, "/v2/channels/general/reactions?messages=9999", "", 200},
 	"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}": {classManager, "/v2/channels/general/messages/9999/reactions/%F0%9F%91%8D/2", "", 404},
 	"DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}":          {classManager, "/v2/channels/general/messages/9999/reactors/2", "", 404},
+	"PUT /v2/channels/{channel}/messages/{message_id}/body":                                {classAuth, "/v2/channels/general/messages/9999/body", `{"body":"x"}`, 404},
+	"GET /v2/channels/{channel}/messages/{message_id}/revisions":                           {classAuth, "/v2/channels/general/messages/9999/revisions", "", 404},
 	"PUT /v1/principals/{id}/manifest":                                                     {classOp, "/v1/principals/1/manifest", `{}`, 400},
 	"GET /v1/principals/{id}/manifest":                                                     {classSelf, "/v1/principals/1/manifest", "", 404},
 	"PUT /v1/principals/{id}/name":                                                         {classSelf, "/v1/principals/1/name", `{}`, 400},
@@ -583,8 +585,10 @@ func TestRoleMatrix(t *testing.T) {
 				agentWant = http.StatusForbidden
 			}
 			// Invites are for people (issue #437), and so are problem
-			// reports (issue #446).
-			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" {
+			// reports (issue #446) and message edits (issue #845: message
+			// 9999 does not exist, so a person gets message_not_found, and an
+			// agent is refused before any lookup).
+			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" || isMessageEditRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// Signing out (issue #439) succeeds for any member and revokes
@@ -627,6 +631,13 @@ func isReactionRoute(pattern string) bool {
 	return strings.Contains(pattern, "/v2/channels/{channel}/") && (strings.Contains(pattern, "/reactions") || strings.Contains(pattern, "/reactors"))
 }
 
+// isMessageEditRoute reports whether pattern is one of the two message edit
+// routes (issue #845).
+func isMessageEditRoute(pattern string) bool {
+	return pattern == "PUT /v2/channels/{channel}/messages/{message_id}/body" ||
+		pattern == "GET /v2/channels/{channel}/messages/{message_id}/revisions"
+}
+
 // TestAuthOffUnchanged runs the route table with AuthOff and no credential:
 // the statuses are what the handlers gave before authentication existed, no
 // route reads a credential, and no role check applies.
@@ -661,6 +672,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if rt.pattern == "POST /v1/ws-tickets" {
 					want = http.StatusBadRequest // tickets_require_auth: a ticket is bound to a credential
+				}
+				if isMessageEditRoute(rt.pattern) {
+					want = http.StatusBadRequest // message_edit_requires_auth: no one to be the author
 				}
 				if isInviteRoute(rt.pattern) {
 					want = http.StatusUnauthorized // like whoami: no one to make or own an invite

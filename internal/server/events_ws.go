@@ -78,6 +78,9 @@ const (
 	// eventReactions is one message whose reactions changed (issue #765): id
 	// is the message and channelID its channel.
 	eventReactions
+	// eventMessageEdited is one message whose text its author changed (issue
+	// #845): id is the message and channelID its channel.
+	eventMessageEdited
 )
 
 // eventRef names a document that changed. It carries no content.
@@ -352,6 +355,24 @@ func (h *eventsHub) notifyMessage(channelID, messageID, authorID int64) {
 // reactions costs one read when the socket drains.
 func (h *eventsHub) notifyReactions(channelID, messageID int64) {
 	h.notifyChannel(channelID, eventRef{kind: eventReactions, id: messageID, channelID: channelID})
+}
+
+// notifyMessageEdited queues an edited message for every human who holds a
+// membership of channelID, the author's own other sockets included
+// (docs/design/message-editing.md §7.2). Agents are not sent it, as they are
+// not sent a new message. The reference names the message and nothing more:
+// each subscriber's goroutine reads it, when it sends, with its own reader,
+// and sends conch.message_edited.v1 or, if it may not see it, nothing.
+// References for one message coalesce in the queue (push). An edit is not a
+// new message: no read state is owed.
+func (h *eventsHub) notifyMessageEdited(channelID, messageID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if _, member := sub.memberships[channelID]; sub.human && member {
+			sub.push(eventRef{kind: eventMessageEdited, id: messageID, channelID: channelID})
+		}
+	}
 }
 
 // notifyReadState owes every other reader the count in a channel with a new
@@ -981,6 +1002,21 @@ func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
 		}
 		raw, ok := e.encode(ctx, messageV2FromStore(messages[0]))
 		return ok && e.writeReadState(ctx, epoch, raw)
+	case eventMessageEdited:
+		// The message as this reader may see it now, read as eventMessage
+		// reads one; nothing if the reader cannot, or is no longer a member.
+		// It never touches read state: an edit changes no count.
+		if !e.sub.hasMembership(ref.channelID) {
+			return true
+		}
+		messages, err := s.store.ListVisibleMessages(ctx, ref.channelID, readerFor(e.r, apiV2), ref.id-1, 1)
+		if err != nil {
+			return e.failed(ctx, "read an edited message", err)
+		}
+		if len(messages) != 1 || messages[0].ID != ref.id || messages[0].EditedAt.IsZero() || !e.sub.hasMembership(ref.channelID) {
+			return true
+		}
+		return e.sendDoc(ctx, schema.MessageEditedV1{Schema: schema.MessageEditedSchemaV1, Message: messageV2FromStore(messages[0])})
 	case eventReactions:
 		// The message's whole reaction state for this reader, or nothing: no
 		// row when the message is not visible to the reader, or when the reader
