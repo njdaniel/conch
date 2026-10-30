@@ -167,6 +167,13 @@ describe('parseEventFrame', () => {
     expect(parseEventFrame(JSON.stringify(doc))).toEqual({ kind: 'message', message: doc });
   });
 
+  // Issue #845: an edit is its own frame, never a new message.
+  it('reads a message edit as an edit', () => {
+    const message = { schema: 'conch.message.v2', id: 9, channel_id: 7, author_id: 3, created_at: '2026-10-21T00:00:00Z', body: 'hello @ada', edited_at: '2026-10-21T00:01:00Z' };
+    expect(parseEventFrame(JSON.stringify({ schema: 'conch.message_edited.v1', message }))).toEqual({ kind: 'messageEdited', message });
+    expect(parseEventFrame(JSON.stringify({ schema: 'conch.message_edited.v1', message: { ...message, id: 'x' } }))).toBeNull();
+  });
+
   // Issue #728: the channel as it now is, sent when it is renamed.
   it('reads the channel document, the whole of it', () => {
     const doc = { schema: 'conch.channel.v1', channel_id: 7, name: 'ops-room', created_at: '2026-10-21T00:00:00Z' };

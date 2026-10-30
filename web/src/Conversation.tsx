@@ -4,12 +4,14 @@ import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar } from './Icons';
 import { ImageAttachment } from './ImageAttachment';
+import { canEdit, EditedMarker, editEnds, MessageEditor } from './MessageEdit';
+import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
 import { fileAttachmentPayloadSchema, fileAttachmentV1, type FileAttachmentV1 } from './schema/file';
 import type { Audience, MessageV2 } from './schema/message';
 import type { Target, TargetAction } from './state/drafts';
 import type { ChannelChat, PendingSend } from './state/messages';
-import { canLoadOlder, lastId, oldestId, ordered } from './state/messages';
+import { canLoadOlder, isLater, lastId, oldestId, ordered } from './state/messages';
 import type { LiveStatus, Person } from './useLiveChannel';
 
 // HH:MM in the reader's own time zone.
@@ -122,6 +124,9 @@ export function Message({
   onReply,
   onOpenThread,
   thread,
+  actions,
+  editor,
+  notice,
 }: {
   readonly message: MessageV2;
   readonly people: ReadonlyMap<number, Person>;
@@ -136,11 +141,25 @@ export function Message({
   readonly onReply?: (id: number, opener: HTMLElement) => void;
   readonly onOpenThread?: (id: number, opener: HTMLElement) => void;
   readonly thread?: ReactNode;
+  // The message's actions menu (issue #845): only what the viewer may do
+  // here, and none at all draws no menu.
+  readonly actions?: readonly MenuItem[];
+  // The inline editor, in place of the text, while the viewer edits it.
+  readonly editor?: ReactNode;
+  // A line about the message, under it: an edit that could not be made.
+  readonly notice?: string | null;
 }) {
   const approval = approvalOf(message);
   const attachments = attachmentsOf(message);
+  const items = editor === undefined ? actions ?? [] : [];
+  const [menuOpen, setMenuOpen] = useState(false);
+  const more = useRef<HTMLButtonElement>(null);
+  const openers = useOpeners(items.length > 0, () => {
+    setMenuOpen(true);
+  });
+  const classes = ['message', ...(cont ? ['cont'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
   return (
-    <li className={cont ? 'message cont' : 'message'} data-message-id={message.id} tabIndex={-1}>
+    <li className={classes.join(' ')} data-message-id={message.id} tabIndex={-1} {...openers}>
       <Line
         time={clock(message.created_at)}
         author={authorOf(message, people)}
@@ -149,7 +168,12 @@ export function Message({
         badge={message.audience === undefined ? null : audienceLabel(message.audience, viewer, nets)}
         tag={sent ? 'Sent' : null}
       >
-        {approval === null ? message.body : <ApprovalCard approval={approval} people={people} />}
+        {editor ?? (approval === null ? (
+          <>
+            {message.body}
+            <EditedMarker message={message} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} />
+          </>
+        ) : <ApprovalCard approval={approval} people={people} />)}
         {attachments === null ? null : (
           <span className="attachments">
             {attachments.file_ids.map((fileId) => (
@@ -158,6 +182,10 @@ export function Message({
           </span>
         )}
       </Line>
+      {notice === undefined || notice === null ? null : <p role="status" className="edit-notice">{notice}</p>}
+      {items.length === 0 ? null : (
+        <ActionsMenu label={`More actions for message ${String(message.id)}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
+      )}
       {onOpen === undefined ? null : <button type="button" className="search-open" aria-label={`Open context for message ${String(message.id)}`} onClick={() => {
         onOpen(message.id);
       }}>Open context</button>}
@@ -300,7 +328,10 @@ function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, d
   const byId = new Map<number, MessageV2>();
   if (root !== undefined) byId.set(root.id, root);
   for (const message of [...fetched, ...ordered(chat)]) {
-    if (message.id === rootId || message.thread_root_id === rootId) byId.set(message.id, message);
+    if (message.id !== rootId && message.thread_root_id !== rootId) continue;
+    // The thread's own read and the channel's copy: the later edit wins.
+    const held = byId.get(message.id);
+    if (held === undefined || isLater(message, held)) byId.set(message.id, message);
   }
   const messages = [...byId.values()].sort((a, b) => a.id - b.id);
   const rootMessage = byId.get(rootId);
@@ -388,6 +419,7 @@ export function Conversation({
   onBottom,
   onUnauthorized,
   onSearch,
+  onEdited,
 }: {
   readonly channel: string;
   readonly chat: ChannelChat;
@@ -410,6 +442,9 @@ export function Conversation({
   readonly onBottom: (atBottom: boolean) => void;
   readonly onUnauthorized?: () => void;
   readonly onSearch?: () => void;
+  // An edit of the viewer's own message saved (issue #845): the server's copy,
+  // for the page to hold. Without it nothing here offers Edit.
+  readonly onEdited?: (message: MessageV2) => void;
 }) {
   const log = useRef<HTMLDivElement>(null);
   // Whether the reader is at the bottom, so new messages follow them.
@@ -460,6 +495,65 @@ export function Conversation({
         ?? list?.querySelector<HTMLElement>(`[data-message-id="${String(back.anchor)}"]`);
     target?.focus();
   }, [openThread]);
+
+  // Editing (issue #845, docs/design/message-editing.md §13.2): one editor at
+  // a time, its text kept here; a line under a message an edit could not
+  // reach; and the time the window is counted from, moved on when the next
+  // of the viewer's messages leaves it, so Edit goes when it can no longer be
+  // used.
+  const [edit, setEdit] = useState<{ readonly id: number; readonly text: string; readonly next: number | null } | null>(null);
+  const [notices, setNotices] = useState<ReadonlyMap<number, string>>(new Map());
+  const [now, setNow] = useState(() => Date.now());
+  const focusBack = useRef<number | null>(null);
+  const viewerKind = people.get(viewer)?.kind ?? null;
+  useEffect(() => {
+    let next = Infinity;
+    for (const message of chat.byId.values()) {
+      if (message.author_id !== viewer) continue;
+      const ends = editEnds(message);
+      if (ends >= now && ends < next) next = ends;
+    }
+    if (next === Infinity) return;
+    const handle = window.setTimeout(() => {
+      setNow(Date.now());
+    }, Math.min(Math.max(0, next - Date.now()) + 1, 2 ** 31 - 1));
+    return () => {
+      window.clearTimeout(handle);
+    };
+  }, [chat.byId, viewer, now]);
+  // After the editor closes, focus goes back to the message's ⋯ button, or to
+  // the message when it no longer offers one (its window closed meanwhile).
+  useEffect(() => {
+    const id = focusBack.current;
+    if (id === null || edit !== null) return;
+    focusBack.current = null;
+    const item = log.current?.querySelector<HTMLElement>(`[data-message-id="${String(id)}"]`);
+    (item?.querySelector<HTMLElement>('.more-actions') ?? item)?.focus();
+  }, [edit]);
+  const note = useCallback((id: number, line: string | null) => {
+    setNotices((previous) => {
+      if (line === null && !previous.has(id)) return previous;
+      const next = new Map(previous);
+      if (line === null) next.delete(id);
+      else next.set(id, line);
+      return next;
+    });
+  }, []);
+  const startEdit = useCallback((id: number) => {
+    const message = chatNow.current.byId.get(id);
+    if (message === undefined) return;
+    note(id, null);
+    setEdit((current) => {
+      // Unsaved text elsewhere is dropped only once the person says so.
+      const was = current === null ? undefined : chatNow.current.byId.get(current.id);
+      if (current !== null && current.id !== id && was !== undefined && current.text !== was.body) return { ...current, next: id };
+      return { id, text: message.body, next: null };
+    });
+  }, [note]);
+  const closeEdit = useCallback((id: number) => {
+    focusBack.current = id;
+    setEdit((current) => (current?.id === id ? null : current));
+  }, []);
 
   const shown = ordered(chat);
   const threadAnchor = openThread === null ? null : shown.some((message) => message.id === openThread) ? openThread : shown.find((message) => message.thread_root_id === openThread)?.id ?? null;
@@ -588,6 +682,42 @@ export function Conversation({
               onUnauthorized={onUnauthorized}
               onReply={openFrom}
               onOpenThread={openFrom}
+              actions={onEdited !== undefined && canEdit(message, viewer, viewerKind, now) ? [{ key: 'edit', label: 'Edit', onSelect: () => { startEdit(message.id); } }] : []}
+              notice={notices.get(message.id) ?? null}
+              {...(edit?.id !== message.id || onEdited === undefined ? {} : {
+                editor: (
+                  <MessageEditor
+                    message={message}
+                    channel={channel}
+                    text={edit.text}
+                    onText={(text) => {
+                      setEdit((current) => (current?.id === message.id ? { ...current, text } : current));
+                    }}
+                    onCancel={() => {
+                      closeEdit(message.id);
+                    }}
+                    onSaved={(saved) => {
+                      onEdited(saved);
+                      closeEdit(message.id);
+                    }}
+                    onGone={(line) => {
+                      note(message.id, line);
+                      closeEdit(message.id);
+                    }}
+                    onUnauthorized={onUnauthorized}
+                    discard={edit.next === null ? undefined : {
+                      onDiscard: () => {
+                        const next = edit.next;
+                        const target = next === null ? undefined : chatNow.current.byId.get(next);
+                        setEdit(target === undefined ? null : { id: target.id, text: target.body, next: null });
+                      },
+                      onKeep: () => {
+                        setEdit((current) => (current === null ? null : { ...current, next: null }));
+                      },
+                    }}
+                  />
+                ),
+              })}
               thread={threadAnchor === null || message.id !== threadAnchor ? null : (
                 <ThreadView
                   key={openThread}

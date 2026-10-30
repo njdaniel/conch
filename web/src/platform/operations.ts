@@ -25,6 +25,8 @@ import {
   createSessionRequestV1,
   createSignInLinkResponseV1,
   createDeviceLinkRequestV1,
+  editMessageRequestV1,
+  editMessageResponseV1,
   endGuestsRequestV1,
   endGuestsResponseV1,
   fileV1,
@@ -45,6 +47,7 @@ import {
   listGuestsResponseV1,
   listInterventionsResponseV1,
   listInvitesResponseV1,
+  listMessageRevisionsResponseV1,
   listMessagesResponseV2,
   listNetsResponseV1,
   listOwnCredentialsResponseV1,
@@ -230,6 +233,10 @@ export const operations = {
   listMessages: op('GET', '/v2/channels/{channel}/messages', 'bearer', { response: check(listMessagesResponseV2) }),
   postMessage: op('POST', '/v2/channels/{channel}/messages', 'bearer', { request: check(postMessageRequestV2), response: check(postMessageResponseV2) }),
   searchMessages: op('GET', '/v2/channels/{channel}/messages/search', 'bearer', { response: check(searchMessagesResponseV2) }),
+  // The author's own recent text (issue #845): the edit, and the earlier
+  // versions only the author may read.
+  editMessage: op('PUT', '/v2/channels/{channel}/messages/{id}/body', 'bearer', { request: check(editMessageRequestV1), response: check(editMessageResponseV1) }),
+  messageRevisions: op('GET', '/v2/channels/{channel}/messages/{id}/revisions', 'bearer', { response: check(listMessageRevisionsResponseV1) }),
   uploadFile: op('POST', '/v2/channels/{channel}/files', 'bearer', { response: check(fileV1) }),
   fileMeta: op('GET', '/v2/files/{id}/meta', 'bearer', { response: check(fileV1) }),
   fileBytes: op('GET', '/v2/files/{id}', 'bearer'),

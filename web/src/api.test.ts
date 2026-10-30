@@ -17,7 +17,9 @@ import {
   listSignIns,
   loadMessagesAfter,
   loadMessagesAscending,
+  editMessage,
   loadThread,
+  messageRevisions,
   onSignedOutElsewhere,
   openSocket,
   postMessage,
@@ -996,5 +998,43 @@ describe('file attachments', () => {
     const calls = serve(() => json({ messages: [first], next_after: next }));
     expect(await loadMessagesAscending('red', 10)).toEqual({ ok: true, complete: false, value: [first] });
     expect(calls).toHaveLength(1);
+  });
+});
+
+// Issue #845: the author's edit of their own text, and its earlier versions.
+describe('message editing', () => {
+  const edited = { schema: 'conch.message.v2', id: 42, channel_id: 7, author_id: 2, created_at: '2026-10-30T12:34:56.789Z', body: 'hello', edited_at: '2026-10-30T12:40:02.105Z' };
+
+  it('PUTs the body sub-resource and hands back the server’s copy', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockResolvedValue(json({ message: edited }));
+    vi.stubGlobal('fetch', request);
+    expect(await editMessage('red team', 42, 'hello')).toEqual({ ok: true, message: edited });
+    const [path, init] = request.mock.calls[0] ?? [];
+    expect(path).toBe('/v2/channels/red%20team/messages/42/body');
+    expect(init?.method).toBe('PUT');
+    expect(init?.body).toBe(JSON.stringify({ body: 'hello' }));
+  });
+
+  it.each([
+    ['a window closed', () => json({ code: 'message_edit_window_closed', message: 'too old' }, 409), { ok: false, failure: 'refused', code: 'message_edit_window_closed' }],
+    ['a rate limit, with how long', () => json({ code: 'rate_limited', message: 'slow down', retry_after_seconds: 4 }, 429), { ok: false, failure: 'refused', code: 'rate_limited', retryAfter: 4 }],
+    ['a refusal with no document', () => new Response('nope', { status: 400 }), { ok: false, failure: 'refused' }],
+    ['a server error, which may come after the write', () => new Response('', { status: 502 }), { ok: false, failure: 'network' }],
+    ['an answer that is not the schema', () => json({ message: { id: 42 } }), { ok: false, failure: 'network' }],
+  ])('answers %s', async (_name, response, want) => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(response);
+    expect(await editMessage('red', 42, 'hello')).toEqual(want);
+  });
+
+  it('reads the earlier versions, and passes a refusal’s code through', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const revisions = [{ revision: 1, body: 'helo', created_at: '2026-10-30T12:34:56.789Z' }, { revision: 2, body: 'hello', created_at: '2026-10-30T12:40:02.105Z' }];
+    const calls = serve(() => json({ channel_id: 7, message_id: 42, revisions }));
+    expect(await messageRevisions('red team', 42)).toEqual({ ok: true, value: revisions });
+    expect(calls).toEqual([{ path: '/v2/channels/red%20team/messages/42/revisions', method: 'GET', auth: `Bearer ${memberToken}` }]);
+    serve(() => json({ code: 'message_not_found', message: 'no' }, 404));
+    expect(await messageRevisions('red', 42)).toEqual({ ok: false, failure: 'invalid', code: 'message_not_found' });
   });
 });

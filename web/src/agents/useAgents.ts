@@ -216,6 +216,7 @@ export function useAgents({
   onMissing,
   onReadState,
   onMessage,
+  onMessageEdited,
 }: {
   readonly signedIn: boolean;
   readonly channel: string | null;
@@ -235,6 +236,9 @@ export function useAgents({
   readonly onMissing: (channelId: number) => void;
   readonly onReadState: (state: ReadStateV1) => void;
   readonly onMessage: (message: MessageV2) => void;
+  // A message edited (issue #845, conch.message_edited.v1): an update of one
+  // the page may hold, never a new one.
+  readonly onMessageEdited?: (message: MessageV2) => void;
 }): Agents {
   const [state, dispatch] = useReducer(agentsReducer, initialAgents);
   const [members, setMembers] = useState<readonly ChannelMemberV1[]>([]);
@@ -409,6 +413,9 @@ export function useAgents({
           case 'message':
             onMessage(frame.message);
             break;
+          case 'messageEdited':
+            onMessageEdited?.(frame.message);
+            break;
         }
       },
       onStatus,
@@ -419,7 +426,7 @@ export function useAgents({
       if (retry !== null) realClock.clearTimeout(retry);
       feed.stop();
     };
-  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, replace, healthy]);
+  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, onMessageEdited, replace, healthy]);
 
   // The members line is read again each time the socket comes back.
   useEffect(() => {

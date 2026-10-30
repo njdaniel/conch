@@ -6,6 +6,7 @@ import type { NativeNotification } from './platform/types';
 import type { ChannelV0 } from './schema/channel';
 import type { MessageV2 } from './schema/message';
 import type { ReadStateV1 } from './schema/readstate';
+import { isLater } from './state/messages';
 
 export type { NotificationPolicy } from './api';
 export type BrowserPermission = 'default' | 'denied' | 'granted' | 'unsupported';
@@ -53,6 +54,7 @@ export function useNotifications({
   loaded,
   eventsLive,
   event,
+  editEvent = null,
   readStateEvent,
   onOpen,
 }: {
@@ -63,6 +65,10 @@ export function useNotifications({
   readonly loaded: boolean;
   readonly eventsLive: boolean;
   readonly event: MessageV2 | null;
+  // A message edited (issue #845, conch.message_edited.v1). It updates the
+  // text of an alert already shown, in place, and never notifies, counts or
+  // matches a mention: an edit is not a new message.
+  readonly editEvent?: MessageV2 | null;
   readonly readStateEvent: ReadStateV1 | null;
   readonly onOpen: (channel: string) => void;
 }) {
@@ -173,6 +179,15 @@ export function useNotifications({
       };
     }
   }, [signedIn, eventsLive, principal, preferences, browserPermission, channels, origin, account, close]);
+  useEffect(() => {
+    if (editEvent === null) return;
+    // The alert of this message, under the client rule: an older copy never
+    // replaces a newer one.
+    const stale = (alert: NotificationAlert) =>
+      alert.message.id === editEvent.id && alert.message.channel_id === editEvent.channel_id && isLater(editEvent, alert.message);
+    setAlerts((previous) => (previous.some(stale) ? previous.map((alert) => (stale(alert) ? { ...alert, message: editEvent } : alert)) : previous));
+  }, [editEvent]);
+
   const latestDeliver = useRef(deliver);
   latestDeliver.current = deliver;
 

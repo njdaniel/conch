@@ -409,10 +409,23 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // authors in the conversation.
   const [readStateEvent, setReadStateEvent] = useState<ReadStateV1 | null>(null);
   const [messageEvent, setMessageEvent] = useState<MessageV2 | null>(null);
+  const [editEvent, setEditEvent] = useState<MessageV2 | null>(null);
   useEffect(() => {
     setReadStateEvent(null);
     setMessageEvent(null);
+    setEditEvent(null);
   }, [signedIn, principal?.id]);
+  // An edited message (issue #845): the copy goes to whatever the page holds
+  // of it, the open conversation and a notification alike, and is dropped
+  // where nothing holds it. It is never a new message.
+  const edited = useCallback((message: MessageV2) => {
+    const name = nameOf(message.channel_id);
+    if (name !== null) dispatchChat({ type: 'edited', channel: name, message });
+  }, [nameOf, dispatchChat]);
+  const onMessageEdited = useCallback((message: MessageV2) => {
+    setEditEvent(message);
+    edited(message);
+  }, [edited]);
   const agents = useAgents({
     signedIn,
     channel: channelId === null ? null : selected,
@@ -425,6 +438,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onMissing,
     onReadState: setReadStateEvent,
     onMessage: setMessageEvent,
+    onMessageEdited,
   });
   const live = useLiveChannel({
     channel: channelId === null ? null : selected,
@@ -477,6 +491,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     loaded: channels.loaded,
     eventsLive: agents.state.link === 'live',
     event: messageEvent,
+    editEvent,
     readStateEvent,
     onOpen,
   });
@@ -1473,6 +1488,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                   const pending = chatFor(chatNow.current, selected).pending.find((p) => p.localId === localId);
                   dispatchChat({ type: 'discard', channel: selected, localId, ...(pending?.requestId === undefined ? {} : { requestId: pending.requestId }) });
                 }}
+                onEdited={edited}
                 onLoadOlder={live.loadOlder}
                 onReload={live.retry}
                 onSearch={() => {
