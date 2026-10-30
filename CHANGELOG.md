@@ -8,8 +8,44 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.7] - 2026-10-30
+
+Upgrade with `conch-server upgrade v0.1.0-alpha.7` from your workstation, or
+with `conch-upgrade.sh` on the droplet (docs/deploy.md step 11). Migration 38
+adds message editing (the `edited_at` column and the revisions table), so a
+rollback to `alpha.6` restores the pre-upgrade backup: what was written since
+the upgrade is lost, and everyone signs in again (docs/deploy.md, "Rollback
+with a migration").
+
+### Added
+
+- **Edit your own message** (#845). Each of your own text messages has a ⋯
+  menu (also reached by right-click, a long press, or the keyboard) with
+  **Edit**.
+  - **Limits:** an edit is allowed for an hour after you send it, up to ten
+    times.
+  - **Keys:** Enter saves, Shift+Enter adds a line, and Esc cancels.
+  - **What others see:** the new text arrives live with an **(edited)**
+    marker. Only you can open **Earlier versions**.
+  - **Search** finds the new text only.
+  - **Nothing else changes:** an edit sends no notification, and the
+    message's attachments, audience, reactions and replies stay as they
+    were. Approval requests can't be edited.
+  - **API:** `PUT /v2/channels/{channel}/messages/{message_id}/body` and
+    `GET …/revisions`. Agents can't edit. Owners see a `message_edited` row
+    in the audit log, with no text.
+
 ### Changed
 
+- **No minimum password length** (#975, #977). A password can be as short
+  as you like, but not empty, and at most 128 characters. Every way of
+  setting one accepts this: sign-up, invite, change, reset and operator
+  setup. The browser and the CLI no longer ask for 15 characters.
+  - **Still refused:** passwords that are only spaces, that repeat a short
+    pattern (`aaaa`, `abab`), or that contain your name.
+  - **Note:** common short passwords such as `password` are accepted.
+    Sign-in rate limits (five failures per name per ten minutes) are the
+    protection.
 - **Guests are turned off for now** (#1005). No route starts a guest visit
   (`403 guests_disabled`). The settings and invites can no longer admit
   guests (`409 join_policy_conflict`). The web client no longer offers guest
