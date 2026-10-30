@@ -41,6 +41,41 @@ type joinClaims struct {
 // It also requires that no two tokens seen in this run share a jti. It never
 // returns the token in an error.
 func (h *harness) checkJoinToken(token string, lk *livekitSettings, sub, room string, canPublish bool, expiresAt time.Time) error {
+	want := map[string]any{
+		"roomJoin":          true,
+		"room":              room,
+		"canSubscribe":      true,
+		"canPublish":        canPublish,
+		"canPublishData":    false,
+		"canPublishSources": []any{"microphone"},
+	}
+	return h.checkClaims(token, lk, sub, room, want, expiresAt, "join+subscribe+publish(microphone only) for the one room")
+}
+
+// checkCompanionToken is checkJoinToken for the second participant of a person
+// (issue #933): the companion (publishScreen) may publish the screen-share
+// source and nothing else; the viewer publishes nothing, and its source list
+// is an empty array. Neither names a microphone, share audio or data, and
+// neither sets hidden. canSubscribe is what the request asked for.
+func (h *harness) checkCompanionToken(token string, lk *livekitSettings, sub, room string, publishScreen, canSubscribe bool, expiresAt time.Time) error {
+	sources := []any{}
+	if publishScreen {
+		sources = []any{"screen_share"}
+	}
+	want := map[string]any{
+		"roomJoin":          true,
+		"room":              room,
+		"canSubscribe":      canSubscribe,
+		"canPublish":        publishScreen,
+		"canPublishData":    false,
+		"canPublishSources": sources,
+	}
+	return h.checkClaims(token, lk, sub, room, want, expiresAt, "exactly the companion's grant for the one room")
+}
+
+// checkClaims is the check both share: the token's signature, its top-level
+// claims, its lifetime, and its video grant, which must be exactly want.
+func (h *harness) checkClaims(token string, lk *livekitSettings, sub, room string, want map[string]any, expiresAt time.Time, grantName string) error {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return errors.New("join token is not a three-part JWT")
@@ -86,14 +121,6 @@ func (h *harness) checkJoinToken(token string, lk *livekitSettings, sub, room st
 	case c.Exp-expiresAt.Unix() > 1 || expiresAt.Unix()-c.Exp > 1:
 		return fmt.Errorf("join token exp differs from the response's expires_at by %d s", c.Exp-expiresAt.Unix())
 	}
-	want := map[string]any{
-		"roomJoin":          true,
-		"room":              room,
-		"canSubscribe":      true,
-		"canPublish":        canPublish,
-		"canPublishData":    false,
-		"canPublishSources": []any{"microphone"},
-	}
 	if !reflect.DeepEqual(c.Video, want) {
 		// Say which grants differ without printing the room name.
 		var diff []string
@@ -115,7 +142,7 @@ func (h *harness) checkJoinToken(token string, lk *livekitSettings, sub, room st
 				diff = append(diff, "missing grant "+k)
 			}
 		}
-		return fmt.Errorf("join token video grant is not exactly join+subscribe+publish(microphone only) for the one room: %s", strings.Join(diff, "; "))
+		return fmt.Errorf("join token video grant is not %s: %s", grantName, strings.Join(diff, "; "))
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()

@@ -1122,6 +1122,36 @@ mod tests {
             "voice-occupancy-v1-not-configured.json",
             "occupancy is for a channel list",
         ),
+        // Companion and viewer participants (issue #933). The companion's request and
+        // answer are Electron's renderer's, never the voice client's: it connects with
+        // the session it asked for itself.
+        (
+            "voice-companion-request-v1.json",
+            "the companion route is the desktop renderer's",
+        ),
+        (
+            "voice-companion-request-v1-publish-only.json",
+            "the companion route is the desktop renderer's",
+        ),
+        (
+            "voice-companion-request-v1-viewer.json",
+            "the companion route is the desktop renderer's",
+        ),
+        (
+            "voice-companion-response-v1.json",
+            "the companion route is the desktop renderer's",
+        ),
+        (
+            "voice-companion-response-v1-viewer.json",
+            "the companion route is the desktop renderer's",
+        ),
+        // The session answer that names the companion identity. This client ignores the
+        // field until it learns to leave its own companion's tracks unplayed (issue #934),
+        // and that issue claims the fixture with the type.
+        (
+            "voice-session-response-v1-companion.json",
+            "companion_identity is read from #934 on",
+        ),
     ];
 
     #[test]
