@@ -8,8 +8,25 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6] - 2026-10-30
+
+Upgrade with `conch-server upgrade v0.1.0-alpha.6` from your workstation, or
+with `conch-upgrade.sh` on the droplet (docs/deploy.md step 11). Migration 37
+adds the reactions table, so a rollback to `alpha.5` restores the
+pre-upgrade backup: what was written since the upgrade is lost, and everyone
+signs in again (docs/deploy.md, "Rollback with a migration").
+
 ### Added
 
+- **The phone layout: Chat, Channels and Voice** (#929). On a phone the web
+  client has three tabs along the bottom. **Voice** is where you join and leave
+  voice, talk, mute and see who is in the room. A thin bar on the other tabs
+  shows you are still connected. Before this release a phone had no way to
+  join voice.
+- **An emoji picker, and `:shortcode:` completion in the message box** (#763).
+  - The picker searches by name.
+  - Typing `:fire` offers matches, and Enter or Tab inserts the chosen one.
+  - The catalog is Unicode 18.0, vendored and generated (#953).
 - **Message reactions on the server** (#765, `docs/design/message-reactions.md`):
   a durable record of (message, person, emoji) with derived counts. REST:
   `PUT` and `DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}`
@@ -25,6 +42,33 @@ release that Nick publishes.
   change. **Migration 37** adds the `message_reactions` table; as for every
   migration, going back to an earlier binary means restoring the pre-upgrade
   backup. See README.md, "Reactions".
+  The browser doesn't show reactions yet (#766).
+- **A release delay for push-to-talk** (#965). It's a slider under Voice
+  options, from 0 to 2 seconds, kept per tab.
+- **Screen-share companions on the server** (#933, #932). A person in a
+  voice room can get a second token that publishes only their screen, or
+  only watches. The server counts it as the same person in presence and
+  occupancy. This is for the desktop app, which is not released yet.
+- **Desktop app groundwork** (#940, #941, #942, #944). This is the packaged
+  Electron shell, its credential vault and its REST client. It is built and
+  tested in CI but not yet shipped.
+- **The voice helper's Linux events socket** (`--events-pipe`, #937) and its
+  attach line (#893).
+
+### Changed
+
+- **The end of a push-to-talk phrase is no longer cut off** (#965). The browser
+  dropped audio it had captured but not yet sent, so the 100 ms release tail
+  was heard as about half of that. The default is now 200 ms, which is heard
+  as about 150 ms.
+- **"Transmitting" now means audio is actually going out** (#965). While a
+  press waits for the server's answer, the voice strip says "Waiting for the
+  server".
+- **Losing focus shuts the push-to-talk microphone at once** (#965), without
+  the release delay. A press still waiting for the server's answer never
+  opens after focus is lost.
+- **Open-mic detection is faster** (#965). It reads the level every 10 ms
+  instead of every 50 ms.
 
 ## [0.1.0-alpha.5] - 2026-10-29
 
