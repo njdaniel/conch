@@ -824,7 +824,7 @@ label {
   margin: 0 0 var(--s2);
 }
 
-/* Settings → Password, Add a device, and Joining and guests (issue #714):
+/* Settings → Password, Add a device, and Joining (issue #714):
    each opens in place, its forms one field under another, and wraps rather
    than widening the drawer. */
 .password-settings,
@@ -1362,6 +1362,221 @@ label {
   display: flex;
   gap: var(--s2);
   margin: var(--s1) 0;
+}
+
+/* A message's actions menu (issue #845, docs/design/message-editing.md §13):
+   the ⋯ button at the message's top right, and the menu under it. With a
+   mouse it shows on hover and on focus within the message; on a touch screen
+   and on a phone it is always there. */
+.message.has-actions {
+  position: relative;
+  padding-right: 2.75rem;
+}
+
+.message-menu {
+  position: absolute;
+  top: 0.15rem;
+  right: var(--s1);
+}
+
+.more-actions {
+  min-width: 2.25rem;
+  padding: 0 var(--s2);
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+}
+
+@media (hover: hover) and (min-width: 700px) {
+  .message .more-actions {
+    opacity: 0;
+  }
+
+  .message:hover .more-actions,
+  .message:focus-within .more-actions,
+  .more-actions[aria-expanded='true'] {
+    opacity: 1;
+  }
+}
+
+.actions-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 10;
+  display: grid;
+  min-width: 9rem;
+  padding: var(--s1);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
+
+.actions-menu [role='menuitem'] {
+  justify-content: flex-start;
+  background: transparent;
+  border-color: transparent;
+}
+
+.actions-menu [role='menuitem']:focus-visible,
+.actions-menu [role='menuitem']:hover {
+  background: var(--hover);
+}
+
+/* The inline editor, in place of the text. */
+.message-editor {
+  display: grid;
+  gap: var(--s1);
+  margin: var(--s1) 0;
+  white-space: normal;
+}
+
+.message-editor textarea {
+  width: 100%;
+  resize: vertical;
+  background: var(--bg);
+}
+
+.message-editor .hint {
+  margin: 0;
+}
+
+.editor-actions,
+.edit-discard {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.edit-discard p {
+  margin: 0;
+}
+
+.edit-error,
+.edit-notice {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--small);
+}
+
+/* "(edited)", muted, after the text; for the author a button that opens
+   Earlier versions. */
+.edited-marker,
+.edited {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.messages button.edited-marker {
+  display: inline;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.messages button.edited-marker:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+}
+
+.versions-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: var(--s4);
+  white-space: normal;
+}
+
+.versions-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 0.75);
+}
+
+.versions-dialog {
+  position: relative;
+  display: grid;
+  gap: var(--s3);
+  box-sizing: border-box;
+  width: min(36rem, 100%);
+  max-height: 85vh;
+  padding: var(--s4);
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.versions-dialog h2,
+.versions-dialog .hint {
+  margin: 0;
+}
+
+.versions {
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.version {
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.version.current {
+  border-color: var(--accent);
+}
+
+.version-head {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.version-current {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.version-body {
+  margin: var(--s1) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A phone (below 700 px): no hover, so the ⋯ is always shown, a 44 px
+   square; the editor's buttons are 44 px; Earlier versions is a full-width
+   sheet from the bottom. */
+@media (max-width: 699px) {
+  .more-actions,
+  .actions-menu [role='menuitem'],
+  .editor-actions button,
+  .edit-discard button {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+
+  .versions-layer {
+    place-items: end stretch;
+    padding: 0;
+  }
+
+  .versions-dialog {
+    width: 100%;
+    max-height: 90vh;
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
 }
 
 .approval-card {

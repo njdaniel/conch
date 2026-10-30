@@ -14,6 +14,8 @@ export const MAX_REACTION_KEY_CODE_POINTS = 16;
 export const MAX_REACTION_BATCH_MESSAGES = 100;
 export const DEFAULT_REACTOR_LIMIT = 50;
 export const MAX_REACTOR_LIMIT = 100;
+export const MESSAGE_EDIT_WINDOW_SECONDS = 3600;
+export const MAX_MESSAGE_EDITS = 10;
 
 // schema.PrincipalKind
 export type PrincipalKind = 'human' | 'agent';
@@ -366,6 +368,7 @@ export interface MessageV2 {
   audience?: Audience;
   thread_root_id?: number;
   guest_author?: GuestAttributionV1;
+  edited_at?: string;
 }
 
 export const messageV2 = object<MessageV2>({
@@ -379,6 +382,7 @@ export const messageV2 = object<MessageV2>({
   audience: optional(audience),
   thread_root_id: optional(int),
   guest_author: optional(guestAttributionV1),
+  edited_at: optional(timestamp),
 });
 
 // schema.PostMessageRequestV2
@@ -438,6 +442,63 @@ export interface WSTicketV1 {
 export const wsTicketV1 = object<WSTicketV1>({
   ticket: str,
   expires_at: timestamp,
+});
+
+// schema.EditMessageRequestV1
+export interface EditMessageRequestV1 {
+  body: string;
+}
+
+export const editMessageRequestV1 = object<EditMessageRequestV1>({
+  body: str,
+});
+
+// schema.EditMessageResponseV1
+export interface EditMessageResponseV1 {
+  message: MessageV2;
+}
+
+export const editMessageResponseV1 = object<EditMessageResponseV1>({
+  message: messageV2,
+});
+
+// schema.MessageRevisionV1
+export interface MessageRevisionV1 {
+  revision: number;
+  body: string;
+  created_at: string;
+}
+
+export const messageRevisionV1 = object<MessageRevisionV1>({
+  revision: int,
+  body: str,
+  created_at: timestamp,
+});
+
+// schema.ListMessageRevisionsResponseV1
+export interface ListMessageRevisionsResponseV1 {
+  channel_id: number;
+  message_id: number;
+  revisions: MessageRevisionV1[];
+}
+
+export const listMessageRevisionsResponseV1 = object<ListMessageRevisionsResponseV1>({
+  channel_id: int,
+  message_id: int,
+  revisions: array(messageRevisionV1),
+});
+
+// schema.MessageEditedV1
+export const messageEditedV1Schema = 'conch.message_edited.v1';
+
+export interface MessageEditedV1 {
+  schema: typeof messageEditedV1Schema;
+  message: MessageV2;
+}
+
+export const messageEditedV1 = object<MessageEditedV1>({
+  schema: vocab<typeof messageEditedV1Schema>({ [messageEditedV1Schema]: true }),
+  message: messageV2,
 });
 
 // schema.OptionKind

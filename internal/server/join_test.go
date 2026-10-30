@@ -9,8 +9,6 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,16 +19,19 @@ import (
 
 // Guest entry (issue #710): the front door, Join as guest from the bare
 // address and through an invite, the joining settings, the guest list and
-// End all guest visits. The policy matrix checks that what a preview offers
-// and what a write allows agree; the race tests that the policy, the caps
-// and the open channels are checked in the transaction that starts a visit.
+// End all guest visits. Guests are removed for now (issue #1005): the policy
+// matrices check that, whatever a database from before the change holds,
+// what a preview offers and what a write allows still agree, and that
+// neither offers or starts a visit. The visits the operator routes act on
+// are started through the store (seedGuest, newGuest).
 
 func modePtr(m schema.OpenJoiningMode) *schema.OpenJoiningMode { return &m }
 
-// openTo is the settings change that lets guests join from the bare address
-// into channels.
+// openTo is the settings change that opens the bare address to accounts in
+// channels: the most that may be opened while guests are removed (issue
+// #1005).
 func openTo(channels ...string) schema.PutJoinSettingsRequestV1 {
-	return schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(true), OpenJoining: modePtr(schema.OpenJoiningGuest), OpenChannels: &channels}
+	return schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningAccount), OpenChannels: &channels}
 }
 
 func (f *authFixture) putJoin(t *testing.T, req schema.PutJoinSettingsRequestV1) *httptest.ResponseRecorder {
@@ -81,17 +82,6 @@ func (f *inviteFixture) redeemGuest(t *testing.T, code, label, remote string) *h
 	return f.send(t, "POST", "/v1/invites/redeem-guest", "", inviteJSON(t, schema.RedeemInviteGuestRequestV1{Code: code, Label: label}), remote)
 }
 
-func mustJoined(t *testing.T, rec *httptest.ResponseRecorder) schema.JoinGuestResponseV1 {
-	t.Helper()
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("join = %d %s", rec.Code, rec.Body)
-	}
-	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
-		t.Errorf("Cache-Control = %q, want no-store: the answer carries a token", got)
-	}
-	return decodeBody[schema.JoinGuestResponseV1](t, rec)
-}
-
 // auditOf returns the rows of action, oldest first.
 func (f *authFixture) auditOf(t *testing.T, action string) []store.AuditEvent {
 	t.Helper()
@@ -105,9 +95,10 @@ func (f *authFixture) auditOf(t *testing.T, action string) []store.AuditEvent {
 }
 
 // The bare address under every combination of the master switch, its mode
-// and its pause: what the front door offers is exactly what Join as guest
-// and Create an account (issue #711) do. Each case runs both writes, and a
-// refused one leaves nothing behind.
+// and its pause, as a database from before issue #1005 could hold them:
+// what the front door offers is exactly what Create an account (issue #711)
+// does, it never offers a visit, and Join as guest is refused in every case.
+// A refused write leaves nothing behind.
 func TestGuestEntryAddressMatrix(t *testing.T) {
 	const closed, paused = schema.ErrorCodeJoiningClosed, schema.ErrorCodeJoiningPaused
 	tests := []struct {
@@ -116,28 +107,25 @@ func TestGuestEntryAddressMatrix(t *testing.T) {
 		mode     schema.OpenJoiningMode
 		paused   bool
 		offer    schema.JoinOptionsV1
-		status   int
-		code     string
 		accountC string // the refusal of an account, or "" when one is made
 	}{
-		{"nothing changed", false, schema.OpenJoiningOff, false, schema.JoinOptionsV1{}, 403, schema.ErrorCodeGuestsDisabled, closed},
-		{"guests on, address off", true, schema.OpenJoiningOff, false, schema.JoinOptionsV1{}, 403, schema.ErrorCodeGuestsDisabled, closed},
-		{"guests on, address accounts only", true, schema.OpenJoiningAccount, false, schema.JoinOptionsV1{Account: true}, 403, schema.ErrorCodeGuestsDisabled, ""},
-		{"guests off, address both", false, schema.OpenJoiningBoth, false, schema.JoinOptionsV1{Account: true}, 403, schema.ErrorCodeGuestsDisabled, ""},
-		{"guests off, address accounts only", false, schema.OpenJoiningAccount, false, schema.JoinOptionsV1{Account: true}, 403, schema.ErrorCodeGuestsDisabled, ""},
-		{"guests on, address guest", true, schema.OpenJoiningGuest, false, schema.JoinOptionsV1{Guest: true}, 201, "", closed},
-		{"guests on, address both", true, schema.OpenJoiningBoth, false, schema.JoinOptionsV1{Guest: true, Account: true}, 201, "", ""},
-		{"guests on, address guest, paused", true, schema.OpenJoiningGuest, true, schema.JoinOptionsV1{Paused: true}, 403, schema.ErrorCodeJoiningPaused, closed},
-		{"guests on, address both, paused", true, schema.OpenJoiningBoth, true, schema.JoinOptionsV1{Paused: true}, 403, schema.ErrorCodeJoiningPaused, paused},
-		{"guests off, address accounts only, paused", false, schema.OpenJoiningAccount, true, schema.JoinOptionsV1{Paused: true}, 403, schema.ErrorCodeGuestsDisabled, paused},
-		{"guests off, address off, paused", false, schema.OpenJoiningOff, true, schema.JoinOptionsV1{}, 403, schema.ErrorCodeGuestsDisabled, closed},
+		{"nothing changed", false, schema.OpenJoiningOff, false, schema.JoinOptionsV1{}, closed},
+		{"guests on, address off", true, schema.OpenJoiningOff, false, schema.JoinOptionsV1{}, closed},
+		{"guests on, address accounts only", true, schema.OpenJoiningAccount, false, schema.JoinOptionsV1{Account: true}, ""},
+		{"guests off, address both", false, schema.OpenJoiningBoth, false, schema.JoinOptionsV1{Account: true}, ""},
+		{"guests off, address accounts only", false, schema.OpenJoiningAccount, false, schema.JoinOptionsV1{Account: true}, ""},
+		{"guests on, address guest", true, schema.OpenJoiningGuest, false, schema.JoinOptionsV1{}, closed},
+		{"guests on, address both", true, schema.OpenJoiningBoth, false, schema.JoinOptionsV1{Account: true}, ""},
+		{"guests on, address guest, paused", true, schema.OpenJoiningGuest, true, schema.JoinOptionsV1{Paused: true}, closed},
+		{"guests on, address both, paused", true, schema.OpenJoiningBoth, true, schema.JoinOptionsV1{Paused: true}, paused},
+		{"guests off, address accounts only, paused", false, schema.OpenJoiningAccount, true, schema.JoinOptionsV1{Paused: true}, paused},
+		{"guests off, address off, paused", false, schema.OpenJoiningOff, true, schema.JoinOptionsV1{}, closed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newInviteFixture(t, Config{})
-			req := schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(tt.enabled), JoiningPaused: boolPtr(tt.paused),
-				OpenJoining: modePtr(tt.mode), OpenChannels: &[]string{"red"}}
-			f.mustPutJoin(t, req)
+			legacySettingRows(t, f.srv, map[string]string{"guests_enabled": fmt.Sprint(tt.enabled), "open_joining": string(tt.mode),
+				"joining_paused": fmt.Sprint(tt.paused)}, f.red)
 			if got := f.frontDoor(t).Join; got != tt.offer {
 				t.Errorf("front door offers %+v, want %+v", got, tt.offer)
 			}
@@ -153,12 +141,7 @@ func TestGuestEntryAddressMatrix(t *testing.T) {
 					t.Errorf("a refused account was made: %v, %v", found, err)
 				}
 			}
-			rec = f.joinGuest(t, "", "")
-			if tt.status == http.StatusCreated {
-				mustJoined(t, rec)
-				return
-			}
-			assertErrorBody(t, rec, tt.status, tt.code)
+			assertErrorBody(t, f.joinGuest(t, "", ""), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
 			if n, err := f.srv.store.LiveGuests(context.Background()); err != nil || n != 0 {
 				t.Errorf("a refused join left %d live visits, %v", n, err)
 			}
@@ -166,10 +149,11 @@ func TestGuestEntryAddressMatrix(t *testing.T) {
 	}
 }
 
-// Invites under every join mode and the master switch: the preview's join is
-// what redemption allows, by either route; a guest-only invite makes no
-// account through the passwordless v1 redemption, and nothing is spent by a
-// refusal.
+// Invites under every join mode and the master switch, as a database from
+// before issue #1005 could hold them: the preview's join is what redemption
+// allows, it never offers a visit, and the guest redemption is refused in
+// every case; a guest-only invite makes no account through the passwordless
+// v1 redemption, and nothing is spent by a refusal.
 func TestGuestEntryInviteMatrix(t *testing.T) {
 	tests := []struct {
 		joinAs  schema.InviteJoinMode
@@ -180,23 +164,24 @@ func TestGuestEntryInviteMatrix(t *testing.T) {
 		{"", true, schema.JoinOptionsV1{Account: true}},
 		{schema.InviteJoinAccount, true, schema.JoinOptionsV1{Account: true}},
 		{schema.InviteJoinGuest, false, schema.JoinOptionsV1{}},
-		{schema.InviteJoinGuest, true, schema.JoinOptionsV1{Guest: true}},
+		{schema.InviteJoinGuest, true, schema.JoinOptionsV1{}},
 		{schema.InviteJoinBoth, false, schema.JoinOptionsV1{Account: true}},
-		{schema.InviteJoinBoth, true, schema.JoinOptionsV1{Guest: true, Account: true}},
+		{schema.InviteJoinBoth, true, schema.JoinOptionsV1{Account: true}},
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("join_as=%q guests=%t", tt.joinAs, tt.enabled), func(t *testing.T) {
 			f := newInviteFixture(t, Config{})
-			f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(tt.enabled)})
-			req := openLink("red")
-			req.JoinAs = tt.joinAs
-			inv := f.createInvite(t, f.rootTok, req)
-			wantMode := tt.joinAs
-			if wantMode == "" {
-				wantMode = schema.InviteJoinAccount
-			}
-			if inv.Invite.JoinAs != wantMode {
-				t.Errorf("invite join_as = %q, want %q", inv.Invite.JoinAs, wantMode)
+			legacySettingRows(t, f.srv, map[string]string{"guests_enabled": fmt.Sprint(tt.enabled)})
+			var inv schema.CreateInviteResponseV1
+			if tt.joinAs.Valid() && tt.joinAs != schema.InviteJoinAccount {
+				inv = f.legacyInvite(t, openLink("red"), tt.joinAs)
+			} else {
+				req := openLink("red")
+				req.JoinAs = tt.joinAs
+				inv = f.createInvite(t, f.rootTok, req)
+				if inv.Invite.JoinAs != schema.InviteJoinAccount {
+					t.Errorf("invite join_as = %q, want account", inv.Invite.JoinAs)
+				}
 			}
 			rec := f.preview(t, inv.Code)
 			p := decodeBody[schema.InvitePreviewV1](t, rec)
@@ -213,16 +198,11 @@ func TestGuestEntryInviteMatrix(t *testing.T) {
 				t.Fatal("the invite is not listed")
 				return 0
 			}
-			rec = f.redeemGuest(t, inv.Code, "Pat", "")
-			if tt.offer.Guest {
-				g := mustJoined(t, rec)
-				if g.Guest.Origin != schema.GuestOriginInvite || len(g.Channels) != 1 || g.Channels[0].Name != "red" {
-					t.Errorf("visit = %+v, channels %+v", g.Guest, g.Channels)
-				}
-			} else {
-				assertErrorBody(t, rec, http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
-			}
+			assertErrorBody(t, f.redeemGuest(t, inv.Code, "Pat", ""), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
 			before := uses()
+			if before != 0 {
+				t.Errorf("a refused guest redemption spent a use: %d", before)
+			}
 			rec = f.redeem(t, inv.Code, "newcomer")
 			if tt.offer.Account {
 				if rec.Code != http.StatusCreated {
@@ -238,85 +218,14 @@ func TestGuestEntryInviteMatrix(t *testing.T) {
 	}
 }
 
-// A paused or invalid invite and a malformed one answer as the existing
-// redemption does, and the refusal reveals nothing a guest switch would not:
-// with guests off every well-formed code is guests_disabled.
-func TestRedeemInviteGuestRefusals(t *testing.T) {
-	f := newInviteFixture(t, Config{})
-	req := openLink("red")
-	req.JoinAs = schema.InviteJoinGuest
-	inv := f.createInvite(t, f.rootTok, req)
-	unknown := schema.InviteCodePrefix + strings.Repeat("A", 43)
-
-	assertErrorBody(t, f.redeemGuest(t, inv.Code, "", ""), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
-	assertErrorBody(t, f.redeemGuest(t, unknown, "", ""), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
-	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(true)})
-	tests := []struct {
-		name, code, label string
-		status            int
-		errCode           string
-	}{
-		{"malformed code", "nope", "", 404, schema.ErrorCodeInviteInvalid},
-		{"unknown code", unknown, "", 404, schema.ErrorCodeInviteInvalid},
-		{"control character in the label", inv.Code, "Pa\u0007t", 400, "invalid_request"},
-		{"a label in the guest namespace", inv.Code, "guest-x", 400, "invalid_request"},
-		{"the server's own name", inv.Code, DefaultServerName, 400, "invalid_request"},
-		{"a label in the hidden namespace", inv.Code, "Hidden-1", 400, "invalid_request"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assertErrorBody(t, f.redeemGuest(t, tt.code, tt.label, ""), tt.status, tt.errCode)
-		})
-	}
-	if _, err := f.srv.store.SetInvitesPaused(context.Background(), "system", true); err != nil {
-		t.Fatal(err)
-	}
-	assertErrorBody(t, f.redeemGuest(t, inv.Code, "", ""), http.StatusServiceUnavailable, schema.ErrorCodeInvitesPaused)
-	assertErrorBody(t, f.preview(t, inv.Code), http.StatusServiceUnavailable, schema.ErrorCodeInvitesPaused)
-	if n, err := f.srv.store.LiveGuests(context.Background()); err != nil || n != 0 {
-		t.Errorf("refusals left %d live visits, %v", n, err)
-	}
-}
-
-// A visit through an invite: what the invite grants and no more, its hard
-// deadline bounded by the invite's credential lifetime, a use spent, the
-// invite recorded on the principal so disabling the invite's joiners ends
-// it, and every row attributed to the invite.
+// A visit through an invite made before issue #1005 is one of the invite's
+// joiners: disabling them ends it.
 func TestRedeemInviteGuestVisit(t *testing.T) {
 	f := newInviteFixture(t, Config{})
-	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(true)})
 	req := personal("red", "blue")
-	req.JoinAs, req.Voice = schema.InviteJoinBoth, true
-	req.CredentialLifetimeSeconds = int64Ptr(600)
-	inv := f.createInvite(t, f.rootTok, req)
-	g := mustJoined(t, f.redeemGuest(t, inv.Code, "Pat", ""))
-	if err := g.Guest.Validate(); err != nil {
-		t.Errorf("the visit does not validate: %v", err)
-	}
-	if g.Guest.Label != "Pat" || g.Principal.Name != g.Guest.Handle || g.Token == "" {
-		t.Errorf("joined = %+v", g)
-	}
-	if d := g.Guest.ExpiresAt.Time().Sub(g.Guest.StartedAt.Time()); d != 600*time.Second {
-		t.Errorf("visit lasts %v, want the invite's credential lifetime, 10m", d)
-	}
-	if names := []string{g.Channels[0].Name, g.Channels[1].Name}; len(g.Channels) != 2 || !slices.Contains(names, "red") || !slices.Contains(names, "blue") {
-		t.Errorf("channels = %+v", g.Channels)
-	}
-	// A personal invite has one use: it is spent.
-	assertErrorBody(t, f.redeemGuest(t, inv.Code, "", ""), http.StatusNotFound, schema.ErrorCodeInviteInvalid)
-	starts := f.auditOf(t, store.AuditGuestStarted)
-	if len(starts) != 1 || starts[0].Actor != fmt.Sprintf("invite:%d", inv.Invite.ID) ||
-		starts[0].Detail != fmt.Sprintf("origin=invite invite=%d", inv.Invite.ID) {
-		t.Errorf("guest_started rows = %+v", starts)
-	}
-	var redeemed bool
-	for _, e := range f.auditOf(t, store.AuditInviteRedeemed) {
-		redeemed = redeemed || strings.HasSuffix(e.Detail, "guest=1")
-	}
-	if !redeemed {
-		t.Error("no invite_redeemed row marks the guest redemption")
-	}
-	// The invite's joiners include the guest; disabling them ends its visit.
+	req.Voice = true
+	inv := f.legacyInvite(t, req, schema.InviteJoinBoth)
+	g := f.seedInviteGuest(t, inv.Invite, "Pat")
 	rec := f.send(t, "POST", fmt.Sprintf("/v1/invites/%d/disable-joiners", inv.Invite.ID), f.rootTok, `{"dry_run":false}`, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("disable joiners = %d %s", rec.Code, rec.Body)
@@ -327,49 +236,27 @@ func TestRedeemInviteGuestVisit(t *testing.T) {
 	}
 }
 
-// A front door read a moment ago admits nobody the policy now refuses:
-// turning guests off refuses the next join through both entry points, turns
-// a guest-only address off with it, and leaves the live visit to its
-// bounds, said in the answer and the audit row.
+// A visit live when guests were removed (issue #1005) lasts to its bounds:
+// the settings say how many remain and warn, and the guest still works.
 func TestGuestEntryStalePreview(t *testing.T) {
 	f := newInviteFixture(t, Config{})
 	f.mustPutJoin(t, openTo("red"))
-	req := openLink("red")
-	req.JoinAs = schema.InviteJoinGuest
-	inv := f.createInvite(t, f.rootTok, req)
-	if !f.frontDoor(t).Join.Guest || !decodeBody[schema.InvitePreviewV1](t, f.preview(t, inv.Code)).Join.Guest {
-		t.Fatal("the entry points do not offer a visit")
-	}
-	live := mustJoined(t, f.joinGuest(t, "", ""))
-
-	resp := f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(false)})
-	if resp.Settings.OpenJoining != schema.OpenJoiningOff || resp.LiveGuests != 1 ||
-		!slices.Contains(resp.Warnings, schema.JoinWarningLiveGuestsRemain) {
-		t.Errorf("turning guests off answered %+v", resp)
-	}
-	rows := f.auditOf(t, store.AuditJoinSettingsChanged)
-	last := rows[len(rows)-1]
-	if last.Detail != "open_joining=guest->off guests_enabled=true->false live_guests=1" || last.Subject != "server" {
-		t.Errorf("join_settings_changed = %+v", last)
-	}
-
-	assertErrorBody(t, f.joinGuest(t, "", ""), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
-	assertErrorBody(t, f.redeemGuest(t, inv.Code, "", ""), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
-	if p := decodeBody[schema.InvitePreviewV1](t, f.preview(t, inv.Code)); p.Join == nil || p.Join.Guest {
-		t.Errorf("preview after guests went off = %+v", p.Join)
+	live := f.seedGuest(t, "")
+	resp := f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(false), MaxGuests: int64Ptr(3)})
+	if resp.Settings.GuestsEnabled || resp.LiveGuests != 1 || !slices.Contains(resp.Warnings, schema.JoinWarningLiveGuestsRemain) {
+		t.Errorf("the settings with a visit live answered %+v", resp)
 	}
 	if f.frontDoor(t).Join.Guest {
-		t.Error("the front door still offers a visit")
+		t.Error("the front door offers a visit")
 	}
-	// The live visit lasts until its bounds or End all guest visits.
 	if rec := f.send(t, "GET", "/v1/whoami", live.Token, "", ""); rec.Code != http.StatusOK {
-		t.Errorf("the live guest after guests went off: whoami = %d", rec.Code)
+		t.Errorf("the live guest: whoami = %d", rec.Code)
 	}
 }
 
 // The settings refuse contradictions and bad values, and write nothing when
 // they do; a channel must exist; turning guests off while the address is
-// both leaves account mode as it was.
+// open to accounts leaves account mode as it was.
 func TestJoinSettingsRefusals(t *testing.T) {
 	f := newInviteFixture(t, Config{})
 	tests := []struct {
@@ -380,7 +267,7 @@ func TestJoinSettingsRefusals(t *testing.T) {
 	}{
 		{"nothing to change", schema.PutJoinSettingsRequestV1{}, 400, "invalid_request"},
 		{"guest-only with guests off", schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningGuest), OpenChannels: &[]string{"red"}}, 409, schema.ErrorCodeJoinPolicyConflict},
-		{"open joining with no channel", schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(true), OpenJoining: modePtr(schema.OpenJoiningBoth)}, 409, schema.ErrorCodeJoinPolicyConflict},
+		{"open joining with no channel", schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningAccount)}, 409, schema.ErrorCodeJoinPolicyConflict},
 		{"a channel that does not exist", openTo("nosuch"), 400, "invalid_request"},
 		{"an unknown mode", schema.PutJoinSettingsRequestV1{OpenJoining: modePtr("sometimes")}, 400, "invalid_request"},
 		{"a negative cap", schema.PutJoinSettingsRequestV1{MaxGuests: int64Ptr(-1)}, 400, "invalid_request"},
@@ -412,10 +299,10 @@ func TestJoinSettingsRefusals(t *testing.T) {
 		len(removed) != 1 || removed[0].Subject != fmt.Sprintf("channel:%d", f.red.ID) {
 		t.Errorf("open channel rows: added %+v, removed %+v", added, removed)
 	}
-	// Both, then guests off: the address keeps its account mode.
-	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningBoth)})
-	if resp := f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(false)}); resp.Settings.OpenJoining != schema.OpenJoiningBoth {
-		t.Errorf("guests off with the address on both: mode = %q", resp.Settings.OpenJoining)
+	// Guests off with the address open to accounts: the address keeps its
+	// account mode.
+	if resp := f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(false)}); resp.Settings.OpenJoining != schema.OpenJoiningAccount {
+		t.Errorf("guests off with the address on accounts: mode = %q", resp.Settings.OpenJoining)
 	}
 	// Setting what is already set writes nothing.
 	n := len(f.auditOf(t, store.AuditJoinSettingsChanged))
@@ -425,8 +312,8 @@ func TestJoinSettingsRefusals(t *testing.T) {
 	}
 }
 
-// Guests cannot be enabled while a permanent principal has a name in the
-// reserved namespace, from before migration 31; the settings warn about it.
+// The settings warn while a permanent principal has a name in the reserved
+// namespace, from before migration 31, and other changes still go through.
 func TestJoinSettingsReservedNames(t *testing.T) {
 	f := newInviteFixture(t, Config{})
 	path, ok := testDBPaths.Load(f.srv)
@@ -449,311 +336,8 @@ func TestJoinSettingsReservedNames(t *testing.T) {
 	if !slices.Contains(got.Warnings, schema.JoinWarningReservedNamesInUse) {
 		t.Errorf("warnings = %v", got.Warnings)
 	}
-	assertErrorBody(t, f.putJoin(t, openTo("red")), http.StatusConflict, schema.ErrorCodeJoinPolicyConflict)
 	// Other changes still go through.
 	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{MaxGuests: int64Ptr(7)})
-}
-
-// The cap on live visits holds under concurrent joins through both entry
-// points: exactly max_guests start. A visit past its deadline, not yet swept,
-// does not hold a place; an ended one gives its place back.
-func TestGuestCapUnderConcurrentJoins(t *testing.T) {
-	f := newInviteFixture(t, Config{})
-	f.mustPutJoin(t, openTo("red"))
-	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{MaxGuests: int64Ptr(3)})
-	req := openLink("red")
-	req.JoinAs = schema.InviteJoinGuest
-	inv := f.createInvite(t, f.rootTok, req)
-
-	const tries = 16
-	codes := make([]int, tries)
-	var wg sync.WaitGroup
-	for i := range tries {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			remote := fmt.Sprintf("198.51.100.%d:1", i+1)
-			if i%2 == 0 {
-				codes[i] = f.joinGuest(t, "", remote).Code
-			} else {
-				codes[i] = f.redeemGuest(t, inv.Code, "", remote).Code
-			}
-		}()
-	}
-	wg.Wait()
-	var made, full int
-	for _, c := range codes {
-		switch c {
-		case http.StatusCreated:
-			made++
-		case http.StatusTooManyRequests:
-			full++
-		default:
-			t.Errorf("a join answered %d", c)
-		}
-	}
-	if made != 3 || full != tries-3 {
-		t.Fatalf("made %d, refused %d as full; want 3 and %d", made, full, tries-3)
-	}
-	if n, err := f.srv.store.LiveGuests(context.Background()); err != nil || n != 3 {
-		t.Errorf("live = %d, %v", n, err)
-	}
-	info := f.frontDoor(t)
-	if info.Join.Guest || !info.Join.GuestsFull {
-		t.Errorf("front door at the cap = %+v", info.Join)
-	}
-	assertErrorBody(t, f.joinGuest(t, "", "203.0.113.9:1"), http.StatusTooManyRequests, schema.ErrorCodeGuestsFull)
-
-	// End one: its place is free.
-	list := decodeBody[schema.ListGuestsResponseV1](t, f.send(t, "GET", "/v1/guests", f.rootTok, "", ""))
-	if rec := f.send(t, "POST", fmt.Sprintf("/v1/guests/%d/end", list.Guests[0].ID), f.rootTok, "", ""); rec.Code != http.StatusOK {
-		t.Fatalf("end = %d %s", rec.Code, rec.Body)
-	}
-	mustJoined(t, f.joinGuest(t, "", "203.0.113.9:1"))
-
-	// A visit past its deadline holds no place, before any sweep.
-	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{MaxGuests: int64Ptr(4)})
-	if _, err := f.srv.store.CreateGuest(context.Background(), "system", store.NewGuest{Origin: schema.GuestOriginAddress,
-		Channels: []int64{f.red.ID}, Idle: time.Hour, Absolute: 200 * time.Millisecond}); err != nil {
-		t.Fatal(err)
-	}
-	assertErrorBody(t, f.joinGuest(t, "", "203.0.113.10:1"), http.StatusTooManyRequests, schema.ErrorCodeGuestsFull)
-	time.Sleep(300 * time.Millisecond)
-	mustJoined(t, f.joinGuest(t, "", "203.0.113.10:1"))
-}
-
-// The per-address cap (review F13): one address fills its share and no more,
-// another address still joins; behind a trusted proxy the forwarded address
-// is the one counted, and an untrusted peer cannot choose it.
-func TestGuestCapPerAddress(t *testing.T) {
-	proxies, err := ParseTrustedProxies("10.0.0.0/8")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := newInviteFixture(t, Config{TrustedProxies: proxies})
-	f.mustPutJoin(t, openTo("red"))
-	resp := f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{MaxGuestsPerAddress: int64Ptr(2)})
-	if slices.Contains(resp.Warnings, schema.JoinWarningTrustedProxyUnset) {
-		t.Errorf("warnings = %v with a trusted proxy set", resp.Warnings)
-	}
-	via := func(client string) *httptest.ResponseRecorder {
-		return f.send(t, "POST", "/v1/join/guest", "", `{}`, "10.0.0.1:1", client)
-	}
-	mustJoined(t, via("198.51.100.7"))
-	mustJoined(t, via("198.51.100.7"))
-	assertErrorBody(t, via("198.51.100.7"), http.StatusTooManyRequests, schema.ErrorCodeGuestsFull)
-	// An untrusted peer cannot choose its bucket with a forwarded header: a
-	// forwarded request it sends is not taken as secure at all. Without one
-	// it is its own address.
-	assertErrorBody(t, f.send(t, "POST", "/v1/join/guest", "", `{}`, "192.0.2.50:1", "198.51.100.8"), http.StatusForbidden, schema.ErrorCodeHTTPSRequired)
-	mustJoined(t, f.send(t, "POST", "/v1/join/guest", "", `{}`, "192.0.2.50:1"))
-	mustJoined(t, via("198.51.100.8"))
-	got := decodeBody[schema.JoinSettingsResponseV1](t, f.send(t, "GET", "/v1/join/settings", f.rootTok, "", ""))
-	if got.LiveGuests != 4 || slices.Contains(got.Warnings, schema.JoinWarningOneAddress) {
-		t.Errorf("settings = %+v", got)
-	}
-
-	// Concurrent joins from one address take its share and no more.
-	g := newInviteFixture(t, Config{})
-	g.mustPutJoin(t, openTo("red"))
-	codes := make([]int, 10)
-	var wg sync.WaitGroup
-	for i := range codes {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			codes[i] = g.joinGuest(t, "", "198.51.100.99:1").Code
-		}()
-	}
-	wg.Wait()
-	made := 0
-	for _, c := range codes {
-		if c == http.StatusCreated {
-			made++
-		} else if c != http.StatusTooManyRequests {
-			t.Errorf("a join answered %d", c)
-		}
-	}
-	if made != schema.DefaultMaxGuestsPerAddress {
-		t.Errorf("one address started %d visits, want %d", made, schema.DefaultMaxGuestsPerAddress)
-	}
-	got = decodeBody[schema.JoinSettingsResponseV1](t, g.send(t, "GET", "/v1/join/settings", g.rootTok, "", ""))
-	if !slices.Contains(got.Warnings, schema.JoinWarningOneAddress) || !slices.Contains(got.Warnings, schema.JoinWarningTrustedProxyUnset) {
-		t.Errorf("warnings with every visit from one address and no proxy = %v", got.Warnings)
-	}
-}
-
-// The open channel set races guest joins and mode changes: whatever wins,
-// no visit starts with nowhere to go, and each visit's channels were open.
-//
-// The joins go on until they have raced enough: at least minJoined visits
-// admitted, into at least minSets different channel sets, while the
-// settings goroutine answered at least minChanges changes. Each settings
-// answer releases one bounded batch of joins. An unbounded stream can keep
-// taking SQLite's unfair write lock until the settings change exceeds its
-// busy timeout (issue #800); backpressure leaves only the current batch for
-// that change to wait behind, without deciding which request wins.
-func TestOpenChannelsRaceJoins(t *testing.T) {
-	f := newInviteFixture(t, Config{})
-	f.mustPutJoin(t, openTo("red"))
-	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{MaxGuests: int64Ptr(0), MaxGuestsPerAddress: int64Ptr(schema.MaxMaxGuests)})
-	const (
-		joiners    = 4
-		minJoined  = 20
-		minSets    = 2
-		minChanges = 12 // the six states twice
-		limit      = 30 * time.Second
-	)
-	var changes atomic.Int64
-	race, stop := context.WithTimeout(context.Background(), limit)
-	defer stop()
-	permits := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		// Joining is off in one state of six, so most joins race a channel
-		// change and some race the switch.
-		sets := []schema.PutJoinSettingsRequestV1{
-			{OpenChannels: &[]string{"blue"}},
-			{OpenChannels: &[]string{"red", "blue"}},
-			{OpenChannels: &[]string{}}, // refused while on: the last channel stays
-			{OpenChannels: &[]string{"red"}},
-			{OpenJoining: modePtr(schema.OpenJoiningOff), OpenChannels: &[]string{}},
-			openTo("red"),
-		}
-		for i := 0; race.Err() == nil; i++ {
-			rec := f.putJoin(t, sets[i%len(sets)])
-			if rec.Code != http.StatusOK && rec.Code != http.StatusConflict {
-				t.Errorf("settings change = %d %s", rec.Code, rec.Body)
-				stop()
-				return
-			}
-			changes.Add(1)
-			for range joiners {
-				select {
-				case permits <- struct{}{}:
-				case <-race.Done():
-					return
-				}
-			}
-		}
-	}()
-	var joined []schema.JoinGuestResponseV1
-	answered := map[string]bool{} // the channel sets the joins were admitted to
-	var mu sync.Mutex
-	raced := false
-	// enough stops the joins once they have raced enough. mu is held.
-	enough := func() {
-		if len(joined) >= minJoined && len(answered) >= minSets && changes.Load() >= minChanges {
-			raced = true
-			stop()
-		}
-	}
-	var next atomic.Int64 // every join comes from an address of its own
-	var joining sync.WaitGroup
-	for range joiners {
-		joining.Add(1)
-		go func() {
-			defer joining.Done()
-			for {
-				select {
-				case <-race.Done():
-					return
-				case <-permits:
-				}
-				n := next.Add(1)
-				rec := f.joinGuest(t, "", fmt.Sprintf("10.%d.%d.%d:1", n>>16&0xff, n>>8&0xff, n&0xff))
-				mu.Lock()
-				switch rec.Code {
-				case http.StatusCreated:
-					g := decodeBody[schema.JoinGuestResponseV1](t, rec)
-					joined = append(joined, g)
-					chans := make([]string, len(g.Channels))
-					for i, c := range g.Channels {
-						chans[i] = c.Name
-					}
-					slices.Sort(chans)
-					answered[strings.Join(chans, ",")] = true
-				case http.StatusForbidden:
-				default:
-					t.Errorf("join = %d %s", rec.Code, rec.Body)
-					stop()
-					mu.Unlock()
-					return
-				}
-				enough()
-				mu.Unlock()
-			}
-		}()
-	}
-	joining.Wait()
-	stop()
-	wg.Wait()
-	if !raced {
-		t.Fatalf("after %v, %d joins admitted into channel sets %v while %d settings changes were answered; want at least %d, %d and %d: the test proved nothing",
-			limit, len(joined), answered, changes.Load(), minJoined, minSets, minChanges)
-	}
-	for _, g := range joined {
-		members, err := f.srv.store.ListChannelsForPrincipal(context.Background(), g.Principal.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(g.Channels) == 0 || len(members) != len(g.Channels) {
-			t.Errorf("visit %d answered channels %+v and holds %v", g.Principal.ID, g.Channels, members)
-		}
-	}
-}
-
-// A visit from the bare address joins the open channels only, with a fresh
-// history bound and no right to decide; it reads what was posted after it
-// arrived and nothing before. Joining starts no voice: nothing is asked of
-// LiveKit, and without join_voice the guest has none.
-func TestJoinGuestScopeAndHistory(t *testing.T) {
-	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
-	if rec := f.do(t, "POST", "/v2/channels/ops/messages", f.tokens["ann"], `{"body":"before-the-visit"}`); rec.Code != http.StatusCreated {
-		t.Fatalf("post = %d %s", rec.Code, rec.Body)
-	}
-	f.mustPutJoin(t, openTo("ops"))
-	calls := len(f.lk.calls())
-	g := mustJoined(t, presenceSend(t, f, "POST", "/v1/join/guest", "", `{"label":"Pat"}`))
-	// presenceSend logs the response in the call log; nothing else may be.
-	for _, c := range f.lk.calls()[calls:] {
-		if c.method != "http-response" {
-			t.Errorf("joining asked LiveKit for %s", c.method)
-		}
-	}
-	if g.Guest.State != schema.GuestStateActive || g.Guest.Origin != schema.GuestOriginAddress || g.Guest.Label != "Pat" ||
-		len(g.Channels) != 1 || g.Channels[0].Name != "ops" {
-		t.Errorf("joined = %+v", g)
-	}
-	if p, err := f.srv.store.PrincipalByID(context.Background(), g.Principal.ID); err != nil || p.VoiceAllowed || p.InviteID != 0 {
-		t.Errorf("the guest's principal = %+v, %v; want no voice and no invite", p, err)
-	}
-	if d := g.Guest.ExpiresAt.Time().Sub(g.Guest.StartedAt.Time()); d != schema.DefaultGuestAbsoluteSeconds*time.Second {
-		t.Errorf("visit lasts %v", d)
-	}
-	starts := f.auditOf(t, store.AuditGuestStarted)
-	if len(starts) != 1 || starts[0].Actor != "system" || starts[0].Detail != "origin=address" {
-		t.Errorf("guest_started = %+v", starts)
-	}
-	if rec := f.do(t, "POST", "/v2/channels/ops/messages", f.tokens["ann"], `{"body":"during-the-visit"}`); rec.Code != http.StatusCreated {
-		t.Fatalf("post = %d", rec.Code)
-	}
-	rec := f.do(t, "GET", "/v2/channels/ops/messages", g.Token, "")
-	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "before-the-visit") || !strings.Contains(rec.Body.String(), "during-the-visit") {
-		t.Errorf("the guest reads %d %s", rec.Code, rec.Body)
-	}
-	assertErrorBody(t, f.do(t, "GET", "/v2/channels/ops2/messages", g.Token, ""), http.StatusNotFound, "channel_not_found")
-	if can, err := f.srv.store.CanDecideApprovals(context.Background(), f.ops.ID, g.Principal.ID); err != nil || can {
-		t.Errorf("the guest can decide: %v, %v", can, err)
-	}
-	// Without join_voice, no voice session.
-	assertErrorBody(t, f.do(t, "POST", "/v1/channels/ops/voice/session", g.Token, ""), http.StatusForbidden, "voice_not_allowed")
-	who := decodeBody[schema.WhoAmIResponseV1](t, f.do(t, "GET", "/v1/whoami", g.Token, ""))
-	if who.IdentityClass != schema.IdentityGuest || who.Guest == nil || who.Guest.Handle != g.Guest.Handle {
-		t.Errorf("whoami = %+v", who)
-	}
 }
 
 // End all guest visits: the dry run lists the active visits and changes
@@ -766,14 +350,13 @@ func TestEndAllGuestVisits(t *testing.T) {
 	f.srv.credRecheckInterval = time.Hour
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	f.mustPutJoin(t, openTo("ops"))
-	a := mustJoined(t, presenceSend(t, f, "POST", "/v1/join/guest", "", `{}`))
-	b := mustJoined(t, presenceSend(t, f, "POST", "/v1/join/guest", "", `{}`))
-	c := newGuest(t, f.srv, "", time.Hour, time.Hour, f.ops.ID)
-	conv := newGuest(t, f.srv, "", time.Hour, time.Hour, f.ops.ID)
 	// A bare-address visit converts while the address offers accounts
 	// (issue #711).
-	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningBoth)})
+	f.mustPutJoin(t, openTo("ops"))
+	a := newGuest(t, f.srv, "", time.Hour, time.Hour, f.ops.ID)
+	b := newGuest(t, f.srv, "", time.Hour, time.Hour, f.ops.ID)
+	c := newGuest(t, f.srv, "", time.Hour, time.Hour, f.ops.ID)
+	conv := newGuest(t, f.srv, "", time.Hour, time.Hour, f.ops.ID)
 	converted, err := f.srv.store.ConvertGuest(ctx, "system", store.GuestConversion{PrincipalID: conv.Principal.ID, Name: "kept",
 		Record: hashedRecord(t, f.srv, testJoinPassword), CredentialLabel: "member", CredentialLifetime: time.Hour})
 	if err != nil {
@@ -876,12 +459,10 @@ func TestEndAllGuestVisits(t *testing.T) {
 func TestEndGuestsSelection(t *testing.T) {
 	f := newInviteFixture(t, Config{})
 	f.mustPutJoin(t, openTo("red"))
-	req := openLink("red")
-	req.JoinAs = schema.InviteJoinGuest
-	one, two := f.createInvite(t, f.rootTok, req), f.createInvite(t, f.rootTok, req)
-	addr := mustJoined(t, f.joinGuest(t, "", ""))
-	viaOne := mustJoined(t, f.redeemGuest(t, one.Code, "", ""))
-	viaTwo := mustJoined(t, f.redeemGuest(t, two.Code, "", ""))
+	one, two := f.legacyInvite(t, openLink("red"), schema.InviteJoinGuest), f.legacyInvite(t, openLink("red"), schema.InviteJoinGuest)
+	addr := f.seedGuest(t, "")
+	viaOne := f.seedInviteGuest(t, one.Invite, "")
+	viaTwo := f.seedInviteGuest(t, two.Invite, "")
 	end := func(body string) schema.EndGuestsResponseV1 {
 		rec := f.send(t, "POST", "/v1/guests/end", f.rootTok, body, "")
 		if rec.Code != http.StatusOK {
@@ -924,7 +505,7 @@ func TestEndOneGuestAndListGuests(t *testing.T) {
 	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{MaxGuestsPerAddress: int64Ptr(10)})
 	var ids []int64
 	for range 5 {
-		ids = append(ids, mustJoined(t, f.joinGuest(t, "", "")).Principal.ID)
+		ids = append(ids, f.seedGuest(t, "").Principal.ID)
 	}
 	assertErrorBody(t, f.send(t, "POST", fmt.Sprintf("/v1/guests/%d/end", f.alice.ID), f.rootTok, "", ""), http.StatusNotFound, schema.ErrorCodeNotAGuest)
 	rec := f.send(t, "POST", fmt.Sprintf("/v1/guests/%d/end", ids[0]), f.rootTok, "", "")
@@ -967,32 +548,10 @@ func TestEndOneGuestAndListGuests(t *testing.T) {
 	}
 }
 
-// The entry routes share #437's buckets: Join as guest spends the
-// per-address redemption allowance an invite redemption does, before the
-// body is read.
-func TestGuestEntrySharesInviteLimits(t *testing.T) {
-	f := newInviteFixture(t, Config{})
-	l := looseInviteLimits()
-	l.redeemPerAddress = inviteLimit{"redeem_per_address", 3, time.Hour}
-	f.srv.setInviteLimits(l)
-	f.mustPutJoin(t, openTo("red"))
-	inv := f.createInvite(t, f.rootTok, openLink("red"))
-	const remote = "198.51.100.40:1"
-	mustJoined(t, f.joinGuest(t, "", remote))
-	if rec := f.send(t, "POST", "/v2/invites/redeem", "", redeemJSON(t, inv.Code, "newcomer"), remote); rec.Code != http.StatusCreated {
-		t.Fatalf("redeem = %d %s", rec.Code, rec.Body)
-	}
-	assertErrorBody(t, f.redeemGuest(t, inv.Code, "", remote), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
-	for _, rec := range []*httptest.ResponseRecorder{f.joinGuest(t, "", remote), f.redeemGuest(t, inv.Code, "", remote),
-		f.send(t, "POST", "/v1/join/guest", "", "not json", remote)} {
-		assertErrorBody(t, rec, http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
-	}
-	mustJoined(t, f.joinGuest(t, "", "198.51.100.41:1"))
-}
-
 // With authentication off there is nobody to join as (design §7.4): the
 // front door offers nothing, password sign-in included, and every other
-// route of #710 and #711 is 403 accounts_require_auth.
+// route of #710 and #711 is 403 accounts_require_auth, but for the guest
+// entry routes, which refuse every visit (issue #1005).
 func TestGuestEntryWithAuthOff(t *testing.T) {
 	f := newAuthFixture(t, AuthOff)
 	info := f.frontDoor(t)
@@ -1001,8 +560,6 @@ func TestGuestEntryWithAuthOff(t *testing.T) {
 		t.Errorf("front door = %+v", info)
 	}
 	for _, c := range []struct{ method, path, body string }{
-		{"POST", "/v1/join/guest", `{}`},
-		{"POST", "/v1/invites/redeem-guest", `{}`},
 		{"GET", "/v1/join/settings", ""},
 		{"PUT", "/v1/join/settings", `{"guests_enabled":true}`},
 		{"GET", "/v1/guests", ""},
@@ -1014,17 +571,19 @@ func TestGuestEntryWithAuthOff(t *testing.T) {
 	} {
 		assertErrorBody(t, f.do(t, c.method, c.path, "", c.body), http.StatusForbidden, schema.ErrorCodeAccountsRequireAuth)
 	}
+	// Guests are removed for now (issue #1005): the entry routes refuse
+	// first, whatever the mode.
+	assertErrorBody(t, f.do(t, "POST", "/v1/join/guest", "", `{}`), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
+	assertErrorBody(t, f.do(t, "POST", "/v1/invites/redeem-guest", "", `{}`), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
 }
 
-// The front door carries the configured server name, and no guest may take
-// it as a label.
+// The front door and the settings carry the configured server name.
 func TestServerNameOnTheFrontDoor(t *testing.T) {
 	f := newInviteFixture(t, Config{ServerName: "Harbour Club"})
 	if got := f.frontDoor(t).ServerName; got != "Harbour Club" {
 		t.Errorf("server name = %q", got)
 	}
 	f.mustPutJoin(t, openTo("red"))
-	assertErrorBody(t, f.joinGuest(t, "harbour club", ""), http.StatusBadRequest, "invalid_request")
 	if s := decodeBody[schema.JoinSettingsResponseV1](t, f.send(t, "GET", "/v1/join/settings", f.rootTok, "", "")); s.ServerName != "Harbour Club" {
 		t.Errorf("settings server name = %q", s.ServerName)
 	}
@@ -1079,50 +638,13 @@ func TestValidateServerNameNamespaces(t *testing.T) {
 	}
 }
 
-// Both entry routes answer a bearer token, and the guest redemption takes a
-// code: over plain HTTP beyond loopback they are 403 https_required before
-// anything is read, a rate-limit token included; loopback and HTTPS are
-// served. The front door is not a code route and answers either way.
-func TestGuestEntryNeedsHTTPS(t *testing.T) {
-	f := newInviteFixture(t, Config{})
-	l := looseInviteLimits()
-	l.redeemPerAddress = inviteLimit{"redeem_per_address", 1, time.Hour}
-	f.srv.setInviteLimits(l)
-	f.mustPutJoin(t, openTo("red"))
-	req := openLink("red")
-	req.JoinAs = schema.InviteJoinGuest
-	inv := f.createInvite(t, f.rootTok, req)
-	plain := func(method, path, body, remote string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest(method, path, strings.NewReader(body))
-		r.RemoteAddr = remote
-		rec := httptest.NewRecorder()
-		f.srv.Handler().ServeHTTP(rec, r)
-		return rec
-	}
-	for range 3 {
-		assertErrorBody(t, plain("POST", "/v1/join/guest", `{}`, "198.51.100.60:1"), http.StatusForbidden, schema.ErrorCodeHTTPSRequired)
-		assertErrorBody(t, plain("POST", "/v1/invites/redeem-guest", inviteJSON(t, schema.RedeemInviteGuestRequestV1{Code: inv.Code}), "198.51.100.61:1"),
-			http.StatusForbidden, schema.ErrorCodeHTTPSRequired)
-	}
-	if n, err := f.srv.store.LiveGuests(context.Background()); err != nil || n != 0 {
-		t.Fatalf("plain HTTP started %d visits, %v", n, err)
-	}
-	// The refusals spent no token: each address still has its one.
-	mustJoined(t, f.joinGuest(t, "", "198.51.100.60:1"))
-	mustJoined(t, f.redeemGuest(t, inv.Code, "", "198.51.100.61:1"))
-	mustJoined(t, plain("POST", "/v1/join/guest", `{}`, "127.0.0.1:1"))
-	if rec := plain("GET", "/v1/join", "", "198.51.100.62:1"); rec.Code != http.StatusOK {
-		t.Errorf("the front door over plain HTTP = %d %s", rec.Code, rec.Body)
-	}
-}
-
 // A guest's bearer reaches none of the operator's guest routes: the route
 // table refuses it, and nothing changes.
 func TestGuestCannotAdministerGuests(t *testing.T) {
 	f := newInviteFixture(t, Config{})
 	f.mustPutJoin(t, openTo("red"))
-	g := mustJoined(t, f.joinGuest(t, "", ""))
-	other := mustJoined(t, f.joinGuest(t, "", ""))
+	g := f.seedGuest(t, "")
+	other := f.seedGuest(t, "")
 	before := decodeBody[schema.JoinSettingsResponseV1](t, f.send(t, "GET", "/v1/join/settings", f.rootTok, "", ""))
 	for _, c := range []struct{ method, path, body string }{
 		{"PUT", "/v1/join/settings", `{"guests_enabled":false}`},

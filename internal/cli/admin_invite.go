@@ -58,7 +58,7 @@ func bindInviteCreate(fs *flag.FlagSet, o *adminOpts) {
 	fs.BoolVar(&o.invite.voice, "voice", false, "the joiner may use voice")
 	fs.BoolVar(&o.invite.mayInvite, "may-invite", false, "the joiner may invite others in turn")
 	fs.Int64Var(&o.invite.credentialDays, "credential-days", 0, "how many days the joiner's first credential lasts")
-	fs.StringVar(&o.invite.joinAs, "join-as", "", "what the invite admits: account (the default), guest or both; guests only while the server allows them")
+	fs.StringVar(&o.invite.joinAs, "join-as", "", "what the invite admits: account, the default (guests are turned off for now, so the server refuses guest and both)")
 }
 
 func bindInviteList(fs *flag.FlagSet, o *adminOpts) {

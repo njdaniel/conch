@@ -90,17 +90,12 @@ func newRestoreWorld(t *testing.T) *restoreWorld {
 	if _, err := w.s.CreateHook(ctx, "system", "a-hook-token-for-the-restore-test", w.channel.ID, w.agent.ID); err != nil {
 		t.Fatal(err)
 	}
-	// Guests may join from the bare address and through an open invite.
+	// Guests may join from the bare address and through an open invite, as
+	// on a server from before guests were removed (issue #1005).
 	both, on, channels := schema.OpenJoiningBoth, true, []string{"ops"}
-	if _, err := w.s.PutJoinSettings(ctx, "system", w.op.ID, schema.PutJoinSettingsRequestV1{
-		GuestsEnabled: &on, OpenJoining: &both, OpenChannels: &channels}); err != nil {
-		t.Fatal(err)
-	}
-	inv, err := w.s.CreateInvite(ctx, principalActor(w.op.ID), w.op.ID,
+	legacyJoinSettings(t, w.s, schema.PutJoinSettingsRequestV1{GuestsEnabled: &on, OpenJoining: &both, OpenChannels: &channels})
+	inv := legacyCreateInvite(t, w.s, principalActor(w.op.ID), w.op.ID,
 		schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"ops"}, JoinAs: schema.InviteJoinBoth}, InviteOptions{}, w.now)
-	if err != nil {
-		t.Fatal(err)
-	}
 	w.inviteCode = inv.Code
 	// The operator signed in with a code once before the backup.
 	w.totpStepB = totpFloor(w.now) - schema.TOTPWindowSteps - 10
@@ -218,18 +213,22 @@ func TestInvalidateRestoredBackup(t *testing.T) {
 	if !res.JoiningPaused {
 		t.Errorf("the restore did not report pausing guest joining: %+v", res)
 	}
-	// Joining turned off since the backup may be on in it: no visit starts
-	// from the bare address until an operator has looked, nor through an
-	// invite, since invites are paused too. Guests stay enabled: that is
-	// the operator's choice, not the restore's.
-	if _, err := r.s.JoinAsGuest(ctx, GuestEntry{}); !errors.Is(err, ErrJoiningPaused) {
-		t.Errorf("a guest joining from the bare address after the restore = %v, want ErrJoiningPaused", err)
+	// Joining turned off since the backup may be on in it: nobody joins from
+	// the bare address until an operator has looked, nor through an invite,
+	// since invites are paused too. Opening the backup turned its guests off
+	// (issue #1005), so no visit starts at all; the address open to both is
+	// open to accounts, paused.
+	if _, err := r.s.JoinAsGuest(ctx, GuestEntry{}); !errors.Is(err, ErrGuestsDisabled) {
+		t.Errorf("a guest joining from the bare address after the restore = %v, want ErrGuestsDisabled", err)
+	}
+	if err := r.s.CheckJoinAccount(ctx); !errors.Is(err, ErrJoiningPaused) {
+		t.Errorf("an account from the bare address after the restore = %v, want ErrJoiningPaused", err)
 	}
 	if _, err := r.s.RedeemInviteGuest(ctx, HashInviteCode(r.inviteCode), GuestEntry{}, r.now); !errors.Is(err, ErrInvitesPaused) {
 		t.Errorf("a guest joining through an invite after the restore = %v, want ErrInvitesPaused", err)
 	}
-	if set, _, err := r.s.JoinSettings(ctx); err != nil || !set.JoiningPaused || !set.GuestsEnabled {
-		t.Errorf("join settings after the restore = %+v, %v; want paused, guests still enabled", set, err)
+	if set, _, err := r.s.JoinSettings(ctx); err != nil || !set.JoiningPaused || set.GuestsEnabled || set.OpenJoining != schema.OpenJoiningAccount {
+		t.Errorf("join settings after the restore = %+v, %v; want paused, guests off, accounts", set, err)
 	}
 	if len(announcedAuth) != principals || len(announcedGuests) != 1 {
 		t.Errorf("announced %d principals and %d guests after the commit", len(announcedAuth), len(announcedGuests))
@@ -688,7 +687,7 @@ func TestInvalidateRestoredAlreadyPaused(t *testing.T) {
 			t.Errorf("the restore wrote %s %q for a switch already paused", e.Action, e.Detail)
 		}
 	}
-	if _, err := r.s.JoinAsGuest(ctx, GuestEntry{}); !errors.Is(err, ErrJoiningPaused) {
+	if err := r.s.CheckJoinAccount(ctx); !errors.Is(err, ErrJoiningPaused) {
 		t.Errorf("joining = %v, want ErrJoiningPaused", err)
 	}
 	if p, err := r.s.InvitesPaused(ctx); err != nil || !p {

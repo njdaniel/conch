@@ -252,6 +252,10 @@ type Server struct {
 	// memory only; its clock is now. Tests replace it with setReactionLimit
 	// before serving.
 	reactionLimits *reactionLimiter
+	// messageEditLimits is the people's message edit limit (message_edit.go),
+	// in memory only; its clock is now. Tests replace it with
+	// setMessageEditLimit before serving.
+	messageEditLimits *messageEditLimiter
 	// guestAddrs is which address each guest visit came from, for the
 	// per-address cap (join.go), in memory only.
 	guestAddrs guestAddressBook
@@ -310,7 +314,7 @@ func New(cfg Config, st *store.Store) *Server {
 	}
 	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()),
 		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
-		setupLimits: newSetupLimiter(cfg)}
+		setupLimits: newSetupLimiter(cfg), messageEditLimits: newMessageEditLimiter(defaultMessageEditLimit())}
 	// The server's name is a permanent name nobody may take (issue #760):
 	// the store refuses it on every write of a name from here on.
 	st.SetServerName(s.serverName())

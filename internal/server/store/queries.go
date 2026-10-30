@@ -142,6 +142,9 @@ type Message struct {
 	// as a guest (issue #705), nil for every other message. It never
 	// changes, whatever the author does or is called later.
 	GuestAuthor *schema.GuestAttributionV1
+	// EditedAt is when the author last changed Body (issue #845); zero for
+	// a message never edited. It is always after CreatedAt and only grows.
+	EditedAt time.Time
 }
 
 // AuditEvent is one append-only entry in the audit log. Actor is free text

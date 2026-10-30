@@ -203,13 +203,23 @@ type MessageV2 struct {
 	// the author's current name. Omitted on every other message. Additive:
 	// a client that predates it shows the author's current name.
 	GuestAuthor *GuestAttributionV1 `json:"guest_author,omitempty"`
+	// EditedAt is when the author last changed Body (issue #845,
+	// docs/design/message-editing.md); nil (omitted) for a message never
+	// edited. Body is then the text as of this time. It is strictly after
+	// CreatedAt and strictly increases with each edit, so of two copies of
+	// one message the one with the later EditedAt (absent counting as
+	// earliest) is the newer. Additive: a client that predates it shows the
+	// current text with no marker. A frame carrying it on a message socket
+	// is an update of a message already sent, not a new message.
+	EditedAt *Timestamp `json:"edited_at,omitempty"`
 }
 
 // Validate reports whether the envelope is structurally well-formed. It
 // enforces every MessageV1 rule, requires the v2 schema name, and requires a
 // present audience to be well-formed and, for a principals audience, in the
 // normalized read-back form: sorted ascending, distinct, including the
-// author, and including at least one other principal. Unknown payload schemas are tolerated by design (forward
+// author, and including at least one other principal. A present edited_at
+// must be strictly after created_at. Unknown payload schemas are tolerated by design (forward
 // compatibility); unknown audience kinds are not (fail closed).
 func (m MessageV2) Validate() error {
 	if m.Schema != MessageSchemaV2 {
@@ -249,6 +259,9 @@ func (m MessageV2) Validate() error {
 	if m.ThreadRootID < 0 || (m.ThreadRootID > 0 && m.ThreadRootID >= m.ID) {
 		return fmt.Errorf("schema: message thread_root_id must be omitted or the id of an earlier message, got %d", m.ThreadRootID)
 	}
+	if m.EditedAt != nil && !m.EditedAt.Time().After(m.CreatedAt.Time()) {
+		return errors.New("schema: message edited_at must be after created_at")
+	}
 	return nil
 }
 
@@ -271,6 +284,8 @@ func MessageV2FromV1(m MessageV1) MessageV2 {
 // message (one with an audience) has no v1 form and is rejected: rendering it
 // through v1 would present a whisper as an open message. Callers serving v1
 // readers must therefore drop scoped messages rather than downgrade them.
+// EditedAt has no v1 form and is dropped: a v1 reader gets the current body
+// without the edited marker (docs/design/message-editing.md §6.3).
 func MessageV1FromV2(m MessageV2) (MessageV1, error) {
 	if m.Audience != nil {
 		return MessageV1{}, errors.New("schema: a scoped message has no v1 form")

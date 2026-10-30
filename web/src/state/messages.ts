@@ -97,6 +97,10 @@ export type ChatAction =
   // own: the message is the caller's, so it may stand for a pending send of
   // theirs whose POST has not answered yet (issue #490).
   | { readonly type: 'received'; readonly channel: string; readonly message: MessageV2; readonly own?: boolean }
+  // An edited copy of a message the tab may hold (issue #845): the edit's own
+  // answer, or the events socket's conch.message_edited.v1. Applied only to a
+  // message held, under the client rule (isLater); never appended.
+  | { readonly type: 'edited'; readonly channel: string; readonly message: MessageV2 }
   // A frame that was not a message of this schema or channel.
   | { readonly type: 'dropped'; readonly channel: string }
   | {
@@ -131,13 +135,40 @@ export type ChatAction =
   | { readonly type: 'restored'; readonly pending: Readonly<Record<string, readonly PendingSend[]>> }
   | { readonly type: 'reset' };
 
+// editedMs is when a copy of a message was last edited, in ms; a copy never
+// edited is the earliest of all.
+function editedMs(message: MessageV2): number {
+  return message.edited_at === undefined ? -Infinity : Date.parse(message.edited_at);
+}
+
+// isLater is the client rule of message editing (docs/design/message-editing.md
+// §7.1): a copy replaces the one held only if its edited_at is the same or
+// later, absent counting as earliest. edited_at strictly increases per message,
+// so a history page read before an edit but answered after its frame, two
+// edit frames out of order and a replay overlap all leave the newest text.
+export function isLater(incoming: MessageV2, held: MessageV2): boolean {
+  return editedMs(incoming) >= editedMs(held);
+}
+
 // mergeMessages is the TUI's: a map by id, so a message held already is
-// replaced by itself and never doubled.
+// replaced by itself and never doubled, and never by an older copy of itself.
 function merge(existing: ReadonlyMap<number, MessageV2>, incoming: readonly MessageV2[]): ReadonlyMap<number, MessageV2> {
   if (incoming.length === 0) return existing;
   const merged = new Map(existing);
-  for (const message of incoming) merged.set(message.id, message);
+  for (const message of incoming) {
+    const held = merged.get(message.id);
+    if (held === undefined || isLater(message, held)) merged.set(message.id, message);
+  }
   return merged;
+}
+
+// newest keeps, of each message on a page, the copy held already when that one
+// is the later: the page replaces what is held, but never with older text.
+function newest(held: ReadonlyMap<number, MessageV2>, page: readonly MessageV2[]): readonly MessageV2[] {
+  return page.map((message) => {
+    const was = held.get(message.id);
+    return was === undefined || isLater(message, was) ? message : was;
+  });
 }
 
 // hold merges and keeps only the newest maxHeld.
@@ -197,7 +228,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return update(state, action.channel, (c) =>
         reconcile(
           {
-            ...hold({ ...c, byId: new Map() }, action.messages),
+            ...hold({ ...c, byId: new Map() }, newest(c.byId, action.messages)),
             history: 'ready',
             older: 'idle',
             trimmed: false,
@@ -210,11 +241,23 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return update(state, action.channel, (c) => ({ ...c, history: 'error' }));
     case 'received':
       return update(state, action.channel, (c) => {
+        const message = action.message;
+        if (message.edited_at !== undefined) {
+          // An edit frame (issue #845) of a message not held is not a new
+          // message: it is dropped, never appended. One newer than anything
+          // held is a message the socket is sending for the first time that
+          // was edited before it was sent (a replay after a reconnect), and
+          // is shown. An edit never stands for a pending send.
+          if (!c.byId.has(message.id) && message.id <= lastId(c)) return c;
+          return hold(c, [message]);
+        }
         // Only one's own frames may stand for a pending send. The oldest match
         // wins, so identical sends never show twice (issue #490).
-        const held = hold(c, [action.message]);
-        return action.own === true ? reconcile(held, [action.message]) : held;
+        const held = hold(c, [message]);
+        return action.own === true ? reconcile(held, [message]) : held;
       });
+    case 'edited':
+      return known(state, action.channel, (c) => (c.byId.has(action.message.id) ? hold(c, [action.message]) : c));
     case 'dropped':
       return update(state, action.channel, (c) => ({ ...c, dropped: c.dropped + 1 }));
     case 'sending':

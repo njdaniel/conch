@@ -1,13 +1,13 @@
 // Temporary guests, accounts and signing in again, in the browser (issue
-// #713, ADR-009): the front door, Join as guest, the visit's panel, End
+// #713, ADR-009; guests removed for now, issue #1005): the front door, which
+// offers no guest entry whatever the server says, a live visit's panel, End
 // visit, Create an account during a visit (its lost answer included), a
-// returning member's password sign-in, an invite's guest and account modes,
-// and guest attribution in the conversation. conchd is a stand-in fetch.
+// returning member's password sign-in, an invite's account mode, and guest
+// attribution in the conversation. conchd is a stand-in fetch.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { App } from './App';
 import { authorOf } from './Conversation';
-import { durationWords } from './Guest';
 import { displayName, guestName, memberName } from './guestName';
 import { httpsRequiredLine } from './Invite';
 import { insecureLine, needsHttps } from './transport';
@@ -40,13 +40,6 @@ const guestWho: WhoAmIResponseV1 = { id: 12, kind: 'human', name: handle, role: 
 const memberWho: WhoAmIResponseV1 = { id: 12, kind: 'human', name: 'pat', role: 'member', identity_class: 'member', auth: { scope: 'full', password_set: true, setup_complete: true } };
 const otherWho: WhoAmIResponseV1 = { id: 2, kind: 'human', name: 'ada', role: 'member' };
 const principal = { id: 12, kind: 'human', name: handle, created_at: at };
-const joinedAsGuest = {
-  principal,
-  guest: visit,
-  credential: { id: 30, principal_id: 12, label: 'guest visit', created_at: at },
-  token: guestToken,
-  channels: [{ id: 1, name: 'lobby' }],
-};
 const converted = {
   principal: { ...principal, name: 'pat' },
   credential: { id: 31, principal_id: 12, label: 'browser', created_at: at, renews: true },
@@ -109,21 +102,25 @@ function people(by: Record<string, object>): Record<string, Route> {
 
 const both = { 'GET /v1/join': () => json(frontDoor({ guest: true, account: true })) };
 
-// guestServer is a server where a guest visit can start from the bare
-// address, and the guest's lobby answers.
+// guestServer is a server with a guest visit already live in this tab (the
+// token is in sessionStorage, as a visit started before guests were removed
+// left it), and the guest's lobby answering. No route starts a visit: none
+// can any more.
 function guestServer(routes: Record<string, Route> = {}): Record<string, Route> {
+  window.sessionStorage.setItem(key, guestToken);
+  return guestRoutes(routes);
+}
+
+// guestRoutes is the same server with the credential kept elsewhere.
+function guestRoutes(routes: Record<string, Route> = {}): Record<string, Route> {
   return {
     ...both,
-    'POST /v1/join/guest': () => json(joinedAsGuest, 201),
     ...people({ [guestToken]: guestWho }),
     ...routes,
   };
 }
 
-async function joinAsGuest(label = 'Pat') {
-  fireEvent.click(await screen.findByRole('button', { name: 'Join as guest' }));
-  fireEvent.change(screen.getByLabelText('Name to show (optional)'), { target: { value: label } });
-  fireEvent.click(screen.getByRole('button', { name: 'Join as guest' }));
+async function joinAsGuest() {
   await screen.findByRole('region', { name: 'Guest visit' });
 }
 
@@ -177,18 +174,14 @@ describe('naming a guest', () => {
     // Made as the member: the member's name.
     expect(authorOf(post, now)).toBe('pat');
   });
-
-  it('says a visit bound in words', () => {
-    expect(durationWords(7200)).toBe('2 hours');
-    expect(durationWords(86400)).toBe('1 day');
-    expect(durationWords(1800)).toBe('30 minutes');
-  });
 });
 
 describe('the front door', () => {
   it.each([
-    { join: { guest: true, account: true }, offered: ['Join as guest', 'Create an account'] },
-    { join: { guest: true, account: false }, offered: ['Join as guest'] },
+    // Guests are removed for now (issue #1005): even a server that still
+    // says guest: true gets no guest entry here.
+    { join: { guest: true, account: true }, offered: ['Create an account'] },
+    { join: { guest: true, account: false }, offered: [] },
     { join: { guest: false, account: true }, offered: ['Create an account'] },
     { join: { guest: false, account: false }, offered: [] },
     { join: { guest: false, account: true, guests_full: true }, offered: ['Create an account'] },
@@ -204,8 +197,7 @@ describe('the front door', () => {
 
   it.each([
     { join: { guest: false, account: false, paused: true }, line: 'Joining is paused on this server for now. If you have an account, sign in below.' },
-    { join: { guest: false, account: false, guests_full: true }, line: 'No more guests can join right now. Try again later.' },
-    { join: { guest: false, account: true, guests_full: true }, line: 'Guest visits are full right now; you can still create an account.' },
+    { join: { guest: true, account: false, guests_full: true }, line: 'This server is invite-only. To join, ask someone on it for an invite link.' },
     { join: { guest: false, account: false }, line: 'This server is invite-only. To join, ask someone on it for an invite link.' },
   ])('says honestly why: $line', async ({ join, line }) => {
     serve({ 'GET /v1/join': () => json(frontDoor(join)) });
@@ -223,6 +215,17 @@ describe('the front door', () => {
     expect(screen.queryByRole('region', { name: 'Join' })).toBeNull();
     expect(screen.getByLabelText('Password')).toBeDefined();
     expect(screen.getByLabelText('Credential')).toBeDefined();
+  });
+
+  it('offers no guest entry anywhere on the sign-in page, and calls no guest route', async () => {
+    const calls = serve({ 'GET /v1/join': () => json(frontDoor({ guest: true, account: true, guests_full: true })) });
+    render(<App origin={origin} />);
+    const door = await screen.findByRole('region', { name: 'Join' });
+    expect(screen.queryByRole('button', { name: /guest/i })).toBeNull();
+    fireEvent.click(within(door).getByRole('button', { name: 'Create an account' }));
+    expect(screen.queryByRole('button', { name: /guest/i })).toBeNull();
+    expect(screen.queryByLabelText('Name to show (optional)')).toBeNull();
+    expect(calls.some((c) => c.path.includes('guest'))).toBe(false);
   });
 
   it('asks for no credential to read the front door', async () => {
@@ -258,7 +261,7 @@ describe('the front door', () => {
 });
 
 describe('a guest visit', () => {
-  it('starts with a label, is kept for this tab alone, and shows who, until when, and what to do', async () => {
+  it('a live visit is kept for this tab alone and shows who, until when, and what to do', async () => {
     const getUserMedia = vi.fn();
     Object.defineProperty(window.navigator, 'mediaDevices', { value: { getUserMedia }, configurable: true });
     onTestFinished(() => {
@@ -266,8 +269,9 @@ describe('a guest visit', () => {
     });
     const calls = serve(guestServer());
     const { container } = render(<App origin={origin} />);
-    await joinAsGuest('Pat');
-    expect(calls.find((c) => c.path === '/v1/join/guest')).toMatchObject({ method: 'POST', auth: null, body: { label: 'Pat' } });
+    await joinAsGuest();
+    // No route starts a visit.
+    expect(calls.some((c) => c.path.includes('/join/guest') || c.path.includes('redeem-guest'))).toBe(false);
     // Tab-scoped: in sessionStorage, never in localStorage.
     expect(window.sessionStorage.getItem(key)).toBe(guestToken);
     expect(window.localStorage.getItem(key)).toBeNull();
@@ -282,30 +286,10 @@ describe('a guest visit', () => {
     expect(within(panel).getByRole('button', { name: 'End visit' })).toBeDefined();
     // The lobby names the guest by its attribution.
     expect(screen.getByRole('status', { name: 'Status' }).textContent).toContain('Guest: Pat · a7k4');
-    // Joining chat asks for no microphone and no voice session.
+    // Chat asks for no microphone and no voice session.
     expect(getUserMedia).not.toHaveBeenCalled();
     expect(calls.some((c) => c.path.includes('/voice/'))).toBe(false);
     expectNoSecret(container, guestToken);
-  });
-
-  it('sends no label when none is typed', async () => {
-    const calls = serve(guestServer());
-    render(<App origin={origin} />);
-    await joinAsGuest('');
-    expect(calls.find((c) => c.path === '/v1/join/guest')?.body).toEqual({});
-  });
-
-  it.each([
-    { code: 'guests_full', status: 429, line: 'No more guests can join right now. Try again later.' },
-    { code: 'guests_disabled', status: 403, line: 'Guest visits are not open here now. Ask someone on this server for a way in.' },
-    { code: 'https_required', status: 403, line: httpsRequiredLine },
-  ])('says why a visit did not start: $code, and keeps nothing', async ({ code, status, line }) => {
-    serve(guestServer({ 'POST /v1/join/guest': () => refusal(status, code) }));
-    render(<App origin={origin} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Join as guest' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Join as guest' }));
-    expect(await screen.findByText(line)).toBeDefined();
-    expect(window.sessionStorage.length + window.localStorage.length).toBe(0);
   });
 
   it('survives a refresh while the visit is live, and only then', async () => {
@@ -339,7 +323,7 @@ describe('a guest visit', () => {
 
   it('moves a guest credential found kept to last into the tab', async () => {
     window.localStorage.setItem(key, guestToken);
-    serve(guestServer());
+    serve(guestRoutes());
     render(<App origin={origin} />);
     await screen.findByRole('region', { name: 'Guest visit' });
     expect(window.localStorage.getItem(key)).toBeNull();
@@ -351,7 +335,6 @@ describe('a guest visit', () => {
     const ending = { ...visit, expires_at: new Date(Date.now() + 100).toISOString(), idle_expires_at: new Date(Date.now() + 100).toISOString() };
     serve(
       guestServer({
-        'POST /v1/join/guest': () => json({ ...joinedAsGuest, guest: ending }, 201),
         'GET /v1/whoami': (c) => (live && c.auth === `Bearer ${guestToken}` ? json({ ...guestWho, guest: ending }) : json({}, 401)),
       }),
     );
@@ -698,7 +681,7 @@ describe('a guest credential this tab cannot keep', () => {
   // will not take is revoked rather than kept nowhere and left alive.
   it('is revoked when it cannot be moved into the tab', async () => {
     window.localStorage.setItem(key, guestToken);
-    const calls = serve(guestServer({ 'DELETE /v1/credentials/current': () => new Response(null, { status: 204 }) }));
+    const calls = serve(guestRoutes({ 'DELETE /v1/credentials/current': () => new Response(null, { status: 204 }) }));
     // Nothing can be written: the tab's storage refuses the credential.
     vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
       throw new DOMException('blocked', 'SecurityError');
@@ -760,28 +743,22 @@ describe('an invite and its join modes', () => {
     return { calls, view };
   }
 
-  it('offers both when the invite allows both, and joins as a guest for this tab only', async () => {
-    const { calls, view } = opened({
-      'POST /v1/invites/preview': () => json(preview({ guest: true, account: true })),
-      'POST /v1/invites/redeem-guest': () => json({ ...joinedAsGuest, guest: { ...visit, origin: 'invite' } }, 201),
-      ...people({ [guestToken]: { ...guestWho, guest: { ...visit, origin: 'invite' } } }),
-    });
-    const choice = await screen.findByRole('group', { name: 'How to join' });
-    expect(within(choice).getAllByRole('button').map((b) => b.textContent)).toEqual(['Create an account', 'Join as guest']);
-    fireEvent.click(within(choice).getByRole('button', { name: 'Join as guest' }));
-    fireEvent.change(screen.getByLabelText('Name to show (optional)'), { target: { value: 'Pat' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Join as guest' }));
-    await screen.findByRole('region', { name: 'Guest visit' });
-    expect(calls.find((c) => c.path === '/v1/invites/redeem-guest')).toMatchObject({ auth: null, body: { code: inviteCode, label: 'Pat' } });
-    expect(window.sessionStorage.getItem(key)).toBe(guestToken);
-    expect(window.localStorage.getItem(key)).toBeNull();
-    expectNoSecret(view.container, inviteCode, guestToken);
+  it.each([
+    { name: 'both', join: { guest: true, account: true } },
+    { name: 'guests only', join: { guest: true, account: false } },
+  ])('offers no guest choice for an invite that says $name, and calls no guest route', async ({ join }) => {
+    const { calls } = opened({ 'POST /v1/invites/preview': () => json(preview(join)) });
+    await screen.findByText('Invited by');
+    expect(screen.queryByRole('group', { name: 'How to join' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Join as guest' })).toBeNull();
+    expect(screen.queryByLabelText('Name to show (optional)')).toBeNull();
+    expect(calls.some((c) => c.path.includes('guest'))).toBe(false);
   });
 
-  it('offers the guest form alone for a guest-only invite', async () => {
-    opened({ 'POST /v1/invites/preview': () => json(preview({ guest: true, account: false })) });
-    expect(await screen.findByLabelText('Name to show (optional)')).toBeDefined();
-    expect(screen.queryByLabelText('Choose a password')).toBeNull();
+  it('offers the account form alone for an invite that allows accounts', async () => {
+    opened({ 'POST /v1/invites/preview': () => json(preview({ guest: true, account: true })) });
+    expect(await screen.findByLabelText('Choose a password')).toBeDefined();
+    expect(screen.queryByLabelText('Name to show (optional)')).toBeNull();
   });
 
   it('offers the account form alone for an account-only invite, as invites were', async () => {
@@ -792,7 +769,7 @@ describe('an invite and its join modes', () => {
 
   it.each([
     { join: { guest: false, account: false, paused: true }, line: 'Joining through this invite is paused for now. Try the link again later.' },
-    { join: { guest: false, account: false, guests_full: true }, line: 'No more guests can join right now. Try the link again later.' },
+    { join: { guest: true, account: false, guests_full: true }, line: 'This invite cannot be used to join right now. Ask ada for another way in.' },
     { join: { guest: false, account: false }, line: 'This invite cannot be used to join right now. Ask ada for another way in.' },
   ])('says honestly why it cannot be used now: $line', async ({ join, line }) => {
     opened({ 'POST /v1/invites/preview': () => json(preview(join)) });

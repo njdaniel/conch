@@ -44,9 +44,11 @@
 //   - The guests (issue #717, guests.go and the files it names): a third
 //     part of the world, the plaza, open at the bare address, where members
 //     who made accounts there leave private markers before any guest comes.
-//     Guests come from the bare address and through invites, each caller
-//     from a client address of its own through the trusted proxy, so the
-//     entry routes run for real; they run the guests' rows of the matrix
+//     Guests are removed for now (issue #1005): no route starts a visit,
+//     so the guests' visits are started beside the server in its database
+//     (seed.go), as the entry routes did, each guest calling from a client
+//     address of its own through the trusted proxy, and the entry routes
+//     are tried as refusals; the guests run the guests' rows of the matrix
 //     (the history from the visit's bound alone, nothing of A's, every
 //     right a guest may not have refused) and the newcomers' rows; the
 //     entry gates are stepped through; a guest becomes a member, and two

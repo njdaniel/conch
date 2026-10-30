@@ -260,6 +260,30 @@ describe('loading', () => {
   });
 });
 
+// Issue #845: an edit arrives on the message socket as the message again, with
+// edited_at. It changes the message held and adds the marker; one for a
+// message the page does not hold is not drawn; a stale copy changes nothing.
+describe('a live edit', () => {
+  it('replaces the text in place, marks it, and is never a new message', async () => {
+    server.history.general = [message(1, 'helo'), message(2, 'two')];
+    const socket = await openChat();
+    await connect(socket);
+    socket.send(message(1, 'hello', { edited_at: '2026-10-14T10:43:00Z' }));
+    await screen.findByText('hello');
+    expect(screen.queryByText('helo')).toBeNull();
+    expect(screen.getAllByText('(edited)')).toHaveLength(1);
+    // An edit of a message older than anything held: dropped, not appended.
+    socket.send(message(0, 'from before the page', { edited_at: '2026-10-14T10:43:00Z' }));
+    // A stale copy of message 1 (the original, replayed) changes nothing.
+    socket.send(message(1, 'helo'));
+    socket.send(message(3, 'three'));
+    await screen.findByText('three');
+    expect(lines()).toHaveLength(3);
+    expect(screen.queryByText('from before the page')).toBeNull();
+    expect(screen.getByText('hello')).toBeTruthy();
+  });
+});
+
 describe('an empty channel', () => {
   const emptyLine = 'No messages in #general yet. Say hello.';
 

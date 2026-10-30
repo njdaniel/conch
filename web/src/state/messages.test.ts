@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { MessageV2 } from '../schema/message';
 import type { DraftAttachment } from './attachments';
-import { chatFor, chatReducer, initialChat, lastId, ordered, maxHeld, pageSize, canLoadOlder, oldestId, parseFrame, type ChatAction, type ChatState } from './messages';
+import { chatFor, chatReducer, initialChat, isLater, lastId, ordered, maxHeld, pageSize, canLoadOlder, oldestId, parseFrame, type ChatAction, type ChatState } from './messages';
 
 const msg = (id: number, body = `m${String(id)}`): MessageV2 => ({
   schema: 'conch.message.v2',
@@ -379,5 +379,113 @@ describe('parseFrame', () => {
   ];
   it.each(bad)('refuses %s', (_name, data) => {
     expect(parseFrame(data, 7)).toBeNull();
+  });
+});
+
+// Message editing (issue #845, docs/design/message-editing.md §7.1): a copy of
+// a message replaces the one held only if its edited_at is the same or later,
+// absent counting as earliest; an edit of a message not held is not a new one.
+describe('edits', () => {
+  const edited = (id: number, body: string, at: string): MessageV2 => ({ ...msg(id, body), edited_at: at });
+  const body = (state: ChatState, id: number) => chatFor(state, 'ops').byId.get(id)?.body;
+
+  it('takes an edit frame that comes after the original', () => {
+    const state = run(
+      { type: 'historyLoaded', channel: 'ops', messages: [msg(1, 'helo')], more: false },
+      { type: 'received', channel: 'ops', message: edited(1, 'hello', '2026-10-14T10:01:00Z') },
+    );
+    expect(body(state, 1)).toBe('hello');
+    expect(chatFor(state, 'ops').byId.get(1)?.edited_at).toBe('2026-10-14T10:01:00Z');
+  });
+
+  it('keeps an edit that came before a stale copy of the original: a frame, then the history page read before it', () => {
+    const state = run(
+      { type: 'historyLoaded', channel: 'ops', messages: [msg(1, 'helo')], more: false },
+      { type: 'received', channel: 'ops', message: edited(1, 'hello', '2026-10-14T10:01:00Z') },
+      { type: 'historyLoaded', channel: 'ops', messages: [msg(1, 'helo'), msg(2)], more: false },
+      { type: 'received', channel: 'ops', message: msg(1, 'helo') },
+      { type: 'olderLoaded', channel: 'ops', messages: [msg(1, 'helo')], more: false },
+    );
+    expect(body(state, 1)).toBe('hello');
+    expect(ids(state)).toEqual([1, 2]);
+  });
+
+  it('keeps the later of two edits whatever order they arrive in', () => {
+    const second = edited(1, 'third text', '2026-10-14T10:02:00.500Z');
+    const first = edited(1, 'second text', '2026-10-14T10:02:00.000Z');
+    const state = run(
+      { type: 'historyLoaded', channel: 'ops', messages: [msg(1, 'first text')], more: false },
+      { type: 'received', channel: 'ops', message: second },
+      { type: 'received', channel: 'ops', message: first },
+      { type: 'edited', channel: 'ops', message: first },
+    );
+    expect(body(state, 1)).toBe('third text');
+  });
+
+  it('takes a copy with the same edited_at (a replay overlap)', () => {
+    const copy = edited(1, 'hello', '2026-10-14T10:01:00Z');
+    const state = run(
+      { type: 'historyLoaded', channel: 'ops', messages: [copy], more: false },
+      { type: 'received', channel: 'ops', message: copy },
+    );
+    expect(body(state, 1)).toBe('hello');
+    expect(ids(state)).toEqual([1]);
+  });
+
+  it('drops an edit frame for a message it does not hold, and never appends it', () => {
+    const state = run(
+      { type: 'historyLoaded', channel: 'ops', messages: [msg(5), msg(6)], more: false },
+      { type: 'received', channel: 'ops', message: edited(3, 'not ours to show', '2026-10-14T10:01:00Z') },
+      { type: 'edited', channel: 'ops', message: edited(9, 'nor this', '2026-10-14T10:01:00Z') },
+    );
+    expect(ids(state)).toEqual([5, 6]);
+    expect(lastId(chatFor(state, 'ops'))).toBe(6);
+  });
+
+  it('drops an edit for a channel it holds nothing of', () => {
+    const state = run({ type: 'edited', channel: 'ops', message: edited(1, 'x', '2026-10-14T10:01:00Z') });
+    expect(state.channels['ops']).toBeUndefined();
+  });
+
+  it('shows a new message that was already edited when the socket first sent it (a replay after a reconnect)', () => {
+    const state = run(
+      { type: 'historyLoaded', channel: 'ops', messages: [msg(5)], more: false },
+      { type: 'received', channel: 'ops', message: edited(6, 'posted and fixed while away', '2026-10-14T10:01:00Z') },
+    );
+    expect(ids(state)).toEqual([5, 6]);
+    expect(body(state, 6)).toBe('posted and fixed while away');
+  });
+
+  it('never lets an edit stand for a pending send', () => {
+    const state = run(
+      { type: 'historyLoaded', channel: 'ops', messages: [msg(5, 'before'), msg(6, 'other words')], more: false },
+      { type: 'sending', channel: 'ops', channelId: 7, authorId: 3, body: 'same words', at: 1 },
+      { type: 'received', channel: 'ops', message: msg(7, 'something else'), own: true },
+      { type: 'received', channel: 'ops', message: edited(7, 'same words', '2026-10-14T10:01:00Z'), own: true },
+    );
+    expect(chatFor(state, 'ops').pending).toHaveLength(1);
+  });
+
+  it('applies the POST answer only when nothing later is held', () => {
+    const state = run(
+      { type: 'historyLoaded', channel: 'ops', messages: [], more: false },
+      { type: 'sending', channel: 'ops', channelId: 7, authorId: 3, body: 'mine', at: 1 },
+      // Not own: the frame does not settle the send, so the POST answer does.
+      { type: 'received', channel: 'ops', message: msg(1, 'mine') },
+      { type: 'received', channel: 'ops', message: edited(1, 'mine, fixed', '2026-10-14T10:01:00Z') },
+      { type: 'sent', channel: 'ops', localId: 1, message: msg(1, 'mine') },
+    );
+    expect(body(state, 1)).toBe('mine, fixed');
+  });
+});
+
+describe('isLater', () => {
+  it('orders copies by edited_at, absent first', () => {
+    const a = msg(1);
+    const b = { ...msg(1), edited_at: '2026-10-14T10:01:00Z' };
+    expect(isLater(b, a)).toBe(true);
+    expect(isLater(a, b)).toBe(false);
+    expect(isLater(a, a)).toBe(true);
+    expect(isLater(b, b)).toBe(true);
   });
 });

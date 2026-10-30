@@ -92,7 +92,7 @@ func (w *world) startExpiry() (*expiring, error) {
 		return nil, err
 	}
 	e := &expiring{sweep: sweep, idleLK: make(chan seen, 1), busyLK: make(chan seen, 1), busyErr: make(chan error, 1)}
-	if _, err := w.joinSettings(schema.PutJoinSettingsRequestV1{GuestsEnabled: ptr(true), OpenJoining: ptr(schema.OpenJoiningBoth), JoinVoice: ptr(true),
+	if _, err := w.joinSettings(schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningAccount), JoinVoice: ptr(true),
 		GuestIdleSeconds: ptr(int64(expiryIdleSeconds)), GuestAbsoluteSeconds: ptr(int64(expiryAbsoluteSeconds))}); err != nil {
 		return nil, err
 	}

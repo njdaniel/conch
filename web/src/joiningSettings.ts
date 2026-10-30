@@ -1,6 +1,6 @@
 import { createContext } from 'react';
 
-// A way to open Settings with Joining and guests expanded (issue #909). The
+// A way to open Settings with Joining expanded (issue #909). The
 // lobby owns the Settings drawer and provides it; the invite panel asks for it
 // when an operator's invite is refused as paused, and GuestSettings expands on
 // a new request. Null where there is no lobby: nothing then offers the jump.

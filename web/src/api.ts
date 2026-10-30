@@ -41,7 +41,6 @@ import {
   convertGuestResponseV1,
   endGuestsResponseV1,
   joinAccountResponseV1,
-  joinGuestResponseV1,
   joinInfoV1,
   joinSettingsResponseV1,
   listGuestsResponseV1,
@@ -51,7 +50,6 @@ import {
   type EndGuestsResponseV1,
   type GuestAdminV1,
   type JoinAccountRequestV1,
-  type JoinGuestRequestV1,
   type JoinInfoV1,
   type JoinSettingsResponseV1,
   type PutJoinSettingsRequestV1,
@@ -69,7 +67,6 @@ import {
   type InvitePreviewV1,
   type InviteSettingsV1,
   type InviteV1,
-  type RedeemInviteGuestRequestV1,
   type RedeemInviteRequestV2,
 } from './schema/invite';
 import { interventionV1, listInterventionsResponseV1, type CreateInterventionRequestV1, type InterventionV1 } from './schema/intervention';
@@ -89,7 +86,22 @@ import {
   type RenameChannelRequestV1,
 } from './schema/channel';
 import { fileAttachmentPayloadSchema, fileV1, type FileAttachmentV1, type FileV1 } from './schema/file';
-import { listMessagesResponseV2, postMessageResponseV2, searchMessagesResponseV2, type Audience, type ListMessagesResponseV2, type MessageV2, type Payload, type PostMessageRequestV2, type SearchMessagesResponseV2 } from './schema/message';
+import {
+  editMessageResponseV1,
+  listMessageRevisionsResponseV1,
+  listMessagesResponseV2,
+  postMessageResponseV2,
+  searchMessagesResponseV2,
+  type Audience,
+  type EditMessageRequestV1,
+  type EditMessageResponseV1,
+  type ListMessagesResponseV2,
+  type MessageRevisionV1,
+  type MessageV2,
+  type Payload,
+  type PostMessageRequestV2,
+  type SearchMessagesResponseV2,
+} from './schema/message';
 import { listNetsResponseV1, type NetV1 } from './schema/net';
 import {
   createSignInLinkResponseV1,
@@ -991,22 +1003,6 @@ export async function redeemInvite(inviteCode: string, name: string, password: s
   return keepRedeemed(redeemed.value.token, redeemed.value.principal.id, 'lasting');
 }
 
-// redeemInviteAsGuest uses an invite that admits guests to start a visit
-// (POST /v1/invites/redeem-guest), with the display label typed, if any. The
-// visit's credential is kept for this tab alone. It is refused while this
-// browser holds another sign-in, as redeemInvite is.
-export async function redeemInviteAsGuest(inviteCode: string, label: string): Promise<RedeemResult> {
-  if (heldElsewhere()) return { ok: false, failure: 'held' };
-  pinned = null;
-  const request: RedeemInviteGuestRequestV1 = label === '' ? { code: inviteCode } : { code: inviteCode, label };
-  const res = await sendOpen(call('redeemInviteGuest'), request);
-  if (res === null) return { ok: false, failure: 'network' };
-  if (!res.ok) return inviteRefused(res);
-  const joined = await readBody(res, joinGuestResponseV1);
-  if (!joined.ok) return joined;
-  return keepRedeemed(joined.value.token, joined.value.principal.id, 'tab');
-}
-
 // Joining from the bare address (issue #713). The front door says what the
 // address offers now; the server decides again when someone joins.
 
@@ -1016,20 +1012,6 @@ export async function joinInfo(): Promise<InviteResult<JoinInfoV1>> {
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   return readBody(res, joinInfoV1);
-}
-
-// joinAsGuest starts a visit from the bare address (POST /v1/join/guest).
-// Its credential is kept for this tab alone, as an invite's guest's is.
-export async function joinAsGuest(label: string): Promise<RedeemResult> {
-  if (heldElsewhere()) return { ok: false, failure: 'held' };
-  pinned = null;
-  const request: JoinGuestRequestV1 = label === '' ? {} : { label };
-  const res = await sendOpen(call('joinGuest'), request);
-  if (res === null) return { ok: false, failure: 'network' };
-  if (!res.ok) return inviteRefused(res);
-  const joined = await readBody(res, joinGuestResponseV1);
-  if (!joined.ok) return joined;
-  return keepRedeemed(joined.value.token, joined.value.principal.id, 'tab');
 }
 
 // createAccount makes a member from the bare address, name and password
@@ -1486,6 +1468,53 @@ export async function searchMessages(channel: string, words: string, before?: nu
   const query = new URLSearchParams({ q: words, limit: String(historyLimit) });
   if (before !== undefined) query.set('before', String(before));
   return authed(call('searchMessages', { channel }, query.toString()), searchMessagesResponseV2);
+}
+
+// What an edit of one's own message came to (issue #845,
+// docs/design/message-editing.md §4). refused is the server's no, with its
+// code (message_edit_window_closed, rate_limited, …) and, for a rate limit,
+// how long to wait; network is no answer, or one that cannot be trusted, and
+// is safe to send again: a repeated PUT of the same text changes nothing (§3.5).
+export type EditResult =
+  | { readonly ok: true; readonly message: MessageV2 }
+  | { readonly ok: false; readonly failure: 'unauthorized' | 'network' }
+  | { readonly ok: false; readonly failure: 'refused'; readonly code?: string; readonly retryAfter?: number };
+
+// editMessage replaces the text of one's own message. It is never repeated
+// here: Save again is the person's.
+export async function editMessage(channel: string, id: number, body: string): Promise<EditResult> {
+  const request: EditMessageRequestV1 = { body };
+  const reply = await authedSend(call('editMessage', { channel, id }), request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  const res = reply.res;
+  if (res.status >= 500) return { ok: false, failure: 'network' };
+  if (!res.ok) {
+    try {
+      const doc: unknown = await res.json();
+      if (errorV0(doc).length === 0) {
+        const { code, retry_after_seconds: retryAfter } = doc as ErrorV0;
+        return { ok: false, failure: 'refused', code, ...(retryAfter === undefined ? {} : { retryAfter }) };
+      }
+    } catch {
+      // No document, or not one.
+    }
+    return { ok: false, failure: 'refused' };
+  }
+  try {
+    const parsed: unknown = await res.json();
+    if (editMessageResponseV1(parsed).length === 0) return { ok: true, message: (parsed as EditMessageResponseV1).message };
+  } catch {
+    // Fall through: the body was cut off.
+  }
+  return { ok: false, failure: 'network' };
+}
+
+// messageRevisions reads one's own message's earlier versions, oldest first.
+// Only the author is answered; anyone else is message_not_found.
+export async function messageRevisions(channel: string, id: number): Promise<ApiResult<MessageRevisionV1[]>> {
+  const result = await authed(call('messageRevisions', { channel, id }), listMessageRevisionsResponseV1);
+  return result.ok ? { ok: true, value: result.value.revisions } : result;
 }
 
 export type AscendingMessagesResult =

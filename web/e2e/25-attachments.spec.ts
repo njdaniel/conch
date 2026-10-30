@@ -1,10 +1,9 @@
 import type { Page } from '@playwright/test';
 import { createCredentialResponseV1, createPrincipalResponse } from '../src/schema/credential';
 import { fileAttachmentPayloadSchema, fileAttachmentV1 } from '../src/schema/file';
-import { joinGuestResponseV1, joinSettingsResponseV1 } from '../src/schema/guest';
 import type { MessageV2 } from '../src/schema/message';
 import { listNetsResponseV1 } from '../src/schema/net';
-import { attach, history, makeInvite, post } from './api';
+import { attach, history, post } from './api';
 import { channelButton, expect, expectFits, messages, phones, signIn, statusLine, test } from './fixtures';
 import { call, ok, type World } from './world';
 
@@ -33,16 +32,6 @@ async function person(world: World, secrets: string[], name: string, channels: r
   secrets.push(issued.token);
   for (const channel of channels) await done(world, 'PUT', `/v1/channels/${encodeURIComponent(channel)}/members/${String(made.principal.id)}`);
   return { id: made.principal.id, name, token: issued.token, credentialId: issued.credential.id };
-}
-
-async function invitedGuest(world: World, channel: string) {
-  await ok(world, world.tokens.operator, 'PUT', '/v1/join/settings', joinSettingsResponseV1, { guests_enabled: true, open_joining: 'off', open_channels: [] });
-  try {
-    const invite = await makeInvite(world, world.tokens.operator, { kind: 'open', channels: [channel], voice: false, join_as: 'guest' });
-    return await ok(world, '', 'POST', '/v1/invites/redeem-guest', joinGuestResponseV1, { code: invite.code, label: 'Late' });
-  } finally {
-    await ok(world, world.tokens.operator, 'PUT', '/v1/join/settings', joinSettingsResponseV1, { guests_enabled: false, open_joining: 'off', open_channels: [] });
-  }
 }
 
 function fileIds(message: MessageV2): number[] {
@@ -369,7 +358,7 @@ test('uncertain sends reconcile across complete history walks and never duplicat
   await expect.poll(() => uploads).toBe(2);
 });
 
-test('two clients deliver only authorized previews to members, nets, whispers and post-watermark guests', async ({ meet, secrets, world }) => {
+test('two clients deliver only authorized previews to members, nets and whispers', async ({ meet, secrets, world }) => {
   const channel = unique('private');
   await done(world, 'POST', '/v0/channels', { name: channel });
   const sender = await person(world, secrets, unique('sender'), [channel]);
@@ -384,16 +373,12 @@ test('two clients deliver only authorized previews to members, nets, whispers an
   const wide = await attach(world, sender.token, channel, unique('wide-before'), [{ filename: 'wide.png', mediaType: 'image/png', bytes: png }]);
   const netMessage = await attach(world, sender.token, channel, unique('net-before'), [{ filename: 'net.png', mediaType: 'image/png', bytes: png }], { kind: 'net', net_id: net.id });
   const whisper = await attach(world, sender.token, channel, unique('whisper-before'), [{ filename: 'whisper.png', mediaType: 'image/png', bytes: png }], { kind: 'principals', principal_ids: [member.id] });
-  const guest = await invitedGuest(world, channel);
-  secrets.push(guest.token);
 
   const senderPage = (await meet()).page;
   const memberPage = (await meet()).page;
   const wrongPage = (await meet()).page;
-  const guestPage = (await meet()).page;
   const outsiderPage = (await meet()).page;
   const wrongReads = fileRequests(wrongPage);
-  const guestReads = fileRequests(guestPage);
   const outsiderReads = fileRequests(outsiderPage);
   await Promise.all([
     signIn(senderPage, world, sender.token, sender.name),
@@ -401,23 +386,17 @@ test('two clients deliver only authorized previews to members, nets, whispers an
     signIn(wrongPage, world, wrong.token, wrong.name),
     signIn(outsiderPage, world, world.tokens.browser, 'browser-test'),
   ]);
-  await guestPage.goto(world.appUrl);
-  await guestPage.getByLabel('Credential').fill(guest.token);
-  await guestPage.getByRole('button', { name: 'Use credential' }).click();
-  await expect(statusLine(guestPage)).toContainText('Connected');
-  for (const page of [senderPage, memberPage, wrongPage, guestPage]) await channelButton(page, channel).click();
+  for (const page of [senderPage, memberPage, wrongPage]) await channelButton(page, channel).click();
 
   for (const body of [wide.body, netMessage.body, whisper.body]) {
     await expect(messages(memberPage).getByText(body)).toBeVisible();
     await expect(messages(wrongPage).getByText(body)).toHaveCount(wide.body === body ? 1 : 0);
-    await expect(messages(guestPage).getByText(body)).toHaveCount(0);
   }
   await expect(memberPage.getByRole('button', { name: 'Enlarge wide.png' })).toBeVisible();
   await expect(memberPage.getByRole('button', { name: 'Enlarge net.png' })).toBeVisible();
   await expect(memberPage.getByRole('button', { name: 'Enlarge whisper.png' })).toBeVisible();
   await expect(wrongPage.getByRole('button', { name: 'Enlarge wide.png' })).toBeVisible();
   await expect(wrongPage.getByRole('button', { name: /Enlarge (net|whisper)\.png/ })).toHaveCount(0);
-  await expect(guestPage.getByRole('button', { name: /Enlarge/ })).toHaveCount(0);
   await expect(channelButton(outsiderPage, channel)).toHaveCount(0);
 
   for (const id of fileIds(wide)) await expectDenied(world, world.tokens.browser, id);
@@ -425,7 +404,6 @@ test('two clients deliver only authorized previews to members, nets, whispers an
     for (const id of fileIds(message)) await expectDenied(world, wrong.token, id);
   }
   for (const message of [wide, netMessage, whisper]) {
-    for (const id of fileIds(message)) await expectDenied(world, guest.token, id);
     for (const id of fileIds(message)) await expectDenied(world, world.tokens.browser, id);
   }
 
@@ -433,21 +411,15 @@ test('two clients deliver only authorized previews to members, nets, whispers an
   await senderPage.getByLabel('Choose images').setInputFiles({ ...pickerFile, name: 'after.png' });
   await senderPage.getByLabel(`Message #${channel}`).fill(after);
   await senderPage.getByRole('button', { name: 'Send', exact: true }).click();
-  for (const page of [memberPage, wrongPage, guestPage]) {
+  for (const page of [memberPage, wrongPage]) {
     await expect(messages(page).getByText(after)).toBeVisible();
     await expect(page.getByRole('button', { name: 'Enlarge after.png' })).toBeVisible();
   }
   const stored = (await history(world, sender.token, channel)).find((message) => message.body === after);
   if (stored === undefined) throw new Error('the after-watermark message was not stored');
-  for (const id of fileIds(stored)) {
-    expect((await call(world, guest.token, 'GET', `/v2/files/${String(id)}/meta`)).status).toBe(200);
-    expect((await call(world, guest.token, 'GET', `/v2/files/${String(id)}`)).status).toBe(200);
-    await expectDenied(world, world.tokens.browser, id);
-  }
+  for (const id of fileIds(stored)) await expectDenied(world, world.tokens.browser, id);
   const wrongIds = requestedFileIds(wrongReads);
   expect(fileIds(netMessage).concat(fileIds(whisper)).some((id) => wrongIds.has(id))).toBe(false);
-  const guestIds = requestedFileIds(guestReads);
-  expect([wide, netMessage, whisper].flatMap(fileIds).some((id) => guestIds.has(id))).toBe(false);
   const outsiderIds = requestedFileIds(outsiderReads);
   expect([wide, netMessage, whisper, stored].flatMap(fileIds).some((id) => outsiderIds.has(id))).toBe(false);
 });

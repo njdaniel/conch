@@ -406,6 +406,12 @@ func messageV2FromStore(message store.Message) schema.MessageV2 {
 		a := *message.GuestAuthor
 		m.GuestAuthor = &a
 	}
+	// v0 and v1 have no form for it (docs/design/message-editing.md §6.3):
+	// they serve the current body unmarked.
+	if !message.EditedAt.IsZero() {
+		at := schema.NewTimestamp(message.EditedAt)
+		m.EditedAt = &at
+	}
 	return m
 }
 

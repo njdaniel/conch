@@ -107,6 +107,10 @@ type mcpMessageOutput struct {
 	// Audience is absent for a channel-wide message. A message that carries
 	// one was not sent to the whole channel, and a reply must not be either.
 	Audience *mcpAudience `json:"audience,omitempty"`
+	// EditedAt is when the author last changed the body (issue #845);
+	// absent for a message never edited. An agent polling by id never sees
+	// an edit as a new message: the id does not change.
+	EditedAt string `json:"edited_at,omitempty"`
 }
 
 type mcpPostMessageOutput struct {

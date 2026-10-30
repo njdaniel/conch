@@ -265,20 +265,23 @@ test('G7a a replayed code is refused, and an action that needs a recent proof as
   const token = (await tabToken(page)) ?? '';
   secrets.push(token);
 
-  // Joining: guests allowed. Save asks for the proof, over the form.
+  // Joining: pause the address (guests are removed, issue #1005, so the
+  // change that asks for the proof is the pause). Save asks for the proof,
+  // over the form.
   await page.getByRole('button', { name: 'Settings' }).click();
-  await page.getByRole('button', { name: 'Joining and guests' }).click();
-  const region = page.getByRole('region', { name: 'Joining and guests' });
-  await region.getByLabel('Allow guest visits').check();
+  await page.getByRole('button', { name: 'Joining' }).click();
+  const region = page.getByRole('region', { name: 'Joining' });
+  await expect(region.getByLabel('Allow guest visits')).toHaveCount(0);
+  await region.getByLabel('Pause joining from the address').check();
   await region.getByRole('button', { name: 'Save joining' }).click();
   const dialog = page.getByRole('dialog', { name: 'Confirm it is you' });
   await expect(dialog).toBeVisible();
-  await expect(region.getByLabel('Allow guest visits')).toBeChecked();
+  await expect(region.getByLabel('Pause joining from the address')).toBeChecked();
   // Cancel first: nothing changes, and the choice is still there.
   await dialog.getByRole('button', { name: 'Cancel' }).click();
   await expect(region.getByText('It needs your password first. Nothing was changed.')).toBeVisible();
-  await expect(region.getByLabel('Allow guest visits')).toBeChecked();
-  expect(await guestsAllowed(origin, token)).toBe(false);
+  await expect(region.getByLabel('Pause joining from the address')).toBeChecked();
+  expect(await joiningPaused(origin, token)).toBe(false);
 
   await region.getByRole('button', { name: 'Save joining' }).click();
   await expect(dialog).toBeVisible();
@@ -288,19 +291,19 @@ test('G7a a replayed code is refused, and an action that needs a recent proof as
   await expect(dialog).toHaveCount(0);
   // The same change, sent again once the proof stood.
   await expect(region.getByText('Saved.')).toBeVisible();
-  expect(await guestsAllowed(origin, token)).toBe(true);
+  expect(await joiningPaused(origin, token)).toBe(true);
   // Within the proof's ten minutes the next change asks nothing.
-  await region.getByLabel('Allow guest visits').uncheck();
+  await region.getByLabel('Pause joining from the address').uncheck();
   await region.getByRole('button', { name: 'Save joining' }).click();
-  await expect.poll(() => guestsAllowed(origin, token)).toBe(false);
+  await expect.poll(() => joiningPaused(origin, token)).toBe(false);
   await expect(dialog).toHaveCount(0);
 });
 
-async function guestsAllowed(origin: string, token: string): Promise<boolean> {
+async function joiningPaused(origin: string, token: string): Promise<boolean> {
   const reply = await fetch(`${origin}/v1/join/settings`, { headers: { Authorization: `Bearer ${token}` } });
   const body: unknown = await reply.json();
   expect(joinSettingsResponseV1(body)).toEqual([]);
-  return (body as { settings: { guests_enabled: boolean } }).settings.guests_enabled;
+  return (body as { settings: { joining_paused: boolean } }).settings.joining_paused;
 }
 
 test('G7a the code’s step runs out of time and goes back to the password, sending no code', async ({ meet, secrets }) => {

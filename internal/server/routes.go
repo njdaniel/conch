@@ -131,6 +131,13 @@ func (s *Server) routeTable() []route {
 		rt("GET /v2/channels/{channel}/reactions", accessAuthenticated, hf(s.handleBatchReactions)),
 		rt("DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}", accessChannelManager, hf(s.handleModerateReaction)),
 		rt("DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}", accessChannelManager, hf(s.handleModerateReactor)),
+		// Message editing (issue #845, docs/design/message-editing.md §4, §5).
+		// The author, a person, replaces the text of their own recent message,
+		// and reads its earlier versions; checked in the handlers
+		// (message_edit.go). body and revisions are literals no other
+		// .../messages/{message_id}/ route ends in.
+		rt("PUT /v2/channels/{channel}/messages/{message_id}/body", accessAuthenticated, hf(s.handleEditMessage)),
+		rt("GET /v2/channels/{channel}/messages/{message_id}/revisions", accessAuthenticated, hf(s.handleListMessageRevisions)),
 		rt("GET /v1/read-state", accessAuthenticated, hf(s.handleListReadState)),
 		rt("PUT /v1/channels/{channel}/read-state", accessAuthenticated, hf(s.handlePutReadState)),
 		rt("PUT /v1/principals/{id}/manifest", accessOperator, hf(s.handlePutManifest)),

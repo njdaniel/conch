@@ -1,18 +1,13 @@
 import type { Page } from '@playwright/test';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
-import { joinSettingsResponseV1, type PutJoinSettingsRequestV1 } from '../src/schema/guest';
 import { postMessageResponseV2 } from '../src/schema/message';
 import { listNetsResponseV1 } from '../src/schema/net';
 import { history, post, reply } from './api';
-import { channelButton, expect, expectFits, phones, signIn, statusLine, test } from './fixtures';
-import { call, ok, principalId, type World } from './world';
+import { channelButton, expect, expectFits, phones, signIn, test } from './fixtures';
+import { call, ok, principalId } from './world';
 
 let next = 0;
 const unique = (label: string) => `r842-${label}-${Date.now().toString(36)}-${String(++next)}`;
-
-async function joining(world: World, request: PutJoinSettingsRequestV1) {
-  await ok(world, world.tokens.operator, 'PUT', '/v1/join/settings', joinSettingsResponseV1, request);
-}
 
 
 async function openThread(page: Page, root: number) {
@@ -103,35 +98,4 @@ test('net and whisper replies keep their authorized audience', async ({ meet, se
   expect(joined.status).toBe(204);
   const outsider = await history(world, outsiderToken, 'nets-demo');
   expect(outsider.some((message) => [netRoot.id, netReply.id, whisperRoot.id, whisperReply.id].includes(message.id))).toBe(false);
-});
-
-test('a reply cannot move an old root across a guest watermark', async ({ meet, secrets, world }) => {
-  await joining(world, { guests_enabled: true, open_joining: 'both', open_channels: ['general'], max_guests_per_address: 50 });
-  try {
-    const tag = unique('guest');
-    const before = await post(world, world.tokens.browser, 'general', `${tag} before root`);
-    const beforeReply = await reply(world, world.tokens.browser, 'general', before.id, `${tag} before reply`);
-    const { page } = await meet();
-    await page.goto(world.appUrl);
-    await page.getByRole('button', { name: 'Join as guest', exact: true }).click();
-    await page.getByLabel('Name to show (optional)').fill('Reply guest');
-    await page.getByRole('button', { name: 'Join as guest', exact: true }).click();
-    await expect(page.getByRole('region', { name: 'Guest visit' })).toContainText('Temporary guest');
-    await expect(statusLine(page)).toContainText('Connected');
-    const token = await page.evaluate(() => window.sessionStorage.getItem('conch.web.token'));
-    if (token !== null) secrets.push(token);
-    expect((await history(world, token ?? '', 'general')).some((message) => [before.id, beforeReply.id].includes(message.id))).toBe(false);
-    await expect(page.getByText(before.body, { exact: true })).toHaveCount(0);
-    await expect(page.getByText(beforeReply.body, { exact: true })).toHaveCount(0);
-
-    const during = await post(world, token ?? '', 'general', `${tag} during root`);
-    const duringReply = await reply(world, world.tokens.browser, 'general', during.id, `${tag} during reply`);
-    const thread = await openThread(page, during.id);
-    await expect(thread.getByText(duringReply.body, { exact: true })).toBeVisible();
-    await page.reload();
-    const restored = await openThread(page, during.id);
-    await expect(restored.getByText(duringReply.body, { exact: true })).toBeVisible();
-  } finally {
-    await joining(world, { open_joining: 'off', guests_enabled: false, open_channels: [] });
-  }
 });

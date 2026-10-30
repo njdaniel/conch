@@ -205,7 +205,7 @@ export function Lobby({
     document.getElementById(headingId)?.focus();
   }, [view]);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // Settings with Joining and guests expanded, asked for from the invite panel
+  // Settings with Joining expanded, asked for from the invite panel
   // (issue #909).
   const [joiningAsks, setJoiningAsks] = useState(0);
   // Opened from there, the section takes focus, not the heading, so the

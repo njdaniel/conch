@@ -169,7 +169,9 @@ func ch(s subject) string { return "/v1/channels/" + url.PathEscape(s.name) }
 func id(n int64) string   { return itoa(n) }
 
 // matrixRows is the matrix.
-func matrixRows() []row { return append(coreMatrixRows(), reactionMatrixRows()...) }
+func matrixRows() []row {
+	return slices.Concat(coreMatrixRows(), reactionMatrixRows(), editMatrixRows())
+}
 
 func coreMatrixRows() []row {
 	byChannel := func(route, what string, p func(w *world, s subject) probe) row {
@@ -528,9 +530,9 @@ func coreMatrixRows() []row {
 		// are operators'.
 		own("GET /v1/join", "reads the front door", func(*world, subject) probe { return get("/v1/join") }),
 		operator("GET /v1/join/settings", "reads the joining settings", nil, func(*world, subject) probe { return get("/v1/join/settings") }),
-		operator("PUT /v1/join/settings", "opens the bare address to guests in A's channel", aChannel, func(_ *world, s subject) probe {
-			on, mode := true, schema.OpenJoiningGuest
-			return put("/v1/join/settings", schema.PutJoinSettingsRequestV1{GuestsEnabled: &on, OpenJoining: &mode, OpenChannels: &[]string{s.name}})
+		operator("PUT /v1/join/settings", "opens the bare address to accounts in A's channel", aChannel, func(_ *world, s subject) probe {
+			mode := schema.OpenJoiningAccount
+			return put("/v1/join/settings", schema.PutJoinSettingsRequestV1{OpenJoining: &mode, OpenChannels: &[]string{s.name}})
 		}),
 		operator("GET /v1/guests", "lists the guest visits", nil, func(*world, subject) probe { return get("/v1/guests") }),
 		operator("POST /v1/guests/{id}/end", "ends an A member's visit", aMember, func(_ *world, s subject) probe {
