@@ -24,11 +24,16 @@ const fake = vi.hoisted(() => ({
   down: false,
   // What a presence read answers; never, unless a test says.
   read: (): Promise<ApiResult<VoicePresenceV1>> => new Promise(() => undefined),
+  // Issue #965: a session and a room for a test that talks, and what each
+  // transmit report answers; by default no session, and reports answered.
+  session: (): Promise<unknown> => new Promise(() => undefined),
+  report: (): Promise<string> => Promise.resolve('ok'),
+  room: (): unknown => ({}),
 }));
 
 vi.mock('../api', () => ({
-  createVoiceSession: () => new Promise(() => undefined),
-  reportVoiceTransmit: () => Promise.resolve('ok'),
+  createVoiceSession: () => fake.session(),
+  reportVoiceTransmit: () => fake.report(),
   getVoicePresence: (channel: string) => {
     fake.reads.push(channel);
     return fake.read();
@@ -49,7 +54,7 @@ vi.mock('../api', () => ({
   claimVoiceShare: () => new Promise(() => undefined),
   stopVoiceShare: () => new Promise(() => undefined),
 }));
-vi.mock('./sdk', () => ({ newLiveKitRoom: () => ({}), canChooseOutput: () => true }));
+vi.mock('./sdk', () => ({ newLiveKitRoom: () => fake.room(), canChooseOutput: () => true }));
 
 import { defaultTalkKey } from './keys';
 import { useVoice } from './useVoice';
@@ -177,6 +182,101 @@ describe('the release delay', () => {
   it.each([['not a number', 'soon'], ['out of range', '99999'], ['negative', '-5']])('kept as %s, it is the default', (_what, kept) => {
     window.sessionStorage.setItem('conch.web.voice.release', kept);
     expect(hook({ channel: null }).result.current.state.releaseDelay).toBe(200);
+  });
+});
+
+// Issue #965: losing focus or visibility shuts the gate at once, whatever the
+// talk key is doing: while a new key is being chosen, Hold to talk still
+// works, and what it opened must shut on a blur too.
+describe('losing focus', () => {
+  // A room that records the track's mutes and answers everything else with
+  // nothing.
+  function talkingRoom(sending: boolean[]): unknown {
+    const methods: Record<string, unknown> = {
+      setSending: (on: boolean) => {
+        sending.push(on);
+        return Promise.resolve();
+      },
+      level: () => 0,
+      microphoneInUse: () => null,
+      microphoneProcessing: () => null,
+    };
+    return new Proxy(methods, {
+      get: (target, name: string) => target[name] ?? (() => Promise.resolve(undefined)),
+    });
+  }
+
+  async function joinedHook(sending: boolean[]) {
+    fake.session = () =>
+      Promise.resolve({ ok: true, value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-10-16T00:00:15.000Z' }] } });
+    fake.room = () => talkingRoom(sending);
+    const view = hook({ channel: 'c' });
+    act(() => {
+      view.result.current.join();
+    });
+    await flush();
+    expect(view.result.current.state.phase).toBe('connected');
+    act(() => {
+      view.result.current.client.setReleaseDelay(2000);
+      // Change talk key: the talk key's listeners are off meanwhile.
+      view.result.current.capture(true);
+    });
+    expect(view.result.current.capturing).toBe(true);
+    return view;
+  }
+
+  afterEach(() => {
+    fake.session = () => new Promise(() => undefined);
+    fake.report = () => Promise.resolve('ok');
+    fake.room = () => ({});
+  });
+
+  it.each([
+    ['a blur', () => window.dispatchEvent(new Event('blur'))],
+    ['a pagehide', () => window.dispatchEvent(new Event('pagehide'))],
+    ['the page hidden', () => {
+      Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }],
+  ])('while a new talk key is chosen, %s shuts a transmission at once', async (_what, away) => {
+    const sending: boolean[] = [];
+    const view = await joinedHook(sending);
+    const client = view.result.current.client;
+    act(() => {
+      client.press();
+    });
+    await flush();
+    expect(sending).toEqual([true]);
+    act(() => {
+      client.release();
+      away();
+    });
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    expect(sending).toEqual([true, false]);
+    expect(view.result.current.state.transmitting).toBe(false);
+  });
+
+  it('while a new talk key is chosen, a blur during a press waiting for its answer: the track never opens', async () => {
+    const answers: ((a: string) => void)[] = [];
+    fake.report = () =>
+      new Promise((resolve) => {
+        answers.push(resolve);
+      });
+    const sending: boolean[] = [];
+    const view = await joinedHook(sending);
+    const client = view.result.current.client;
+    act(() => {
+      client.press();
+      client.release();
+      window.dispatchEvent(new Event('blur'));
+    });
+    await flush();
+    for (const answer of answers.splice(0)) answer('ok');
+    await flush();
+    for (const answer of answers.splice(0)) answer('ok');
+    await flush();
+    expect(sending).not.toContain(true);
+    expect(view.result.current.state.talking).toBe(false);
   });
 });
 

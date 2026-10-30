@@ -406,6 +406,26 @@ export function useVoice({
     if (reachable && feedStatus.current === 'waiting') feedRef.current?.start();
   }, [reachable]);
 
+  // Losing focus or visibility shuts the gate at once (issue #965), always:
+  // not only while the talk key listens. Hold to talk works while a new key
+  // is being chosen, and a transmission it opened must shut on a blur too.
+  useEffect(() => {
+    const away = () => {
+      client.lost();
+    };
+    const hidden = () => {
+      if (document.visibilityState === 'hidden') client.lost();
+    };
+    window.addEventListener('blur', away);
+    window.addEventListener('pagehide', away);
+    document.addEventListener('visibilitychange', hidden);
+    return () => {
+      window.removeEventListener('blur', away);
+      window.removeEventListener('pagehide', away);
+      document.removeEventListener('visibilitychange', hidden);
+    };
+  }, [client]);
+
   // The talk key, only while the tab has focus and focus is not in a field.
   useEffect(() => {
     if (!signedIn || capturing) return;
@@ -417,26 +437,14 @@ export function useVoice({
     const up = (e: KeyboardEvent) => {
       if (e.code === talkKey) client.release();
     };
-    const away = () => {
-      client.lost();
-    };
-    const hidden = () => {
-      if (document.visibilityState === 'hidden') client.lost();
-    };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
-    window.addEventListener('blur', away);
-    window.addEventListener('pagehide', away);
-    document.addEventListener('visibilitychange', hidden);
     return () => {
       // A key held while the key, capture or sign-in changes would never see
       // its keyup here: let go of it.
       client.release();
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
-      window.removeEventListener('blur', away);
-      window.removeEventListener('pagehide', away);
-      document.removeEventListener('visibilitychange', hidden);
     };
   }, [signedIn, capturing, talkKey, client]);
 
