@@ -1,0 +1,79 @@
+# ADR-013: One community with private channels
+
+- **Status:** Accepted — Nick, 2026-10-30, in session: "accept recommendations". Every open point of the design (§11, O1–O14) takes its recommended reading, and the clauses marked "(O#)" below are final as written. For O13, whose recommendation left the joining settings open, the reading taken is the reviewers' lean: the invite family gets a second version (`InviteV2`, signed off by the same answer, CLAUDE.md rule 2) and the joining settings stay on v1 with additive fields and the documented mapping (design §3.4, Option B). Effective when the PR that adds this ADR merges.
+- **Date:** 2026-10-29 (proposed), 2026-10-30 (accepted)
+- **Decider:** Nick (Tier-H)
+- **Design:** [docs/design/community-model.md](../design/community-model.md)
+- **Amends:**
+  - [ADR-003](ADR-003-multi-human-access.md): channel membership stays the boundary for **content** and stops being the boundary for **people**. Every member sees every member of the server.
+  - [ADR-008](ADR-008-private-communications-alpha.md) Decision 4 (invites grant named channels, voice and the right to invite; personal invites single-use by permitted testers, open links by operators) and the exit scenario's step 3 ("see nothing of the other groups"): replaced by member links and guest links, and by "see nothing of the other groups' private channels". Decision 5 (separate groups are separate private channels) stands.
+  - [ADR-009](ADR-009-guests-and-open-joining.md) D1 (the bare address in four modes; guests through every entry point): the bare address is a sign-in page with one `open_signup` switch and never admits guests; guests come through operator-made guest links only. D3 and item 3's "retain history boundaries" on conversion: a converted guest is a member and sees the full history of the channels it keeps (O7). Everything else in ADR-009 (passwords, guest identity, bounds, End visit, operator authentication) stands.
+  - [ADR-010](ADR-010-delegated-administration.md): channel creation is no longer operator-only, so the creator of a channel is its first manager (O9; ADR-010 rejected creator ownership only because creation was operator-only); the bound that a manager adds only people who already share a channel with it is dropped, since the member list is community-wide (O10). The owner mark, the manager grant, owner protection, "grants never exceed the granter" and the precedence order stand; `may_invite` becomes a brake an operator pulls rather than a grant an operator gives.
+  - [docs/design/private-alpha.md](../design/private-alpha.md) §3 "inviting is a per-person permission that only an operator grants": every member may make member links.
+
+  Accepted ADRs are not edited; this one records what changes. Nothing in [ADR-000](ADR-000-charter.md)'s locked table moves: single tenancy (one server is one community), no DMs, no team abstraction above the channel, and the deployment invariant are unchanged.
+
+## Context
+
+On 2026-10-29 the first real tester got lost. Nick had made a per-channel invite to
+#belgium; the tester, on a phone, joined through the bare address instead, landed in
+#general alone, saw no earlier messages (address joins carry a history bound), could not
+see Nick (in voice in #belgium), and had no voice (address joins carry `join_voice`, off).
+No route changes a person's voice after joining; the fix was a database edit.
+
+The model on main is ADR-008's: several separate groups of strangers on one server, nobody
+sees anyone outside their channels, and every entry point (personal invite, open link,
+bare address in one of four modes) grants exactly the channels, voice and invite right its
+maker chose. It is correct for a server shared by groups that must not know of each other.
+It is too complicated, and wrong, for Nick's use: one community of people who know each
+other, with some private rooms.
+
+Nick's decisions, made in session on 2026-10-29, verbatim in intent:
+
+**Model:** one community with private channels, Discord-like.
+
+1. **Joining.** The server invite link is the one way in for members: it makes you a member and puts you in the default channels; reusable, with an optional expiry and use limit. The bare address is invite-only by default: a sign-in page only. Open sign-up is a switch, off by default, that only operators can turn on; when on, the address works like a server invite link. Any member can make member links; each link is tied to whoever made it, so you can see who brought whom, switch the link off, or remove the people it brought in. Only operators make guest links, or turn on open sign-up.
+2. **Guests:** off by default. Visitors only, marked as guests in the channels they visit. Never in private channels. They can't browse the server member list. They see history only from when they joined. They get voice only if the guest link says so. Visits stay time-limited.
+3. **The member list:** every member can see everyone on the server. Agents are listed and marked as agents. Guests appear only in the channels they're visiting. A private channel's membership and contents stay members-only.
+4. **History:** members see the full history of every channel they're in, however they got there. Guests only from their join.
+5. **Voice:** on for every member by default. An operator can switch it off or on for any person, at any time, from the member list; this needs a new route.
+6. **Channels.** Any member can create a channel and chooses public or private. Operators pick the default channels, which new members start in. Other public channels are listed, and members can join them themselves. A private channel is visible only to its members; its managers and operators add people.
+7. **Migration:** existing servers convert automatically. Open-joining channels become default channels; other existing channels become public; existing members join the default channels; existing per-channel invites keep working until they expire.
+
+## Decision
+
+1. **One server is one community.** Every account is a member of it. Members see every other member (people and agents, agents marked) in a server-wide member list. Channel membership remains the boundary for channel content: a private channel's existence, members and messages are visible to its members alone, and to anyone else it answers the same 404 as a channel that does not exist.
+2. **Channels are public or private.** Any member creates one and chooses; the creator is its first member and its manager (O9). Operators mark public channels as default channels and set a channel's visibility (O5). Public channels are listed to every member, who may join and leave them; private channels are entered only by a manager's or operator's add, and a manager may add any member (O10).
+3. **Members see full history** of every channel they are in, however they got there. No member membership carries a history bound; conversion of a guest clears the bounds it had (O7).
+4. **Voice is on for every member** and an operator may switch it off or on per person at any time, with immediate effect on live media.
+5. **The way in is a member link** (reusable, with an optional expiry and use limit, made by any member, tied to its maker, landing the joiner in the default channels; a link that names no expiry gets the server's default, and a link that never expires is an operator's (O3)) **or open sign-up** (one switch, off by default, owner-set under ADR-010 (O1), which makes the bare address behave as a member link). Otherwise the bare address is a sign-in page. Operators see who brought whom, close any link, and remove a link's joiners; makers see and close their own (O2).
+6. **Guests are visitors through guest links** that only operators make, naming public channels and whether voice is included. Guests are never in private channels, never see the member list or the channel directory (O8), see history from their arrival, and their visits stay bounded as ADR-009 says. The server-wide `guests_enabled` switch stays, off by default.
+7. **Retired:** the four `open_joining` modes (replaced by `open_signup`), `join_voice`, the open-channel set (replaced by default channels), per-channel invites as the way in (existing ones keep working until they expire; new ones cannot be made), `may_invite` as a grant (it becomes a brake, on by default).
+8. **Existing servers convert automatically** by one migration: open channels become public default channels; every other channel becomes private with its current members, for the operator to make public where it should be (O6); every member joins the default channels; every member bound is cleared (recorded in a side table); voice and link-making are on for every member; settings are mapped.
+9. **Optional: hide members from each other** (issue #964). One server setting, `hide_members`, off by default so that decision 3 is the default, set by the class O1 settles. When it is on, an ordinary member may know only themself, the members of the channels both are in, and the people their own links brought in (O14). This is enforced in every server answer and live event, not only in clients, and an unknown principal gets the same answer as one that never existed (O14). Operators see everyone. Channel visibility and the guest rules apply unchanged, and the setting never widens access. A message's author stays named in its channel's history (O14). Everyone who shares a channel sees each other, so the setting's description says that a default or public channel exposes its participants; a default channel draws a warning, not a refusal (O14). The setting promises no anonymity and no isolation of processes.
+
+## Consequences
+
+- **Wire shapes follow the schema rules.** The invite family gets a second version (`InviteV2` and its requests): `InviteV1.expires_at` cannot say "none" and `CreateInviteRequestV1` requires named channels, so neither can describe a member link without mutating a published shape. The joining settings stay on v1 with additive fields and a documented mapping (O13, Option B). v1 shapes and fixtures are immutable and v1 routes keep answering legacy data; everything else is additive. Nick signed off the invite bump with this ADR (2026-10-30); any further bump needs its own sign-off (CLAUDE.md rule 2).
+- **Published routes change behaviour:** `POST /v1/invites` is refused (409 `invite_kind_retired`); `POST /v1/join/guest` is always refused (403 `guests_disabled`), since the bare address admits no guests whatever `guests_enabled` says; `PUT /v1/join/settings` refuses the `guest` and `both` modes and `join_voice: false` (O13, Option B).
+- **A closed vocabulary grows:** `JoinWarning` gains `no_default_channel`. The vocabulary is closed but client-tolerant by its own contract (a client shows a value it does not know by its value), so no fixture changes; the addition is recorded, not a bump.
+- **No MCP tool is added:** joining, the directory and administration are human acts, and parity holds through REST (ADR-001).
+- **One migration** (37 at `671a16e`), additive in shape, that changes the visibility of every existing channel and the history of every existing member, removes active guests from channels that become private and strips those channels from guest-admitting invites, and writes one `community_migrated` audit row, the first migration to write the audit log. Rollback is the previous binary plus the pre-upgrade backup, as for every migration. Operators get an upgrade notice in the CHANGELOG and release notes.
+- **New security surface:** the member directory, the channel directory and the operators' all-channels view, self-join, member channel creation (a name collision is a bounded, audited existence oracle on private names), channel settings, the voice route, member links. Every implementing PR gets a `security-reviewer` pass. Membership-writing slices (migration, join and create, redemption, conversion) are `approval-path` and merged by Nick.
+- **The isolation check and ADR-008's exit step 3 change premise:** a member of one group finds nothing of another group's **private channels**; names and public channels are community-wide by design. The check's markers split into a private register and the world is amended, slice by slice, in the same wave.
+- **ADR-010's manager rules loosen in one place and gain one case:** a manager adds any member (the directory shows everyone) (O10), and a channel's creator is its manager (O9). Owner protection, the approval right and "grants never exceed the granter" are untouched.
+- **ADR-009's guest machinery stays whole**; only its entry points narrow (guest links, not the bare address) and conversion stops carrying a bound (O7).
+- **Reactions, the desktop companion and moderation** need one-line amendments each (conversion widens reactions with messages; the voice route is an entitlement loss the companion design already handles; self-join runs the ban predicate). None waits on this ADR.
+- **The private alpha's onboarding is simpler:** one link, one sign-in page, one switch. The tester story of 2026-10-29 becomes an end-to-end scenario that must pass before this is called done.
+- **The optional `hide_members` setting (#964)** adds one store predicate that every member-facing read of principals goes through, two small routes (the directory settings and a channel's authors) and one content-free events document, with no version bump; the isolation check gains a phase with it on (design §13).
+- The design lists fourteen open points (O1–O14). Nick accepted the recommended reading of every one on 2026-10-30; the "(O#)" clauses above are that reading. O6 departs from the brief's decision 7 ("other existing channels become public") and is part of what he accepted: existing non-open channels become private with their members, and the operator makes public the ones that should be.
+
+## Alternatives considered
+
+| Option | Why not |
+| --- | --- |
+| Keep ADR-008's model and fix the four symptoms (voice route, no bound on address joins, join_voice default on, a landing page that says "use your link") | Leaves four entry modes, per-channel grants and an invisible member list; the next tester gets lost one step later. Nick judged the model wrong for his use, not merely rough. |
+| Public channels only, no private ones ("one room") | Groups that need separation (ADR-008 §5) would need a second server; private channels cost one column and keep today's 404 behaviour. |
+| A `visibility` field on `ChannelV0` as the only change, listing every channel to everyone | A directory of private channel names is exactly what decision 3 forbids; a separate directory route with a `joined` flag keeps `GET /v1/channels` meaning what it means. |
+| New values in the published `InviteKind` vocabulary instead of v2 invite shapes | `InviteV1.expires_at` is a non-pointer timestamp that cannot say "none", and `CreateInviteRequestV1.Validate` requires 1 to 32 channels and refuses `max_uses` on a personal invite; a member link fits none of that without changing a published shape, which the schema rules forbid. The v2 shapes leave v1 immutable and old clients working on legacy data. (The joining settings are different: they can stay on v1 with additive fields and a mapping, O13.) |
+| Make every joiner a channel manager of the default channels, or give the creator of a channel an "owner of channel" standing | ADR-010 has one manager grant; the creator receives it. A second ownership concept would need its own lock-out rules. |
