@@ -37,7 +37,8 @@ import { MicTestShown, VoiceLive } from '../phone';
 import { StageHost } from '../stage';
 import { MicTest } from './MicTest';
 import type { Person } from '../useLiveChannel';
-import type { Phase, Processing } from './connection';
+import type { Phase, Processing, VoiceState } from './connection';
+import { maxTail } from './gate';
 import { keyLabel } from './keys';
 import { occupants, sharer, type Occupant } from './presence';
 import { busyNote, endedNote, oneSharerNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, watchNote } from './share';
@@ -338,7 +339,7 @@ export function VoicePanel({
                   {state.deafened ? 'Deafened (you hear no one, and you are muted). ' : ''}
                   {state.listenOnly ? 'Listen only. ' : ''}
                   {state.watchOnly ? 'Watch only: your microphone is off. ' : ''}
-                  {state.transmitting ? 'Transmitting' : 'Not transmitting'}
+                  {transmitLabel(state)}
                 </span>
               </p>
             ) : (
@@ -353,7 +354,7 @@ export function VoicePanel({
                   <button
                     type="button"
                     className="talk"
-                    aria-pressed={state.transmitting}
+                    aria-pressed={state.talking}
                     disabled={state.listenOnly || state.watchOnly}
                     // Muted or deafened it stays pressable (a press reaches the
                     // gate, which is shut and sends nothing), but it looks off
@@ -769,6 +770,19 @@ export const processingUseNote =
   'Use this for a virtual microphone (such as one a text-to-speech program provides) or a studio microphone. With speakers rather than headphones, others may hear themselves.';
 export const thresholdHint = 'Without automatic gain your level may differ: check the meter and set the level.';
 
+// transmitLabel says what is sent (issue #965): Transmitting only while audio
+// leaves the page. A press waits for conchd's answer before the track opens
+// (at most a second), and the page says so rather than claim to transmit.
+export function transmitLabel(state: Pick<VoiceState, 'talking' | 'transmitting'>): string {
+  if (state.transmitting) return 'Transmitting';
+  return state.talking ? 'Waiting for the server' : 'Not transmitting';
+}
+
+// releaseLabel names a release delay for people.
+export function releaseLabel(ms: number): string {
+  return `${String(ms)} ms`;
+}
+
 // The filters, by the names the switch gives them.
 const filterNames: readonly (readonly [keyof Processing, string])[] = [
   ['echoCancellation', 'echo cancellation'],
@@ -843,12 +857,29 @@ function Options({ voice, open, sharable, about, others }: {
         <ProcessingChoice voice={voice} />
       </fieldset>
       {state.mode === 'ptt' ? (
-        <p className="hint">
-          Talk key: {keyLabel(voice.talkKey)}.{' '}
-          <button type="button" onClick={() => { voice.capture(!voice.capturing); }}>
-            {voice.capturing ? 'Press a key (Escape cancels)' : 'Change talk key'}
-          </button>
-        </p>
+        <>
+          <p className="hint">
+            Talk key: {keyLabel(voice.talkKey)}.{' '}
+            <button type="button" onClick={() => { voice.capture(!voice.capturing); }}>
+              {voice.capturing ? 'Press a key (Escape cancels)' : 'Change talk key'}
+            </button>
+          </p>
+          {/* How long the microphone stays open after the key comes up, so
+              the last word is not cut (issue #965). */}
+          <label className="threshold">
+            Release delay
+            <input
+              type="range"
+              min={0}
+              max={maxTail}
+              step={10}
+              value={state.releaseDelay}
+              aria-valuetext={releaseLabel(state.releaseDelay)}
+              onChange={(e) => { voice.setReleaseDelay(Number(e.target.value)); }}
+            />
+            <output>{releaseLabel(state.releaseDelay)}</output>
+          </label>
+        </>
       ) : (
         <>
           <label className="threshold">

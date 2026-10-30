@@ -12,7 +12,8 @@ export type GateMode = 'ptt' | 'open';
 
 export interface GateOptions {
   // How long the gate stays open after a release, so the last syllable is not
-  // cut (conch-voice.md section 3).
+  // cut (conch-voice.md section 3): the release delay, which the person can
+  // change (setTail).
   readonly tail?: number;
   // How long the open microphone stays open after the level falls below the
   // threshold.
@@ -21,14 +22,22 @@ export interface GateOptions {
   readonly max?: number;
 }
 
-export const defaultTail = 100;
+// The browser's release delay is longer than conch-voice's 100 ms (issue
+// #965). conch-voice's gate drops frames at the microphone, so its tail is
+// what a listener hears; the browser's is a mute of the track, which silences
+// what the browser has captured and not yet sent as well. Measured against
+// LiveKit (web/e2e/32-voice-onset.spec.ts), a 100 ms tail was heard as 36 to
+// 51 ms after the key came up. 200 ms is heard as about 150.
+export const defaultTail = 200;
+// The longest release delay, as conch-voice's release_tail_ms.
+export const maxTail = 2000;
 export const defaultHang = 400;
 export const defaultMax = 120_000;
 
 export class TransmitGate {
   private readonly clock: Clock;
   private readonly onChange: (open: boolean) => void;
-  private readonly tail: number;
+  private tail: number;
   private readonly hang: number;
   private readonly max: number;
   private isOpen = false;
@@ -42,7 +51,7 @@ export class TransmitGate {
   constructor(clock: Clock, onChange: (open: boolean) => void, options: GateOptions = {}) {
     this.clock = clock;
     this.onChange = onChange;
-    this.tail = options.tail ?? defaultTail;
+    this.tail = clampTail(options.tail ?? defaultTail);
     this.hang = options.hang ?? defaultHang;
     this.max = options.max ?? defaultMax;
   }
@@ -66,6 +75,16 @@ export class TransmitGate {
 
   setThreshold(level: number): void {
     this.threshold = level;
+  }
+
+  get releaseDelay(): number {
+    return this.tail;
+  }
+
+  // setTail sets the release delay, from 0 to maxTail ms. A release already
+  // in its tail keeps the delay it started with.
+  setTail(ms: number): void {
+    this.tail = clampTail(ms);
   }
 
   press(): void {
@@ -125,4 +144,11 @@ export class TransmitGate {
     else if (which === 'hang') this.hangTimer = null;
     else this.maxTimer = null;
   }
+}
+
+// clampTail keeps a release delay between 0 and maxTail ms, in whole ms; a
+// value that is not a number is the default.
+export function clampTail(ms: number): number {
+  if (!Number.isFinite(ms)) return defaultTail;
+  return Math.round(Math.min(maxTail, Math.max(0, ms)));
 }

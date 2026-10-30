@@ -131,6 +131,7 @@ function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome
       features,
       client,
       setTalkKey: () => undefined,
+      setReleaseDelay: () => undefined,
       capture: () => undefined,
       join: () => {
         joins.push('join');

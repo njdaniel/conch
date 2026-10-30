@@ -155,6 +155,31 @@ describe('the talk key', () => {
   });
 });
 
+// Issue #965: the release delay lasts for the tab, as the talk key does.
+describe('the release delay', () => {
+  beforeEach(() => {
+    window.sessionStorage.clear();
+  });
+
+  it('is kept for the tab: the next hook starts with it', () => {
+    const first = hook({ channel: null });
+    expect(first.result.current.state.releaseDelay).toBe(200);
+    act(() => {
+      first.result.current.setReleaseDelay(700);
+    });
+    expect(first.result.current.state.releaseDelay).toBe(700);
+    expect(window.sessionStorage.getItem('conch.web.voice.release')).toBe('700');
+    first.unmount();
+    const second = hook({ channel: null });
+    expect(second.result.current.state.releaseDelay).toBe(700);
+  });
+
+  it.each([['not a number', 'soon'], ['out of range', '99999'], ['negative', '-5']])('kept as %s, it is the default', (_what, kept) => {
+    window.sessionStorage.setItem('conch.web.voice.release', kept);
+    expect(hook({ channel: null }).result.current.state.releaseDelay).toBe(200);
+  });
+});
+
 // Issue #658: the microphone chosen lasts for the tab, in sessionStorage
 // beside the talk key, and nowhere else: its device id, and its name, by
 // which it is found again under a new id.

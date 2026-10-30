@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
-import { VoiceClient, chosenGone, earlierGone, outputMoved, outputRefused, reconnectLimit, reportWait, type Microphone, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, chosenGone, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type Microphone, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { resumeLimit, type Captured, type KeptScreen } from './share';
+import { defaultTail } from './gate';
 import { FakeClock, settle } from './fakes';
 
 const token = 'join-token-secret-value';
@@ -319,7 +320,7 @@ describe('talking', () => {
     expect(t.reports).toEqual(['started']);
     expect(t.client.snapshot().transmitting).toBe(true);
     t.client.release();
-    t.clock.advance(100);
+    t.clock.advance(defaultTail);
     await settle();
     expect(t.rooms[0]?.sending).toEqual([true, false]);
     expect(t.reports).toEqual(['started', 'stopped']);
@@ -329,7 +330,7 @@ describe('talking', () => {
     const t = await joined();
     t.client.press();
     t.client.lost();
-    t.clock.advance(100);
+    t.clock.advance(defaultTail);
     expect(t.client.snapshot().transmitting).toBe(false);
   });
 
@@ -347,7 +348,7 @@ describe('talking', () => {
     expect(t.rooms[0]?.deafened.at(-1)).toBe(true);
     t.client.setDeafened(false);
     t.client.press();
-    expect(t.client.snapshot().transmitting).toBe(true);
+    expect(t.client.snapshot().talking).toBe(true);
   });
 
   it('the open microphone opens on speech and closes after the hang time', async () => {
@@ -357,7 +358,7 @@ describe('talking', () => {
     if (room === undefined) throw new Error('no room');
     room.levelNow = 0.5;
     t.clock.advance(50);
-    expect(t.client.snapshot().transmitting).toBe(true);
+    expect(t.client.snapshot().talking).toBe(true);
     room.levelNow = 0;
     t.clock.advance(50);
     t.clock.advance(400);
@@ -393,7 +394,7 @@ describe('the order of the track and the reports', () => {
     const t = await joined(setup([okSession()], [], 0, true));
     t.client.press();
     await settle();
-    expect(t.client.snapshot().transmitting).toBe(true);
+    expect(t.client.snapshot().talking).toBe(true);
     t.clock.advance(reportWait - 100);
     await settle();
     expect(t.rooms[0]?.sending).toEqual([]);
@@ -411,7 +412,7 @@ describe('the order of the track and the reports', () => {
     await t.answer('ok');
     room.holdMute = true;
     t.client.release();
-    t.clock.advance(100);
+    t.clock.advance(defaultTail);
     await settle();
     expect(t.reports).toEqual(['started']);
     room.heldMute?.();
@@ -426,11 +427,11 @@ describe('the order of the track and the reports', () => {
     t.client.press();
     await settle();
     t.client.release();
-    t.clock.advance(100);
+    t.clock.advance(defaultTail);
     t.client.press();
     t.clock.advance(50);
     t.client.release();
-    t.clock.advance(100);
+    t.clock.advance(defaultTail);
     await settle();
     await t.answer('ok');
     await t.answer('ok');
@@ -491,6 +492,149 @@ describe('the order of the track and the reports', () => {
     expect(t.rooms[0]?.sending).toEqual([false]);
     expect(t.rooms[1]?.sending).toEqual([]);
     expect(t.reports).toEqual(['started']);
+  });
+});
+
+// Issue #965: what the page says is what is sent, the release delay is the
+// person's, and the open microphone hears an onset sooner.
+describe('what is sent, and when', () => {
+  it('says transmitting only once the track is unmuted: not while the press waits for its answer', async () => {
+    const t = await joined(setup([okSession()], [], 0, true));
+    t.client.press();
+    await settle();
+    t.clock.advance(300);
+    await settle();
+    // The key is down and the gate open, but nothing is sent yet.
+    expect(t.rooms[0]?.sending).toEqual([]);
+    expect(t.client.snapshot()).toMatchObject({ talking: true, transmitting: false });
+    await t.answer('ok');
+    expect(t.rooms[0]?.sending).toEqual([true]);
+    expect(t.client.snapshot()).toMatchObject({ talking: true, transmitting: true });
+    // The gate shuts and the mute goes at once: so does the indicator.
+    t.client.release();
+    t.clock.advance(defaultTail);
+    expect(t.rooms[0]?.sending).toEqual([true, false]);
+    expect(t.client.snapshot()).toMatchObject({ talking: false, transmitting: false });
+  });
+
+  it('a press released while its report waits is never said to transmit', async () => {
+    const t = await joined(setup([okSession()], [], 0, true));
+    const said: boolean[] = [];
+    t.client.subscribe(() => {
+      said.push(t.client.snapshot().transmitting);
+    });
+    t.client.press();
+    await settle();
+    t.client.release();
+    t.clock.advance(defaultTail);
+    await settle();
+    await t.answer('ok');
+    await t.answer('ok');
+    expect(t.rooms[0]?.sending).toEqual([false]);
+    expect(said).not.toContain(true);
+  });
+
+  it('a report that never answers: transmitting from reportWait, when the track opens anyway', async () => {
+    const t = await joined(setup([okSession()], [], 0, true));
+    t.client.press();
+    await settle();
+    t.clock.advance(reportWait - 1);
+    await settle();
+    expect(t.client.snapshot().transmitting).toBe(false);
+    t.clock.advance(1);
+    await settle();
+    expect(t.rooms[0]?.sending).toEqual([true]);
+    expect(t.client.snapshot().transmitting).toBe(true);
+  });
+
+  it('a drop after the unmute ends transmitting with the connection', async () => {
+    const t = await joined(setup([okSession(), okSession()]));
+    t.client.press();
+    await settle();
+    expect(t.client.snapshot().transmitting).toBe(true);
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    expect(t.client.snapshot()).toMatchObject({ talking: false, transmitting: false });
+  });
+
+  it('the release delay is the default until set; set, it holds from the next release, between 0 and 2 s', async () => {
+    const t = await joined();
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    expect(t.client.snapshot().releaseDelay).toBe(defaultTail);
+    t.client.setReleaseDelay(600);
+    expect(t.client.snapshot().releaseDelay).toBe(600);
+    t.client.press();
+    await settle();
+    t.client.release();
+    t.clock.advance(599);
+    expect(room.sending).toEqual([true]);
+    t.clock.advance(1);
+    expect(room.sending).toEqual([true, false]);
+    await settle();
+    expect(t.reports).toEqual(['started', 'stopped']);
+    for (const [asked, kept] of [[-5, 0], [5000, 2000], [Number.NaN, defaultTail], [123.4, 123]] as const) {
+      t.client.setReleaseDelay(asked);
+      expect(t.client.snapshot().releaseDelay).toBe(kept);
+    }
+  });
+
+  it('a release delay handed in at the start holds from the first release', async () => {
+    const clock = new FakeClock();
+    const rooms: StubRoom[] = [];
+    const client = new VoiceClient({
+      clock,
+      random: () => 0.5,
+      createSession: () => Promise.resolve(okSession()),
+      report: () => Promise.resolve('ok'),
+      newRoom: () => {
+        const r = new StubRoom();
+        rooms.push(r);
+        return r;
+      },
+      claimShare: () => Promise.resolve(claim),
+      stopShare: () => Promise.resolve(),
+      gate: { tail: 40 },
+    });
+    expect(client.snapshot().releaseDelay).toBe(40);
+    client.join('general');
+    await settle();
+    client.press();
+    await settle();
+    client.release();
+    clock.advance(40);
+    expect(rooms[0]?.sending).toEqual([true, false]);
+  });
+
+  it('the open microphone opens within one 10 ms read of an onset', async () => {
+    const t = await joined();
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    t.client.setMode('open');
+    // The level is read every 10 ms from the connection; the onset lands
+    // just after a read, and is heard by the next. Until issue #965 it was
+    // read every 50 ms, and this onset waited 49 ms.
+    t.clock.advance(1);
+    room.levelNow = 0.5;
+    t.clock.advance(9);
+    await settle();
+    expect(room.sending).toEqual([true]);
+    expect(t.reports).toEqual(['started']);
+  });
+
+  it('the meter is told at most every meterEvery ms, however often the level is read', async () => {
+    const t = await joined();
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    let renders = 0;
+    t.client.subscribe(() => {
+      renders++;
+    });
+    for (let ms = 0; ms < 1000; ms += levelEvery) {
+      room.levelNow = (ms / levelEvery) % 2 === 0 ? 0.3 : 0.6;
+      t.clock.advance(levelEvery);
+    }
+    expect(renders).toBeLessThanOrEqual(1000 / meterEvery);
+    expect(t.client.snapshot().level).toBeGreaterThan(0);
   });
 });
 
@@ -1074,7 +1218,7 @@ describe('the microphone chosen', () => {
     t.client.setMode('open');
     r.levelNow = 0.5;
     t.clock.advance(50);
-    expect(t.client.snapshot().transmitting).toBe(true);
+    expect(t.client.snapshot().talking).toBe(true);
     r.holdSwitch = true;
     const switching = t.client.chooseMicrophone(headset);
     expect(t.client.snapshot().transmitting).toBe(false);
@@ -1083,7 +1227,7 @@ describe('the microphone chosen', () => {
     r.heldSwitch?.();
     await switching;
     t.clock.advance(50);
-    expect(t.client.snapshot().transmitting).toBe(true);
+    expect(t.client.snapshot().talking).toBe(true);
     await settle();
     expect(t.reports).toEqual(['started', 'stopped', 'started']);
   });
@@ -1346,7 +1490,7 @@ describe('voice processing', () => {
     t.client.setThreshold(0.3);
     r.levelNow = 0.5;
     t.clock.advance(50);
-    expect(t.client.snapshot().transmitting).toBe(true);
+    expect(t.client.snapshot().talking).toBe(true);
     r.holdSwitch = true;
     const changing = t.client.setProcessing(false);
     expect(t.client.snapshot().transmitting).toBe(false);
@@ -1359,7 +1503,7 @@ describe('voice processing', () => {
     expect(t.client.snapshot().transmitting).toBe(false);
     r.levelNow = 0.5;
     t.clock.advance(50);
-    expect(t.client.snapshot().transmitting).toBe(true);
+    expect(t.client.snapshot().talking).toBe(true);
     await settle();
     expect(t.reports).toEqual(['started', 'stopped', 'started']);
   });
@@ -1755,7 +1899,7 @@ describe('a rename of the channel joined', () => {
     t.client.press();
     await settle();
     t.client.release();
-    t.clock.advance(100);
+    t.clock.advance(defaultTail);
     await settle();
     expect(t.reports).toEqual(['started', 'stopped']);
     expect(t.reportedIn).toEqual(['lounge', 'lounge']);

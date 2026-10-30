@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { FakeClock } from './fakes';
-import { TransmitGate } from './gate';
+import { defaultTail, maxTail, TransmitGate } from './gate';
 
 function setup(options = {}) {
   const clock = new FakeClock();
@@ -11,15 +11,52 @@ function setup(options = {}) {
 }
 
 describe('push to talk', () => {
-  it('opens on a press and shuts 100 ms after the release', () => {
+  it('opens on a press and shuts the release delay after the release', () => {
     const { clock, gate, changes } = setup();
     gate.press();
     expect(changes).toEqual([true]);
     gate.release();
-    clock.advance(99);
+    clock.advance(defaultTail - 1);
     expect(gate.open).toBe(true);
     clock.advance(1);
     expect(changes).toEqual([true, false]);
+  });
+
+  // Issue #965: the browser's mute also silences what is captured and not
+  // yet sent, so its default delay is longer than conch-voice's 100 ms.
+  it('by default stays open 200 ms after the release', () => {
+    const { clock, gate, changes } = setup();
+    gate.press();
+    gate.release();
+    clock.advance(199);
+    expect(changes).toEqual([true]);
+    clock.advance(1);
+    expect(changes).toEqual([true, false]);
+  });
+
+  it('takes a new release delay from the next release, kept between 0 and the maximum', () => {
+    const { clock, gate, changes } = setup();
+    gate.press();
+    gate.release();
+    // A release already in its delay keeps the one it started with.
+    gate.setTail(1000);
+    clock.advance(defaultTail);
+    expect(changes).toEqual([true, false]);
+    gate.press();
+    gate.release();
+    clock.advance(999);
+    expect(gate.open).toBe(true);
+    clock.advance(1);
+    expect(changes).toEqual([true, false, true, false]);
+    gate.setTail(0);
+    gate.press();
+    gate.release();
+    clock.advance(0);
+    expect(changes).toEqual([true, false, true, false, true, false]);
+    for (const [asked, kept] of [[-1, 0], [maxTail + 1, maxTail], [Number.POSITIVE_INFINITY, defaultTail]] as const) {
+      gate.setTail(asked);
+      expect(gate.releaseDelay).toBe(kept);
+    }
   });
 
   it('a press during the tail keeps one transmission', () => {
@@ -31,7 +68,7 @@ describe('push to talk', () => {
     clock.advance(500);
     expect(changes).toEqual([true]);
     gate.release();
-    clock.advance(100);
+    clock.advance(defaultTail);
     expect(changes).toEqual([true, false]);
   });
 
@@ -66,7 +103,7 @@ describe('push to talk', () => {
     const { clock, gate, changes } = setup();
     gate.press();
     gate.release(); // what blur and hidden call
-    clock.advance(100);
+    clock.advance(defaultTail);
     expect(changes).toEqual([true, false]);
   });
 
