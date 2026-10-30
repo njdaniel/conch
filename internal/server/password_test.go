@@ -208,10 +208,12 @@ func TestVerifyRecords(t *testing.T) {
 
 // Passwords are normalized to NFC before their length is checked: a password
 // typed with combining accents is the same password, and as long, as one
-// typed with precomposed letters.
+// typed with precomposed letters. There is no minimum beyond one character
+// (#975); NFC can lengthen a string too, so the upper bounds are held again
+// after it.
 func TestNormalizePassword(t *testing.T) {
-	composed := strings.Repeat("é", 15)    // é, precomposed: 15 characters
-	decomposed := strings.Repeat("é", 15) // e and a combining acute: 30 before NFC
+	composed := strings.Repeat("\u00e9", 15)    // é, precomposed: 15 characters
+	decomposed := strings.Repeat("e\u0301", 15) // e and a combining acute: 30 before NFC
 	for _, tt := range []struct {
 		name, in, want string
 		err            bool
@@ -220,19 +222,32 @@ func TestNormalizePassword(t *testing.T) {
 		{"spaces kept", "  spaces  inside  ", "  spaces  inside  ", false},
 		{"precomposed", composed, composed, false},
 		{"decomposed becomes precomposed", decomposed, composed, false},
-		{"long only before NFC", strings.Repeat("é", 8), "", true},
-		{"fourteen", strings.Repeat("x", 14), "", true},
+		{"empty", "", "", true},
+		{"one character", "a", "a", false},
+		{"four characters", "frog", "frog", false},
+		{"fourteen", strings.Repeat("x", 14), strings.Repeat("x", 14), false},
+		{"fifteen", strings.Repeat("x", 15), strings.Repeat("x", 15), false},
+		{"one decomposed accent is one character", "e\u0301", "\u00e9", false},
+		{"short only after NFC", strings.Repeat("e\u0301", 8), strings.Repeat("\u00e9", 8), false},
+		{"the most characters", strings.Repeat("x", 128), strings.Repeat("x", 128), false},
 		{"too many characters", strings.Repeat("x", 129), "", true},
+		// U+1D15E is one code point of four bytes that NFC writes as two of
+		// four: 64 of them are both bounds after NFC, and 65 are past them
+		// though only 65 characters and 260 bytes before.
+		{"at the most only after NFC", strings.Repeat("\U0001D15E", 64), strings.Repeat("\U0001D157\U0001D165", 64), false},
+		{"too many only after NFC", strings.Repeat("\U0001D15E", 65), "", true},
 		// 128 four-byte characters are exactly the byte bound.
 		{"at the byte bound", strings.Repeat("🐚", 128), strings.Repeat("🐚", 128), false},
+		{"past the byte bound", strings.Repeat("a", 513), "", true},
 		{"invalid UTF-8", "fifteen letters\xff", "", true},
+		{"invalid UTF-8, short", "q\xff", "", true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := normalizePassword(tt.in)
 			if (err != nil) != tt.err || got != tt.want {
 				t.Fatalf("normalizePassword = %q, %v; want %q, error %v", got, err, tt.want, tt.err)
 			}
-			if err != nil && strings.Contains(err.Error(), tt.in) {
+			if err != nil && tt.in != "" && strings.Contains(err.Error(), tt.in) {
 				t.Errorf("the error %q echoes the password", err)
 			}
 		})
@@ -258,6 +273,14 @@ func TestCheckPasswordPolicy(t *testing.T) {
 		{"the account's name, other case", "WRENFIELD likes long walks", []string{"wrenfield"}, false},
 		{"a short name is not looked for", "the bee flew over the field", []string{"bee"}, true},
 		{"the server's name", "welcome to example-chat today", []string{"wren", "example-chat"}, false},
+		// Short passwords (#975) meet the same rules, no more and no fewer.
+		{"four letters", "frog", []string{"wrenfield"}, true},
+		{"one letter", "a", nil, true},
+		{"four of one letter", "aaaa", nil, false},
+		{"one pair twice", "abab", nil, false},
+		{"two of one letter", "zz", nil, false},
+		{"only the account's name", "Wren", []string{"wren"}, false},
+		{"a short name inside a short password", "beekeep", []string{"bee"}, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := checkPasswordPolicy(tt.password, tt.words...)

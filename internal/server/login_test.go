@@ -689,8 +689,9 @@ func TestRedeemV2PasswordRefusals(t *testing.T) {
 		name, joiner, password string
 		code                   string
 	}{
-		{"too short", "wren", "short one", "invalid_request"},
-		{"too short after NFC", "wren", strings.Repeat("é", 8), "invalid_request"},
+		{"empty", "wren", "", "invalid_request"},
+		{"too long", "wren", strings.Repeat("x", schema.MaxPasswordLength+1), "invalid_request"},
+		{"too long after NFC", "wren", strings.Repeat("\U0001D15E", 65), "invalid_request"},
 		{"common", "wren", "correct horse battery staple", schema.ErrorCodePasswordUnacceptable},
 		{"one letter repeated", "wren", strings.Repeat("z", 20), schema.ErrorCodePasswordUnacceptable},
 		{"contains the name", "wrenfield", "hello I am wrenfield the great", schema.ErrorCodePasswordUnacceptable},
@@ -699,7 +700,7 @@ func TestRedeemV2PasswordRefusals(t *testing.T) {
 			body := inviteJSON(t, schema.RedeemInviteRequestV2{Code: code, Name: tt.joiner, Password: tt.password})
 			rec := f.send(t, "POST", "/v2/invites/redeem", "", body, "")
 			assertErrorBody(t, rec, http.StatusBadRequest, tt.code)
-			if strings.Contains(rec.Body.String(), tt.password) {
+			if tt.password != "" && strings.Contains(rec.Body.String(), tt.password) {
 				t.Errorf("the refusal echoes the password: %s", rec.Body)
 			}
 		})

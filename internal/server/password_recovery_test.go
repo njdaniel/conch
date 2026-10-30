@@ -269,8 +269,8 @@ func TestEnrollRefusals(t *testing.T) {
 		{"an unacceptable password", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			return f.enroll(t, f.wrenTok, "correct horse battery staple", f.link(t, schema.SignInLinkPurposeEnrollment, f.wren.ID).Code)
 		}, http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable},
-		{"a password too short", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
-			return f.enroll(t, f.wrenTok, "short", f.link(t, schema.SignInLinkPurposeEnrollment, f.wren.ID).Code)
+		{"an empty password", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
+			return f.enroll(t, f.wrenTok, "", f.link(t, schema.SignInLinkPurposeEnrollment, f.wren.ID).Code)
 		}, http.StatusBadRequest, "invalid_request"},
 		{"an operator on an ordinary credential", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			f.exec(t, "DELETE FROM passwords WHERE principal_id = ?", f.root.ID)

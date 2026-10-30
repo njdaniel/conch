@@ -215,7 +215,8 @@ func TestJoinAccountRefusals(t *testing.T) {
 		status         int
 		code           string
 	}{
-		{"newcomer", "short", http.StatusBadRequest, "invalid_request"},
+		{"newcomer", "", http.StatusBadRequest, "invalid_request"},
+		{"newcomer", strings.Repeat("x", schema.MaxPasswordLength+1), http.StatusBadRequest, "invalid_request"},
 		{"newcomer", "newcomer and the rest of it", http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable},
 		{"newcomer", "a harbour club password", http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable},
 		{"guest-newcomer", testJoinPassword, http.StatusBadRequest, "invalid_request"},
@@ -512,7 +513,8 @@ func TestConvertGuestRefusals(t *testing.T) {
 		status                 int
 		code                   string
 	}{
-		{"member", "short", "", http.StatusBadRequest, "invalid_request"},
+		{"member", "", "", http.StatusBadRequest, "invalid_request"},
+		{"member", strings.Repeat("x", schema.MaxPasswordLength+1), "", http.StatusBadRequest, "invalid_request"},
 		{"member", "member and the rest of it", "", http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable},
 		{"guest-member", testJoinPassword, "", http.StatusBadRequest, "invalid_request"},
 		{"guеst-member", testJoinPassword, "", http.StatusConflict, schema.ErrorCodePrincipalExists},
