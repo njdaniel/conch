@@ -1,7 +1,7 @@
 # ADR-013: One community with private channels
 
-- **Status:** Proposed — awaiting Nick's sign-off. Accepted only when Nick merges the PR that adds it; the implementation issues in the design stay blocked until then. Clauses marked "(O#)" depend on an open point in the design (§11); they carry the design's recommended reading, which both round-1 reviewers share for O1–O13 (O14 came after round 1), and are finalised from Nick's answers before acceptance.
-- **Date:** 2026-10-29
+- **Status:** Accepted — Nick, 2026-10-30, in session: "accept recommendations". Every open point of the design (§11, O1–O14) takes its recommended reading, and the clauses marked "(O#)" below are final as written. For O13, whose recommendation left the joining settings open, the reading taken is the reviewers' lean: the invite family gets a second version (`InviteV2`, signed off by the same answer, CLAUDE.md rule 2) and the joining settings stay on v1 with additive fields and the documented mapping (design §3.4, Option B). Effective when the PR that adds this ADR merges.
+- **Date:** 2026-10-29 (proposed), 2026-10-30 (accepted)
 - **Decider:** Nick (Tier-H)
 - **Design:** [docs/design/community-model.md](../design/community-model.md)
 - **Amends:**
@@ -54,8 +54,8 @@ Nick's decisions, made in session on 2026-10-29, verbatim in intent:
 
 ## Consequences
 
-- **Wire shapes follow the schema rules.** The invite family gets a second version (`InviteV2` and its requests): `InviteV1.expires_at` cannot say "none" and `CreateInviteRequestV1` requires named channels, so neither can describe a member link without mutating a published shape. Whether the joining settings also get one (`JoinSettingsV2`) or stay on v1 with additive fields and a documented mapping is O13. v1 shapes and fixtures are immutable and v1 routes keep answering legacy data; everything else is additive. Each bump needs Nick's sign-off before the schema slice is written (CLAUDE.md rule 2).
-- **Published routes change behaviour:** `POST /v1/invites` is refused (409 `invite_kind_retired`); `POST /v1/join/guest` is always refused (403 `guests_disabled`), since the bare address admits no guests whatever `guests_enabled` says; under O13's first option `PUT /v1/join/settings` is refused too, under the second it refuses the `guest` and `both` modes and `join_voice: false`.
+- **Wire shapes follow the schema rules.** The invite family gets a second version (`InviteV2` and its requests): `InviteV1.expires_at` cannot say "none" and `CreateInviteRequestV1` requires named channels, so neither can describe a member link without mutating a published shape. The joining settings stay on v1 with additive fields and a documented mapping (O13, Option B). v1 shapes and fixtures are immutable and v1 routes keep answering legacy data; everything else is additive. Nick signed off the invite bump with this ADR (2026-10-30); any further bump needs its own sign-off (CLAUDE.md rule 2).
+- **Published routes change behaviour:** `POST /v1/invites` is refused (409 `invite_kind_retired`); `POST /v1/join/guest` is always refused (403 `guests_disabled`), since the bare address admits no guests whatever `guests_enabled` says; `PUT /v1/join/settings` refuses the `guest` and `both` modes and `join_voice: false` (O13, Option B).
 - **A closed vocabulary grows:** `JoinWarning` gains `no_default_channel`. The vocabulary is closed but client-tolerant by its own contract (a client shows a value it does not know by its value), so no fixture changes; the addition is recorded, not a bump.
 - **No MCP tool is added:** joining, the directory and administration are human acts, and parity holds through REST (ADR-001).
 - **One migration** (37 at `671a16e`), additive in shape, that changes the visibility of every existing channel and the history of every existing member, removes active guests from channels that become private and strips those channels from guest-admitting invites, and writes one `community_migrated` audit row, the first migration to write the audit log. Rollback is the previous binary plus the pre-upgrade backup, as for every migration. Operators get an upgrade notice in the CHANGELOG and release notes.
@@ -66,7 +66,7 @@ Nick's decisions, made in session on 2026-10-29, verbatim in intent:
 - **Reactions, the desktop companion and moderation** need one-line amendments each (conversion widens reactions with messages; the voice route is an entitlement loss the companion design already handles; self-join runs the ban predicate). None waits on this ADR.
 - **The private alpha's onboarding is simpler:** one link, one sign-in page, one switch. The tester story of 2026-10-29 becomes an end-to-end scenario that must pass before this is called done.
 - **The optional `hide_members` setting (#964)** adds one store predicate that every member-facing read of principals goes through, two small routes (the directory settings and a channel's authors) and one content-free events document, with no version bump; the isolation check gains a phase with it on (design §13).
-- The design lists fourteen open points (O1–O14), with both round-1 reviewers' recommendations beside O1–O13; O14 (#964) came after round 1 and carries the design's recommendation only. The recommended reading of each is what the design implements and what the "(O#)" clauses above say until Nick answers. O6 departs from the brief's decision 7 ("other existing channels become public") and needs his explicit answer; no other point reopens a decision above.
+- The design lists fourteen open points (O1–O14). Nick accepted the recommended reading of every one on 2026-10-30; the "(O#)" clauses above are that reading. O6 departs from the brief's decision 7 ("other existing channels become public") and is part of what he accepted: existing non-open channels become private with their members, and the operator makes public the ones that should be.
 
 ## Alternatives considered
 

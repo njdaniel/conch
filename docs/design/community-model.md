@@ -6,7 +6,7 @@ behaviour, the wire shapes as they would appear in `pkg/schema`, the permissions
 privacy model of each read path, the migration, what is retired, the impact on work in
 flight, the implementation issues, the test plan, and the points Nick still has to settle.
 
-**Status: proposed, 2026-10-29; revised after review round 1 (security and general
+**Status: accepted 2026-10-30 (ADR-013, Nick: "accept recommendations", every open point as recommended); proposed 2026-10-29; revised after review round 1 (security and general
 reviewers, PR #963); issue #964 (an optional setting that hides members from each other)
 folded in as §13 the same day.** Facts about main are as of `671a16e`. No code, schema file,
 migration or issue exists for this yet. Nothing here is implemented behaviour.
@@ -975,6 +975,8 @@ does); parity test that every new REST route has a CLI verb; TUI pane tests.
 §13.9.
 
 ## 11. Open points for Nick
+
+**Answered 2026-10-30.** Nick: "accept recommendations". Every point below takes its recommended reading. For O13 that is the invite bump plus Option B for the joining settings (§3.4), the general reviewer's lean. ADR-013 records it.
 
 Each is a consequence of a decision, or a gap the decision did not reach. The design above
 takes the recommended reading and marks it "(O#)" wherever it bites; ADR-013's Decision
