@@ -198,6 +198,72 @@ func TestOpenTurnsGuestsOff(t *testing.T) {
 	}
 }
 
+// Opening a database whose settings admit no guest takes no write lock: it
+// opens while another connection holds one. One whose settings still admit
+// guests needs the lock to turn them off, so with it held Open fails, which
+// is what shows the lock was held.
+func TestOpenWithoutGuestsTakesNoWriteLock(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		guests bool
+	}{
+		{"no guests", false},
+		{"guests on", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "conch.db")
+			s, err := Open(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.guests {
+				if _, err := s.db.Exec(`INSERT INTO server_settings (key, value, updated_at) VALUES ('guests_enabled', 'true', 0)`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = db.Close() }()
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _, _ = conn.ExecContext(ctx, "ROLLBACK") }()
+
+			done := make(chan error, 1)
+			go func() {
+				s, err := Open(ctx, path)
+				if err == nil {
+					err = s.Close()
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if tt.guests && err == nil {
+					t.Fatal("Open turned guests off while another connection held the write lock: the lock was not held")
+				}
+				if !tt.guests && err != nil {
+					t.Fatalf("Open of a database without guests, beside a writer: %v", err)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("Open did not return within 30 s")
+			}
+		})
+	}
+}
+
 // The settings refuse every request for guests, writing nothing, and any
 // change they make leaves guests off whatever the rows held; an invite
 // admits accounts only.

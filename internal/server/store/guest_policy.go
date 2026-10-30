@@ -105,6 +105,13 @@ func withoutGuests(s schema.JoinSettingsV1) schema.JoinSettingsV1 {
 	return s
 }
 
+// settingsAdmitGuests reports whether s holds a setting withoutGuests
+// would turn off.
+func settingsAdmitGuests(s schema.JoinSettingsV1) bool {
+	n := withoutGuests(s)
+	return n.GuestsEnabled != s.GuestsEnabled || n.OpenJoining != s.OpenJoining
+}
+
 // requestAdmitsGuests reports whether a settings change asks for guests:
 // guests_enabled true, or an open_joining mode that offers them.
 func requestAdmitsGuests(req schema.PutJoinSettingsRequestV1) bool {
@@ -555,16 +562,29 @@ func writeJoinSettingsTx(ctx context.Context, tx execer, c, n schema.JoinSetting
 // last to their bounds, or an operator ends them. Settings that admit no
 // guest write nothing, so it is idempotent; Open runs it on every start. It
 // reports whether it changed anything.
+//
+// It reads the settings first, outside any transaction, and takes the write
+// lock only when they still admit guests, then reads them again under it:
+// opening a database that admits none, every start after the first, waits
+// for no writer.
 func (s *Store) NormalizeGuestSettings(ctx context.Context) (bool, error) {
+	cur, err := joinSettingsTx(ctx, s.db)
+	if err != nil {
+		return false, fmt.Errorf("store: turn guests off: %w", err)
+	}
+	if !settingsAdmitGuests(cur) {
+		return false, nil
+	}
 	changed := false
-	err := s.withImmediateTx(ctx, func(tx execer) error {
+	err = s.withImmediateTx(ctx, func(tx execer) error {
 		changed = false
 		now := credentialNow().Truncate(time.Millisecond)
-		cur, err := joinSettingsTx(ctx, tx)
+		// Again, under the lock: another process may have written since.
+		locked, err := joinSettingsTx(ctx, tx)
 		if err != nil {
 			return err
 		}
-		changes, err := writeJoinSettingsTx(ctx, tx, cur, withoutGuests(cur), now)
+		changes, err := writeJoinSettingsTx(ctx, tx, locked, withoutGuests(locked), now)
 		if err != nil || len(changes) == 0 {
 			return err
 		}
