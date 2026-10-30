@@ -401,6 +401,11 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 	mayInvite := req.EffectiveMayInvite()
 	lifetimeMs := req.EffectiveCredentialLifetime().Milliseconds()
 	joinAs := req.EffectiveJoinAs()
+	// Guests are removed for now (issue #1005): an invite admits accounts
+	// only. Refused before anything is read, so the answer says nothing else.
+	if InviteAdmitsGuests(joinAs) {
+		return schema.CreateInviteResponseV1{}, fmt.Errorf("%w: an invite may admit accounts only", ErrGuestsRemoved)
+	}
 	code, err := NewInviteCode()
 	if err != nil {
 		return schema.CreateInviteResponseV1{}, err

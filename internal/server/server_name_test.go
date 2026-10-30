@@ -2,12 +2,14 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -37,8 +39,8 @@ func TestServerNameRefused(t *testing.T) {
 		for _, name := range tt.names {
 			t.Run(fmt.Sprintf("%s/%+q", tt.server, name), func(t *testing.T) {
 				f := newInviteFixture(t, tt.cfg)
-				f.mustPutJoin(t, openBoth("red"))
-				guest := mustJoined(t, f.joinGuest(t, "", ""))
+				f.mustPutJoin(t, openAccounts("red"))
+				guest := f.seedGuest(t, "")
 				link := f.createInvite(t, f.rootTok, openLink("red"))
 				principals := len(listPrincipals(t, f))
 				routes := []struct {
@@ -70,7 +72,13 @@ func TestServerNameRefused(t *testing.T) {
 				if n := countAction(f.audit(t), store.AuditPrincipalRenameRefused); n != 0 {
 					t.Errorf("principal_rename_refused rows = %d, want 0 for the server's name", n)
 				}
-				assertErrorBody(t, f.joinGuest(t, name, ""), http.StatusBadRequest, "invalid_request")
+				// No route starts a visit while guests are removed (issue
+				// #1005); the store still refuses the server's name as a
+				// label, for the visits it keeps the code for.
+				if _, err := f.srv.store.CreateGuest(context.Background(), "system", store.NewGuest{Label: name, ServerName: f.srv.serverName(),
+					Origin: schema.GuestOriginAddress, Channels: []int64{f.red.ID}, Idle: time.Hour, Absolute: 2 * time.Hour}); !errors.Is(err, store.ErrGuestLabelInvalid) {
+					t.Errorf("a visit labelled with the server's name: %v, want ErrGuestLabelInvalid", err)
+				}
 				// The name that is not this server's is anyone's.
 				if rec := f.do(t, "PUT", renamePath(f.alice.ID), f.aliceTok, renameBody(t, tt.free)); rec.Code != http.StatusOK {
 					t.Errorf("rename to %q = %d %s, want 200", tt.free, rec.Code, rec.Body)
@@ -139,8 +147,8 @@ func TestServerNameHeldAtStart(t *testing.T) {
 	if got := settings(); !slices.Contains(got, schema.JoinWarningServerNameInUse) || slices.Contains(got, schema.JoinWarningReservedNamesInUse) {
 		t.Errorf("warnings = %v, want %s and not %s", got, schema.JoinWarningServerNameInUse, schema.JoinWarningReservedNamesInUse)
 	}
-	// Not a block: guests can still be enabled.
-	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(true)})
+	// Not a block: the settings can still change.
+	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{MaxGuests: int64Ptr(7)})
 
 	rec := f.do(t, "GET", "/v1/whoami", holderTok, "")
 	if rec.Code != http.StatusOK {

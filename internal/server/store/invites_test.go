@@ -76,6 +76,10 @@ func (f *inviteFixture) create(creator Principal, req schema.CreateInviteRequest
 
 func (f *inviteFixture) mustCreate(creator Principal, req schema.CreateInviteRequestV1) schema.CreateInviteResponseV1 {
 	f.t.Helper()
+	// An invite that admits guests is one made before issue #1005.
+	if InviteAdmitsGuests(req.JoinAs) {
+		return legacyCreateInvite(f.t, f.s, principalActor(creator.ID), creator.ID, req, InviteOptions{}, f.now)
+	}
 	resp, err := f.create(creator, req)
 	if err != nil {
 		f.t.Fatalf("CreateInvite: %v", err)

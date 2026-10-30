@@ -37,14 +37,14 @@ func (w *world) guestPhase(bounds voiceBounds) ([]timing, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the expiring visits: %w", err)
 	}
-	h.say("ok   expiry: two guests joined under a %d s idle and %d s hard bound, each holding every socket variant%s; their clocks run on while the rest goes on",
+	h.say("ok   expiry: two guests, started beside the server as no route starts one now, under a %d s idle and %d s hard bound, each holding every socket variant%s; their clocks run on while the rest goes on",
 		expiryIdleSeconds, expiryAbsoluteSeconds, map[bool]string{true: " and a LiveKit participant", false: ""}[w.lk != nil])
 	piaFeed, err := w.buildCohort()
 	if err != nil {
 		return nil, fmt.Errorf("the cohort: %w", err)
 	}
 	p := w.p
-	h.say("ok   the cohort: two guests labelled Nick at the bare address, one through the guest-only invite and one who will make an account, each from an address of its own; then the members went on, some of it private")
+	h.say("ok   the cohort: two guests labelled Nick from the bare address, one through the guest-only invite and one who will make an account, each started beside the server and from an address of its own; then the members went on, some of it private")
 	if err := w.checkGuestSockets(); err != nil {
 		return nil, fmt.Errorf("the guests' sockets: %w", err)
 	}
@@ -76,7 +76,7 @@ func (w *world) guestPhase(bounds voiceBounds) ([]timing, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the entry gates: %w", err)
 	}
-	h.say("ok   gates: %d steps of the joining policy, %d tries, each from a newcomer's own address: guests off (accounts open, no visit evicted), guest-only (no account without a permit), closed, each invite's mode, paused, invites paused, the cap, the cap per address, a closed invite, voice off", len(gates()), tries)
+	h.say("ok   gates: %d steps of the joining policy, %d tries, each from a newcomer's own address: guests off and kept off (no visit started, no setting or invite admits one, no visit evicted), closed (no account without a permit), each invite's mode, paused, invites paused, a closed invite", len(gates()), tries)
 	member, samPost, err := w.convertSam()
 	if err != nil {
 		return nil, fmt.Errorf("the conversion: %w", err)

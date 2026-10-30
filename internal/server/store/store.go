@@ -991,7 +991,8 @@ func (s *Store) announceRunsEnded(runs []EndedRun) {
 // Open opens (creating if necessary) the database at path, enables WAL mode
 // and foreign-key enforcement on every connection, and applies any pending
 // migrations. Migrations are idempotent: reopening an up-to-date database is
-// a no-op.
+// a no-op. Then it turns off any joining setting that admits guests
+// (NormalizeGuestSettings, issue #1005).
 func Open(ctx context.Context, path string) (*Store, error) {
 	// The database holds the hashes of every bearer credential and hook
 	// token and the whole message log, so it must never be readable by other
@@ -1021,6 +1022,14 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := s.migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	// Guests are removed for now (issue #1005): a database whose settings
+	// still admit them is opened with them off, audited, or not at all.
+	if changed, err := s.NormalizeGuestSettings(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	} else if changed {
+		slog.Info("store: guests are removed for now; the joining settings that admitted them are turned off (a bare address open to both now offers accounts only)")
 	}
 	return s, nil
 }

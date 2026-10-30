@@ -127,6 +127,8 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.store.CreateInvite(ctx, auditActor(ctx), caller.ID, req, store.InviteOptions{Allowance: s.cfg.InviteAllowance}, now)
 	switch {
+	case errors.Is(err, store.ErrGuestsRemoved):
+		writeGuestsRemovedConflict(w, "guests are turned off on this server for now: an invite may admit accounts only (join_as account)")
 	case errors.Is(err, store.ErrInviteRequestInvalid):
 		// Validated above; the clock moved past a just-valid expiry.
 		writeError(w, http.StatusBadRequest, "invalid_request", "the invite request is not valid")
@@ -290,7 +292,9 @@ func (s *Server) handlePreviewInvite(w http.ResponseWriter, r *http.Request) {
 // already holds. The store has applied the switch, the mode and the
 // server-wide cap.
 func (s *Server) previewGuestJoin(ctx context.Context, join *schema.JoinOptionsV1, addr netip.Addr) error {
-	if !s.cfg.authRequired() {
+	// Guests are removed for now (issue #1005): no invite offers a visit,
+	// whatever an invite made before said.
+	if guestsRemoved || !s.cfg.authRequired() {
 		join.Guest, join.GuestsFull = false, false
 		return nil
 	}

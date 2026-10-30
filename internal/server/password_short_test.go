@@ -32,7 +32,7 @@ func TestShortPasswordThroughEveryMemberRoute(t *testing.T) {
 	}{
 		{"join an account from the bare address", func(t *testing.T) (*loginFixture, string) {
 			f := newLoginFixture(t, Config{})
-			f.mustPutJoin(t, openBoth("red"))
+			f.mustPutJoin(t, openAccounts("red"))
 			rec := f.send(t, "POST", "/v1/join/account", "", inviteJSON(t, schema.JoinAccountRequestV1{Name: "newcomer", Password: shortPassword}), "")
 			mustAccount(t, rec)
 			return f, "newcomer"
@@ -48,8 +48,8 @@ func TestShortPasswordThroughEveryMemberRoute(t *testing.T) {
 		}},
 		{"convert a guest visit", func(t *testing.T) (*loginFixture, string) {
 			f := newLoginFixture(t, Config{})
-			f.mustPutJoin(t, openBoth("red"))
-			g := mustJoined(t, f.joinGuest(t, "Pat", ""))
+			f.mustPutJoin(t, openAccounts("red"))
+			g := f.seedGuest(t, "Pat")
 			mustConverted(t, f.send(t, "POST", "/v1/guest/convert", g.Token,
 				inviteJSON(t, schema.ConvertGuestRequestV1{Name: "member", Password: shortPassword}), ""))
 			return f, "member"

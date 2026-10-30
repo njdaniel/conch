@@ -83,9 +83,8 @@ func ptrMode(m schema.OpenJoiningMode) *schema.OpenJoiningMode { return &m }
 // makes nothing; one that succeeds spends one.
 func TestRedeemInviteGuestFullSpendsNothing(t *testing.T) {
 	f := newInviteFixture(t)
-	if _, err := f.s.PutJoinSettings(f.ctx, "system", f.op.ID, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolRef(true), MaxGuests: int64Ref(1)}); err != nil {
-		t.Fatal(err)
-	}
+	// The policy of a database from before guests were removed (issue #1005).
+	legacyJoinSettings(t, f.s, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolRef(true), MaxGuests: int64Ref(1)})
 	req := open("general")
 	req.JoinAs = schema.InviteJoinBoth
 	inv := f.mustCreate(f.op, req)
