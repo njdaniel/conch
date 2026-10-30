@@ -185,7 +185,11 @@ export const operations = {
     credentials: token,
   }),
 
-  // Joining, invites and guests.
+  // Joining, invites and guests. Guests are removed for now (issue #1005):
+  // the server refuses joinGuest and redeemInviteGuest (403 guests_disabled)
+  // and no page calls them. They stay, renderer: false, because the desktop
+  // bridge's functions joinAsGuest and redeemInviteAsGuest name them
+  // (desktop/shared/bridge-names.ts, desktop/main/ipc.ts).
   joinInfo: op('GET', '/v1/join', 'none', { response: check(joinInfoV1) }),
   joinGuest: op('POST', '/v1/join/guest', 'none', { request: check(joinGuestRequestV1), response: check(joinGuestResponseV1), renderer: false, credentials: token }),
   joinAccount: op('POST', '/v1/join/account', 'none', { request: check(joinAccountRequestV1), response: check(joinAccountResponseV1), renderer: false, credentials: token }),

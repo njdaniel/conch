@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
 
@@ -234,10 +233,12 @@ func guestRows() []row {
 }
 
 // entryRows are the entry routes as a newcomer tries them, each from an
-// address of its own, while the plaza is open to guests and accounts.
+// address of its own, while the plaza is open to accounts. Guests are
+// removed for now (issue #1005): the guest entry routes refuse every try
+// with guests_disabled before the label or the code is read.
 func entryRows() []row {
 	badLabel := func(what, label string) row {
-		return row{route: "POST /v1/join/guest", what: "joins as a guest under " + what, want: answer{http.StatusBadRequest, "invalid_request"},
+		return row{route: "POST /v1/join/guest", what: "joins as a guest under " + what, want: guestsDisabled,
 			probe: func(*world, subject) probe { return post("/v1/join/guest", schema.JoinGuestRequestV1{Label: label}) }}
 	}
 	takenName := func(what string, name func(w *world) string) row {
@@ -251,18 +252,22 @@ func entryRows() []row {
 	// say https. Here the proxy says http, or says nothing of the protocol.
 	// (Plain HTTP from a peer that is not loopback and not a trusted proxy
 	// is the unit tests': every peer of this run is loopback. See
-	// internal/server/clientaddr_test.go TestClientAddr, login_test.go
-	// TestSecureTransport and join_test.go TestGuestEntryNeedsHTTPS.)
+	// internal/server/clientaddr_test.go TestClientAddr and login_test.go
+	// TestSecureTransport.)
 	httpsRequired := answer{http.StatusForbidden, schema.ErrorCodeHTTPSRequired}
 	overHTTP := map[string]string{"X-Forwarded-Proto": "http"}
 	noProto := map[string]string{"X-Forwarded-Proto": ""}
 	unknownInvite := schema.InviteCodePrefix + strings.Repeat("Q", schema.InviteCodeLength-len(schema.InviteCodePrefix))
 	unknownLink := schema.SignInLinkCodePrefix + strings.Repeat("Q", schema.SignInLinkCodeLength-len(schema.SignInLinkCodePrefix))
 	return []row{
-		{route: "GET /v1/join", what: "reads the front door", own: true, inspect: offersBoth,
+		{route: "GET /v1/join", what: "reads the front door", own: true, inspect: offersAccounts,
 			probe: func(*world, subject) probe { return get("/v1/join") }},
-		{route: "POST /v1/join/guest", what: "joins as a guest at the bare address", own: true, inspect: joinedThePlaza,
+		{route: "POST /v1/join/guest", what: "joins as a guest at the bare address", want: guestsDisabled,
 			probe: func(*world, subject) probe { return post("/v1/join/guest", schema.JoinGuestRequestV1{Label: "Kim"}) }},
+		{route: "POST /v1/invites/redeem-guest", what: "joins as a guest through the plaza's invite for guests", want: guestsDisabled,
+			probe: func(w *world, _ subject) probe {
+				return post("/v1/invites/redeem-guest", schema.RedeemInviteGuestRequestV1{Code: w.p.invites[schema.InviteJoinGuest].code, Label: "Kim"})
+			}},
 		badLabel("a label with a bidi control", "Ki\u202em"),
 		badLabel("a label with a control character", "Ki\u0007m"),
 		badLabel("a label that fakes a second tag", "Kim \u00b7 a7k4"),
@@ -301,7 +306,7 @@ func entryRows() []row {
 				p.headers = noProto
 				return p
 			}},
-		{route: "POST /v1/invites/redeem-guest", what: "joins as a guest with a code nobody gave her", want: answer{http.StatusNotFound, schema.ErrorCodeInviteInvalid},
+		{route: "POST /v1/invites/redeem-guest", what: "joins as a guest with a code nobody gave her", want: guestsDisabled,
 			probe: func(*world, subject) probe {
 				return post("/v1/invites/redeem-guest", schema.RedeemInviteGuestRequestV1{Code: unknownInvite, Label: "Kim"})
 			}},
@@ -397,50 +402,17 @@ func oneSignIn(w *world, _ api, body []byte) error {
 	return nil
 }
 
-// offersBoth requires that the front door offers a visit and an account, as
-// the plaza's policy says, and names nothing else.
-func offersBoth(_ *world, _ api, body []byte) error {
+// offersAccounts requires that the front door offers an account and no
+// visit: guests are removed for now (issue #1005).
+func offersAccounts(_ *world, _ api, body []byte) error {
 	var info schema.JoinInfoV1
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&info); err != nil {
 		return err
 	}
-	if !info.Join.Guest || !info.Join.Account || info.ServerName != "conch" || !info.PasswordLogin {
-		return fmt.Errorf("the front door says %+v, want a visit and an account at conch", info)
-	}
-	return nil
-}
-
-// joinedThePlaza requires that a visit from the bare address is a guest of
-// the plaza alone, named by its handle, and ends it with its own credential
-// so that it holds no place under the caps.
-func joinedThePlaza(w *world, a api, body []byte) error {
-	var resp schema.JoinGuestResponseV1
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return err
-	}
-	w.h.secret("a newcomer's credential", resp.Token)
-	g, err := w.guestJoined(resp, a.addr)
-	if err != nil {
-		return err
-	}
-	if g.guest.Origin != schema.GuestOriginAddress || g.guest.State != schema.GuestStateActive || g.guest.Label != "Kim" {
-		return fmt.Errorf("the visit is %+v, want an active one from the address labelled Kim", *g.guest)
-	}
-	var names []string
-	for _, c := range resp.Channels {
-		names = append(names, c.Name)
-	}
-	if !slices.Equal(names, []string{w.p.channel}) {
-		return fmt.Errorf("a visit from the bare address joined %v, want the plaza alone", names)
-	}
-	var ended schema.EndVisitResponseV1
-	if err := g.api.call(http.MethodPost, "/v1/guest/end", nil, &ended); err != nil {
-		return err
-	}
-	if ended.Guest.State != schema.GuestStateEnded || ended.Guest.EndReason != schema.GuestEndVisit {
-		return fmt.Errorf("the End visit answered %+v", ended.Guest)
+	if info.Join.Guest || info.Join.GuestsFull || !info.Join.Account || info.ServerName != "conch" || !info.PasswordLogin {
+		return fmt.Errorf("the front door says %+v, want an account and no visit at conch", info)
 	}
 	return nil
 }

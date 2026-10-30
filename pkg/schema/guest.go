@@ -78,7 +78,8 @@ const (
 const (
 	// ErrorCodeGuestsDisabled (HTTP 403): no visit may start at this entry
 	// point now: the server's guests_enabled switch is off, or the entry
-	// point's mode admits no guests.
+	// point's mode admits no guests. While guests are removed (issue #1005)
+	// POST /v1/join/guest and POST /v1/invites/redeem-guest always answer it.
 	ErrorCodeGuestsDisabled = "guests_disabled"
 	// ErrorCodeJoiningClosed (HTTP 403): no account may be made at this
 	// entry point: open_joining is off or guest-only, or the invite admits
@@ -118,6 +119,10 @@ const (
 	// contradict each other or the server's state: guest-only joining with
 	// guests disabled, open joining with no open channel, or enabling guests
 	// while a permanent principal still has a name in the reserved namespace.
+	// While guests are removed (issue #1005) it also answers any request for
+	// an entry point that would admit guests: PUT /v1/join/settings with
+	// guests_enabled true or open_joining guest or both, and POST
+	// /v1/invites with join_as guest or both.
 	ErrorCodeJoinPolicyConflict = "join_policy_conflict"
 )
 

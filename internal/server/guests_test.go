@@ -72,8 +72,9 @@ func TestUnconfiguredServerAdmitsNobody(t *testing.T) {
 	if info.Join != (schema.JoinOptionsV1{}) || !info.PasswordLogin {
 		t.Errorf("the front door of an unconfigured server offers %+v", info)
 	}
+	// Guests are removed for now (issue #1005): refused over any transport.
 	assertErrorBody(t, secureDo(t, f, "POST", "/v1/join/guest", "", `{}`), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
-	assertErrorBody(t, f.do(t, "POST", "/v1/join/guest", "", `{}`), http.StatusForbidden, schema.ErrorCodeHTTPSRequired)
+	assertErrorBody(t, f.do(t, "POST", "/v1/join/guest", "", `{}`), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
 	if n, err := f.srv.store.LiveGuests(context.Background()); err != nil || n != 0 {
 		t.Errorf("live guests = %d, %v", n, err)
 	}

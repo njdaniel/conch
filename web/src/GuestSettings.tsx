@@ -27,11 +27,10 @@ import type { EndGuestsResponseV1, GuestAdminV1, JoinSettingsResponseV1, JoinWar
 
 type Line = { readonly text: string; readonly refused: boolean };
 
-const modes: readonly { readonly mode: OpenJoiningMode; readonly label: string; readonly guests: boolean }[] = [
-  { mode: 'off', label: 'Nothing: invite-only', guests: false },
-  { mode: 'account', label: 'Create an account', guests: false },
-  { mode: 'guest', label: 'Join as guest', guests: true },
-  { mode: 'both', label: 'Both', guests: true },
+// Guests are off for now (issue #1005): the address offers nothing or accounts.
+const modes: readonly { readonly mode: OpenJoiningMode; readonly label: string }[] = [
+  { mode: 'off', label: 'Nothing: invite-only' },
+  { mode: 'account', label: 'Create an account' },
 ];
 
 // warningLine is what the operator is told of a warning the server gives.
@@ -78,7 +77,6 @@ export function GuestSettings({ channels, onUnauthorized }: { readonly channels:
   const [loaded, setLoaded] = useState<JoinSettingsResponseV1 | null>(null);
   const [loadLine, setLoadLine] = useState<string | null>(null);
   // What is chosen here, not yet saved.
-  const [guests, setGuests] = useState(false);
   const [mode, setMode] = useState<OpenJoiningMode>('off');
   const [paused, setPaused] = useState(false);
   const [openChannels, setOpenChannels] = useState<ReadonlySet<string>>(new Set());
@@ -90,8 +88,8 @@ export function GuestSettings({ channels, onUnauthorized }: { readonly channels:
 
   const take = useCallback((doc: JoinSettingsResponseV1) => {
     setLoaded(doc);
-    setGuests(doc.settings.guests_enabled);
-    setMode(doc.settings.open_joining);
+    // A server that still reads a guest mode (an older one) shows as off.
+    setMode(doc.settings.open_joining === 'account' ? 'account' : 'off');
     setPaused(doc.settings.joining_paused);
     setOpenChannels(new Set(doc.settings.open_channels));
   }, []);
@@ -126,8 +124,7 @@ export function GuestSettings({ channels, onUnauthorized }: { readonly channels:
     const was = loaded.settings;
     const chosen = [...openChannels].sort();
     const request: PutJoinSettingsRequestV1 = {
-      ...(guests === was.guests_enabled ? {} : { guests_enabled: guests }),
-      ...(mode === was.open_joining ? {} : { open_joining: mode }),
+      ...(mode === (was.open_joining === 'account' ? 'account' : 'off') ? {} : { open_joining: mode }),
       ...(paused === was.joining_paused ? {} : { joining_paused: paused }),
       ...(chosen.join('\n') === [...was.open_channels].sort().join('\n') ? {} : { open_channels: chosen }),
     };
@@ -207,9 +204,9 @@ export function GuestSettings({ channels, onUnauthorized }: { readonly channels:
           setEndAll({ phase: 'idle' });
         }}
       >
-        Joining and guests
+        Joining
       </button>
-      <div id={`${id}-panel`} role="region" aria-label="Joining and guests" hidden={!open} className="guest-settings-panel">
+      <div id={`${id}-panel`} role="region" aria-label="Joining" hidden={!open} className="guest-settings-panel">
         {loadLine === null ? null : (
           <p role="alert" className="notice">
             {loadLine}
@@ -223,22 +220,6 @@ export function GuestSettings({ channels, onUnauthorized }: { readonly channels:
         ) : (
           <>
             <form aria-label="Joining" onSubmit={save}>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={guests}
-                  onChange={(event) => {
-                    setGuests(event.target.checked);
-                    // The address cannot offer guests while guests are off.
-                    if (!event.target.checked && (mode === 'guest' || mode === 'both')) setMode(mode === 'both' ? 'account' : 'off');
-                  }}
-                />{' '}
-                Allow guest visits
-              </label>
-              <p className="hint">
-                The master switch, for invites and the address alike. Allowing guests changes no invite: each says whom it
-                admits, and an invite admits accounts only unless its maker chose guests. Turning guests off ends no visit already live.
-              </p>
               <fieldset>
                 <legend>The server’s address offers</legend>
                 {modes.map((m) => (
@@ -247,7 +228,6 @@ export function GuestSettings({ channels, onUnauthorized }: { readonly channels:
                       type="radio"
                       name={`${id}-mode`}
                       checked={mode === m.mode}
-                      disabled={m.guests && !guests}
                       onChange={() => {
                         setMode(m.mode);
                       }}
@@ -275,7 +255,7 @@ export function GuestSettings({ channels, onUnauthorized }: { readonly channels:
                     #{channel.name}
                   </label>
                 ))}
-                <p className="hint">Choosing a channel does not show its older private history to guests.</p>
+                <p className="hint">Choosing a channel does not show its older private history to people who join.</p>
               </fieldset>
               <label>
                 <input
@@ -303,12 +283,9 @@ export function GuestSettings({ channels, onUnauthorized }: { readonly channels:
             )}
           </>
         )}
-        <h3>Live guest visits</h3>
-        {live === null ? (
-          <p className="hint">Loading…</p>
-        ) : live.length === 0 ? (
-          <p className="hint">None.</p>
-        ) : (
+        {live === null || live.length === 0 ? null : (
+          <>
+          <h3>Live guest visits</h3>
           <ul className="signin-list" aria-label="Live guest visits">
             {live.map((g) => (
               <li key={g.id}>
@@ -321,8 +298,9 @@ export function GuestSettings({ channels, onUnauthorized }: { readonly channels:
               </li>
             ))}
           </ul>
+          </>
         )}
-        {asked === null ? (
+        {live === null || live.length === 0 ? null : asked === null ? (
           <div className="actions">
             <button type="button" className="danger" onClick={dryRun} aria-busy={endAll.phase === 'checking'} disabled={endAll.phase !== 'idle'}>
               {endAll.phase === 'ending' ? 'Ending…' : 'End all guest visits'}

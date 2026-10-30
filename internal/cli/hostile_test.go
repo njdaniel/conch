@@ -237,7 +237,6 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "login", stdin: walkSignInCode + "\n", args: func(u, _ string) []string { return []string{"login", "--server", u, "--link", "--yes"} }},
 		// Joining, guest visits, passwords and device links (issue #715).
 		{key: "join info", args: func(u, _ string) []string { return []string{"join", "info", "--server", u} }},
-		{key: "join guest", args: func(u, _ string) []string { return []string{"join", "guest", "--server", u, "--label", "Pat"} }},
 		{key: "join account", stdin: walkPassword + "\n", args: func(u, _ string) []string { return []string{"join", "account", "--server", u, "bob"} }},
 		{key: "account create", stdin: walkPassword + "\n", args: func(u, _ string) []string { return []string{"account", "create", "--server", u, "bob"} }},
 		{key: "end-visit", args: func(u, _ string) []string { return []string{"end-visit", "--server", u} }},

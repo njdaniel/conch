@@ -4,7 +4,7 @@
 // sign-in after, a device link's page with the account switch it asks for,
 // an operator's joining settings with End all guest visits (a dry run, then
 // a yes), and whom an operator's invite admits. conchd is a stand-in fetch.
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { memberRecoveryLine, operatorRecoveryLine } from './Settings';
@@ -391,28 +391,44 @@ describe('joining and guests, for an operator', () => {
   async function openJoining(routes: Record<string, Route>) {
     const calls = serve({ ...people({ [operatorToken]: operatorWho }), 'GET /v1/join/settings': () => json(settings), 'GET /v1/guests': () => json({ guests: live }), ...routes });
     await signedIn(operatorToken, 'tab');
-    fireEvent.click(await screen.findByRole('button', { name: 'Joining and guests' }));
-    const region = screen.getByRole('region', { name: 'Joining and guests' });
-    await within(region).findByLabelText('Allow guest visits');
+    fireEvent.click(await screen.findByRole('button', { name: 'Joining' }));
+    const region = screen.getByRole('region', { name: 'Joining' });
+    await within(region).findByLabelText('Create an account');
     return { calls, region };
   }
 
-  it('offers the address’s guest modes only while guests are allowed, and sends only what changed', async () => {
-    const { calls, region } = await openJoining({ 'PUT /v1/join/settings': () => json({ ...settings, settings: { ...settings.settings, guests_enabled: true, open_joining: 'both', open_channels: ['lobby'] }, warnings: [] }) });
-    expect(within(region).getByLabelText<HTMLInputElement>('Join as guest').disabled).toBe(true);
-    expect(within(region).getByLabelText<HTMLInputElement>('Both').disabled).toBe(true);
+  it('offers no guest switch and no guest mode: the address offers nothing or accounts, and only what changed is sent', async () => {
+    const { calls, region } = await openJoining({ 'PUT /v1/join/settings': () => json({ ...settings, settings: { ...settings.settings, open_joining: 'account', open_channels: ['lobby'] }, warnings: [] }) });
+    expect(within(region).queryByLabelText('Allow guest visits')).toBeNull();
+    expect(within(region).queryByLabelText('Join as guest')).toBeNull();
+    expect(within(region).queryByLabelText('Both')).toBeNull();
+    expect(within(region).getAllByRole('radio').map((r) => (r.parentElement?.textContent ?? '').trim())).toEqual(['Nothing: invite-only', 'Create an account']);
+    // Live visits are still said, so an operator can end them.
     expect(within(region).getByText(/2 guest visits are still live/)).toBeDefined();
-    expect(within(region).getByText(/Allowing guests changes no invite/)).toBeDefined();
-    fireEvent.click(within(region).getByLabelText('Allow guest visits'));
-    expect(within(region).getByLabelText<HTMLInputElement>('Both').disabled).toBe(false);
-    fireEvent.click(within(region).getByLabelText('Both'));
+    fireEvent.click(within(region).getByLabelText('Create an account'));
     fireEvent.click(within(region).getByLabelText('#lobby'));
     fireEvent.click(within(region).getByRole('button', { name: 'Save joining' }));
     expect(await within(region).findByText('Saved.')).toBeDefined();
-    expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ guests_enabled: true, open_joining: 'both', open_channels: ['lobby'] });
-    // Turning guests off again takes the address's guest modes with it.
-    fireEvent.click(within(region).getByLabelText('Allow guest visits'));
-    expect(within(region).getByLabelText<HTMLInputElement>('Create an account').checked).toBe(true);
+    expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ open_joining: 'account', open_channels: ['lobby'] });
+  });
+
+  it('shows a server that still reads a guest mode as invite-only, and never sends it back', async () => {
+    const { calls, region } = await openJoining({
+      'GET /v1/join/settings': () => json({ ...settings, settings: { ...settings.settings, guests_enabled: true, open_joining: 'both' } }),
+      'PUT /v1/join/settings': () => json({ ...settings, settings: { ...settings.settings, joining_paused: true } }),
+    });
+    expect(within(region).getByLabelText<HTMLInputElement>('Nothing: invite-only').checked).toBe(true);
+    fireEvent.click(within(region).getByLabelText('Pause joining from the address'));
+    fireEvent.click(within(region).getByRole('button', { name: 'Save joining' }));
+    expect(await within(region).findByText('Saved.')).toBeDefined();
+    expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ joining_paused: true });
+  });
+
+  it('says plainly what a stale page is told when the server refuses a guest setting', async () => {
+    const { region } = await openJoining({ 'PUT /v1/join/settings': () => refusal(409, 'join_policy_conflict', 'guests are not available') });
+    fireEvent.click(within(region).getByLabelText('Create an account'));
+    fireEvent.click(within(region).getByRole('button', { name: 'Save joining' }));
+    expect(await within(region).findByText('Guests are not available.')).toBeDefined();
   });
 
   it('says what the server refused, and keeps what was chosen', async () => {
@@ -456,11 +472,11 @@ describe('joining and guests, for an operator', () => {
     serve(people({ [memberToken]: memberWho }));
     await signedIn(memberToken);
     await screen.findByRole('button', { name: 'Password' });
-    expect(screen.queryByRole('button', { name: 'Joining and guests' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Joining' })).toBeNull();
   });
 });
 
-describe('whom an operator’s invite admits', () => {
+describe('an operator’s invite admits accounts only', () => {
   async function inviting(guestsEnabled: boolean) {
     const calls = serve({
       ...people({ [operatorToken]: operatorWho }),
@@ -490,22 +506,16 @@ describe('whom an operator’s invite admits', () => {
     return calls;
   }
 
-  it('offers a guest or either while guests are allowed, and sends the choice', async () => {
-    const calls = await inviting(true);
-    fireEvent.click(await screen.findByLabelText('A temporary guest'));
-    fireEvent.click(screen.getByLabelText('#lobby'));
-    fireEvent.click(screen.getByRole('button', { name: 'Make invite' }));
-    await waitFor(() => {
-      expect(calls.find((c) => c.method === 'POST' && c.path === '/v1/invites')?.body).toMatchObject({ join_as: 'guest' });
-    });
-  });
-
-  it('offers no choice while guests are not allowed: the invite admits accounts', async () => {
-    const calls = await inviting(false);
-    await waitFor(() => {
-      expect(calls.some((c) => c.path === '/v1/join/settings')).toBe(true);
+  // Guests are removed for now (issue #1005): no choice, whatever the
+  // joining settings read, and the request names none.
+  it.each([true, false])('offers no choice of whom an invite admits (a server reading guests_enabled %s): it admits accounts', async (guestsEnabled) => {
+    const calls = await inviting(guestsEnabled);
+    // Let any read of the joining settings land before looking.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
     });
     expect(screen.queryByLabelText('A temporary guest')).toBeNull();
+    expect(screen.queryByRole('group', { name: 'Who may join with it' })).toBeNull();
     fireEvent.click(screen.getByLabelText('#lobby'));
     fireEvent.click(screen.getByRole('button', { name: 'Make invite' }));
     await waitFor(() => {

@@ -180,7 +180,7 @@ func TestOlderServer(t *testing.T) {
 	isolateConfig(t)
 	ts := httptest.NewServer(http.NotFoundHandler())
 	defer ts.Close()
-	for _, args := range [][]string{{"join", "info"}, {"join", "guest"}} {
+	for _, args := range [][]string{{"join", "info"}} {
 		_, _, err := runCLI(t, "", append(args, "--server", ts.URL)...)
 		if err == nil || !strings.Contains(err.Error(), "it is older than this conch") {
 			t.Errorf("%v = %v", args, err)

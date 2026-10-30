@@ -136,7 +136,7 @@ Usage:
   conch admin member remove [--server <url>] [--json] <channel> <principal-id>
   conch admin manifest put [--server <url>] [--json] [--file <path>] <principal-id>
   conch admin manifest get [--server <url>] [--json] <principal-id>
-  conch admin invite create [--server <url>] [--json] --open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] [--join-as account|guest|both]
+  conch admin invite create [--server <url>] [--json] --open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] [--join-as account]
   conch admin invite list [--server <url>] [--json] [--state open|used|expired|closed] [--kind personal|open] [--created-by <id>]
   conch admin invite close|joiners [--server <url>] [--json] <id>
   conch admin invite disable-joiners [--server <url>] [--json] [--yes] <id>
@@ -146,7 +146,7 @@ Usage:
   conch admin principal sign-in-link [--server <url>] [--json] [--purpose sign_in|reset|enrollment] [--expires <duration|RFC3339>] <id>
   conch admin sign-in-link close [--server <url>] [--json] <id>
   conch admin join status [--server <url>] [--json]
-  conch admin join set [--server <url>] [--json] [--open-joining off|guest|account|both] [--guests on|off] [--paused on|off] [--voice on|off] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels]
+  conch admin join set [--server <url>] [--json] [--open-joining off|account] [--guests off] [--paused on|off] [--voice on|off] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels]
   conch admin guest list [--server <url>] [--json] [--state active|ended|converted] [--origin address|invite]
   conch admin guest end [--server <url>] [--json] <id>
   conch admin guest end-all [--server <url>] [--json] [--origin address|invite] [--invite <id>] [--dry-run | --yes]
@@ -166,7 +166,6 @@ Usage:
   conch logout [--server <url>]
   conch whoami [--server <url>]
   conch join info [--server <url>] [--json]
-  conch join guest [--server <url>] [--label <label>] [--invite]
   conch join account [--server <url>] [--invite] <name>
   conch account create [--server <url>] [--permit] <name>
   conch end-visit [--server <url>]
@@ -251,14 +250,14 @@ Scope:
   environment: on a terminal without echo, otherwise one line each from
   standard input, in the order asked (name, password, code). They are sent
   only over https, or plain http to this machine. join info shows what the
-  server's address offers. join guest starts a temporary guest visit, from
-  the address or, with --invite, an invite (its link or code is asked for);
-  its credential is kept apart from your logins, in guest-visits.json, and
-  is dropped when the visit's deadline passes or the server refuses it. A
-  guest is shown everywhere as "Guest: <label> · <tag>". end-visit (and
-  logout, on a visit) ends it on the server first, and says whether that was
-  confirmed. account create turns the live visit into an account with the
-  same access, and join account makes a new one; both ask for a password.
+  server's address offers. Guest visits are turned off for now: nothing
+  here starts one. A visit already stored here keeps its credential apart
+  from your logins, in guest-visits.json, dropped when the visit's deadline
+  passes or the server refuses it; a guest is shown everywhere as "Guest:
+  <label> · <tag>". end-visit (and logout, on a visit) ends it on the server
+  first, and says whether that was confirmed. account create turns the live
+  visit into an account with the same access, and join account makes a new
+  one; both ask for a password.
   login --password signs in with a name and password, and an operator's
   authenticator code; login --link with a sign-in or device link, after
   saying whose account it opens. An operator's commands that need a recent

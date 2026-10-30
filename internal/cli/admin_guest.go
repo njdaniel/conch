@@ -45,8 +45,8 @@ type joinOpts struct {
 }
 
 func bindJoinSet(fs *flag.FlagSet, o *adminOpts) {
-	fs.StringVar(&o.join.openJoining, "open-joining", "", "what the bare address offers: off, guest, account or both")
-	fs.StringVar(&o.join.guests, "guests", "", "on or off: whether any entry point, invites included, may start a guest visit")
+	fs.StringVar(&o.join.openJoining, "open-joining", "", "what the bare address offers: off or account (guests are turned off for now, so the server refuses guest and both)")
+	fs.StringVar(&o.join.guests, "guests", "", "on or off: whether any entry point, invites included, may start a guest visit (guests are turned off for now, so the server refuses on)")
 	fs.StringVar(&o.join.paused, "paused", "", "on or off: pause joining from the bare address")
 	fs.StringVar(&o.join.voice, "voice", "", "on or off: whether people who join from the bare address may use voice")
 	fs.Int64Var(&o.join.maxGuests, "max-guests", -1, "the most live guest visits at once")

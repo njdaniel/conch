@@ -745,7 +745,7 @@ func TestRedeemV2RefusesBeforeHashing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newLoginFixture(t, Config{ServerName: serverName})
-			f.mustPutJoin(t, openBoth("red"))
+			f.mustPutJoin(t, openAccounts("red"))
 			limits := looseLoginLimits()
 			limits.nameProbesPerAddress = inviteLimit{"name_probes_per_address", 1, time.Hour}
 			f.srv.setLoginLimits(limits)

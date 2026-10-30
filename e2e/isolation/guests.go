@@ -25,7 +25,8 @@ import (
 // private markers (w.priv), as A's things are A's markers: no guest whose
 // visit began later may see any of it. Then the guests come, from the bare
 // address and through invites, each from a client address of its own, and
-// the members carry on: some of what they say after is for the guests (a
+// the members carry on (guests are removed for now, issue #1005: their
+// visits are started beside the server, seed.go, as the entry routes did): some of what they say after is for the guests (a
 // message, a whisper to one of them, a file, a run), and some is private
 // too (a reply in the thread from before, a whisper to the other member,
 // activity on the old run).
@@ -191,28 +192,22 @@ func (w *world) guestJoined(resp schema.JoinGuestResponseV1, addr string) (*memb
 	return m, nil
 }
 
-// joinGuest starts a visit at the bare address, from an address of its own
-// unless from is given.
+// joinGuest starts a visit from the bare address, from an address of its own
+// unless from is given. No route starts one now (issue #1005): it is started
+// beside the server, as POST /v1/join/guest did (seedVisit).
 func (w *world) joinGuest(label string, from *api) (*member, error) {
 	a := w.newcomer("a guest (joining)")
 	if from != nil {
 		a = *from
 	}
-	var resp schema.JoinGuestResponseV1
-	if err := w.entryCall(a, http.MethodPost, "/v1/join/guest", schema.JoinGuestRequestV1{Label: label}, &resp); err != nil {
-		return nil, err
-	}
-	return w.guestJoined(resp, a.addr)
+	return w.seedVisit(a, label, nil)
 }
 
-// redeemGuest starts a visit through one of the plaza's invites.
+// redeemGuest starts a visit through one of the plaza's invites, beside the
+// server, as POST /v1/invites/redeem-guest did (seedVisit).
 func (w *world) redeemGuest(mode schema.InviteJoinMode, label string) (*member, error) {
-	a := w.newcomer("a guest (joining by invite)")
-	var resp schema.JoinGuestResponseV1
-	if err := w.entryCall(a, http.MethodPost, "/v1/invites/redeem-guest", schema.RedeemInviteGuestRequestV1{Code: w.p.invites[mode].code, Label: label}, &resp); err != nil {
-		return nil, err
-	}
-	return w.guestJoined(resp, a.addr)
+	inv := w.p.invites[mode]
+	return w.seedVisit(w.newcomer("a guest (joining by invite)"), label, &inv)
 }
 
 // joinSettings changes the joining policy as the operator.
@@ -360,22 +355,22 @@ func (w *world) buildPlaza() error {
 	p.preIV = iv.ID
 	w.priv.id("intervention", "the plaza's intervention from before", iv.ID)
 
-	// The operator's invites to the plaza, one for each mode.
+	// The operator's invites to the plaza, one for each mode: the two that
+	// admit guests as they were made before guests were removed (seed.go).
 	for _, mode := range []schema.InviteJoinMode{schema.InviteJoinBoth, schema.InviteJoinGuest, schema.InviteJoinAccount} {
-		resp, err := w.invite(w.op, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{p.channel}, Voice: true, JoinAs: mode})
-		if err != nil {
+		if p.invites[mode], err = w.legacyInvite(mode); err != nil {
 			return err
 		}
-		p.invites[mode] = plazaInvite{id: resp.Invite.ID, code: resp.Code}
 	}
 	return nil
 }
 
-// openPlaza is the policy the cohort joins under: guests on, the address
-// open to guests and accounts, voice for its joiners, and the default
-// bounds.
+// openPlaza is the policy the cohort joins under: the address open to
+// accounts (the most it may be, guests being removed), voice for its
+// joiners, and the default bounds, which the visits started beside the
+// server take.
 func (w *world) openPlaza() error {
-	_, err := w.joinSettings(schema.PutJoinSettingsRequestV1{GuestsEnabled: ptr(true), OpenJoining: ptr(schema.OpenJoiningBoth), JoiningPaused: ptr(false),
+	_, err := w.joinSettings(schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningAccount), JoiningPaused: ptr(false),
 		JoinVoice: ptr(true), MaxGuests: ptr(int64(schema.DefaultMaxGuests)), MaxGuestsPerAddress: ptr(int64(schema.DefaultMaxGuestsPerAddress)),
 		GuestIdleSeconds: ptr(int64(schema.DefaultGuestIdleSeconds)), GuestAbsoluteSeconds: ptr(int64(schema.DefaultGuestAbsoluteSeconds))})
 	return err

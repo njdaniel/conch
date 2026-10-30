@@ -48,7 +48,7 @@ var ErrGuestVisitEnded = errors.New("guest visit ended")
 type GuestVisitEndedError struct{ Server string }
 
 func (e *GuestVisitEndedError) Error() string {
-	return fmt.Sprintf("your guest visit to %s has ended (or its credential no longer works); a later visit is a new guest: run 'conch join guest'", e.Server)
+	return fmt.Sprintf("your guest visit to %s has ended (or its credential no longer works); a later visit would be a new guest", e.Server)
 }
 
 // Is makes errors.Is true for ErrGuestVisitEnded and ErrUnauthenticated.

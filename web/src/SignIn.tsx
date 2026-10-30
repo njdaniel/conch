@@ -1,7 +1,7 @@
 // The page of someone not signed in: the bare address's front door (issue
 // #713, ADR-009, design §3.1, §3.2). It offers what the server's front door
-// says the address allows now (Join as guest, Create an account, either or
-// neither, with honest words for paused and full), then Sign in with a name
+// says the address allows now (Create an account, or nothing, with honest words
+// for paused; guests are removed for now, issue #1005), then Sign in with a name
 // and a password for a returning member, then the advanced way in: a
 // credential an operator issued, for operators and scripts. The server
 // decides again whatever is sent; hiding a button is not enforcement.
@@ -14,7 +14,6 @@
 import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { CreateAccount, type AccountProblem } from './CreateAccount';
-import { durationWords, GuestJoin, guestJoinRefusal } from './Guest';
 import { accountRefusal, heldLine, refusalLine } from './Invite';
 import type { JoinInfoV1 } from './schema/guest';
 import type { WhoAmIResponseV1 } from './schema/principal';
@@ -72,7 +71,7 @@ export function SignIn({
   // Forgetting a stored sign-in that could not be checked (issue #469),
   // offered only when signing in was refused because of one.
   readonly onForget: () => void;
-  // Joined from the front door, as a guest or with a new account. principal
+  // Joined from the front door, with a new account. principal
   // is null when the credential was kept but whoami did not answer.
   readonly onJoined: (principal: WhoAmIResponseV1 | null) => void;
 }) {
@@ -80,10 +79,9 @@ export function SignIn({
   const nameField = useRef<HTMLInputElement>(null);
   const passwordField = useRef<HTMLInputElement>(null);
   const [info, setInfo] = useState<Info>({ state: 'loading' });
-  const [way, setWay] = useState<'guest' | 'account' | null>(null);
+  const [way, setWay] = useState<'account' | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<AccountProblem | null>(null);
-  const [guestProblem, setGuestProblem] = useState<string | null>(null);
   const [credentialLine, setCredentialLine] = useState<string | null>(null);
   const insecure = needsHttps(origin);
 
@@ -147,32 +145,6 @@ export function SignIn({
     onPassword(name, typed);
   }
 
-  function joinAsGuest(label: string) {
-    if (busy) return;
-    setBusy(true);
-    setGuestProblem(null);
-    void api.joinAsGuest(label).then((result) => {
-      setBusy(false);
-      if (result.ok) {
-        onJoined(result.value);
-        return;
-      }
-      switch (result.failure) {
-        case 'unchecked':
-          onJoined(null);
-          return;
-        case 'held':
-          setGuestProblem(heldLine);
-          return;
-        case 'unkept':
-          setGuestProblem(keepLine);
-          return;
-        default:
-          setGuestProblem(guestJoinRefusal(result));
-      }
-    });
-  }
-
   function createAccount(name: string, password: string) {
     if (busy) return;
     setBusy(true);
@@ -225,51 +197,21 @@ export function SignIn({
           <h2 id="join-heading">Join</h2>
           {join.paused ? (
             <p className="notice">Joining is paused on this server for now. If you have an account, sign in below.</p>
-          ) : !join.guest && !join.account ? (
-            <p className="hint">
-              {join.guests_full
-                ? 'No more guests can join right now. Try again later.'
-                : 'This server is invite-only. To join, ask someone on it for an invite link.'}
-            </p>
+          ) : !join.account ? (
+            <p className="hint">This server is invite-only. To join, ask someone on it for an invite link.</p>
           ) : (
             <>
-              {join.guests_full ? <p className="hint">Guest visits are full right now; you can still create an account.</p> : null}
               {way === null ? (
                 <div className="actions">
-                  {join.guest ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setWay('guest');
-                      }}
-                    >
-                      Join as guest
-                    </button>
-                  ) : null}
-                  {join.account ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setWay('account');
-                      }}
-                    >
-                      Create an account
-                    </button>
-                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWay('account');
+                    }}
+                  >
+                    Create an account
+                  </button>
                 </div>
-              ) : null}
-              {way === 'guest' && ready !== null ? (
-                <GuestJoin
-                  busy={busy}
-                  problem={guestProblem}
-                  bounds={`after ${durationWords(ready.guest_idle_seconds)} without activity, and after ${durationWords(ready.guest_absolute_seconds)} at most`}
-                  onJoin={joinAsGuest}
-                  onCancel={() => {
-                    if (busy) return;
-                    setGuestProblem(null);
-                    setWay(null);
-                  }}
-                />
               ) : null}
               {way === 'account' ? (
                 <CreateAccount
