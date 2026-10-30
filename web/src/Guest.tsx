@@ -1,117 +1,16 @@
-// Temporary guests in the browser (issue #713, ADR-009 D2, design §3.1,
-// §3.3, §3.4): the form that starts a visit, and the visit's own panel in the
-// lobby, which says who the guest is shown as and until when, and offers
-// Create an account and End visit. A guest's credential is this tab's alone
+// Temporary guests in the browser (issue #713, ADR-009 D2, design §3.3,
+// §3.4): the visit's own panel in the lobby, which says who the guest is shown
+// as and until when, and offers Create an account and End visit. No form
+// starts a visit: guests are removed for now (issue #1005), and a visit
+// already live is all this serves. A guest's credential is this tab's alone
 // (src/api.ts); nothing here sees it.
-import { useEffect, useId, useRef, useState, type SyntheticEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ConvertResult, InviteRefusal } from './api';
 import { CreateAccount, type AccountProblem } from './CreateAccount';
 import { guestName } from './guestName';
-import { accountRefusal, refusalLine, type Refusal } from './Invite';
+import { accountRefusal, refusalLine } from './Invite';
 import type { GuestV1 } from './schema/guest';
 import { insecureLine } from './transport';
-
-// The longest display label, in characters (pkg/schema MaxGuestLabelLength).
-const maxLabel = 32;
-
-// durationWords says a visit bound in words: "2 hours", "1 day", "30 minutes".
-export function durationWords(seconds: number): string {
-  const unit = (n: number, one: string) => `${String(n)} ${one}${n === 1 ? '' : 's'}`;
-  if (seconds % 86_400 === 0) return unit(seconds / 86_400, 'day');
-  if (seconds >= 3_600 && seconds % 3_600 === 0) return unit(seconds / 3_600, 'hour');
-  return unit(Math.max(1, Math.round(seconds / 60)), 'minute');
-}
-
-// guestJoinRefusal is the plain words for a visit the server would not
-// start, from the bare address or through an invite.
-export function guestJoinRefusal(result: Refusal): string {
-  switch (result.code) {
-    case 'guests_disabled':
-      return 'Guest visits are not open here now. Ask someone on this server for a way in.';
-    case 'guests_full':
-      return 'No more guests can join right now. Try again later.';
-    case 'joining_paused':
-      return 'Joining is paused on this server for now. Try again later.';
-    case 'invalid_request':
-      return 'The server did not accept that name. Leave it empty, or choose another: no “·”, no double spaces, and not one that begins with “guest”.';
-    default:
-      return accountRefusal(result)?.line ?? refusalLine(result);
-  }
-}
-
-// GuestJoin is Join as guest: an optional name to be shown by, and what a
-// visit is, before it starts. bounds says when a visit ends on its own.
-export function GuestJoin({
-  busy,
-  problem,
-  bounds,
-  onJoin,
-  onCancel,
-}: {
-  readonly busy: boolean;
-  readonly problem: string | null;
-  readonly bounds: string;
-  readonly onJoin: (label: string) => void;
-  readonly onCancel?: () => void;
-}) {
-  const id = useId();
-  const [label, setLabel] = useState('');
-  const field = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (problem !== null) field.current?.focus();
-  }, [problem]);
-
-  function submit(event: SyntheticEvent) {
-    event.preventDefault();
-    if (busy) return;
-    // Sent as typed; an empty field is no label, and the handle is shown.
-    onJoin(label);
-  }
-
-  return (
-    <form className="guest-join" onSubmit={submit}>
-      <p id={`${id}-about`}>
-        A guest visit is temporary and needs no password. It ends when you choose End visit, or {bounds}. Closing the tab or
-        the browser does not end it. Your messages stay in the conversation after it ends.
-      </p>
-      <label htmlFor={`${id}-label`}>Name to show (optional)</label>
-      <p id={`${id}-label-help`} className="hint">
-        Others see you as “Guest: name · tag”. Up to {maxLabel} characters. Anyone may choose the same name: the tag tells
-        visits apart. Nobody signs in with it.
-      </p>
-      <input
-        id={`${id}-label`}
-        ref={field}
-        type="text"
-        value={label}
-        // maxLength counts UTF-16 units, and a character may take two: the
-        // server holds the real bound, in characters.
-        maxLength={maxLabel * 2}
-        autoComplete="off"
-        autoCapitalize="off"
-        autoCorrect="off"
-        spellCheck={false}
-        aria-describedby={`${id}-about ${id}-label-help ${id}-problem`}
-        aria-invalid={problem !== null}
-        onChange={(event) => {
-          setLabel(event.target.value);
-        }}
-      />
-      <button type="submit" aria-busy={busy}>
-        {busy ? 'Joining…' : 'Join as guest'}
-      </button>
-      <p id={`${id}-problem`} role="alert" className="notice">
-        {problem ?? ''}
-      </p>
-      {onCancel === undefined ? null : (
-        <button type="button" onClick={onCancel}>
-          Go back
-        </button>
-      )}
-    </form>
-  );
-}
 
 // conversionRefusal is the plain words for a Create an account the server
 // refused during a visit. The guest is as it was.

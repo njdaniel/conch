@@ -16,12 +16,12 @@ import (
 // permits themselves. The routes' matrices are in
 // internal/server/conversion_test.go.
 
-// putJoin applies req as the operator, failing the test on a refusal.
+// putJoin applies req as PutJoinSettings did before guests were removed
+// (issue #1005), guests and all: the policies of the visits these tests
+// convert are those of a database from before then.
 func (f *inviteFixture) putJoin(req schema.PutJoinSettingsRequestV1) {
 	f.t.Helper()
-	if _, err := f.s.PutJoinSettings(f.ctx, "system", f.op.ID, req); err != nil {
-		f.t.Fatalf("PutJoinSettings: %v", err)
-	}
+	legacyJoinSettings(f.t, f.s, req)
 }
 
 // Every mode and pause of the bare address: an account is made exactly

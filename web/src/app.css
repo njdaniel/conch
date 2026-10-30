@@ -824,7 +824,7 @@ label {
   margin: 0 0 var(--s2);
 }
 
-/* Settings → Password, Add a device, and Joining and guests (issue #714):
+/* Settings → Password, Add a device, and Joining (issue #714):
    each opens in place, its forms one field under another, and wraps rather
    than widening the drawer. */
 .password-settings,

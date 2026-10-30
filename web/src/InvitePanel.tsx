@@ -6,11 +6,8 @@
 // Voice is offered only to someone who holds it, and a member sees how many
 // more personal invites they may make, both as whoami says (issue #468).
 //
-// Whom an invite admits (issue #714, design §2): an account, as every invite
-// always has, a guest visit, or either. The choice is an operator's, offered
-// only while the joining settings allow guests; without it an invite admits
-// accounts alone, and a member's always does here. Guests are still subject
-// to the server's switch when the invite is used.
+// An invite admits accounts only: guests are removed for now (issue #1005),
+// so there is no choice of whom it admits and the request names none.
 import { useCallback, useContext, useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { clock } from './Conversation';
@@ -20,7 +17,7 @@ import { JoiningSettings } from './joiningSettings';
 import { platform } from './platform';
 import { inviteLink } from './route';
 import type { ChannelV0 } from './schema/channel';
-import type { CreateInviteRequestV1, InviteJoinMode, InviteKind, InviteV1 } from './schema/invite';
+import type { CreateInviteRequestV1, InviteKind, InviteV1 } from './schema/invite';
 import type { WhoAmIResponseV1 } from './schema/principal';
 
 // How long an invite lasts. The marked one is the server's default for the
@@ -52,10 +49,12 @@ const createRefusals: Readonly<Record<string, string>> = {
   invites_paused: 'Invites are paused on this server for now.',
   channel_not_found: 'One of those channels does not exist any more.',
   human_required: 'Only people make invites.',
+  join_policy_conflict: 'Invites make accounts only: guest visits are not available.',
+  guests_disabled: 'Guest visits are not available.',
 };
 
 // An operator can lift the pause, so is told where (issue #909).
-const pausedForOperator = 'Invites are paused on this server. Resume them in Settings → Joining and guests.';
+const pausedForOperator = 'Invites are paused on this server. Resume them in Settings → Joining.';
 
 // createLine is the plain words for an invite the server would not make.
 function createLine(result: { readonly failure: api.ApiFailure; readonly code?: string; readonly message?: string; readonly retryAfter?: number }): string {
@@ -99,10 +98,6 @@ export function InvitePanel({
   const [capped, setCapped] = useState(false);
   const [cap, setCap] = useState('10');
   const [mayInvite, setMayInvite] = useState(false);
-  const [joinAs, setJoinAs] = useState<InviteJoinMode>('account');
-  // Whether the joining settings allow guests, as an operator reads them
-  // when the panel opens; false until they say so.
-  const [guestsAllowed, setGuestsAllowed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   // Whether the problem is a pause an operator can lift (issue #909).
@@ -143,20 +138,6 @@ export function InvitePanel({
   useEffect(() => {
     if (open) refresh();
   }, [open, refresh]);
-
-  useEffect(() => {
-    if (!open || !operator) return;
-    let live = true;
-    void api.joinSettings().then((result) => {
-      if (!live) return;
-      const allowed = result.ok && result.value.settings.guests_enabled;
-      setGuestsAllowed(allowed);
-      if (!allowed) setJoinAs('account');
-    });
-    return () => {
-      live = false;
-    };
-  }, [open, operator]);
 
   // An invite is used elsewhere, by someone else: while the panel is open, the
   // list is read again when the person comes back to the page. No timer polls
@@ -200,7 +181,6 @@ export function InvitePanel({
       ...(chosen === undefined || chosen.isDefault === true ? {} : { expires_at: new Date(Date.now() + chosen.seconds * 1000).toISOString() }),
       ...(operator && kind === 'open' && capped ? { max_uses: cappedUses } : {}),
       ...(operator && mayInvite ? { may_invite: true } : {}),
-      ...(operator && guestsAllowed && joinAs !== 'account' ? { join_as: joinAs } : {}),
     };
     setBusy(true);
     setProblem(null);
@@ -427,31 +407,6 @@ export function InvitePanel({
               Joiners may invite others
             </label>
           ) : null}
-          {operator && guestsAllowed ? (
-            <fieldset>
-              <legend>Who may join with it</legend>
-              {(
-                [
-                  ['account', 'An account: a name and a password'],
-                  ['guest', 'A temporary guest'],
-                  ['both', 'Either: the joiner chooses'],
-                ] as const
-              ).map(([mode, words]) => (
-                <label key={mode}>
-                  <input
-                    type="radio"
-                    name="invite-join-as"
-                    checked={joinAs === mode}
-                    onChange={() => {
-                      setJoinAs(mode);
-                    }}
-                  />{' '}
-                  {words}
-                </label>
-              ))}
-              <p className="hint">A guest joins only while guests are allowed, and can become an account only if the invite allows accounts.</p>
-            </fieldset>
-          ) : null}
           {remaining === undefined ? null : (
             <p className="hint">{remaining === 1 ? '1 invite left' : `${String(remaining)} invites left`}</p>
           )}
@@ -463,7 +418,7 @@ export function InvitePanel({
           </p>
           {resume && joining !== null ? (
             <button type="button" onClick={joining.open}>
-              Open Settings → Joining and guests
+              Open Settings → Joining
             </button>
           ) : null}
         </form>

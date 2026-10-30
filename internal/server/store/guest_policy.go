@@ -29,6 +29,13 @@ import (
 // An account from the bare address (JoinAsAccount, issue #711) is held to
 // the same settings, in the same way: its mode is checked in the creating
 // transaction, and the account exists only with its password.
+//
+// Guests are removed for now (issue #1005): no entry point may admit them.
+// The settings can no longer turn guests on or make the bare address admit
+// them (PutJoinSettings), no invite may admit them (CreateInvite), and a
+// store whose rows still do is normalized when it is opened
+// (NormalizeGuestSettings). The guest tables, the visits already live and
+// the code that starts a visit stay, unused, for when guests come back.
 
 // The server_settings keys of the joining settings.
 const (
@@ -75,7 +82,37 @@ var (
 	// JoinSettingsError.
 	ErrJoinPolicyConflict  = errors.New("store: the join settings contradict each other or the server")
 	ErrJoinSettingsInvalid = errors.New("store: the join settings are not valid")
+	// ErrGuestsRemoved: the request would make an entry point that admits
+	// guests, and guests are removed for now (issue #1005).
+	ErrGuestsRemoved = errors.New("store: guests are turned off on this server for now")
 )
+
+// guestsRemovedReason is what a refused settings change says.
+const guestsRemovedReason = "guests are turned off on this server for now: guests_enabled cannot be turned on, and open_joining may be off or account"
+
+// withoutGuests is s with every guest-admitting setting turned off, as
+// guests are removed for now (issue #1005): guests disabled, a bare address
+// open to guests and accounts open to accounts only, and a guest-only one
+// off. Nothing else changes.
+func withoutGuests(s schema.JoinSettingsV1) schema.JoinSettingsV1 {
+	s.GuestsEnabled = false
+	switch s.OpenJoining {
+	case schema.OpenJoiningBoth:
+		s.OpenJoining = schema.OpenJoiningAccount
+	case schema.OpenJoiningGuest:
+		s.OpenJoining = schema.OpenJoiningOff
+	}
+	return s
+}
+
+// requestAdmitsGuests reports whether a settings change asks for guests:
+// guests_enabled true, or an open_joining mode that offers them.
+func requestAdmitsGuests(req schema.PutJoinSettingsRequestV1) bool {
+	if req.GuestsEnabled != nil && *req.GuestsEnabled {
+		return true
+	}
+	return req.OpenJoining != nil && (*req.OpenJoining == schema.OpenJoiningGuest || *req.OpenJoining == schema.OpenJoiningBoth)
+}
 
 // JoinSettingsError is a refused settings change. Err is
 // ErrJoinPolicyConflict (contradictory settings, the last open channel
@@ -378,9 +415,17 @@ func (s *Store) joinStateTx(ctx context.Context, tx execer, now time.Time) (Join
 // visits when guests are turned off, and each channel added or removed in
 // its own row. A request that changes nothing writes nothing. Turning guests
 // off ends no visit: End all guest visits does (EndGuests).
+//
+// Guests are removed for now (issue #1005): a request for guests_enabled
+// true or an open_joining of guest or both is refused with
+// ErrJoinPolicyConflict and writes nothing, and every change it makes leaves
+// the settings without guests (withoutGuests), whatever the rows held.
 func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64, req schema.PutJoinSettingsRequestV1) (JoinState, error) {
 	if err := req.Validate(); err != nil {
 		return JoinState{}, invalidSettings(strings.TrimPrefix(err.Error(), "schema: "))
+	}
+	if requestAdmitsGuests(req) {
+		return JoinState{}, conflict(guestsRemovedReason)
 	}
 	var out JoinState
 	err := s.withImmediateTx(ctx, func(tx execer) error {
@@ -389,7 +434,7 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 		if err != nil {
 			return err
 		}
-		next := req.Apply(cur.Settings)
+		next := withoutGuests(req.Apply(cur.Settings))
 		if next.OpenJoining == schema.OpenJoiningGuest && !next.GuestsEnabled {
 			return conflict("the bare address cannot be guest-only while guests are disabled")
 		}
@@ -418,34 +463,10 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 			return err
 		}
 
-		var changes []string
-		write := func(key, old, val string) error {
-			if old == val {
-				return nil
-			}
-			changes = append(changes, key+"="+old+"->"+val)
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO server_settings (key, value, updated_at) VALUES (?, ?, ?)
-				 ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-				key, val, now.UnixMilli()); err != nil {
-				return fmt.Errorf("store: put join settings: %s: %w", key, err)
-			}
-			return nil
-		}
 		c, n := cur.Settings, next
-		for _, f := range []struct{ key, old, val string }{
-			{settingOpenJoining, string(c.OpenJoining), string(n.OpenJoining)},
-			{settingGuestsEnabled, strconv.FormatBool(c.GuestsEnabled), strconv.FormatBool(n.GuestsEnabled)},
-			{settingJoiningPaused, strconv.FormatBool(c.JoiningPaused), strconv.FormatBool(n.JoiningPaused)},
-			{settingJoinVoice, strconv.FormatBool(c.JoinVoice), strconv.FormatBool(n.JoinVoice)},
-			{settingMaxGuests, strconv.FormatInt(c.MaxGuests, 10), strconv.FormatInt(n.MaxGuests, 10)},
-			{settingMaxGuestsPerAddress, strconv.FormatInt(c.MaxGuestsPerAddress, 10), strconv.FormatInt(n.MaxGuestsPerAddress, 10)},
-			{settingGuestIdleSeconds, strconv.FormatInt(c.GuestIdleSeconds, 10), strconv.FormatInt(n.GuestIdleSeconds, 10)},
-			{settingGuestAbsoluteSeconds, strconv.FormatInt(c.GuestAbsoluteSeconds, 10), strconv.FormatInt(n.GuestAbsoluteSeconds, 10)},
-		} {
-			if err := write(f.key, f.old, f.val); err != nil {
-				return err
-			}
+		changes, err := writeJoinSettingsTx(ctx, tx, c, n, now)
+		if err != nil {
+			return err
 		}
 		if len(changes) > 0 {
 			detail := strings.Join(changes, " ")
@@ -495,6 +516,70 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 		return JoinState{}, err
 	}
 	return out, nil
+}
+
+// writeJoinSettingsTx writes each of the settings that differs between c and
+// n, and returns them as field=old->new, in a fixed order.
+func writeJoinSettingsTx(ctx context.Context, tx execer, c, n schema.JoinSettingsV1, now time.Time) ([]string, error) {
+	var changes []string
+	for _, f := range []struct{ key, old, val string }{
+		{settingOpenJoining, string(c.OpenJoining), string(n.OpenJoining)},
+		{settingGuestsEnabled, strconv.FormatBool(c.GuestsEnabled), strconv.FormatBool(n.GuestsEnabled)},
+		{settingJoiningPaused, strconv.FormatBool(c.JoiningPaused), strconv.FormatBool(n.JoiningPaused)},
+		{settingJoinVoice, strconv.FormatBool(c.JoinVoice), strconv.FormatBool(n.JoinVoice)},
+		{settingMaxGuests, strconv.FormatInt(c.MaxGuests, 10), strconv.FormatInt(n.MaxGuests, 10)},
+		{settingMaxGuestsPerAddress, strconv.FormatInt(c.MaxGuestsPerAddress, 10), strconv.FormatInt(n.MaxGuestsPerAddress, 10)},
+		{settingGuestIdleSeconds, strconv.FormatInt(c.GuestIdleSeconds, 10), strconv.FormatInt(n.GuestIdleSeconds, 10)},
+		{settingGuestAbsoluteSeconds, strconv.FormatInt(c.GuestAbsoluteSeconds, 10), strconv.FormatInt(n.GuestAbsoluteSeconds, 10)},
+	} {
+		if f.old == f.val {
+			continue
+		}
+		changes = append(changes, f.key+"="+f.old+"->"+f.val)
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO server_settings (key, value, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+			f.key, f.val, now.UnixMilli()); err != nil {
+			return nil, fmt.Errorf("store: write join settings: %s: %w", f.key, err)
+		}
+	}
+	return changes, nil
+}
+
+// NormalizeGuestSettings turns off every stored setting that admits guests,
+// as guests are removed for now (issue #1005): guests_enabled becomes false,
+// an open_joining of both becomes account and one of guest becomes off. It
+// runs in one IMMEDIATE transaction, audited as actor "system" in one
+// join_settings_changed row whose detail is each field that changed, the
+// live visits and reason=guests_removed. Live visits are not ended: they
+// last to their bounds, or an operator ends them. Settings that admit no
+// guest write nothing, so it is idempotent; Open runs it on every start. It
+// reports whether it changed anything.
+func (s *Store) NormalizeGuestSettings(ctx context.Context) (bool, error) {
+	changed := false
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		changed = false
+		now := credentialNow().Truncate(time.Millisecond)
+		cur, err := joinSettingsTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		changes, err := writeJoinSettingsTx(ctx, tx, cur, withoutGuests(cur), now)
+		if err != nil || len(changes) == 0 {
+			return err
+		}
+		live, err := liveGuestsTx(ctx, tx, now)
+		if err != nil {
+			return err
+		}
+		changed = true
+		return appendAuditEventTx(ctx, tx, "system", AuditJoinSettingsChanged, "server",
+			fmt.Sprintf("%s live_guests=%d reason=guests_removed", strings.Join(changes, " "), live), now)
+	})
+	if err != nil {
+		return false, fmt.Errorf("store: turn guests off: %w", err)
+	}
+	return changed, nil
 }
 
 // GuestEntry is who asks to start a visit: the optional display label and

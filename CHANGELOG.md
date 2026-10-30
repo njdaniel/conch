@@ -8,6 +8,15 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Guests are turned off for now** (#1005). No route starts a guest visit
+  (`403 guests_disabled`). The settings and invites can no longer admit
+  guests (`409 join_policy_conflict`). The web client no longer offers guest
+  entry. A server upgraded with guests on turns them off at start, audited as
+  `system`; a bare address open to both is then open to accounts only. Visits
+  already live can still end or become accounts. No guest data is deleted.
+
 ## [0.1.0-alpha.6] - 2026-10-30
 
 Upgrade with `conch-server upgrade v0.1.0-alpha.6` from your workstation, or

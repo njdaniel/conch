@@ -41,7 +41,6 @@ import {
   convertGuestResponseV1,
   endGuestsResponseV1,
   joinAccountResponseV1,
-  joinGuestResponseV1,
   joinInfoV1,
   joinSettingsResponseV1,
   listGuestsResponseV1,
@@ -51,7 +50,6 @@ import {
   type EndGuestsResponseV1,
   type GuestAdminV1,
   type JoinAccountRequestV1,
-  type JoinGuestRequestV1,
   type JoinInfoV1,
   type JoinSettingsResponseV1,
   type PutJoinSettingsRequestV1,
@@ -69,7 +67,6 @@ import {
   type InvitePreviewV1,
   type InviteSettingsV1,
   type InviteV1,
-  type RedeemInviteGuestRequestV1,
   type RedeemInviteRequestV2,
 } from './schema/invite';
 import { interventionV1, listInterventionsResponseV1, type CreateInterventionRequestV1, type InterventionV1 } from './schema/intervention';
@@ -991,22 +988,6 @@ export async function redeemInvite(inviteCode: string, name: string, password: s
   return keepRedeemed(redeemed.value.token, redeemed.value.principal.id, 'lasting');
 }
 
-// redeemInviteAsGuest uses an invite that admits guests to start a visit
-// (POST /v1/invites/redeem-guest), with the display label typed, if any. The
-// visit's credential is kept for this tab alone. It is refused while this
-// browser holds another sign-in, as redeemInvite is.
-export async function redeemInviteAsGuest(inviteCode: string, label: string): Promise<RedeemResult> {
-  if (heldElsewhere()) return { ok: false, failure: 'held' };
-  pinned = null;
-  const request: RedeemInviteGuestRequestV1 = label === '' ? { code: inviteCode } : { code: inviteCode, label };
-  const res = await sendOpen(call('redeemInviteGuest'), request);
-  if (res === null) return { ok: false, failure: 'network' };
-  if (!res.ok) return inviteRefused(res);
-  const joined = await readBody(res, joinGuestResponseV1);
-  if (!joined.ok) return joined;
-  return keepRedeemed(joined.value.token, joined.value.principal.id, 'tab');
-}
-
 // Joining from the bare address (issue #713). The front door says what the
 // address offers now; the server decides again when someone joins.
 
@@ -1016,20 +997,6 @@ export async function joinInfo(): Promise<InviteResult<JoinInfoV1>> {
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   return readBody(res, joinInfoV1);
-}
-
-// joinAsGuest starts a visit from the bare address (POST /v1/join/guest).
-// Its credential is kept for this tab alone, as an invite's guest's is.
-export async function joinAsGuest(label: string): Promise<RedeemResult> {
-  if (heldElsewhere()) return { ok: false, failure: 'held' };
-  pinned = null;
-  const request: JoinGuestRequestV1 = label === '' ? {} : { label };
-  const res = await sendOpen(call('joinGuest'), request);
-  if (res === null) return { ok: false, failure: 'network' };
-  if (!res.ok) return inviteRefused(res);
-  const joined = await readBody(res, joinGuestResponseV1);
-  if (!joined.ok) return joined;
-  return keepRedeemed(joined.value.token, joined.value.principal.id, 'tab');
 }
 
 // createAccount makes a member from the bare address, name and password

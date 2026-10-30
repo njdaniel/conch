@@ -448,7 +448,7 @@ After the start:
 - **Members** sign in again with their password, on each device. A member who joined before passwords and has none gets a reset link ([A member who forgot their password](#a-member-who-forgot-their-password)).
 - **Operators** sign in with password and code, a minute or more after the start. One with no password or authenticator yet uses `conchd operator setup`, and one who lost either uses `conchd operator recover` (step 6).
 - **Script and agent credentials** are gone: issue new ones (`conch admin credential issue`) and replace them where they are configured. Tokens given to `conchd` with `--mcp-token` are configuration, not data, and are not affected.
-- **Guests** join again as new guests; an ended visit never comes back.
+- **Guests** do not come back: the restore ends every visit the backup held, and an ended visit never comes back. Guests are turned off for now, so nobody can join as a new guest either. A backup taken while guests were on is opened with them off: a bare address open to both is opened to accounts only.
 
 **What a restore does not undo.** Apart from sign-ins, the restored data is the server as it was when the backup was taken, and every change made after it is lost, including ones made for safety. Nothing can reconstruct them: their record went with the data (if the database in `.broken-*` still opens, its audit log shows what happened). Before people return, check and redo what matters:
 
@@ -457,8 +457,8 @@ After the start:
 - passwords and authenticators are as the backup has them: a password reset, a password change or a `conchd operator recover` made since is undone, and the old password or authenticator works again. Do each again;
 - approvals resolved since are pending again, and can be decided again;
 - invites are paused by the restore: once you have closed the ones that should be closed, resume them with `conch admin invite resume`;
-- guest joining is paused by the restore: once the joining settings and open channels are as they should be (`GET /v1/join/settings`), resume it with `PUT /v1/join/settings` and `{"joining_paused": false}`;
-- people disabled or hidden since are enabled again, and roles, invite and voice rights, channel memberships, agent manifests, open channels and the joining and guest settings are as the backup has them.
+- joining from the bare address is paused by the restore: once the joining settings and open channels are as they should be (`GET /v1/join/settings`), resume it with `PUT /v1/join/settings` and `{"joining_paused": false}`;
+- people disabled or hidden since are enabled again, and roles, invite and voice rights, channel memberships, agent manifests, open channels and the joining settings are as the backup has them, except that guests stay off.
 
 **The TOTP key is not in the archive.** A backup holds the operators' authenticator secrets only encrypted under `CONCHD_TOTP_KEY`, which lives in `/etc/conch/alpha.env` and is never backed up with the data. Restoring onto the same droplet keeps the env file, and operators sign in as before. Restoring onto a new one, put the key back from your password manager into the new env file before the first start. If the key is lost, the data is not: start without it (or with a new one; `conchd` logs at start that the key does not open the stored secrets), and recover each operator with `conchd operator recover` (step 6), which removes the authenticator the old key protected and lets them enrol a new one. Members and messages do not depend on the key.
 

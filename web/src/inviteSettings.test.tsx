@@ -81,8 +81,8 @@ async function opened() {
   window.sessionStorage.setItem(key, token);
   render(<App origin={origin} />);
   fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
-  fireEvent.click(await screen.findByRole('button', { name: 'Joining and guests' }));
-  const region = screen.getByRole('region', { name: 'Joining and guests' });
+  fireEvent.click(await screen.findByRole('button', { name: 'Joining' }));
+  const region = screen.getByRole('region', { name: 'Joining' });
   const box = await within(region).findByLabelText<HTMLInputElement>('Pause all invites');
   await waitFor(() => {
     expect(box.disabled).toBe(false);
@@ -270,8 +270,8 @@ describe('Settings → Joining: pause all invites', () => {
     window.sessionStorage.setItem(key, token);
     render(<App origin={origin} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Joining and guests' }));
-    const region = screen.getByRole('region', { name: 'Joining and guests' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Joining' }));
+    const region = screen.getByRole('region', { name: 'Joining' });
     await within(region).findByText('Loading whether invites are paused…');
     expect(within(region).queryByLabelText('Pause all invites')).toBeNull();
     answer(refusal(500, 'internal'));
@@ -298,7 +298,7 @@ describe('Settings → Joining: pause all invites', () => {
       expect(puts(calls)).toHaveLength(1);
     });
     // Close and open the section while the change is in flight.
-    const toggle = screen.getByRole('button', { name: 'Joining and guests' });
+    const toggle = screen.getByRole('button', { name: 'Joining' });
     fireEvent.click(toggle);
     fireEvent.click(toggle);
     const reads = () => calls.filter((c) => c.method === 'GET' && c.path === '/v1/invites/settings').length;

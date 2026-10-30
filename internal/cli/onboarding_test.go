@@ -109,15 +109,40 @@ func (e *onboardEnv) mustRun(t *testing.T, token, stdin string, args ...string) 
 	return stdout, stderr
 }
 
-// openJoining opens the bare address to guests and accounts, into lobby, as
-// the operator's script credential, which is never asked to re-authenticate.
+// openJoining opens the bare address to accounts, into lobby, as the
+// operator's script credential, which is never asked to re-authenticate.
+// Guests are removed for now (issue #1005): no entry point admits them.
 func (e *onboardEnv) openJoining(t *testing.T) {
 	t.Helper()
 	e.mustRun(t, e.operatorToken, "", "admin", "channel", "create", "lobby")
-	out, _ := e.mustRun(t, e.operatorToken, "", "admin", "join", "set", "--open-joining", "both", "--guests", "on", "--open-channel", "lobby")
-	if !strings.Contains(out, "open joining: both\nguests: on\n") || !strings.Contains(out, "open channels: lobby\n") {
+	out, _ := e.mustRun(t, e.operatorToken, "", "admin", "join", "set", "--open-joining", "account", "--open-channel", "lobby")
+	if !strings.Contains(out, "open joining: account\nguests: off\n") || !strings.Contains(out, "open channels: lobby\n") {
 		t.Fatalf("join set printed %q", out)
 	}
+}
+
+// seedVisit starts a guest visit into lobby through the server's store, as
+// `conch join guest` did before guests were removed (issue #1005), and
+// stores it here as that command did. It returns the visit's tag.
+func (e *onboardEnv) seedVisit(t *testing.T, label string) string {
+	t.Helper()
+	// As a command run with no token of its own: the stored visit is the
+	// credential from here on.
+	t.Setenv("CONCH_TOKEN", "")
+	ctx := context.Background()
+	lobby, err := e.st.ChannelByName(ctx, "lobby")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := e.st.CreateGuest(ctx, "system", store.NewGuest{Label: label, Origin: schema.GuestOriginAddress, Channels: []int64{lobby.ID},
+		Idle: 2 * time.Hour, Absolute: 24 * time.Hour})
+	if err != nil {
+		t.Fatalf("CreateGuest: %v", err)
+	}
+	if err := saveGuestVisit(e.url, storedGuestVisit{Token: g.Token, Handle: g.Visit.Handle, ExpiresAt: g.Visit.ExpiresAt}); err != nil {
+		t.Fatal(err)
+	}
+	return schema.GuestTag(g.Visit.Handle)
 }
 
 // totp is an authenticator's code for secret at step (RFC 6238, the server's
@@ -171,31 +196,31 @@ func memberFile() string {
 	return filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "conch", credentialsFileName)
 }
 
-var joinedPattern = regexp.MustCompile(`^joined (\S+) as Guest: Pat · ([0-9a-z]{4}), a temporary guest\nchannels: lobby\nthe visit ends at .+ at the latest, or after 2h unused\n$`)
-
 const memberPassword = "a long enough member password"
 
-// A whole guest visit: joining from the address with a label, a credential
-// kept only in the temporary guest file, the server's refusals of what a
-// guest may not do, creating an account that keeps the principal, and the
-// member signing back in with the password.
+// A whole guest visit, for one live when guests were removed (issue
+// #1005): this client offers no way to start one and join info offers none;
+// a visit already live keeps a credential only in the temporary guest file,
+// meets the server's refusals of what a guest may not do, creates an account
+// that keeps the principal, and the member signs back in with the password.
 func TestGuestLifecycle(t *testing.T) {
 	e := newOnboardEnv(t)
 	e.openJoining(t)
 
 	info, _ := e.mustRun(t, "", "", "join", "info")
-	if !strings.Contains(info, "join as guest: yes\ncreate an account: yes\npassword sign-in: yes\n") || !strings.Contains(info, "a guest visit lasts: at most 24h, and ends after 2h unused\n") {
+	if !strings.Contains(info, "create an account: yes\npassword sign-in: yes\n") || strings.Contains(info, "guest") {
 		t.Errorf("join info = %q", info)
 	}
+	for _, args := range [][]string{{"join", "guest", "--label", "Pat"}, {"join", "guest", "--invite"}} {
+		if _, _, err := e.run(t, "", "", args...); err == nil || !strings.Contains(err.Error(), "unknown subcommand (want info or account)") {
+			t.Errorf("%v = %v, want no such command", args, err)
+		}
+		if _, err := os.Stat(guestFile()); !os.IsNotExist(err) {
+			t.Fatalf("%v stored a visit (%v)", args, err)
+		}
+	}
 
-	out, notice := e.mustRun(t, "", "", "join", "guest", "--label", "Pat")
-	m := joinedPattern.FindStringSubmatch(out)
-	if m == nil || m[1] != e.url {
-		t.Fatalf("join guest printed %q", out)
-	}
-	if notice != guestNotice+"\n" {
-		t.Errorf("stderr = %q, want the temporary guest notice", notice)
-	}
+	tag := e.seedVisit(t, "Pat")
 	// The visit is stored only in its own private file.
 	if _, err := os.Stat(memberFile()); !os.IsNotExist(err) {
 		t.Errorf("a guest visit wrote credentials.json (%v)", err)
@@ -210,7 +235,7 @@ func TestGuestLifecycle(t *testing.T) {
 	}
 
 	who, _ := e.mustRun(t, "", "", "whoami")
-	for _, want := range []string{"class: guest\n", "guest: Guest: Pat · " + m[2] + ", a temporary visit from address\n", "visit ends: ", "create an account: open to this visit"} {
+	for _, want := range []string{"class: guest\n", "guest: Guest: Pat · " + tag + ", a temporary visit from address\n", "visit ends: ", "create an account: open to this visit"} {
 		if !strings.Contains(who, want) {
 			t.Errorf("whoami = %q, want %q", who, want)
 		}
@@ -232,7 +257,6 @@ func TestGuestLifecycle(t *testing.T) {
 	}{
 		{"invite", []string{"admin", "invite", "create", "--open", "--channel", "lobby", "--expires", "1h"}, schema.ErrorCodeGuestNotAllowed},
 		{"device link", []string{"device-link", "create"}, schema.ErrorCodeGuestNotAllowed},
-		{"another guest visit", []string{"join", "guest"}, "already stored"},
 		{"a member sign-in over the visit", []string{"login", "--password", "--name", "root"}, "end it first"},
 	}
 	for _, tt := range refusals {
@@ -243,7 +267,7 @@ func TestGuestLifecycle(t *testing.T) {
 		})
 	}
 
-	out, _ = e.mustRun(t, "", memberPassword+"\n", "account", "create", "alice")
+	out, _ := e.mustRun(t, "", memberPassword+"\n", "account", "create", "alice")
 	if want := fmt.Sprintf("created account alice (id %d) on %s and signed in", id, e.url); !strings.HasPrefix(out, want) {
 		t.Errorf("account create = %q, want %q", out, want)
 	}
@@ -281,7 +305,7 @@ func TestEndVisit(t *testing.T) {
 	e := newOnboardEnv(t)
 	e.openJoining(t)
 
-	e.mustRun(t, "", "", "join", "guest")
+	e.seedVisit(t, "")
 	token, _ := LoadToken(e.url)
 	out, _ := e.mustRun(t, "", "", "end-visit")
 	if !strings.HasPrefix(out, "ended the visit of guest-") || !strings.HasSuffix(out, "; your messages remain\n") {
@@ -298,7 +322,7 @@ func TestEndVisit(t *testing.T) {
 	}
 
 	// logout on a visit ends it, rather than only forgetting it.
-	e.mustRun(t, "", "", "join", "guest")
+	e.seedVisit(t, "")
 	token, _ = LoadToken(e.url)
 	if out, _ := e.mustRun(t, "", "", "logout"); !strings.HasPrefix(out, "ended the visit of ") {
 		t.Errorf("logout on a visit = %q", out)
@@ -308,7 +332,7 @@ func TestEndVisit(t *testing.T) {
 	}
 
 	// An operator ends a visit; the next command says so and forgets it.
-	e.mustRun(t, "", "", "join", "guest")
+	e.seedVisit(t, "")
 	list, _ := e.mustRun(t, e.operatorToken, "", "admin", "guest", "list")
 	id := strings.Fields(list)[0]
 	if out, _ := e.mustRun(t, e.operatorToken, "", "admin", "guest", "end", id); !strings.HasPrefix(out, "ended guest visit "+id+" (guest-") {
@@ -328,7 +352,7 @@ func TestEndVisit(t *testing.T) {
 func TestAdminGuestEndAllAndPermit(t *testing.T) {
 	e := newOnboardEnv(t)
 	e.openJoining(t)
-	e.mustRun(t, "", "", "join", "guest")
+	e.seedVisit(t, "")
 	dry, _ := e.mustRun(t, e.operatorToken, "", "admin", "guest", "end-all")
 	if !strings.HasSuffix(dry, "would end 1 guest visit(s); run again with --yes to do it\n") {
 		t.Errorf("dry run = %q", dry)
@@ -338,7 +362,7 @@ func TestAdminGuestEndAllAndPermit(t *testing.T) {
 	}
 
 	// Close account creation at the address: the guest needs a permit.
-	e.mustRun(t, e.operatorToken, "", "admin", "join", "set", "--open-joining", "guest")
+	e.mustRun(t, e.operatorToken, "", "admin", "join", "set", "--open-joining", "off")
 	if _, _, err := e.run(t, "", memberPassword+"\n", "account", "create", "carol"); err == nil || !strings.Contains(err.Error(), "conversion permit") {
 		t.Fatalf("account create with the policy closed = %v", err)
 	}
@@ -356,7 +380,7 @@ func TestAdminGuestEndAllAndPermit(t *testing.T) {
 	e.assertNoSecrets(t, []string{out, stderr, list}, code, memberPassword)
 
 	e.mustRun(t, "", "", "logout")
-	e.mustRun(t, "", "", "join", "guest")
+	e.seedVisit(t, "")
 	done, _ := e.mustRun(t, e.operatorToken, "", "admin", "guest", "end-all", "--yes")
 	if !strings.HasSuffix(done, "ended 1 guest visit(s)\n") {
 		t.Errorf("end-all --yes = %q", done)
@@ -459,11 +483,11 @@ func TestOperatorSetupLoginAndReauth(t *testing.T) {
 	// The session holds no recent proof yet: the server asks, the command
 	// asks the person, and the change is made on the second send.
 	reauthCode := e.nextCode(t, secret)
-	set, asked := e.mustRun(t, "", operatorPassword+"\n"+reauthCode+"\n", "admin", "join", "set", "--guests", "on")
+	set, asked := e.mustRun(t, "", operatorPassword+"\n"+reauthCode+"\n", "admin", "join", "set", "--max-guests", "7")
 	if asked != "This needs a recent proof that it is you: your password and an authenticator code.\n" {
 		t.Errorf("stderr = %q, want the one question", asked)
 	}
-	if !strings.Contains(set, "guests: on\n") {
+	if !strings.Contains(set, "max guests: 7 ") {
 		t.Errorf("join set = %q", set)
 	}
 	who, _ = e.mustRun(t, "", "", "whoami")
@@ -475,10 +499,46 @@ func TestOperatorSetupLoginAndReauth(t *testing.T) {
 		t.Errorf("asked again within the proof: %q", asked)
 	}
 	// The script credential is outside the class and is never asked.
-	if _, asked := e.mustRun(t, e.operatorToken, "", "admin", "join", "set", "--guests", "on"); asked != "" {
+	if _, asked := e.mustRun(t, e.operatorToken, "", "admin", "join", "set", "--max-guests", "8"); asked != "" {
 		t.Errorf("a script credential was asked to re-authenticate: %q", asked)
 	}
 	e.assertNoSecrets(t, []string{out, stderr, who, set, asked}, operatorPassword, code, reauthCode)
+}
+
+// `conch admin join set` refuses what would let guests in with the
+// server's answer, and changes nothing; the rest still work (issue #1005).
+func TestAdminJoinSetRefusesGuests(t *testing.T) {
+	e := newOnboardEnv(t)
+	e.openJoining(t)
+	for _, tt := range []struct {
+		args []string
+		want string // "" for a change made
+	}{
+		{[]string{"--guests", "on"}, schema.ErrorCodeJoinPolicyConflict},
+		{[]string{"--open-joining", "guest"}, schema.ErrorCodeJoinPolicyConflict},
+		{[]string{"--open-joining", "both"}, schema.ErrorCodeJoinPolicyConflict},
+		{[]string{"--open-joining", "both", "--guests", "off"}, schema.ErrorCodeJoinPolicyConflict},
+		{[]string{"--guests", "off"}, ""},
+		{[]string{"--open-joining", "off"}, ""},
+		{[]string{"--open-joining", "account"}, ""},
+	} {
+		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
+			before, _ := e.mustRun(t, e.operatorToken, "", "admin", "join", "status")
+			out, _, err := e.run(t, e.operatorToken, "", append([]string{"admin", "join", "set"}, tt.args...)...)
+			if tt.want == "" {
+				if err != nil || !strings.Contains(out, "guests: off\n") {
+					t.Errorf("join set = %q, %v", out, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "guests are turned off") {
+				t.Errorf("join set = %v, want the server's %s and its reason", err, tt.want)
+			}
+			if after, _ := e.mustRun(t, e.operatorToken, "", "admin", "join", "status"); after != before {
+				t.Errorf("a refused change changed the settings: %q -> %q", before, after)
+			}
+		})
+	}
 }
 
 // A wrong proof is refused, and the command it guarded does nothing.
@@ -615,24 +675,26 @@ func TestDeviceLinks(t *testing.T) {
 	e.assertNoSecrets(t, []string{notes, out}, memberPassword, strings.TrimSpace(link))
 }
 
-// An invite that admits guests and accounts: both entry points take its code
-// on standard input, never as an argument, and an account is made through
-// the v2 route with its password.
+// An invite: join account takes its code on standard input, never as an
+// argument, and makes an account through the v2 route with its password.
+// Guests are removed for now (issue #1005): an invite that would admit them
+// is refused with the server's answer.
 func TestJoinThroughInvite(t *testing.T) {
 	e := newOnboardEnv(t)
 	e.openJoining(t)
-	link, _ := e.mustRun(t, e.operatorToken, "", "admin", "invite", "create", "--open", "--channel", "lobby", "--expires", "1h", "--join-as", "both")
-	out, _ := e.mustRun(t, "", link, "join", "guest", "--invite")
-	if !strings.HasPrefix(out, "joined "+e.url+" as guest-") {
-		t.Errorf("join guest --invite = %q", out)
+	for _, mode := range []string{"both", "guest"} {
+		if _, _, err := e.run(t, e.operatorToken, "", "admin", "invite", "create", "--open", "--channel", "lobby", "--expires", "1h", "--join-as", mode); err == nil ||
+			!strings.Contains(err.Error(), schema.ErrorCodeJoinPolicyConflict) {
+			t.Errorf("invite create --join-as %s = %v, want the server's %s", mode, err, schema.ErrorCodeJoinPolicyConflict)
+		}
 	}
-	e.mustRun(t, "", "", "end-visit")
-	out, _ = e.mustRun(t, "", link+memberPassword+"\n", "join", "account", "frank", "--invite")
+	link, _ := e.mustRun(t, e.operatorToken, "", "admin", "invite", "create", "--open", "--channel", "lobby", "--expires", "1h")
+	out, _ := e.mustRun(t, "", link+memberPassword+"\n", "join", "account", "frank", "--invite")
 	if !strings.HasPrefix(out, "created account frank (id ") {
 		t.Errorf("join account --invite = %q", out)
 	}
 	list, _ := e.mustRun(t, e.operatorToken, "", "admin", "invite", "list")
-	if !strings.Contains(list, " uses 2 ") {
+	if !strings.Contains(list, " uses 1 ") {
 		t.Errorf("the invite's uses = %q", list)
 	}
 	e.assertNoSecrets(t, []string{out, list}, strings.TrimSpace(link), memberPassword)
@@ -654,8 +716,8 @@ func TestSecretArgumentsRefused(t *testing.T) {
 		{"password after the switch", []string{"login", "--password", password}, password},
 		{"a code flag", []string{"login", "--password", "--code", "123456"}, "123456"},
 		{"a token flag", []string{"login", "--token", fakeToken}, fakeToken},
-		{"an invite code argument", []string{"join", "guest", inv}, inv},
-		{"an invite code flag value", []string{"join", "guest", "--invite=" + inv}, inv},
+		{"an invite code argument", []string{"join", "account", "bob", inv}, inv},
+		{"an invite code flag value", []string{"join", "account", "bob", "--invite=" + inv}, inv},
 		{"an invite link argument", []string{"join", "account", "bob", "https://x.example/app/#/invite/" + inv}, inv},
 		{"a password flag on join", []string{"join", "account", "bob", "--password", password}, password},
 		{"a permit argument", []string{"account", "create", "bob", "--permit", sil}, sil},
@@ -704,7 +766,6 @@ func TestSecretsNeedHTTPS(t *testing.T) {
 	tests := [][]string{
 		{"login", "--password", "--name", "bob"},
 		{"login", "--link"},
-		{"join", "guest"},
 		{"join", "account", "bob"},
 		{"account", "create", "bob"},
 		{"password", "set"},

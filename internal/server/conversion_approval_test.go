@@ -41,8 +41,8 @@ func TestConvertedMemberDecidesOnlyOnceGrantedFullChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.mustPutJoin(t, openBoth("general"))
-	g := mustJoined(t, secureDo(t, f, "POST", "/v1/join/guest", "", `{"label":"Pat"}`))
+	f.mustPutJoin(t, openAccounts("general"))
+	g := f.seedGuest(t, "Pat")
 	id := g.Principal.ID
 	canDecide := func(stage string) {
 		t.Helper()

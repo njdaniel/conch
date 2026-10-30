@@ -185,8 +185,32 @@ func (s *Server) admitGuest(key string, admit func(peers []int64) (store.Admitte
 	return g, err
 }
 
+// guestsRemoved is the owner's decision of 2026-10-30 (issue #1005): guests
+// are removed for now, turned off and hidden but not deleted. No route
+// starts a visit (403 guests_disabled), none makes an entry point that
+// admits one (409 join_policy_conflict), and no front door or preview
+// offers one; the store turns off any stored setting that admitted guests
+// when it is opened. What a visit already live needs stays: End visit, the
+// operators' end, the guest list and conversion. A later issue brings guests
+// back on top of ADR-013.
+const guestsRemoved = true
+
 func writeGuestsDisabled(w http.ResponseWriter) {
 	writeError(w, http.StatusForbidden, schema.ErrorCodeGuestsDisabled, "guests cannot join here now")
+}
+
+// writeGuestsRemoved answers a route that would start a visit: guests are
+// removed for now (issue #1005). Nothing about the request is read first, so
+// the answer says nothing about a code, a label or the policy.
+func writeGuestsRemoved(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, schema.ErrorCodeGuestsDisabled, "guests are turned off on this server for now")
+}
+
+// writeGuestsRemovedConflict answers a request for an entry point that
+// would admit guests (issue #1005): 409 join_policy_conflict, as a settings
+// change the server cannot accept is.
+func writeGuestsRemovedConflict(w http.ResponseWriter, reason string) {
+	writeError(w, http.StatusConflict, schema.ErrorCodeJoinPolicyConflict, reason)
 }
 
 // writeGuestsFull is 429 with no Retry-After: visits end on their own, at no
@@ -231,6 +255,9 @@ func (s *Server) handleJoinInfo(w http.ResponseWriter, r *http.Request) {
 		}
 		info.Join = store.AddressJoinOptions(set, len(set.OpenChannels), live, addrLive)
 		info.Voice = set.JoinVoice
+		if guestsRemoved {
+			info.Join.Guest, info.Join.GuestsFull = false, false
+		}
 	}
 	writeJSON(w, http.StatusOK, info)
 }
@@ -241,8 +268,15 @@ func (s *Server) handleJoinInfo(w http.ResponseWriter, r *http.Request) {
 // server-wide limit last and given back when the store refuses. The store
 // decides the rest in the transaction that starts the visit, so a stale
 // front door admits nobody the policy now refuses.
+//
+// Guests are removed for now (issue #1005): it answers 403 guests_disabled
+// before anything else, and starts no visit.
 func (s *Server) handleJoinGuest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	if guestsRemoved {
+		writeGuestsRemoved(w)
+		return
+	}
 	if !s.cfg.authRequired() {
 		writeAccountsRequireAuth(w)
 		return
@@ -298,8 +332,16 @@ func (s *Server) handleJoinGuest(w http.ResponseWriter, r *http.Request) {
 // authentication: Join as guest through an invite. It is redemption's order
 // and limits: a malformed code is the same 404 as any invalid one, a bad
 // label a 400 that says nothing about the code.
+//
+// Guests are removed for now (issue #1005): it answers 403 guests_disabled
+// before the body is read, so it says nothing about any code, and neither
+// starts a visit nor spends a use.
 func (s *Server) handleRedeemInviteGuest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	if guestsRemoved {
+		writeGuestsRemoved(w)
+		return
+	}
 	if !s.cfg.authRequired() {
 		writeAccountsRequireAuth(w)
 		return
@@ -602,6 +644,8 @@ func (s *Server) handlePutJoinSettings(w http.ResponseWriter, r *http.Request) {
 	if !decodeBoundedBody(w, r, &req, joinSettingsBodyMaxBytes) {
 		return
 	}
+	// Guests are removed for now (issue #1005): the store refuses
+	// guests_enabled true and the guest modes as a conflict, 409.
 	st, err := s.store.PutJoinSettings(ctx, auditActor(ctx), caller.ID, req)
 	var refused *store.JoinSettingsError
 	switch {

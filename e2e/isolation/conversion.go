@@ -78,15 +78,15 @@ func (w *world) converted(g *member, name string, resp schema.ConvertGuestRespon
 	return m, nil
 }
 
-// conversionNeedsPermit: at a guest-only address a guest cannot create an
-// account by itself (design §9.2), and can with the operator's permit, made
-// for it by name; the permit makes nothing else.
+// conversionNeedsPermit: at an address that offers no account a guest
+// cannot create one by itself (design §9.2), and can with the operator's
+// permit, made for it by name; the permit makes nothing else.
 func (w *world) conversionNeedsPermit() error {
 	g, err := w.joinGuest("Lee", nil)
 	if err != nil {
 		return err
 	}
-	if err := w.convertRefused(g, answer{http.StatusForbidden, schema.ErrorCodeConversionNotAllowed}, "at a guest-only address"); err != nil {
+	if err := w.convertRefused(g, answer{http.StatusForbidden, schema.ErrorCodeConversionNotAllowed}, "at an address closed to accounts"); err != nil {
 		return err
 	}
 	var permit schema.CreateSignInLinkResponseV1

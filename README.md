@@ -998,7 +998,7 @@ What the routes answer:
 
 | Route | Who | Success | Refusals |
 | --- | --- | --- | --- |
-| `POST /v1/invites` | people (an agent gets `403 human_required`) | `201` with the invite and its code, `Cache-Control: no-store` | `400 invalid_request`; `403 invite_not_allowed` (may not make this kind), `invite_grant_exceeds_inviter`, `invite_allowance_exceeded`; `404 channel_not_found` (an operator naming no channel); `503 invites_paused`; `429 rate_limited` |
+| `POST /v1/invites` | people (an agent gets `403 human_required`) | `201` with the invite and its code, `Cache-Control: no-store` | `400 invalid_request`; `403 invite_not_allowed` (may not make this kind), `invite_grant_exceeds_inviter`, `invite_allowance_exceeded`; `404 channel_not_found` (an operator naming no channel); `409 join_policy_conflict` (`join_as` `guest` or `both`: guests are turned off for now); `503 invites_paused`; `429 rate_limited` |
 | `GET /v1/invites` | people | `200`, newest first: every invite for an operator, the caller's own for anyone else. `?kind=personal\|open`, `?state=open\|used\|expired\|closed` and, for an operator, `?created_by=<id>` narrow it | `400 invalid_request` for a filter value it does not know |
 | `DELETE /v1/invites/{id}` | the invite's maker (or an operator) | `204`, also for one already closed | `404 invite_not_found`, the same for someone else's invite as for no invite |
 | `POST /v1/invites/preview` | anyone | `200` | `404 invite_invalid`; `503 invites_paused`; `429 rate_limited` |
@@ -1021,6 +1021,15 @@ Each is a bucket that refills evenly, and failed attempts count the same as succ
 Anyone holding a valid code can learn whether a name is taken, from the `409`, within the redeem limit, and without using the invite up (through v2, five such answers an hour per address, then `429`). A link that leaks lets whoever finds it test names that way, so close a leaked link.
 
 A password is up to 128 characters (normalized to NFC first) and may be short, but not empty: any characters, spaces welcome; it may not be on the bundled list of common passwords, be one short run repeated, or contain the account's name. It is stored only as an Argon2id hash (64 MiB, 3 passes) and is in no log, audit row or error.
+
+### Joining and guests: guests are turned off for now
+
+Guest visits (ADR-009) are turned off for now (#1005). They will come back later, on top of ADR-013. Nothing was deleted: the guest tables, the visits already live and the guest attribution of past messages are kept.
+
+- **No new guest, by any route.** `POST /v1/join/guest` and `POST /v1/invites/redeem-guest` always answer `403 guests_disabled`. They read nothing first, and spend no invite use.
+- **No new way in for guests.** `PUT /v1/join/settings` refuses `guests_enabled: true` and the `open_joining` modes `guest` and `both` with `409 join_policy_conflict`; `account` and `off` work as before. `POST /v1/invites` refuses `join_as` `guest` or `both` the same way, so an invite makes accounts only. `conch admin join set` and `conch admin invite create` pass that answer on.
+- **A server upgraded with guests on.** At start the server turns its stored settings to guests off. A bare address open to `both` is then open to accounts only, and a `guest`-only one is off. This is audited once as `join_settings_changed` by `system`, with `reason=guests_removed`. Starting again changes nothing. An invite made earlier to admit guests still makes accounts if it admitted them.
+- **Visits already live** last until their bounds, at most a day. A guest can still end the visit or create an account, and an operator can still list visits and end them (`GET /v1/guests`, `POST /v1/guests/{id}/end`, `POST /v1/guests/end`, `conch admin guest list|end|end-all`). The front door (`GET /v1/join`) and an invite's preview never offer a visit.
 
 ### Signing in with a password
 

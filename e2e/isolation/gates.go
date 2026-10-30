@@ -19,6 +19,12 @@ import (
 // yes: that is the stale page of §9.1. The steps run in order; each says the
 // settings it changes, and the last puts the plaza back as the cohort found
 // it.
+//
+// Guests are removed for now (issue #1005): under every step the guest
+// entry routes refuse with guests_disabled, no front door or preview offers
+// a visit, and neither the settings nor an invite can be made to admit one
+// (409 join_policy_conflict). The visits already live, started beside the
+// server (seed.go), are what the steps' checks act on.
 
 // tryEntry is one attempt at an entry point.
 type tryEntry struct {
@@ -63,16 +69,20 @@ func tryInviteGuest(mode schema.InviteJoinMode, want answer) tryEntry {
 	}}
 }
 
-// tryPersonalGuest has the operator make a personal invite to the plaza for
-// a guest, and redeems it as one: §9.1 names personal invites beside open
-// links.
+// tryPersonalGuest has the operator try to make a personal invite to the
+// plaza for a guest: §9.1 names personal invites beside open links, and
+// none may admit a guest now.
 func tryPersonalGuest(want answer) tryEntry {
-	return tryEntry{what: "joins as a guest through a personal invite for a guest", want: want, do: func(w *world, from api) (int, []byte, error) {
-		inv, err := w.invite(w.op, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{w.p.channel}, JoinAs: schema.InviteJoinGuest})
-		if err != nil {
-			return 0, nil, err
-		}
-		return w.entry(from, http.MethodPost, "/v1/invites/redeem-guest", schema.RedeemInviteGuestRequestV1{Code: inv.Code, Label: "Lee"})
+	return tryEntry{what: "is made a personal invite for a guest by the operator", want: want, do: func(w *world, _ api) (int, []byte, error) {
+		return w.op.do(http.MethodPost, "/v1/invites", schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{w.p.channel}, JoinAs: schema.InviteJoinGuest})
+	}}
+}
+
+// trySettings has the operator try a settings change that would let guests
+// in.
+func trySettings(what string, req schema.PutJoinSettingsRequestV1, want answer) tryEntry {
+	return tryEntry{what: "is let in by the operator, who " + what, want: want, do: func(w *world, _ api) (int, []byte, error) {
+		return w.op.do(http.MethodPut, "/v1/join/settings", req)
 	}}
 }
 
@@ -112,94 +122,63 @@ var (
 	joiningClosed  = answer{http.StatusForbidden, schema.ErrorCodeJoiningClosed}
 	joiningPaused  = answer{http.StatusForbidden, schema.ErrorCodeJoiningPaused}
 	invitesPaused  = answer{http.StatusServiceUnavailable, schema.ErrorCodeInvitesPaused}
-	guestsFull     = answer{http.StatusTooManyRequests, schema.ErrorCodeGuestsFull}
+	policyConflict = answer{http.StatusConflict, schema.ErrorCodeJoinPolicyConflict}
 )
 
 // gates is the steps, in order.
 func gates() []gate {
 	yes, no := true, false
 	return []gate{
-		{what: "the address open to guests and accounts", set: settings(schema.PutJoinSettingsRequestV1{GuestsEnabled: &yes, OpenJoining: ptr(schema.OpenJoiningBoth)}),
-			front: schema.JoinOptionsV1{Guest: true, Account: true},
-			tries: []tryEntry{tryPreview(schema.InviteJoinBoth, schema.JoinOptionsV1{Guest: true, Account: true})}},
-		// The front door said yes a moment ago; the page that read it is stale.
-		{what: "guests turned off, accounts still open", set: settings(schema.PutJoinSettingsRequestV1{GuestsEnabled: &no}),
+		// Guests stay off, whatever is asked; the visits already live stay.
+		{what: "guests off, accounts open", set: settings(schema.PutJoinSettingsRequestV1{GuestsEnabled: &no}),
 			front: schema.JoinOptionsV1{Account: true},
-			tries: []tryEntry{tryGuest(guestsDisabled), tryInviteGuest(schema.InviteJoinBoth, guestsDisabled), tryPersonalGuest(guestsDisabled),
-				tryPreview(schema.InviteJoinBoth, schema.JoinOptionsV1{Account: true}), tryAccount(answer{}), tryInviteAccount(schema.InviteJoinBoth, answer{})},
+			tries: []tryEntry{tryGuest(guestsDisabled), tryInviteGuest(schema.InviteJoinBoth, guestsDisabled), tryInviteGuest(schema.InviteJoinGuest, guestsDisabled),
+				tryPersonalGuest(policyConflict),
+				trySettings("turns guests on", schema.PutJoinSettingsRequestV1{GuestsEnabled: &yes}, policyConflict),
+				trySettings("makes the address guest-only", schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningGuest)}, policyConflict),
+				trySettings("opens the address to guests and accounts", schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningBoth)}, policyConflict),
+				tryPreview(schema.InviteJoinBoth, schema.JoinOptionsV1{Account: true}), tryPreview(schema.InviteJoinGuest, schema.JoinOptionsV1{}),
+				tryAccount(answer{}), tryInviteAccount(schema.InviteJoinBoth, answer{})},
 			check: guestsStay},
-		{what: "the address guest-only", set: settings(schema.PutJoinSettingsRequestV1{GuestsEnabled: &yes, OpenJoining: ptr(schema.OpenJoiningGuest)}),
-			front: schema.JoinOptionsV1{Guest: true},
-			tries: []tryEntry{tryAccount(joiningClosed), tryGuest(answer{})},
-			check: func(w *world, _ schema.JoinSettingsResponseV1) error { return w.conversionNeedsPermit() }},
 		{what: "the address closed, invites open", set: settings(schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningOff)}),
 			front: schema.JoinOptionsV1{},
-			tries: []tryEntry{tryGuest(guestsDisabled), tryAccount(joiningClosed), tryInviteGuest(schema.InviteJoinGuest, answer{})}},
-		{what: "each invite's mode", set: settings(schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningBoth)}),
-			front: schema.JoinOptionsV1{Guest: true, Account: true},
+			tries: []tryEntry{tryGuest(guestsDisabled), tryAccount(joiningClosed), tryInviteGuest(schema.InviteJoinGuest, guestsDisabled)},
+			check: func(w *world, _ schema.JoinSettingsResponseV1) error { return w.conversionNeedsPermit() }},
+		{what: "each invite's mode", set: settings(schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningAccount)}),
+			front: schema.JoinOptionsV1{Account: true},
 			tries: []tryEntry{tryInviteAccount(schema.InviteJoinGuest, joiningClosed), tryInviteGuest(schema.InviteJoinAccount, guestsDisabled),
-				tryPreview(schema.InviteJoinGuest, schema.JoinOptionsV1{Guest: true}), tryPreview(schema.InviteJoinAccount, schema.JoinOptionsV1{Account: true}),
-				tryPreview(schema.InviteJoinBoth, schema.JoinOptionsV1{Guest: true, Account: true}),
-				// With guests on, a personal invite for a guest admits one: so
-				// its refusal while guests are off is the switch's doing.
-				tryPersonalGuest(answer{})}},
+				tryPreview(schema.InviteJoinGuest, schema.JoinOptionsV1{}), tryPreview(schema.InviteJoinAccount, schema.JoinOptionsV1{Account: true}),
+				tryPreview(schema.InviteJoinBoth, schema.JoinOptionsV1{Account: true})}},
 		// Pausing joining pauses the bare address and the conversion of its
 		// guests, not invites.
 		{what: "joining paused", set: settings(schema.PutJoinSettingsRequestV1{JoiningPaused: &yes}),
 			front: schema.JoinOptionsV1{Paused: true},
-			tries: []tryEntry{tryGuest(joiningPaused), tryAccount(joiningPaused), tryInviteGuest(schema.InviteJoinBoth, answer{})},
+			tries: []tryEntry{tryGuest(guestsDisabled), tryAccount(joiningPaused), tryInviteGuest(schema.InviteJoinBoth, guestsDisabled),
+				tryInviteAccount(schema.InviteJoinBoth, answer{})},
 			check: func(w *world, _ schema.JoinSettingsResponseV1) error {
 				return w.convertRefused(w.p.sam, joiningPaused, "while joining is paused")
 			}},
 		{what: "invites paused, joining resumed", set: settings(schema.PutJoinSettingsRequestV1{JoiningPaused: &no}), invitesPaused: &yes,
-			front: schema.JoinOptionsV1{Guest: true, Account: true},
-			tries: []tryEntry{tryInviteGuest(schema.InviteJoinBoth, invitesPaused), tryInviteAccount(schema.InviteJoinBoth, invitesPaused), tryGuest(answer{})},
+			front: schema.JoinOptionsV1{Account: true},
+			tries: []tryEntry{tryInviteGuest(schema.InviteJoinBoth, guestsDisabled), tryInviteAccount(schema.InviteJoinBoth, invitesPaused), tryGuest(guestsDisabled)},
 			check: func(w *world, _ schema.JoinSettingsResponseV1) error {
 				return w.convertRefused(w.p.ola, invitesPaused, "of a guest who came by invite, while invites are paused")
 			}},
-		// The cap is every live visit, from the address and through invites.
-		// It is set below the cohort's four, so the expiring visits running
-		// out meanwhile cannot open a place.
-		{what: "the cap reached", invitesPaused: &no, set: settings(schema.PutJoinSettingsRequestV1{MaxGuests: ptr(int64(1))}),
-			front: schema.JoinOptionsV1{Account: true, GuestsFull: true},
-			tries: []tryEntry{tryGuest(guestsFull), tryInviteGuest(schema.InviteJoinBoth, guestsFull)}},
-		// The cap per address: Nick's address holds his visit.
-		{what: "one visit per address", set: settings(schema.PutJoinSettingsRequestV1{MaxGuests: ptr(int64(schema.DefaultMaxGuests)), MaxGuestsPerAddress: ptr(int64(1))}),
-			front: schema.JoinOptionsV1{Guest: true, Account: true},
-			tries: []tryEntry{
-				{what: "joins as a guest from the address of a live visit", want: guestsFull, from: func(w *world) api { return w.newcomerAt(w.p.nick.addr) },
-					do: tryGuest(answer{}).do},
-				{what: "reads the front door from the address of a live visit", from: func(w *world) api { return w.newcomerAt(w.p.nick.addr) },
-					do: func(_ *world, from api) (int, []byte, error) { return from.do(http.MethodGet, "/v1/join", nil) },
-					inspect: func(_ *world, _ *member, body []byte) error {
-						var info schema.JoinInfoV1
-						if err := json.Unmarshal(body, &info); err != nil {
-							return err
-						}
-						if info.Join.Guest || !info.Join.GuestsFull {
-							return fmt.Errorf("the front door at a full address offers %+v", info.Join)
-						}
-						return nil
-					}},
-				tryGuest(answer{})}},
-		// A closed invite admits nobody, as a guest or otherwise.
-		{what: "a closed invite", set: settings(schema.PutJoinSettingsRequestV1{MaxGuestsPerAddress: ptr(int64(schema.DefaultMaxGuestsPerAddress))}),
-			front: schema.JoinOptionsV1{Guest: true, Account: true},
-			tries: []tryEntry{{what: "joins as a guest through an invite the operator closed", want: answer{http.StatusNotFound, schema.ErrorCodeInviteInvalid},
+		// A closed invite admits nobody.
+		{what: "a closed invite", invitesPaused: &no, set: settings(schema.PutJoinSettingsRequestV1{MaxGuests: ptr(int64(schema.DefaultMaxGuests))}),
+			front: schema.JoinOptionsV1{Account: true},
+			tries: []tryEntry{{what: "creates an account through an invite the operator closed", want: answer{http.StatusNotFound, schema.ErrorCodeInviteInvalid},
 				do: func(w *world, from api) (int, []byte, error) {
-					closed, err := w.invite(w.op, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{w.p.channel}, JoinAs: schema.InviteJoinBoth})
+					closed, err := w.invite(w.op, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{w.p.channel}})
 					if err != nil {
 						return 0, nil, err
 					}
 					if err := w.op.call(http.MethodDelete, fmt.Sprintf("/v1/invites/%d", closed.Invite.ID), nil, nil); err != nil {
 						return 0, nil, err
 					}
-					return w.entry(from, http.MethodPost, "/v1/invites/redeem-guest", schema.RedeemInviteGuestRequestV1{Code: closed.Code, Label: "Lee"})
+					return w.entry(from, http.MethodPost, "/v2/invites/redeem", schema.RedeemInviteRequestV2{Code: closed.Code,
+						Name: w.pubName(fmt.Sprintf("joiner-%d", w.addrs)), Password: joinPassword})
 				}}}},
-		// Voice is the address's to give: off, a joiner holds none.
-		{what: "voice off for joiners", set: settings(schema.PutJoinSettingsRequestV1{JoinVoice: &no}),
-			front: schema.JoinOptionsV1{Guest: true, Account: true},
-			tries: []tryEntry{{what: "joins as a guest and asks for voice", do: tryGuest(answer{}).do, inspect: noVoice}}},
 	}
 }
 
@@ -326,22 +305,4 @@ func guestsStay(w *world, set schema.JoinSettingsResponseV1) error {
 		}
 	}
 	return nil
-}
-
-// noVoice: a guest who joined while voice was off for joiners holds none.
-func noVoice(w *world, g *member, _ []byte) error {
-	var who schema.WhoAmIResponseV1
-	if err := g.api.call(http.MethodGet, "/v1/whoami", nil, &who); err != nil {
-		return err
-	}
-	if who.VoiceAllowed == nil || *who.VoiceAllowed {
-		return fmt.Errorf("a guest who joined with voice off is told voice_allowed %v", who.VoiceAllowed)
-	}
-	status, body, err := g.api.do(http.MethodPost, "/v1/channels/"+pch(w)+"/voice/session", nil)
-	if err != nil {
-		return err
-	}
-	// The caller's voice is looked at before whether the server has any,
-	// so the answer is the same with LiveKit and without.
-	return checkRefusal(result{status: status, body: body}, answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed}, asked{strs: []string{w.p.channel}})
 }
