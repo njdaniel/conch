@@ -1,6 +1,6 @@
 # ADR-014: Fixed roles with configurable permissions
 
-- **Status:** Proposed; accepted only when Nick merges the PR that adds it. Implementation issues stay blocked until then. Revised 2026-10-30 after two rounds of security review on PR #1008; round 2 approved (design §16).
+- **Status:** Accepted — Nick, 2026-10-30, in session: "approve adr for admin". Every open point (O1–O13) takes the design's recommended reading, and the clauses marked with an open point are final as written. Revised the same day after two rounds of security review on PR #1008; round 2 approved (design §16). Effective when the PR that adds it merges.
 - **Date:** 2026-10-30
 - **Decider:** Nick (Tier-H)
 - **Design:** [docs/design/admin-roles.md](../design/admin-roles.md)
