@@ -1,6 +1,6 @@
 # ADR-014: Fixed roles with configurable permissions
 
-- **Status:** Proposed; accepted only when Nick merges the PR that adds it. Implementation issues stay blocked until then. Revised 2026-10-30 after the security review of PR #1008 (design §16).
+- **Status:** Proposed; accepted only when Nick merges the PR that adds it. Implementation issues stay blocked until then. Revised 2026-10-30 after two rounds of security review on PR #1008; round 2 approved (design §16).
 - **Date:** 2026-10-30
 - **Decider:** Nick (Tier-H)
 - **Design:** [docs/design/admin-roles.md](../design/admin-roles.md)
@@ -105,8 +105,8 @@ The security review of the first draft found two things on main that any restric
    - Grants never exceed the granter (ADR-010 D4), and no setting can lock an owner out.
 
 4. **Per-person switches only take away.** A person holds a permission when their role holds it and no brake on them withholds it. The two existing brakes stay and no new one is added:
-   - `voice_allowed` withholds `use_voice` and `share_screen`;
-   - `may_invite` withholds `make_member_links`.
+   - `voice_allowed` withholds `use_voice` and `share_screen`, for members and operators;
+   - `may_invite` withholds `make_member_links` for **members only**. Operators bypass it today and still do: their links follow the operator cell alone, since `may_invite` defaults to 0 and would otherwise take links away from every promoted operator.
 
 5. **Presets set the member column and nothing else.**
    - "Personal server" turns off channel creation, member links and the directory, and keeps voice and share on.
@@ -119,9 +119,11 @@ The security review of the first draft found two things on main that any restric
    - This covers the store's own standing decisions:
      - the channel-manager standing functions;
      - link creation and redemption (channels beyond the maker's own need `manage_channels`; open links and `may_invite` grants need `manage_members`);
-     - `open_channels`;
+     - `open_channels`, judged on the state each write leaves, and re-checked at every address join against each channel's `added_by`, which must be an owner or hold `manage_channels`;
      - sign-in links (`act_as_members`, re-checked at redemption);
-     - closing another's invite.
+     - closing another's invite;
+     - the personal-invite allowance.
+   - Channel names an operator route carries are filtered to the caller's own channels unless it holds `manage_channels`. That covers invites, hooks and the joining settings, each with a count of the rest. Problem reports are redacted on the server, and the redaction list goes only to holders of `manage_channels`. What still reveals private channel names is recorded in design §7.6: the audit export, which is why `read_audit_log` is off by default; a report's own text; and the counts.
    - Checks on a *target's* role (who is protected) and on sign-in strength stay keyed on role, as listed exceptions. A structural test over handlers and store holds that list.
    - One new route class, `accessPermission`, names the route's permission. Today's 35 operator routes split into 21 under `manage_members`, 4 under `act_as_members`, 5 under `manage_channels`, and 5 that stay open to every operator.
    - `PUT /v1/join/settings` needs `change_server_settings`, and `GET /v1/audit` needs `read_audit_log`. The role route stays `accessOwner`.
@@ -159,13 +161,17 @@ The security review of the first draft found two things on main that any restric
 - **ADR-013's unbuilt shapes shrink.** The directory-settings shapes and routes of #978 and #988 are dropped before publication. #992 is superseded by three console issues. The community issues #981, #982, #983, #984, #985, #986, #987 and #988 each gain a line. The design's §11 and §13 list them for the designer amending ADR-013.
 - **Ordering is a safety requirement, twice over:**
   - The store's authority fix (design issue A3a) must merge before the route remap and the permissions PUT (A3b). The remap alone would let a restricted operator keep operator standing in a channel it manages.
+  - **The enforcement of the member permissions on today's routes (A4) ships in the same release as A3b.** Link-making, voice and screen share already have routes, and a release with the PUT but without A4 would let an owner set cells those routes ignore. As a safety net, A3b's PUT refuses any cell whose gates are not all wired yet. A permission with no route yet counts as enforced, so the personal preset still works before the directory exists.
   - A3b must be released no later than the member directory (#983). Otherwise Nick's personal server would show its members to each other before he can turn that off.
+  - From A3a on, every change to `permittedTx`, `Permission.Fixed` or the store's standing functions is approval-path.
 - **New security surface:** the permission class; the remapping of every operator route and of the operator branches in handlers and the store; the permissions PUT; the role-level live effects (voice eviction, share stop, link and sign-in-link suspension). Every implementing PR gets a `security-reviewer` pass.
 - **Approval path.** A3a and A3b change who may set `can_decide` and who writes memberships. Both are labelled `approval-path` and ship the full end-to-end approval test, including a restricted operator-manager refused `can_decide` and an agent add. Nick merges both.
 - **A limit is recorded (O13):**
-  - credentials and hooks an operator issued stay live after `act_as_members` is taken away, because no table records who issued them;
+  - credentials and hooks an operator issued stay live after `act_as_members` is taken away. Demotion and disable leave the same gap today;
+  - neither table has an issuer column, but the audit trail records the issuer of every credential and hook since 2026-10-08 (`credential_created`, `credential_rotated`, `hook_created`);
   - unredeemed links are suspended;
-  - the owner ends credentials and hooks with sign-out-everywhere or a hook revoke.
+  - the PUT that turns `act_as_members` off lists what operators issued to others, from the audit trail, so the owner can revoke it;
+  - a follow-up (design issue A12) adds `issued_by` to both tables, backfilled from the trail, and uses it on demotion and disable too.
 - **Owners skip brakes.** A brake stored on an owner stops counting. The CHANGELOG says so.
 - **What fixed roles cost.** "This one member may also create channels" has no answer short of making them an operator. That is accepted: the matrix stays the truth, and every role keeps ADR-010's protections.
 - **A gap for the personal server**, raised as an open point (O5): a member link lands in the default channels, of which a personal server has none. The design recommends that a link made by a holder of `manage_channels` may name its landing channels, checked again at redemption, without `can_decide` or `manages`. That is a field on `CreateInviteRequestV2`, which must be added before it is published.

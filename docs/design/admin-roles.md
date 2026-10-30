@@ -1,6 +1,6 @@
 # Design: fixed roles with configurable permissions, and the admin console
 
-- **Status:** Proposed 2026-10-30, for Nick's sign-off with [ADR-014](../adr/ADR-014-fixed-roles-configurable-permissions.md). Revised the same day after the security review of PR #1008 (two blocks, five should-fix items and the nits, all adopted; §16 lists what changed). No code, schema file, migration or issue exists for this yet. Nothing here is implemented behaviour.
+- **Status:** Proposed 2026-10-30, for Nick's sign-off with [ADR-014](../adr/ADR-014-fixed-roles-configurable-permissions.md). Revised the same day after two rounds of security review on PR #1008. Round 1 raised two blocks, five should-fix items and nits; round 2 approved with four should-fix items and six nits. All are adopted, and §16 lists what changed. No code, schema file, migration or issue exists for this yet. Nothing here is implemented behaviour.
 - **Facts on main** are as of `53aa569`. The community model ([ADR-013](../adr/ADR-013-one-community-model.md), [community-model.md](community-model.md)) is accepted, but none of its issues (#978–#998) has merged, so none of its shapes is published. Guests are being removed for now (#1005, and an amendment to ADR-013 that another designer is writing); this note leaves them out of the role set and says in §3.4 how a guest role would fit later.
 - **Builds on:** [ADR-010](../adr/ADR-010-delegated-administration.md) and [delegated-administration.md](delegated-administration.md) (owner mark, channel manager, precedence, "grants never exceed the granter", owner protection, the last-owner guard, the route classes); ADR-013 (member channel creation, member links and the `may_invite` brake, per-person voice, open sign-up, default channels, `hide_members`); [ADR-012](../adr/ADR-012-optional-operator-totp.md) (operator TOTP is optional and set on the host).
 - **Owner:** protocol-designer (this note, the shapes in §8); server-engineer, web-engineer and cli-engineer for the issues in §12.
@@ -127,8 +127,8 @@ The catalog is closed: eleven permissions, in this order on the wire and in ever
 | 6 | `share_screen` | Share a screen in voice (needs `use_voice`) | on | on | always | as 1 |
 | 7 | `manage_members` | Administer people and agents without speaking as them: create, rename, disable, enable, remove (hide), list and revoke credentials, close sign-in links, list and revoke hooks, manifests, invite administration (everyone's links, joiners, open links, granting `may_invite` through a link), the brakes, the voice switch, the operator fields of the directory, `GET /v1/principals`, a session's runtime and host | **fixed off** | on | always | operator cell: owner |
 | 8 | `act_as_members` | **Sign in as, and post as, any person or agent who isn't an owner:** issue or rotate a credential for someone else, make a sign-in, reset or enrolment link for someone else, bind a hook to someone. Needs `manage_members`. | **fixed off** | on | always | operator cell: owner |
-| 9 | `manage_channels` | Administer every channel: create without a daily cap, visibility and default, add and remove members, `manages` and `can_decide`, add agents, rename, nets, stop a share, moderation (#698), `?scope=all`, read any channel's member list and every net. Also **name landing channels the holder is not in**: a link's channels, O5's field, `open_channels`. | **fixed off** | on | always | operator cell: owner |
-| 10 | `change_server_settings` | Change server-wide policy: joining and open sign-up, the default link expiry, and the member column of this document. Naming channels in `open_channels` also needs `manage_channels`. | **fixed off** | **off** | always | operator cell: owner |
+| 9 | `manage_channels` | Administer every channel: create without a daily cap, visibility and default, add and remove members, `manages` and `can_decide`, add agents, rename, nets, stop a share, moderation (#698), `?scope=all`, read any channel's member list and every net. Also **name landing channels the holder is not in**: a link's channels, O5's field, `open_channels`. For `open_channels` the test is the *resulting* list, and it is checked again at each address join against whoever added each channel (§7.3). Also **see the names of channels the holder is not in** wherever an operator route carries them: invites, hooks, the joining settings, problem reports (§7.3). | **fixed off** | on | always | operator cell: owner |
+| 10 | `change_server_settings` | Change server-wide policy: joining and open sign-up, the default link expiry, and the member column of this document. A write that leaves the address admitting people also needs `manage_channels` for every listed channel the writer is not in (row 9; §7.3). | **fixed off** | **off** | always | operator cell: owner |
 | 11 | `read_audit_log` | Export the audit trail (`GET /v1/audit`). **The trail names every member and every private channel**, including channels the holder is not in, so granting this reveals them. Recent authentication for anyone but an owner. | **fixed off** | **off** | always | operator cell: owner |
 
 `act_as_members` is split from `manage_members` because it is a different kind of power. On main an operator issues a full credential to any non-owner (`credentials.go`), makes sign-in, reset and enrolment links for any member, and binds hooks that post as any member (`hooks.go`). Each of those lets the operator become that person. `manage_members` keeps the roster, the brakes and removal, which act on people without speaking for them. The console and `conch admin permissions show` carry the plain description: "can sign in as, and post as, any member who isn't an owner". The default is on for operators, so today's behaviour holds.
@@ -139,7 +139,7 @@ With these defaults a server behaves as it does today and as ADR-013 decided:
 - Policy and audit stay owner-only (ADR-010 D2).
 - Members create channels, make links, see the directory and use voice (ADR-013 decisions 2–5).
 
-Rows 1–3 and 4 gate routes that do not exist yet (§2). Until those routes exist, the cells have no effect.
+Rows 1, 2 and 4 gate routes that do not exist yet (§2): channel creation by members (#981) and the member directory (#983). Until those routes exist, the cells have no effect, and each of those issues wires its check as it builds the route. **Rows 3, 5 and 6 gate routes that exist today**: personal invites (`POST /v1/invites`), voice and screen share. A4 wires them, and it ships in the same release as A3b (§12), so no released server lets an owner set a cell it does not enforce.
 
 **The rule for adding a permission later:** its default must reproduce what the server did before it existed, so that an upgrade changes nothing. The new permission is added to the vocabulary (closed, client-tolerant), and no migration is needed, because an absent row reads as the default (§9).
 
@@ -184,6 +184,8 @@ Host settings stay on the host: `CONCHD_OPERATOR_TOTP` (ADR-012), the mode (ADR-
    - The owner holds everything, so nothing an owner writes exceeds the owner.
 5. **No lock-out is possible.** Owners hold every permission whatever the document says, and the last-owner guard is unchanged.
 
+A **preset is expanded into cell changes first**: the member cells it turns on and off, against the column as it stands. The changes are then checked exactly as a `changes` patch would be, so a preset can never pass a check that the same cells sent by hand would fail.
+
 The store checks all five inside the PUT's IMMEDIATE transaction. It checks them against the caller as re-read there (role, mark, brakes, `change_server_settings`) and against the rows as they stand under the lock. `Validate` and the handler check first only so that a refusal comes early.
 
 ## 5. Per-person switches: brakes only
@@ -195,7 +197,9 @@ Only the two brakes that already exist are kept:
 | Brake | Column | Withholds | Set by |
 | --- | --- | --- | --- |
 | Voice switch | `principals.voice_allowed` | `use_voice`, `share_screen` | an operator with `manage_members`, never on an owner (#984's route) |
-| Link brake | `principals.may_invite` | `make_member_links` | an operator with `manage_members`, never on an owner (`PUT /v1/principals/{id}/invite-permission`) |
+| Link brake | `principals.may_invite` | `make_member_links`, **for members only** | an operator with `manage_members`, never on an owner (`PUT /v1/principals/{id}/invite-permission`) |
+
+**The link brake does not apply to operators,** as today: on main an operator "invites by role" (`auth.go` `mayInvite`, `SetMayInvite`), and `may_invite` defaults to 0, so applying it would take links away from every promoted operator. An operator's links are governed by the operator cell of `make_member_links` alone. The voice brake applies to operators, as it does today.
 
 Why this rule:
 
@@ -259,7 +263,7 @@ func permittedTx(ctx context.Context, tx *sql.Tx, principalID int64, p schema.Pe
 1. An agent, a guest, or a disabled or hidden principal: **false**.
 2. An owner: **true**. Brakes are not applied.
 3. A **fixed cell** is decided in code and never read from a row. A member asking for rows 7–11 gets false, and an operator asking for `see_member_directory` gets true. A stored row that contradicts a fixed cell is ignored, and the store never writes one (§9).
-4. Otherwise, the cell for the principal's role (an absent row reads as the catalog default), ANDed with the matching brake for rows 3, 5 and 6, and with the dependencies of §4.4.2: `share_screen` needs `use_voice`, and `act_as_members` needs `manage_members`.
+4. Otherwise, the cell for the principal's role (an absent row reads as the catalog default), ANDed with the matching brake, and with the dependencies of §4.4.2 (`share_screen` needs `use_voice`; `act_as_members` needs `manage_members`). The brakes are: `voice_allowed` for rows 5 and 6, for members and operators; `may_invite` for row 3, **for members only** (§5).
 
 The document is read per request from SQLite, so there is no cache to invalidate. That is the same choice as community-model §13.6: one indexed read of at most twenty rows.
 
@@ -267,7 +271,14 @@ Every write that a permission gates calls `permittedTx` again inside its IMMEDIA
 
 A structural test, in the style of `TestMessageReadsStayInTheVisibilityFunction`, keeps the helper the only door. It covers the handlers **and the store**, because the store makes authorization decisions of its own (`memberActorStandingTx`, `CreateInvite`, `makerStillAllowed`, `CloseInvite`):
 
-- No handler may call `isOperator(caller)`, and no store function may compare an **actor's** `Role` with `RoleOperator`, to decide what the actor may do, except at listed sites. Each listed site carries its reason. The list holds §4.2's two rows (target protection; sign-in strength) and the fixed operator reads of §4.2 (reports, the settings reads).
+- No handler may call `isOperator(caller)`, and no store function may compare an **actor's** role, to decide what the actor may do, except at listed sites. Each listed site carries its reason. The list holds §4.2's two rows (target protection; sign-in strength) and the fixed operator reads of §4.2 (reports, the settings reads).
+- **The test works on the syntax tree and on SQL text, not on a grep.** It parses `internal/server` and `internal/server/store` with `go/ast` and flags:
+  - a comparison with `RoleOperator` or `RoleMember` (`creatorRole == RoleOperator`, `caller.Role != RoleMember` in `channels_rename.go`);
+  - a `switch` on a role value with a `RoleOperator` or `RoleMember` case (`memberActorStandingTx`);
+  - a call to `isOperator`;
+  - a string literal holding SQL that compares `role` with `'operator'` or `'member'`.
+
+  Each flagged site must be in the allowlist, keyed by file and function. The test fails on an allowlisted entry that no longer matches, so the list cannot go stale.
 - `isOwner(caller)` passed as a `forbidOwner` argument is target protection, and is allowed.
 - Every `schema.Permission` value must be named by at least one route or handler check, so there is no dead permission.
 
@@ -363,9 +374,13 @@ Member permissions gate routes anyone authenticated may call, so they are checke
 | `GET /v1/channels/{channel}/nets` seeing every net (`nets.go` `seeAll`) | `manage_channels`; otherwise only the nets the caller is on |
 | `GET /v1/invites` listing everyone's invites (`invites.go`); `DELETE /v1/invites/{id}` closing someone else's (`CloseInvite`) | `manage_members`; otherwise one's own, and someone else's is 404 |
 | A session's `runtime` and `host` (`sessions.go`) | `manage_members`, or the session's own principal |
+| The personal-invite allowance (`store/invites.go`, skipped for an operator by role) and whoami's `invites_remaining` (`auth.go`, omitted for an operator) | `manage_members`: its holder has no allowance and is told no `invites_remaining`; anyone else, a restricted operator included, has the allowance and is told what is left |
+| **Channel names in operator answers**: `InviteV1.channels` in `GET /v1/invites` and its v2 successor; `HookV1.channel` in `GET /v1/hooks`; `JoinSettingsV1.open_channels` in `GET /v1/join/settings` | `manage_channels` sees every name. Anyone else sees only the channels they are in: an invite lists those, plus a new optional count `other_channels`, so it does not seem to grant less than it does; a hook in a channel the caller is not in is left out of the list (it is revoked by a holder of `manage_channels`), with a new optional count `other_hooks` on the list; `open_channels` lists the caller's own, with `other_open_channels`. |
+| **Problem reports** (`GET /v1/reports/{id}`, a fixed operator right) | The redaction list (`redact`) names every channel and net on the server (`store.ProblemReportRedaction`). The server now **applies the redaction itself**: every operator gets the report with channel and net names already replaced, and `redact` is filled only for a holder of `manage_channels`, who files the issue as today. A report's own text is the reporter's words, and stays as written. |
 | **Making a link** (`CreateInvite`, v1 and v2) | Checked by the store in the creation transaction. An **open** (reusable) v1 link needs `manage_members`, and so does **granting `may_invite`** through a link. **Naming a channel the maker is not in**, in v1 `channels` or O5's field, needs `manage_channels`. Without it, the answer is the one a member gets today (`ErrInviteGrantExceedsInviter`, "a channel you are not in"), so it reveals nothing. A landing membership never carries `can_decide` or `manages`. |
 | **Redeeming a link** (`makerStillAllowed`, `effectiveChannelsTx`, the `may_invite` grant) | Re-checked by the store in the redemption transaction, against the maker as they are then. The link needs its own permission (§7.5). Channels the maker is not in are kept only while the maker holds `manage_channels`; otherwise they are dropped (audited in `dropped_channels`, the existing field), and the link is `invite_invalid` when none is left. `may_invite` is granted only while the maker holds `manage_members`. |
-| `PUT /v1/join/settings` with `open_channels` (`pkg/schema/guest.go`) | `change_server_settings` for the route, **and** `manage_channels` for the channels, checked in the store transaction. Without it, 403 `permission_denied` naming `manage_channels`. The setting has no maker, so nothing is re-checked at an address join: it is server policy until someone changes it. |
+| `PUT /v1/join/settings` (`pkg/schema/guest.go`), checked on the **resulting** state | `change_server_settings` for the route. In the store transaction, the settings as they will be after the write are checked: **if they leave the address admitting people** (any mode other than `off`, not paused), the writer needs `manage_channels` for every channel in the resulting `open_channels` that the writer is not in, whether or not this write touched the list. So an operator holding only `change_server_settings` cannot open the address over an owner's list of private channels. Without it, 403 `permission_denied` naming `manage_channels`. An owner's write sets `added_by` to the owner on every listed channel it leaves listed. |
+| An address join (`JoinAsAccount`, which today reads `open_channels` with no re-check) | Each listed channel has a maker, `open_channels.added_by`. In the join's transaction, a channel is kept only while its `added_by` is an owner or holds `manage_channels`. Otherwise it is dropped for that join and audited (`join_channel_dropped`, with the channel id and the reason `permission`). If none is left, the join answers as a closed address does. So an operator that lists P, is then demoted or restricted, and signs up through the address does not land in P. A row with no `added_by` (from before migration 31's column was filled) counts as an owner's, since only owners could write the list then (`accessOwner`). |
 | Sign-in, reset and enrolment links at redemption (`makerIsOperatorTx`, `usableSignInLinkTx`) | The maker still holds `act_as_members` (§7.5). A device link, a member's own, is unchanged. |
 
 ### 7.4 The refusal
@@ -391,7 +406,7 @@ Rights are read per request, so most changes take effect on the next request wit
 | `see_member_directory` changed for members | The `conch.directory_changed.v1` signal (community-model §13.6) goes to every member's and operator's events socket, as "the setting toggled" does there. |
 | `make_member_links` off for a role | Open member links of affected makers are **suspended, not closed**. Redemption and preview refuse them (`invite_invalid`) while the maker lacks the permission, and they work again when it comes back. Closing them, as the per-person brake does, would make an experiment with a preset permanent (O4). The per-person brake keeps its close-on-off rule (ADR-013). |
 | `manage_members` or `manage_channels` off for operators | Their outstanding links are judged again at redemption (§7.3). Without `manage_members`, open links and `may_invite` grants are suspended; without `manage_channels`, channels the maker is not in are dropped. Nothing is closed. |
-| `act_as_members` off for operators | Their unredeemed sign-in, reset and enrolment links are **suspended**: while the maker lacks the permission, redemption and preview refuse them with the existing answer for an unusable link. **Limit:** credentials and hooks already issued stay live. They belong to their target, and neither table records who issued them, so there is nothing to suspend them by. The audit trail names the issuer, and the owner ends them with sign-out-everywhere or a hook revoke (O13). |
+| `act_as_members` off for operators | Their unredeemed sign-in, reset and enrolment links are **suspended**: while the maker lacks the permission, redemption and preview refuse them with the existing answer for an unusable link. **Limit:** credentials and hooks already issued stay live (O13). They belong to their target, and neither table has an issuer column yet. The audit trail does name the issuer (`credential_created`, `credential_rotated`, `hook_created` record the actor and the id, since e48b6e3, 2026-10-08). So **the PUT that turns `act_as_members` off answers with a list** (`issued_to_others`, §8.2) of the live credentials and hooks that operators issued to principals other than themselves, joined from those rows, and the console shows it with Sign out everywhere and Revoke beside each. |
 
 Raising a permission revokes nothing. ADR-010 D1 revokes a target's credentials when the owner mark is set, so that no token another operator issued becomes owner-grade. Raising an operator cell raises every operator equally, including the operator who issued any given token, so no token ends up above its issuer.
 
@@ -410,9 +425,9 @@ Lowering a permission revokes nothing either. The next request is refused.
 | Can a racing request use a permission that was just removed? | No. Every gated write re-checks inside its transaction. A read that was already answered is answered, as with any read. |
 | Can an operator without `manage_members` act on people through another route? | No. Each such route is mapped in §7.2 or §7.3, and the structural test of §7.1 catches a new one. |
 | Can an operator without `manage_channels` gain operator standing in a channel it manages? | No, once §7.2.1 lands. On main, the store's standing functions decide by role, so the guard change alone would let such an operator set `can_decide` and `manages` and add agents in any channel it creates. Every standing function reads `permittedTx(manage_channels)`, and an isolation row and an approval end-to-end case pin the refusal (§7.7). |
-| Can an operator without `manage_channels` land an account in a private channel it is not in? | No, once §7.3's link and joining rows land. On main, `CreateInvite` skips the "a channel you are not in" check for any operator, and `open_channels` can name any channel. Both read `manage_channels`, at creation and, for links, at redemption. |
-| Can an operator without `manage_channels` learn about private channels it is not in? | Not through the routes this note maps, which give the uniform 404: the manager class, a channel's member list, the nets list, `?scope=all`. **But `read_audit_log` reveals them**, because the trail names every channel and every member. That is why it is off by default and needs recent authentication. |
-| Can an operator without `act_as_members` become someone? | Not through any new credential, link or hook. Those it issued earlier stay live (§7.5, O13). |
+| Can an operator without `manage_channels` land an account in a private channel it is not in? | No, once §7.3's link and joining rows land. On main, `CreateInvite` skips the "a channel you are not in" check for any operator, and `open_channels` can name any channel. Both read `manage_channels`: a link at creation and at redemption; `open_channels` on the state each write leaves, and at each address join against the channel's `added_by`. |
+| Can an operator without `manage_channels` learn private channel names it is not in? | Not through the routes and fields this note maps: the manager class, a channel's member list, the nets list and `?scope=all` answer the uniform 404; invites, hooks and the joining settings show only the caller's channels plus counts; problem reports come with names already redacted (§7.3). **The exposures that remain:** (1) the audit export, which names every channel and member, so `read_audit_log` is off by default and needs recent authentication; (2) a problem report's own text, which may name a channel because its reporter did; (3) the counts (`other_channels`, `other_hooks`, `other_open_channels`), which say that channels the caller cannot see exist, not which. Before the §7.3 rows land, reports, invites, hooks and the joining settings all expose names to every operator, as on main today. |
+| Can an operator without `act_as_members` become someone? | Not through any new credential, link or hook. Those it issued earlier stay live, and the PUT lists them for the owner (§7.5, O13). |
 | Can `manage_members` alone be used to become someone? | No. It lists and revokes credentials and hooks, closes links and removes people. Everything that hands over a way to speak as someone is `act_as_members`. |
 
 ### 7.7 The isolation matrix and the coverage test
@@ -522,7 +537,7 @@ const (
 )
 ```
 
-All four vocabularies go into `Vocabularies` (`vocabularies.go`), so `go generate ./pkg/schema` emits their TypeScript unions.
+These four, and `IssuedKind` (`credential`, `hook`; §8.2), go into `Vocabularies` (`vocabularies.go`), so `go generate ./pkg/schema` emits their TypeScript unions.
 
 ### 8.2 The document and its routes
 
@@ -556,6 +571,22 @@ type PermissionsResponseV1 struct {
 	Editable  []PermissionRole      `json:"editable"`
 	Warnings  []PermissionsWarning  `json:"warnings"`
 	UpdatedAt Timestamp             `json:"updated_at"`
+	// IssuedToOthers is filled only in the answer to a PUT that turned
+	// act_as_members off for operators: the live credentials and hooks
+	// operators issued to principals other than themselves, from the audit
+	// trail (design §7.5, O13). Never null when present.
+	IssuedToOthers []IssuedByOperatorV1 `json:"issued_to_others,omitempty"`
+}
+
+// IssuedByOperatorV1 is one live credential or hook an operator issued to
+// someone else. Kind is "credential" or "hook" (closed vocabulary
+// IssuedKind). The ids are what the revoke routes take.
+type IssuedByOperatorV1 struct {
+	Kind        IssuedKind `json:"kind"`
+	ID          int64      `json:"id"`
+	PrincipalID int64      `json:"principal_id"`
+	IssuedBy    int64      `json:"issued_by"`
+	IssuedAt    Timestamp  `json:"issued_at"`
 }
 
 // PermissionChangeV1 sets one cell.
@@ -632,6 +663,7 @@ This is an additive optional field. MCP tool errors never carry it, since agents
 | `access_denied` (existing) | the caller | the route | gains `permission=<name>` in its detail for a permission refusal |
 | `invite_suspended`, `invite_resumed` | `system` | the invite | Written when a role change suspends or resumes a maker's links (§7.5), with `reason=permission`. One row per link. |
 | `sign_in_link_suspended`, `sign_in_link_resumed` | `system` | the link | The same, for sign-in, reset and enrolment links when `act_as_members` changes |
+| `join_channel_dropped` | `system` | the channel | An address join left out a listed channel whose `added_by` no longer holds `manage_channels` (§7.3) |
 | `member_add_refused`, `access_denied` (existing) | the caller | the channel | A restricted operator-manager refused operator standing in a channel it manages (§7.2.1), with `permission=manage_channels` |
 
 ### 8.6 Live refresh
@@ -667,6 +699,10 @@ A client without an events socket (the CLI) reads `whoami` the next time it need
 | `WhoAmIResponseV1.permissions`, `.permissions_revision` | additive optional | no |
 | `schema.Error.permission` | additive optional | no |
 | `permission_denied`, `permissions_stale`, `permissions_conflict` | additive codes | no |
+| `IssuedByOperatorV1`, `IssuedKind`, `PermissionsResponseV1.issued_to_others` | new type, vocabulary and optional field | no |
+| `InviteV1.other_channels`, `ListHooksResponseV1.other_hooks`, `JoinSettingsV1.other_open_channels` | additive optional counts on published shapes | no |
+| Invites, hooks and `open_channels` filtered to the caller's channels without `manage_channels`; reports returned already redacted, `redact` only for `manage_channels` | behaviour on published routes, only after an owner removes `manage_channels` from operators | yes, ADR-014 |
+| `JoinAsAccount` drops a listed channel whose `added_by` lacks `manage_channels` | behaviour on a published route, only after a lister is demoted or restricted | yes, ADR-014 |
 | `PUT /v1/join/settings` and `GET /v1/audit` move from `accessOwner` to permission classes | behaviour on a published route. Unchanged under the defaults: only owners pass | **yes, as part of ADR-014** (it amends ADR-010 D2) |
 | An operator without `manage_members`, `act_as_members` or `manage_channels` refused on today's operator routes, links and channel reads | behaviour on published routes, only after an owner removes the permission | yes, ADR-014 |
 | `GET /v1/audit` needs recent authentication for a non-owner holder | behaviour on a published route, only after an owner grants `read_audit_log` | yes, ADR-014 |
@@ -808,11 +844,18 @@ The community issues are all open, so the cheapest path is to land the permissio
 
 Each would be filed to the issue template once ADR-014 is accepted. The labels follow the house rules. Every server slice is `security`. **A3a and A3b are also `approval-path`**, because they change who may set `can_decide` and who writes memberships; each ships the full request → notify → resolve → audit test, and Nick merges them.
 
-1. **A1 — schema: roles and permissions (ADR-014).** Everything in §8, in `pkg/schema`: the four vocabularies (eleven permissions) with `Valid`, `OperatorOnly`, `Fixed` and `Default`; the document, change, request and response types with `Validate`; the preset table; `PermissionsChangedV1`; the whoami fields; `schema.Error.permission`; the three error codes; fixtures in `testdata/`; the `ts.go` and `vocabularies.go` entries; `go generate`; `schema-compat.sh` green with every existing fixture byte-identical. No behaviour. If #978 is still open, it also removes the directory-settings shapes from #978's scope (§11). *Blocked by:* ADR-014.
+1. **A1 — schema: roles and permissions (ADR-014).** Everything in §8, in `pkg/schema`: the five vocabularies (eleven permissions; `IssuedKind`) with `Valid`, `OperatorOnly`, `Fixed` and `Default`; `IssuedByOperatorV1`; the optional counts `other_channels`, `other_hooks` and `other_open_channels`; the document, change, request and response types with `Validate`; the preset table; `PermissionsChangedV1`; the whoami fields; `schema.Error.permission`; the three error codes; fixtures in `testdata/`; the `ts.go` and `vocabularies.go` entries; `go generate`; `schema-compat.sh` green with every existing fixture byte-identical. No behaviour. If #978 is still open, it also removes the directory-settings shapes from #978's scope (§11). *Blocked by:* ADR-014.
 
 2. **A2 — store: `role_permissions`, `permittedTx` and the migration.** The table, the `permissions_revision` row, and `Permitted`/`permittedTx` (agent false; owner true, brakes skipped; fixed cells in code; role cell or default; the brakes and the two dependencies ANDed). The precedence, dependency, fixed-cell and writer checks of §4.4, inside the write transaction. The migration of §9, with the hide-members mapping and `permissions_initialized`. Table-driven tests over every role × permission × brake, including an absent row, an unknown row, a hand-written row contradicting a fixed cell, an owner with a stored brake, and an agent. No caller yet. *Blocked by:* A1.
 
-3. **A3a — store and handlers: actor authority reads permissions, not role.** Every store function that grants an operator wider standing on a write reads `permittedTx` (§7.2.1): the two standing functions, `CreateInvite`, `makerStillAllowed`, `effectiveChannelsTx`, the `may_invite` grant, `CloseInvite`, `CreateSignInLink`, `makerIsOperatorTx`, `SetMayInvite`. Every handler branch of §7.3's table reads `can()`: members.go (both write handlers, the member list and its privileged view), nets.go `seeAll`, invites.go, sessions.go, voice_share.go. Add the structural test of §7.1 over handlers and store, with its allowlist. Under the defaults nothing changes, and no route can change the document yet, so this lands safely alone. The approval e2e test runs unchanged, plus a store-level case: an operator without `manage_channels` who manages a channel is refused `can_decide`, `manages` and an agent add, audited. *Labels:* approval-path, security. *Blocked by:* A2.
+3. **A3a — store and handlers: actor authority reads permissions, not role.** The scope:
+   - Every store function that grants an operator wider standing on a write reads `permittedTx` (§7.2.1): the two standing functions, `CreateInvite`, `makerStillAllowed`, `effectiveChannelsTx`, the `may_invite` grant, the personal-invite allowance, `CloseInvite`, `CreateSignInLink`, `SetMayInvite`.
+   - **`makerIsOperatorTx` is split**: sign-in, reset and enrolment links get `makerMayActAsTx` (`act_as_members`); the conversion-permit callers keep the role check, listed in the allowlist with the note that #1005 retires the permits.
+   - The joining settings: the resulting-state check on `PUT /v1/join/settings`, `added_by` refreshed by owners, and the per-join re-check in `JoinAsAccount` with `join_channel_dropped` (§7.3).
+   - Every handler branch of §7.3's table reads `can()`: members.go (both write handlers, the member list and its privileged view), nets.go `seeAll`, invites.go, sessions.go, voice_share.go, auth.go's `invites_remaining`; the channel-name filters for invites, hooks and `open_channels`, with their counts; problem reports redacted on the server.
+   - The structural test of §7.1 over handlers and store, on the syntax tree and SQL, with its allowlist.
+
+   Under the defaults nothing changes, and no route can change the document yet, so this lands safely alone. The approval e2e test runs unchanged, plus a case that **seeds a `role_permissions` row** taking `manage_channels` from operators: an operator who manages a channel is then refused `can_decide`, `manages` and an agent add, all audited. **From here on, any change to `permittedTx`, `Permission.Fixed` or the standing functions is approval-path.** *Labels:* approval-path, security. *Blocked by:* A2.
 
 4. **A3b — server: the permission class, `GET/PUT /v1/permissions`, whoami, audit, live signal.** The scope:
    - `accessPermission` and `route.perm`; the remapping of §7.2 (21 + 4 + 5 + 5);
@@ -822,6 +865,9 @@ Each would be filed to the issue template once ADR-014 is accepted. The labels f
    - the restricted-operator isolation rows of §7.7 for every remapped route and every §7.3 branch, the operator-manager rows included;
    - the approval e2e case of §7.7 (CLAUDE.md rule 3).
 
+   - **The safety net:** the PUT refuses a change to any cell whose enforcement is not yet built, with 409 `permissions_conflict` and the message "this server does not enforce `<permission>` yet". A list in code, `enforcedPermissions`, holds the permissions whose every existing gate reads `can()`. A permission with no route yet (rows 1, 2, 4) is enforced vacuously and is in the list, so the personal preset can be applied before #981 and #983 exist. Rows 3, 5 and 6 join the list in A4. A test fails if a permission is in the list while one of §7.3's gates for it still reads only the role or the brake.
+   - The PUT answer's `issued_to_others` (§7.5, O13).
+
    This is the issue that makes restriction possible, so it must not merge before A3a. *Labels:* approval-path, security. *Blocked by:* A3a.
 
 5. **A4 — server: member permissions on today's routes, and the live effects.** The scope:
@@ -830,7 +876,9 @@ Each would be filed to the issue template once ADR-014 is accepted. The labels f
    - the live effects of §7.5: role-level voice eviction, share stop, link suspension, sign-in-link suspension on `act_as_members`, with their audit rows;
    - the `conch.directory_changed.v1` send on a directory-cell change, if #988 has landed.
 
-   Tests include a join token minted before a role-level voice change, a live share when `share_screen` goes off, and a sign-in link redeemed after its maker lost `act_as_members`. *Labels:* security. *Blocked by:* A3b, and #984 for the immediate hook (or it carries the hook if it lands first).
+   - adding `make_member_links`, `use_voice` and `share_screen` to `enforcedPermissions`.
+
+   Tests include a join token minted before a role-level voice change, a live share when `share_screen` goes off, and a sign-in link redeemed after its maker lost `act_as_members`. **A4 ships in the same release as A3b**: no tagged release may contain A3b without A4. *Labels:* security. *Blocked by:* A3b, and #984 for the immediate hook (or it carries the hook if it lands first).
 
 6. **A5 — e2e/isolation: the personal-preset phase and the coverage rule.** `TestEveryPermissionRouteHasARestrictedRow` and the preset phase of §7.7, which takes over community-model §13.9's phase when #988 lands. (A3b carries the restricted-operator rows themselves.) *Blocked by:* A3b. It grows with each community slice.
 
@@ -846,10 +894,13 @@ Each would be filed to the issue template once ADR-014 is accepted. The labels f
 
 12. **A11 — docs: running a personal or a group server.** `docs/deploy.md` gets a section per preset (alpha.gankbears.com and chat.gankbears.com as the examples), the CHANGELOG upgrade note (the migration, the alpha ordering of §9, rollback forgetting a preset, and owners skipping brakes), and README's administration paragraph. *Blocked by:* A6–A10.
 
+13. **A12 — store and server: who issued each credential and hook (O13).** `credentials.issued_by` and `hooks.issued_by`, backfilled in the migration from `credential_created`, `credential_rotated` and `hook_created` (left `NULL` where no row exists). `issued_to_others` then reads the columns. Demotion, disable and `act_as_members` off each answer with what the operator issued to others, plus one confirmed revoke-all for the owner. *Labels:* security. *Blocked by:* A3b. Not a release blocker.
+
 **Order and lanes:**
 
 - ADR-014, then A1, A2, A3a, A3b, in that order. A3b must not merge before A3a: the route remap alone opens the hole of §7.2.1.
-- After A3b: A4, A5, A6 and A10 can run in parallel, and A7 follows A6.
+- **A4 must ship in the same release as A3b.** Otherwise an owner could turn off link-making, voice or screen share, and the existing routes would ignore it. A3b's safety net refuses those cells until A4 lands, so a release that broke this rule would refuse the change rather than ignore it. The rule is still the release manager's to hold, since the safety net makes the personal preset fail until A4 is in.
+- After A3b: A4, A5, A6 and A10 can run in parallel, and A7 follows A6. A12 can follow A3b at any time.
 - A8 and A9 follow their community slices. A11 comes last.
 - The community slices #981, #983, #984, #985 and #987 take their one-line changes from §11, and are built after A3a where possible. **A3b must be released no later than #983**, so that a personal server can turn the directory off before it exists.
 
@@ -871,7 +922,7 @@ These are listed for the designer amending those files now. This note edits neit
    - If O5 is accepted, a link made by a holder of `manage_channels` may name the channels it lands in, in place of the defaults. That is a field on `CreateInviteRequestV2` before #978 publishes it, checked at creation and again at redemption.
    - Every "operator" in link creation and redemption becomes a permission: open links and `may_invite` grants need `manage_members`; channels beyond the maker's own need `manage_channels`. A landing membership never carries `can_decide` or `manages`.
 6. **ADR-013 O1 and the §4 row "Turn on open sign-up…":** the class is `change_server_settings` (owners always, operators when granted, default owner-only). The same goes for hide members.
-7. **ADR-013 O5 and community-model §2.6:** channel settings, `?scope=all`, adding agents and setting `manages`/`can_decide` are for operators holding `manage_channels`. An operator without it, in a channel it created, is that channel's manager and nothing more (§7.2.1). The voice switch and the directory's operator fields are for those holding `manage_members`. `open_channels` (Option B) needs `manage_channels` beside the settings permission.
+7. **ADR-013 O5 and community-model §2.6:** channel settings, `?scope=all`, adding agents and setting `manages`/`can_decide` are for operators holding `manage_channels`. An operator without it, in a channel it created, is that channel's manager and nothing more (§7.2.1). The voice switch and the directory's operator fields are for those holding `manage_members`. `open_channels` (Option B) needs `manage_channels` beside the settings permission, judged on the state a write leaves, and each address join re-checks every listed channel's `added_by` (design §7.3). The same filter applies to the default channels that replace it.
 8. **Community-model §4 (the permissions table):** each row that a permission now decides names it, and the header points to ADR-014 for the configurable cells.
 9. **Community-model §9 and §13.11:** the issue table takes §11's changes. I9c is superseded by A6/A8/A9. I14a loses the setting and route. I14b's setting UI moves to A7.
 10. **Community-model §13.9:** the hide-members isolation phase is run as A5's personal-preset phase.
@@ -893,7 +944,10 @@ Each has a recommendation. The design above takes the recommended reading wherev
 - **O10. Who sees the matrix?** *Recommend:* every operator reads it, and only the owner (and an operator with `change_server_settings`, for members) writes it. Members see their own effective list in whoami and Settings, not the configuration.
 - **O11. Preset warnings or refusals** for a default channel or open sign-up on a personal server? *Recommend:* warnings (§6). Either may be deliberate.
 - **O12. The refusal code.** `permission_denied` with an optional `permission` field on `schema.Error`, keeping one existing code per question where one already answers? *Recommend:* yes (§7.4).
-- **O13. Credentials and hooks already issued when `act_as_members` is taken away.** They stay live (§7.5): neither table records an issuer. *Recommend:* accept this for now, and say so in the matrix row ("taking this away does not end credentials and hooks already issued; use Sign out everywhere"). If Nick wants them ended, a later issue adds `issued_by` to both tables, which cannot cover the ones issued before it.
+- **O13. Credentials and hooks already issued when `act_as_members` is taken away.** They stay live (§7.5). Neither table has an issuer column, but the audit trail records one for every credential and hook since e48b6e3 (2026-10-08): `credential_created`, `credential_rotated` and `hook_created` carry the actor and the id. This is not new: demoting or disabling an operator leaves what it issued live today, too. *Recommend:*
+  - accept it for now, and say so in the matrix row ("taking this away does not end credentials and hooks already issued; the answer lists them");
+  - meanwhile, the PUT that turns it off lists them (`issued_to_others`, from the audit join), and the console shows Sign out everywhere and Revoke beside each;
+  - **a follow-up issue (A12, §12)** adds `issued_by` to `credentials` and `hooks`, backfilled from those audit rows (rows older than e48b6e3 stay `NULL`, and the console says so). It then uses the column on three events: `act_as_members` turned off, an operator demoted, an operator disabled. Each answer lists what that operator issued to others, and the owner chooses to revoke all of it in one confirmed step.
 
 Decided by the security review rather than open: `act_as_members` as its own permission (§4.1).
 
@@ -922,7 +976,20 @@ Decided by the security review rather than open: `act_as_members` as its own per
   - owners skip brakes, recorded in §4.3 with the CHANGELOG line;
   - one refusal code per question;
   - the ADR-010 amendments are restated in ADR-014.
-- **Where this revision goes slightly beyond or differs from the review:**
+- **Where round 1's revision went beyond or differed from the review:**
   - `act_as_members` requires `manage_members` (a dependency, §4.4.2), so that nobody can become a person they cannot see administered.
-  - `open_channels` is checked only when written, not at each address join, because it has no maker to re-check. It stays server policy until someone changes it.
+  - ~~`open_channels` is checked only when written.~~ Withdrawn in round 2: the list does have a maker (SF-2 below).
   - Issue A3 is split into A3a (store authority, safe alone) and A3b (routes), with A3a first. The remap must never ship without the store fix.
+
+### Round 2 (approve, with should-fix and nits)
+
+- **SF-1, adopted.** Channel names in invites, hooks and the joining settings are filtered to the caller's channels without `manage_channels`, with counts. Problem reports are redacted on the server, and `redact` goes only to holders of `manage_channels` (§7.3). §7.6 is corrected and lists what remains: the audit export, a report's own text, the counts. The first draft also missed `GET /v1/join/settings`'s `open_channels`, which every operator reads.
+- **SF-2, adopted.** `open_channels.added_by` is the list's maker. Each address join keeps a channel only while its maker is an owner or holds `manage_channels`, and audits the drops. A PUT is checked on the state it leaves, and an owner's PUT refreshes `added_by`. Rows 9 and 10 and the §7.3 rows agree (§4.1, §7.3).
+- **SF-3, adopted, both options.** A4 ships in the same release as A3b (§12, the ADR's consequences). A3b's PUT also refuses cells that are not yet enforced, through `enforcedPermissions`, as a safety net. Rows 1, 2 and 4 count as enforced vacuously, so the personal preset still works before the directory exists. §4.1 now says which rows gate existing routes.
+- **SF-4, adopted.** O13's text is corrected: the audit trail has the issuer. A12 adds `issued_by` with a backfill and uses it on demotion and disable as well. Meanwhile the PUT lists what operators issued (`issued_to_others`). O13 stays accepted, as not new.
+- **N1:** the allowance and `invites_remaining` map onto `manage_members` (§7.3).
+- **N2:** the `may_invite` brake does not apply to operators, as today (§5, §7.1).
+- **N3:** `makerIsOperatorTx` is split. Sign-in links use `makerMayActAsTx`, and the conversion-permit callers keep the role check, allowlisted until #1005 retires them (A3a).
+- **N4:** the structural test works on the syntax tree and on SQL text (§7.1).
+- **N5:** A3a's e2e seeds a `role_permissions` row. Later changes to `permittedTx`, `Permission.Fixed` or the standing functions are approval-path (A3a).
+- **N6:** a preset expands into cell changes before the §4.4 checks (§4.4).
