@@ -381,6 +381,7 @@ func (l *live) run(ctx context.Context) error {
 		{"credential expiring by itself", l.credentialExpires},
 		{"conch-voice clients", l.voiceClients},
 		{"screen share", l.screenShare},
+		{"companion and viewer", l.companion},
 		{"LiveKit down", l.liveKitDown},
 	}
 	for _, s := range steps {

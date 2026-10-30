@@ -14,6 +14,10 @@ declare module 'node:fs' {
   export function writeFileSync(path: string, data: Uint8Array | string): void;
 }
 
+declare module 'node:url' {
+  export function fileURLToPath(url: URL | string): string;
+}
+
 declare module 'node:os' {
   export function tmpdir(): string;
 }

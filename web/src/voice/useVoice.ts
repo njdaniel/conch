@@ -8,6 +8,7 @@ import type { ChannelV0 } from '../schema/channel';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
 import { VoiceClient, type Microphone, type Output, type ProcessingStore, type VoiceState } from './connection';
+import { clampTail, defaultTail } from './gate';
 import { defaultTalkKey, isTyping } from './keys';
 import { parsePresence } from './presence';
 import { canChooseOutput, newLiveKitRoom } from './sdk';
@@ -33,6 +34,27 @@ function readKey(): string {
 function writeKey(code: string): void {
   try {
     window.sessionStorage.setItem(keyStore, code);
+  } catch {
+    // The choice lasts until the page is reloaded.
+  }
+}
+
+// The release delay (issue #965), for as long as the tab lasts, as the talk
+// key is: none stored, or one that is not a number of ms, is the default.
+const releaseStore = 'conch.web.voice.release';
+
+function readRelease(): number {
+  try {
+    const kept = window.sessionStorage.getItem(releaseStore);
+    return kept === null || !/^\d{1,4}$/.test(kept) ? defaultTail : clampTail(Number(kept));
+  } catch {
+    return defaultTail;
+  }
+}
+
+function writeRelease(ms: number): void {
+  try {
+    window.sessionStorage.setItem(releaseStore, String(ms));
   } catch {
     // The choice lasts until the page is reloaded.
   }
@@ -162,6 +184,8 @@ export interface VoiceControl {
   readonly features: ShareFeatures;
   readonly client: VoiceClient;
   readonly setTalkKey: (code: string) => void;
+  // Sets the release delay, and keeps it for the tab.
+  readonly setReleaseDelay: (ms: number) => void;
   readonly capture: (on: boolean) => void;
   readonly join: () => void;
   // Joins to watch, without the microphone.
@@ -206,6 +230,7 @@ export function useVoice({
       processing: processingChoices(),
       outputSelection: canChooseOutput(),
       output: readOutput(),
+      gate: { tail: readRelease() },
     });
   }
   const client = clientRef.current;
@@ -381,6 +406,26 @@ export function useVoice({
     if (reachable && feedStatus.current === 'waiting') feedRef.current?.start();
   }, [reachable]);
 
+  // Losing focus or visibility shuts the gate at once (issue #965), always:
+  // not only while the talk key listens. Hold to talk works while a new key
+  // is being chosen, and a transmission it opened must shut on a blur too.
+  useEffect(() => {
+    const away = () => {
+      client.lost();
+    };
+    const hidden = () => {
+      if (document.visibilityState === 'hidden') client.lost();
+    };
+    window.addEventListener('blur', away);
+    window.addEventListener('pagehide', away);
+    document.addEventListener('visibilitychange', hidden);
+    return () => {
+      window.removeEventListener('blur', away);
+      window.removeEventListener('pagehide', away);
+      document.removeEventListener('visibilitychange', hidden);
+    };
+  }, [client]);
+
   // The talk key, only while the tab has focus and focus is not in a field.
   useEffect(() => {
     if (!signedIn || capturing) return;
@@ -392,26 +437,14 @@ export function useVoice({
     const up = (e: KeyboardEvent) => {
       if (e.code === talkKey) client.release();
     };
-    const away = () => {
-      client.lost();
-    };
-    const hidden = () => {
-      if (document.visibilityState === 'hidden') client.lost();
-    };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
-    window.addEventListener('blur', away);
-    window.addEventListener('pagehide', away);
-    document.addEventListener('visibilitychange', hidden);
     return () => {
       // A key held while the key, capture or sign-in changes would never see
       // its keyup here: let go of it.
       client.release();
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
-      window.removeEventListener('blur', away);
-      window.removeEventListener('pagehide', away);
-      document.removeEventListener('visibilitychange', hidden);
     };
   }, [signedIn, capturing, talkKey, client]);
 
@@ -420,6 +453,10 @@ export function useVoice({
     setKey(code);
     setCapturing(false);
   }, []);
+  const setReleaseDelay = useCallback((ms: number) => {
+    client.setReleaseDelay(ms);
+    writeRelease(client.snapshot().releaseDelay);
+  }, [client]);
   // The id of the channel joined is noted first, so the render the join
   // causes already follows it by id.
   const channelsNow = useRef(channels);
@@ -452,6 +489,7 @@ export function useVoice({
     features,
     client,
     setTalkKey,
+    setReleaseDelay,
     capture: setCapturing,
     join,
     watchOnly,

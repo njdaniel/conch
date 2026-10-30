@@ -1,12 +1,18 @@
 // The preload: the only code that runs in the renderer's isolated world.
-// Input: none. Output: window.conchDesktop, an EMPTY object. It has no method
-// yet: D2-3 adds the named functions of the bridge. It never exposes
-// ipcRenderer, an event object or a caller-chosen channel.
+// Input: none. Output: window.conchDesktop, a frozen object whose keys are
+// exactly the functions of web/src/platform/desktop/bridge.ts (bridge.ts here
+// builds it). It never exposes ipcRenderer, an event object or a
+// caller-chosen channel.
 //
 // The object is frozen here, but contextBridge hands the page a copy, and that
 // copy is NOT frozen: the page can add properties to its own window.conchDesktop.
 // Nothing may rely on it being frozen; what the page can reach is the functions
-// the bridge exposes, and main validates every call.
-import { contextBridge } from 'electron';
+// the bridge exposes, and main checks every call (desktop/main/ipc.ts).
+import { contextBridge, ipcRenderer } from 'electron';
 
-contextBridge.exposeInMainWorld('conchDesktop', Object.freeze({}));
+import { createBridge } from './bridge.ts';
+
+contextBridge.exposeInMainWorld(
+  'conchDesktop',
+  createBridge((channel, ...args) => ipcRenderer.invoke(channel, ...args) as Promise<unknown>),
+);

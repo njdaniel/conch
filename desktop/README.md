@@ -4,11 +4,15 @@ An Electron app that opens the existing web client from packaged files at
 `conch-app://ui/`. Design: [docs/design/linux-desktop.md](../docs/design/linux-desktop.md)
 §2 to §4 and §10; epic #770, this skeleton #940; governed by ADR-007.
 
-**What it does today:** one hardened window showing the React client. **What it
-does not do yet:** no network (the CSP says `connect-src 'none'`, so the client
-shows its "cannot reach the server" state), no sign-in, no profiles, no
-credentials, no IPC method (the preload exposes an empty `conchDesktop`),
-no voice, no tray, no installer. Later children of #770 add those.
+**What it does today:** one hardened window showing the React client, which
+talks to **one** conchd over REST through the main process (issue #942, D2-3):
+a "Server address" step, then the existing sign-in views, then chat, with the
+credential held in main's memory only (restart means signing in again). **What it
+does not do yet:** live feeds (#943, so a view is not live until then), saved
+profiles and persistence (#944, #945), attachments, clipboard, notifications and
+links (#947, #773), the operations whose answers hold a credential the renderer
+may not see (re-authentication, password change, invite and device-link codes),
+voice (#771), tray, installer. Later children of #770 add those.
 
 ## Layout
 
@@ -18,8 +22,17 @@ no voice, no tray, no installer. Later children of #770 add those.
 | `main/csp.ts` | the Content-Security-Policy of every response |
 | `main/window.ts` | the one window and its `webPreferences` (pinned by a unit test) |
 | `main/guards.ts` | what a web contents may not do: navigate, open windows, attach webviews, download, ask for permissions, choose devices |
+| `main/api/origin.ts` | the server-address rules (https; http only for loopback; no userinfo, path, query or fragment) |
+| `main/api/target.ts` | an operation id plus values to a request target; refuses anything that is not a call of the table |
+| `main/api/client.ts` | the one request executor: bearer only for bearer operations, no Origin or Cookie, no redirects, size cap, response validation, generation check |
+| `main/api/session.ts` | the in-memory credential, the server address and the generation; holds the operator code-step challenge behind a handle |
+| `main/api/service.ts` | what each bridge function does: the sign-in sequence, sign-out, restore |
+| `main/api/trust.ts` | adds the system trust store to Node's roots; classifies a certificate failure |
+| `main/ipc.ts` | the one registry of IPC handlers and the caller check every invocation passes |
+| `main/document.ts` | which frame shows the current document (the document generation) |
 | `main/app.ts`, `main/main.ts` | startup |
-| `preload/index.ts` | `window.conchDesktop`, empty; the page-side copy is not frozen, so nothing may rely on that |
+| `preload/bridge.ts`, `preload/index.ts` | `window.conchDesktop`: a frozen object whose keys are exactly the functions of `web/src/platform/desktop/bridge.ts`; the page-side copy is not frozen, so nothing may rely on that |
+| `shared/bridge-names.ts` | the function names and channels, shared by the preload and main |
 | `build/manifest.ts` | writes `out/ui-manifest.json` (path, SHA-256, content type) |
 | `build/electron-builder.config.json` | the Linux `dir` target, asar and the fuses |
 | `tests/unit/` | Vitest, no Electron runtime, no display, no network |
@@ -117,3 +130,62 @@ rest are the tools `web/` already uses, at `web/`'s exact versions
 (`scripts/desktop-lint.sh` checks they stay equal). A new direct dependency
 needs Nick's sign-off and a line in `deps-allowlist.txt`; a new licence needs
 his sign-off and a line in `licences-allowlist.txt`.
+
+## Talking to the server (issue #942)
+
+The renderer makes no network request (its CSP says `connect-src 'none'`). Main
+makes them all, with Node's `fetch`, from `main/api/client.ts`. The renderer
+names an operation of the table in `web/src/platform/operations.ts` and its
+values; main builds the URL, sends `Authorization: Bearer` for a bearer
+operation only, sends no `Origin` and no `Cookie`, uses no proxy, follows no
+redirect (a redirect is a typed failure on every operation, and the credential
+is never sent to its target), reads at most 4 MiB of answer and validates it
+with the operation's validator before the renderer sees it. A 401 on a bearer
+operation signs the window out. Sign-in steps (password, operator code,
+invite, sign-in link, setup token, reset, guest, account, pasted credential)
+are bridge functions of their own: main consumes the token and returns the
+account; the operator's code-step challenge stays in main behind a handle.
+
+Every IPC invocation is checked in `main/ipc.ts` before anything else: the
+sender is the owned web contents and is not destroyed; the frame is its live
+main frame (not a subframe, not detached) at `conch-app://ui/`; it is the frame
+of the current document generation; then the function name, a per-function rate
+limit, a byte cap, and the argument shape. A refusal is one opaque `refused`,
+counted and logged by reason only.
+
+### Which HTTP stack (Q6)
+
+Measured on the pinned Electron 44.10.0 (Node 24.22.1, Chromium 152.0.7977.169), against a
+local HTTPS server whose certificate was signed by a throwaway CA, 2026-10-29:
+
+| Stack | CA not installed | `NODE_EXTRA_CA_CERTS=ca.pem` | System store (`SSL_CERT_FILE`/`/etc/ssl/certs`) |
+| --- | --- | --- | --- |
+| Node `fetch` (undici), in Electron's main | fails `UNABLE_TO_VERIFY_LEAF_SIGNATURE` | trusts | trusts after `tls.setDefaultCACertificates([...default, ...system])` (or `NODE_USE_SYSTEM_CA=1`) |
+| `net.fetch` (Chromium's stack) | fails `ERR_CERT_AUTHORITY_INVALID` | **ignores it** (still fails) | not read; Chromium's own store plus the NSS database `~/.pki/nssdb`, which needs `certutil` (not installed here) to change |
+
+Decision: **Node's `fetch`**. Electron's main has no WebSocket client of its
+own, Node's `WebSocket` is the same undici and trusts the same roots, and Q7
+forbids the `ws` package, so one stack for REST and for the feeds of #943 is
+Node's. `net.fetch` would need a second, different trust procedure for the
+sockets. Node's `fetch` also reads no system proxy, which §3 asks for. Main adds
+the operating system's store to Node's bundled roots once at startup
+(`main/api/trust.ts`); nothing relaxes a check.
+
+### Private CA
+
+Install the CA the way the system documents (Debian and Ubuntu: copy it to
+`/usr/local/share/ca-certificates/` and run `sudo update-ca-certificates`) and
+start the app. Or start it with `NODE_EXTRA_CA_CERTS=/path/to/ca.pem`, which
+Node reads at start. Nothing else is supported: the app never asks to trust a
+certificate it has refused, and no code sets `rejectUnauthorized`,
+`NODE_TLS_REJECT_UNAUTHORIZED`, a certificate-verify procedure or the
+certificate-error event (`tests/unit/trust.test.ts` greps for them, and runs a
+child process against a local HTTPS server with a test CA, both ways). The app
+says "does not trust that server's certificate" on the address step.
+
+### Localhost development
+
+Plain `http://` is accepted for `localhost`, `127.0.0.0/8` and `[::1]` only, the
+same rule as `web/src/transport.ts`: `conchd serve --listen 127.0.0.1:8080
+--no-web`, then enter `http://127.0.0.1:8080`. The server refuses passwords over
+plain HTTP from anywhere else, and so does the address step.

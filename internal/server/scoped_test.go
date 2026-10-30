@@ -319,13 +319,23 @@ func TestEveryMessageReadPathIsInTheLeakTest(t *testing.T) {
 	for _, p := range scopedReadPaths {
 		covered[p] = true
 	}
+	// The reaction reads (issue #765) carry counts, emoji and reactor ids of a
+	// message, never its body, and only for a message the reader can see; they
+	// have their own leak tests (reactions_test.go) and rows in the isolation
+	// matrix. Exactly these three patterns are exempt: a new route whose path
+	// merely mentions reactions is held to the rule like any other.
+	reactionReads := map[string]bool{
+		"GET /v2/channels/{channel}/messages/{message_id}/reactions":         true,
+		"GET /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}": true,
+		"GET /v2/channels/{channel}/reactions":                               true,
+	}
 	for _, rt := range f.srv.routes {
 		// The voice presence socket (issue #127) ends in /ws but carries
 		// presence documents, never messages; it has its own leak-table row
 		// in TestChannelContentLeak. The occupancy socket (issue #596)
 		// carries counts, never messages, and names no channel to leak; its
 		// isolation tests are in voice_occupancy_test.go.
-		isRead := strings.HasPrefix(rt.pattern, "GET ") && rt.pattern != "GET /v1/voice/ws" && rt.pattern != "GET /v1/voice/occupancy/ws" && rt.pattern != "GET /v1/events/ws" &&
+		isRead := strings.HasPrefix(rt.pattern, "GET ") && !reactionReads[rt.pattern] && rt.pattern != "GET /v1/voice/ws" && rt.pattern != "GET /v1/voice/occupancy/ws" && rt.pattern != "GET /v1/events/ws" &&
 			(strings.Contains(rt.pattern, "/messages") || strings.HasSuffix(rt.pattern, "/ws"))
 		if isRead && !covered[rt.pattern] {
 			t.Errorf("route %q reads messages but is not in scopedReadPaths and TestScopedMessagesExactSets: add a column there", rt.pattern)
@@ -362,6 +372,14 @@ func TestEveryMessageReadPathIsInTheLeakTest(t *testing.T) {
 		"post_activity":      "returns the activity entry the caller just stored",
 		"poll_interventions": "returns interventions on the caller's own runs; a person's instruction to the run, not a channel message",
 		"ack_intervention":   "returns an intervention on the caller's own run",
+		// Reactions (issue #765) carry counts, emoji and reactor ids, never a
+		// message body, and only for a message the caller can see by the one
+		// visibility condition; TestReactionsLeakNothing and the isolation
+		// matrix (e2e/isolation) hold them to it.
+		"set_reaction":    "returns the reaction summary of a message the caller can see: counts and emoji, no body",
+		"remove_reaction": "returns the reaction summary of a message the caller can see: counts and emoji, no body",
+		"read_reactions":  "returns reaction summaries of messages the caller can see: counts and emoji, no body",
+		"list_reactors":   "returns who reacted to a message the caller can see: ids and emoji, no body",
 	}
 	for tool := range schema.MCPToolCapabilities() {
 		if tool == "read_channel" {

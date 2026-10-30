@@ -169,6 +169,13 @@ the id of the last message returned.
 |---|---|---|---|
 | `post_message` | `POST /v2/channels/{channel}/messages` + WS broadcast | `store.InsertMessage` → hub/broadcaster; with an audience, `store.InsertScopedMessage` → the recipients' v2 sockets | in: `PostMessageRequestV2` (author from auth); out: `PostMessageResponseV2` |
 | `read_channel` | `GET /v2/channels/{channel}/messages` | `store.ListVisibleMessages` | out: `ListMessagesResponseV2` |
+| `set_reaction`, `remove_reaction` (`messages.post`) | `PUT` / `DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}` | `store.SetReaction` / `store.RemoveReaction`; the agent also needs `messages.read` and `read` in the channel, and the permission it would need to reply in the message's audience (`post`, `post_net`, `whisper`) | in: channel, message_id, emoji (author from auth); out: `ReactionSummaryV1` |
+| `read_reactions` (`messages.read`) | `GET /v2/channels/{channel}/reactions?messages=…` | `store.ReactionSummariesOf` | out: `ReactionSummariesResponseV1` |
+| `list_reactors` (`messages.read`) | `GET /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}` | `store.ListReactorsOf` | out: `ListReactorsResponseV1` |
+
+The reaction tools (issue #765, `message-reactions.md` §4.2) add no capability and no
+administration tool: the two moderation routes have none. A reaction posts nothing,
+notifies no one and marks nothing read.
 
 No MCP-only capability: every tool is a call into an operation the REST/WS API
 already fronts. The one shape difference (`author_id` sourced from auth, not the

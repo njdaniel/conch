@@ -20,6 +20,13 @@ type JoinParams struct {
 	// CanPublish allows publishing a microphone track. Without it the holder
 	// can only listen.
 	CanPublish bool
+	// Companion, when set, replaces the person's grant (a microphone, and
+	// receiving) with a companion's or a viewer's (issue #933). Nil is the
+	// person's own token, claim for claim as it was before companions existed.
+	// CanPublish must be left false when Companion is set: the two are not
+	// combined, and a caller that sets both gets an error rather than a
+	// guess about which was meant.
+	Companion *CompanionJoin
 	// Lifetime sets "exp". LiveKit checks a token only when a connection
 	// starts, and it allows 60 seconds of leeway (measured on 1.13.7: accepted
 	// 55 s past exp, refused at 65 s), so a token can start a connection for
@@ -29,6 +36,20 @@ type JoinParams struct {
 	// leeway applies to "nbf" too, so this is only needed for a clock more
 	// than a minute behind ours; zero is the normal value.
 	BackdateNotBefore time.Duration
+}
+
+// CompanionJoin is the grant of a participant that is not a person's own
+// connection: the screen companion, which publishes a screen and nothing else,
+// or the viewer, which publishes nothing. Neither is ever granted a
+// microphone, share audio or data, whatever the caller sets: there is no field
+// for them.
+type CompanionJoin struct {
+	// CanSubscribe is whether the participant may receive the room's tracks.
+	CanSubscribe bool
+	// PublishScreen lets the participant publish the screen-share source and
+	// no other. False is a viewer: canPublish is false and the source list is
+	// an empty array.
+	PublishScreen bool
 }
 
 // joinGrant is LiveKit's "video" grant for a participant. LiveKit treats an
@@ -83,9 +104,30 @@ func (c *Client) JoinToken(p JoinParams) (string, error) {
 	if p.BackdateNotBefore < 0 {
 		return "", errors.New("livekit: join token backdate must not be negative")
 	}
+	if p.Companion != nil && p.CanPublish {
+		return "", errors.New("livekit: a companion join token takes its publish rights from Companion alone")
+	}
 	var id [12]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return "", errors.New("livekit: generate token id")
+	}
+	grant := joinGrant{
+		RoomJoin:          true,
+		Room:              p.Room,
+		CanSubscribe:      true,
+		CanPublish:        p.CanPublish,
+		CanPublishData:    false,
+		CanPublishSources: []string{"microphone"},
+	}
+	if co := p.Companion; co != nil {
+		grant.CanSubscribe = co.CanSubscribe
+		grant.CanPublish = co.PublishScreen
+		// Never nil: an empty list is written as [], and a viewer's
+		// canPublish false is what withholds.
+		grant.CanPublishSources = []string{}
+		if co.PublishScreen {
+			grant.CanPublishSources = []string{"screen_share"}
+		}
 	}
 	now := c.now()
 	return c.sign(claims{
@@ -94,14 +136,7 @@ func (c *Client) JoinToken(p JoinParams) (string, error) {
 		ID:        base64.RawURLEncoding.EncodeToString(id[:]),
 		NotBefore: now.Add(-p.BackdateNotBefore).Unix(),
 		Expires:   now.Add(p.Lifetime).Unix(),
-		Video: joinGrant{
-			RoomJoin:          true,
-			Room:              p.Room,
-			CanSubscribe:      true,
-			CanPublish:        p.CanPublish,
-			CanPublishData:    false,
-			CanPublishSources: []string{"microphone"},
-		},
+		Video:     grant,
 	})
 }
 

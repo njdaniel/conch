@@ -15,6 +15,14 @@
 // the report is still being retried, the track opens anyway, so audio never
 // depends on conchd being reachable (conch-voice.md section 6, "Client side").
 //
+// What the page says of a transmission is what is sent (issue #965): it says
+// transmitting once the track is unmuted, not when the key goes down, and
+// stops saying it when the gate shuts, as the track is muted. Between the two
+// the gate is open (talking) while the press waits for its answer: nothing is
+// sent yet, and the page says it is waiting. The release delay (the gate's
+// tail) is the person's to set, and the open microphone's level is read
+// every 10 ms, so that an onset opens the gate sooner.
+//
 // It also holds the screen share (issue #444): the sharer's state machine
 // (share.ts), whether this page watches someone else's share, and the
 // elements a watched share plays into.
@@ -57,7 +65,7 @@ import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../ap
 import type { VoicePresenceV1, VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
 import { afterDisconnect, afterRefusal, retryDelay, type DisconnectCause, type Next } from './disconnect';
-import { TransmitGate, type GateMode, type GateOptions } from './gate';
+import { clampTail, defaultTail, TransmitGate, type GateMode, type GateOptions } from './gate';
 import { occupants, principalOf, sharer } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
 import { idleShare, resumeLimit, ScreenShare, type ScreenEnd, type ShareRoom, type ShareState } from './share';
@@ -256,7 +264,13 @@ export interface VoiceState {
   readonly listenOnly: boolean;
   // Joined to watch: connected without the microphone, until asked for it.
   readonly watchOnly: boolean;
+  // The gate is open: the key is held (or in its release delay), or the open
+  // microphone hears speech. Nothing may be sent yet: see transmitting.
+  readonly talking: boolean;
+  // Audio is being sent: the gate is open and the track unmuted.
   readonly transmitting: boolean;
+  // How long the gate stays open after the key comes up, in ms.
+  readonly releaseDelay: number;
   readonly level: number;
   readonly threshold: number;
   readonly speaking: ReadonlySet<number>;
@@ -319,8 +333,11 @@ export interface VoiceEnv {
 export const reconnectLimit = 20_000;
 // A connection that lasted this long starts the retry wait over.
 export const healthyAfter = 30_000;
-// How often the microphone level is read.
-export const levelEvery = 50;
+// How often the microphone level is read, for the open microphone's gate, and
+// how often the meter is told of it. The gate's read was every 50 ms until
+// issue #965: an onset waited up to that long before the gate opened.
+export const levelEvery = 10;
+export const meterEvery = 50;
 // How long a Leave waits for the last report.
 const leaveDrain = 1000;
 // The longest a press waits for the answer to its `started` report before the
@@ -337,7 +354,9 @@ export const initialVoice: VoiceState = {
   deafened: false,
   listenOnly: false,
   watchOnly: false,
+  talking: false,
   transmitting: false,
+  releaseDelay: defaultTail,
   level: 0,
   threshold: 0.1,
   speaking: new Set(),
@@ -413,7 +432,13 @@ export class VoiceClient {
     this.env = env;
     this.now = now;
     this.processing = env.processing ?? memoryStore();
-    this.state = { ...initialVoice, ...this.chosen(env.microphone ?? null), outputSelection: env.outputSelection === true, output: env.output ?? null };
+    this.state = {
+      ...initialVoice,
+      ...this.chosen(env.microphone ?? null),
+      outputSelection: env.outputSelection === true,
+      output: env.output ?? null,
+      releaseDelay: clampTail(env.gate?.tail ?? defaultTail),
+    };
     this.gate = new TransmitGate(env.clock, (open) => {
       this.onGate(open);
     }, env.gate);
@@ -775,6 +800,7 @@ export class VoiceClient {
       phase: 'idle',
       channel: null,
       why: null,
+      talking: false,
       transmitting: false,
       level: 0,
       speaking: new Set(),
@@ -823,6 +849,13 @@ export class VoiceClient {
     this.set({ threshold });
   }
 
+  // setReleaseDelay sets how long the gate stays open after the key comes
+  // up, from 0 to 2 s: from the next release on.
+  setReleaseDelay(ms: number): void {
+    this.gate.setTail(ms);
+    this.set({ releaseDelay: this.gate.releaseDelay });
+  }
+
   press(): void {
     this.gate.press();
   }
@@ -831,9 +864,13 @@ export class VoiceClient {
     this.gate.release();
   }
 
-  // lost is losing focus or visibility: a release.
+  // lost is losing focus or visibility. In push to talk it shuts the gate at
+  // once, with no release delay (issue #965): the delay can be 2 s, and
+  // whoever switched window is not talking to the room any more. A press
+  // still waiting for its answer never opens the track. The open microphone
+  // goes on, as it does in a tab out of sight.
   lost(): void {
-    this.gate.release();
+    this.gate.lost();
   }
 
   dispose(): void {
@@ -865,12 +902,16 @@ export class VoiceClient {
       const muted = (this.room?.setSending(false) ?? Promise.resolve()).catch(() => undefined);
       this.steps = this.steps.then(() => this.shut(talk, muted));
     }
-    this.set({ transmitting: open });
+    // Transmitting begins once the track is unmuted (opened), and ends here,
+    // with the mute.
+    this.set(open ? { talking: true } : { talking: false, transmitting: false });
   }
 
   // opened reports `started` and opens the track once conchd has answered,
   // or after reportWait, unless the gate has changed since or the connection
-  // has gone. A report that fails for good drops the connection first.
+  // has gone. A report that fails for good drops the connection first. Once
+  // the track is unmuted, if the gate has not changed meanwhile, the page
+  // says it is transmitting.
   private async opened(talk: number, edge: number): Promise<void> {
     if (talk !== this.talk) return;
     const answered = new Promise<void>((resolve) => {
@@ -879,7 +920,15 @@ export class VoiceClient {
     await this.within(answered, reportWait);
     const room = this.room;
     if (talk !== this.talk || edge !== this.edge || room === null) return;
-    await this.within(room.setSending(true), reportWait);
+    // Said when the unmute lands, however late: past reportWait the steps go
+    // on without it, but the track is open once it does. Not if the gate has
+    // shut, or the connection gone, meanwhile.
+    await this.within(
+      room.setSending(true).then(() => {
+        if (talk === this.talk && edge === this.edge && room === this.room) this.set({ transmitting: true });
+      }),
+      reportWait,
+    );
   }
 
   private async shut(talk: number, muted: Promise<void>): Promise<void> {
@@ -943,7 +992,7 @@ export class VoiceClient {
     this.room = null;
     // A switch under way goes with its connection; its choice is kept.
     this.switching = false;
-    this.set({ speaking: new Set(), level: 0, transmitting: false, shareTracks: noTracks, ...nothingInUse });
+    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, shareTracks: noTracks, ...nothingInUse });
     if (room !== null) void room.close().catch(() => undefined);
     this.act(next, mine);
   }
@@ -1127,13 +1176,18 @@ export class VoiceClient {
   }
 
   private watchLevel(mine: number, room: Room): void {
+    let reads = 0;
     const tick = () => {
       if (mine !== this.attempt) return;
       const raw = room.level();
-      // Quantised, so a meter does not re-render the page at every read.
-      const level = Math.round(raw * 20) / 20;
       this.gate.level(raw);
-      if (level !== this.state.level) this.set({ level });
+      // Quantised, and told every meterEvery ms, so a meter does not
+      // re-render the page at every read.
+      if (++reads * levelEvery >= meterEvery) {
+        reads = 0;
+        const level = Math.round(raw * 20) / 20;
+        if (level !== this.state.level) this.set({ level });
+      }
       this.levelTimer = this.env.clock.setTimeout(tick, levelEvery);
     };
     this.levelTimer = this.env.clock.setTimeout(tick, levelEvery);

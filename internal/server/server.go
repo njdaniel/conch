@@ -208,6 +208,10 @@ type Server struct {
 	// events socket writes: a test blocks in it to be a subscriber that is
 	// stuck in a write.
 	eventsBeforeWrite func()
+	// reactionBeforeRead, when set by a test, runs in an events socket
+	// just before it reads a message's reactions for a reference: a test
+	// lands a removal in that window. Nil in conchd.
+	reactionBeforeRead func()
 	// eventsRosterFloor is the least time between two roster rebuilds for one
 	// events socket (defaultEventsRosterFloor). It is measured on the
 	// monotonic clock, not now: it paces work, it is not a time anyone reads.
@@ -244,6 +248,10 @@ type Server struct {
 	// reportLimits is the problem-report rate limit (reports.go), in memory
 	// only; its clock is now. Tests replace it before serving.
 	reportLimits *reportLimiter
+	// reactionLimits is the people's reaction write limit (reactions.go), in
+	// memory only; its clock is now. Tests replace it with setReactionLimit
+	// before serving.
+	reactionLimits *reactionLimiter
 	// guestAddrs is which address each guest visit came from, for the
 	// per-address cap (join.go), in memory only.
 	guestAddrs guestAddressBook
@@ -300,7 +308,7 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()),
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()),
 		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
 		setupLimits: newSetupLimiter(cfg)}
 	// The server's name is a permanent name nobody may take (issue #760):
