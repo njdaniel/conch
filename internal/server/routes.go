@@ -116,6 +116,21 @@ func (s *Server) routeTable() []route {
 		// Read state (issue #351). People only (an agent gets 403
 		// human_required, in the handler); the caller's own marks, per
 		// principal. See read_state.go.
+		// Reactions (issue #765, docs/design/message-reactions.md §4.1). Every
+		// route is authenticated; what a caller may do is decided in the
+		// handlers (reactions.go). The emoji is a percent-encoded path segment.
+		// A reaction is a durable record of (message, principal, emoji), and
+		// counts are derived. reactions/{emoji} and reactions/{emoji}/{principal_id}
+		// differ in segment count, and reactors is a literal, so no two patterns
+		// meet in the mux. The two moderation routes are reduce-only, for a
+		// channel's managers and operators who can see the message.
+		rt("PUT /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}", accessAuthenticated, hf(s.handlePutReaction)),
+		rt("DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}", accessAuthenticated, hf(s.handleDeleteReaction)),
+		rt("GET /v2/channels/{channel}/messages/{message_id}/reactions", accessAuthenticated, hf(s.handleGetReactions)),
+		rt("GET /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}", accessAuthenticated, hf(s.handleListReactors)),
+		rt("GET /v2/channels/{channel}/reactions", accessAuthenticated, hf(s.handleBatchReactions)),
+		rt("DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}", accessChannelManager, hf(s.handleModerateReaction)),
+		rt("DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}", accessChannelManager, hf(s.handleModerateReactor)),
 		rt("GET /v1/read-state", accessAuthenticated, hf(s.handleListReadState)),
 		rt("PUT /v1/channels/{channel}/read-state", accessAuthenticated, hf(s.handlePutReadState)),
 		rt("PUT /v1/principals/{id}/manifest", accessOperator, hf(s.handlePutManifest)),

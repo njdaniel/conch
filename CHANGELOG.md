@@ -8,6 +8,24 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Added
+
+- **Message reactions on the server** (#765, `docs/design/message-reactions.md`):
+  a durable record of (message, person, emoji) with derived counts. REST:
+  `PUT` and `DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}`
+  (idempotent; answer `conch.reaction_summary.v1`), `GET .../reactions`,
+  `GET .../reactions/{emoji}?after=&limit=` (who reacted), the batch
+  `GET /v2/channels/{channel}/reactions?messages=1,2,3` (at most 100), and two
+  moderation removals for a channel's managers and operators. Four MCP tools
+  (`set_reaction`, `remove_reaction`, `read_reactions`, `list_reactors`) over the
+  same code; live updates as `conch.reaction_summary.v1` frames on
+  `/v1/events/ws`. Reactions follow the message's visibility (a hidden message,
+  whisper, net or the part of history before a guest's bound has none to read),
+  keep their rows when the reactor loses access, and are audited when they
+  change. **Migration 37** adds the `message_reactions` table; as for every
+  migration, going back to an earlier binary means restoring the pre-upgrade
+  backup. See README.md, "Reactions".
+
 ## [0.1.0-alpha.5] - 2026-10-29
 
 Upgrade with `conch-upgrade.sh` (docs/deploy.md step 11). Once the droplet

@@ -238,15 +238,26 @@ var routeExpectations = map[string]routeExpectation{
 	// Read state (issue #351): people only, so an agent gets 403 on both and
 	// AuthOff 400 read_state_require_auth (both special-cased below). A mark of
 	// 0 writes nothing.
-	"GET /v1/read-state":                          {classAuth, "/v1/read-state", "", 200},
-	"PUT /v1/channels/{channel}/read-state":       {classAuth, "/v1/channels/general/read-state", `{"last_read_id":0}`, 200},
-	"PUT /v1/principals/{id}/manifest":            {classOp, "/v1/principals/1/manifest", `{}`, 400},
-	"GET /v1/principals/{id}/manifest":            {classSelf, "/v1/principals/1/manifest", "", 404},
-	"PUT /v1/principals/{id}/name":                {classSelf, "/v1/principals/1/name", `{}`, 400},
-	"POST /v1/principals/{id}/credentials":        {classOp, "/v1/principals/1/credentials", `{}`, 400},
-	"GET /v1/principals/{id}/credentials":         {classOp, "/v1/principals/1/credentials", "", 200},
-	"POST /v1/credentials/{credential_id}/rotate": {classOp, "/v1/credentials/9999/rotate", "", 404},
-	"DELETE /v1/credentials/{credential_id}":      {classOp, "/v1/credentials/9999", "", 404},
+	"GET /v1/read-state":                    {classAuth, "/v1/read-state", "", 200},
+	"PUT /v1/channels/{channel}/read-state": {classAuth, "/v1/channels/general/read-state", `{"last_read_id":0}`, 200},
+	// Reactions (issue #765): message 9999 does not exist, so an authorized
+	// caller gets message_not_found; an agent is refused only at the two
+	// moderation routes (humans only), and AuthOff gets 400
+	// reactions_require_auth on all seven (special-cased below).
+	"PUT /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                   {classAuth, "/v2/channels/general/messages/9999/reactions/%F0%9F%91%8D", "", 404},
+	"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                {classAuth, "/v2/channels/general/messages/9999/reactions/%F0%9F%91%8D", "", 404},
+	"GET /v2/channels/{channel}/messages/{message_id}/reactions":                           {classAuth, "/v2/channels/general/messages/9999/reactions", "", 404},
+	"GET /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                   {classAuth, "/v2/channels/general/messages/9999/reactions/%F0%9F%91%8D", "", 404},
+	"GET /v2/channels/{channel}/reactions":                                                 {classAuth, "/v2/channels/general/reactions?messages=9999", "", 200},
+	"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}": {classManager, "/v2/channels/general/messages/9999/reactions/%F0%9F%91%8D/2", "", 404},
+	"DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}":          {classManager, "/v2/channels/general/messages/9999/reactors/2", "", 404},
+	"PUT /v1/principals/{id}/manifest":                                                     {classOp, "/v1/principals/1/manifest", `{}`, 400},
+	"GET /v1/principals/{id}/manifest":                                                     {classSelf, "/v1/principals/1/manifest", "", 404},
+	"PUT /v1/principals/{id}/name":                                                         {classSelf, "/v1/principals/1/name", `{}`, 400},
+	"POST /v1/principals/{id}/credentials":                                                 {classOp, "/v1/principals/1/credentials", `{}`, 400},
+	"GET /v1/principals/{id}/credentials":                                                  {classOp, "/v1/principals/1/credentials", "", 200},
+	"POST /v1/credentials/{credential_id}/rotate":                                          {classOp, "/v1/credentials/9999/rotate", "", 404},
+	"DELETE /v1/credentials/{credential_id}":                                               {classOp, "/v1/credentials/9999", "", 404},
 	// Signing out (issue #439) revokes the caller's own credential, so the
 	// role matrix sends it from a fixture of its own (special-cased below).
 	// The fixture's operator holds the only operator credential: 409. AuthOff
@@ -566,6 +577,11 @@ func TestRoleMatrix(t *testing.T) {
 			if strings.HasSuffix(rt.pattern, "/read-state") {
 				agentWant = http.StatusForbidden
 			}
+			// The moderation routes of reactions (issue #765) administer a
+			// channel: an agent is refused by the class, before any lookup.
+			if exp.class == classManager && isReactionRoute(rt.pattern) {
+				agentWant = http.StatusForbidden
+			}
 			// Invites are for people (issue #437), and so are problem
 			// reports (issue #446).
 			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" {
@@ -605,6 +621,12 @@ func TestRoleMatrix(t *testing.T) {
 	}
 }
 
+// isReactionRoute reports whether pattern is one of the seven reaction routes
+// (issue #765).
+func isReactionRoute(pattern string) bool {
+	return strings.Contains(pattern, "/v2/channels/{channel}/") && (strings.Contains(pattern, "/reactions") || strings.Contains(pattern, "/reactors"))
+}
+
 // TestAuthOffUnchanged runs the route table with AuthOff and no credential:
 // the statuses are what the handlers gave before authentication existed, no
 // route reads a credential, and no role check applies.
@@ -633,6 +655,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if strings.HasSuffix(rt.pattern, "/read-state") {
 					want = http.StatusBadRequest // read_state_require_auth: a mark belongs to a principal
+				}
+				if isReactionRoute(rt.pattern) {
+					want = http.StatusBadRequest // reactions_require_auth: a reaction belongs to a principal
 				}
 				if rt.pattern == "POST /v1/ws-tickets" {
 					want = http.StatusBadRequest // tickets_require_auth: a ticket is bound to a credential

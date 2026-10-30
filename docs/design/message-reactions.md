@@ -64,6 +64,8 @@ The vendored file, the generator, both outputs, `pkg/schema/reaction.go`, its fi
 
 Upgrading the pinned version is a **compatible** change: it widens the set of accepted keys. Stored keys are never validated against the catalog on read, so a server downgraded to an older catalog still serves every stored reaction (§12).
 
+*Amended 2026-10-29 (#765 security review):* the rows are kept, but the one builder of the wire summary leaves out any stored count whose key fails `ValidateReactionKey` (logging the drop once per summary, without the key), so REST, MCP and the events socket all serve a valid summary and no socket closes over such a row; its owner cannot remove it through the own-reaction route, which canonicalizes the key first and so never names it, but the moderation route `DELETE …/messages/{message_id}/reactors/{principal_id}` removes it with the rest of that principal's reactions on the message.
+
 ### 3.2 Canonical key
 
 Definitions, with `emoji-test.txt` statuses: `fully-qualified`, `minimally-qualified`, `unqualified`, `component`.
@@ -137,6 +139,8 @@ Four tools, each a plain mirror of one REST route and nothing more (parity, D6):
 | `remove_reaction` | `{channel, message_id, emoji}` | `ReactionSummaryV1` | the same |
 | `read_reactions` | `{channel, message_ids: [..≤100]}` | `ReactionSummariesResponseV1` | `messages.read` / `read` |
 | `list_reactors` | `{channel, message_id, emoji, after?, limit?}` | `ListReactorsResponseV1` | `messages.read` / `read` |
+
+*Amended 2026-10-29 (#765 security review):* because `set_reaction` and `remove_reaction`, like the `PUT` and `DELETE` they mirror, answer the message's whole summary, an agent also needs `messages.read` and `read` in the channel for them, checked right after membership and refused with the read routes' own `forbidden`, audited, without spending budget.
 
 Tool descriptions say what the server does and does not do: "Reacting does not post a message, does not notify anyone and does not mark anything read; the people who can see the message see the reaction." `mcpToolCapabilities` in `pkg/schema/agent_manifest.go` gets the four entries (`set_reaction`, `remove_reaction` → `messages.post`; `read_reactions`, `list_reactors` → `messages.read`), in the same schema PR as the types (the `schema-change` skill's sync rule); `docs/design/mcp-endpoint.md` lists them. No MCP-only capability is introduced; the single-message `GET …/reactions` has no tool because `read_reactions` with one id is the same call. The two moderation routes have **no tool**: as moderation.md §1 says, no operation adds an MCP administration tool, and agents are refused at the class.
 
@@ -339,6 +343,8 @@ The second question is never re-asked in Go after the statement. The handler run
 | Non-member (any role) | `channel_not_found` | `channel_not_found` | `channel_not_found` |
 | Disabled principal, revoked or expired credential | Refused by authentication before any route | — | — |
 | Authentication off | `reactions_require_auth` on every route | same | same |
+
+*Amended 2026-10-29 (#765 security review):* an agent's set and remove also need the read grant (`messages.read` and `read` in the channel), since both answer the message's whole summary: without it the answer is the `403 forbidden` the summary `GET` gives, audited, and no budget is spent.
 
 Why an agent reacts with the permission it would need to reply: a reaction on a net message or a whisper is a small transmission into that audience, and the manifest already says, per channel, whether the agent may transmit there (`post`, `post_net`, `whisper`). Reusing the reply rule means an operator reads one grant table, a reaction is never a way to speak into a net or whisper the agent may only read, and the capability vocabulary does not grow. An agent that may only read may not react anywhere. The alternative, a new capability `reactions.write`, is in §15.
 
