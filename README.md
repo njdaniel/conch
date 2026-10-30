@@ -1020,7 +1020,7 @@ Each is a bucket that refills evenly, and failed attempts count the same as succ
 
 Anyone holding a valid code can learn whether a name is taken, from the `409`, within the redeem limit, and without using the invite up (through v2, five such answers an hour per address, then `429`). A link that leaks lets whoever finds it test names that way, so close a leaked link.
 
-A password is 15 to 128 characters (normalized to NFC first), any characters, spaces welcome; it may not be on the bundled list of common passwords, be one short run repeated, or contain the account's name. It is stored only as an Argon2id hash (64 MiB, 3 passes) and is in no log, audit row or error.
+A password is up to 128 characters (normalized to NFC first) and may be short, but not empty: any characters, spaces welcome; it may not be on the bundled list of common passwords, be one short run repeated, or contain the account's name. It is stored only as an Argon2id hash (64 MiB, 3 passes) and is in no log, audit row or error.
 
 ### Signing in with a password
 

@@ -508,6 +508,19 @@ describe('Create an account during a visit', () => {
     expectNoSecret(container, guestToken, memberToken, password);
   });
 
+  it('sends a short password, as the server decides on the rest (issue #977)', async () => {
+    const calls = serve(converting(() => json(converted)));
+    render(<App origin={origin} />);
+    await joinAsGuest();
+    await openForm();
+    fillAccount('pat', 'tide', 'tide');
+    fireEvent.click(screen.getByRole('button', { name: 'Create my account' }));
+    await waitFor(() => {
+      expect(calls.find((c) => c.path === '/v1/guest/convert')).toMatchObject({ body: { name: 'pat', password: 'tide' } });
+    });
+    expect(screen.queryByText(/at least 15/)).toBeNull();
+  });
+
   it('changes nothing on cancel', async () => {
     const calls = serve(converting(() => json(converted)));
     render(<App origin={origin} />);
@@ -522,7 +535,7 @@ describe('Create an account during a visit', () => {
 
   it.each([
     { name: 'two passwords that differ', fill: ['pat', password, `${password}!`], line: 'The two passwords are not the same. Type them again.' },
-    { name: 'a short password', fill: ['pat', 'too short', 'too short'], line: 'Choose a password of at least 15 characters.' },
+    { name: 'no password', fill: ['pat', '', ''], line: 'Choose a password.' },
     { name: 'no name', fill: ['', password, password], line: 'Choose a name.' },
   ])('checks $name before sending anything', async ({ fill, line }) => {
     const calls = serve(converting(() => json(converted)));

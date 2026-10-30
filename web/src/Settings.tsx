@@ -15,7 +15,7 @@
 // authenticator are recovered only on the server's host.
 import { useEffect, useId, useRef, useState, type ReactNode, type RefObject, type SyntheticEvent } from 'react';
 import * as api from './api';
-import { minPassword, passwordProblem } from './CreateAccount';
+import { passwordProblem } from './CreateAccount';
 import { serverLine, waitWords } from './Invite';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { typedCode } from './SignIn';
@@ -64,7 +64,7 @@ export function NewPassword({
     <>
       <label htmlFor={`${id}-new`}>{label}</label>
       <p id={`${id}-help`} className="hint">
-        At least {minPassword} characters; a few words with spaces between them work well.
+        A few words with spaces between them work well.
       </p>
       <input id={`${id}-new`} ref={chosen} type="password" autoComplete="new-password" aria-describedby={`${id}-help`} />
       <label htmlFor={`${id}-again`}>Type it again</label>
