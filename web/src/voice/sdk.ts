@@ -446,6 +446,12 @@ class Kept implements KeptScreen {
   };
 }
 
+// How many samples the level is read from: 512, about 10 ms at 48 kHz, the
+// frame conch-voice's open microphone judges (conch-voice.md section 3).
+// It was 1024 until issue #965; with the level read every 10 ms, a longer
+// window would let a loud onset show only once it filled more of it.
+export const levelWindow = 512;
+
 class LiveKitAdapter implements Room {
   private readonly room = new LiveKitRoom(roomOptions);
   // Set by close(); every step after an await checks it.
@@ -475,7 +481,7 @@ class LiveKitAdapter implements Room {
   // the volume of each person not at full volume, by principal (issue #661).
   private readonly elements = new Map<string, { readonly el: HTMLMediaElement; readonly principal: number | null }>();
   private readonly volumes = new Map<number, number>();
-  private readonly buffer = new Uint8Array(1024);
+  private readonly buffer = new Uint8Array(levelWindow);
   // The share this page captured, until it is stopped; and whether this
   // adapter is the one taking it down, so its own unpublish is not reported.
   private screen: LocalTrack[] = [];
@@ -766,7 +772,7 @@ class LiveKitAdapter implements Room {
     clone.enabled = true;
     const context = new AudioContext();
     const analyser = context.createAnalyser();
-    analyser.fftSize = 1024;
+    analyser.fftSize = levelWindow;
     context.createMediaStreamSource(new MediaStream([clone])).connect(analyser);
     this.tap = { context, analyser, clone };
     // The page was interacted with to get here, so the browser lets it run;
