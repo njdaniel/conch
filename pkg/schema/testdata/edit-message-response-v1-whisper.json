@@ -1,0 +1,18 @@
+{
+  "message": {
+    "schema": "conch.message.v2",
+    "id": 44,
+    "channel_id": 7,
+    "author_id": 3,
+    "created_at": "2026-07-13T12:36:00.000Z",
+    "body": "meet at 3, not 2",
+    "audience": {
+      "kind": "principals",
+      "principal_ids": [
+        3,
+        4
+      ]
+    },
+    "edited_at": "2026-07-13T12:37:30.000Z"
+  }
+}

@@ -223,6 +223,9 @@ func TestReactionConstants(t *testing.T) {
 		"MAX_REACTION_BATCH_MESSAGES":  MaxReactionBatchMessages,
 		"DEFAULT_REACTOR_LIMIT":        DefaultReactorLimit,
 		"MAX_REACTOR_LIMIT":            MaxReactorLimit,
+		// Message editing (issue #845).
+		"MESSAGE_EDIT_WINDOW_SECONDS": MessageEditWindowSeconds,
+		"MAX_MESSAGE_EDITS":           MaxMessageEdits,
 	}
 	if len(TSConstants) != len(want) {
 		t.Errorf("TSConstants has %d entries, want %d", len(TSConstants), len(want))

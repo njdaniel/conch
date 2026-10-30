@@ -66,6 +66,10 @@ var TSConstants = []TSConstant{
 	{Name: "MAX_REACTION_BATCH_MESSAGES", Value: MaxReactionBatchMessages},
 	{Name: "DEFAULT_REACTOR_LIMIT", Value: DefaultReactorLimit},
 	{Name: "MAX_REACTOR_LIMIT", Value: MaxReactorLimit},
+	// Message editing (issue #845): the page stops offering Edit when the
+	// server would refuse it.
+	{Name: "MESSAGE_EDIT_WINDOW_SECONDS", Value: MessageEditWindowSeconds},
+	{Name: "MAX_MESSAGE_EDITS", Value: MaxMessageEdits},
 }
 
 // TSTypes is every struct the web client reads or sends, and the refusal
@@ -98,6 +102,13 @@ var TSTypes = []TSType{
 	{Value: ListMessagesResponseV2{}, Family: "list-messages-response-v2"},
 	{Value: SearchMessagesResponseV2{}, Family: "search-messages-response-v2"},
 	{Value: WSTicketV1{}, Family: "ws-ticket-v1"},
+	// The author edits their own recent text (issue #845); the events socket
+	// says so with a frame of its own.
+	{Value: EditMessageRequestV1{}, Family: "edit-message-request-v1"},
+	{Value: EditMessageResponseV1{}, Family: "edit-message-response-v1"},
+	{Value: MessageRevisionV1{}, Family: "message-revision-v1"},
+	{Value: ListMessageRevisionsResponseV1{}, Family: "list-message-revisions-response-v1"},
+	{Value: MessageEditedV1{}, Family: "message-edited-v1", Schema: MessageEditedSchemaV1},
 
 	// An approval, as a message carries it in its payload.
 	{Value: Option{}, Family: "approval-option-v1"},
