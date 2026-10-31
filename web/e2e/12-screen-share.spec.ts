@@ -603,9 +603,10 @@ test.describe('screen share with LiveKit', () => {
       await expect(b.page.getByRole('region', { name: 'Members list' })).toBeFocused();
       await b.page.keyboard.press('Escape');
       await expectFits(b.page, 'watching at phone width');
-      // With Voice options closed again, the composer is on the screen while
+      // Voice options, left open, are the Voice view's: under Chat the strip
+      // is one row (issue #1028), and the composer is on the screen while
       // watching, without scrolling to it.
-      await voiceRegion(b.page).getByRole('button', { name: 'Voice options' }).click();
+      await expect(voiceRegion(b.page).getByRole('button', { name: 'Voice options' })).toBeHidden();
       await expectComposerShown(b.page, 'watching at 390×844');
       await b.page.setViewportSize({ width: 360, height: 740 });
       await expectFits(b.page, 'watching at 360×740');
@@ -661,10 +662,12 @@ test.describe('screen share with LiveKit', () => {
     }
   });
 
-  // Issue #641: eight in voice on a phone. The roster is one row and the
-  // strip, joined, fits in #600's 200 px; while a share is watched, who shares
-  // is the stage's title and not said again in the notes, the message log has
-  // at least 120 px and the composer is on the screen.
+  // Issue #641, revised by #1028: eight in voice on a phone. The Voice view
+  // shows all of them; the strip under Chat is one row of four controls, at
+  // most 64 px, with no roster. While a share is watched, who shares is the
+  // stage's title and not drawn again under Chat, the message log has at
+  // least 200 px at 390×844 (120 px at 360×740) and the composer is on the
+  // screen.
   test('on a phone with eight in voice the strip stays compact, joined and while watching', async ({ browser }) => {
     const a = await person(browser, 'alice');
     try {
@@ -688,32 +691,38 @@ test.describe('screen share with LiveKit', () => {
     // Eight, or a ninth if an earlier page of bob's has not yet left the room on the server.
     const count = voice.getByRole('heading', { name: /^[89] in voice$/ });
     await expect(count).toBeVisible();
-    // The compact strip is under Chat (issue #929); Join voice was in Voice.
-    await showView(b.page, 'Chat');
     // Nobody shares (the earlier size's share has ended on the server too).
     await expect(voice.getByRole('listitem').filter({ hasText: 'sharing' })).toHaveCount(0, { timeout: 15_000 });
+    // The Voice view, where Join voice was, shows everyone (issue #929).
+    const chips = voice.getByRole('list', { name: /^[89] in voice$/ }).locator('li:visible');
+    await expect.poll(() => chips.count()).toBeGreaterThanOrEqual(8);
+    await expect(chips.filter({ hasText: 'You' })).toHaveCount(1);
+    // The strip is under Chat: one row of four, with no roster, however many
+    // are in voice (issue #1028).
+    await showView(b.page, 'Chat');
     const box = async (el: Locator, what: string) => {
       const found = await el.boundingBox();
       if (found === null) throw new Error(`${size}: ${what} has no box`);
       return found;
     };
     const dock = await box(b.page.locator('.dock'), 'the dock');
-    expect(dock.height, `${size}: the dock joined with eight in voice (200 px, less 12 for a wider font)`).toBeLessThanOrEqual(188);
-    const chips = voice.getByRole('list', { name: /^[89] in voice$/ }).locator('li:visible');
-    await expect(chips).toHaveCount(3);
-    await expect(chips.filter({ hasText: 'You' })).toHaveCount(1);
-    const mid = (b: { y: number; height: number } | undefined): number => (b?.y ?? 0) + (b?.height ?? 0) / 2;
-    const tops = [await box(count, 'the count'), await box(chips.first(), 'a chip'), await box(voice.getByRole('button', { name: /^\+[56] more$/ }), '+5 more')];
-    expect(Math.abs(mid(tops[0]) - mid(tops[2])) + Math.abs(mid(tops[1]) - mid(tops[2])), `${size}: the roster is one row`).toBeLessThanOrEqual(8);
+    expect(dock.height, `${size}: the dock joined with eight in voice`).toBeLessThanOrEqual(64);
+    await expect(voice.getByRole('list')).toBeHidden();
+    await expect(count).toBeHidden();
     await expectFits(b.page, `${size}: eight in voice`);
 
     await share(a);
+    await showView(b.page, 'Voice');
     await watching(b);
-    // Still Share screen's description, but drawn as nothing.
-    const said = await box(b.page.locator('#voice-share-busy'), 'the line about who shares');
-    expect(said.width * said.height, `${size}: the line about who shares is drawn`).toBeLessThanOrEqual(1);
+    await showView(b.page, 'Chat');
+    // Share screen's description stays in the tree, but is not drawn under
+    // Chat.
+    await expect(b.page.locator('#voice-share-busy')).toHaveCount(1);
+    await expect(b.page.locator('#voice-share-busy')).toBeHidden();
     const log = await box(b.page.getByRole('log', { name: 'Messages' }), 'the message log');
-    expect(log.height, `${size}: the message log while watching with eight in voice`).toBeGreaterThanOrEqual(120);
+    // 200 px at 390×844 (issue #1028); #641's 120 px at the smaller phone,
+    // where the picture of a share takes the room.
+    expect(log.height, `${size}: the message log while watching with eight in voice`).toBeGreaterThanOrEqual(size === '390×844' ? 200 : 120);
     await expectComposerShown(b.page, `${size}: watching with eight in voice`);
     await expectFits(b.page, `${size}: watching with eight in voice`);
     await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();

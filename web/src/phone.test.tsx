@@ -7,7 +7,7 @@ import { useContext, useEffect, useState, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { headingId } from './Conversation';
 import { Lobby } from './Lobby';
-import { MicTestShown, useAppHeight, VoiceLive } from './phone';
+import { MicTestShown, useAppHeight, VoiceLive, VoiceStrip } from './phone';
 import type { ChannelV0 } from './schema/channel';
 import type { ChannelsState } from './state/channels';
 
@@ -43,6 +43,7 @@ function Conversation() {
 function Voice({ live, joined }: { readonly live: boolean; readonly joined: () => void }) {
   const report = useContext(VoiceLive);
   const micTest = useContext(MicTestShown);
+  const strip = useContext(VoiceStrip);
   useEffect(() => {
     report(live);
   }, [live, report]);
@@ -50,6 +51,12 @@ function Voice({ live, joined }: { readonly live: boolean; readonly joined: () =
     <section aria-label="Voice">
       <Probe name="voice" />
       {micTest ? <p>microphone test offered</p> : null}
+      {/* The strip's state button, while the lobby says this is the strip. */}
+      {strip === null ? null : (
+        <button type="button" onClick={strip}>
+          In voice in #general
+        </button>
+      )}
       <button type="button" onClick={joined}>
         Join voice
       </button>
@@ -307,6 +314,41 @@ describe('focus when the strip goes (leaving voice under Chat or Channels)', () 
     wideJoin.focus();
     third.setLive(false);
     expect(document.activeElement).toBe(wideJoin);
+  });
+});
+
+describe('the strip under Chat and Channels (issue #1028)', () => {
+  const stateButton = () => screen.queryByRole('button', { name: 'In voice in #general' });
+
+  it('is the strip under Chat and Channels and the whole section in the Voice view', () => {
+    windowOf(true);
+    lobby({ live: true });
+    expect(stateButton()).not.toBeNull();
+    fireEvent.click(tab('Channels'));
+    expect(stateButton()).not.toBeNull();
+    fireEvent.click(tab('Voice'));
+    expect(stateButton()).toBeNull();
+    fireEvent.click(tab('Chat'));
+    expect(stateButton()).not.toBeNull();
+  });
+
+  it('is never the strip on a wide window', () => {
+    windowOf(false);
+    lobby({ live: true });
+    expect(stateButton()).toBeNull();
+  });
+
+  it('opens the Voice view from its state button, with focus on the Voice button, and mounts nothing again', () => {
+    windowOf(true);
+    lobby({ live: true });
+    events.length = 0;
+    const button = stateButton();
+    if (button === null) throw new Error('no state button');
+    button.focus();
+    fireEvent.click(button);
+    expect(tab('Voice').getAttribute('aria-current')).toBe('page');
+    expect(document.activeElement).toBe(tab('Voice'));
+    expect(events).toEqual([]);
   });
 });
 
