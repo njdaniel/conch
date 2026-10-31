@@ -114,7 +114,11 @@ const namesOf = (e: Emoji): Name[] => [...e.aliases.map((text) => ({ text, alias
 function tierOf(name: string, q: string): number | null {
   if (name === q) return 0;
   if (name.startsWith(q)) return 1;
-  if (name.split(/[^a-z0-9]+/).some((w) => w.startsWith(q))) return 2;
+  // From each word boundary on, so a query that spans words ("foo_bar") can
+  // match where a word starts.
+  for (let i = 1; i < name.length; i++) {
+    if (!/[a-z0-9]/.test(name.charAt(i - 1)) && name.startsWith(q, i)) return 2;
+  }
   return name.includes(q) ? 3 : null;
 }
 

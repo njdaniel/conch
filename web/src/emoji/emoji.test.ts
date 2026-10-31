@@ -165,6 +165,17 @@ describe('aliases and ranking (issue #1036)', () => {
     expect(completeShortcode(small, 'foo').map((e) => e.key)).toEqual(['4', '3', '2', '1']);
   });
 
+  it('lets a multiword query match at a word boundary, above a mid-word hit', () => {
+    const small = { version: index.version, groups: [], all: [fake('1', 'xxfoo_bar'), fake('2', 'a_foo_bar'), fake('3', 'foo_bar_z')] };
+    expect(completeShortcode(small, 'foo_bar').map((e) => e.key)).toEqual(['3', '2', '1']);
+    expect(searchEmoji(small, 'foo bar').map((e) => e.key)).toEqual(['3', '2', '1']);
+  });
+
+  it('puts a name with the words "with smiling" at a boundary first in the picker', () => {
+    const first = searchEmoji(index, 'with smiling').slice(0, 5);
+    expect(first.every((e) => e.shortcode.includes('_with_smiling') || e.shortcode.startsWith('with_smiling'))).toBe(true);
+  });
+
   it('ranks an alias before a CLDR name of the same tier, then the shorter name', () => {
     const small = { version: index.version, groups: [], all: [fake('a', 'bar_long'), fake('b', 'bar_x'), fake('c', 'qq', ['barz']), fake('d', 'qq2', ['bar_alias_long'])] };
     expect(completeShortcode(small, 'bar').map((e) => e.key)).toEqual(['c', 'd', 'b', 'a']);
