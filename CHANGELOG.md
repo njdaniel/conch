@@ -10,13 +10,33 @@ release that Nick publishes.
 
 ## [0.1.0-alpha.8] - 2026-10-31
 
-These are fixes for the three biggest problems found by browser UX audit 3
-(`docs/reviews/browser-ux-audit-3.md`). Upgrade with
+These are fixes for the biggest problems found by browser UX audit 3
+(`docs/reviews/browser-ux-audit-3.md`), drafts that survive a reload, and
+the groundwork for admin-configurable permissions. Upgrade with
 `conch-server upgrade v0.1.0-alpha.8` from your workstation, or with
-`conch-upgrade.sh` on the droplet (docs/deploy.md step 11). There is no
-migration, so a rollback to `alpha.7` keeps the data as it is.
+`conch-upgrade.sh` on the droplet (docs/deploy.md step 11).
+
+Migration 39 adds the `role_permissions` table (ADR-014). It starts empty,
+so every permission reads as its default and nothing anyone can do changes.
+A rollback to `alpha.7` restores the pre-upgrade backup: what was written
+since the upgrade is lost, and everyone signs in again (docs/deploy.md,
+"Rollback with a migration").
 
 ### Added
+
+- **Unsent drafts survive a reload** (#1039). What you were typing, who it
+  was going to (a whisper's recipients or a net) and a message you were
+  editing all come back after a reload or after signing back in.
+  - A draft never comes back addressed to more people than you chose. Until
+    its recipients are checked it can't be sent, and if they are no longer
+    available it stays unsent and says so.
+  - Pressing Escape never widens a draft that came back. Only choosing an
+    audience yourself does.
+  - Drafts are kept for the browser tab only, and signing out clears them
+    (except when the network caused it).
+- **Emoji shortcodes find common names** (#1036). `:thumbsup:`, `:+1:`,
+  `:heart:` and other everyday aliases work, and a search of several words
+  ranks the closest match first.
 
 - **Your channel list follows changes live** (#1027). When someone adds you
   to a channel, removes you, or renames a channel you are in, your list
@@ -42,6 +62,18 @@ migration, so a rollback to `alpha.7` keeps the data as it is.
 
   Everything else is on the Voice tab. At 320 px wide, the message list
   grows from 96 px to 272 px.
+- **Signing in with a password and code counts as recent proof** (#1033).
+  For ten minutes after such a sign-in, an operator is not asked to prove
+  it again before a sensitive change.
+
+### Changed
+
+- **Operator powers now come from a permissions table, not the role**
+  (#1013, #1014; ADR-014). Today every operator still holds every operator
+  permission, so nothing anyone can do changes. Once the admin console
+  lands (#1015), an owner can turn individual permissions on or off for
+  operators and members. Refusals by a store check now also guard renaming
+  a person and revoking their sign-ins.
 
 ## [0.1.0-alpha.7] - 2026-10-30
 
