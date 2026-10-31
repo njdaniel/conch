@@ -31,7 +31,7 @@ import { channelsReducer, initialChannels, type ChannelsAction } from './state/c
 import { connectionReducer } from './state/connection';
 import { ComposerAttachmentProvider, whisperNotice, type ComposerAttachmentContextValue } from './Composer';
 import { clearStored, forgetChannelStored, loadStored, pruneStored, saveDrafts, storedAudience, type StoredTarget } from './state/draftStore';
-import { draftFor, draftsReducer, initialDrafts, initialTargets, targetFor, targetsReducer, type Drafts, type Target, type TargetAction } from './state/drafts';
+import { draftFor, draftsReducer, initialDrafts, initialTargets, targetFor, targetsReducer, type Target, type TargetAction } from './state/drafts';
 import type { Audience, MessageV2 } from './schema/message';
 import {
   attachmentDraftsReducer,
@@ -183,7 +183,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // forgets it.
   const kept = useRef<{
     readonly principal: number;
-    readonly drafts: Drafts;
+    // By channel id, as the audiences are (issue #1039): a channel renamed,
+    // or a new one given the old name, while signed out never gets the text.
+    readonly drafts: Readonly<Record<number, string>>;
     readonly attachments: AttachmentDrafts;
     readonly pending: Readonly<Record<string, readonly PendingSend[]>>;
     // Who each channel's draft was for, by channel id (issue #1039): text
@@ -206,6 +208,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // choice the person makes meanwhile wins and the kept one is dropped
   // (onTarget). When in doubt, the draft stays unsendable.
   const pendingTargets = useRef(new Map<number, StoredTarget>());
+  // The audience of a send whose text a 401 gave back to the composer, by
+  // channel id; null is the whole channel. The text goes with the audience
+  // it was sent to, never with whatever the composer shows by then.
+  const returnedAudiences = useRef(new Map<number, StoredTarget | null>());
   const draftsNow = useRef(drafts);
   useEffect(() => {
     draftsNow.current = drafts;
@@ -221,7 +227,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     if (auth.phase === 'signedOut') {
       // Once, as the sign-in ends; the notice is the one it ended with.
       if (lastSignedIn.current !== null) {
-        const typed = draftsNow.current;
+        const typed: Record<number, string> = {};
+        for (const channel of channelsNow.current.channels) {
+          const text = draftsNow.current[channel.name];
+          if (text !== undefined && text !== '') typed[channel.id] = text;
+        }
         const files = attachmentsNow.current;
         const pending: Record<string, readonly PendingSend[]> = {};
         if (keptAcross(endedNotice)) {
@@ -236,7 +246,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         // is kept as it was, never as the placeholder.
         const audiences: Record<number, StoredTarget> = {};
         for (const channel of channelsNow.current.channels) {
-          const audience = pendingTargets.current.get(channel.id) ?? storedAudience(targetFor(targetsNow.current, channel.name));
+          const returned = returnedAudiences.current.get(channel.id);
+          const audience = returned !== undefined ? returned : (pendingTargets.current.get(channel.id) ?? storedAudience(targetFor(targetsNow.current, channel.name)));
           if (audience !== null) audiences[channel.id] = audience;
         }
         kept.current = keptAcross(endedNotice) && (Object.keys(typed).length > 0 || Object.keys(files.channels).length > 0 || Object.keys(pending).length > 0)
@@ -257,6 +268,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       // server away leaves the drafts for when it is back.
       if (endedNotice !== 'network') clearStored();
       pendingTargets.current.clear();
+      returnedAudiences.current.clear();
       setDraftsReady(false);
       setAttempt(0);
       setEverywhereFailed(null);
@@ -659,7 +671,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         if (send.attachments.length === 0 && send.threadRootId === undefined) {
           // Text alone returns to the composer; attachments stay in the pending
           // line so their bytes and uploaded file ids survive the sign-in.
-          if ((draftsNow.current[name] ?? '') === '') dispatchDrafts({ type: 'edit', channel: name, text: send.body });
+          if ((draftsNow.current[name] ?? '') === '') {
+            dispatchDrafts({ type: 'edit', channel: name, text: send.body });
+            returnedAudiences.current.set(send.channelId, storedAudienceOf(send.audience));
+          }
           dispatchChat({ type: 'discard', channel: name, localId, requestId: send.requestId });
         } else {
           dispatchChat({ type: 'sendFailed', channel: name, localId, outcome: 'failed', requestId: send.requestId });
@@ -893,7 +908,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           pending[name] = [...(pending[name] ?? []), send];
         }
       }
-      dispatchDrafts({ type: 'restore', drafts: was.drafts });
+      // Text goes to the channel it was typed in, by id, under its name now;
+      // a channel that is gone takes its text with it.
+      const typed: Record<string, string> = {};
+      for (const [id, text] of Object.entries(was.drafts)) {
+        const name = channelsNow.current.channels.find((c) => String(c.id) === id)?.name;
+        if (name !== undefined) typed[name] = text;
+      }
+      dispatchDrafts({ type: 'restore', drafts: typed });
       dispatchAttachments({ type: 'restore', drafts: was.attachments });
       dispatchChat({ type: 'restored', pending });
     }
@@ -949,9 +971,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     if (kept === undefined || live.netsFor !== channelId || agents.membersFor !== channelId) return;
     pendingTargets.current.delete(channelId);
     // The whisper first, as the composer sends it.
+    // A whisper to nobody never stands: it would leave the draft one Escape
+    // from the whole channel.
     const stands =
       kept.whisper !== null
-        ? kept.whisper.every((id) => id !== principalId && live.people.has(id))
+        ? kept.whisper.length > 0 && kept.whisper.every((id) => id !== principalId && live.people.has(id))
         : kept.net !== null && live.nets.has(kept.net) && !live.monitored.has(kept.net);
     if (!stands) {
       dispatchTargets({ type: 'held', channel: selected, line: audienceGone });
@@ -962,9 +986,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
 
   // The audience controls (issue #1039): the person's own choice, in a channel
   // whose kept audience is still being checked, wins, and the kept one is
-  // dropped, so the check can never add to what they chose.
+  // dropped, so the check can never add to what they chose. Escape is not a
+  // choice: it cannot end a hold (the reducer keeps it), so it leaves the
+  // check running too.
   const chooseTarget = useCallback((action: TargetAction) => {
-    if (action.type === 'channel' || action.type === 'net' || action.type === 'whisper' || action.type === 'toggle' || action.type === 'closePicker') {
+    if (action.type === 'channel' || action.type === 'net' || action.type === 'whisper' || action.type === 'toggle') {
       const id = channelsNow.current.channels.find((c) => c.name === action.channel)?.id;
       if (id !== undefined) pendingTargets.current.delete(id);
     }
@@ -1665,6 +1691,14 @@ function audienceForTarget(target: Target): Audience | undefined {
   if (target.whisper !== null) return { kind: 'principals', principal_ids: [...target.whisper] };
   if (target.net !== null) return { kind: 'net', net_id: target.net };
   return undefined;
+}
+
+// storedAudienceOf is a send's audience as it is kept: null for the whole
+// channel.
+function storedAudienceOf(audience: Audience | undefined): StoredTarget | null {
+  if (audience === undefined) return null;
+  if (audience.kind === 'principals') return { net: null, whisper: [...audience.principal_ids] };
+  return { net: audience.net_id, whisper: null };
 }
 
 function audienceForScope(scope: string): Audience | undefined {

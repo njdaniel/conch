@@ -54,6 +54,10 @@ export interface Target {
   readonly refusal: string | null;
   // A note to show beside the composer (the audit-log notice).
   readonly note: string | null;
+  // A kept audience not yet given back (issue #1039): a whisper to nobody,
+  // which cannot be sent, that Escape cannot close. Only the person choosing
+  // who it goes to ends it, or the kept audience coming back whole.
+  readonly held?: boolean;
 }
 
 export type Targets = Readonly<Record<string, Target>>;
@@ -99,26 +103,29 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
   const set = (next: Target): Targets => ({ ...state, [action.channel]: next });
   switch (action.type) {
     case 'channel':
-      return set({ ...current, net: null, whisper: null, refusal: null });
+      return set({ ...current, net: null, whisper: null, refusal: null, held: false });
     case 'net':
-      return set({ ...current, net: action.net, whisper: null, refusal: null });
+      return set({ ...current, net: action.net, whisper: null, refusal: null, held: false });
     case 'whisper':
-      return set({ ...current, whisper: current.whisper ?? [], refusal: null });
+      return set({ ...current, whisper: current.whisper ?? [], refusal: null, held: false });
     case 'toggle': {
       const chosen = current.whisper ?? [];
       const next = chosen.includes(action.principal) ? chosen.filter((id) => id !== action.principal) : [...chosen, action.principal];
-      return set({ ...current, whisper: next, refusal: null });
+      return set({ ...current, whisper: next, refusal: null, held: false });
     }
     case 'closePicker':
+      // A held draft stays held: closing the picker would leave it addressed
+      // to the whole channel, which nobody chose.
+      if (current.held === true) return state;
       return set({ ...current, whisper: null, refusal: null });
     case 'posting':
       return set({ ...current, refusal: null, note: null });
     case 'refused':
       return set({ ...current, refusal: action.line });
     case 'held':
-      return set({ ...current, net: null, whisper: [], refusal: action.line });
+      return set({ ...current, net: null, whisper: [], refusal: action.line, held: true });
     case 'restore':
-      return set({ ...current, net: action.whisper === null ? action.net : null, whisper: action.whisper === null ? null : [...action.whisper], refusal: null });
+      return set({ ...current, net: action.whisper === null ? action.net : null, whisper: action.whisper === null ? null : [...action.whisper], refusal: null, held: false });
     case 'whispered': {
       // Only if the whisper still chosen is the one that was sent: a second one
       // being composed while the first was on its way is left as it is.

@@ -876,25 +876,36 @@ describe('composing to a net or a whisper', () => {
     await screen.findByText('Signed out: the credential is no longer valid');
     expired = false;
     meanwhile();
-    FakeSocket.all = [];
-    fireEvent.change(screen.getByLabelText('Credential'), { target: { value: token } });
-    fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
-    await screen.findByRole('log', { name: 'Messages' });
-    fireEvent.click(await screen.findByRole('button', { name: 'general' }));
-    // Every socket the page opens from here is let in, once.
-    const opened = new Set<FakeSocket>();
-    await waitFor(() => {
-      for (const socket of FakeSocket.all) {
-        if (opened.has(socket) || socket.closed) continue;
-        opened.add(socket);
-        socket.open();
-      }
-      expect(document.querySelector<HTMLTextAreaElement>('textarea')?.disabled).toBe(false);
-    });
+    await signBackIn(token);
     // The nets list ada alone, so eve is offered none.
     if (ada) await screen.findByRole('option', { name: 'net alpha' });
     else await screen.findByLabelText('Message #general');
     await checked();
+  }
+
+  // signBackIn signs in again from the sign-in screen and opens `channel`,
+  // letting in every socket the page opens from here, once.
+  async function signBackIn(token: string, channel = 'general') {
+    FakeSocket.all = [];
+    fireEvent.change(screen.getByLabelText('Credential'), { target: { value: token } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
+    await screen.findByRole('log', { name: 'Messages' });
+    fireEvent.click(await screen.findByRole('button', { name: channel }));
+    await letIn();
+  }
+
+  // letIn opens every socket the page has opened and not yet been let in on,
+  // until the composer is usable.
+  const admitted = new WeakSet<FakeSocket>();
+  async function letIn() {
+    await waitFor(() => {
+      for (const socket of FakeSocket.all) {
+        if (admitted.has(socket) || socket.closed) continue;
+        admitted.add(socket);
+        socket.open();
+      }
+      expect(document.querySelector<HTMLTextAreaElement>('textarea')?.disabled).toBe(false);
+    });
   }
 
   it('a whisper draft kept across a sign-in that ended goes to the same people', async () => {
@@ -939,6 +950,132 @@ describe('composing to a net or a whisper', () => {
     expect(sendButton().disabled).toBe(true);
     fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Enter' });
     expect(server.posts).toHaveLength(0);
+  });
+
+  it('a whisper draft kept across a sign-in follows its channel through a rename, and the new channel of the old name gets nothing', async () => {
+    await ready();
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    await expireThenSignIn(secret, () => {
+      server.channels = [
+        { id: 9, name: 'general', created_at: at },
+        { id: 7, name: 'original', created_at: at },
+        { id: 8, name: 'ops', created_at: at },
+      ];
+      server.history.original = [];
+    });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    expect(to().value).toBe('channel');
+    fireEvent.click(screen.getByRole('button', { name: 'original' }));
+    await letIn();
+    await screen.findByRole('option', { name: 'net alpha' });
+    await checked();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'original', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } }]);
+  });
+
+  it('a new channel given the old name while signed out never gets the text kept for the one that went', async () => {
+    await ready();
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    await expireThenSignIn(secret, () => {
+      server.channels = [
+        { id: 9, name: 'general', created_at: at },
+        { id: 8, name: 'ops', created_at: at },
+      ];
+    });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    expect(to().value).toBe('channel');
+    expect(document.body.innerHTML).not.toContain('psst');
+  });
+
+  it('a whisper a 401 gives back keeps the audience it was sent to, not the one chosen since, and is held until checked', async () => {
+    await ready();
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    let answer: (response: Response) => void = () => undefined;
+    server.post = () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve;
+      });
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    // The person moves on to the whole channel before the answer comes.
+    choose('channel');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    await act(async () => {
+      answer(json({}, 401));
+      await Promise.resolve();
+    });
+    await screen.findByText('Signed out: the credential is no longer valid');
+    server.post = (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201);
+    let release = () => {};
+    server.netsHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await signBackIn(secret);
+    await screen.findByText(/Checking who this draft goes to/);
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to…').value).toBe('psst');
+    expect(sendButton().disabled).toBe(true);
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await checked();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(2);
+    });
+    expect(server.posts[1]).toEqual({ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } });
+  });
+
+  it('Escape does not end a hold while the kept audience is being checked', async () => {
+    keepDraft({ net: 5, whisper: null });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    let release = () => {};
+    server.netsHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await reopen('Whisper to…');
+    await screen.findByText(/Checking who this draft goes to/);
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Escape' });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to…').value).toBe('psst');
+    expect(sendButton().disabled).toBe(true);
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Enter' });
+    expect(server.posts).toHaveLength(0);
+    // The check still runs, and gives the net back.
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await checked();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message net alpha').value).toBe('psst');
+  });
+
+  it('Escape does not end a hold once the kept audience is no longer available', async () => {
+    keepDraft({ net: 77, whisper: null });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    await reopen('Whisper to…');
+    await screen.findByText(/no longer available/);
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Escape' });
+    fireEvent.keyDown(screen.getByRole('checkbox', { name: 'bot [agent]' }), { key: 'Escape' });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to…').value).toBe('psst');
+    expect(sendButton().disabled).toBe(true);
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Enter' });
+    expect(server.posts).toHaveLength(0);
+    // Choosing the channel is a choice, and ends it.
+    choose('channel');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('psst');
   });
 
   it('a whisper draft is not given, nor who it was for, to someone else signing in next', async () => {
