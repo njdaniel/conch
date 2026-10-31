@@ -303,7 +303,7 @@ describe('a send in progress', () => {
   function WithImage({ status }: { readonly status: DraftAttachment['status'] }) {
     const [draft, setDraft] = useState('caption :fire');
     return (
-      <ComposerAttachmentProvider value={{ attachments: [image(status)], add: () => undefined, remove: () => undefined, cancel: () => undefined, retry: () => undefined }}>
+      <ComposerAttachmentProvider value={{ attachments: [image(status)], add: () => undefined, remove: () => undefined, cancel: () => undefined, retry: () => undefined, editing: () => undefined }}>
         <Composer channel="general" target={target} nets={new Map()} monitored={new Set()} people={new Map()} viewer={2} draft={draft} enabled paused={false} onDraft={setDraft} onTarget={() => undefined} onSend={() => undefined} atBottom={() => undefined} />
       </ComposerAttachmentProvider>
     );

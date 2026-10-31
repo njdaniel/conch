@@ -66,7 +66,7 @@ describe('targets', () => {
     state = targetsReducer(state, { type: 'toggle', channel: 'ops', principal: 3 });
     state = targetsReducer(state, { type: 'posting', channel: 'ops', requestId: 'r1' });
     // Something is typed to the same whisper while r1 is on its way.
-    state = targetsReducer(state, { type: 'typed', channel: 'ops' });
+    state = targetsReducer(state, { type: 'edited', channel: 'ops' });
     state = targetsReducer(state, { type: 'whispered', channel: 'ops', requestId: 'r1', note: null });
     expect(targetFor(state, 'ops')).toMatchObject({ whisper: [3] });
     // The same whisper chosen again is a newer draft too.

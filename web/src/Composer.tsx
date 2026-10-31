@@ -25,6 +25,10 @@ export interface ComposerAttachmentContextValue {
   readonly remove: (clientId: number) => void;
   readonly cancel: (clientId: number) => void;
   readonly retry: (clientId: number) => void;
+  // The draft's images are about to change (issue #1066): said before any
+  // image is checked, so a send already on its way can no longer take this
+  // draft for its own.
+  readonly editing: () => void;
 }
 
 const noAttachments: ComposerAttachmentContextValue = {
@@ -33,6 +37,7 @@ const noAttachments: ComposerAttachmentContextValue = {
   remove: () => undefined,
   cancel: () => undefined,
   retry: () => undefined,
+  editing: () => undefined,
 };
 const ComposerAttachmentContext = createContext<ComposerAttachmentContextValue>(noAttachments);
 
@@ -269,6 +274,7 @@ export function Composer({
 
   async function addFiles(incoming: readonly File[]): Promise<void> {
     if (!enabled || busy || incoming.length === 0) return;
+    fileDraft.editing();
     const generation = ++validationGeneration.current;
     const frozenScope = scope;
     const slots = Math.max(0, maxDraftAttachments - attachments.length);

@@ -66,9 +66,10 @@ export interface Target {
   readonly protected?: boolean;
   // The draft generation of the composer (issue #1066): the request id of the
   // send this composer's draft last went out as, for as long as the composer
-  // still holds that same draft, with nothing typed or chosen since. Anything
-  // written or chosen after the send ends it, so the send's answer can tell
-  // its own draft from a newer one with the same recipients.
+  // still holds that same draft, with nothing typed, inserted, attached,
+  // removed or chosen since. Any change to the draft after the send ends it
+  // ('edited', or a choice of audience), so the send's answer can tell its
+  // own draft from a newer one with the same recipients. Never stored.
   readonly sentAs?: string;
 }
 
@@ -85,9 +86,9 @@ export type TargetAction =
   // composer's own draft carries its request id; a Retry from a pending line
   // does not, since it is not the draft the composer holds.
   | { readonly type: 'posting'; readonly channel: string; readonly requestId?: string }
-  // The composer's text changed: whatever it holds now is a newer draft than
-  // any send already on its way (issue #1066).
-  | { readonly type: 'typed'; readonly channel: string }
+  // The composer's draft changed, its text or its images: whatever it holds
+  // now is a newer draft than any send already on its way (issue #1066).
+  | { readonly type: 'edited'; readonly channel: string }
   | { readonly type: 'refused'; readonly channel: string; readonly line: string }
   // The whisper sent as `requestId` was accepted: back to the whole channel,
   // with the notice if one is due, only if the composer still holds the very
@@ -119,7 +120,7 @@ export function targetFor(state: Targets, channel: string): Target {
 // the next message goes to. The one change a completion may make is the end
 // of a whisper on its own success ('whispered'), and only while the composer
 // still holds the very draft it was sent as (Target.sentAs, the send's
-// request id): emptied by the send, with nothing typed or chosen since. A
+// request id): emptied by the send, with nothing changed or chosen since. A
 // newer draft to the same people is not that draft, so it keeps its whisper.
 // Every other action here starts a newer draft, or keeps sentAs as it was.
 export function targetsReducer(state: Targets, action: TargetAction): Targets {
@@ -147,7 +148,7 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
       // leave it addressed to the whole channel, which nobody chose.
       if (current.held === true || current.protected === true) return state;
       return set({ ...chosen, whisper: null, refusal: null });
-    case 'typed':
+    case 'edited':
       // Once per send, not per key: a draft already newer stays as it is.
       return current.sentAs === undefined ? state : set(chosen);
     case 'posting':

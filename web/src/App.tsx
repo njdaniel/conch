@@ -679,7 +679,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           // line so their bytes and uploaded file ids survive the sign-in.
           if ((draftsNow.current[name] ?? '') === '') {
             dispatchDrafts({ type: 'edit', channel: name, text: send.body });
-            dispatchTargets({ type: 'typed', channel: name });
+            dispatchTargets({ type: 'edited', channel: name });
             returnedAudiences.current.set(send.channelId, storedAudienceOf(send.audience, send.netUnder));
           }
           dispatchChat({ type: 'discard', channel: name, localId, requestId: send.requestId });
@@ -1304,20 +1304,29 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
 
   const composerTarget: Target | null = selected === null ? null : targetFor(targets, selected);
   const composerAudience = composerTarget === null ? undefined : audienceForTarget(composerTarget);
+  // Every change to the draft's images makes it a newer draft than any send
+  // on its way (issue #1066), from the moment one is chosen, pasted or dropped.
+  const editedImages = () => {
+    if (selected !== null) dispatchTargets({ type: 'edited', channel: selected });
+  };
   const composerAttachments: ComposerAttachmentContextValue = {
     attachments: selected === null ? [] : attachmentsFor(attachmentDrafts, selected, composerAudience),
+    editing: editedImages,
     add: (files: readonly NewDraftAttachment[]) => {
       if (selected === null || channelId === null) return;
+      editedImages();
       dispatchAttachments({ type: 'add', channel: selected, ...(composerAudience === undefined ? {} : { audience: composerAudience }), files });
     },
     remove: (clientId: number) => {
       if (selected === null) return;
+      editedImages();
       dispatchAttachments({ type: 'remove', channel: selected, ...(composerAudience === undefined ? {} : { audience: composerAudience }), clientId });
     },
     cancel: (clientId: number) => {
       if (selected === null) return;
       const attachment = attachmentsFor(attachmentsNow.current, selected, composerAudience).find((a) => a.clientId === clientId);
       if (attachment === undefined) return;
+      editedImages();
       uploadControllers.current.get(`${String(attachmentsNow.current.generation)}:${String(clientId)}`)?.controller.abort();
       dispatchAttachments({
         type: 'cancelled',
@@ -1332,6 +1341,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       if (selected === null || channelId === null) return;
       const attachment = attachmentsFor(attachmentsNow.current, selected, composerAudience).find((a) => a.clientId === clientId);
       if (attachment === undefined || attachment.status === 'ready' || attachment.status === 'uploading') return;
+      editedImages();
       const frozen = freezeSend(channelId, selected, draftFor(draftsNow.current, selected), composerAudience, [attachment]);
       if (frozen !== null) void uploadOne(frozen, attachment);
     },
@@ -1663,9 +1673,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 target={targetFor(targets, selected)}
                 onDraft={(text) => {
                   dispatchDrafts({ type: 'edit', channel: selected, text });
-                  // Whatever is typed now is a newer draft than any send on
-                  // its way (issue #1066).
-                  dispatchTargets({ type: 'typed', channel: selected });
+                  // Whatever is typed or inserted now is a newer draft than
+                  // any send on its way (issue #1066).
+                  dispatchTargets({ type: 'edited', channel: selected });
                 }}
                 onTarget={chooseTarget}
                 onSend={(body, audience, files?: readonly DraftAttachment[]) => {
