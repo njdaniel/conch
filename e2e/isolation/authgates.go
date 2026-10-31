@@ -567,10 +567,27 @@ func (w *world) operatorAuth() (timing, error) {
 		return timing{}, fmt.Errorf("the operator's session is bounded %+v, want an hour idle and twelve in all", sw.Auth)
 	}
 
-	// The session needs a recent proof on a sensitive route, and a code is
-	// good once.
+	// The sign-in with both factors is the session's recent proof for its
+	// first ten minutes (issue #1033): a sensitive route takes it at once.
+	if sw.Auth.RecentAuthUntil == nil || sw.Auth.RecentAuthUntil.Time().Before(now.Add(9*time.Minute)) ||
+		sw.Auth.RecentAuthUntil.Time().After(now.Add(11*time.Minute)) {
+		return timing{}, fmt.Errorf("the operator's session holds a proof to %v, want ten minutes from the sign-in", sw.Auth.RecentAuthUntil)
+	}
 	change := schema.PutJoinSettingsRequestV1{JoinVoice: ptr(true)}
-	if err := refusedAs(sess.api, http.MethodPut, "/v1/join/settings", change, answer{http.StatusForbidden, schema.ErrorCodeReauthRequired}, "the session changes the joining policy without a proof"); err != nil {
+	if err := sess.api.call(http.MethodPut, "/v1/join/settings", change, nil); err != nil {
+		return timing{}, fmt.Errorf("the session changes the joining policy with the sign-in's proof: %w", err)
+	}
+	// The proof is the signed-in credential's alone: the session rotated
+	// from it has none, needs one on a sensitive route, and a code is good
+	// once.
+	var rotated schema.RotateCredentialResponseV1
+	if err := sess.api.call(http.MethodPost, fmt.Sprintf("/v1/credentials/%d/rotate", sess.credID), nil, &rotated); err != nil {
+		return timing{}, err
+	}
+	w.h.secret("the operator's rotated session", rotated.Token)
+	sess.token, sess.credID = rotated.Token, rotated.Credential.ID
+	sess.api = w.as(sess)
+	if err := refusedAs(sess.api, http.MethodPut, "/v1/join/settings", change, answer{http.StatusForbidden, schema.ErrorCodeReauthRequired}, "the rotated session changes the joining policy without a proof"); err != nil {
 		return timing{}, err
 	}
 	if err := refusedAs(sess.api, http.MethodPost, "/v1/reauth", schema.ReauthRequestV1{Password: operatorPassword, Code: auth.spent()},

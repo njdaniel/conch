@@ -13,7 +13,8 @@
 //     password with no code. The second operator sets a password, then takes
 //     the authenticator step that stays on offer, and from then on is asked
 //     for the code. Left behind on purpose: the first operator's browser
-//     session with a recent-authentication proof, the second's session, a
+//     session with a recent-authentication proof, the second's session with
+//     the proof its sign-in with a code made (issue #1033), a
 //     pending sign-in of the second's, and an unfinished setup credential.
 //   - The same data restarted in normal mode (CONCHD_MODE unset): /healthz
 //     says nothing of a mode; every one of those is dead; a password-only
@@ -467,7 +468,7 @@ func (r *run) normalPart() error {
 	}
 	wantModes := []string{
 		"mode=temporary password_only=true first_start=true",
-		"mode=temporary->normal password_only=true->false sessions_revoked=2 proofs_cleared=1 pending_logins_spent=1 setup_credentials_revoked=1 operators_without_authenticator=1",
+		"mode=temporary->normal password_only=true->false sessions_revoked=2 proofs_cleared=2 pending_logins_spent=1 setup_credentials_revoked=1 operators_without_authenticator=1",
 	}
 	if strings.Join(modes, "\n") != strings.Join(wantModes, "\n") {
 		return fmt.Errorf("server_mode rows %q, want %q", modes, wantModes)
