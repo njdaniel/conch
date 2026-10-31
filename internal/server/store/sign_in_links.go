@@ -181,8 +181,9 @@ func signInLinkTargetTx(ctx context.Context, tx execer, principalID int64) (Prin
 
 // CreateSignInLink makes a link of the request's purpose for principalID,
 // made by creatorID, and returns it with its code, which is shown only here.
-// In one IMMEDIATE transaction with the insert it checks that the maker is an
-// enabled human operator (ErrSignInLinkNotAllowed) and that the person may be
+// In one IMMEDIATE transaction with the insert it checks that the maker holds
+// act_as_members (makerMayActAsTx, ErrSignInLinkNotAllowed) and that the
+// person may be
 // given one (signInLinkTargetTx, the same rule for every purpose); the row
 // records the person's authentication generation as it is then.
 // sign_in_link_created (password_reset_issued for a reset link,
@@ -201,14 +202,10 @@ func (s *Store) CreateSignInLink(ctx context.Context, actor string, creatorID, p
 	}
 	var out schema.SignInLinkV1
 	err = s.withImmediateTx(ctx, func(tx execer) error {
-		creator, err := principalByIDTx(ctx, tx, creatorID)
-		switch {
-		case errors.Is(err, ErrPrincipalNotFound):
-			return ErrSignInLinkNotAllowed
+		switch ok, err := makerMayActAsTx(ctx, tx, creatorID); {
 		case err != nil:
 			return err
-		}
-		if creator.DisabledAt != nil || creator.Kind != PrincipalHuman || creator.Role != RoleOperator {
+		case !ok:
 			return ErrSignInLinkNotAllowed
 		}
 		if err := ownerProtectedTx(ctx, tx, principalID, len(forbidOwner) > 0 && forbidOwner[0]); err != nil {
@@ -298,9 +295,23 @@ func liveSignInLinkTx(ctx context.Context, tx execer, codeHash string, now time.
 	return l, nil
 }
 
+// makerMayActAsTx reports whether principal id holds act_as_members now: who
+// must make, and stand behind at every redemption, a sign-in, reset or
+// enrolment link (ADR-014 design §7.3, §7.5, N3). A link whose maker has lost
+// it is suspended, not closed: it works again if the permission comes back.
+// A principal with no row holds nothing.
+func makerMayActAsTx(ctx context.Context, tx execer, id int64) (bool, error) {
+	ok, err := permittedTx(ctx, tx, id, schema.PermActAsMembers)
+	if err != nil {
+		return false, fmt.Errorf("store: sign-in link maker: %w", err)
+	}
+	return ok, nil
+}
+
 // makerIsOperatorTx reports whether principal id is still an enabled human
-// operator: who must stand behind every link but a device link, as for an
-// invite.
+// operator: who must make and stand behind a conversion permit. It is a role
+// check, kept for the permits alone until #1005 retires them; every other
+// link reads makerMayActAsTx.
 func makerIsOperatorTx(ctx context.Context, tx execer, id int64) (bool, error) {
 	creator, err := principalByIDTx(ctx, tx, id)
 	if err != nil {
@@ -316,7 +327,8 @@ func makerIsOperatorTx(ctx context.Context, tx execer, id int64) (bool, error) {
 // no longer its person's (liveSignInLinkTx), a maker who can no longer stand
 // behind it, or a person who may no longer be given a link. The maker of a
 // device link must be the member it is for (and so, by the person's check,
-// still a member); of any other, an enabled human operator. A conversion
+// still a member); of any other, a holder of act_as_members now
+// (makerMayActAsTx). A conversion
 // permit is for a guest, whom no sign-in link is for, so it is never usable
 // here: usableConversionPermitTx is its check.
 func usableSignInLinkTx(ctx context.Context, tx execer, codeHash string, now time.Time) (usableLink, error) {
@@ -333,7 +345,7 @@ func usableSignInLinkTx(ctx context.Context, tx execer, codeHash string, now tim
 		}
 	} else {
 		// The maker must still be able to stand behind it, as for an invite.
-		if ok, err := makerIsOperatorTx(ctx, tx, l.createdBy); err != nil {
+		if ok, err := makerMayActAsTx(ctx, tx, l.createdBy); err != nil {
 			return usableLink{}, err
 		} else if !ok {
 			return usableLink{}, ErrSignInLinkInvalid

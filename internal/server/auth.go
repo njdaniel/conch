@@ -130,6 +130,76 @@ func auditActor(ctx context.Context) string {
 
 func isOperator(p store.Principal) bool { return p.Role == store.RoleOperator }
 
+// can is the one handler question about an actor's authority (ADR-014,
+// docs/design/admin-roles.md §7.1): whether caller holds perm now, by the
+// permissions document, read per request. A handler decides which branch to
+// take with it; the write behind that branch asks the store again inside its
+// own transaction (ADR-010 D7), so a document change racing the request
+// cannot pass on this answer.
+func (s *Server) can(ctx context.Context, caller store.Principal, perm schema.Permission) (bool, error) {
+	return s.store.Permitted(ctx, caller.ID, perm)
+}
+
+// canOrFail is can for a handler: on a store error it logs, writes 500 and
+// answers ok = false, and the handler returns.
+func (s *Server) canOrFail(w http.ResponseWriter, r *http.Request, caller store.Principal, perm schema.Permission) (allowed, ok bool) {
+	allowed, err := s.can(r.Context(), caller, perm)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "auth: permission check failed", "principal", caller.ID, "permission", perm, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return false, false
+	}
+	return allowed, true
+}
+
+// channelSight says which channel names caller may read in an operator
+// answer (ADR-014 design §7.3, SF-1): every channel's when all is true (a
+// holder of manage_channels), and otherwise only those of the channels in
+// mine, the ones caller is in. The answers that list channels filter by it
+// and count what they leave out.
+type channelSight struct {
+	all       bool
+	mine      map[int64]bool
+	mineNames map[string]bool
+}
+
+func (c channelSight) sees(channelID int64) bool { return c.all || c.mine[channelID] }
+
+// seesName is sees for an answer that names channels by name only (the
+// joining settings' open_channels). Channel names are unique.
+func (c channelSight) seesName(name string) bool { return c.all || c.mineNames[name] }
+
+// channelSightFor reads caller's channelSight.
+func (s *Server) channelSightFor(ctx context.Context, caller store.Principal) (channelSight, error) {
+	all, err := s.can(ctx, caller, schema.PermManageChannels)
+	if err != nil || all {
+		return channelSight{all: all}, err
+	}
+	chans, err := s.store.ListChannelsForPrincipal(ctx, caller.ID)
+	if err != nil {
+		return channelSight{}, err
+	}
+	sight := channelSight{mine: make(map[int64]bool, len(chans)), mineNames: make(map[string]bool, len(chans))}
+	for _, c := range chans {
+		sight.mine[c.ID] = true
+		sight.mineNames[c.Name] = true
+	}
+	return sight, nil
+}
+
+// refusedPermission is the permission a refusal names (design §7.4, §8.5):
+// perm when caller's role could hold it, so that holding it would have
+// changed the answer, and "" when its cell is fixed off for that role (a
+// member is never told of an operator permission). Under the default
+// document no operator is refused for want of a permission it could hold,
+// so no answer that existed before ADR-014 changes.
+func refusedPermission(caller store.Principal, perm schema.Permission) schema.Permission {
+	if fixed, _ := perm.Fixed(store.PermissionRoleOf(caller)); fixed {
+		return ""
+	}
+	return perm
+}
+
 func isOwner(p store.Principal) bool { return p.IsOwner() }
 
 // ownerProtected refuses a non-owner operator acting on an owner principal
@@ -357,6 +427,14 @@ func (s *Server) guard(rt route) http.Handler {
 // detail the error code. The event carries no request content or credential
 // material. If the audit write fails the request is still denied.
 func (s *Server) denyForbidden(w http.ResponseWriter, r *http.Request, caller store.Principal, code, message string) {
+	s.denyForbiddenFor(w, r, caller, code, message, "")
+}
+
+// denyForbiddenFor is denyForbidden for a refusal decided on a permission
+// (ADR-014, design §7.4, §8.5): a non-empty perm is named in the answer's
+// permission field and in the audit detail as "permission=<name>". An empty
+// perm gives denyForbidden's answer and audit row, byte for byte.
+func (s *Server) denyForbiddenFor(w http.ResponseWriter, r *http.Request, caller store.Principal, code, message string, perm schema.Permission) {
 	// The client may already be gone; the denial must still be recorded.
 	ctx := context.WithoutCancel(r.Context())
 	// The mux sets r.Pattern on every dispatched request. Never fall back to
@@ -366,18 +444,23 @@ func (s *Server) denyForbidden(w http.ResponseWriter, r *http.Request, caller st
 	if subject == "" {
 		subject = "<unmatched>"
 	}
+	detail := code
+	if perm != "" {
+		detail += " permission=" + string(perm)
+	}
+	body := schema.Error{Code: code, Message: message, Permission: perm}
 	// Repeated identical denials from one principal are thinned out, so a
 	// caller cannot grow the audit log with every refused request; the first
 	// of each kind is written at once (issue #80, denialCoalescer).
-	write, count := s.denials.admit(caller.ID, subject+"|"+code, s.now())
+	write, count := s.denials.admit(caller.ID, subject+"|"+detail, s.now())
 	if !write {
-		writeError(w, http.StatusForbidden, code, message)
+		writeJSON(w, http.StatusForbidden, body)
 		return
 	}
-	if _, err := s.store.AppendAuditEvent(ctx, fmt.Sprintf("principal:%d", caller.ID), "access_denied", subject, denialDetail(code, count)); err != nil {
+	if _, err := s.store.AppendAuditEvent(ctx, fmt.Sprintf("principal:%d", caller.ID), "access_denied", subject, denialDetail(detail, count)); err != nil {
 		slog.ErrorContext(ctx, "auth: audit access_denied failed", "principal", caller.ID, "error", err)
 	}
-	writeError(w, http.StatusForbidden, code, message)
+	writeJSON(w, http.StatusForbidden, body)
 }
 
 // bindAuthor enforces author binding on a message post. Without a caller
@@ -420,6 +503,12 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	voice := voiceAllowed(caller)
+	invites, err := s.mayInvite(r.Context(), caller)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "whoami: check invite right failed", "principal", caller.ID, "error", err)
+		writeInternalError(w)
+		return
+	}
 	resp := schema.WhoAmIResponseV1{
 		ID:            caller.ID,
 		Kind:          schema.PrincipalKind(caller.Kind),
@@ -427,7 +516,7 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		Role:          schema.PrincipalRole(caller.Role),
 		Owner:         caller.IsOwner(),
 		ServerVersion: s.cfg.Version,
-		MayInvite:     mayInvite(caller),
+		MayInvite:     invites,
 		VoiceAllowed:  &voice,
 	}
 	// ADR-011 item 2.3: everyone is told, absent in normal mode.
@@ -452,7 +541,14 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only a person with an allowance is told what is left of it (issue
 	// #468): operators have none, and nobody else may invite.
-	if resp.MayInvite && !isOperator(caller) {
+	// A holder of manage_members has no allowance, and is told no count
+	// (ADR-014 design §7.3, N1); anyone else who may invite, a restricted
+	// operator included, is told what is left.
+	unbounded, ok := s.canOrFail(w, r, caller, schema.PermManageMembers)
+	if !ok {
+		return
+	}
+	if resp.MayInvite && !unbounded {
 		ctx := r.Context()
 		n, err := s.store.InvitesRemaining(ctx, caller.ID, store.InviteOptions{Allowance: s.cfg.InviteAllowance}, s.now())
 		if err != nil {
@@ -473,9 +569,11 @@ func voiceAllowed(p store.Principal) bool {
 	return p.Kind == store.PrincipalHuman && p.VoiceAllowed
 }
 
-// mayInvite is what whoami says about making invites (issue #437): true for
-// an operator and for a person granted the right. Only people make invites,
-// so an agent is told false whatever its role; the store refuses it anyway.
-func mayInvite(p store.Principal) bool {
-	return p.Kind == store.PrincipalHuman && (isOperator(p) || p.MayInvite)
+// mayInvite is what whoami says about making invites (issue #437): whether
+// p holds make_member_links, the right the store's CreateInvite checks for
+// a personal invite (ADR-014 design §5, §7.3). Under the default document
+// that is every operator and every member whose may_invite brake is off.
+// Only people make invites, so an agent is told false.
+func (s *Server) mayInvite(ctx context.Context, p store.Principal) (bool, error) {
+	return s.can(ctx, p, schema.PermMakeMemberLinks)
 }

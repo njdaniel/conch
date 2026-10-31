@@ -304,7 +304,11 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	roster, err := s.channelRoster(ctx, r, channel, caller)
+	seesHosts, ok := s.canOrFail(w, r, caller, schema.PermManageMembers)
+	if !ok {
+		return
+	}
+	roster, err := s.channelRoster(ctx, r, channel, caller, seesHosts)
 	if err != nil {
 		writeInternalError(w)
 		return
@@ -319,8 +323,10 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 // channel; its callers have (channelForCaller). A failure is logged here and
 // returned for the caller to answer, except a read cut short because ctx is
 // done: that is the client leaving (an events socket closed mid-roster, a
-// request hung up), not a fault (issue #313).
-func (s *Server) channelRoster(ctx context.Context, r *http.Request, channel store.Channel, viewer store.Principal) (schema.SessionRosterV1, error) {
+// request hung up), not a fault (issue #313). seesHosts is whether viewer
+// holds manage_members, which shows every session's runtime and host
+// (sessionDoc).
+func (s *Server) channelRoster(ctx context.Context, r *http.Request, channel store.Channel, viewer store.Principal, seesHosts bool) (schema.SessionRosterV1, error) {
 	sessions, err := s.store.ListChannelSessions(ctx, channel.ID, s.now(), sessionRosterWindow)
 	if err != nil {
 		if ctx.Err() == nil {
@@ -348,7 +354,7 @@ func (s *Server) channelRoster(ctx context.Context, r *http.Request, channel sto
 		Sessions:  make([]schema.SessionV1, 0, len(sessions)),
 	}
 	for _, sess := range sessions {
-		roster.Sessions = append(roster.Sessions, sessionDoc(sess, viewer, runs[sess.ID]))
+		roster.Sessions = append(roster.Sessions, sessionDoc(sess, viewer, seesHosts, runs[sess.ID]))
 	}
 	if err := roster.Validate(); err != nil {
 		slog.ErrorContext(ctx, "sessions: built an invalid roster", "channel", channel.ID, "error", err)
@@ -366,7 +372,8 @@ func (s *Server) ownSessionDoc(ctx context.Context, call sessionCall, sess store
 		slog.ErrorContext(ctx, "sessions: read runs failed", "session", sess.ID, "error", err)
 		return schema.SessionV1{}, callInternal
 	}
-	doc := sessionDoc(sess, call.caller, runs[sess.ID])
+	// The session is the caller's own, which shows its runtime and host.
+	doc := sessionDoc(sess, call.caller, false, runs[sess.ID])
 	if err := doc.Validate(); err != nil {
 		slog.ErrorContext(ctx, "sessions: built an invalid session document", "session", sess.ID, "error", err)
 		return schema.SessionV1{}, callInternal
@@ -376,10 +383,11 @@ func (s *Server) ownSessionDoc(ctx context.Context, call sessionCall, sess store
 
 // sessionDoc is the wire form of sess as viewer may see it, given its runs as
 // the same viewer may see them (store.SessionRunViews). Runtime and host say
-// where an agent runs, so they are shown only to an operator and to the
-// session's own principal; the model is shown to everyone who sees the
-// session. Interventions are always a list.
-func sessionDoc(sess store.Session, viewer store.Principal, runs store.SessionRuns) schema.SessionV1 {
+// where an agent runs, so they are shown only to a viewer holding
+// manage_members (seesHosts, ADR-014 design §7.3) and to the session's own
+// principal; the model is shown to everyone who sees the session.
+// Interventions are always a list.
+func sessionDoc(sess store.Session, viewer store.Principal, seesHosts bool, runs store.SessionRuns) schema.SessionV1 {
 	doc := schema.SessionV1{
 		Schema:        schema.SessionSchemaV1,
 		ID:            sess.ID,
@@ -398,7 +406,7 @@ func sessionDoc(sess store.Session, viewer store.Principal, runs store.SessionRu
 		ts := schema.NewTimestamp(*sess.EndedAt)
 		doc.EndedAt = &ts
 	}
-	if isOperator(viewer) || viewer.ID == sess.PrincipalID {
+	if seesHosts || viewer.ID == sess.PrincipalID {
 		doc.Runtime = sess.Runtime
 		doc.Host = sess.Host
 	}

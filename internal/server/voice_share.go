@@ -233,7 +233,12 @@ func (s *Server) handleVoiceShareStop(w http.ResponseWriter, r *http.Request) {
 		claim = &started
 	}
 	var channel store.Channel
-	moderator := isOperator(caller)
+	// A moderator holds manage_channels or manages the channel (ADR-014
+	// design §7.3).
+	moderator, ok := s.canOrFail(w, r, caller, schema.PermManageChannels)
+	if !ok {
+		return
+	}
 	if moderator {
 		ch, err := s.store.ChannelByName(ctx, r.PathValue("channel"))
 		if errors.Is(err, store.ErrNotFound) {
