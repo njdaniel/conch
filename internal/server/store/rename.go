@@ -295,15 +295,39 @@ type RenameResult struct {
 //
 // An unknown principal is ErrPrincipalNotFound.
 func (s *Store) RenamePrincipal(ctx context.Context, actor string, id int64, name string, lim RenameLimits, now time.Time, forbidOwner ...bool) (RenameResult, error) {
+	return s.renamePrincipal(ctx, actor, 0, id, name, lim, true, now, len(forbidOwner) > 0 && forbidOwner[0])
+}
+
+// RenamePrincipalAs is RenamePrincipal by actorID, whose standing is decided
+// in the renaming transaction (selfOrAdministratorTx, ADR-014 design §7.2):
+// a holder of manage_members renames anyone, without limits; anyone else
+// renames only itself, within selfLim, and renaming someone else is
+// ErrManageMembersRequired, decided before the target is read, so a refused
+// caller learns nothing of it. actorID 0 is RenamePrincipal with no limits.
+func (s *Store) RenamePrincipalAs(ctx context.Context, actor string, actorID, id int64, name string, selfLim RenameLimits, now time.Time, forbidOwner bool) (RenameResult, error) {
+	return s.renamePrincipal(ctx, actor, actorID, id, name, selfLim, false, now, forbidOwner)
+}
+
+// renamePrincipal is both: with limitsAlways the limits bind whoever
+// renames (RenamePrincipal's contract); otherwise only a self-rename by an
+// actor without manage_members.
+func (s *Store) renamePrincipal(ctx context.Context, actor string, actorID, id int64, name string, lim RenameLimits, limitsAlways bool, now time.Time, forbidOwner bool) (RenameResult, error) {
 	now = now.Truncate(time.Millisecond)
 	var out RenameResult
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		out = RenameResult{}
+		administers, err := selfOrAdministratorTx(ctx, tx, actorID, id)
+		if err != nil {
+			return err
+		}
+		if !limitsAlways && administers {
+			lim = RenameLimits{}
+		}
 		p, err := principalByIDTx(ctx, tx, id)
 		if err != nil {
 			return err
 		}
-		if err := ownerProtectedTx(ctx, tx, id, len(forbidOwner) > 0 && forbidOwner[0]); err != nil {
+		if err := ownerProtectedTx(ctx, tx, id, forbidOwner); err != nil {
 			return err
 		}
 		out.From = p.Name

@@ -66,7 +66,9 @@ const (
 )
 
 // handleRenameChannel serves PUT /v1/channels/{id}/name (issues #727, #791).
-// Operators are unlimited; a channel manager has the same rename and attempt
+// An owner, and an operator holding manage_channels, are unlimited (the
+// store decides the standing, ADR-014 design §7.2.1); a channel manager,
+// a restricted operator included, has the same rename and attempt
 // bounds as a principal self-rename. The route class hides an unknown or
 // non-member channel before the body is read. A duplicate-name refusal is
 // audited without either name and counts toward the manager's attempt limit.
@@ -103,7 +105,7 @@ func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 		writeChannelNotFound(w)
 		return
 	case errors.Is(err, store.ErrManagerRefused):
-		s.denyForbidden(w, r, caller, "forbidden", "operator role or channel manager required")
+		s.denyForbiddenFor(w, r, caller, "forbidden", "operator role or channel manager required", refusedPermission(caller, schema.PermManageChannels))
 		return
 	case errors.Is(err, store.ErrChannelNameStale):
 		writeError(w, http.StatusConflict, schema.ErrorCodeChannelNameStale, channelNameStaleMessage)
@@ -120,7 +122,7 @@ func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 				case errors.Is(rerr, store.ErrNotFound):
 					writeChannelNotFound(w)
 				case errors.Is(rerr, store.ErrManagerRefused):
-					s.denyForbidden(w, r, caller, "forbidden", "operator role or channel manager required")
+					s.denyForbiddenFor(w, r, caller, "forbidden", "operator role or channel manager required", refusedPermission(caller, schema.PermManageChannels))
 				default:
 					slog.ErrorContext(ctx, "channels: audit refused rename failed", "channel", id, "error", rerr)
 					writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")

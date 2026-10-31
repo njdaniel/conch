@@ -966,6 +966,9 @@ func conversionPolicyTx(ctx context.Context, tx execer, v GuestVisit, now time.T
 		case err != nil:
 			return fmt.Errorf("store: conversion policy: entry invite: %w", err)
 		}
+		if err := r.loadMakerTx(ctx, tx); err != nil {
+			return err
+		}
 		if !admitsAccount(r.joinAs) || r.closedAt.Valid || r.expiresAt <= now.UnixMilli() || !r.makerStillAllowed() {
 			return ErrConversionNotAllowed
 		}

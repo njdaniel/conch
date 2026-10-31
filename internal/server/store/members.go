@@ -181,10 +181,19 @@ const (
 )
 
 // memberActorStandingTx re-reads the acting principal under the write lock
-// (issue #789, ADR-010 §5.1). An actorID of 0 means an unconstrained system
-// or unauthenticated caller and has owner standing. Otherwise the actor must
-// be an enabled, non-hidden, non-guest human who is either an operator (with
-// or without the owner mark) or a member of channelID holding manages = 1.
+// (issue #789, ADR-010 §5.1) and decides its standing by permission, never
+// by role alone (ADR-014, design §7.2.1):
+//
+//  1. actor 0 (an unconstrained system or unauthenticated caller): owner
+//     standing;
+//  2. a disabled, hidden, guest or non-human actor: refused;
+//  3. an owner: owner standing;
+//  4. an operator holding manage_channels: operator standing;
+//  5. otherwise an operator or member: manager standing if its membership of
+//     channelID holds manages = 1, else refused.
+//
+// So an operator the owner has restricted gets exactly a member-manager's
+// standing in a channel it manages: no can_decide, no manages, no agents.
 func memberActorStandingTx(ctx context.Context, tx execer, channelID, actorID int64) (memberActorStanding, error) {
 	if actorID == 0 {
 		return standingOwner, nil
@@ -196,32 +205,31 @@ func memberActorStandingTx(ctx context.Context, tx execer, channelID, actorID in
 	if !found || actorP.DisabledAt != nil || actorP.HiddenAt != nil || actorP.Kind != PrincipalHuman || actorP.guestTarget() {
 		return 0, ErrManagerRefused
 	}
-	switch actorP.Role {
-	case RoleOperator:
-		if actorP.Owner {
-			return standingOwner, nil
-		}
+	if actorP.IsOwner() {
+		return standingOwner, nil
+	}
+	switch ok, err := principalPermittedTx(ctx, tx, actorP, schema.PermManageChannels); {
+	case err != nil:
+		return 0, err
+	case ok:
 		return standingOperator, nil
-	case RoleMember:
-		if err := checkChannelExistsTx(ctx, tx, channelID); err != nil {
-			return 0, err
-		}
-		var manages int
-		switch err := tx.QueryRowContext(ctx,
-			"SELECT manages FROM channel_members WHERE channel_id = ? AND principal_id = ?",
-			channelID, actorID).Scan(&manages); {
-		case errors.Is(err, sql.ErrNoRows):
-			return 0, ErrManagerRefused
-		case err != nil:
-			return 0, fmt.Errorf("store: check manager standing of %d in channel %d: %w", actorID, channelID, err)
-		}
-		if manages != 1 {
-			return 0, ErrManagerRefused
-		}
-		return standingManager, nil
-	default:
+	}
+	if err := checkChannelExistsTx(ctx, tx, channelID); err != nil {
+		return 0, err
+	}
+	var manages int
+	switch err := tx.QueryRowContext(ctx,
+		"SELECT manages FROM channel_members WHERE channel_id = ? AND principal_id = ?",
+		channelID, actorID).Scan(&manages); {
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, ErrManagerRefused
+	case err != nil:
+		return 0, fmt.Errorf("store: check manager standing of %d in channel %d: %w", actorID, channelID, err)
+	}
+	if manages != 1 {
 		return 0, ErrManagerRefused
 	}
+	return standingManager, nil
 }
 
 // checkManagerAddTargetTx checks whether managerID may add targetID to a
@@ -980,11 +988,23 @@ func checkMemberAddLimit(ctx context.Context, q execer, callerID int64, limit in
 // member_add_refused audit row for callerID on channelID, with an empty detail
 // so no tried name or principal id is recorded (issue #790, ADR-010 §3.3).
 func (s *Store) RecordMemberAddRefused(ctx context.Context, callerID, channelID int64, limit int, now time.Time) error {
+	return s.RecordMemberAddRefusedFor(ctx, callerID, channelID, "", limit, now)
+}
+
+// RecordMemberAddRefusedFor is RecordMemberAddRefused for a refusal that a
+// permission decided (ADR-014, design §8.5): a non-empty perm is recorded
+// as the detail "permission=<name>", so the trail says a restricted
+// operator was refused operator standing. It still names no tried target.
+func (s *Store) RecordMemberAddRefusedFor(ctx context.Context, callerID, channelID int64, perm schema.Permission, limit int, now time.Time) error {
 	now = now.Truncate(time.Millisecond)
+	detail := ""
+	if perm != "" {
+		detail = "permission=" + string(perm)
+	}
 	return s.withImmediateTx(ctx, func(tx execer) error {
 		if err := checkMemberAddLimit(ctx, tx, callerID, limit, now); err != nil {
 			return err
 		}
-		return appendAuditEventTx(ctx, tx, principalActor(callerID), AuditMemberAddRefused, channelSubject(channelID), "", now)
+		return appendAuditEventTx(ctx, tx, principalActor(callerID), AuditMemberAddRefused, channelSubject(channelID), detail, now)
 	})
 }

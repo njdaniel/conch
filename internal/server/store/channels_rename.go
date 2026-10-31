@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/njdaniel/conch/internal/server/names"
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // Channel names and renames (issue #727, docs/design/channel-rename.md). A
@@ -183,14 +184,17 @@ func channelRenameStandingTx(ctx context.Context, tx execer, channelID, callerID
 	if !found || caller.DisabledAt != nil || caller.HiddenAt != nil || caller.Kind != PrincipalHuman || caller.guestTarget() {
 		return 0, ErrManagerRefused
 	}
-	if caller.Role == RoleOperator {
-		if caller.Owner {
-			return standingOwner, nil
-		}
-		return standingOperator, nil
+	// The same standing rule as memberActorStandingTx (design §7.2.1): an
+	// owner, then an operator holding manage_channels, then a manager of
+	// this channel. A restricted operator renames as its manages flag allows.
+	if caller.IsOwner() {
+		return standingOwner, nil
 	}
-	if caller.Role != RoleMember {
-		return 0, ErrManagerRefused
+	switch ok, err := principalPermittedTx(ctx, tx, caller, schema.PermManageChannels); {
+	case err != nil:
+		return 0, err
+	case ok:
+		return standingOperator, nil
 	}
 	var manages int
 	switch err := tx.QueryRowContext(ctx, "SELECT manages FROM channel_members WHERE channel_id = ? AND principal_id = ?", channelID, callerID).Scan(&manages); {

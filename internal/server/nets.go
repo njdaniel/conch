@@ -120,8 +120,9 @@ func (s *Server) handleCreateNet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, schema.CreateNetResponseV1{Net: view})
 }
 
-// handleListNets serves GET /v1/channels/{channel}/nets. Operators and, with
-// authentication off, everyone get every live net of the channel; any other
+// handleListNets serves GET /v1/channels/{channel}/nets. A holder of
+// manage_channels and, with authentication off, everyone get every live net
+// of the channel; any other
 // caller must be a member of the channel (else the channel-not-found
 // response) and gets only the nets they are on.
 func (s *Server) handleListNets(w http.ResponseWriter, r *http.Request) {
@@ -131,7 +132,13 @@ func (s *Server) handleListNets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	caller, haveCaller := callerFrom(ctx)
-	seeAll := !haveCaller || isOperator(caller)
+	// Every net needs manage_channels (ADR-014 design §7.3).
+	seeAll := !haveCaller
+	if haveCaller {
+		if seeAll, ok = s.canOrFail(w, r, caller, schema.PermManageChannels); !ok {
+			return
+		}
+	}
 	if !seeAll {
 		member, err := s.store.IsChannelMember(ctx, channel.ID, caller.ID)
 		if err != nil {

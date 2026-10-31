@@ -115,15 +115,34 @@ func (s *Server) handleRevokeAllCredentials(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	caller, authed := callerFrom(ctx)
-	if authed && !isOperator(caller) && caller.ID != id {
-		s.denyForbidden(w, r, caller, "forbidden", "operator role or the principal itself required")
-		return
+	if authed && caller.ID != id {
+		// Someone else's needs manage_members (ADR-014 design §7.2).
+		allowed, ok := s.canOrFail(w, r, caller, schema.PermManageMembers)
+		if !ok {
+			return
+		}
+		if !allowed {
+			s.denyForbiddenFor(w, r, caller, "forbidden", "operator role or the principal itself required",
+				refusedPermission(caller, schema.PermManageMembers))
+			return
+		}
 	}
 	if s.ownerProtected(w, r, id) {
 		return
 	}
-	n, err := s.store.RevokeAllCredentials(ctx, auditActor(ctx), id, authed && !isOwner(caller))
+	// The store decides the standing again under its write lock, so a
+	// caller that lost manage_members since the check above signs only
+	// itself out (ADR-014 design §7.2, ADR-010 D7).
+	var actorID int64
+	if authed {
+		actorID = caller.ID
+	}
+	n, err := s.store.RevokeAllCredentialsAs(ctx, auditActor(ctx), actorID, id, authed && !isOwner(caller))
 	switch {
+	case errors.Is(err, store.ErrManageMembersRequired):
+		s.denyForbiddenFor(w, r, caller, "forbidden", "operator role or the principal itself required",
+			refusedPermission(caller, schema.PermManageMembers))
+		return
 	case errors.Is(err, store.ErrOwnerProtected):
 		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
 		return

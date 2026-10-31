@@ -243,18 +243,8 @@ func principalHolds(p Principal, d permissionDoc, perm schema.Permission) bool {
 	default:
 		return false
 	}
-	if !d.roleHolds(r, perm) {
+	if !d.roleHolds(r, perm) || brakeWithholds(p, perm) {
 		return false
-	}
-	switch perm {
-	case schema.PermUseVoice, schema.PermShareScreen:
-		if !p.VoiceAllowed {
-			return false
-		}
-	case schema.PermMakeMemberLinks:
-		if r == schema.PermissionRoleMember && !p.MayInvite {
-			return false
-		}
 	}
 	for _, req := range perm.Requires() {
 		if !principalHolds(p, d, req) {
@@ -284,6 +274,89 @@ func permittedTx(ctx context.Context, tx execer, principalID int64, perm schema.
 	return principalHolds(p, d, perm), nil
 }
 
+// principalPermittedTx is permittedTx for a principal already read inside
+// tx: it reads only the document. A caller that has just re-read the actor
+// under the write lock uses it to decide that actor's standing (§7.2.1).
+func principalPermittedTx(ctx context.Context, tx execer, p Principal, perm schema.Permission) (bool, error) {
+	if !perm.Valid() {
+		return false, nil
+	}
+	d, err := readPermissionDocTx(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	return principalHolds(p, d, perm), nil
+}
+
+// ErrManageMembersRequired is a write on another principal's account (its
+// name, its credentials) by an actor that does not hold manage_members now
+// (ADR-014 design §7.2): the operator-or-self routes. HTTP 403 forbidden,
+// naming manage_members to a role that could hold it.
+var ErrManageMembersRequired = errors.New("store: acting on another principal needs manage_members")
+
+// selfOrAdministratorTx is the standing of actorID writing to targetID's
+// account, decided inside the write transaction (ADR-010 D7), so a
+// permission removed after the handler asked cannot pass on the old answer.
+// administers is true for actor 0 (the system, or --auth off) and for a
+// holder of manage_members; otherwise the actor may act only on itself, and
+// acting on anyone else is ErrManageMembersRequired.
+func selfOrAdministratorTx(ctx context.Context, tx execer, actorID, targetID int64) (administers bool, err error) {
+	if actorID == 0 {
+		return true, nil
+	}
+	if administers, err = permittedTx(ctx, tx, actorID, schema.PermManageMembers); err != nil {
+		return false, err
+	}
+	if !administers && actorID != targetID {
+		return false, ErrManageMembersRequired
+	}
+	return administers, nil
+}
+
+// brakeWithholds reports whether a per-person brake on p withholds perm
+// (design §5), whatever the document says of perm: voice_allowed = 0
+// withholds use_voice and share_screen from members and operators, and
+// may_invite = 0 withholds make_member_links from members only. An owner
+// skips brakes (§4.3). It is the one statement of the brakes: principalHolds
+// ANDs it in, and SetMayInvite asks it alone, so a permission switched off
+// by the document (reversible) is never taken for the brake (final).
+func brakeWithholds(p Principal, perm schema.Permission) bool {
+	if p.IsOwner() {
+		return false
+	}
+	switch perm {
+	case schema.PermUseVoice, schema.PermShareScreen:
+		return !p.VoiceAllowed
+	case schema.PermMakeMemberLinks:
+		return PermissionRoleOf(p) == schema.PermissionRoleMember && !p.MayInvite
+	}
+	return false
+}
+
+// mayInviteBrakeBindsTx reports whether principalID's may_invite brake, as it
+// is now in tx, withholds make_member_links (brakeWithholds). A principal
+// with no row answers false.
+func mayInviteBrakeBindsTx(ctx context.Context, tx execer, principalID int64) (bool, error) {
+	p, found, err := queryPrincipal(ctx, tx, principalID)
+	if err != nil || !found {
+		return false, err
+	}
+	return brakeWithholds(p, schema.PermMakeMemberLinks), nil
+}
+
+// PermissionRoleOf is the document column that p's role reads (design §1):
+// operator for an operator, owner or not, and member for anyone else. It
+// names a column; it decides nothing, and an owner holds every permission
+// whatever its column says (principalHolds). A client of it asks
+// Permission.Fixed whether a refusal can be lifted for that role, to word
+// the refusal (design §7.4).
+func PermissionRoleOf(p Principal) schema.PermissionRole {
+	if p.Role == RoleOperator {
+		return schema.PermissionRoleOperator
+	}
+	return schema.PermissionRoleMember
+}
+
 // Permitted reports whether principalID holds perm now (permittedTx), read
 // in one read transaction. A write that a permission gates asks permittedTx
 // again inside its own transaction instead.
@@ -294,6 +367,24 @@ func (s *Store) Permitted(ctx context.Context, principalID int64, perm schema.Pe
 	}
 	defer func() { _ = tx.Rollback() }()
 	return permittedTx(ctx, tx, principalID, perm)
+}
+
+// HeldBy reports which of perms p holds by the document as it is now, in
+// one read of the document and none of the principal: for a reader that has
+// just read p and asks about several permissions at once, as an events
+// socket does for each roster. The answer is in perms' order. It decides
+// reads only; a write a permission gates asks permittedTx in its own
+// transaction.
+func (s *Store) HeldBy(ctx context.Context, p Principal, perms ...schema.Permission) ([]bool, error) {
+	d, err := readPermissionDocTx(ctx, s.db)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]bool, len(perms))
+	for i, perm := range perms {
+		out[i] = principalHolds(p, d, perm)
+	}
+	return out, nil
 }
 
 // effectivePermissionsTx lists what principalID holds now, in catalog
