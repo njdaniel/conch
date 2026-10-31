@@ -119,11 +119,75 @@ describe('completeShortcode', () => {
   it('lists prefix matches when there is no exact one', () => {
     const found = completeShortcode(index, 'heart');
     expect(found).toHaveLength(8);
-    expect(found.every((e) => e.shortcode.startsWith('heart'))).toBe(true);
+    expect(found.every((e) => [e.shortcode, ...e.aliases].some((n) => n.startsWith('heart')))).toBe(true);
   });
 
   it('finds nothing for nonsense', () => {
     expect(completeShortcode(index, 'zzzzqq')).toEqual([]);
+  });
+});
+
+describe('aliases and ranking (issue #1036)', () => {
+  it.each([
+    ['fire', '🔥'],
+    ['smile', '😄'],
+    ['heart', '❤️'],
+    ['joy', '😂'],
+    ['tada', '🎉'],
+    ['+1', '👍'],
+    ['thumb', '👍'],
+  ])('the first suggestion for :%s is %s', (query, key) => {
+    expect(completeShortcode(index, query)[0]?.key).toBe(key);
+  });
+
+  it('offers no skin-tone variant unless the query names a tone', () => {
+    for (const query of ['fir', 'thumb', 'ok', 'thumbs_up', 'wave']) {
+      const found = completeShortcode(index, query, 50);
+      expect(found.length, query).toBeGreaterThan(0);
+      expect(found.some((e) => e.toned), query).toBe(false);
+    }
+    expect(completeShortcode(index, 'thumbs_up_medium_skin').every((e) => e.toned)).toBe(true);
+    expect(completeShortcode(index, 'thumbs_up_medium_skin').length).toBeGreaterThan(0);
+    expect(searchEmoji(index, 'thumb').some((e) => e.toned)).toBe(false);
+  });
+
+  it('keeps the key canonical: an alias finds the emoji, whose key is its sequence', () => {
+    const tada = completeShortcode(index, 'tada')[0];
+    expect(tada?.key).toBe('🎉');
+    expect(tada?.aliases).toContain('tada');
+    expect(completeShortcode(index, 'heart')[0]?.key).toBe('\u2764\uFE0F');
+  });
+
+  const fake = (key: string, shortcode: string, aliases: string[] = []) => ({ key, name: shortcode.replace(/_/g, ' '), shortcode, aliases, group: 'g', subgroup: 's', toned: false });
+
+  it('orders the tiers: exact, then starts with, then a later word, then contains', () => {
+    const small = { version: index.version, groups: [], all: [fake('1', 'xxfoo'), fake('2', 'a_foo_b'), fake('3', 'foo_bar'), fake('4', 'foo')] };
+    expect(completeShortcode(small, 'foo').map((e) => e.key)).toEqual(['4', '3', '2', '1']);
+  });
+
+  it('lets a multiword query match at a word boundary, above a mid-word hit', () => {
+    const small = { version: index.version, groups: [], all: [fake('1', 'xxfoo_bar'), fake('2', 'a_foo_bar'), fake('3', 'foo_bar_z')] };
+    expect(completeShortcode(small, 'foo_bar').map((e) => e.key)).toEqual(['3', '2', '1']);
+    expect(searchEmoji(small, 'foo bar').map((e) => e.key)).toEqual(['3', '2', '1']);
+  });
+
+  it('puts a name with the words "with smiling" at a boundary first in the picker', () => {
+    const first = searchEmoji(index, 'with smiling').slice(0, 5);
+    expect(first.every((e) => e.shortcode.includes('_with_smiling') || e.shortcode.startsWith('with_smiling'))).toBe(true);
+  });
+
+  it('ranks an alias before a CLDR name of the same tier, then the shorter name', () => {
+    const small = { version: index.version, groups: [], all: [fake('a', 'bar_long'), fake('b', 'bar_x'), fake('c', 'qq', ['barz']), fake('d', 'qq2', ['bar_alias_long'])] };
+    expect(completeShortcode(small, 'bar').map((e) => e.key)).toEqual(['c', 'd', 'b', 'a']);
+  });
+
+  it('finds an alias in the picker search too, first', () => {
+    expect(searchEmoji(index, 'tada')[0]?.key).toBe('🎉');
+    expect(searchEmoji(index, '+1')[0]?.key).toBe('👍');
+  });
+
+  it('opens a completion for :+1', () => {
+    expect(completionAt('go :+1', 6)).toEqual({ start: 3, query: '+1' });
   });
 });
 

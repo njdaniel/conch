@@ -96,6 +96,18 @@ describe('the emoji picker', () => {
     expect(screen.queryByRole('group', { name: 'Search results' })).toBeNull();
   });
 
+  it('searches by alias and hides skin tones (issue #1036)', async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
+    const search = screen.getByRole('searchbox');
+    fireEvent.change(search, { target: { value: 'thumbsup' } });
+    const results = await screen.findByRole('group', { name: 'Search results' });
+    expect(within(results).getAllByRole('button')[0]?.textContent).toBe('👍');
+    fireEvent.change(search, { target: { value: 'thumb' } });
+    const again = await screen.findByRole('group', { name: 'Search results' });
+    expect(within(again).queryByRole('button', { name: /skin tone/ })).toBeNull();
+  });
+
   it('moves with the arrow keys: one button in the tab order, rows of eight, Up from the first row to the search box', async () => {
     render(<Harness />);
     fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
@@ -206,6 +218,15 @@ describe('shortcode completion', () => {
     expect(box().value).toBe('say 👍');
     expect(screen.queryByRole('listbox')).toBeNull();
     focused(box());
+  });
+
+  it('completes an alias to the emoji itself (issue #1036)', async () => {
+    render(<Harness />);
+    type('yay :tada');
+    const list = await screen.findByRole('listbox', { name: 'Emoji suggestions' });
+    expect(within(list).getAllByRole('option')[0]?.textContent).toContain('🎉');
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(box().value).toBe('yay 🎉');
   });
 
   it('keeps the text after the caret and puts the caret after the emoji', async () => {

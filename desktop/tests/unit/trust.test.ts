@@ -96,6 +96,10 @@ describe('no TLS override anywhere in the shell', () => {
     ['allow-insecure', '-localhost'],
     ['ignore-certificate', '-errors'],
     ['setDefaultCA', 'Certificates\\(\\[\\]'],
+    // A hostname check of its own, or a TLS context of its own, would replace
+    // Node's defaults (the feed socket's connect hook relies on them).
+    ['checkServer', 'Identity'],
+    ['secure', 'Context'],
   ].map((parts) => new RegExp(parts.join(''), 'u'));
 
   function sources(dir: string): string[] {

@@ -11,7 +11,7 @@ LINT    = golangci-lint
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS  = -X main.version=$(VERSION)
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate deploy-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-smoke p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate deploy-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -100,7 +100,7 @@ web-e2e: web-node
 # without it this fails and names that version, it does not skip.
 DESKTOP_NODE = $(shell cat desktop/.nvmrc)
 DESKTOP_NODE_BIN = $(HOME)/.nvm/versions/node/v$(DESKTOP_NODE)/bin
-desktop-node desktop-check desktop-build desktop-smoke: export PATH := $(if $(wildcard $(DESKTOP_NODE_BIN)/node),$(DESKTOP_NODE_BIN):)$(PATH)
+desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it: export PATH := $(if $(wildcard $(DESKTOP_NODE_BIN)/node),$(DESKTOP_NODE_BIN):)$(PATH)
 
 desktop-node:
 	@v=$$(node --version 2>/dev/null) || { echo "desktop: FAIL: Node.js is not installed; install Node $(DESKTOP_NODE) (desktop/.nvmrc)"; exit 1; }; \
@@ -131,6 +131,16 @@ desktop-build: desktop-node
 desktop-smoke: desktop-node
 	cd desktop && npm ci --no-audit
 	cd desktop && npm run smoke
+
+# The voice supervisor with the real conch-voice (issue #948): a stub conchd
+# on loopback, no audio device. Builds bin/conch-voice with rust-build unless
+# CONCH_VOICE_BIN names a binary already built (CI uses the one rust-check's
+# cargo test built). Not part of check; CI runs it after desktop-check. With
+# CI set, a missing binary fails rather than skips.
+desktop-voice-it: desktop-node
+	@if [ -z "$$CONCH_VOICE_BIN" ]; then $(MAKE) rust-build; fi
+	cd desktop && npm ci --no-audit
+	cd desktop && npm run test:integration
 
 # The P3 local prototype (issue #283, docs/p3-walkthrough.md): p3-local builds
 # the binaries and the web client, starts a disposable conchd, creates the test

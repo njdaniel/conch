@@ -94,8 +94,14 @@ export type SignInOutcome =
 
 export type SignOutOutcome = 'ended' | 'unconfirmed' | 'unsent';
 
-// A live feed the renderer may subscribe to. Main owns the socket, the ticket
-// and the reconnect; it sends validated frames.
+// A live feed the renderer may subscribe to. Main owns the socket, the bearer
+// it is opened with, its queue and its teardown; it sends frames it has
+// validated. The reconnect is the renderer's own, as in the browser: a close
+// is reported once, with its code, and the renderer subscribes again.
+//
+// The parameters each kind takes, and no others (main refuses anything else):
+// messages a channel and the cursor after; events a channel and the
+// renderer's session; voice a channel; occupancy none.
 export type FeedKind = 'messages' | 'events' | 'voice' | 'occupancy';
 
 export interface FeedRequest {
@@ -105,6 +111,9 @@ export interface FeedRequest {
   readonly after?: number;
 }
 
+// onClose's code is the server's close code, or 1008 when the sign-in the
+// feed was opened for has ended, 1013 when main refused the subscription or
+// closed it because the page fell behind, 1006 for a socket that failed.
 export interface FeedHandlers {
   readonly onOpen: () => void;
   readonly onFrame: (frame: string) => void;

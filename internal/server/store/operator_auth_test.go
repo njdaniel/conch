@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"sync"
@@ -105,6 +106,172 @@ func TestCompleteTOTPLogin(t *testing.T) {
 	joined := strings.Join(actions, " ")
 	if !strings.HasSuffix(joined, AuditLogin+" credential_created") {
 		t.Errorf("audit ends %q, want login credential_created", joined)
+	}
+}
+
+// recentAuthOf reads credentialID's stored recent-auth proof, nil when
+// there is none.
+func (w *loginWorld) recentAuthOf(t *testing.T, credentialID int64) *time.Time {
+	t.Helper()
+	var until sql.NullInt64
+	if err := w.s.db.QueryRow("SELECT recent_auth_until FROM credentials WHERE id = ?", credentialID).Scan(&until); err != nil {
+		t.Fatal(err)
+	}
+	return millisPtr(until)
+}
+
+// A sign-in with password and code is the recent proof (design §5.3, issue
+// #1033): the session it issues holds it from the code's acceptance for
+// schema.RecentAuthLifetimeSeconds, and no other credential of the operator
+// gets it, an older session or a script credential.
+func TestCompleteTOTPLoginIsTheRecentProof(t *testing.T) {
+	ctx := context.Background()
+	w := newLoginWorld(t)
+	older, err := w.s.CompleteTOTPLogin(ctx, TOTPLogin{ChallengeHash: w.challenge(t), AddressMatches: true, Check: stepCheck(10)}, w.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, _, err := w.s.CreateCredential(ctx, "system", w.op.ID, "cli", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lifetime := schema.RecentAuthLifetimeSeconds * time.Second
+	// The next sign-in comes after the older session's own proof ran out.
+	w.now = w.now.Add(lifetime + time.Minute)
+	signedIn := w.now.Truncate(time.Millisecond)
+	session, err := w.s.CompleteTOTPLogin(ctx, TOTPLogin{ChallengeHash: w.challenge(t), AddressMatches: true, Check: stepCheck(11)}, w.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := w.recentAuthOf(t, session.Credential.ID); got == nil || !got.Equal(signedIn.Add(lifetime)) {
+		t.Errorf("the session's proof runs to %v, want %v", got, signedIn.Add(lifetime))
+	}
+	for _, c := range []struct {
+		name string
+		id   int64
+	}{{"the older session", older.Credential.ID}, {"the script credential", script.ID}} {
+		if ok, err := w.s.RecentAuthStands(ctx, c.id, signedIn); err != nil || ok {
+			t.Errorf("%s holds the sign-in's proof (%v)", c.name, err)
+		}
+	}
+	if got := w.recentAuthOf(t, script.ID); got != nil {
+		t.Errorf("the script credential has a proof to %v", got)
+	}
+	tests := []struct {
+		name  string
+		after time.Duration
+		want  bool
+	}{
+		{"at the sign-in", 0, true},
+		{"a minute on", time.Minute, true},
+		{"a second before the end", lifetime - time.Second, true},
+		{"at the end", lifetime, false},
+		{"a second after the end", lifetime + time.Second, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if ok, err := w.s.RecentAuthStands(ctx, session.Credential.ID, signedIn.Add(tt.after)); err != nil || ok != tt.want {
+				t.Errorf("RecentAuthStands at +%v = %v, %v; want %v", tt.after, ok, err, tt.want)
+			}
+		})
+	}
+	// The sign-in is audited as a sign-in, not as a re-authentication.
+	for _, e := range allAuditEvents(t, w.s) {
+		if e.Action == AuditReauth {
+			t.Errorf("a sign-in audited %s", AuditReauth)
+		}
+	}
+}
+
+// Only the sign-in with both factors is the proof: an operator's
+// password-only sign-in and a member's password sign-in make none (issue
+// #1033 keeps them out of scope).
+func TestPasswordSignInsMakeNoProof(t *testing.T) {
+	tests := []struct {
+		name   string
+		signIn func(t *testing.T, w *modeWorld) (IssuedLogin, error)
+	}{
+		{"a password-only operator", func(t *testing.T, w *modeWorld) (IssuedLogin, error) {
+			w.start(t, setting{ModeTemporary, true})
+			return w.s.IssuePasswordOnlyOperatorSession(context.Background(), w.issue(t, w.olga), w.now)
+		}},
+		{"a member", func(t *testing.T, w *modeWorld) (IssuedLogin, error) {
+			return w.s.IssueLoginCredential(context.Background(), w.issue(t, w.member), w.now)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := newModeWorld(t)
+			issued, err := tt.signIn(t, w)
+			if err != nil {
+				t.Fatalf("sign-in = %v", err)
+			}
+			if got := w.recentAuthOf(t, issued.Credential.ID); got != nil {
+				t.Errorf("the sign-in made a proof to %v", got)
+			}
+		})
+	}
+}
+
+// Every change that cleared a re-authentication's proof clears a sign-in's
+// (issue #1033): a password change, a second factor removed by recovery,
+// signing out everywhere, and the end of password-only.
+func TestSignInProofCleared(t *testing.T) {
+	tests := []struct {
+		name  string
+		clear func(t *testing.T, w *loginWorld, session IssuedLogin)
+	}{
+		{"a password change", func(t *testing.T, w *loginWorld, session IssuedLogin) {
+			issue := w.issue(t, w.op)
+			res, err := w.s.ChangePassword(context.Background(), "system", PasswordChange{PrincipalID: w.op.ID, CredentialID: session.Credential.ID,
+				AuthGeneration: issue.AuthGeneration, Record: issue.Record, NewRecord: testRecord("new"), SecondFactor: stepCheck(11)}, w.now)
+			if err != nil {
+				t.Fatalf("ChangePassword = %v", err)
+			}
+			// The rotated session carries no proof either.
+			if got := w.recentAuthOf(t, res.Credential.ID); got != nil {
+				t.Errorf("the rotated session has a proof to %v", got)
+			}
+		}},
+		{"a second factor change by recovery", func(t *testing.T, w *loginWorld, _ IssuedLogin) {
+			if _, err := w.s.RecoverOperator(context.Background(), w.op.ID, w.now); err != nil {
+				t.Fatalf("RecoverOperator = %v", err)
+			}
+		}},
+		{"signing out everywhere", func(t *testing.T, w *loginWorld, _ IssuedLogin) {
+			if _, err := w.s.RevokeAllCredentials(context.Background(), principalActor(w.op.ID), w.op.ID); err != nil {
+				t.Fatalf("RevokeAllCredentials = %v", err)
+			}
+		}},
+		{"the end of password-only", func(t *testing.T, w *loginWorld, _ IssuedLogin) {
+			ctx := context.Background()
+			if _, err := w.s.StartMode(ctx, ModeTemporary, true, w.now); err != nil {
+				t.Fatal(err)
+			}
+			if res, err := w.s.StartMode(ctx, ModeNormal, false, w.now); err != nil || !res.Ended {
+				t.Fatalf("StartMode = %+v, %v", res, err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			w := newLoginWorld(t)
+			session, err := w.s.CompleteTOTPLogin(ctx, TOTPLogin{ChallengeHash: w.challenge(t), AddressMatches: true, Check: stepCheck(10)}, w.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if w.recentAuthOf(t, session.Credential.ID) == nil {
+				t.Fatal("the sign-in made no proof")
+			}
+			tt.clear(t, w, session)
+			if got := w.recentAuthOf(t, session.Credential.ID); got != nil {
+				t.Errorf("the proof survived, to %v", got)
+			}
+			if ok, _ := w.s.RecentAuthStands(ctx, session.Credential.ID, w.now); ok {
+				t.Error("the proof stands")
+			}
+		})
 	}
 }
 
@@ -233,6 +400,8 @@ func TestRecordOperatorRecentAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The sign-in's own proof (issue #1033) has run out.
+	w.now = w.now.Add(schema.RecentAuthLifetimeSeconds * time.Second)
 	if _, err := w.s.RecordOperatorRecentAuth(ctx, w.issue(t, w.op), session.Credential.ID, nil, w.now); !errors.Is(err, ErrSecondFactorRequired) {
 		t.Errorf("no check = %v, want ErrSecondFactorRequired", err)
 	}

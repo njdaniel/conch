@@ -43,6 +43,13 @@ test('desktop: the picker inserts at the caret, and :short completes by keyboard
   await expect(box).toHaveValue(`${tag} go 🔥`);
   await page.keyboard.press('Enter');
   await expect(messages(page).getByText(`${tag} go 🔥`, { exact: true })).toBeVisible();
+
+  // Issue #1036: an alias completes to the emoji itself.
+  await box.fill(`${tag} yay :tada`);
+  await expect(list).toBeVisible();
+  await expect(list.getByRole('option').first()).toContainText('🎉');
+  await page.keyboard.press('Enter');
+  await expect(box).toHaveValue(`${tag} yay 🎉`);
 });
 
 test('desktop: Enter in the picker search box picks, and never sends the draft', async ({ meet, world }) => {
