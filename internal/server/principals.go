@@ -85,20 +85,28 @@ func (s *Server) handleRenamePrincipal(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var lim store.RenameLimits
+	var lim store.RenameLimits // the self limits, set below for any caller
 	self := false
 	caller, authed := callerFrom(ctx)
-	// No caller is AuthOff, where the route is open like every other.
-	if authed && !isOperator(caller) {
+	// No caller is AuthOff, where the route is open like every other. A
+	// caller without manage_members renames only itself, within the limits
+	// (ADR-014 design §7.2).
+	administers := !authed
+	if authed {
+		if administers, ok = s.canOrFail(w, r, caller, schema.PermManageMembers); !ok {
+			return
+		}
+	}
+	if !administers {
 		if caller.ID != id {
-			s.denyForbidden(w, r, caller, "forbidden", "operator role or the principal itself required")
+			s.denyForbiddenFor(w, r, caller, "forbidden", "operator role or the principal itself required",
+				refusedPermission(caller, schema.PermManageMembers))
 			return
 		}
 		if caller.Kind != store.PrincipalHuman {
 			s.denyForbidden(w, r, caller, schema.ErrorCodeHumanRequired, "an agent's name is set by an operator")
 			return
 		}
-		lim = store.RenameLimits{Renames: renamesPerDay, Attempts: renameAttemptsPerDay}
 		self = true
 	}
 
@@ -120,9 +128,21 @@ func (s *Server) handleRenamePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.store.RenamePrincipal(ctx, auditActor(ctx), id, req.Name, lim, s.now(), authed && !isOwner(caller))
+	// The store decides the standing again under its write lock: a caller
+	// that lost manage_members since the check above renames only itself,
+	// within the self limits (ADR-014 design §7.2, ADR-010 D7).
+	var actorID int64
+	if authed {
+		actorID = caller.ID
+		lim = store.RenameLimits{Renames: renamesPerDay, Attempts: renameAttemptsPerDay}
+	}
+	res, err := s.store.RenamePrincipalAs(ctx, auditActor(ctx), actorID, id, req.Name, lim, s.now(), authed && !isOwner(caller))
 	var limited *store.RenameLimitedError
 	switch {
+	case errors.Is(err, store.ErrManageMembersRequired):
+		s.denyForbiddenFor(w, r, caller, "forbidden", "operator role or the principal itself required",
+			refusedPermission(caller, schema.PermManageMembers))
+		return
 	case errors.Is(err, store.ErrOwnerProtected):
 		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
 		return

@@ -156,12 +156,14 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleListInvites serves GET /v1/invites, newest first. An operator sees
-// every invite (issue #438); anyone else sees their own, as before. Both may
-// narrow the list with ?kind= (personal, open) and ?state= (open, used,
-// expired, closed); an operator also with ?created_by=<id>. A non-operator
-// naming anyone but themselves there gets an empty list: none of their own
-// invites was made by someone else.
+// handleListInvites serves GET /v1/invites, newest first. A holder of
+// manage_members sees every invite (issue #438, ADR-014 design §7.3); anyone
+// else sees their own, as before. Both may narrow the list with ?kind=
+// (personal, open) and ?state= (open, used, expired, closed); a holder also
+// with ?created_by=<id>. Anyone else naming anyone but themselves there gets
+// an empty list: none of their own invites was made by someone else. Without
+// manage_channels an invite lists only the channels the caller is in, and
+// counts the rest in other_channels.
 func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	caller, ok := s.inviteCaller(w, r)
@@ -172,7 +174,11 @@ func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !isOperator(caller) {
+	everyone, ok := s.canOrFail(w, r, caller, schema.PermManageMembers)
+	if !ok {
+		return
+	}
+	if !everyone {
 		if filter.CreatedBy != 0 && filter.CreatedBy != caller.ID {
 			writeJSON(w, http.StatusOK, schema.ListInvitesResponseV1{Invites: []schema.InviteV1{}})
 			return
@@ -185,7 +191,34 @@ func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
+	sight, err := s.channelSightFor(ctx, caller)
+	if err != nil {
+		slog.ErrorContext(ctx, "invites: read channel sight failed", "principal", caller.ID, "error", err)
+		writeInternalError(w)
+		return
+	}
+	for i := range invites {
+		invites[i] = inviteAsSeen(invites[i], sight)
+	}
 	writeJSON(w, http.StatusOK, schema.ListInvitesResponseV1{Invites: invites})
+}
+
+// inviteAsSeen is inv with only the channels sight shows, and the rest
+// counted in OtherChannels (ADR-014 design §7.3, SF-1).
+func inviteAsSeen(inv schema.InviteV1, sight channelSight) schema.InviteV1 {
+	if sight.all {
+		return inv
+	}
+	shown := make([]schema.InviteChannelV1, 0, len(inv.Channels))
+	for _, c := range inv.Channels {
+		if sight.sees(c.ID) {
+			shown = append(shown, c)
+			continue
+		}
+		inv.OtherChannels++
+	}
+	inv.Channels = shown
+	return inv
 }
 
 // inviteFilterFrom reads the list filters from the query. On a value it does

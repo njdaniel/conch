@@ -100,7 +100,37 @@ func (s *Server) handleListHooks(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	writeJSON(w, http.StatusOK, schema.ListHooksResponseV1{Hooks: hooks})
+	resp := schema.ListHooksResponseV1{Hooks: hooks}
+	if authed {
+		// Without manage_channels, a hook posting in a channel the caller is
+		// not in is left out and counted (ADR-014 design §7.3, SF-1).
+		sight, err := s.channelSightFor(ctx, caller)
+		if err != nil {
+			slog.ErrorContext(ctx, "hooks: read channel sight failed", "principal", caller.ID, "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+		resp = hooksAsSeen(resp, sight)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// hooksAsSeen is resp with only the hooks in channels sight shows; the rest
+// are counted in OtherHooks.
+func hooksAsSeen(resp schema.ListHooksResponseV1, sight channelSight) schema.ListHooksResponseV1 {
+	if sight.all {
+		return resp
+	}
+	shown := make([]schema.HookV1, 0, len(resp.Hooks))
+	for _, h := range resp.Hooks {
+		if sight.seesName(h.Channel) {
+			shown = append(shown, h)
+			continue
+		}
+		resp.OtherHooks++
+	}
+	resp.Hooks = shown
+	return resp
 }
 
 // handleRevokeHook revokes a hook by its numeric id (never its token), the way
