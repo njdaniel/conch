@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # The browser build must hold no desktop code (issue #940, linux-desktop.md §2:
 # "no Electron dependency in browser graph"). Fails if any file in the web
-# build mentions the desktop shell's bridge or scheme. Run it on web/dist after
+# build mentions the desktop shell's bridge or scheme, or the voice-control
+# protocol that only the desktop owner's supervisor speaks (issue #948: its
+# types are generated into web/src/schema for desktop/ to import, and the
+# browser bundle must not carry them). Run it on web/dist after
 # `make web-build`; CI's desktop-smoke job does.
 #
 # usage: desktop-web-dist-check.sh [dist directory]   (default: web/dist)
@@ -15,7 +18,7 @@ if [ ! -f "$dist/index.html" ]; then
     exit 1
 fi
 
-if hits=$(grep -rIlE -e 'conchDesktop|conch-app:' "$dist"); then
+if hits=$(grep -rIlE -e 'conchDesktop|conch-app:|conch\.voice_control' "$dist"); then
     echo "desktop-web-dist-check: FAIL: desktop code is in the browser build:"
     echo "$hits"
     exit 1

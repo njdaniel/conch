@@ -948,7 +948,16 @@ func (e *eventsStream) sendRoster(ctx context.Context) bool {
 	if err != nil {
 		return e.failed(ctx, "read the viewer", err)
 	}
-	roster, err := e.s.channelRoster(ctx, e.r, e.channel, viewer)
+	// What the viewer holds, read once per roster from the viewer just read
+	// (ADR-014 design §7.3): manage_members shows every session's runtime
+	// and host, manage_channels the member list's roles and every
+	// can_decide.
+	held, err := e.s.store.HeldBy(ctx, viewer, schema.PermManageMembers, schema.PermManageChannels)
+	if err != nil {
+		return e.failed(ctx, "read the viewer's permissions", err)
+	}
+	seesHosts, seesAll := held[0], held[1]
+	roster, err := e.s.channelRoster(ctx, e.r, e.channel, viewer, seesHosts)
 	if err != nil {
 		return e.failed(ctx, "build a roster", err)
 	}
@@ -962,7 +971,7 @@ func (e *eventsStream) sendRoster(ctx context.Context) bool {
 	// may have missed: read afterwards, the baseline would already hold it,
 	// and the change would never be sent.
 	if e.lastMembers == nil {
-		if e.lastMembers, ok = e.membersFrame(ctx, viewer); !ok {
+		if e.lastMembers, ok = e.membersFrame(ctx, viewer, seesAll); !ok {
 			return false
 		}
 	}
@@ -972,7 +981,7 @@ func (e *eventsStream) sendRoster(ctx context.Context) bool {
 		}
 		e.lastRoster = raw
 	}
-	return e.sendMembers(ctx, viewer)
+	return e.sendMembers(ctx, viewer, seesAll)
 }
 
 // sendMembers builds the member list for this reader now and sends it if it
@@ -984,8 +993,8 @@ func (e *eventsStream) sendRoster(ctx context.Context) bool {
 // the list over REST once the socket is live, as it always has, and learns
 // here only what changed after.
 // A channel the change did not touch hears nothing.
-func (e *eventsStream) sendMembers(ctx context.Context, viewer store.Principal) bool {
-	raw, ok := e.membersFrame(ctx, viewer)
+func (e *eventsStream) sendMembers(ctx context.Context, viewer store.Principal, seesAll bool) bool {
+	raw, ok := e.membersFrame(ctx, viewer, seesAll)
 	if !ok {
 		return false
 	}
@@ -999,13 +1008,14 @@ func (e *eventsStream) sendMembers(ctx context.Context, viewer store.Principal) 
 	return true
 }
 
-// membersFrame is the encoded member list as viewer sees it now.
-func (e *eventsStream) membersFrame(ctx context.Context, viewer store.Principal) ([]byte, bool) {
+// membersFrame is the encoded member list as viewer sees it now; seesAll is
+// whether viewer holds manage_channels (memberDocs).
+func (e *eventsStream) membersFrame(ctx context.Context, viewer store.Principal, seesAll bool) ([]byte, bool) {
 	members, err := e.s.store.ListChannelMembers(ctx, e.channel.ID)
 	if err != nil {
 		return nil, e.failed(ctx, "list members", err)
 	}
-	doc := schema.ChannelMembersV1{Schema: schema.ChannelMembersSchemaV1, ChannelID: e.channel.ID, Members: memberDocs(members, &viewer)}
+	doc := schema.ChannelMembersV1{Schema: schema.ChannelMembersSchemaV1, ChannelID: e.channel.ID, Members: memberDocs(members, &viewer, seesAll)}
 	return e.encode(ctx, doc)
 }
 

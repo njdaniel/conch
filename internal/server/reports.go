@@ -200,6 +200,23 @@ func (s *Server) handleGetReport(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
+	// The list names every channel and net on the server, so it goes only to
+	// a holder of manage_channels, who files the issue (ADR-014 design §7.3,
+	// SF-1). Every other field the server sends is already free of names:
+	// diagnostics are codes, words and route patterns (never paths), by
+	// their schema, and the reporter's own words and environment stay as
+	// written.
+	caller, authed := callerFrom(ctx)
+	if authed {
+		files, ok := s.canOrFail(w, r, caller, schema.PermManageChannels)
+		if !ok {
+			return
+		}
+		if !files {
+			writeJSON(w, http.StatusOK, report)
+			return
+		}
+	}
 	// The names an issue made from it must leave out, from the whole server:
 	// the operator's own channels are not enough when groups have private
 	// ones. Fail closed: a report without them could be filed unredacted.

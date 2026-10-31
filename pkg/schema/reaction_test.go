@@ -228,6 +228,30 @@ func TestReactionConstants(t *testing.T) {
 		"MAX_MESSAGE_EDITS":           MaxMessageEdits,
 		// Kept drafts (issue #1039): the web client budgets a draft inside it.
 		"MAX_POST_REQUEST_BYTES": MaxPostRequestBytes,
+		// The voice-control protocol, for the desktop owner (issue #948).
+		"VOICE_CONTROL_SUBCOMMAND":               VoiceControlSubcommand,
+		"VOICE_CONTROL_MAX_LINE_BYTES":           VoiceControlMaxLineBytes,
+		"VOICE_CONTROL_MAX_ID":                   int64(VoiceControlMaxID),
+		"VOICE_CONTROL_MAX_IN_FLIGHT":            VoiceControlMaxInFlight,
+		"VOICE_CONTROL_MAX_VERSIONS":             VoiceControlMaxVersions,
+		"VOICE_CONTROL_MAX_HELPER_VERSION_BYTES": VoiceControlMaxHelperVersionBytes,
+		"VOICE_CONTROL_MAX_SERVER_BYTES":         VoiceControlMaxServerBytes,
+		"VOICE_CONTROL_MAX_CHANNEL_BYTES":        VoiceControlMaxChannelBytes,
+		"VOICE_CONTROL_MAX_RETRY_IN_MS":          VoiceControlMaxRetryInMS,
+		"VOICE_CONTROL_HELLO_TIMEOUT_MS":         VoiceControlHelloTimeoutMS,
+		"VOICE_CONTROL_ACK_TIMEOUT_MS":           VoiceControlAckTimeoutMS,
+		"VOICE_CONTROL_GATE_SHUT_MS":             VoiceControlGateShutMS,
+		"VOICE_CONTROL_CAPTURE_STOP_MS":          VoiceControlCaptureStopMS,
+		"VOICE_CONTROL_OWNER_LOSS_EXIT_MS":       VoiceControlOwnerLossExitMS,
+		"VOICE_CONTROL_LEAVE_EXIT_MS":            VoiceControlLeaveExitMS,
+		"VOICE_CONTROL_STOP_TERM_AFTER_MS":       VoiceControlStopTermAfterMS,
+		"VOICE_CONTROL_STOP_KILL_AFTER_MS":       VoiceControlStopKillAfterMS,
+		"VOICE_CONTROL_DEVICE_DEFAULT":           VoiceControlDeviceDefault,
+		"VOICE_DEVICES_MAX_NAME_BYTES":           VoiceDevicesMaxNameBytes,
+		"VOICE_CONTROL_PIPE_FLAG":                VoiceControlPipeFlag,
+		"VOICE_CONTROL_PIPE_NONCE_ENV":           VoiceControlPipeNonceEnv,
+		"VOICE_CONTROL_PIPE_NONCE_BYTES":         VoiceControlPipeNonceBytes,
+		"VOICE_CONTROL_PIPE_NONCE_CHARS":         VoiceControlPipeNonceChars,
 	}
 	if len(TSConstants) != len(want) {
 		t.Errorf("TSConstants has %d entries, want %d", len(TSConstants), len(want))

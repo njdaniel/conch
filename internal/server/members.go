@@ -98,7 +98,17 @@ func (s *Server) handleListChannelMembers(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	if caller, ok := callerFrom(ctx); ok && !isOperator(caller) {
+	caller, authed := callerFrom(ctx)
+	// A caller without manage_channels sees only a channel it is in; any
+	// other gets the uniform channel-not-found (design §7.3).
+	seesAll := !authed
+	if authed {
+		var ok bool
+		if seesAll, ok = s.canOrFail(w, r, caller, schema.PermManageChannels); !ok {
+			return
+		}
+	}
+	if !seesAll {
 		member, err := s.store.IsChannelMember(ctx, channel.ID, caller.ID)
 		if err != nil {
 			slog.ErrorContext(ctx, "members: check membership failed", "error", err)
@@ -122,24 +132,23 @@ func (s *Server) handleListChannelMembers(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	caller, authed := callerFrom(ctx)
 	var viewer *store.Principal
 	if authed {
 		viewer = &caller
 	}
-	writeJSON(w, http.StatusOK, schema.ListChannelMembersResponseV1{Members: memberDocs(members, viewer)})
+	writeJSON(w, http.StatusOK, schema.ListChannelMembersResponseV1{Members: memberDocs(members, viewer, seesAll)})
 }
 
 // memberDocs is a channel's member list as viewer sees it, nil for a caller
 // with authentication off. The REST list and the events socket's members
 // document (issue #515) both come from it, so neither shows more than the
 // other. Every viewer sees Manages on every human member; Role (for non-guest
-// humans) is shown when the viewer is an operator or a manager of the channel;
-// CanDecide is shown when the viewer is an operator, a manager of the channel,
-// or that member itself (issues #450, #790, ADR-010 §7.3).
-func memberDocs(members []store.ChannelMember, viewer *store.Principal) []schema.ChannelMemberV1 {
-	viewerManages := false
-	if viewer != nil && viewer.Kind == store.PrincipalHuman && !viewer.IsGuest() && viewer.DisabledAt == nil && viewer.HiddenAt == nil {
+// humans) is shown when the viewer holds manage_channels (seesAll) or
+// manages the channel; CanDecide is shown to those and to that member itself
+// (issues #450, #790, ADR-010 §7.3, ADR-014 design §7.3).
+func memberDocs(members []store.ChannelMember, viewer *store.Principal, seesAll bool) []schema.ChannelMemberV1 {
+	viewerManages := seesAll || viewer == nil
+	if !viewerManages && viewer.Kind == store.PrincipalHuman && !viewer.IsGuest() && viewer.DisabledAt == nil && viewer.HiddenAt == nil {
 		for _, m := range members {
 			if m.PrincipalID == viewer.ID && m.Manages {
 				viewerManages = true
@@ -154,8 +163,12 @@ func memberDocs(members []store.ChannelMember, viewer *store.Principal) []schema
 	return docs
 }
 
-func memberDoc(m store.ChannelMember, viewer *store.Principal, viewerManages bool) schema.ChannelMemberV1 {
-	privileged := viewer == nil || isOperator(*viewer) || viewerManages
+// memberDoc is one member as viewer sees it. privileged (the viewer holds
+// manage_channels, manages the channel, or is unconstrained) shows Role and
+// every member's CanDecide; otherwise CanDecide is shown on the viewer's own
+// row only.
+func memberDoc(m store.ChannelMember, viewer *store.Principal, privileged bool) schema.ChannelMemberV1 {
+	privileged = privileged || viewer == nil
 	var canDecide, manages *bool
 	var role schema.PrincipalRole
 	if m.Kind == store.PrincipalHuman {
@@ -183,6 +196,25 @@ func memberDoc(m store.ChannelMember, viewer *store.Principal, viewerManages boo
 	}
 }
 
+// memberWriteAsManager decides which branch a membership write takes (design
+// §7.2.1): an authenticated caller without manage_channels writes as a
+// channel manager, with a manager's limits and protections, whatever its
+// role; the store decides the same standing again under its write lock. A
+// caller with no credential (--auth off) is unconstrained, as before.
+// refused is the permission a refusal on the manager branch names: set for a
+// restricted operator, empty for a member (refusedPermission). ok = false
+// means a 500 was written.
+func (s *Server) memberWriteAsManager(w http.ResponseWriter, r *http.Request, caller store.Principal, authed bool) (manager bool, refused schema.Permission, ok bool) {
+	if !authed {
+		return false, "", true
+	}
+	allowed, ok := s.canOrFail(w, r, caller, schema.PermManageChannels)
+	if !ok || allowed {
+		return false, "", ok
+	}
+	return true, refusedPermission(caller, schema.PermManageChannels), true
+}
+
 // handlePutChannelMember serves PUT /v1/channels/{channel}/members/{principal_id}
 // (operator or channel manager, enforced by the route table; issue #790). Idempotent.
 func (s *Server) handlePutChannelMember(w http.ResponseWriter, r *http.Request) {
@@ -202,7 +234,10 @@ func (s *Server) handlePutChannelMember(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	caller, authed := callerFrom(ctx)
-	manager := authed && !isOperator(caller)
+	manager, refused, ok := s.memberWriteAsManager(w, r, caller, authed)
+	if !ok {
+		return
+	}
 	now := s.now()
 	if manager {
 		if err := s.store.CheckMemberAddLimit(ctx, caller.ID, renameAttemptsPerDay, now); err != nil {
@@ -211,7 +246,7 @@ func (s *Server) handlePutChannelMember(w http.ResponseWriter, r *http.Request) 
 		}
 		err = s.store.CheckManagerAddTarget(ctx, channel.ID, caller.ID, principalID)
 		if errors.Is(err, store.ErrNotAddable) || errors.Is(err, store.ErrPrincipalNotFound) {
-			if rerr := s.store.RecordMemberAddRefused(context.WithoutCancel(ctx), caller.ID, channel.ID, renameAttemptsPerDay, now); rerr != nil {
+			if rerr := s.store.RecordMemberAddRefusedFor(context.WithoutCancel(ctx), caller.ID, channel.ID, refused, renameAttemptsPerDay, now); rerr != nil {
 				s.writeMemberAddLimitError(w, r, rerr, now)
 				return
 			}
@@ -229,12 +264,12 @@ func (s *Server) handlePutChannelMember(w http.ResponseWriter, r *http.Request) 
 	var added bool
 	if manager {
 		if req.CanDecide != nil || req.Manages != nil {
-			s.denyForbidden(w, r, caller, "forbidden", "only an operator may set can_decide or manages")
+			s.denyForbiddenFor(w, r, caller, "forbidden", "only an operator may set can_decide or manages", refused)
 			return
 		}
 		added, err = s.store.PutChannelMember(ctx, auditActor(ctx), channel.ID, principalID, caller.ID, nil, nil)
 		if errors.Is(err, store.ErrNotAddable) || errors.Is(err, store.ErrPrincipalNotFound) {
-			if rerr := s.store.RecordMemberAddRefused(context.WithoutCancel(ctx), caller.ID, channel.ID, renameAttemptsPerDay, now); rerr != nil {
+			if rerr := s.store.RecordMemberAddRefusedFor(context.WithoutCancel(ctx), caller.ID, channel.ID, refused, renameAttemptsPerDay, now); rerr != nil {
 				s.writeMemberAddLimitError(w, r, rerr, now)
 				return
 			}
@@ -287,7 +322,10 @@ func (s *Server) handleAddChannelMemberByName(w http.ResponseWriter, r *http.Req
 		return
 	}
 	caller, authed := callerFrom(ctx)
-	manager := authed && !isOperator(caller)
+	manager, refused, ok := s.memberWriteAsManager(w, r, caller, authed)
+	if !ok {
+		return
+	}
 	now := s.now()
 	var addedBy int64
 	if authed {
@@ -302,7 +340,7 @@ func (s *Server) handleAddChannelMemberByName(w http.ResponseWriter, r *http.Req
 	member, added, err := s.store.AddChannelMemberByName(ctx, auditActor(ctx), channel.ID, addedBy, req.Name)
 	if errors.Is(err, store.ErrNotAddable) || errors.Is(err, store.ErrPrincipalNotFound) {
 		if manager {
-			if rerr := s.store.RecordMemberAddRefused(context.WithoutCancel(ctx), caller.ID, channel.ID, renameAttemptsPerDay, now); rerr != nil {
+			if rerr := s.store.RecordMemberAddRefusedFor(context.WithoutCancel(ctx), caller.ID, channel.ID, refused, renameAttemptsPerDay, now); rerr != nil {
 				s.writeMemberAddLimitError(w, r, rerr, now)
 				return
 			}
@@ -398,7 +436,15 @@ func (s *Server) writeMemberError(w http.ResponseWriter, r *http.Request, err er
 		writeChannelNotFound(w)
 	case errors.Is(err, store.ErrOwnerProtected), errors.Is(err, store.ErrManagerRefused):
 		if caller, ok := callerFrom(r.Context()); ok {
-			s.denyForbidden(w, r, caller, "forbidden", err.Error())
+			// A manager-standing refusal names manage_channels when the
+			// caller's role could hold it: a restricted operator was refused
+			// operator standing (design §7.2.1, §8.5). Owner protection is
+			// about the target, and names nothing.
+			var perm schema.Permission
+			if !errors.Is(err, store.ErrOwnerProtected) {
+				perm = refusedPermission(caller, schema.PermManageChannels)
+			}
+			s.denyForbiddenFor(w, r, caller, "forbidden", err.Error(), perm)
 		} else {
 			writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		}

@@ -729,7 +729,7 @@ describe('the platform seam', () => {
       .filter(([, code]) => /from\s+['"](\.\.?\/)+(platform\/)?operations['"]/.test(code))
       .map(([path]) => path)
       .sort();
-    expect(reading).toEqual(['./api.ts', './platform/browser/http.ts', './platform/browser/sockets.ts', './platform/desktop/bridge.ts', './platform/desktop/http.ts', './platform/types.ts']);
+    expect(reading).toEqual(['./api.ts', './platform/browser/http.ts', './platform/browser/sockets.ts', './platform/desktop/bridge.ts', './platform/desktop/http.ts', './platform/desktop/sockets.ts', './platform/types.ts']);
   });
 
   it('keeps the desktop adapter out of the browser graph', () => {

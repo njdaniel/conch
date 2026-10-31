@@ -592,8 +592,26 @@ func (s *Server) operatorGuestCaller(w http.ResponseWriter, r *http.Request) (st
 	return caller, true
 }
 
-// joinSettingsResponse is the answer of both settings routes.
-func (s *Server) joinSettingsResponse(ctx context.Context, st store.JoinState) schema.JoinSettingsResponseV1 {
+// joinSettingsResponse is the answer of both settings routes, as caller
+// sees it: without manage_channels, open_channels lists only the channels
+// caller is in and counts the rest in other_open_channels (ADR-014 design
+// §7.3, SF-1).
+func (s *Server) joinSettingsResponse(ctx context.Context, caller store.Principal, st store.JoinState) (schema.JoinSettingsResponseV1, error) {
+	sight, err := s.channelSightFor(ctx, caller)
+	if err != nil {
+		return schema.JoinSettingsResponseV1{}, err
+	}
+	if !sight.all {
+		shown := make([]string, 0, len(st.Settings.OpenChannels))
+		for _, name := range st.Settings.OpenChannels {
+			if sight.seesName(name) {
+				shown = append(shown, name)
+				continue
+			}
+			st.Settings.OtherOpenChannels++
+		}
+		st.Settings.OpenChannels = shown
+	}
 	out := schema.JoinSettingsResponseV1{Settings: st.Settings, ServerName: s.serverName(), LiveGuests: int64(st.LiveGuests),
 		Warnings: []schema.JoinWarning{}}
 	if !st.Settings.GuestsEnabled && st.LiveGuests > 0 {
@@ -615,14 +633,26 @@ func (s *Server) joinSettingsResponse(ctx context.Context, st store.JoinState) s
 	if st.ServerNameHolders > 0 {
 		out.Warnings = append(out.Warnings, schema.JoinWarningServerNameInUse)
 	}
-	return out
+	return out, nil
+}
+
+// writeJoinSettings answers either settings route with st as caller sees it.
+func (s *Server) writeJoinSettings(w http.ResponseWriter, r *http.Request, caller store.Principal, st store.JoinState) {
+	out, err := s.joinSettingsResponse(r.Context(), caller, st)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "join: read channel sight failed", "principal", caller.ID, "error", err)
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleGetJoinSettings serves GET /v1/join/settings: the joining policy,
 // the live visits and the warnings that apply.
 func (s *Server) handleGetJoinSettings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, ok := s.operatorGuestCaller(w, r); !ok {
+	caller, ok := s.operatorGuestCaller(w, r)
+	if !ok {
 		return
 	}
 	st, err := s.store.JoinState(ctx)
@@ -631,7 +661,7 @@ func (s *Server) handleGetJoinSettings(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.joinSettingsResponse(ctx, st))
+	s.writeJoinSettings(w, r, caller, st)
 }
 
 // handlePutJoinSettings serves PUT /v1/join/settings: an operator changes
@@ -652,18 +682,23 @@ func (s *Server) handlePutJoinSettings(w http.ResponseWriter, r *http.Request) {
 	// guests_enabled true and the guest modes as a conflict, 409.
 	st, err := s.store.PutJoinSettings(ctx, auditActor(ctx), caller.ID, req)
 	var refused *store.JoinSettingsError
+	var denied *store.PermissionError
 	switch {
 	case errors.As(err, &refused) && errors.Is(err, store.ErrJoinPolicyConflict):
 		writeError(w, http.StatusConflict, schema.ErrorCodeJoinPolicyConflict, refused.Reason)
 	case errors.As(err, &refused):
 		writeError(w, http.StatusBadRequest, "invalid_request", refused.Reason)
+	case errors.As(err, &denied) && errors.Is(err, store.ErrPermissionDenied):
+		// The resulting state admits people to a channel the writer is not
+		// in, and it lacks manage_channels (ADR-014 design §7.3).
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodePermissionDenied, denied.Reason, denied.Permission)
 	case err != nil:
 		slog.ErrorContext(ctx, "join: write settings failed", "error", err)
 		writeInternalError(w)
 	default:
 		slog.InfoContext(ctx, "join: settings changed", "principal", caller.ID,
 			"guests_enabled", st.Settings.GuestsEnabled, "open_joining", string(st.Settings.OpenJoining), "live_guests", st.LiveGuests)
-		writeJSON(w, http.StatusOK, s.joinSettingsResponse(ctx, st))
+		s.writeJoinSettings(w, r, caller, st)
 	}
 }
 

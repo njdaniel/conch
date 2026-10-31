@@ -40,9 +40,13 @@ export interface FeedConnection {
   close(): void;
 }
 
-// SocketTransport opens the live feeds. The ticket is part of query: a
-// single-use credential for this socket, which the caller asked for.
+// SocketTransport opens the live feeds. When ticket is true the caller asks
+// for a single-use ticket before each socket and puts it in query (the
+// browser). When it is false the place opens the socket with the credential
+// it holds itself, and the caller asks for no ticket (the desktop shell, whose
+// main holds the bearer: a renderer never holds a ticket).
 export interface SocketTransport {
+  readonly ticket: boolean;
   open(id: OperationId, query: Readonly<Record<string, string>>): FeedConnection;
 }
 

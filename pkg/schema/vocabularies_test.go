@@ -215,6 +215,13 @@ var validators = map[string]func(string) bool{
 	"VoiceDevicesPipeWire":     validOf[VoiceDevicesPipeWire](),
 	"VoiceShareEndReason":      validOf[VoiceShareEndReason](),
 	"VoiceTransmitState":       validOf[VoiceTransmitState](),
+
+	// Roles and permissions (ADR-014, issue #1012).
+	"Permission":         validOf[Permission](),
+	"PermissionRole":     validOf[PermissionRole](),
+	"PermissionPreset":   validOf[PermissionPreset](),
+	"PermissionsWarning": validOf[PermissionsWarning](),
+	"IssuedKind":         validOf[IssuedKind](),
 }
 
 // namers is every …Names() func, by the type it names. TestVocabularies fails

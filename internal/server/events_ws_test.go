@@ -796,12 +796,21 @@ func TestEventsChannelRenamed(t *testing.T) {
 		}
 	}
 
-	// ops2 heard nothing: its next frame is the change made to it.
+	// ops2 heard nothing about the rename of ops: no channel document comes
+	// before the change made to it. ann owns this socket and is a member of
+	// ops, so the rename also sent it conch.channels_changed.v1 (#1049); that
+	// frame may arrive before or after the member list, depending on timing,
+	// and is the only other frame allowed before it.
 	if rec := f.do(t, http.MethodPut, fmt.Sprintf("/v1/channels/ops2/members/%d", f.ids["bob"]), f.rootTok, ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("add bob to ops2 = %d %s", rec.Code, rec.Body)
 	}
-	if fr := other.next(); fr.schema != schema.ChannelMembersSchemaV1 || fr.members.ChannelID != f.ops2.ID {
-		t.Errorf("ops2: next frame = %v, want its member list", fr)
+	seen := other.until("ops2's member list", isMembers(func(d schema.ChannelMembersV1) bool {
+		return d.ChannelID == f.ops2.ID
+	}))
+	for _, fr := range seen[:len(seen)-1] {
+		if fr.schema != schema.ChannelsChangedSchemaV1 {
+			t.Errorf("ops2: frame before its member list = %v, want only %s: %v", fr, schema.ChannelsChangedSchemaV1, seen)
+		}
 	}
 
 	// The message socket's next frame is the next message, posted by the

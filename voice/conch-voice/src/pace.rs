@@ -111,17 +111,19 @@ mod tests {
         );
     }
 
+    /// Measured from before the pace is made, which is where its ticks are counted from: a
+    /// test thread held up between the first tick and the clock's reading would otherwise
+    /// have spent part of the frame unseen, and a loaded machine made this fail (issue #957).
+    /// The second tick cannot come sooner than a frame after the first, which is no sooner
+    /// than this reading.
     #[tokio::test]
     async fn a_timer_paced_task_waits_a_frame_whatever_it_found() {
+        let made = tokio::time::Instant::now();
         let mut pace = Pace::new(Pacing::Timer);
         pace.wait().await; // The first tick is immediate.
         pace.found(true);
-        let begun = Instant::now();
         pace.wait().await;
-        assert!(
-            begun.elapsed() >= Duration::from_millis(5),
-            "{:?}",
-            begun.elapsed()
-        );
+        let elapsed = made.elapsed();
+        assert!(elapsed >= look_every(Pacing::Timer), "{elapsed:?}");
     }
 }

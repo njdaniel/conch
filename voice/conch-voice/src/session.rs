@@ -314,6 +314,9 @@ pub struct Timings {
     pub presence: PresenceTimings,
     /// A random number for the policy's jitter.
     pub jitter: fn() -> u32,
+    /// What the transmit task measures the open microphone's hang, and the cut of a release
+    /// tail, by. Tokio's clock outside tests ([`transmit::TxClock`]).
+    pub transmit_clock: transmit::TxClock,
 }
 
 impl Default for Timings {
@@ -333,6 +336,7 @@ impl Default for Timings {
             reports: ReportTimings::default(),
             presence: PresenceTimings::default(),
             jitter: random,
+            transmit_clock: transmit::TxClock::real(),
         }
     }
 }
@@ -921,6 +925,7 @@ impl<T: Transport> Session<T> {
         let transmitter = transmit::spawn_with_level(
             transmit::gate_config(release_tail_ms, max_transmit),
             level,
+            timings.transmit_clock.clone(),
         )?;
         let output = Device::configured(output.as_deref());
         let speakers = match output.opened_as() {

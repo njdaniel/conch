@@ -13,6 +13,7 @@
 import type { BrowserContextOptions, Page } from '@playwright/test';
 import { channelButton, expect, expectFits, messages, openChannel, phones, showView, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
+import { findLeak } from './traffic';
 import { call, type World } from './world';
 
 const desktop: BrowserContextOptions = { viewport: { width: 1280, height: 800 } };
@@ -142,7 +143,8 @@ async function expectNothingOf(page: Page, traffic: Traffic, markers: readonly s
   expect(sent.length, `${view}: the page was sent something`).toBeGreaterThan(0);
   for (const m of markers) {
     expect(shown, `${view}: the page shows "${m}" of the other group`).not.toContain(m);
-    expect(sent, `${view}: the page was sent "${m}" of the other group`).not.toContain(m);
+    // Random tickets and tokens are blanked first (traffic.ts, issue #1069).
+    expect(findLeak(sent, m), `${view}: the page was sent something of the other group`).toBeUndefined();
   }
 }
 

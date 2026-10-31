@@ -71,6 +71,34 @@ var TSConstants = []TSConstant{
 	{Name: "MESSAGE_EDIT_WINDOW_SECONDS", Value: MessageEditWindowSeconds},
 	{Name: "MAX_MESSAGE_EDITS", Value: MaxMessageEdits},
 	{Name: "MAX_POST_REQUEST_BYTES", Value: MaxPostRequestBytes},
+
+	// The managed voice-helper control protocol, for the desktop owner's
+	// supervisor (issue #948, Q10 of #770): the helper's command line, the
+	// framing bounds, the owner's timers and the attach line's nonce. desktop/
+	// imports them; the browser bundle does not.
+	{Name: "VOICE_CONTROL_SUBCOMMAND", Value: VoiceControlSubcommand},
+	{Name: "VOICE_CONTROL_MAX_LINE_BYTES", Value: VoiceControlMaxLineBytes},
+	{Name: "VOICE_CONTROL_MAX_ID", Value: int64(VoiceControlMaxID)},
+	{Name: "VOICE_CONTROL_MAX_IN_FLIGHT", Value: VoiceControlMaxInFlight},
+	{Name: "VOICE_CONTROL_MAX_VERSIONS", Value: VoiceControlMaxVersions},
+	{Name: "VOICE_CONTROL_MAX_HELPER_VERSION_BYTES", Value: VoiceControlMaxHelperVersionBytes},
+	{Name: "VOICE_CONTROL_MAX_SERVER_BYTES", Value: VoiceControlMaxServerBytes},
+	{Name: "VOICE_CONTROL_MAX_CHANNEL_BYTES", Value: VoiceControlMaxChannelBytes},
+	{Name: "VOICE_CONTROL_MAX_RETRY_IN_MS", Value: VoiceControlMaxRetryInMS},
+	{Name: "VOICE_CONTROL_HELLO_TIMEOUT_MS", Value: VoiceControlHelloTimeoutMS},
+	{Name: "VOICE_CONTROL_ACK_TIMEOUT_MS", Value: VoiceControlAckTimeoutMS},
+	{Name: "VOICE_CONTROL_GATE_SHUT_MS", Value: VoiceControlGateShutMS},
+	{Name: "VOICE_CONTROL_CAPTURE_STOP_MS", Value: VoiceControlCaptureStopMS},
+	{Name: "VOICE_CONTROL_OWNER_LOSS_EXIT_MS", Value: VoiceControlOwnerLossExitMS},
+	{Name: "VOICE_CONTROL_LEAVE_EXIT_MS", Value: VoiceControlLeaveExitMS},
+	{Name: "VOICE_CONTROL_STOP_TERM_AFTER_MS", Value: VoiceControlStopTermAfterMS},
+	{Name: "VOICE_CONTROL_STOP_KILL_AFTER_MS", Value: VoiceControlStopKillAfterMS},
+	{Name: "VOICE_CONTROL_DEVICE_DEFAULT", Value: VoiceControlDeviceDefault},
+	{Name: "VOICE_DEVICES_MAX_NAME_BYTES", Value: VoiceDevicesMaxNameBytes},
+	{Name: "VOICE_CONTROL_PIPE_FLAG", Value: VoiceControlPipeFlag},
+	{Name: "VOICE_CONTROL_PIPE_NONCE_ENV", Value: VoiceControlPipeNonceEnv},
+	{Name: "VOICE_CONTROL_PIPE_NONCE_BYTES", Value: VoiceControlPipeNonceBytes},
+	{Name: "VOICE_CONTROL_PIPE_NONCE_CHARS", Value: VoiceControlPipeNonceChars},
 }
 
 // TSTypes is every struct the web client reads or sends, and the refusal
@@ -165,6 +193,32 @@ var TSTypes = []TSType{
 	// streamed on a socket of its own so the channel list can show it.
 	{Value: VoiceChannelOccupancy{}},
 	{Value: VoiceOccupancyV1{}, Family: "voice-occupancy-v1", Schema: VoiceOccupancySchemaV1},
+	// The managed voice-helper control protocol (issue #948, Q10 of #770):
+	// what the desktop owner writes to conch-voice and reads back, v1 and v2,
+	// and the attach line of its events endpoint. Their fixtures are in
+	// testdata/voice-control*/, a directory per version, so the rows name no
+	// family; desktop/tests/unit/voice-protocol.test.ts checks every one of
+	// them against these validators. The browser bundle does not import them.
+	{Value: VoiceControlStartV1{}, Schema: VoiceControlSchemaV1},
+	{Value: VoiceControlSetMuteV1{}, Schema: VoiceControlSchemaV1},
+	{Value: VoiceControlSetDeafenV1{}, Schema: VoiceControlSchemaV1},
+	{Value: VoiceControlGetStateV1{}, Schema: VoiceControlSchemaV1},
+	{Value: VoiceControlLeaveV1{}, Schema: VoiceControlSchemaV1},
+	{Value: VoiceControlHelloV1{}, Schema: VoiceControlSchemaV1},
+	{Value: VoiceControlAckV1{}, Schema: VoiceControlSchemaV1},
+	{Value: VoiceControlStateV1{}, Schema: VoiceControlSchemaV1},
+	{Value: VoiceControlProtocolErrorV1{}, Schema: VoiceControlSchemaV1},
+	{Value: VoiceControlStartV2{}, Schema: VoiceControlSchemaV2},
+	{Value: VoiceControlSetMuteV2{}, Schema: VoiceControlSchemaV2},
+	{Value: VoiceControlSetDeafenV2{}, Schema: VoiceControlSchemaV2},
+	{Value: VoiceControlGetStateV2{}, Schema: VoiceControlSchemaV2},
+	{Value: VoiceControlLeaveV2{}, Schema: VoiceControlSchemaV2},
+	{Value: VoiceControlSetDevicesV2{}, Schema: VoiceControlSchemaV2},
+	{Value: VoiceControlSetTalkModeV2{}, Schema: VoiceControlSchemaV2},
+	{Value: VoiceControlAckV2{}, Schema: VoiceControlSchemaV2},
+	{Value: VoiceControlStateV2{}, Schema: VoiceControlSchemaV2},
+	{Value: VoiceControlProtocolErrorV2{}, Schema: VoiceControlSchemaV2},
+	{Value: VoiceControlPipeAttachedV1{}, Schema: VoiceControlPipeSchemaV1},
 	// Invites: the way in (ADR-008 §4). The code is in the create response
 	// alone; the new principal is in the redeem response.
 	{Value: PrincipalV0{}, Family: "principal-v0"},
@@ -291,6 +345,19 @@ var TSTypes = []TSType{
 	{Value: ReactionSummariesResponseV1{}, Family: "reaction-summaries-response-v1"},
 	{Value: ReactionV1{}, Family: "reaction-v1"},
 	{Value: ListReactorsResponseV1{}, Family: "list-reactors-response-v1"},
+
+	// Roles and permissions (ADR-014, issue #1012,
+	// docs/design/admin-roles.md §8): the document an operator reads and
+	// the owner changes, a cell patch or a preset, and the content-free
+	// signal that says to re-read whoami. The caller's own permissions are
+	// in WhoAmIResponseV1.
+	{Value: PermissionRowV1{}},
+	{Value: PermissionPresetV1{}},
+	{Value: IssuedByOperatorV1{}},
+	{Value: PermissionsResponseV1{}, Family: "permissions-response-v1"},
+	{Value: PermissionChangeV1{}},
+	{Value: PutPermissionsRequestV1{}, Family: "put-permissions-request-v1"},
+	{Value: PermissionsChangedV1{}, Family: "permissions-changed-v1", Schema: PermissionsChangedSchemaV1},
 
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},
