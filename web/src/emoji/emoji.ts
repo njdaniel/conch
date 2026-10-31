@@ -5,7 +5,9 @@
 // Shortcodes are derived, not vendored. Unicode publishes CLDR short names, not
 // shortcodes, so the vocabulary is the name made lower case with underscores
 // (see shortcodeOf). It is a client vocabulary for typing; it never travels on
-// the wire. What is inserted is the catalog's key, the fully-qualified
+// the wire. Beside the derived names are Conch's own aliases for what people
+// type from other chat tools (:+1:, :tada:; cmd/emoji-gen/aliases.txt, issue
+// #1036): names for typing and search only. What is inserted is the catalog's key, the fully-qualified
 // sequence (docs/design/message-reactions.md section 3.2).
 import { EMOJI_VERSION } from '../schema/reaction';
 import catalog from './catalog.json';
@@ -17,6 +19,9 @@ export interface Emoji {
   readonly name: string;
   // The derived :shortcode: without its colons.
   readonly shortcode: string;
+  // Conch's own typed names (":tada:", ":+1:"), from aliases.txt; they are for
+  // typing and search only, and the key stays the CLDR sequence.
+  readonly aliases: readonly string[];
   readonly group: string;
   readonly subgroup: string;
   // A skin-tone variant: found by search, not listed when browsing a group.
@@ -41,7 +46,7 @@ export interface RawCatalog {
   readonly version: string;
   readonly groups: readonly {
     readonly name: string;
-    readonly subgroups: readonly { readonly name: string; readonly emoji: readonly { readonly key: string; readonly name: string }[] }[];
+    readonly subgroups: readonly { readonly name: string; readonly emoji: readonly { readonly key: string; readonly name: string; readonly aliases?: readonly string[] }[] }[];
   }[];
 }
 
@@ -69,7 +74,7 @@ export function buildIndex(raw: RawCatalog): EmojiIndex {
     const emoji: Emoji[] = [];
     for (const s of g.subgroups) {
       for (const e of s.emoji) {
-        emoji.push({ key: e.key, name: e.name, shortcode: shortcodeOf(e.name), group: g.name, subgroup: s.name, toned: e.name.includes('skin tone') });
+        emoji.push({ key: e.key, name: e.name, shortcode: shortcodeOf(e.name), aliases: e.aliases ?? [], group: g.name, subgroup: s.name, toned: e.name.includes('skin tone') });
       }
     }
     all.push(...emoji);
@@ -95,22 +100,63 @@ export function loadEmoji(): Promise<EmojiIndex> {
 
 const fold = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
-// Search: every word of the query must be in the name or the shortcode. Names
-// that start with the query come first, then names with a word that starts with
-// it, then the rest; within each, the catalog's order.
+// A name the user can type for an emoji: one of Conch's aliases (":tada:",
+// ":+1:") or the derived CLDR shortcode.
+interface Name {
+  readonly text: string;
+  readonly alias: boolean;
+}
+
+const namesOf = (e: Emoji): Name[] => [...e.aliases.map((text) => ({ text, alias: true })), { text: e.shortcode, alias: false }];
+
+// How a typed name matches: 0 exact, 1 starts with the query, 2 a later
+// whole word starts with it, 3 contains it somewhere (null: no match).
+function tierOf(name: string, q: string): number | null {
+  if (name === q) return 0;
+  if (name.startsWith(q)) return 1;
+  if (name.split(/[^a-z0-9]+/).some((w) => w.startsWith(q))) return 2;
+  return name.includes(q) ? 3 : null;
+}
+
+// The ranking of #1036, shared by the picker's search and the composer's
+// completion: by tier, then an alias before a CLDR name, then the shorter name,
+// then the catalog's order. An emoji ranks by its best name.
+function rankOf(e: Emoji, q: string): readonly [number, number, number] | null {
+  let best: [number, number, number] | null = null;
+  for (const n of namesOf(e)) {
+    const tier = tierOf(n.text, q);
+    if (tier === null) continue;
+    const r: [number, number, number] = [tier, n.alias ? 0 : 1, n.text.length];
+    if (best === null || r[0] < best[0] || (r[0] === best[0] && (r[1] < best[1] || (r[1] === best[1] && r[2] < best[2])))) best = r;
+  }
+  return best;
+}
+
+const byRank = (a: readonly [number, number, number], b: readonly [number, number, number]) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+
+// A skin-tone variant is offered only when the query names a tone.
+const namesATone = (q: string) => /tone|skin/.test(q);
+
+// Search: every word of the query must be in the name, the shortcode or an
+// alias. Ranked as above; the skin-tone variants are left out unless the query
+// names a tone.
 export function searchEmoji(index: EmojiIndex, query: string, limit = 120): Emoji[] {
   const terms = fold(query).split(/[\s_]+/).filter((t) => t !== '');
   if (terms.length === 0) return [];
-  const phrase = terms.join(' ');
-  const first = terms[0] ?? '';
-  const ranked: { e: Emoji; rank: number; at: number }[] = [];
+  const phrase = terms.join('_');
+  const tones = namesATone(phrase);
+  const ranked: { e: Emoji; rank: readonly [number, number, number]; at: number }[] = [];
   index.all.forEach((e, at) => {
+    if (e.toned && !tones) return;
     const name = fold(e.name);
-    if (!terms.every((t) => name.includes(t) || e.shortcode.includes(t))) return;
-    const rank = e.shortcode === terms.join('_') ? -1 : name.startsWith(phrase) ? 0 : name.split(/[^a-z0-9]+/).some((w) => w.startsWith(first)) ? 1 : 2;
+    const names = namesOf(e);
+    if (!terms.every((t) => name.includes(t) || names.some((n) => n.text.includes(t)))) return;
+    // The phrase ranks as a name; a multi-word query that is no name's
+    // substring ranks last, by length.
+    const rank = rankOf(e, phrase) ?? ([3, 1, e.shortcode.length] as const);
     ranked.push({ e, rank, at });
   });
-  ranked.sort((a, b) => a.rank - b.rank || a.at - b.at);
+  ranked.sort((a, b) => byRank(a.rank, b.rank) || a.at - b.at);
   return ranked.slice(0, limit).map((r) => r.e);
 }
 
@@ -128,27 +174,27 @@ export interface Completion {
 // URL do not open it, and the query holds only what a shortcode holds.
 export function completionAt(text: string, caret: number): Completion | null {
   const before = text.slice(0, caret);
-  const m = /(^|[\s([{])(:)([a-z0-9_]*)$/i.exec(before);
+  const m = /(^|[\s([{])(:)([a-z0-9_+-]*)$/i.exec(before);
   if (m === null) return null;
   const query = m[3] ?? '';
   if (query.length < completionMinQuery) return null;
   return { start: before.length - query.length - 1, query: query.toLowerCase() };
 }
 
-// The shortcode that is the query comes first, then those that start with it,
-// then those that contain it.
+// The completion for `:query`, ranked as searchEmoji ranks: the exact name or
+// alias first, then names that start with the query, then those with a word
+// that does, then those that contain it. A skin-tone variant is not offered
+// unless the query names a tone.
 export function completeShortcode(index: EmojiIndex, query: string, limit = completionMax): Emoji[] {
-  const exact: Emoji[] = [];
-  const prefix: Emoji[] = [];
-  const inside: Emoji[] = [];
-  for (const e of index.all) {
-    // Scan it all: the exact match may come after more than `limit` longer ones.
-    if (e.shortcode === query) exact.push(e);
-    else if (e.shortcode.startsWith(query)) {
-      if (prefix.length < limit) prefix.push(e);
-    } else if (e.shortcode.includes(query) && inside.length < limit) inside.push(e);
-  }
-  return [...exact, ...prefix, ...inside].slice(0, limit);
+  const tones = namesATone(query);
+  const ranked: { e: Emoji; rank: readonly [number, number, number]; at: number }[] = [];
+  index.all.forEach((e, at) => {
+    if (e.toned && !tones) return;
+    const rank = rankOf(e, query);
+    if (rank !== null) ranked.push({ e, rank, at });
+  });
+  ranked.sort((a, b) => byRank(a.rank, b.rank) || a.at - b.at);
+  return ranked.slice(0, limit).map((r) => r.e);
 }
 
 // Put `insert` where the selection is, in place of the selection; the caret goes

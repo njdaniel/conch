@@ -13,11 +13,25 @@ import (
 
 // The vendored data and the committed outputs, relative to this package.
 const (
-	dataFile = "../../third_party/unicode/emoji-test.txt"
-	pinFile  = "../../third_party/unicode/emoji-test.sha256"
-	goFile   = "../../pkg/schema/emoji_catalog_gen.go"
-	jsonFile = "../../web/src/emoji/catalog.json"
+	dataFile  = "../../third_party/unicode/emoji-test.txt"
+	pinFile   = "../../third_party/unicode/emoji-test.sha256"
+	goFile    = "../../pkg/schema/emoji_catalog_gen.go"
+	jsonFile  = "../../web/src/emoji/catalog.json"
+	aliasFile = "aliases.txt"
 )
+
+// sampleAliases names two of the sample's sequences, one with its selector
+// left off.
+const sampleAliases = "# a comment\n\nheart 2764\n+1 1F44D\nthumbsup 1F44D\n"
+
+func writeAliases(t *testing.T, dir string) string {
+	t.Helper()
+	p := filepath.Join(dir, "aliases.txt")
+	if err := os.WriteFile(p, []byte(sampleAliases), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
 
 // sample is a small file in emoji-test.txt's grammar: a selector-only
 // variant, a keycap, a ZWJ sequence with its minimally-qualified form, skin
@@ -213,7 +227,7 @@ func TestHashMismatchRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	goOut, jsonOut := filepath.Join(dir, "out.go"), filepath.Join(dir, "out.json")
-	err := run(data, pin, goOut, jsonOut)
+	err := run(data, pin, writeAliases(t, dir), goOut, jsonOut)
 	if err == nil || !strings.Contains(err.Error(), "the pin says") {
 		t.Fatalf("run with a wrong pin: %v, want the hash refused", err)
 	}
@@ -226,7 +240,7 @@ func TestHashMismatchRefused(t *testing.T) {
 	if err := os.WriteFile(pin, []byte("not a hash\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(data, pin, goOut, jsonOut); err == nil || !strings.Contains(err.Error(), "does not start with a SHA-256") {
+	if err := run(data, pin, writeAliases(t, dir), goOut, jsonOut); err == nil || !strings.Contains(err.Error(), "does not start with a SHA-256") {
 		t.Fatalf("run with a malformed pin: %v", err)
 	}
 }
@@ -246,7 +260,7 @@ func assertRunWritesNothing(t *testing.T, data, want string) {
 		t.Fatal(err)
 	}
 	goOut, jsonOut := filepath.Join(dir, "out.go"), filepath.Join(dir, "out.json")
-	err := run(dataPath, pin, goOut, jsonOut)
+	err := run(dataPath, pin, writeAliases(t, dir), goOut, jsonOut)
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("run: %v, want an error containing %q", err, want)
 	}
@@ -271,11 +285,14 @@ func TestRunWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	goOut, jsonOut := filepath.Join(dir, "out.go"), filepath.Join(dir, "out.json")
-	if err := run(dataPath, pin, goOut, jsonOut); err != nil {
+	if err := run(dataPath, pin, writeAliases(t, dir), goOut, jsonOut); err != nil {
 		t.Fatal(err)
 	}
 	c, err := parse([]byte(sample))
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyAliases(c, []byte(sampleAliases)); err != nil {
 		t.Fatal(err)
 	}
 	wantGo, _ := goSource(c)
@@ -338,6 +355,13 @@ func TestCommittedOutputsAreCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	aliases, err := os.ReadFile(aliasFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyAliases(c, aliases); err != nil {
+		t.Fatal(err)
+	}
 	wantJSON, err := jsonCatalog(c)
 	if err != nil {
 		t.Fatal(err)
@@ -387,5 +411,110 @@ func TestVendoredDataShape(t *testing.T) {
 	// well inside them, or the headroom for a future version is gone.
 	if maxBytes > 48 || maxPoints > 12 {
 		t.Errorf("longest key: %d bytes, %d code points; the §3.3 bounds (64, 16) leave too little headroom", maxBytes, maxPoints)
+	}
+}
+
+// Issue #1036: the alias table resolves to catalog entries, in the JSON only,
+// and a bad alias fails the generator with the alias named.
+func TestAliasesResolve(t *testing.T) {
+	c, err := parse([]byte(sample))
+	if err != nil {
+		t.Fatal(err)
+	}
+	goBefore, err := goSource(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyAliases(c, []byte(sampleAliases)); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][]string{}
+	for _, g := range c.Groups {
+		for _, sg := range g.Subgroups {
+			for _, e := range sg.Emoji {
+				got[e.Name] = e.Aliases
+			}
+		}
+	}
+	if want := []string{"heart"}; fmt.Sprint(got["red heart"]) != fmt.Sprint(want) {
+		t.Errorf("red heart aliases = %v, want %v", got["red heart"], want)
+	}
+	if want := []string{"+1", "thumbsup"}; fmt.Sprint(got["thumbs up"]) != fmt.Sprint(want) {
+		t.Errorf("thumbs up aliases = %v, want %v", got["thumbs up"], want)
+	}
+	// The reaction-key table does not see aliases.
+	goAfter, err := goSource(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(goBefore) != string(goAfter) {
+		t.Error("an alias changed the Go reaction-key table")
+	}
+	j, err := jsonCatalog(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(j), `"aliases": [`) {
+		t.Errorf("the JSON catalog has no aliases:\n%s", j)
+	}
+}
+
+func TestAliasesRefused(t *testing.T) {
+	tests := []struct {
+		name, src, want string
+	}{
+		{"missing sequence", "heart 2764\nghostly 1F47B\n", `alias "ghostly"`},
+		{"a component is not an emoji", "tone 1F3FD\n", `alias "tone"`},
+		{"duplicate", "heart 2764\nheart 1F44D\n", `alias "heart" is already defined on line 1`},
+		{"bad name", "Heart 2764\n", `alias "Heart"`},
+		{"no code points", "heart\n", `alias "heart" has no code points`},
+		{"bad code point", "heart ZZ\n", `alias "heart"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := parse([]byte(sample))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = applyAliases(c, []byte(tt.src))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("applyAliases: %v, want an error containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// The committed table resolves against the pinned data, and holds the names
+// the audit found missing.
+func TestCommittedAliases(t *testing.T) {
+	data, err := os.ReadFile(dataFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := parse(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := os.ReadFile(aliasFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := applyAliases(c, src); err != nil {
+		t.Fatal(err)
+	}
+	have := map[string]string{}
+	for _, g := range c.Groups {
+		for _, sg := range g.Subgroups {
+			for _, e := range sg.Emoji {
+				for _, a := range e.Aliases {
+					have[a] = e.Key
+				}
+			}
+		}
+	}
+	for alias, key := range map[string]string{"+1": "\U0001F44D", "tada": "\U0001F389", "smile": "\U0001F604", "joy": "\U0001F602", "heart": "\u2764\uFE0F"} {
+		if have[alias] != key {
+			t.Errorf("alias %q = %q, want %q", alias, have[alias], key)
+		}
 	}
 }

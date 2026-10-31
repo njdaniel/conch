@@ -13,39 +13,67 @@
             },
             {
               "key": "😃",
-              "name": "grinning face with big eyes"
+              "name": "grinning face with big eyes",
+              "aliases": [
+                "smiley"
+              ]
             },
             {
               "key": "😄",
-              "name": "grinning face with smiling eyes"
+              "name": "grinning face with smiling eyes",
+              "aliases": [
+                "smile"
+              ]
             },
             {
               "key": "😁",
-              "name": "beaming face with smiling eyes"
+              "name": "beaming face with smiling eyes",
+              "aliases": [
+                "grin"
+              ]
             },
             {
               "key": "😆",
-              "name": "grinning squinting face"
+              "name": "grinning squinting face",
+              "aliases": [
+                "laughing"
+              ]
             },
             {
               "key": "😅",
-              "name": "grinning face with sweat"
+              "name": "grinning face with sweat",
+              "aliases": [
+                "sweat_smile"
+              ]
             },
             {
               "key": "🤣",
-              "name": "rolling on the floor laughing"
+              "name": "rolling on the floor laughing",
+              "aliases": [
+                "lol",
+                "rofl"
+              ]
             },
             {
               "key": "😂",
-              "name": "face with tears of joy"
+              "name": "face with tears of joy",
+              "aliases": [
+                "joy"
+              ]
             },
             {
               "key": "🙂",
-              "name": "slightly smiling face"
+              "name": "slightly smiling face",
+              "aliases": [
+                "slightly_smiling_face"
+              ]
             },
             {
               "key": "🙃",
-              "name": "upside-down face"
+              "name": "upside-down face",
+              "aliases": [
+                "upside_down"
+              ]
             },
             {
               "key": "🫠",
@@ -57,15 +85,24 @@
             },
             {
               "key": "😉",
-              "name": "winking face"
+              "name": "winking face",
+              "aliases": [
+                "wink"
+              ]
             },
             {
               "key": "😊",
-              "name": "smiling face with smiling eyes"
+              "name": "smiling face with smiling eyes",
+              "aliases": [
+                "blush"
+              ]
             },
             {
               "key": "😇",
-              "name": "smiling face with halo"
+              "name": "smiling face with halo",
+              "aliases": [
+                "innocent"
+              ]
             }
           ]
         },
@@ -78,7 +115,10 @@
             },
             {
               "key": "😍",
-              "name": "smiling face with heart-eyes"
+              "name": "smiling face with heart-eyes",
+              "aliases": [
+                "heart_eyes"
+              ]
             },
             {
               "key": "🤩",
@@ -86,7 +126,10 @@
             },
             {
               "key": "😘",
-              "name": "face blowing a kiss"
+              "name": "face blowing a kiss",
+              "aliases": [
+                "kissing_heart"
+              ]
             },
             {
               "key": "😗",
@@ -115,11 +158,17 @@
           "emoji": [
             {
               "key": "😋",
-              "name": "face savoring food"
+              "name": "face savoring food",
+              "aliases": [
+                "yum"
+              ]
             },
             {
               "key": "😛",
-              "name": "face with tongue"
+              "name": "face with tongue",
+              "aliases": [
+                "stuck_out_tongue"
+              ]
             },
             {
               "key": "😜",
@@ -127,7 +176,10 @@
             },
             {
               "key": "🤪",
-              "name": "zany face"
+              "name": "zany face",
+              "aliases": [
+                "zany"
+              ]
             },
             {
               "key": "😝",
@@ -144,7 +196,10 @@
           "emoji": [
             {
               "key": "🤗",
-              "name": "smiling face with open hands"
+              "name": "smiling face with open hands",
+              "aliases": [
+                "hugs"
+              ]
             },
             {
               "key": "🤭",
@@ -160,11 +215,17 @@
             },
             {
               "key": "🤫",
-              "name": "shushing face"
+              "name": "shushing face",
+              "aliases": [
+                "shushing"
+              ]
             },
             {
               "key": "🤔",
-              "name": "thinking face"
+              "name": "thinking face",
+              "aliases": [
+                "thinking"
+              ]
             },
             {
               "key": "🫡",
@@ -185,11 +246,17 @@
             },
             {
               "key": "😐",
-              "name": "neutral face"
+              "name": "neutral face",
+              "aliases": [
+                "neutral_face"
+              ]
             },
             {
               "key": "😑",
-              "name": "expressionless face"
+              "name": "expressionless face",
+              "aliases": [
+                "expressionless"
+              ]
             },
             {
               "key": "😶",
@@ -205,15 +272,24 @@
             },
             {
               "key": "😏",
-              "name": "smirking face"
+              "name": "smirking face",
+              "aliases": [
+                "smirk"
+              ]
             },
             {
               "key": "😒",
-              "name": "unamused face"
+              "name": "unamused face",
+              "aliases": [
+                "unamused"
+              ]
             },
             {
               "key": "🙄",
-              "name": "face with rolling eyes"
+              "name": "face with rolling eyes",
+              "aliases": [
+                "roll_eyes"
+              ]
             },
             {
               "key": "😬",
@@ -246,11 +322,17 @@
           "emoji": [
             {
               "key": "😌",
-              "name": "relieved face"
+              "name": "relieved face",
+              "aliases": [
+                "relieved"
+              ]
             },
             {
               "key": "😔",
-              "name": "pensive face"
+              "name": "pensive face",
+              "aliases": [
+                "pensive"
+              ]
             },
             {
               "key": "😪",
@@ -262,7 +344,10 @@
             },
             {
               "key": "😴",
-              "name": "sleeping face"
+              "name": "sleeping face",
+              "aliases": [
+                "sleeping"
+              ]
             },
             {
               "key": "🫩",
@@ -275,7 +360,10 @@
           "emoji": [
             {
               "key": "😷",
-              "name": "face with medical mask"
+              "name": "face with medical mask",
+              "aliases": [
+                "mask"
+              ]
             },
             {
               "key": "🤒",
@@ -311,7 +399,10 @@
             },
             {
               "key": "😵",
-              "name": "face with crossed-out eyes"
+              "name": "face with crossed-out eyes",
+              "aliases": [
+                "dizzy_face"
+              ]
             },
             {
               "key": "😵‍💫",
@@ -319,7 +410,10 @@
             },
             {
               "key": "🤯",
-              "name": "exploding head"
+              "name": "exploding head",
+              "aliases": [
+                "exploding_head"
+              ]
             }
           ]
         },
@@ -332,7 +426,10 @@
             },
             {
               "key": "🥳",
-              "name": "partying face"
+              "name": "partying face",
+              "aliases": [
+                "partying"
+              ]
             },
             {
               "key": "🥸",
@@ -349,7 +446,10 @@
             },
             {
               "key": "🤓",
-              "name": "nerd face"
+              "name": "nerd face",
+              "aliases": [
+                "nerd"
+              ]
             },
             {
               "key": "🧐",
@@ -362,7 +462,10 @@
           "emoji": [
             {
               "key": "😕",
-              "name": "confused face"
+              "name": "confused face",
+              "aliases": [
+                "confused"
+              ]
             },
             {
               "key": "🫤",
@@ -370,11 +473,17 @@
             },
             {
               "key": "😟",
-              "name": "worried face"
+              "name": "worried face",
+              "aliases": [
+                "worried"
+              ]
             },
             {
               "key": "🙁",
-              "name": "slightly frowning face"
+              "name": "slightly frowning face",
+              "aliases": [
+                "slightly_frowning_face"
+              ]
             },
             {
               "key": "☹️",
@@ -394,7 +503,10 @@
             },
             {
               "key": "😳",
-              "name": "flushed face"
+              "name": "flushed face",
+              "aliases": [
+                "flushed"
+              ]
             },
             {
               "key": "🫪",
@@ -418,7 +530,10 @@
             },
             {
               "key": "😨",
-              "name": "fearful face"
+              "name": "fearful face",
+              "aliases": [
+                "fearful"
+              ]
             },
             {
               "key": "😰",
@@ -430,15 +545,24 @@
             },
             {
               "key": "😢",
-              "name": "crying face"
+              "name": "crying face",
+              "aliases": [
+                "cry"
+              ]
             },
             {
               "key": "😭",
-              "name": "loudly crying face"
+              "name": "loudly crying face",
+              "aliases": [
+                "sob"
+              ]
             },
             {
               "key": "😱",
-              "name": "face screaming in fear"
+              "name": "face screaming in fear",
+              "aliases": [
+                "scream"
+              ]
             },
             {
               "key": "😖",
@@ -450,11 +574,17 @@
             },
             {
               "key": "😞",
-              "name": "disappointed face"
+              "name": "disappointed face",
+              "aliases": [
+                "disappointed"
+              ]
             },
             {
               "key": "😓",
-              "name": "downcast face with sweat"
+              "name": "downcast face with sweat",
+              "aliases": [
+                "sweat"
+              ]
             },
             {
               "key": "😩",
@@ -479,11 +609,17 @@
             },
             {
               "key": "😡",
-              "name": "enraged face"
+              "name": "enraged face",
+              "aliases": [
+                "rage"
+              ]
             },
             {
               "key": "😠",
-              "name": "angry face"
+              "name": "angry face",
+              "aliases": [
+                "angry"
+              ]
             },
             {
               "key": "🤬",
@@ -499,7 +635,10 @@
             },
             {
               "key": "💀",
-              "name": "skull"
+              "name": "skull",
+              "aliases": [
+                "skull"
+              ]
             },
             {
               "key": "☠️",
@@ -512,7 +651,10 @@
           "emoji": [
             {
               "key": "💩",
-              "name": "pile of poo"
+              "name": "pile of poo",
+              "aliases": [
+                "poop"
+              ]
             },
             {
               "key": "🤡",
@@ -528,7 +670,10 @@
             },
             {
               "key": "👻",
-              "name": "ghost"
+              "name": "ghost",
+              "aliases": [
+                "ghost"
+              ]
             },
             {
               "key": "👽",
@@ -540,7 +685,10 @@
             },
             {
               "key": "🤖",
-              "name": "robot"
+              "name": "robot",
+              "aliases": [
+                "robot"
+              ]
             }
           ]
         },
@@ -590,15 +738,24 @@
           "emoji": [
             {
               "key": "🙈",
-              "name": "see-no-evil monkey"
+              "name": "see-no-evil monkey",
+              "aliases": [
+                "see_no_evil"
+              ]
             },
             {
               "key": "🙉",
-              "name": "hear-no-evil monkey"
+              "name": "hear-no-evil monkey",
+              "aliases": [
+                "hear_no_evil"
+              ]
             },
             {
               "key": "🙊",
-              "name": "speak-no-evil monkey"
+              "name": "speak-no-evil monkey",
+              "aliases": [
+                "speak_no_evil"
+              ]
             }
           ]
         },
@@ -619,7 +776,10 @@
             },
             {
               "key": "💖",
-              "name": "sparkling heart"
+              "name": "sparkling heart",
+              "aliases": [
+                "sparkling_heart"
+              ]
             },
             {
               "key": "💗",
@@ -635,7 +795,10 @@
             },
             {
               "key": "💕",
-              "name": "two hearts"
+              "name": "two hearts",
+              "aliases": [
+                "two_hearts"
+              ]
             },
             {
               "key": "💟",
@@ -647,7 +810,10 @@
             },
             {
               "key": "💔",
-              "name": "broken heart"
+              "name": "broken heart",
+              "aliases": [
+                "broken_heart"
+              ]
             },
             {
               "key": "❤️‍🔥",
@@ -659,7 +825,10 @@
             },
             {
               "key": "❤️",
-              "name": "red heart"
+              "name": "red heart",
+              "aliases": [
+                "heart"
+              ]
             },
             {
               "key": "🩷",
@@ -667,19 +836,31 @@
             },
             {
               "key": "🧡",
-              "name": "orange heart"
+              "name": "orange heart",
+              "aliases": [
+                "orange_heart"
+              ]
             },
             {
               "key": "💛",
-              "name": "yellow heart"
+              "name": "yellow heart",
+              "aliases": [
+                "yellow_heart"
+              ]
             },
             {
               "key": "💚",
-              "name": "green heart"
+              "name": "green heart",
+              "aliases": [
+                "green_heart"
+              ]
             },
             {
               "key": "💙",
-              "name": "blue heart"
+              "name": "blue heart",
+              "aliases": [
+                "blue_heart"
+              ]
             },
             {
               "key": "🩵",
@@ -687,7 +868,10 @@
             },
             {
               "key": "💜",
-              "name": "purple heart"
+              "name": "purple heart",
+              "aliases": [
+                "purple_heart"
+              ]
             },
             {
               "key": "🤎",
@@ -695,7 +879,10 @@
             },
             {
               "key": "🖤",
-              "name": "black heart"
+              "name": "black heart",
+              "aliases": [
+                "black_heart"
+              ]
             },
             {
               "key": "🩶",
@@ -703,7 +890,10 @@
             },
             {
               "key": "🤍",
-              "name": "white heart"
+              "name": "white heart",
+              "aliases": [
+                "white_heart"
+              ]
             }
           ]
         },
@@ -716,7 +906,10 @@
             },
             {
               "key": "💯",
-              "name": "hundred points"
+              "name": "hundred points",
+              "aliases": [
+                "100"
+              ]
             },
             {
               "key": "💢",
@@ -728,7 +921,10 @@
             },
             {
               "key": "💥",
-              "name": "collision"
+              "name": "collision",
+              "aliases": [
+                "boom"
+              ]
             },
             {
               "key": "💫",
@@ -782,7 +978,10 @@
           "emoji": [
             {
               "key": "👋",
-              "name": "waving hand"
+              "name": "waving hand",
+              "aliases": [
+                "wave"
+              ]
             },
             {
               "key": "👋🏻",
@@ -1051,7 +1250,10 @@
           "emoji": [
             {
               "key": "👌",
-              "name": "OK hand"
+              "name": "OK hand",
+              "aliases": [
+                "ok_hand"
+              ]
             },
             {
               "key": "👌🏻",
@@ -1123,7 +1325,10 @@
             },
             {
               "key": "✌️",
-              "name": "victory hand"
+              "name": "victory hand",
+              "aliases": [
+                "v"
+              ]
             },
             {
               "key": "✌🏻",
@@ -1272,7 +1477,10 @@
           "emoji": [
             {
               "key": "👈",
-              "name": "backhand index pointing left"
+              "name": "backhand index pointing left",
+              "aliases": [
+                "point_left"
+              ]
             },
             {
               "key": "👈🏻",
@@ -1296,7 +1504,10 @@
             },
             {
               "key": "👉",
-              "name": "backhand index pointing right"
+              "name": "backhand index pointing right",
+              "aliases": [
+                "point_right"
+              ]
             },
             {
               "key": "👉🏻",
@@ -1368,7 +1579,10 @@
             },
             {
               "key": "👇",
-              "name": "backhand index pointing down"
+              "name": "backhand index pointing down",
+              "aliases": [
+                "point_down"
+              ]
             },
             {
               "key": "👇🏻",
@@ -1392,7 +1606,10 @@
             },
             {
               "key": "☝️",
-              "name": "index pointing up"
+              "name": "index pointing up",
+              "aliases": [
+                "point_up"
+              ]
             },
             {
               "key": "☝🏻",
@@ -1445,7 +1662,11 @@
           "emoji": [
             {
               "key": "👍",
-              "name": "thumbs up"
+              "name": "thumbs up",
+              "aliases": [
+                "+1",
+                "thumbsup"
+              ]
             },
             {
               "key": "👍🏻",
@@ -1469,7 +1690,11 @@
             },
             {
               "key": "👎",
-              "name": "thumbs down"
+              "name": "thumbs down",
+              "aliases": [
+                "-1",
+                "thumbsdown"
+              ]
             },
             {
               "key": "👎🏻",
@@ -1541,7 +1766,10 @@
             },
             {
               "key": "✊",
-              "name": "raised fist"
+              "name": "raised fist",
+              "aliases": [
+                "fist"
+              ]
             },
             {
               "key": "✊🏻",
@@ -1565,7 +1793,10 @@
             },
             {
               "key": "👊",
-              "name": "oncoming fist"
+              "name": "oncoming fist",
+              "aliases": [
+                "punch"
+              ]
             },
             {
               "key": "👊🏻",
@@ -1642,7 +1873,10 @@
           "emoji": [
             {
               "key": "👏",
-              "name": "clapping hands"
+              "name": "clapping hands",
+              "aliases": [
+                "clap"
+              ]
             },
             {
               "key": "👏🏻",
@@ -1666,7 +1900,10 @@
             },
             {
               "key": "🙌",
-              "name": "raising hands"
+              "name": "raising hands",
+              "aliases": [
+                "raised_hands"
+              ]
             },
             {
               "key": "🙌🏻",
@@ -1762,7 +1999,10 @@
             },
             {
               "key": "🤝",
-              "name": "handshake"
+              "name": "handshake",
+              "aliases": [
+                "handshake"
+              ]
             },
             {
               "key": "🤝🏻",
@@ -1866,7 +2106,10 @@
             },
             {
               "key": "🙏",
-              "name": "folded hands"
+              "name": "folded hands",
+              "aliases": [
+                "pray"
+              ]
             },
             {
               "key": "🙏🏻",
@@ -1972,7 +2215,10 @@
           "emoji": [
             {
               "key": "💪",
-              "name": "flexed biceps"
+              "name": "flexed biceps",
+              "aliases": [
+                "muscle"
+              ]
             },
             {
               "key": "💪🏻",
@@ -2144,7 +2390,10 @@
             },
             {
               "key": "👀",
-              "name": "eyes"
+              "name": "eyes",
+              "aliases": [
+                "eyes"
+              ]
             },
             {
               "key": "👁️",
@@ -3422,7 +3671,10 @@
             },
             {
               "key": "🤦",
-              "name": "person facepalming"
+              "name": "person facepalming",
+              "aliases": [
+                "facepalm"
+              ]
             },
             {
               "key": "🤦🏻",
@@ -3494,7 +3746,10 @@
             },
             {
               "key": "🤷",
-              "name": "person shrugging"
+              "name": "person shrugging",
+              "aliases": [
+                "shrug"
+              ]
             },
             {
               "key": "🤷🏻",
@@ -10679,7 +10934,10 @@
             },
             {
               "key": "🦄",
-              "name": "unicorn"
+              "name": "unicorn",
+              "aliases": [
+                "unicorn"
+              ]
             },
             {
               "key": "🦓",
@@ -10962,7 +11220,10 @@
             },
             {
               "key": "🐢",
-              "name": "turtle"
+              "name": "turtle",
+              "aliases": [
+                "turtle"
+              ]
             },
             {
               "key": "🦎",
@@ -11084,7 +11345,10 @@
             },
             {
               "key": "🐛",
-              "name": "bug"
+              "name": "bug",
+              "aliases": [
+                "bug"
+              ]
             },
             {
               "key": "🐜",
@@ -11506,7 +11770,10 @@
             },
             {
               "key": "🍕",
-              "name": "pizza"
+              "name": "pizza",
+              "aliases": [
+                "pizza"
+              ]
             },
             {
               "key": "🌭",
@@ -11684,7 +11951,10 @@
             },
             {
               "key": "🍰",
-              "name": "shortcake"
+              "name": "shortcake",
+              "aliases": [
+                "cake"
+              ]
             },
             {
               "key": "🧁",
@@ -11729,7 +11999,10 @@
             },
             {
               "key": "☕",
-              "name": "hot beverage"
+              "name": "hot beverage",
+              "aliases": [
+                "coffee"
+              ]
             },
             {
               "key": "🫖",
@@ -11761,7 +12034,10 @@
             },
             {
               "key": "🍺",
-              "name": "beer mug"
+              "name": "beer mug",
+              "aliases": [
+                "beer"
+              ]
             },
             {
               "key": "🍻",
@@ -12333,7 +12609,10 @@
             },
             {
               "key": "🚧",
-              "name": "construction"
+              "name": "construction",
+              "aliases": [
+                "construction"
+              ]
             }
           ]
         },
@@ -12431,7 +12710,10 @@
             },
             {
               "key": "🚀",
-              "name": "rocket"
+              "name": "rocket",
+              "aliases": [
+                "rocket"
+              ]
             },
             {
               "key": "🛸",
@@ -12457,7 +12739,10 @@
           "emoji": [
             {
               "key": "⌛",
-              "name": "hourglass done"
+              "name": "hourglass done",
+              "aliases": [
+                "hourglass"
+              ]
             },
             {
               "key": "⏳",
@@ -12638,7 +12923,10 @@
             },
             {
               "key": "☀️",
-              "name": "sun"
+              "name": "sun",
+              "aliases": [
+                "sunny"
+              ]
             },
             {
               "key": "🌝",
@@ -12658,7 +12946,10 @@
             },
             {
               "key": "🌟",
-              "name": "glowing star"
+              "name": "glowing star",
+              "aliases": [
+                "star2"
+              ]
             },
             {
               "key": "🌠",
@@ -12670,7 +12961,10 @@
             },
             {
               "key": "☁️",
-              "name": "cloud"
+              "name": "cloud",
+              "aliases": [
+                "cloud"
+              ]
             },
             {
               "key": "⛅",
@@ -12722,7 +13016,10 @@
             },
             {
               "key": "🌈",
-              "name": "rainbow"
+              "name": "rainbow",
+              "aliases": [
+                "rainbow"
+              ]
             },
             {
               "key": "🌂",
@@ -12742,11 +13039,17 @@
             },
             {
               "key": "⚡",
-              "name": "high voltage"
+              "name": "high voltage",
+              "aliases": [
+                "zap"
+              ]
             },
             {
               "key": "❄️",
-              "name": "snowflake"
+              "name": "snowflake",
+              "aliases": [
+                "snowflake"
+              ]
             },
             {
               "key": "☃️",
@@ -12808,19 +13111,32 @@
             },
             {
               "key": "✨",
-              "name": "sparkles"
+              "name": "sparkles",
+              "aliases": [
+                "sparkles"
+              ]
             },
             {
               "key": "🎈",
-              "name": "balloon"
+              "name": "balloon",
+              "aliases": [
+                "balloon"
+              ]
             },
             {
               "key": "🎉",
-              "name": "party popper"
+              "name": "party popper",
+              "aliases": [
+                "tada",
+                "party_popper"
+              ]
             },
             {
               "key": "🎊",
-              "name": "confetti ball"
+              "name": "confetti ball",
+              "aliases": [
+                "confetti_ball"
+              ]
             },
             {
               "key": "🎋",
@@ -12856,7 +13172,10 @@
             },
             {
               "key": "🎁",
-              "name": "wrapped gift"
+              "name": "wrapped gift",
+              "aliases": [
+                "gift"
+              ]
             },
             {
               "key": "🎗️",
@@ -12881,11 +13200,17 @@
             },
             {
               "key": "🏆",
-              "name": "trophy"
+              "name": "trophy",
+              "aliases": [
+                "trophy"
+              ]
             },
             {
               "key": "🏅",
-              "name": "sports medal"
+              "name": "sports medal",
+              "aliases": [
+                "medal"
+              ]
             },
             {
               "key": "🥇",
@@ -13628,7 +13953,10 @@
             },
             {
               "key": "💡",
-              "name": "light bulb"
+              "name": "light bulb",
+              "aliases": [
+                "bulb"
+              ]
             },
             {
               "key": "🔦",
@@ -13852,7 +14180,10 @@
             },
             {
               "key": "📝",
-              "name": "memo"
+              "name": "memo",
+              "aliases": [
+                "memo"
+              ]
             },
             {
               "key": "🪌",
@@ -13962,7 +14293,10 @@
           "emoji": [
             {
               "key": "🔒",
-              "name": "locked"
+              "name": "locked",
+              "aliases": [
+                "lock"
+              ]
             },
             {
               "key": "🔓",
@@ -13978,7 +14312,10 @@
             },
             {
               "key": "🔑",
-              "name": "key"
+              "name": "key",
+              "aliases": [
+                "key"
+              ]
             },
             {
               "key": "🗝️",
@@ -14382,7 +14719,10 @@
           "emoji": [
             {
               "key": "⚠️",
-              "name": "warning"
+              "name": "warning",
+              "aliases": [
+                "warning"
+              ]
             },
             {
               "key": "🚸",
@@ -14390,7 +14730,10 @@
             },
             {
               "key": "⛔",
-              "name": "no entry"
+              "name": "no entry",
+              "aliases": [
+                "no_entry"
+              ]
             },
             {
               "key": "🚫",
@@ -14801,7 +15144,10 @@
             },
             {
               "key": "❓",
-              "name": "red question mark"
+              "name": "red question mark",
+              "aliases": [
+                "question"
+              ]
             },
             {
               "key": "❔",
@@ -14813,7 +15159,10 @@
             },
             {
               "key": "❗",
-              "name": "red exclamation mark"
+              "name": "red exclamation mark",
+              "aliases": [
+                "exclamation"
+              ]
             },
             {
               "key": "〰️",
@@ -14867,7 +15216,11 @@
             },
             {
               "key": "✅",
-              "name": "check mark button"
+              "name": "check mark button",
+              "aliases": [
+                "check",
+                "white_check_mark"
+              ]
             },
             {
               "key": "☑️",
@@ -14875,11 +15228,17 @@
             },
             {
               "key": "✔️",
-              "name": "check mark"
+              "name": "check mark",
+              "aliases": [
+                "heavy_check_mark"
+              ]
             },
             {
               "key": "❌",
-              "name": "cross mark"
+              "name": "cross mark",
+              "aliases": [
+                "x"
+              ]
             },
             {
               "key": "❎",
