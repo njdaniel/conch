@@ -23,6 +23,15 @@ export interface StoredTarget {
   readonly whisper: readonly number[] | null;
 }
 
+// storedAudience is who a message from this choice would go to, as the
+// composer sends it (App's audienceForTarget): an open whisper wins over the
+// net under it. Only that is kept, so what comes back can never be wider.
+export function storedAudience(target: { readonly net: number | null; readonly whisper: readonly number[] | null }): StoredTarget | null {
+  if (target.whisper !== null) return { net: null, whisper: [...target.whisper] };
+  if (target.net !== null) return { net: target.net, whisper: null };
+  return null;
+}
+
 export interface Stored {
   readonly principal: number;
   // Channel id to draft.
@@ -76,8 +85,7 @@ function targetOf(value: unknown): StoredTarget | null {
   if (!isRecord(value)) return null;
   const net = typeof value.net === 'number' ? value.net : null;
   const whisper = Array.isArray(value.whisper) && value.whisper.every((id): id is number => typeof id === 'number') ? value.whisper : null;
-  if (net === null && whisper === null) return null;
-  return { net, whisper };
+  return storedAudience({ net, whisper });
 }
 
 function read(): Stored | null {

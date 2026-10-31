@@ -87,6 +87,8 @@ interface Server {
   // returns whatever limit it asked for: a test that needs a nearly full
   // channel gets there without one render per page (#459).
   firstPage?: number;
+  // netsHeld, when set, holds every nets answer until it resolves.
+  netsHeld?: Promise<void>;
 }
 
 let server: Server;
@@ -125,7 +127,7 @@ function install() {
       if (m?.[1] === undefined) return Promise.resolve(json({}, 404));
       const channel = decodeURIComponent(m[1]);
       if (m[2] === 'members') return Promise.resolve(json(members));
-      if (m[2] === 'nets') return Promise.resolve(json(server.nets));
+      if (m[2] === 'nets') return (server.netsHeld ?? Promise.resolve()).then(() => json(server.nets));
       if (init?.method === 'POST') {
         const sent = JSON.parse(init.body as string) as { body: string; audience?: unknown };
         const body = sent.body;
@@ -798,6 +800,156 @@ describe('composing to a net or a whisper', () => {
     await screen.findByText(/no longer available/);
     expect(sendButton().disabled).toBe(true);
     expect(server.posts).toHaveLength(0);
+  });
+
+  // checked waits until no kept audience is still being checked.
+  async function checked() {
+    await waitFor(() => {
+      expect(screen.queryByText(/Checking who this draft goes to/)).toBeNull();
+    });
+  }
+
+  it('a whisper chosen over a net is still that whisper after a reload, never the net', async () => {
+    await ready();
+    choose('net:5');
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    cleanup();
+    FakeSocket.all = [];
+    (await openChat()).open();
+    await checked();
+    await waitFor(() => {
+      expect(sendButton().disabled).toBe(false);
+    });
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } }]);
+  });
+
+  it('a choice made while a kept whisper is still being checked wins, and the check adds nobody to it', async () => {
+    keepDraft({ net: null, whisper: [3] });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    let release = () => {};
+    server.netsHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await reopen('Whisper to…');
+    await screen.findByText(/Checking who this draft goes to/);
+    fireEvent.click(screen.getByRole('checkbox', { name: '<b>mallory</b>' }));
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await screen.findByRole('option', { name: 'net alpha' });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to <b>mallory</b>').value).toBe('psst');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [4] } }]);
+  });
+
+  // A sign-in that ends by itself keeps the text for the same person (issue
+  // #714), and now who it was for (issue #1039). The credential stops working
+  // when ops is opened; the person signs back in with `token`, who is ada
+  // unless it is `other`, eve.
+  const otherToken = 'conch_other_token_value';
+  async function expireThenSignIn(token: string, meanwhile: () => void = () => {}) {
+    const ada = token === secret;
+    const real = globalThis.fetch;
+    let expired = true;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, origin);
+      const headers = new Headers(init?.headers);
+      if (headers.get('Authorization') === `Bearer ${otherToken}`) {
+        if (url.pathname === '/v1/whoami') return Promise.resolve(json({ id: 9, kind: 'human', name: 'eve', role: 'member', voice_allowed: false }));
+        headers.set('Authorization', `Bearer ${secret}`);
+        return real(input, { ...init, headers });
+      }
+      if (expired && url.pathname === '/v2/channels/ops/messages') return Promise.resolve(json({}, 401));
+      return real(input, init);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+    await screen.findByText('Signed out: the credential is no longer valid');
+    expired = false;
+    meanwhile();
+    FakeSocket.all = [];
+    fireEvent.change(screen.getByLabelText('Credential'), { target: { value: token } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
+    await screen.findByRole('log', { name: 'Messages' });
+    fireEvent.click(await screen.findByRole('button', { name: 'general' }));
+    // Every socket the page opens from here is let in, once.
+    const opened = new Set<FakeSocket>();
+    await waitFor(() => {
+      for (const socket of FakeSocket.all) {
+        if (opened.has(socket) || socket.closed) continue;
+        opened.add(socket);
+        socket.open();
+      }
+      expect(document.querySelector<HTMLTextAreaElement>('textarea')?.disabled).toBe(false);
+    });
+    // The nets list ada alone, so eve is offered none.
+    if (ada) await screen.findByRole('option', { name: 'net alpha' });
+    else await screen.findByLabelText('Message #general');
+    await checked();
+  }
+
+  it('a whisper draft kept across a sign-in that ended goes to the same people', async () => {
+    await ready();
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    await expireThenSignIn(secret);
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    await waitFor(() => {
+      expect(sendButton().disabled).toBe(false);
+    });
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } }]);
+  });
+
+  it('a net draft kept across a sign-in that ended goes to the same net', async () => {
+    await ready();
+    choose('net:5');
+    type('on the net', 'Message net alpha');
+    await expireThenSignIn(secret);
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message net alpha').value).toBe('on the net');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'general', body: 'on the net', audience: { kind: 'net', net_id: 5 } }]);
+  });
+
+  it('a net lost while signed out keeps the text, cannot be sent, and does not go to the channel', async () => {
+    await ready();
+    choose('net:5');
+    type('on the net', 'Message net alpha');
+    await expireThenSignIn(secret, () => {
+      server.nets = netsOf({ id: 5, name: 'alpha', role: 'monitor' }, { id: 8, name: 'alpha' });
+    });
+    await screen.findByText(/no longer available/);
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to…').value).toBe('on the net');
+    expect(sendButton().disabled).toBe(true);
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Enter' });
+    expect(server.posts).toHaveLength(0);
+  });
+
+  it('a whisper draft is not given, nor who it was for, to someone else signing in next', async () => {
+    await ready();
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    await expireThenSignIn(otherToken);
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    expect(to().value).toBe('channel');
+    expect(document.body.innerHTML).not.toContain('psst');
   });
 
   it('sends a whisper once, returns to the channel, and shows the audit notice only for the first', async () => {

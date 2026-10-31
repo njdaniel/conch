@@ -75,6 +75,12 @@ export type TargetAction =
   | { readonly type: 'renamed'; readonly from: string; readonly to: string }
   // The channel was lost (issue #1027): its choice goes with it.
   | { readonly type: 'forget'; readonly channel: string }
+  // A kept audience not yet checked (issue #1039): a whisper to nobody, which
+  // cannot be sent, with the line saying why.
+  | { readonly type: 'held'; readonly channel: string; readonly line: string }
+  // A kept audience that still stands, given back whole: it replaces the
+  // choice, never merges into it, so it can only be what was kept.
+  | { readonly type: 'restore'; readonly channel: string; readonly net: number | null; readonly whisper: readonly number[] | null }
   | { readonly type: 'reset' };
 
 export const initialTargets: Targets = {};
@@ -109,6 +115,10 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
       return set({ ...current, refusal: null, note: null });
     case 'refused':
       return set({ ...current, refusal: action.line });
+    case 'held':
+      return set({ ...current, net: null, whisper: [], refusal: action.line });
+    case 'restore':
+      return set({ ...current, net: action.whisper === null ? action.net : null, whisper: action.whisper === null ? null : [...action.whisper], refusal: null });
     case 'whispered': {
       // Only if the whisper still chosen is the one that was sent: a second one
       // being composed while the first was on its way is left as it is.
