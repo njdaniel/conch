@@ -196,6 +196,9 @@ pub fn quick() -> Timings {
             longest_wait: Duration::from_millis(40),
         },
         jitter: || u32::MAX,
+        // The real clock. A test whose microphone is a script gives the transmit task one
+        // that counts the script's frames instead ([`script::Played::clock`]).
+        transmit_clock: transmit::TxClock::real(),
     }
 }
 
@@ -249,7 +252,12 @@ impl Default for Setup {
             timings: quick(),
             release_tail_ms: 20,
             max_transmit: Duration::from_secs(120),
-            report_timeout: Duration::from_millis(200),
+            // As long as every other request is given (`Rig::start_scrubbing`). An attempt
+            // that runs out is tried again, and the stub, which had the first and answered it
+            // late, records the state twice: on a loaded machine a stub's answer can take
+            // longer than 200 ms, and with that bound a test that counts reports failed one
+            // run in twenty (issue #957). A test of a report that runs out sets its own.
+            report_timeout: Duration::from_secs(2),
             sink_tones: vec![440.0, 880.0],
             server: None,
             also_stdout: false,

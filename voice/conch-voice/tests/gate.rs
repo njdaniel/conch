@@ -574,9 +574,12 @@ async fn the_gates_own_cap_ends_a_transmission_when_no_timer_fires() {
 // every 10 ms, the default level (-40 dBFS) and hang (400 ms, forty frames), and the rig's
 // release tail of 20 ms (two frames).
 
+use std::sync::Arc;
+
+use conch_voice::session::Timings;
 use conch_voice_control::{Key, KeyAction, KeyEvent, TalkMode};
 use support::MakeMic;
-use support::script::{After, Script, Switch, frame_number};
+use support::script::{After, Played, Script, Switch, frame_number};
 
 /// The hang, in frames.
 const HANG: u64 = 40;
@@ -592,6 +595,19 @@ fn open_mode(microphone: MakeMic) -> Setup {
         talk_mode: TalkMode::Open,
         microphone: Some(microphone),
         ..Setup::default()
+    }
+}
+
+/// As [`open_mode`], for a script that never stops delivering: what the transmit task
+/// measures by the clock is measured in the script's frames ([`Played::clock`]), so that
+/// which frames are sent is the script's doing, however late a loaded machine reads it.
+fn scripted(microphone: MakeMic, played: &Arc<Played>) -> Setup {
+    Setup {
+        timings: Timings {
+            transmit_clock: played.clock(),
+            ..support::quick()
+        },
+        ..open_mode(microphone)
     }
 }
 
@@ -621,7 +637,7 @@ async fn in_open_mode_two_utterances_are_two_transmissions_sent_from_onset_to_ha
         &[(100, false), (100, true), (100, false), (50, true)],
         After::Quiet,
     );
-    let rig = Rig::start_with(Stub::start().await, open_mode(mic), |_| {}).await;
+    let rig = Rig::start_with(Stub::start().await, scripted(mic, &played), |_| {}).await;
     rig.connected(1).await;
     transmissions(&rig, 2).await;
     several_frames().await;
@@ -734,13 +750,13 @@ async fn in_open_mode_nothing_is_sent_muted_or_deafened_and_unmuting_needs_a_fre
 /// not open again until quiet and a new onset.
 #[tokio::test]
 async fn in_open_mode_the_limit_cuts_a_long_tone_and_stands_until_quiet_and_a_new_onset() {
-    let (mic, _) = Script::make(
+    let (mic, played) = Script::make(
         &[(50, false), (300, true), (60, false), (30, true)],
         After::Quiet,
     );
     let setup = Setup {
         max_transmit: Duration::from_secs(1),
-        ..open_mode(mic)
+        ..scripted(mic, &played)
     };
     let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
     rig.connected(1).await;
