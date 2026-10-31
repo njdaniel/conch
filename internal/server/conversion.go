@@ -260,6 +260,9 @@ func (s *Server) guestConverted(ctx context.Context, c store.ConvertedGuest) {
 	for _, ch := range c.Channels {
 		s.events.notifyChannelRoster(ch)
 	}
+	// The member's sockets on the new credential, if any are open yet, are
+	// told their channel list changed (issue #1027).
+	s.events.notifyChannelsChanged(c.Principal.ID)
 	slog.InfoContext(ctx, "guests: visit converted", "principal", c.Principal.ID, "credential", c.Credential.ID)
 }
 

@@ -31,6 +31,9 @@ export type ChannelsAction =
   // The caller's manager grant in one channel, from its accepted member list.
   | { readonly type: 'managed'; readonly id: number; readonly manages: boolean }
   | { readonly type: 'lost'; readonly name: string }
+  // The list as the server now answers it (issue #1027): it replaces the one
+  // held, never merges. If the open channel is not in it, it is lost.
+  | { readonly type: 'refreshed'; readonly channels: readonly ChannelV0[] }
   | { readonly type: 'reset' };
 
 export const initialChannels: ChannelsState = { channels: [], loaded: false, selected: null };
@@ -63,6 +66,10 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
       return { channels, loaded: true, selected };
     }
     case 'select':
+      // The channel already open is not opened again: the address bar echoing
+      // a fallback the page has just opened must not clear the line that says
+      // why (issue #1027).
+      if (action.name === state.selected) return state;
       return has(state.channels, action.name)
         ? { channels: state.channels, loaded: state.loaded, selected: action.name }
         : state;
@@ -93,6 +100,15 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
       const channels = state.channels.filter((c) => c.name !== action.name);
       const selected = state.selected === action.name ? fallback(channels) : state.selected;
       return { ...state, channels, selected, lost: action.name };
+    }
+    case 'refreshed': {
+      const { channels } = action;
+      if (state.loaded && JSON.stringify(channels) === JSON.stringify(state.channels) && (state.selected === null) === (channels.length === 0)) return state;
+      if (state.selected === null || has(channels, state.selected)) {
+        // Nothing open (a person who was in no channel) lands on the default.
+        return { ...state, channels, loaded: true, selected: state.selected ?? fallback(channels) };
+      }
+      return { channels, loaded: true, selected: fallback(channels), lost: state.selected };
     }
     case 'reset':
       return initialChannels;

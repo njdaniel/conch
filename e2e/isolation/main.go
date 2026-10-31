@@ -279,6 +279,11 @@ func run(h *harness) (summary, error) {
 	}
 	h.say("ok   MCP: %d tool calls as B's agent about A's objects and ghosts, each refused alike and with nothing of A (%s)", n, strings.Join(codes, ", "))
 
+	if n, err = w.channelsChangedRows(bsock); err != nil {
+		return sum, fmt.Errorf("the channel-list signal: %w", err)
+	}
+	h.say("ok   channel list: ann added to and removed from a channel of A's, with ola of B in it, and the channel renamed; each conch.channels_changed.v1 went to its subject alone, exactly %s, and none of %d events sockets (bob's, ola's, the operator's, both agents') carried one of another's (L1-L4, L7)", channelsChangedWire, n)
+
 	if v != nil {
 		if err := w.mediaB(v); err != nil {
 			return sum, fmt.Errorf("media: %w", err)

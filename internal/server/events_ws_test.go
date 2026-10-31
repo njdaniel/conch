@@ -137,6 +137,11 @@ func (c *eventsClient) next() eventFrame {
 		if err = json.Unmarshal(raw, &fr.message); err == nil {
 			verr = fr.message.Validate()
 		}
+	case schema.ChannelsChangedSchemaV1:
+		var doc schema.ChannelsChangedV1
+		if err = json.Unmarshal(raw, &doc); err == nil {
+			verr = doc.Validate()
+		}
 	default:
 		c.t.Fatalf("a frame of schema %q, which the events socket does not send:\n%s", head.Schema, raw)
 	}

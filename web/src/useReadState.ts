@@ -72,6 +72,7 @@ export function useReadState({
   me,
   onUnauthorized,
   onMissing,
+  reload,
 }: {
   readonly signedIn: boolean;
   readonly channels: readonly ChannelV0[];
@@ -91,6 +92,9 @@ export function useReadState({
   // A mark refused with channel_not_found (issue #728): the channel, by id,
   // may have been renamed since the list was read.
   readonly onMissing?: (channel: number) => void;
+  // Set to a function that reads the counts again and replaces them (issue
+  // #1027): the list was read again, so a channel may be new to it.
+  readonly reload?: { current: (() => void) | null };
 }): ReadonlyMap<string, number> {
   const [counts, setCounts] = useState<ReadonlyMap<number, number>>(new Map());
   const openId = idOf(channels, open);
@@ -167,6 +171,22 @@ export function useReadState({
       });
     });
   }, [failed]);
+
+  // A reload waits for the render that holds the new list, so the answer is
+  // matched against it.
+  const [reloads, setReloads] = useState(0);
+  useEffect(() => {
+    if (reload === undefined) return;
+    reload.current = () => {
+      setReloads((n) => n + 1);
+    };
+    return () => {
+      reload.current = null;
+    };
+  }, [reload]);
+  useEffect(() => {
+    if (reloads > 0 && signedIn && loaded) read();
+  }, [reloads, signedIn, loaded, read]);
 
   // readSoon is read for a channel just opened: at most once per interval, the
   // last ask winning.
