@@ -42,4 +42,12 @@ type Error struct {
 	// Retry-After header; an MCP tool error has no headers, so this is where
 	// an agent reads the delay (issue #228).
 	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
+	// Permission names the permission a refusal was decided on (ADR-014,
+	// docs/design/admin-roles.md §7.4): set on 403 permission_denied, and
+	// on the older codes that answer the same question (forbidden for a
+	// member on an operator route, voice_not_allowed, invite_not_allowed).
+	// Omitted on every other error. A client chooses its words from it,
+	// not from Message, and shows a value it does not know by its name.
+	// MCP tool errors never carry it: agents hold no permissions.
+	Permission Permission `json:"permission,omitempty"`
 }

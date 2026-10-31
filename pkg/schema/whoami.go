@@ -63,12 +63,18 @@ type WhoAmIResponseV1 struct {
 	// MayInvite says whether the caller may make invites, so a client knows
 	// whether to offer it (issue #436). True for an operator and for a member
 	// granted the right; omitted when false, and by a server that predates it.
+	// From ADR-014 on it is the effective answer, whether the caller holds
+	// make_member_links: for a member the role's cell AND their may_invite
+	// brake, for an operator the operator cell alone (the brake does not
+	// apply to operators).
 	MayInvite bool `json:"may_invite,omitempty"`
 	// VoiceAllowed says whether the caller may use voice, so a client offers
 	// it only to those who hold it (issue #468). The server always sends it:
 	// true unless the person's invite withheld voice, and false for an agent,
 	// which never uses voice. It is a pointer so that a server that predates
-	// it, which omits it, is told apart from one that says false.
+	// it, which omits it, is told apart from one that says false. From
+	// ADR-014 on it is the effective answer, whether the caller holds
+	// use_voice: the role's cell AND their voice_allowed brake.
 	VoiceAllowed *bool `json:"voice_allowed,omitempty"`
 	// InvitesRemaining is how many more personal invites the caller may make
 	// now: the server's per-inviter allowance less their open personal
@@ -101,6 +107,18 @@ type WhoAmIResponseV1 struct {
 	// issue #865). Omitted in normal mode, and by a server that predates
 	// the field, so every normal-mode response is byte-for-byte unchanged.
 	ServerMode ServerMode `json:"server_mode,omitempty"`
+	// Permissions is what the caller holds now (ADR-014,
+	// docs/design/admin-roles.md §8.3): its role's cells with its brakes and
+	// the dependencies applied; every permission for an owner; none for an
+	// agent. Catalog order, omitted when empty. A client keys its controls
+	// on it and shows a value it does not know by its name; the server
+	// decides every request regardless.
+	Permissions []Permission `json:"permissions,omitempty"`
+	// PermissionsRevision is the revision of the permissions document the
+	// answer was computed from. A server that predates ADR-014 omits it and
+	// Permissions; a server with it always sends it (it is at least 1), so
+	// a revision with no Permissions means the caller holds none.
+	PermissionsRevision int64 `json:"permissions_revision,omitempty"`
 }
 
 // Validate reports whether r is a well-formed whoami response: server_mode,
