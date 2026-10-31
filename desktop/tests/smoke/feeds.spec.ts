@@ -27,18 +27,22 @@ async function signIn(page: Page, name: string, password: string): Promise<void>
   await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
 }
 
-// The feed lines main's log has, and how many sockets the last one says are
-// open (main counts every socket it holds; it logs the kind and the reason,
-// never the address).
+// The feed lines main's log has, and how many sockets the last one says main
+// holds: open, and closed but not yet gone (main counts every socket until its
+// close arrives or it is destroyed; it logs the kind and the reason, never the
+// address).
 function feedLines(output: string): string[] {
   return output.split('\n').filter((line) => line.startsWith('conch-desktop: feed '));
 }
 
-function openSockets(output: string): number {
+function counts(output: string): { readonly open: number; readonly closing: number } {
   const last = feedLines(output).at(-1);
-  const m = last === undefined ? null : /; (\d+) open$/.exec(last);
-  return m?.[1] === undefined ? 0 : Number(m[1]);
+  const m = last === undefined ? null : /; (\d+) open, (\d+) closing$/.exec(last);
+  return { open: Number(m?.[1] ?? 0), closing: Number(m?.[2] ?? 0) };
 }
+
+const openSockets = (output: string): number => counts(output).open;
+const heldSockets = (output: string): number => counts(output).open + counts(output).closing;
 
 test.describe('live feeds through main, beside a browser user', () => {
   let server: Disposable;
@@ -76,6 +80,9 @@ test.describe('live feeds through main, beside a browser user', () => {
     // fed by main.
     await expect(statusLine(desktop)).toContainText('Connected');
     await expect.poll(() => openSockets(app.output())).toBeGreaterThanOrEqual(2);
+    // Through undici's Agent: the frame-size cap at the header and a
+    // connection main can destroy (main/api/socket.ts).
+    expect(app.output()).not.toContain('not undici’s Agent');
   });
 
   test('a browser user signs in on the same server as another principal', async () => {
@@ -131,17 +138,18 @@ test.describe('live feeds through main, beside a browser user', () => {
     await desktop.getByRole('button', { name: 'Sign out', exact: true }).click();
     await desktop.getByRole('button', { name: 'Yes, sign out', exact: true }).click();
     await expect(desktop.getByLabel('Credential')).toBeVisible();
-    await expect.poll(() => openSockets(app.output())).toBe(0);
+    await expect.poll(() => heldSockets(app.output())).toBe(0);
   });
 
   test('a renderer crash closes every socket it owned', async () => {
     await signIn(desktop, server.member.name, server.member.password);
     await expect(statusLine(desktop)).toContainText('Connected');
     await expect.poll(() => openSockets(app.output())).toBeGreaterThanOrEqual(2);
+    const before = feedLines(app.output()).length;
     const session = await desktop.context().newCDPSession(desktop);
     // The crashed page never answers the command: it is not waited for.
     void session.send('Page.crash').catch(() => undefined);
-    await expect.poll(() => openSockets(app.output())).toBe(0);
-    expect(feedLines(app.output()).at(-1)).toContain('closed (document)');
+    await expect.poll(() => heldSockets(app.output())).toBe(0);
+    expect(feedLines(app.output()).slice(before).some((line) => line.includes('closed (document)'))).toBe(true);
   });
 });

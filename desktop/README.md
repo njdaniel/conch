@@ -27,7 +27,8 @@ voice (#771), tray, installer. Later children of #770 add those.
 | `main/api/client.ts` | the one request executor: bearer only for bearer operations, no Origin or Cookie, no redirects, size cap, response validation, generation check |
 | `main/api/session.ts` | the in-memory credential, the server address and the generation; holds the operator code-step challenge behind a handle |
 | `main/api/service.ts` | what each bridge function does: the sign-in sequence, sign-out, restore |
-| `main/api/feeds.ts` | the live feeds: the sockets main opens with the bearer header, frame validation, the bounded queue, and teardown at unsubscribe, reload, crash and sign-out |
+| `main/api/feeds.ts` | the live feeds: subscriptions, frame validation, the bounded queue, the held-socket count and cap, and teardown at unsubscribe, reload, crash and sign-out |
+| `main/api/socket.ts` | the feed socket: Node's `WebSocket` with the bearer header, through undici's `Agent` for the frame-size cap and a connection main can destroy |
 | `main/api/trust.ts` | adds the system trust store to Node's roots; classifies a certificate failure |
 | `main/ipc.ts` | the one registry of IPC handlers and the caller check every invocation passes |
 | `main/document.ts` | which frame shows the current document (the document generation) |
@@ -170,7 +171,8 @@ conchd reads a ticket only when no `Authorization` header is present, so main
 sends the bearer header, asks for no ticket, and the bearer is never in a URL.
 An upgrade answered with a redirect fails, and its target is never asked.
 
-Every frame is checked before the page sees it: text only, at most 1 MiB, and
+Every frame is checked before the page sees it: text only, at most 1 MiB (a
+larger one is refused at its header, before its payload is read), and
 valid for its feed by the generated validators (a v2 message or the heartbeat;
 an events document the client's own parser accepts, or the heartbeat; a
 presence document; an occupancy document). Anything else is dropped and
@@ -189,7 +191,25 @@ same turn), and a frame that arrives after that is dropped, never sent on. A
 socket that fails before it opens is followed by one `whoami`: a 401 there
 signs the window out, and the page is told 1008, as the browser learns from a
 ticket refused with 401. Main logs each socket opened and closed, with its
-kind, the reason and how many are open, never its address.
+kind, the reason and how many are open and closing, never its address.
+
+A socket main has closed stays held, and counted as closing, until its close
+event: a server that never answers the close frame cannot keep it, because
+main destroys it 5 s after closing it. With 64 sockets held, open or closing,
+a new subscription is refused (the page retries it, 1013), so no server can
+make main run out of descriptors. Both limits come from undici's own `Agent`,
+the class of Node's global dispatcher (no `undici` package): one per socket,
+with `webSocket.maxPayloadSize` (the 1 MiB cap, at the frame header, where
+undici's default would buffer 128 MiB) and a `connect` hook that makes the TCP
+or TLS connection with Node's `net` and `tls` defaults, so main can destroy it.
+The hook passes no CA list and no verification option: the process-wide roots
+and the hostname check apply as they do to a fetch (`tests/unit/feeds.test.ts`
+runs both TLS cases in a fresh process). Measured on the pinned Electron's Node
+24.22.1, 2026-10-31: the global dispatcher is an `Agent` before the first
+request, a 2 MiB frame header ends the socket in about 20 ms, and a socket whose
+server ignores the close frame has no close event until it is destroyed. If the
+dispatcher is not an `Agent`, main says so once in its log and opens a plain
+`WebSocket`, which still has the after-the-fact size check and the count.
 
 ### Which HTTP stack (Q6)
 

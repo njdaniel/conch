@@ -1,5 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
+import { execFile } from 'node:child_process';
+import { createServer as createHttpsServer } from 'node:https';
 import { createHash } from 'node:crypto';
 import type { AddressInfo, Socket } from 'node:net';
 import { join, resolve } from 'node:path';
@@ -10,18 +12,21 @@ import type { FeedRequest } from '../../../web/src/platform/desktop/bridge.ts';
 import type { Exchange, Send } from '../../main/api/client.ts';
 import {
   CLOSE_BEHIND,
+  CLOSE_DEADLINE_MS,
   CLOSE_SIGNED_OUT,
   feedUrl,
   Feeds,
   MAX_FEEDS,
   MAX_FRAME_BYTES,
-  nodeConnect,
+  MAX_SOCKETS,
   parseFeedRequest,
   validFrame,
   type Connect,
   type SocketHandlers,
 } from '../../main/api/feeds.ts';
+import { agentConstructor, createNodeConnect } from '../../main/api/socket.ts';
 import { Session } from '../../main/api/session.ts';
+import { makePki, type Pki } from './support.ts';
 import type { FeedEvent } from '../../shared/bridge-names.ts';
 
 // Frames are the Go golden fixtures, as the server writes them.
@@ -42,6 +47,9 @@ interface FakeSocket {
   readonly headers: Readonly<Record<string, string>>;
   readonly on: SocketHandlers;
   closed: boolean;
+  destroyed: boolean;
+  // Whether destroy() can reach a connection.
+  destroyable: boolean;
 }
 
 interface Rig {
@@ -55,6 +63,8 @@ interface Rig {
   whoami: Exchange;
   // Who heard what, in order: socket closes and the identity's first request.
   readonly order: string[];
+  // The close deadlines set, to be run by the test.
+  readonly timers: { run: () => void; ms: number; cleared: boolean }[];
 }
 
 function rig(limits: { maxQueuedFrames?: number; maxQueuedBytes?: number } = {}): Rig {
@@ -66,7 +76,9 @@ function rig(limits: { maxQueuedFrames?: number; maxQueuedBytes?: number } = {})
   const logs: string[] = [];
   const sent: Send[] = [];
   const order: string[] = [];
+  const timers: Rig['timers'] = [];
   const r: Rig = {
+    timers,
     session,
     sockets,
     events,
@@ -77,12 +89,17 @@ function rig(limits: { maxQueuedFrames?: number; maxQueuedBytes?: number } = {})
     feeds: undefined as unknown as Feeds,
   };
   const connect: Connect = (url, headers, on) => {
-    const socket: FakeSocket = { url, headers, on, closed: false };
+    const socket: FakeSocket = { url, headers, on, closed: false, destroyed: false, destroyable: true };
     sockets.push(socket);
     return {
       close: () => {
         socket.closed = true;
         order.push(`closed ${url}`);
+      },
+      destroy: () => {
+        if (!socket.destroyable) return false;
+        socket.destroyed = true;
+        return true;
       },
     };
   };
@@ -102,6 +119,14 @@ function rig(limits: { maxQueuedFrames?: number; maxQueuedBytes?: number } = {})
       events.push([document, event]);
     },
     log: (line) => logs.push(line),
+    setTimer: (run, ms) => {
+      const timer = { run, ms, cleared: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimer: (timer) => {
+      (timer as Rig['timers'][number]).cleared = true;
+    },
     ...limits,
   });
   return Object.assign(r, { feeds });
@@ -318,7 +343,7 @@ describe('closes', () => {
     r.sockets[0]?.on.close(1000, '');
     expect(r.events).toEqual([]);
     expect(r.feeds.unsubscribe(1, 1)).toBe(false);
-    expect(r.logs.at(-1)).toBe('conch-desktop: feed occupancy closed (unsubscribed); 1 open');
+    expect(r.logs).toContain('conch-desktop: feed occupancy closed (unsubscribed); 1 open, 1 closing');
   });
 
   it('closes every feed of a document that ended (a reload, a crash), and tells it nothing', () => {
@@ -336,6 +361,68 @@ describe('closes', () => {
     expect(r.feeds.subscribe(2, 1, occupancy)).toBe(true);
     r.feeds.endDocument(2);
     expect(r.feeds.open).toBe(1);
+  });
+});
+
+describe('sockets main has closed', () => {
+  it('are held, and counted as closing, until their close arrives', () => {
+    const r = rig();
+    r.feeds.subscribe(1, 1, occupancy);
+    r.sockets[0]?.on.open();
+    r.feeds.unsubscribe(1, 1);
+    expect([r.feeds.open, r.feeds.closing]).toEqual([0, 1]);
+    r.sockets[0]?.on.close(1000, '');
+    expect([r.feeds.open, r.feeds.closing]).toEqual([0, 0]);
+    // The deadline is cleared, and the page is told nothing.
+    expect(r.timers.map((t) => [t.ms, t.cleared])).toEqual([[CLOSE_DEADLINE_MS, true]]);
+    expect(r.events).toEqual([[1, { id: 1, type: 'open' }]]);
+    expect(r.logs.at(-1)).toBe('conch-desktop: feed occupancy socket closed; 0 open, 0 closing');
+  });
+
+  it('are destroyed when the server does not finish the close by the deadline', () => {
+    const r = rig();
+    r.feeds.subscribe(1, 1, occupancy);
+    r.feeds.unsubscribe(1, 1);
+    expect(r.sockets[0]?.closed).toBe(true);
+    r.timers[0]?.run();
+    expect(r.sockets[0]?.destroyed).toBe(true);
+    expect(r.feeds.closing).toBe(0);
+    expect(r.logs.at(-1)).toBe(`conch-desktop: feed occupancy socket destroyed: no close within ${String(CLOSE_DEADLINE_MS)} ms; 0 open, 0 closing`);
+    // Its close event, when it comes, changes nothing.
+    r.sockets[0]?.on.close(1006, '');
+    expect(r.feeds.closing).toBe(0);
+    expect(r.events).toEqual([]);
+  });
+
+  it('stay counted when there is nothing to destroy, until their close arrives', () => {
+    const r = rig();
+    r.feeds.subscribe(1, 1, occupancy);
+    const socket = r.sockets[0];
+    if (socket !== undefined) socket.destroyable = false;
+    r.feeds.unsubscribe(1, 1);
+    r.timers[0]?.run();
+    expect(r.feeds.closing).toBe(1);
+    expect(r.logs.at(-1)).toContain('cannot be destroyed; 0 open, 1 closing');
+    socket?.on.close(1006, '');
+    expect(r.feeds.closing).toBe(0);
+  });
+
+  it('count toward the cap: with MAX_SOCKETS held, open or closing, a subscription is refused and logged', () => {
+    const r = rig();
+    let n = 0;
+    for (let document = 1; n < MAX_SOCKETS; document++) {
+      for (let id = 1; id <= MAX_FEEDS && n < MAX_SOCKETS; id++, n++) expect(r.feeds.subscribe(document, id, occupancy)).toBe(true);
+    }
+    // Close half: they are still held while they close.
+    r.feeds.endDocument(99);
+    expect([r.feeds.open, r.feeds.closing]).toEqual([0, MAX_SOCKETS]);
+    expect(r.feeds.subscribe(99, 1, occupancy)).toBe(false);
+    expect(r.sockets).toHaveLength(MAX_SOCKETS);
+    expect(r.logs.at(-1)).toBe(`conch-desktop: refused a occupancy feed: ${String(MAX_SOCKETS)} sockets held (0 open, ${String(MAX_SOCKETS)} closing), the most there may be`);
+    // One finishing its close makes room for one.
+    r.sockets[0]?.on.close(1000, '');
+    expect(r.feeds.subscribe(99, 1, occupancy)).toBe(true);
+    expect(r.feeds.subscribe(99, 2, occupancy)).toBe(false);
   });
 });
 
@@ -427,9 +514,9 @@ describe('Node’s WebSocket, as main opens it', () => {
     });
     const got: string[] = [];
     await new Promise<void>((done) => {
-      const handle = nodeConnect(feedUrl(origin, messages), { Authorization: `Bearer ${TOKEN}` }, {
+      const handle = createNodeConnect(() => undefined)(feedUrl(origin, messages), { Authorization: `Bearer ${TOKEN}` }, {
         open: () => got.push('open'),
-        frame: (data) => {
+        frame: (data: unknown) => {
           got.push(String(data));
           handle.close();
           done();
@@ -466,10 +553,10 @@ describe('Node’s WebSocket, as main opens it', () => {
       socket.end(`HTTP/1.1 302 Found\r\nLocation: ${away}\r\nContent-Length: 0\r\n\r\n`);
     });
     const code = await new Promise<number>((done) => {
-      nodeConnect(feedUrl(origin, occupancy), { Authorization: `Bearer ${TOKEN}` }, {
+      createNodeConnect(() => undefined)(feedUrl(origin, occupancy), { Authorization: `Bearer ${TOKEN}` }, {
         open: () => undefined,
         frame: () => undefined,
-        close: (c) => {
+        close: (c: number) => {
           done(c);
         },
       });
@@ -481,5 +568,140 @@ describe('Node’s WebSocket, as main opens it', () => {
     });
     expect(code).toBe(1006);
     expect(elsewhere).toBe(0);
+  });
+
+  it('is opened through undici’s own Agent, which this Node has', () => {
+    expect(agentConstructor()?.name).toBe('Agent');
+  });
+
+  it('refuses a frame larger than the cap at its header, without waiting for its payload', async () => {
+    let serverSaw = '';
+    const origin = await listen((_url, headers, socket) => {
+      accept(headers, socket);
+      // The server's half stays open (allowHalfOpen); its end is the client
+      // going away.
+      socket.resume();
+      socket.on('end', () => {
+        serverSaw += 'closed';
+      });
+      // A text frame that says it is 2 MiB long; its payload never comes.
+      const header = Buffer.alloc(10);
+      header[0] = 0x81;
+      header[1] = 127;
+      header.writeBigUInt64BE(BigInt(2 * MAX_FRAME_BYTES), 2);
+      socket.write(header);
+    });
+    const got: string[] = [];
+    const started = Date.now();
+    const code = await new Promise<number>((done) => {
+      createNodeConnect(() => undefined)(feedUrl(origin, occupancy), { Authorization: `Bearer ${TOKEN}` }, {
+        open: () => got.push('open'),
+        frame: () => got.push('frame'),
+        close: (c: number) => {
+          done(c);
+        },
+      });
+    });
+    expect(got).toEqual(['open']);
+    expect(code).toBe(1006);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    await expect.poll(() => serverSaw).toBe('closed');
+  });
+
+  it('destroys a socket whose server ignores the close frame, within the deadline, and frees its place', async () => {
+    const ends: string[] = [];
+    const origin = await listen((_url, headers, socket) => {
+      accept(headers, socket);
+      // Never answers the close frame, and never closes.
+      socket.resume();
+      socket.on('end', () => ends.push('server saw the socket end'));
+    });
+    const session = new Session();
+    session.setOrigin(origin);
+    session.adopt(TOKEN);
+    const logs: string[] = [];
+    let deadlines = 0;
+    const feeds = new Feeds({
+      session,
+      client: { send: () => Promise.resolve({ kind: 'answer', status: 200, ok: true }) },
+      connect: createNodeConnect(() => undefined),
+      deliver: () => undefined,
+      log: (line) => logs.push(line),
+      // The deadline, shortened for the test.
+      setTimer: (run, ms) => {
+        expect(ms).toBe(CLOSE_DEADLINE_MS);
+        deadlines++;
+        return setTimeout(run, 200);
+      },
+      clearTimer: (timer) => {
+        clearTimeout(timer as ReturnType<typeof setTimeout>);
+      },
+    });
+    expect(feeds.subscribe(1, 1, occupancy)).toBe(true);
+    await expect.poll(() => feeds.open).toBe(1);
+    await expect.poll(() => sockets.length).toBe(1);
+    // Let the socket open before closing it.
+    await new Promise((r) => setTimeout(r, 100));
+    feeds.unsubscribe(1, 1);
+    expect([feeds.open, feeds.closing]).toEqual([0, 1]);
+    await expect.poll(() => ends, { timeout: 2_000 }).toEqual(['server saw the socket end']);
+    expect(feeds.closing).toBe(0);
+    expect(deadlines).toBe(1);
+    expect(logs.some((l) => l.includes('socket destroyed: no close within'))).toBe(true);
+  });
+
+  // The connect hook makes the TLS connection with Node's defaults: the
+  // process-wide roots and the hostname check, as a fetch has them. Trust is
+  // process-wide, so each case is a fresh process (./socket-child.ts), as the
+  // private-CA tests of trust.test.ts are.
+  describe('over TLS', () => {
+    const child = resolve(import.meta.dirname, 'socket-child.ts');
+
+    async function overTls(env: (pki: Pki) => Record<string, string>): Promise<{ said: string; upgrades: string[] }> {
+      const pki = makePki();
+      const upgrades: string[] = [];
+      const https = createHttpsServer({ key: pki.keyPem, cert: pki.certPem }, (_req, res) => {
+        res.writeHead(200).end('{}');
+      });
+      https.on('upgrade', (req, socket: Socket) => {
+        sockets.push(socket);
+        upgrades.push(req.url ?? '');
+        accept(req.headers, socket);
+        socket.write(textFrame(HEARTBEAT));
+      });
+      await new Promise<void>((done) => {
+        https.listen(0, '127.0.0.1', () => {
+          done();
+        });
+      });
+      const origin = `https://localhost:${String((https.address() as AddressInfo).port)}`;
+      try {
+        const said = await new Promise<string>((done) => {
+          execFile(process.execPath, [child, origin], { env: { PATH: process.env['PATH'] ?? '', ...env(pki) }, encoding: 'utf8', timeout: 30_000 }, (_error, stdout) => {
+            done(stdout.trim());
+          });
+        });
+        return { said, upgrades };
+      } finally {
+        // An upgraded socket is the test's, not the server's: close() would
+        // wait for it.
+        for (const socket of sockets) socket.destroy();
+        https.closeAllConnections();
+        await new Promise<void>((done) => {
+          https.close(() => {
+            done();
+          });
+        });
+        pki.cleanup();
+      }
+    }
+
+    it('refuses a certificate this machine does not trust, before any request', async () => {
+      expect(await overTls(() => ({}))).toEqual({ said: 'agent close 1006', upgrades: [] });
+    });
+
+    it('trusts a private CA installed the documented way, and sends the upgrade there', async () => {
+      expect(await overTls((pki) => ({ NODE_EXTRA_CA_CERTS: pki.caPath }))).toEqual({ said: `agent frame ${HEARTBEAT}`, upgrades: ['/v2/ws'] });
+    });
   });
 });

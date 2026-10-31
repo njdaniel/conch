@@ -15,9 +15,10 @@
 //    ticket is sent (Node's WebSocket, measured on the pinned Electron:
 //    desktop/README.md). conchd reads a ticket only when there is no
 //    Authorization header, so none is asked for and none exists to be logged;
-//  - every frame: text only, at most MAX_FRAME_BYTES, valid for its feed by
-//    the generated validators of web/src/schema. Anything else is dropped and
-//    counted, never sent on;
+//  - every frame: text only, at most MAX_FRAME_BYTES (refused at its header
+//    by the socket itself: ./socket.ts), valid for its feed by the generated
+//    validators of web/src/schema. Anything else is dropped and counted, never
+//    sent on;
 //  - the queue: frames go to the renderer one batch at a time, and the next
 //    batch waits until the preload acknowledges the last. Frames that wait
 //    are bounded in number and bytes; past either bound the socket is closed
@@ -28,7 +29,13 @@
 //    out, a new sign-in, another server) each close the sockets they own, and
 //    the last two do it synchronously, before anything else runs. A socket
 //    event that arrives after its subscription ended is dropped here, so a
-//    frame from a closed socket never reaches the renderer.
+//    frame from a closed socket never reaches the renderer;
+//  - the sockets themselves, until each has really closed: a socket main has
+//    closed is still held, and counted as closing, until its close event; one
+//    whose server does not finish the close within CLOSE_DEADLINE_MS is
+//    destroyed. With MAX_SOCKETS open or closing, a new subscription is
+//    refused (the page retries it later), so no server can make main run out
+//    of descriptors.
 //
 // Reconnecting and the heartbeat watchdog are the renderer's own
 // (web/src/state/feed.ts), as in the browser; main reports open, close and the
@@ -42,12 +49,20 @@ import { heartbeatV1, messageV2, voiceOccupancyV1, voicePresenceV1 } from '../..
 import type { FeedEvent } from '../../shared/bridge-names.ts';
 import type { Client } from './client.ts';
 import type { Capture, Session } from './session.ts';
+import { MAX_FRAME_BYTES, type Connect, type SocketHandle } from './socket.ts';
+
+export { MAX_FRAME_BYTES } from './socket.ts';
+export type { Connect, SocketHandle, SocketHandlers } from './socket.ts';
 
 // How many feeds one document may hold at once. The web client holds four at
 // most (a channel's messages, events and voice, and the occupancy), and a
 // fifth for a moment while it changes channel.
 export const MAX_FEEDS = 32;
-export const MAX_FRAME_BYTES = 1024 * 1024;
+// How many sockets main holds at once, open or closing, for every document.
+export const MAX_SOCKETS = 64;
+// How long a socket main closed may take to finish the close before it is
+// destroyed.
+export const CLOSE_DEADLINE_MS = 5_000;
 export const MAX_QUEUED_FRAMES = 512;
 export const MAX_QUEUED_BYTES = 4 * 1024 * 1024;
 const MAX_REASON_LENGTH = 123;
@@ -57,42 +72,6 @@ export const CLOSE_SIGNED_OUT = 1008;
 export const CLOSE_BEHIND = 1013;
 // What a socket that ended without a close frame reports, as a browser's does.
 export const CLOSE_ABNORMAL = 1006;
-
-// The socket main opens, as the feeds need it: Node's WebSocket in the app
-// (nodeConnect), a fake in the tests.
-export interface SocketHandlers {
-  readonly open: () => void;
-  readonly frame: (data: unknown) => void;
-  readonly close: (code: number, reason: string) => void;
-}
-
-export interface SocketHandle {
-  close(): void;
-}
-
-export type Connect = (url: string, headers: Readonly<Record<string, string>>, on: SocketHandlers) => SocketHandle;
-
-// nodeConnect opens a WebSocket with Node's own client (undici). An error is
-// always followed by a close, which is what is reported. Binary frames arrive
-// as an ArrayBuffer and are refused by the validation.
-export const nodeConnect: Connect = (url, headers, on) => {
-  const socket = new WebSocket(url, { headers: { ...headers } });
-  socket.binaryType = 'arraybuffer';
-  socket.addEventListener('open', () => {
-    on.open();
-  });
-  socket.addEventListener('message', (event) => {
-    on.frame(event.data);
-  });
-  socket.addEventListener('close', (event) => {
-    on.close(event.code, event.reason);
-  });
-  return {
-    close: () => {
-      socket.close();
-    },
-  };
-};
 
 const ROUTES: Readonly<Record<FeedKind, OperationId>> = {
   messages: 'messagesSocket',
@@ -199,7 +178,7 @@ interface Subscription {
   readonly document: number;
   readonly kind: FeedKind;
   readonly capture: Capture;
-  socket: SocketHandle | null;
+  socket: Held | null;
   opened: boolean;
   ended: boolean;
   // Frames waiting for the batch in flight to be acknowledged.
@@ -207,6 +186,15 @@ interface Subscription {
   queuedBytes: number;
   inFlight: boolean;
   readonly onAbort: () => void;
+}
+
+// A socket main holds, from its opening to its close event (or its
+// destruction).
+interface Held {
+  readonly kind: FeedKind;
+  handle: SocketHandle | null;
+  closing: boolean;
+  timer: unknown;
 }
 
 export interface FeedsDeps {
@@ -221,6 +209,19 @@ export interface FeedsDeps {
   readonly log: (line: string) => void;
   readonly maxQueuedFrames?: number;
   readonly maxQueuedBytes?: number;
+  // The clock of the close deadline; the real one by default.
+  readonly setTimer?: (run: () => void, ms: number) => unknown;
+  readonly clearTimer?: (timer: unknown) => void;
+}
+
+function realTimer(run: () => void, ms: number): unknown {
+  const timer = setTimeout(run, ms);
+  timer.unref();
+  return timer;
+}
+
+function clearRealTimer(timer: unknown): void {
+  clearTimeout(timer as ReturnType<typeof setTimeout>);
 }
 
 const keyOf = (document: number, id: number): string => `${String(document)}/${String(id)}`;
@@ -236,6 +237,7 @@ function closeCodeOf(code: unknown): number {
 export class Feeds {
   readonly #deps: FeedsDeps;
   readonly #subscriptions = new Map<string, Subscription>();
+  readonly #held = new Set<Held>();
   #invalid = 0;
   #behind = 0;
 
@@ -243,11 +245,20 @@ export class Feeds {
     this.#deps = deps;
   }
 
-  // How many sockets main holds open (or opening) now.
+  // How many sockets main holds open (or opening) for a feed now.
   get open(): number {
     let n = 0;
-    for (const sub of this.#subscriptions.values()) if (sub.socket !== null) n++;
+    for (const held of this.#held) if (!held.closing) n++;
     return n;
+  }
+
+  // How many sockets main has closed and still holds, waiting for their close.
+  get closing(): number {
+    return this.#held.size - this.open;
+  }
+
+  #counts(): string {
+    return `${String(this.open)} open, ${String(this.closing)} closing`;
   }
 
   // How many frames have been dropped as invalid since start.
@@ -261,15 +272,16 @@ export class Feeds {
   }
 
   // subscribe opens the feed request names for document under the number id.
-  // false when it is refused: a number already in use, or too many feeds. A
+  // false when it is refused: a number already in use, too many feeds, or too
+  // many sockets held (open or still closing). A
   // subscription made with nobody signed in is accepted and closed at once,
   // 1008, as conchd closes a socket whose credential has ended.
   subscribe(document: number, id: number, request: FeedRequest): boolean {
     const key = keyOf(document, id);
     if (this.#subscriptions.has(key)) return false;
-    let held = 0;
-    for (const sub of this.#subscriptions.values()) if (sub.document === document) held++;
-    if (held >= MAX_FEEDS) return false;
+    let feeds = 0;
+    for (const sub of this.#subscriptions.values()) if (sub.document === document) feeds++;
+    if (feeds >= MAX_FEEDS) return false;
 
     const { session } = this.#deps;
     const capture = session.capture();
@@ -278,6 +290,11 @@ export class Feeds {
         this.#deps.deliver(document, { id, type: 'close', code: CLOSE_SIGNED_OUT, reason: 'signed out' });
       });
       return true;
+    }
+
+    if (this.#held.size >= MAX_SOCKETS) {
+      this.#deps.log(`conch-desktop: refused a ${request.kind} feed: ${String(this.#held.size)} sockets held (${this.#counts()}), the most there may be`);
+      return false;
     }
 
     const sub: Subscription = {
@@ -302,8 +319,11 @@ export class Feeds {
     capture.signal.addEventListener('abort', sub.onAbort, { once: true });
 
     const live = (): boolean => !sub.ended && this.#subscriptions.get(key) === sub && session.current(capture);
+    const held: Held = { kind: request.kind, handle: null, closing: false, timer: null };
+    this.#held.add(held);
+    sub.socket = held;
     try {
-      sub.socket = this.#deps.connect(feedUrl(capture.origin, request), { Authorization: `Bearer ${capture.token}` }, {
+      held.handle = this.#deps.connect(feedUrl(capture.origin, request), { Authorization: `Bearer ${capture.token}` }, {
         open: () => {
           if (!live()) return;
           sub.opened = true;
@@ -313,17 +333,19 @@ export class Feeds {
           if (live()) this.#frame(sub, data);
         },
         close: (code, reason) => {
+          this.#gone(held, 'closed');
           if (live()) this.#closed(sub, closeCodeOf(code), reasonOf(reason));
         },
       });
     } catch {
       // An address Node's WebSocket would not take: a socket that never
       // opened.
+      this.#gone(held, 'closed');
       queueMicrotask(() => {
         if (live()) this.#closed(sub, CLOSE_ABNORMAL, '');
       });
     }
-    this.#deps.log(`conch-desktop: feed ${sub.kind} opening; ${String(this.open)} open`);
+    this.#deps.log(`conch-desktop: feed ${sub.kind} opening; ${this.#counts()}`);
     return true;
   }
 
@@ -412,19 +434,49 @@ export class Feeds {
   // end closes the socket main holds and, when told, says so to the page.
   #end(sub: Subscription, why: Ending, tell: { readonly code: number; readonly reason: string } | null): void {
     if (sub.ended) return;
-    const socket = sub.socket;
     this.#remove(sub, why);
-    socket?.close();
     if (tell !== null) this.#deps.deliver(sub.document, { id: sub.id, type: 'close', ...tell });
   }
 
   #remove(sub: Subscription, why: Ending): void {
+    const held = sub.socket;
     sub.ended = true;
     sub.socket = null;
     sub.queue = [];
     sub.queuedBytes = 0;
     sub.capture.signal.removeEventListener('abort', sub.onAbort);
     this.#subscriptions.delete(sub.key);
-    this.#deps.log(`conch-desktop: feed ${sub.kind} closed (${why}); ${String(this.open)} open`);
+    if (held !== null) this.#release(held);
+    this.#deps.log(`conch-desktop: feed ${sub.kind} closed (${why}); ${this.#counts()}`);
+  }
+
+  // release closes a socket that is still held, and destroys it if its server
+  // has not finished the close by the deadline. It stays held (and counted)
+  // until then.
+  #release(held: Held): void {
+    if (!this.#held.has(held) || held.closing) return;
+    held.closing = true;
+    held.handle?.close();
+    held.timer = (this.#deps.setTimer ?? realTimer)(() => {
+      held.timer = null;
+      if (!this.#held.has(held)) return;
+      if (held.handle?.destroy() === true) {
+        this.#gone(held, 'destroyed');
+      } else {
+        // Nothing to destroy: it stays counted until its close arrives.
+        this.#deps.log(`conch-desktop: a ${held.kind} feed socket did not close within ${String(CLOSE_DEADLINE_MS)} ms and cannot be destroyed; ${this.#counts()}`);
+      }
+    }, CLOSE_DEADLINE_MS);
+  }
+
+  // gone is a socket's end: its close event, or its destruction.
+  #gone(held: Held, how: 'closed' | 'destroyed'): void {
+    if (!this.#held.delete(held)) return;
+    if (held.timer !== null) (this.#deps.clearTimer ?? clearRealTimer)(held.timer);
+    held.timer = null;
+    if (held.closing || how === 'destroyed') {
+      const what = how === 'destroyed' ? `destroyed: no close within ${String(CLOSE_DEADLINE_MS)} ms` : 'closed';
+      this.#deps.log(`conch-desktop: feed ${held.kind} socket ${what}; ${this.#counts()}`);
+    }
   }
 }

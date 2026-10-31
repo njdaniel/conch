@@ -12,9 +12,10 @@ import { app, ipcMain, protocol, session, type BrowserWindow } from 'electron';
 
 import { FEED_EVENTS } from '../shared/bridge-names.ts';
 import { Client } from './api/client.ts';
-import { Feeds, nodeConnect } from './api/feeds.ts';
+import { Feeds } from './api/feeds.ts';
 import { Service } from './api/service.ts';
 import { Session } from './api/session.ts';
+import { createNodeConnect } from './api/socket.ts';
 import { transportVerdict, trustSystemRoots } from './api/trust.ts';
 import { debuggingVerdict } from './debugging.ts';
 import { DocumentGate } from './document.ts';
@@ -76,7 +77,7 @@ export async function start(): Promise<void> {
   const feeds = new Feeds({
     session: identity,
     client,
-    connect: nodeConnect,
+    connect: createNodeConnect(log),
     deliver: (document, event) => {
       const contents = owned();
       if (contents !== null && gate.shows(document)) contents.send(FEED_EVENTS, event);
