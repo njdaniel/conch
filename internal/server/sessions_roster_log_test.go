@@ -19,7 +19,7 @@ func TestChannelRosterLogsOnlyRealFailures(t *testing.T) {
 	logs := captureLogs(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := f.srv.channelRoster(ctx, r, f.general, f.alice); err == nil {
+	if _, err := f.srv.channelRoster(ctx, r, f.general, f.alice, false); err == nil {
 		t.Fatal("a roster on a cancelled context succeeded; the test cannot show what it means to")
 	}
 	if strings.Contains(logs.buf.String(), "level=ERROR") {
@@ -29,7 +29,7 @@ func TestChannelRosterLogsOnlyRealFailures(t *testing.T) {
 	if err := f.srv.store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.srv.channelRoster(context.Background(), r, f.general, f.alice); err == nil {
+	if _, err := f.srv.channelRoster(context.Background(), r, f.general, f.alice, false); err == nil {
 		t.Fatal("a roster on a closed store succeeded")
 	}
 	if !strings.Contains(logs.buf.String(), "level=ERROR") || !strings.Contains(logs.buf.String(), "sessions: list failed") {

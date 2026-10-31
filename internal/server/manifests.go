@@ -78,9 +78,17 @@ func (s *Server) handleGetManifest(w http.ResponseWriter, r *http.Request) {
 	}
 	// Operators and the agent the manifest belongs to only. Checked before any
 	// lookup so a forbidden caller cannot probe which manifests exist.
-	if caller, authed := callerFrom(ctx); authed && !isOperator(caller) && caller.ID != id {
-		s.denyForbidden(w, r, caller, "forbidden", "operator role or the manifest's own agent required")
-		return
+	// Someone else's needs manage_members (ADR-014 design §7.2).
+	if caller, authed := callerFrom(ctx); authed && caller.ID != id {
+		allowed, ok := s.canOrFail(w, r, caller, schema.PermManageMembers)
+		if !ok {
+			return
+		}
+		if !allowed {
+			s.denyForbiddenFor(w, r, caller, "forbidden", "operator role or the manifest's own agent required",
+				refusedPermission(caller, schema.PermManageMembers))
+			return
+		}
 	}
 	manifest, err := s.store.AgentManifestByPrincipal(ctx, id)
 	if errors.Is(err, store.ErrNotFound) {

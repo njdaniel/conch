@@ -88,10 +88,19 @@ func (s *Server) handleRenamePrincipal(w http.ResponseWriter, r *http.Request) {
 	var lim store.RenameLimits
 	self := false
 	caller, authed := callerFrom(ctx)
-	// No caller is AuthOff, where the route is open like every other.
-	if authed && !isOperator(caller) {
+	// No caller is AuthOff, where the route is open like every other. A
+	// caller without manage_members renames only itself, within the limits
+	// (ADR-014 design §7.2).
+	administers := !authed
+	if authed {
+		if administers, ok = s.canOrFail(w, r, caller, schema.PermManageMembers); !ok {
+			return
+		}
+	}
+	if !administers {
 		if caller.ID != id {
-			s.denyForbidden(w, r, caller, "forbidden", "operator role or the principal itself required")
+			s.denyForbiddenFor(w, r, caller, "forbidden", "operator role or the principal itself required",
+				refusedPermission(caller, schema.PermManageMembers))
 			return
 		}
 		if caller.Kind != store.PrincipalHuman {

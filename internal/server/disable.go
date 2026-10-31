@@ -115,9 +115,17 @@ func (s *Server) handleRevokeAllCredentials(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	caller, authed := callerFrom(ctx)
-	if authed && !isOperator(caller) && caller.ID != id {
-		s.denyForbidden(w, r, caller, "forbidden", "operator role or the principal itself required")
-		return
+	if authed && caller.ID != id {
+		// Someone else's needs manage_members (ADR-014 design §7.2).
+		allowed, ok := s.canOrFail(w, r, caller, schema.PermManageMembers)
+		if !ok {
+			return
+		}
+		if !allowed {
+			s.denyForbiddenFor(w, r, caller, "forbidden", "operator role or the principal itself required",
+				refusedPermission(caller, schema.PermManageMembers))
+			return
+		}
 	}
 	if s.ownerProtected(w, r, id) {
 		return

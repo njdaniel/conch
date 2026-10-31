@@ -345,6 +345,59 @@ func openChannelsTx(ctx context.Context, tx execer) ([]schema.InviteChannelV1, e
 	return out, nil
 }
 
+// AuditJoinChannelDropped records an address join that left out a listed
+// open channel because whoever listed it (open_channels.added_by) no
+// longer holds manage_channels (ADR-014 design §7.3, §8.5). Actor system,
+// subject the channel, detail "reason=permission".
+const AuditJoinChannelDropped = "join_channel_dropped"
+
+// admittingOpenChannelsTx splits the bare address's channels into those an
+// address join lands in now and those it drops (ADR-014 design §7.3, SF-2):
+// a channel is kept only while whoever listed it is an owner or holds
+// manage_channels, read in tx. A row with no added_by was written before
+// the column was filled, when only an owner could write the list, and
+// counts as an owner's.
+func admittingOpenChannelsTx(ctx context.Context, tx execer) (kept, dropped []schema.InviteChannelV1, err error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT c.id, c.name, o.added_by FROM open_channels o JOIN channels c ON c.id = o.channel_id ORDER BY c.id`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: read open channels: %w", err)
+	}
+	type listed struct {
+		ch      schema.InviteChannelV1
+		addedBy sql.NullInt64
+	}
+	var all []listed
+	for rows.Next() {
+		var l listed
+		if err := rows.Scan(&l.ch.ID, &l.ch.Name, &l.addedBy); err != nil {
+			_ = rows.Close()
+			return nil, nil, fmt.Errorf("store: read open channels: %w", err)
+		}
+		all = append(all, l)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, nil, fmt.Errorf("store: read open channels: %w", err)
+	}
+	_ = rows.Close()
+	kept = []schema.InviteChannelV1{}
+	for _, l := range all {
+		ok := !l.addedBy.Valid
+		if !ok {
+			if ok, err = permittedTx(ctx, tx, l.addedBy.Int64, schema.PermManageChannels); err != nil {
+				return nil, nil, err
+			}
+		}
+		if ok {
+			kept = append(kept, l.ch)
+		} else {
+			dropped = append(dropped, l.ch)
+		}
+	}
+	return kept, dropped, nil
+}
+
 // JoinState is the joining policy as it stands, with what an answer about
 // it needs beside the settings.
 type JoinState struct {
@@ -465,8 +518,14 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 			}
 			nextIDs[id] = true
 		}
+		if err := checkOpenChannelsWriterTx(ctx, tx, actorID, next, nextIDs); err != nil {
+			return err
+		}
 		curChannels, err := openChannelsTx(ctx, tx)
 		if err != nil {
+			return err
+		}
+		if err := refreshOpenChannelsListerTx(ctx, tx, actorID, nextIDs); err != nil {
 			return err
 		}
 
@@ -523,6 +582,58 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 		return JoinState{}, err
 	}
 	return out, nil
+}
+
+// checkOpenChannelsWriterTx holds the writer of the joining settings to the
+// state its write leaves (ADR-014 design §7.3, SF-2): if next admits people
+// at the bare address (any mode but off, not paused), the writer needs
+// manage_channels for every channel in next's open_channels (nextIDs) that
+// it is not in, whether or not this write touched the list. Without it the
+// write is refused with a PermissionError (ErrPermissionDenied, naming
+// manage_channels). Actor 0 (the system, or --auth off) is not held to it.
+func checkOpenChannelsWriterTx(ctx context.Context, tx execer, actorID int64, next schema.JoinSettingsV1, nextIDs map[int64]bool) error {
+	if actorID == 0 || next.OpenJoining == schema.OpenJoiningOff || next.JoiningPaused || len(nextIDs) == 0 {
+		return nil
+	}
+	ok, err := permittedTx(ctx, tx, actorID, schema.PermManageChannels)
+	if err != nil || ok {
+		return err
+	}
+	for id := range nextIDs {
+		var one int
+		switch err := tx.QueryRowContext(ctx,
+			"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", id, actorID).Scan(&one); {
+		case errors.Is(err, sql.ErrNoRows):
+			return &PermissionError{Err: ErrPermissionDenied, Permission: schema.PermManageChannels,
+				Reason: "opening the address to a channel you are not in needs manage_channels"}
+		case err != nil:
+			return fmt.Errorf("store: put join settings: check membership: %w", err)
+		}
+	}
+	return nil
+}
+
+// refreshOpenChannelsListerTx makes an owner's write of the joining
+// settings the lister of every channel it leaves listed (ADR-014 design
+// §7.3): open_channels.added_by is who stands behind each channel at every
+// address join (admittingOpenChannelsTx), and an owner's write vouches for
+// the whole list it leaves. A write by anyone else changes no lister but
+// the channels it adds.
+func refreshOpenChannelsListerTx(ctx context.Context, tx execer, actorID int64, nextIDs map[int64]bool) error {
+	if actorID == 0 || len(nextIDs) == 0 {
+		return nil
+	}
+	actor, found, err := queryPrincipal(ctx, tx, actorID)
+	if err != nil || !found || !actor.IsOwner() {
+		return err
+	}
+	for id := range nextIDs {
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE open_channels SET added_by = ? WHERE channel_id = ? AND added_by IS NOT ?", actorID, id, actorID); err != nil {
+			return fmt.Errorf("store: put join settings: refresh open channel lister: %w", err)
+		}
+	}
+	return nil
 }
 
 // writeJoinSettingsTx writes each of the settings that differs between c and
@@ -737,7 +848,9 @@ func (s *Store) JoinAsAccount(ctx context.Context, name, record string, now time
 		if err := addressAccountPolicy(set); err != nil {
 			return err
 		}
-		channels, err := openChannelsTx(ctx, tx)
+		// Only the channels whose lister still stands behind them (ADR-014
+		// design §7.3); with none left the address is closed to this join.
+		channels, dropped, err := admittingOpenChannelsTx(ctx, tx)
 		if err != nil {
 			return err
 		}
@@ -747,6 +860,11 @@ func (s *Store) JoinAsAccount(ctx context.Context, name, record string, now time
 		keys, err := s.claimNameTx(ctx, tx, name, 0)
 		if err != nil {
 			return fmt.Errorf("store: join as an account: %w", err)
+		}
+		for _, c := range dropped {
+			if err := appendAuditEventTx(ctx, tx, actor, AuditJoinChannelDropped, channelSubject(c.ID), "reason=permission", now); err != nil {
+				return err
+			}
 		}
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO principals (kind, name, name_key, name_skel, role, created_at, voice_allowed)

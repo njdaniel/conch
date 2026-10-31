@@ -166,26 +166,69 @@ type inviteRow struct {
 	lifetimeMs   int64
 	joinAs       schema.InviteJoinMode
 	creatorName  string
-	creatorRole  Role
 	creatorOff   bool
 	creatorHuman bool
 	creatorMay   bool
 	creatorVoice bool
+	// maker is what the maker holds now, read by loadMakerTx; zero (holding
+	// nothing) until it is loaded.
+	maker makerRights
+}
+
+// makerRights is what an invite's maker holds now, by permission (ADR-014
+// design §7.2.1, §7.3): read in the transaction that judges the invite, so a
+// change to the document or to the maker takes effect at the next
+// redemption, not when the invite was made.
+type makerRights struct {
+	// members: manage_members, which an open link and a may_invite grant need.
+	members bool
+	// channels: manage_channels, which keeps the channels the maker is not in.
+	channels bool
+	// links: make_member_links, which a personal invite needs; for a member it
+	// is withheld by the may_invite brake (design §5).
+	links bool
+}
+
+// makerRightsTx reads what principalID holds now. A principal with no row
+// holds nothing.
+func makerRightsTx(ctx context.Context, tx execer, principalID int64) (makerRights, error) {
+	p, found, err := queryPrincipal(ctx, tx, principalID)
+	if err != nil || !found {
+		return makerRights{}, err
+	}
+	d, err := readPermissionDocTx(ctx, tx)
+	if err != nil {
+		return makerRights{}, err
+	}
+	return makerRights{
+		members:  principalHolds(p, d, schema.PermManageMembers),
+		channels: principalHolds(p, d, schema.PermManageChannels),
+		links:    principalHolds(p, d, schema.PermMakeMemberLinks),
+	}, nil
+}
+
+// loadMakerTx fills r.maker from the maker as it is now.
+func (r *inviteRow) loadMakerTx(ctx context.Context, tx execer) error {
+	m, err := makerRightsTx(ctx, tx, r.createdBy)
+	if err != nil {
+		return fmt.Errorf("store: invite maker rights: %w", err)
+	}
+	r.maker = m
+	return nil
 }
 
 const inviteColumns = `i.id, i.kind, i.code_hash, i.created_by, i.created_at, i.expires_at, i.max_uses, i.uses,
 	i.closed_at, i.voice, i.may_invite, i.credential_lifetime_ms, i.join_as,
-	p.name, p.role, p.disabled_at IS NOT NULL, p.kind = 'human', p.may_invite, p.voice_allowed`
+	p.name, p.disabled_at IS NOT NULL, p.kind = 'human', p.may_invite, p.voice_allowed`
 
 func scanInvite(row interface{ Scan(...any) error }) (inviteRow, error) {
 	var r inviteRow
-	var kind, role, joinAs string
+	var kind, joinAs string
 	err := row.Scan(&r.id, &kind, &r.codeHash, &r.createdBy, &r.createdAt, &r.expiresAt, &r.maxUses, &r.uses,
 		&r.closedAt, &r.voice, &r.mayInvite, &r.lifetimeMs, &joinAs,
-		&r.creatorName, &role, &r.creatorOff, &r.creatorHuman, &r.creatorMay, &r.creatorVoice)
+		&r.creatorName, &r.creatorOff, &r.creatorHuman, &r.creatorMay, &r.creatorVoice)
 	r.kind = schema.InviteKind(kind)
 	r.joinAs = schema.InviteJoinMode(joinAs)
-	r.creatorRole = Role(role)
 	return r, err
 }
 
@@ -204,17 +247,19 @@ func (r inviteRow) state(now time.Time) InviteState {
 }
 
 // makerStillAllowed reports whether the invite's maker may still stand behind
-// it: enabled, human, and holding the right the invite's kind needs. Anything
-// else fails closed, so taking an inviter's right away also ends the invites
-// they left outstanding.
+// it: enabled, human, and holding now the right the invite's kind needs (r.maker,
+// loaded by loadMakerTx): manage_members for an open link, make_member_links
+// for a personal one (ADR-014 design §7.3). Anything else fails closed, so
+// taking an inviter's right away suspends the invites they left
+// outstanding, and they work again if it comes back.
 func (r inviteRow) makerStillAllowed() bool {
 	if r.creatorOff || !r.creatorHuman {
 		return false
 	}
-	if r.creatorRole == RoleOperator {
-		return true
+	if r.kind == schema.InviteKindPersonal {
+		return r.maker.links
 	}
-	return r.kind == schema.InviteKindPersonal && r.creatorMay
+	return r.maker.members
 }
 
 func (r inviteRow) wire(channels []schema.InviteChannelV1) schema.InviteV1 {
@@ -263,15 +308,16 @@ func inviteChannelsTx(ctx context.Context, tx execer, inviteID int64) ([]schema.
 }
 
 // effectiveChannelsTx splits the channels an invite names into those a joiner
-// is added to and those dropped. An operator-made invite keeps every named
-// channel that exists. A personal invite keeps only the channels its maker is
-// still a member of, so an invite never outlives its maker's access.
+// is added to and those dropped. While its maker holds manage_channels
+// (r.maker, loaded by loadMakerTx) an invite keeps every named channel that
+// exists. Otherwise it keeps only the channels its maker is still a member
+// of, so an invite never outlives its maker's access (ADR-014 design §7.3).
 func effectiveChannelsTx(ctx context.Context, tx execer, r inviteRow) (kept, dropped []schema.InviteChannelV1, err error) {
 	all, err := inviteChannelsTx(ctx, tx, r.id)
 	if err != nil {
 		return nil, nil, err
 	}
-	if r.creatorRole == RoleOperator {
+	if r.maker.channels {
 		return all, nil, nil
 	}
 	rows, err := tx.QueryContext(ctx,
@@ -331,6 +377,9 @@ func usableInviteTx(ctx context.Context, tx execer, codeHash string, now time.Ti
 	if subtle.ConstantTimeCompare([]byte(r.codeHash), []byte(codeHash)) != 1 {
 		return inviteRow{}, nil, nil, ErrInviteInvalid
 	}
+	if err := r.loadMakerTx(ctx, tx); err != nil {
+		return inviteRow{}, nil, nil, err
+	}
 	if r.state(now) != InviteStateOpen || !r.makerStillAllowed() {
 		return inviteRow{}, nil, nil, ErrInviteInvalid
 	}
@@ -378,17 +427,18 @@ func (s *Store) InvitesRemaining(ctx context.Context, principalID int64, opts In
 // leaves out, and checks in one IMMEDIATE transaction with the insert that:
 //
 //   - invites are not paused (ErrInvitesPaused);
-//   - the creator is an enabled human who may make this kind: a personal
-//     invite needs an operator or the right to invite, an open link needs an
-//     operator (ErrInviteNotAllowed);
-//   - an invite grants only what its maker holds: a non-operator must be a
-//     member of every channel named and may grant voice only with
-//     voice_allowed; only an operator grants the right to invite, issue #457
-//     (ErrInviteGrantExceedsInviter;
-//     a channel that does not exist is the same answer for a non-operator, and
-//     ErrNotFound for an operator);
-//   - a non-operator has fewer outstanding personal invites than the
-//     allowance (ErrInviteAllowanceExceeded).
+//   - the creator is an enabled human who may make this kind, by what it
+//     holds now (ADR-014 design §7.3): a personal invite needs
+//     make_member_links (an operator, or a member with the right to invite),
+//     an open link needs manage_members (ErrInviteNotAllowed);
+//   - an invite grants only what its maker holds: without manage_channels
+//     the maker must be a member of every channel named; voice needs
+//     voice_allowed; only a holder of manage_members grants the right to
+//     invite, issue #457 (ErrInviteGrantExceedsInviter; a channel that does
+//     not exist is the same answer without manage_channels, and ErrNotFound
+//     with it);
+//   - without manage_members, the creator has fewer outstanding personal
+//     invites than the allowance (ErrInviteAllowanceExceeded).
 //
 // invite_created is audited in the same transaction. The code is not.
 func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64, req schema.CreateInviteRequestV1, opts InviteOptions, now time.Time) (schema.CreateInviteResponseV1, error) {
@@ -419,39 +469,41 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 			return ErrInvitesPaused
 		}
 
-		var (
-			kind, role               string
-			disabledAt               sql.NullInt64
-			creatorMay, creatorVoice bool
-		)
-		switch err := tx.QueryRowContext(ctx,
-			"SELECT kind, role, disabled_at, may_invite, voice_allowed FROM principals WHERE id = ?", creatorID,
-		).Scan(&kind, &role, &disabledAt, &creatorMay, &creatorVoice); {
-		case errors.Is(err, sql.ErrNoRows):
-			return ErrPrincipalNotFound
+		creator, found, err := queryPrincipal(ctx, tx, creatorID)
+		switch {
 		case err != nil:
 			return fmt.Errorf("store: create invite: find creator: %w", err)
+		case !found:
+			return ErrPrincipalNotFound
 		}
-		if disabledAt.Valid || PrincipalKind(kind) != PrincipalHuman {
+		if creator.DisabledAt != nil || creator.Kind != PrincipalHuman {
 			return ErrInviteNotAllowed
 		}
-		isOperator := Role(role) == RoleOperator
+		// What the maker may do is what it holds now, by permission (ADR-014
+		// design §7.2.1, §7.3), never its role: manage_members for an open
+		// link, its allowance and a may_invite grant; manage_channels for a
+		// channel it is not in; make_member_links (with a member's may_invite
+		// brake) for a personal invite.
+		rights, err := makerRightsTx(ctx, tx, creatorID)
+		if err != nil {
+			return fmt.Errorf("store: create invite: %w", err)
+		}
 		switch req.Kind {
 		case schema.InviteKindOpen:
-			if !isOperator {
+			if !rights.members {
 				return fmt.Errorf("%w: only an operator makes an open link", ErrInviteNotAllowed)
 			}
 		default:
-			if !isOperator && !creatorMay {
+			if !rights.links {
 				return fmt.Errorf("%w: you may not invite", ErrInviteNotAllowed)
 			}
 		}
-		if req.Voice && !creatorVoice {
+		if req.Voice && !creator.VoiceAllowed {
 			return fmt.Errorf("%w: you do not hold voice", ErrInviteGrantExceedsInviter)
 		}
-		// Only an operator grants the right to invite (issue #457): a tester
-		// who may invite still cannot pass the right on.
-		if mayInvite && !isOperator {
+		// Only a holder of manage_members grants the right to invite (issue
+		// #457): a tester who may invite still cannot pass the right on.
+		if mayInvite && !rights.members {
 			return fmt.Errorf("%w: only an operator grants the right to invite", ErrInviteGrantExceedsInviter)
 		}
 
@@ -460,7 +512,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 			var id int64
 			switch err := tx.QueryRowContext(ctx, "SELECT id FROM channels WHERE name = ?", name).Scan(&id); {
 			case errors.Is(err, sql.ErrNoRows):
-				if isOperator {
+				if rights.channels {
 					return fmt.Errorf("store: create invite: channel %q: %w", name, ErrNotFound)
 				}
 				// Not told apart from a channel the creator is not in, so
@@ -469,7 +521,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 			case err != nil:
 				return fmt.Errorf("store: create invite: find channel: %w", err)
 			}
-			if !isOperator {
+			if !rights.channels {
 				var one int
 				switch err := tx.QueryRowContext(ctx,
 					"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", id, creatorID).Scan(&one); {
@@ -482,7 +534,9 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 			channelIDs = append(channelIDs, id)
 		}
 
-		if req.Kind == schema.InviteKindPersonal && !isOperator {
+		// The allowance binds anyone without manage_members, a restricted
+		// operator included (ADR-014 design §7.3, N1).
+		if req.Kind == schema.InviteKindPersonal && !rights.members {
 			outstanding, err := outstandingPersonalInvitesTx(ctx, tx, creatorID, now)
 			if err != nil {
 				return fmt.Errorf("store: create invite: %w", err)
@@ -721,10 +775,11 @@ func (s *Store) redeemInvite(ctx context.Context, codeHash, name, record string,
 		}
 
 		voice := r.voice && r.creatorVoice
-		// Only an operator grants the right to invite (issue #457). Checked
-		// again here, against the maker as they are now, so the rule does not
-		// rest on what an invite row says.
-		mayInvite := r.mayInvite && r.creatorRole == RoleOperator
+		// Only a holder of manage_members grants the right to invite (issue
+		// #457, ADR-014 design §7.3). Checked again here, against the maker as
+		// they are now (usableInviteTx loaded r.maker in this transaction), so
+		// the rule does not rest on what an invite row says.
+		mayInvite := r.mayInvite && r.maker.members
 		// A name that clashes with another by case or look-alike
 		// characters is taken (issue #441).
 		keys, err := s.claimNameTx(ctx, tx, name, 0)
@@ -813,7 +868,8 @@ func (s *Store) redeemInvite(ctx context.Context, codeHash, name, record string,
 }
 
 // CloseInvite closes an invite so it can no longer be used; uses already made
-// stand. closerID must be the invite's maker or an operator, both enabled;
+// stand. closerID must be the invite's maker or hold manage_members, both
+// enabled;
 // anyone else gets ErrNotFound, as for an id that does not exist, so ids are
 // not probed. Closing a closed invite succeeds, changes nothing and writes no
 // audit row (changed is false). invite_closed is audited in the same
@@ -830,15 +886,25 @@ func (s *Store) CloseInvite(ctx context.Context, actor string, closerID, inviteI
 		case err != nil:
 			return fmt.Errorf("store: close invite: find: %w", err)
 		}
-		role, _, disabled, err := principalState(ctx, tx, closerID)
+		_, _, disabled, err := principalState(ctx, tx, closerID)
 		switch {
 		case errors.Is(err, ErrPrincipalNotFound):
 			return fmt.Errorf("store: close invite %d: %w", inviteID, ErrNotFound)
 		case err != nil:
 			return err
 		}
-		if disabled || (role != RoleOperator && closerID != r.createdBy) {
+		if disabled {
 			return fmt.Errorf("store: close invite %d: %w", inviteID, ErrNotFound)
+		}
+		// Someone else's invite needs manage_members (ADR-014 design §7.3).
+		if closerID != r.createdBy {
+			ok, err := permittedTx(ctx, tx, closerID, schema.PermManageMembers)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("store: close invite %d: %w", inviteID, ErrNotFound)
+			}
 		}
 		if r.closedAt.Valid {
 			return nil
@@ -1128,10 +1194,10 @@ func (s *Store) SetMayInvite(ctx context.Context, actor string, principalID int6
 			return err
 		}
 		var (
-			kind, role string
-			cur        bool
+			kind string
+			cur  bool
 		)
-		switch err := tx.QueryRowContext(ctx, "SELECT kind, role, may_invite FROM principals WHERE id = ?", principalID).Scan(&kind, &role, &cur); {
+		switch err := tx.QueryRowContext(ctx, "SELECT kind, may_invite FROM principals WHERE id = ?", principalID).Scan(&kind, &cur); {
 		case errors.Is(err, sql.ErrNoRows):
 			return ErrPrincipalNotFound
 		case err != nil:
@@ -1164,9 +1230,15 @@ func (s *Store) SetMayInvite(ctx context.Context, actor string, principalID int6
 			fmt.Sprintf("may_invite=%t", may), now); err != nil {
 			return err
 		}
-		// An operator invites by role, not by this flag, so their invites stand.
-		if may || Role(role) == RoleOperator {
+		if may {
 			return nil
+		}
+		// The flag is a brake on make_member_links for members only (ADR-014
+		// design §5): a principal who would hold the permission without it,
+		// as an operator does by its column, keeps its invites.
+		stands, err := holdsWithoutBrakeTx(ctx, tx, principalID, schema.PermMakeMemberLinks)
+		if err != nil || stands {
+			return err
 		}
 		return closeCreatorInvitesTx(ctx, tx, actor, principalID, schema.InviteKindPersonal, InviteClosePermissionRevoked, now)
 	})

@@ -284,6 +284,49 @@ func permittedTx(ctx context.Context, tx execer, principalID int64, perm schema.
 	return principalHolds(p, d, perm), nil
 }
 
+// principalPermittedTx is permittedTx for a principal already read inside
+// tx: it reads only the document. A caller that has just re-read the actor
+// under the write lock uses it to decide that actor's standing (§7.2.1).
+func principalPermittedTx(ctx context.Context, tx execer, p Principal, perm schema.Permission) (bool, error) {
+	if !perm.Valid() {
+		return false, nil
+	}
+	d, err := readPermissionDocTx(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	return principalHolds(p, d, perm), nil
+}
+
+// holdsWithoutBrakeTx reports whether principalID, were it enabled and
+// visible, would hold perm now even with may_invite = 0: whether that
+// per-person brake, where it binds, would withhold perm (design §5).
+// SetMayInvite asks it of make_member_links when it turns may_invite off,
+// to tell a member, whose personal invites close, from an operator, whom
+// the brake does not bind and whose invites stand. A principal with no row
+// answers false.
+func holdsWithoutBrakeTx(ctx context.Context, tx execer, principalID int64, perm schema.Permission) (bool, error) {
+	p, found, err := queryPrincipal(ctx, tx, principalID)
+	if err != nil || !found {
+		return false, err
+	}
+	p.DisabledAt, p.HiddenAt, p.MayInvite = nil, nil, false
+	return principalPermittedTx(ctx, tx, p, perm)
+}
+
+// PermissionRoleOf is the document column that p's role reads (design §1):
+// operator for an operator, owner or not, and member for anyone else. It
+// names a column; it decides nothing, and an owner holds every permission
+// whatever its column says (principalHolds). A client of it asks
+// Permission.Fixed whether a refusal can be lifted for that role, to word
+// the refusal (design §7.4).
+func PermissionRoleOf(p Principal) schema.PermissionRole {
+	if p.Role == RoleOperator {
+		return schema.PermissionRoleOperator
+	}
+	return schema.PermissionRoleMember
+}
+
 // Permitted reports whether principalID holds perm now (permittedTx), read
 // in one read transaction. A write that a permission gates asks permittedTx
 // again inside its own transaction instead.
@@ -294,6 +337,24 @@ func (s *Store) Permitted(ctx context.Context, principalID int64, perm schema.Pe
 	}
 	defer func() { _ = tx.Rollback() }()
 	return permittedTx(ctx, tx, principalID, perm)
+}
+
+// HeldBy reports which of perms p holds by the document as it is now, in
+// one read of the document and none of the principal: for a reader that has
+// just read p and asks about several permissions at once, as an events
+// socket does for each roster. The answer is in perms' order. It decides
+// reads only; a write a permission gates asks permittedTx in its own
+// transaction.
+func (s *Store) HeldBy(ctx context.Context, p Principal, perms ...schema.Permission) ([]bool, error) {
+	d, err := readPermissionDocTx(ctx, s.db)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]bool, len(perms))
+	for i, perm := range perms {
+		out[i] = principalHolds(p, d, perm)
+	}
+	return out, nil
 }
 
 // effectivePermissionsTx lists what principalID holds now, in catalog
