@@ -31,6 +31,7 @@ function Harness({ onSend }: { readonly onSend: (body: string, audience: Audienc
       remove: (clientId) => { dispatch({ type: 'remove', channel: 'general', clientId }); },
       cancel: () => undefined,
       retry: () => undefined,
+      editing: () => undefined,
     }}>
       <Composer
         channel="general"

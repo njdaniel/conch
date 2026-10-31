@@ -65,6 +65,12 @@ since the upgrade is lost, and everyone signs in again (docs/deploy.md,
 - **Signing in with a password and code counts as recent proof** (#1033).
   For ten minutes after such a sign-in, an operator is not asked to prove
   it again before a sensitive change.
+- **A second whisper to the same people stays a whisper** (#1066). If you
+  started a new whisper, or added an image to one, while your previous
+  whisper to the same people was still being sent, the composer could fall
+  back to the whole channel when the first was accepted, and the next Send
+  went to everyone. A finished send now never changes the audience of a
+  newer draft.
 
 ### Changed
 

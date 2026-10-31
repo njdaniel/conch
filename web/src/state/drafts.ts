@@ -64,6 +64,13 @@ export interface Target {
   // never fall to the whole channel by a key. Only choosing the channel or a
   // net in the To: list ends it; who a whisper goes to can still be changed.
   readonly protected?: boolean;
+  // The draft generation of the composer (issue #1066): the request id of the
+  // send this composer's draft last went out as, for as long as the composer
+  // still holds that same draft, with nothing typed, inserted, attached,
+  // removed or chosen since. Any change to the draft after the send ends it
+  // ('edited', or a choice of audience), so the send's answer can tell its
+  // own draft from a newer one with the same recipients. Never stored.
+  readonly sentAs?: string;
 }
 
 export type Targets = Readonly<Record<string, Target>>;
@@ -75,12 +82,18 @@ export type TargetAction =
   | { readonly type: 'toggle'; readonly channel: string; readonly principal: number }
   // Escape in the picker: back to the net or channel chosen before.
   | { readonly type: 'closePicker'; readonly channel: string }
-  // A post is starting: what was said about the last one goes.
-  | { readonly type: 'posting'; readonly channel: string }
+  // A post is starting: what was said about the last one goes. A send of the
+  // composer's own draft carries its request id; a Retry from a pending line
+  // does not, since it is not the draft the composer holds.
+  | { readonly type: 'posting'; readonly channel: string; readonly requestId?: string }
+  // The composer's draft changed, its text or its images: whatever it holds
+  // now is a newer draft than any send already on its way (issue #1066).
+  | { readonly type: 'edited'; readonly channel: string }
   | { readonly type: 'refused'; readonly channel: string; readonly line: string }
-  // A whisper to `sent` was accepted: back to the whole channel, with the
-  // notice if one is due. Only if that is still the whisper being composed.
-  | { readonly type: 'whispered'; readonly channel: string; readonly sent: readonly number[]; readonly note: string | null }
+  // The whisper sent as `requestId` was accepted: back to the whole channel,
+  // with the notice if one is due, only if the composer still holds the very
+  // draft that was sent (issue #1066). Never matched by recipients.
+  | { readonly type: 'whispered'; readonly channel: string; readonly requestId: string; readonly note: string | null }
   // The channel `from` is now called `to` (issue #728): its choice goes with it.
   | { readonly type: 'renamed'; readonly from: string; readonly to: string }
   // The channel was lost (issue #1027): its choice goes with it.
@@ -101,38 +114,52 @@ export function targetFor(state: Targets, channel: string): Target {
   return state[channel] ?? wholeChannel;
 }
 
+// The rule for the answer to a send (issue #1066): no completion handler ever
+// widens the audience of a draft the composer holds. Success, a refusal, a
+// 401, a Retry and a sign-in that ended may say how the send went, never who
+// the next message goes to. The one change a completion may make is the end
+// of a whisper on its own success ('whispered'), and only while the composer
+// still holds the very draft it was sent as (Target.sentAs, the send's
+// request id): emptied by the send, with nothing changed or chosen since. A
+// newer draft to the same people is not that draft, so it keeps its whisper.
+// Every other action here starts a newer draft, or keeps sentAs as it was.
 export function targetsReducer(state: Targets, action: TargetAction): Targets {
   if (action.type === 'reset') return initialTargets;
   if (action.type === 'renamed') return rekey(state, action.from, action.to);
   if (action.type === 'forget') return without(state, action.channel);
   const current = targetFor(state, action.channel);
   const set = (next: Target): Targets => ({ ...state, [action.channel]: next });
+  // A choice of who the draft goes to makes it a newer draft than any send.
+  const chosen: Target = { ...current, sentAs: undefined };
   switch (action.type) {
     case 'channel':
-      return set({ ...current, net: null, whisper: null, refusal: null, held: false, protected: false });
+      return set({ ...chosen, net: null, whisper: null, refusal: null, held: false, protected: false });
     case 'net':
-      return set({ ...current, net: action.net, whisper: null, refusal: null, held: false, protected: false });
+      return set({ ...chosen, net: action.net, whisper: null, refusal: null, held: false, protected: false });
     case 'whisper':
-      return set({ ...current, whisper: current.whisper ?? [], refusal: null, held: false });
+      return set({ ...chosen, whisper: current.whisper ?? [], refusal: null, held: false });
     case 'toggle': {
-      const chosen = current.whisper ?? [];
-      const next = chosen.includes(action.principal) ? chosen.filter((id) => id !== action.principal) : [...chosen, action.principal];
-      return set({ ...current, whisper: next, refusal: null, held: false });
+      const picked = current.whisper ?? [];
+      const next = picked.includes(action.principal) ? picked.filter((id) => id !== action.principal) : [...picked, action.principal];
+      return set({ ...chosen, whisper: next, refusal: null, held: false });
     }
     case 'closePicker':
       // A held or protected draft stays as it is: closing the picker would
       // leave it addressed to the whole channel, which nobody chose.
       if (current.held === true || current.protected === true) return state;
-      return set({ ...current, whisper: null, refusal: null });
+      return set({ ...chosen, whisper: null, refusal: null });
+    case 'edited':
+      // Once per send, not per key: a draft already newer stays as it is.
+      return current.sentAs === undefined ? state : set(chosen);
     case 'posting':
-      return set({ ...current, refusal: null, note: null });
+      return set(action.requestId === undefined ? { ...current, refusal: null, note: null } : { ...current, refusal: null, note: null, sentAs: action.requestId });
     case 'refused':
       return set({ ...current, refusal: action.line });
     case 'held':
-      return set({ ...current, net: null, whisper: [], refusal: action.line, held: true, protected: true });
+      return set({ ...chosen, net: null, whisper: [], refusal: action.line, held: true, protected: true });
     case 'restore':
       return set({
-        ...current,
+        ...chosen,
         net: action.net,
         whisper: action.whisper === null ? null : [...action.whisper],
         refusal: null,
@@ -140,13 +167,10 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
         protected: true,
       });
     case 'whispered': {
-      // Only if the whisper still chosen is the one that was sent: a second one
-      // being composed while the first was on its way is left as it is.
-      const same =
-        current.whisper !== null &&
-        current.whisper.length === action.sent.length &&
-        action.sent.every((id) => current.whisper?.includes(id) === true);
-      return set(same ? { ...current, net: null, whisper: null, note: action.note, protected: false } : { ...current, note: action.note });
+      // Only the draft this very send took: a newer one, to anyone, is left
+      // as it is, with the notice beside it.
+      const same = current.sentAs === action.requestId && current.whisper !== null;
+      return set(same ? { ...chosen, net: null, whisper: null, note: action.note, protected: false } : { ...current, note: action.note });
     }
   }
 }

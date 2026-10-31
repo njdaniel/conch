@@ -1315,6 +1315,185 @@ describe('composing to a net or a whisper', () => {
     expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to <b>mallory</b>').value).toBe('second');
   });
 
+  // Issue #1066: the answer to a send ends only the draft that send took,
+  // never a newer one to the same people. No answer widens a draft.
+  describe('an answer never widens a newer draft (issue #1066)', () => {
+    const toBot = { kind: 'principals', principal_ids: [3] };
+    const accepted = (body: string, ids: number[]) => json({ message: message(nextId++, body, { author_id: 2, audience: { kind: 'principals', principal_ids: ids } }) }, 201);
+    // held answers each POST only when the test says so, in order.
+    function held() {
+      const answers: ((response: Response) => void)[] = [];
+      server.post = () =>
+        new Promise<Response>((resolve) => {
+          answers.push(resolve);
+        });
+      return async (index: number, response: Response) => {
+        await waitFor(() => {
+          expect(answers.length).toBeGreaterThan(index);
+        });
+        await act(async () => {
+          answers[index]?.(response);
+          await Promise.resolve();
+        });
+      };
+    }
+    const immediately = () => {
+      server.post = (_c, body) => accepted(body, [2, 3]);
+    };
+    function whisperToBot(text: string) {
+      choose('whisper');
+      fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+      type(text, 'Whisper to bot');
+    }
+
+    it('a second whisper to the same person, typed while the first is on its way, goes to that person', async () => {
+      await ready();
+      const answer = held();
+      whisperToBot('a');
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(1);
+      });
+      type('b', 'Whisper to bot');
+      await answer(0, accepted('a', [2, 3]));
+      await screen.findByText('Sent');
+      expect(to().value).toBe('whisper');
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('b');
+      immediately();
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(2);
+      });
+      expect(server.posts[1]).toEqual({ channel: 'general', body: 'b', audience: toBot });
+    });
+
+    it('the same whisper chosen again while the first is on its way keeps its audience', async () => {
+      await ready();
+      const answer = held();
+      whisperToBot('a');
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(1);
+      });
+      choose('channel');
+      whisperToBot('b');
+      await answer(0, accepted('a', [2, 3]));
+      await screen.findByText('Sent');
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('b');
+      immediately();
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(2);
+      });
+      expect(server.posts[1]).toEqual({ channel: 'general', body: 'b', audience: toBot });
+    });
+
+    it('a refused whisper retried after a second one is typed leaves the second its audience', async () => {
+      await ready();
+      server.post = () => json({ code: 'forbidden', message: 'not now' }, 403);
+      whisperToBot('a');
+      send();
+      await screen.findByText('Failed');
+      type('b', 'Whisper to bot');
+      immediately();
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      await screen.findByText('Sent');
+      expect(server.posts[1]).toEqual({ channel: 'general', body: 'a', audience: toBot });
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('b');
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(3);
+      });
+      expect(server.posts[2]).toEqual({ channel: 'general', body: 'b', audience: toBot });
+    });
+
+    it('an unconfirmed whisper whose Retry is answered after a second one is typed leaves the second its audience', async () => {
+      await ready();
+      server.post = () => Promise.reject(new TypeError('connection dropped'));
+      whisperToBot('a');
+      send();
+      await screen.findByText(/^Not confirmed/);
+      const answer = held();
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(2);
+      });
+      type('b', 'Whisper to bot');
+      await answer(0, accepted('a', [2, 3]));
+      await screen.findByText('Sent');
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('b');
+      immediately();
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(3);
+      });
+      expect(server.posts[2]).toEqual({ channel: 'general', body: 'b', audience: toBot });
+    });
+
+    it('a whisper confirmed while a different one is composed leaves that one as it is', async () => {
+      await ready();
+      const answer = held();
+      whisperToBot('a');
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(1);
+      });
+      fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+      fireEvent.click(screen.getByRole('checkbox', { name: '<b>mallory</b>' }));
+      type('b', 'Whisper to <b>mallory</b>');
+      await answer(0, accepted('a', [2, 3]));
+      await screen.findByText('Sent');
+      expect(to().value).toBe('whisper');
+      immediately();
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(2);
+      });
+      expect(server.posts[1]).toEqual({ channel: 'general', body: 'b', audience: { kind: 'principals', principal_ids: [4] } });
+    });
+
+    it('a whisper confirmed after a switch to another channel leaves that channel\'s whisper as it is', async () => {
+      await ready();
+      const answer = held();
+      whisperToBot('a');
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(1);
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+      await screen.findByLabelText('Message #ops');
+      await letIn();
+      choose('whisper');
+      fireEvent.click(await screen.findByRole('checkbox', { name: 'bot [agent]' }));
+      type('b', 'Whisper to bot');
+      await answer(0, accepted('a', [2, 3]));
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(1);
+      });
+      expect(to().value).toBe('whisper');
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('b');
+      immediately();
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(2);
+      });
+      expect(server.posts[1]).toEqual({ channel: 'ops', body: 'b', audience: toBot });
+    });
+
+    it('a whisper confirmed with nothing typed since still ends, as before', async () => {
+      await ready();
+      const answer = held();
+      whisperToBot('a');
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(1);
+      });
+      await answer(0, accepted('a', [2, 3]));
+      await screen.findByText('Sent');
+      expect(to().value).toBe('channel');
+    });
+  });
+
   it('does not widen a net post to the channel while the nets are not known', async () => {
     server.nets = netsOf({ id: 5, name: 'alpha' });
     await connect(await openChat());

@@ -66,6 +66,8 @@ interface Server {
   post: (channel: string, request: SentMessage) => Response | Promise<Response>;
   whoami: () => Response;
   channels: typeof channels;
+  // The channel's members as the server lists them; ada alone by default.
+  members: { principal_id: number; created_at: string; name: string; kind: string }[];
   nextFile: number;
   nextMessage: number;
 }
@@ -83,6 +85,7 @@ function fileMetadata(call: UploadCall, id: number) {
 function install() {
   server = {
     history: { general: [], ops: [] }, uploads: [], posts: [], channels,
+    members: [{ principal_id: 2, created_at: at, name: 'ada', kind: 'human' }],
     nextFile: 70, nextMessage: 100,
     upload: (call) => json(fileMetadata(call, server.nextFile++), 201),
     post: (channel, request) => {
@@ -118,7 +121,7 @@ function install() {
     const route = /^\/v[12]\/channels\/([^/]+)\/(members|nets|messages|files)$/.exec(path);
     if (route?.[1] === undefined) return Promise.resolve(json({}, 404));
     const channel = decodeURIComponent(route[1]);
-    if (route[2] === 'members') return Promise.resolve(json({ members: [{ principal_id: 2, created_at: at, name: 'ada', kind: 'human' }] }));
+    if (route[2] === 'members') return Promise.resolve(json({ members: server.members }));
     if (route[2] === 'nets') return Promise.resolve(json({ nets: [{ id: 5, channel_id: 7, name: 'alpha', members: [{ principal_id: 2, role: 'member' }], created_at: at }] }));
     if (route[2] === 'files') {
       const call: UploadCall = {
@@ -546,5 +549,51 @@ describe('Composer and App attachment sending', () => {
     expect(server.uploads).toHaveLength(1);
     expect(server.posts).toHaveLength(3);
     expect(server.posts[2]?.request).toEqual({ body: 'only.png', payload: { schema: 'conch.file_attachment.v1', data: { file_ids: [70] } } });
+  });
+});
+
+// Issue #1066: an image chosen, pasted or dropped for the next whisper makes
+// it a newer draft at once, so the answer to the whisper sent before it can
+// never end its audience and send the image to the whole channel.
+describe('images for a newer whisper while the last is on its way (issue #1066)', () => {
+  const toBot = { kind: 'principals', principal_ids: [3] };
+  const to = () => screen.getByLabelText<HTMLSelectElement>('To:');
+  const ways: [string, (file: File) => void][] = [
+    ['chosen', (file) => { choose(file); }],
+    ['pasted', (file) => { fireEvent.paste(screen.getByLabelText('Whisper to bot'), { clipboardData: { files: [file] } }); }],
+    ['dropped', (file) => { fireEvent.drop(document.querySelector('form.composer') as HTMLFormElement, { dataTransfer: { files: [file], types: ['Files'] } }); }],
+  ];
+  it.each(ways)('an image %s keeps the whisper it was added to', async (_how, add) => {
+    server.members = [
+      { principal_id: 2, created_at: at, name: 'ada', kind: 'human' },
+      { principal_id: 3, created_at: at, name: 'bot', kind: 'agent' },
+    ];
+    await openChat();
+    await screen.findByRole('option', { name: 'net alpha' });
+    fireEvent.change(to(), { target: { value: 'whisper' } });
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'bot [agent]' }));
+    fireEvent.change(screen.getByLabelText('Whisper to bot'), { target: { value: 'a' } });
+    let answer: (response: Response) => void = () => undefined;
+    const accept = server.post;
+    server.post = () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve;
+      });
+    clickSend();
+    await waitFor(() => { expect(server.posts).toHaveLength(1); });
+    // Nothing typed: only an image for the next whisper.
+    add(image('next.png'));
+    await screen.findByText('next.png');
+    await act(async () => {
+      answer(json({ message: storedMessage(server.nextMessage++, { body: 'a', audience: { kind: 'principals', principal_ids: [2, 3] } }) }, 201));
+      await Promise.resolve();
+    });
+    await screen.findByText('Sent');
+    expect(to().value).toBe('whisper');
+    expect(screen.getByText('next.png')).toBeDefined();
+    server.post = accept;
+    clickSend();
+    await waitFor(() => { expect(server.posts).toHaveLength(2); });
+    expect(server.posts[1]?.request).toEqual({ body: 'next.png', audience: toBot, payload: { schema: 'conch.file_attachment.v1', data: { file_ids: [70] } } });
   });
 });
