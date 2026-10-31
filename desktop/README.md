@@ -12,7 +12,9 @@ does not do yet:** live feeds (#943, so a view is not live until then), saved
 profiles and persistence (#944, #945), attachments, clipboard, notifications and
 links (#947, #773), the operations whose answers hold a credential the renderer
 may not see (re-authentication, password change, invite and device-link codes),
-voice (#771), tray, installer. Later children of #770 add those.
+voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
+`main/voice/`, but nothing starts it yet), tray, installer. Later children of
+#770 add those.
 
 ## Layout
 
@@ -29,6 +31,10 @@ voice (#771), tray, installer. Later children of #770 add those.
 | `main/api/service.ts` | what each bridge function does: the sign-in sequence, sign-out, restore |
 | `main/api/trust.ts` | adds the system trust store to Node's roots; classifies a certificate failure |
 | `main/ipc.ts` | the one registry of IPC handlers and the caller check every invocation passes |
+| `main/voice/protocol.ts` | the voice-control protocol as the owner speaks it: Go's framing and event rules over the types generated into `web/src/schema`, version negotiation, the stream tracker (#948) |
+| `main/voice/endpoint.ts` | the helper's Linux events endpoint: the verified `$XDG_RUNTIME_DIR`, `conch/<profile-id>` (0700), the stale sweep, the `sun_path` budget, the socket and the attach (#948) |
+| `main/voice/spawn.ts` | the bundled `conch-voice` and its trusted-path checks, the environment built from empty by an allowlist, the spawn options (#948) |
+| `main/voice/supervisor.ts` | one helper per instance: start, commands and acks, the stop escalation and the reap, helper loss as one typed state (#948) |
 | `main/document.ts` | which frame shows the current document (the document generation) |
 | `main/app.ts`, `main/main.ts` | startup |
 | `preload/bridge.ts`, `preload/index.ts` | `window.conchDesktop`: a frozen object whose keys are exactly the functions of `web/src/platform/desktop/bridge.ts`; the page-side copy is not frozen, so nothing may rely on that |
@@ -36,6 +42,8 @@ voice (#771), tray, installer. Later children of #770 add those.
 | `build/manifest.ts` | writes `out/ui-manifest.json` (path, SHA-256, content type) |
 | `build/electron-builder.config.json` | the Linux `dir` target, asar and the fuses |
 | `tests/unit/` | Vitest, no Electron runtime, no display, no network |
+| `tests/fixtures/fake-helper.ts` | a stand-in `conch-voice` that replays `pkg/schema/testdata/voice-control*/` transcripts |
+| `tests/integration/` | the supervisor with the real `conch-voice` and a stub conchd (`make desktop-voice-it`) |
 | `tests/smoke/` | the packaged smoke test (Playwright over CDP) |
 
 Generated, git-ignored: `node_modules/`, `out/` (bundles, the web client, the
