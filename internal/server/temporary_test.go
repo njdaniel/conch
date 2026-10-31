@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -281,6 +282,9 @@ func TestTemporaryReauth(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newModeFixture(t, tt.mode)
 			tok, secret := rootSession(t, f, tt.mode, tt.enrolled)
+			// A sign-in with a code is a proof of its own (issue #1033):
+			// it is let run out, so the re-authentication is what is tested.
+			f.advance(schema.RecentAuthLifetimeSeconds * time.Second)
 			makeCredential := func() int {
 				return f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/credentials", f.root.ID), tok,
 					inviteJSON(t, schema.CreateCredentialRequestV1{Label: "cli"}), "").Code

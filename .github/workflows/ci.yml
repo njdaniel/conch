@@ -160,6 +160,11 @@ jobs:
       - name: desktop check
         run: make desktop-check
 
+      # The voice supervisor against the real conch-voice (#948): the binary
+      # rust check's cargo test built, a stub conchd on loopback, no audio.
+      - name: desktop voice-helper integration
+        run: CONCH_VOICE_BIN="$PWD/voice/target/debug/conch-voice" make desktop-voice-it
+
   desktop-smoke:
     # The packaged desktop shell (#940): make desktop-build fetches the pinned
     # Electron (scripts/desktop-electron.sh checks its SHA-256 twice), builds

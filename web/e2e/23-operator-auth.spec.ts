@@ -7,13 +7,20 @@
 // key behind Reveal, a code to confirm), then a password that alone signs
 // nobody in, a wrong code, a replayed code, a challenge that runs out of
 // time, the recent proof an action asks for over a form that keeps what was
-// chosen, and a session that ends under a draft, which is kept for the same
-// operator signing in again. The authenticator is computed here (RFC 6238,
-// with Web Crypto), from the key the page reveals.
+// chosen, an invite made at once after a sign-in, which counts as that
+// proof (issue #1033), and a session that ends under a draft, which is kept
+// for the same operator signing in again. The authenticator is computed
+// here (RFC 6238, with Web Crypto), from the key the page reveals.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Page } from '@playwright/test';
+import {
+  createCredentialResponseV1,
+  listOwnCredentialsResponseV1,
+  type CreateCredentialResponseV1,
+  type ListOwnCredentialsResponseV1,
+} from '../src/schema/credential';
 import { joinSettingsResponseV1 } from '../src/schema/guest';
 import { expect, statusLine, test } from './fixtures';
 import { loadWorld, repoRoot, safePath, type World } from './world';
@@ -262,8 +269,20 @@ test('G7a a replayed code is refused, and an action that needs a recent proof as
   await expect(statusLine(page)).toHaveCount(0);
   await codeStep(page, await freshCode());
   await expect(statusLine(page)).toContainText(operator);
-  const token = (await tabToken(page)) ?? '';
+  const signedIn = (await tabToken(page)) ?? '';
+  secrets.push(signedIn);
+
+  // The sign-in is a proof of its own for ten minutes (issue #1033), on the
+  // session it made and no other: the session rotated from it has none. The
+  // tab carries on with that one, so the proof is asked for.
+  const token = await rotated(origin, signedIn);
   secrets.push(token);
+  await page.evaluate((t) => {
+    window.sessionStorage.setItem('conch.web.token', t);
+  }, token);
+  await page.reload();
+  await expect(statusLine(page)).toContainText(operator);
+  expect(await tabToken(page)).toBe(token);
 
   // Joining: pause the address (guests are removed, issue #1005, so the
   // change that asks for the proof is the pause). Save asks for the proof,
@@ -297,6 +316,56 @@ test('G7a a replayed code is refused, and an action that needs a recent proof as
   await region.getByRole('button', { name: 'Save joining' }).click();
   await expect.poll(() => joiningPaused(origin, token)).toBe(false);
   await expect(dialog).toHaveCount(0);
+});
+
+// rotated replaces the session token with the one rotated from it, which
+// holds no recent proof, and returns that one.
+async function rotated(origin: string, token: string): Promise<string> {
+  const headers = { Authorization: `Bearer ${token}` };
+  const mine = await fetch(`${origin}/v1/credentials/mine`, { headers });
+  expect(mine.status).toBe(200);
+  const list: unknown = await mine.json();
+  expect(listOwnCredentialsResponseV1(list)).toEqual([]);
+  const current = (list as ListOwnCredentialsResponseV1).credentials.find((c) => c.current === true);
+  if (current === undefined) throw new Error('the session is not among the operator’s credentials');
+  const reply = await fetch(`${origin}/v1/credentials/${String(current.id)}/rotate`, { method: 'POST', headers });
+  expect(reply.status).toBe(201);
+  // A rotation answers the shape a new credential does (pkg/schema
+  // RotateCredentialResponseV1 is CreateCredentialResponseV1's).
+  const body: unknown = await reply.json();
+  expect(createCredentialResponseV1(body)).toEqual([]);
+  return (body as CreateCredentialResponseV1).token;
+}
+
+// The first invite straight after a sign-in with both factors (browser UX
+// audit 3 F8, issue #1033): the sign-in is the recent proof, so the invite
+// is made with no "Confirm it is you" over it.
+test('G7a a sign-in with a code is the recent proof: an invite made at once asks for nothing', async ({ meet, secrets }) => {
+  test.setTimeout(150_000);
+  const { appUrl } = theServer();
+  secrets.push(password);
+  const { page } = await meet();
+  await page.goto(appUrl);
+  await signInFully(page, secrets);
+  // A channel to invite to (making one is outside the class).
+  const channel = `g7a-invite-${String(Date.now())}`;
+  const nav = page.getByRole('navigation', { name: 'Channels' });
+  await nav.getByRole('button', { name: 'New channel' }).click();
+  const form = page.getByRole('form', { name: 'New channel' });
+  await form.getByLabel('Channel name').fill(channel);
+  await form.getByRole('button', { name: 'Create channel' }).click();
+  await expect(page.getByRole('heading', { name: channel, exact: true })).toBeVisible();
+
+  const panel = page.getByRole('region', { name: 'Invites' });
+  await panel.getByRole('button', { name: 'Invite someone' }).click();
+  await panel.getByRole('checkbox', { name: `#${channel}` }).check();
+  const made = page.waitForResponse((r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/v1/invites');
+  await panel.getByRole('button', { name: 'Make invite' }).click();
+  const reply = await made;
+  expect(reply.status()).toBeGreaterThanOrEqual(200);
+  expect(reply.status()).toBeLessThan(300);
+  await expect(panel.getByRole('textbox', { name: 'Invite link' })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Confirm it is you' })).toHaveCount(0);
 });
 
 async function joiningPaused(origin: string, token: string): Promise<boolean> {
