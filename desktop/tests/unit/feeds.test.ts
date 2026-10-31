@@ -24,7 +24,7 @@ import {
   type Connect,
   type SocketHandlers,
 } from '../../main/api/feeds.ts';
-import { agentConstructor, createNodeConnect } from '../../main/api/socket.ts';
+import { agentConstructor, connector, createNodeConnect } from '../../main/api/socket.ts';
 import { Session } from '../../main/api/session.ts';
 import { makePki, type Pki } from './support.ts';
 import type { FeedEvent } from '../../shared/bridge-names.ts';
@@ -657,8 +657,8 @@ describe('Node’s WebSocket, as main opens it', () => {
   describe('over TLS', () => {
     const child = resolve(import.meta.dirname, 'socket-child.ts');
 
-    async function overTls(env: (pki: Pki) => Record<string, string>): Promise<{ said: string; upgrades: string[] }> {
-      const pki = makePki();
+    async function overTls(env: (pki: Pki) => Record<string, string>, names?: string, host = 'localhost'): Promise<{ said: string; upgrades: string[] }> {
+      const pki = makePki(names);
       const upgrades: string[] = [];
       const https = createHttpsServer({ key: pki.keyPem, cert: pki.certPem }, (_req, res) => {
         res.writeHead(200).end('{}');
@@ -674,7 +674,7 @@ describe('Node’s WebSocket, as main opens it', () => {
           done();
         });
       });
-      const origin = `https://localhost:${String((https.address() as AddressInfo).port)}`;
+      const origin = `https://${host}:${String((https.address() as AddressInfo).port)}`;
       try {
         const said = await new Promise<string>((done) => {
           execFile(process.execPath, [child, origin], { env: { PATH: process.env['PATH'] ?? '', ...env(pki) }, encoding: 'utf8', timeout: 30_000 }, (_error, stdout) => {
@@ -700,8 +700,35 @@ describe('Node’s WebSocket, as main opens it', () => {
       expect(await overTls(() => ({}))).toEqual({ said: 'agent close 1006', upgrades: [] });
     });
 
+    // A certificate from a trusted CA for another name is refused, by name
+    // and by address alike: Node's hostname check is in force.
+    it.each(['localhost', '127.0.0.1'])('refuses a trusted CA’s certificate for another name, reached as %s', async (host) => {
+      expect(await overTls((pki) => ({ NODE_EXTRA_CA_CERTS: pki.caPath }), 'DNS:other.example', host)).toEqual({ said: 'agent close 1006', upgrades: [] });
+    });
+
     it('trusts a private CA installed the documented way, and sends the upgrade there', async () => {
       expect(await overTls((pki) => ({ NODE_EXTRA_CA_CERTS: pki.caPath }))).toEqual({ said: `agent frame ${HEARTBEAT}`, upgrades: ['/v2/ws'] });
     });
+  });
+});
+
+describe('the connection the feed socket makes', () => {
+  it.each([
+    ['http:', 'example.org'],
+    ['http:', '10.0.0.1'],
+    ['http:', '[2001:db8::1]'],
+    ['ws:', 'localhost'],
+    ['ftp:', 'localhost'],
+    ['', 'localhost'],
+  ])('refuses %s to %s: TLS, or plain text to this machine only', async (protocol, hostname) => {
+    let made = 0;
+    const answer = await new Promise<{ error: Error | null; socket: unknown }>((done) => {
+      connector(() => made++)({ protocol, hostname, port: '80' }, (error, socket) => {
+        done({ error, socket });
+      });
+    });
+    expect(answer.error).toBeInstanceOf(Error);
+    expect(answer.socket).toBeNull();
+    expect(made).toBe(0);
   });
 });

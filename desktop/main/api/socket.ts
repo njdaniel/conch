@@ -25,6 +25,8 @@
 import { isIP, connect as netConnect, type Socket } from 'node:net';
 import { connect as tlsConnect } from 'node:tls';
 
+import { loopback } from './origin.ts';
+
 export const MAX_FRAME_BYTES = 1024 * 1024;
 export const CONNECT_TIMEOUT_MS = 30_000;
 
@@ -72,10 +74,17 @@ export function agentConstructor(): AgentConstructor | null {
   return typeof ctor === 'function' && ctor.name === 'Agent' ? (ctor as AgentConstructor) : null;
 }
 
-// connector makes the connection undici asks for, and gives it to made.
-function connector(made: (socket: Socket) => void): Connector {
+// connector makes the connection undici asks for, and gives it to made: TLS
+// for https:, plain TCP for http: to a loopback host only (the address rule of
+// ./origin.ts), and nothing at all for anything else. The address was checked
+// when it was set; this holds if that check is ever loosened.
+export function connector(made: (socket: Socket) => void): Connector {
   return (options, callback) => {
     const secure = options.protocol === 'https:';
+    if (!secure && !(options.protocol === 'http:' && loopback(options.hostname))) {
+      callback(new Error('a feed connects with TLS, or in plain text to this machine only'), null);
+      return;
+    }
     const host = options.hostname.replace(/^\[(.*)\]$/u, '$1');
     const port = Number(options.port) || (secure ? 443 : 80);
     const servername = options.servername ?? (isIP(host) === 0 ? host : undefined);
