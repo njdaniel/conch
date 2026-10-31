@@ -162,7 +162,7 @@ class Run {
   readonly tracker = new Tracker();
   readonly splitter = new LineSplitter();
   readonly waiters = new Map<number, Waiter>();
-  readonly stderr: string[] = [];
+  readonly stderr: StderrTail;
   child: ChildProcessWithoutNullStreams | null = null;
   listening: Listening | null = null;
   socket: Socket | null = null;
@@ -190,6 +190,7 @@ class Run {
     readonly generation: number,
     readonly secrets: readonly string[],
   ) {
+    this.stderr = new StderrTail(secrets);
     this.reaped = new Promise((resolve) => {
       this.markReaped = resolve;
     });
@@ -223,6 +224,54 @@ function printable(line: string, secrets: readonly string[]): string {
   return out.length > STDERR_LINE_BYTES ? `${out.slice(0, STDERR_LINE_BYTES)}…` : out;
 }
 
+// The longest partial line held while waiting for its line feed.
+const STDERR_PARTIAL_MAX = STDERR_LINE_BYTES * 4;
+const STDERR_TOO_LONG = '<line too long>';
+
+// StderrTail keeps the last lines of the helper's standard error, redacted,
+// printable and bounded. A line is redacted whole or not kept at all: one
+// that passes STDERR_PARTIAL_MAX before its line feed is dropped, with a
+// fixed marker in its place, and the rest of it is skipped up to its line
+// feed (as LineSplitter does). A fragment cut from a line is never kept,
+// since a secret straddling the cut would survive redaction in part.
+export class StderrTail {
+  private partial = '';
+  private skipping = false;
+  readonly lines: string[] = [];
+
+  constructor(private readonly secrets: readonly string[]) {}
+
+  private keep(line: string): void {
+    this.lines.push(line);
+    if (this.lines.length > STDERR_LINES) this.lines.shift();
+  }
+
+  push(chunk: string): void {
+    let rest = chunk;
+    while (rest !== '') {
+      const lf = rest.indexOf('\n');
+      const piece = lf < 0 ? rest : rest.slice(0, lf);
+      rest = lf < 0 ? '' : rest.slice(lf + 1);
+      if (this.skipping) {
+        if (lf >= 0) this.skipping = false;
+        continue;
+      }
+      if (this.partial.length + piece.length > STDERR_PARTIAL_MAX) {
+        this.partial = '';
+        this.skipping = lf < 0;
+        this.keep(STDERR_TOO_LONG);
+        continue;
+      }
+      if (lf < 0) {
+        this.partial += piece;
+      } else {
+        this.keep(printable(this.partial + piece, this.secrets));
+        this.partial = '';
+      }
+    }
+  }
+}
+
 export class Supervisor {
   private current: Run | null = null;
   private generation = 0;
@@ -248,7 +297,7 @@ export class Supervisor {
 
   // diagnostics is the helper's recent standard error, redacted.
   diagnostics(): readonly string[] {
-    return this.current === null ? [] : [...this.current.stderr];
+    return this.current === null ? [] : [...this.current.stderr.lines];
   }
 
   private set(next: VoiceState): void {
@@ -449,24 +498,19 @@ export class Supervisor {
     // Standard output is libwebrtc's, never the protocol: drained and
     // dropped. Standard error is kept, redacted and bounded.
     child.stdout.resume();
-    let partial = '';
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', (chunk: string) => {
-      const lines = (partial + chunk).split('\n');
-      partial = lines.pop() ?? '';
-      if (partial.length > STDERR_LINE_BYTES * 4) partial = partial.slice(-STDERR_LINE_BYTES * 4);
-      for (const line of lines) {
-        run.stderr.push(printable(line, run.secrets));
-        if (run.stderr.length > STDERR_LINES) run.stderr.shift();
-      }
+      run.stderr.push(chunk);
     });
     child.stdin.on('error', () => {
       if (!run.stopping) this.lose(run, 'write-failed');
     });
     child.on('error', () => {
       // A spawn that failed (the file went between the check and the exec)
-      // has no pid and no exit event.
-      if (child.pid === undefined && run.outcome === null) run.outcome = { status: 'failed', generation: run.generation, reason: 'spawn-failed' };
+      // has no pid and no exit event. Any other error (a kill() that failed,
+      // say) leaves a live process, which only its exit event reaps.
+      if (child.pid !== undefined) return;
+      if (run.outcome === null) run.outcome = { status: 'failed', generation: run.generation, reason: 'spawn-failed' };
       if (!run.exited) this.exitedRun(run, null, null);
     });
     child.once('exit', (code, signal) => {

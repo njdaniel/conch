@@ -103,11 +103,43 @@ export async function findHelper(resources: string, deps: FindDeps = {}): Promis
     throw new HelperError('untrusted', 'the voice helper cannot be resolved');
   }
   if (!real.startsWith(realResources + sep)) throw new HelperError('untrusted', "the voice helper is not inside the app's resources");
-  const dir = await lstat(dirname(real));
-  if (!dir.isDirectory() || !safeOwner(dir.uid, own) || (dir.mode & 0o022) !== 0) {
-    throw new HelperError('untrusted', 'the voice helper is in a directory other users can change');
-  }
+  await safeAncestors(dirname(real), own);
   return real;
+}
+
+// safeAncestors checks every directory from dir up to /: each must be a
+// directory owned by the user or root, and either closed to writes by group
+// and others, or sticky and owned by root. Otherwise another user could
+// rename a directory on the way and put another tree, or another
+// conch-voice, where the checked one was between the check and the spawn.
+//
+// How this differs from internal/cli/voicehelper/find.go's trusted(): that
+// walks the configured path one name at a time, following each link itself
+// and checking every directory a link sits in or leads to, with no
+// exception for sticky directories. Here the path is resolved by realpath
+// first and the chain of real directories is walked; what is spawned is that
+// real path, so a link on the way to it cannot be swapped afterwards to
+// change what runs. And a root-owned sticky directory (/tmp, where an
+// unpacked build or a test may live) is accepted: in it, other users may add
+// entries but cannot rename or remove ours (unlink(2), "sticky bit").
+async function safeAncestors(dir: string, own: number): Promise<void> {
+  let at = dir;
+  for (;;) {
+    let st;
+    try {
+      st = await lstat(at);
+    } catch {
+      throw new HelperError('untrusted', 'a directory above the voice helper cannot be read');
+    }
+    const closed = (st.mode & 0o022) === 0;
+    const rootSticky = (st.mode & 0o1000) !== 0 && st.uid === 0;
+    if (!st.isDirectory() || !safeOwner(st.uid, own) || !(closed || rootSticky)) {
+      throw new HelperError('untrusted', 'the voice helper is under a directory other users can change');
+    }
+    const up = dirname(at);
+    if (up === at) return;
+    at = up;
+  }
 }
 
 export interface HelperEnvInput {

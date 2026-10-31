@@ -3,9 +3,9 @@
 // directory whose conch-voice runs tests/fixtures/fake-helper.ts; the
 // fixtures of pkg/schema/testdata/voice-control*/; and the reader of what
 // the fake helper reported.
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 import type { Scenario } from '../fixtures/fake-helper.ts';
 
@@ -25,6 +25,25 @@ export function readFixture<T>(path: string): T {
 // kind: a value no real server would issue, to be found nowhere it must not be.
 export const FAKE_TOKEN = 'conch_FAKE_login_token_do_not_print';
 
+// scratchBase is where a scratch directory goes: the system's temporary
+// directory, if every directory above it is one the helper check accepts
+// (owned by the user or root, closed to group and others, or sticky and
+// root's), else /tmp. A TMPDIR under a group-writable home would otherwise
+// make every fake helper untrusted.
+export function scratchBase(): string {
+  const own = process.getuid?.() ?? -1;
+  const ok = (dir: string): boolean => {
+    for (let at = realpathSync(dir); ; at = dirname(at)) {
+      const st = lstatSync(at);
+      const closed = (st.mode & 0o022) === 0;
+      const rootSticky = (st.mode & 0o1000) !== 0 && st.uid === 0;
+      if (!st.isDirectory() || !(st.uid === own || st.uid === 0) || !(closed || rootSticky)) return false;
+      if (dirname(at) === at) return true;
+    }
+  };
+  return ok(tmpdir()) ? realpathSync(tmpdir()) : '/tmp';
+}
+
 export interface Scratch {
   readonly root: string;
   readonly run: string;
@@ -38,7 +57,7 @@ export interface Scratch {
 }
 
 export function scratch(): Scratch {
-  const root = mkdtempSync(join(tmpdir(), 'conch-voice-'));
+  const root = mkdtempSync(join(scratchBase(), 'conch-voice-'));
   const run = join(root, 'run');
   const config = join(root, 'config');
   const resources = join(root, 'resources');

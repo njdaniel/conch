@@ -1,6 +1,6 @@
 // Which conch-voice may be run, the environment it gets and how it is
 // spawned (issue #948; linux-desktop.md §4.1, §5.3).
-import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -71,6 +71,35 @@ describe('the bundled executable', () => {
 
   it('a relative resources path is refused', async () => {
     expect(await refusal(findHelper('resources'))).toBe('untrusted');
+  });
+
+  it('a group-writable directory anywhere above it is refused', async () => {
+    install();
+    chmodSync(s.root, 0o775);
+    expect(await refusal(findHelper(s.resources))).toBe('untrusted');
+  });
+
+  it('a sticky directory above it that is not root-owned is refused', async () => {
+    install();
+    chmodSync(s.root, 0o1777);
+    expect(await refusal(findHelper(s.resources))).toBe('untrusted');
+  });
+
+  it('a root-owned sticky directory above it (/tmp) is accepted', async () => {
+    const tmp = lstatSync('/tmp');
+    expect(tmp.uid === 0 && (tmp.mode & 0o1002) === 0o1002, '/tmp is root-owned, sticky and world-writable').toBe(true);
+    const base = mkdtempSync('/tmp/conch-voice-sticky-');
+    try {
+      const resources = join(base, 'resources');
+      mkdirSync(resources, { mode: 0o755 });
+      chmodSync(resources, 0o755);
+      const path = join(resources, HELPER_NAME);
+      writeFileSync(path, '#!/bin/sh\nexit 0\n');
+      chmodSync(path, 0o755);
+      expect(await findHelper(resources)).toBe(path);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it('a resources directory others can write is refused', async () => {

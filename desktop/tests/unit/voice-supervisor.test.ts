@@ -5,8 +5,10 @@
 // no real helper, no Electron.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { PASSED_THROUGH } from '../../main/voice/spawn.ts';
-import { Supervisor, type StartRequest, type Timings, type VoiceState } from '../../main/voice/supervisor.ts';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+
+import { PASSED_THROUGH, defaultSpawn } from '../../main/voice/spawn.ts';
+import { StderrTail, Supervisor, type StartRequest, type Timings, type VoiceState } from '../../main/voice/supervisor.ts';
 import { FAKE_TOKEN, fixture, ownerLines, readFixture, scratch, until, type Scratch } from './voice-support.ts';
 
 let s: Scratch;
@@ -313,5 +315,62 @@ describe('helper loss is one state, and nothing restarts the helper', () => {
     await v.start(request);
     await until(() => v.state.status === 'lost', 5000, 'the loss');
     expect(await v.setMute(true)).toEqual({ ok: false, error: 'not-running' });
+  });
+});
+
+describe('a process error', () => {
+  it("an 'error' from a live helper (a failed kill, say) does not mark it reaped", async () => {
+    s.helper({ transcript: fixture('voice-control-v2/transcript-negotiation-v2-owner.json'), stopAt: 6 });
+    const children: ChildProcessWithoutNullStreams[] = [];
+    sup = new Supervisor({
+      resources: s.resources,
+      env: { HOME: s.root, XDG_RUNTIME_DIR: s.run },
+      log: (line) => logs.push({ at: Date.now(), line }),
+      spawn: (command, args, options) => {
+        const child = defaultSpawn(command, args, options);
+        children.push(child);
+        return child;
+      },
+    });
+    expect((await sup.start(request)).status).toBe('running');
+    children[0]?.emit('error', new Error('kill failed'));
+    await new Promise((r) => setTimeout(r, 200));
+    expect(sup.state.status).toBe('running');
+    expect(logs.some((l) => l.line.includes('exited'))).toBe(false);
+    await sup.stop();
+    expect(logs.some((l) => l.line === 'voice: helper 1 reaped')).toBe(true);
+  });
+});
+
+describe("the helper's standard error", () => {
+  // Every 8-character piece of the secret: none may survive, not even a tail.
+  function pieces(secret: string): string[] {
+    const out: string[] = [];
+    for (let i = 0; i + 8 <= secret.length; i++) out.push(secret.slice(i, i + 8));
+    return out;
+  }
+
+  it.each([0, 1, 20, FAKE_TOKEN.length - 1, FAKE_TOKEN.length])(
+    'a token across the line cap (the cap %i characters into it) never appears, not even in part',
+    (into) => {
+      const tail = new StderrTail([FAKE_TOKEN]);
+      const head = `error: auth failed token=${FAKE_TOKEN}`;
+      const tokenAt = head.length - FAKE_TOKEN.length;
+      // A partial line just long enough that keeping its last 2048
+      // characters would cut `into` characters into the token.
+      const length = tokenAt + into + 2048;
+      tail.push(head + 'x'.repeat(length - head.length));
+      tail.push('\nnext line\n');
+      const kept = tail.lines.join('\n');
+      for (const p of pieces(FAKE_TOKEN)) expect(kept).not.toContain(p);
+      expect(tail.lines).toEqual(['<line too long>', 'next line']);
+    },
+  );
+
+  it('a token split across chunks of one ordinary line is still redacted', () => {
+    const tail = new StderrTail([FAKE_TOKEN]);
+    tail.push(`token=${FAKE_TOKEN.slice(0, 10)}`);
+    tail.push(`${FAKE_TOKEN.slice(10)} done\n`);
+    expect(tail.lines).toEqual(['token=<redacted> done']);
   });
 });
