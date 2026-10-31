@@ -131,6 +131,9 @@ export type ChatAction =
   // The channel held under `from` is now called `to` (issue #728): what is
   // held moves with it, history, pending sends and all.
   | { readonly type: 'renamed'; readonly from: string; readonly to: string }
+  // The channel held under this name was lost (issue #1027): nothing of it is
+  // kept, so a later channel given the same name starts empty.
+  | { readonly type: 'forget'; readonly channel: string }
   // Pending sends kept across an expired session return for the same principal.
   | { readonly type: 'restored'; readonly pending: Readonly<Record<string, readonly PendingSend[]>> }
   | { readonly type: 'reset' };
@@ -344,6 +347,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return known(state, action.channel, (c) => ({ ...c, older: 'error' }));
     case 'renamed':
       return { channels: rekey(state.channels, action.from, action.to) };
+    case 'forget':
+      return Object.hasOwn(state.channels, action.channel) ? { channels: without(state.channels, action.channel) } : state;
     case 'restored':
       return Object.entries(action.pending).reduce(
         (restored, [channel, pending]) =>
@@ -357,6 +362,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'reset':
       return initialChat;
   }
+}
+
+// without is held less what is kept under one channel name (issue #1027).
+export function without<T>(held: Readonly<Record<string, T>>, name: string): Readonly<Record<string, T>> {
+  if (!Object.hasOwn(held, name)) return held;
+  const next: Record<string, T> = {};
+  for (const [key, value] of Object.entries(held)) if (key !== name) next[key] = value;
+  return next;
 }
 
 // rekey moves what is held under one channel name to another (issue #728).

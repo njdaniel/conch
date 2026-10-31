@@ -427,6 +427,10 @@ describe('in the lobby', () => {
     t.client.join('general', { watchOnly: true });
     await act(settle);
     t.seen(presence(8, true));
+    // On a phone Watch is in the Voice view: the strip under Chat is four
+    // controls (issue #1028).
+    const nav = (name: string) => within(screen.getByRole('navigation', { name: 'Main navigation' })).getByRole('button', { name });
+    fireEvent.click(nav('Voice'));
     fireEvent.click(await within(voice()).findByRole('button', { name: 'Watch' }));
     const view = await screen.findByRole('region', { name: 'Shared screen' });
     expect(view.closest('.stage')).not.toBeNull();
@@ -442,6 +446,10 @@ describe('in the lobby', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Members' }));
     fireEvent.keyDown(screen.getByRole('region', { name: 'Members list' }), { key: 'Escape' });
     size.resize(true);
+    // Under Chat the section is the strip, and the watched share stays on
+    // the stage.
+    fireEvent.click(nav('Chat'));
+    expect(within(voice()).queryByRole('button', { name: 'Voice options' })).toBeNull();
 
     expect(screen.getByRole('region', { name: 'Shared screen' }).querySelector('video')).toBe(video);
     expect(attached.mock.calls.map(([sink]) => sink?.video ?? null)).toEqual([video]);

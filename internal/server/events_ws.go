@@ -28,6 +28,14 @@ import (
 // wherever a post or shared read mark changes it. Each frame is one pkg/schema
 // document, told apart by its schema field.
 //
+// A human socket is also sent conch.channels_changed.v1 (issue #1027,
+// docs/design/membership-live.md) when its principal's own answer to
+// GET /v1/channels may have changed: they were added to or removed from a
+// channel, given manages, created one, or a channel they are in was renamed.
+// The frame names nothing: the client re-reads its channel list and counts.
+// It goes to no one but that principal, never to an agent, and changes
+// within the roster floor coalesce into one trailing frame per socket.
+//
 // This file holds no visibility rule and no SQL. A change commits, and the
 // handler that made it enqueues a reference ("the roster changed", "run 41
 // changed", "activity 7 of run 41") for every subscriber of the channel. The
@@ -123,8 +131,12 @@ type eventsSub struct {
 	membershipDirty  bool
 	readStateEpoch   uint64
 	human            bool
-	refs             []eventRef
-	gone             bool
+	// channelsChanged owes a human socket one conch.channels_changed.v1
+	// (notifyChannelsChanged). It is a flag, not a queue: the frame carries
+	// nothing, so any number of changes owe the same one.
+	channelsChanged bool
+	refs            []eventRef
+	gone            bool
 }
 
 // subscribe registers a subscriber, owed its first roster: that roster goes
@@ -157,15 +169,15 @@ func (sub *eventsSub) cancel() {
 
 // take returns what is waiting and empties it, or live=false when the
 // subscription was dropped.
-func (sub *eventsSub) take() (roster, readState bool, refs []eventRef, live bool) {
+func (sub *eventsSub) take() (roster, readState, channelsChanged bool, refs []eventRef, live bool) {
 	sub.hub.mu.Lock()
 	defer sub.hub.mu.Unlock()
 	if sub.gone {
-		return false, false, nil, false
+		return false, false, false, nil, false
 	}
-	roster, readState, refs = sub.roster, sub.readState, sub.refs
-	sub.roster, sub.readState, sub.refs = false, false, nil
-	return roster, readState, refs, true
+	roster, readState, channelsChanged, refs = sub.roster, sub.readState, sub.channelsChanged, sub.refs
+	sub.roster, sub.readState, sub.channelsChanged, sub.refs = false, false, false, nil
+	return roster, readState, channelsChanged, refs, true
 }
 
 func (sub *eventsSub) signal() {
@@ -293,6 +305,32 @@ func (h *eventsHub) notifyChannelRoster(channelID int64) {
 			sub.roster = true
 		}
 		sub.signal()
+	}
+}
+
+// notifyChannelsChanged owes every human events socket of each of
+// principalIDs one conch.channels_changed.v1 (issue #1027,
+// membership-live.md §2): that principal's answer to GET /v1/channels may
+// have changed. A handler calls it after the change commits, and only for a
+// change that took effect. A zero id matches nothing, and an agent's socket
+// is never owed it: an agent learns its memberships over MCP.
+func (h *eventsHub) notifyChannelsChanged(principalIDs ...int64) {
+	if len(principalIDs) == 0 {
+		return
+	}
+	want := make(map[int64]struct{}, len(principalIDs))
+	for _, id := range principalIDs {
+		if id != 0 {
+			want[id] = struct{}{}
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if _, ok := want[sub.principalID]; ok && sub.human {
+			sub.channelsChanged = true
+			sub.signal()
+		}
 	}
 }
 
@@ -587,8 +625,12 @@ type eventsStream struct {
 	// rosterBuilt is when a roster was last built, for the roster floor;
 	// rosterLater fires when one owed meanwhile may be built, and is nil
 	// while none is owed.
-	rosterBuilt      time.Time
-	rosterLater      <-chan time.Time
+	rosterBuilt time.Time
+	rosterLater <-chan time.Time
+	// channelsLater fires when an owed conch.channels_changed.v1 goes, one
+	// roster floor after the first change that owed it; nil while none is
+	// owed (trailing-edge coalescing, membership-live.md §3).
+	channelsLater    <-chan time.Time
 	readStateBuilt   time.Time
 	readStateLater   <-chan time.Time
 	lastReadStates   map[int64][]byte
@@ -661,6 +703,19 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 			default:
 			}
 			if !e.stillMember(ctx) || !e.sendReadStates(ctx) {
+				return
+			}
+		case <-e.channelsLater:
+			e.channelsLater = nil
+			// As for the roster: a drop that is ready too wins, and the
+			// socket closes with its reason and no frame.
+			select {
+			case <-e.sub.dropped:
+				e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+				return
+			default:
+			}
+			if !e.stillMember(ctx) || !e.sendDoc(ctx, schema.ChannelsChangedV1{Schema: schema.ChannelsChangedSchemaV1}) {
 				return
 			}
 		case <-e.sub.dropped:
@@ -749,7 +804,7 @@ func (e *eventsStream) stillMember(ctx context.Context) bool {
 
 // flush sends what is waiting. It reports false when the socket is closed.
 func (e *eventsStream) flush(ctx context.Context) bool {
-	roster, readState, refs, live := e.sub.take()
+	roster, readState, channelsChanged, refs, live := e.sub.take()
 	if !live {
 		e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
 		return false
@@ -762,6 +817,9 @@ func (e *eventsStream) flush(ctx context.Context) bool {
 	}
 	if readState && !e.readStateNowOrLater(ctx) {
 		return false
+	}
+	if channelsChanged && e.channelsLater == nil {
+		e.channelsLater = time.After(e.s.eventsRosterFloor)
 	}
 	for _, ref := range refs {
 		if !e.sendRef(ctx, ref) {

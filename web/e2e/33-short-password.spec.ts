@@ -54,10 +54,19 @@ test('G977 a four-letter password creates an account, signs in, changes and rese
   const changed = page.waitForResponse((r) => r.url().endsWith('/v1/password/mine') && r.request().method() === 'PUT');
   await region.getByRole('button', { name: 'Change password' }).click();
   expect((await changed).status()).toBe(200);
-  // The change ended the sign-in it was made from (it is rotated). What the
-  // page shows after is not this spec's concern, so it is not read here: the
-  // server's answers are.
+  // The change ended the sign-in it was made from (it is rotated), and the
+  // page goes on with the new credential: a call of its own that the old one
+  // had out meanwhile (a whoami after the socket the revocation closed) is
+  // asked again with it, never a sign-out (issue #1000).
+  await expect(region.getByText('Your password is changed. Every other sign-in of yours has ended; this one goes on.')).toBeVisible();
   expect((await call(world, secondToken, 'GET', '/v1/whoami')).status).toBe(401);
+  const rotatedToken = await keepToken(page, secrets);
+  expect(rotatedToken).not.toBe(secondToken);
+  expect((await call(world, rotatedToken, 'GET', '/v1/whoami')).status).toBe(200);
+  await expect(statusLine(page)).toContainText(name);
+  await expect(statusLine(page)).toContainText('Connected');
+  await expect(page.getByText(/Signed out/)).toHaveCount(0);
+  await expect(page.getByLabel('Credential')).toHaveCount(0);
   // The old one no longer signs in, the new one does.
   const elsewhere = await meet();
   await elsewhere.page.goto(world.appUrl);

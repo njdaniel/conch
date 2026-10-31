@@ -62,3 +62,20 @@ describe('targets', () => {
     expect(targetFor(targetsReducer(state, { type: 'closePicker', channel: 'ops' }), 'ops').refusal).toBeNull();
   });
 });
+
+describe('a lost channel (issue #1027)', () => {
+  it('takes its draft and its audience with it, and nothing else', () => {
+    let drafts = draftsReducer(initialDrafts, { type: 'edit', channel: 'ops', text: 'for ops' });
+    drafts = draftsReducer(drafts, { type: 'edit', channel: 'dev', text: 'for dev' });
+    drafts = draftsReducer(drafts, { type: 'forget', channel: 'ops' });
+    expect(draftFor(drafts, 'ops')).toBe('');
+    expect(draftFor(drafts, 'dev')).toBe('for dev');
+    expect(draftsReducer(drafts, { type: 'forget', channel: 'nowhere' })).toBe(drafts);
+
+    let targets = targetsReducer(initialTargets, { type: 'net', channel: 'ops', net: 4 });
+    targets = targetsReducer(targets, { type: 'whisper', channel: 'dev' });
+    targets = targetsReducer(targets, { type: 'forget', channel: 'ops' });
+    expect(targetFor(targets, 'ops')).toEqual(targetFor(initialTargets, 'ops'));
+    expect(targetFor(targets, 'dev').whisper).toEqual([]);
+  });
+});
