@@ -228,7 +228,8 @@ function whileReplacing<T>(from: Held | null, work: () => Promise<T>): Promise<T
 // held from a sign-in that is over is 'stale': no answer for this page, and
 // never a sign-out of the one now signed in.
 async function settleRefusal(held: Held, wait: boolean): Promise<Held | 'stale' | null> {
-  if (wait) await replacing.get(held.token);
+  const change = wait ? replacing.get(held.token) : undefined;
+  if (change !== undefined) await within(change, replacingWait);
   const now = current();
   if (now === null || now.token === held.token) {
     forget(held);
@@ -240,6 +241,22 @@ async function settleRefusal(held: Held, wait: boolean): Promise<Held | 'stale' 
 // How many times a call is sent again after a 401 for a credential since
 // replaced: once per replacement, and never without end.
 const resends = 3;
+
+// How long a 401 waits for a replacement before it is settled as it stands:
+// a change held up (an answer that never comes, a proof the person never
+// gives) does not hold every refused call up with it.
+const replacingWait = 30_000;
+
+// within resolves when change does, or after ms, whichever is first.
+function within(change: Promise<void>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  return Promise.race([change, late]).finally(() => {
+    clearTimeout(timer);
+  });
+}
 
 // unchecked is the credential restore found stored but could not check (the
 // server did not answer): neither pinned nor dropped. Only it may be forgotten
@@ -399,6 +416,11 @@ async function authedSend(request: Call, body?: unknown, keepalive = false, sign
   for (let sent = 0; sent < resends; sent++) {
     const reply = await sendProving(held, request, body, keepalive, signal);
     if (reply.kind !== 'replaced') return reply;
+    // A write that replaces the credential carries a proof made for the
+    // one it was sent with (the current password, a one-use code): sent
+    // again with another, it would be a wrong password counted against the
+    // person. No answer for this one; they can try again.
+    if (replacingOps.has(request.op)) return { kind: 'none' };
     held = reply.by;
   }
   return { kind: 'none' };
@@ -457,7 +479,8 @@ async function sendAs(held: Held, request: Call, body?: unknown, keepalive = fal
 
 // The writes that replace the credential they are sent with, and the proof
 // one may ask for on the way (reauth): a 401 for theirs never waits for the
-// replacement, which is waiting for them (see whileReplacing).
+// replacement, which is waiting for them (see whileReplacing), and is never
+// sent again with another credential (see authedSend).
 const replacingOps: ReadonlySet<OperationId> = new Set<OperationId>(['changePassword', 'setPassword', 'convertGuest', 'reauth']);
 
 // sendWith sends a write with held and reads a 401 as settleRefusal does.

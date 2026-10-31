@@ -62,10 +62,18 @@ describe('credential handling', () => {
     // the place of the one the server revoked. Each pins what the store says
     // it kept (kept, or held), which for the desktop's is its stand-in.
     // The last two rotate (issue #1000): the same sign-in, under a new
-    // credential. The pin itself is assigned by pin and rotate alone.
-    expect(code.match(/\bpinned = /g)?.length ?? 0).toBe(2);
+    // credential. The pin itself is assigned by pin and rotate alone (any
+    // assignment, compound ones included), rotate is called twice, and only
+    // rotate adds to the credentials a 401 for which is sent again as the
+    // one pinned now (only pin empties it, and nothing takes one out).
+    expect(code.match(/\bpinned\s*(\?\?|\|\||&&)?=(?!=)/g)?.length ?? 0).toBe(2);
     expect(code.match(/\bpin\((held|kept)\)/g)?.length ?? 0).toBe(4);
+    expect(code.match(/\brotate\(/g)?.length ?? 0).toBe(3);
     expect(code.match(/\brotate\(held, kept\)/g)?.length ?? 0).toBe(2);
+    expect(code.match(/\breplaced\.(add|delete)\(/g)?.length ?? 0).toBe(1);
+    expect(code.match(/\breplaced\.clear\(/g)?.length ?? 0).toBe(1);
+    // Its declaration, a const, is its one assignment.
+    expect(code.match(/\breplaced\s*=(?!=)/g)?.length ?? 0).toBe(1);
   });
 
   it('is not placed in a URL: the only fetch sends it as a header', () => {

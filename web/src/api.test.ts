@@ -22,16 +22,19 @@ import {
   editMessage,
   loadThread,
   messageRevisions,
+  onReauthRequired,
   onSignedOutElsewhere,
   openSocket,
   postMessage,
   previewInvite,
+  reauth,
   redeemInvite,
   reportVoiceTransmit,
   restore,
   searchMessages,
   signIn,
   signOut,
+  setPassword,
   signOutEverywhere,
   stopVoiceShare,
   uploadFile,
@@ -1066,30 +1069,45 @@ describe('a credential replaced while a call was out', () => {
     return { answer, give };
   }
 
+  const file = { schema: 'conch.file.v1', id: 17, channel_id: 4, uploader_id: 2, filename: 'a.png', media_type: 'image/png', size: 3, sha256: 'a'.repeat(64), created_at: at };
+  const uploading = '/v2/channels/ops/files?filename=a.png';
+
   // A stand-in server whose password change rotates memberToken into
-  // rotatedToken: once it has, the old one is refused. A call put in held
-  // (by method, path and credential) waits for the answer the test gives.
+  // rotatedToken: once it has, the old one is refused (and the new one too,
+  // once revokedRotated says so). A call put in held (by method, path and
+  // credential) waits, once, for the answer the test gives. A change answers
+  // the responses in before first, in turn.
   interface Server {
     readonly calls: Call[];
     readonly held: Map<string, Later>;
-    readonly state: { revoked: boolean };
+    readonly state: { revoked: boolean; revokedRotated: boolean; readonly before: Response[] };
   }
 
   async function signedInToChange(): Promise<Server> {
     await signedInFrom(window.localStorage, memberToken);
     const held = new Map<string, Later>();
-    const state = { revoked: false };
+    const state = { revoked: false, revokedRotated: false, before: [] as Response[] };
     const calls = serve((c) => {
-      const waiting = held.get(`${c.method} ${c.path} ${c.auth ?? ''}`);
-      if (waiting !== undefined) return waiting.answer;
+      const name = `${c.method} ${c.path} ${c.auth ?? ''}`;
+      const waiting = held.get(name);
+      if (waiting !== undefined) {
+        held.delete(name);
+        return waiting.answer;
+      }
       if (c.path === changing) {
+        const first = state.before.shift();
+        if (first !== undefined) return first;
         state.revoked = true;
         return json(rotated);
       }
       if (c.auth === `Bearer ${memberToken}` && state.revoked) return json({}, 401);
-      if (c.auth !== `Bearer ${memberToken}` && c.auth !== `Bearer ${rotatedToken}`) return json({}, 401);
-      if (c.path === '/v1/whoami') return json(member);
+      if (c.auth === `Bearer ${rotatedToken}` && state.revokedRotated) return json({}, 401);
+      if (![memberToken, rotatedToken, otherMemberToken].some((t) => c.auth === `Bearer ${t}`)) return json({}, 401);
+      if (c.path === '/v1/whoami') return json(c.auth === `Bearer ${otherMemberToken}` ? otherMember : member);
       if (c.path === '/v1/ws-tickets') return json({ ticket: 'conch_wst_T', expires_at: at }, 201);
+      if (c.path === '/v1/reauth') return json({ until: '2099-10-31T12:10:00.000Z' });
+      if (c.path === uploading) return json(file, 201);
+      if (c.path === '/v2/files/17') return new Response(new Uint8Array([1, 2, 3]));
       return new Response(null, { status: 204 });
     });
     return { calls, held, state };
@@ -1244,6 +1262,142 @@ describe('a credential replaced while a call was out', () => {
     expect(calls.filter((c) => c.path === '/v1/whoami').map((c) => c.auth)).toEqual([`Bearer ${guestToken}`, `Bearer ${guestToken}`, `Bearer ${rotatedToken}`]);
     expect(window.localStorage.getItem(key)).toBe(rotatedToken);
     expect(window.sessionStorage.getItem(key)).toBeNull();
+  });
+
+  it.each([
+    { name: 'an upload', path: uploading, method: 'POST', run: () => uploadFile('ops', 'a.png', 'image/png', new Blob([new Uint8Array([1, 2, 3])]), new AbortController().signal), want: { ok: true, file } },
+    { name: 'a download', path: '/v2/files/17', method: 'GET', run: () => fetchFileBytes(17), want: { ok: true, value: expect.any(Blob) as unknown } },
+  ])('sends $name again with the new credential', async ({ path, method, run, want }) => {
+    const server = await signedInToChange();
+    const old = holding(server, method, path, memberToken);
+    const running = run();
+    await sent(server, path);
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    old.give(json({}, 401));
+    expect(await running).toEqual(want);
+    expect(auths(server, path)).toEqual([`Bearer ${memberToken}`, `Bearer ${rotatedToken}`]);
+    expect(window.localStorage.getItem(key)).toBe(rotatedToken);
+  });
+
+  it('signs out when the call sent again is refused with the new credential too', async () => {
+    const server = await signedInToChange();
+    const old = holding(server, 'GET', '/v1/whoami', memberToken);
+    const asking = whoAmI();
+    await sent(server, '/v1/whoami');
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    server.state.revokedRotated = true;
+    old.give(json({}, 401));
+    expect(await asking).toEqual({ ok: false, failure: 'unauthorized' });
+    expect(auths(server, '/v1/whoami')).toEqual([`Bearer ${memberToken}`, `Bearer ${rotatedToken}`]);
+    expect(window.localStorage.getItem(key)).toBeNull();
+    expect(hasToken()).toBe(false);
+  });
+
+  // The identity claim: a 401 is sent again only as the same sign-in.
+  it('never sends a call from before a rotation again as the next person, after a sign-out and a sign-in', async () => {
+    const server = await signedInToChange();
+    const old = holding(server, 'GET', '/v1/whoami', memberToken);
+    const asking = whoAmI();
+    await sent(server, '/v1/whoami');
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    expect(await signOut()).toBe(true);
+    expect((await signIn(otherMemberToken)).ok).toBe(true);
+    old.give(json({}, 401));
+    expect(await asking).toEqual({ ok: false, failure: 'network' });
+    expect(auths(server, '/v1/whoami')).toEqual([`Bearer ${memberToken}`, `Bearer ${otherMemberToken}`]);
+    expect(window.localStorage.getItem(key)).toBe(otherMemberToken);
+    await whoAmI();
+    expect(server.calls.at(-1)?.auth).toBe(`Bearer ${otherMemberToken}`);
+  });
+
+  it('signs out, and sends nothing again, when another tab stored another credential after the rotation', async () => {
+    const server = await signedInToChange();
+    const old = holding(server, 'GET', '/v1/whoami', memberToken);
+    const asking = whoAmI();
+    await sent(server, '/v1/whoami');
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    window.localStorage.setItem(key, otherMemberToken);
+    old.give(json({}, 401));
+    expect(await asking).toEqual({ ok: false, failure: 'unauthorized' });
+    expect(auths(server, '/v1/whoami')).toEqual([`Bearer ${memberToken}`]);
+    // The other tab's credential is theirs: left alone.
+    expect(window.localStorage.getItem(key)).toBe(otherMemberToken);
+  });
+
+  // The proof a change asks for is sent with the old credential while a
+  // refused call waits for the change: it never waits for that call.
+  it.each([
+    { proof: 'given', answer: () => json({ until: '2099-10-31T12:10:00.000Z' }), changed: true, asked: { ok: true, value: member } },
+    { proof: 'refused', answer: () => json({}, 401), changed: false, asked: { ok: false, failure: 'unauthorized' } },
+  ])('settles a call that waited for a change whose proof was $proof', async ({ answer, changed, asked }) => {
+    const server = await signedInToChange();
+    server.state.before.push(json({ code: 'reauth_required', message: 'prove it' }, 403));
+    onReauthRequired(async () => (await reauth('the old one')).ok);
+    try {
+      const proof = holding(server, 'POST', '/v1/reauth', memberToken);
+      const writing = changePassword('the old one', 'a new one');
+      await sent(server, '/v1/reauth');
+      const old = holding(server, 'GET', '/v1/whoami', memberToken);
+      const asking = whoAmI();
+      await sent(server, '/v1/whoami');
+      old.give(json({}, 401));
+      proof.give(answer());
+      expect((await writing).ok).toBe(changed);
+      expect(await asking).toEqual(asked);
+      expect(auths(server, changing)).toEqual(changed ? [`Bearer ${memberToken}`, `Bearer ${memberToken}`] : [`Bearer ${memberToken}`]);
+      expect(window.localStorage.getItem(key)).toBe(changed ? rotatedToken : null);
+    } finally {
+      onReauthRequired(null);
+    }
+  });
+
+  // A write that replaces the credential carries a proof made for the one
+  // it was sent with: sent again with another, it would be a wrong password
+  // counted against the person (security review of #1045).
+  it.each([
+    { name: 'a password change', method: 'PUT', write: () => changePassword('the old one', 'another new one') },
+    { name: 'a first password', method: 'POST', write: () => setPassword('another new one', `conch_sil_${'E'.repeat(43)}`) },
+  ])('never sends $name again with the credential that replaced its own', async ({ method, write }) => {
+    const server = await signedInToChange();
+    const first = holding(server, method, changing, memberToken);
+    const writing = write();
+    await sent(server, changing);
+    // Another change, sent after it, rotates the credential first.
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    first.give(json({}, 401));
+    expect(await writing).toEqual({ ok: false, failure: 'network' });
+    expect(server.calls.filter((c) => c.path === changing).map((c) => [c.method, c.auth])).toEqual([
+      [method, `Bearer ${memberToken}`],
+      ['PUT', `Bearer ${memberToken}`],
+    ]);
+    expect(window.localStorage.getItem(key)).toBe(rotatedToken);
+  });
+
+  it('settles a 401 as it stands after waiting thirty seconds for a change that does not answer', async () => {
+    const server = await signedInToChange();
+    const change = holding(server, 'PUT', changing, memberToken);
+    const changed = changePassword('the old one', 'a new one');
+    await sent(server, changing);
+    vi.useFakeTimers();
+    try {
+      server.state.revoked = true;
+      let settled = false;
+      const asking = whoAmI().finally(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => {
+        expect(vi.getTimerCount()).toBe(1);
+      });
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await asking).toEqual({ ok: false, failure: 'unauthorized' });
+      expect(window.localStorage.getItem(key)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      change.give(json({}, 401));
+      await changed;
+    }
   });
 
   // A call from a sign-in that is over is never sent again as the one made
