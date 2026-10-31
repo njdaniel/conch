@@ -1,6 +1,6 @@
 # Design: webcam video in channel voice rooms
 
-- **Status:** Proposed, 2026-10-31. Nothing here is built. The governing decision is [ADR-015](../adr/ADR-015-webcam-video.md) (Proposed). Until Nick accepts it, camera video stays at P9.
+- **Status:** Accepted, 2026-10-31. Nothing here is built yet. The governing decision is [ADR-015](../adr/ADR-015-webcam-video.md) (Accepted); camera video moves from P9 into the alpha track under it.
 - **Issue:** #973. The implementation issues are in §13.
 - **Touches:**
   - [ADR-000](../adr/ADR-000-charter.md), whose non-goal is "no video before P9";
@@ -63,7 +63,7 @@ Nick asked on 2026-10-30 for webcam video, "starting with one-on-one conversatio
 
 ### 1.3 Governance
 
-ADR-000's non-goals say "no video or screen sharing before P9". ADR-004 says "video and screen sharing remain at P9" and "LiveKit only moves audio". ADR-008 moved the screen share into the alpha, but not camera video. This feature therefore needs an ADR. **ADR-015 is proposed with this note.** It also records the additions to ADR-014's catalog (§3).
+ADR-000's non-goals say "no video or screen sharing before P9". ADR-004 says "video and screen sharing remain at P9" and "LiveKit only moves audio". ADR-008 moved the screen share into the alpha, but not camera video. This feature therefore needs an ADR. **ADR-015 records it (Accepted 2026-10-31).** It also records the additions to ADR-014's catalog (§3).
 
 The non-goal is not in ADR-000's locked table (D1–D10), and nothing in that table changes:
 

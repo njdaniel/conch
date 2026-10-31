@@ -1,6 +1,6 @@
 # ADR-015: Webcam video in channel voice rooms
 
-- **Status:** Proposed. It is accepted when Nick merges the PR that adds it.
+- **Status:** Accepted — Nick, 2026-10-31, in session: "accept ADR-015 recommendations, merge 1059". Every open point (O1–O15) takes the design's recommended reading, guests watching but never claiming (O15) included. Revised the same day after the security review on PR #1059 (verdict approve; its should-fixes and nits folded in). Effective when the PR that adds it merges.
 - **Date:** 2026-10-31
 - **Decider:** Nick (Tier-H)
 - **Proposal:** [#973](https://github.com/njdaniel/conch/issues/973)
