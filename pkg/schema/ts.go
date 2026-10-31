@@ -141,6 +141,8 @@ var TSTypes = []TSType{
 	{Value: ReadStateV1{}, Family: "read-state-v1", Schema: ReadStateSchemaV1},
 	{Value: MarkReadRequestV1{}, Family: "mark-read-request-v1"},
 	{Value: ListReadStateResponseV1{}, Family: "list-read-state-response-v1"},
+	// The channel-list signal (issue #1027): re-read GET /v1/channels.
+	{Value: ChannelsChangedV1{}, Family: "channels-changed-v1", Schema: ChannelsChangedSchemaV1},
 
 	// Browser voice (issue #442): the session that admits the page to a room,
 	// the presence snapshot its socket streams, and the transmit report.

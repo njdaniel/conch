@@ -1023,6 +1023,17 @@ export const listReadStateResponseV1 = object<ListReadStateResponseV1>({
   read_state: array(readStateV1),
 });
 
+// schema.ChannelsChangedV1
+export const channelsChangedV1Schema = 'conch.channels_changed.v1';
+
+export interface ChannelsChangedV1 {
+  schema: typeof channelsChangedV1Schema;
+}
+
+export const channelsChangedV1 = object<ChannelsChangedV1>({
+  schema: vocab<typeof channelsChangedV1Schema>({ [channelsChangedV1Schema]: true }),
+});
+
 // schema.VoiceRoomGrant
 export interface VoiceRoomGrant {
   room: string;
