@@ -52,7 +52,10 @@ describe('secret handling in desktop/main', () => {
   });
 
   it('only vault/files.ts may import write-capable node:fs names; the rest are read-only', () => {
-    const readOnly = new Set(['readFile', 'readFileSync', 'readdir', 'readdirSync', 'stat', 'lstat', 'access', 'existsSync']);
+    const readOnly = new Set(['readFile', 'readFileSync', 'readdir', 'readdirSync', 'stat', 'lstat', 'realpath', 'access', 'existsSync']);
+    // The voice endpoint (#948) makes its private runtime directories and
+    // removes stale sockets from them; it writes no file's content.
+    const endpointOnly = new Set(['mkdir', 'chmod', 'unlink']);
     const offenders: string[] = [];
     for (const f of files) {
       const text = stripComments(f.text);
@@ -66,7 +69,8 @@ describe('secret handling in desktop/main', () => {
         }
         for (const raw of named.split(',')) {
           const name = raw.trim().split(/\s+as\s+/)[0] ?? '';
-          if (name !== '' && !readOnly.has(name) && f.rel !== 'vault/files.ts') {
+          const allowed = readOnly.has(name) || (f.rel === 'voice/endpoint.ts' && endpointOnly.has(name));
+          if (name !== '' && !allowed && f.rel !== 'vault/files.ts') {
             offenders.push(`${f.rel}: ${name}`);
           }
         }
