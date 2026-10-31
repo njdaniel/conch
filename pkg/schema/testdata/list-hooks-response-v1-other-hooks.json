@@ -1,0 +1,12 @@
+{
+  "hooks": [
+    {
+      "id": 4,
+      "channel": "channel-a",
+      "principal": 7,
+      "label": "ci builds",
+      "created_at": "2026-09-01T08:30:00.000Z"
+    }
+  ],
+  "other_hooks": 3
+}

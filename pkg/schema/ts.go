@@ -169,6 +169,8 @@ var TSTypes = []TSType{
 	{Value: ReadStateV1{}, Family: "read-state-v1", Schema: ReadStateSchemaV1},
 	{Value: MarkReadRequestV1{}, Family: "mark-read-request-v1"},
 	{Value: ListReadStateResponseV1{}, Family: "list-read-state-response-v1"},
+	// The channel-list signal (issue #1027): re-read GET /v1/channels.
+	{Value: ChannelsChangedV1{}, Family: "channels-changed-v1", Schema: ChannelsChangedSchemaV1},
 
 	// Browser voice (issue #442): the session that admits the page to a room,
 	// the presence snapshot its socket streams, and the transmit report.
@@ -342,6 +344,19 @@ var TSTypes = []TSType{
 	{Value: ReactionSummariesResponseV1{}, Family: "reaction-summaries-response-v1"},
 	{Value: ReactionV1{}, Family: "reaction-v1"},
 	{Value: ListReactorsResponseV1{}, Family: "list-reactors-response-v1"},
+
+	// Roles and permissions (ADR-014, issue #1012,
+	// docs/design/admin-roles.md §8): the document an operator reads and
+	// the owner changes, a cell patch or a preset, and the content-free
+	// signal that says to re-read whoami. The caller's own permissions are
+	// in WhoAmIResponseV1.
+	{Value: PermissionRowV1{}},
+	{Value: PermissionPresetV1{}},
+	{Value: IssuedByOperatorV1{}},
+	{Value: PermissionsResponseV1{}, Family: "permissions-response-v1"},
+	{Value: PermissionChangeV1{}},
+	{Value: PutPermissionsRequestV1{}, Family: "put-permissions-request-v1"},
+	{Value: PermissionsChangedV1{}, Family: "permissions-changed-v1", Schema: PermissionsChangedSchemaV1},
 
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},

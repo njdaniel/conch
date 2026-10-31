@@ -489,3 +489,15 @@ describe('isLater', () => {
     expect(isLater(b, b)).toBe(true);
   });
 });
+
+describe('a lost channel (issue #1027)', () => {
+  it('is forgotten whole, so a later channel of the same name starts empty', () => {
+    let state = chatReducer(initialChat, { type: 'historyLoaded', channel: 'ops', messages: [msg(1), msg(2)], more: false });
+    state = chatReducer(state, { type: 'historyLoaded', channel: 'dev', messages: [msg(3)], more: false });
+    state = chatReducer(state, { type: 'forget', channel: 'ops' });
+    expect(ordered(chatFor(state, 'ops'))).toEqual([]);
+    expect(chatFor(state, 'ops')).toEqual(chatFor(initialChat, 'ops'));
+    expect(ordered(chatFor(state, 'dev')).map((x) => x.id)).toEqual([3]);
+    expect(chatReducer(state, { type: 'forget', channel: 'nowhere' })).toBe(state);
+  });
+});

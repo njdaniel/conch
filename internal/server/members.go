@@ -226,12 +226,13 @@ func (s *Server) handlePutChannelMember(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	var added bool
 	if manager {
 		if req.CanDecide != nil || req.Manages != nil {
 			s.denyForbidden(w, r, caller, "forbidden", "only an operator may set can_decide or manages")
 			return
 		}
-		_, err = s.store.PutChannelMember(ctx, auditActor(ctx), channel.ID, principalID, caller.ID, nil, nil)
+		added, err = s.store.PutChannelMember(ctx, auditActor(ctx), channel.ID, principalID, caller.ID, nil, nil)
 		if errors.Is(err, store.ErrNotAddable) || errors.Is(err, store.ErrPrincipalNotFound) {
 			if rerr := s.store.RecordMemberAddRefused(context.WithoutCancel(ctx), caller.ID, channel.ID, renameAttemptsPerDay, now); rerr != nil {
 				s.writeMemberAddLimitError(w, r, rerr, now)
@@ -245,13 +246,19 @@ func (s *Server) handlePutChannelMember(w http.ResponseWriter, r *http.Request) 
 		if authed {
 			addedBy = caller.ID
 		}
-		_, err = s.store.PutChannelMember(ctx, auditActor(ctx), channel.ID, principalID, addedBy, req.CanDecide, req.Manages)
+		added, err = s.store.PutChannelMember(ctx, auditActor(ctx), channel.ID, principalID, addedBy, req.CanDecide, req.Manages)
 	}
 	if s.writeMemberError(w, r, err) {
 		return
 	}
 	// A new member's sessions join the channel's roster.
 	s.events.notifyChannelRoster(channel.ID)
+	// The member's own channel list changed if they were added, or if an
+	// operator set manages, which the list carries (issue #1027). A PUT
+	// that did neither sends them nothing.
+	if added || req.Manages != nil {
+		s.events.notifyChannelsChanged(principalID)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -313,6 +320,7 @@ func (s *Server) handleAddChannelMemberByName(w http.ResponseWriter, r *http.Req
 	doc := memberDoc(member, viewer, true)
 	if added {
 		s.events.notifyChannelRoster(channel.ID)
+		s.events.notifyChannelsChanged(member.PrincipalID)
 		writeJSON(w, http.StatusCreated, doc)
 		return
 	}
@@ -356,7 +364,7 @@ func (s *Server) handleDeleteChannelMember(w http.ResponseWriter, r *http.Reques
 	if caller, ok := callerFrom(ctx); ok {
 		callerID = caller.ID
 	}
-	_, err = s.store.RemoveChannelMember(ctx, auditActor(ctx), channel.ID, principalID, callerID)
+	removed, err := s.store.RemoveChannelMember(ctx, auditActor(ctx), channel.ID, principalID, callerID)
 	if s.writeMemberError(w, r, err) {
 		return
 	}
@@ -367,6 +375,12 @@ func (s *Server) handleDeleteChannelMember(w http.ResponseWriter, r *http.Reques
 	// and the member list lost them (events_ws.go).
 	s.events.dropPrincipal(channel.ID, principalID)
 	s.events.notifyChannelRoster(channel.ID)
+	// Their sockets on other channels, now that the one on this channel is
+	// gone, are told their channel list changed (issue #1027). A removal
+	// that removed nobody sends nothing.
+	if removed {
+		s.events.notifyChannelsChanged(principalID)
+	}
 	// Voice: close their presence sockets and remove them from the channel's
 	// rooms before the response is written. It cannot fail the request;
 	// the poller finds anyone it could not remove (issue #127).
