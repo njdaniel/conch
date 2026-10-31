@@ -163,6 +163,25 @@ func (o *OneShot) SetDevice(ctx context.Context, key DeviceKey, name string) err
 	return res.failure()
 }
 
+// talkModeKey is the key `config set` saves the talk mode under (#654).
+const talkModeKey = "audio.talk_mode"
+
+// SetTalkMode runs `conch-voice config set audio.talk_mode <mode>`, which saves
+// the talk mode in voice.toml: the next helper reads it as it starts, and a
+// running v2 helper is told with Supervisor.SetTalkMode. A mode of no version
+// is refused before anything runs. A conch-voice older than the key refuses
+// its command line (RunUnsupported).
+func (o *OneShot) SetTalkMode(ctx context.Context, mode schema.VoiceControlTalkMode) error {
+	if !mode.Valid() {
+		return fmt.Errorf("voicehelper: %q is not a talk mode: push_to_talk or open", mode)
+	}
+	res, err := o.exec(ctx, "config", "set", talkModeKey, "--", string(mode))
+	if err != nil {
+		return err
+	}
+	return res.failure()
+}
+
 // DeviceNameFits reports whether name can be saved in voice.toml as it
 // stands: DefaultDevice, or a name under the device list's own rule, which is
 // the rule conch-voice's command line holds it to.
