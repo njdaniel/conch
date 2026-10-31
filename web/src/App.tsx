@@ -30,7 +30,8 @@ import { authReducer, initialAuth, keptAcross, operatorSession } from './state/a
 import { channelsReducer, initialChannels, type ChannelsAction } from './state/channels';
 import { connectionReducer } from './state/connection';
 import { ComposerAttachmentProvider, whisperNotice, type ComposerAttachmentContextValue } from './Composer';
-import { draftFor, draftsReducer, initialDrafts, initialTargets, targetFor, targetsReducer, type Drafts, type Target } from './state/drafts';
+import { clearStored, forgetChannelStored, loadStored, pruneStored, saveDrafts, storedAudience, type StoredTarget } from './state/draftStore';
+import { draftFor, draftsReducer, initialDrafts, initialTargets, targetFor, targetsReducer, type Target, type TargetAction } from './state/drafts';
 import type { Audience, MessageV2 } from './schema/message';
 import {
   attachmentDraftsReducer,
@@ -58,6 +59,9 @@ import { useNow } from './agents/useNow';
 import { VoiceStatus } from './VoiceStatus';
 import { useOccupancy } from './voice/useOccupancy';
 import { needsHttps } from './transport';
+
+const checkingAudience = 'Checking who this draft goes to…';
+const audienceGone = 'Who this draft was for is no longer available. Choose who it goes to before sending.';
 
 // App is the page. A guest who creates an account (issue #713) becomes a
 // member with a new credential, and every socket, session and list the page
@@ -179,14 +183,43 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // forgets it.
   const kept = useRef<{
     readonly principal: number;
-    readonly drafts: Drafts;
+    // By channel id, as the audiences are (issue #1039): a channel renamed,
+    // or a new one given the old name, while signed out never gets the text.
+    readonly drafts: Readonly<Record<number, string>>;
     readonly attachments: AttachmentDrafts;
     readonly pending: Readonly<Record<string, readonly PendingSend[]>>;
+    // Who each channel's draft was for, by channel id (issue #1039): text
+    // kept without it would come back addressed to the whole channel.
+    readonly targets: Readonly<Record<number, StoredTarget>>;
   } | null>(null);
+  // Whether the drafts kept in this tab for a reload (issue #1039) have been
+  // given back; until then nothing is written, so the empty start cannot
+  // overwrite them.
+  const [draftsReady, setDraftsReady] = useState(false);
+  // The audiences kept across a reload that are not yet checked against the
+  // channel's nets and members, by channel id. Until then the draft cannot
+  // be sent, and what was kept is what stays stored.
+  //
+  // The rule for every kept draft, across a reload and across a sign-in that
+  // ended by itself: it never reaches a wider audience than the one it was
+  // written for. Only the audience the composer would have sent to is kept
+  // (storedAudience); it comes back held, unsendable, until it is known to
+  // stand, and then whole (the 'restore' action replaces, never merges); a
+  // choice the person makes meanwhile wins and the kept one is dropped
+  // (onTarget). When in doubt, the draft stays unsendable.
+  const pendingTargets = useRef(new Map<number, StoredTarget>());
+  // The audience of a send whose text a 401 gave back to the composer, by
+  // channel id; null is the whole channel. The text goes with the audience
+  // it was sent to, never with whatever the composer shows by then.
+  const returnedAudiences = useRef(new Map<number, StoredTarget | null>());
   const draftsNow = useRef(drafts);
   useEffect(() => {
     draftsNow.current = drafts;
   }, [drafts]);
+  const targetsNow = useRef(targets);
+  useEffect(() => {
+    targetsNow.current = targets;
+  }, [targets]);
   const lastSignedIn = useRef<number | null>(null);
   const endedNotice = auth.phase === 'signedOut' ? auth.notice : null;
 
@@ -194,7 +227,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     if (auth.phase === 'signedOut') {
       // Once, as the sign-in ends; the notice is the one it ended with.
       if (lastSignedIn.current !== null) {
-        const typed = draftsNow.current;
+        const typed: Record<number, string> = {};
+        for (const channel of channelsNow.current.channels) {
+          const text = draftsNow.current[channel.name];
+          if (text !== undefined && text !== '') typed[channel.id] = text;
+        }
         const files = attachmentsNow.current;
         const pending: Record<string, readonly PendingSend[]> = {};
         if (keptAcross(endedNotice)) {
@@ -205,8 +242,16 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             );
           }
         }
+        // Each channel's audience goes with its text: one still being checked
+        // is kept as it was, never as the placeholder.
+        const audiences: Record<number, StoredTarget> = {};
+        for (const channel of channelsNow.current.channels) {
+          const returned = returnedAudiences.current.get(channel.id);
+          const audience = returned !== undefined ? returned : (pendingTargets.current.get(channel.id) ?? storedAudience(targetFor(targetsNow.current, channel.name)));
+          if (audience !== null) audiences[channel.id] = audience;
+        }
         kept.current = keptAcross(endedNotice) && (Object.keys(typed).length > 0 || Object.keys(files.channels).length > 0 || Object.keys(pending).length > 0)
-          ? { principal: lastSignedIn.current, drafts: typed, attachments: files, pending }
+          ? { principal: lastSignedIn.current, drafts: typed, attachments: files, pending, targets: audiences }
           : null;
         lastSignedIn.current = null;
       }
@@ -218,6 +263,13 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       dispatchDrafts({ type: 'reset' });
       dispatchTargets({ type: 'reset' });
       dispatchAttachments({ type: 'reset' });
+      // Nothing of this person's stays readable in the tab (issue #1039),
+      // unless the sign-in only could not be checked: a reload with the
+      // server away leaves the drafts for when it is back.
+      if (endedNotice !== 'network') clearStored();
+      pendingTargets.current.clear();
+      returnedAudiences.current.clear();
+      setDraftsReady(false);
       setAttempt(0);
       setEverywhereFailed(null);
     }
@@ -315,6 +367,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     dispatchChat({ type: 'forget', channel: name });
     dispatchDrafts({ type: 'forget', channel: name });
     dispatchTargets({ type: 'forget', channel: name });
+    // The draft and any open edit kept for a reload go with it (issue #1039).
+    pendingTargets.current.delete(id);
+    if (principalNow.current !== null) forgetChannelStored(principalNow.current, id);
   }, [invalidateChannel, dispatchAttachments, dispatchChat]);
 
   const loseChannel = useCallback((id: number, name: string) => {
@@ -616,7 +671,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         if (send.attachments.length === 0 && send.threadRootId === undefined) {
           // Text alone returns to the composer; attachments stay in the pending
           // line so their bytes and uploaded file ids survive the sign-in.
-          if ((draftsNow.current[name] ?? '') === '') dispatchDrafts({ type: 'edit', channel: name, text: send.body });
+          if ((draftsNow.current[name] ?? '') === '') {
+            dispatchDrafts({ type: 'edit', channel: name, text: send.body });
+            returnedAudiences.current.set(send.channelId, storedAudienceOf(send.audience));
+          }
           dispatchChat({ type: 'discard', channel: name, localId, requestId: send.requestId });
         } else {
           dispatchChat({ type: 'sendFailed', channel: name, localId, outcome: 'failed', requestId: send.requestId });
@@ -850,11 +908,94 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           pending[name] = [...(pending[name] ?? []), send];
         }
       }
-      dispatchDrafts({ type: 'restore', drafts: was.drafts });
+      // Text goes to the channel it was typed in, by id, under its name now;
+      // a channel that is gone takes its text with it.
+      const typed: Record<string, string> = {};
+      for (const [id, text] of Object.entries(was.drafts)) {
+        const name = channelsNow.current.channels.find((c) => String(c.id) === id)?.name;
+        if (name !== undefined) typed[name] = text;
+      }
+      dispatchDrafts({ type: 'restore', drafts: typed });
       dispatchAttachments({ type: 'restore', drafts: was.attachments });
       dispatchChat({ type: 'restored', pending });
     }
+    // An audience is never guessed: the box starts as a whisper to nobody,
+    // which cannot be sent, until the channel's nets and members say the
+    // audience still stands (below).
+    const hold = (id: number, target: StoredTarget) => {
+      const name = channelsNow.current.channels.find((c) => c.id === id)?.name;
+      if (name === undefined) return;
+      pendingTargets.current.set(id, target);
+      dispatchTargets({ type: 'held', channel: name, line: checkingAudience });
+    };
+    if (was !== null && was.principal === principalId) {
+      for (const [id, target] of Object.entries(was.targets)) hold(Number(id), target);
+    }
+    // The drafts this tab kept across a reload (issue #1039), by channel id so
+    // a rename since does not matter. What was typed since wins. What belongs
+    // to a channel the person can no longer open is dropped first.
+    pruneStored(principalId, (id) => channelsNow.current.channels.some((c) => c.id === id));
+    const stored = loadStored(principalId);
+    const back: Record<string, string> = {};
+    for (const [id, text] of Object.entries(stored.drafts)) {
+      const name = channelsNow.current.channels.find((c) => String(c.id) === id)?.name;
+      if (name !== undefined) back[name] = text;
+    }
+    if (Object.keys(back).length > 0) dispatchDrafts({ type: 'restore', drafts: back });
+    for (const [id, target] of Object.entries(stored.targets)) hold(Number(id), target);
+    setDraftsReady(true);
   }, [principalId, channels.loaded, dispatchAttachments, dispatchChat]);
+
+  // Keep the drafts and audiences for a reload: only text and ids, only in
+  // this tab (issue #1039).
+  useEffect(() => {
+    if (!draftsReady || principalId === null) return;
+    const byId: Record<number, string> = {};
+    const audiences: Record<number, StoredTarget> = {};
+    for (const channel of channels.channels) {
+      const text = drafts[channel.name];
+      if (text !== undefined) byId[channel.id] = text;
+      const audience = pendingTargets.current.get(channel.id) ?? storedAudience(targetFor(targets, channel.name));
+      if (audience !== null) audiences[channel.id] = audience;
+    }
+    saveDrafts(principalId, byId, audiences);
+  }, [drafts, targets, channels.channels, draftsReady, principalId]);
+
+  // An audience kept across a reload is given back once the open channel's
+  // nets and members are here and it still stands: the net is one the person
+  // may transmit to, every recipient is still a member. Otherwise the text
+  // stays, unsendable, until they choose who it goes to.
+  useEffect(() => {
+    if (channelId === null || selected === null) return;
+    const kept = pendingTargets.current.get(channelId);
+    if (kept === undefined || live.netsFor !== channelId || agents.membersFor !== channelId) return;
+    pendingTargets.current.delete(channelId);
+    // The whisper first, as the composer sends it.
+    // A whisper to nobody never stands: it would leave the draft one Escape
+    // from the whole channel.
+    const stands =
+      kept.whisper !== null
+        ? kept.whisper.length > 0 && kept.whisper.every((id) => id !== principalId && live.people.has(id))
+        : kept.net !== null && live.nets.has(kept.net) && !live.monitored.has(kept.net);
+    if (!stands) {
+      dispatchTargets({ type: 'held', channel: selected, line: audienceGone });
+      return;
+    }
+    dispatchTargets({ type: 'restore', channel: selected, net: kept.net, whisper: kept.whisper });
+  }, [channelId, selected, live.netsFor, live.nets, live.monitored, live.people, agents.membersFor, principalId]);
+
+  // The audience controls (issue #1039): the person's own choice, in a channel
+  // whose kept audience is still being checked, wins, and the kept one is
+  // dropped, so the check can never add to what they chose. Escape is not a
+  // choice: it cannot end a hold (the reducer keeps it), so it leaves the
+  // check running too.
+  const chooseTarget = useCallback((action: TargetAction) => {
+    if (action.type === 'channel' || action.type === 'net' || action.type === 'whisper' || action.type === 'toggle') {
+      const id = channelsNow.current.channels.find((c) => c.name === action.channel)?.id;
+      if (id !== undefined) pendingTargets.current.delete(id);
+    }
+    dispatchTargets(action);
+  }, []);
 
   // An operator's session ends at its twelve hours (issue #714, design
   // §5.3): when it comes, the page asks who it is, and the server's 401
@@ -1491,6 +1632,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 <div className="conversation-body" hidden={agents.state.detail !== null || searchOpen}>
               <Conversation
                 key={channelId}
+                channelId={channelId}
                 channel={selected}
                 chat={chatFor(chat, selected)}
                 live={live.status}
@@ -1503,7 +1645,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 onDraft={(text) => {
                   dispatchDrafts({ type: 'edit', channel: selected, text });
                 }}
-                onTarget={dispatchTargets}
+                onTarget={chooseTarget}
                 onSend={(body, audience, files?: readonly DraftAttachment[]) => {
                   send(channelId, selected, body, audience, files ?? []);
                 }}
@@ -1549,6 +1691,14 @@ function audienceForTarget(target: Target): Audience | undefined {
   if (target.whisper !== null) return { kind: 'principals', principal_ids: [...target.whisper] };
   if (target.net !== null) return { kind: 'net', net_id: target.net };
   return undefined;
+}
+
+// storedAudienceOf is a send's audience as it is kept: null for the whole
+// channel.
+function storedAudienceOf(audience: Audience | undefined): StoredTarget | null {
+  if (audience === undefined) return null;
+  if (audience.kind === 'principals') return { net: null, whisper: [...audience.principal_ids] };
+  return { net: audience.net_id, whisper: null };
 }
 
 function audienceForScope(scope: string): Audience | undefined {

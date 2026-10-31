@@ -4,7 +4,8 @@ import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar } from './Icons';
 import { ImageAttachment } from './ImageAttachment';
-import { canEdit, EditedMarker, editEnds, MessageEditor } from './MessageEdit';
+import { loadStored, saveEdit } from './state/draftStore';
+import { canEdit, EditedMarker, editEnds, editWindowMs, MessageEditor } from './MessageEdit';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
 import { fileAttachmentPayloadSchema, fileAttachmentV1, type FileAttachmentV1 } from './schema/file';
@@ -399,6 +400,7 @@ const nearBottom = 24;
 
 // The open channel: its messages in id order, and the box to write in.
 export function Conversation({
+  channelId,
   channel,
   chat,
   live,
@@ -421,6 +423,9 @@ export function Conversation({
   onSearch,
   onEdited,
 }: {
+  // The channel's id, for keeping an open edit across a reload (issue #1039);
+  // without it nothing is kept.
+  readonly channelId?: number;
   readonly channel: string;
   readonly chat: ChannelChat;
   readonly live: LiveStatus;
@@ -554,6 +559,39 @@ export function Conversation({
     focusBack.current = id;
     setEdit((current) => (current?.id === id ? null : current));
   }, []);
+
+  // An edit left open by a reload (issue #1039) reopens with its text once
+  // the history and the members are here, if the message is still the
+  // viewer's to edit; otherwise it is dropped. Nothing is written meanwhile.
+  const savedEdit = useRef(channelId === undefined ? null : (loadStored(viewer).edits[String(channelId)] ?? null));
+  const [editSettled, setEditSettled] = useState(savedEdit.current === null);
+  useEffect(() => {
+    const saved = savedEdit.current;
+    if (saved === null || chat.history !== 'ready' || viewerKind === null) return;
+    const message = chat.byId.get(saved.message);
+    if (message === undefined) {
+      // Not held is not gone: the message may be below the page read. While
+      // the oldest held message is still inside the edit window, and older
+      // ones exist, ask for them and look again; the saved text is kept.
+      let oldest: MessageV2 | undefined;
+      for (const held of chat.byId.values()) if (oldest === undefined || held.id < oldest.id) oldest = held;
+      if (oldest !== undefined && saved.message < oldest.id && !chat.exhausted && Date.now() - Date.parse(oldest.created_at) <= editWindowMs) {
+        if (chat.older === 'idle') onLoadOlder();
+        return;
+      }
+    }
+    savedEdit.current = null;
+    if (message !== undefined && onEdited !== undefined && canEdit(message, viewer, viewerKind, Date.now())) {
+      setEdit({ id: message.id, text: saved.text, next: null });
+    }
+    setEditSettled(true);
+  }, [chat.history, chat.byId, chat.older, chat.exhausted, viewerKind, viewer, onEdited, onLoadOlder]);
+  const editMessage = edit?.id ?? null;
+  const editText = edit?.text ?? '';
+  useEffect(() => {
+    if (!editSettled || channelId === undefined) return;
+    saveEdit(viewer, channelId, editMessage === null ? null : { message: editMessage, text: editText });
+  }, [editSettled, channelId, viewer, editMessage, editText]);
 
   const shown = ordered(chat);
   const threadAnchor = openThread === null ? null : shown.some((message) => message.id === openThread) ? openThread : shown.find((message) => message.thread_root_id === openThread)?.id ?? null;

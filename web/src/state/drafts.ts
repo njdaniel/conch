@@ -1,5 +1,8 @@
-// What has been typed and not sent, per channel. In memory for the tab: it
-// survives switching channels, not a reload (decision D2 keeps nothing on disk).
+// What has been typed and not sent, per channel. In memory for the tab, and
+// written to the tab's sessionStorage by the page (draftStore.ts, issue
+// #1039) so it survives a reload too, not closing the tab. Decision D2 of the
+// P3 plan kept nothing on disk because the bearer lived in the tab; ADR-008's
+// O1 has since let the sign-in last, so a draft in the tab is no wider.
 import { rekey, without } from './messages';
 
 export type Drafts = Readonly<Record<string, string>>;
@@ -51,6 +54,10 @@ export interface Target {
   readonly refusal: string | null;
   // A note to show beside the composer (the audit-log notice).
   readonly note: string | null;
+  // A kept audience not yet given back (issue #1039): a whisper to nobody,
+  // which cannot be sent, that Escape cannot close. Only the person choosing
+  // who it goes to ends it, or the kept audience coming back whole.
+  readonly held?: boolean;
 }
 
 export type Targets = Readonly<Record<string, Target>>;
@@ -72,6 +79,12 @@ export type TargetAction =
   | { readonly type: 'renamed'; readonly from: string; readonly to: string }
   // The channel was lost (issue #1027): its choice goes with it.
   | { readonly type: 'forget'; readonly channel: string }
+  // A kept audience not yet checked (issue #1039): a whisper to nobody, which
+  // cannot be sent, with the line saying why.
+  | { readonly type: 'held'; readonly channel: string; readonly line: string }
+  // A kept audience that still stands, given back whole: it replaces the
+  // choice, never merges into it, so it can only be what was kept.
+  | { readonly type: 'restore'; readonly channel: string; readonly net: number | null; readonly whisper: readonly number[] | null }
   | { readonly type: 'reset' };
 
 export const initialTargets: Targets = {};
@@ -90,22 +103,29 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
   const set = (next: Target): Targets => ({ ...state, [action.channel]: next });
   switch (action.type) {
     case 'channel':
-      return set({ ...current, net: null, whisper: null, refusal: null });
+      return set({ ...current, net: null, whisper: null, refusal: null, held: false });
     case 'net':
-      return set({ ...current, net: action.net, whisper: null, refusal: null });
+      return set({ ...current, net: action.net, whisper: null, refusal: null, held: false });
     case 'whisper':
-      return set({ ...current, whisper: current.whisper ?? [], refusal: null });
+      return set({ ...current, whisper: current.whisper ?? [], refusal: null, held: false });
     case 'toggle': {
       const chosen = current.whisper ?? [];
       const next = chosen.includes(action.principal) ? chosen.filter((id) => id !== action.principal) : [...chosen, action.principal];
-      return set({ ...current, whisper: next, refusal: null });
+      return set({ ...current, whisper: next, refusal: null, held: false });
     }
     case 'closePicker':
+      // A held draft stays held: closing the picker would leave it addressed
+      // to the whole channel, which nobody chose.
+      if (current.held === true) return state;
       return set({ ...current, whisper: null, refusal: null });
     case 'posting':
       return set({ ...current, refusal: null, note: null });
     case 'refused':
       return set({ ...current, refusal: action.line });
+    case 'held':
+      return set({ ...current, net: null, whisper: [], refusal: action.line, held: true });
+    case 'restore':
+      return set({ ...current, net: action.whisper === null ? action.net : null, whisper: action.whisper === null ? null : [...action.whisper], refusal: null, held: false });
     case 'whispered': {
       // Only if the whisper still chosen is the one that was sent: a second one
       // being composed while the first was on its way is left as it is.

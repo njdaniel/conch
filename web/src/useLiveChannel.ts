@@ -27,6 +27,9 @@ export interface Live {
   readonly nets: ReadonlyMap<number, string>;
   // The nets the viewer only monitors: they cannot transmit to them.
   readonly monitored: ReadonlySet<number>;
+  // The channel whose nets `nets` is the answer for, or null before it comes:
+  // an empty list is only "no nets" once this is the open channel's id.
+  readonly netsFor: number | null;
   readonly retry: () => void;
   // Asks for the page below the oldest message held; a 401 signs out.
   readonly loadOlder: () => void;
@@ -81,6 +84,7 @@ export function useLiveChannel({
   const [status, setStatus] = useState<LiveStatus>('loading');
   const [nets, setNets] = useState<ReadonlyMap<number, string>>(new Map());
   const [monitored, setMonitored] = useState<ReadonlySet<number>>(new Set());
+  const [netsFor, setNetsFor] = useState<number | null>(null);
   const [attempt, setAttempt] = useState(0);
   // Moved on when the effect below is cleaned up (another channel, a retry,
   // sign-out): an older page asked for under an earlier one is then dropped.
@@ -106,6 +110,7 @@ export function useLiveChannel({
     setStatus('loading');
     setNets(new Map());
     setMonitored(new Set());
+    setNetsFor(null);
 
     void api.listNets(name()).then((result) => {
       if (!live) return;
@@ -114,6 +119,7 @@ export function useLiveChannel({
         return;
       }
       setNets(new Map(result.value.map((n) => [n.id, n.name])));
+      setNetsFor(id);
       setMonitored(new Set(result.value.filter((n) => n.members.some((m) => m.principal_id === meId && m.role === 'monitor')).map((n) => n.id)));
     });
 
@@ -247,5 +253,5 @@ export function useLiveChannel({
     });
   }, [channelId, nameOf, getOldest, dispatchChat, dispatchConnection, onUnauthorized, onMissing]);
 
-  return { status, people, nets, monitored, retry, loadOlder };
+  return { status, people, nets, monitored, netsFor, retry, loadOlder };
 }

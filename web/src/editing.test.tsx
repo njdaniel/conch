@@ -23,8 +23,8 @@ function msg(id: number, fields: Partial<MessageV2> = {}): MessageV2 {
 
 const people = (kind: Person['kind'] = 'human') => new Map<number, Person>([[viewer, { name: 'ada', kind }], [3, { name: 'bea', kind: 'human' }]]);
 
-function chat(messages: readonly MessageV2[], pending: readonly PendingSend[] = []): ChannelChat {
-  return { byId: new Map(messages.map((m) => [m.id, m])), pending, sentIds: new Set(), history: 'ready', older: 'idle', exhausted: true, trimmed: false, dropped: 0, nextLocalId: 9 };
+function chat(messages: readonly MessageV2[], pending: readonly PendingSend[] = [], exhausted = true): ChannelChat {
+  return { byId: new Map(messages.map((m) => [m.id, m])), pending, sentIds: new Set(), history: 'ready', older: 'idle', exhausted, trimmed: false, dropped: 0, nextLocalId: 9 };
 }
 
 interface Options {
@@ -32,13 +32,17 @@ interface Options {
   readonly kind?: Person['kind'];
   readonly pending?: readonly PendingSend[];
   readonly edits?: boolean;
+  readonly channelId?: number;
+  readonly exhausted?: boolean;
+  readonly onLoadOlder?: () => void;
 }
 
-function conversation(messages: readonly MessageV2[], { onEdited = vi.fn(), kind = 'human', pending = [], edits = true }: Options = {}) {
+function conversation(messages: readonly MessageV2[], { onEdited = vi.fn(), kind = 'human', pending = [], edits = true, channelId, exhausted = true, onLoadOlder = () => undefined }: Options = {}) {
   return (
     <Conversation
+      {...(channelId === undefined ? {} : { channelId })}
       channel="general"
-      chat={chat(messages, pending)}
+      chat={chat(messages, pending, exhausted)}
       live="open"
       people={people(kind)}
       nets={new Map()}
@@ -52,7 +56,7 @@ function conversation(messages: readonly MessageV2[], { onEdited = vi.fn(), kind
       onReplySend={() => undefined}
       onRetrySend={() => undefined}
       onDismissSend={() => undefined}
-      onLoadOlder={() => undefined}
+      onLoadOlder={onLoadOlder}
       onReload={() => undefined}
       onBottom={() => undefined}
       {...(edits ? { onEdited } : {})}
@@ -78,6 +82,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  window.sessionStorage.clear();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -412,5 +417,67 @@ describe('the (edited) marker', () => {
     expect((await within(dialog).findByRole('alert')).textContent).toContain("Couldn't load the earlier versions.");
     fireEvent.click(within(dialog).getByRole('button', { name: 'Try again' }));
     expect(revisions).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('an open edit across a reload (issue #1039)', () => {
+  it('is kept as it is typed, and reopens with its text while the message is editable', () => {
+    const first = render(conversation([msg(1, { body: 'helo, conch' })], { channelId: 7 }));
+    fireEvent.change(openEditor(1), { target: { value: 'hello, half done' } });
+    first.unmount();
+    render(conversation([msg(1, { body: 'helo, conch' })], { channelId: 7 }));
+    expect((box(1) as HTMLTextAreaElement).value).toBe('hello, half done');
+  });
+
+  it('is dropped once the message is no longer editable', () => {
+    const first = render(conversation([msg(1, { body: 'helo, conch' })], { channelId: 7 }));
+    fireEvent.change(openEditor(1), { target: { value: 'hello, half done' } });
+    first.unmount();
+    render(conversation([msg(1, { body: 'helo, conch', created_at: ago(editWindowMs + minute) })], { channelId: 7 }));
+    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it('on a message below the page read is kept while the page asks for older ones, and reopens when it arrives', () => {
+    const first = render(conversation([msg(1, { body: 'old one' }), msg(5)], { channelId: 7 }));
+    fireEvent.change(openEditor(1), { target: { value: 'old one, changed' } });
+    first.unmount();
+    const onLoadOlder = vi.fn();
+    const page = render(conversation([msg(5), msg(6)], { channelId: 7, exhausted: false, onLoadOlder }));
+    expect(onLoadOlder).toHaveBeenCalled();
+    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+    expect(window.sessionStorage.getItem('conch.web.drafts')).toContain('old one, changed');
+    page.rerender(conversation([msg(1, { body: 'old one' }), msg(5), msg(6)], { channelId: 7, exhausted: false, onLoadOlder }));
+    expect((box(1) as HTMLTextAreaElement).value).toBe('old one, changed');
+  });
+
+  it('on a message that is not there once every page is read is dropped', () => {
+    const first = render(conversation([msg(1), msg(5)], { channelId: 7 }));
+    fireEvent.change(openEditor(1), { target: { value: 'changed' } });
+    first.unmount();
+    render(conversation([msg(5)], { channelId: 7, exhausted: true }));
+    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it('is forgotten when the editor is cancelled', () => {
+    const first = render(conversation([msg(1)], { channelId: 7 }));
+    fireEvent.change(openEditor(1), { target: { value: 'changed' } });
+    fireEvent.keyDown(box(1), { key: 'Escape' });
+    first.unmount();
+    render(conversation([msg(1)], { channelId: 7 }));
+    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+  });
+
+  it('works with storage refused', () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('blocked');
+    });
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('blocked');
+    });
+    render(conversation([msg(1, { body: 'helo' })], { channelId: 7 }));
+    fireEvent.change(openEditor(1), { target: { value: 'fixed' } });
+    expect((box(1) as HTMLTextAreaElement).value).toBe('fixed');
   });
 });
