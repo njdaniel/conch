@@ -459,6 +459,9 @@ func (s *Server) writeRedeemed(w http.ResponseWriter, r *http.Request, res store
 		writeInternalError(w)
 	default:
 		slog.InfoContext(ctx, "invites: redeemed", "principal", res.Principal.ID, "invite", res.Principal.InviteID)
+		// A new principal has no socket open yet; the call covers a later
+		// route that redeems for an existing one (issue #1027).
+		s.events.notifyChannelsChanged(res.Principal.ID)
 		writeSecretJSON(w, http.StatusCreated, schema.RedeemInviteResponseV1{
 			Principal:  principalFromStore(res.Principal),
 			Credential: res.Credential,

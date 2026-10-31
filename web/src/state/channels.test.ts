@@ -132,3 +132,49 @@ describe('what is kept by name moves with a rename', () => {
     expect(rekey(held, 'ops', 'ops-room')).toEqual({ general: 1, 'ops-room': 2 });
   });
 });
+
+describe('channelsReducer refreshed', () => {
+  const cases: { name: string; from: ChannelsState; channels: ChannelV0[]; want: ChannelsState }[] = [
+    {
+      name: 'replaces the list, adding a channel and dropping one, and keeps the open one open',
+      from: listed('general'),
+      channels: [general, dev, { id: 4, name: 'new', created_at: at }],
+      want: { channels: [general, dev, { id: 4, name: 'new', created_at: at }], loaded: true, selected: 'general' },
+    },
+    {
+      name: 'leaves the open channel, absent from the answer, with the line and the fallback',
+      from: listed('ops'),
+      channels: [dev, general],
+      want: { channels: [dev, general], loaded: true, selected: 'general', lost: 'ops' },
+    },
+    {
+      name: 'opens the first channel of a person who had none',
+      from: { channels: [], loaded: true, selected: null },
+      channels: [ops, dev],
+      want: { channels: [ops, dev], loaded: true, selected: 'ops' },
+    },
+    {
+      name: 'leaves nothing open when the answer is empty',
+      from: listed('ops'),
+      channels: [],
+      want: { channels: [], loaded: true, selected: null, lost: 'ops' },
+    },
+  ];
+  it.each(cases)('$name', ({ from, channels, want }) => {
+    expect(channelsReducer(from, { type: 'refreshed', channels })).toEqual(want);
+  });
+  it('returns the same state when the answer is the list already held', () => {
+    const from = listed('ops');
+    expect(channelsReducer(from, { type: 'refreshed', channels: [general, ops, dev] })).toBe(from);
+  });
+});
+
+describe('channelsReducer select', () => {
+  it('keeps the line when the channel already open is selected again (the address bar echoing the fallback)', () => {
+    const from = listed('ops', 'general');
+    expect(channelsReducer(from, { type: 'select', name: 'ops' })).toBe(from);
+  });
+  it('clears the line when another channel is chosen', () => {
+    expect(channelsReducer(listed('ops', 'general'), { type: 'select', name: 'dev' })).toEqual(listed('dev'));
+  });
+});

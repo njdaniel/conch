@@ -217,6 +217,7 @@ export function useAgents({
   onReadState,
   onMessage,
   onMessageEdited,
+  onChannelsChanged,
 }: {
   readonly signedIn: boolean;
   readonly channel: string | null;
@@ -239,6 +240,9 @@ export function useAgents({
   // A message edited (issue #845, conch.message_edited.v1): an update of one
   // the page may hold, never a new one.
   readonly onMessageEdited?: (message: MessageV2) => void;
+  // The person's channel list may have changed (issue #1027): the frame, and
+  // each reconnect of the socket, which may have missed one.
+  readonly onChannelsChanged?: () => void;
 }): Agents {
   const [state, dispatch] = useReducer(agentsReducer, initialAgents);
   const [members, setMembers] = useState<readonly ChannelMemberV1[]>([]);
@@ -332,11 +336,20 @@ export function useAgents({
     let reason = '';
     let denials = firstDelay;
     let retry: unknown = null;
+    // Set when the socket goes down, so that its next open catches up.
+    let interrupted = false;
 
     function onStatus(status: FeedStatus) {
       if (!live) return;
       switch (status) {
+        case 'open':
+          if (interrupted) {
+            interrupted = false;
+            onChannelsChanged?.();
+          }
+          break;
         case 'waiting':
+          interrupted = true;
           dispatch({ type: 'down' });
           break;
         case 'unauthorized':
@@ -344,6 +357,7 @@ export function useAgents({
           onUnauthorized();
           break;
         case 'denied':
+          interrupted = true;
           dispatch({ type: 'down' });
           if (reason === sessionEnded) {
             replace();
@@ -416,6 +430,9 @@ export function useAgents({
           case 'messageEdited':
             onMessageEdited?.(frame.message);
             break;
+          case 'channelsChanged':
+            onChannelsChanged?.();
+            break;
         }
       },
       onStatus,
@@ -426,7 +443,7 @@ export function useAgents({
       if (retry !== null) realClock.clearTimeout(retry);
       feed.stop();
     };
-  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, onMessageEdited, replace, healthy]);
+  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, onMessageEdited, onChannelsChanged, replace, healthy]);
 
   // The members line is read again each time the socket comes back.
   useEffect(() => {

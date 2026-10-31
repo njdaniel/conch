@@ -51,6 +51,8 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+	// The creator's other tabs list the new channel (issue #1027).
+	s.events.notifyChannelsChanged(creatorID)
 	writeJSON(w, http.StatusCreated, schema.CreateChannelResponse{Channel: channelFromStore(channel)})
 }
 
@@ -141,8 +143,29 @@ func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 		// now is. The message and voice sockets are bound to the id and need
 		// nothing; no socket is closed.
 		s.events.notifyChannel(id, eventRef{kind: eventChannel, id: id})
+		s.channelRenamedLists(ctx, id)
 	}
 	writeJSON(w, http.StatusOK, schema.RenameChannelResponseV1{Channel: channelFromStore(res.Channel)})
+}
+
+// channelRenamedLists tells every human member of a renamed channel that
+// their channel list changed (issue #1027, membership-live.md §2): the name
+// is in it. The members are read after the commit, so each one told can read
+// the new name. A failed read is logged and does not fail the rename; the
+// member's next re-read of the list catches up.
+func (s *Server) channelRenamedLists(ctx context.Context, channelID int64) {
+	members, err := s.store.ListChannelMembers(ctx, channelID)
+	if err != nil {
+		slog.ErrorContext(ctx, "channels: list members after rename failed", "channel", channelID, "error", err)
+		return
+	}
+	ids := make([]int64, 0, len(members))
+	for _, m := range members {
+		if m.Kind == store.PrincipalHuman {
+			ids = append(ids, m.PrincipalID)
+		}
+	}
+	s.events.notifyChannelsChanged(ids...)
 }
 
 func (s *Server) writeChannelRenameLimitError(w http.ResponseWriter, limited *store.RenameLimitedError) {

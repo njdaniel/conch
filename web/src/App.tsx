@@ -50,6 +50,7 @@ import { NotificationCenter } from './NotificationCenter';
 import { NotificationSettings } from './NotificationSettings';
 import { SearchPanel } from './SearchPanel';
 import { useReadState } from './useReadState';
+import { useChannelRefresh } from './useChannelRefresh';
 import { MembersPanel } from './agents/MembersPanel';
 import { RunDetail } from './agents/RunDetail';
 import { useAgents } from './agents/useAgents';
@@ -303,13 +304,18 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     [invalidateChannel, dispatchChannels, dispatchChat, dispatchAttachments],
   );
 
-  const loseChannel = useCallback((id: number, name: string) => {
+  // Everything the page keeps of a channel it can no longer open.
+  const dropChannel = useCallback((id: number, name: string) => {
     invalidateChannel(id);
-    dispatchChannels({ type: 'lost', name });
     for (const scope of Object.keys(attachmentsNow.current.channels[name] ?? {})) {
       dispatchAttachments({ type: 'clear', channel: name, audience: audienceForScope(scope) });
     }
-  }, [invalidateChannel, dispatchChannels, dispatchAttachments]);
+  }, [invalidateChannel, dispatchAttachments]);
+
+  const loseChannel = useCallback((id: number, name: string) => {
+    dropChannel(id, name);
+    dispatchChannels({ type: 'lost', name });
+  }, [dispatchChannels, dropChannel]);
 
   // The slow way (issue #728): a call for a channel answered
   // channel_not_found. The list is read again and the channel found by its
@@ -407,6 +413,22 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // The browser's own session, the events socket and what the panel and run
   // detail show from them. The member list it keeps current also names the
   // authors in the conversation.
+  // The list read again and replaced (issue #1027), on the events socket's word
+  // and on focus; the counts are then read again too.
+  const reloadReadState = useRef<(() => void) | null>(null);
+  const reloadCounts = useCallback(() => {
+    reloadReadState.current?.();
+  }, []);
+  const refreshChannels = useChannelRefresh({
+    signedIn,
+    channelsNow,
+    empty: channels.loaded && channels.channels.length === 0,
+    dispatchChannels,
+    renamed,
+    forget: dropChannel,
+    onUnauthorized,
+    reloadReadState: reloadCounts,
+  });
   const [readStateEvent, setReadStateEvent] = useState<ReadStateV1 | null>(null);
   const [messageEvent, setMessageEvent] = useState<MessageV2 | null>(null);
   const [editEvent, setEditEvent] = useState<MessageV2 | null>(null);
@@ -439,6 +461,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onReadState: setReadStateEvent,
     onMessage: setMessageEvent,
     onMessageEdited,
+    onChannelsChanged: refreshChannels,
   });
   const live = useLiveChannel({
     channel: channelId === null ? null : selected,
@@ -482,6 +505,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     me: principal?.id ?? 0,
     onUnauthorized,
     onMissing,
+    reload: reloadReadState,
   });
   const notifications = useNotifications({
     signedIn,
