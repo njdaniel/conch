@@ -291,6 +291,19 @@ var TSTypes = []TSType{
 	{Value: ReactionV1{}, Family: "reaction-v1"},
 	{Value: ListReactorsResponseV1{}, Family: "list-reactors-response-v1"},
 
+	// Roles and permissions (ADR-014, issue #1012,
+	// docs/design/admin-roles.md §8): the document an operator reads and
+	// the owner changes, a cell patch or a preset, and the content-free
+	// signal that says to re-read whoami. The caller's own permissions are
+	// in WhoAmIResponseV1.
+	{Value: PermissionRowV1{}},
+	{Value: PermissionPresetV1{}},
+	{Value: IssuedByOperatorV1{}},
+	{Value: PermissionsResponseV1{}, Family: "permissions-response-v1"},
+	{Value: PermissionChangeV1{}},
+	{Value: PutPermissionsRequestV1{}, Family: "put-permissions-request-v1"},
+	{Value: PermissionsChangedV1{}, Family: "permissions-changed-v1", Schema: PermissionsChangedSchemaV1},
+
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},
 }
