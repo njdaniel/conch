@@ -178,8 +178,14 @@ type TOTPLogin struct {
 // generation, with a password), and the code right and unused. Then the
 // step is recorded, the challenge spent, and the operator issued a browser
 // session: schema.OperatorSessionAbsoluteSeconds absolute and
-// schema.OperatorSessionIdleSeconds idle, never renewed. login and
-// credential_created are audited.
+// schema.OperatorSessionIdleSeconds idle, never renewed. The sign-in is
+// also the session's recent-auth proof (design §5.3, issue #1033): the
+// password, verified for this challenge and of the present generation, and
+// the code, accepted at now. The new session, and no other credential of
+// the operator, holds the proof until schema.RecentAuthLifetimeSeconds
+// after now, cleared as a re-authentication's is. login and
+// credential_created are audited; the proof is part of the login, not a
+// reauth.
 //
 // A wrong address or code counts as one of the challenge's attempts and is
 // committed as such (the challenge is spent at the last one), then answered
@@ -261,6 +267,11 @@ func (s *Store) CompleteTOTPLogin(ctx context.Context, in TOTPLogin, now time.Ti
 		}
 		cred, err := insertOperatorSessionTx(ctx, tx, principalID, token, now)
 		if err != nil {
+			return err
+		}
+		// The password and the code just verified are the recent proof
+		// (design §5.3, issue #1033), on this session alone.
+		if err := setRecentAuthTx(ctx, tx, cred.ID, now.Add(schema.RecentAuthLifetimeSeconds*time.Second)); err != nil {
 			return err
 		}
 		out.Principal, out.Credential = p, cred

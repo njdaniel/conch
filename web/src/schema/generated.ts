@@ -118,6 +118,34 @@ export type ServerMode = 'temporary';
 
 export const serverMode = vocab<ServerMode>({ temporary: true });
 
+// schema.Permission
+export type Permission =
+  | 'create_public_channels'
+  | 'create_private_channels'
+  | 'make_member_links'
+  | 'see_member_directory'
+  | 'use_voice'
+  | 'share_screen'
+  | 'manage_members'
+  | 'act_as_members'
+  | 'manage_channels'
+  | 'change_server_settings'
+  | 'read_audit_log';
+
+export const permission = vocab<Permission>({
+  create_public_channels: true,
+  create_private_channels: true,
+  make_member_links: true,
+  see_member_directory: true,
+  use_voice: true,
+  share_screen: true,
+  manage_members: true,
+  act_as_members: true,
+  manage_channels: true,
+  change_server_settings: true,
+  read_audit_log: true,
+});
+
 // schema.WhoAmIResponseV1
 export interface WhoAmIResponseV1 {
   id: number;
@@ -133,6 +161,8 @@ export interface WhoAmIResponseV1 {
   auth?: AuthStateV1;
   owner?: boolean;
   server_mode?: ServerMode;
+  permissions?: Permission[];
+  permissions_revision?: number;
 }
 
 export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
@@ -149,6 +179,8 @@ export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
   auth: optional(authStateV1),
   owner: optional(bool),
   server_mode: optional(serverMode),
+  permissions: optional(array(permission)),
+  permissions_revision: optional(int),
 });
 
 // schema.ChannelV0
@@ -1023,6 +1055,17 @@ export const listReadStateResponseV1 = object<ListReadStateResponseV1>({
   read_state: array(readStateV1),
 });
 
+// schema.ChannelsChangedV1
+export const channelsChangedV1Schema = 'conch.channels_changed.v1';
+
+export interface ChannelsChangedV1 {
+  schema: typeof channelsChangedV1Schema;
+}
+
+export const channelsChangedV1 = object<ChannelsChangedV1>({
+  schema: vocab<typeof channelsChangedV1Schema>({ [channelsChangedV1Schema]: true }),
+});
+
 // schema.VoiceRoomGrant
 export interface VoiceRoomGrant {
   room: string;
@@ -1301,6 +1344,7 @@ export interface InviteV1 {
   may_invite: boolean;
   credential_lifetime_seconds: number;
   join_as?: InviteJoinMode;
+  other_channels?: number;
 }
 
 export const inviteV1 = object<InviteV1>({
@@ -1317,6 +1361,7 @@ export const inviteV1 = object<InviteV1>({
   may_invite: bool,
   credential_lifetime_seconds: int,
   join_as: optional(inviteJoinMode),
+  other_channels: optional(int),
 });
 
 // schema.CreateInviteRequestV1
@@ -1975,6 +2020,7 @@ export interface JoinSettingsV1 {
   guest_idle_seconds: number;
   guest_absolute_seconds: number;
   open_channels: string[];
+  other_open_channels?: number;
 }
 
 export const joinSettingsV1 = object<JoinSettingsV1>({
@@ -1987,6 +2033,7 @@ export const joinSettingsV1 = object<JoinSettingsV1>({
   guest_idle_seconds: int,
   guest_absolute_seconds: int,
   open_channels: array(str),
+  other_open_channels: optional(int),
 });
 
 // schema.PutJoinSettingsRequestV1
@@ -2543,17 +2590,147 @@ export const listReactorsResponseV1 = object<ListReactorsResponseV1>({
   next_after: optional(int),
 });
 
+// schema.PermissionRowV1
+export interface PermissionRowV1 {
+  permission: Permission;
+  member: boolean;
+  operator: boolean;
+  member_fixed?: boolean;
+  operator_fixed?: boolean;
+}
+
+export const permissionRowV1 = object<PermissionRowV1>({
+  permission: permission,
+  member: bool,
+  operator: bool,
+  member_fixed: optional(bool),
+  operator_fixed: optional(bool),
+});
+
+// schema.PermissionPreset
+export type PermissionPreset = 'personal' | 'group';
+
+export const permissionPreset = vocab<PermissionPreset>({ personal: true, group: true });
+
+// schema.PermissionPresetV1
+export interface PermissionPresetV1 {
+  preset: PermissionPreset;
+  member: Permission[];
+}
+
+export const permissionPresetV1 = object<PermissionPresetV1>({
+  preset: permissionPreset,
+  member: array(permission),
+});
+
+// schema.IssuedKind
+export type IssuedKind = 'credential' | 'hook';
+
+export const issuedKind = vocab<IssuedKind>({ credential: true, hook: true });
+
+// schema.IssuedByOperatorV1
+export interface IssuedByOperatorV1 {
+  kind: IssuedKind;
+  id: number;
+  principal_id: number;
+  issued_by: number;
+  issued_at: string;
+}
+
+export const issuedByOperatorV1 = object<IssuedByOperatorV1>({
+  kind: issuedKind,
+  id: int,
+  principal_id: int,
+  issued_by: int,
+  issued_at: timestamp,
+});
+
+// schema.PermissionRole
+export type PermissionRole = 'member' | 'operator';
+
+export const permissionRole = vocab<PermissionRole>({ member: true, operator: true });
+
+// schema.PermissionsWarning
+export type PermissionsWarning = 'default_channel_exposes_members' | 'open_signup_on';
+
+export const permissionsWarning = vocab<PermissionsWarning>({
+  default_channel_exposes_members: true,
+  open_signup_on: true,
+});
+
+// schema.PermissionsResponseV1
+export interface PermissionsResponseV1 {
+  revision: number;
+  rows: PermissionRowV1[];
+  preset?: PermissionPreset;
+  presets: PermissionPresetV1[];
+  editable: PermissionRole[];
+  warnings: PermissionsWarning[];
+  updated_at: string;
+  issued_to_others?: IssuedByOperatorV1[];
+}
+
+export const permissionsResponseV1 = object<PermissionsResponseV1>({
+  revision: int,
+  rows: array(permissionRowV1),
+  preset: optional(permissionPreset),
+  presets: array(permissionPresetV1),
+  editable: array(permissionRole),
+  warnings: array(permissionsWarning),
+  updated_at: timestamp,
+  issued_to_others: optional(array(issuedByOperatorV1)),
+});
+
+// schema.PermissionChangeV1
+export interface PermissionChangeV1 {
+  permission: Permission;
+  role: PermissionRole;
+  granted: boolean;
+}
+
+export const permissionChangeV1 = object<PermissionChangeV1>({
+  permission: permission,
+  role: permissionRole,
+  granted: bool,
+});
+
+// schema.PutPermissionsRequestV1
+export interface PutPermissionsRequestV1 {
+  revision: number;
+  changes?: PermissionChangeV1[];
+  preset?: PermissionPreset;
+}
+
+export const putPermissionsRequestV1 = object<PutPermissionsRequestV1>({
+  revision: int,
+  changes: optional(array(permissionChangeV1)),
+  preset: optional(permissionPreset),
+});
+
+// schema.PermissionsChangedV1
+export const permissionsChangedV1Schema = 'conch.permissions_changed.v1';
+
+export interface PermissionsChangedV1 {
+  schema: typeof permissionsChangedV1Schema;
+}
+
+export const permissionsChangedV1 = object<PermissionsChangedV1>({
+  schema: vocab<typeof permissionsChangedV1Schema>({ [permissionsChangedV1Schema]: true }),
+});
+
 // schema.Error
 export interface ErrorV0 {
   code: string;
   message: string;
   retry_after_seconds?: number;
+  permission?: Permission;
 }
 
 export const errorV0 = object<ErrorV0>({
   code: str,
   message: str,
   retry_after_seconds: optional(int),
+  permission: optional(permission),
 });
 
 // schema.LoginNext
