@@ -55,3 +55,20 @@ test('P3-02 a message posted through the API as nick-test appears once in the br
   await expect(messages(page).getByText(body)).toHaveCount(1);
   expect((await history(world, world.tokens.browser, 'general')).filter((m) => m.body === body)).toHaveLength(1);
 });
+
+test('F14 a typed draft survives a reload, and sending it leaves an empty box after the next', async ({ meet, world }) => {
+  const { page } = await meet();
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  const box = page.getByLabel('Message #general');
+  await box.fill('a draft I was typing');
+
+  await page.reload();
+  await expect(page.getByLabel('Message #general')).toHaveValue('a draft I was typing');
+
+  const body = 'f14 sent after a reload';
+  await page.getByLabel('Message #general').fill(body);
+  await page.getByRole('button', { name: 'Send' }).click();
+  await expect(messages(page).getByText(body)).toHaveCount(1);
+  await page.reload();
+  await expect(page.getByLabel('Message #general')).toHaveValue('');
+});
