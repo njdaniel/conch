@@ -1426,7 +1426,10 @@ describe('the phone strip under Chat and Channels (issue #1028)', () => {
   it('is the four controls with the open microphone, its level in place of Hold to talk', () => {
     const { voice } = mount({ ...inVoice('connected', 'channel-a'), mode: 'open' }, () => undefined);
     expect(buttons(voice)).toEqual([stateName.connected, 'Mute', 'Leave voice']);
-    expect(within(voice).getByRole('meter', { name: 'Microphone level' })).toBeTruthy();
+    const meter = within(voice).getByRole('meter', { name: 'Microphone level' });
+    // The words stay, for a screen reader, in their own span, which the strip
+    // hides on screen so the meter has the room.
+    expect(meter.parentElement?.querySelector('.open-mic-label')?.textContent).toBe('Open microphone');
   });
 
   it('opens the Voice view from the state button, and its Leave voice leaves', () => {

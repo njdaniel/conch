@@ -517,7 +517,10 @@ function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readon
     return (
       <span className="open-mic">
         <Glyph name="mic" />
-        Open microphone <meter min={0} max={1} value={state.level} aria-label="Microphone level" />
+        {/* In the phone's strip the words are only read out, and the meter
+            has their room (issue #1028). */}
+        <span className="open-mic-label">Open microphone</span>{' '}
+        <meter min={0} max={1} value={state.level} aria-label="Microphone level" />
       </span>
     );
   }

@@ -3055,18 +3055,29 @@ button.link {
     text-overflow: ellipsis;
   }
 
+  /* With the open microphone the slot is the icon and the level: its words
+     are only read out (as .vh), and the meter keeps at least 3rem, so it is
+     never pushed out of the slot and clipped. */
   .voice.strip .open-mic {
     flex: 1 1 auto;
-    min-width: 0;
+    min-width: 5rem;
     min-height: 2.75rem;
+    padding-inline: var(--s2);
+  }
+
+  .voice.strip .open-mic-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
     overflow: hidden;
+    clip-path: inset(50%);
     white-space: nowrap;
   }
 
   .voice.strip .open-mic meter {
-    flex: 1 1 2rem;
+    flex: 1 1 auto;
     width: auto;
-    min-width: 1.5rem;
+    min-width: 3rem;
   }
 
   .voice-notes[hidden] {

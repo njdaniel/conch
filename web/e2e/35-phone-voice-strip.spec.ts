@@ -112,7 +112,13 @@ test.describe('the phone voice strip with LiveKit', () => {
     const page = await context.newPage();
     await signIn(page, vw, member.token, member.name);
     await openChannel(page, vw.channel);
-    return { page, size, close: () => context.close() };
+    // The page is closed before its context, as fixtures.ts does: its pagehide
+    // ends the session it started (issue #802).
+    const close = async () => {
+      if (!page.isClosed()) await page.close();
+      await context.close();
+    };
+    return { page, size, close };
   }
 
   async function join(p: Someone): Promise<void> {
@@ -166,11 +172,76 @@ test.describe('the phone voice strip with LiveKit', () => {
     return dock;
   }
 
+  // expectOpenMicrophone checks the strip under Chat with the open
+  // microphone: the level meter lies wholly inside its slot, which lies inside
+  // the window, so nothing of it is clipped; the strip is still one row of at
+  // most 64 px, and the slot still reads "Open microphone".
+  async function expectOpenMicrophone(p: Someone): Promise<void> {
+    const where = `${p.size}, open microphone`;
+    const voice = voiceRegion(p.page);
+    const meter = voice.getByRole('meter', { name: 'Microphone level' });
+    await expect(meter).toBeAttached();
+    const slot = await boxOf(p.page.locator('.voice.strip .open-mic'), `${where}: the slot`);
+    const level = await boxOf(meter, `${where}: the meter`);
+    const screen = p.page.viewportSize()?.width ?? 0;
+    console.log(`phone voice strip, ${where}: ${JSON.stringify({ slot, meter: level })}`);
+    expect.soft(slot.x, `${where}: the slot starts at ${String(slot.x)} px`).toBeGreaterThanOrEqual(0);
+    expect.soft(slot.x + slot.width, `${where}: the slot ends at ${String(slot.x + slot.width)} px of ${String(screen)}`).toBeLessThanOrEqual(screen);
+    expect.soft(level.width, `${where}: the meter is ${String(level.width)} px wide`).toBeGreaterThanOrEqual(24);
+    expect.soft(level.x, `${where}: the meter starts at ${String(level.x)}, its slot at ${String(slot.x)}`).toBeGreaterThanOrEqual(slot.x);
+    expect
+      .soft(level.x + level.width, `${where}: the meter ends at ${String(level.x + level.width)}, its slot at ${String(slot.x + slot.width)}`)
+      .toBeLessThanOrEqual(slot.x + slot.width + 0.5);
+    expect.soft(level.y, `${where}: the meter's top`).toBeGreaterThanOrEqual(slot.y);
+    expect.soft(level.y + level.height, `${where}: the meter's bottom`).toBeLessThanOrEqual(slot.y + slot.height + 0.5);
+    await expect.soft(p.page.locator('.voice.strip .open-mic'), `${where}: the slot is named`).toContainText('Open microphone');
+    const dock = await boxOf(p.page.locator('.dock'), `${where}: the strip`);
+    expect.soft(dock.height, `${where}: the strip is ${String(dock.height)} px high`).toBeLessThanOrEqual(64);
+    await expectFits(p.page, where);
+  }
+
+  // settled waits until the strip, the stage and the log keep their sizes for
+  // two reads in a row: a watched share's first frames resize the stage, and
+  // the log with it.
+  async function settled(page: Page): Promise<void> {
+    let last = '';
+    await expect
+      .poll(
+        async () => {
+          const now = await page.evaluate(() =>
+            JSON.stringify(['.dock', '.stage', '[role="log"]'].map((s) => document.querySelector(s)?.getBoundingClientRect().toJSON() as unknown)),
+          );
+          const same = now === last;
+          last = now;
+          return same;
+        },
+        { timeout: 15_000, intervals: [250] },
+      )
+      .toBe(true);
+  }
+
+  // framesArrive waits, as 12-screen-share does, until the watched share's
+  // frames arrive and keep arriving: the video has its size and more than ten
+  // frames, then more.
+  async function framesArrive(page: Page): Promise<void> {
+    const video = shareView(page).locator('video');
+    const frames = () =>
+      video.evaluate((el) => {
+        const v = el as HTMLVideoElement;
+        return v.videoWidth > 0 ? v.getVideoPlaybackQuality().totalVideoFrames : 0;
+      });
+    await expect.poll(frames, { timeout: 30_000 }).toBeGreaterThan(10);
+    const before = await frames();
+    await expect.poll(frames, { timeout: 15_000 }).toBeGreaterThan(before);
+  }
+
   // measure checks one phone in one state, under Chat and then Channels.
   async function measure(p: Someone, state: State): Promise<void> {
     const where = `${p.size}, ${state}`;
     const { page } = p;
     await showView(page, 'Chat');
+    if (state === 'watching') await framesArrive(page);
+    await settled(page);
     const dock = await expectStrip(p, `${where}, Chat`);
     const log = messages(page);
     const composer = page.locator('form.composer');
@@ -295,6 +366,13 @@ test.describe('the phone voice strip with LiveKit', () => {
         const options = voice.getByRole('button', { name: 'Voice options' });
         await options.tap();
         await expect(voice.getByLabel('Push to talk')).toBeVisible();
+        // With the open microphone, the strip shows its level where Hold to
+        // talk was: the meter is drawn whole inside its slot, in one row.
+        await voice.getByLabel('Open microphone').tap();
+        await showView(page, 'Chat');
+        await expectOpenMicrophone(p);
+        await voice.getByRole('button', { name: fourControls[0] }).tap();
+        await voice.getByLabel('Push to talk').tap();
         await options.tap();
         await expect(voice.getByLabel('Push to talk')).toBeHidden();
         // The strip's Leave voice leaves.
