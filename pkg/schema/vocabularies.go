@@ -142,6 +142,18 @@ var Vocabularies = map[string][]string{
 		VoiceShareEndAccessLost, VoiceShareEndRotated, VoiceShareEndIdle,
 	),
 	"VoiceTransmitState": values(VoiceTransmitStateStarted, VoiceTransmitStateStopped),
+
+	// Roles and permissions (ADR-014, issue #1012). Permission is in catalog
+	// order, the order of Permissions.
+	"Permission": values(
+		PermCreatePublicChannels, PermCreatePrivateChannels, PermMakeMemberLinks, PermSeeMemberDirectory,
+		PermUseVoice, PermShareScreen, PermManageMembers, PermActAsMembers, PermManageChannels,
+		PermChangeServerSettings, PermReadAuditLog,
+	),
+	"PermissionRole":     values(PermissionRoleMember, PermissionRoleOperator),
+	"PermissionPreset":   values(PresetPersonal, PresetGroup),
+	"PermissionsWarning": values(PermissionsWarningDefaultChannelExposesMembers, PermissionsWarningOpenSignupOn),
+	"IssuedKind":         values(IssuedCredential, IssuedHook),
 }
 
 // values lists a vocabulary by its constants, so an entry above cannot hold a

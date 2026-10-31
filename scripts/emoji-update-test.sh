@@ -123,7 +123,7 @@ cmp -s "$VENDORED/emoji-test.sha256" "$WORK/unicode/emoji-test.sha256" || fail "
 fresh
 printf '1F44D 1F44D ; fully-qualified # x E0.6 two thumbs\n' >> "$WORK/unicode/emoji-test.txt"
 status=0
-out=$(go run ./cmd/emoji-gen -data "$WORK/unicode/emoji-test.txt" -sha256 "$WORK/unicode/emoji-test.sha256" -go "$WORK/out.go" -json "$WORK/out.json" 2>&1) || status=$?
+out=$(go run ./cmd/emoji-gen -data "$WORK/unicode/emoji-test.txt" -sha256 "$WORK/unicode/emoji-test.sha256" -aliases cmd/emoji-gen/aliases.txt -go "$WORK/out.go" -json "$WORK/out.json" 2>&1) || status=$?
 [ "$status" -eq 1 ] || fail "an edited data file: emoji-gen exit status $status, want 1; output: $out"
 case "$out" in
     *"the pin says"*) ;;

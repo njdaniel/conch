@@ -926,6 +926,26 @@ BEGIN
 		VALUES (NEW.id, NEW.body, NEW.fts_channel);
 END`,
 	},
+	// 39 (permissionsMigration): Configurable role permissions (issue #1013,
+	// ADR-014, docs/design/admin-roles.md §9). role_permissions holds the
+	// cells of the permissions document that have been written. An absent
+	// row reads as the catalog default (schema.Permission.Default), so the
+	// table starts empty and every route behaves as before. permission has no CHECK, so a permission added later
+	// needs no table rebuild; the store refuses an unknown one on write and
+	// ignores one on read, and decides fixed cells in code
+	// (schema.Permission.Fixed), never from a row. The Go step
+	// (initializePermissions) maps a hide_members setting, where one exists,
+	// onto the member cell of see_member_directory, writes the
+	// permissions_revision setting as 1 and audits permissions_initialized.
+	{
+		`CREATE TABLE role_permissions (
+	role       TEXT    NOT NULL CHECK (role IN ('member', 'operator')),
+	permission TEXT    NOT NULL,
+	granted    INTEGER NOT NULL CHECK (granted IN (0, 1)),
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY (role, permission)
+)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
@@ -940,6 +960,9 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 	// Channel names are keyed as principal names are (issue #727).
 	channelNameKeyMigration: fillChannelNameKeys,
 	ownerMarkMigration:      reportPromotedOwners,
+
+	// The permissions document starts at revision 1 (issue #1013).
+	permissionsMigration: initializePermissions,
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.

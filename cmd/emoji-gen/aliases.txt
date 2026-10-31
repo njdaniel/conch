@@ -1,0 +1,136 @@
+# Conch's own table of the shortcode aliases people type from Slack, GitHub
+# and Discord (issue #1036). Written for Conch, not copied from gemoji or any
+# other list: that data carries a licence, and this table does not.
+#
+# One alias per line: <alias> <code points of the emoji>. An alias is
+# lower-case a-z, 0-9, '_', '+' or '-'. The code points are the emoji's
+# sequence with or without U+FE0F; it must be a fully-qualified sequence of
+# the pinned emoji-test.txt, or cmd/emoji-gen fails naming the alias.
+#
+# Aliases reach web/src/emoji/catalog.json only. They are names for typing and
+# search: the reaction-key table (pkg/schema/emoji_catalog_gen.go) is
+# unchanged, and what a reaction carries is always the emoji itself.
+
++1 1F44D
+thumbsup 1F44D
+-1 1F44E
+thumbsdown 1F44E
+smile 1F604
+smiley 1F603
+grin 1F601
+laughing 1F606
+joy 1F602
+lol 1F923
+rofl 1F923
+wink 1F609
+blush 1F60A
+innocent 1F607
+heart_eyes 1F60D
+kissing_heart 1F618
+smirk 1F60F
+neutral_face 1F610
+expressionless 1F611
+unamused 1F612
+roll_eyes 1F644
+thinking 1F914
+shushing 1F92B
+sweat_smile 1F605
+sweat 1F613
+disappointed 1F61E
+worried 1F61F
+angry 1F620
+rage 1F621
+cry 1F622
+sob 1F62D
+scream 1F631
+fearful 1F628
+flushed 1F633
+dizzy_face 1F635
+sleeping 1F634
+mask 1F637
+nerd 1F913
+hugs 1F917
+upside_down 1F643
+slightly_smiling_face 1F642
+slightly_frowning_face 1F641
+confused 1F615
+pensive 1F614
+relieved 1F60C
+yum 1F60B
+stuck_out_tongue 1F61B
+zany 1F92A
+partying 1F973
+exploding_head 1F92F
+skull 1F480
+poop 1F4A9
+ghost 1F47B
+robot 1F916
+see_no_evil 1F648
+hear_no_evil 1F649
+speak_no_evil 1F64A
+heart 2764
+orange_heart 1F9E1
+yellow_heart 1F49B
+green_heart 1F49A
+blue_heart 1F499
+purple_heart 1F49C
+black_heart 1F5A4
+white_heart 1F90D
+broken_heart 1F494
+sparkling_heart 1F496
+two_hearts 1F495
+100 1F4AF
+boom 1F4A5
+sparkles 2728
+star2 1F31F
+zap 26A1
+tada 1F389
+party_popper 1F389
+confetti_ball 1F38A
+balloon 1F388
+gift 1F381
+trophy 1F3C6
+medal 1F3C5
+rocket 1F680
+eyes 1F440
+wave 1F44B
+clap 1F44F
+raised_hands 1F64C
+pray 1F64F
+ok_hand 1F44C
+v 270C
+muscle 1F4AA
+point_up 261D
+point_down 1F447
+point_left 1F448
+point_right 1F449
+fist 270A
+punch 1F44A
+handshake 1F91D
+facepalm 1F926
+shrug 1F937
+check 2705
+white_check_mark 2705
+heavy_check_mark 2714
+x 274C
+warning 26A0
+no_entry 26D4
+question 2753
+exclamation 2757
+bulb 1F4A1
+memo 1F4DD
+bug 1F41B
+construction 1F6A7
+lock 1F512
+key 1F511
+hourglass 231B
+coffee 2615
+pizza 1F355
+beer 1F37A
+cake 1F370
+sunny 2600
+cloud 2601
+snowflake 2744
+rainbow 1F308
+unicorn 1F984
+turtle 1F422
