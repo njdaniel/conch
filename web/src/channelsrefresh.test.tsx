@@ -1,6 +1,6 @@
 // The channel list follows membership changes live (issue #1027), against a
 // fake conchd (fetch) and a fake WebSocket. No network, no browser.
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { parseEventFrame } from './agents/frames';
@@ -54,12 +54,16 @@ interface Server {
   listGets: number;
   // When set, a channel list answer waits for it.
   hold: Promise<void> | null;
+  // When set, the next channel list answer alone waits for it.
+  holdOnce: Promise<void> | null;
+  // When set, a message history answer waits for it.
+  holdHistory: Promise<void> | null;
 }
 
 let server: Server;
 
 function install() {
-  server = { channels: [general, ops], unread: {}, listGets: 0, hold: null };
+  server = { channels: [general, ops], unread: {}, listGets: 0, hold: null, holdOnce: null, holdHistory: null };
   vi.stubGlobal('WebSocket', FakeSocket);
   vi.stubGlobal(
     'fetch',
@@ -71,7 +75,9 @@ function install() {
       if (path === '/v1/channels') {
         server.listGets++;
         const answer = server.channels;
-        return (server.hold ?? Promise.resolve()).then(() => json({ channels: answer }));
+        const once = server.holdOnce;
+        server.holdOnce = null;
+        return (once ?? server.hold ?? Promise.resolve()).then(() => json({ channels: answer }));
       }
       if (path === '/v1/ws-tickets') return Promise.resolve(json({ ticket: ticketValue, expires_at: at }, 201));
       if (path === '/v1/sessions' && init?.method === 'POST') {
@@ -83,7 +89,7 @@ function install() {
       const m = /^\/v[12]\/channels\/([^/]+)\/(members|nets|messages|read-state)$/.exec(path);
       if (m?.[2] === 'members') return Promise.resolve(json({ members: [{ principal_id: 2, created_at: at, name: 'ada', kind: 'human' }] }));
       if (m?.[2] === 'nets') return Promise.resolve(json({ nets: [] }));
-      if (m?.[2] === 'messages') return Promise.resolve(json({ messages: [] }));
+      if (m?.[2] === 'messages') return (server.holdHistory ?? Promise.resolve()).then(() => json({ messages: [] }));
       return Promise.resolve(json({}, 404));
     }),
   );
@@ -277,5 +283,71 @@ describe('a frame is not list information', () => {
       await Promise.resolve();
     });
     expect(screen.queryAllByRole('img')).toHaveLength(0);
+  });
+});
+
+describe('a lost channel leaves nothing behind', () => {
+  it('keeps no message, draft or audience of it, so a new channel of the same name starts empty', async () => {
+    const events = await openChat();
+    const chat = FakeSocket.all.find((s) => s.url.includes('/v2/ws?'));
+    chat?.send(message(1, 'a secret of the old general'));
+    await screen.findByText('a secret of the old general');
+    fireEvent.change(screen.getByLabelText<HTMLTextAreaElement>('Message #general'), { target: { value: 'a draft for the old general' } });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('a draft for the old general');
+    server.channels = [ops];
+    events.send(frame);
+    await screen.findByText('You no longer have access to #general');
+    // Another channel, new, is given the name, and the person is added to it.
+    const reborn = { id: 10, name: 'general', created_at: at };
+    server.channels = [ops, reborn];
+    // Its history is slow: what the page shows meanwhile is what it held.
+    server.holdHistory = new Promise<void>(() => undefined);
+    const opsEvents = eventsSockets().at(-1);
+    if (opsEvents === undefined) throw new Error('no events socket');
+    opsEvents.open();
+    opsEvents.send(frame);
+    const button = await screen.findByRole('button', { name: 'general' });
+    act(() => {
+      button.click();
+    });
+    const box = await screen.findByLabelText<HTMLTextAreaElement>('Message #general');
+    expect(screen.queryByText('a secret of the old general')).toBeNull();
+    expect(box.value).toBe('');
+  });
+});
+
+describe('a stale answer', () => {
+  it('does not put back a channel the page lost while it was on its way', async () => {
+    await openChat();
+    let release: () => void = () => undefined;
+    server.holdOnce = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const before = server.listGets;
+    // A focus read begins while general is still the person's.
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    await waitFor(() => {
+      expect(server.listGets).toBe(before + 1);
+    });
+    // Then general is lost through the chat socket's 1008.
+    server.channels = [ops];
+    const chat = FakeSocket.all.find((s) => s.url.includes('/v2/ws?'));
+    chat?.drop(1008);
+    await screen.findByText('You no longer have access to #general');
+    // The older answer, which still lists general, now arrives.
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 100));
+    });
+    expect(screen.queryByRole('button', { name: 'general' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'ops' }).getAttribute('aria-current')).toBe('true');
+    // The stale answer was not applied but read again: the focus read, the
+    // 1008 path's own, and the one after the discard.
+    expect(server.listGets).toBe(before + 3);
   });
 });

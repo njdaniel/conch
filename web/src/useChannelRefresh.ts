@@ -59,10 +59,17 @@ export function useChannelRefresh({
     }
     running.current = true;
     again.current = false;
+    // The list as it stood when the read began. An answer that comes after
+    // the page changed its list by another way (a 1008 loss, a rename, a
+    // channel made) may be older than that change: it is not applied, and the
+    // list is read once more instead.
+    const began = channelsNow.current.channels;
     void api.listChannels().then((result) => {
       running.current = false;
       if (!live.current) return;
-      if (result.ok) {
+      if (result.ok && channelsNow.current.channels !== began) {
+        again.current = true;
+      } else if (result.ok) {
         const held = channelsNow.current.channels;
         const next = result.value;
         for (const c of next) {

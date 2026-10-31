@@ -304,13 +304,18 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     [invalidateChannel, dispatchChannels, dispatchChat, dispatchAttachments],
   );
 
-  // Everything the page keeps of a channel it can no longer open.
+  // Everything the page keeps of a channel it can no longer open: its
+  // messages, draft and audience go too, so a later channel given the same
+  // name starts empty (issue #1027).
   const dropChannel = useCallback((id: number, name: string) => {
     invalidateChannel(id);
     for (const scope of Object.keys(attachmentsNow.current.channels[name] ?? {})) {
       dispatchAttachments({ type: 'clear', channel: name, audience: audienceForScope(scope) });
     }
-  }, [invalidateChannel, dispatchAttachments]);
+    dispatchChat({ type: 'forget', channel: name });
+    dispatchDrafts({ type: 'forget', channel: name });
+    dispatchTargets({ type: 'forget', channel: name });
+  }, [invalidateChannel, dispatchAttachments, dispatchChat]);
 
   const loseChannel = useCallback((id: number, name: string) => {
     dropChannel(id, name);
