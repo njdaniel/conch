@@ -566,6 +566,13 @@ type JoinSettingsV1 struct {
 	GuestIdleSeconds     int64           `json:"guest_idle_seconds"`
 	GuestAbsoluteSeconds int64           `json:"guest_absolute_seconds"`
 	OpenChannels         []string        `json:"open_channels"`
+	// OtherOpenChannels is how many open channels OpenChannels leaves out
+	// because the reader is not in them and does not hold manage_channels
+	// (ADR-014, docs/design/admin-roles.md §7.3). The server fills it in
+	// its answers only: it is not a setting, Validate ignores it, and
+	// PutJoinSettingsRequestV1 cannot carry it. Omitted when 0, and by a
+	// server that predates it.
+	OtherOpenChannels int64 `json:"other_open_channels,omitempty"`
 }
 
 // DefaultJoinSettings is the policy of a server nobody has changed: the

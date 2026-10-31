@@ -1,0 +1,14 @@
+{
+  "id": 5,
+  "kind": "human",
+  "name": "member-1",
+  "role": "member",
+  "server_version": "v0.9.0",
+  "voice_allowed": true,
+  "identity_class": "member",
+  "permissions": [
+    "use_voice",
+    "share_screen"
+  ],
+  "permissions_revision": 2
+}
