@@ -53,18 +53,19 @@ ADR-014 governs who may do what through a closed catalog of permissions. Its rul
    - it is off for members and for operators, by ADR-014's rule for new permissions;
    - owners always hold it;
    - the voice switch withholds it, and no camera-only brake is added.
-3. **The camera is off on joining.** The server enforces this: the join token still grants the microphone alone.
-4. **Turning the camera on is a server claim**, made through `POST /v1/channels/{channel}/voice/camera` and ended through `DELETE`:
-   - The claim adds the `camera` source to the live connection, with the mechanism the screen share uses.
+3. **The camera is off on joining, and exists only while conchd holds a claim for it.** What the server enforces is exactly this, no more: the join token grants the microphone alone; `camera` is granted only to a claim; a request that continues a claim must name it (`?started_at=`), and a named request never starts a new claim, except the adoption of a claim that the room's rotation ended, within a short window. Whether an un-named request was the person's own choice is the client's honesty, and the browser sends one from the camera button alone.
+4. **Turning the camera on is a server claim**, made through `POST /v1/channels/{channel}/voice/camera[?started_at=…]` and ended through `DELETE`:
+   - The claim adds the `camera` source to the participant the caller is, with the mechanism the screen share uses.
+   - A name that is not the caller's current claim is refused, 409 `voice_camera_stale`, and the client stops its capture.
    - There is no one-per-room rule, but a room holds at most 9 claims.
-   - The claimer can stop it, and so can a holder of `manage_channels`.
-   - The poller withdraws any camera nobody claimed, and evicts a publisher that keeps it.
+   - The claimer can stop it, and so can a holder of `manage_channels`; the channel's manager, who may stop a share, may not.
+   - The poller judges every track by its kind and its declared source together, withdraws any camera nobody claimed, and evicts a publisher that keeps it.
    - Claims are held in memory, and a restart drops them.
-5. **Every publish permission conchd writes is computed by one function** from the person's claims: microphone, screen and camera. Stopping a share never removes a camera, and stopping a camera never removes a share.
-6. **Revocation is live.** A route that takes the camera away ends the claim before it answers. Those routes are the permissions PUT, the voice switch, membership loss and the other rotation triggers. Every pass re-reads `use_camera` for each claim holder.
+5. **Every publish permission conchd writes is computed by one function** from the person's current claims, under the room's claims lock, at every `UpdateParticipant` call site, with a structural test that there is no other. Stopping a share never removes a camera, and stopping a camera never removes a share.
+6. **Revocation is live.** A route that takes the camera away ends the claim before it answers, through the same lock a claim is made under, and a claim in flight re-reads its entitlement under that lock, so no claim is granted after a revocation has answered. Those routes are the permissions PUT, the voice switch, membership loss and the other rotation triggers. Every pass re-reads `use_camera` for each claim holder.
 7. **The browser's `Permissions-Policy` becomes `camera=(self)`**. The change lands in the PR that first captures a camera, with a security review.
 8. **On a phone, video is shown and received only in the Voice tab.** The camera stops when the page is hidden.
-9. **On the desktop (Model B, a later phase), the Electron companion publishes the camera.** The Rust helper gets no video. This amends Model B's "screen video only", and the desktop issue asks Nick first.
+9. **On the desktop (Model B, a later phase), the Electron companion publishes the camera.** The Rust helper gets no video. The camera is granted only to the participant the claiming client is, bound to the companion's own bearer, and Electron's permission handler grants video to one armed press at a time; conchd's `Permissions-Policy` does not reach `conch-app://` and is not relied on. This amends Model B's "screen video only", and the desktop issue asks Nick first.
 10. **The wire is additive; no version bump.** The additions are:
     - the permission value;
     - `VoiceCameraV1` and its routes;
@@ -103,4 +104,6 @@ ADR-014 governs who may do what through a closed catalog of permissions. Its rul
   - Members can use the camera only once A3b (#1015) and A4 (#1016) are released together, as ADR-014 already requires.
 - **Bandwidth sizes the deployment again.** The design's figures are the SDK's presets, not measurements. The 1:1 and 9-camera figures are measured on the droplet before anything about capacity is documented.
 - **The hygiene and media rules of the browser hold.** No source but `src/voice/sdk.ts` reaches for a device, and the camera is captured through the SDK. No new npm dependency is needed.
-- **Open points O1–O14** are in the design §14, each with a recommendation. Accepting this ADR as written takes the recommended reading of each.
+- **Guests.** A live guest in voice receives cameras, as they receive voice and the share, and can never claim one. The design's O15 records why.
+- **A gap this uncovers in the share.** The share's claim reads the caller's entitlement before it takes the room's lock, the race decision 6 closes for the camera. It is filed as its own issue and fixed in the shared permission function, not here.
+- **Open points O1–O15** are in the design §14, each with a recommendation. Accepting this ADR as written takes the recommended reading of each.
