@@ -209,6 +209,13 @@ jobs:
       - name: build the unpacked app
         run: make desktop-build
 
+      # The feeds smoke test (#943) puts a browser user, in the Chromium that
+      # Playwright's own version pins, beside the app on the same conchd,
+      # which serves the web/dist built above at /app/.
+      - name: browser for the second client
+        working-directory: desktop
+        run: npx playwright install --with-deps chromium
+
       - name: browser build after
         run: |
           (cd web/dist && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$RUNNER_TEMP/web-dist.after"

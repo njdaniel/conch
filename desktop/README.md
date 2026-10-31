@@ -7,9 +7,9 @@ An Electron app that opens the existing web client from packaged files at
 **What it does today:** one hardened window showing the React client, which
 talks to **one** conchd over REST through the main process (issue #942, D2-3):
 a "Server address" step, then the existing sign-in views, then chat, with the
-credential held in main's memory only (restart means signing in again). **What it
-does not do yet:** live feeds (#943, so a view is not live until then), saved
-profiles and persistence (#944, #945), attachments, clipboard, notifications and
+credential held in main's memory only (restart means signing in again), and
+live feeds that main opens and holds for the page (issue #943, D2-4). **What it
+does not do yet:** saved profiles and persistence (#944, #945), attachments, clipboard, notifications and
 links (#947, #773), the operations whose answers hold a credential the renderer
 may not see (re-authentication, password change, invite and device-link codes),
 voice (#771), tray, installer. Later children of #770 add those.
@@ -27,6 +27,7 @@ voice (#771), tray, installer. Later children of #770 add those.
 | `main/api/client.ts` | the one request executor: bearer only for bearer operations, no Origin or Cookie, no redirects, size cap, response validation, generation check |
 | `main/api/session.ts` | the in-memory credential, the server address and the generation; holds the operator code-step challenge behind a handle |
 | `main/api/service.ts` | what each bridge function does: the sign-in sequence, sign-out, restore |
+| `main/api/feeds.ts` | the live feeds: the sockets main opens with the bearer header, frame validation, the bounded queue, and teardown at unsubscribe, reload, crash and sign-out |
 | `main/api/trust.ts` | adds the system trust store to Node's roots; classifies a certificate failure |
 | `main/ipc.ts` | the one registry of IPC handlers and the caller check every invocation passes |
 | `main/document.ts` | which frame shows the current document (the document generation) |
@@ -79,8 +80,11 @@ inspector's "Debugger listening on", which the `EnableNodeCliInspectArguments`
 fuse turns off in the shipped build, and the test must not use an unfused
 build. So the test passes Chromium's `--remote-debugging-port=0` (an OS-chosen
 loopback port) itself; **the app never turns that port on**, and a launch
-without the flag has none. Playwright launches no browser here, so none is
-downloaded.
+without the flag has none. The feeds spec (`tests/smoke/feeds.spec.ts`, #943)
+also puts a browser user beside the app, in the Chromium that Playwright's own
+version pins, signed in as another member at the disposable conchd's `/app/`
+(which serves `web/dist`: `make web-build` first). Fetch that browser once with
+`cd desktop && npx playwright install chromium`.
 
 A packaged app that is started with `--remote-debugging-port` or
 `--remote-debugging-pipe` prints `conch-desktop: remote debugging is ON` and
@@ -152,6 +156,40 @@ main frame (not a subframe, not detached) at `conch-app://ui/`; it is the frame
 of the current document generation; then the function name, a per-function rate
 limit, a byte cap, and the argument shape. A refusal is one opaque `refused`,
 counted and logged by reason only.
+
+### Live feeds (issue #943)
+
+The renderer subscribes by feed kind (`messages`, `events`, `voice`,
+`occupancy`) with exactly that kind's parameters (a channel name, the cursor,
+the renderer's session), under a number the preload chose; main refuses
+anything else. Main opens the socket itself (`main/api/feeds.ts`), with Node's
+`WebSocket` (Q7: no `ws` package). Measured on the pinned Electron 44.10.0
+(Node 24.22.1), 2026-10-31: its `WebSocket` takes a `headers` option, sends
+the `Authorization` header it is given, and sends no `Origin` and no `Cookie`;
+conchd reads a ticket only when no `Authorization` header is present, so main
+sends the bearer header, asks for no ticket, and the bearer is never in a URL.
+An upgrade answered with a redirect fails, and its target is never asked.
+
+Every frame is checked before the page sees it: text only, at most 1 MiB, and
+valid for its feed by the generated validators (a v2 message or the heartbeat;
+an events document the client's own parser accepts, or the heartbeat; a
+presence document; an occupancy document). Anything else is dropped and
+counted. Frames go to the page one batch at a time, the next only once the
+preload has acknowledged the last; at most 512 frames or 4 MiB wait, and past
+either main closes the socket and tells the page 1013, which the page's own
+feed state machine retries like any lost socket (the messages feed resuming
+after the newest id it holds). The reconnect and the heartbeat watchdog stay
+the page's; main reports open, the frames and one close.
+
+An unsubscribe closes its socket. A reload, a crash or the window closing ends
+the document, and every socket it owned is closed before the next document can
+subscribe. Sign-out, a new sign-in and a change of server close every socket
+before the next identity's first request (the session's abort signal, in the
+same turn), and a frame that arrives after that is dropped, never sent on. A
+socket that fails before it opens is followed by one `whoami`: a 401 there
+signs the window out, and the page is told 1008, as the browser learns from a
+ticket refused with 401. Main logs each socket opened and closed, with its
+kind, the reason and how many are open, never its address.
 
 ### Which HTTP stack (Q6)
 

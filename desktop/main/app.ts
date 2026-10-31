@@ -1,7 +1,8 @@
 // The shell's startup (linux-desktop.md §2, §3). Input: Electron's app events.
 // Output: one hardened window showing the packaged web client, and nothing
-// else but main's public-API client behind the bridge's IPC handlers (D2-3).
-// The renderer itself still makes no network request.
+// else but main's public-API client behind the bridge's IPC handlers (D2-3)
+// and the live feeds main holds for the page (D2-4). The renderer itself
+// still makes no network request.
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -9,7 +10,9 @@ import tls from 'node:tls';
 
 import { app, ipcMain, protocol, session, type BrowserWindow } from 'electron';
 
+import { FEED_EVENTS } from '../shared/bridge-names.ts';
 import { Client } from './api/client.ts';
+import { Feeds, nodeConnect } from './api/feeds.ts';
 import { Service } from './api/service.ts';
 import { Session } from './api/session.ts';
 import { transportVerdict, trustSystemRoots } from './api/trust.ts';
@@ -63,9 +66,26 @@ export async function start(): Promise<void> {
   // registered before the window exists to be checked against.
   trustSystemRoots(tls);
   const identity = new Session();
-  const service = new Service({ client: new Client({ fetch: globalThis.fetch, session: identity }), session: identity, now: Date.now, log });
+  const client = new Client({ fetch: globalThis.fetch, session: identity });
+  const service = new Service({ client, session: identity, now: Date.now, log });
   const gate = new DocumentGate();
   let window: BrowserWindow | null = null;
-  new Ipc({ owned: () => (window === null || window.isDestroyed() ? null : window.webContents), gate, service, now: Date.now, log }).register(ipcMain);
+  const owned = () => (window === null || window.isDestroyed() ? null : window.webContents);
+  // A feed event goes to the owned web contents, and only while the document
+  // that subscribed is the one it shows.
+  const feeds = new Feeds({
+    session: identity,
+    client,
+    connect: nodeConnect,
+    deliver: (document, event) => {
+      const contents = owned();
+      if (contents !== null && gate.shows(document)) contents.send(FEED_EVENTS, event);
+    },
+    log,
+  });
+  gate.onEnd((current) => {
+    feeds.endDocument(current);
+  });
+  new Ipc({ owned, gate, service, feeds, now: Date.now, log }).register(ipcMain);
   window = createWindow(app.isPackaged, appPath, gate);
 }
