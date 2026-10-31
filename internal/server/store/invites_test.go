@@ -1134,7 +1134,10 @@ func TestInvitesMigrationFromSchema23(t *testing.T) {
 		}
 		// Pass 1 made one invite after migrating; pass 2 must find it, not a fresh table.
 		invites := pass - 1
-		for table, want := range map[string]int{"channel_members": 2, "messages": 1, "credentials": 2, "invites": invites, "invite_channels": invites, "server_settings": 0} {
+		// The permissions migration (39) writes its revision row on an upgraded
+		// database; this migration writes no setting.
+		for table, want := range map[string]int{"channel_members": 2, "messages": 1, "credentials": 2, "invites": invites, "invite_channels": invites,
+			"server_settings WHERE key != '" + settingPermissionsRevision + "'": 0} {
 			var got int
 			if err := s.db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&got); err != nil || got != want {
 				t.Errorf("pass %d: %s rows = %d, %v; want %d", pass, table, got, err, want)

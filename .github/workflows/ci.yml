@@ -160,6 +160,11 @@ jobs:
       - name: desktop check
         run: make desktop-check
 
+      # The voice supervisor against the real conch-voice (#948): the binary
+      # rust check's cargo test built, a stub conchd on loopback, no audio.
+      - name: desktop voice-helper integration
+        run: CONCH_VOICE_BIN="$PWD/voice/target/debug/conch-voice" make desktop-voice-it
+
   desktop-smoke:
     # The packaged desktop shell (#940): make desktop-build fetches the pinned
     # Electron (scripts/desktop-electron.sh checks its SHA-256 twice), builds
@@ -208,6 +213,13 @@ jobs:
 
       - name: build the unpacked app
         run: make desktop-build
+
+      # The feeds smoke test (#943) puts a browser user, in the Chromium that
+      # Playwright's own version pins, beside the app on the same conchd,
+      # which serves the web/dist built above at /app/.
+      - name: browser for the second client
+        working-directory: desktop
+        run: npx playwright install --with-deps chromium
 
       - name: browser build after
         run: |

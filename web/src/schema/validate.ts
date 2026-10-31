@@ -7,6 +7,12 @@
 // validator for every key of T, of that key's type, and vocab<T>() every member
 // of T. So a type and its validator cannot drift apart without the typecheck
 // failing, and a type that has drifted from Go fails the fixture test.
+//
+// Every combinator is marked @__NO_SIDE_EFFECTS__: building a validator does
+// nothing but return a function, so the bundler may drop a generated validator
+// nobody imports. That is what keeps the desktop owner's voice-control types
+// (issue #948) out of the browser build; scripts/desktop-web-dist-check.sh
+// fails if they are ever in it.
 
 // Validator<T> checks that a decoded JSON value has the shape of T. It returns
 // the problems it found, each starting with where in the value it is; an empty
@@ -36,6 +42,7 @@ export type Shape<T> = {
     : Validator<T[K]>;
 };
 
+/* @__NO_SIDE_EFFECTS__ */
 function validator<T>(check: (value: unknown, path: string) => string[]): Validator<T> {
   return (value: unknown, path = '$') => check(value, path);
 }
@@ -82,6 +89,7 @@ export const json: Validator<unknown> = validator((v, path) =>
 
 // vocab checks a closed vocabulary. Its argument must name every member of T
 // and nothing else, so the list cannot fall behind the type.
+/* @__NO_SIDE_EFFECTS__ */
 export function vocab<T extends string>(members: { readonly [V in T]: true }): Validator<T> {
   const allowed = Object.keys(members);
   return validator((v, path) =>
@@ -91,6 +99,7 @@ export function vocab<T extends string>(members: { readonly [V in T]: true }): V
   );
 }
 
+/* @__NO_SIDE_EFFECTS__ */
 export function array<T>(item: Validator<T>): Validator<T[]> {
   return validator((v, path) =>
     Array.isArray(v)
@@ -99,6 +108,7 @@ export function array<T>(item: Validator<T>): Validator<T[]> {
   );
 }
 
+/* @__NO_SIDE_EFFECTS__ */
 export function optional<T>(v: Validator<T>): Optional<T> {
   return { optional: v };
 }
@@ -106,6 +116,7 @@ export function optional<T>(v: Validator<T>): Optional<T> {
 // object checks a JSON object against T: every required key present, every key
 // of the right type, and no key T does not have. A key the fixture has and the
 // type lacks means the type is behind Go.
+/* @__NO_SIDE_EFFECTS__ */
 export function object<T>(shape: Shape<T>): Validator<T> {
   const fields: [string, Validator<unknown> | Optional<unknown>][] = Object.entries(shape);
   return validator((v, path) => {
@@ -135,6 +146,7 @@ export function object<T>(shape: Shape<T>): Validator<T> {
 // tagged checks a union discriminated by key, such as Audience by kind. It
 // needs one validator per value of the key; a value with none is refused, so
 // an unknown variant is never read as a known one.
+/* @__NO_SIDE_EFFECTS__ */
 export function tagged<T extends Record<K, string>, K extends string>(
   key: K,
   cases: { readonly [V in T[K]]: Validator<Extract<T, Record<K, V>>> },
