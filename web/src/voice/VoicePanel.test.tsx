@@ -10,7 +10,7 @@ import type { Person } from '../useLiveChannel';
 import { initialVoice, VoiceClient, type Phase, type Processing, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
 import { ownPageNote, soundNote, type ShareFeatures } from './share';
-import { MicTestShown, VoiceLive } from '../phone';
+import { MicTestShown, VoiceLive, VoiceStrip } from '../phone';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { followsNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
 
@@ -1363,5 +1363,118 @@ describe('what the strip reports to the phone layout (issue #929)', () => {
     cleanup();
     mount('idle', true);
     expect(screen.getByRole('button', { name: 'Test microphone' })).toBeTruthy();
+  });
+});
+
+// Issue #1028: on a phone under Chat and Channels, in voice, the section is
+// one row of four controls: where voice is (a button to the Voice view), Hold
+// to talk (or the open microphone's level), Mute and Leave voice. The rest is
+// in the Voice view, where the lobby gives no VoiceStrip.
+describe('the phone strip under Chat and Channels (issue #1028)', () => {
+  // Three in the room, the viewer (7) among them, and member-1 (3) sharing.
+  const crowd: Snapshot = {
+    kind: 'presence',
+    presence: {
+      ...presence,
+      rooms: [
+        {
+          participants: [3, 5, 7].map((id) => ({
+            principal_id: id,
+            can_publish: true,
+            transmitting: false,
+            joined_at: '2026-10-18T00:00:00Z',
+            ...(id === 3 ? { sharing: true, sharing_audio: true } : {}),
+          })),
+        },
+      ],
+    },
+  };
+  const people: ReadonlyMap<number, Person> = new Map([
+    [3, { name: 'member-1', kind: null }],
+    [5, { name: 'member-2', kind: null }],
+  ]);
+  const mount = (state: VoiceState, opens: (() => void) | null) => {
+    const calls: string[] = [];
+    const voice = control(state, calls, crowd);
+    render(
+      <VoiceStrip.Provider value={opens}>
+        <VoicePanel voice={voice} viewer={7} people={people} viewed="channel-a" onOpen={() => undefined} />
+      </VoiceStrip.Provider>,
+    );
+    return { calls, voice: screen.getByRole('region', { name: 'Voice' }) };
+  };
+  const buttons = (voice: HTMLElement) => within(voice).queryAllByRole('button').map((b) => b.textContent);
+  const stateName: Record<'connecting' | 'connected' | 'reconnecting', string> = {
+    connecting: 'Connecting to #channel-a',
+    connected: 'In voice in #channel-a',
+    reconnecting: 'Reconnecting to #channel-a',
+  };
+
+  it.each(['connecting', 'connected', 'reconnecting'] as const)('is the four controls, and nothing else, while %s', (phase) => {
+    const { voice } = mount(inVoice(phase, 'channel-a'), () => undefined);
+    expect(within(voice).getByRole('button', { name: stateName[phase] })).toBeTruthy();
+    expect(buttons(voice)).toEqual([stateName[phase], 'Hold to talk', 'Mute', 'Leave voice']);
+    // No roster, status line, hint or share note is drawn; the notes and
+    // Voice options are kept, hidden, for the Voice view.
+    expect(within(voice).queryByRole('list')).toBeNull();
+    expect(within(voice).queryByText('Microphone in use')).toBeNull();
+    expect(voice.querySelector('.voice-phase')).toBeNull();
+    expect(voice.querySelector('.voice-notes')?.hasAttribute('hidden')).toBe(true);
+    expect(voice.querySelector('.voice-options')?.hasAttribute('hidden')).toBe(true);
+  });
+
+  it('is the four controls with the open microphone, its level in place of Hold to talk', () => {
+    const { voice } = mount({ ...inVoice('connected', 'channel-a'), mode: 'open' }, () => undefined);
+    expect(buttons(voice)).toEqual([stateName.connected, 'Mute', 'Leave voice']);
+    const meter = within(voice).getByRole('meter', { name: 'Microphone level' });
+    // The words stay, for a screen reader, in their own span, which the strip
+    // hides on screen so the meter has the room.
+    expect(meter.parentElement?.querySelector('.open-mic-label')?.textContent).toBe('Open microphone');
+  });
+
+  it('opens the Voice view from the state button, and its Leave voice leaves', () => {
+    let opened = 0;
+    const { voice, calls } = mount(inVoice('connected', 'channel-a'), () => {
+      opened++;
+    });
+    fireEvent.click(within(voice).getByRole('button', { name: stateName.connected }));
+    expect(opened).toBe(1);
+    fireEvent.click(within(voice).getByRole('button', { name: 'Leave voice' }));
+    expect(calls).toEqual(['leave']);
+  });
+
+  it('is the whole section in the Voice view: who is in voice, the status, and every control', () => {
+    const { voice } = mount(inVoice('connected', 'channel-a'), null);
+    expect(within(voice).queryByRole('button', { name: stateName.connected })).toBeNull();
+    expect(within(voice).getByRole('list', { name: '3 in voice' })).toBeTruthy();
+    expect(voice.querySelector('.voice-phase')?.textContent).toBe('Connected in #channel-a');
+    for (const name of ['Hold to talk', 'Mute', 'Deafen', 'Share screen', 'Watch', 'Voice options', 'Leave voice']) {
+      expect(within(voice).getByRole('button', { name })).toBeTruthy();
+    }
+    expect(voice.querySelector('.voice-notes')?.hasAttribute('hidden')).toBe(false);
+  });
+
+  it('keeps Voice options as they were left across the strip and the Voice view', () => {
+    const voiceControl = control(inVoice('connected', 'channel-a'), [], crowd);
+    const page = (opens: (() => void) | null) => (
+      <VoiceStrip.Provider value={opens}>
+        <VoicePanel voice={voiceControl} viewer={7} people={people} viewed="channel-a" onOpen={() => undefined} />
+      </VoiceStrip.Provider>
+    );
+    const { rerender } = render(page(null));
+    const voice = screen.getByRole('region', { name: 'Voice' });
+    const options = () => voice.querySelector('.voice-options')?.hasAttribute('hidden');
+    fireEvent.click(within(voice).getByRole('button', { name: 'Voice options' }));
+    expect(options()).toBe(false);
+    rerender(page(() => undefined));
+    expect(options()).toBe(true);
+    rerender(page(null));
+    expect(options()).toBe(false);
+  });
+
+  it('is not the strip out of voice: Join voice is the Voice view\'s, and the lobby hides the dock', () => {
+    const { voice } = mount(initialVoice, () => undefined);
+    expect(within(voice).getByRole('button', { name: 'Join voice in #channel-a' })).toBeTruthy();
+    expect(voice.classList.contains('strip')).toBe(false);
   });
 });

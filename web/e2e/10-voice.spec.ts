@@ -8,7 +8,7 @@
 // page says voice is not set up and asks for no device.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { PostMessageRequestV2 } from '../src/schema/generated';
-import { channelButton, conversation, expect, expectFits, messages, openChannel, phones, showView, signIn, statusLine, test } from './fixtures';
+import { channelButton, conversation, expect, expectFits, mainNav, messages, openChannel, phones, showView, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -612,11 +612,13 @@ test.describe('with LiveKit', () => {
       await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
       await expect(voice.getByRole('list', { name: 'In voice' }).getByRole('listitem')).toHaveCount(3, { timeout: 15_000 });
       await expectFits(a.page, `${size}: the Voice view, joined`);
-      // Back under Chat the compact strip stays, with the controls.
+      // Back under Chat the strip stays, one row of four controls (issue
+      // #1028): where voice is, Hold to talk, Mute and Leave voice. The line
+      // about sharing and the rest are the Voice view's.
       await showView(a.page, 'Chat');
       await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
       await expect(voice.getByRole('button', { name: 'Leave voice' })).toBeVisible();
-      await expect(voice.getByRole('button', { name: 'More about sharing' }), `${size}: the line about sharing shows`).toBeVisible();
+      await expect(voice.getByRole('button', { name: 'More about sharing' }), `${size}: the line about sharing is the Voice view's`).toBeHidden();
       await expectFits(a.page, `${size}: the voice panel, push to talk`);
       await expectInside(newest, log, `${size}: the newest message after joining voice`);
       const dock = await voice.evaluate((el) => {
@@ -624,12 +626,15 @@ test.describe('with LiveKit', () => {
         return d === null ? null : { height: d.getBoundingClientRect().height, scroll: d.scrollHeight, client: d.clientHeight };
       });
       if (dock === null) throw new Error('the voice panel is in no dock');
-      // 200 px is the 390×844 phone's bound. At 360 px the controls take two
-      // rows (Hold to talk keeps its words), and the strip still needs no
-      // scrolling.
-      if (size === '390×844') expect(dock.height, `${size}: the strip is ${String(dock.height)} px high`).toBeLessThanOrEqual(200);
+      // 64 px at every phone size (issue #1028; #600's bound was 200 px at
+      // 390×844), and nothing in it needs scrolling.
+      expect(dock.height, `${size}: the strip is ${String(dock.height)} px high`).toBeLessThanOrEqual(64);
       expect(dock.scroll, `${size}: the strip holds ${String(dock.scroll)} px in ${String(dock.client)}`).toBeLessThanOrEqual(dock.client);
       await voice.getByRole('button', { name: 'Mute' }).tap();
+      await expect(voice.getByRole('button', { name: 'Unmute' })).toHaveAttribute('aria-pressed', 'true');
+      // The state button opens the Voice view, which says so in words.
+      await voice.getByRole('button', { name: 'In voice in #voice-room' }).tap();
+      await expect(mainNav(a.page).getByRole('button', { name: 'Voice', exact: true })).toHaveAttribute('aria-current', 'page');
       await expect(voice).toContainText('Muted.');
       await voice.getByRole('button', { name: 'Unmute' }).tap();
       await voice.getByRole('button', { name: 'Voice options' }).tap();
@@ -637,9 +642,16 @@ test.describe('with LiveKit', () => {
       await voice.getByLabel('Open microphone').tap();
       await expect(voice.getByRole('meter', { name: 'Microphone level' })).toBeVisible();
       await expectFits(a.page, `${size}: the voice panel, open microphone`);
+      // With the open microphone the strip shows its level where Hold to talk
+      // was, still one row.
+      await showView(a.page, 'Chat');
+      await expect(voice.getByRole('meter', { name: 'Microphone level' })).toBeVisible();
+      const open = await a.page.locator('.dock').boundingBox();
+      expect(open?.height ?? Infinity, `${size}: the strip, open microphone`).toBeLessThanOrEqual(64);
+      await expectFits(a.page, `${size}: the strip, open microphone`);
+      await showView(a.page, 'Voice');
       await voice.getByLabel('Push to talk').tap();
       await voice.getByRole('button', { name: 'Leave voice' }).tap();
-      await showView(a.page, 'Voice');
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
     } finally {
       await a.context.close();
@@ -702,12 +714,14 @@ test.describe('with LiveKit', () => {
         expect(sessions, `${size}: one voice session for the join`).toBe(1);
 
         // Browsing never moves voice; the strip offers the way back. On a
-        // phone the channel is chosen in Channels, which returns to Chat, and
-        // the strip under Chat names the voice channel.
+        // phone the channel is chosen in Channels, which returns to Chat; the
+        // strip under Chat names the voice channel on its state button, which
+        // opens the Voice view, where the way back is (issue #1028).
         if (phone) await showView(a.page, 'Channels');
         await press(channelButton(a.page, last));
         if (phone) await showView(a.page, 'Chat');
         await expect(conversation(a.page).getByRole('heading', { name: last })).toBeVisible();
+        if (phone) await press(voice.getByRole('button', { name: 'In voice in #voice-room', exact: true }));
         const back = voice.getByRole('button', { name: '#voice-room', exact: true });
         await expect(back).toBeVisible();
         await expect(voice).toContainText('Connected in #voice-room');
@@ -718,6 +732,7 @@ test.describe('with LiveKit', () => {
         if (phone) await showView(a.page, 'Chat');
         await expect(conversation(a.page).getByRole('heading', { name: vw.channel })).toBeVisible();
         // Still the same connection: connected all along, and no new session.
+        if (phone) await showView(a.page, 'Voice');
         await expect(voice).toContainText('Connected in #voice-room');
         await expect(voice).not.toContainText('Reconnecting');
         await expect(back).toHaveCount(0);

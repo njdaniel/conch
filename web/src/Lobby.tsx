@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { JoiningSettings, type JoiningRequest } from './joiningSettings';
-import { MicTestShown, phoneViews, useAppHeight, usePhone, VoiceLive, type PhoneView } from './phone';
+import { MicTestShown, phoneViews, useAppHeight, usePhone, VoiceLive, VoiceStrip, type PhoneView } from './phone';
 import { StageHost } from './stage';
 import type { ChannelsState } from './state/channels';
 import { connectionLabel, type ConnectionState } from './state/connection';
@@ -169,6 +169,12 @@ export function Lobby({
   // strip, or nowhere.
   const dock = useRef<HTMLDivElement>(null);
   const voiceTab = useRef<HTMLButtonElement>(null);
+  // The strip's state button opens the Voice view (issue #1028). It is not
+  // drawn there, so focus goes to the Voice button, now the current view's.
+  const openVoice = useCallback(() => {
+    voiceTab.current?.focus();
+    setView('voice');
+  }, []);
   // The conversation's height while a view that shows it (or leaves it laid out
   // at the same size) is current, kept as --chat-height on the lobby for the
   // Voice view, which lays it out hidden behind. Resizing it there would clamp
@@ -413,7 +419,9 @@ export function Lobby({
         <div ref={dock} className="dock" inert={settingsOpen || asking}>
           <VoiceLive.Provider value={setLive}>
             <MicTestShown.Provider value={!phone || view === 'voice'}>
-              <StageHost.Provider value={stage}>{voice}</StageHost.Provider>
+              <VoiceStrip.Provider value={phone && view !== 'voice' ? openVoice : null}>
+                <StageHost.Provider value={stage}>{voice}</StageHost.Provider>
+              </VoiceStrip.Provider>
             </MicTestShown.Provider>
           </VoiceLive.Provider>
         </div>

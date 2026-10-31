@@ -15,6 +15,13 @@ export const VoiceLive = createContext<(live: boolean) => void>(() => undefined)
 // capture, so nothing about voice changes. True everywhere else.
 export const MicTestShown = createContext(true);
 
+// Whether the voice section is the phone's strip under Chat and Channels, and
+// if so the way to the Voice view (issue #1028). In voice, the strip is one
+// row of four controls: where voice is (a button to the Voice view), Hold to
+// talk, Mute and Leave voice. Everything else of voice is in the Voice view.
+// Null in the Voice view and at 700 px and wider, where the section is whole.
+export const VoiceStrip = createContext<(() => void) | null>(null);
+
 // The phone layout (issue #929): below this width the lobby shows one of
 // three views at a time, with a bottom navigation. The same width is in
 // app.css; at and above it nothing here applies.

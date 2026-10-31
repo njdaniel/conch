@@ -53,7 +53,7 @@ away.
 | Voice: "Mic idle" | Not used | The production words are the existing ones: **Microphone in use** (captured) and **Transmitting** / **Not transmitting**, Muted, Deafened, Listen only, Watch only (UX-11). Capture is not transmission. |
 | Voice: "Sam's screen, tap to watch" | The existing **Watch** button (and the screen-share notes) | The concept's separate Watch page is the existing stage: see below. |
 | Voice: Audio settings | The existing **Voice options** (microphone, output where the browser allows it, per-person volume, processing, microphone test) and Settings | The concept's "Managed by your phone" output and "Preview microphone test" are sample content; the real controls are detected by capability. |
-| Persistent voice bar: destination, status, Mute, Leave, talk | The existing strip, compact, under Chat and Channels **while in, connecting or reconnecting** (a stopped or unavailable voice says why in the Voice view): the state with the actual channel (a button back to it when another is on screen), **Hold to talk**, Mute, Deafen, Share / Stop sharing, Watch, Voice options, **Leave voice** | Hidden under Chat and Channels while not in voice (the concept's bar shows only when connected); Join is in the Voice view. Stop sharing and Leave voice keep their words. |
+| Persistent voice bar: destination, status, Mute, Leave, talk | The existing strip, under Chat and Channels **while in, connecting or reconnecting** (a stopped or unavailable voice says why in the Voice view), as **one row of four controls** (issue #1028): the state with the actual channel ("In voice in #general", "Connecting to #general"), a button that opens the Voice view; **Hold to talk**, or the open microphone's level; **Mute**; **Leave voice**. Each is 44 × 44 px at least, and the strip is at most **64 px** high. | Hidden under Chat and Channels while not in voice (the concept's bar shows only when connected); Join is in the Voice view. Everything else is in the Voice view only: who is in voice, the status lines, Deafen, Share / Stop sharing, Watch, Use microphone, Voice options, the talk-key hint and the share notes (kept mounted, hidden, so nothing restarts). **Why four:** at 64 px the strip is one row of 44 px controls and its padding. With the roster, the status, seven controls and the hint (as built for #929) it took 245 px at 390 × 844 and 305 px at 320 × 640, where it covered Send and left the log 96 px (browser UX audit 3, F3). The Voice tab's dot still says you are in voice. The strip sits in the normal flow between the conversation and the navigation, so the log gives way, never the composer. |
 | Watch page: preview, share audio, back | The existing `ShareView` on the stage, which is above the conversation under Chat and above the strip in Voice | Mute share, Share volume, Full screen, Stop watching as on main. Not a view of its own: the way back to chat is the navigation. |
 | Settings page | The existing Settings panel over the page | Modal, as before; account, sign-ins, sign-out, report. |
 | Sample content: Campfire, Sam, Alex, Maya, messages, "8 online", mic meter, "Preview" notes | Not copied | Illustrative. |
@@ -64,8 +64,8 @@ away.
 
 | View | Shown | In the strip (dock) |
 | --- | --- | --- |
-| Chat | The stage (a watched share), then the conversation: heading, log, composer | Compact, only while in voice |
-| Channels | The channel list (and rename / New channel) | Compact, only while in voice |
+| Chat | The stage (a watched share), then the conversation: heading, log, composer | Only while in voice: one row of four (where voice is, a button to the Voice view; Hold to talk; Mute; Leave voice), at most 64 px |
+| Channels | The channel list (and rename / New channel) | The same as under Chat |
 | Voice | The stage (a watched share), then the voice panel filling the rest, scrolling inside itself | Expanded: everyone in voice, labelled controls, notes and Voice options |
 
 The conversation is not drawn in Voice but stays laid out (hidden, behind), so
@@ -77,12 +77,15 @@ returning finds the log where it was and the draft in the box.
   only what it called before. The Join and Watch only buttons are the only way
   in (`VoicePanel`, unchanged). The test in `App.test.tsx` (line 310) that no control
   outside the voice section is named for joining holds.
-- **Truthful destination.** The strip's text names the voice channel, as a button
-  to it when another is on screen; in the Voice view the channel Join would use
-  is written out ("Join voice in #general").
+- **Truthful destination.** The strip's state button names the voice channel
+  and opens the Voice view, whose state line names it again, as a button to it
+  when another is on screen; in the Voice view the channel Join would use is
+  written out ("Join voice in #general").
 - **Focus.** After choosing a channel in Channels, focus goes to the
   conversation's heading (the page has moved under the finger). The navigation
-  buttons keep focus when pressed. Settings and Members return focus as before.
+  buttons keep focus when pressed. The strip's state button, which the Voice
+  view does not draw, leaves focus on the Voice button. Settings and Members
+  return focus as before.
 - **Keyboard and browser chrome.** `index.html`'s viewport asks for
   `interactive-widget=resizes-content` and `viewport-fit=cover`; the lobby is
   `100dvh`, follows the visual viewport (`window.visualViewport`) where a browser
@@ -106,7 +109,7 @@ rebases `app.css` and `ChannelList.tsx`.
 ## 6. Verified and not verified
 
 Verified: Vitest component tests; Playwright (Chromium, emulated phone sizes,
-touch) in `12-phone`, `16-layout`, `10-voice` and `12-screen-share`; before and
+touch) in `12-phone`, `16-layout`, `10-voice`, `12-screen-share` and, for the strip, `35-phone-voice-strip`; before and
 after captures in [`mobile-browser-layout/`](mobile-browser-layout/), made by
 `web/e2e/shots/phone.shots.ts`.
 
