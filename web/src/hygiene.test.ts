@@ -61,7 +61,11 @@ describe('credential handling', () => {
     // keeps the credential a password change rotates this page's into, in
     // the place of the one the server revoked. Each pins what the store says
     // it kept (kept, or held), which for the desktop's is its stand-in.
-    expect(code.match(/\bpinned = \{|\bpinned = (held|kept)\b/g)?.length ?? 0).toBe(6);
+    // The last two rotate (issue #1000): the same sign-in, under a new
+    // credential. The pin itself is assigned by pin and rotate alone.
+    expect(code.match(/\bpinned = /g)?.length ?? 0).toBe(2);
+    expect(code.match(/\bpin\((held|kept)\)/g)?.length ?? 0).toBe(4);
+    expect(code.match(/\brotate\(held, kept\)/g)?.length ?? 0).toBe(2);
   });
 
   it('is not placed in a URL: the only fetch sends it as a header', () => {
