@@ -23,11 +23,12 @@ export interface StoredTarget {
   readonly whisper: readonly number[] | null;
 }
 
-// storedAudience is who a message from this choice would go to, as the
-// composer sends it (App's audienceForTarget): an open whisper wins over the
-// net under it. Only that is kept, so what comes back can never be wider.
+// storedAudience is the choice as it is kept. An open whisper is who the
+// message goes to (App's audienceForTarget); the net under it is kept too,
+// because Escape returns to it, and it is checked on its own when it comes
+// back, so neither can come back wider than it was.
 export function storedAudience(target: { readonly net: number | null; readonly whisper: readonly number[] | null }): StoredTarget | null {
-  if (target.whisper !== null) return { net: null, whisper: [...target.whisper] };
+  if (target.whisper !== null) return { net: target.net, whisper: [...target.whisper] };
   if (target.net !== null) return { net: target.net, whisper: null };
   return null;
 }

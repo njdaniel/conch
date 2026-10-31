@@ -970,18 +970,24 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     const kept = pendingTargets.current.get(channelId);
     if (kept === undefined || live.netsFor !== channelId || agents.membersFor !== channelId) return;
     pendingTargets.current.delete(channelId);
-    // The whisper first, as the composer sends it.
-    // A whisper to nobody never stands: it would leave the draft one Escape
-    // from the whole channel.
-    const stands =
-      kept.whisper !== null
-        ? kept.whisper.length > 0 && kept.whisper.every((id) => id !== principalId && live.people.has(id))
-        : kept.net !== null && live.nets.has(kept.net) && !live.monitored.has(kept.net);
-    if (!stands) {
+    // The whisper first, as the composer sends it. A whisper to nobody never
+    // stands: it would leave the draft one Escape from the whole channel.
+    const netStands = (net: number) => live.nets.has(net) && !live.monitored.has(net);
+    if (kept.whisper === null) {
+      if (kept.net !== null && netStands(kept.net)) dispatchTargets({ type: 'restore', channel: selected, net: kept.net, whisper: null });
+      else dispatchTargets({ type: 'held', channel: selected, line: audienceGone });
+      return;
+    }
+    if (!(kept.whisper.length > 0 && kept.whisper.every((id) => id !== principalId && live.people.has(id)))) {
       dispatchTargets({ type: 'held', channel: selected, line: audienceGone });
       return;
     }
-    dispatchTargets({ type: 'restore', channel: selected, net: kept.net, whisper: kept.whisper });
+    // The net under the whisper is checked on its own: Escape goes back to it
+    // if it stands, and keeps the whisper if it does not, never falling to
+    // the whole channel. With no net under it, Escape goes to the channel, as
+    // it did before the reload.
+    const under = kept.net !== null && netStands(kept.net) ? kept.net : null;
+    dispatchTargets({ type: 'restore', channel: selected, net: under, whisper: kept.whisper, netGone: kept.net !== null && under === null });
   }, [channelId, selected, live.netsFor, live.nets, live.monitored, live.people, agents.membersFor, principalId]);
 
   // The audience controls (issue #1039): the person's own choice, in a channel

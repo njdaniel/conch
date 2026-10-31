@@ -1078,6 +1078,40 @@ describe('composing to a net or a whisper', () => {
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('psst');
   });
 
+  it('Escape on a whisper over a net, given back after a reload, returns to that net as it would have before', async () => {
+    await ready();
+    choose('net:5');
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    await reload('Whisper to bot');
+    await checked();
+    fireEvent.keyDown(screen.getByLabelText('Whisper to bot'), { key: 'Escape' });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message net alpha').value).toBe('psst');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'general', body: 'psst', audience: { kind: 'net', net_id: 5 } }]);
+  });
+
+  it('Escape on a whisper whose net under it is gone keeps the whisper, never the whole channel', async () => {
+    keepDraft({ net: 77, whisper: [3] });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    await reopen('Whisper to bot');
+    await checked();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    fireEvent.keyDown(screen.getByLabelText('Whisper to bot'), { key: 'Escape' });
+    fireEvent.keyDown(screen.getByRole('checkbox', { name: 'bot [agent]' }), { key: 'Escape' });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    expect(to().value).toBe('whisper');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } }]);
+  });
+
   it('a whisper draft is not given, nor who it was for, to someone else signing in next', async () => {
     await ready();
     choose('whisper');

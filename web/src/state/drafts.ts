@@ -58,6 +58,12 @@ export interface Target {
   // which cannot be sent, that Escape cannot close. Only the person choosing
   // who it goes to ends it, or the kept audience coming back whole.
   readonly held?: boolean;
+  // A whisper given back after a reload or a sign-in whose net under it is no
+  // longer one the person may transmit to (issue #1039): Escape keeps the
+  // whisper rather than leave the text addressed to the whole channel, where
+  // before the reload it would have gone back to that net. Choosing the
+  // channel or a net ends it.
+  readonly netGone?: boolean;
 }
 
 export type Targets = Readonly<Record<string, Target>>;
@@ -84,7 +90,7 @@ export type TargetAction =
   | { readonly type: 'held'; readonly channel: string; readonly line: string }
   // A kept audience that still stands, given back whole: it replaces the
   // choice, never merges into it, so it can only be what was kept.
-  | { readonly type: 'restore'; readonly channel: string; readonly net: number | null; readonly whisper: readonly number[] | null }
+  | { readonly type: 'restore'; readonly channel: string; readonly net: number | null; readonly whisper: readonly number[] | null; readonly netGone?: boolean }
   | { readonly type: 'reset' };
 
 export const initialTargets: Targets = {};
@@ -103,9 +109,9 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
   const set = (next: Target): Targets => ({ ...state, [action.channel]: next });
   switch (action.type) {
     case 'channel':
-      return set({ ...current, net: null, whisper: null, refusal: null, held: false });
+      return set({ ...current, net: null, whisper: null, refusal: null, held: false, netGone: false });
     case 'net':
-      return set({ ...current, net: action.net, whisper: null, refusal: null, held: false });
+      return set({ ...current, net: action.net, whisper: null, refusal: null, held: false, netGone: false });
     case 'whisper':
       return set({ ...current, whisper: current.whisper ?? [], refusal: null, held: false });
     case 'toggle': {
@@ -116,7 +122,7 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
     case 'closePicker':
       // A held draft stays held: closing the picker would leave it addressed
       // to the whole channel, which nobody chose.
-      if (current.held === true) return state;
+      if (current.held === true || current.netGone === true) return state;
       return set({ ...current, whisper: null, refusal: null });
     case 'posting':
       return set({ ...current, refusal: null, note: null });
@@ -125,7 +131,14 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
     case 'held':
       return set({ ...current, net: null, whisper: [], refusal: action.line, held: true });
     case 'restore':
-      return set({ ...current, net: action.whisper === null ? action.net : null, whisper: action.whisper === null ? null : [...action.whisper], refusal: null, held: false });
+      return set({
+        ...current,
+        net: action.net,
+        whisper: action.whisper === null ? null : [...action.whisper],
+        refusal: null,
+        held: false,
+        netGone: action.netGone === true,
+      });
     case 'whispered': {
       // Only if the whisper still chosen is the one that was sent: a second one
       // being composed while the first was on its way is left as it is.
@@ -133,7 +146,7 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
         current.whisper !== null &&
         current.whisper.length === action.sent.length &&
         action.sent.every((id) => current.whisper?.includes(id) === true);
-      return set(same ? { ...current, net: null, whisper: null, note: action.note } : { ...current, note: action.note });
+      return set(same ? { ...current, net: null, whisper: null, note: action.note, netGone: false } : { ...current, note: action.note });
     }
   }
 }
