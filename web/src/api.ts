@@ -1970,21 +1970,27 @@ const retries: Record<SocketName, number> = { messages: 0, events: 0, voice: 0, 
 const lost: Record<SocketName, boolean> = { messages: false, events: false, voice: false, occupancy: false };
 
 // connect asks for a ticket with the credential and opens the socket that
-// `address` names, given the ticket. The ticket is single use, so a reconnect
-// calls this again. The diagnostic ring is told of each open, each close with
-// its code and each try after a loss, by kind, never by address: the
-// address holds the channel and the ticket.
-async function connect(name: SocketName, id: OperationId, query: (ticket: string) => Record<string, string>, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
+// `query` names, with the ticket added. The ticket is single use, so a
+// reconnect calls this again. A platform that opens its sockets with the
+// credential it holds (the desktop shell's main) is asked for none. The
+// diagnostic ring is told of each open, each close with its code and each try
+// after a loss, by kind, never by address: the address holds the channel and
+// the ticket.
+async function connect(name: SocketName, id: OperationId, query: Readonly<Record<string, string>>, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
   const kind = diagnosticOf[name];
   if (lost[name]) record({ kind: 'reconnect', socket: kind, attempt: ++retries[name] });
   // Lost until it opens: a ticket refused or a socket that never opens is
   // followed by another try.
   lost[name] = true;
-  const ticket = await requestTicket();
-  if (!ticket.ok) return ticket;
+  let address = query;
+  if (platform.sockets.ticket) {
+    const ticket = await requestTicket();
+    if (!ticket.ok) return ticket;
+    address = { ...query, ticket: ticket.value.ticket };
+  }
   let socket: FeedConnection;
   try {
-    socket = platform.sockets.open(id, query(ticket.value.ticket));
+    socket = platform.sockets.open(id, address);
   } catch {
     return { ok: false, failure: 'network' };
   }
@@ -2018,13 +2024,13 @@ async function connect(name: SocketName, id: OperationId, query: (ticket: string
 // heartbeat=1 asks for the server's heartbeat frames, which the feed's silence
 // watchdog lives on; without it /v2/ws sends messages and nothing else.
 export const openSocket: OpenSocket = (channel, after, events) =>
-  connect('messages', 'messagesSocket', (ticket) => ({ channel, after: String(after), heartbeat: '1', ticket }), events);
+  connect('messages', 'messagesSocket', { channel, after: String(after), heartbeat: '1' }, events);
 
 // openEventsSocket opens the events stream of a channel (roster, runs,
 // activity, interventions) with the browser's own session, which the server
 // then keeps online while the socket is open.
 export function openEventsSocket(channel: string, session: number, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  return connect('events', 'eventsSocket', (ticket) => ({ channel, session: String(session), ticket }), events);
+  return connect('events', 'eventsSocket', { channel, session: String(session) }, events);
 }
 
 // The browser's own session (UX-18): created after sign-in, ended on sign-out
@@ -2193,7 +2199,7 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
 // openVoiceSocket opens the presence stream of a channel's voice with a ticket:
 // the roster, and who is transmitting.
 export function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  return connect('voice', 'voiceSocket', (ticket) => ({ channel, ticket }), events);
+  return connect('voice', 'voiceSocket', { channel }, events);
 }
 
 // Voice occupancy (issue #596): how many are in each channel's voice, for
@@ -2209,7 +2215,7 @@ export function getVoiceOccupancy(): Promise<ApiResult<VoiceOccupancyV1>> {
 // openOccupancySocket opens its stream with a ticket: the whole document on
 // connect, and again whenever a count changes.
 export function openOccupancySocket(events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  return connect('occupancy', 'occupancySocket', (ticket) => ({ ticket }), events);
+  return connect('occupancy', 'occupancySocket', {}, events);
 }
 
 // sendReport sends a problem report (issue #446) to the server's operator.

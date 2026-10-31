@@ -1,19 +1,29 @@
 // A disposable conchd on loopback for the smoke tests (issue #942): built from
 // this checkout, with a throwaway data directory, one operator, one channel and
-// one member who has a password. Nothing outside the temporary directory is
-// touched and nothing is shared with a real server.
+// two members who have a password. Nothing outside the temporary directory is
+// touched and nothing is shared with a real server. With web, it also serves
+// the browser build in web/dist at /app/, for a browser user beside the app
+// (issue #943); make web-build makes it.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const repo = resolve(import.meta.dirname, '../../..');
 
+export interface Member {
+  readonly name: string;
+  readonly password: string;
+  readonly token: string;
+}
+
 export interface Disposable {
   readonly origin: string;
   readonly operatorToken: string;
-  readonly member: { readonly name: string; readonly password: string; readonly token: string };
+  readonly member: Member;
+  // A second member, another principal, for the browser beside the app.
+  readonly other: Member;
   api(token: string, method: string, path: string, body?: unknown): Promise<{ status: number; body: unknown }>;
   stop(): Promise<void>;
 }
@@ -32,7 +42,12 @@ function freePort(): Promise<number> {
   });
 }
 
-export async function startConchd(): Promise<Disposable> {
+export const WEB_DIST = join(repo, 'web', 'dist');
+
+export async function startConchd(options: { readonly web?: boolean } = {}): Promise<Disposable> {
+  if (options.web === true && !existsSync(join(WEB_DIST, 'index.html'))) {
+    throw new Error(`${WEB_DIST} has no browser build; run make web-build first`);
+  }
   const dir = mkdtempSync(join(tmpdir(), 'conch-desktop-conchd-'));
   const binary = join(dir, 'conchd');
   execFileSync('go', ['build', '-o', binary, './cmd/conchd'], { cwd: repo, stdio: 'inherit' });
@@ -41,7 +56,7 @@ export async function startConchd(): Promise<Disposable> {
   const operatorToken = boot.split('\n')[0]?.trim() ?? '';
   const port = await freePort();
   const origin = `http://127.0.0.1:${String(port)}`;
-  const child: ChildProcess = spawn(binary, ['serve', '--data', data, '--listen', `127.0.0.1:${String(port)}`, '--auth', 'required', '--no-web', '--test-relax-invite-limits'], {
+  const child: ChildProcess = spawn(binary, ['serve', '--data', data, '--listen', `127.0.0.1:${String(port)}`, '--auth', 'required', ...(options.web === true ? ['--web-dir', WEB_DIST] : ['--no-web']), '--test-relax-invite-limits'], {
     stdio: 'ignore',
     env: { PATH: process.env['PATH'] ?? '' },
   });
@@ -72,19 +87,24 @@ export async function startConchd(): Promise<Disposable> {
   const invite = await api(operatorToken, 'POST', '/v1/invites', { kind: 'open', channels: ['general'], voice: false, max_uses: 5 });
   const code = (invite.body as { code?: string }).code;
   if (invite.status >= 300 || code === undefined) throw new Error(`could not make an invite: ${JSON.stringify(invite.body)}`);
-  const password = 'smoke-password-canary-5521';
-  const redeemed = await fetch(`${origin}/v2/invites/redeem`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code, name: 'ada', password }),
-  });
-  const joined = (await redeemed.json()) as { token?: string };
-  if (!redeemed.ok || joined.token === undefined) throw new Error(`could not make a member: ${JSON.stringify(joined)}`);
+  const enrol = async (name: string, password: string): Promise<Member> => {
+    const redeemed = await fetch(`${origin}/v2/invites/redeem`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, name, password }),
+    });
+    const joined = (await redeemed.json()) as { token?: string };
+    if (!redeemed.ok || joined.token === undefined) throw new Error(`could not make a member: ${JSON.stringify(joined)}`);
+    return { name, password, token: joined.token };
+  };
+  const member = await enrol('ada', 'smoke-password-canary-5521');
+  const other = await enrol('grace', 'smoke-password-canary-7713');
 
   return {
     origin,
     operatorToken,
-    member: { name: 'ada', password, token: joined.token },
+    member,
+    other,
     api,
     stop: async () => {
       child.kill('SIGTERM');

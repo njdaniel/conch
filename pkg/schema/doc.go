@@ -42,5 +42,5 @@ package schema
 
 // The emoji catalog comes first: schema-ts reads EmojiVersion from the file
 // it writes (issue #953; go generate runs a file's directives in order).
-//go:generate go run ../../cmd/emoji-gen -data ../../third_party/unicode/emoji-test.txt -sha256 ../../third_party/unicode/emoji-test.sha256 -go emoji_catalog_gen.go -json ../../web/src/emoji/catalog.json
+//go:generate go run ../../cmd/emoji-gen -data ../../third_party/unicode/emoji-test.txt -sha256 ../../third_party/unicode/emoji-test.sha256 -aliases ../../cmd/emoji-gen/aliases.txt -go emoji_catalog_gen.go -json ../../web/src/emoji/catalog.json
 //go:generate go run ../../cmd/schema-ts -out ../../web/src/schema

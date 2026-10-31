@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import type { Feeds } from '../../main/api/feeds.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
 import { checkCaller, Ipc, parseRequest, plain, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
@@ -32,9 +33,10 @@ function fixture(): Fixture {
     return Promise.resolve({ ran: name });
   };
   const service = new Proxy({} as Service, { get: (_t, name: string) => record(name) });
+  const feeds = new Proxy({} as Feeds, { get: (_t, name: string) => record(`feeds.${name}`) });
   const logs: string[] = [];
   const clock = { now: 1_000_000 };
-  const ipc = new Ipc({ owned: () => contents, gate, service, now: () => clock.now, log: (line) => logs.push(line) });
+  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, now: () => clock.now, log: (line) => logs.push(line) });
   return { ipc, gate, contents, main, calls, logs, clock, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
@@ -68,7 +70,7 @@ describe('every invocation is checked before anything else', () => {
 
   it('refuses everything when the window is gone', async () => {
     const f = fixture();
-    const ipc = new Ipc({ owned: () => null, gate: f.gate, service: {} as Service, now: () => 0, log: () => undefined });
+    const ipc = new Ipc({ owned: () => null, gate: f.gate, service: {} as Service, feeds: {} as Feeds, now: () => 0, log: () => undefined });
     expect(await ipc.invoke(f.event(), 'serverAddress', [])).toEqual({ ok: false, kind: 'refused' });
   });
 
@@ -135,6 +137,27 @@ describe('arguments', () => {
     ['request', [{ operation: 'whoami', keepalive: 'yes' }]],
     ['request', [{ operation: 'whoami' }, 'extra']],
     ['request', [{ operation: 'whoami', toString: () => 'x' }]],
+    ['feedSubscribe', [1]],
+    ['feedSubscribe', [{ kind: 'occupancy' }]],
+    ['feedSubscribe', [0, { kind: 'occupancy' }]],
+    ['feedSubscribe', [-1, { kind: 'occupancy' }]],
+    ['feedSubscribe', [1.5, { kind: 'occupancy' }]],
+    ['feedSubscribe', ['1', { kind: 'occupancy' }]],
+    ['feedSubscribe', [1, { kind: 'occupancy' }, 'extra']],
+    ['feedSubscribe', [1, { kind: 'tickets' }]],
+    ['feedSubscribe', [1, { kind: 'occupancy', channel: 'general' }]],
+    ['feedSubscribe', [1, { kind: 'messages', channel: 'general' }]],
+    ['feedSubscribe', [1, { kind: 'messages', channel: 'general', after: -1 }]],
+    ['feedSubscribe', [1, { kind: 'messages', channel: 'general', after: 0, url: 'wss://evil.example/' }]],
+    ['feedSubscribe', [1, { kind: 'events', channel: 'general' }]],
+    ['feedSubscribe', [1, { kind: 'events', channel: 'general', session: 0 }]],
+    ['feedSubscribe', [1, { kind: 'voice', channel: '' }]],
+    ['feedSubscribe', [1, { kind: 'voice', channel: 'a\nb' }]],
+    ['feedSubscribe', [1, { kind: 'voice', channel: 'x'.repeat(300) }]],
+    ['feedAck', []],
+    ['feedAck', ['1']],
+    ['feedUnsubscribe', [0]],
+    ['feedUnsubscribe', [1, 2]],
   ])('refuses a bad shape: %s %j', async (name, args) => {
     const f = fixture();
     expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
@@ -160,6 +183,30 @@ describe('arguments', () => {
       ['signIn', ['login', { name: 'ada', password: 'pw' }]],
       ['signIn', ['joinAccount', { name: 'ada', password: 'pw' }]],
     ]);
+  });
+
+  it('passes a feed call to the feeds with the caller’s document generation, and the parameters it parsed', async () => {
+    const f = fixture();
+    const document = f.gate.generation;
+    await f.ipc.invoke(f.event(), 'feedSubscribe', [3, { kind: 'messages', channel: 'general', after: 41 }]);
+    await f.ipc.invoke(f.event(), 'feedSubscribe', [4, { kind: 'events', channel: 'general', session: 9 }]);
+    await f.ipc.invoke(f.event(), 'feedSubscribe', [5, { kind: 'occupancy' }]);
+    await f.ipc.invoke(f.event(), 'feedAck', [3]);
+    await f.ipc.invoke(f.event(), 'feedUnsubscribe', [3]);
+    expect(f.calls).toEqual([
+      ['feeds.subscribe', [document, 3, { kind: 'messages', channel: 'general', after: 41 }]],
+      ['feeds.subscribe', [document, 4, { kind: 'events', channel: 'general', session: 9 }]],
+      ['feeds.subscribe', [document, 5, { kind: 'occupancy' }]],
+      ['feeds.ack', [document, 3]],
+      ['feeds.unsubscribe', [document, 3]],
+    ]);
+  });
+
+  it('checks a feed call’s caller like any other: a stale document subscribes nothing', async () => {
+    const f = fixture();
+    f.gate.begin();
+    expect(await f.ipc.invoke(f.event(), 'feedSubscribe', [1, { kind: 'occupancy' }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
   });
 
   it('refuses arguments that are not plain data: functions, class instances, cycles-by-depth, huge arrays', async () => {
@@ -204,6 +251,7 @@ describe('arguments', () => {
       owned: () => f.contents,
       gate: f.gate,
       service: { setServerAddress: () => { throw new Error('boom secret-arg'); } } as unknown as Service,
+      feeds: {} as Feeds,
       now: () => 0,
       log: (line) => f.logs.push(line),
     });
@@ -218,7 +266,7 @@ describe('the registry', () => {
     const channels: string[] = [];
     f.ipc.register({ handle: (channel) => void channels.push(channel) });
     expect(channels.sort()).toEqual(INVOKED_FUNCTIONS.map((n) => `conch:${n}`).sort());
-    expect(channels).toHaveLength(16);
+    expect(channels).toHaveLength(19);
   });
 
   it('parses a request the way the table says', () => {
