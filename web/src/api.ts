@@ -174,6 +174,90 @@ let pending: string | null = null;
 // another person's credential under this page's name.
 let pinned: Held | null = null;
 
+// A write that replaces the credential it is sent with (a password write
+// rotates it; a guest's conversion makes it a member's) races every other
+// call sent with that credential: the server revokes it as it answers, so a
+// call already out with it, or sent before the answer is read, comes back 401
+// although the person is still signed in, with the new one (issue #1000).
+//
+// replacing holds, by the credential being replaced, when its write has been
+// answered and the new credential kept (or not). replaced holds the
+// credentials this page has replaced so, since it last signed in: a 401 for
+// one of them is sent again with the credential pinned now, which is the
+// same person's. Every other way the pin changes (a sign-in, a sign-out, a
+// 401) empties it, so a call is never sent again as someone else.
+const replacing = new Map<string, Promise<void>>();
+const replaced = new Set<string>();
+
+// pin sets the credential this page signs in with, as a new sign-in (or none).
+function pin(held: Held | null): void {
+  pinned = held;
+  replaced.clear();
+}
+
+// rotate pins next in the place of from, which the server has revoked: the
+// same sign-in, under a new credential.
+function rotate(from: Held, next: Held): void {
+  pinned = next;
+  replaced.add(from.token);
+}
+
+// whileReplacing runs work, a write that may replace from, so that a 401 for
+// from meanwhile waits for its answer (see settleRefusal). It is in force
+// before work sends anything.
+function whileReplacing<T>(from: Held | null, work: () => Promise<T>): Promise<T> {
+  if (from === null) return work();
+  const done = Promise.resolve().then(work);
+  const settled = done.then(
+    () => undefined,
+    () => undefined,
+  );
+  replacing.set(from.token, settled);
+  void settled.then(() => {
+    if (replacing.get(from.token) === settled) replacing.delete(from.token);
+  });
+  return done;
+}
+
+// settleRefusal decides what a 401 for a call sent with held means. A write
+// replacing held is waited for first, unless wait is false: the write's own
+// requests, and the proof it may ask for, never wait for themselves. Then:
+// held still the pinned credential (or none pinned) is a credential refused,
+// so it is forgotten and the page signs out (null); held replaced by the
+// credential pinned now is the same person, who is to be asked again with it;
+// held from a sign-in that is over is 'stale': no answer for this page, and
+// never a sign-out of the one now signed in.
+async function settleRefusal(held: Held, wait: boolean): Promise<Held | 'stale' | null> {
+  const change = wait ? replacing.get(held.token) : undefined;
+  if (change !== undefined) await within(change, replacingWait);
+  const now = current();
+  if (now === null || now.token === held.token) {
+    forget(held);
+    return null;
+  }
+  return replaced.has(held.token) ? now : 'stale';
+}
+
+// How many times a call is sent again after a 401 for a credential since
+// replaced: once per replacement, and never without end.
+const resends = 3;
+
+// How long a 401 waits for a replacement before it is settled as it stands:
+// a change held up (an answer that never comes, a proof the person never
+// gives) does not hold every refused call up with it.
+const replacingWait = 30_000;
+
+// within resolves when change does, or after ms, whichever is first.
+function within(change: Promise<void>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  return Promise.race([change, late]).finally(() => {
+    clearTimeout(timer);
+  });
+}
+
 // unchecked is the credential restore found stored but could not check (the
 // server did not answer): neither pinned nor dropped. Only it may be forgotten
 // by forgetStored, and only while it is still the one stored (issue #469).
@@ -191,7 +275,7 @@ function current(): Held | null {
   if (held === null) return null;
   // A storage that refuses the read is as good as gone.
   if (stillStored(held)) return held;
-  pinned = null;
+  pin(null);
   return null;
 }
 
@@ -199,7 +283,7 @@ function current(): Held | null {
 // diagnostic ring goes with it: the session it describes is over, and the next
 // person to sign in on this browser must not report the last one's events.
 function forget(held: Held): void {
-  if (pinned?.token === held.token && pinned.place === held.place) pinned = null;
+  if (pinned?.token === held.token && pinned.place === held.place) pin(null);
   platform.credentials.drop(held);
   forgetDiagnostics();
 }
@@ -282,13 +366,21 @@ async function get<T>(request: Call, token: string, check: Validator<T>): Promis
 // authed is every call made with the signed-in credential: it takes the pinned
 // token, makes the request and, on a 401, drops the token, so "a 401 anywhere
 // signs out" holds for every call added here without each one remembering it.
+// A 401 for a credential this page has since replaced is not a sign-out: the
+// call is asked again with the new one (settleRefusal, issue #1000).
 // signIn and restore are the calls that do not use it: they check a candidate.
 async function authed<T>(request: Call, check: Validator<T>): Promise<ApiResult<T>> {
-  const held = current();
+  let held = current();
   if (held === null) return { ok: false, failure: 'unauthorized' };
-  const result = await get(request, held.token, check);
-  if (!result.ok && result.failure === 'unauthorized') forget(held);
-  return result;
+  for (let sent = 0; sent < resends; sent++) {
+    const result = await get(request, held.token, check);
+    if (result.ok || result.failure !== 'unauthorized') return result;
+    const next = await settleRefusal(held, true);
+    if (next === null) return result;
+    if (next === 'stale') break;
+    held = next;
+  }
+  return { ok: false, failure: 'network' };
 }
 
 // authedSend is the writing sibling of authed: the stored credential, a JSON
@@ -300,6 +392,12 @@ type PostReply =
   | { readonly kind: 'none' }
   | { readonly kind: 'unauthorized' };
 
+// What a write sent with a credential gave, before it is a PostReply:
+// replaced is a 401 for a credential this page has since replaced by `by`,
+// the same person's (settleRefusal); the server did nothing, since a 401
+// comes before a route acts.
+type Sent = PostReply | { readonly kind: 'replaced'; readonly by: Held };
+
 //
 // A write the server answers 403 reauth_required (design §5.3: it needs a
 // recent proof of the password, and an operator's code) is sent once more
@@ -309,16 +407,35 @@ type PostReply =
 // is the caller's answer, so a server that keeps asking gets one question,
 // not one after another (the CLI's rule, #715). Cancelled, the first answer
 // stands.
+//
+// A 401 for a credential since replaced (a password changed meanwhile) is
+// sent again with the new one, as authed's is.
 async function authedSend(request: Call, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<PostReply> {
-  const held = current();
+  let held = current();
   if (held === null) return { kind: 'unauthorized' };
-  const reply = await sendAs(held, request, body, keepalive, signal);
+  for (let sent = 0; sent < resends; sent++) {
+    const reply = await sendProving(held, request, body, keepalive, signal);
+    if (reply.kind !== 'replaced') return reply;
+    // A write that replaces the credential carries a proof made for the
+    // one it was sent with (the current password, a one-use code): sent
+    // again with another, it would be a wrong password counted against the
+    // person. No answer for this one; they can try again.
+    if (replacingOps.has(request.op)) return { kind: 'none' };
+    held = reply.by;
+  }
+  return { kind: 'none' };
+}
+
+// sendProving is one send of authedSend's with held, and the one more after
+// a proof the server asked for.
+async function sendProving(held: Held, request: Call, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<Sent> {
+  const reply = await sendWith(held, request, body, keepalive, signal);
   if (reply.kind !== 'reply' || reply.res.status !== 403 || askReauth === null) return reply;
   if ((await refusalCode(reply.res.clone())) !== reauthRequired) return reply;
   if (!(await proveAgain())) return reply;
   const again = current();
   if (again === null) return { kind: 'unauthorized' };
-  return sendAs(again, request, body, keepalive, signal);
+  return sendWith(again, request, body, keepalive, signal);
 }
 
 // The server's codes the module acts on itself.
@@ -352,8 +469,22 @@ function proveAgain(): Promise<boolean> {
 }
 
 // sendAs is authedSend with the credential already taken, for the sign-outs,
-// which must drop the very credential they revoked.
+// which must drop the very credential they revoked. It is never sent again
+// with another credential: a 401 for one since replaced, or from a sign-in
+// that is over, is no answer for this page (settleRefusal), not a sign-out.
 async function sendAs(held: Held, request: Call, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<PostReply> {
+  const reply = await sendWith(held, request, body, keepalive, signal);
+  return reply.kind === 'replaced' ? { kind: 'none' } : reply;
+}
+
+// The writes that replace the credential they are sent with, and the proof
+// one may ask for on the way (reauth): a 401 for theirs never waits for the
+// replacement, which is waiting for them (see whileReplacing), and is never
+// sent again with another credential (see authedSend).
+const replacingOps: ReadonlySet<OperationId> = new Set<OperationId>(['changePassword', 'setPassword', 'convertGuest', 'reauth']);
+
+// sendWith sends a write with held and reads a 401 as settleRefusal does.
+async function sendWith(held: Held, request: Call, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<Sent> {
   let res: Response;
   try {
     res = await platform.http.send(request, held.token, { body, keepalive, ...(signal === undefined ? {} : { signal }) });
@@ -371,8 +502,9 @@ async function sendAs(held: Held, request: Call, body?: unknown, keepalive = fal
   // they say so (secretRoutes); every other 401, auth_failed or not, is the
   // credential refused, which signs out.
   if (res.status === 401 && !(operations[request.op].secret === true && (await refusalCode(res.clone())) === authFailed)) {
-    forget(held);
-    return { kind: 'unauthorized' };
+    const next = await settleRefusal(held, !replacingOps.has(request.op));
+    if (next === null) return { kind: 'unauthorized' };
+    return next === 'stale' ? { kind: 'none' } : { kind: 'replaced', by: next };
   }
   // A 204 is a status alone by definition (sign-outs, closes, a transmit
   // report): read it out here so no caller has to remember to (issue #622).
@@ -444,7 +576,7 @@ export async function signIn(candidate: string): Promise<ApiResult<WhoAmIRespons
   if (pending !== null || unchecked !== null) return { ok: false, failure: 'held' };
   if (hasToken()) return { ok: false, failure: 'stored' };
   pending = null;
-  pinned = null;
+  pin(null);
   const result = await get(call('whoami'), candidate, whoAmIResponseV1);
   if (!result.ok) return result;
   // A guest's credential pasted here stays with this tab, as a visit's does.
@@ -457,7 +589,7 @@ export async function signIn(candidate: string): Promise<ApiResult<WhoAmIRespons
   // localStorage is refused (blocked site data): signing in would not last
   // a reload, and the lobby could not call the API either.
   if (kept === null) return { ok: false, failure: 'invalid' };
-  pinned = kept;
+  pin(kept);
   return result;
 }
 
@@ -468,7 +600,7 @@ export function continueAsOperator(): boolean {
   pending = null;
   const kept = token === null ? null : platform.credentials.write(token, 'tab');
   if (kept === null) return false;
-  pinned = kept;
+  pin(kept);
   return true;
 }
 
@@ -485,7 +617,7 @@ export interface Restored {
 // the operator warning, as signIn holds one.
 export async function restore(): Promise<ApiResult<Restored>> {
   pending = null;
-  pinned = null;
+  pin(null);
   unchecked = null;
   let held = platform.credentials.read();
   if (held === null) return { ok: false, failure: 'unauthorized' };
@@ -514,13 +646,16 @@ export async function restore(): Promise<ApiResult<Restored>> {
     }
     held = kept;
   }
-  pinned = held;
+  pin(held);
   return { ok: true, value: { principal: result.value, warn: false } };
 }
 
 // whoAmI asks who the signed-in credential is, mid-session (after a socket was
 // refused, say). Unlike restore it never picks a credential: it asks with the
-// one this page signed in with, and a 401 drops it.
+// one this page signed in with, and a 401 drops it. A socket closed because
+// a password change revoked the credential it was opened with asks this
+// before the change's answer is read: the 401 for the old credential waits
+// for it, and is asked again with the new one (issue #1000).
 export function whoAmI(): Promise<ApiResult<WhoAmIResponseV1>> {
   return authed(call('whoami'), whoAmIResponseV1);
 }
@@ -533,7 +668,7 @@ export function whoAmI(): Promise<ApiResult<WhoAmIResponseV1>> {
 export async function signOut(): Promise<boolean> {
   pending = null;
   const held = current();
-  pinned = null;
+  pin(null);
   forgetDiagnostics();
   if (held === null) return true;
   const reply = await sendAs(held, call('logout'));
@@ -637,7 +772,7 @@ export type PasswordResult = InviteResult<PasswordUpdatedResponseV1> | { readonl
 export async function changePassword(currentPassword: string, password: string, code?: string): Promise<PasswordResult> {
   const request: ChangePasswordRequestV1 = code === undefined ? { current: currentPassword, password } : { current: currentPassword, password, code };
   const before = current();
-  return keepRotated(before, await authedSend(call('changePassword'), request));
+  return whileReplacing(before, async () => keepRotated(before, await authedSend(call('changePassword'), request)));
 }
 
 // setPassword sets a first password for a member from before passwords
@@ -646,12 +781,13 @@ export async function changePassword(currentPassword: string, password: string, 
 export async function setPassword(password: string, proof: string): Promise<PasswordResult> {
   const request: SetPasswordRequestV1 = { password, proof };
   const before = current();
-  return keepRotated(before, await authedSend(call('setPassword'), request));
+  return whileReplacing(before, async () => keepRotated(before, await authedSend(call('setPassword'), request)));
 }
 
 // keepRotated reads a password write's answer and, when it carries a new
 // credential for this page, keeps it in the place of the old one, which the
-// server has revoked.
+// server has revoked. A call of this page's that the server refused with the
+// old one, meanwhile or after, is sent again with the new one (issue #1000).
 //
 // before is the credential the write was sent with. When it is no longer
 // the one stored (another tab signed out or in meanwhile), the new
@@ -672,7 +808,7 @@ async function keepRotated(before: Held | null, reply: PostReply): Promise<Passw
     forget(held);
     return { ok: false, failure: 'unkept' };
   }
-  pinned = kept;
+  rotate(held, kept);
   return result;
 }
 
@@ -993,7 +1129,7 @@ export async function forgetStored(): Promise<boolean> {
 // The password goes in the body alone and is kept nowhere.
 export async function redeemInvite(inviteCode: string, name: string, password: string): Promise<RedeemResult> {
   if (heldElsewhere()) return { ok: false, failure: 'held' };
-  pinned = null;
+  pin(null);
   const request: RedeemInviteRequestV2 = { code: inviteCode, name, password };
   const res = await sendOpen(call('redeemInvite'), request);
   if (res === null) return { ok: false, failure: 'network' };
@@ -1019,7 +1155,7 @@ export async function joinInfo(): Promise<InviteResult<JoinInfoV1>> {
 // invite's member's is.
 export async function createAccount(name: string, password: string): Promise<RedeemResult> {
   if (heldElsewhere()) return { ok: false, failure: 'held' };
-  pinned = null;
+  pin(null);
   const request: JoinAccountRequestV1 = { name, password };
   const res = await sendOpen(call('joinAccount'), request);
   if (res === null) return { ok: false, failure: 'network' };
@@ -1046,7 +1182,7 @@ async function keepRedeemed(token: string, principal: number, place: Place, oper
     await sendAs(made, call('logout'));
     return { ok: false, failure: 'unkept' };
   }
-  pinned = held;
+  pin(held);
   const who = await whoAmI();
   if (!who.ok) return { ok: false, failure: 'unchecked' };
   if ((who.value.role === 'operator') !== operator || who.value.id !== principal || (held.place === 'lasting' && visitOf(who.value) !== null)) {
@@ -1098,7 +1234,7 @@ export async function signInWithPassword(name: string, password: string): Promis
   if (unchecked !== null && !stillStored(unchecked)) unchecked = null;
   if (pending !== null || unchecked !== null) return { ok: false, failure: 'held' };
   if (hasToken()) return { ok: false, failure: 'stored' };
-  pinned = null;
+  pin(null);
   pendingLogin = null;
   const request: LoginRequestV1 = { name, password };
   const res = await sendOpen(call('login'), request);
@@ -1227,6 +1363,11 @@ export type ConvertResult =
 export async function convertGuest(name: string, password: string): Promise<ConvertResult> {
   const held = current();
   if (held === null) return { ok: false, failure: 'gone' };
+  return whileReplacing(held, () => convertAs(held, name, password));
+}
+
+// convertAs is convertGuest with the guest credential taken.
+async function convertAs(held: Held, name: string, password: string): Promise<ConvertResult> {
   const request: ConvertGuestRequestV1 = { name, password };
   const reply = await sendAs(held, call('convertGuest'), request);
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'gone' };
@@ -1261,7 +1402,7 @@ export async function convertGuest(name: string, password: string): Promise<Conv
   const made = { value: body as ConvertGuestResponseV1 };
   // The guest credential is revoked already, with the visit.
   platform.credentials.drop(held);
-  pinned = null;
+  pin(null);
   forgetDiagnostics();
   // The member's credential is kept to last, as any member's is, unless
   // another tab keeps a sign-in there (with this tab's gone, hasToken finds
@@ -1273,7 +1414,9 @@ export async function convertGuest(name: string, password: string): Promise<Conv
     await sendAs(member, call('logout'));
     return { ok: false, failure: 'unkept' };
   }
-  pinned = kept;
+  // The same person, as a member now: a call of the guest's that the
+  // conversion refused is sent again with the member's credential.
+  rotate(held, kept);
   return { ok: true };
 }
 
@@ -1317,7 +1460,7 @@ export async function previewSignInLink(signInCode: string): Promise<InviteResul
 // redeemInvite is: the page signs that one out first, revoking it.
 export async function redeemSignInLink(signInCode: string): Promise<RedeemResult> {
   if (heldElsewhere()) return { ok: false, failure: 'held' };
-  pinned = null;
+  pin(null);
   const request: RedeemSignInLinkRequestV1 = { code: signInCode };
   const res = await sendOpen(call('redeemSignInLink'), request);
   if (res === null) return { ok: false, failure: 'network' };
@@ -1653,20 +1796,26 @@ export type UploadResult =
 // server's early 413, which answers before reading), so a byte counter would
 // be a lie. A 401 signs out, as everywhere.
 export async function uploadFile(channel: string, name: string, mediaType: string, bytes: Blob, signal: AbortSignal): Promise<UploadResult> {
-  const held = current();
+  let held = current();
   if (held === null) return { ok: false, outcome: 'unauthorized' };
   let res: Response;
-  try {
-    res = await platform.http.upload(call('uploadFile', { channel }, fileQuery(name)), held.token, mediaType, bytes, signal);
-  } catch {
-    if (signal.aborted) return { ok: false, outcome: 'cancelled' };
-    noteNoAnswer();
-    return { ok: false, outcome: 'network' };
-  }
-  if (!res.ok) await noteRefusal(res);
-  if (res.status === 401) {
-    forget(held);
-    return { ok: false, outcome: 'unauthorized' };
+  for (let sent = 0; ; sent++) {
+    try {
+      res = await platform.http.upload(call('uploadFile', { channel }, fileQuery(name)), held.token, mediaType, bytes, signal);
+    } catch {
+      if (signal.aborted) return { ok: false, outcome: 'cancelled' };
+      noteNoAnswer();
+      return { ok: false, outcome: 'network' };
+    }
+    if (!res.ok) await noteRefusal(res);
+    if (res.status !== 401) break;
+    // A 401 is answered before the bytes are stored: sent again with a
+    // credential since replaced, it is still one file (issue #1000).
+    await discard(res);
+    const next = await settleRefusal(held, true);
+    if (next === null) return { ok: false, outcome: 'unauthorized' };
+    if (next === 'stale' || sent + 1 >= resends) return { ok: false, outcome: 'network' };
+    held = next;
   }
   if (!res.ok) return { ok: false, outcome: 'refused', ...(await requestRefusal(res, 'The server refused the upload')) };
   try {
@@ -1697,19 +1846,23 @@ export async function getFileMeta(id: number): Promise<FileResult<FileV1>> {
 // always application/octet-stream with nosniff: the caller that renders them
 // must validate the content itself, and never trust the stored media type.
 export async function fetchFileBytes(id: number): Promise<FileResult<Blob>> {
-  const held = current();
+  let held = current();
   if (held === null) return { ok: false, failure: 'unauthorized' };
   let res: Response;
-  try {
-    res = await platform.http.download(call('fileBytes', { id }), held.token);
-  } catch {
-    noteNoAnswer();
-    return { ok: false, failure: 'network' };
-  }
-  if (!res.ok) await noteRefusal(res);
-  if (res.status === 401) {
-    forget(held);
-    return { ok: false, failure: 'unauthorized' };
+  for (let sent = 0; ; sent++) {
+    try {
+      res = await platform.http.download(call('fileBytes', { id }), held.token);
+    } catch {
+      noteNoAnswer();
+      return { ok: false, failure: 'network' };
+    }
+    if (!res.ok) await noteRefusal(res);
+    if (res.status !== 401) break;
+    await discard(res);
+    const next = await settleRefusal(held, true);
+    if (next === null) return { ok: false, failure: 'unauthorized' };
+    if (next === 'stale' || sent + 1 >= resends) return { ok: false, failure: 'network' };
+    held = next;
   }
   if (res.status === 404) {
     await discard(res);
