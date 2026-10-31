@@ -1171,8 +1171,8 @@ func (s *Store) recordRecentAuth(ctx context.Context, in LoginIssue, credentialI
 				return ErrSecondFactorRequired
 			}
 		}
-		if _, err := tx.ExecContext(ctx, "UPDATE credentials SET recent_auth_until = ? WHERE id = ?", until.UnixMilli(), credentialID); err != nil {
-			return fmt.Errorf("store: record recent auth: %w", err)
+		if err := setRecentAuthTx(ctx, tx, credentialID, until); err != nil {
+			return err
 		}
 		actor := principalActor(in.PrincipalID)
 		return appendAuditEventTx(ctx, tx, actor, AuditReauth, actor, fmt.Sprintf("credential=%d", credentialID), now)
@@ -1181,6 +1181,23 @@ func (s *Store) recordRecentAuth(ctx context.Context, in LoginIssue, credentialI
 		return time.Time{}, err
 	}
 	return until, nil
+}
+
+// setRecentAuthTx records, in the caller's transaction, a recent-auth proof
+// on credentialID, and on it alone, until until. Every caller has already
+// verified the proof and checked the credential: a re-authentication
+// (recordRecentAuth) or a sign-in with both factors (CompleteTOTPLogin).
+func setRecentAuthTx(ctx context.Context, tx execer, credentialID int64, until time.Time) error {
+	res, err := tx.ExecContext(ctx, "UPDATE credentials SET recent_auth_until = ? WHERE id = ?", until.UnixMilli(), credentialID)
+	if err != nil {
+		return fmt.Errorf("store: record recent auth: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("store: record recent auth: %w", err)
+	} else if n != 1 {
+		return ErrCredentialNotFound
+	}
+	return nil
 }
 
 // RecentAuthStands reports whether credentialID holds a recent-password

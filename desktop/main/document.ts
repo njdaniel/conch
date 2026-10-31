@@ -19,15 +19,29 @@ export interface FrameToken {
 export class DocumentGate {
   #generation = 0;
   #frame: string | null = null;
+  readonly #ended: ((current: number) => void)[] = [];
 
   get generation(): number {
     return this.#generation;
   }
 
-  // begin ends the current document.
+  // begin ends the current document. Whatever main held for it (its feeds) is
+  // let go before begin returns.
   begin(): void {
     this.#generation++;
     this.#frame = null;
+    for (const ended of this.#ended) ended(this.#generation);
+  }
+
+  // onEnd calls back, with the new generation, each time a document ends.
+  onEnd(callback: (current: number) => void): void {
+    this.#ended.push(callback);
+  }
+
+  // shows says whether generation is the current document's and it has
+  // committed: the one that may be sent to.
+  shows(generation: number): boolean {
+    return this.#frame !== null && this.#generation === generation;
   }
 
   // commit makes the frame the one that shows the current document.

@@ -74,16 +74,18 @@ export interface Pki {
   cleanup(): void;
 }
 
-// A CA and a server certificate for localhost and 127.0.0.1, made with the
-// openssl on the machine (the same tool a person would use for a private CA).
-export function makePki(): Pki {
+// A CA and a server certificate for localhost and 127.0.0.1 (or for the
+// subject alternative names given), made with the openssl on the machine (the
+// same tool a person would use for a private CA).
+export function makePki(names = 'DNS:localhost,IP:127.0.0.1'): Pki {
+  if (!/^[A-Za-z0-9:.,-]+$/u.test(names)) throw new Error('makePki: names are DNS: and IP: entries only');
   const dir = mkdtempSync(join(tmpdir(), 'conch-desktop-pki-'));
   const run = (...args: string[]): void => {
     execFileSync('openssl', args, { cwd: dir, stdio: 'ignore' });
   };
   run('req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'ca.key', '-out', 'ca.pem', '-days', '2', '-subj', '/CN=Conch Test CA', '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign');
   run('req', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'srv.key', '-out', 'srv.csr', '-subj', '/CN=localhost');
-  execFileSync('sh', ['-c', 'printf "subjectAltName=DNS:localhost,IP:127.0.0.1\\nbasicConstraints=CA:FALSE\\nkeyUsage=digitalSignature,keyEncipherment\\nextendedKeyUsage=serverAuth\\n" > ext.cnf'], { cwd: dir });
+  execFileSync('sh', ['-c', `printf "subjectAltName=${names}\\nbasicConstraints=CA:FALSE\\nkeyUsage=digitalSignature,keyEncipherment\\nextendedKeyUsage=serverAuth\\n" > ext.cnf`], { cwd: dir });
   run('x509', '-req', '-in', 'srv.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key', '-CAcreateserial', '-out', 'srv.pem', '-days', '2', '-extfile', 'ext.cnf');
   const read = (name: string): string => readFileSync(join(dir, name), 'utf8');
   return {

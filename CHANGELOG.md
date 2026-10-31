@@ -8,6 +8,41 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.8] - 2026-10-31
+
+These are fixes for the three biggest problems found by browser UX audit 3
+(`docs/reviews/browser-ux-audit-3.md`). Upgrade with
+`conch-server upgrade v0.1.0-alpha.8` from your workstation, or with
+`conch-upgrade.sh` on the droplet (docs/deploy.md step 11). There is no
+migration, so a rollback to `alpha.7` keeps the data as it is.
+
+### Added
+
+- **Your channel list follows changes live** (#1027). When someone adds you
+  to a channel, removes you, or renames a channel you are in, your list
+  changes without a reload.
+  - This works through a new events-socket document,
+    `conch.channels_changed.v1`. It carries no channel names, and only the
+    person concerned (or a renamed channel's members) receives it.
+  - A page with no channels yet checks again when you come back to it, and
+    every 30 seconds.
+
+### Fixed
+
+- **Changing your password no longer signs that page out** (#1000). A
+  request still carrying the old sign-in could answer "not signed in" and
+  end the session. Now such a request is sent again with the new sign-in,
+  for the same person only. A real sign-out still signs you out.
+- **On a phone, the voice strip is one row and never covers the message
+  box** (#1028). Under Chat and Channels it shows four controls:
+  - where you are (tap to open Voice);
+  - Hold to talk;
+  - Mute;
+  - Leave.
+
+  Everything else is on the Voice tab. At 320 px wide, the message list
+  grows from 96 px to 272 px.
+
 ## [0.1.0-alpha.7] - 2026-10-30
 
 Upgrade with `conch-server upgrade v0.1.0-alpha.7` from your workstation, or

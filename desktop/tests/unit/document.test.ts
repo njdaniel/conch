@@ -41,4 +41,28 @@ describe('the document gate', () => {
     contents.emit('render-process-gone');
     expect(gate.current({ frameToken: 'f1' })).toBe(false);
   });
+
+  it('tells what it holds for a document that the document has ended: at a navigation, a reload, a crash and the window going away', () => {
+    const contents = Object.assign(new EventEmitter(), { mainFrame: { frameToken: 'f1' } });
+    const gate = new DocumentGate();
+    const ended: number[] = [];
+    gate.onEnd((current) => ended.push(current));
+    trackDocument(contents as never, gate);
+    contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+    contents.emit('did-navigate', {}, 'conch-app://ui/');
+    const shown = gate.generation;
+    expect(gate.shows(shown)).toBe(true);
+    expect(gate.shows(shown - 1)).toBe(false);
+    // A same-document change (the client's routes) ends nothing.
+    contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: true });
+    expect(ended).toEqual([shown]);
+    contents.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false });
+    expect(gate.shows(shown)).toBe(false);
+    contents.emit('did-navigate', {}, 'conch-app://ui/');
+    contents.emit('render-process-gone');
+    contents.emit('destroyed');
+    expect(ended).toEqual([shown, shown + 1, shown + 2, shown + 3]);
+    // Before a document commits, nothing may be sent to it.
+    expect(gate.shows(gate.generation)).toBe(false);
+  });
 });
