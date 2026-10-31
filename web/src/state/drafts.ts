@@ -1,6 +1,6 @@
 // What has been typed and not sent, per channel. In memory for the tab: it
 // survives switching channels, not a reload (decision D2 keeps nothing on disk).
-import { rekey } from './messages';
+import { rekey, without } from './messages';
 
 export type Drafts = Readonly<Record<string, string>>;
 
@@ -8,6 +8,8 @@ export type DraftAction =
   | { readonly type: 'edit'; readonly channel: string; readonly text: string }
   // The channel `from` is now called `to` (issue #728): its draft goes with it.
   | { readonly type: 'renamed'; readonly from: string; readonly to: string }
+  // The channel was lost (issue #1027): its draft goes with it.
+  | { readonly type: 'forget'; readonly channel: string }
   // The drafts kept from a sign-in that ended by itself, given back to the
   // same person signing in again (issue #714). What was typed since wins.
   | { readonly type: 'restore'; readonly drafts: Drafts }
@@ -23,6 +25,8 @@ export function draftsReducer(state: Drafts, action: DraftAction): Drafts {
     }
     case 'renamed':
       return rekey(state, action.from, action.to);
+    case 'forget':
+      return without(state, action.channel);
     case 'restore':
       return { ...action.drafts, ...state };
     case 'reset':
@@ -66,6 +70,8 @@ export type TargetAction =
   | { readonly type: 'whispered'; readonly channel: string; readonly sent: readonly number[]; readonly note: string | null }
   // The channel `from` is now called `to` (issue #728): its choice goes with it.
   | { readonly type: 'renamed'; readonly from: string; readonly to: string }
+  // The channel was lost (issue #1027): its choice goes with it.
+  | { readonly type: 'forget'; readonly channel: string }
   | { readonly type: 'reset' };
 
 export const initialTargets: Targets = {};
@@ -79,6 +85,7 @@ export function targetFor(state: Targets, channel: string): Target {
 export function targetsReducer(state: Targets, action: TargetAction): Targets {
   if (action.type === 'reset') return initialTargets;
   if (action.type === 'renamed') return rekey(state, action.from, action.to);
+  if (action.type === 'forget') return without(state, action.channel);
   const current = targetFor(state, action.channel);
   const set = (next: Target): Targets => ({ ...state, [action.channel]: next });
   switch (action.type) {

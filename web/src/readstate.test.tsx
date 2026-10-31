@@ -464,7 +464,11 @@ describe('live counts from the events socket', () => {
     reconnected.open();
     reconnected.send({ schema: 'conch.session_roster.v1', channel_id: 7, sessions: [] });
     expect(await badge('2 unread')).toBeDefined();
-    expect(server.gets).toBe(2);
+    // The reconnect also reads the channel list again (issue #1027), which
+    // replaces the counts once more: three reads, not two.
+    await waitFor(() => {
+      expect(server.gets).toBe(3);
+    });
   });
 
   it('does not let an older reconnect response erase a newer event', async () => {

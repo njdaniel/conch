@@ -477,6 +477,9 @@ func (s *Server) handleJoinAccount(w http.ResponseWriter, r *http.Request) {
 	for _, ch := range acct.Channels {
 		s.events.notifyChannelRoster(ch.ID)
 	}
+	// A new principal has no socket open yet; this covers a later route
+	// that adds an existing one (issue #1027).
+	s.events.notifyChannelsChanged(acct.Principal.ID)
 	slog.InfoContext(ctx, "join: account created", "principal", acct.Principal.ID)
 	writeSecretJSON(w, http.StatusCreated, schema.JoinAccountResponseV1{
 		Principal:  principalFromStore(acct.Principal),
@@ -562,6 +565,7 @@ func (s *Server) writeGuestJoined(ctx context.Context, w http.ResponseWriter, g 
 	for _, ch := range g.Channels {
 		s.events.notifyChannelRoster(ch.ID)
 	}
+	s.events.notifyChannelsChanged(g.Principal.ID)
 	slog.InfoContext(ctx, "join: guest visit started", "principal", g.Principal.ID, "origin", string(g.Visit.Origin))
 	writeSecretJSON(w, http.StatusCreated, schema.JoinGuestResponseV1{
 		Principal:  principalFromStore(g.Principal),

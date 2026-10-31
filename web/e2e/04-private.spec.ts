@@ -1,8 +1,11 @@
 // P3-05: what is restricted to test-private stays there, a run in it included.
+import type { Locator, Page } from '@playwright/test';
 import { history, post, roster, run, runsIn } from './api';
 import { launchWorker } from './agents';
-import { channelButton, conversation, expect, messages, signIn, test } from './fixtures';
-import { call, principalId } from './world';
+import { createChannelResponse, type CreateChannelRequest } from '../src/schema/channel';
+import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
+import { channelButton, conversation, expect, messages, signIn, statusLine, test } from './fixtures';
+import { call, ok, principalId, type World } from './world';
 
 test('P3-05 browser-test cannot open test-private and nothing about a run there shows in its members panel', async ({ meet, world }) => {
   // worker-test is busy in test-private (a slow fixture, so that the run stays)
@@ -131,4 +134,92 @@ test('P3-05 the browser composes to a net and to a whisper, and only the audienc
   expect(whispered[0]?.audience?.kind === 'principals' ? whispered[0].audience.principal_ids : []).toContain(guest);
   expect((await history(world, world.tokens.nick, 'nets-demo')).filter((m) => m.body === whisperBody)).toHaveLength(0);
   expect((await history(world, world.tokens.worker, 'nets-demo')).filter((m) => m.body === whisperBody)).toHaveLength(0);
+});
+
+// Issue #1027: a person's channel list follows membership changes with no
+// reload. The owner (an operator) works in a browser of their own; member-1 is
+// in channel-b only, and is added to, and removed from, channel-a. Each wait is
+// two seconds: the server coalesces for 250 ms.
+const live = { timeout: 2000 };
+const panel = (page: Page) => page.getByRole('region', { name: 'Members list' });
+const memberRow = (page: Page, name: string): Locator =>
+  panel(page).locator('li').filter({ has: page.locator('.ag-name').getByText(name, { exact: true }) });
+
+async function seedMembership(world: World, secrets: string[], suffix: string) {
+  const a = `channel-a-${suffix}`;
+  const b = `channel-b-${suffix}`;
+  for (const name of [a, b]) {
+    const request: CreateChannelRequest = { name };
+    await ok(world, world.tokens.operator, 'POST', '/v0/channels', createChannelResponse, request);
+  }
+  const member = `member-1-${suffix}`;
+  const principal: CreatePrincipalRequest = { kind: 'human', name: member };
+  const id = (await ok(world, world.tokens.operator, 'POST', '/v0/principals', createPrincipalResponse, principal)).principal.id;
+  const credential: CreateCredentialRequestV1 = { label: member };
+  const { token } = await ok(world, world.tokens.operator, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, credential);
+  secrets.push(token);
+  const put = await call(world, world.tokens.operator, 'PUT', `/v1/channels/${encodeURIComponent(b)}/members/${String(id)}`);
+  expect(put.status).toBeLessThan(300);
+  return { a, b, member, token };
+}
+
+async function ownerPage(meet: () => Promise<{ page: Page }>, world: World): Promise<Page> {
+  const { page } = await meet();
+  await page.goto(world.appUrl);
+  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await page.getByRole('button', { name: 'Use credential' }).click();
+  await page.getByRole('button', { name: 'Continue anyway' }).click();
+  await expect(statusLine(page)).toContainText('Connected');
+  return page;
+}
+
+async function addByName(owner: Page, name: string): Promise<void> {
+  const form = panel(owner).getByRole('form', { name: 'Add person by name' });
+  const button = form.getByRole('button', { name: 'Add by name' });
+  // The form is busy while an earlier change is on its way: fill until it takes.
+  await expect(async () => {
+    await form.getByLabel('Exact name').fill(name);
+    await expect(button).toBeEnabled({ timeout: 1000 });
+  }).toPass();
+  await button.click();
+  await expect(memberRow(owner, name)).toBeVisible();
+}
+
+test('C1027 a channel the owner adds member-1 to shows in their list with its unread count, and goes when they are removed, with no reload', async ({ meet, secrets, world }) => {
+  const { a, b, member, token } = await seedMembership(world, secrets, String(Date.now()));
+  const owner = await ownerPage(() => meet({ viewport: { width: 1440, height: 900 } }), world);
+  const other = (await meet({ viewport: { width: 1440, height: 900 } })).page;
+  await signIn(other, world, token, member);
+  await expect(channelButton(other, b)).toHaveAttribute('aria-current', 'true');
+  await expect(channelButton(other, a)).toHaveCount(0);
+
+  // Added: the channel shows within two seconds, with no reload.
+  await channelButton(owner, a).click();
+  await addByName(owner, member);
+  await expect(channelButton(other, a)).toBeVisible(live);
+  await expect(channelButton(other, b)).toHaveAttribute('aria-current', 'true');
+
+  // A post in it: member-1's badge shows 1 within two seconds.
+  await owner.getByLabel(`Message #${a}`).fill('hello from the owner');
+  await owner.getByRole('button', { name: 'Send' }).click();
+  await expect(other.getByRole('img', { name: '1 unread' })).toBeVisible(live);
+
+  // Removed while it is not open: it goes from the list, with no line.
+  await memberRow(owner, member).getByRole('button', { name: `Remove ${member}` }).click();
+  await expect(memberRow(owner, member)).toHaveCount(0);
+  await expect(channelButton(other, a)).toHaveCount(0, live);
+  await expect(other.getByText(/You no longer have access/)).toHaveCount(0);
+  await expect(channelButton(other, b)).toHaveAttribute('aria-current', 'true');
+
+  // Added again and opened, then removed: another channel opens with the line.
+  await addByName(owner, member);
+  await expect(channelButton(other, a)).toBeVisible(live);
+  await channelButton(other, a).click();
+  await expect(other.getByText('hello from the owner')).toBeVisible();
+  await memberRow(owner, member).getByRole('button', { name: `Remove ${member}` }).click();
+  await expect(memberRow(owner, member)).toHaveCount(0);
+  await expect(other.getByText(`You no longer have access to #${a}`)).toBeVisible(live);
+  await expect(channelButton(other, a)).toHaveCount(0);
+  await expect(channelButton(other, b)).toHaveAttribute('aria-current', 'true');
+  await expect(other.getByText('hello from the owner')).toHaveCount(0);
 });
