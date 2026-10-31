@@ -301,8 +301,16 @@ func TestLoginReadsExactlyTheTypedToken(t *testing.T) {
 		t.Fatalf("no token prompt within %v; output %q", fastLimit, s.output())
 	}
 	t.Logf("prompt after %v", time.Since(start))
-	if echoOn(t, s.slave) {
-		t.Error("echo is on while the token is read")
+	// The prompt is printed just before term.ReadPassword turns echo off
+	// (readToken in internal/cli/command.go), so echo may still be on for a
+	// few microseconds after the prompt is seen. That window is accepted
+	// (#1068): poll until echo goes off rather than racing it.
+	echoDeadline := time.Now().Add(250 * time.Millisecond)
+	for echoOn(t, s.slave) {
+		if time.Now().After(echoDeadline) {
+			t.Fatal("echo is still on 250ms after the prompt")
+		}
+		time.Sleep(time.Millisecond)
 	}
 	s.send(fakeToken + "\n")
 	exited, err := s.waitExit(fastLimit)
