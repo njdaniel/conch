@@ -70,6 +70,7 @@ var TSConstants = []TSConstant{
 	// server would refuse it.
 	{Name: "MESSAGE_EDIT_WINDOW_SECONDS", Value: MessageEditWindowSeconds},
 	{Name: "MAX_MESSAGE_EDITS", Value: MaxMessageEdits},
+	{Name: "MAX_POST_REQUEST_BYTES", Value: MaxPostRequestBytes},
 }
 
 // TSTypes is every struct the web client reads or sends, and the refusal

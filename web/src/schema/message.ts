@@ -19,3 +19,5 @@ export {
   type MessageEditedV1,
   type MessageRevisionV1,
 } from './generated';
+// The most bytes of one post request, the cap the page keeps a stored draft to.
+export { MAX_POST_REQUEST_BYTES } from './generated';

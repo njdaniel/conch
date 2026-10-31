@@ -632,6 +632,19 @@ describe('lobby', () => {
     expect(window.localStorage.getItem('conch.web.token')).toBeNull();
   });
 
+  it('signs out everywhere: no draft of the person stays readable in the tab (issue #1039)', async () => {
+    serve({ ...asMember, '/v1/principals/2/credentials/revoke-all': () => json({ revoked: 2 }) });
+    window.sessionStorage.setItem('conch.web.drafts', JSON.stringify({ principal: 2, drafts: { '7': 'a private draft' }, edits: {} }));
+    render(<App origin={origin} />);
+    signIn();
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign out everywhere' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out everywhere' }));
+    await screen.findByText('Signed out everywhere: every sign-in of yours has ended');
+    expect(JSON.stringify(Object.entries(window.sessionStorage))).not.toContain('a private draft');
+    expect(window.sessionStorage.getItem('conch.web.drafts')).toBeNull();
+  });
+
   it.each([
     ['cannot be reached', (): Response => { throw new TypeError('Failed to fetch'); }, /the server cannot be reached/],
     ['refuses the last operator', () => json({ code: 'last_operator', message: 'no' }, 409), /the only operator who can sign in/],

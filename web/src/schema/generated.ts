@@ -16,6 +16,7 @@ export const DEFAULT_REACTOR_LIMIT = 50;
 export const MAX_REACTOR_LIMIT = 100;
 export const MESSAGE_EDIT_WINDOW_SECONDS = 3600;
 export const MAX_MESSAGE_EDITS = 10;
+export const MAX_POST_REQUEST_BYTES = 1048576;
 
 // schema.PrincipalKind
 export type PrincipalKind = 'human' | 'agent';

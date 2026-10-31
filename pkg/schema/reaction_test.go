@@ -226,6 +226,8 @@ func TestReactionConstants(t *testing.T) {
 		// Message editing (issue #845).
 		"MESSAGE_EDIT_WINDOW_SECONDS": MessageEditWindowSeconds,
 		"MAX_MESSAGE_EDITS":           MaxMessageEdits,
+		// Kept drafts (issue #1039): the web client budgets a draft inside it.
+		"MAX_POST_REQUEST_BYTES": MaxPostRequestBytes,
 	}
 	if len(TSConstants) != len(want) {
 		t.Errorf("TSConstants has %d entries, want %d", len(TSConstants), len(want))

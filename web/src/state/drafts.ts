@@ -1,5 +1,8 @@
-// What has been typed and not sent, per channel. In memory for the tab: it
-// survives switching channels, not a reload (decision D2 keeps nothing on disk).
+// What has been typed and not sent, per channel. In memory for the tab, and
+// written to the tab's sessionStorage by the page (draftStore.ts, issue
+// #1039) so it survives a reload too, not closing the tab. Decision D2 of the
+// P3 plan kept nothing on disk because the bearer lived in the tab; ADR-008's
+// O1 has since let the sign-in last, so a draft in the tab is no wider.
 import { rekey, without } from './messages';
 
 export type Drafts = Readonly<Record<string, string>>;

@@ -729,6 +729,77 @@ describe('composing to a net or a whisper', () => {
     expect(to().value).toBe('channel');
   });
 
+  // A reload keeps the tab's sessionStorage (issue #1039): a draft kept for a
+  // few is never sent to everyone.
+  async function reopen(label: string) {
+    const socket = await openChat();
+    socket.open();
+    await waitFor(() => {
+      expect(screen.getByLabelText<HTMLTextAreaElement>(label).disabled).toBe(false);
+    });
+  }
+  async function reload(label: string) {
+    cleanup();
+    FakeSocket.all = [];
+    await reopen(label);
+  }
+  const keepDraft = (target: { net: number | null; whisper: number[] | null }) => {
+    window.sessionStorage.setItem('conch.web.drafts', JSON.stringify({ principal: 2, drafts: { '7': 'psst' }, targets: { '7': target }, edits: {} }));
+  };
+
+  it('a whisper draft is still a whisper to the same people after a reload', async () => {
+    await ready();
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    await reload('Whisper to bot');
+    await waitFor(() => {
+      expect(sendButton().disabled).toBe(false);
+    });
+    send();
+    await waitFor(() => {
+      expect(server.posts).toEqual([{ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } }]);
+    });
+  });
+
+  it('a net draft is still for the same net after a reload', async () => {
+    await ready();
+    choose('net:5');
+    type('on the net', 'Message net alpha');
+    await reload('Message net alpha');
+    await waitFor(() => {
+      expect(sendButton().disabled).toBe(false);
+    });
+    send();
+    await waitFor(() => {
+      expect(server.posts).toEqual([{ channel: 'general', body: 'on the net', audience: { kind: 'net', net_id: 5 } }]);
+    });
+  });
+
+  it('a whisper to someone who has left keeps the text, cannot be sent, and does not go to the channel', async () => {
+    keepDraft({ net: null, whisper: [3, 99] });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    await reopen('Whisper to…');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to…').value).toBe('psst');
+    await screen.findByText(/no longer available/);
+    expect(sendButton().disabled).toBe(true);
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Enter' });
+    expect(server.posts).toHaveLength(0);
+    // Choosing who it goes to again makes it sendable.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    expect(sendButton().disabled).toBe(false);
+  });
+
+  it('a net the person can no longer transmit to keeps the text, cannot be sent, and does not go to the channel', async () => {
+    keepDraft({ net: 77, whisper: null });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    await reopen('Whisper to…');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to…').value).toBe('psst');
+    await screen.findByText(/no longer available/);
+    expect(sendButton().disabled).toBe(true);
+    expect(server.posts).toHaveLength(0);
+  });
+
   it('sends a whisper once, returns to the channel, and shows the audit notice only for the first', async () => {
     await ready();
     const notice = 'note: whispers are recorded in the audit log';
@@ -895,10 +966,99 @@ describe('drafts', () => {
     expect((await screen.findByLabelText<HTMLTextAreaElement>('Message #ops')).value).toBe('ops note');
   });
 
-  it('are kept in memory only', async () => {
+  // A reload keeps what the tab holds in sessionStorage (issue #1039).
+  const reload = async () => {
+    cleanup();
+    FakeSocket.all = [];
+    await connect(await openChat());
+  };
+
+  it('survive a reload, and a reload after sending shows an empty box', async () => {
+    await connect(await openChat());
+    fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'half a thought' } });
+    await reload();
+    await waitFor(() => {
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('half a thought');
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    await reload();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    expect(window.sessionStorage.getItem('conch.web.drafts')).toBeNull();
+  });
+
+  it('are kept under the channel id, never the name, and hold no credential', async () => {
     await connect(await openChat());
     fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'secretive draft' } });
+    const kept = window.sessionStorage.getItem('conch.web.drafts') ?? '';
+    expect(JSON.parse(kept)).toEqual({ principal: 2, drafts: { '7': 'secretive draft' }, targets: {}, edits: {} });
+    expect(kept).not.toContain(secret);
+    expect(kept).not.toContain('general');
+  });
+
+  it('survive a reload while the server cannot be reached, and are there when it is back', async () => {
+    window.sessionStorage.setItem('conch.web.drafts', JSON.stringify({ principal: 2, drafts: { '7': 'kept offline' }, targets: {}, edits: {} }));
+    server.whoami = () => {
+      throw new TypeError('Failed to fetch');
+    };
+    window.sessionStorage.setItem('conch.web.token', secret);
+    render(<App origin={origin} />);
+    await screen.findByText('Cannot reach the server');
+    expect(JSON.parse(window.sessionStorage.getItem('conch.web.drafts') ?? '{}')).toMatchObject({ drafts: { '7': 'kept offline' } });
+    cleanup();
+    server.whoami = () => json(member);
+    await connect(await openChat());
+    await waitFor(() => {
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('kept offline');
+    });
+  });
+
+  it('are pruned of channels the person lost while the page was closed', async () => {
+    window.sessionStorage.setItem(
+      'conch.web.drafts',
+      JSON.stringify({ principal: 2, drafts: { '7': 'mine', '99': 'lost channel' }, targets: { '99': { net: 5, whisper: null } }, edits: { '99': { message: 1, text: 'lost edit' } } }),
+    );
+    await connect(await openChat());
+    await waitFor(() => {
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('mine');
+    });
+    expect(JSON.parse(window.sessionStorage.getItem('conch.web.drafts') ?? '{}')).toEqual({ principal: 2, drafts: { '7': 'mine' }, targets: {}, edits: {} });
+  });
+
+  it('leave nothing readable in storage after sign-out', async () => {
+    await connect(await openChat());
+    fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'secretive draft' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out' }));
+    await screen.findByLabelText('Credential');
     expect(JSON.stringify(Object.entries(window.sessionStorage))).not.toContain('secretive draft');
+  });
+
+  it('are not given to another person signing in on the tab', async () => {
+    window.sessionStorage.setItem('conch.web.drafts', JSON.stringify({ principal: 9, drafts: { '7': 'someone else’s' }, edits: {} }));
+    await connect(await openChat());
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    expect(window.sessionStorage.getItem('conch.web.drafts') ?? '').not.toContain('someone else');
+  });
+
+  it('work as before when storage is refused', async () => {
+    await connect(await openChat());
+    const refuse = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('blocked');
+    });
+    try {
+      fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'still here' } });
+      fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+      await screen.findByLabelText('Message #ops');
+      fireEvent.click(screen.getByRole('button', { name: 'general' }));
+      expect((await screen.findByLabelText<HTMLTextAreaElement>('Message #general')).value).toBe('still here');
+    } finally {
+      refuse.mockRestore();
+    }
   });
 });
 

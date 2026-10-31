@@ -171,6 +171,31 @@ test('Escape cancels an edit and Shift+Enter adds a line, in a real browser', as
   expect((await history(world, author.token, channel)).find((m) => m.id === id)?.edited_at).toBeUndefined();
 });
 
+test('an open edit reopens with its text after a reload (issue #1039)', async ({ meet, secrets, world }) => {
+  const { channel, people } = await community(world, secrets, 'reload', ['reload']);
+  const [author] = people as [Someone];
+  const { page } = await meet();
+  await signIn(page, world, author.token, author.name);
+  await openChannel(page, channel);
+  const body = word('reload');
+  await say(page, channel, body);
+  const id = await postedId(world, author.token, channel, body);
+  await row(page, id).click({ button: 'right' });
+  await page.getByRole('menuitem', { name: 'Edit' }).click();
+  const box = page.getByRole('textbox', { name: `Edit message ${String(id)}` });
+  await box.fill('half an edit, not saved');
+
+  await page.reload();
+  await openChannel(page, channel);
+  await expect(page.getByRole('textbox', { name: `Edit message ${String(id)}` })).toHaveValue('half an edit, not saved');
+  // Cancelling forgets it: a reload after shows no editor.
+  await page.getByRole('textbox', { name: `Edit message ${String(id)}` }).press('Escape');
+  await page.reload();
+  await openChannel(page, channel);
+  await expect(row(page, id)).toContainText(body);
+  await expect(page.getByRole('textbox', { name: `Edit message ${String(id)}` })).toHaveCount(0);
+});
+
 test('a whisper’s edit reaches its recipients, and no one else', async ({ meet, secrets, world }) => {
   const { channel, people } = await community(world, secrets, 'whisper', ['whisperer', 'hearer', 'outsider']);
   const [author, hearer, outsider] = people as [Someone, Someone, Someone];
