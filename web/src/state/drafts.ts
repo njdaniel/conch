@@ -58,12 +58,12 @@ export interface Target {
   // which cannot be sent, that Escape cannot close. Only the person choosing
   // who it goes to ends it, or the kept audience coming back whole.
   readonly held?: boolean;
-  // A whisper given back after a reload or a sign-in whose net under it is no
-  // longer one the person may transmit to (issue #1039): Escape keeps the
-  // whisper rather than leave the text addressed to the whole channel, where
-  // before the reload it would have gone back to that net. Choosing the
-  // channel or a net ends it.
-  readonly netGone?: boolean;
+  // An audience that came back from anywhere (issue #1039): the tab's
+  // storage after a reload, the drafts kept across a sign-in, or a send a 401
+  // gave back. Escape (closePicker) never changes it, so what came back can
+  // never fall to the whole channel by a key. Only choosing the channel or a
+  // net in the To: list ends it; who a whisper goes to can still be changed.
+  readonly protected?: boolean;
 }
 
 export type Targets = Readonly<Record<string, Target>>;
@@ -90,7 +90,7 @@ export type TargetAction =
   | { readonly type: 'held'; readonly channel: string; readonly line: string }
   // A kept audience that still stands, given back whole: it replaces the
   // choice, never merges into it, so it can only be what was kept.
-  | { readonly type: 'restore'; readonly channel: string; readonly net: number | null; readonly whisper: readonly number[] | null; readonly netGone?: boolean }
+  | { readonly type: 'restore'; readonly channel: string; readonly net: number | null; readonly whisper: readonly number[] | null }
   | { readonly type: 'reset' };
 
 export const initialTargets: Targets = {};
@@ -109,9 +109,9 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
   const set = (next: Target): Targets => ({ ...state, [action.channel]: next });
   switch (action.type) {
     case 'channel':
-      return set({ ...current, net: null, whisper: null, refusal: null, held: false, netGone: false });
+      return set({ ...current, net: null, whisper: null, refusal: null, held: false, protected: false });
     case 'net':
-      return set({ ...current, net: action.net, whisper: null, refusal: null, held: false, netGone: false });
+      return set({ ...current, net: action.net, whisper: null, refusal: null, held: false, protected: false });
     case 'whisper':
       return set({ ...current, whisper: current.whisper ?? [], refusal: null, held: false });
     case 'toggle': {
@@ -120,16 +120,16 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
       return set({ ...current, whisper: next, refusal: null, held: false });
     }
     case 'closePicker':
-      // A held draft stays held: closing the picker would leave it addressed
-      // to the whole channel, which nobody chose.
-      if (current.held === true || current.netGone === true) return state;
+      // A held or protected draft stays as it is: closing the picker would
+      // leave it addressed to the whole channel, which nobody chose.
+      if (current.held === true || current.protected === true) return state;
       return set({ ...current, whisper: null, refusal: null });
     case 'posting':
       return set({ ...current, refusal: null, note: null });
     case 'refused':
       return set({ ...current, refusal: action.line });
     case 'held':
-      return set({ ...current, net: null, whisper: [], refusal: action.line, held: true });
+      return set({ ...current, net: null, whisper: [], refusal: action.line, held: true, protected: true });
     case 'restore':
       return set({
         ...current,
@@ -137,7 +137,7 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
         whisper: action.whisper === null ? null : [...action.whisper],
         refusal: null,
         held: false,
-        netGone: action.netGone === true,
+        protected: true,
       });
     case 'whispered': {
       // Only if the whisper still chosen is the one that was sent: a second one
@@ -146,7 +146,7 @@ export function targetsReducer(state: Targets, action: TargetAction): Targets {
         current.whisper !== null &&
         current.whisper.length === action.sent.length &&
         action.sent.every((id) => current.whisper?.includes(id) === true);
-      return set(same ? { ...current, net: null, whisper: null, note: action.note, netGone: false } : { ...current, note: action.note });
+      return set(same ? { ...current, net: null, whisper: null, note: action.note, protected: false } : { ...current, note: action.note });
     }
   }
 }

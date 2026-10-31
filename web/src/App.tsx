@@ -202,11 +202,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   //
   // The rule for every kept draft, across a reload and across a sign-in that
   // ended by itself: it never reaches a wider audience than the one it was
-  // written for. Only the audience the composer would have sent to is kept
-  // (storedAudience); it comes back held, unsendable, until it is known to
-  // stand, and then whole (the 'restore' action replaces, never merges); a
-  // choice the person makes meanwhile wins and the kept one is dropped
-  // (onTarget). When in doubt, the draft stays unsendable.
+  // written for. The audience is kept through one function (storedAudience);
+  // it comes back held, unsendable, until it is known to stand, and then
+  // whole (the 'restore' action replaces, never merges); a choice the person
+  // makes meanwhile wins and the kept one is dropped (chooseTarget). Whatever
+  // comes back, from storage, from the drafts kept across a sign-in or from
+  // a send a 401 gave back, is protected: Escape never changes it, and only
+  // choosing the channel or a net does. When in doubt, the draft stays
+  // unsendable.
   const pendingTargets = useRef(new Map<number, StoredTarget>());
   // The audience of a send whose text a 401 gave back to the composer, by
   // channel id; null is the whole channel. The text goes with the audience
@@ -673,7 +676,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           // line so their bytes and uploaded file ids survive the sign-in.
           if ((draftsNow.current[name] ?? '') === '') {
             dispatchDrafts({ type: 'edit', channel: name, text: send.body });
-            returnedAudiences.current.set(send.channelId, storedAudienceOf(send.audience));
+            returnedAudiences.current.set(send.channelId, storedAudienceOf(send.audience, send.netUnder));
           }
           dispatchChat({ type: 'discard', channel: name, localId, requestId: send.requestId });
         } else {
@@ -754,8 +757,12 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   }, [nameOf, dispatchChat, post]);
 
   const send = useCallback((channelId: number, channel: string, body: string, audience: Audience | undefined, files: readonly DraftAttachment[], threadRootId?: number) => {
-    const frozen = freezeSend(channelId, channel, body, audience, files, threadRootId);
-    if (frozen === null) return;
+    const plain = freezeSend(channelId, channel, body, audience, files, threadRootId);
+    if (plain === null) return;
+    // The net under a whisper, as the composer shows it at the press: a 401
+    // gives the text back with it (issue #1039).
+    const under = audience?.kind === 'principals' && threadRootId === undefined ? targetFor(targetsNow.current, channel).net : null;
+    const frozen: FrozenSend = under === null ? plain : { ...plain, netUnder: under };
     if (files.length === 0) {
       beginSend(frozen);
       return;
@@ -982,12 +989,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       dispatchTargets({ type: 'held', channel: selected, line: audienceGone });
       return;
     }
-    // The net under the whisper is checked on its own: Escape goes back to it
-    // if it stands, and keeps the whisper if it does not, never falling to
-    // the whole channel. With no net under it, Escape goes to the channel, as
-    // it did before the reload.
+    // The net under the whisper is checked on its own and kept only if it
+    // stands, for the To: list and Send. Either way the draft comes back
+    // protected, so Escape cannot take it anywhere.
     const under = kept.net !== null && netStands(kept.net) ? kept.net : null;
-    dispatchTargets({ type: 'restore', channel: selected, net: under, whisper: kept.whisper, netGone: kept.net !== null && under === null });
+    dispatchTargets({ type: 'restore', channel: selected, net: under, whisper: kept.whisper });
   }, [channelId, selected, live.netsFor, live.nets, live.monitored, live.people, agents.membersFor, principalId]);
 
   // The audience controls (issue #1039): the person's own choice, in a channel
@@ -1699,12 +1705,13 @@ function audienceForTarget(target: Target): Audience | undefined {
   return undefined;
 }
 
-// storedAudienceOf is a send's audience as it is kept: null for the whole
-// channel.
-function storedAudienceOf(audience: Audience | undefined): StoredTarget | null {
+// storedAudienceOf is a send's audience as it is kept when a 401 gives its
+// text back, with the net that was under its whisper: null for the whole
+// channel. It came back, so it is protected.
+function storedAudienceOf(audience: Audience | undefined, netUnder: number | undefined): StoredTarget | null {
   if (audience === undefined) return null;
-  if (audience.kind === 'principals') return { net: null, whisper: [...audience.principal_ids] };
-  return { net: audience.net_id, whisper: null };
+  if (audience.kind === 'principals') return { net: netUnder ?? null, whisper: [...audience.principal_ids], protected: true };
+  return { net: audience.net_id, whisper: null, protected: true };
 }
 
 function audienceForScope(scope: string): Audience | undefined {
@@ -1723,6 +1730,8 @@ interface FrozenSend {
   readonly requestId: string;
   readonly body: string;
   readonly audience?: Audience;
+  // The net under a whisper when it was sent from the composer (issue #1039).
+  readonly netUnder?: number;
   readonly threadRootId?: number;
   readonly attachments: readonly DraftAttachment[];
   readonly payload?: ReturnType<typeof attachmentPayload>;

@@ -21,15 +21,21 @@ export interface StoredEdit {
 export interface StoredTarget {
   readonly net: number | null;
   readonly whisper: readonly number[] | null;
+  // Whether it had already come back once (drafts.ts Target.protected). Every
+  // audience that comes back is protected whatever this says; it is kept so
+  // the stored shape says so too.
+  readonly protected: boolean;
 }
 
-// storedAudience is the choice as it is kept. An open whisper is who the
-// message goes to (App's audienceForTarget); the net under it is kept too,
-// because Escape returns to it, and it is checked on its own when it comes
-// back, so neither can come back wider than it was.
-export function storedAudience(target: { readonly net: number | null; readonly whisper: readonly number[] | null }): StoredTarget | null {
-  if (target.whisper !== null) return { net: target.net, whisper: [...target.whisper] };
-  if (target.net !== null) return { net: target.net, whisper: null };
+// storedAudience is the one place a composer's choice becomes a kept
+// audience, for storage and for the drafts kept across a sign-in. An open
+// whisper is who the message goes to (App's audienceForTarget); the net under
+// it is kept too, for the To: list and Send, and checked on its own when it
+// comes back. The protection is copied, so no keep can drop it.
+export function storedAudience(target: { readonly net: number | null; readonly whisper: readonly number[] | null; readonly protected?: boolean }): StoredTarget | null {
+  const kept = target.protected === true;
+  if (target.whisper !== null) return { net: target.net, whisper: [...target.whisper], protected: kept };
+  if (target.net !== null) return { net: target.net, whisper: null, protected: kept };
   return null;
 }
 
@@ -86,7 +92,7 @@ function targetOf(value: unknown): StoredTarget | null {
   if (!isRecord(value)) return null;
   const net = typeof value.net === 'number' ? value.net : null;
   const whisper = Array.isArray(value.whisper) && value.whisper.every((id): id is number => typeof id === 'number') ? value.whisper : null;
-  return storedAudience({ net, whisper });
+  return storedAudience({ net, whisper, protected: value.protected === true });
 }
 
 function read(): Stored | null {

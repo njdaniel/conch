@@ -1078,7 +1078,7 @@ describe('composing to a net or a whisper', () => {
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('psst');
   });
 
-  it('Escape on a whisper over a net, given back after a reload, returns to that net as it would have before', async () => {
+  it('a whisper over a net given back after a reload is protected: Escape keeps the whisper, and choosing the net is what moves it', async () => {
     await ready();
     choose('net:5');
     choose('whisper');
@@ -1087,12 +1087,66 @@ describe('composing to a net or a whisper', () => {
     await reload('Whisper to bot');
     await checked();
     fireEvent.keyDown(screen.getByLabelText('Whisper to bot'), { key: 'Escape' });
+    fireEvent.keyDown(screen.getByRole('checkbox', { name: 'bot [agent]' }), { key: 'Escape' });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    expect(to().value).toBe('whisper');
+    // An explicit choice in the To: list ends the protection.
+    choose('net:5');
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message net alpha').value).toBe('psst');
     send();
     await waitFor(() => {
       expect(server.posts).toHaveLength(1);
     });
     expect(server.posts).toEqual([{ channel: 'general', body: 'psst', audience: { kind: 'net', net_id: 5 } }]);
+  });
+
+  // escapeThenSend presses Escape in the whisper box and its picker, then
+  // sends: a protected whisper still goes to [3] alone.
+  async function escapeThenSend(sent: number) {
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    fireEvent.keyDown(screen.getByLabelText('Whisper to bot'), { key: 'Escape' });
+    fireEvent.keyDown(screen.getByRole('checkbox', { name: 'bot [agent]' }), { key: 'Escape' });
+    expect(to().value).toBe('whisper');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(sent);
+    });
+    expect(server.posts[sent - 1]).toEqual({ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } });
+  }
+
+  it('a whisper over a lost net stays protected through a second reload', async () => {
+    keepDraft({ net: 77, whisper: [3] });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    await reopen('Whisper to bot');
+    await checked();
+    await reload('Whisper to bot');
+    await checked();
+    await escapeThenSend(1);
+  });
+
+  it('a whisper over a lost net stays protected through a sign-in that ended and began again', async () => {
+    keepDraft({ net: 77, whisper: [3] });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    await reopen('Whisper to bot');
+    await checked();
+    await expireThenSignIn(secret);
+    await escapeThenSend(1);
+  });
+
+  it('a whisper over a net that a 401 gives back is protected after signing in again: Escape and Send go to the whisper alone', async () => {
+    await ready();
+    choose('net:5');
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    server.post = () => json({}, 401);
+    send();
+    await screen.findByText('Signed out: the credential is no longer valid');
+    server.post = (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201);
+    await signBackIn(secret);
+    await screen.findByRole('option', { name: 'net alpha' });
+    await checked();
+    await escapeThenSend(2);
   });
 
   it('Escape on a whisper whose net under it is gone keeps the whisper, never the whole channel', async () => {

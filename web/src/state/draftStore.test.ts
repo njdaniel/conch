@@ -77,11 +77,12 @@ describe('the drafts kept across a reload', () => {
   });
 
   it('keeps an audience beside the draft, and prunes channels the person lost', () => {
-    saveDrafts(2, { 7: 'x', 8: 'y' }, { 7: { net: null, whisper: [3, 4] }, 8: { net: 5, whisper: null } });
+    saveDrafts(2, { 7: 'x', 8: 'y' }, { 7: { net: 5, whisper: [3, 4], protected: true }, 8: { net: 5, whisper: null, protected: false } });
     saveEdit(2, 8, { message: 1, text: 'e' });
-    expect(loadStored(2).targets).toEqual({ '7': { net: null, whisper: [3, 4] }, '8': { net: 5, whisper: null } });
+    // The net under a whisper, and whether it had come back before, are kept.
+    expect(loadStored(2).targets).toEqual({ '7': { net: 5, whisper: [3, 4], protected: true }, '8': { net: 5, whisper: null, protected: false } });
     pruneStored(2, (id) => id === 7);
-    expect(loadStored(2)).toEqual({ principal: 2, drafts: { '7': 'x' }, targets: { '7': { net: null, whisper: [3, 4] } }, edits: {} });
+    expect(loadStored(2)).toEqual({ principal: 2, drafts: { '7': 'x' }, targets: { '7': { net: 5, whisper: [3, 4], protected: true } }, edits: {} });
   });
 
   it('removes the old snapshot when a write fails, so sent text does not come back', () => {
