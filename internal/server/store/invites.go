@@ -1234,10 +1234,13 @@ func (s *Store) SetMayInvite(ctx context.Context, actor string, principalID int6
 			return nil
 		}
 		// The flag is a brake on make_member_links for members only (ADR-014
-		// design §5): a principal who would hold the permission without it,
-		// as an operator does by its column, keeps its invites.
-		stands, err := holdsWithoutBrakeTx(ctx, tx, principalID, schema.PermMakeMemberLinks)
-		if err != nil || stands {
+		// design §5): an operator's or an owner's invites stand. Whether the
+		// brake binds is asked alone, not whether the principal holds the
+		// permission now: a permission the document switched off suspends
+		// invites (reversible) and must not be taken for the brake, which
+		// closes them for good.
+		binds, err := mayInviteBrakeBindsTx(ctx, tx, principalID)
+		if err != nil || !binds {
 			return err
 		}
 		return closeCreatorInvitesTx(ctx, tx, actor, principalID, schema.InviteKindPersonal, InviteClosePermissionRevoked, now)

@@ -119,6 +119,7 @@ const (
 	kindRoleCompare authorityKind = "role-compare"
 	kindRoleSwitch  authorityKind = "role-switch"
 	kindIsOperator  authorityKind = "isOperator"
+	kindRoleHelper  authorityKind = "role-helper"
 	kindRoleSQL     authorityKind = "role-sql"
 )
 
@@ -176,7 +177,7 @@ var authorityAllowlist = []authorityAllowed{
 	// internal/server/store.
 	{"store/credentials.go", "Store.RotateCredential", kindRoleCompare, 1, whyTarget + ": an owner's credential"},
 	{"store/credentials.go", "Store.revokeCredential", kindRoleCompare, 2, whyTarget + ": an owner's credential, and the last owner's sign-in"},
-	{"store/disable.go", "Store.RevokeAllCredentials", kindRoleCompare, 1, whyTarget + ": the last owner's sign-in"},
+	{"store/disable.go", "Store.RevokeAllCredentialsAs", kindRoleCompare, 1, whyTarget + ": the last owner's sign-in"},
 	{"store/disable.go", "disablePrincipalTx", kindRoleCompare, 1, whyTarget + ": the last owner"},
 	{"store/disable.go", "liveOperatorCredentialsTx", kindRoleSQL, 2, whyTarget + ": counts the owners who can still sign in"},
 	{"store/hide.go", "Store.HidePrincipal", kindRoleCompare, 1, whyTarget + ": a bulk hide never touches an operator"},
@@ -199,7 +200,19 @@ var authorityAllowlist = []authorityAllowed{
 	{"store/queries.go", "ownerProtectedTx", kindRoleCompare, 1, whyTarget + ": nobody but an owner acts on an owner"},
 	{"store/roles.go", "Store.BootstrapOperatorWith", kindRoleSQL, 1, whyRoleAdmin + ": the first operator"},
 	{"store/roles.go", "reportPromotedOwners", kindRoleSQL, 1, whyRoleAdmin + ": the migration's report of owners"},
-	{"store/roles.go", "setRoleTx", kindRoleCompare, 6, whyRoleAdmin},
+	{"store/roles.go", "setRoleTx", kindRoleCompare, 7, whyRoleAdmin},
+	{"store/hide.go", "Store.ListPrincipals", kindRoleCompare, 1, whyFilter},
+	{"store/passwords.go", "recheckLoginTx", kindRoleCompare, 1, whySignIn + ": a login finishes only for the role it began under, so a promotion mid-login cannot skip the operator's second factor"},
+	{"store/operator_auth.go", "Store.BeginTOTPEnrollment", kindRoleHelper, 1, whySignIn},
+	{"store/operator_auth.go", "Store.ConfirmTOTP", kindRoleHelper, 1, whySignIn},
+	{"store/operator_auth.go", "Store.IssueSetupToken", kindRoleHelper, 1, whySignIn},
+	{"store/operator_auth.go", "Store.RecoverOperator", kindRoleHelper, 1, whySignIn},
+	{"store/operator_auth.go", "Store.RedeemSetupToken", kindRoleHelper, 1, whySignIn},
+	{"store/permissions.go", "brakeWithholds", kindRoleHelper, 1, whyHelper + ": the may_invite brake binds the member column only (design §5)"},
+	{"store/permissions.go", "putPermissionsTx", kindRoleCompare, 1, whyHelper + ": a change's column, not a principal's role: the operator column is owner-only (§4.3)"},
+	{"store/sign_in_links.go", "Store.CreateConversionPermit", kindRoleHelper, 1, whyPermit},
+	{"store/sign_in_links.go", "usableConversionPermitTx", kindRoleHelper, 1, whyPermit},
+	{"auth.go", "refusedPermission", kindRoleHelper, 1, "a refusal's wording (design §7.4): whether the caller's column could hold the permission it lacks, so a member is never named an operator permission; decides nothing"},
 	{"store/sign_in_links.go", "Store.CloseSignInLink", kindRoleCompare, 1, whyTarget + ": an owner's link"},
 	{"store/sign_in_links.go", "makerIsOperatorTx", kindRoleCompare, 1, whyPermit},
 	{"store/sign_in_links.go", "signInLinkTargetTx", kindRoleCompare, 1, whySignIn + ": a sign-in link never targets an operator"},
@@ -209,17 +222,81 @@ var authorityAllowlist = []authorityAllowed{
 // roleSQL is SQL that compares a principal's role with a role literal.
 var roleSQL = regexp.MustCompile(`(?i)\brole\s*(?:=|==|<>|!=)\s*'(?:operator|member)'|\brole\s+(?:not\s+)?in\s*\([^)]*'(?:operator|member)'`)
 
-func isRoleName(e ast.Expr) bool {
-	switch x := e.(type) {
+// roleConsts are the names of every principal-role value a check could
+// compare with: the store's and the wire's principal roles, and whoami's
+// identity classes. The document's columns (schema.PermissionRole*) are
+// not: the permissions helper compares them to read the document, and a
+// principal reaches a column only through PermissionRoleOf, whose callers
+// are counted as roleHelpers.
+var roleConsts = map[string]bool{
+	"RoleOperator": true, "RoleMember": true,
+	"PrincipalRoleOperator": true, "PrincipalRoleMember": true,
+	"IdentityOperator": true, "IdentityMember": true,
+}
+
+// roleHelpers are the allowlisted functions that answer a role question
+// themselves: a new call to one is a new role-based decision, counted as
+// isOperator calls are.
+var roleHelpers = map[string]bool{
+	"isOperator": true, "makerIsOperatorTx": true, "hostOperatorTx": true, "setupCallerTx": true,
+	"PermissionRoleOf": true,
+}
+
+// conversions are the conversions a role passes through on its way to a
+// comparison: Role(role), string(p.Role), schema.PrincipalRole(p.Role).
+var conversions = map[string]bool{"Role": true, "string": true, "PrincipalRole": true, "PermissionRole": true}
+
+// unwrapRole strips parentheses and role conversions from e.
+func unwrapRole(e ast.Expr) ast.Expr {
+	for {
+		switch x := e.(type) {
+		case *ast.ParenExpr:
+			e = x.X
+			continue
+		case *ast.CallExpr:
+			if len(x.Args) == 1 && conversions[calleeName(x.Fun)] {
+				e = x.Args[0]
+				continue
+			}
+		}
+		return e
+	}
+}
+
+// calleeName is the name a call is made by: f for f(x), F for pkg.F(x) or
+// recv.F(x).
+func calleeName(fun ast.Expr) string {
+	switch f := fun.(type) {
 	case *ast.Ident:
-		return x.Name == "RoleOperator" || x.Name == "RoleMember"
+		return f.Name
 	case *ast.SelectorExpr:
-		return x.Sel.Name == "RoleOperator" || x.Sel.Name == "RoleMember"
-	case *ast.CallExpr:
-		// Role(role) == RoleOperator is the same comparison.
-		return false
+		return f.Sel.Name
+	}
+	return ""
+}
+
+// isRoleName reports whether e is a role value: one of roleConsts, or the
+// literal "operator" or "member".
+func isRoleName(e ast.Expr) bool {
+	switch x := unwrapRole(e).(type) {
+	case *ast.Ident:
+		return roleConsts[x.Name]
+	case *ast.SelectorExpr:
+		return roleConsts[x.Sel.Name]
+	case *ast.BasicLit:
+		if x.Kind != token.STRING || len(x.Value) < 2 {
+			return false
+		}
+		v := x.Value[1 : len(x.Value)-1]
+		return v == "operator" || v == "member"
 	}
 	return false
+}
+
+// isRoleField reports whether e is a principal's role field: x.Role.
+func isRoleField(e ast.Expr) bool {
+	sel, ok := unwrapRole(e).(*ast.SelectorExpr)
+	return ok && sel.Sel.Name == "Role"
 }
 
 // scanAuthority returns the flagged sites in one parsed file; rel is its
@@ -233,11 +310,16 @@ func scanAuthority(fset *token.FileSet, rel string, file *ast.File) []authorityH
 		ast.Inspect(root, func(n ast.Node) bool {
 			switch x := n.(type) {
 			case *ast.BinaryExpr:
-				if (x.Op == token.EQL || x.Op == token.NEQ) && (isRoleName(x.X) || isRoleName(x.Y)) {
+				if (x.Op == token.EQL || x.Op == token.NEQ) &&
+					(isRoleName(x.X) || isRoleName(x.Y) || isRoleField(x.X) || isRoleField(x.Y)) {
 					add(fn, kindRoleCompare, x)
 				}
 			case *ast.SwitchStmt:
 				if x.Tag == nil {
+					return true
+				}
+				if isRoleField(x.Tag) {
+					add(fn, kindRoleSwitch, x)
 					return true
 				}
 				for _, stmt := range x.Body.List {
@@ -251,8 +333,11 @@ func scanAuthority(fset *token.FileSet, rel string, file *ast.File) []authorityH
 					}
 				}
 			case *ast.CallExpr:
-				if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "isOperator" {
+				switch name := calleeName(x.Fun); {
+				case name == "isOperator":
 					add(fn, kindIsOperator, x)
+				case roleHelpers[name]:
+					add(fn, kindRoleHelper, x)
 				}
 			case *ast.BasicLit:
 				if x.Kind == token.STRING && roleSQL.MatchString(x.Value) {
@@ -424,7 +509,36 @@ func sqlEquals() string { return "SELECT 1 FROM principals WHERE role = 'operato
 func sqlNotEquals() string { return ` + "`" + `SELECT 1 FROM principals WHERE p.role <> 'member'` + "`" + ` }
 func sqlIn() string { return "SELECT 1 FROM principals WHERE role IN ('operator', 'member')" }
 
+func literal(p Principal) bool { return p.Role == "operator" }
+func literalLeft(role string) bool { return "member" != role }
+func wireRole(r schema.PrincipalRole) bool { return r == schema.RoleOperator }
+func futureWireRole(r schema.PrincipalRole) bool { return r == schema.PrincipalRoleOperator }
+func identity(c IdentityClass) bool { return c == schema.IdentityOperator }
+func parens(p Principal) bool { return (p.Role) == (RoleOperator) }
+func againstVariable(p Principal, role Role) bool { return p.Role != role }
+func converted(p Principal) bool { return string(p.Role) == want }
+func switchOnField(p Principal) int {
+	switch p.Role {
+	case wanted:
+		return 1
+	}
+	return 0
+}
+func switchOnLiteral(role string) int {
+	switch role {
+	case "member":
+		return 1
+	}
+	return 0
+}
+func callsMakerIsOperator() { _, _ = makerIsOperatorTx(ctx, tx, 1) }
+func callsHostOperator() { _, _ = hostOperatorTx(ctx, tx, 1) }
+func callsSetupCaller() { _ = setupCallerTx(ctx, tx, 1, 2, now) }
+func callsPermissionRoleOf(p Principal) { _ = store.PermissionRoleOf(p) }
+
 func netRole(r NetRole) bool { return r == schema.NetRoleMember }
+func otherLiteral(kind string) bool { return kind == "human" }
+func otherField(p Principal) bool { return p.Kind == PrincipalHuman }
 func column(r PermissionRole) bool { return r == schema.PermissionRoleOperator }
 func value() Principal { return Principal{Role: RoleMember} }
 func insert() string { return "INSERT INTO principals (role) VALUES ('member')" }
@@ -457,6 +571,21 @@ func taglessSwitch(p Principal) int {
 		"sqlEquals":       kindRoleSQL,
 		"sqlNotEquals":    kindRoleSQL,
 		"sqlIn":           kindRoleSQL,
+
+		"literal":               kindRoleCompare,
+		"literalLeft":           kindRoleCompare,
+		"wireRole":              kindRoleCompare,
+		"futureWireRole":        kindRoleCompare,
+		"identity":              kindRoleCompare,
+		"parens":                kindRoleCompare,
+		"againstVariable":       kindRoleCompare,
+		"converted":             kindRoleCompare,
+		"switchOnField":         kindRoleSwitch,
+		"switchOnLiteral":       kindRoleSwitch,
+		"callsMakerIsOperator":  kindRoleHelper,
+		"callsHostOperator":     kindRoleHelper,
+		"callsSetupCaller":      kindRoleHelper,
+		"callsPermissionRoleOf": kindRoleHelper,
 	}
 	for fn, kind := range want {
 		if got[fn] != kind {

@@ -243,18 +243,8 @@ func principalHolds(p Principal, d permissionDoc, perm schema.Permission) bool {
 	default:
 		return false
 	}
-	if !d.roleHolds(r, perm) {
+	if !d.roleHolds(r, perm) || brakeWithholds(p, perm) {
 		return false
-	}
-	switch perm {
-	case schema.PermUseVoice, schema.PermShareScreen:
-		if !p.VoiceAllowed {
-			return false
-		}
-	case schema.PermMakeMemberLinks:
-		if r == schema.PermissionRoleMember && !p.MayInvite {
-			return false
-		}
 	}
 	for _, req := range perm.Requires() {
 		if !principalHolds(p, d, req) {
@@ -298,20 +288,60 @@ func principalPermittedTx(ctx context.Context, tx execer, p Principal, perm sche
 	return principalHolds(p, d, perm), nil
 }
 
-// holdsWithoutBrakeTx reports whether principalID, were it enabled and
-// visible, would hold perm now even with may_invite = 0: whether that
-// per-person brake, where it binds, would withhold perm (design §5).
-// SetMayInvite asks it of make_member_links when it turns may_invite off,
-// to tell a member, whose personal invites close, from an operator, whom
-// the brake does not bind and whose invites stand. A principal with no row
-// answers false.
-func holdsWithoutBrakeTx(ctx context.Context, tx execer, principalID int64, perm schema.Permission) (bool, error) {
+// ErrManageMembersRequired is a write on another principal's account (its
+// name, its credentials) by an actor that does not hold manage_members now
+// (ADR-014 design §7.2): the operator-or-self routes. HTTP 403 forbidden,
+// naming manage_members to a role that could hold it.
+var ErrManageMembersRequired = errors.New("store: acting on another principal needs manage_members")
+
+// selfOrAdministratorTx is the standing of actorID writing to targetID's
+// account, decided inside the write transaction (ADR-010 D7), so a
+// permission removed after the handler asked cannot pass on the old answer.
+// administers is true for actor 0 (the system, or --auth off) and for a
+// holder of manage_members; otherwise the actor may act only on itself, and
+// acting on anyone else is ErrManageMembersRequired.
+func selfOrAdministratorTx(ctx context.Context, tx execer, actorID, targetID int64) (administers bool, err error) {
+	if actorID == 0 {
+		return true, nil
+	}
+	if administers, err = permittedTx(ctx, tx, actorID, schema.PermManageMembers); err != nil {
+		return false, err
+	}
+	if !administers && actorID != targetID {
+		return false, ErrManageMembersRequired
+	}
+	return administers, nil
+}
+
+// brakeWithholds reports whether a per-person brake on p withholds perm
+// (design §5), whatever the document says of perm: voice_allowed = 0
+// withholds use_voice and share_screen from members and operators, and
+// may_invite = 0 withholds make_member_links from members only. An owner
+// skips brakes (§4.3). It is the one statement of the brakes: principalHolds
+// ANDs it in, and SetMayInvite asks it alone, so a permission switched off
+// by the document (reversible) is never taken for the brake (final).
+func brakeWithholds(p Principal, perm schema.Permission) bool {
+	if p.IsOwner() {
+		return false
+	}
+	switch perm {
+	case schema.PermUseVoice, schema.PermShareScreen:
+		return !p.VoiceAllowed
+	case schema.PermMakeMemberLinks:
+		return PermissionRoleOf(p) == schema.PermissionRoleMember && !p.MayInvite
+	}
+	return false
+}
+
+// mayInviteBrakeBindsTx reports whether principalID's may_invite brake, as it
+// is now in tx, withholds make_member_links (brakeWithholds). A principal
+// with no row answers false.
+func mayInviteBrakeBindsTx(ctx context.Context, tx execer, principalID int64) (bool, error) {
 	p, found, err := queryPrincipal(ctx, tx, principalID)
 	if err != nil || !found {
 		return false, err
 	}
-	p.DisabledAt, p.HiddenAt, p.MayInvite = nil, nil, false
-	return principalPermittedTx(ctx, tx, p, perm)
+	return brakeWithholds(p, schema.PermMakeMemberLinks), nil
 }
 
 // PermissionRoleOf is the document column that p's role reads (design §1):

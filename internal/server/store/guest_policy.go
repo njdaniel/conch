@@ -518,11 +518,11 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 			}
 			nextIDs[id] = true
 		}
-		if err := checkOpenChannelsWriterTx(ctx, tx, actorID, next, nextIDs); err != nil {
-			return err
-		}
 		curChannels, err := openChannelsTx(ctx, tx)
 		if err != nil {
+			return err
+		}
+		if err := checkOpenChannelsWriterTx(ctx, tx, actorID, next, curChannels, nextIDs); err != nil {
 			return err
 		}
 		if err := refreshOpenChannelsListerTx(ctx, tx, actorID, nextIDs); err != nil {
@@ -584,28 +584,54 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 	return out, nil
 }
 
-// checkOpenChannelsWriterTx holds the writer of the joining settings to the
-// state its write leaves (ADR-014 design §7.3, SF-2): if next admits people
-// at the bare address (any mode but off, not paused), the writer needs
-// manage_channels for every channel in next's open_channels (nextIDs) that
-// it is not in, whether or not this write touched the list. Without it the
-// write is refused with a PermissionError (ErrPermissionDenied, naming
-// manage_channels). Actor 0 (the system, or --auth off) is not held to it.
-func checkOpenChannelsWriterTx(ctx context.Context, tx execer, actorID int64, next schema.JoinSettingsV1, nextIDs map[int64]bool) error {
-	if actorID == 0 || next.OpenJoining == schema.OpenJoiningOff || next.JoiningPaused || len(nextIDs) == 0 {
+// checkOpenChannelsWriterTx holds a writer of the joining settings without
+// manage_channels to the channels it is in (ADR-014 design §7.3, SF-2). Two
+// rules, both refused with a PermissionError (ErrPermissionDenied, naming
+// manage_channels); actor 0 (the system, or --auth off) is held to neither:
+//
+//   - every channel the write adds to open_channels must be one the writer
+//     is in, whatever the mode. A channel enters the list only behind a
+//     lister who could vouch for it then. Without this a writer could list a
+//     private channel while the address is off or paused, and an owner's
+//     later write (an unpause), which becomes the lister of every channel it
+//     leaves listed (refreshOpenChannelsListerTx), would vouch for it
+//     unawares. This rule is the smaller fix: it keeps the design's
+//     owner-refresh rule whole, where narrowing the refresh to channels the
+//     owner names would still be defeated by a client that sends back the
+//     list it read;
+//   - if next admits people (any mode but off, not paused), every listed
+//     channel (nextIDs) must be one the writer is in, whether or not this
+//     write touched the list: a writer may not open the address over
+//     channels others listed.
+func checkOpenChannelsWriterTx(ctx context.Context, tx execer, actorID int64, next schema.JoinSettingsV1, cur []schema.InviteChannelV1, nextIDs map[int64]bool) error {
+	if actorID == 0 || len(nextIDs) == 0 {
 		return nil
 	}
 	ok, err := permittedTx(ctx, tx, actorID, schema.PermManageChannels)
 	if err != nil || ok {
 		return err
 	}
-	for id := range nextIDs {
+	check := nextIDs
+	if next.OpenJoining == schema.OpenJoiningOff || next.JoiningPaused {
+		// The address admits nobody: only what this write adds.
+		listed := make(map[int64]bool, len(cur))
+		for _, c := range cur {
+			listed[c.ID] = true
+		}
+		check = map[int64]bool{}
+		for id := range nextIDs {
+			if !listed[id] {
+				check[id] = true
+			}
+		}
+	}
+	for id := range check {
 		var one int
 		switch err := tx.QueryRowContext(ctx,
 			"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", id, actorID).Scan(&one); {
 		case errors.Is(err, sql.ErrNoRows):
 			return &PermissionError{Err: ErrPermissionDenied, Permission: schema.PermManageChannels,
-				Reason: "opening the address to a channel you are not in needs manage_channels"}
+				Reason: "listing a channel you are not in, or opening the address to one, needs manage_channels"}
 		case err != nil:
 			return fmt.Errorf("store: put join settings: check membership: %w", err)
 		}
@@ -754,12 +780,20 @@ func (s *Store) JoinAsGuest(ctx context.Context, e GuestEntry) (AdmittedGuest, e
 		if set.JoiningPaused {
 			return ErrJoiningPaused
 		}
-		channels, err := openChannelsTx(ctx, tx)
+		// The channels whose lister still stands behind them, as for an
+		// account (ADR-014 design §7.3). Guests are removed for now (#1005);
+		// this keeps the path from becoming a hole if they return.
+		channels, dropped, err := admittingOpenChannelsTx(ctx, tx)
 		if err != nil {
 			return err
 		}
 		if len(channels) == 0 {
 			return ErrGuestsDisabled
+		}
+		for _, c := range dropped {
+			if err := appendAuditEventTx(ctx, tx, "system", AuditJoinChannelDropped, channelSubject(c.ID), "reason=permission", now); err != nil {
+				return err
+			}
 		}
 		ids := make([]int64, len(channels))
 		for i, c := range channels {

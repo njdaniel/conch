@@ -304,16 +304,28 @@ func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID i
 // operator holds a live credential, and no operator, the target included,
 // holds a password and a confirmed TOTP.
 func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principalID int64, forbidOwner ...bool) (int, error) {
+	return s.RevokeAllCredentialsAs(ctx, actor, 0, principalID, len(forbidOwner) > 0 && forbidOwner[0])
+}
+
+// RevokeAllCredentialsAs is RevokeAllCredentials by actorID, whose standing
+// is decided in the revoking transaction (selfOrAdministratorTx, ADR-014
+// design §7.2): a holder of manage_members signs anyone out everywhere,
+// anyone else only itself, and anyone else's is ErrManageMembersRequired,
+// decided before the target is read. actorID 0 is RevokeAllCredentials.
+func (s *Store) RevokeAllCredentialsAs(ctx context.Context, actor string, actorID, principalID int64, forbidOwner bool) (int, error) {
 	var n int
 	var runs []EndedRun
 	var guests []EndedGuest
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		runs, guests = nil, nil
+		if _, err := selfOrAdministratorTx(ctx, tx, actorID, principalID); err != nil {
+			return err
+		}
 		role, owner, disabled, err := principalState(ctx, tx, principalID)
 		if err != nil {
 			return err
 		}
-		if err := ownerProtectedTx(ctx, tx, principalID, len(forbidOwner) > 0 && forbidOwner[0]); err != nil {
+		if err := ownerProtectedTx(ctx, tx, principalID, forbidOwner); err != nil {
 			return err
 		}
 		now := credentialNow().Truncate(time.Millisecond)

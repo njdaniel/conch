@@ -264,6 +264,43 @@ func TestPutJoinSettingsChecksTheResultingState(t *testing.T) {
 	})
 }
 
+// TestNoChannelSlippedInWhilePaused: a writer without manage_channels cannot
+// list a channel it is not in while the address admits nobody, so an
+// owner's later unpause, which becomes the lister of every listed channel,
+// never vouches for one it did not choose (security SF-1).
+func TestNoChannelSlippedInWhilePaused(t *testing.T) {
+	f := newJoinFixture(t)
+	account := ptrMode(schema.OpenJoiningAccount)
+	if err := f.putJoin(f.owner.ID, schema.PutJoinSettingsRequestV1{OpenJoining: account, JoiningPaused: boolRef(true),
+		OpenChannels: &[]string{"channel-b"}}); err != nil {
+		t.Fatal(err)
+	}
+	f.setOperatorCells(t, false, schema.PermManageChannels)
+	var pe *PermissionError
+	for _, mode := range []*schema.OpenJoiningMode{nil, ptrMode(schema.OpenJoiningOff)} {
+		err := f.putJoin(f.op.ID, schema.PutJoinSettingsRequestV1{OpenJoining: mode, OpenChannels: &[]string{"channel-a", "channel-b"}})
+		if !errors.As(err, &pe) || pe.Permission != schema.PermManageChannels {
+			t.Fatalf("operator-1 slips channel-a into a list that admits nobody (mode %v) = %v, want permission_denied", mode, err)
+		}
+	}
+	// A channel it is in, it may list while paused.
+	if err := f.putJoin(f.op.ID, schema.PutJoinSettingsRequestV1{OpenChannels: &[]string{"channel-b"}}); err != nil {
+		t.Fatalf("operator-1 keeps channel-b: %v", err)
+	}
+	// The owner unpauses.
+	if err := f.putJoin(f.owner.ID, schema.PutJoinSettingsRequestV1{JoiningPaused: boolRef(false)}); err != nil {
+		t.Fatal(err)
+	}
+	listers := f.openChannelListers(t)
+	if _, listed := listers[f.chanA.ID]; listed || len(listers) != 1 {
+		t.Fatalf("open channels after the owner's unpause = %v, want channel-b only", listers)
+	}
+	got, err := f.s.JoinAsAccount(f.ctx, "joiner-1", testRecord("j"), time.Now())
+	if err != nil || len(got.Channels) != 1 || got.Channels[0].ID != f.chanB.ID {
+		t.Fatalf("join = %+v, %v; want channel-b only", got.Channels, err)
+	}
+}
+
 // TestOwnerWriteRefreshesListers: an owner's write makes it the lister of
 // every channel it leaves listed; another's write does not.
 func TestOwnerWriteRefreshesListers(t *testing.T) {
@@ -366,4 +403,68 @@ func TestJoinAsAccountKeepsOnlyVouchedChannels(t *testing.T) {
 			t.Fatalf("a refused join left %d principals, %v", n, err)
 		}
 	})
+}
+
+// TestMayInviteBrakeIsNotThePermission: turning an operator's may_invite off
+// while the document has switched make_member_links off for operators must
+// not close the operator's invites. The brake does not bind operators
+// (design §5); the document's switch only suspends them, and they work
+// again when it comes back. A member's invites still close for good.
+func TestMayInviteBrakeIsNotThePermission(t *testing.T) {
+	f := newStandingFixture(t)
+	now := time.Now()
+	personal := func(maker Principal) string {
+		t.Helper()
+		resp, err := f.s.CreateInvite(f.ctx, "system", maker.ID,
+			schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-b"}}, InviteOptions{}, now)
+		if err != nil {
+			t.Fatalf("invite by %s: %v", maker.Name, err)
+		}
+		return HashInviteCode(resp.Code)
+	}
+	if _, err := f.s.SetMayInvite(f.ctx, "system", f.member.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	opInvite := personal(f.op)
+	memberInvite := personal(f.member)
+
+	// make_member_links off for both columns (a member cell may not exceed
+	// the operator's), then back on.
+	links := func(granted bool) {
+		t.Helper()
+		doc, err := f.s.Permissions(f.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := schema.PutPermissionsRequestV1{Revision: doc.Revision, Changes: []schema.PermissionChangeV1{
+			{Permission: schema.PermMakeMemberLinks, Role: schema.PermissionRoleMember, Granted: granted},
+			{Permission: schema.PermMakeMemberLinks, Role: schema.PermissionRoleOperator, Granted: granted},
+		}}
+		if _, err := f.s.PutPermissions(f.ctx, "system", f.owner.ID, req, time.Now()); err != nil {
+			t.Fatalf("make_member_links %t: %v", granted, err)
+		}
+	}
+	links(false)
+	if _, err := f.s.PreviewInvite(f.ctx, opInvite, now); !errors.Is(err, ErrInviteInvalid) {
+		t.Fatalf("operator's invite with make_member_links off = %v, want suspended", err)
+	}
+	for _, may := range []bool{true, false} {
+		if _, err := f.s.SetMayInvite(f.ctx, "system", f.op.ID, may); err != nil {
+			t.Fatal(err)
+		}
+	}
+	links(true)
+	if _, err := f.s.PreviewInvite(f.ctx, opInvite, now); err != nil {
+		t.Fatalf("operator's invite after make_member_links came back = %v, want usable: the brake closed it", err)
+	}
+
+	if _, err := f.s.SetMayInvite(f.ctx, "system", f.member.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.SetMayInvite(f.ctx, "system", f.member.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.PreviewInvite(f.ctx, memberInvite, now); !errors.Is(err, ErrInviteInvalid) {
+		t.Fatalf("member's invite after its brake was applied = %v, want closed for good", err)
+	}
 }

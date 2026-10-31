@@ -608,3 +608,89 @@ func TestRestrictedOperatorOperatorOrSelf(t *testing.T) {
 		t.Fatalf("restricted operator renames itself = %d %s", rec.Code, rec.Body)
 	}
 }
+
+// withholdOnRead is a request body that, when the handler first reads it,
+// takes perms from operators: the permission is removed after the
+// handler's own check and before the store's write.
+type withholdOnRead struct {
+	t     *testing.T
+	f     *restrictedFixture
+	perms []schema.Permission
+	body  *strings.Reader
+	done  bool
+}
+
+func (b *withholdOnRead) Read(p []byte) (int, error) {
+	if !b.done {
+		b.done = true
+		b.f.withhold(b.t, b.perms...)
+	}
+	return b.body.Read(p)
+}
+
+// TestOperatorOrSelfDecidedInTheStore: rename and revoke-all decide self
+// versus administrator standing inside their write transactions (ADR-010
+// D7), so a permission removed after the handler asked, or a caller that
+// reaches the store by another way, cannot act on someone else.
+func TestOperatorOrSelfDecidedInTheStore(t *testing.T) {
+	ctx := context.Background()
+	t.Run("rename, manage_members removed mid-request", func(t *testing.T) {
+		f := newRestrictedFixture(t, Config{AuthMode: AuthRequired})
+		body := &withholdOnRead{t: t, f: f, perms: []schema.Permission{schema.PermActAsMembers, schema.PermManageMembers},
+			body: strings.NewReader(`{"name":"member-2b"}`)}
+		req := httptest.NewRequest("PUT", fmt.Sprintf("/v1/principals/%d/name", f.member2.ID), body)
+		req.Header.Set("Authorization", "Bearer "+f.opTok)
+		rec := httptest.NewRecorder()
+		f.srv.Handler().ServeHTTP(rec, req)
+		if !body.done {
+			t.Fatal("the handler never read the body; the race was not run")
+		}
+		assertErrorBody(t, rec, http.StatusForbidden, "forbidden")
+		if got := permissionOf(t, rec.Body.Bytes()); got != schema.PermManageMembers {
+			t.Errorf("refusal names %q, want manage_members", got)
+		}
+		p, err := f.srv.store.PrincipalByID(ctx, f.member2.ID)
+		if err != nil || p.Name != "member-2" {
+			t.Fatalf("member-2 is now %q, %v; want unrenamed", p.Name, err)
+		}
+	})
+	t.Run("rename, direct store call", func(t *testing.T) {
+		f := newRestrictedFixture(t, Config{AuthMode: AuthRequired})
+		actor := fmt.Sprintf("principal:%d", f.op.ID)
+		if _, err := f.srv.store.RenamePrincipalAs(ctx, actor, f.op.ID, f.member2.ID, "member-2b", store.RenameLimits{}, time.Now(), true); err != nil {
+			t.Fatalf("an operator holding manage_members renames member-2: %v", err)
+		}
+		f.withhold(t, schema.PermActAsMembers, schema.PermManageMembers)
+		if _, err := f.srv.store.RenamePrincipalAs(ctx, actor, f.op.ID, f.member2.ID, "member-2c", store.RenameLimits{}, time.Now(), true); !errors.Is(err, store.ErrManageMembersRequired) {
+			t.Fatalf("restricted operator renames member-2 = %v, want ErrManageMembersRequired", err)
+		}
+		// Itself, with the self limits now binding.
+		lim := store.RenameLimits{Renames: 1, Attempts: 5}
+		if _, err := f.srv.store.RenamePrincipalAs(ctx, actor, f.op.ID, f.op.ID, "operator-1b", lim, time.Now(), true); err != nil {
+			t.Fatalf("restricted operator renames itself: %v", err)
+		}
+		var limited *store.RenameLimitedError
+		if _, err := f.srv.store.RenamePrincipalAs(ctx, actor, f.op.ID, f.op.ID, "operator-1c", lim, time.Now(), true); !errors.As(err, &limited) {
+			t.Fatalf("second self-rename past a limit of one = %v, want limited", err)
+		}
+	})
+	t.Run("revoke-all, manage_members removed after the check", func(t *testing.T) {
+		f := newRestrictedFixture(t, Config{AuthMode: AuthRequired})
+		actor := fmt.Sprintf("principal:%d", f.op.ID)
+		// The handler's question, answered yes...
+		if ok, err := f.srv.can(ctx, f.op, schema.PermManageMembers); err != nil || !ok {
+			t.Fatalf("can(manage_members) = %v, %v; want yes", ok, err)
+		}
+		// ...and the permission removed before the write.
+		f.withhold(t, schema.PermActAsMembers, schema.PermManageMembers)
+		if _, err := f.srv.store.RevokeAllCredentialsAs(ctx, actor, f.op.ID, f.member2.ID, true); !errors.Is(err, store.ErrManageMembersRequired) {
+			t.Fatalf("revoke-all of member-2 = %v, want ErrManageMembersRequired", err)
+		}
+		if rec := f.do(t, "GET", "/v1/whoami", f.member2Tok, ""); rec.Code != http.StatusOK {
+			t.Fatalf("member-2's credential no longer works (%d): the refused revoke-all revoked it", rec.Code)
+		}
+		if _, err := f.srv.store.RevokeAllCredentialsAs(ctx, actor, f.op.ID, f.op.ID, true); err != nil {
+			t.Fatalf("restricted operator signs itself out everywhere: %v", err)
+		}
+	})
+}
