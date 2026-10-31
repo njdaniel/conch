@@ -33,7 +33,7 @@ import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent
 import { createPortal } from 'react-dom';
 import { Avatar, Glyph } from '../Icons';
 import type { ChannelV0 } from '../schema/channel';
-import { MicTestShown, VoiceLive } from '../phone';
+import { MicTestShown, VoiceLive, VoiceStrip } from '../phone';
 import { StageHost } from '../stage';
 import { MicTest } from './MicTest';
 import type { Person } from '../useLiveChannel';
@@ -136,6 +136,14 @@ export function VoicePanel({
   // The phone layout's Voice button and strip follow it (issue #929).
   const reportLive = useContext(VoiceLive);
   const micTestShown = useContext(MicTestShown);
+  // On a phone under Chat and Channels, in voice, the section is the strip of
+  // four controls (issue #1028); the rest is in the Voice view, which the
+  // strip's state button opens. Nothing is unmounted for it but what the
+  // strip does not draw: the notes and Voice options stay, hidden, and the
+  // watched share stays on the stage.
+  const toVoiceView = useContext(VoiceStrip);
+  const stripOpens = inVoice ? toVoiceView : null;
+  const strip = stripOpens !== null;
   useEffect(() => {
     reportLive(inVoice);
     return () => {
@@ -313,97 +321,65 @@ export function VoicePanel({
     setOptions(true);
     setToAbout(true);
   };
+  const leave = (focused: boolean) => {
+    left.current = focused;
+    voice.leave();
+  };
 
   return (
-    <section aria-label="Voice" className={`voice phase-${state.phase}${state.transmitting ? ' sending' : ''}`}>
+    <section aria-label="Voice" className={`voice phase-${state.phase}${state.transmitting ? ' sending' : ''}${strip ? ' strip' : ''}`}>
       {/* Two rows (issue #587): who is in voice on top, and below it where
           you are and the controls. The dock sits on the window's bottom edge,
           so a roster that grows, or a longer status, moves the strip's top and
-          leaves the controls where they were. */}
+          leaves the controls where they were. The phone's strip is the one
+          row, of four controls (issue #1028). */}
       <div className="voice-bar">
-        {roster.length === 0 ? null : (
+        {strip || roster.length === 0 ? null : (
           <Roster roster={roster} people={people} viewer={viewer} elsewhere={elsewhere} speaking={speaking} volumes={inVoice ? state.volumes : noVolumes} />
         )}
         {awayLine}
         <div className="voice-row">
-          <div className="voice-state">
-            <p className="voice-phase">
-              {phaseLabel[state.phase]}
-              {where}
-            </p>
-            {inVoice ? (
-              <p className="voice-sub">
-                {captured ? <span className="chip">Microphone in use</span> : null}{' '}
-                <span className="voice-tx">
-                  {state.muted ? 'Muted. ' : ''}
-                  {state.deafened ? 'Deafened (you hear no one, and you are muted). ' : ''}
-                  {state.listenOnly ? 'Listen only. ' : ''}
-                  {state.watchOnly ? 'Watch only: your microphone is off. ' : ''}
-                  {transmitLabel(state)}
-                </span>
+          {stripOpens !== null ? (
+            <StripState phase={state.phase} channel={state.channel} onOpen={stripOpens} />
+          ) : (
+            <div className="voice-state">
+              <p className="voice-phase">
+                {phaseLabel[state.phase]}
+                {where}
               </p>
-            ) : (
-              <p className="voice-sub">Microphone off</p>
-            )}
-          </div>
+              {inVoice ? (
+                <p className="voice-sub">
+                  {captured ? <span className="chip">Microphone in use</span> : null}{' '}
+                  <span className="voice-tx">
+                    {state.muted ? 'Muted. ' : ''}
+                    {state.deafened ? 'Deafened (you hear no one, and you are muted). ' : ''}
+                    {state.listenOnly ? 'Listen only. ' : ''}
+                    {state.watchOnly ? 'Watch only: your microphone is off. ' : ''}
+                    {transmitLabel(state)}
+                  </span>
+                </p>
+              ) : (
+                <p className="voice-sub">Microphone off</p>
+              )}
+            </div>
+          )}
 
           <div className="voice-controls">
-            {inVoice ? (
+            {strip ? (
               <>
-                {state.mode === 'ptt' ? (
-                  <button
-                    type="button"
-                    className="talk"
-                    aria-pressed={state.talking}
-                    disabled={state.listenOnly || state.watchOnly}
-                    // Muted or deafened it stays pressable (a press reaches the
-                    // gate, which is shut and sends nothing), but it looks off
-                    // and says why in the note below (UX-07).
-                    aria-disabled={silenced ? true : undefined}
-                    aria-describedby={silenced ? 'voice-talk-why' : undefined}
-                    onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
-                    onPointerUp={() => { client.release(); }}
-                    onPointerCancel={() => { client.release(); }}
-                    // The keyboard holds it as a pointer does (issue #590): a
-                    // held key repeats, and only its first press counts. Focus
-                    // moving away lets go, as a lost pointer does.
-                    onKeyDown={(e) => {
-                      if (!holdKey(e) || e.repeat) return;
-                      e.preventDefault();
-                      client.press();
-                    }}
-                    onKeyUp={(e) => {
-                      if (holdKey(e)) client.release();
-                    }}
-                    onBlur={() => { client.release(); }}
-                    onContextMenu={(e) => { e.preventDefault(); }}
-                  >
-                    <Glyph name="mic" />
-                    Hold to talk
-                  </button>
-                ) : (
-                  <span className="open-mic">
-                    <Glyph name="mic" />
-                    Open microphone <meter min={0} max={1} value={state.level} aria-label="Microphone level" />
-                  </span>
-                )}
+                <TalkControl voice={voice} silenced={silenced} />
+                <MuteButton voice={voice} />
+                <LeaveButton onLeave={leave} />
+              </>
+            ) : inVoice ? (
+              <>
+                <TalkControl voice={voice} silenced={silenced} />
                 {state.watchOnly && !state.listenOnly ? (
                   <button type="button" onClick={() => { void client.useMicrophone(); }} disabled={state.phase !== 'connected'}>
                     Use microphone
                   </button>
                 ) : null}
-                {/* Deafened is muted too (UX-11), so Mute shows pressed and
-                    cannot be let go of. The choice made before is kept, and
-                    is back on Undeafen (issue #591, F13). */}
-                <button
-                  type="button"
-                  aria-pressed={state.muted || state.deafened}
-                  disabled={state.deafened}
-                  onClick={() => { client.setMuted(!state.muted); }}
-                >
-                  <Glyph name="micOff" />
-                  <span className="label">{state.deafened ? 'Muted by deafen' : state.muted ? 'Unmute' : 'Mute'}</span>
-                </button>
+                <MuteButton voice={voice} />
                 <button type="button" aria-pressed={state.deafened} onClick={() => { client.setDeafened(!state.deafened); }}>
                   <Glyph name="headphones" />
                   <span className="label">{state.deafened ? 'Undeafen' : 'Deafen'}</span>
@@ -419,17 +395,7 @@ export function VoicePanel({
                   <Glyph name="options" />
                   <span className="label">Voice options</span>
                 </button>
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={(e) => {
-                    left.current = document.activeElement === e.currentTarget;
-                    voice.leave();
-                  }}
-                >
-                  <Glyph name="leave" />
-                  <span className="label">Leave voice</span>
-                </button>
+                <LeaveButton onLeave={leave} />
               </>
             ) : (
               <>
@@ -446,7 +412,7 @@ export function VoicePanel({
         </div>
       </div>
 
-      <div className="voice-notes">
+      <div className="voice-notes" hidden={strip}>
         {state.why === null ? null : <p role="status" className="hint">{state.why}</p>}
         {state.reportNote === 'rate_limited' ? <p role="status" className="hint">Too many talk reports; slow down</p> : null}
         {state.reportNote === 'retrying' ? <p role="status" className="hint">Reporting your talking is slow; retrying</p> : null}
@@ -515,9 +481,107 @@ export function VoicePanel({
         )}
       </div>
 
-      {inVoice ? <Options voice={voice} open={options} sharable={sharable} about={about} others={others} /> : null}
+      {inVoice ? <Options voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} /> : null}
       {view === null ? null : stage === null ? view : createPortal(view, stage)}
     </section>
+  );
+}
+
+// StripState is the first of the phone strip's four controls (issue #1028):
+// where voice is, as a button that opens the Voice view, where the rest is.
+// Its words are the state and the channel, on two short lines; a long name
+// ends in an ellipsis.
+function StripState({ phase, channel, onOpen }: { readonly phase: Phase; readonly channel: string | null; readonly onOpen: () => void }) {
+  const going = phase === 'connecting' || phase === 'reconnecting';
+  return (
+    <button type="button" className="voice-open" onClick={onOpen}>
+      <span className="voice-open-phase">{phase === 'connected' ? 'In voice' : phaseLabel[phase]}</span>
+      {channel === null ? null : (
+        <>
+          {/* The spaces are outside the spans, where a flex column draws
+              none and the name still has them. */}
+          {' '}
+          <span className="vh">{going ? 'to' : 'in'}</span>{' '}
+          <span className="voice-open-where">#{channel}</span>
+        </>
+      )}
+    </button>
+  );
+}
+
+// TalkControl is Hold to talk, or, with the open microphone, its level: the
+// one way to talk, in the strip and in the Voice view alike.
+function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readonly silenced: boolean }) {
+  const { state, client } = voice;
+  if (state.mode !== 'ptt') {
+    return (
+      <span className="open-mic">
+        <Glyph name="mic" />
+        Open microphone <meter min={0} max={1} value={state.level} aria-label="Microphone level" />
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="talk"
+      aria-pressed={state.talking}
+      disabled={state.listenOnly || state.watchOnly}
+      // Muted or deafened it stays pressable (a press reaches the gate, which
+      // is shut and sends nothing), but it looks off and says why in the note
+      // below (UX-07).
+      aria-disabled={silenced ? true : undefined}
+      aria-describedby={silenced ? 'voice-talk-why' : undefined}
+      onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); client.press(); }}
+      onPointerUp={() => { client.release(); }}
+      onPointerCancel={() => { client.release(); }}
+      // The keyboard holds it as a pointer does (issue #590): a held key
+      // repeats, and only its first press counts. Focus moving away lets go,
+      // as a lost pointer does.
+      onKeyDown={(e) => {
+        if (!holdKey(e) || e.repeat) return;
+        e.preventDefault();
+        client.press();
+      }}
+      onKeyUp={(e) => {
+        if (holdKey(e)) client.release();
+      }}
+      onBlur={() => { client.release(); }}
+      onContextMenu={(e) => { e.preventDefault(); }}
+    >
+      <Glyph name="mic" />
+      Hold to talk
+    </button>
+  );
+}
+
+// MuteButton is Mute. Deafened is muted too (UX-11), so Mute shows pressed and
+// cannot be let go of. The choice made before is kept, and is back on
+// Undeafen (issue #591, F13).
+function MuteButton({ voice }: { readonly voice: VoiceControl }) {
+  const { state, client } = voice;
+  return (
+    <button type="button" aria-pressed={state.muted || state.deafened} disabled={state.deafened} onClick={() => { client.setMuted(!state.muted); }}>
+      <Glyph name="micOff" />
+      <span className="label">{state.deafened ? 'Muted by deafen' : state.muted ? 'Unmute' : 'Mute'}</span>
+    </button>
+  );
+}
+
+// LeaveButton is Leave voice. It says whether it had focus when pressed, for
+// where focus goes once the client has drained (issue #590).
+function LeaveButton({ onLeave }: { readonly onLeave: (focused: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      className="danger"
+      onClick={(e) => {
+        onLeave(document.activeElement === e.currentTarget);
+      }}
+    >
+      <Glyph name="leave" />
+      <span className="label">Leave voice</span>
+    </button>
   );
 }
 

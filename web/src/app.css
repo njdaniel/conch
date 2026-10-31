@@ -2755,7 +2755,8 @@ button.link {
 
   /* The strip in voice fits in 200 px of a 390×844 phone (issue #600): the
      count beside the chips, the controls in one row, and less space between
-     the rows. */
+     the rows. (Under Chat and Channels it is now one row of four, issue
+     #1028, in the phone layout's block below.) */
   .voice-bar,
   .voice-row {
     row-gap: var(--s1);
@@ -2890,7 +2891,9 @@ button.link {
   /* With four or more in voice (the roster capped), the picture gives way so
      that the log keeps 120 px (issue #641): a fifth of the window's height,
      which a 16:9 share of a phone's width is taller than. With fewer in
-     voice the strip is shorter and the picture keeps its size. */
+     voice the strip is shorter and the picture keeps its size. Since issue
+     #1028 the strip under Chat has no roster, so this applies only in the
+     Voice view, whose roster is drawn in full. */
   body:has(.voice-roster.capped) .share-frame video {
     max-height: 20vh;
   }
@@ -3020,6 +3023,104 @@ button.link {
      (Join voice and Watch only are in the Voice view). */
   .lobby.phone:not(.in-voice):not(.view-voice) .dock {
     display: none;
+  }
+
+  /* In voice it is one row of four controls (issue #1028): where voice is (a
+     button to the Voice view), Hold to talk, Mute and Leave voice, 44 px
+     high, so the strip is at most 64 px and the log, not the composer, gives
+     way. The notes and Voice options are kept, hidden, for the Voice view.
+     The row is as wide as the window, never its content: the state button
+     and Hold to talk give way, the channel's name ending in an ellipsis. */
+  .voice.strip .voice-bar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .voice.strip .voice-row {
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.2rem;
+  }
+
+  .voice.strip .voice-controls {
+    flex: 1 1 auto;
+    flex-wrap: nowrap;
+    width: auto;
+    min-width: 0;
+  }
+
+  .voice.strip .talk {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .voice.strip .open-mic {
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 2.75rem;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .voice.strip .open-mic meter {
+    flex: 1 1 2rem;
+    width: auto;
+    min-width: 1.5rem;
+  }
+
+  .voice-notes[hidden] {
+    display: none;
+  }
+
+  .voice-open {
+    display: flex;
+    flex: 0 1 auto;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    min-width: 2.75rem;
+    max-width: 38%;
+    overflow: hidden;
+    padding: 0.1rem 0.5rem;
+    line-height: 1.2;
+    text-align: left;
+  }
+
+  .voice-open-phase {
+    color: var(--muted);
+    font-size: 0.75rem;
+    white-space: nowrap;
+  }
+
+  .voice-open-phase::before {
+    content: '';
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    margin-right: 0.3rem;
+    border-radius: 50%;
+    border: 2px solid var(--muted);
+    vertical-align: 0;
+  }
+
+  .phase-connected .voice-open-phase::before {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .phase-connecting .voice-open-phase::before,
+  .phase-reconnecting .voice-open-phase::before {
+    border-color: var(--warn);
+  }
+
+  .voice-open-where {
+    max-width: 100%;
+    overflow: hidden;
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* Voice: the stage (a watched share) on top, then the voice section filling
