@@ -6,6 +6,7 @@ import { operations } from '../operations';
 import type { SocketTransport } from '../types';
 
 export const sockets: SocketTransport = {
+  ticket: true,
   open(id, query) {
     const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     return new WebSocket(`${scheme}//${window.location.host}${operations[id].path}?${new URLSearchParams(query).toString()}`);

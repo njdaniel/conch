@@ -12,9 +12,10 @@
 // name a channel, a URL, a header or a method.
 import type { IpcMain } from 'electron';
 
-import type { BridgeRequest } from '../../web/src/platform/desktop/bridge.ts';
+import type { BridgeRequest, FeedRequest } from '../../web/src/platform/desktop/bridge.ts';
 import { operations } from '../../web/src/platform/operations.ts';
 import { channelOf, INVOKED_FUNCTIONS, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
+import { parseFeedRequest, type Feeds } from './api/feeds.ts';
 import { targetOf, isOperationId } from './api/target.ts';
 import { invocable, type Service, type SignInStep } from './api/service.ts';
 import type { DocumentGate } from './document.ts';
@@ -44,6 +45,7 @@ export interface IpcDeps {
   readonly owned: () => ContentsLike | null;
   readonly gate: DocumentGate;
   readonly service: Service;
+  readonly feeds: Pick<Feeds, 'subscribe' | 'ack' | 'unsubscribe'>;
   readonly now: () => number;
   readonly log: (line: string) => void;
 }
@@ -113,8 +115,21 @@ interface Spec {
   // The argument list as the function takes it, or null when it is not a
   // valid call.
   readonly parse: (args: readonly unknown[]) => readonly unknown[] | null;
-  readonly run: (service: Service, args: readonly unknown[]) => unknown;
+  readonly run: (to: Handlers, args: readonly unknown[]) => unknown;
 }
+
+// What a function runs against: the service, the feeds, and the document
+// generation of the caller (already checked to be the current one).
+interface Handlers {
+  readonly service: Service;
+  readonly feeds: IpcDeps['feeds'];
+  readonly document: number;
+}
+
+// A feed's number, which the preload chose: a positive whole number.
+const isFeedId = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= 2 ** 31;
+
+const feedId = (args: readonly unknown[]): readonly unknown[] | null => (args.length === 1 && isFeedId(args[0]) ? args : null);
 
 const none = (args: readonly unknown[]): readonly unknown[] | null => (args.length === 0 ? args : null);
 
@@ -128,7 +143,7 @@ function signIn(step: SignInStep): Spec {
       const [body] = args;
       return args.length === 1 && isRecord(body) && operations[step].request?.(body).length === 0 ? [body] : null;
     },
-    run: (service, [body]) => service.signIn(step, body as Record<string, unknown>),
+    run: ({ service }, [body]) => service.signIn(step, body as Record<string, unknown>),
   };
 }
 
@@ -157,12 +172,12 @@ export function parseRequest(value: unknown): BridgeRequest | null {
 }
 
 export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
-  serverAddress: { limit: 120, maxBytes: 0, parse: none, run: (service) => service.serverAddress() },
+  serverAddress: { limit: 120, maxBytes: 0, parse: none, run: ({ service }) => service.serverAddress() },
   setServerAddress: {
     limit: 30,
     maxBytes: 4 * 1024,
     parse: (args) => (args.length === 1 && typeof args[0] === 'string' ? args : null),
-    run: (service, [origin]) => service.setServerAddress(origin as string),
+    run: ({ service }, [origin]) => service.setServerAddress(origin as string),
   },
   request: {
     limit: 1200,
@@ -171,20 +186,20 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
       const parsed = args.length === 1 ? parseRequest(args[0]) : null;
       return parsed === null ? null : [parsed];
     },
-    run: (service, [request]) => service.request(request as BridgeRequest),
+    run: ({ service }, [request]) => service.request(request as BridgeRequest),
   },
-  restore: { limit: 120, maxBytes: 0, parse: none, run: (service) => service.restore() },
+  restore: { limit: 120, maxBytes: 0, parse: none, run: ({ service }) => service.restore() },
   signInWithCredential: {
     limit: 30,
     maxBytes: 8 * 1024,
     parse: (args) => (args.length === 1 && typeof args[0] === 'string' && /^\S{1,4096}$/u.test(args[0]) ? args : null),
-    run: (service, [credential]) => service.signInWithCredential(credential as string),
+    run: ({ service }, [credential]) => service.signInWithCredential(credential as string),
   },
   keepCredential: {
     limit: 30,
     maxBytes: 8 * 1024,
     parse: (args) => (args.length === 1 && typeof args[0] === 'string' && /^\S{1,4096}$/u.test(args[0]) ? args : null),
-    run: (service, [credential]) => service.keepCredential(credential as string),
+    run: ({ service }, [credential]) => service.keepCredential(credential as string),
   },
   signInWithPassword: signIn('login'),
   signInWithCode: signIn('loginTotp'),
@@ -195,7 +210,22 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   resetPassword: signIn('resetPassword'),
   joinAsGuest: signIn('joinGuest'),
   createAccount: signIn('joinAccount'),
-  signOut: { limit: 120, maxBytes: 0, parse: none, run: (service) => service.signOut() },
+  signOut: { limit: 120, maxBytes: 0, parse: none, run: ({ service }) => service.signOut() },
+  // The feeds (issue #943). A reconnecting feed subscribes at most once a
+  // second, and an acknowledgement follows each batch of frames; past these
+  // a batch waits, and a feed that waits too long is closed and resubscribes.
+  feedSubscribe: {
+    limit: 600,
+    maxBytes: 1024,
+    parse: (args) => {
+      const [id, request] = args;
+      const feed = args.length === 2 && isFeedId(id) ? parseFeedRequest(request) : null;
+      return feed === null ? null : [id, feed];
+    },
+    run: ({ feeds, document }, [id, request]) => feeds.subscribe(document, id as number, request as FeedRequest),
+  },
+  feedAck: { limit: 60_000, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.ack(document, id as number) },
+  feedUnsubscribe: { limit: 600, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.unsubscribe(document, id as number) },
 };
 
 export class Ipc {
@@ -230,7 +260,8 @@ export class Ipc {
     const parsed = spec.parse(args);
     if (parsed === null) return this.#refuse('shape');
     try {
-      return { ok: true, value: await spec.run(this.#deps.service, parsed) };
+      const to: Handlers = { service: this.#deps.service, feeds: this.#deps.feeds, document: this.#deps.gate.generation };
+      return { ok: true, value: await spec.run(to, parsed) };
     } catch {
       // A bug in a function is not the renderer's to learn about.
       return this.#refuse('error');
