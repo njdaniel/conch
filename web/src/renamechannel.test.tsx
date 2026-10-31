@@ -259,6 +259,19 @@ describe('the rename control', () => {
     await movedTo('managed-room', 'general');
   });
 
+  it('keeps the draft typed in the channel, in the box and in the tab, under the same id (issue #1039)', async () => {
+    await open();
+    fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'half a thought' } });
+    const form = openForm('general');
+    fireEvent.change(field(), { target: { value: 'renamed-room' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Rename channel' }));
+    await movedTo('renamed-room', 'general');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #renamed-room').value).toBe('half a thought');
+    await waitFor(() => {
+      expect(JSON.parse(window.sessionStorage.getItem('conch.web.drafts') ?? '{}')).toMatchObject({ drafts: { '7': 'half a thought' } });
+    });
+  });
+
   it('is not offered to a member', async () => {
     window.sessionStorage.clear();
     window.localStorage.setItem(key, secret);

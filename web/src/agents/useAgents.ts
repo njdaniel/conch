@@ -170,6 +170,9 @@ export interface Agents {
   readonly state: AgentsState;
   readonly session: OwnSession;
   readonly members: readonly ChannelMemberV1[];
+  // The channel whose members `members` is the answer for, or null before it
+  // comes: an empty list is only "nobody" once this is the open channel's id.
+  readonly membersFor: number | null;
   readonly refreshMembers: () => void;
   readonly release: () => Promise<void>;
   readonly loadRuns: (session: number) => void;
@@ -246,6 +249,7 @@ export function useAgents({
 }): Agents {
   const [state, dispatch] = useReducer(agentsReducer, initialAgents);
   const [members, setMembers] = useState<readonly ChannelMemberV1[]>([]);
+  const [membersFor, setMembersFor] = useState<number | null>(null);
   const own = useOwnSession(signedIn, onUnauthorized);
   const sessionId = own.session.phase === 'ready' ? own.session.id : null;
   const { replace, healthy, release } = own;
@@ -273,6 +277,7 @@ export function useAgents({
   const membersSent = useRef(0);
   useEffect(() => {
     setMembers([]);
+    setMembersFor(null);
   }, [channelId]);
   useEffect(() => {
     if (!open || channelId === null) return;
@@ -286,6 +291,7 @@ export function useAgents({
       if (result.ok) {
         if (asked === membersSent.current) {
           setMembers(result.value);
+          setMembersFor(id);
           onManages(id, result.value.some((member) => member.principal_id === viewer && member.manages === true));
         }
       } else if (result.failure === 'unauthorized') onUnauthorized();
@@ -405,6 +411,7 @@ export function useAgents({
             if (frame.members.channel_id !== id) return;
             membersSent.current++;
             setMembers(frame.members.members);
+            setMembersFor(id);
             onManages(id, frame.members.members.some((member) => member.principal_id === viewer && member.manages === true));
             break;
           case 'run':
@@ -600,5 +607,5 @@ export function useAgents({
     setMembersAttempt((n) => n + 1);
   }, []);
 
-  return { state, session: own.session, members, refreshMembers, release, loadRuns, openRun, closeRun, moreRuns, setRunFilter, ask };
+  return { state, session: own.session, members, membersFor, refreshMembers, release, loadRuns, openRun, closeRun, moreRuns, setRunFilter, ask };
 }

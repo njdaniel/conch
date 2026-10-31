@@ -226,6 +226,8 @@ func TestReactionConstants(t *testing.T) {
 		// Message editing (issue #845).
 		"MESSAGE_EDIT_WINDOW_SECONDS": MessageEditWindowSeconds,
 		"MAX_MESSAGE_EDITS":           MaxMessageEdits,
+		// Kept drafts (issue #1039): the web client budgets a draft inside it.
+		"MAX_POST_REQUEST_BYTES": MaxPostRequestBytes,
 		// The voice-control protocol, for the desktop owner (issue #948).
 		"VOICE_CONTROL_SUBCOMMAND":               VoiceControlSubcommand,
 		"VOICE_CONTROL_MAX_LINE_BYTES":           VoiceControlMaxLineBytes,

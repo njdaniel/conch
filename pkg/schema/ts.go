@@ -70,6 +70,7 @@ var TSConstants = []TSConstant{
 	// server would refuse it.
 	{Name: "MESSAGE_EDIT_WINDOW_SECONDS", Value: MessageEditWindowSeconds},
 	{Name: "MAX_MESSAGE_EDITS", Value: MaxMessageEdits},
+	{Name: "MAX_POST_REQUEST_BYTES", Value: MaxPostRequestBytes},
 
 	// The managed voice-helper control protocol, for the desktop owner's
 	// supervisor (issue #948, Q10 of #770): the helper's command line, the
