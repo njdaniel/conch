@@ -250,6 +250,52 @@ impl TrackLock {
     }
 }
 
+/// What the transmit task reads the time from, for what it measures by the clock rather than
+/// in frames: in open mode the hang, since the last frame and since the last sound, and in
+/// either mode the cut of a release tail that no frames come to end. Each reading is the
+/// time since some fixed moment, and never goes back.
+///
+/// Outside tests it is tokio's clock ([`TxClock::real`], the default). A test whose
+/// microphone is scripted frame by frame can give the task a clock that counts that
+/// microphone's frames instead, 10 ms each ([`TxClock::from_fn`]): then the clock and the
+/// frames agree, however late a loaded machine runs the task, and where a transmission ends
+/// is decided by the script alone. Nothing about the gate depends on which clock it is: a
+/// frame still reaches the track only through [`TransmitGate::pass`].
+#[derive(Clone)]
+pub struct TxClock(Arc<dyn Fn() -> Duration + Send + Sync>);
+
+impl TxClock {
+    /// Tokio's clock, counted from now.
+    #[must_use]
+    pub fn real() -> Self {
+        let origin = Instant::now();
+        Self(Arc::new(move || origin.elapsed()))
+    }
+
+    /// A clock that reads `now`, which must never go back.
+    #[must_use]
+    pub fn from_fn(now: impl Fn() -> Duration + Send + Sync + 'static) -> Self {
+        Self(Arc::new(now))
+    }
+
+    /// The time now, by this clock.
+    fn now(&self) -> Duration {
+        (self.0)()
+    }
+}
+
+impl Default for TxClock {
+    fn default() -> Self {
+        Self::real()
+    }
+}
+
+impl std::fmt::Debug for TxClock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TxClock")
+    }
+}
+
 /// The gate's settings for a release tail and a transmit limit. The limit becomes the
 /// gate's own cap in frames (`max_open_ms`), which needs no timer to hold.
 #[must_use]
@@ -293,12 +339,13 @@ pub fn spawn<F: MicFeed>(config: GateConfig) -> Result<Transmitter<F>, AudioErro
     spawn_with_level(
         config,
         level_config(DEFAULT_OPEN_THRESHOLD_DB, DEFAULT_OPEN_HANG_MS),
+        TxClock::real(),
     )
 }
 
-/// As [`spawn`], with this level and hang for open mode. The task starts in push-to-talk
-/// mode, and runs the level detector only once the push-to-talk machine has said open mode
-/// ([`GateCommand::TalkMode`]).
+/// As [`spawn`], with this level and hang for open mode, and what is measured by the clock
+/// read from `clock`. The task starts in push-to-talk mode, and runs the level detector only
+/// once the push-to-talk machine has said open mode ([`GateCommand::TalkMode`]).
 ///
 /// # Errors
 ///
@@ -306,10 +353,11 @@ pub fn spawn<F: MicFeed>(config: GateConfig) -> Result<Transmitter<F>, AudioErro
 pub fn spawn_with_level<F: MicFeed>(
     config: GateConfig,
     level: LevelConfig,
+    clock: TxClock,
 ) -> Result<Transmitter<F>, AudioError> {
     let gate = TransmitGate::new(config)?;
     let tail = Duration::from_millis(u64::from(config.release_tail_ms));
-    let listen = Listen::new(level, tail)?;
+    let listen = Listen::new(level, tail, clock)?;
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (event_tx, events) = mpsc::unbounded_channel();
     let frames_sent = Arc::new(AtomicU64::new(0));
@@ -370,31 +418,39 @@ struct Listen {
     /// ([`restarts_detector`]). Every report carries it, so that one made before the latest
     /// restart is known for stale ([`Transmitter::is_current`]).
     restarts: u64,
+    /// What the times below are read from.
+    clock: TxClock,
     /// Where a stretch with no frame is measured from: the last frame the detector was
     /// given, or the moment it was last put back in its sounding state, whichever is later.
-    since: Instant,
+    since: Duration,
     /// Where the time with no sound is measured from: the last frame at or above the level,
     /// or the moment the detector was last put back in its sounding state.
-    sound_at: Instant,
+    sound_at: Duration,
     /// The release tail, as time: in open mode it ends by the clock as well as by frames,
     /// since a source that delivers slowly, or not at all, would otherwise make it last.
     tail: Duration,
     /// When the gate was last told to shut after its tail, in open mode.
-    tail_from: Option<Instant>,
+    tail_from: Option<Duration>,
 }
 
 impl Listen {
-    fn new(level: LevelConfig, tail: Duration) -> Result<Self, AudioError> {
-        let now = Instant::now();
+    fn new(level: LevelConfig, tail: Duration, clock: TxClock) -> Result<Self, AudioError> {
+        let now = clock.now();
         Ok(Self {
             mode: TalkMode::PushToTalk,
             detector: LevelDetector::new(level)?,
             restarts: 0,
+            clock,
             since: now,
             sound_at: now,
             tail,
             tail_from: None,
         })
+    }
+
+    /// The time since `then`, a reading of this clock.
+    fn elapsed_since(&self, then: Duration) -> Duration {
+        self.clock.now().saturating_sub(then)
     }
 
     fn is_open(&self) -> bool {
@@ -407,7 +463,7 @@ impl Listen {
     fn start_sounding(&mut self) {
         self.detector.start_sounding();
         self.restarts += 1;
-        let now = Instant::now();
+        let now = self.clock.now();
         self.since = now;
         self.sound_at = now;
     }
@@ -425,7 +481,7 @@ impl Listen {
         if !self.is_open() {
             return None;
         }
-        let now = Instant::now();
+        let now = self.clock.now();
         self.since = now;
         let change = self.detector.frame(frame);
         if self.detector.last_frame_loud() {
@@ -433,7 +489,7 @@ impl Listen {
         }
         // Quiet frames that trickle in can each be too late to count, and still too early
         // for the stretch with none to reach the hang: the time since the last sound ends it.
-        let change = change.or_else(|| self.detector.silent_for(self.sound_at.elapsed()));
+        let change = change.or_else(|| self.detector.silent_for(self.elapsed_since(self.sound_at)));
         change.map(|change| self.report(change))
     }
 
@@ -443,16 +499,20 @@ impl Listen {
         if !self.is_open() {
             return None;
         }
+        let (no_frame, no_sound) = (
+            self.elapsed_since(self.since),
+            self.elapsed_since(self.sound_at),
+        );
         let change = self
             .detector
-            .no_frame_for(self.since.elapsed())
-            .or_else(|| self.detector.silent_for(self.sound_at.elapsed()));
+            .no_frame_for(no_frame)
+            .or_else(|| self.detector.silent_for(no_sound));
         change.map(|change| self.report(change))
     }
 
     /// The gate was told to shut after its tail.
     fn tail_began(&mut self) {
-        self.tail_from = Some(Instant::now());
+        self.tail_from = Some(self.clock.now());
     }
 
     /// Whether the release tail has run for as long as it lasts, by the clock, plus
@@ -460,7 +520,7 @@ impl Listen {
     /// the whole tail by then, so only one that has stopped delivering is cut.
     fn tail_over(&self) -> bool {
         self.tail_from
-            .is_some_and(|from| from.elapsed() >= self.tail + TAIL_SLACK)
+            .is_some_and(|from| self.elapsed_since(from) >= self.tail + TAIL_SLACK)
     }
 }
 
@@ -770,6 +830,28 @@ mod tests {
         }
     }
 
+    /// A clock the test moves by hand, a millisecond at a time if it likes: what the task
+    /// measures by the clock then happens at the moment the test says, however slowly the
+    /// machine runs the test.
+    #[derive(Clone, Default)]
+    struct Hand(Arc<AtomicU64>);
+
+    impl Hand {
+        fn clock(&self) -> TxClock {
+            let ms = Arc::clone(&self.0);
+            TxClock::from_fn(move || Duration::from_millis(ms.load(Ordering::SeqCst)))
+        }
+
+        fn advance(&self, by: Duration) {
+            let by = u64::try_from(by.as_millis()).unwrap();
+            self.0.fetch_add(by, Ordering::SeqCst);
+        }
+
+        fn now(&self) -> Duration {
+            Duration::from_millis(self.0.load(Ordering::SeqCst))
+        }
+    }
+
     /// A lock as the session loop leaves it while the track is unmuted.
     fn open_lock() -> TrackLock {
         let lock = TrackLock::new();
@@ -780,23 +862,25 @@ mod tests {
     /// A task's open-microphone part as it starts: in push-to-talk mode, with the default
     /// level and hang.
     fn push_to_talk() -> Listen {
-        Listen::new(level_config(-40, 400), Duration::ZERO).unwrap()
+        Listen::new(level_config(-40, 400), Duration::ZERO, TxClock::real()).unwrap()
     }
 
     /// The tail is over by the clock only once its length and TAIL_SLACK have passed (#686's
     /// review): a microphone that hands over a quantum at a time sends its last tail frames
-    /// up to a quantum after the length, and they must not be cut. Checked against the
-    /// clock as it is read, so a slow machine cannot make it fail.
+    /// up to a quantum after the length, and they must not be cut. On a clock moved by hand,
+    /// a millisecond at a time, so a slow machine cannot make it fail.
     #[test]
     fn the_tail_is_over_only_after_its_length_and_the_slack() {
         let tail = Duration::from_millis(20);
-        let mut listen = Listen::new(level_config(-40, 400), tail).unwrap();
+        let hand = Hand::default();
+        let mut listen = Listen::new(level_config(-40, 400), tail, hand.clock()).unwrap();
         assert!(!listen.tail_over(), "no tail has begun");
+        hand.advance(Duration::from_millis(7));
         listen.tail_began();
-        let began = Instant::now();
+        let began = hand.now();
         loop {
             let over = listen.tail_over();
-            let elapsed = began.elapsed();
+            let elapsed = hand.now() - began;
             // At least a quantum of a 2048-sample graph (43 ms) past the length, whatever
             // TAIL_SLACK is set to.
             if elapsed < tail + Duration::from_millis(43) {
@@ -806,10 +890,11 @@ mod tests {
                 );
             }
             if over {
+                assert_eq!(elapsed, tail + TAIL_SLACK, "over as soon as the slack is");
                 break;
             }
             assert!(elapsed < Duration::from_secs(5), "never over");
-            std::thread::sleep(Duration::from_millis(2));
+            hand.advance(Duration::from_millis(1));
         }
     }
 
@@ -863,9 +948,13 @@ mod tests {
         .await;
     }
 
-    /// A source with no clock is read once every 10 ms, as it always was.
+    /// A source with no clock is read once every 10 ms, as it always was: it always has a
+    /// frame, and is not read again until the next tick. The bound is the ticks there can
+    /// have been in the time the reads took, by the clock as it is read, so a slow machine,
+    /// which only makes for fewer reads, cannot make it fail (issue #957).
     #[tokio::test]
     async fn a_microphone_with_no_clock_is_read_once_a_tick() {
+        let begun = Instant::now();
         let transmitter = spawn::<Record>(gate_config(0, Duration::from_secs(60))).unwrap();
         let reads = Arc::new(AtomicU64::new(0));
         let mic = Box::new(CountedTone(Arc::clone(&reads))) as BoxedMic;
@@ -875,9 +964,16 @@ mod tests {
                 .send(TxCommand::Microphone(mic))
                 .is_ok()
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        until("ten reads", Duration::from_secs(10), || {
+            reads.load(Ordering::Relaxed) >= 10
+        })
+        .await;
+        // Read before the clock, so that no read can come between the two.
         let n = reads.load(Ordering::Relaxed);
-        assert!((10..=25).contains(&n), "{n} reads in 200 ms");
+        let elapsed = begun.elapsed();
+        // The first tick is at once, and the others 10 ms apart at the soonest.
+        let ticks = u64::try_from(elapsed.as_millis() / 10).unwrap() + 1;
+        assert!(n <= ticks, "{n} reads in {elapsed:?}");
     }
 
     /// The gate judges a frame when it is passed, so what a stalled task found waiting when
@@ -1103,6 +1199,15 @@ mod tests {
             tail_ms: u32,
             hang_ms: u32,
         ) -> (Task<Record>, Ring, Record, mpsc::UnboundedReceiver<TxEvent>) {
+            task_on(tail_ms, hang_ms, TxClock::real())
+        }
+
+        /// As [`task`], with what it measures by the clock read from `clock`.
+        fn task_on(
+            tail_ms: u32,
+            hang_ms: u32,
+            clock: TxClock,
+        ) -> (Task<Record>, Ring, Record, mpsc::UnboundedReceiver<TxEvent>) {
             let (events, said) = mpsc::unbounded_channel();
             let (_, commands) = mpsc::unbounded_channel();
             let (ring, record) = (Ring::default(), Record::default());
@@ -1120,6 +1225,7 @@ mod tests {
                 listen: Listen::new(
                     level_config(-40, hang_ms),
                     Duration::from_millis(u64::from(tail_ms)),
+                    clock,
                 )
                 .unwrap(),
                 mic_changes: 0,
@@ -1157,7 +1263,15 @@ mod tests {
         async fn listening(
             tail_ms: u32,
         ) -> (Task<Record>, Ring, Record, mpsc::UnboundedReceiver<TxEvent>) {
-            let (mut task, ring, record, mut said) = task(tail_ms, 100);
+            listening_on(tail_ms, TxClock::real()).await
+        }
+
+        /// As [`listening`], with what the task measures by the clock read from `clock`.
+        async fn listening_on(
+            tail_ms: u32,
+            clock: TxClock,
+        ) -> (Task<Record>, Ring, Record, mpsc::UnboundedReceiver<TxEvent>) {
+            let (mut task, ring, record, mut said) = task_on(tail_ms, 100, clock);
             task.obey(TxCommand::Gate(GateCommand::TalkMode(TalkMode::Open)));
             for n in 0..10 {
                 push_quiet(&ring, n);
@@ -1319,9 +1433,13 @@ mod tests {
 
         /// A source that stops delivering counts as quiet, and the release tail, which the
         /// gate counts in frames, is cut once no frame has come for as long as it had left.
+        /// On a clock moved by hand: each thing happens at the millisecond it should, and
+        /// not one before, however slowly the machine runs the test (issue #957).
         #[tokio::test]
         async fn a_microphone_that_stops_delivering_counts_as_quiet_and_its_tail_is_cut() {
-            let (mut task, ring, record, mut said) = listening(50).await;
+            let ms = Duration::from_millis;
+            let hand = Hand::default();
+            let (mut task, ring, record, mut said) = listening_on(50, hand.clock()).await;
             ring.push(1);
             read_all(&mut task).await;
             assert_eq!(reported(&mut said), [sound(true)]);
@@ -1330,47 +1448,32 @@ mod tests {
             read_all(&mut task).await;
             assert_eq!(record.heard(), [2.0]);
 
-            // No frame comes. Short of the hang (100 ms) nothing is said: checked against the
-            // task's own measure, taken after the look, so that a test thread the system
-            // held up for longer than that does not count as the detector speaking early.
-            std::thread::sleep(Duration::from_millis(40));
+            // No frame comes. Short of the hang (100 ms) nothing is said; at it, quiet.
+            hand.advance(ms(40));
             read_all(&mut task).await;
-            let mut quiet = reported(&mut said);
-            if task.listen.since.elapsed() < Duration::from_millis(100) {
-                assert_eq!(quiet, [], "quiet before the hang");
-            }
-            while task.listen.since.elapsed() < Duration::from_millis(110) {
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            hand.advance(ms(59));
             read_all(&mut task).await;
-            quiet.extend(reported(&mut said));
-            assert_eq!(quiet, [sound(false)]);
+            assert_eq!(reported(&mut said), [], "quiet before the hang");
+            hand.advance(ms(1));
+            read_all(&mut task).await;
+            assert_eq!(reported(&mut said), [sound(false)]);
 
             // The machine shuts the gate. Its tail of 50 ms, which the gate counts in frames,
             // would never run out with none coming: it is cut once it has run for 50 ms and
             // TAIL_SLACK by the clock, and not before.
             task.obey(TxCommand::Gate(GateCommand::Shut));
             assert_eq!(reported(&mut said), []);
-            let mut shut = Vec::new();
             for _ in 0..3 {
+                hand.advance(ms(10));
                 read_all(&mut task).await;
-                shut.extend(reported(&mut said));
-                if task.listen.tail_from.unwrap().elapsed() < Duration::from_millis(50) + TAIL_SLACK
-                {
-                    assert_eq!(shut, [], "the tail was cut short");
-                }
-                std::thread::sleep(Duration::from_millis(10));
             }
-            for _ in 0..200 {
-                if task.listen.tail_over() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
+            hand.advance(ms(50) + TAIL_SLACK - ms(31));
             read_all(&mut task).await;
-            shut.extend(reported(&mut said));
+            assert_eq!(reported(&mut said), [], "the tail was cut short");
+            hand.advance(ms(1));
+            read_all(&mut task).await;
             assert_eq!(
-                shut,
+                reported(&mut said),
                 [TxEvent::GateShut {
                     limit_reached: false
                 }]
@@ -1387,13 +1490,15 @@ mod tests {
         /// 10 ms × frames + period reaches the hang, which for a period of half the hang
         /// takes hang²/40 (4 s at the default hang, 100 s at the longest). Here every 50 ms
         /// with a hang of 100: counted alone, quiet after five frames, 250 ms. Quiet comes
-        /// once the hang has passed since the last sound, after at most three, and the tail
-        /// is cut once it has run for its length, with at most two trickled frames sent in it
-        /// (counted alone, its 50 ms would be five).
+        /// once the hang has passed since the last sound, at the second, and the tail is cut
+        /// once it has run for its length, with at most two trickled frames sent in it
+        /// (counted alone, its 50 ms would be five). On a clock moved by hand, 10 ms a look
+        /// as the task's pace would look, so the machine's speed changes nothing (#957).
         #[tokio::test]
         async fn a_trickle_of_quiet_frames_goes_quiet_within_the_hang_and_its_tail_is_cut() {
-            let trickle = Duration::from_millis(50);
-            let (mut task, ring, record, mut said) = listening(50).await;
+            let (look, trickle) = (Duration::from_millis(10), Duration::from_millis(50));
+            let hand = Hand::default();
+            let (mut task, ring, record, mut said) = listening_on(50, hand.clock()).await;
             ring.push(1);
             read_all(&mut task).await;
             assert_eq!(reported(&mut said), [sound(true)]);
@@ -1401,44 +1506,50 @@ mod tests {
             ring.push(2);
             read_all(&mut task).await;
             assert_eq!(record.heard(), [2.0]);
+            let last_sound = hand.now();
 
-            // One quiet frame every 90 ms, looked for every 10 ms as the task's pace would.
+            // One quiet frame every 50 ms, looked for every 10 ms.
             let mut trickled = 0;
-            let mut last_push = Instant::now();
-            let quiet = loop {
-                if last_push.elapsed() >= trickle {
+            let mut last_push = hand.now();
+            let mut trickle_on = || {
+                hand.advance(look);
+                if hand.now() - last_push >= trickle {
                     push_quiet(&ring, trickled);
                     trickled += 1;
-                    last_push = Instant::now();
+                    last_push = hand.now();
                 }
+            };
+            let quiet = loop {
+                trickle_on();
                 read_all(&mut task).await;
                 let now = reported(&mut said);
                 if !now.is_empty() {
                     break now;
                 }
-                assert!(trickled < 10, "no quiet after {trickled} trickled frames");
-                std::thread::sleep(Duration::from_millis(10));
+                assert!(
+                    hand.now() < Duration::from_secs(1),
+                    "no quiet after a second"
+                );
             };
             assert_eq!(quiet, [sound(false)]);
-            assert!(trickled <= 3, "quiet only after {trickled} trickled frames");
+            assert_eq!(
+                hand.now() - last_sound,
+                Duration::from_millis(100),
+                "quiet at the hang"
+            );
 
             // The machine shuts the gate; the tail of 50 ms ends by the clock, whatever the
             // trickle.
             task.obey(TxCommand::Gate(GateCommand::Shut));
-            let heard_at_shut = record.heard().len();
+            let (heard_at_shut, shut_at) = (record.heard().len(), hand.now());
             let shut = loop {
-                if last_push.elapsed() >= trickle {
-                    push_quiet(&ring, trickled);
-                    trickled += 1;
-                    last_push = Instant::now();
-                }
+                trickle_on();
                 read_all(&mut task).await;
                 let now = reported(&mut said);
                 if !now.is_empty() {
                     break now;
                 }
-                assert!(trickled < 20, "the tail never ended");
-                std::thread::sleep(Duration::from_millis(10));
+                assert!(hand.now() < Duration::from_secs(1), "the tail never ended");
             };
             assert_eq!(
                 shut,
@@ -1446,6 +1557,7 @@ mod tests {
                     limit_reached: false
                 }]
             );
+            assert_eq!(hand.now() - shut_at, Duration::from_millis(50) + TAIL_SLACK);
             assert!(
                 record.heard().len() <= heard_at_shut + 2,
                 "{} frames in the tail",
@@ -1502,7 +1614,10 @@ mod tests {
 
             let level = level_config(-40, 100);
             let config = gate_config(0, Duration::from_secs(60));
-            let mut transmitter = spawn_with_level::<Record>(config, level).unwrap();
+            // Time stands still for the detector: only frames count, so a test thread the
+            // machine holds up cannot make quiet come between two pushes (issue #957).
+            let still = TxClock::from_fn(|| Duration::ZERO);
+            let mut transmitter = spawn_with_level::<Record>(config, level, still).unwrap();
             transmitter.track_lock.reopen();
             let (ring, record) = (Ring::default(), Record::default());
             let now = || Duration::ZERO;
