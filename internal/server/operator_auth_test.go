@@ -206,10 +206,18 @@ func TestOperatorSetupAndSignIn(t *testing.T) {
 		!cred.IdleExpiresAt.Time().Equal(now.Add(time.Hour)) || cred.Renews {
 		t.Errorf("the operator session: %+v", cred)
 	}
-	if got := f.whoamiAuth(t, tok); !got.SetupComplete || !got.TOTPEnrolled || got.IdleExpiresAt == nil || got.RecentAuthUntil != nil {
+	// The sign-in with both factors is the proof for its first ten minutes
+	// (issue #1033), and the sensitive action needs nothing more.
+	if got := f.whoamiAuth(t, tok); !got.SetupComplete || !got.TOTPEnrolled || got.IdleExpiresAt == nil ||
+		got.RecentAuthUntil == nil || !got.RecentAuthUntil.Time().Equal(now.Add(schema.RecentAuthLifetimeSeconds*time.Second)) {
 		t.Errorf("whoami on the session: %+v", got)
 	}
 	f.nextStep()
+	if rec := f.sensitive(t, tok); rec.Code != http.StatusCreated {
+		t.Fatalf("a sensitive action just after the sign-in = %d %s", rec.Code, rec.Body)
+	}
+	// After them, it asks for a fresh one.
+	f.advance(schema.RecentAuthLifetimeSeconds * time.Second)
 	assertErrorBody(t, f.sensitive(t, tok), http.StatusForbidden, schema.ErrorCodeReauthRequired)
 	if rec := f.reauthOp(t, tok, newRoot, f.code(secret)); rec.Code != http.StatusOK {
 		t.Fatalf("reauth = %d %s", rec.Code, rec.Body)
@@ -657,6 +665,9 @@ func TestRecentAuthGate(t *testing.T) {
 	f := newOperatorFixture(t)
 	secret := f.enrolOperator(t, f.root.ID)
 	_, session := f.operatorSession(t, secret)
+	// The gate is held to a session with no proof: the sign-in's own
+	// (issue #1033) is let run out first.
+	f.advance(schema.RecentAuthLifetimeSeconds * time.Second)
 	for pattern := range recentAuthRoutes {
 		exp := routeExpectations[pattern]
 		path := exp.path
@@ -702,6 +713,157 @@ func TestRecentAuthGate(t *testing.T) {
 	// it through with no proof. Last, since it ends the session.
 	if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", f.root.ID), session, "", ""); rec.Code == http.StatusForbidden {
 		t.Errorf("signing oneself out = %d %s", rec.Code, rec.Body)
+	}
+}
+
+// signInWithCode signs root in with password and code at the fixture's clock
+// and returns the session's token and the instant the code was accepted.
+func (f *operatorFixture) signInWithCode(t *testing.T, secret []byte) (string, time.Time) {
+	t.Helper()
+	ch := f.rootChallenge(t, rootPassword, "")
+	at := f.srv.now()
+	rec := f.completeLogin(t, ch, f.code(secret), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login/totp = %d %s", rec.Code, rec.Body)
+	}
+	return decodeBody[schema.LoginResponseV1](t, rec).Token, at
+}
+
+// inviteNow is the operator's first invite, a route of the
+// re-authentication class (audit 3 F8).
+func (f *operatorFixture) inviteNow(t *testing.T, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	return f.send(t, "POST", "/v1/invites", token, inviteJSON(t, personal("general")), "")
+}
+
+// A full sign-in with password and code is the recent proof for its first
+// ten minutes (design §5.3, issue #1033, audit 3 F8): whoami shows it, the
+// class admits the session within the window and asks again after it, and
+// an older session of the same operator gets nothing from it.
+func TestSignInIsTheRecentProof(t *testing.T) {
+	f := newOperatorFixture(t)
+	secret := f.enrolOperator(t, f.root.ID)
+	_, older := f.operatorSession(t, secret)
+	lifetime := schema.RecentAuthLifetimeSeconds * time.Second
+	// The next sign-in comes after the older session's own proof ran out.
+	f.advance(lifetime + time.Minute)
+	session, signedIn := f.signInWithCode(t, secret)
+
+	got := f.whoamiAuth(t, session).RecentAuthUntil
+	if want := signedIn.Add(lifetime); got == nil || got.Time().Sub(want).Abs() > time.Second {
+		t.Errorf("whoami recent_auth_until = %v, want %v ±1s", got, want)
+	}
+	if got := f.whoamiAuth(t, older).RecentAuthUntil; got != nil {
+		t.Errorf("the older session holds a proof to %v", got)
+	}
+	tests := []struct {
+		name  string
+		at    time.Duration
+		token string
+		want  int
+	}{
+		{"the older session, a minute on", time.Minute, older, http.StatusForbidden},
+		{"the new session, a minute on", time.Minute, session, http.StatusCreated},
+		{"the new session, nine minutes on", 9 * time.Minute, session, http.StatusCreated},
+		{"the new session, ten minutes and a second on", lifetime + time.Second, session, http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f.advance(signedIn.Add(tt.at).Sub(f.srv.now()))
+			rec := f.inviteNow(t, tt.token)
+			if tt.want == http.StatusForbidden {
+				assertErrorBody(t, rec, http.StatusForbidden, schema.ErrorCodeReauthRequired)
+				return
+			}
+			if rec.Code != tt.want {
+				t.Errorf("invite = %d %s, want %d", rec.Code, rec.Body, tt.want)
+			}
+		})
+	}
+	// The sign-in is audited as one, not as a re-authentication.
+	if n := len(auditRows(t, f.authFixture, store.AuditReauth)); n != 0 {
+		t.Errorf("%d reauth rows, want none", n)
+	}
+}
+
+// Every change that cleared a re-authentication's proof clears the
+// sign-in's (issue #1033): a password change leaves the rotated session
+// without one, and a second factor change (recovery) or signing out
+// everywhere ends the session with it.
+func TestSignInProofClears(t *testing.T) {
+	tests := []struct {
+		name string
+		// clear makes the change and returns the token that is left, if any.
+		clear func(t *testing.T, f *operatorFixture, secret []byte, session string) string
+	}{
+		{"a password change", func(t *testing.T, f *operatorFixture, secret []byte, session string) string {
+			rec := f.send(t, "PUT", "/v1/password/mine", session,
+				inviteJSON(t, schema.ChangePasswordRequestV1{Current: rootPassword, Password: newAlicePassword, Code: f.code(secret)}), "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("change = %d %s", rec.Code, rec.Body)
+			}
+			return decodeBody[schema.PasswordUpdatedResponseV1](t, rec).Token
+		}},
+		{"a second factor change by recovery", func(t *testing.T, f *operatorFixture, _ []byte, _ string) string {
+			if _, err := f.srv.store.RecoverOperator(context.Background(), f.root.ID, f.srv.now()); err != nil {
+				t.Fatalf("RecoverOperator = %v", err)
+			}
+			return ""
+		}},
+		{"signing out everywhere", func(t *testing.T, f *operatorFixture, _ []byte, session string) string {
+			if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", f.root.ID), session, "", ""); rec.Code >= 300 {
+				t.Fatalf("revoke-all = %d %s", rec.Code, rec.Body)
+			}
+			return ""
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newOperatorFixture(t)
+			secret := f.enrolOperator(t, f.root.ID)
+			session, _ := f.signInWithCode(t, secret)
+			f.nextStep()
+			if f.whoamiAuth(t, session).RecentAuthUntil == nil {
+				t.Fatal("the sign-in made no proof")
+			}
+			left := tt.clear(t, f, secret, session)
+			if got := f.status(t, session); got != http.StatusUnauthorized {
+				t.Errorf("the signed-in session = %d after the change, want 401", got)
+			}
+			if left == "" {
+				return
+			}
+			if got := f.whoamiAuth(t, left).RecentAuthUntil; got != nil {
+				t.Errorf("the session left holds a proof to %v", got)
+			}
+			assertErrorBody(t, f.inviteNow(t, left), http.StatusForbidden, schema.ErrorCodeReauthRequired)
+		})
+	}
+}
+
+// A password-only operator's sign-in and a member's are not the proof
+// (issue #1033 keeps them out of scope): whoami shows none.
+func TestPasswordSignInsAreNotTheProof(t *testing.T) {
+	tests := []struct {
+		name     string
+		who      string
+		password string
+	}{
+		{"a password-only operator on a temporary server", "root", rootPassword},
+		{"a member", "alice", alicePassword},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newModeFixture(t, temporary)
+			rec := f.login(t, tt.who, tt.password, "")
+			resp := decodeBody[schema.LoginResponseV1](t, rec)
+			if rec.Code != http.StatusOK || resp.Next != schema.LoginNextSignedIn {
+				t.Fatalf("login = %d %s", rec.Code, rec.Body)
+			}
+			if got := f.whoamiAuth(t, resp.Token).RecentAuthUntil; got != nil {
+				t.Errorf("the sign-in made a proof to %v", got)
+			}
+		})
 	}
 }
 

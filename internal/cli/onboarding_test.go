@@ -8,6 +8,7 @@ import (
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -171,6 +172,44 @@ func (e *onboardEnv) nextCode(t *testing.T, secret []byte) string {
 			return totp(secret, step)
 		}
 		time.Sleep(time.Second)
+	}
+}
+
+// dropSignInProof leaves the stored login without a recent proof. A sign-in
+// with password and code is one for ten minutes (issue #1033), on its own
+// session alone: the session rotated from it has none, and is stored in its
+// place, so the command's question is what a test reaches.
+func (e *onboardEnv) dropSignInProof(t *testing.T) {
+	t.Helper()
+	key, err := NormalizeServer(e.url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds, err := readCredentials()
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := creds[key].Token
+	_, cred, err := e.st.ResolveRequestCredential(context.Background(), token)
+	if err != nil {
+		t.Fatalf("the stored login: %v", err)
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, fmt.Sprintf("%s/v1/credentials/%d/rotate", e.url, cred.ID), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var rotated schema.RotateCredentialResponseV1
+	if err := json.NewDecoder(resp.Body).Decode(&rotated); err != nil || resp.StatusCode != http.StatusCreated {
+		t.Fatalf("rotate the stored login = %d, %v", resp.StatusCode, err)
+	}
+	if err := SaveToken(e.url, rotated.Token); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -476,12 +515,18 @@ func TestOperatorSetupLoginAndReauth(t *testing.T) {
 		t.Errorf("login stderr = %q", stderr)
 	}
 	who, _ := e.mustRun(t, "", "", "whoami")
-	if !strings.Contains(who, "class: operator\nsetup: complete (password set, authenticator enrolled)\nsign-in ends: ") {
+	if !strings.Contains(who, "class: operator\nsetup: complete (password set, authenticator enrolled)\nsign-in ends: ") ||
+		!strings.Contains(who, "re-authenticated until: ") {
 		t.Errorf("whoami = %q", who)
 	}
+	// The sign-in is the recent proof (issue #1033): nothing is asked.
+	if _, asked := e.mustRun(t, "", "", "admin", "join", "set", "--max-guests", "6"); asked != "" {
+		t.Errorf("asked just after the sign-in: %q", asked)
+	}
 
-	// The session holds no recent proof yet: the server asks, the command
-	// asks the person, and the change is made on the second send.
+	// A session with no recent proof: the server asks, the command asks
+	// the person, and the change is made on the second send.
+	e.dropSignInProof(t)
 	reauthCode := e.nextCode(t, secret)
 	set, asked := e.mustRun(t, "", operatorPassword+"\n"+reauthCode+"\n", "admin", "join", "set", "--max-guests", "7")
 	if asked != "This needs a recent proof that it is you: your password and an authenticator code.\n" {
@@ -546,6 +591,7 @@ func TestOperatorReauthRefused(t *testing.T) {
 	e := newOnboardEnv(t)
 	secret := e.setupOperator(t)
 	e.mustRun(t, "", operatorPassword+"\n"+e.nextCode(t, secret)+"\n", "login", "--password", "--name", "root")
+	e.dropSignInProof(t)
 	_, _, err := e.run(t, "", "not the operator password\n"+e.nextCode(t, secret)+"\n", "admin", "join", "set", "--guests", "on")
 	if err == nil || !strings.Contains(err.Error(), "the password or the code is not right") {
 		t.Fatalf("a wrong proof = %v", err)
