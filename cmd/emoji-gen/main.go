@@ -39,12 +39,13 @@ func main() {
 	pin := flag.String("sha256", "", "the file holding its pinned SHA-256 (sha256sum form)")
 	goOut := flag.String("go", "", "the Go file to write (package schema)")
 	jsonOut := flag.String("json", "", "the JSON catalog to write")
+	aliases := flag.String("aliases", "", "Conch's shortcode alias table (aliases.txt)")
 	flag.Parse()
-	if *data == "" || *pin == "" || *goOut == "" || *jsonOut == "" || flag.NArg() > 0 {
-		fmt.Fprintln(os.Stderr, "usage: emoji-gen -data <emoji-test.txt> -sha256 <pin file> -go <out.go> -json <out.json>")
+	if *data == "" || *pin == "" || *aliases == "" || *goOut == "" || *jsonOut == "" || flag.NArg() > 0 {
+		fmt.Fprintln(os.Stderr, "usage: emoji-gen -data <emoji-test.txt> -sha256 <pin file> -aliases <aliases.txt> -go <out.go> -json <out.json>")
 		os.Exit(2)
 	}
-	if err := run(*data, *pin, *goOut, *jsonOut); err != nil {
+	if err := run(*data, *pin, *aliases, *goOut, *jsonOut); err != nil {
 		fmt.Fprintln(os.Stderr, "emoji-gen:", err)
 		os.Exit(1)
 	}
@@ -52,7 +53,7 @@ func main() {
 
 // run generates both outputs into memory first, so that a refusal writes
 // nothing, then writes them.
-func run(dataPath, pinPath, goPath, jsonPath string) error {
+func run(dataPath, pinPath, aliasPath, goPath, jsonPath string) error {
 	data, err := os.ReadFile(dataPath) // #nosec G304 -- the path is this program's own flag
 	if err != nil {
 		return err
@@ -66,6 +67,13 @@ func run(dataPath, pinPath, goPath, jsonPath string) error {
 	}
 	c, err := parse(data)
 	if err != nil {
+		return err
+	}
+	aliasSrc, err := os.ReadFile(aliasPath) // #nosec G304 -- the path is this program's own flag
+	if err != nil {
+		return err
+	}
+	if err := applyAliases(c, aliasSrc); err != nil {
 		return err
 	}
 	goSrc, err := goSource(c)
@@ -124,10 +132,12 @@ type subgroup struct {
 }
 
 // entry is one fully-qualified sequence: the key is its UTF-8 string, the
-// name its CLDR short name from the line's comment.
+// name its CLDR short name from the line's comment. Aliases are the typed
+// names from aliases.txt (applyAliases); they reach the JSON catalog only.
 type entry struct {
-	Key  string
-	Name string
+	Key     string
+	Name    string
+	Aliases []string
 }
 
 // parse reads the file. Every line is either blank, a comment (`# Version:`,
@@ -243,6 +253,69 @@ func parse(data []byte) (*catalog, error) {
 	return c, nil
 }
 
+// applyAliases reads Conch's alias table (see aliases.txt) and attaches each
+// alias to the catalog entry its sequence names. Every alias must name a
+// fully-qualified sequence of the pinned data, once selectors are stripped,
+// and be unique, or it fails naming the alias and the line. The Go table is
+// not touched: aliases are names for typing, never reaction keys.
+func applyAliases(c *catalog, src []byte) error {
+	byStripped := map[string]*entry{}
+	for gi := range c.Groups {
+		for si := range c.Groups[gi].Subgroups {
+			sg := &c.Groups[gi].Subgroups[si]
+			for ei := range sg.Emoji {
+				byStripped[stripSelectors(sg.Emoji[ei].Key)] = &sg.Emoji[ei]
+			}
+		}
+	}
+	seen := map[string]int{}
+	for n, line := range strings.Split(string(src), "\n") {
+		lineNo := n + 1
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		alias := fields[0]
+		if !validAlias(alias) {
+			return fmt.Errorf("aliases line %d: alias %q is not lower-case a-z, 0-9, '_', '+' or '-'", lineNo, alias)
+		}
+		if first, dup := seen[alias]; dup {
+			return fmt.Errorf("aliases line %d: alias %q is already defined on line %d", lineNo, alias, first)
+		}
+		seen[alias] = lineNo
+		if len(fields) < 2 {
+			return fmt.Errorf("aliases line %d: alias %q has no code points", lineNo, alias)
+		}
+		var seq strings.Builder
+		for _, p := range fields[1:] {
+			r, err := parseCodePoint(p)
+			if err != nil {
+				return fmt.Errorf("aliases line %d: alias %q: %w", lineNo, alias, err)
+			}
+			seq.WriteRune(r)
+		}
+		e, ok := byStripped[stripSelectors(seq.String())]
+		if !ok {
+			return fmt.Errorf("aliases line %d: alias %q names %s, which is no fully-qualified sequence of the pinned data", lineNo, alias, codePoints(seq.String()))
+		}
+		e.Aliases = append(e.Aliases, alias)
+	}
+	return nil
+}
+
+func validAlias(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' && r != '+' && r != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 // parseCodePoint reads one hexadecimal code point of a data line: a scalar
 // value, so neither a surrogate nor anything past U+10FFFF.
 func parseCodePoint(p string) (rune, error) {
@@ -345,8 +418,9 @@ type jsonSubgroup struct {
 }
 
 type jsonEmoji struct {
-	Key  string `json:"key"`
-	Name string `json:"name"`
+	Key     string   `json:"key"`
+	Name    string   `json:"name"`
+	Aliases []string `json:"aliases,omitempty"`
 }
 
 func jsonCatalog(c *catalog) ([]byte, error) {
