@@ -22,6 +22,7 @@ import {
   editMessage,
   loadThread,
   messageRevisions,
+  onCredentialReplacing,
   onReauthRequired,
   onSignedOutElsewhere,
   openSocket,
@@ -51,6 +52,7 @@ afterEach(async () => {
 });
 
 const key = 'conch.web.token';
+const revokedClose = 'credential no longer valid';
 const memberToken = 'conch_member_secret';
 const otherMemberToken = 'conch_other_member_secret';
 const operatorToken = 'conch_operator_secret';
@@ -1144,6 +1146,160 @@ describe('a credential replaced while a call was out', () => {
     expect(hasToken()).toBe(true);
     await whoAmI();
     expect(server.calls.at(-1)?.auth).toBe(`Bearer ${rotatedToken}`);
+  });
+
+
+  // Issue #1084: a socket opened while the change is out would ask for its
+  // ticket with a credential about to be revoked, and be refused: a request
+  // known to fail, which the browser logs as an error. It waits for the answer
+  // instead, and asks once, with the new credential. A socket the revocation
+  // closed with 1008 is told to its owner as lost, not refused, so the owner
+  // asks nobody who it is with the old credential.
+  it('holds the opening of a socket while the change is out, and a 1008 the change caused reaches its owner as lost', async () => {
+    const server = await signedInToChange();
+    const opened: { url: string; onclose: ((event: { code: number; reason?: string }) => void) | null }[] = [];
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen: (() => void) | null = null;
+        onmessage: (() => void) | null = null;
+        onclose: ((event: { code: number; reason?: string }) => void) | null = null;
+        constructor(readonly url: string) {
+          opened.push(this);
+        }
+        close() {
+          return undefined;
+        }
+      },
+    );
+    const closes: number[] = [];
+    const events = { onOpen: () => undefined, onFrame: () => undefined, onClose: (code: number) => closes.push(code) };
+    // A socket open from before the change.
+    expect((await openSocket('ops', 0, events)).ok).toBe(true);
+    const change = holding(server, 'PUT', changing, memberToken);
+    const changed = changePassword('the old one', 'a new one');
+    await sent(server, changing);
+    const later = openSocket('ops', 0, events);
+    await new Promise((r) => setTimeout(r, 20));
+    // No ticket has been asked for, and no second socket opened.
+    expect(auths(server, '/v1/ws-tickets')).toHaveLength(1);
+    expect(opened).toHaveLength(1);
+    // The revocation closes the first socket, 1008, before the answer is read.
+    opened[0]?.onclose?.({ code: 1008, reason: revokedClose });
+    change.give(json(rotated));
+    expect((await changed).ok).toBe(true);
+    expect((await later).ok).toBe(true);
+    expect(auths(server, '/v1/ws-tickets')).toEqual([`Bearer ${memberToken}`, `Bearer ${rotatedToken}`]);
+    expect(opened).toHaveLength(2);
+    expect(closes).toEqual([1006]);
+    // After the change a 1008 of the socket opened under the old credential is
+    // still the change's, but one of the new credential's is a refusal.
+    opened[0]?.onclose?.({ code: 1008, reason: revokedClose });
+    opened[1]?.onclose?.({ code: 1008, reason: revokedClose });
+    expect(closes).toEqual([1006, 1006, 1008]);
+  });
+
+  // A 1008 that means something else (the channel lost, the session ended)
+  // keeps its reason while a change is out, failed or unanswered: the owner
+  // acts on it.
+  describe('a close that is not the credential revoked', () => {
+    async function openedWithChange(held: 'failed' | 'unanswered') {
+      const server = await signedInToChange();
+      const sockets: { onclose: ((event: { code: number; reason?: string }) => void) | null }[] = [];
+      vi.stubGlobal(
+        'WebSocket',
+        class {
+          onopen: (() => void) | null = null;
+          onmessage: (() => void) | null = null;
+          onclose: ((event: { code: number; reason?: string }) => void) | null = null;
+          constructor() {
+            sockets.push(this);
+          }
+          close() {
+            return undefined;
+          }
+        },
+      );
+      const closes: { code: number; reason?: string }[] = [];
+      expect((await openSocket('ops', 0, { onOpen: () => undefined, onFrame: () => undefined, onClose: (code, reason) => closes.push({ code, reason }) })).ok).toBe(true);
+      const change = holding(server, 'PUT', changing, memberToken);
+      const changed = changePassword('the old one', 'a new one');
+      await sent(server, changing);
+      if (held === 'failed') change.give(json({ code: 'auth_failed', message: 'no' }, 403));
+      return { sockets, closes, change, changed };
+    }
+
+    it.each(['failed', 'unanswered'] as const)('reaches its owner with its reason during a write that %s', async (held) => {
+      const { sockets, closes, change, changed } = await openedWithChange(held);
+      if (held === 'failed') await changed;
+      sockets[0]?.onclose?.({ code: 1008, reason: 'no longer a member of this channel' });
+      sockets[0]?.onclose?.({ code: 1008, reason: 'session ended' });
+      expect(closes).toEqual([
+        { code: 1008, reason: 'no longer a member of this channel' },
+        { code: 1008, reason: 'session ended' },
+      ]);
+      change.give(json(rotated));
+      await changed;
+    });
+  });
+
+  // A write that is not answered releases what waits for it at the deadline,
+  // and tells its listeners it ended unreplaced; answered later with a new
+  // credential, it tells them once more.
+  it('drops an unanswered change at the deadline, and tells a late answer', async () => {
+    const server = await signedInToChange();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const told: string[] = [];
+      const stop = onCredentialReplacing((e) => {
+        told.push(e.phase === 'begin' ? 'begin' : `end rotated=${String(e.rotated)} late=${String(e.late)}`);
+      });
+      vi.stubGlobal(
+        'WebSocket',
+        class {
+          onopen: (() => void) | null = null;
+          onmessage: (() => void) | null = null;
+          onclose: (() => void) | null = null;
+          close() {
+            return undefined;
+          }
+        },
+      );
+      const change = holding(server, 'PUT', changing, memberToken);
+      const changed = changePassword('the old one', 'a new one');
+      await sent(server, changing);
+      let opened = false;
+      void openSocket('ops', 0, { onOpen: () => undefined, onFrame: () => undefined, onClose: () => undefined }).then(() => {
+        opened = true;
+      });
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(opened).toBe(false);
+      expect(told).toEqual(['begin']);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(opened).toBe(true);
+      expect(told).toEqual(['begin', 'end rotated=false late=false']);
+      change.give(json(rotated));
+      await changed;
+      expect(told).toEqual(['begin', 'end rotated=false late=false', 'end rotated=true late=true']);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('tells a listener that a change begins before it is sent, and ends with whether the credential was replaced', async () => {
+    const server = await signedInToChange();
+    const told: string[] = [];
+    const stop = onCredentialReplacing((event) => {
+      told.push(event.phase === 'begin' ? `begin (calls so far: ${String(server.calls.length)})` : `end rotated=${String(event.rotated)}`);
+    });
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    // A change the server refuses leaves the credential in force.
+    server.state.before.push(json({ code: 'auth_failed', message: 'no' }, 403));
+    expect((await changePassword('wrong', 'a new one')).ok).toBe(false);
+    stop();
+    await changePassword('the old one', 'again');
+    expect(told).toEqual(['begin (calls so far: 0)', 'end rotated=true', 'begin (calls so far: 1)', 'end rotated=false']);
   });
 
   it('waits for the change when the old one is refused before its answer is read', async () => {

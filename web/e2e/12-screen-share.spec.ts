@@ -296,6 +296,29 @@ test.describe('screen share with LiveKit', () => {
     return (await vw.audit()).filter((e) => e.action.startsWith('voice_share_')).map(({ action, detail }) => ({ action, detail }));
   }
 
+  // Issue #1084 (browser UX audit 4, F7): starting a share leaves one console
+  // error, the camera report that Chromium makes by itself when getDisplayMedia
+  // opens the picker, whatever the options (checked on the pinned Chromium for
+  // a bare call, for { video: true } and for the page's own capture options),
+  // so the page cannot avoid it and the Permissions-Policy stays camera=().
+  // Nothing else is an error: the share asks for no request that is known to
+  // fail.
+  test('F7 starting a share at 1440×900 logs no console error but the one camera report the browser makes itself', async ({ browser }) => {
+    const a = await person(browser, 'alice', { viewport: { width: 1440, height: 900 } });
+    try {
+      await join(a, 'Join voice');
+      await share(a);
+      await a.watch.settled();
+      const errors = a.watch.console.filter((l) => l.startsWith('error: '));
+      expect(errors).toEqual([cameraReport]);
+      await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
+      await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
+      await expectClean(a, 1);
+    } finally {
+      await a.close();
+    }
+  });
+
   test('a member shares a screen with sound; another watches it without a microphone; a third is told who is sharing; stopping closes the view', async ({ browser }) => {
     const before = (await shareRows()).length;
     const a = await person(browser, 'alice');

@@ -195,6 +195,11 @@ export type Snapshot =
 // (schema.ErrorCodeVoiceNotAllowed).
 const voiceNotAllowed = 'voice_not_allowed';
 
+// The reason conchd gives when it closes a voice socket (1008) because its
+// reader is no longer a member of the channel. The channel is then gone, and
+// the read that would say so is a request known to fail (issue #1084).
+const noLongerMember = 'no longer a member of this channel';
+
 export interface VoiceControl {
   readonly state: VoiceState;
   readonly snapshot: Snapshot;
@@ -363,6 +368,8 @@ export function useVoice({
         setSnapshot({ kind: 'unreachable' });
       }
     };
+    // The reason of the socket's last close.
+    let closeReason = '';
     const feed = new Feed({
       channel: named(),
       clock: realClock,
@@ -371,7 +378,14 @@ export function useVoice({
       // silence watchdog is long: a reconnect is a fresh snapshot.
       silence: 300_000,
       // Each attempt names the channel as it is called then.
-      open: (_channel, _after, events) => api.openVoiceSocket(named(), events),
+      open: (_channel, _after, events) =>
+        api.openVoiceSocket(named(), {
+          ...events,
+          onClose: (code, why) => {
+            closeReason = why ?? '';
+            events.onClose(code, why);
+          },
+        }),
       onFrame: (data) => {
         const presence = parsePresence(data);
         if (presence === null || !live) return;
@@ -392,6 +406,12 @@ export function useVoice({
     // voice withdrawn, the channel lost, or neither (it answers), when the
     // feed goes back through its backoff rather than retrying at once.
     const settle = () => {
+      // Told it by the close itself: the channel is gone, and asking would
+      // only be answered 404.
+      if (closeReason === noLongerMember) {
+        set('gone');
+        return;
+      }
       void api.getVoicePresence(named()).then((result) => {
         if (!live) return;
         if (result.ok) {
