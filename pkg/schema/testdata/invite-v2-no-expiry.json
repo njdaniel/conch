@@ -1,0 +1,10 @@
+{
+  "id": 13,
+  "kind": "member",
+  "created_by": 1,
+  "created_by_name": "nick",
+  "created_at": "2026-10-30T12:00:00.000Z",
+  "uses": 0,
+  "joiners": 0,
+  "credential_lifetime_seconds": 7776000
+}

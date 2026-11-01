@@ -1,0 +1,12 @@
+{
+  "members": [
+    {
+      "id": 3,
+      "kind": "human",
+      "name": "wren",
+      "role": "member",
+      "created_at": "2026-10-30T12:00:00.000Z"
+    }
+  ],
+  "scope": "shared_channels"
+}

@@ -1,0 +1,26 @@
+{
+  "members": [
+    {
+      "id": 1,
+      "kind": "human",
+      "name": "nick",
+      "role": "operator",
+      "created_at": "2026-07-13T12:34:56.000Z"
+    },
+    {
+      "id": 3,
+      "kind": "human",
+      "name": "wren",
+      "role": "member",
+      "created_at": "2026-10-30T12:00:00.000Z"
+    },
+    {
+      "id": 5,
+      "kind": "agent",
+      "name": "leviathan",
+      "created_at": "2026-08-01T09:00:00.000Z"
+    }
+  ],
+  "after": 5,
+  "scope": "everyone"
+}

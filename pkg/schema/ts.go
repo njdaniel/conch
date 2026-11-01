@@ -99,6 +99,11 @@ var TSConstants = []TSConstant{
 	{Name: "VOICE_CONTROL_PIPE_NONCE_ENV", Value: VoiceControlPipeNonceEnv},
 	{Name: "VOICE_CONTROL_PIPE_NONCE_BYTES", Value: VoiceControlPipeNonceBytes},
 	{Name: "VOICE_CONTROL_PIPE_NONCE_CHARS", Value: VoiceControlPipeNonceChars},
+
+	// The community model (ADR-013, issue #978): the authors route's batch
+	// size, and the default expiry the link form shows when none is typed.
+	{Name: "MAX_CHANNEL_AUTHOR_IDS", Value: MaxChannelAuthorIDs},
+	{Name: "DEFAULT_MEMBER_LINK_EXPIRY_SECONDS", Value: DefaultMemberLinkExpirySeconds},
 }
 
 // TSTypes is every struct the web client reads or sends, and the refusal
@@ -367,6 +372,36 @@ var TSTypes = []TSType{
 	{Value: PermissionChangeV1{}},
 	{Value: PutPermissionsRequestV1{}, Family: "put-permissions-request-v1"},
 	{Value: PermissionsChangedV1{}, Family: "permissions-changed-v1", Schema: PermissionsChangedSchemaV1},
+
+	// The community model (ADR-013, issue #978,
+	// docs/design/community-model.md §3): channels a member creates and
+	// operators set, the channel directory and self-join, member links (v2
+	// invites), the member directory and its signal, a channel's authors,
+	// and the per-person voice switch. ChannelV0, ChannelDocV1,
+	// PrincipalAdminV1 and the joining settings above carry the additive
+	// fields.
+	{Value: CreateChannelRequestV1{}, Family: "create-channel-request-v1"},
+	{Value: CreateChannelResponseV1{}, Family: "create-channel-response-v1"},
+	{Value: ChannelListingV1{}, Family: "channel-listing-v1"},
+	{Value: ChannelDirectoryResponseV1{}, Family: "channel-directory-response-v1"},
+	{Value: JoinChannelResponseV1{}, Family: "join-channel-response-v1"},
+	{Value: ChannelSettingsRequestV1{}, Family: "channel-settings-request-v1"},
+	{Value: ChannelSettingsResponseV1{}, Family: "channel-settings-response-v1"},
+	{Value: InviteV2{}, Family: "invite-v2"},
+	{Value: CreateInviteRequestV2{}, Family: "create-invite-request-v2"},
+	{Value: CreateInviteResponseV2{}, Family: "create-invite-response-v2"},
+	{Value: ListInvitesResponseV2{}, Family: "list-invites-response-v2"},
+	{Value: InvitePreviewV2{}, Family: "invite-preview-v2"},
+	{Value: ServerMemberV1{}, Family: "server-member-v1"},
+	{Value: ServerMembersResponseV1{}, Family: "server-members-response-v1"},
+	{Value: DirectoryChangedV1{}, Family: "directory-changed-v1", Schema: DirectoryChangedSchemaV1},
+	{Value: ChannelAuthorV1{}, Family: "channel-author-v1"},
+	{Value: ChannelAuthorsResponseV1{}, Family: "channel-authors-response-v1"},
+	// The families are named for the route, PUT /v1/principals/{id}/voice-
+	// permission, not "voice-…": the voice client's test claims every
+	// voice-* fixture, and this switch is administration, not the client's.
+	{Value: VoicePermissionRequestV1{}, Family: "principal-voice-permission-request-v1"},
+	{Value: VoicePermissionResponseV1{}, Family: "principal-voice-permission-response-v1"},
 
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},

@@ -1,0 +1,19 @@
+{
+  "id": 7,
+  "kind": "member",
+  "created_by": 2,
+  "created_by_name": "ada",
+  "created_at": "2026-10-15T12:00:00.000Z",
+  "expires_at": "2026-10-22T12:00:00.000Z",
+  "max_uses": 1,
+  "uses": 0,
+  "joiners": 0,
+  "channels": [
+    {
+      "id": 3,
+      "name": "general"
+    }
+  ],
+  "credential_lifetime_seconds": 7776000,
+  "legacy": true
+}
