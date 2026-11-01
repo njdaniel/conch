@@ -508,6 +508,31 @@ describe('invite someone', () => {
     });
   });
 
+  it('asked for another channel after an invite was made, drops the old link and its copy state', async () => {
+    serve({
+      ...as(memberToken, inviter, channelList('private', 'public')),
+      'GET /v1/invites': () => json({ invites: [] }),
+      'POST /v1/invites': () => json({ invite: inviteOf(7, 2), code: newCode }, 201),
+    });
+    window.localStorage.setItem(key, memberToken);
+    render(<App origin={origin} />);
+    const nav = within(await screen.findByRole('navigation', { name: 'Channels' }));
+    await nav.findByRole('button', { name: 'public' });
+    const panel = screen.getByRole('region', { name: 'Invites' });
+    fireEvent.click(nav.getByRole('button', { name: 'Actions for private' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+    await within(panel).findByRole('textbox', { name: 'Invite link' });
+
+    fireEvent.click(nav.getByRole('button', { name: 'Actions for public' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
+    expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).toBeNull();
+    expect(within(panel).queryByRole('group', { name: 'New invite link' })).toBeNull();
+    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#public' }).checked).toBe(true);
+    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#private' }).checked).toBe(false);
+    await act(async () => {});
+  });
+
   it('asked again for another channel, re-ticks only that one', async () => {
     serve({ ...as(memberToken, inviter, channelList('general', 'ops')), 'GET /v1/invites': () => json({ invites: [] }) });
     window.localStorage.setItem(key, memberToken);

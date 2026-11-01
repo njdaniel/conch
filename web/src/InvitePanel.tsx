@@ -168,6 +168,11 @@ export function InvitePanel({
     if (asked === 0 || askedChannel === undefined) return;
     setOpen(true);
     setPicked(new Set([askedChannel]));
+    // An earlier invite's link grants other channels: forget it, and its state.
+    setLink(null);
+    setCopied('no');
+    setProblem(null);
+    setResume(false);
     setFocusAsk(asked);
   }, [asked, askedChannel]);
   useEffect(() => {

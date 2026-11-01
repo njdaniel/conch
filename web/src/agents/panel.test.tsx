@@ -501,12 +501,20 @@ describe('the member list the socket sends', () => {
     expect(screen.getByText('You manage #general.')).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
 
+    // Rename is open when the grant is revoked: the form goes with it, and
+    // focus lands on the channel's button, not nowhere.
+    fireEvent.click(nav().getByRole('button', { name: 'Actions for general' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename channel…' }));
+    expect(screen.getByRole('form', { name: 'Rename channel' })).toBeDefined();
+
     socket.send(memberList(granted.map((member) => (member.principal_id === 2 ? { ...member, manages: false } : member))));
     await waitFor(() => {
       expect(panel().queryByRole('form', { name: 'Add person by name' })).toBeNull();
     });
     expect(nav().queryByText('manages')).toBeNull();
     expect(nav().queryByRole('button', { name: 'Actions for general' })).toBeNull();
+    expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
+    expect(document.activeElement).toBe(nav().getByRole('button', { name: 'general' }));
     expect(panel().getByText('Only operators and this channel\'s managers add people.')).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     expect(screen.getByText('You are a member.')).toBeDefined();

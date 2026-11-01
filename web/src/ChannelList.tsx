@@ -73,6 +73,14 @@ function ChannelRow({
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const more = useRef<HTMLButtonElement>(null);
+  const main = useRef<HTMLButtonElement | null>(null);
+  // The grant to rename was revoked while the form was open: it goes, and
+  // focus, which was in it, goes to the row's button.
+  useEffect(() => {
+    if (mayRename || !renaming) return;
+    setRenaming(false);
+    main.current?.focus();
+  }, [mayRename, renaming]);
   // What describes the button: a manager grant, who is in its voice, then its unread.
   const described = [channel.manages === true ? managesId(channel.id) : null, voiced > 0 ? voiceId(channel.id) : null, unread > 0 ? badgeId(channel.id) : null].filter(
     (x) => x !== null,
@@ -106,6 +114,7 @@ function ChannelRow({
       <button
         type="button"
         ref={(el) => {
+          main.current = el;
           register(channel.name, el);
         }}
         tabIndex={channel.name === stop ? 0 : -1}
@@ -130,10 +139,11 @@ function ChannelRow({
       {items.length === 0 ? null : (
         <ActionsMenu label={`Actions for ${channel.name}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
       )}
-      {renaming && renderRename !== undefined
+      {renaming && mayRename && renderRename !== undefined
         ? renderRename(channel, () => {
             setRenaming(false);
-            more.current?.focus();
+            // The ⋯ may be gone (the grant was revoked meanwhile): the row's button then.
+            (more.current ?? main.current)?.focus();
           })
         : null}
     </li>
