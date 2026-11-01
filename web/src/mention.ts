@@ -19,7 +19,11 @@ export function mentionAt(text: string, caret: number): MentionCompletion | null
   const m = /(^|[\s([{])@([^\s@]*)$/u.exec(before);
   if (m === null) return null;
   // An '@' inside a URL (a query string, a path) is not a mention.
-  const token = before.slice(Math.max(before.lastIndexOf(' '), before.lastIndexOf('\n'), before.lastIndexOf('\t')) + 1);
+  // The token is split on the same whitespace (\s) the match uses, read
+  // backwards from the caret so it stays linear.
+  let from = before.length;
+  while (from > 0 && !/\s/u.test(before.charAt(from - 1))) from -= 1;
+  const token = before.slice(from);
   if (token.includes('://')) return null;
   const query = m[2] ?? '';
   return { start: before.length - query.length - 1, query };

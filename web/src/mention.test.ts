@@ -21,6 +21,8 @@ describe('mentionAt', () => {
     ['see https://example.com/?q=(@ada', 33, null],
     ['(https://example.com/@ada', 25, null],
     ['https://example.com/ (@ada', 26, { start: 22, query: 'ada' }],
+    // A no-break space separates the URL from the mention too.
+    ['https://example.com/\u00a0(@ada', 26, { start: 22, query: 'ada' }],
   ])('%s at %i', (text, caret, want) => {
     expect(mentionAt(text, caret)).toEqual(want);
   });
