@@ -344,8 +344,9 @@ type voicePoller struct {
 	// claimSeam and endSharesSeam are test seams, nil outside tests (issue
 	// #1061): claimSeam(stage) runs in claimShare at "enter", once the
 	// request has been admitted, and at "lock", just before the room's
-	// claims are taken; endSharesSeam(n) runs in endSharesOf once it has
-	// found the n rooms whose claims it will take.
+	// claims are taken; endSharesSeam(n) runs in endSharesOf, and in
+	// waitRetiredClaims, once it has found the n rooms whose claims it will
+	// take.
 	claimSeam     func(stage string)
 	endSharesSeam func(rooms int)
 	// removed remembers recent successful removals for audit de-duplication.
@@ -2201,7 +2202,42 @@ func (s *Server) voiceEnforceHolders(ctx context.Context) []voiceRotation {
 		olds = append(olds, r.old)
 	}
 	s.voice.deleteRooms(ctx, olds)
+	// A claim still running in a room just retired may be inside LiveKit's
+	// answer to a grant; the hook answers only once it has returned, having
+	// withdrawn what it granted (claimShare's retired branch). This covers
+	// the hooks that end no share by principal: a credential revoked, every
+	// credential revoked.
+	s.voice.waitRetiredClaims(rotated)
 	return rotated
+}
+
+// waitRetiredClaims waits for every share claim still running in a room that
+// rotated just retired (retiring), by taking and letting go of the room's
+// claims. A claim lets them go only once it has withdrawn a grant it made in
+// a retired room, so after this no screen grant is left from it, even where
+// LiveKit's DeleteRoom failed. It holds no other lock while it waits.
+func (p *voicePoller) waitRetiredClaims(rotated []voiceRotation) {
+	if len(rotated) == 0 {
+		return
+	}
+	p.mu.Lock()
+	var rooms []*voiceRoomState
+	for r := range p.retiring {
+		if slices.ContainsFunc(rotated, func(rot voiceRotation) bool { return rot.old.RoomName == r.name }) {
+			rooms = append(rooms, r)
+		}
+	}
+	p.mu.Unlock()
+	if p.endSharesSeam != nil {
+		p.endSharesSeam(len(rooms))
+	}
+	slices.SortFunc(rooms, func(a, b *voiceRoomState) int {
+		return cmp.Or(cmp.Compare(a.channelID, b.channelID), cmp.Compare(a.name, b.name))
+	})
+	for _, r := range rooms {
+		r.claims.Lock()
+		r.claims.Unlock() //nolint:staticcheck // SA2001: taking the lock is the wait.
+	}
 }
 
 // withoutRotated is rooms minus those a rotation just retired.

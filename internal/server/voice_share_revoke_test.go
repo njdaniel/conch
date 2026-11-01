@@ -80,6 +80,21 @@ var revocations = []struct {
 		}
 		f.srv.principalDisabled(context.Background(), f.ids["ann"])
 	}},
+	// The credential ann's session was issued under: its revocation rotates
+	// the room and ends no share by principal (voiceCredentialRevoked).
+	{"credential revoked", true, func(t *testing.T, f *presenceFixture) {
+		id := f.credID(t, "ann")
+		if err := f.srv.store.RevokeCredential(context.Background(), "system", id); err != nil {
+			t.Error(err)
+		}
+		f.srv.credentialRevoked(context.Background(), id)
+	}},
+	{"all credentials revoked", true, func(t *testing.T, f *presenceFixture) {
+		if _, err := f.srv.store.RevokeAllCredentials(context.Background(), "system", f.ids["ann"]); err != nil {
+			t.Error(err)
+		}
+		f.srv.voicePrincipalLostAccess(context.Background(), f.ids["ann"], voiceReasonCredsRevoked)
+	}},
 }
 
 // revocationCase is one row of revocations with DeleteRoom answering or not.
