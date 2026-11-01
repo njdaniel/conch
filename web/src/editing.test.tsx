@@ -429,6 +429,36 @@ describe('the edit limit', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
   });
 
+  it('a 429 answered after the tenth edit arrived while Save was pending says the limit', async () => {
+    const held = known(9);
+    let answer: (r: api.EditResult) => void = () => undefined;
+    vi.spyOn(api, 'editMessage').mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+    const final = vi.fn();
+    const { rerender } = render(rendered(held, final));
+    fireEvent.change(openEditor(1), { target: { value: 'new words' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    rerender(rendered({ ...held, edits: new Map([[1, stamps(10)]]) }, final));
+    await act(async () => {
+      answer({ ok: false, failure: 'refused', code: 'rate_limited', retryAfter: 5 });
+      await Promise.resolve();
+    });
+    expect((await screen.findByRole('alert')).textContent).toBe('This message has been edited the most times allowed.');
+    expect(final).toHaveBeenCalledWith(1);
+  });
+
+  it('a rate line showing when the tenth edit becomes known turns into the limit line', async () => {
+    const held = known(9);
+    vi.spyOn(api, 'editMessage').mockResolvedValue({ ok: false, failure: 'refused', code: 'rate_limited', retryAfter: 5 });
+    const final = vi.fn();
+    const { rerender } = render(rendered(held, final));
+    fireEvent.change(openEditor(1), { target: { value: 'new words' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('Too many edits. Try again in 5 seconds.');
+    rerender(rendered({ ...held, edits: new Map([[1, stamps(10)]]) }, final));
+    expect((await screen.findByRole('alert')).textContent).toBe('This message has been edited the most times allowed.');
+    expect(final).toHaveBeenCalledWith(1);
+  });
+
   it('a 429 with fewer known edits still says the rate', async () => {
     vi.spyOn(api, 'editMessage').mockResolvedValue({ ok: false, failure: 'refused', code: 'rate_limited', retryAfter: 5 });
     const final = vi.fn();

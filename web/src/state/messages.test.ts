@@ -551,4 +551,31 @@ describe('known edits', () => {
     expect([...chatFor(state, 'ops').final]).toEqual([1]);
     expect(chatFor(run({ type: 'editFinal', channel: 'ops', id: 1 }), 'ops').final.size).toBe(0);
   });
+
+  it('prunes counts and final marks of messages evicted past maxHeld, keeping those held', () => {
+    const many = Array.from({ length: maxHeld }, (_, i) => msg(i + 1));
+    const state = run(
+      { type: 'historyLoaded', channel: 'ops', messages: many, more: true },
+      { type: 'edited', channel: 'ops', message: edited(1, 1) },
+      { type: 'edited', channel: 'ops', message: edited(maxHeld, 1) },
+      { type: 'editFinal', channel: 'ops', id: 1 },
+      { type: 'received', channel: 'ops', message: msg(maxHeld + 1) },
+    );
+    const chat = chatFor(state, 'ops');
+    expect(chat.byId.has(1)).toBe(false);
+    expect(editsKnown(chat, 1)).toBe(0);
+    expect(chat.final.has(1)).toBe(false);
+    expect(editsKnown(chat, maxHeld)).toBe(1);
+  });
+
+  it('a history reload keeps the counts of the messages it reloads', () => {
+    const state = run(
+      start,
+      { type: 'edited', channel: 'ops', message: edited(1, 1) },
+      { type: 'editFinal', channel: 'ops', id: 1 },
+      { type: 'historyLoaded', channel: 'ops', messages: [msg(1)], more: false },
+    );
+    expect(known(state)).toBe(1);
+    expect(chatFor(state, 'ops').final.has(1)).toBe(true);
+  });
 });

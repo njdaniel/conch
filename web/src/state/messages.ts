@@ -211,7 +211,18 @@ function hold(base: ChannelChat, incoming: readonly MessageV2[]): ChannelChat {
   if (merged.size <= maxHeld) return merged === c.byId ? c : { ...c, byId: merged };
   const newest = [...merged.keys()].sort((a, b) => a - b).slice(merged.size - maxHeld);
   const keep = new Set(newest);
-  return { ...c, byId: new Map([...merged].filter(([id]) => keep.has(id))), trimmed: true };
+  return prune({ ...c, byId: new Map([...merged].filter(([id]) => keep.has(id))), trimmed: true });
+}
+
+// prune drops the edit counts and final marks of messages no longer held, so
+// a long-lived channel does not grow without bound. A message evicted and
+// later loaded again (Load older) may undercount and offer Edit until the
+// server refuses: the server stays the authority.
+function prune(c: ChannelChat): ChannelChat {
+  const edits = [...c.edits].filter(([id]) => c.byId.has(id));
+  const final = [...c.final].filter((id) => c.byId.has(id));
+  if (edits.length === c.edits.size && final.length === c.final.size) return c;
+  return { ...c, edits: new Map(edits), final: new Set(final) };
 }
 
 function update(state: ChatState, channel: string, change: (c: ChannelChat) => ChannelChat): ChatState {
@@ -262,7 +273,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return update(state, action.channel, (c) =>
         reconcile(
           {
-            ...hold(track({ ...c, byId: new Map() }, action.messages), newest(c.byId, action.messages)),
+            ...prune(hold(track({ ...c, byId: new Map() }, action.messages), newest(c.byId, action.messages))),
             history: 'ready',
             older: 'idle',
             trimmed: false,

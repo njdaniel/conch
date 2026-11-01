@@ -300,6 +300,10 @@ export function MessageEditor({
   const [saving, setSaving] = useState(false);
   const [refusal, setRefusal] = useState<Refusal | null>(null);
   const [waiting, setWaiting] = useState(false);
+  // atLimit as of now: a save in flight classifies its answer by this, not by
+  // the value it started with.
+  const limited = useRef(atLimit);
+  limited.current = atLimit;
   const hint = useId();
   const error = useId();
   const live = useRef(true);
@@ -316,6 +320,15 @@ export function MessageEditor({
     el.focus();
     el.setSelectionRange(el.value.length, el.value.length);
   }, []);
+
+  // A rate refusal showing when the tenth edit becomes known is the limit.
+  const finalNow = useRef(onFinal);
+  finalNow.current = onFinal;
+  useEffect(() => {
+    if (!atLimit || refusal?.wait === undefined) return;
+    setRefusal({ line: limitLine, final: true });
+    finalNow.current?.();
+  }, [atLimit, refusal]);
 
   // A rate limit holds Save back for as long as the server said.
   const wait = refusal?.wait;
@@ -355,7 +368,7 @@ export function MessageEditor({
       onUnauthorized?.();
       return;
     }
-    const next = refusalOf(result, atLimit);
+    const next = refusalOf(result, limited.current);
     if (next.gone === true) {
       onGone(next.line);
       return;
