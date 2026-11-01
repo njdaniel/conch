@@ -3451,3 +3451,23 @@ button.link {
 .draft-attachment-size {
   white-space: nowrap;
 }
+
+/* Settings → Reports (issue #1029): a report is other people's text, shown
+   as it was written, wrapped rather than widening the drawer. */
+.report-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.report-technical {
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+}
+
+.report-view h4 {
+  margin: var(--s2) 0 var(--s1);
+  font-size: 0.9rem;
+}
