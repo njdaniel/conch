@@ -153,17 +153,25 @@ ok "no secret in ops/deploy"
 # ("listening on 127.0.0.1:PORT"). That line is written by the process we
 # started, after it bound, so the port read from it is ours.
 
+# Both waits are bounded by the clock, not by a count of polls: a poll count
+# is only as long as the machine is fast, and under load (a dozen builds at
+# once) 10 or 20 seconds of polls was not enough for a conchd to come up
+# (issue #1104). Each says how long it waited when it gives up.
+listen_wait=${DEPLOY_TEST_LISTEN_WAIT:-60}
+health_wait=${DEPLOY_TEST_HEALTH_WAIT:-120}
+
 # wait_listening <pid> <log>: print the port the conchd <pid> bound, read from
 # its log. Return 1 if it exits first (a bind failure, a bad flag) or says
-# nothing in 10 seconds.
+# nothing in $listen_wait seconds.
 wait_listening() {
-    local pid=$1 log=$2 addr
-    for _ in $(seq 1 100); do
+    local pid=$1 log=$2 addr start=$SECONDS
+    while [ $((SECONDS - start)) -lt "$listen_wait" ]; do
         addr=$(sed -n 's/.* listening on \([^ ]*\) (data .*/\1/p' "$log" 2>/dev/null | head -n 1)
         if [ -n "$addr" ]; then echo "${addr##*:}"; return 0; fi
         kill -0 "$pid" 2>/dev/null || return 1
         sleep 0.1
     done
+    echo "wait_listening: pid $pid said nothing in $((SECONDS - start))s ($log)" >&2
     return 1
 }
 
@@ -173,11 +181,15 @@ listen_or_fail() {
     wait_listening "$1" "$2" || { cat "$2" >&2; fail "conchd did not bind a port; see $2"; }
 }
 
-wait_health() { # <port>
-    for _ in $(seq 1 100); do
-        if curl -fsS "http://127.0.0.1:$1/healthz" >/dev/null 2>&1; then return 0; fi
+# wait_health <port>: return 0 once /healthz answers; 1 after $health_wait
+# seconds, saying how long it waited.
+wait_health() {
+    local start=$SECONDS
+    while [ $((SECONDS - start)) -lt "$health_wait" ]; do
+        if curl -fsS --max-time 5 "http://127.0.0.1:$1/healthz" >/dev/null 2>&1; then return 0; fi
         sleep 0.2
     done
+    echo "wait_health: port $1 did not answer /healthz in $((SECONDS - start))s" >&2
     return 1
 }
 
@@ -919,7 +931,7 @@ export CONCH_OPT=$opt CONCH_ETC=$etc CONCH_DATA_ROOT=$up_data CONCH_BACKUP_DIR=$
 export CONCH_CADDYFILE=$caddyfile CONCH_TMPFILES_DIR=$work/tmpfiles CONCH_METADATA_URL=file://$work/metadata
 export SYSTEMCTL=$work/systemctl CADDY=$sb/caddy USERADD=$sb/useradd USERDEL=$sb/userdel GETENT=$sb/getent SS=$sb/ss
 export CONCH_PUBLIC_CURL=$sb/public-curl CONCH_RELEASE_URL=file://$rel
-export CONCH_HEALTH_TIMEOUT=\${CONCH_HEALTH_TIMEOUT:-10} CONCH_LOOPBACK_TIMEOUT=\${CONCH_LOOPBACK_TIMEOUT:-30}
+export CONCH_HEALTH_TIMEOUT=\${CONCH_HEALTH_TIMEOUT:-10} CONCH_LOOPBACK_TIMEOUT=\${CONCH_LOOPBACK_TIMEOUT:-120}
 EOF
 for s in add-instance remove-instance list-instances; do
     printf '#!/usr/bin/env bash\n. %q\nexec %q "$@"\n' "$work/droplet.env" "$deploy/$s.sh" >"$work/$s"
@@ -1380,9 +1392,10 @@ ok "remove-instance delta --force-normal --purge-backups: a normal server with a
 printf '14 A rho 203.0.113.7\n15 AAAA rho 2001:db8::7\n' >>"$work/dns-records"
 touch "$work/fail-public"
 : >"$work/public-curl.calls"
-onpty env CONCH_HEALTH_TIMEOUT=60 "$work/add-instance" rho example.test --temporary --port "$((gport + 3))" --yes >"$work/rho.out" 2>&1 &
+onpty env CONCH_HEALTH_TIMEOUT=180 "$work/add-instance" rho example.test --temporary --port "$((gport + 3))" --yes >"$work/rho.out" 2>&1 &
 rpid=$!
-for _ in $(seq 1 150); do
+wait_started=$SECONDS
+while [ $((SECONDS - wait_started)) -lt "$health_wait" ]; do
     if grep -q 'rho.example.test' "$work/public-curl.calls"; then break; fi
     sleep 0.2
 done
@@ -1625,7 +1638,8 @@ touch "$work/fail-public"
 : >"$work/public-curl.calls"
 onpty "$work/cs" new xi --temporary --port "$((kport + 1))" --yes >"$work/cs-xi.out" 2>&1 &
 xpid=$!
-for _ in $(seq 1 150); do
+wait_started=$SECONDS
+while [ $((SECONDS - wait_started)) -lt "$health_wait" ]; do
     if grep -q 'xi.example.test' "$work/public-curl.calls"; then break; fi
     sleep 0.2
 done

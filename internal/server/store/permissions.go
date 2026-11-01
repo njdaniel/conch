@@ -687,6 +687,10 @@ func putPermissionsTx(ctx context.Context, tx execer, actor string, actorID int6
 	if err := appendAuditEventTx(ctx, tx, actor, AuditPermissionsChanged, "server", strings.Join(detail, ";"), now); err != nil {
 		return PermissionsWrite{}, err
 	}
+	// The links this write suspends or resumes, one row each (design §7.5).
+	if err := auditLinkSuspensionsTx(ctx, tx, d, d.with(changes), now); err != nil {
+		return PermissionsWrite{}, err
+	}
 	doc, err := permissionsDocumentTx(ctx, tx)
 	if err != nil {
 		return PermissionsWrite{}, err
@@ -937,4 +941,94 @@ func principalOfActor(s string) (int64, bool) {
 	}
 	id, err := strconv.ParseInt(rest, 10, 64)
 	return id, err == nil && id > 0
+}
+
+// auditLinkSuspensionsTx writes, for a write that takes the document from
+// before to after, one audit row per link whose maker's standing it
+// changes (design §7.5, §8.5): invite_suspended or invite_resumed for each
+// open personal invite whose maker's make_member_links flips, and
+// sign_in_link_suspended or sign_in_link_resumed for each live sign-in,
+// reset or enrolment link whose maker's act_as_members flips. Actor system,
+// subject the link, detail reason=permission. Nothing is closed: the links
+// are judged again at every preview and redemption (makerRightsTx,
+// makerMayActAsTx), and these rows say when that judgement changed. A link
+// that was never open, or no longer is (closed, used, expired), writes none,
+// and neither does a link whose maker's standing is the same under both
+// documents, whatever the cell did for someone else. Device links (made by
+// their own person) and conversion permits (read as a role check until
+// #1005) do not read act_as_members and write none.
+func auditLinkSuspensionsTx(ctx context.Context, tx execer, before, after permissionDoc, now time.Time) error {
+	type link struct {
+		id, maker int64
+	}
+	collect := func(query string, args ...any) ([]link, error) {
+		rows, err := tx.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("store: list links for suspension: %w", err)
+		}
+		defer func() { _ = rows.Close() }()
+		var out []link
+		for rows.Next() {
+			var l link
+			if err := rows.Scan(&l.id, &l.maker); err != nil {
+				return nil, fmt.Errorf("store: list links for suspension: %w", err)
+			}
+			out = append(out, l)
+		}
+		return out, rows.Err()
+	}
+	invites, err := collect(
+		`SELECT id, created_by FROM invites
+		 WHERE kind = ? AND closed_at IS NULL AND expires_at > ? AND (max_uses IS NULL OR uses < max_uses)
+		 ORDER BY id`, string(schema.InviteKindPersonal), now.UnixMilli())
+	if err != nil {
+		return err
+	}
+	signIns, err := collect(
+		`SELECT l.id, l.created_by FROM sign_in_links l JOIN principals p ON p.id = l.principal_id
+		 WHERE l.used_at IS NULL AND l.closed_at IS NULL AND l.expires_at > ? AND l.auth_generation = p.auth_generation
+		   AND l.purpose NOT IN (?, ?)
+		 ORDER BY l.id`, now.UnixMilli(), string(schema.SignInLinkPurposeDevice), string(schema.SignInLinkPurposeConversion))
+	if err != nil {
+		return err
+	}
+	makers := map[int64]Principal{}
+	flip := func(maker int64, perm schema.Permission) (suspended, resumed bool, err error) {
+		p, ok := makers[maker]
+		if !ok {
+			var found bool
+			if p, found, err = queryPrincipal(ctx, tx, maker); err != nil || !found {
+				return false, false, err
+			}
+			makers[maker] = p
+		}
+		was, is := principalHolds(p, before, perm), principalHolds(p, after, perm)
+		return was && !is, !was && is, nil
+	}
+	write := func(links []link, perm schema.Permission, subject func(int64) string, suspended, resumed string) error {
+		for _, l := range links {
+			off, on, err := flip(l.maker, perm)
+			if err != nil {
+				return err
+			}
+			action := ""
+			switch {
+			case off:
+				action = suspended
+			case on:
+				action = resumed
+			default:
+				continue
+			}
+			if err := appendAuditEventTx(ctx, tx, "system", action, subject(l.id),
+				fmt.Sprintf("reason=permission permission=%s maker=%d", perm, l.maker), now); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := write(invites, schema.PermMakeMemberLinks, inviteSubject, AuditInviteSuspended, AuditInviteResumed); err != nil {
+		return err
+	}
+	return write(signIns, schema.PermActAsMembers, signInLinkSubject, AuditSignInLinkSuspended, AuditSignInLinkResumed)
 }

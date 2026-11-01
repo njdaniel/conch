@@ -181,9 +181,10 @@ func TestPermissionsPut(t *testing.T) {
 		{"owner preset group, already the document", false, false, func(rev int64) schema.PutPermissionsRequestV1 {
 			return schema.PutPermissionsRequestV1{Revision: rev, Preset: schema.PresetGroup}
 		}, http.StatusOK, "", false},
-		{"owner preset personal, which turns make_member_links off before A4 enforces it", false, false, func(rev int64) schema.PutPermissionsRequestV1 {
+		// A4 (#1016) enforces make_member_links, so the personal preset applies.
+		{"owner preset personal", false, false, func(rev int64) schema.PutPermissionsRequestV1 {
 			return schema.PutPermissionsRequestV1{Revision: rev, Preset: schema.PresetPersonal}
-		}, http.StatusConflict, schema.ErrorCodePermissionsConflict, false},
+		}, http.StatusOK, "", true},
 		{"owner operator-column patch", false, false, func(rev int64) schema.PutPermissionsRequestV1 {
 			return schema.PutPermissionsRequestV1{Revision: rev, Changes: []schema.PermissionChangeV1{operator(schema.PermReadAuditLog, true)}}
 		}, http.StatusOK, "", true},
@@ -202,9 +203,9 @@ func TestPermissionsPut(t *testing.T) {
 		{"dependency breach: act_as_members without manage_members", false, false, func(rev int64) schema.PutPermissionsRequestV1 {
 			return schema.PutPermissionsRequestV1{Revision: rev, Changes: []schema.PermissionChangeV1{operator(schema.PermManageMembers, false)}}
 		}, http.StatusConflict, schema.ErrorCodePermissionsConflict, false},
-		{"a cell this server does not enforce yet", false, false, func(rev int64) schema.PutPermissionsRequestV1 {
-			return schema.PutPermissionsRequestV1{Revision: rev, Changes: []schema.PermissionChangeV1{member(schema.PermUseVoice, false)}}
-		}, http.StatusConflict, schema.ErrorCodePermissionsConflict, false},
+		{"use_voice, which A4 enforces", false, false, func(rev int64) schema.PutPermissionsRequestV1 {
+			return schema.PutPermissionsRequestV1{Revision: rev, Changes: []schema.PermissionChangeV1{member(schema.PermShareScreen, false), member(schema.PermUseVoice, false)}}
+		}, http.StatusOK, "", true},
 		{"no change", false, false, func(rev int64) schema.PutPermissionsRequestV1 {
 			return schema.PutPermissionsRequestV1{Revision: rev, Changes: []schema.PermissionChangeV1{member(schema.PermCreatePrivateChannels, true)}}
 		}, http.StatusOK, "", false},
@@ -530,19 +531,24 @@ var permissionGates = map[schema.Permission][][2]string{
 	schema.PermSeeMemberDirectory:   {{"directory.go", "Server.handleListDirectoryMembers"}},
 	schema.PermChangeServerSettings: {{"routes.go", "Server.routeTable"}},
 	schema.PermReadAuditLog:         {{"routes.go", "Server.routeTable"}},
-	// A4's (#1016): listed so that adding one of these to
-	// enforcedPermissions fails until its gates read it.
+	// A4 (#1016): every voice route reads use_voice through
+	// voicePresenceChannel (session, transmit, companion, presence, the
+	// socket, the share routes) or voiceOccupancyCaller; the poller and the
+	// signing re-check read it in voiceEntitlement and voiceStillEntitled.
 	schema.PermMakeMemberLinks: {
 		{"store/invites.go", "makerRightsTx"},
-		{"store/invites.go", "makerStillAllowedTx"},
 	},
 	schema.PermUseVoice: {
-		{"voice.go", "Server.handleVoiceSession"},
+		{"voice.go", "Server.voicePresenceChannel"},
+		{"voice.go", "Server.voiceStillEntitled"},
+		{"voice_occupancy.go", "Server.voiceOccupancyCaller"},
 		{"voice_presence.go", "Server.voiceEntitlement"},
+		{"voice_presence.go", "Server.voiceWithheld"},
 	},
 	schema.PermShareScreen: {
 		{"voice_share.go", "Server.handleVoiceShareStart"},
 		{"voice_share.go", "voicePoller.shareEntitled"},
+		{"voice_share.go", "voicePoller.sharesWithheld"},
 	},
 }
 
@@ -619,13 +625,8 @@ func TestEnforcedPermissionsAreHonest(t *testing.T) {
 
 // A PUT that withholds share_screen ends a live share before it answers
 // (the security review of #1061, S1): the voice passes read the person's
-// brake, not the document, so nothing else would. share_screen joins the
-// safety net in A4 (#1016); this test lists it for its own run, as A4 will.
+// brake, not the document, so nothing else would.
 func TestPermissionsPutEndsAWithheldShare(t *testing.T) {
-	saved := enforcedPermissions
-	enforcedPermissions = append(slices.Clone(saved), schema.PermShareScreen)
-	t.Cleanup(func() { enforcedPermissions = saved })
-
 	f, room := newShareFixture(t)
 	f.mustClaim(t, "ann")
 	if !f.granted(t, room, "ann") {

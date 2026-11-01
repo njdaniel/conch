@@ -74,12 +74,11 @@ func TestEveryPermissionIsChecked(t *testing.T) {
 
 // notYetGated is each permission no route or store check reads yet, with
 // the issue that wires its gate (ADR-014 design §12). The member cells of
-// rows 1 and 2 gate a route that does not exist yet; row 5 is A4's to wire.
-// Rows 10 and 11 left with A3b (#1015), whose route classes read them.
+// rows 1 and 2 gate a route that does not exist yet. Row 4 left with I4
+// (#983), row 5 with A4 (#1016), and rows 10 and 11 with A3b (#1015).
 var notYetGated = map[schema.Permission]string{
 	schema.PermCreatePublicChannels:  "#981, member channel creation",
 	schema.PermCreatePrivateChannels: "#981, member channel creation",
-	schema.PermUseVoice:              "A4, the member permissions on voice",
 }
 
 // permissionConsts names each schema.Permission constant, so the scan can
@@ -674,4 +673,33 @@ func TestAuthorityViolationsFailsOnNewAndStale(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestVoiceIsNeverDecidedByTheBrakeAlone is the structural half of A4's
+// (#1016) voice rule: no handler or poller reads a principal's voice_allowed
+// brake to decide voice. Voice is use_voice, read through can() (or the
+// store's Permitted and HeldBy), which ANDs the brake in for members and
+// operators and skips it for owners (design §5, §7.3). The one read left is
+// whoami's, which reports the brake's half beside the effective list.
+func TestVoiceIsNeverDecidedByTheBrakeAlone(t *testing.T) {
+	allowed := map[string]bool{"auth.go voiceAllowed": true}
+	authoritySources(t, func(_ *token.FileSet, rel string, file *ast.File) {
+		if strings.HasPrefix(rel, "store/") {
+			return
+		}
+		for _, decl := range file.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			ast.Inspect(fd, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "VoiceAllowed" {
+					if key := rel + " " + funcName(fd); !allowed[key] {
+						t.Errorf("%s reads the voice_allowed brake directly: ask can(schema.PermUseVoice) (or PermShareScreen) so the role's cell counts too", key)
+					}
+				}
+				return true
+			})
+		}
+	})
 }
