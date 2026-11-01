@@ -33,6 +33,9 @@ function fakeBridge(overrides: Partial<ConchDesktopBridge>): ConchDesktopBridge 
     profileSwitch: unexpected('profileSwitch'),
     storageRetry: unexpected('storageRetry'),
     profilesRecover: unexpected('profilesRecover'),
+    uploadFile: unexpected('uploadFile'),
+    downloadFile: unexpected('downloadFile'),
+    saveFile: unexpected('saveFile'),
     ...overrides,
   };
 }
@@ -102,10 +105,30 @@ describe('the desktop transport: a call of the table is a call of the bridge', (
     expect(request).not.toHaveBeenCalled();
   });
 
-  it('has no attachments yet', async () => {
-    install(fakeBridge({}));
-    await expect(http.download(call('fileBytes', { id: 1 }), STAND_IN)).rejects.toBeInstanceOf(TypeError);
-    await expect(http.upload(call('uploadFile', { channel: 'a' }), STAND_IN, 'image/png', new Blob(), new AbortController().signal)).rejects.toBeInstanceOf(TypeError);
+  it('uploads a file as base64 through the bridge, with the name and declared type, and reads the server’s answer', async () => {
+    const uploadFile = vi.fn((): Promise<BridgeReply> => Promise.resolve({ kind: 'reply', status: 201, body: { id: 7 } }));
+    install(fakeBridge({ uploadFile }));
+    const res = await http.upload(call('uploadFile', { channel: 'general' }, 'filename=a%20b.png'), STAND_IN, 'image/png', new Blob([new Uint8Array([1, 2, 3])]), new AbortController().signal);
+    expect(res.status).toBe(201);
+    expect(uploadFile).toHaveBeenCalledExactlyOnceWith({ channel: 'general', filename: 'a b.png', mediaType: 'image/png', data: 'AQID' });
+  });
+
+  it('does not upload to another operation, or without a name', async () => {
+    const uploadFile = vi.fn((): Promise<BridgeReply> => Promise.resolve({ kind: 'none' }));
+    install(fakeBridge({ uploadFile }));
+    const signal = new AbortController().signal;
+    await expect(http.upload(call('postMessage', { channel: 'a' }), STAND_IN, 'x/y', new Blob(), signal)).rejects.toBeInstanceOf(TypeError);
+    await expect(http.upload(call('uploadFile', { channel: 'a' }), STAND_IN, 'x/y', new Blob(), signal)).rejects.toBeInstanceOf(TypeError);
+    expect(uploadFile).not.toHaveBeenCalled();
+  });
+
+  it('downloads a file’s bytes as a response, and a refusal as its status', async () => {
+    install(fakeBridge({ downloadFile: () => Promise.resolve({ kind: 'bytes', data: 'AQID' }) }));
+    const res = await http.download(call('fileBytes', { id: 1 }), STAND_IN);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+    install(fakeBridge({ downloadFile: () => Promise.resolve({ kind: 'reply', status: 404, body: { code: 'file_not_found', message: 'no' } }) }));
+    expect((await http.download(call('fileBytes', { id: 1 }), STAND_IN)).status).toBe(404);
+    await expect(http.download(call('whoami'), STAND_IN)).rejects.toBeInstanceOf(TypeError);
   });
 
   it('ends a wait when the caller’s signal aborts', async () => {

@@ -69,7 +69,10 @@ describe('the desktop bridge type', () => {
       profileSwitch: true,
       storageRetry: true,
       profilesRecover: true,
+      uploadFile: true,
+      downloadFile: true,
+      saveFile: true,
     };
-    expect(Object.keys(named)).toHaveLength(23);
+    expect(Object.keys(named)).toHaveLength(26);
   });
 });

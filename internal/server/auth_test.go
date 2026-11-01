@@ -118,7 +118,50 @@ const (
 	// classManager routes an operator or a manager of the channel (issue #790).
 	classOwner   routeClass = "owner"
 	classManager routeClass = "channel-manager"
+	// classPerm routes need a permission (ADR-014, issue #1015), named in
+	// routePermissions, pinned as the class is.
+	classPerm routeClass = "permission"
 )
+
+// routePermissions is the permission each classPerm route needs (design
+// §7.2): 21 manage_members, 4 act_as_members and 5 manage_channels of the
+// operator routes, change_server_settings for the joining settings and the
+// permissions PUT, read_audit_log for the audit export.
+var routePermissions = map[string]schema.Permission{
+	"POST /v0/principals":                                             schema.PermManageMembers,
+	"PUT /v1/principals/{id}/manifest":                                schema.PermManageMembers,
+	"GET /v1/principals/{id}/credentials":                             schema.PermManageMembers,
+	"DELETE /v1/credentials/{credential_id}":                          schema.PermManageMembers,
+	"POST /v1/principals/{id}/disable":                                schema.PermManageMembers,
+	"POST /v1/principals/{id}/enable":                                 schema.PermManageMembers,
+	"POST /v1/principals/{id}/hide":                                   schema.PermManageMembers,
+	"POST /v1/principals/hide":                                        schema.PermManageMembers,
+	"GET /v1/principals":                                              schema.PermManageMembers,
+	"GET /v1/hooks":                                                   schema.PermManageMembers,
+	"DELETE /v1/hooks/{id}":                                           schema.PermManageMembers,
+	"GET /v1/guests":                                                  schema.PermManageMembers,
+	"POST /v1/guests/{id}/end":                                        schema.PermManageMembers,
+	"POST /v1/guests/end":                                             schema.PermManageMembers,
+	"POST /v1/guests/{id}/conversion-permit":                          schema.PermManageMembers,
+	"GET /v1/invites/{id}/principals":                                 schema.PermManageMembers,
+	"POST /v1/invites/{id}/disable-joiners":                           schema.PermManageMembers,
+	"POST /v1/principals/{id}/disable-invitees":                       schema.PermManageMembers,
+	"PUT /v1/principals/{id}/invite-permission":                       schema.PermManageMembers,
+	"PUT /v1/invites/settings":                                        schema.PermManageMembers,
+	"DELETE /v1/sign-in-links/{id}":                                   schema.PermManageMembers,
+	"POST /v1/principals/{id}/credentials":                            schema.PermActAsMembers,
+	"POST /v1/credentials/{credential_id}/rotate":                     schema.PermActAsMembers,
+	"POST /v1/hooks":                                                  schema.PermActAsMembers,
+	"POST /v1/principals/{id}/sign-in-links":                          schema.PermActAsMembers,
+	"POST /v0/channels":                                               schema.PermManageChannels,
+	"POST /v1/channels/{channel}/nets":                                schema.PermManageChannels,
+	"DELETE /v1/channels/{channel}/nets/{net}":                        schema.PermManageChannels,
+	"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    schema.PermManageChannels,
+	"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": schema.PermManageChannels,
+	"PUT /v1/join/settings":                                           schema.PermChangeServerSettings,
+	"PUT /v1/permissions":                                             schema.PermChangeServerSettings,
+	"GET /v1/audit":                                                   schema.PermReadAuditLog,
+}
 
 // routeExpectation pins, per route pattern: its class, the request to send,
 // and the status an authorized caller gets (the same status AuthOff gives).
@@ -139,8 +182,12 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v1/ws":        {classAuth, "/v1/ws", "", 400},
 	"GET /v2/ws":        {classAuth, "/v2/ws", "", 400},
 	"GET /v1/whoami":    {classAuth, "/v1/whoami", "", 200},
-	"POST /v0/channels": {classOp, "/v0/channels", `{}`, 400},
-	"GET /v1/channels":  {classAuth, "/v1/channels", "", 200},
+	"POST /v0/channels": {classPerm, "/v0/channels", `{}`, 400},
+	// The permissions document (issue #1015): any operator reads it; a PUT
+	// of nothing is refused as malformed.
+	"GET /v1/permissions": {classOp, "/v1/permissions", "", 200},
+	"PUT /v1/permissions": {classPerm, "/v1/permissions", `{}`, 400},
+	"GET /v1/channels":    {classAuth, "/v1/channels", "", 200},
 	// Both membership writes are no-ops in the fixture (alice is already a
 	// member; ghost, id 4, is not), so they change nothing and audit nothing.
 	"GET /v1/channels/{channel}/members":                   {classAuth, "/v1/channels/general/members", "", 200},
@@ -151,12 +198,12 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/channels/{channel}/members": {classManager, "/v1/channels/general/members", `{}`, 400},
 	// Nets (issue #115). The net-addressed routes use a net that does not
 	// exist, so they change and audit nothing.
-	"POST /v1/channels/{channel}/nets":                                {classOp, "/v1/channels/general/nets", `{}`, 400},
+	"POST /v1/channels/{channel}/nets":                                {classPerm, "/v1/channels/general/nets", `{}`, 400},
 	"GET /v1/channels/{channel}/nets":                                 {classAuth, "/v1/channels/general/nets", "", 200},
-	"DELETE /v1/channels/{channel}/nets/{net}":                        {classOp, "/v1/channels/general/nets/nosuch", "", 404},
-	"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    {classOp, "/v1/channels/general/nets/nosuch/members/2", `{"role":"member"}`, 404},
-	"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": {classOp, "/v1/channels/general/nets/nosuch/members/2", "", 404},
-	"POST /v0/principals":                                             {classOp, "/v0/principals", `{}`, 400},
+	"DELETE /v1/channels/{channel}/nets/{net}":                        {classPerm, "/v1/channels/general/nets/nosuch", "", 404},
+	"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    {classPerm, "/v1/channels/general/nets/nosuch/members/2", `{"role":"member"}`, 404},
+	"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": {classPerm, "/v1/channels/general/nets/nosuch/members/2", "", 404},
+	"POST /v0/principals":                                             {classPerm, "/v0/principals", `{}`, 400},
 	"POST /v0/channels/{channel}/messages":                            {classAuth, "/v0/channels/general/messages", `{}`, 400},
 	"GET /v0/channels/{channel}/messages":                             {classAuth, "/v0/channels/general/messages", "", 200},
 	"POST /v1/channels/{channel}/messages":                            {classAuth, "/v1/channels/general/messages", `{}`, 400},
@@ -253,13 +300,13 @@ var routeExpectations = map[string]routeExpectation{
 	"DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}":          {classManager, "/v2/channels/general/messages/9999/reactors/2", "", 404},
 	"PUT /v2/channels/{channel}/messages/{message_id}/body":                                {classAuth, "/v2/channels/general/messages/9999/body", `{"body":"x"}`, 404},
 	"GET /v2/channels/{channel}/messages/{message_id}/revisions":                           {classAuth, "/v2/channels/general/messages/9999/revisions", "", 404},
-	"PUT /v1/principals/{id}/manifest":                                                     {classOp, "/v1/principals/1/manifest", `{}`, 400},
+	"PUT /v1/principals/{id}/manifest":                                                     {classPerm, "/v1/principals/1/manifest", `{}`, 400},
 	"GET /v1/principals/{id}/manifest":                                                     {classSelf, "/v1/principals/1/manifest", "", 404},
 	"PUT /v1/principals/{id}/name":                                                         {classSelf, "/v1/principals/1/name", `{}`, 400},
-	"POST /v1/principals/{id}/credentials":                                                 {classOp, "/v1/principals/1/credentials", `{}`, 400},
-	"GET /v1/principals/{id}/credentials":                                                  {classOp, "/v1/principals/1/credentials", "", 200},
-	"POST /v1/credentials/{credential_id}/rotate":                                          {classOp, "/v1/credentials/9999/rotate", "", 404},
-	"DELETE /v1/credentials/{credential_id}":                                               {classOp, "/v1/credentials/9999", "", 404},
+	"POST /v1/principals/{id}/credentials":                                                 {classPerm, "/v1/principals/1/credentials", `{}`, 400},
+	"GET /v1/principals/{id}/credentials":                                                  {classPerm, "/v1/principals/1/credentials", "", 200},
+	"POST /v1/credentials/{credential_id}/rotate":                                          {classPerm, "/v1/credentials/9999/rotate", "", 404},
+	"DELETE /v1/credentials/{credential_id}":                                               {classPerm, "/v1/credentials/9999", "", 404},
 	// Signing out (issue #439) revokes the caller's own credential, so the
 	// role matrix sends it from a fixture of its own (special-cased below).
 	// The fixture's operator holds the only operator credential: 409. AuthOff
@@ -276,12 +323,12 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/guest/end": {classAuth, "/v1/guest/end", "", 403},
 	// Unknown principal / already-enabled ghost: no-ops that write no audit
 	// event, so the AuthOff audit count below is unaffected.
-	"POST /v1/principals/{id}/disable":                {classOp, "/v1/principals/9999/disable", "", 404},
-	"POST /v1/principals/{id}/enable":                 {classOp, "/v1/principals/4/enable", "", 204},
+	"POST /v1/principals/{id}/disable":                {classPerm, "/v1/principals/9999/disable", "", 404},
+	"POST /v1/principals/{id}/enable":                 {classPerm, "/v1/principals/4/enable", "", 204},
 	"POST /v1/principals/{id}/credentials/revoke-all": {classSelf, "/v1/principals/9999/credentials/revoke-all", "", 404},
-	"POST /v1/hooks":                                  {classOp, "/v1/hooks", `{}`, 400},
-	"GET /v1/hooks":                                   {classOp, "/v1/hooks", "", 200},
-	"DELETE /v1/hooks/{id}":                           {classOp, "/v1/hooks/9999", "", 404},
+	"POST /v1/hooks":                                  {classPerm, "/v1/hooks", `{}`, 400},
+	"GET /v1/hooks":                                   {classPerm, "/v1/hooks", "", 200},
+	"DELETE /v1/hooks/{id}":                           {classPerm, "/v1/hooks/9999", "", 404},
 	"POST /v1/hooks/{token}":                          {classExempt, "/v1/hooks/nope", `{}`, 404},
 	"POST /v1/approvals":                              {classAuth, "/v1/approvals", `{}`, 400},
 	"GET /v1/approvals":                               {classAuth, "/v1/approvals", "", 200},
@@ -290,7 +337,7 @@ var routeExpectations = map[string]routeExpectation{
 	"/mcp":                                            {classExempt, "/mcp", `{}`, 401},
 	// limit=0 is a 400 before anything is exported or recorded, so the AuthOff
 	// audit count below is unaffected by a route that audits every success.
-	"GET /v1/audit": {classOwner, "/v1/audit?limit=0", "", 400},
+	"GET /v1/audit": {classPerm, "/v1/audit?limit=0", "", 400},
 	// A ticket is for a credential: AuthOff gets 400 tickets_require_auth
 	// (special-cased below). Issuing one writes no audit row.
 	"POST /v1/ws-tickets": {classAuth, "/v1/ws-tickets", "", 201},
@@ -322,16 +369,16 @@ var routeExpectations = map[string]routeExpectation{
 	// audited; AuthOff is 403 accounts_require_auth (special-cased below).
 	"POST /v1/join/account":                  {classExempt, "/v1/join/account", `{}`, 403},
 	"POST /v1/guest/convert":                 {classAuth, "/v1/guest/convert", `{}`, 403},
-	"POST /v1/guests/{id}/conversion-permit": {classOp, "/v1/guests/9999/conversion-permit", `{}`, 404},
+	"POST /v1/guests/{id}/conversion-permit": {classPerm, "/v1/guests/9999/conversion-permit", `{}`, 404},
 	// The operator's guest routes (issue #710). A settings change with no
 	// field and a bulk end with no dry_run are 400s before anything is
 	// written; the per-id end names a principal that does not exist. AuthOff
 	// is 403 accounts_require_auth (special-cased below).
 	"GET /v1/join/settings":    {classOp, "/v1/join/settings", "", 200},
-	"PUT /v1/join/settings":    {classOwner, "/v1/join/settings", `{}`, 400},
-	"GET /v1/guests":           {classOp, "/v1/guests", "", 200},
-	"POST /v1/guests/{id}/end": {classOp, "/v1/guests/9999/end", "", 404},
-	"POST /v1/guests/end":      {classOp, "/v1/guests/end", `{}`, 400},
+	"PUT /v1/join/settings":    {classPerm, "/v1/join/settings", `{}`, 400},
+	"GET /v1/guests":           {classPerm, "/v1/guests", "", 200},
+	"POST /v1/guests/{id}/end": {classPerm, "/v1/guests/9999/end", "", 404},
+	"POST /v1/guests/end":      {classPerm, "/v1/guests/end", `{}`, 400},
 	// The v2 redeem and the sign-in take a password (issue #707), so they
 	// answer 403 before reading anything: https_required to this fixture's
 	// plain HTTP from a test address, and accounts_require_auth under AuthOff.
@@ -347,21 +394,21 @@ var routeExpectations = map[string]routeExpectation{
 	// or a principal that does not exist, or sets the pause switch to the
 	// value it has, so it changes and audits nothing. Like the routes above,
 	// AuthOff gets 401 (special-cased below).
-	"GET /v1/invites/{id}/principals":           {classOp, "/v1/invites/9999/principals", "", 404},
-	"POST /v1/invites/{id}/disable-joiners":     {classOp, "/v1/invites/9999/disable-joiners", `{"dry_run":true}`, 404},
-	"POST /v1/principals/{id}/disable-invitees": {classOp, "/v1/principals/9999/disable-invitees", `{"dry_run":true}`, 404},
-	"PUT /v1/principals/{id}/invite-permission": {classOp, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
+	"GET /v1/invites/{id}/principals":           {classPerm, "/v1/invites/9999/principals", "", 404},
+	"POST /v1/invites/{id}/disable-joiners":     {classPerm, "/v1/invites/9999/disable-joiners", `{"dry_run":true}`, 404},
+	"POST /v1/principals/{id}/disable-invitees": {classPerm, "/v1/principals/9999/disable-invitees", `{"dry_run":true}`, 404},
+	"PUT /v1/principals/{id}/invite-permission": {classPerm, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
 	"GET /v1/invites/settings":                  {classOp, "/v1/invites/settings", "", 200},
-	"PUT /v1/invites/settings":                  {classOp, "/v1/invites/settings", `{"paused":false}`, 200},
+	"PUT /v1/invites/settings":                  {classPerm, "/v1/invites/settings", `{"paused":false}`, 200},
 	// Sign-in links (issue #493). The create names a principal that does not
 	// exist, and preview and redeem send no code, which is the
 	// sign_in_link_invalid 404 before anything is looked up or audited.
 	// AuthOff gets 401 on the create and the close (special-cased below).
-	"POST /v1/principals/{id}/sign-in-links": {classOp, "/v1/principals/9999/sign-in-links", `{}`, 404},
+	"POST /v1/principals/{id}/sign-in-links": {classPerm, "/v1/principals/9999/sign-in-links", `{}`, 404},
 	"POST /v1/sign-in-links/preview":         {classExempt, "/v1/sign-in-links/preview", `{}`, 404},
 	"POST /v1/sign-in-links/redeem":          {classExempt, "/v1/sign-in-links/redeem", `{}`, 404},
 	// Closing one names a link that does not exist: 404, nothing audited.
-	"DELETE /v1/sign-in-links/{id}": {classOp, "/v1/sign-in-links/9999", "", 404},
+	"DELETE /v1/sign-in-links/{id}": {classPerm, "/v1/sign-in-links/9999", "", 404},
 	// Problem reports (issue #446). An empty report is a 400 before anything
 	// is stored or audited; the operator routes name a report that does not
 	// exist. Sending one is for people: an agent gets 403 and AuthOff 401
@@ -375,9 +422,9 @@ var routeExpectations = map[string]routeExpectation{
 	// before anything is read), and the list only reads. The bulk hide, like
 	// the bulk disables, needs a caller to leave out: AuthOff gets 401
 	// (special-cased below).
-	"POST /v1/principals/{id}/hide": {classOp, "/v1/principals/9999/hide", "", 404},
-	"POST /v1/principals/hide":      {classOp, "/v1/principals/hide", `{"dry_run":true}`, 400},
-	"GET /v1/principals":            {classOp, "/v1/principals", "", 200},
+	"POST /v1/principals/{id}/hide": {classPerm, "/v1/principals/9999/hide", "", 404},
+	"POST /v1/principals/hide":      {classPerm, "/v1/principals/hide", `{"dry_run":true}`, 400},
+	"GET /v1/principals":            {classPerm, "/v1/principals", "", 200},
 	// Device links (issue #712): a member's own. The member gets 403
 	// reauth_required (no proof on the fixture's credential), an empty
 	// list, and 404 for a link that does not exist; agents and operators are
@@ -468,9 +515,23 @@ func TestRouteTable(t *testing.T) {
 			t.Errorf("route %q has no entry in routeExpectations: decide its authentication class", rt.pattern)
 			continue
 		}
-		want := map[routeClass]access{classExempt: accessExempt, classAuth: accessAuthenticated, classOp: accessOperator, classSelf: accessOperatorOrSelf, classOwner: accessOwner, classManager: accessChannelManager}[exp.class]
+		want := map[routeClass]access{classExempt: accessExempt, classAuth: accessAuthenticated, classOp: accessOperator, classSelf: accessOperatorOrSelf, classOwner: accessOwner, classManager: accessChannelManager, classPerm: accessPermission}[exp.class]
 		if rt.access != want {
 			t.Errorf("route %q access = %d, expectation says %s", rt.pattern, rt.access, exp.class)
+		}
+		// A permission route's permission is pinned like its class; every
+		// other route names none.
+		perm, isPerm := routePermissions[rt.pattern]
+		if isPerm != (exp.class == classPerm) {
+			t.Errorf("route %q: class %s, but routePermissions %s it", rt.pattern, exp.class, map[bool]string{true: "names", false: "does not name"}[isPerm])
+		}
+		if rt.perm != perm {
+			t.Errorf("route %q needs %q, expectation says %q", rt.pattern, rt.perm, perm)
+		}
+	}
+	for p := range routePermissions {
+		if _, ok := routeExpectations[p]; !ok {
+			t.Errorf("routePermissions names %q, which routeExpectations does not", p)
 		}
 	}
 	var want []string
@@ -548,7 +609,7 @@ func TestRoleMatrix(t *testing.T) {
 		t.Run(rt.pattern, func(t *testing.T) {
 			method := routeMethod(rt.pattern)
 			memberWant := exp.allowed
-			if exp.class == classOp || exp.class == classSelf || exp.class == classOwner || exp.class == classManager {
+			if exp.class == classOp || exp.class == classSelf || exp.class == classOwner || exp.class == classManager || exp.class == classPerm {
 				memberWant = http.StatusForbidden
 			}
 			if rt.pattern == "PUT /v1/channels/{id}/name" {
@@ -1054,11 +1115,18 @@ func TestWhoAmI(t *testing.T) {
 		// classed (issue #705); a guest's case is in guests_test.go. People
 		// are told how they are authenticated (issue #708): neither has a
 		// password yet, so neither has finished setting up.
+		// Each is told what it holds (ADR-014 design §8.3, issue #1015):
+		// every permission for an owner, the member column with alice's
+		// may_invite brake applied for alice, none for an agent; and always
+		// the document's revision.
 		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true, VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityOperator,
-			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}, Owner: true}}, // the bootstrap operator is the owner (issue #790)
+			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}, Owner: true, // the bootstrap operator is the owner (issue #790)
+			Permissions: schema.Permissions, PermissionsRevision: 1}},
 		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityMember,
-			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}}},
-		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false), IdentityClass: schema.IdentityAgent}},
+			Auth:        &schema.AuthStateV1{Scope: schema.CredentialScopeFull},
+			Permissions: []schema.Permission{schema.PermCreatePublicChannels, schema.PermCreatePrivateChannels, schema.PermSeeMemberDirectory, schema.PermUseVoice, schema.PermShareScreen}, PermissionsRevision: 1}},
+		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false), IdentityClass: schema.IdentityAgent,
+			PermissionsRevision: 1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1108,13 +1176,25 @@ func TestOperatorOnlyRoutesDeny(t *testing.T) {
 	f := newAuthFixture(t, AuthRequired)
 	for _, rt := range f.srv.routes {
 		exp := routeExpectations[rt.pattern]
-		if exp.class != classOp && exp.class != classSelf {
+		if exp.class != classOp && exp.class != classSelf && exp.class != classPerm {
 			continue
 		}
 		t.Run(rt.pattern, func(t *testing.T) {
 			before := countAction(f.audit(t), "access_denied")
 			rec := f.do(t, routeMethod(rt.pattern), exp.path, f.aliceTok, exp.body)
 			assertErrorBody(t, rec, http.StatusForbidden, "forbidden")
+			// A member's answer on a permission route is the one it got
+			// before ADR-014, byte for byte (design §7.2): no permission named,
+			// and the old message.
+			if exp.class == classPerm {
+				want := `{"code":"forbidden","message":"operator role required"}`
+				if rt.pattern == "PUT /v1/join/settings" || rt.pattern == "GET /v1/audit" {
+					want = `{"code":"forbidden","message":"owner required"}`
+				}
+				if got := strings.TrimSpace(rec.Body.String()); got != want {
+					t.Errorf("a member's answer = %s, want %s", got, want)
+				}
+			}
 			var last store.AuditEvent
 			for _, e := range f.audit(t) {
 				if e.Action == "access_denied" {

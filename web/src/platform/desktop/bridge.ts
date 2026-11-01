@@ -156,6 +156,26 @@ export interface FeedHandlers {
 
 export type Unsubscribe = () => void;
 
+// A file to upload: the bytes (base64, the bridge carries data, not binary
+// objects) with the name and media type the page declares. All of it is
+// untrusted data: main caps the size, shapes the type and the name, and sends
+// the operation itself. The channel is a path value of the table.
+export type ChannelName = string;
+
+export interface UploadRequest {
+  readonly channel: ChannelName;
+  readonly filename: string;
+  readonly mediaType: string;
+  readonly data: string;
+}
+
+// A file's bytes (base64) for a preview, or the server's refusal or no answer.
+export type DownloadReply = BridgeReply | { readonly kind: 'bytes'; readonly data: string };
+
+// What saving a file came to. cancelled is the person closing the dialog;
+// failed is anything else (no answer, too large, not writable).
+export type SaveOutcome = 'saved' | 'cancelled' | 'failed' | 'unauthorized';
+
 export interface ConchDesktopBridge {
   // The server address of the active profile (null: none is active).
   serverAddress(): Promise<ServerAddress>;
@@ -189,6 +209,15 @@ export interface ConchDesktopBridge {
   createAccount(request: JoinAccountRequestV1): Promise<SignInOutcome>;
   signOut(): Promise<SignOutOutcome>;
 
+  // Attachments (issue #947). Upload sends the operation uploadFile; the
+  // answer is the server's, validated. Download gives a file's bytes for a
+  // blob preview; nothing is written or opened. Save asks main to show the
+  // native save dialog (only right after the person's own click or key) and
+  // write the file to the path the person chooses there: the page names a
+  // file by id and never a path, and gets no bytes back.
+  uploadFile(request: UploadRequest): Promise<BridgeReply>;
+  downloadFile(id: number): Promise<DownloadReply>;
+  saveFile(id: number): Promise<SaveOutcome>;
   // The saved server profiles (issue #945). Ids are opaque to the page.
   profiles(): Promise<ProfilesView>;
   profileAdd(address: string): Promise<ProfileAddResult>;

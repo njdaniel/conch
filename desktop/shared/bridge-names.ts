@@ -25,6 +25,9 @@ export const BRIDGE_FUNCTIONS = [
   'joinAsGuest',
   'createAccount',
   'signOut',
+  'uploadFile',
+  'downloadFile',
+  'saveFile',
 ] as const satisfies readonly (keyof ConchDesktopBridge)[];
 
 // The saved server profiles (issue #945), a family of their own.

@@ -272,17 +272,13 @@ func (s *Store) RecordChannelRenameRefused(ctx context.Context, callerID, channe
 
 // channelByIDTx is ChannelByID inside a transaction.
 func channelByIDTx(ctx context.Context, tx execer, id int64) (Channel, error) {
-	var ch Channel
-	var createdAt int64
-	err := tx.QueryRowContext(ctx, "SELECT id, name, created_at FROM channels WHERE id = ?", id).
-		Scan(&ch.ID, &ch.Name, &createdAt)
+	ch, err := scanChannel(tx.QueryRowContext(ctx, "SELECT "+channelColumns+" FROM channels WHERE id = ?", id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Channel{}, fmt.Errorf("store: find channel %d: %w", id, ErrNotFound)
 	}
 	if err != nil {
 		return Channel{}, fmt.Errorf("store: find channel %d: %w", id, err)
 	}
-	ch.CreatedAt = time.UnixMilli(createdAt)
 	return ch, nil
 }
 

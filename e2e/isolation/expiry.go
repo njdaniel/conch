@@ -119,7 +119,7 @@ func (w *world) startExpiry() (*expiring, error) {
 	if e.busyHeld, err = w.hold(e.busy, w.p.channel, ""); err != nil {
 		return nil, err
 	}
-	if w.lk != nil {
+	if guestsHoldVoice && w.lk != nil {
 		if err := w.joinVoice(e.idle, e.idleHeld.room); err != nil {
 			return nil, err
 		}
@@ -191,7 +191,7 @@ func (w *world) busyTimeline(e *expiring) error {
 	} else if status != http.StatusUnauthorized {
 		return fmt.Errorf("the idle guest's credential past its idle deadline: status %d, want 401", status)
 	}
-	if w.lk == nil {
+	if !guestsHoldVoice || w.lk == nil {
 		return nil
 	}
 	if err := waitFor("LiveKit to list the idle guest nowhere", 30*time.Second, func() (bool, string) {
@@ -258,7 +258,7 @@ func (w *world) finishExpiry(e *expiring, bounds voiceBounds) ([]timing, error) 
 		if err := closedAllExpired(c.h.sockets); err != nil {
 			return nil, err
 		}
-		if w.lk != nil {
+		if guestsHoldVoice && w.lk != nil {
 			s := <-c.lk
 			if s.err != nil {
 				return nil, s.err
@@ -343,3 +343,9 @@ func (w *world) expiredStayOut(holders []holder, bounds voiceBounds) error {
 	}
 	return nil
 }
+
+// guestsHoldVoice is whether a guest can be in voice: it cannot since A4
+// (ADR-014, #1016), because permittedTx answers false for every guest, so
+// the voice legs of the visits expiry have nothing to watch. The legs stay
+// for when guests return.
+const guestsHoldVoice = false

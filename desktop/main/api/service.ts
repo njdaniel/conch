@@ -54,7 +54,8 @@ export type SignInStep =
 const DEDICATED: ReadonlySet<OperationId> = new Set<OperationId>(['logout']);
 
 // Operations whose answer is a stream of bytes or whose request is one: the
-// bridge carries JSON only. (Attachments are #947.)
+// bridge's generic request carries JSON only. (Attachments have their own
+// functions, main/files.ts.)
 const NOT_JSON: ReadonlySet<OperationId> = new Set<OperationId>(['uploadFile', 'fileBytes']);
 
 export function invocable(id: OperationId): boolean {
@@ -98,6 +99,25 @@ function failed(exchange: Exchange): SignInOutcome {
   }
 }
 
+// replyOf is what the renderer is told of an exchange: the server's answer
+// already validated, or the reason there was none. Bytes never go this way.
+export function replyOf(exchange: Exchange): BridgeReply {
+  switch (exchange.kind) {
+    case 'none':
+      return exchange.reason === undefined ? { kind: 'none' } : { kind: 'none', reason: exchange.reason };
+    case 'unauthorized':
+      return { kind: 'unauthorized' };
+    case 'answer':
+      return {
+        kind: 'reply',
+        status: exchange.status,
+        ...(exchange.body === undefined ? {} : { body: exchange.body }),
+        ...(exchange.retryAfter === undefined ? {} : { retryAfter: exchange.retryAfter }),
+        ...(exchange.requestId === undefined ? {} : { requestId: exchange.requestId }),
+      };
+  }
+}
+
 export class Service {
   readonly #deps: ServiceDeps;
 
@@ -120,21 +140,8 @@ export class Service {
       ...(request.query === undefined ? {} : { query: request.query }),
       ...(request.body === undefined ? {} : { body: request.body }),
     });
-    switch (exchange.kind) {
-      case 'none':
-        this.#note(id, exchange.reason);
-        return exchange.reason === undefined ? { kind: 'none' } : { kind: 'none', reason: exchange.reason };
-      case 'unauthorized':
-        return { kind: 'unauthorized' };
-      case 'answer':
-        return {
-          kind: 'reply',
-          status: exchange.status,
-          ...(exchange.body === undefined ? {} : { body: exchange.body }),
-          ...(exchange.retryAfter === undefined ? {} : { retryAfter: exchange.retryAfter }),
-          ...(exchange.requestId === undefined ? {} : { requestId: exchange.requestId }),
-        };
-    }
+    if (exchange.kind === 'none') this.#note(id, exchange.reason);
+    return replyOf(exchange);
   }
 
   #note(id: OperationId, reason: string | undefined): void {

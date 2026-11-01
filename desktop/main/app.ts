@@ -4,11 +4,11 @@
 // and the live feeds main holds for the page (D2-4). The renderer itself
 // still makes no network request.
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 import tls from 'node:tls';
 
-import { app, ipcMain, protocol, safeStorage } from 'electron';
+import { app, dialog, ipcMain, protocol, safeStorage, shell } from 'electron';
 
 import { activationFactory, Live, prober, revoker, verifier } from './profiles/activation.ts';
 import { createProfileFiles } from './profiles/files.ts';
@@ -16,11 +16,17 @@ import { TeardownHooks } from './profiles/hooks.ts';
 import { ProfilesService } from './profiles/service.ts';
 import { ProfileStore } from './profiles/store.ts';
 import { acquire, prepareRoot } from './instance.ts';
+import { Client } from './api/client.ts';
+import { Session } from './api/session.ts';
 import { createNodeConnect } from './api/socket.ts';
 import { transportVerdict, trustSystemRoots } from './api/trust.ts';
 import { debuggingVerdict } from './debugging.ts';
+import { Files } from './files.ts';
+import { Gestures } from './gestures.ts';
 import { installGuards } from './guards.ts';
 import { Ipc } from './ipc.ts';
+import { Links } from './links.ts';
+import { saveChosenFile } from './save-file.ts';
 import { parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { electronStorage } from './vault/electron-storage.ts';
 import { createVault, type Vault } from './vault/vault.ts';
@@ -59,9 +65,40 @@ export async function start(): Promise<void> {
     return;
   }
   app.enableSandbox();
-  installGuards(app, { log });
-
   const live = new Live();
+  // What the person has just done, and the one way out of the window: a link
+  // they clicked, validated, to the OS browser (issue #947). Both read the
+  // window of the activation in force.
+  const owned = () => live.owned();
+  const parent = () => (live.window === null || live.window.isDestroyed() ? null : live.window);
+  const gestures = new Gestures(Date.now);
+  const links = new Links({
+    gestures,
+    owned,
+    openExternal: (url) => shell.openExternal(url),
+    confirm: async (host, url) => {
+      const window = parent();
+      const options = {
+        type: 'question' as const,
+        message: 'Open this link in your browser?',
+        detail: `${host}\n\n${url}`,
+        buttons: ['Open', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      };
+      const answer = await (window === null ? dialog.showMessageBox(options) : dialog.showMessageBox(window, options));
+      return answer.response === 0;
+    },
+    tell: (message) => {
+      const window = parent();
+      const options = { type: 'warning' as const, message: 'Conch did not open that link', detail: message, buttons: ['OK'] };
+      void (window === null ? dialog.showMessageBox(options) : dialog.showMessageBox(window, options));
+    },
+    log,
+  });
+  installGuards(app, { log, gestures, owned, links });
+
   // One instance per data root: the lock comes before anything reads or
   // writes the root. A second launch focuses the first and exits.
   const first = acquire(app, () => {
@@ -109,12 +146,29 @@ export async function start(): Promise<void> {
     : refusingVault();
 
   trustSystemRoots(tls);
+  // The attachments of the activation in force: its own client and session.
+  const makeFiles = (client: Client, identity: Session): Files =>
+    new Files({
+      client,
+      session: identity,
+      chooseSavePath: async (suggested) => {
+        const options = { title: 'Save attachment', defaultPath: suggested, properties: ['showOverwriteConfirmation' as const, 'createDirectory' as const] };
+        const window = parent();
+        const chosen = await (window === null ? dialog.showSaveDialog(options) : dialog.showSaveDialog(window, options));
+        return chosen.canceled || chosen.filePath === '' ? null : chosen.filePath;
+      },
+      writeFile: saveChosenFile,
+      downloadsDir: () => app.getPath('downloads'),
+      join,
+      isAbsolute,
+      log,
+    });
   const profiles = new ProfilesService({
     store,
     vault,
     hooks: teardownHooks,
     createActivation: activationFactory(
-      { packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))), connect: createNodeConnect(log), now: Date.now, log },
+      { packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))), connect: createNodeConnect(log), guard: { log, gestures, owned, links }, makeFiles, now: Date.now, log },
       live,
     ),
     probe: prober(log),
@@ -142,6 +196,10 @@ export async function start(): Promise<void> {
     get feeds() {
       return current(live.feeds);
     },
+    get files() {
+      return current(live.files);
+    },
+    gestures,
     profiles,
     now: Date.now,
     log,

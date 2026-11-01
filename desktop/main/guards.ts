@@ -7,6 +7,8 @@
 // validated link opened in the OS browser).
 import type { App, Event, Session, WebContents } from 'electron';
 
+import { CLIPBOARD_GESTURE_MS, type Gestures } from './gestures.ts';
+import type { Links } from './links.ts';
 import { INITIAL_URL, SCHEME, HOST } from './scheme.ts';
 
 interface NavigationDetails {
@@ -34,6 +36,29 @@ function describe(url: string): string {
 
 export interface GuardDeps {
   readonly log: (line: string) => void;
+  // What lets a clipboard write through and a link out (issue #947). Without
+  // them (a unit test of the refusals alone) nothing is let through.
+  readonly gestures?: Gestures;
+  // The one web contents that is the app's window.
+  readonly owned?: () => object | null;
+  readonly links?: Pick<Links, 'fromWindow'>;
+}
+
+// clipboardWriteAllowed is the one permission the page is given: writing
+// plain text to the clipboard (clipboard-sanitized-write), from the owned
+// window's main frame at the app's own origin, right after the person's own
+// input. clipboard-read is never given; paste reaches the page as a paste
+// event.
+export function clipboardWriteAllowed(
+  deps: GuardDeps,
+  contents: object | null,
+  permission: string,
+  details: { readonly isMainFrame?: boolean; readonly requestingUrl?: string },
+): boolean {
+  if (permission !== 'clipboard-sanitized-write' || contents === null) return false;
+  if (deps.owned === undefined || deps.gestures === undefined || contents !== deps.owned()) return false;
+  if (details.isMainFrame !== true || !(details.requestingUrl ?? '').startsWith(ALLOWED_PREFIX)) return false;
+  return deps.gestures.recent(contents, CLIPBOARD_GESTURE_MS);
 }
 
 // guardSession denies, on a session, what a page might ask of the host: every
@@ -41,10 +66,10 @@ export interface GuardDeps {
 // display capture, device choosers, downloads, and any request that is not to
 // the app's own scheme. Idempotent in effect: handlers are replaced.
 export function guardSession(ses: Session, deps: GuardDeps): void {
-  ses.setPermissionRequestHandler((_contents, _permission, callback) => {
-    callback(false);
+  ses.setPermissionRequestHandler((contents, permission, callback, details) => {
+    callback(clipboardWriteAllowed(deps, contents, permission, details));
   });
-  ses.setPermissionCheckHandler(() => false);
+  ses.setPermissionCheckHandler((contents, permission, _origin, details) => clipboardWriteAllowed(deps, contents, permission, details));
   ses.setDevicePermissionHandler(() => false);
   ses.setDisplayMediaRequestHandler((_request, callback) => {
     callback(null);
@@ -81,14 +106,19 @@ export function guardSession(ses: Session, deps: GuardDeps): void {
 // guardContents refuses, on one web contents: navigation away from the
 // initial document (including redirects and frame navigation), every new
 // window, every webview, and bluetooth choosers.
-export function guardContents(contents: WebContents): void {
+export function guardContents(contents: WebContents, links?: Pick<Links, 'fromWindow'>): void {
   const refuse = (details: NavigationDetails): void => {
     if (details.url !== INITIAL_URL) details.preventDefault();
   };
   contents.on('will-navigate', refuse);
   contents.on('will-redirect', refuse);
   contents.on('will-frame-navigate', refuse);
-  contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  // No window is ever made. A link the person clicked, that opens a new
+  // window, goes to the OS browser instead, after main's own checks.
+  contents.setWindowOpenHandler((details) => {
+    links?.fromWindow(contents, details.url, details.postBody !== undefined);
+    return { action: 'deny' };
+  });
   contents.on('will-attach-webview', (event: Event) => {
     event.preventDefault();
   });
@@ -101,6 +131,7 @@ export function guardContents(contents: WebContents): void {
 export function installGuards(app: App, deps: GuardDeps): void {
   app.on('web-contents-created', (_event, contents) => {
     guardSession(contents.session, deps);
-    guardContents(contents);
+    deps.gestures?.attach(contents);
+    guardContents(contents, deps.links);
   });
 }
