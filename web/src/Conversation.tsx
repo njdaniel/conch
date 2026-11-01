@@ -14,6 +14,7 @@ import type { Target, TargetAction } from './state/drafts';
 import type { ChannelChat, PendingSend } from './state/messages';
 import { canLoadOlder, isLater, lastId, oldestId, ordered } from './state/messages';
 import type { LiveStatus, Person } from './useLiveChannel';
+import { mentions } from './useNotifications';
 
 // HH:MM in the reader's own time zone.
 export function clock(when: string | number): string {
@@ -158,9 +159,11 @@ export function Message({
   const openers = useOpeners(items.length > 0, () => {
     setMenuOpen(true);
   });
-  const classes = ['message', ...(cont ? ['cont'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
+  const named = approval === null && editor === undefined && mentions(message.body, people.get(viewer)?.name ?? '');
+  const classes = ['message', ...(cont ? ['cont'] : []), ...(named ? ['mentions-you'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
   return (
     <li className={classes.join(' ')} data-message-id={message.id} tabIndex={-1} {...openers}>
+      {named ? <span className="vh">Mentions you. </span> : null}
       <Line
         time={clock(message.created_at)}
         author={authorOf(message, people)}

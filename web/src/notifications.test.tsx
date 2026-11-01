@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Message } from './Conversation';
 import { NotificationCenter } from './NotificationCenter';
 import { NotificationSettings } from './NotificationSettings';
 import * as api from './api';
@@ -69,6 +70,14 @@ describe('mentions', () => {
     ['hello @bob', false],
   ])('%s', (body, want) => {
     expect(mentions(body, 'ada')).toBe(want);
+    // The row's mark follows the same matcher, case for case (issue #1043).
+    const { container } = render(
+      <ol>
+        <Message message={message(1, body, 3)} people={new Map([[2, { name: 'ada', kind: 'human' }], [3, { name: 'bob', kind: 'human' }]])} nets={new Map()} viewer={2} channel="general" sent={false} cont={false} />
+      </ol>,
+    );
+    expect(container.querySelector('li.mentions-you') !== null).toBe(want);
+    expect(screen.queryByText('Mentions you.') !== null).toBe(want);
   });
 });
 

@@ -3412,6 +3412,13 @@ button.link {
   margin: 0.25rem 0;
 }
 
+/* A message that names the viewer: a mark on the row, beside the hidden
+   "Mentions you" text; the words of the body are left alone. */
+.message.mentions-you {
+  background: var(--raised);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 /* The first-run panel and the empty conversation (issues #1032, #1034). */
 .first-run {
   padding: 1.5rem;

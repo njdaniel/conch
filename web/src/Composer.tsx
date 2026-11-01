@@ -3,6 +3,7 @@ import { EmojiPicker } from './EmojiPicker';
 import { completeShortcode, completionAt, insertAt, loadEmoji, type Emoji, type EmojiIndex } from './emoji/emoji';
 import { Glyph } from './Icons';
 import { formatSize, isPreviewType } from './fileSize';
+import { completeMention, mentionAt } from './mention';
 import { validateImage } from './image';
 import type { Audience } from './schema/message';
 import { audienceScope, maxDraftAttachments, type DraftAttachment, type NewDraftAttachment } from './state/attachments';
@@ -209,6 +210,16 @@ export function Composer({
   const suggesting = completion !== null && suggestions.length > 0 && dismissed !== completionKey;
   const activeSuggestion = Math.min(suggestion, Math.max(0, suggestions.length - 1));
   const optionId = (i: number) => `composer-emoji-option-${String(i)}`;
+  // `@pre` at the caret offers this channel's members (not the viewer to
+  // themselves). One popup at a time: a `:short` wins.
+  const naming = editable && !emojiOpen && completion === null ? mentionAt(draft, caret) : null;
+  const namingKey = naming === null ? null : `@${String(naming.start)}:${naming.query}`;
+  const candidates = naming === null ? [] : completeMention(others.map(([, person]) => person.name), naming.query);
+  const mentioning = naming !== null && candidates.length > 0 && dismissed !== namingKey;
+  const activeCandidate = Math.min(suggestion, Math.max(0, candidates.length - 1));
+  const mentionId = (i: number) => `composer-mention-option-${String(i)}`;
+  const popup = mentioning ? 'composer-mention-list' : suggesting ? 'composer-emoji-list' : undefined;
+  const activeOption = mentioning ? mentionId(activeCandidate) : suggesting ? optionId(activeSuggestion) : undefined;
   useLayoutEffect(() => {
     const at = caretAfter.current;
     const box = textarea.current;
@@ -223,6 +234,14 @@ export function Composer({
   function insertEmoji(key: string, from: number, to: number): void {
     if (!editable) return;
     const done = insertAt(draft, from, to, key);
+    caretAfter.current = done.caret;
+    setSuggestion(0);
+    onDraft(done.text);
+    setInsertions((n) => n + 1);
+  }
+  function insertMention(name: string, from: number, to: number): void {
+    if (!editable) return;
+    const done = insertAt(draft, from, to, `@${name} `);
     caretAfter.current = done.caret;
     setSuggestion(0);
     onDraft(done.text);
@@ -411,6 +430,22 @@ export function Composer({
           ))}
         </ul>
       ) : null}
+      {mentioning ? (
+        <ul id="composer-mention-list" className="emoji-suggestions" role="listbox" aria-label="Mention suggestions">
+          {candidates.map((name, i) => (
+            <li
+              key={name}
+              id={mentionId(i)}
+              role="option"
+              aria-selected={i === activeCandidate}
+              onMouseDown={(event) => { event.preventDefault(); }}
+              onClick={() => { insertMention(name, naming.start, caret); }}
+            >
+              @{name}
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <div className={paused ? 'composer-box paused' : 'composer-box'}>
       <input
         ref={picker}
@@ -440,8 +475,8 @@ export function Composer({
         readOnly={busy}
         aria-describedby={paused ? pausedId : undefined}
         aria-autocomplete="list"
-        aria-controls={suggesting ? 'composer-emoji-list' : undefined}
-        aria-activedescendant={suggesting ? optionId(activeSuggestion) : undefined}
+        aria-controls={popup}
+        aria-activedescendant={activeOption}
         onChange={(event) => {
           setCaret(event.target.selectionStart);
           setSuggestion(0);
@@ -450,6 +485,25 @@ export function Composer({
         onSelect={(event) => { setCaret(event.currentTarget.selectionStart); }}
         onPaste={paste}
         onKeyDown={(event) => {
+          if (mentioning && !event.nativeEvent.isComposing) {
+            const n = candidates.length;
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault();
+              setSuggestion((activeCandidate + (event.key === 'ArrowDown' ? 1 : n - 1)) % n);
+              return;
+            }
+            if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+              event.preventDefault();
+              const name = candidates[activeCandidate];
+              if (name !== undefined) insertMention(name, naming.start, caret);
+              return;
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              setDismissed(namingKey);
+              return;
+            }
+          }
           if (suggesting && !event.nativeEvent.isComposing) {
             const n = suggestions.length;
             if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
