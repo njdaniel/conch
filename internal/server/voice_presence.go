@@ -366,8 +366,9 @@ type voicePoller struct {
 	// #1061): claimSeam(stage) runs in claimShare at "enter", once the
 	// request has been admitted, and at "lock", just before the room's
 	// claims are taken, at "claimed" (issue #1087), with the claims held and
-	// the room knowing the claim is running, before the holder check, and at "retire", in retireRoom between
-	// forgetRoom's return and its look at claimer; endSharesSeam(n) runs in endSharesOf, and in
+	// the room knowing the claim is running, before the holder check, and at
+	// "retire", in retireRoom between forgetRoom's return and its look at
+	// claimer; endSharesSeam(n) runs in endSharesOf, and in
 	// waitRunningClaims, once it has found the n rooms whose claims it will
 	// take.
 	claimSeam     func(stage string)
@@ -2024,6 +2025,12 @@ func (p *voicePoller) sweepSoon() {
 // (0 when nobody did, or when another forget got there first), so a caller
 // that holds no claims can withdraw the sources (retireRoom). It takes no
 // claims itself: claimShare calls it with the room's claims held.
+//
+// A non-zero holder from a forget with no claim running is an obligation: the
+// room is in retiring with withdrawDone open, and whoever got the holder must
+// close withdrawDone (withdrawFinished) or hand the debt to a claim
+// (owedWithdraw), or every later hook hangs in waitRunningClaims. retireRoom
+// is the only caller that is not a claim allowed to forget a room.
 func (p *voicePoller) forgetRoom(ctx context.Context, name string) (*voiceRoomState, int64) {
 	r := p.roomNamed(name)
 	if r == nil {
@@ -2349,11 +2356,10 @@ func (p *voicePoller) waitRunningClaims() {
 	p.mu.Lock()
 	var done []chan struct{}
 	for _, r := range p.rooms {
+		// No withdrawDone here: forgetRoom takes the room out of rooms before
+		// it opens one, so it is found in retiring below.
 		if r.claimer != 0 && r.claimDone != nil {
 			done = append(done, r.claimDone)
-		}
-		if r.withdrawDone != nil {
-			done = append(done, r.withdrawDone)
 		}
 	}
 	for r := range p.retiring {

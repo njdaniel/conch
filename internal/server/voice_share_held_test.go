@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/njdaniel/conch/internal/server/store"
 )
@@ -90,8 +91,8 @@ func revokeWhileClaimHeld(t *testing.T, f *presenceFixture, rev revocationCase, 
 
 // TestVoiceShareHeldShareWithdrawnWithOtherClaimRunning (issue #1087): ann
 // holds the share and a claim of ann2's is running in the room (it is refused
-// room_gone once the room is retired, and as busy before), when
-// running in the room when a rotation retires it with DeleteRoom failing.
+// room_gone once the room is retired, and as busy before) when a rotation
+// retires the room with DeleteRoom failing.
 // That claim never touches ann's grant, so the debt left for it
 // (owedWithdraw) is paid in its defer, before the hook answers.
 func TestVoiceShareHeldShareWithdrawnWithOtherClaimRunning(t *testing.T) {
@@ -188,10 +189,12 @@ func TestVoiceShareProxyForgetKeepsRotationsWithdrawal(t *testing.T) {
 // TestVoiceShareDebtRegistersRetiringRoom (issue #1087): a claim of ann2's
 // looked the room up before the rotation forgot it and takes the room's
 // claims only between forgetRoom's return and retireRoom's look at claimer
-// (the "retire" seam). It is then in neither rooms nor retiring unless
-// retireRoom puts the room in retiring with the debt, and the hook's wait
-// would skip it and answer before the debt is paid. The hook must find that
-// claim to wait for, and when it answers ann's grant is gone.
+// (the "retire" seam). forgetRoom has already put the room in retiring (value
+// 0) with withdrawDone open, so the hook's wait finds two steps: that
+// withdrawal and, once retireRoom hands it the debt and records the claim in
+// retiring, the claim's own claimDone. When it answers ann's grant is gone.
+// (The debt branch's retiring entry matters to endSharesOf's by-principal
+// match; this test pins the hook's wait, not that.)
 func TestVoiceShareDebtRegistersRetiringRoom(t *testing.T) {
 	f, room := newShareFixture(t)
 	f.lk.config(func(l *scriptedLiveKit) { l.deleteFail = map[string]bool{room: true} })
@@ -301,7 +304,11 @@ func TestVoiceShareHookWaitsForProxyWithdrawal(t *testing.T) {
 				defer close(proxied)
 				proxy.do(t, f, old) // wins the room's order, then withdraws
 			}()
-			<-withdrawing
+			select {
+			case <-withdrawing:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the proxy's withdrawal never reached LiveKit")
+			}
 			hooked := make(chan struct{})
 			go func() {
 				defer close(hooked)
@@ -324,4 +331,89 @@ func TestVoiceShareHookWaitsForProxyWithdrawal(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestVoiceShareRefusedClaimLeavesProxyWithdrawalToItsOwner (issue #1087): a
+// claim that looked the room up before a forget, and takes the claims after
+// it, is refused room_gone and returns; it was handed no debt, so its defer
+// must not close withdrawDone or drop the retiring entry of the forget that
+// is still to withdraw. The claim runs in full between forgetRoom and
+// retireRoom's look at claimer (the "retire" seam), and the withdrawal is
+// held inside LiveKit while the rotator's hook runs: the hook must still
+// find the withdrawal to wait for, and answer only after it.
+func TestVoiceShareRefusedClaimLeavesProxyWithdrawalToItsOwner(t *testing.T) {
+	f, room := newShareFixture(t)
+	f.lk.config(func(l *scriptedLiveKit) { l.deleteFail = map[string]bool{room: true} })
+	f.mustClaim(t, "ann")
+	old, err := f.srv.store.ChannelVoiceRoom(context.Background(), f.ops.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := f.credID(t, "ann")
+	ann := f.identity("ann")
+	atLock, past, claimDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	f.srv.voice.claimSeam = func(at string) {
+		switch at {
+		case "lock": // looked the room up; waits for the forget
+			close(atLock)
+			<-past
+		case "retire": // forgotten, claimer still 0: the claim runs in full now
+			close(past)
+			<-claimDone
+		}
+	}
+	withdrawing, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	f.lk.setOnUpdate(func(_, identity string, share bool) {
+		if !share && identity == ann {
+			once.Do(func() {
+				close(withdrawing)
+				<-release
+			})
+		}
+	})
+	waiting := make(chan int, 1)
+	f.srv.voice.endSharesSeam = func(n int) {
+		select {
+		case waiting <- n:
+		default:
+		}
+	}
+	claimed := make(chan wireResult, 1)
+	go func() {
+		claimed <- f.claimShare(t, "ann2", "ops")
+		close(claimDone)
+	}()
+	<-atLock
+	if err := f.srv.store.RevokeCredential(context.Background(), "system", id); err != nil {
+		t.Fatal(err)
+	}
+	f.rotateInStoreOnly(t)
+	proxied := make(chan struct{})
+	go func() {
+		defer close(proxied)
+		f.srv.voiceDropIfRetired(context.Background(), old) // forgets first, then withdraws
+	}()
+	select {
+	case <-withdrawing:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the proxy's withdrawal never reached LiveKit")
+	}
+	if res := <-claimed; res.status == http.StatusOK {
+		t.Errorf("ann2's claim was granted: %s", res.body)
+	}
+	hooked := make(chan struct{})
+	go func() {
+		defer close(hooked)
+		f.srv.credentialRevoked(context.Background(), id)
+	}()
+	if n := <-waiting; n != 1 {
+		t.Errorf("the hook's wait found %d pending steps, want 1 (the proxy's withdrawal)", n)
+	}
+	close(release)
+	<-hooked
+	if f.granted(t, room, "ann") {
+		t.Error("the screen is still granted when the hook answered")
+	}
+	<-proxied
 }
