@@ -4,7 +4,7 @@ import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
-import { checkCaller, Ipc, parseRequest, plain, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
+import { checkCaller, Ipc, parseRequest, plain, type ProfilesApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
 import { INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
 
 function frame(token = 'frame-1', over: Partial<FrameLike> = {}): FrameLike {
@@ -36,12 +36,13 @@ function fixture(): Fixture {
   };
   const service = new Proxy({} as Service, { get: (_t, name: string) => record(name) });
   const feeds = new Proxy({} as Feeds, { get: (_t, name: string) => record(`feeds.${name}`) });
+  const profiles = new Proxy({} as ProfilesApi, { get: (_t, name: string) => record(`profiles.${name}`) });
   const logs: string[] = [];
   const clock = { now: 1_000_000 };
   const input = { recent: false };
   const files = new Proxy({} as Files, { get: (_t, name: string) => record(`files.${name}`) });
   const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, now: () => clock.now, log: (line) => logs.push(line) });
+  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, now: () => clock.now, log: (line) => logs.push(line) });
   return { ipc, gate, contents, main, calls, logs, clock, input, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
@@ -75,7 +76,17 @@ describe('every invocation is checked before anything else', () => {
 
   it('refuses everything when the window is gone', async () => {
     const f = fixture();
-    const ipc = new Ipc({ owned: () => null, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, gestures: { take: () => null }, now: () => 0, log: () => undefined });
+    const ipc = new Ipc({
+      owned: () => null,
+      gate: f.gate,
+      service: {} as Service,
+      feeds: {} as Feeds,
+      files: {} as Files,
+      gestures: { take: () => null },
+      profiles: {} as ProfilesApi,
+      now: () => 0,
+      log: () => undefined,
+    });
     expect(await ipc.invoke(f.event(), 'serverAddress', [])).toEqual({ ok: false, kind: 'refused' });
   });
 
@@ -107,9 +118,9 @@ describe('arguments', () => {
   it.each([
     ['serverAddress', [1]],
     ['signOut', ['x']],
-    ['setServerAddress', []],
-    ['setServerAddress', [5]],
-    ['setServerAddress', ['a', 'b']],
+    ['profileAdd', []],
+    ['profileAdd', [5]],
+    ['profileAdd', ['a', 'b']],
     ['signInWithCredential', ['has space']],
     ['signInWithCredential', ['']],
     ['signInWithCredential', ['x'.repeat(5000)]],
@@ -224,7 +235,7 @@ describe('arguments', () => {
       cursor = next;
     }
     for (const arg of [() => 1, new Map(), new Date(), new Uint8Array(2), Symbol('s'), 10n, Number.NaN, deep, new Array<number>(20_000).fill(1)]) {
-      expect(await f.ipc.invoke(f.event(), 'setServerAddress', [arg]), typeof arg).toEqual({ ok: false, kind: 'refused' });
+      expect(await f.ipc.invoke(f.event(), 'profileAdd', [arg]), typeof arg).toEqual({ ok: false, kind: 'refused' });
     }
     expect(plain({ a: [1, 'b', null, true] })).toBe(true);
     expect(plain(Object.create(null))).toBe(true);
@@ -233,7 +244,7 @@ describe('arguments', () => {
 
   it('refuses an argument over its byte cap', async () => {
     const f = fixture();
-    expect(await f.ipc.invoke(f.event(), 'setServerAddress', ['a'.repeat(5000)])).toEqual({ ok: false, kind: 'refused' });
+    expect(await f.ipc.invoke(f.event(), 'profileAdd', ['a'.repeat(5000)])).toEqual({ ok: false, kind: 'refused' });
     expect(f.logs.at(-1)).toContain('(size)');
     expect(await f.ipc.invoke(f.event(), 'signInWithPassword', [{ name: 'a', password: 'p'.repeat(20_000) }])).toEqual({ ok: false, kind: 'refused' });
   });
@@ -255,14 +266,15 @@ describe('arguments', () => {
     const ipc = new Ipc({
       owned: () => f.contents,
       gate: f.gate,
-      service: { setServerAddress: () => { throw new Error('boom secret-arg'); } } as unknown as Service,
+      service: {} as Service,
       feeds: {} as Feeds,
       files: {} as Files,
       gestures: { take: () => null },
+      profiles: { add: () => { throw new Error('boom secret-arg'); } } as unknown as ProfilesApi,
       now: () => 0,
       log: (line) => f.logs.push(line),
     });
-    expect(await ipc.invoke(f.event(), 'setServerAddress', ['secret-arg'])).toEqual({ ok: false, kind: 'refused' });
+    expect(await ipc.invoke(f.event(), 'profileAdd', ['secret-arg'])).toEqual({ ok: false, kind: 'refused' });
     expect(f.logs.join('\n')).not.toContain('secret-arg');
   });
 });
@@ -273,7 +285,7 @@ describe('the registry', () => {
     const channels: string[] = [];
     f.ipc.register({ handle: (channel) => void channels.push(channel) });
     expect(channels.sort()).toEqual(INVOKED_FUNCTIONS.map((n) => `conch:${n}`).sort());
-    expect(channels).toHaveLength(22);
+    expect(channels).toHaveLength(INVOKED_FUNCTIONS.length);
   });
 
   it('parses a request the way the table says', () => {

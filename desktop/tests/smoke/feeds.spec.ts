@@ -8,7 +8,7 @@
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test';
 
 import { startConchd, type Disposable } from './conchd.ts';
-import { launch, type Launched } from './launch.ts';
+import { launch, livePage, type Launched } from './launch.ts';
 
 const TOKEN_SHAPE = /conch_[A-Za-z0-9_-]{20,}/;
 
@@ -75,6 +75,8 @@ test.describe('live feeds through main, beside a browser user', () => {
   test('the desktop app signs in, and main opens its feeds with nothing in a URL but the route', async () => {
     await desktop.getByLabel('Server address').fill(server.origin);
     await desktop.getByRole('button', { name: 'Continue' }).click();
+    // Adding the server makes it the active profile: a new window.
+    desktop = await livePage(cdp, desktop);
     await signIn(desktop, server.member.name, server.member.password);
     // Connected is the messages feed open: the renderer's own state machine,
     // fed by main.
@@ -137,6 +139,8 @@ test.describe('live feeds through main, beside a browser user', () => {
     await desktop.getByRole('button', { name: 'Settings' }).click();
     await desktop.getByRole('button', { name: 'Sign out', exact: true }).click();
     await desktop.getByRole('button', { name: 'Yes, sign out', exact: true }).click();
+    // Sign-out replaces the window: a new web contents in a fresh session.
+    desktop = await livePage(cdp, desktop);
     await expect(desktop.getByLabel('Credential')).toBeVisible();
     await expect.poll(() => heldSockets(app.output())).toBe(0);
   });

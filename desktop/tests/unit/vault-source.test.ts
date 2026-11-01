@@ -46,12 +46,21 @@ describe('secret handling in desktop/main', () => {
     expect(hits).toEqual([]);
   });
 
-  it('only the vault names safeStorage', () => {
+  it('only the vault names safeStorage, and only vault/electron-storage.ts imports electron for it', () => {
     const names = files.filter((f) => /safeStorage/.test(stripComments(f.text))).map((f) => f.rel);
-    expect(names.every((r) => r.startsWith('vault/'))).toBe(true);
+    // app.ts hands electron's safeStorage to that one adapter and calls nothing on it.
+    expect(names.every((r) => r.startsWith('vault/') || r === 'app.ts')).toBe(true);
+    const app = files.find((f) => f.rel === 'app.ts');
+    expect(/safeStorage\./.test(stripComments(app?.text ?? ''))).toBe(false);
+    const adapters = files.filter((f) => f.rel.startsWith('vault/') && /from 'electron'/.test(f.text)).map((f) => f.rel);
+    expect(adapters).toEqual(['vault/electron-storage.ts']);
   });
 
-  it('only vault/files.ts may import write-capable node:fs names; the rest are read-only', () => {
+  it('only the named writers may import write-capable node:fs names; the rest are read-only', () => {
+    // vault/files.ts writes the sealed credentials; profiles/files.ts the
+    // non-secret profiles.json and the profile directories; instance.ts makes
+    // the data root private. Each says what it writes in its own header.
+    const writers = new Set(['vault/files.ts', 'profiles/files.ts', 'instance.ts']);
     const readOnly = new Set(['readFile', 'readFileSync', 'readdir', 'readdirSync', 'stat', 'lstat', 'realpath', 'access', 'existsSync']);
     // The voice endpoint (#948) makes its private runtime directories and
     // removes stale sockets from them; it writes no file's content.
@@ -67,21 +76,21 @@ describe('secret handling in desktop/main', () => {
         const clause = m[1] ?? '';
         const named = /\{([^}]*)\}/.exec(clause)?.[1];
         if (named === undefined) {
-          if (f.rel !== 'vault/files.ts') offenders.push(`${f.rel}: namespace or default import`);
+          if (!writers.has(f.rel)) offenders.push(`${f.rel}: namespace or default import`);
           continue;
         }
         for (const raw of named.split(',')) {
           const name = raw.trim().split(/\s+as\s+/)[0] ?? '';
           const allowed = readOnly.has(name) || (f.rel === 'voice/endpoint.ts' && endpointOnly.has(name)) || (f.rel === 'save-file.ts' && chosenFileOnly.has(name));
-          if (name !== '' && !allowed && f.rel !== 'vault/files.ts') {
+          if (name !== '' && !allowed && !writers.has(f.rel)) {
             offenders.push(`${f.rel}: ${name}`);
           }
         }
       }
-      if (/\b(?:import|require)\(\s*['"`](?:node:)?fs/.test(text) && f.rel !== 'vault/files.ts') {
+      if (/\b(?:import|require)\(\s*['"`](?:node:)?fs/.test(text) && !writers.has(f.rel)) {
         offenders.push(`${f.rel}: dynamic import`);
       }
-      if (/\brequire\(\s*'(?:node:)?fs/.test(text) && f.rel !== 'vault/files.ts') {
+      if (/\brequire\(\s*'(?:node:)?fs/.test(text) && !writers.has(f.rel)) {
         offenders.push(`${f.rel}: require`);
       }
     }
@@ -91,7 +100,7 @@ describe('secret handling in desktop/main', () => {
   });
 
   it('the vault modules import no logger, console or IPC', () => {
-    for (const f of files.filter((x) => x.rel.startsWith('vault/'))) {
+    for (const f of files.filter((x) => x.rel.startsWith('vault/') && x.rel !== 'vault/electron-storage.ts')) {
       expect(f.text, f.rel).not.toMatch(/console\.|ipcMain|contextBridge|from 'electron'/);
     }
   });

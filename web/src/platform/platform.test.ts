@@ -47,7 +47,6 @@ describe('the desktop bridge type', () => {
   it('declares the functions the desktop main and renderer need', () => {
     const named: Record<keyof ConchDesktopBridge, true> = {
       serverAddress: true,
-      setServerAddress: true,
       request: true,
       subscribe: true,
       restore: true,
@@ -63,10 +62,17 @@ describe('the desktop bridge type', () => {
       joinAsGuest: true,
       createAccount: true,
       signOut: true,
+      profiles: true,
+      profileAdd: true,
+      profileRename: true,
+      profileRemove: true,
+      profileSwitch: true,
+      storageRetry: true,
+      profilesRecover: true,
       uploadFile: true,
       downloadFile: true,
       saveFile: true,
     };
-    expect(Object.keys(named)).toHaveLength(20);
+    expect(Object.keys(named)).toHaveLength(26);
   });
 });
