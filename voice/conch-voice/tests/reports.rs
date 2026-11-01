@@ -673,13 +673,19 @@ use support::script::{After, Script};
 /// utterances of 1 s and 0.5 s give exactly two pairs, in order, and `self` says so.
 #[tokio::test]
 async fn in_open_mode_each_opening_is_reported_started_then_stopped_once() {
-    let (mic, _) = Script::make(
+    let (mic, played) = Script::make(
         &[(100, false), (100, true), (100, false), (50, true)],
         After::Quiet,
     );
+    // The hang is timed by the script's frames, not the wall clock: on a loaded machine the
+    // clock would otherwise end an opening a few frames before the script does (issue #1098).
     let setup = Setup {
         talk_mode: TalkMode::Open,
         microphone: Some(mic),
+        timings: Timings {
+            transmit_clock: played.clock(),
+            ..quick()
+        },
         ..Setup::default()
     };
     let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
