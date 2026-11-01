@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -384,7 +383,7 @@ func TestVoiceShareHookWaitsOnlyForClaimsRunningAtRevocation(t *testing.T) {
 	<-grantingA
 
 	// The hook takes its snapshot (A is in it), then is held at the seam
-	// until B is queued behind A.
+	// until B, which starts after the snapshot, holds the room's claims.
 	atSnapshot, proceed := make(chan int, 1), make(chan struct{})
 	f.srv.voice.endSharesSeam = func(n int) {
 		atSnapshot <- n
@@ -398,31 +397,22 @@ func TestVoiceShareHookWaitsOnlyForClaimsRunningAtRevocation(t *testing.T) {
 	if n := <-atSnapshot; n != 1 {
 		t.Fatalf("the hook's snapshot holds %d running claims, want 1", n)
 	}
-	queued := make(chan struct{})
-	f.srv.voice.claimSeam = func(stage string) {
-		if stage == "lock" {
-			close(queued)
-		}
-	}
+	// B starts after the snapshot and queues behind A. A finishes, B takes
+	// the room's claims and is held inside LiveKit; only then is the hook let
+	// past its snapshot. A hook that waited on the claims lock would now
+	// wait for B; one that waits on the snapshot's done channels does not.
 	claimedB := make(chan wireResult, 1)
 	go func() { claimedB <- f.claimShare(t, "ann", "ops") }()
-	<-queued
-	// Let B reach the claims lock and queue on it (nothing sleeps).
-	for range 1000 {
-		runtime.Gosched()
-	}
-	close(proceed)
 	close(releaseA)
 	if res := <-claimedA; res.status != http.StatusOK {
 		t.Fatalf("the first claim: %d %s, want 200", res.status, res.body)
 	}
-	// B now holds the room's claims inside LiveKit. The hook must answer
-	// without it.
 	select {
 	case <-grantingB:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the queued claim never reached LiveKit")
 	}
+	close(proceed)
 	select {
 	case <-hookDone:
 	case <-time.After(2 * time.Second):
