@@ -973,6 +973,25 @@ fn signal(child: &Child, name: &str) {
     assert!(status.success(), "kill -{name} failed");
 }
 
+/// How long the client has to leave once it was told to, with a pipe nobody reads. It
+/// leaves in about a second on an idle machine, but first it works through the thirty
+/// thousand lines queued before the signal or the end of input, and a machine with a load
+/// of fifty gives it the processor for a fraction of the time. A client stuck on the pipe
+/// would never leave, so this bounds whether it is stuck, not how fast it is.
+const LEAVE_WITHIN: Duration = Duration::from_secs(60);
+
+/// How many bytes the child has read so far, by the kernel's count (`rchar` in
+/// `/proc/<pid>/io`, which counts what was read from a pipe). `None` where the kernel does
+/// not say, and the caller then goes on without waiting.
+fn bytes_read(child: &Child) -> Option<u64> {
+    let io = std::fs::read_to_string(format!("/proc/{}/io", child.id())).ok()?;
+    io.lines()
+        .find_map(|line| line.strip_prefix("rchar: "))?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// Waits for a child to exit by itself, for at most `within`. `None` if it did not.
 fn exit_within(child: &mut Child, within: Duration) -> Option<(Option<i32>, Duration)> {
     let began = Instant::now();
@@ -1042,9 +1061,23 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
             // The command holds the client's end too: the pipe ends when the client's does.
             drop(command);
             let mut stdin = child.stdin.take().unwrap();
-            stdin.write_all(&b"junk\n".repeat(30_000)).unwrap();
+            let junk = b"junk\n".repeat(30_000);
+            stdin.write_all(&junk).unwrap();
             stdin.flush().unwrap();
-            // Long enough for the client to have read all of it and filled the pipe.
+            // Not a guess at how long the client needs: it is waited for until the kernel
+            // says it has read all of it. A client starved of the processor reads it late,
+            // and a fixed wait would then tell it to leave while it was still at the
+            // junk, which is not what is being tried.
+            let began = Instant::now();
+            while bytes_read(&child).is_some_and(|read| read < junk.len() as u64) {
+                assert!(
+                    began.elapsed() < Duration::from_secs(60)
+                        && child.try_wait().unwrap().is_none(),
+                    "{way}: the client did not read what it was sent"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // And a moment for it to have answered them and filled the pipe.
             std::thread::sleep(Duration::from_millis(1500));
             assert!(
                 child.try_wait().unwrap().is_none(),
@@ -1058,7 +1091,7 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
                 // Standard input stays open: it is the signal that is being tried.
                 std::mem::forget(stdin);
             }
-            let exited = exit_within(&mut child, Duration::from_secs(8));
+            let exited = exit_within(&mut child, LEAVE_WITHIN);
             if exited.is_none() {
                 child.kill().unwrap();
                 child.wait().unwrap();
@@ -1075,10 +1108,13 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
         .unwrap();
 
         let (code, took) = exited.unwrap_or_else(|| {
-            panic!("{way}: still running 8 s later, with nobody reading its standard output")
+            panic!(
+                "{way}: still running {LEAVE_WITHIN:?} later, with nobody reading its standard output"
+            )
         });
+        eprintln!("{way}: left after {took:?}");
         assert_eq!(code, Some(0), "{way}: a clean exit");
-        assert!(took < Duration::from_secs(8), "{way}: {took:?}");
+        assert!(took < LEAVE_WITHIN, "{way}: {took:?}");
         // The pipe really was full: when the client left it had no room for a line, whatever
         // size the pipe was.
         assert!(
