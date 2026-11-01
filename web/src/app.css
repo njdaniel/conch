@@ -3418,3 +3418,36 @@ button.link {
   background: var(--raised);
   box-shadow: inset 3px 0 0 var(--accent);
 }
+
+/* The first-run panel and the empty conversation (issues #1032, #1034). */
+.first-run {
+  padding: 1.5rem;
+}
+.first-run-actions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+.empty-conversation p {
+  margin: 0 0 0.25rem;
+}
+
+.attachment-file {
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.attachment-size {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.draft-attachment-size {
+  white-space: nowrap;
+}

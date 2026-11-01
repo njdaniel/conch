@@ -146,12 +146,44 @@ describe('preview fallbacks', () => {
     expect(createObjectURL).not.toHaveBeenCalled();
   });
 
-  it('rejects oversized metadata without fetching preview bytes and keeps explicit download cleanup', async () => {
+  it('shows a PDF as a file chip with name, size and Download, without fetching it to preview', async () => {
+    mockedMeta.mockResolvedValue({ ok: true, value: { ...metadata, filename: 'notes.pdf', media_type: 'application/pdf', size: 3400 } });
+    const { container } = render(<ImageAttachment fileId={17} channel="general" viewer={2} />);
+
+    expect(await screen.findByText('notes.pdf')).toBeDefined();
+    expect(screen.getByText('3.4 KB')).toBeDefined();
+    expect(screen.getByRole('button', { name: 'Download' })).toBeDefined();
+    expect(container.querySelector('figure.attachment-file')).not.toBeNull();
+    expect(container.textContent).not.toContain('not supported');
+    expect(mockedBytes).not.toHaveBeenCalled();
+    expect(mockedValidation).not.toHaveBeenCalled();
+  });
+
+  it('shows an octet-stream file that fails the sniff as a chip, not as unsupported', async () => {
+    mockedMeta.mockResolvedValue({ ok: true, value: { ...metadata, filename: 'bundle.zip', media_type: 'application/octet-stream', size: 12 } });
+    mockedValidation.mockResolvedValue({ ok: false, failure: 'unsupported' });
+    const { container } = render(<ImageAttachment fileId={17} channel="general" viewer={2} />);
+
+    expect(await screen.findByText('12 B')).toBeDefined();
+    expect(screen.getByText('bundle.zip')).toBeDefined();
+    expect(container.textContent).not.toContain('not supported');
+    expect(container.querySelector('figure.attachment-file')).not.toBeNull();
+  });
+
+  it('renders a hostile filename as text', async () => {
+    mockedMeta.mockResolvedValue({ ok: true, value: { ...metadata, filename: '<img src=x onerror=alert(1)>.pdf', media_type: 'application/pdf' } });
+    const { container } = render(<ImageAttachment fileId={17} channel="general" viewer={2} />);
+
+    expect(await screen.findByText('<img src=x onerror=alert(1)>.pdf')).toBeDefined();
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('keeps oversized metadata from fetching preview bytes and keeps explicit download cleanup', async () => {
     mockedMeta.mockResolvedValue({ ok: true, value: { ...metadata, size: maxImageEncodedBytes + 1 } });
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     render(<ImageAttachment fileId={17} channel="general" viewer={2} />);
 
-    expect(await screen.findByText('This image is too large to preview.')).toBeDefined();
+    expect(await screen.findByText('21 MB')).toBeDefined();
     expect(screen.getByText('photo.png')).toBeDefined();
     expect(mockedBytes).not.toHaveBeenCalled();
     expect(mockedValidation).not.toHaveBeenCalled();

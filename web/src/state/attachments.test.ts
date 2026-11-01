@@ -25,6 +25,22 @@ function add(state: AttachmentDrafts, channel: string, audience: Audience | unde
   return attachmentDraftsReducer(state, { type: 'add', channel, ...(audience === undefined ? {} : { audience }), files });
 }
 
+describe('attachment drafts of any file type', () => {
+  it('keeps an image, a non-image and an image that failed the sniff under one scope, in order', () => {
+    const generic = (filename: string, mediaType: string): NewDraftAttachment => ({ filename, mediaType, bytes: new Blob(['x'], { type: mediaType }) });
+    const state = add(initialAttachmentDrafts, 'ops', whisper([2, 1]), file('a.png'), generic('notes.pdf', 'application/pdf'), generic('fake.png', 'application/octet-stream'));
+    expect(attachmentsFor(state, 'ops', whisper([1, 2])).map((a) => [a.filename, a.mediaType, a.status])).toEqual([
+      ['a.png', 'image/png', 'pending'],
+      ['notes.pdf', 'application/pdf', 'pending'],
+      ['fake.png', 'application/octet-stream', 'pending'],
+    ]);
+    // A kept file is restored under its own audience only.
+    const restored = attachmentDraftsReducer(initialAttachmentDrafts, { type: 'restore', drafts: state });
+    expect(attachmentsFor(restored, 'ops')).toEqual([]);
+    expect(attachmentsFor(restored, 'ops', whisper([1, 2])).map((a) => a.filename)).toEqual(['a.png', 'notes.pdf', 'fake.png']);
+  });
+});
+
 describe('attachment drafts', () => {
   it('keeps local bytes and metadata under stable client ids', async () => {
     let state = add(initialAttachmentDrafts, 'ops', undefined, file('one.png', 'abc'), file('two.png'));
