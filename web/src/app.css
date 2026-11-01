@@ -2714,11 +2714,12 @@ button.link {
      cut; the name shrinks after it. */
   .topbar {
     flex-wrap: wrap;
-    gap: var(--s1) var(--s2);
-    padding: var(--s2) var(--s3);
+    gap: 0 var(--s2);
+    padding: var(--s1) var(--s3);
   }
 
   .topbar .status {
+    line-height: 1;
     order: 3;
     flex: 1 1 100%;
   }
