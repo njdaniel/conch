@@ -233,8 +233,11 @@ var PresetMemberPermissions = map[PermissionPreset][]Permission{
 }
 
 // PermissionsWarning is a condition of the permissions document the owner
-// should know about, never a refusal (design §6, O11). Closed and
-// client-tolerant.
+// should know about, never a refusal (design §6, O11). It also appears on
+// the channel-settings answer (ChannelSettingsResponseV1.Warnings, ADR-013
+// issue #978): marking a channel default while members do not hold
+// see_member_directory raises PermissionsWarningDefaultChannelExposesMembers
+// there, at the moment the condition is made. Closed and client-tolerant.
 type PermissionsWarning string
 
 const (

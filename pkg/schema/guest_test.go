@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -312,6 +313,15 @@ func TestPutJoinSettingsRequestV1(t *testing.T) {
 			{"nothing", PutJoinSettingsRequestV1{}, "changes no setting"},
 			{"unknown mode", PutJoinSettingsRequestV1{OpenJoining: mode("anyone")}, "open_joining"},
 			{"a channel twice", PutJoinSettingsRequestV1{OpenChannels: &[]string{"a", "a"}}, "twice"},
+			// The community model's fields (ADR-013 Option B, issue #978).
+			{"open_signup alone", PutJoinSettingsRequestV1{OpenSignup: b(true)}, ""},
+			{"default expiry alone", PutJoinSettingsRequestV1{MemberLinkDefaultExpirySeconds: i(DefaultMemberLinkExpirySeconds)}, ""},
+			{"default expiry zero, no default", PutJoinSettingsRequestV1{MemberLinkDefaultExpirySeconds: i(0)}, ""},
+			{"default expiry at the bound", PutJoinSettingsRequestV1{MemberLinkDefaultExpirySeconds: i(MaxMemberLinkExpirySeconds)}, ""},
+			{"default expiry negative", PutJoinSettingsRequestV1{MemberLinkDefaultExpirySeconds: i(-1)}, "member_link_default_expiry_seconds must be between 0 and 31536000"},
+			{"default expiry past the bound", PutJoinSettingsRequestV1{MemberLinkDefaultExpirySeconds: i(MaxMemberLinkExpirySeconds + 1)}, "member_link_default_expiry_seconds must be between 0 and 31536000"},
+			// Large enough to overflow time.Duration arithmetic (S2).
+			{"default expiry absurd", PutJoinSettingsRequestV1{MemberLinkDefaultExpirySeconds: i(1 << 62)}, "member_link_default_expiry_seconds must be between 0 and 31536000"},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
@@ -366,6 +376,79 @@ func TestPutJoinSettingsRequestV1(t *testing.T) {
 		if got.OpenChannels == nil {
 			t.Error("OpenChannels is nil")
 		}
+	})
+	t.Run("apply merges the community fields", func(t *testing.T) {
+		base := DefaultJoinSettings()
+		got := PutJoinSettingsRequestV1{OpenSignup: b(true), MemberLinkDefaultExpirySeconds: i(0)}.Apply(base)
+		if got.OpenSignup == nil || !*got.OpenSignup || got.MemberLinkDefaultExpirySeconds == nil || *got.MemberLinkDefaultExpirySeconds != 0 {
+			t.Errorf("Apply = %+v", got)
+		}
+		if base.OpenSignup != nil || base.MemberLinkDefaultExpirySeconds != nil {
+			t.Errorf("Apply modified the receiver: %+v", base)
+		}
+		// One left out keeps its value, and a field a server predating the
+		// model never set stays unset.
+		kept := PutJoinSettingsRequestV1{JoiningPaused: b(true)}.Apply(got)
+		if kept.OpenSignup == nil || !*kept.OpenSignup {
+			t.Errorf("Apply lost open_signup: %+v", kept)
+		}
+		if old := (PutJoinSettingsRequestV1{JoiningPaused: b(true)}).Apply(base); old.OpenSignup != nil || old.MemberLinkDefaultExpirySeconds != nil {
+			t.Errorf("Apply invented a community field: %+v", old)
+		}
+		if err := got.Validate(); err != nil {
+			t.Errorf("the applied settings do not validate: %v", err)
+		}
+		for _, bad := range []int64{-5, MaxMemberLinkExpirySeconds + 1, 1 << 62} {
+			out := got
+			out.MemberLinkDefaultExpirySeconds = i(bad)
+			if err := out.Validate(); err == nil || !strings.Contains(err.Error(), "member_link_default_expiry_seconds must be between 0 and") {
+				t.Errorf("Validate with %d = %v, want a member_link_default_expiry_seconds error", bad, err)
+			}
+		}
+		top := got
+		top.MemberLinkDefaultExpirySeconds = i(MaxMemberLinkExpirySeconds)
+		if err := top.Validate(); err != nil {
+			t.Errorf("Validate at the bound = %v, want nil", err)
+		}
+	})
+	t.Run("the community fields are omitted when unset", func(t *testing.T) {
+		raw, err := json.Marshal(DefaultJoinSettings())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"open_signup", "member_link_default_expiry_seconds"} {
+			if strings.Contains(string(raw), key) {
+				t.Errorf("default settings carry %s: %s", key, raw)
+			}
+		}
+	})
+}
+
+// The community model's fixtures on the joining-settings shapes (ADR-013
+// Option B, issue #978): the published ones are untouched.
+func TestJoinSettingsCommunityGoldenFixtures(t *testing.T) {
+	tests := []struct {
+		file string
+		new  func() any
+	}{
+		{"join-settings-v1-open-signup.json", func() any { return new(JoinSettingsV1) }},
+		{"put-join-settings-request-v1-open-signup.json", func() any { return new(PutJoinSettingsRequestV1) }},
+		{"join-settings-response-v1-default-channels.json", func() any { return new(JoinSettingsResponseV1) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			assertGoldenFixture(t, tt.file, tt.new)
+		})
+	}
+	t.Run("join-settings-v1-open-signup.json validates", func(t *testing.T) {
+		var s JoinSettingsV1
+		decodeFixture(t, "join-settings-v1-open-signup.json", &s)
+		assertValidation(t, s.Validate(), "")
+	})
+	t.Run("put-join-settings-request-v1-open-signup.json validates", func(t *testing.T) {
+		var r PutJoinSettingsRequestV1
+		decodeFixture(t, "put-join-settings-request-v1-open-signup.json", &r)
+		assertValidation(t, r.Validate(), "")
 	})
 }
 

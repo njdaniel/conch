@@ -1,7 +1,7 @@
 // The browser client's top level: sign-in, the operator warning, then the
 // lobby. The auth, connection and channels reducers hold the state; src/api.ts
 // does every call and is the only code that sees the credential.
-import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import * as api from './api';
 import { uploadRefusalLine } from './fileSize';
 import { ChangeName } from './ChangeName';
@@ -24,6 +24,7 @@ import { SignIn } from './SignIn';
 import { YourSignIns } from './SignIns';
 import { SignInLink } from './SignInLink';
 import { AddDevice } from './AddDevice';
+import { ReportsSection } from './admin/ReportsSection';
 import { GuestSettings } from './GuestSettings';
 import { Reauth } from './Reauth';
 import { PasswordSettings } from './Settings';
@@ -558,6 +559,13 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onMessageEdited,
     onChannelsChanged: refreshChannels,
   });
+  // The people the page knows by name, for Settings → Reports (issue #1029):
+  // the open channel's members. A sender it does not know is "person #id".
+  const memberNames = useMemo(() => {
+    const names = new Map<number, string>();
+    for (const m of agents.members) if (m.name !== undefined) names.set(m.principal_id, m.name);
+    return names;
+  }, [agents.members]);
   const live = useLiveChannel({
     channel: channelId === null ? null : selected,
     channelId,
@@ -1619,7 +1627,15 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 ),
               }
             : {})}
-          admin={auth.principal.role === 'operator' ? <GuestSettings channels={channels.channels} onUnauthorized={onUnauthorized} /> : null}
+          admin={
+            auth.principal.role === 'operator' ? (
+              <>
+                <GuestSettings channels={channels.channels} onUnauthorized={onUnauthorized} />
+                {/* The names the page knows are the open channel's members. */}
+                <ReportsSection names={memberNames} onUnauthorized={onUnauthorized} />
+              </>
+            ) : null
+          }
           overlay={
             asking ? (
               <Reauth operator={auth.principal.role === 'operator' && auth.principal.auth?.totp_enrolled === true} insecure={needsHttps(origin)} onDone={finishReauth} onUnauthorized={onUnauthorized} />

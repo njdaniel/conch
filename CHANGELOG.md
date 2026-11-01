@@ -11,8 +11,9 @@ release that Nick publishes.
 ## [0.1.0-alpha.9] - 2026-11-01
 
 These are the core-flow fixes from browser UX audit 3 (first run, the
-empty channel, attachments, the phone top bar, a faster first load), and a
-screen-share revocation fix. Upgrade with
+empty channel, attachments, the phone top bar, a faster first load),
+@mentions, reply context and links in messages, and a screen-share
+revocation fix. Upgrade with
 `conch-server upgrade v0.1.0-alpha.9` from your workstation, or with
 `conch-upgrade.sh` on the droplet (docs/deploy.md step 11).
 
@@ -42,6 +43,27 @@ There is no migration and no wire change since `alpha.8`, so rolling back to
 - **A loading screen, and a smaller first download** (#1037). conchd gzips
   the web client's own files (HTML, JavaScript, CSS) and nothing else, so
   no API, socket or attachment answer is compressed.
+- **@mention completion, and a mark on messages that name you** (#1043).
+  Typing `@` and a few letters offers up to 8 of the channel's members
+  (never yourself), worked with the arrow keys, Enter, Tab and Escape.
+  Enter or Tab inserts `@name `. A message that names you gets a mark at
+  its edge, using the same rule that decides a mention notification.
+- **A reply shows what it answers** (#1038). Above a reply in the log is
+  "Replying to <author>: <the first line of what it answers>", or "Reply
+  in a thread" when that message isn't loaded. A message shows "1 reply"
+  or "N replies" for the replies loaded in the log, which opens the
+  thread. The thread form says "Reply to <author>" and fits a phone
+  screen, and Reply and Open thread are at least 44 px square.
+- **Web addresses in messages are links** (#1044). Only `http` and
+  `https` addresses become links, and they open in a new tab. To make
+  lookalike links harder, some addresses stay plain text:
+  - an address with a user name or password in it;
+  - an address whose site name has letters outside plain ASCII, or is
+    written percent-encoded or in its `xn--` form.
+
+  An invisible character never becomes part of a link: inside an address
+  it leaves the address as text, and a few end the address where they
+  stand.
 
 ### Changed
 

@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
 import { EmojiPicker } from './EmojiPicker';
-import { completeShortcode, completionAt, insertAt, loadEmoji, type Emoji, type EmojiIndex } from './emoji/emoji';
+import { closedShortcodeAt, completeShortcode, completionAt, emojiNow, exactEmoji, insertAt, loadEmoji, type Emoji, type EmojiIndex } from './emoji/emoji';
 import { Glyph } from './Icons';
 import { formatSize, isPreviewType } from './fileSize';
 import { completeMention, mentionAt } from './mention';
@@ -137,6 +137,11 @@ export function Composer({
   const [emojiIndex, setEmojiIndex] = useState<EmojiIndex | null>(null);
   // Where the caret goes once a chosen emoji is in the draft.
   const caretAfter = useRef<number | null>(null);
+  // The last `:name:` swap, until anything else changes the draft: what Backspace
+  // right after it puts back.
+  // Whether an input method is composing: nothing is swapped while it is.
+  const composing = useRef(false);
+  const swapped = useRef<{ readonly text: string; readonly caret: number; readonly original: string; readonly originalCaret: number } | null>(null);
   // Counted on each insertion, so the caret and focus are put back even when
   // the text did not change (an emoji replaced by itself).
   const [insertions, setInsertions] = useState(0);
@@ -220,6 +225,12 @@ export function Composer({
   const mentionId = (i: number) => `composer-mention-option-${String(i)}`;
   const popup = mentioning ? 'composer-mention-list' : suggesting ? 'composer-emoji-list' : undefined;
   const activeOption = mentioning ? mentionId(activeCandidate) : suggesting ? optionId(activeSuggestion) : undefined;
+  // The Backspace undo holds only while the draft is what the swap left: any
+  // other change (the picker, a completion, a mention, a send, a draft set from
+  // outside) drops it.
+  useEffect(() => {
+    if (swapped.current !== null && swapped.current.text !== draft) swapped.current = null;
+  }, [draft]);
   useLayoutEffect(() => {
     const at = caretAfter.current;
     const box = textarea.current;
@@ -233,6 +244,7 @@ export function Composer({
   // Put an emoji where the selection is (or in place of the typed `:short`).
   function insertEmoji(key: string, from: number, to: number): void {
     if (!editable) return;
+    swapped.current = null;
     const done = insertAt(draft, from, to, key);
     caretAfter.current = done.caret;
     setSuggestion(0);
@@ -241,6 +253,7 @@ export function Composer({
   }
   function insertMention(name: string, from: number, to: number): void {
     if (!editable) return;
+    swapped.current = null;
     const done = insertAt(draft, from, to, `@${name} `);
     caretAfter.current = done.caret;
     setSuggestion(0);
@@ -478,13 +491,45 @@ export function Composer({
         aria-controls={popup}
         aria-activedescendant={activeOption}
         onChange={(event) => {
-          setCaret(event.target.selectionStart);
+          const value = event.target.value;
+          const at = event.target.selectionStart;
+          swapped.current = null;
           setSuggestion(0);
-          onDraft(event.target.value);
+          // Typing the closing colon of a known `:name:` swaps it for the emoji.
+          // Only typing: a paste, a drop or a composition is left as it came.
+          const native = event.nativeEvent as Partial<InputEvent>;
+          const closed = editable && native.inputType === 'insertText' && native.data === ':' && native.isComposing !== true && !composing.current ? closedShortcodeAt(value, at) : null;
+          const index = closed === null ? null : emojiNow();
+          const found = closed === null || index === null ? null : exactEmoji(index, closed.name);
+          if (closed !== null && found !== null) {
+            const done = insertAt(value, closed.start, at, found.key);
+            swapped.current = { text: done.text, caret: done.caret, original: value, originalCaret: at };
+            caretAfter.current = done.caret;
+            onDraft(done.text);
+            setInsertions((n) => n + 1);
+            return;
+          }
+          setCaret(at);
+          onDraft(value);
         }}
+        onCompositionStart={() => { composing.current = true; }}
+        onCompositionEnd={() => { composing.current = false; }}
         onSelect={(event) => { setCaret(event.currentTarget.selectionStart); }}
         onPaste={paste}
         onKeyDown={(event) => {
+          // One Backspace right after a swap gives back the `:name:` as typed.
+          const back = swapped.current;
+          if (back !== null && editable && event.key === 'Backspace' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.nativeEvent.isComposing) {
+            const box = event.currentTarget;
+            if (draft === back.text && box.selectionStart === back.caret && box.selectionEnd === back.caret) {
+              event.preventDefault();
+              swapped.current = null;
+              caretAfter.current = back.originalCaret;
+              onDraft(back.original);
+              setInsertions((n) => n + 1);
+              return;
+            }
+          }
           if (mentioning && !event.nativeEvent.isComposing) {
             const n = candidates.length;
             if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
