@@ -208,9 +208,17 @@ async fn a_microphone_that_stalls_in_the_release_tail_ends_the_transmission() {
     source.stall(true);
     let stalled_at = std::time::Instant::now();
     rig.not_talking().await;
-    let took = stalled_at.elapsed();
+    // When the client muted the track, not when this test noticed: a test thread starved
+    // by a loaded machine notices late, and that is not the client stopping late.
+    let muted_at = rig.sdk.last_mute_at().expect("the track was muted");
+    let took = muted_at.saturating_duration_since(stalled_at);
+    // The tail is cut by the clock once it has run its length and a little more, so the
+    // transmission ends about a tail after the stall. A client that did not cut it would
+    // never stop (the tail is counted in frames and none come), which `not_talking` above
+    // turns into a timeout; this bound is the second line, and is wide enough to hold when
+    // the machine is loaded enough to starve the transmit task for most of a second (#1144).
     assert!(
-        took <= Duration::from_millis(u64::from(TAIL_MS) + 300),
+        took <= Duration::from_millis(u64::from(TAIL_MS) + 1000),
         "stopped {took:?} after the stall, tail {TAIL_MS} ms"
     );
     rig.reported(2).await;

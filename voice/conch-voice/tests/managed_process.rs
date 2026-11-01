@@ -65,6 +65,8 @@ struct Helper {
     events: Arc<Mutex<Vec<String>>>,
     /// Set when the event pipe reached its end: every writer of it has gone.
     events_ended: Arc<Mutex<Option<Instant>>>,
+    /// Whether a thread of the test reads the event pipe, so that `events_ended` is set.
+    reads_events: bool,
     /// Filled when standard error reached its end, by `stderr_reader`.
     stderr: Arc<Mutex<String>>,
     /// The thread that reads standard error; taken when it is waited for.
@@ -181,6 +183,7 @@ fn spawn_env(
         stdin,
         events,
         events_ended,
+        reads_events: matches!(fd3, Fd3::Pipe(_)) && !background,
         stderr,
         stderr_reader: Mutex::new(Some(stderr_reader)),
     }
@@ -247,11 +250,26 @@ impl Helper {
         }
     }
 
+    /// Waits until the thread that reads the event pipe has reached its end, so that
+    /// `events` holds everything the helper wrote. The process having exited is not enough:
+    /// the lines are in the pipe, and a reader that is starved reads them a moment later
+    /// (#1144). The limit only keeps a test from hanging.
+    fn events_read_to_the_end(&self) {
+        if !self.reads_events {
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.events_ended.lock().unwrap().is_none() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Waits for the process to exit, for at most `within`.
     fn exit_within(&mut self, within: Duration) -> Option<i32> {
         let began = Instant::now();
         while began.elapsed() < within {
             if let Some(status) = self.child.try_wait().unwrap() {
+                self.events_read_to_the_end();
                 return status.code();
             }
             std::thread::sleep(Duration::from_millis(5));

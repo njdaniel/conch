@@ -610,6 +610,17 @@ impl Output {
     /// so a reader sees it when it happens. With a queued output this hands the line over
     /// and returns at once, whatever the reader is doing.
     pub fn show(&mut self, event: &Event<'_>) {
+        self.show_as(event, false);
+    }
+
+    /// As [`Output::show`], for an event that ends the output (the connection stopped, or
+    /// closed): with a queued output it is not dropped for a reader that let the queue
+    /// fill, but written once the reader reads on (#1144).
+    pub fn show_last(&mut self, event: &Event<'_>) {
+        self.show_as(event, true);
+    }
+
+    fn show_as(&mut self, event: &Event<'_>, last: bool) {
         if let Some(screen) = &mut self.screen {
             // What the screen gives back has had every line through the same filter as a
             // plain line below.
@@ -640,6 +651,7 @@ impl Output {
                 let _ = writeln!(out, "{line}");
                 let _ = out.flush();
             }
+            Sink::Queued(queue) if last => queue.push_last(line),
             Sink::Queued(queue) => queue.push(line),
         }
     }
