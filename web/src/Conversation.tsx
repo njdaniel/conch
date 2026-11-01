@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
@@ -114,6 +114,12 @@ function attachmentsOf(message: MessageV2): FileAttachmentV1 | null {
   return payload.data as FileAttachmentV1;
 }
 
+// messageName says whose message it is and when, for the names of its
+// controls: "member-1's message, 21:38". Ids stay out of accessible names.
+export function messageName(message: MessageV2, people: ReadonlyMap<number, Person>): string {
+  return `${authorOf(message, people)}'s message, ${clock(message.created_at)}`;
+}
+
 export function Message({
   message,
   people,
@@ -132,6 +138,7 @@ export function Message({
   actions,
   editor,
   notice,
+  stop = false,
 }: {
   readonly message: MessageV2;
   readonly people: ReadonlyMap<number, Person>;
@@ -158,7 +165,10 @@ export function Message({
   readonly editor?: ReactNode;
   // A line about the message, under it: an edit that could not be made.
   readonly notice?: string | null;
+  // This message is the log's one tab stop (issue #1040); the rest are -1.
+  readonly stop?: boolean;
 }) {
+  const who = messageName(message, people);
   const approval = approvalOf(message);
   const attachments = attachmentsOf(message);
   const items = editor === undefined ? actions ?? [] : [];
@@ -170,7 +180,7 @@ export function Message({
   const named = approval === null && editor === undefined && mentions(message.body, people.get(viewer)?.name ?? '');
   const classes = ['message', ...(cont ? ['cont'] : []), ...(named ? ['mentions-you'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
   return (
-    <li className={classes.join(' ')} data-message-id={message.id} tabIndex={-1} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
+    <li className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
       {named ? <span className="vh">Mentions you. </span> : null}
       {context === undefined ? null : (
         <p className="reply-context" id={`reply-context-${String(message.id)}`}>
@@ -201,15 +211,15 @@ export function Message({
       </Line>
       {notice === undefined || notice === null ? null : <p role="status" className="edit-notice">{notice}</p>}
       {items.length === 0 ? null : (
-        <ActionsMenu label={`More actions for message ${String(message.id)}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
+        <ActionsMenu label={`More actions for ${who}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
       )}
-      {onOpen === undefined ? null : <button type="button" className="search-open" aria-label={`Open context for message ${String(message.id)}`} onClick={() => {
+      {onOpen === undefined ? null : <button type="button" className="search-open" aria-label={`Open context for ${who}`} onClick={() => {
         onOpen(message.id);
       }}>Open context</button>}
-      {onReply === undefined || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to message ${String(message.id)}`} onClick={(event) => {
+      {onReply === undefined || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to ${who}`} onClick={(event) => {
         onReply(message.id, event.currentTarget);
       }}>Reply</button>}
-      {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for message ${String(message.thread_root_id)}`} onClick={(event) => {
+      {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for ${who}`} onClick={(event) => {
         onOpenThread(message.thread_root_id as number, event.currentTarget);
       }}>Open thread</button>}
       {replies === undefined || replies === 0 || onOpenThread === undefined ? null : <button type="button" className="message-action reply-count" onClick={(event) => {
@@ -380,7 +390,7 @@ function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, d
   const me = people.get(viewer) ?? { name: `#${String(viewer)}`, kind: null };
   const pending = chat.pending.filter((send) => send.threadRootId === rootId);
   return (
-    <section className="thread-view" aria-label={`Thread around message ${String(rootId)}`}>
+    <section className="thread-view" aria-label={rootMessage === undefined ? 'Thread' : `Thread around ${messageName(rootMessage, people)}`}>
       <div className="thread-head">
         <h3>Thread</h3>
         <button type="button" onClick={onClose}>Close thread</button>
@@ -435,6 +445,32 @@ function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, d
 // (issue #590). It is not the composer: on a phone that would open the
 // keyboard over the page.
 export const headingId = 'conversation-heading';
+
+// The controls inside a message that Tab would stop at.
+const tabbable = 'button, a[href], textarea, input, select';
+
+// syncStops makes the log one tab stop (issue #1040). The message that is the
+// stop keeps its controls reachable by Tab; every other message's controls are
+// taken out of the order, and given back (only those taken) when it becomes the
+// stop. Controls React itself keeps at -1, such as menu items, are not touched.
+function syncStops(list: HTMLElement, stop: number | null) {
+  for (const item of Array.from(list.children)) {
+    if (!(item instanceof HTMLElement) || item.dataset.messageId === undefined) continue;
+    const here = item.dataset.messageId === String(stop);
+    if (here) {
+      for (const el of Array.from(item.querySelectorAll<HTMLElement>('[data-roved]'))) {
+        el.removeAttribute('tabindex');
+        el.removeAttribute('data-roved');
+      }
+    } else {
+      for (const el of Array.from(item.querySelectorAll<HTMLElement>(tabbable))) {
+        if (el.tabIndex < 0) continue;
+        el.setAttribute('tabindex', '-1');
+        el.setAttribute('data-roved', '');
+      }
+    }
+  }
+}
 
 // How close to the bottom still counts as being at it, in pixels.
 const nearBottom = 24;
@@ -667,6 +703,63 @@ export function Conversation({
   }, [repliesSettled, channelId, viewer, replyDrafts]);
 
   const shown = ordered(chat);
+  // The log's roving tab stop (issue #1040): the message last focused, else the
+  // newest. A message arriving moves the stop, never focus.
+  const list = useRef<HTMLOListElement>(null);
+  const [lastFocused, setLastFocused] = useState<number | null>(null);
+  const stop = lastFocused !== null && shown.some((message) => message.id === lastFocused) ? lastFocused : shown.at(-1)?.id ?? null;
+  const stopNow = useRef(stop);
+  stopNow.current = stop;
+  // After every render, before paint: new controls (an editor, a thread) join
+  // the order only in the stop message.
+  useLayoutEffect(() => {
+    if (list.current !== null) syncStops(list.current, stop);
+  });
+  // Controls that mount later on their own (an image's button once it loads).
+  useEffect(() => {
+    const el = list.current;
+    if (el === null || typeof MutationObserver !== 'function') return;
+    const watch = new MutationObserver(() => {
+      syncStops(el, stopNow.current);
+    });
+    watch.observe(el, { childList: true, subtree: true });
+    return () => {
+      watch.disconnect();
+    };
+  }, []);
+  // The top-level message an element is in, if any (not a thread's own).
+  function itemOf(target: EventTarget | null): HTMLElement | null {
+    let el = target instanceof Element ? target : null;
+    while (el !== null && el.parentElement !== list.current) el = el.parentElement;
+    return el instanceof HTMLElement && el.dataset.messageId !== undefined ? el : null;
+  }
+  function onItemKey(event: KeyboardEvent<HTMLOListElement>) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return;
+    // Only on the message itself: a text box or button inside keeps its keys.
+    const item = event.target instanceof HTMLElement && event.target.parentElement === list.current ? itemOf(event.target) : null;
+    if (item === null || list.current === null) return;
+    const all = Array.from(list.current.children).filter((el): el is HTMLElement => el instanceof HTMLElement && el.dataset.messageId !== undefined);
+    const at = all.indexOf(item);
+    let to: number;
+    switch (event.key) {
+      case 'ArrowUp':
+        to = Math.max(0, at - 1);
+        break;
+      case 'ArrowDown':
+        to = Math.min(all.length - 1, at + 1);
+        break;
+      case 'Home':
+        to = 0;
+        break;
+      case 'End':
+        to = all.length - 1;
+        break;
+      default:
+        return;
+    }
+    event.preventDefault();
+    all[to]?.focus();
+  }
   const replyCounts = useMemo(() => {
     const counts = new Map<number, number>();
     for (const held of chat.byId.values()) {
@@ -759,7 +852,7 @@ export function Conversation({
         className="log"
         role="log"
         aria-label="Messages"
-        tabIndex={0}
+        {...(shown.length === 0 ? { tabIndex: 0 } : {})}
         onScroll={(event) => {
           const el = event.currentTarget;
           // A scroll at a height the observer has not handled yet is the
@@ -790,9 +883,18 @@ export function Conversation({
             <p>Write a message to start.</p>
           </div>
         ) : null}
-        <ol className="messages">
+        <ol
+          ref={list}
+          className="messages"
+          onKeyDown={onItemKey}
+          onFocus={(event) => {
+            const item = itemOf(event.target);
+            if (item !== null) setLastFocused(Number(item.dataset.messageId));
+          }}
+        >
           {shown.map((message, i) => (
             <Message
+              stop={message.id === stop}
               replies={replyCounts.get(message.id) ?? 0}
               {...(message.thread_root_id === undefined ? {} : { context: replyContext(chat.byId.get(message.thread_root_id), people) })}
               key={message.id}
@@ -813,6 +915,7 @@ export function Conversation({
                   <MessageEditor
                     message={message}
                     channel={channel}
+                    label={`Edit ${messageName(message, people)}`}
                     text={edit.text}
                     onText={(text) => {
                       setEdit((current) => (current?.id === message.id ? { ...current, text } : current));

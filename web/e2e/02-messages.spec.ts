@@ -2,8 +2,9 @@
 // agrees with what the pages show.
 import type { Page } from '@playwright/test';
 import { history, post } from './api';
-import { channelButton, expect, messages, say, signIn, test } from './fixtures';
-import type { World } from './world';
+import { createCredentialResponseV1, createPrincipalResponse } from '../src/schema/credential';
+import { channelButton, expect, messages, openChannel, say, signIn, test } from './fixtures';
+import { call, ok, type World } from './world';
 
 // settled waits until the page has caught up with the server: a message posted
 // now is on the page, so the replay that follows a reload has landed too. A
@@ -89,4 +90,117 @@ test('F26 a posted URL is a link that opens safely, and a javascript: string is 
   const plain = messages(page).getByRole('listitem').filter({ hasText: 'f26 never' });
   await expect(plain).toContainText('javascript:alert(1) or <b>tags</b>');
   await expect(plain.getByRole('link')).toHaveCount(0);
+});
+
+// Issue #1040: the log is one tab stop, and its controls are named by author
+// and time. A channel of its own, an owner and a member with a credential each.
+async function logCommunity(world: World, secrets: string[], label: string) {
+  const stamp = Date.now().toString(36);
+  const channel = `e1040-${label}-${stamp}`;
+  const done = async (method: 'POST' | 'PUT', path: string, body?: unknown) => {
+    const reply = await call(world, world.tokens.operator, method, path, body);
+    if (reply.status < 200 || reply.status > 299) throw new Error(`${method} ${path}: status ${String(reply.status)}`);
+  };
+  await done('POST', '/v0/channels', { name: channel });
+  const people: { name: string; token: string }[] = [];
+  for (const base of ['owner', 'member-1']) {
+    const name = `${base}-${stamp}`;
+    const made = await ok(world, world.tokens.operator, 'POST', '/v0/principals', createPrincipalResponse, { kind: 'human', name });
+    const issued = await ok(world, world.tokens.operator, 'POST', `/v1/principals/${String(made.principal.id)}/credentials`, createCredentialResponseV1, { label: name });
+    secrets.push(issued.token);
+    await done('PUT', `/v1/channels/${encodeURIComponent(channel)}/members/${String(made.principal.id)}`);
+    people.push({ name, token: issued.token });
+  }
+  const [owner, member] = people as [(typeof people)[number], (typeof people)[number]];
+  return { channel, owner, member };
+}
+
+test('F15 with 30 messages held the log is one tab stop, and no control is named by an id', async ({ meet, secrets, world }) => {
+  const { channel, owner, member } = await logCommunity(world, secrets, 'stop');
+  for (let i = 1; i <= 30; i++) await post(world, i % 3 === 0 ? member.token : owner.token, channel, `f15 message ${String(i)}`);
+  // The newest is the owner's, so the member's stop has one control: Reply.
+  await post(world, owner.token, channel, 'f15 newest');
+  const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+  await signIn(page, world, member.token, member.name);
+  await openChannel(page, channel);
+  await expect(messages(page).getByText('f15 newest')).toHaveCount(1);
+
+  await page.locator('#conversation-heading').focus();
+  const composer = page.getByLabel(`Message #${channel}`);
+  const seen: string[] = [];
+  let presses = 0;
+  while (presses < 12 && !(await composer.evaluate((el) => el === document.activeElement))) {
+    await page.keyboard.press('Tab');
+    presses++;
+    seen.push(await page.evaluate(() => {
+      const el = document.activeElement;
+      return (el?.closest('[data-message-id]')?.getAttribute('data-message-id') ?? '-') + ':' + (el?.getAttribute('aria-label') ?? el?.textContent ?? '');
+    }));
+  }
+  // Search, the newest message, its Reply, the composer's Whisper and Attach,
+  // then its box: six presses, not one per message. The log itself costs two,
+  // the newest message and its one control, whatever history is held.
+  expect(presses, seen.join(' | ')).toBeLessThanOrEqual(6);
+  const inLog = seen.map((where) => where.split(':')[0]).filter((id) => id !== '-');
+  expect(inLog, seen.join(' | ')).toHaveLength(2);
+  expect(new Set(inLog).size, seen.join(' | ')).toBe(1);
+
+  const names = await messages(page).evaluate((log) => [...log.querySelectorAll('[aria-label]')].map((el) => el.getAttribute('aria-label') ?? ''));
+  expect(names.length).toBeGreaterThan(0);
+  for (const name of names) expect(name).not.toMatch(/message \d/);
+  await expect(messages(page).getByRole('button', { name: /^Reply to owner-.+'s message, \d\d:\d\d$/ }).first()).toBeAttached();
+});
+
+test('F15 arrow keys move between messages, and a keyboard alone edits and replies', async ({ meet, secrets, world }) => {
+  const { channel, owner, member } = await logCommunity(world, secrets, 'keys');
+  await post(world, owner.token, channel, 'f15 first from the owner');
+  const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+  await signIn(page, world, member.token, member.name);
+  await openChannel(page, channel);
+  await say(page, channel, 'f15 mine to edit');
+  const items = messages(page).locator('.messages > li');
+  await expect(items).toHaveCount(2);
+
+  // Tab into the log lands on the newest message; ArrowUp and Home go up.
+  await page.locator('#conversation-heading').focus();
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await expect(items.nth(1)).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(items.nth(0)).toBeFocused();
+  await page.keyboard.press('ArrowDown');
+  await expect(items.nth(1)).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(items.nth(0)).toBeFocused();
+  await page.keyboard.press('End');
+  await expect(items.nth(1)).toBeFocused();
+  await expect(items.nth(1)).toHaveCSS('outline-style', 'solid');
+
+  // Edit, by keyboard alone: Tab to the ⋯, Enter, Enter on Edit, type, Enter.
+  await page.keyboard.press('Tab');
+  await expect(items.nth(1).getByRole('button', { name: /^More actions for member-1-.+'s message, \d\d:\d\d$/ })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Enter');
+  const box = items.nth(1).getByRole('textbox', { name: /^Edit member-1-.+'s message, \d\d:\d\d$/ });
+  await expect(box).toBeFocused();
+  await box.fill('f15 mine, edited');
+  await box.press('Enter');
+  await expect(items.nth(1)).toContainText('f15 mine, edited');
+  await expect(items.nth(1).getByRole('button', { name: /^More actions for / })).toBeFocused();
+
+  // Reply, by keyboard alone: up to the owner's message, Tab to Reply, Enter.
+  await page.keyboard.press('Shift+Tab');
+  await page.keyboard.press('Shift+Tab');
+  await expect(items.nth(1)).toBeFocused();
+  await page.keyboard.press('ArrowUp');
+  await expect(items.nth(0)).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(items.nth(0).getByRole('button', { name: /^Reply to owner-.+'s message, \d\d:\d\d$/ })).toBeFocused();
+  await page.keyboard.press('Enter');
+  const thread = page.getByRole('region', { name: /^Thread around owner-.+'s message, \d\d:\d\d$/ });
+  const reply = thread.getByRole('textbox', { name: /^Reply to owner-/ });
+  await expect(reply).toBeFocused();
+  await page.keyboard.type('f15 a reply by keyboard');
+  await page.keyboard.press('Enter');
+  await expect(thread).toContainText('f15 a reply by keyboard');
 });

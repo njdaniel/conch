@@ -262,7 +262,10 @@ export function MessageEditor({
   onGone,
   onUnauthorized,
   discard,
+  label,
 }: {
+  // The editor's accessible name: the author and time, never the id.
+  readonly label: string;
   // The message as held now: its body is what Save compares with.
   readonly message: MessageV2;
   readonly channel: string;
@@ -362,7 +365,7 @@ export function MessageEditor({
     <div className="message-editor">
       <textarea
         ref={box}
-        aria-label={`Edit message ${String(message.id)}`}
+        aria-label={label}
         aria-describedby={refusal === null ? hint : `${hint} ${error}`}
         rows={Math.min(8, Math.max(2, text.split('\n').length))}
         value={text}

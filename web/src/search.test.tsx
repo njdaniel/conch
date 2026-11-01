@@ -1,6 +1,7 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
+import { clock } from './Conversation';
 import { SearchPanel } from './SearchPanel';
 import type { MessageV2 } from './schema/message';
 
@@ -20,6 +21,14 @@ const props = {
 
 function ids(): number[] {
   return [...screen.getByRole('list', { name: 'Search results' }).querySelectorAll('[data-message-id]')].map((element) => Number(element.getAttribute('data-message-id')));
+}
+
+// The Open context button of one result: named by author and time, so the
+// result is found by its id (issue #1040).
+function contextButton(id: number): HTMLElement {
+  const item = screen.getByRole('list', { name: 'Search results' }).querySelector<HTMLElement>(`[data-message-id="${String(id)}"]`);
+  if (item === null) throw new Error(`no result ${String(id)}`);
+  return within(item).getByRole('button', { name: `Open context for bea's message, ${clock(at)}` });
 }
 
 function submit(words = 'match') {
@@ -51,7 +60,7 @@ describe('channel search', () => {
     await screen.findByText('match 1');
     expect(ids()).toEqual([3, 2, 1]);
     expect(search).toHaveBeenLastCalledWith('general', 'match', 2);
-    fireEvent.click(screen.getByRole('button', { name: 'Open context for message 2' }));
+    fireEvent.click(contextButton(2));
     await screen.findByRole('list', { name: 'Message context' });
     await waitFor(() => {
       expect(document.activeElement?.getAttribute('data-message-id')).toBe('2');
@@ -151,7 +160,7 @@ describe('channel search', () => {
     }));
     render(<SearchPanel {...props} />);
     submit();
-    fireEvent.click(await screen.findByRole('button', { name: 'Open context for message 3' }));
+    fireEvent.click(await waitFor(() => contextButton(3)));
     fireEvent.click(screen.getByRole('button', { name: 'Back to results' }));
     finishBefore({ ok: true, value: [message(2)] });
     finishAfter({ ok: true, value: [message(3)] });
@@ -191,7 +200,7 @@ describe('channel search', () => {
     vi.spyOn(api, 'loadMessagesAfter').mockResolvedValue({ ok: false, failure: 'unauthorized' });
     render(<SearchPanel {...props} onUnauthorized={onUnauthorized} />);
     submit();
-    fireEvent.click(await screen.findByRole('button', { name: 'Open context for message 3' }));
+    fireEvent.click(await waitFor(() => contextButton(3)));
     await waitFor(() => {
       expect(onUnauthorized).toHaveBeenCalled();
     });
@@ -211,7 +220,7 @@ describe('channel search', () => {
     }));
     const view = render(<SearchPanel {...props} />);
     submit();
-    fireEvent.click(await screen.findByRole('button', { name: 'Open context for message 3' }));
+    fireEvent.click(await waitFor(() => contextButton(3)));
     view.rerender(<SearchPanel {...props} live="reconnecting" />);
     finishBefore({ ok: true, value: [message(2)] });
     finishAfter({ ok: true, value: [message(3)] });
