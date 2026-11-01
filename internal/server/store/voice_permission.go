@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // AuditVoicePermissionChanged is the audit action of a change to a person's
@@ -20,15 +22,30 @@ var ErrNotAPerson = errors.New("store: not a person")
 // SetVoiceAllowed switches a person's voice on or off, the brake under the
 // role's use_voice cell (ADR-014 design §5). It audits voice_permission_changed
 // in the same transaction and does nothing, and writes nothing, when the value
-// already stands. A hidden or unknown id is ErrPrincipalNotFound (one answer,
+// already stands. callerID is the writer whose manage_members is rechecked in
+// the transaction (ErrPermissionDenied); 0 means no caller (authentication off). A hidden or unknown id is ErrPrincipalNotFound (one answer,
 // so the route does not tell them apart), an agent is ErrNotAPerson, and
 // forbidOwner makes an owner target ErrOwnerProtected (ADR-010), re-checked
 // inside the transaction. It does not touch live media: the caller runs the
 // poller's immediate hook after it commits.
-func (s *Store) SetVoiceAllowed(ctx context.Context, actor string, principalID int64, allowed bool, forbidOwner bool) (changed bool, err error) {
+func (s *Store) SetVoiceAllowed(ctx context.Context, actor string, callerID, principalID int64, allowed bool, forbidOwner bool) (changed bool, err error) {
 	now := time.Now().Truncate(time.Millisecond)
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		changed = false
+		// The caller's authority is asked again under the write lock, before
+		// the target is touched (admin-roles §7.1): a caller who lost
+		// manage_members since the route guard brakes nobody. callerID 0 is
+		// authentication off, which has no caller to ask.
+		if callerID != 0 {
+			held, err := permittedTx(ctx, tx, callerID, schema.PermManageMembers)
+			if err != nil {
+				return err
+			}
+			if !held {
+				return &PermissionError{Err: ErrPermissionDenied, Permission: schema.PermManageMembers,
+					Reason: "switching a person's voice needs manage_members"}
+			}
+		}
 		var (
 			kind   string
 			cur    bool

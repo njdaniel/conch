@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -38,26 +40,28 @@ func (s *Server) handleVoicePermission(w http.ResponseWriter, r *http.Request) {
 	if s.ownerProtected(w, r, id) {
 		return
 	}
-	// The field is read as present or absent: a body without it must not be
-	// taken for "off" (or for anything), so it is refused.
-	var req struct {
-		Allowed *bool `json:"voice_allowed"`
-	}
+	var req voicePermissionBody
 	if !decodeInviteBody(w, r, &req) {
 		return
 	}
-	if req.Allowed == nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", "voice_allowed is required")
-		return
+	allowed := req.VoiceAllowed
+	callerID := int64(0) // authentication off: no caller to recheck
+	if authed {
+		callerID = caller.ID
 	}
-	allowed := *req.Allowed
-	changed, err := s.store.SetVoiceAllowed(ctx, auditActor(ctx), id, allowed, authed && !isOwner(caller))
+	changed, err := s.store.SetVoiceAllowed(ctx, auditActor(ctx), callerID, id, allowed, authed && !isOwner(caller))
 	switch {
 	case errors.Is(err, store.ErrOwnerProtected):
 		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
 		return
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
+		return
+	case errors.Is(err, store.ErrPermissionDenied):
+		// The caller lost manage_members between the route guard and the
+		// write (design §7.1): the guard's own answer.
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodePermissionDenied, "this needs the manage_members permission",
+			refusedPermission(caller, schema.PermManageMembers))
 		return
 	case errors.Is(err, store.ErrNotAPerson):
 		writeError(w, http.StatusConflict, schema.ErrorCodeNotAPerson, "agents do not use voice")
@@ -90,4 +94,25 @@ func (s *Server) voiceAfterVoiceOff(ctx context.Context, id int64) {
 		return
 	}
 	s.voicePrincipalLostAccess(ctx, id, voiceReasonVoiceOff)
+}
+
+// voicePermissionBody is schema.VoicePermissionRequestV1 as the route reads
+// it: the field must be present and not null, because a plain bool would read
+// an empty object as "off". Unknown fields are refused, as for every body;
+// trailing data is refused by the caller's decoder (decodeInviteBody).
+type voicePermissionBody struct {
+	schema.VoicePermissionRequestV1
+}
+
+func (b *voicePermissionBody) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if v, ok := raw["voice_allowed"]; !ok || bytes.Equal(bytes.TrimSpace(v), []byte("null")) {
+		return errors.New("voice_allowed is required")
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	return dec.Decode(&b.VoicePermissionRequestV1)
 }

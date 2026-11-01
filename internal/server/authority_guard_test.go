@@ -683,7 +683,12 @@ func TestAuthorityViolationsFailsOnNewAndStale(t *testing.T) {
 // operators and skips it for owners (design §5, §7.3). The one read left is
 // whoami's, which reports the brake's half beside the effective list.
 func TestVoiceIsNeverDecidedByTheBrakeAlone(t *testing.T) {
-	allowed := map[string]bool{"auth.go voiceAllowed": true}
+	allowed := map[string]bool{
+		"auth.go voiceAllowed": true,
+		// The voice switch's own route writes the brake (the request and
+		// response fields); it decides no voice from it (issue #984).
+		"voice_permission.go Server.handleVoicePermission": true,
+	}
 	authoritySources(t, func(_ *token.FileSet, rel string, file *ast.File) {
 		if strings.HasPrefix(rel, "store/") {
 			return

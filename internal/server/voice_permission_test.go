@@ -173,7 +173,7 @@ func TestVoicePermissionRoute(t *testing.T) {
 func TestVoicePermissionBodyAndState(t *testing.T) {
 	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
 	ann := f.ids["ann"]
-	for _, body := range []string{`{}`, `{"voice_allowed":null}`, `{"voice_allowed":false,"x":1}`, `{`, ``} {
+	for _, body := range []string{`{}`, `{"voice_allowed":null}`, `{"voice_allowed":false,"x":1}`, `{"voice_allowed":false} {}`, `{`, ``} {
 		res := f.callREST(t, http.MethodPut, voicePermissionPath(ann), f.rootTok, body)
 		if res.status != http.StatusBadRequest {
 			t.Errorf("body %q = %d %s, want 400", body, res.status, res.body)
@@ -417,7 +417,7 @@ func TestVoicePermissionTokenMintedBeforeTheFlip(t *testing.T) {
 func TestVoicePermissionFlipUnderRequests(t *testing.T) {
 	flip := func(t *testing.T, f *presenceFixture) {
 		t.Helper()
-		if _, err := f.srv.store.SetVoiceAllowed(context.Background(), "system", f.ids["ann"], false, false); err != nil {
+		if _, err := f.srv.store.SetVoiceAllowed(context.Background(), "system", 0, f.ids["ann"], false, false); err != nil {
 			t.Errorf("flip: %v", err)
 		}
 	}
