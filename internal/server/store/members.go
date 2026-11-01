@@ -128,6 +128,21 @@ func nullableID(id int64) any {
 // channel's is taken, issue #727), and a name with empty keys is
 // ErrNameInvalid.
 func (s *Store) CreateChannelAs(ctx context.Context, actor, name string, creatorID int64) (Channel, error) {
+	return s.createChannel(ctx, actor, name, creatorID, schema.ChannelPrivate)
+}
+
+// CreateUnownedChannel is CreateChannelAs with no creator and the visibility
+// asked for, in the one creating transaction (POST /v1/channels with
+// authentication off, issue #981): the channel, its visibility and its
+// channel_created row are written together or not at all.
+func (s *Store) CreateUnownedChannel(ctx context.Context, actor, name string, v schema.ChannelVisibility) (Channel, error) {
+	if !v.Valid() {
+		return Channel{}, fmt.Errorf("store: create channel %q: unknown visibility %q", name, v)
+	}
+	return s.createChannel(ctx, actor, name, 0, v)
+}
+
+func (s *Store) createChannel(ctx context.Context, actor, name string, creatorID int64, v schema.ChannelVisibility) (Channel, error) {
 	// SQLite stores timestamps at millisecond precision. Normalize the
 	// returned value to the same precision so a create response exactly
 	// describes what a subsequent read returns.
@@ -138,10 +153,17 @@ func (s *Store) CreateChannelAs(ctx context.Context, actor, name string, creator
 		if err != nil {
 			return err
 		}
-		ch = Channel{ID: id, Name: name, CreatedAt: now, Visibility: schema.ChannelPrivate}
 		// Quoted, as a rename's names are, so a name with spaces in it reads
 		// as one field.
-		if err := appendAuditEventTx(ctx, tx, actor, AuditChannelCreated, channelSubject(id), fmt.Sprintf("name=%q", name), now); err != nil {
+		detail := fmt.Sprintf("name=%q", name)
+		if v != schema.ChannelPrivate {
+			if _, err := tx.ExecContext(ctx, "UPDATE channels SET visibility = ? WHERE id = ?", string(v), id); err != nil {
+				return fmt.Errorf("store: create channel %d: set visibility: %w", id, err)
+			}
+			detail += " visibility=" + string(v)
+		}
+		ch = Channel{ID: id, Name: name, CreatedAt: now, Visibility: v}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditChannelCreated, channelSubject(id), detail, now); err != nil {
 			return err
 		}
 		if creatorID == 0 {

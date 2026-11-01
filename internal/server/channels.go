@@ -139,7 +139,7 @@ func (s *Server) handleCreateChannelV1(w http.ResponseWriter, r *http.Request) {
 // visibility asked for.
 func (s *Server) handleCreateChannelUnowned(w http.ResponseWriter, r *http.Request, req schema.CreateChannelRequestV1) {
 	ctx := r.Context()
-	channel, err := s.store.CreateChannelAs(ctx, auditActor(ctx), req.Name, 0)
+	channel, err := s.store.CreateUnownedChannel(ctx, auditActor(ctx), req.Name, req.Visibility)
 	switch {
 	case errors.Is(err, store.ErrDuplicate):
 		writeError(w, http.StatusConflict, "channel_exists", channelExistsMessage)
@@ -151,15 +151,6 @@ func (s *Server) handleCreateChannelUnowned(w http.ResponseWriter, r *http.Reque
 		slog.ErrorContext(ctx, "channels: create failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
-	}
-	if req.Visibility != channel.Visibility {
-		res, err := s.store.ChannelSettings(ctx, auditActor(ctx), 0, channel.ID, store.ChannelSettingsChange{Visibility: &req.Visibility}, s.now())
-		if err != nil {
-			slog.ErrorContext(ctx, "channels: set visibility of new channel failed", "channel", channel.ID, "error", err)
-			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
-			return
-		}
-		channel = res.Channel
 	}
 	writeJSON(w, http.StatusCreated, schema.CreateChannelResponseV1{Channel: channelFromStore(channel)})
 }
