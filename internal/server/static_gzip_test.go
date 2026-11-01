@@ -331,18 +331,14 @@ func TestGzipNeverOnPrivateResponses(t *testing.T) {
 	}
 }
 
-// gzGet requests path from ts with Accept-Encoding gzip and the given extra
-// headers, and returns the response's Content-Encoding, status and body.
-func gzGet(t *testing.T, ts *httptest.Server, path string, hdr map[string]string) (string, int, []byte) {
+// gzGet requests path from ts with Accept-Encoding gzip, and returns the response's Content-Encoding, status and body.
+func gzGet(t *testing.T, ts *httptest.Server, path string) (string, int, []byte) {
 	t.Helper()
 	req, err := http.NewRequestWithContext(context.Background(), "GET", ts.URL+path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Accept-Encoding", "gzip")
-	for k, v := range hdr {
-		req.Header.Set(k, v)
-	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -357,21 +353,55 @@ func gzGet(t *testing.T, ts *httptest.Server, path string, hdr map[string]string
 
 // TestStaticGzipPreconditionsArePlain: a request ServeContent may answer with
 // 412 or a part is served plain, so no compressed representation's headers go
-// out without its body.
+// out without its body. The --web-dir source, whose files have a real
+// modification time, so If-Unmodified-Since is evaluated.
 func TestStaticGzipPreconditionsArePlain(t *testing.T) {
-	ts := gzSources[0].server(t)
-	for _, hdr := range []map[string]string{
-		{"If-Match": `"missing"`},
-		{"If-Unmodified-Since": "Mon, 02 Jan 2006 15:04:05 GMT"},
-		{"If-Range": `"x"`},
-	} {
-		ce, status, body := gzGet(t, ts, "/app/assets/big.js", hdr)
-		if ce != "" {
-			t.Errorf("%v: Content-Encoding = %q, want none", hdr, ce)
-		}
-		if status == http.StatusOK && string(body) != bigJS {
-			t.Errorf("%v: 200 with a body that is not the file", hdr)
-		}
+	ts := gzSources[1].server(t)
+	tests := []struct {
+		name   string
+		hdr    map[string]string
+		status int
+	}{
+		{"If-Match fails", map[string]string{"If-Match": `"missing"`}, http.StatusPreconditionFailed},
+		{"If-Unmodified-Since fails", map[string]string{"If-Unmodified-Since": "Mon, 02 Jan 2006 15:04:05 GMT"}, http.StatusPreconditionFailed},
+		{"If-Range without Range", map[string]string{"If-Range": `"x"`}, http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(context.Background(), "GET", ts.URL+"/app/assets/big.js", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Accept-Encoding", "gzip")
+			for k, v := range tt.hdr {
+				req.Header.Set(k, v)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("read body: %v", err)
+			}
+			if resp.StatusCode != tt.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.status)
+			}
+			if ce := resp.Header.Get("Content-Encoding"); ce != "" {
+				t.Errorf("Content-Encoding = %q, want none", ce)
+			}
+			if tt.status == http.StatusPreconditionFailed {
+				if len(body) != 0 {
+					t.Errorf("412 body is %d bytes, want none", len(body))
+				}
+				if cl := resp.Header.Get("Content-Length"); cl != "" && cl != "0" {
+					t.Errorf("412 Content-Length = %q, want none", cl)
+				}
+			} else if string(body) != bigJS {
+				t.Error("200 body is not the file")
+			}
+		})
 	}
 }
 
@@ -407,7 +437,7 @@ func TestStaticGzipCompressionsAreBounded(t *testing.T) {
 	held := make(chan result, 2)
 	for _, p := range []string{"/app/assets/big.js", "/app/assets/large.js"} {
 		go func() {
-			ce, _, body := gzGet(t, ts, p, nil)
+			ce, _, body := gzGet(t, ts, p)
 			held <- result{ce, body}
 		}()
 	}
@@ -419,7 +449,7 @@ func TestStaticGzipCompressionsAreBounded(t *testing.T) {
 		}
 	}
 	for range 3 {
-		ce, status, body := gzGet(t, ts, "/app/", nil)
+		ce, status, body := gzGet(t, ts, "/app/")
 		if status != http.StatusOK || ce != "" || !strings.HasPrefix(string(body), "<html>") {
 			t.Fatalf("with both workers busy: %d %q, want 200 plain index", status, ce)
 		}
@@ -442,7 +472,7 @@ func TestStaticGzipRemembersPlain(t *testing.T) {
 	calls, _, release := holdCompressions(t)
 	release()
 	for range 3 {
-		ce, _, body := gzGet(t, ts, "/app/assets/noise.js", nil)
+		ce, _, body := gzGet(t, ts, "/app/assets/noise.js")
 		if ce != "" || string(body) != string(noiseJS) {
 			t.Fatalf("noise.js: %q, want plain file", ce)
 		}
@@ -451,7 +481,7 @@ func TestStaticGzipRemembersPlain(t *testing.T) {
 		t.Errorf("compressions = %d, want 1", n)
 	}
 	for range 2 {
-		if ce, _, _ := gzGet(t, ts, "/app/assets/big.js", nil); ce != "gzip" {
+		if ce, _, _ := gzGet(t, ts, "/app/assets/big.js"); ce != "gzip" {
 			t.Fatalf("big.js: %q, want gzip", ce)
 		}
 	}
