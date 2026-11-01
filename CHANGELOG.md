@@ -8,6 +8,80 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.9] - 2026-11-01
+
+These are the core-flow fixes from browser UX audit 3 (first run, the
+empty channel, attachments, the phone top bar, a faster first load), and a
+screen-share revocation fix. Upgrade with
+`conch-server upgrade v0.1.0-alpha.9` from your workstation, or with
+`conch-upgrade.sh` on the droplet (docs/deploy.md step 11).
+
+There is no migration and no wire change since `alpha.8`, so rolling back to
+`alpha.8` is a plain downgrade.
+
+### Added
+
+- **Attach any file the server accepts** (#1035). The composer's Attach
+  button (it was "Attach images") takes any file, by the picker, a paste or
+  a drop.
+  - A PNG or JPEG still goes as an image, with a preview.
+  - Any other file shows in the log as a chip: its name, its size and
+    Download.
+  - A file that is too large gets one line naming it and the server's limit.
+  - Kept files follow the same rule as kept images: a draft that comes back
+    is never sent to more people than you chose.
+- **A first-run screen for an operator in no channel** (#1032). Instead of
+  an empty centre and an endless "Connecting…", it says "You're not in any
+  channels yet" and offers three things:
+  - **Make a channel**, which opens the form with the cursor in its field;
+  - **Invite someone**, which needs a channel first;
+  - **Decide how people join**, which opens Settings at Joining.
+
+  On a phone it shows in the Channels view. The members column says "No
+  channel open".
+- **A loading screen, and a smaller first download** (#1037). conchd gzips
+  the web client's own files (HTML, JavaScript, CSS) and nothing else, so
+  no API, socket or attachment answer is compressed.
+
+### Changed
+
+- **An empty conversation no longer claims the channel is empty** (#1034).
+  It says "No messages here that you can see yet." and invites a first
+  message. Only someone whose history starts when they joined (open
+  joining) is also told "Messages sent before you joined aren't shown."
+
+### Fixed
+
+- **On a phone, the connection state stays readable** (#1030).
+  "Reconnecting" gets its own row under the top bar's buttons, and nothing
+  covers it, down to 320 px wide.
+- **Kept images follow their channel across a re-sign-in** (#1067). They
+  were kept by channel name, so an image could come back in a different
+  channel that had taken the old name while you were signed out.
+- **Revoking someone's access ends a screen share that is still being
+  granted** (#1061). Before, a share being granted at that moment could
+  outlive the revocation by up to 1.5 s. The revocations covered are: the
+  permissions change, removal from the channel, disabling, and revoking a
+  credential or all of them. The server now answers the revocation only
+  once any share being granted has been taken back. This holds even if
+  LiveKit fails to delete the old room. Two hardening follow-ups are #1087
+  and #1089.
+
+### Diagnostics
+
+- **A trace for push-to-talk** (#1041). "Transmitting" lingering after the
+  first press couldn't be reproduced: in 60 tries it cleared within 1.7 s.
+  To catch it on a live server:
+  - in the browser console, run
+    `sessionStorage.setItem('conch.web.voice.trace', '1')`;
+  - reload the page;
+  - after a press that lingers, read `window.conchVoiceTrace`.
+
+  The trace holds no room, token or person. conchd logs the matching steps at
+  debug level. #1041 stays open.
+- Browser UX audit 4, on `alpha.8`, is in `docs/reviews/browser-ux-audit-4.md`
+  (#1078).
+
 ## [0.1.0-alpha.8] - 2026-10-31
 
 These are fixes for the biggest problems found by browser UX audit 3
