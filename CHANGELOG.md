@@ -17,11 +17,16 @@ the usual backup first (docs/deploy.md does).
 - **Channels.** Every channel that was open to the bare address becomes a
   public **default** channel, which new members start in. Every other
   channel stays **private**, with exactly its current members.
-- **Making a channel public.** The channel settings route (#981) is not here
-  yet. Until it ships, listing a channel among the joining settings' open
-  channels makes it public **and** a default channel, and the audit row says
-  `visibility=private->public`. Taking it off the list again makes it no
-  longer a default, but it stays public: it is not made private again.
+- **Making a channel public or private.** An operator holding
+  `manage_channels` sets a channel's visibility and its default mark with
+  `PUT /v1/channels/{id}/settings` (#981; see Added). Listing a channel among
+  the joining settings' open channels still makes it public **and** a
+  default channel, and the audit row says `visibility=private->public`.
+  Taking it off that list makes it no longer a default but leaves it public;
+  the settings route is how to make it private again.
+- **Making a channel.** Any member can now make a public or private channel
+  with `POST /v1/channels` and is its manager (#981; see Added).
+  `POST /v0/channels` stays operator-only and makes a private channel.
 - **Members.** Every member, a disabled account included, is added to every
   default channel, with no right to decide approvals. Anyone already in a
   channel keeps the rights they had there.
@@ -46,18 +51,6 @@ the usual backup first (docs/deploy.md does).
 The server log reports what the migration found and what it changed, and the
 audit trail has one `community_migrated` row with the counts.
 
-## [0.1.0-alpha.9] - 2026-11-01
-
-These are the core-flow fixes from browser UX audit 3 (first run, the
-empty channel, attachments, the phone top bar, a faster first load),
-@mentions, reply context and links in messages, and a screen-share
-revocation fix. Upgrade with
-`conch-server upgrade v0.1.0-alpha.9` from your workstation, or with
-`conch-upgrade.sh` on the droplet (docs/deploy.md step 11).
-
-There is no migration and no wire change since `alpha.8`, so rolling back to
-`alpha.8` is a plain downgrade.
-
 ### Added
 
 - **Members make channels; operators set a channel's visibility and default
@@ -80,6 +73,21 @@ There is no migration and no wire change since `alpha.8`, so rolling back to
     `visibility` and `default`, and a settings change sends the channel
     document. `POST /v0/channels` stays operator-only and makes a private
     channel.
+
+## [0.1.0-alpha.9] - 2026-11-01
+
+These are the core-flow fixes from browser UX audit 3 (first run, the
+empty channel, attachments, the phone top bar, a faster first load),
+@mentions, reply context and links in messages, and a screen-share
+revocation fix. Upgrade with
+`conch-server upgrade v0.1.0-alpha.9` from your workstation, or with
+`conch-upgrade.sh` on the droplet (docs/deploy.md step 11).
+
+There is no migration and no wire change since `alpha.8`, so rolling back to
+`alpha.8` is a plain downgrade.
+
+### Added
+
 - **Attach any file the server accepts** (#1035). The composer's Attach
   button (it was "Attach images") takes any file, by the picker, a paste or
   a drop.
