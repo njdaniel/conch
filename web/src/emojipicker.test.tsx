@@ -205,6 +205,126 @@ describe('the emoji picker', () => {
   });
 });
 
+// A character typed into the box, as the browser reports it.
+function typeChar(before: string, ch: string, inputType = 'insertText'): void {
+  const el = box();
+  el.focus();
+  const value = before + ch;
+  fireEvent.input(el, { target: { value, selectionStart: value.length, selectionEnd: value.length }, inputType, data: ch });
+  el.setSelectionRange(value.length, value.length);
+  fireEvent.select(el);
+}
+
+describe('the closing colon of :name: (issue #1081)', () => {
+  it.each([
+    ['x :tada', 'x 🎉'],
+    ['x :+1', 'x 👍'],
+    ['x :thumbsup', 'x 👍'],
+    ['x :heart', 'x ❤️'],
+  ])('swaps %j for the emoji and puts the caret after it', (before, want) => {
+    render(<Harness />);
+    typeChar(before, ':');
+    expect(box().value).toBe(want);
+    expect(box().selectionStart).toBe(want.length);
+    expect(screen.queryByRole('listbox')).toBeNull();
+    focused(box());
+  });
+
+  it('sends the emoji on Enter', () => {
+    let sent = 0;
+    render(<Harness onSend={() => { sent++; }} />);
+    typeChar('x :tada', ':');
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(box().value).toBe('x 🎉');
+    expect(sent).toBe(1);
+  });
+
+  it.each([
+    ['x :notaname', 'x :notaname:'],
+    ['12:30', '12:30:'],
+    ['http://a:b', 'http://a:b:'],
+    ['https://x.y/a:b', 'https://x.y/a:b:'],
+    ['a:tada', 'a:tada:'],
+    ['x :t', 'x :t:'],
+  ])('leaves %j as typed', (before, want) => {
+    render(<Harness />);
+    typeChar(before, ':');
+    expect(box().value).toBe(want);
+  });
+
+  it('gives back :tada: on one Backspace right after the swap', () => {
+    render(<Harness />);
+    typeChar('x :tada', ':');
+    expect(box().value).toBe('x 🎉');
+    expect(fireEvent.keyDown(box(), { key: 'Backspace' })).toBe(false);
+    expect(box().value).toBe('x :tada:');
+    expect(box().selectionStart).toBe('x :tada:'.length);
+    // It does not swap again, and a second Backspace is the browser's own.
+    expect(fireEvent.keyDown(box(), { key: 'Backspace' })).toBe(true);
+  });
+
+  it.each([
+    ['isComposing', { isComposing: true }],
+    ['inside a composition', null],
+  ])('does not swap during an input method composition (%s)', (_name, init) => {
+    render(<Harness />);
+    if (init === null) fireEvent.compositionStart(box());
+    const value = 'x :tada:';
+    fireEvent.input(box(), { target: { value, selectionStart: value.length, selectionEnd: value.length }, inputType: 'insertText', data: ':', ...(init ?? {}) });
+    expect(box().value).toBe(value);
+    if (init === null) fireEvent.compositionEnd(box());
+    // After the composition ends, typing swaps again.
+    typeChar('y :tada', ':');
+    expect(box().value).toBe('y 🎉');
+  });
+
+  it.each(['(', '[', '{'])('does not swap inside a link after %s', (open) => {
+    render(<Harness />);
+    typeChar(`https://example.com/?q=${open}:heart`, ':');
+    expect(box().value).toBe(`https://example.com/?q=${open}:heart:`);
+  });
+
+  it('gives no Backspace undo once the swapped emoji was replaced by the picker with itself', async () => {
+    render(<Harness />);
+    typeChar('x :tada', ':');
+    expect(box().value).toBe('x 🎉');
+    fireEvent.click(screen.getByRole('button', { name: 'Add emoji' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Emoji' });
+    box().setSelectionRange(2, 'x 🎉'.length);
+    fireEvent.change(within(dialog).getByRole('searchbox'), { target: { value: 'party popper' } });
+    fireEvent.click(await within(dialog).findByRole('button', { name: 'party popper' }));
+    await waitFor(() => { expect(box().value).toBe('x 🎉'); });
+    expect(fireEvent.keyDown(box(), { key: 'Backspace' })).toBe(true);
+    expect(box().value).toBe('x 🎉');
+  });
+
+  it('keeps Backspace as the browser has it once something else was typed', () => {
+    render(<Harness />);
+    typeChar('x :tada', ':');
+    typeChar('x 🎉', 'a');
+    expect(fireEvent.keyDown(box(), { key: 'Backspace' })).toBe(true);
+    expect(box().value).toBe('x 🎉a');
+  });
+
+  it('does not swap pasted text, a change with no typing, or a restored draft', () => {
+    render(<Harness initial="x :tada:" />);
+    expect(box().value).toBe('x :tada:');
+    typeChar('x :tada', ':', 'insertFromPaste');
+    expect(box().value).toBe('x :tada:');
+    type('y :tada:');
+    expect(box().value).toBe('y :tada:');
+  });
+
+  it('keeps the popups: :short still suggests, and a swap leaves no list open', async () => {
+    render(<Harness />);
+    typeChar('x :tad', 'a');
+    expect(await screen.findByRole('listbox', { name: 'Emoji suggestions' })).not.toBeNull();
+    typeChar('x :tada', ':');
+    expect(box().value).toBe('x 🎉');
+    expect(screen.queryByRole('listbox')).toBeNull();
+  });
+});
+
 describe('shortcode completion', () => {
   it('offers matches for :short at the caret and inserts the first on Enter', async () => {
     render(<Harness />);
@@ -321,6 +441,15 @@ describe('a send in progress', () => {
     // Enter is not taken for a completion either.
     fireEvent.keyDown(box(), { key: 'Enter' });
     expect(box().value).toBe('caption :fire');
+  });
+
+  it('gives no Backspace undo of a swap while the images upload (issue #1081)', () => {
+    const { rerender } = render(<WithImage status="ready" />);
+    typeChar('x :tada', ':');
+    expect(box().value).toBe('x 🎉');
+    rerender(<WithImage status="uploading" />);
+    expect(fireEvent.keyDown(box(), { key: 'Backspace' })).toBe(true);
+    expect(box().value).toBe('x 🎉');
   });
 
   it('closes an open picker and disables its button while the images upload', async () => {

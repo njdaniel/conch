@@ -3,7 +3,7 @@ import { createCredentialResponseV1, createPrincipalResponse, type CreateCredent
 import { postMessageResponseV2 } from '../src/schema/message';
 import { listNetsResponseV1 } from '../src/schema/net';
 import { history, post, reply } from './api';
-import { channelButton, expect, expectFits, phoneSizes, phones, signIn, test } from './fixtures';
+import { channelButton, expect, expectFits, openChannel, phoneSizes, phones, signIn, test } from './fixtures';
 import { call, ok, principalId } from './world';
 
 let next = 0;
@@ -136,3 +136,58 @@ for (const [size, options] of phoneSizes.filter(([size]) => size === '390×844' 
     }
   });
 }
+
+// A half-typed reply is kept across a reload, by thread root (issue #1080).
+const kept = [
+  ['1440×900', { viewport: { width: 1440, height: 900 } }],
+  ['390×844', phones[0][1]],
+] as const;
+for (const [size, options] of kept) {
+  test(`a half-typed reply comes back after a reload, and is gone once sent at ${size}`, async ({ meet, world }) => {
+    const { page } = await meet(options);
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    const root = await post(world, world.tokens.browser, 'general', unique(`kept ${size}`));
+    const body = unique(`half-typed reply ${size}`);
+    let thread = await openThread(page, root.id);
+    await thread.getByRole('textbox', { name: /^Reply to (?!message )/ }).fill(body);
+
+    await page.reload();
+    await openChannel(page, 'general');
+    thread = page.getByRole('region', { name: `Thread around message ${String(root.id)}` });
+    await expect(thread.getByRole('textbox', { name: /^Reply to (?!message )/ })).toHaveValue(body);
+    await thread.getByRole('button', { name: 'Send reply' }).click();
+    await expect(thread.getByText(body, { exact: true })).toBeVisible();
+
+    await page.reload();
+    await openChannel(page, 'general');
+    await expect(page.getByRole('region', { name: `Thread around message ${String(root.id)}` })).toHaveCount(0);
+    thread = await openThread(page, root.id);
+    await expect(thread.getByRole('textbox', { name: /^Reply to (?!message )/ })).toHaveValue('');
+  });
+}
+
+test('a kept reply to a whisper root goes out with the root audience', async ({ meet, world }) => {
+  const guest = await principalId(world, world.tokens.guest);
+  const restored = await call(world, world.tokens.operator, 'PUT', `/v1/channels/nets-demo/members/${String(guest)}`);
+  expect(restored.status).toBe(204);
+  const whisperRoot = (await ok(world, world.tokens.browser, 'POST', '/v2/channels/nets-demo/messages', postMessageResponseV2, {
+    body: `${unique('kept whisper')} root`, audience: { kind: 'principals', principal_ids: [guest] },
+  })).message;
+  const body = unique('kept whisper reply');
+  const { page } = await meet();
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  await openChannel(page, 'nets-demo');
+  let thread = await openThread(page, whisperRoot.id);
+  await thread.getByRole('textbox', { name: /^Reply to (?!message )/ }).fill(body);
+
+  await page.reload();
+  await openChannel(page, 'nets-demo');
+  thread = page.getByRole('region', { name: `Thread around message ${String(whisperRoot.id)}` });
+  await expect(thread.getByRole('textbox', { name: /^Reply to (?!message )/ })).toHaveValue(body);
+  await expect(thread.getByText(/Replying to → whisper to 1; the audience cannot be changed/)).toBeVisible();
+  await thread.getByRole('button', { name: 'Send reply' }).click();
+  await expect(thread.getByText(body, { exact: true })).toBeVisible();
+  const sent = (await history(world, world.tokens.browser, 'nets-demo')).find((message) => message.body === body);
+  expect(sent?.thread_root_id).toBe(whisperRoot.id);
+  expect(sent?.audience).toEqual(whisperRoot.audience);
+});

@@ -3,7 +3,7 @@
 // their own, at desktop and phone sizes. This spec runs after the others but
 // 12-phone, which counts nobody, so the people it adds to the fixture channels
 // touch no other spec.
-import type { BrowserContextOptions, Page } from '@playwright/test';
+import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import { invitesOf, makeInvite, post } from './api';
 import { channelButton, expect, expectFits, fillAccount, showView, statusLine, test } from './fixtures';
 import { joinSettingsResponseV1, type PutJoinSettingsRequestV1 } from '../src/schema/guest';
@@ -332,3 +332,67 @@ test('F9 a newcomer admitted under a history bound is told what is not shown, no
     await ok(world, op, 'PUT', '/v1/join/settings', joinSettingsResponseV1, { open_joining: 'off', open_channels: [] } satisfies PutJoinSettingsRequestV1);
   }
 });
+
+// Issue #1083 (browser UX audit 4, F6): pausing every invite asks first, and
+// says what it stops. Cancel and Escape send nothing; the yes pauses, and an
+// invite then answers paused. Un-ticking resumes at once. At both sizes; on a
+// phone the buttons are at least 44 px tall. The invites are put back.
+for (const [size, options] of sizes) {
+  test(`F6 at ${size} pausing all invites asks first, and an invite then answers paused`, async ({ meet, world }) => {
+    const op = world.tokens.operator;
+    const isPhone = options === phone;
+    const paused = async () => (await call(world, op, 'GET', '/v1/invites/settings')).body as { paused?: boolean } | null;
+    const attempt = () => call(world, op, 'POST', '/v1/invites', { kind: 'open', channels: ['general'], voice: false });
+    try {
+      const { page } = await meet(options);
+      await page.goto(world.appUrl);
+      await page.getByLabel('Credential').fill(op);
+      await page.getByRole('button', { name: 'Use credential' }).click();
+      await page.getByRole('button', { name: 'Continue anyway' }).click();
+      await expect(statusLine(page)).toContainText('Connected');
+      await page.getByRole('button', { name: 'Settings' }).click();
+      await page.getByRole('button', { name: 'Joining' }).click();
+      const region = page.getByRole('region', { name: 'Joining' });
+      const box = region.getByLabel('Pause all invites');
+      const press = async (target: Locator) => (isPhone ? target.tap() : target.click());
+      await expect(box).toBeEnabled();
+
+      // Ticking asks, with Cancel focused; nothing is sent and the box stays unticked.
+      await press(box);
+      const question = region.getByRole('group', { name: /^Pause every invite\?/ });
+      await expect(question).toContainText('No one can make, preview or use an invite until you switch this back, including links already sent.');
+      await expect(question.getByRole('button', { name: 'Cancel' })).toBeFocused();
+      await expect(box).not.toBeChecked();
+      if (isPhone) {
+        for (const name of ['Yes, pause', 'Cancel']) expect((await question.getByRole('button', { name }).boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+      }
+      expect((await paused())?.paused).toBe(false);
+      await page.keyboard.press('Escape');
+      await expect(question).toHaveCount(0);
+      await expect(box).toBeFocused();
+      await press(box);
+      await press(question.getByRole('button', { name: 'Cancel' }));
+      await expect(question).toHaveCount(0);
+      await expect(box).not.toBeChecked();
+      expect((await paused())?.paused).toBe(false);
+
+      // Yes pauses, and an invite answers paused.
+      await press(box);
+      await press(question.getByRole('button', { name: 'Yes, pause' }));
+      await expect(box).toBeChecked();
+      await expect(region.getByText('Invites are paused: no one can make, preview or use an invite.')).toBeVisible();
+      expect((await paused())?.paused).toBe(true);
+      const refused = await attempt();
+      expect(refused.status).toBe(503);
+      expect(JSON.stringify(refused.body)).toContain('invites_paused');
+
+      // Un-ticking resumes at once, with no question.
+      await press(box);
+      await expect(box).not.toBeChecked();
+      await expect(question).toHaveCount(0);
+      expect((await paused())?.paused).toBe(false);
+    } finally {
+      await call(world, op, 'PUT', '/v1/invites/settings', { paused: false });
+    }
+  });
+}
