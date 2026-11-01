@@ -206,6 +206,19 @@ describe('arguments', () => {
     expect(f.calls).toEqual([]);
   });
 
+  it.each([
+    ['an invite preview', { operation: 'previewInvite', body: { code: 'secret-invite-code' } }],
+    ['a sign-in link preview', { operation: 'previewSignInLink', body: { code: 'secret-link-code' } }],
+    ['a channel list', { operation: 'listChannels' }],
+  ] as const)('sends no request but the health check when the server is not one the app may sign in to: %s (issue #946)', async (_name, request) => {
+    const f = fixture();
+    f.permit.value = false;
+    expect(await f.ipc.invoke(f.event(), 'request', [request])).toEqual({ ok: true, value: { kind: 'none', reason: 'incompatible' } });
+    expect(f.calls).toEqual([]);
+    expect(await f.ipc.invoke(f.event(), 'request', [{ operation: 'health' }])).toEqual({ ok: true, value: { ran: 'request' } });
+    expect(f.calls).toEqual([['request', [{ operation: 'health' }]]]);
+  });
+
   it('passes a feed call to the feeds with the caller’s document generation, and the parameters it parsed', async () => {
     const f = fixture();
     const document = f.gate.generation;

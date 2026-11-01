@@ -12,7 +12,7 @@
 // name a channel, a URL, a header or a method.
 import type { IpcMain } from 'electron';
 
-import type { BridgeRequest, FeedRequest, SignInOutcome } from '../../web/src/platform/desktop/bridge.ts';
+import type { BridgeReply, BridgeRequest, FeedRequest, SignInOutcome } from '../../web/src/platform/desktop/bridge.ts';
 import { operations } from '../../web/src/platform/operations.ts';
 import { channelOf, INVOKED_FUNCTIONS, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
 import { isProfileId } from './profiles/ids.ts';
@@ -62,6 +62,7 @@ export type ProfilesApi = Pick<
 // What a sign-in step answers when the server's release is not one the app may
 // sign in to (issue #946): nothing was sent.
 const INCOMPATIBLE: SignInOutcome = { ok: false, kind: 'network', reason: 'incompatible' };
+const INCOMPATIBLE_REPLY: BridgeReply = { kind: 'none', reason: 'incompatible' };
 
 const ORIGIN_PREFIX = `${SCHEME}://${HOST}/`;
 
@@ -213,7 +214,13 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
       const parsed = args.length === 1 ? parseRequest(args[0]) : null;
       return parsed === null ? null : [parsed];
     },
-    run: ({ service }, [request]) => service.request(request as BridgeRequest),
+    // On a server the app may not sign in to (issue #946), nothing but the
+    // health check goes out: a preview of an invite or a sign-in link carries
+    // a secret code, and the page has no use for anything else there.
+    run: ({ service, profiles }, [request]) =>
+      profiles.signInPermitted() || (request as BridgeRequest).operation === 'health'
+        ? service.request(request as BridgeRequest)
+        : Promise.resolve(INCOMPATIBLE_REPLY),
   },
   restore: { limit: 120, maxBytes: 0, parse: none, run: ({ service }) => service.restore() },
   signInWithCredential: {
