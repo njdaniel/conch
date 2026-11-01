@@ -64,6 +64,7 @@ export function Lobby({
   notificationCenter,
   connection,
   conversation,
+  firstRun,
   panel,
   voice,
   invites,
@@ -96,6 +97,10 @@ export function Lobby({
   readonly notificationCenter?: ReactNode;
   readonly connection: ConnectionState;
   readonly conversation: ReactNode;
+  // The first-run panel for an operator with no channels (issue #1032). It
+  // stands where the conversation would; on a phone, where that is not shown
+  // with nothing open, it is drawn in the Channels view instead. Never both.
+  readonly firstRun?: ReactNode;
   readonly panel: ReactNode;
   // The voice section: kept by the caller, which owns the voice client. It is
   // rendered in one place only, the strip, whatever the window's width.
@@ -278,7 +283,8 @@ export function Lobby({
   // conversation is shown, focus goes to its heading (issue #590). Only then:
   // opening another channel later leaves focus where it is.
   const arrived = useRef(false);
-  const showing = channels.loaded && conversation !== null && conversation !== undefined;
+  const hasFirstRun = firstRun !== null && firstRun !== undefined;
+  const showing = channels.loaded && ((conversation !== null && conversation !== undefined) || hasFirstRun);
   useEffect(() => {
     if (!showing || arrived.current) return;
     const heading = document.getElementById(headingId);
@@ -371,6 +377,7 @@ export function Lobby({
                   }}
                 />
                 {newChannel}
+                {phone ? firstRun : null}
               </>
             ) : connection === 'reconnecting' ? (
               <div className="problem">
@@ -395,6 +402,7 @@ export function Lobby({
                 </p>
               )}
               {conversation}
+              {phone ? null : firstRun}
             </section>
           </main>
           <aside aria-label="Members panel" className="panel">

@@ -4,9 +4,10 @@
 // 12-phone, which counts nobody, so the people it adds to the fixture channels
 // touch no other spec.
 import type { BrowserContextOptions, Page } from '@playwright/test';
-import { invitesOf, makeInvite } from './api';
+import { invitesOf, makeInvite, post } from './api';
 import { channelButton, expect, expectFits, fillAccount, showView, statusLine, test } from './fixtures';
-import { call, inviteUrl, principalId, type World } from './world';
+import { joinSettingsResponseV1, type PutJoinSettingsRequestV1 } from '../src/schema/guest';
+import { call, inviteUrl, ok, principalId, type World } from './world';
 
 const desktop: BrowserContextOptions = { viewport: { width: 1280, height: 800 } };
 const phone: BrowserContextOptions = { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true };
@@ -285,4 +286,37 @@ test('A8 an operator makes an open link with its defaults, and closes it', async
   await expect(list.getByRole('listitem').filter({ hasText: 'Open link' }).first()).toContainText('Closed');
   const closed = (await invitesOf(world, world.tokens.operator)).find((i) => i.id === open.id);
   expect(closed?.closed_at).toBeDefined();
+});
+
+// Issue #1034 (browser UX audit 3, F9): a newcomer who makes an account at the
+// bare address is admitted to a channel under a history bound, so a channel
+// with messages in it reads empty to them. The page says what is true: it
+// does not claim the channel is empty. (People an operator adds, and those a
+// personal invite admits, read all of the channel's history and never see this
+// state in a channel that has messages.) At the narrowest width. The joining
+// settings are put back when the test is done.
+test('F9 a newcomer admitted under a history bound is told what is not shown, not that the channel is empty', async ({ meet, secrets, world }) => {
+  const channel = `f9-channel-a-${String(Date.now())}`;
+  const op = world.tokens.operator;
+  const created = await call(world, op, 'POST', '/v0/channels', { name: channel });
+  expect(created.status).toBe(201);
+  await post(world, op, channel, 'f9 sent before the newcomer came');
+  await ok(world, op, 'PUT', '/v1/join/settings', joinSettingsResponseV1, { open_joining: 'account', open_channels: [channel] } satisfies PutJoinSettingsRequestV1);
+  try {
+    const { page } = await meet({ viewport: { width: 320, height: 640 } });
+    await page.goto(world.appUrl);
+    await page.getByRole('region', { name: 'Join' }).getByRole('button', { name: 'Create an account' }).click();
+    await join(page, unique('f9'));
+    await keepToken(page, secrets);
+    // At this width one view shows at a time: choose the channel.
+    await showView(page, 'Channels');
+    await channelButton(page, channel).click();
+    const log = page.getByRole('log', { name: 'Messages' });
+    await expect(log.getByText('No messages here that you can see yet.')).toBeVisible();
+    await expect(log.getByText("Messages sent before you joined aren't shown.")).toBeVisible();
+    await expect(log.getByText('Write a message to start.')).toBeVisible();
+    await expect(page.getByText(/Say hello|No messages in #/)).toHaveCount(0);
+  } finally {
+    await ok(world, op, 'PUT', '/v1/join/settings', joinSettingsResponseV1, { open_joining: 'off', open_channels: [] } satisfies PutJoinSettingsRequestV1);
+  }
 });
