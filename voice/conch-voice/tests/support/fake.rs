@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use conch_voice::sdk::{
     DisconnectReason, Joined, MicFeed, MicTrack, RoomHandle, SdkError, SdkEvent, Transport,
@@ -52,6 +52,9 @@ pub fn room_of(token: &str) -> String {
 #[derive(Default)]
 struct Inner {
     calls: Vec<Call>,
+    /// When the track was last muted: the moment the client acted, whatever the test was
+    /// doing when it noticed.
+    last_mute_at: Option<Instant>,
     /// The address and join token of every connection attempt.
     connects: Vec<(String, String)>,
     /// The events of the room that is joined now.
@@ -279,6 +282,11 @@ impl FakeSdk {
             .collect()
     }
 
+    /// When the track was last muted.
+    pub fn last_mute_at(&self) -> Option<Instant> {
+        self.lock().last_mute_at
+    }
+
     /// Whether the track is muted, as LiveKit was told.
     pub fn is_muted(&self) -> bool {
         self.lock().muted
@@ -447,6 +455,7 @@ impl MicTrack for FakeTrack {
         }
         let mut inner = self.inner.lock().unwrap();
         inner.calls.push(Call::Mute);
+        inner.last_mute_at = Some(Instant::now());
         // As the SDK: muting a muted track changes nothing, an enabled one included.
         if !inner.muted {
             inner.muted = true;
