@@ -12,7 +12,6 @@ import type {
   BridgeReply,
   BridgeRequest,
   ServerAddress,
-  SetServerAddressResult,
   SignInOutcome,
   SignInRefusal,
   SignOutOutcome,
@@ -21,7 +20,6 @@ import { operations, type OperationId } from '../../../web/src/platform/operatio
 import type { WhoAmIResponseV1 } from '../../../web/src/schema/principal.ts';
 import { whoAmIResponseV1 } from '../../../web/src/schema/principal.ts';
 import { Client, type Exchange } from './client.ts';
-import { parseServerAddress } from './origin.ts';
 import type { Session } from './session.ts';
 
 export const REVOKE_TIMEOUT_MS = 5_000;
@@ -109,17 +107,6 @@ export class Service {
 
   serverAddress(): ServerAddress {
     return { origin: this.#deps.session.origin };
-  }
-
-  setServerAddress(input: string): SetServerAddressResult {
-    const parsed = parseServerAddress(input);
-    if (!parsed.ok) return parsed;
-    const { session } = this.#deps;
-    const before = session.capture();
-    session.setOrigin(parsed.origin);
-    // A sign-in the change ended is revoked at the server that issued it.
-    if (before.token !== null && !session.signedIn) void this.#revoke(before.origin, before.token);
-    return { ok: true, origin: parsed.origin };
   }
 
   async request(request: BridgeRequest): Promise<BridgeReply> {

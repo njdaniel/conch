@@ -10,7 +10,6 @@ import type { ConchDesktopBridge } from '../../web/src/platform/desktop/bridge.t
 
 export const BRIDGE_FUNCTIONS = [
   'serverAddress',
-  'setServerAddress',
   'request',
   'subscribe',
   'restore',
@@ -28,6 +27,19 @@ export const BRIDGE_FUNCTIONS = [
   'signOut',
 ] as const satisfies readonly (keyof ConchDesktopBridge)[];
 
+// The saved server profiles (issue #945), a family of their own.
+export const PROFILE_FUNCTIONS = [
+  'profiles',
+  'profileAdd',
+  'profileRename',
+  'profileRemove',
+  'profileSwitch',
+  'storageRetry',
+  'profilesRecover',
+] as const satisfies readonly (keyof ConchDesktopBridge)[];
+
+export type ProfileFunction = (typeof PROFILE_FUNCTIONS)[number];
+
 export type BridgeFunction = (typeof BRIDGE_FUNCTIONS)[number];
 
 // The calls a subscription is made of: open a feed under a number the preload
@@ -37,11 +49,12 @@ export const FEED_CALLS = ['feedSubscribe', 'feedAck', 'feedUnsubscribe'] as con
 export type FeedCall = (typeof FEED_CALLS)[number];
 
 // The functions that cross into main as one invoke each.
-export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall;
+export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction;
 
 export const INVOKED_FUNCTIONS: readonly InvokedFunction[] = [
   ...BRIDGE_FUNCTIONS.filter((name): name is Exclude<BridgeFunction, 'subscribe'> => name !== 'subscribe'),
   ...FEED_CALLS,
+  ...PROFILE_FUNCTIONS,
 ];
 
 export function channelOf(name: InvokedFunction): string {

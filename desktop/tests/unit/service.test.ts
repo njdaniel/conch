@@ -74,7 +74,7 @@ async function ready(handler: Handler = conchd) {
   servers.push(fake);
   const logs: string[] = [];
   const s = stack((line) => logs.push(line));
-  expect(s.service.setServerAddress(fake.origin)).toEqual({ ok: true, origin: fake.origin });
+  s.session.setOrigin(fake.origin);
   return { fake, logs, ...s };
 }
 
@@ -188,7 +188,7 @@ describe('sign-in', () => {
     let now = 1_000;
     const session = new Session();
     const service = new Service({ client: new Client({ fetch: globalThis.fetch, session }), session, now: () => now, log: () => undefined });
-    service.setServerAddress(fake.origin);
+    session.setOrigin(fake.origin);
     await service.signInWithCredential(CANARY_TOKEN);
     now += PASTED_TTL_MS;
     expect(service.keepCredential(CANARY_TOKEN)).toBe(false);
@@ -216,9 +216,6 @@ describe('sign-in', () => {
     await service.signIn('login', { name: 'ada', password: CANARY_PASSWORD });
     await new Promise((r) => setTimeout(r, 50));
     expect(revoked).toBe(0);
-    expect(service.setServerAddress('http://127.0.0.1:1')).toMatchObject({ ok: true });
-    await new Promise((r) => setTimeout(r, 100));
-    expect(revoked).toBe(1);
   });
 
   it('restores a sign-in main holds, and says unauthorized when it holds none', async () => {
@@ -286,12 +283,4 @@ describe('the request function', () => {
     expect(fake.seen).toHaveLength(0);
   });
 
-  it('changes server only through the address rules, and a change ends the sign-in', async () => {
-    const { service, session } = await ready();
-    await paste(service);
-    expect(service.setServerAddress('http://example.org')).toEqual({ ok: false, refusal: 'scheme' });
-    expect(session.signedIn).toBe(true);
-    expect(service.setServerAddress('http://127.0.0.1:1')).toMatchObject({ ok: true });
-    expect(session.signedIn).toBe(false);
-  });
 });

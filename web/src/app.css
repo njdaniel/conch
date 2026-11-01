@@ -3481,3 +3481,111 @@ button.link {
 .draft-attachment-size {
   white-space: nowrap;
 }
+
+/* The desktop app's server list and the strip over the client (issue #945). */
+.desktop-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  padding: var(--s2) var(--s3);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--small);
+}
+
+.desktop-bar-host {
+  font-weight: 600;
+}
+
+.desktop-bar-account,
+.desktop-bar-session {
+  color: var(--muted);
+}
+
+.desktop-bar-notice {
+  color: var(--warn);
+}
+
+.desktop-bar button {
+  margin-left: auto;
+}
+
+.desktop-servers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s3);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.desktop-storage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.desktop-server-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.desktop-server {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.desktop-server-active {
+  border-color: var(--accent);
+}
+
+.desktop-server-name {
+  font-weight: 600;
+}
+
+.desktop-server-host,
+.desktop-server-account {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.desktop-server-current {
+  color: var(--accent);
+  font-size: var(--small);
+}
+
+.desktop-server-actions {
+  display: flex;
+  gap: var(--s2);
+  margin-left: auto;
+}
+
+.desktop-server-confirm {
+  flex-basis: 100%;
+  padding: var(--s2) var(--s3);
+  background: var(--danger-bg);
+  border-radius: var(--radius-sm);
+}
+
+.desktop-server-add,
+.desktop-server-rename {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}

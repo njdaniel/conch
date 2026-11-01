@@ -111,7 +111,6 @@ export function createBridge(invoke: Invoke, listen: Listen): Readonly<ConchDesk
 
   return Object.freeze<ConchDesktopBridge>({
     serverAddress: call('serverAddress'),
-    setServerAddress: call('setServerAddress'),
     request: call('request'),
     subscribe,
     restore: call('restore'),
@@ -127,5 +126,13 @@ export function createBridge(invoke: Invoke, listen: Listen): Readonly<ConchDesk
     joinAsGuest: call('joinAsGuest'),
     createAccount: call('createAccount'),
     signOut: call('signOut'),
+    // The saved server profiles (issue #945).
+    profiles: call('profiles'),
+    profileAdd: call('profileAdd'),
+    profileRename: call('profileRename'),
+    profileRemove: call('profileRemove'),
+    profileSwitch: call('profileSwitch'),
+    storageRetry: call('storageRetry'),
+    profilesRecover: call('profilesRecover'),
   });
 }

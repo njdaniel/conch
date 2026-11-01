@@ -11,7 +11,6 @@ function fakeBridge(overrides: Partial<ConchDesktopBridge>): ConchDesktopBridge 
   const unexpected = (name: string) => () => Promise.reject(new Error(`unexpected bridge call: ${name}`));
   return {
     serverAddress: unexpected('serverAddress'),
-    setServerAddress: unexpected('setServerAddress'),
     request: unexpected('request'),
     subscribe: () => () => undefined,
     restore: unexpected('restore'),
@@ -27,6 +26,13 @@ function fakeBridge(overrides: Partial<ConchDesktopBridge>): ConchDesktopBridge 
     joinAsGuest: unexpected('joinAsGuest'),
     createAccount: unexpected('createAccount'),
     signOut: unexpected('signOut'),
+    profiles: unexpected('profiles'),
+    profileAdd: unexpected('profileAdd'),
+    profileRename: unexpected('profileRename'),
+    profileRemove: unexpected('profileRemove'),
+    profileSwitch: unexpected('profileSwitch'),
+    storageRetry: unexpected('storageRetry'),
+    profilesRecover: unexpected('profilesRecover'),
     ...overrides,
   };
 }
