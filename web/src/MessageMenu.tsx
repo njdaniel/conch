@@ -16,6 +16,9 @@ export interface MenuItem {
   readonly key: string;
   readonly label: string;
   readonly onSelect: () => void;
+  // Shown, and announced, as unavailable for now (a request is pending);
+  // choosing it does nothing and leaves the menu open. Absent means usable.
+  readonly disabled?: boolean;
 }
 
 // How long a finger rests on a message before its menu opens.
@@ -128,7 +131,9 @@ export function ActionsMenu({
               type="button"
               role="menuitem"
               tabIndex={-1}
+              {...(item.disabled === true ? { 'aria-disabled': true } : {})}
               onClick={() => {
+                if (item.disabled === true) return;
                 onOpenChange(false);
                 item.onSelect();
               }}

@@ -1068,3 +1068,32 @@ func TestVoiceShareKeepsSecrets(t *testing.T) {
 		}
 	}
 }
+
+// TestVoiceShareClaimFailsClosedOnLivenessReadError (issue #1089): if the
+// read of the room's liveness after the grant fails, the claim cannot tell
+// whether the room was rotated. It takes back what it granted and answers
+// 409 voice_no_session, never 200, for a first claim and for a holder's claim
+// again.
+func TestVoiceShareClaimFailsClosedOnLivenessReadError(t *testing.T) {
+	for _, kind := range []string{"first", "again"} {
+		t.Run(kind, func(t *testing.T) {
+			f, room := newShareFixture(t)
+			if kind == "again" {
+				f.mustClaim(t, "ann")
+			}
+			f.srv.voice.liveReadSeam = func(context.Context, int64) (bool, error) {
+				return false, errors.New("store: disk I/O error")
+			}
+			res := f.claimShare(t, "ann", "ops")
+			if res.status != http.StatusConflict || errCode(t, res.body) != schema.ErrorCodeVoiceNoSession {
+				t.Fatalf("claim whose liveness read fails: %d %s, want 409 voice_no_session", res.status, res.body)
+			}
+			if f.granted(t, room, "ann") {
+				t.Error("the grant was left after the claim was refused")
+			}
+			if holder := f.shareState(room); holder != 0 {
+				t.Errorf("the poller still holds a share for %d", holder)
+			}
+		})
+	}
+}

@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
+import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { Avatar } from './Icons';
 import { memberName } from './guestName';
+import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { Entry } from './agents/join';
 import type { ChannelMemberV1, ChannelV0, PutChannelMemberRequestV1 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
@@ -174,17 +175,29 @@ function AddPeople(props: MemberControlsProps) {
   );
 }
 
-export function MemberControls(props: MemberControlsProps & { readonly principalId: number }) {
-  const { channel, members, viewer, refreshMembers, onUnauthorized, principalId } = props;
+// MemberRow is one person's row in the members panel (issue #1094): the
+// caller's content, the Manager and Approver badges, and one ⋯ menu with the
+// actions this viewer may use on this person. The menu is the message log's
+// (MessageMenu.tsx), opened by its button, Enter or Space on it, a right-click
+// on the row or a long press. A row with no actions draws no button and
+// suppresses no native menu. A refusal after an action stays in the row.
+export function MemberRow({
+  className,
+  principalId,
+  children,
+  after,
+  ...controls
+}: MemberControlsProps & { readonly principalId: number; readonly className: string; readonly children: ReactNode; readonly after?: ReactNode }) {
+  const { channel, members, viewer, refreshMembers, onUnauthorized } = controls;
   const member = members.find((m) => m.principal_id === principalId);
   const [busy, setBusy] = useState(false);
   const [line, setLine] = useState<string | null>(null);
-  if (member === undefined) return null;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const more = useRef<HTMLButtonElement>(null);
 
   const operator = viewer.role === 'operator';
   const manager = !operator && !viewer.guest && channel.manages === true;
-  const name = displayName(member);
-  const human = member.kind === 'human' && member.guest === undefined;
+  const human = member !== undefined && member.kind === 'human' && member.guest === undefined;
 
   async function run(request: PutChannelMemberRequestV1 | null) {
     if (busy || member === undefined) return;
@@ -204,49 +217,43 @@ export function MemberControls(props: MemberControlsProps & { readonly principal
     setLine(refusalLine(result));
   }
 
-  let explanation: string | null = null;
-  let removable = operator;
-  if (manager) {
-    removable = member.role === 'member' && member.kind === 'human' && member.can_decide === false;
-    if (!removable) {
-      if (member.kind === 'agent') explanation = 'Agents are managed by operators.';
-      else if (member.role === 'operator') explanation = 'Operators can only be removed by an operator.';
-      else if (member.can_decide === true) explanation = 'Approvers are removed by an operator.';
+  // The same rules as before the menu: an operator may remove anyone and, for
+  // a human, change the two standings; a manager removes only a plain human
+  // member who does not decide approvals. The server still decides.
+  const items: MenuItem[] = [];
+  if (member !== undefined && (operator || manager)) {
+    const removable = operator || (member.role === 'member' && member.kind === 'human' && member.can_decide === false);
+    if (removable) items.push({ key: 'remove', label: 'Remove from channel', disabled: busy, onSelect: () => void run(null) });
+    if (operator && human) {
+      items.push({
+        key: 'manager',
+        label: member.manages === true ? 'Remove as manager' : 'Make manager',
+        disabled: busy,
+        onSelect: () => void run({ manages: member.manages !== true }),
+      });
+      items.push({
+        key: 'decide',
+        label: member.can_decide === true ? 'Stop deciding approvals' : 'Let decide approvals',
+        disabled: busy,
+        onSelect: () => void run({ can_decide: member.can_decide !== true }),
+      });
     }
   }
+  const openers = useOpeners(items.length > 0, () => {
+    setMenuOpen(true);
+  });
 
   return (
-    <>
-      {member.manages === true ? <span className="ag-badge">Manager</span> : null}
-      {member.can_decide === true ? <span className="ag-badge">Approver</span> : null}
-      {operator || manager ? (
-        <span className="member-controls">
-          {removable ? (
-            <button type="button" disabled={busy} onClick={() => void run(null)}>
-              Remove {name}
-            </button>
-          ) : null}
-          {operator && human ? (
-            <>
-              <button type="button" disabled={busy} onClick={() => void run({ manages: member.manages !== true })}>
-                {member.manages === true ? `Remove ${name} as manager` : `Make ${name} a manager`}
-              </button>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={member.can_decide === true}
-                  disabled={busy}
-                  onChange={(event) => void run({ can_decide: event.target.checked })}
-                />
-                {name} decides approvals
-              </label>
-            </>
-          ) : null}
-          {explanation === null ? null : <span className="hint">{explanation}</span>}
-          {line === null ? null : <span role="status">{line}</span>}
-        </span>
-      ) : null}
-    </>
+    <li className={`${className} member-row${items.length > 0 ? ' has-actions' : ''}`} {...openers}>
+      {children}
+      {member?.manages === true ? <span className="ag-badge">Manager</span> : null}
+      {member?.can_decide === true ? <span className="ag-badge">Approver</span> : null}
+      {after}
+      {items.length === 0 || member === undefined ? null : (
+        <ActionsMenu label={`Actions for ${displayName(member)}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
+      )}
+      {line === null ? null : <span role="status" className="member-line">{line}</span>}
+    </li>
   );
 }
 
@@ -257,12 +264,11 @@ function PeopleGroup({ title, people, controls }: { readonly title: string; read
       <h4>{`${title} — ${String(people.length)}`}</h4>
       <ul aria-label={`${title} — ${String(people.length)}`}>
         {people.map((person) => (
-          <li key={person.id} className={`ag-person state-${person.state}`}>
+          <MemberRow key={`${String(controls.channel.id)}:${String(person.id)}`} {...controls} principalId={person.id} className={`ag-person state-${person.state}`}>
             <Avatar id={person.id} name={person.name} />
             <span className="ag-name">{person.name}</span>
             {person.live > 1 ? <span> ({person.live} sessions)</span> : null} <span className="ag-status">{person.state}</span>
-            <MemberControls key={`${String(controls.channel.id)}:${String(person.id)}`} {...controls} principalId={person.id} />
-          </li>
+          </MemberRow>
         ))}
       </ul>
     </>
