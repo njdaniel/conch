@@ -13,10 +13,15 @@
 // a change that was made, so the switch goes back to unknown and is read
 // again.
 //
+// Pausing asks first (issue #1083), since it stops every invite on the server
+// at once, including links already sent: ticking the box shows the question
+// and sends nothing, and the box stays unticked until the answer is yes.
+// Resuming does not ask.
+//
 // The change needs a recent proof of the operator's password (and code, if
 // enrolled), which authedSend asks for over this page (Reauth.tsx) and then
 // sends the same change again; a cancel leaves the switch as it was.
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import * as api from './api';
 import { serverLine } from './Invite';
 
@@ -37,6 +42,13 @@ export function InviteSettings({ open, asked = 0, onUnauthorized }: { readonly o
   const [paused, setPaused] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [line, setLine] = useState<Line | null>(null);
+  // Whether the question before pausing is showing.
+  const [asking, setAsking] = useState(false);
+  const box = useRef<HTMLInputElement>(null);
+  const cancel = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (asking) cancel.current?.focus();
+  }, [asking]);
   // The number of the newest read or change; an older one's answer is dropped.
   const latest = useRef(0);
   // A change in flight, and whether a read waits for it to answer.
@@ -74,6 +86,7 @@ export function InviteSettings({ open, asked = 0, onUnauthorized }: { readonly o
     if (!open) return;
     setPaused(null);
     setLine(null);
+    setAsking(false);
     if (writing.current) readAfterWrite.current = true;
     else read(null);
     return () => {
@@ -124,6 +137,14 @@ export function InviteSettings({ open, asked = 0, onUnauthorized }: { readonly o
     });
   }
 
+  function leave(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== 'Escape' || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setAsking(false);
+    box.current?.focus();
+  }
+
   return (
     <div className="invite-settings">
       {paused === null ? (
@@ -136,12 +157,49 @@ export function InviteSettings({ open, asked = 0, onUnauthorized }: { readonly o
               checked={paused}
               disabled={busy}
               aria-describedby={`${id}-state`}
+              ref={box}
               onChange={(event) => {
-                change(event.target.checked);
+                if (!event.target.checked) {
+                  setAsking(false);
+                  change(false);
+                } else if (!paused) {
+                  setLine(null);
+                  setAsking(true);
+                }
               }}
             />{' '}
             Pause all invites
           </label>
+          {asking && !paused ? (
+            <div role="group" aria-labelledby={`${id}-ask`} className="signout-confirm" onKeyDown={leave}>
+              <p id={`${id}-ask`}>
+                Pause every invite? No one can make, preview or use an invite until you switch this back, including links already sent.
+              </p>
+              <div className="actions">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setAsking(false);
+                    box.current?.focus();
+                    change(true);
+                  }}
+                >
+                  Yes, pause
+                </button>
+                <button
+                  ref={cancel}
+                  type="button"
+                  onClick={() => {
+                    setAsking(false);
+                    box.current?.focus();
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : null}
           <p id={`${id}-state`} className="hint">
             {paused
               ? 'Invites are paused: no one can make, preview or use an invite.'
