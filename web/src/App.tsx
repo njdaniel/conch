@@ -63,6 +63,31 @@ import { needsHttps } from './transport';
 const checkingAudience = 'Checking who this draft goes to…';
 const audienceGone = 'Who this draft was for is no longer available. Choose who it goes to before sending.';
 
+// The attachment drafts kept across a sign-in that ended: by channel id
+// instead of name (issue #1067), the audience scope of each kept as it is.
+interface KeptAttachments {
+  readonly byChannel: Readonly<Record<number, Readonly<Record<string, readonly DraftAttachment[]>>>>;
+  readonly nextClientId: number;
+}
+
+function keepAttachments(drafts: AttachmentDrafts, channels: readonly { readonly id: number; readonly name: string }[]): KeptAttachments {
+  const byChannel: Record<number, Readonly<Record<string, readonly DraftAttachment[]>>> = {};
+  for (const channel of channels) {
+    const scopes = drafts.channels[channel.name];
+    if (scopes !== undefined) byChannel[channel.id] = scopes;
+  }
+  return { byChannel, nextClientId: drafts.nextClientId };
+}
+
+function restoreAttachments(kept: KeptAttachments, channels: readonly { readonly id: number; readonly name: string }[], generation: number): AttachmentDrafts {
+  const named: Record<string, Readonly<Record<string, readonly DraftAttachment[]>>> = {};
+  for (const [id, scopes] of Object.entries(kept.byChannel)) {
+    const name = channels.find((c) => String(c.id) === id)?.name;
+    if (name !== undefined) named[name] = scopes;
+  }
+  return { channels: named, nextClientId: kept.nextClientId, generation };
+}
+
 // App is the page. A guest who creates an account (issue #713) becomes a
 // member with a new credential, and every socket, session and list the page
 // held was the guest's: the page starts over, as on a reload, with the
@@ -186,7 +211,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     // By channel id, as the audiences are (issue #1039): a channel renamed,
     // or a new one given the old name, while signed out never gets the text.
     readonly drafts: Readonly<Record<number, string>>;
-    readonly attachments: AttachmentDrafts;
+    // Images by channel id too, each under the audience scope it was added to
+    // (issue #1067): they come back to the same channel and the same
+    // audience, which is held until checked like the text's.
+    readonly attachments: KeptAttachments;
     readonly pending: Readonly<Record<string, readonly PendingSend[]>>;
     // Who each channel's draft was for, by channel id (issue #1039): text
     // kept without it would come back addressed to the whole channel.
@@ -235,7 +263,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           const text = draftsNow.current[channel.name];
           if (text !== undefined && text !== '') typed[channel.id] = text;
         }
-        const files = attachmentsNow.current;
+        const files = keepAttachments(attachmentsNow.current, channelsNow.current.channels);
         const pending: Record<string, readonly PendingSend[]> = {};
         if (keptAcross(endedNotice)) {
           for (const [channel, chat] of Object.entries(chatNow.current.channels)) {
@@ -253,7 +281,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           const audience = returned !== undefined ? returned : (pendingTargets.current.get(channel.id) ?? storedAudience(targetFor(targetsNow.current, channel.name)));
           if (audience !== null) audiences[channel.id] = audience;
         }
-        kept.current = keptAcross(endedNotice) && (Object.keys(typed).length > 0 || Object.keys(files.channels).length > 0 || Object.keys(pending).length > 0)
+        kept.current = keptAcross(endedNotice) && (Object.keys(typed).length > 0 || Object.keys(files.byChannel).length > 0 || Object.keys(pending).length > 0)
           ? { principal: lastSignedIn.current, drafts: typed, attachments: files, pending, targets: audiences }
           : null;
         lastSignedIn.current = null;
@@ -930,7 +958,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         if (name !== undefined) typed[name] = text;
       }
       dispatchDrafts({ type: 'restore', drafts: typed });
-      dispatchAttachments({ type: 'restore', drafts: was.attachments });
+      // Images go to the channel they were added in, by id, under its name
+      // now; a channel that is gone takes its images with it (issue #1067).
+      dispatchAttachments({ type: 'restore', drafts: restoreAttachments(was.attachments, channelsNow.current.channels, attachmentsNow.current.generation) });
       dispatchChat({ type: 'restored', pending });
     }
     // An audience is never guessed: the box starts as a whisper to nobody,
