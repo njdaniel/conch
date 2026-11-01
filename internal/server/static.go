@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -280,6 +281,9 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// sniff it from the compressed bytes.
 				hd.Set("Content-Type", mime.TypeByExtension(path.Ext(name)))
 				hd.Set("Content-Encoding", "gzip")
+				// ServeContent leaves the length out once an encoding is
+				// set; the compressed size is known, so say it.
+				hd.Set("Content-Length", strconv.Itoa(len(gz)))
 				http.ServeContent(w, r, path.Base(name), fi.ModTime(), bytes.NewReader(gz))
 				return
 			}
@@ -303,6 +307,8 @@ const (
 	gzMinSize  = 1024     // smaller than this is not worth a gzip header
 	gzMaxSize  = 16 << 20 // larger is served plain rather than held in memory
 	gzMaxCache = 32 << 20 // total compressed bytes kept
+	// gzMaxEntries bounds the names remembered; a build has far fewer files.
+	gzMaxEntries = 4096
 )
 
 // gzipExts are the text types of a built client. Images, fonts and wasm are
@@ -319,36 +325,62 @@ func gzippable(name string) bool {
 	return gzipExts[strings.ToLower(ext)] && mime.TypeByExtension(ext) != ""
 }
 
-// acceptsGzip reports whether the request lists gzip (or *) with a non-zero
-// quality in Accept-Encoding.
+// acceptsGzip reports whether the request's Accept-Encoding allows gzip: an
+// explicit gzip entry decides, and only without one does "*" (RFC 9110
+// 12.5.3). A quality of zero, or one that does not parse, refuses.
 func acceptsGzip(r *http.Request) bool {
+	gzipQ, anyQ := -1.0, -1.0
 	for _, v := range r.Header.Values("Accept-Encoding") {
 		for _, part := range strings.Split(v, ",") {
-			tok, params, _ := strings.Cut(strings.TrimSpace(part), ";")
-			tok = strings.ToLower(strings.TrimSpace(tok))
-			if tok != "gzip" && tok != "*" {
-				continue
+			tok, params, _ := strings.Cut(part, ";")
+			switch strings.ToLower(strings.TrimSpace(tok)) {
+			case "gzip", "x-gzip":
+				gzipQ = max(gzipQ, quality(params))
+			case "*":
+				anyQ = max(anyQ, quality(params))
 			}
-			params = strings.ReplaceAll(strings.ToLower(params), " ", "")
-			if q, ok := strings.CutPrefix(params, "q="); ok {
-				if strings.Trim(q, "0.") == "" {
-					continue
-				}
-			}
-			return true
 		}
 	}
-	return false
+	if gzipQ >= 0 {
+		return gzipQ > 0
+	}
+	return anyQ > 0
 }
 
+// quality is the q parameter in an Accept-Encoding entry's parameters: 1 when
+// absent, 0 when malformed.
+func quality(params string) float64 {
+	for _, p := range strings.Split(params, ";") {
+		k, v, ok := strings.Cut(p, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(k), "q") {
+			continue
+		}
+		q, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		if err != nil || q < 0 || q > 1 {
+			return 0
+		}
+		return q
+	}
+	return 1
+}
+
+// gzEntry is one file's compressed form; nil data means "serve it plain"
+// (gzip did not shrink it, or the cache was full).
 type gzEntry struct {
 	size int64
 	mod  time.Time
 	data []byte
 }
 
+// gzWorkers bounds the compressions running at once. A request that finds
+// none free is served plain rather than queued, so a burst of cold requests
+// costs at most this many buffers.
+var gzWorkers = make(chan struct{}, 2)
+
 // gzipped returns the gzip form of f (read from its start), cached by name
-// until the file's size or modification time changes.
+// until the file's size or modification time changes. A file gzip cannot
+// shrink, or one past the cache's limits, is remembered as plain, so nothing
+// is compressed again on every request.
 func (h *staticHandler) gzipped(name string, fi fs.FileInfo, f io.Reader) ([]byte, bool) {
 	if fi.Size() < gzMinSize || fi.Size() > gzMaxSize {
 		return nil, false
@@ -357,7 +389,13 @@ func (h *staticHandler) gzipped(name string, fi fs.FileInfo, f io.Reader) ([]byt
 	e, ok := h.gzCache[name]
 	h.gzMu.Unlock()
 	if ok && e.size == fi.Size() && e.mod.Equal(fi.ModTime()) {
-		return e.data, true
+		return e.data, e.data != nil
+	}
+	select {
+	case gzWorkers <- struct{}{}:
+		defer func() { <-gzWorkers }()
+	default:
+		return nil, false
 	}
 	var buf bytes.Buffer
 	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
@@ -369,7 +407,7 @@ func (h *staticHandler) gzipped(name string, fi fs.FileInfo, f io.Reader) ([]byt
 	}
 	data := buf.Bytes()
 	if int64(len(data)) >= fi.Size() {
-		return nil, false
+		data = nil
 	}
 	h.gzMu.Lock()
 	defer h.gzMu.Unlock()
@@ -380,11 +418,15 @@ func (h *staticHandler) gzipped(name string, fi fs.FileInfo, f io.Reader) ([]byt
 		h.gzBytes -= len(old.data)
 		delete(h.gzCache, name)
 	}
-	if h.gzBytes+len(data) <= gzMaxCache {
-		h.gzCache[name] = gzEntry{size: fi.Size(), mod: fi.ModTime(), data: data}
-		h.gzBytes += len(data)
+	if len(h.gzCache) >= gzMaxEntries {
+		return data, data != nil
 	}
-	return data, true
+	if h.gzBytes+len(data) > gzMaxCache {
+		data = nil
+	}
+	h.gzCache[name] = gzEntry{size: fi.Size(), mod: fi.ModTime(), data: data}
+	h.gzBytes += len(data)
+	return data, data != nil
 }
 
 // open opens name (slash-separated, relative) inside the source. Only a
