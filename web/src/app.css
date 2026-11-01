@@ -1080,8 +1080,25 @@ label {
   padding: 0.35rem 0;
   color: var(--accent);
   font-size: var(--small);
+  text-align: left;
   background: transparent;
   border: 0;
+}
+
+.message > button.message-action {
+  /* The same size as every other phone control: the class above is beaten by
+     `.message > :not(.avatar)`, which resets min-width and comes later. */
+  min-width: 2.75rem;
+}
+
+.reply-context {
+  grid-column: 2;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .thread-view {
@@ -1112,6 +1129,8 @@ label {
 
 .reply-composer {
   display: grid;
+  /* The column may be narrower than the textarea's own width. */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--s2);
   margin-top: var(--s3);
 }
@@ -1119,6 +1138,17 @@ label {
 .reply-box textarea {
   flex: 1;
   min-width: 0;
+}
+
+/* On a narrow phone the box is full width and Send reply wraps under it. */
+@media (max-width: 400px) {
+  .reply-box {
+    flex-wrap: wrap;
+  }
+
+  .reply-box textarea {
+    flex-basis: 100%;
+  }
 }
 
 .search-context > button,
