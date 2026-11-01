@@ -22,7 +22,7 @@ export function isOperationId(value: string): value is OperationId {
   return Object.hasOwn(operations, value);
 }
 
-function paramOk(value: unknown): value is string | number {
+export function paramOk(value: unknown): value is string | number {
   if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0;
   if (typeof value !== 'string') return false;
   return value.length > 0 && value.length <= MAX_PARAM_LENGTH && value !== '.' && value !== '..' && !BAD_VALUE.test(value);
