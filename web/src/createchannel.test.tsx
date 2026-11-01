@@ -180,25 +180,29 @@ describe('new channel', () => {
   it('shows an operator with no channels the first-run panel', async () => {
     serve(operator, (name) => made(name, 1), []);
     render(<App origin={origin} />);
-    const heading = await screen.findByRole('heading', { name: 'Welcome to your server' });
+    const heading = await screen.findByRole('heading', { name: "You're not in any channels yet" });
     // Focus lands on the heading after sign-in, as on a conversation's.
     await waitFor(() => {
       expect(document.activeElement).toBe(heading);
     });
     const conversation = screen.getByRole('region', { name: 'Conversation' });
-    expect(within(conversation).getByRole('button', { name: 'Make your first channel' })).toBeDefined();
+    expect(within(conversation).getByRole('button', { name: 'Make a channel' })).toBeDefined();
     const invite = within(conversation).getByRole('button', { name: 'Invite someone' });
     expect(invite.hasAttribute('disabled')).toBe(true);
     expect(invite.getAttribute('aria-describedby')).toBeTruthy();
-    expect(within(conversation).getByText('Make a channel first')).toBeDefined();
+    expect(within(conversation).getByText('Needs a channel first')).toBeDefined();
     expect(within(conversation).getByRole('button', { name: 'Decide how people join' })).toBeDefined();
+    // /v1/channels lists only this operator's channels, so the panel never
+    // says the server has none: it may be a busy server they are in no
+    // channel of (codex on #1085).
+    expect(within(conversation).queryByText(/no channels yet|your server|first channel/i)).toBeNull();
     expect(within(screen.getByRole('region', { name: 'Members list' })).queryByText('Connecting…')).toBeNull();
   });
 
   it('opens the New channel form from the first-run panel, and the panel is gone once the channel is made and open', async () => {
     serve(operator, (name) => made(name, 1), []);
     render(<App origin={origin} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Make your first channel' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Make a channel' }));
     const form = screen.getByRole('form', { name: 'New channel' });
     expect(within(nav()).getByRole('button', { name: 'New channel' }).getAttribute('aria-expanded')).toBe('true');
     await waitFor(() => {
@@ -208,8 +212,8 @@ describe('new channel', () => {
     fireEvent.click(within(form).getByRole('button', { name: 'Create channel' }));
     const button = await within(nav()).findByRole('button', { name: 'general' });
     expect(button.getAttribute('aria-current')).toBe('true');
-    expect(screen.queryByRole('heading', { name: 'Welcome to your server' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Make your first channel' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: "You're not in any channels yet" })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Make a channel' })).toBeNull();
   });
 
   it('opens Settings with Joining from the first-run panel', async () => {
@@ -227,8 +231,8 @@ describe('new channel', () => {
     await within(await screen.findByRole('navigation', { name: 'Channels' })).findByText('No channels yet: an operator needs to add you to one');
     expect(screen.queryByRole('button', { name: 'New channel' })).toBeNull();
     expect(screen.queryByRole('form', { name: 'New channel' })).toBeNull();
-    expect(screen.queryByRole('heading', { name: 'Welcome to your server' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Make your first channel' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: "You're not in any channels yet" })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Make a channel' })).toBeNull();
     expect(creates(calls)).toEqual([]);
   });
 });

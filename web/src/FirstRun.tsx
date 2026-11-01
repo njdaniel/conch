@@ -2,8 +2,10 @@ import { useContext } from 'react';
 import { headingId } from './Conversation';
 import { JoiningSettings } from './joiningSettings';
 
-// What an operator sees on a server with no channels (issue #1032): the three
-// things to do first. It stands where the conversation would, and is gone
+// What an operator in no channel sees (issue #1032): on a new server, the
+// three things to do first. /v1/channels lists only the caller's channels, so
+// the page cannot tell a new server from one where this operator is in none;
+// the words are true of both. It stands where the conversation would, and is gone
 // once a channel exists. Its heading takes focus after sign-in as the
 // conversation's does.
 export function FirstRun({ onMakeChannel }: { readonly onMakeChannel: () => void }) {
@@ -11,13 +13,13 @@ export function FirstRun({ onMakeChannel }: { readonly onMakeChannel: () => void
   return (
     <div className="first-run">
       <h2 id={headingId} tabIndex={-1}>
-        Welcome to your server
+        You&apos;re not in any channels yet
       </h2>
-      <p className="hint">There are no channels yet. Three things to do first:</p>
+      <p className="hint">Make a channel to start talking, or ask an operator to add you to one.</p>
       <ul className="first-run-actions">
         <li>
           <button type="button" onClick={onMakeChannel}>
-            Make your first channel
+            Make a channel
           </button>
         </li>
         <li>
@@ -25,7 +27,7 @@ export function FirstRun({ onMakeChannel }: { readonly onMakeChannel: () => void
             Invite someone
           </button>{' '}
           <span id="first-run-invite-why" className="hint">
-            Make a channel first
+            Needs a channel first
           </span>
         </li>
         <li>

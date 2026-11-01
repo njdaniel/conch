@@ -210,25 +210,25 @@ test('G30d a new owner on a server with no channels sees the first-run panel, an
     await skipAndSignIn(page);
     secrets.push((await tabToken(page)) ?? '');
 
-    const heading = page.getByRole('heading', { name: 'Welcome to your server' });
+    const heading = page.getByRole('heading', { name: "You're not in any channels yet" });
     await expect(heading).toBeVisible();
     await expect(heading).toBeFocused();
-    await expect(page.getByRole('button', { name: 'Make your first channel' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Make a channel' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Invite someone' }).last()).toBeDisabled();
-    await expect(page.getByText('Make a channel first')).toBeVisible();
+    await expect(page.getByText('Needs a channel first')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Decide how people join' })).toBeVisible();
     const members = page.getByRole('region', { name: 'Members list' });
     await expect(members.getByText('No channel open')).toBeVisible();
     await expect(page.getByText('Connecting…')).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'Make your first channel' }).click();
+    await page.getByRole('button', { name: 'Make a channel' }).click();
     const field = page.getByLabel('Channel name');
     await expect(field).toBeFocused();
     await field.fill('channel-a');
     await page.getByRole('button', { name: 'Create channel' }).click();
     await expect(page.getByRole('heading', { name: 'channel-a', exact: true })).toBeVisible();
     await expect(heading).toHaveCount(0);
-    await expect(page.getByRole('button', { name: 'Make your first channel' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Make a channel' })).toHaveCount(0);
   } finally {
     server.process.kill('SIGTERM');
   }
@@ -247,15 +247,15 @@ test('G30e on a phone a new owner sees the first-run panel in the Channels view 
     await skipAndSignIn(page);
     secrets.push((await tabToken(page)) ?? '');
 
-    const heading = page.getByRole('heading', { name: 'Welcome to your server' });
+    const heading = page.getByRole('heading', { name: "You're not in any channels yet" });
     await expect(heading).toHaveCount(1);
     await expect(heading).toBeVisible();
     await expect(heading).toBeFocused();
     await expect(page.getByRole('button', { name: 'Decide how people join' })).toBeVisible();
-    await expect(page.getByText('Make a channel first')).toBeVisible();
+    await expect(page.getByText('Needs a channel first')).toBeVisible();
     await expect(page.getByText('Connecting…')).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'Make your first channel' }).click();
+    await page.getByRole('button', { name: 'Make a channel' }).click();
     const field = page.getByLabel('Channel name');
     await expect(field).toBeFocused();
     await field.fill('channel-a');
