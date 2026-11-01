@@ -203,6 +203,10 @@ func (s *Server) handleVoiceCompanion(w http.ResponseWriter, r *http.Request) {
 
 	grant, err := s.voiceCompanionGrant(ctx, caller, channel, credID, identity, req, room.ID)
 	switch {
+	case errors.Is(err, errVoiceNotAllowed):
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server",
+			refusedPermission(caller, schema.PermUseVoice))
+		return
 	case errors.Is(err, errVoiceNoLongerEntitled):
 		writeChannelNotFound(w)
 		return

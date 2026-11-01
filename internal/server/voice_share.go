@@ -155,6 +155,21 @@ func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// share_screen, on top of use_voice (which voiceSessionCaller read): the
+	// role's cell and the person's brake together (design §7.3). The claim
+	// reads it again under the room's claims (shareEntitled). A holder who
+	// claims again after the right was taken away is refused and loses the
+	// share they held, as the claim's own re-read would have done.
+	holds, ok := s.canOrFail(w, r, caller, schema.PermShareScreen)
+	if !ok {
+		return
+	}
+	if !holds {
+		s.endWithheldShare(ctx, caller.ID)
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server",
+			refusedPermission(caller, schema.PermShareScreen))
+		return
+	}
 	credID, ok := credentialIDFrom(ctx)
 	if !ok {
 		writeVoiceNoSession(w)
@@ -176,8 +191,15 @@ func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, schema.ErrorCodeVoiceShareBusy, "someone else is sharing in this room")
 		return
 	case errors.Is(err, errVoiceShareNotAllowed):
-		// The same refusal, word for word, as voicePresenceChannel gives.
-		s.denyForbidden(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server")
+		// The same refusal, word for word, as the up-front checks give; it
+		// names use_voice when that is what was taken away since, else
+		// share_screen.
+		perm := schema.PermShareScreen
+		if holds, err := s.can(ctx, caller, schema.PermUseVoice); err != nil || !holds {
+			perm = schema.PermUseVoice
+		}
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server",
+			refusedPermission(caller, perm))
 		return
 	case errors.Is(err, errVoiceShareNotConnected), errors.Is(err, errVoiceShareRoomGone), errors.Is(err, errVoiceShareNotChannelRoom):
 		writeVoiceNoSession(w)
@@ -388,14 +410,45 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	r.claimDone = done
 	p.mu.Unlock()
 	defer func() {
-		p.mu.Lock()
-		r.claimer = 0
-		r.claimDone = nil
-		close(done)
-		delete(p.retiring, r)
-		p.mu.Unlock()
+		// A withdrawal retireRoom left owing (issue #1087) is paid here, with
+		// only the claims held, while claimer is still set, so nothing can
+		// record a debt after the last look; claimDone closes after it. A
+		// second withdrawal for a principal the claim already withdrew is
+		// harmless: withdrawAll is idempotent.
+		paid := false
+		for {
+			p.mu.Lock()
+			owed := r.owedWithdraw
+			r.owedWithdraw = 0
+			if owed == 0 {
+				r.claimer = 0
+				r.claimDone = nil
+				close(done)
+				// Only a claim that was handed the debt closes withdrawDone,
+				// and only after paying it: for any other claim it belongs
+				// to the retireRoom that opened it, which withdraws after
+				// this claim has let go (a claim that finds the room retired
+				// refuses at once). Likewise the retiring entry: a claim's
+				// own (a principal's id) goes, the sentinel 0 is retireRoom's.
+				if paid && r.withdrawDone != nil {
+					close(r.withdrawDone)
+					r.withdrawDone = nil
+				}
+				if pid, ok := p.retiring[r]; ok && pid != 0 {
+					delete(p.retiring, r)
+				}
+				p.mu.Unlock()
+				return
+			}
+			p.mu.Unlock()
+			p.withdrawAll(context.WithoutCancel(ctx), r, owed, voiceRoomPublishes(room))
+			paid = true
+		}
 	}()
 
+	if p.claimSeam != nil {
+		p.claimSeam("claimed")
+	}
 	r.order.Lock()
 	p.mu.Lock()
 	if r.retired {
@@ -601,6 +654,40 @@ func (p *voicePoller) shareEntitled(ctx context.Context, room store.VoiceRoom, p
 	return nil
 }
 
+// sharesWithheld ends r's share when its holder no longer holds share_screen:
+// the per-pass half of the right (design §7.3, should-fix 4), which reads the
+// document on every pass as voiceEntitlement reads use_voice, so a change
+// that missed its hook (a restart, a failed call) is still found within one
+// pass. It ends the share through the stop path (endSharesOf: under the
+// room's claims, audited access_lost, the sources withdrawn). A read that
+// fails ends it too: the right is not known, and a sharer can claim again. A
+// pass that was cancelled decides nothing. Nothing is held when it is
+// called.
+func (p *voicePoller) sharesWithheld(ctx context.Context, r *voiceRoomState) {
+	if ctx.Err() != nil {
+		return
+	}
+	p.mu.Lock()
+	var holder int64
+	if r.share != nil {
+		holder = r.share.principalID
+	}
+	p.mu.Unlock()
+	if holder == 0 {
+		return
+	}
+	ok, err := p.s.store.Permitted(ctx, holder, schema.PermShareScreen)
+	switch {
+	case ctx.Err() != nil:
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "voice: read share_screen failed; ending the share", "channel", r.channelID, "principal", holder, "error", err)
+	case ok:
+		return
+	}
+	p.endSharesOf(ctx, holder, r.channelID, voiceShareStopAccessLost)
+}
+
 // endSharesOf is the stop path of every revocation of share_screen or of a
 // place in a room (the permissions PUT, the voice switch, membership loss,
 // disabling): it ends principalID's share in every room the poller holds one
@@ -614,6 +701,8 @@ func (p *voicePoller) shareEntitled(ctx context.Context, room store.VoiceRoom, p
 // Lock order: the room's claims, then its order, then p.mu, as every claim
 // and stop takes them. Nothing here is called with any of them held, and the
 // rooms are taken one at a time in channel order.
+//
+//nolint:unparam // every revocation ends a share as access_lost today; the reason is the stop path's own (voice_share_stopped), kept for its other ends
 func (p *voicePoller) endSharesOf(ctx context.Context, principalID, channelID int64, reason schema.VoiceShareEndReason) {
 	p.mu.Lock()
 	var rooms []*voiceRoomState
