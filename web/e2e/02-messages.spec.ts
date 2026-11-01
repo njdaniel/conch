@@ -72,3 +72,21 @@ test('F14 a typed draft survives a reload, and sending it leaves an empty box af
   await page.reload();
   await expect(page.getByLabel('Message #general')).toHaveValue('');
 });
+
+test('F26 a posted URL is a link that opens safely, and a javascript: string is not', async ({ meet, world }) => {
+  const { page } = await meet();
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+
+  await say(page, 'general', 'f26 read https://example.com/a?b=1.');
+  const line = messages(page).getByRole('listitem').filter({ hasText: 'f26 read' });
+  const link = line.getByRole('link', { name: 'https://example.com/a?b=1' });
+  await expect(link).toHaveAttribute('href', 'https://example.com/a?b=1');
+  await expect(link).toHaveAttribute('rel', 'noopener noreferrer');
+  await expect(link).toHaveAttribute('target', '_blank');
+  await expect(line).toContainText('https://example.com/a?b=1.');
+
+  await say(page, 'general', 'f26 never javascript:alert(1) or <b>tags</b>');
+  const plain = messages(page).getByRole('listitem').filter({ hasText: 'f26 never' });
+  await expect(plain).toContainText('javascript:alert(1) or <b>tags</b>');
+  await expect(plain.getByRole('link')).toHaveCount(0);
+});

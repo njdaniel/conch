@@ -400,6 +400,28 @@ describe('the (edited) marker', () => {
     expect(document.activeElement).toBe(marker);
   });
 
+  it('keeps a link in an earlier version inside the dialog’s Tab cycle', async () => {
+    vi.spyOn(api, 'messageRevisions').mockResolvedValue({
+      ok: true,
+      value: [
+        { revision: 1, body: 'see https://example.com/old', created_at: '2026-10-30T12:34:00Z' },
+        { revision: 2, body: 'hello', created_at: '2026-10-30T12:40:00Z' },
+      ],
+    });
+    render(conversation([msg(1, { body: 'hello', edited_at: editedAt.toISOString() })]));
+    fireEvent.click(screen.getByRole('button', { name: `Edited at ${when(editedAt.toISOString())}` }));
+    const dialog = screen.getByRole('dialog', { name: 'Earlier versions' });
+    const link = await within(dialog).findByRole('link', { name: 'https://example.com/old' });
+    const close = within(dialog).getByRole('button', { name: 'Close' });
+    // The link comes before Close. Tab from Close, the last control, wraps to
+    // the link; Shift+Tab from the link wraps back to Close.
+    close.focus();
+    fireEvent.keyDown(close, { key: 'Tab' });
+    expect(document.activeElement).toBe(link);
+    fireEvent.keyDown(link, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(close);
+  });
+
   it('closes Earlier versions when the server says the message is not the viewer’s', async () => {
     vi.spyOn(api, 'messageRevisions').mockResolvedValue({ ok: false, failure: 'invalid', code: 'message_not_found' });
     render(conversation([msg(1, { edited_at: editedAt.toISOString() })]));
