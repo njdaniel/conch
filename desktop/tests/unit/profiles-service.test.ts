@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import { TeardownHooks } from '../../main/profiles/hooks.ts';
+import type { HealthResult } from '../../main/compat.ts';
 import { ProfilesService, type ProbeResult, type StoredCheck } from '../../main/profiles/service.ts';
 import { ProfileStore } from '../../main/profiles/store.ts';
 import { fakeFactory, fakeVault, memoryFiles, ORIGIN_A, ORIGIN_B, type FakeActivation, type FakeVault } from './profiles-support.ts';
 
-async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoundMs?: number; files?: string; vaultBoundMs?: number; verify?: (origin: string, token: string) => StoredCheck } = {}) {
+async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoundMs?: number; files?: string; vaultBoundMs?: number; verify?: (origin: string, token: string) => StoredCheck; servers?: string[]; override?: boolean; health?: () => Promise<HealthResult>; healthBoundMs?: number } = {}) {
   const log: string[] = [];
   const files = memoryFiles(options.files);
   const store = new ProfileStore(files);
@@ -13,6 +14,8 @@ async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoun
   const factory = fakeFactory(log);
   const hooks = new TeardownHooks();
   const revoked: [string, string][] = [];
+  const verified: [string, string][] = [];
+  const asked: string[] = [];
   let clock = 0;
   const service = new ProfilesService({
     store,
@@ -25,7 +28,15 @@ async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoun
     log: (line) => log.push(`log: ${line}`),
     // By default the server says the stored credential is the member the
     // profile is bound to.
+    // By default the server says it is a release on the list.
+    compat: { servers: options.servers ?? ['v1.0.0'], override: options.override ?? false },
+    desktopVersion: '0.0.0',
+    readHealth: (origin) => {
+      asked.push(origin);
+      return (options.health ?? (() => Promise.resolve<HealthResult>({ kind: 'answered', version: 'v1.0.0' })))();
+    },
     verifyStored: (origin, token) => {
+      verified.push([origin, token]);
       if (options.verify !== undefined) return Promise.resolve(options.verify(origin, token));
       const bound = store.list().find((p) => p.origin === origin && p.principal !== null)?.principal;
       return Promise.resolve(bound === undefined || bound === null ? { kind: 'rejected' } : { kind: 'account', account: { id: bound.id, name: bound.name, lasting: true, guest: false } });
@@ -36,6 +47,7 @@ async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoun
     },
     ...(options.stepBoundMs === undefined ? {} : { stepBoundMs: options.stepBoundMs }),
     ...(options.vaultBoundMs === undefined ? {} : { vaultBoundMs: options.vaultBoundMs }),
+    ...(options.healthBoundMs === undefined ? {} : { healthBoundMs: options.healthBoundMs }),
   });
   await service.start();
   const active = (): FakeActivation => {
@@ -43,7 +55,7 @@ async function setup(options: { vault?: FakeVault; probe?: ProbeResult; stepBoun
     if (last === undefined) throw new Error('no activation');
     return last;
   };
-  return { service, store, vault, factory, hooks, files, log, active, revoked };
+  return { service, store, vault, factory, hooks, files, log, active, revoked, verified, asked };
 }
 
 const ADA = { id: 7, name: 'ada', lasting: true, guest: false };
@@ -576,5 +588,160 @@ describe('start', () => {
     expect(await s.service.add(ORIGIN_A)).toMatchObject({ ok: false });
     expect(await s.service.switchTo(null)).toBe(false);
     expect((await s.service.recover()).recovery).toBe(false);
+  });
+});
+
+describe('server compatibility (issue #946)', () => {
+  // A profile signed in once on a supported server, then left; the server's
+  // answer to /healthz is whatever `server.health` says when it is switched to.
+  async function signedInProfile(options: { vault?: FakeVault; servers?: string[]; override?: boolean; healthBoundMs?: number } = {}) {
+    const server: { health: () => Promise<HealthResult> } = { health: () => Promise.resolve({ kind: 'answered', version: 'v1.0.0' }) };
+    const s = await setup({ ...options, health: () => server.health() });
+    const id = await addAndSwitch(s, ORIGIN_A);
+    s.active().held = 'tok-ada';
+    await s.service.signedIn(ADA);
+    await s.service.switchTo(null);
+    return { s, id, server };
+  }
+  const answers = (version: string | null): (() => Promise<HealthResult>) => () => Promise.resolve({ kind: 'answered', version });
+
+  it('proceeds on a listed version: the credential is read, checked, and adopted', async () => {
+    const { s, id } = await signedInProfile();
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBe('tok-ada');
+    expect(s.service.view().compat).toEqual({ state: 'supported', server: 'v1.0.0', desktop: '0.0.0', override: false, invalid: null });
+    expect(s.asked.at(-1)).toBe(ORIGIN_A);
+  });
+
+  it.each([
+    ['an unlisted version', answers('v2.0.0'), 'unsupported', 'v2.0.0'],
+    ['a development version', answers('v0.0.0-dev'), 'unsupported', 'v0.0.0-dev'],
+    ['no version', answers(null), 'unsupported', null],
+    ['a malformed version', answers('<b>x</b>'), 'unsupported', null],
+    ['no answer', () => Promise.resolve<HealthResult>({ kind: 'unreachable' }), 'unreachable', null],
+  ] as const)('refuses automatic sign-in on %s, and asks the vault and the server about the credential nothing', async (_name, health, state, server) => {
+    const { s, id, server: fake } = await signedInProfile();
+    fake.health = health;
+    const gets = s.vault.calls.filter((c) => c.startsWith('get')).length;
+    const checks = s.verified.length;
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBeNull();
+    expect(s.vault.calls.filter((c) => c.startsWith('get')).length).toBe(gets);
+    expect(s.verified.length).toBe(checks);
+    expect(s.service.view().compat).toEqual({ state, server, desktop: '0.0.0', override: false, invalid: null });
+    expect(s.service.signInPermitted()).toBe(false);
+    // Nothing is forgotten or revoked: the server may be tested later.
+    expect(s.vault.secrets.get(id)).toBe('tok-ada');
+    expect(s.revoked).toEqual([]);
+    expect(s.service.view().notice).toBeNull();
+  });
+
+  it('does not hand a credential held in memory to an unsupported server either', async () => {
+    const vault = fakeVault({ kind: 'sessionOnly', reason: 'insecure-backend' });
+    const { s, id, server } = await signedInProfile({ vault });
+    server.health = answers('v2.0.0');
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBeNull();
+    // The server is listed again: the same run's credential is there, and is
+    // checked as ever.
+    server.health = answers('v1.0.0');
+    await s.service.switchTo(null);
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBe('tok-ada');
+  });
+
+  it('keeps the signed-out set: a signed-out profile starts signed out on a supported server and is not read on another', async () => {
+    const { s, id, server } = await signedInProfile();
+    await s.service.switchTo(id);
+    s.vault.removeFails = true;
+    await s.service.signOut();
+    await s.service.switchTo(null);
+    server.health = answers('v1.0.0');
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBeNull();
+    server.health = answers('v2.0.0');
+    await s.service.switchTo(null);
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBeNull();
+  });
+
+  it('a server that does not answer in time is unreachable, and the switch goes on', async () => {
+    const { s, id, server } = await signedInProfile({ healthBoundMs: 20 });
+    server.health = () => new Promise<HealthResult>(() => undefined);
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBeNull();
+    expect(s.service.view().compat.state).toBe('unreachable');
+  });
+
+  it('a version check that throws is unreachable', async () => {
+    const { s, id, server } = await signedInProfile();
+    server.health = () => Promise.reject(new Error('boom'));
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBeNull();
+    expect(s.service.view().compat.state).toBe('unreachable');
+  });
+
+  it('says nothing is checked on the server list, and a new switch forgets the old verdict', async () => {
+    const { s, id, server } = await signedInProfile();
+    server.health = answers('v2.0.0');
+    await s.service.switchTo(id);
+    expect(s.service.view().compat.state).toBe('unsupported');
+    await s.service.switchTo(null);
+    expect(s.service.view().compat).toEqual({ state: 'none', server: null, desktop: '0.0.0', override: false, invalid: null });
+    expect(s.service.signInPermitted()).toBe(false);
+  });
+
+  it('the development override lets an unlisted server sign in, still checks the credential, and says so', async () => {
+    const { s, id, server } = await signedInProfile({ override: true });
+    server.health = answers('v2.0.0');
+    const checks = s.verified.length;
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBe('tok-ada');
+    expect(s.verified.length).toBe(checks + 1);
+    expect(s.service.view().compat).toEqual({ state: 'unlisted', server: 'v2.0.0', desktop: '0.0.0', override: true, invalid: null });
+    expect(s.service.signInPermitted()).toBe(true);
+    await s.service.switchTo(null);
+    expect(s.service.view().compat.override).toBe(true);
+  });
+
+  it('the override does not reach a server that did not answer', async () => {
+    const { s, id, server } = await signedInProfile({ override: true });
+    server.health = () => Promise.resolve<HealthResult>({ kind: 'unreachable' });
+    await s.service.switchTo(id);
+    expect(s.active().spec.token).toBeNull();
+    expect(s.service.signInPermitted()).toBe(false);
+  });
+
+  it('lets a sign-in through only for a supported server', async () => {
+    const { s, id, server } = await signedInProfile();
+    await s.service.switchTo(id);
+    expect(s.service.signInPermitted()).toBe(true);
+    server.health = answers('v2.0.0');
+    await s.service.switchTo(id);
+    expect(s.service.signInPermitted()).toBe(false);
+  });
+
+  it('shows the first answer a required family sent that was not what this app understands, as an incompatibility', async () => {
+    const { s, id } = await signedInProfile();
+    await s.service.switchTo(id);
+    const { onInvalid } = s.active().spec;
+    onInvalid('health');
+    expect(s.service.view().compat.invalid).toBeNull();
+    onInvalid('listChannels');
+    onInvalid('whoami');
+    expect(s.service.view().compat.invalid).toBe('channels');
+    // It is a report, not a sign-out.
+    expect(s.active().signedOut).toBe(false);
+    await s.service.switchTo(null);
+    expect(s.service.view().compat.invalid).toBeNull();
+  });
+
+  it('ignores a report from an activation that has been left', async () => {
+    const { s, id } = await signedInProfile();
+    await s.service.switchTo(id);
+    const { onInvalid } = s.active().spec;
+    await s.service.switchTo(null);
+    onInvalid('whoami');
+    expect(s.service.view().compat.invalid).toBeNull();
   });
 });

@@ -109,6 +109,9 @@ export interface Services {
   // Whether this client may publish the person's own voice. Only the browser
   // may: the desktop renderer never holds the voice grant.
   browserVoice: boolean;
+  // The desktop app's own version, shown beside the server's (issue #946).
+  // Only the desktop shell has one; null when it cannot say.
+  appVersion?(): Promise<string | null>;
 }
 
 export interface Platform {

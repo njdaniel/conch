@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 
 import { bridge } from '../access';
 import type { ProfilesView } from '../bridge';
+import { DevelopmentNote, Incompatible } from './Compat';
 import { ServerList } from './ServerList';
 import { noticeLines } from './text';
 
@@ -53,6 +54,8 @@ export function ProfileBar({ initial }: { readonly initial: ProfilesView }) {
           Servers
         </button>
       </header>
+      {view.compat.override ? <DevelopmentNote compat={view.compat} /> : null}
+      <Incompatible compat={view.compat} />
       {open ? <ServerList view={view} onView={setView} /> : null}
     </>
   );

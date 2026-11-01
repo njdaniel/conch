@@ -34,6 +34,9 @@ export interface ServiceDeps {
   readonly now: () => number;
   // One line; never a body, a header or a credential.
   readonly log: (line: string) => void;
+  // Told when an answer of an operation was not the document the table
+  // promises (issue #946: shown as an incompatibility, not a network error).
+  readonly onInvalid?: (op: OperationId) => void;
 }
 
 // The operations that give a credential, by the bridge function that sends
@@ -123,6 +126,7 @@ export class Service {
     switch (exchange.kind) {
       case 'none':
         this.#note(id, exchange.reason);
+        if (exchange.reason === 'invalid') this.#deps.onInvalid?.(id);
         return exchange.reason === undefined ? { kind: 'none' } : { kind: 'none', reason: exchange.reason };
       case 'unauthorized':
         return { kind: 'unauthorized' };
@@ -150,6 +154,7 @@ export class Service {
     if (exchange.kind === 'answer' && exchange.ok && whoAmIResponseV1(exchange.body).length === 0) {
       return { who: exchange.body as WhoAmIResponseV1 };
     }
+    if (exchange.kind === 'none' && exchange.reason === 'invalid') this.#deps.onInvalid?.('whoami');
     return { outcome: failed(exchange) };
   }
 
@@ -168,6 +173,7 @@ export class Service {
     const { session } = this.#deps;
     const capture = session.capture();
     const exchange = await this.#deps.client.send({ op: 'whoami', token: credential, capture });
+    if (exchange.kind === 'none' && exchange.reason === 'invalid') this.#deps.onInvalid?.('whoami');
     if (exchange.kind !== 'answer' || !exchange.ok || whoAmIResponseV1(exchange.body).length > 0) return failed(exchange);
     if (!session.current(capture)) return { ok: false, kind: 'network', reason: 'stale' };
     session.holdPasted(credential, this.#deps.now() + PASTED_TTL_MS);

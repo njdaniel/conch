@@ -56,8 +56,12 @@ export interface IpcDeps {
 
 export type ProfilesApi = Pick<
   ProfilesService,
-  'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential'
+  'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted'
 >;
+
+// What a sign-in step answers when the server's release is not one the app may
+// sign in to (issue #946): nothing was sent.
+const INCOMPATIBLE: SignInOutcome = { ok: false, kind: 'network', reason: 'incompatible' };
 
 const ORIGIN_PREFIX = `${SCHEME}://${HOST}/`;
 
@@ -153,7 +157,8 @@ function signIn(step: SignInStep): Spec {
       const [body] = args;
       return args.length === 1 && isRecord(body) && operations[step].request?.(body).length === 0 ? [body] : null;
     },
-    run: async ({ service, profiles }, [body]) => bound(profiles, await service.signIn(step, body as Record<string, unknown>)),
+    run: async ({ service, profiles }, [body]) =>
+      profiles.signInPermitted() ? bound(profiles, await service.signIn(step, body as Record<string, unknown>)) : INCOMPATIBLE,
   };
 }
 
@@ -215,13 +220,14 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     limit: 30,
     maxBytes: 8 * 1024,
     parse: (args) => (args.length === 1 && typeof args[0] === 'string' && /^\S{1,4096}$/u.test(args[0]) ? args : null),
-    run: ({ service }, [credential]) => service.signInWithCredential(credential as string),
+    run: ({ service, profiles }, [credential]) => (profiles.signInPermitted() ? service.signInWithCredential(credential as string) : INCOMPATIBLE),
   },
   keepCredential: {
     limit: 30,
     maxBytes: 8 * 1024,
     parse: (args) => (args.length === 1 && typeof args[0] === 'string' && /^\S{1,4096}$/u.test(args[0]) ? args : null),
     run: async ({ service, profiles }, [credential]) => {
+      if (!profiles.signInPermitted()) return false;
       if (!service.keepCredential(credential as string)) return false;
       // The credential is in force: bind it to the profile and keep it.
       return profiles.keptCredential();

@@ -3,7 +3,7 @@
   "productName": "Conch",
   "copyright": "AGPL-3.0-only",
   "directories": { "output": "dist" },
-  "files": ["package.json", "out/main/**", "out/preload/**", "out/ui/**", "out/ui-manifest.json"],
+  "files": ["package.json", "out/main/**", "out/preload/**", "out/ui/**", "out/ui-manifest.json", "out/compat.json"],
   "asar": true,
   "npmRebuild": false,
   "nodeGypRebuild": false,

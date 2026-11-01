@@ -9,6 +9,7 @@
 // not see (an operator's re-authentication, a password change, an invite
 // code, a device link, which main will carry in later children).
 import type { Platform } from '../types';
+import { bridge } from './access';
 import { credentials } from './credentials';
 import { http } from './http';
 import { DesktopShell } from './Shell';
@@ -35,6 +36,11 @@ export const platform: Platform = {
     },
     externalLink: { rel: 'noopener noreferrer' },
     browserVoice: false,
+    appVersion: () =>
+      (bridge()?.profiles() ?? Promise.resolve(null)).then(
+        (view) => view?.compat.desktop ?? null,
+        () => null,
+      ),
   },
   Shell: DesktopShell,
 };

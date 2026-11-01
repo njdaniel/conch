@@ -23,10 +23,11 @@ const reasons: Readonly<Record<NoAnswerReason, string>> = {
   certificate: 'the server’s certificate is not trusted by this computer',
   redirect: 'the server tried to redirect the request',
   oversize: 'the server’s answer was too large',
-  invalid: 'the server’s answer was not what was promised',
+  invalid: 'incompatible: the server’s answer was not what this app version expects',
   stale: 'the answer was for a sign-in that has ended',
   unsupported: 'the desktop app cannot do this yet',
   'no-server': 'no server address has been set',
+  incompatible: 'this server’s version has not been tested with this app',
 };
 
 // noAnswer is "no answer at all", as fetch rejects: the client reports it as
