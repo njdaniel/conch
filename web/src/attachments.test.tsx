@@ -167,7 +167,7 @@ async function openChat(onRender?: (view: ReturnType<typeof render>) => void, st
 }
 
 function choose(...files: File[]) {
-  fireEvent.change(screen.getByLabelText('Choose images'), { target: { files } });
+  fireEvent.change(screen.getByLabelText('Choose files'), { target: { files } });
 }
 
 function clickSend() {
@@ -224,14 +224,14 @@ describe('Composer and App attachment sending', () => {
     await openChat();
     let refuseSecond = true;
     server.upload = (call) => {
-      if (call.filename === 'large.png' && refuseSecond) return json({ code: 'file_too_large', message: 'The file exceeds this server’s upload limit' }, 413);
+      if (call.filename === 'large.png' && refuseSecond) return json({ code: 'file_too_large', message: 'a file may be at most 10485760 bytes' }, 413);
       return json(fileMetadata(call, server.nextFile++), 201);
     };
     choose(image('ready.png'), image('large.png'));
     await screen.findByText('large.png');
     fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'caption kept' } });
     clickSend();
-    await screen.findByText('The file exceeds this server’s upload limit');
+    await screen.findByText('large.png is too large: this server takes files up to 10 MB.');
     expect(server.posts).toHaveLength(0);
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('caption kept');
 

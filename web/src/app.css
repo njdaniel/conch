@@ -3411,3 +3411,19 @@ button.link {
   min-height: 0;
   margin: 0.25rem 0;
 }
+
+.attachment-file {
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.attachment-size {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.draft-attachment-size {
+  white-space: nowrap;
+}
