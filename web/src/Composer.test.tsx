@@ -214,9 +214,34 @@ describe('@mention completion', () => {
     expect(box().value).toBe('x @helper ');
   });
 
-  it('keeps one popup at a time: a :short wins over @', () => {
-    render(<Harness onSend={vi.fn()} people={channel} />);
-    type('@member-2 :fi');
-    expect(screen.queryByRole('listbox', { name: 'Mention suggestions' })).toBeNull();
+  it('keeps one popup at a time: with the caret on a :short, the emoji list wins', async () => {
+    const onSend = vi.fn();
+    render(<Harness onSend={onSend} people={channel} />);
+    // A mention token earlier in the text, the caret on `:fire`: both could match.
+    type('@member-2 hi :fire');
+    await screen.findByRole('listbox', { name: 'Emoji suggestions' });
+    expect(screen.getAllByRole('listbox')).toHaveLength(1);
+    expect(box().getAttribute('aria-controls')).toBe('composer-emoji-list');
+    fireEvent.keyDown(box(), { key: 'Escape' });
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(box().value).toBe('@member-2 hi :fire');
+    type('@member-2 hi :fir');
+    await screen.findByRole('listbox', { name: 'Emoji suggestions' });
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(box().value).not.toContain(':fir');
+    expect(box().value.startsWith('@member-2 hi ')).toBe(true);
+    expect(box().value).not.toContain('@member-2 @');
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('shows only the mention list with the caret on a mention and no :short', () => {
+    const onSend = vi.fn();
+    render(<Harness onSend={onSend} people={channel} />);
+    type(':fire x @mem');
+    expect(screen.getAllByRole('listbox')).toHaveLength(1);
+    expect(screen.getByRole('listbox', { name: 'Mention suggestions' })).toBeTruthy();
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(box().value).toBe(':fire x @member-1 ');
+    expect(onSend).not.toHaveBeenCalled();
   });
 });

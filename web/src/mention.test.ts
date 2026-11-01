@@ -11,6 +11,16 @@ describe('mentionAt', () => {
     ['mail a@b.c', 10, null],
     ['hi @me there', 12, null],
     ['no mention', 10, null],
+    ['(@ada', 5, { start: 1, query: 'ada' }],
+    ['see [@ada', 9, { start: 5, query: 'ada' }],
+    ['see {@ada', 9, { start: 5, query: 'ada' }],
+    ['http://example.com/?q=(@ada', 28, null],
+    ['https://example.com/?q=(@ada', 29, null],
+    ['https://example.com/@ada', 24, null],
+    ['https://example.com/?q=@ada', 28, null],
+    ['see https://example.com/?q=(@ada', 33, null],
+    ['(https://example.com/@ada', 25, null],
+    ['https://example.com/ (@ada', 26, { start: 22, query: 'ada' }],
   ])('%s at %i', (text, caret, want) => {
     expect(mentionAt(text, caret)).toEqual(want);
   });
