@@ -196,6 +196,12 @@ type voiceRoomState struct {
 	// 0 when none is: a first claim or a holder's claim again, whether or
 	// not its share is pending. Under voicePoller.mu (issue #1061).
 	claimer int64
+	// claimDone is closed when the claim that set claimer returns, in the
+	// same step that clears claimer and before the room's claims are let go;
+	// nil when no claim is running. waitRunningClaims waits on it, never on
+	// the claims lock, so a claim that queues after the wait began cannot
+	// lengthen it (issue #1089). Under voicePoller.mu.
+	claimDone chan struct{}
 	// seq counts evictions from this room and evicted records, per principal,
 	// the count at their last one. A pass notes seq before it asks LiveKit
 	// and does not put back anyone evicted after that: without it a pass in
@@ -349,6 +355,9 @@ type voicePoller struct {
 	// take.
 	claimSeam     func(stage string)
 	endSharesSeam func(rooms int)
+	// liveReadSeam, when set, replaces the liveness read a claim makes after
+	// its grant (roomRotatedUnder); nil outside tests (issue #1089).
+	liveReadSeam func(ctx context.Context, roomID int64) (bool, error)
 	// removed remembers recent successful removals for audit de-duplication.
 	removed map[string]time.Time
 	// contacted is whether LiveKit has answered at least once; down is the
@@ -2218,34 +2227,36 @@ func (s *Server) voiceEnforceHolders(ctx context.Context) []voiceRotation {
 }
 
 // waitRunningClaims waits for every share claim running when it is called,
-// in a live room or a retired one (retiring), by taking and letting go of
-// the room's claims. Which rooms a revocation affects is not known here (a
-// rotation may have been made by the sweep, or committed and not yet
-// forgotten), and claims are few and bounded by LiveKit's timeout, so it
-// waits for them all. A claim lets the claims go only after it has re-read
-// the room's liveness and withdrawn a grant made in a retired room. It holds
-// no other lock while it waits.
+// in a live room or a retired one (retiring), on the claims' done channels
+// (voiceRoomState.claimDone), captured in one snapshot under p.mu. Which
+// rooms a revocation affects is not known here (a rotation may have been made
+// by the sweep, or committed and not yet forgotten), so it waits for them
+// all. A claim closes its channel only after it has re-read the room's
+// liveness and withdrawn a grant made in a retired room, and before it lets
+// the room's claims go. A claim that starts after the snapshot is not waited
+// for: its re-read of the revocation (shareEntitled) refuses it, so it cannot
+// lengthen the wait however many queue. It takes no claims lock and holds no
+// lock while it waits, so it sits outside the lock order (claims, order,
+// p.mu).
 func (p *voicePoller) waitRunningClaims() {
 	p.mu.Lock()
-	var rooms []*voiceRoomState
+	var done []chan struct{}
 	for _, r := range p.rooms {
-		if r.claimer != 0 {
-			rooms = append(rooms, r)
+		if r.claimer != 0 && r.claimDone != nil {
+			done = append(done, r.claimDone)
 		}
 	}
 	for r := range p.retiring {
-		rooms = append(rooms, r)
+		if r.claimDone != nil {
+			done = append(done, r.claimDone)
+		}
 	}
 	p.mu.Unlock()
 	if p.endSharesSeam != nil {
-		p.endSharesSeam(len(rooms))
+		p.endSharesSeam(len(done))
 	}
-	slices.SortFunc(rooms, func(a, b *voiceRoomState) int {
-		return cmp.Or(cmp.Compare(a.channelID, b.channelID), cmp.Compare(a.name, b.name))
-	})
-	for _, r := range rooms {
-		r.claims.Lock()
-		r.claims.Unlock() //nolint:staticcheck // SA2001: taking the lock is the wait.
+	for _, d := range done {
+		<-d
 	}
 }
 

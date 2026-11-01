@@ -384,10 +384,14 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	// endSharesOf waits for it. Cleared before the claims are let go.
 	p.mu.Lock()
 	r.claimer = principalID
+	done := make(chan struct{})
+	r.claimDone = done
 	p.mu.Unlock()
 	defer func() {
 		p.mu.Lock()
 		r.claimer = 0
+		r.claimDone = nil
+		close(done)
 		delete(p.retiring, r)
 		p.mu.Unlock()
 	}()
@@ -526,14 +530,29 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 // roomRotatedUnder reads from the store whether room was rotated while a
 // claim's grant was in flight. If it was, what was granted is taken back and
 // the room is forgotten (its share ends, reason=rotated), and it reports
-// true. A failed read is logged and left to the sweep. The caller holds r's
-// claims.
+// true. A read that fails is a refusal, as for shareEntitled: it cannot be
+// told whether the room was rotated, so what was granted is taken back and
+// the claim is answered as for a room that went (errVoiceShareRoomGone),
+// never 200; the room is left to the sweep. The caller holds r's claims.
 func (p *voicePoller) roomRotatedUnder(ctx, lctx context.Context, r *voiceRoomState, room store.VoiceRoom, principalID int64) bool {
-	live, err := p.s.store.VoiceRoomLive(lctx, room.ID)
+	var live bool
+	var err error
+	if p.liveReadSeam != nil {
+		live, err = p.liveReadSeam(lctx, room.ID)
+	} else {
+		live, err = p.s.store.VoiceRoomLive(lctx, room.ID)
+	}
 	switch {
 	case err != nil:
-		slog.ErrorContext(ctx, "voice: could not tell whether a room was retired after a share; the sweep checks", "channel", room.ChannelID, "error", err)
+		slog.ErrorContext(ctx, "voice: could not tell whether a room was retired after a share; the grant is withdrawn and the sweep checks", "channel", room.ChannelID, "error", err)
+		// The share the claim recorded ends with the grant (reason=rotated:
+		// the room could not be shown live), so nothing is held that has no
+		// sources; the withdrawal is made whether or not a share was found.
+		if !p.endHeldShare(ctx, r, room, principalID, voiceShareStopRotated) {
+			p.withdrawAll(ctx, r, principalID, voiceRoomPublishes(room))
+		}
 		p.sweepSoon()
+		return true
 	case !live:
 		p.withdrawAll(ctx, r, principalID, voiceRoomPublishes(room))
 		p.forgetRoom(ctx, room.RoomName)
@@ -632,8 +651,9 @@ func (p *voicePoller) endSharesOf(ctx context.Context, principalID, channelID in
 // share leaves presence and its row is written before LiveKit is asked to
 // withdraw the sources (a failure is retried by the passes, which remove the
 // sharer if the share is still published). room is r's channel-wide room. The
-// caller holds r's claims, so there is no pending claim to skip.
-func (p *voicePoller) endHeldShare(ctx context.Context, r *voiceRoomState, room store.VoiceRoom, principalID int64, reason schema.VoiceShareEndReason) {
+// caller holds r's claims, so there is no pending claim to skip. It reports
+// whether it ended a share.
+func (p *voicePoller) endHeldShare(ctx context.Context, r *voiceRoomState, room store.VoiceRoom, principalID int64, reason schema.VoiceShareEndReason) bool {
 	r.order.Lock()
 	p.mu.Lock()
 	events := p.endShareLocked(r, principalID, reason)
@@ -641,10 +661,11 @@ func (p *voicePoller) endHeldShare(ctx context.Context, r *voiceRoomState, room 
 	p.writeEvents(ctx, events...)
 	r.order.Unlock()
 	if len(events) == 0 {
-		return
+		return false
 	}
 	p.notify(r.channelID)
 	p.withdrawAll(ctx, r, principalID, voiceRoomPublishes(room))
+	return true
 }
 
 // grantCompanion lets principalID's companion, p<id>.screen, publish the
