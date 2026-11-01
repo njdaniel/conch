@@ -40,6 +40,8 @@ export const VOICE_CONTROL_PIPE_FLAG = '--events-pipe';
 export const VOICE_CONTROL_PIPE_NONCE_ENV = 'CONCH_VOICE_ATTACH';
 export const VOICE_CONTROL_PIPE_NONCE_BYTES = 32;
 export const VOICE_CONTROL_PIPE_NONCE_CHARS = 43;
+export const MAX_CHANNEL_AUTHOR_IDS = 100;
+export const DEFAULT_MEMBER_LINK_EXPIRY_SECONDS = 604800;
 
 // schema.PrincipalKind
 export type PrincipalKind = 'human' | 'agent';
@@ -207,12 +209,19 @@ export const whoAmIResponseV1 = object<WhoAmIResponseV1>({
   permissions_revision: optional(int),
 });
 
+// schema.ChannelVisibility
+export type ChannelVisibility = 'public' | 'private';
+
+export const channelVisibility = vocab<ChannelVisibility>({ public: true, private: true });
+
 // schema.ChannelV0
 export interface ChannelV0 {
   id: number;
   name: string;
   created_at: string;
   manages?: boolean;
+  visibility?: ChannelVisibility;
+  default?: boolean;
 }
 
 export const channelV0 = object<ChannelV0>({
@@ -220,6 +229,8 @@ export const channelV0 = object<ChannelV0>({
   name: str,
   created_at: timestamp,
   manages: optional(bool),
+  visibility: optional(channelVisibility),
+  default: optional(bool),
 });
 
 // schema.ListChannelsResponse
@@ -277,6 +288,8 @@ export interface ChannelDocV1 {
   channel_id: number;
   name: string;
   created_at: string;
+  visibility?: ChannelVisibility;
+  default?: boolean;
 }
 
 export const channelDocV1 = object<ChannelDocV1>({
@@ -284,6 +297,8 @@ export const channelDocV1 = object<ChannelDocV1>({
   channel_id: int,
   name: str,
   created_at: timestamp,
+  visibility: optional(channelVisibility),
+  default: optional(bool),
 });
 
 // schema.GuestAttributionV1
@@ -2405,6 +2420,8 @@ export interface PrincipalAdminV1 {
   invite_id?: number;
   live_credentials: number;
   guest_state?: GuestState;
+  voice_allowed?: boolean;
+  may_invite?: boolean;
 }
 
 export const principalAdminV1 = object<PrincipalAdminV1>({
@@ -2420,6 +2437,8 @@ export const principalAdminV1 = object<PrincipalAdminV1>({
   invite_id: optional(int),
   live_credentials: int,
   guest_state: optional(guestState),
+  voice_allowed: optional(bool),
+  may_invite: optional(bool),
 });
 
 // schema.ListPrincipalsResponseV1
@@ -2659,6 +2678,8 @@ export interface JoinSettingsV1 {
   guest_absolute_seconds: number;
   open_channels: string[];
   other_open_channels?: number;
+  open_signup?: boolean;
+  member_link_default_expiry_seconds?: number;
 }
 
 export const joinSettingsV1 = object<JoinSettingsV1>({
@@ -2672,6 +2693,8 @@ export const joinSettingsV1 = object<JoinSettingsV1>({
   guest_absolute_seconds: int,
   open_channels: array(str),
   other_open_channels: optional(int),
+  open_signup: optional(bool),
+  member_link_default_expiry_seconds: optional(int),
 });
 
 // schema.PutJoinSettingsRequestV1
@@ -2685,6 +2708,8 @@ export interface PutJoinSettingsRequestV1 {
   guest_idle_seconds?: number;
   guest_absolute_seconds?: number;
   open_channels?: string[];
+  open_signup?: boolean;
+  member_link_default_expiry_seconds?: number;
 }
 
 export const putJoinSettingsRequestV1 = object<PutJoinSettingsRequestV1>({
@@ -2697,6 +2722,8 @@ export const putJoinSettingsRequestV1 = object<PutJoinSettingsRequestV1>({
   guest_idle_seconds: optional(int),
   guest_absolute_seconds: optional(int),
   open_channels: optional(array(str)),
+  open_signup: optional(bool),
+  member_link_default_expiry_seconds: optional(int),
 });
 
 // schema.JoinWarning
@@ -2705,7 +2732,8 @@ export type JoinWarning =
   | 'trusted_proxy_unset'
   | 'one_address'
   | 'reserved_names_in_use'
-  | 'server_name_in_use';
+  | 'server_name_in_use'
+  | 'no_default_channel';
 
 export const joinWarning = vocab<JoinWarning>({
   live_guests_remain: true,
@@ -2713,6 +2741,7 @@ export const joinWarning = vocab<JoinWarning>({
   one_address: true,
   reserved_names_in_use: true,
   server_name_in_use: true,
+  no_default_channel: true,
 });
 
 // schema.JoinSettingsResponseV1
@@ -2721,6 +2750,7 @@ export interface JoinSettingsResponseV1 {
   server_name: string;
   live_guests: number;
   warnings: JoinWarning[];
+  default_channels?: InviteChannelV1[];
 }
 
 export const joinSettingsResponseV1 = object<JoinSettingsResponseV1>({
@@ -2728,6 +2758,7 @@ export const joinSettingsResponseV1 = object<JoinSettingsResponseV1>({
   server_name: str,
   live_guests: int,
   warnings: array(joinWarning),
+  default_channels: optional(array(inviteChannelV1)),
 });
 
 // schema.JoinGuestRequestV1
@@ -3161,6 +3192,173 @@ export const createProblemReportResponseV1 = object<CreateProblemReportResponseV
   created_at: timestamp,
 });
 
+// schema.ServerRequestTraceV1
+export interface ServerRequestTraceV1 {
+  at: string;
+  request_id: string;
+  route: string;
+  status: number;
+}
+
+export const serverRequestTraceV1 = object<ServerRequestTraceV1>({
+  at: timestamp,
+  request_id: str,
+  route: str,
+  status: int,
+});
+
+// schema.SocketCloseReason
+export type SocketCloseReason =
+  | 'client'
+  | 'server_shutdown'
+  | 'keepalive_timeout'
+  | 'revoked'
+  | 'removed'
+  | 'slow_consumer'
+  | 'session_ended'
+  | 'error';
+
+export const socketCloseReason = vocab<SocketCloseReason>({
+  client: true,
+  server_shutdown: true,
+  keepalive_timeout: true,
+  revoked: true,
+  removed: true,
+  slow_consumer: true,
+  session_ended: true,
+  error: true,
+});
+
+// schema.ServerSocketCloseV1
+export interface ServerSocketCloseV1 {
+  at: string;
+  request_id: string;
+  route: string;
+  reason: SocketCloseReason;
+  duration_seconds: number;
+  frames: number;
+}
+
+export const serverSocketCloseV1 = object<ServerSocketCloseV1>({
+  at: timestamp,
+  request_id: str,
+  route: str,
+  reason: socketCloseReason,
+  duration_seconds: int,
+  frames: int,
+});
+
+// schema.ProblemReportServerV1
+export interface ProblemReportServerV1 {
+  requests: ServerRequestTraceV1[];
+  socket_closes: ServerSocketCloseV1[];
+}
+
+export const problemReportServerV1 = object<ProblemReportServerV1>({
+  requests: array(serverRequestTraceV1),
+  socket_closes: array(serverSocketCloseV1),
+});
+
+// schema.ProblemReportRedactionV1
+export interface ProblemReportRedactionV1 {
+  channels: string[];
+  principals: string[];
+}
+
+export const problemReportRedactionV1 = object<ProblemReportRedactionV1>({
+  channels: array(str),
+  principals: array(str),
+});
+
+// schema.ProblemReportState
+export type ProblemReportState = 'open' | 'filed';
+
+export const problemReportState = vocab<ProblemReportState>({ open: true, filed: true });
+
+// schema.ProblemReportV1
+export interface ProblemReportV1 {
+  id: number;
+  state: ProblemReportState;
+  created_at: string;
+  principal_id: number;
+  server_version: string;
+  voice: HealthVoice;
+  did: string;
+  expected: string;
+  happened: string;
+  often: ProblemReportOften;
+  client: ProblemReportClientV1;
+  diagnostics: DiagnosticEventV1[];
+  server: ProblemReportServerV1;
+  issue?: string;
+  filed_at?: string;
+  redact?: ProblemReportRedactionV1;
+}
+
+export const problemReportV1 = object<ProblemReportV1>({
+  id: int,
+  state: problemReportState,
+  created_at: timestamp,
+  principal_id: int,
+  server_version: str,
+  voice: healthVoice,
+  did: str,
+  expected: str,
+  happened: str,
+  often: problemReportOften,
+  client: problemReportClientV1,
+  diagnostics: array(diagnosticEventV1),
+  server: problemReportServerV1,
+  issue: optional(str),
+  filed_at: optional(timestamp),
+  redact: optional(problemReportRedactionV1),
+});
+
+// schema.ProblemReportSummaryV1
+export interface ProblemReportSummaryV1 {
+  id: number;
+  state: ProblemReportState;
+  created_at: string;
+  principal_id: number;
+  client_name: string;
+  client_version: string;
+  server_version: string;
+  often: ProblemReportOften;
+  issue?: string;
+}
+
+export const problemReportSummaryV1 = object<ProblemReportSummaryV1>({
+  id: int,
+  state: problemReportState,
+  created_at: timestamp,
+  principal_id: int,
+  client_name: str,
+  client_version: str,
+  server_version: str,
+  often: problemReportOften,
+  issue: optional(str),
+});
+
+// schema.ListProblemReportsResponseV1
+export interface ListProblemReportsResponseV1 {
+  reports: ProblemReportSummaryV1[];
+}
+
+export const listProblemReportsResponseV1 = object<ListProblemReportsResponseV1>({
+  reports: array(problemReportSummaryV1),
+});
+
+// schema.UpdateProblemReportRequestV1
+export interface UpdateProblemReportRequestV1 {
+  state: ProblemReportState;
+  issue: string;
+}
+
+export const updateProblemReportRequestV1 = object<UpdateProblemReportRequestV1>({
+  state: problemReportState,
+  issue: str,
+});
+
 // schema.ReactionCountV1
 export interface ReactionCountV1 {
   emoji: string;
@@ -3354,6 +3552,291 @@ export interface PermissionsChangedV1 {
 
 export const permissionsChangedV1 = object<PermissionsChangedV1>({
   schema: vocab<typeof permissionsChangedV1Schema>({ [permissionsChangedV1Schema]: true }),
+});
+
+// schema.CreateChannelRequestV1
+export interface CreateChannelRequestV1 {
+  name: string;
+  visibility: ChannelVisibility;
+}
+
+export const createChannelRequestV1 = object<CreateChannelRequestV1>({
+  name: str,
+  visibility: channelVisibility,
+});
+
+// schema.CreateChannelResponseV1
+export interface CreateChannelResponseV1 {
+  channel: ChannelV0;
+}
+
+export const createChannelResponseV1 = object<CreateChannelResponseV1>({
+  channel: channelV0,
+});
+
+// schema.ChannelListingV1
+export interface ChannelListingV1 {
+  id: number;
+  name: string;
+  created_at: string;
+  visibility: ChannelVisibility;
+  default?: boolean;
+  joined: boolean;
+  manages?: boolean;
+  members?: number;
+}
+
+export const channelListingV1 = object<ChannelListingV1>({
+  id: int,
+  name: str,
+  created_at: timestamp,
+  visibility: channelVisibility,
+  default: optional(bool),
+  joined: bool,
+  manages: optional(bool),
+  members: optional(int),
+});
+
+// schema.ChannelDirectoryResponseV1
+export interface ChannelDirectoryResponseV1 {
+  channels: ChannelListingV1[];
+}
+
+export const channelDirectoryResponseV1 = object<ChannelDirectoryResponseV1>({
+  channels: array(channelListingV1),
+});
+
+// schema.JoinChannelResponseV1
+export interface JoinChannelResponseV1 {
+  channel: ChannelV0;
+  member: ChannelMemberV1;
+}
+
+export const joinChannelResponseV1 = object<JoinChannelResponseV1>({
+  channel: channelV0,
+  member: channelMemberV1,
+});
+
+// schema.ChannelSettingsRequestV1
+export interface ChannelSettingsRequestV1 {
+  visibility?: ChannelVisibility;
+  default?: boolean;
+}
+
+export const channelSettingsRequestV1 = object<ChannelSettingsRequestV1>({
+  visibility: optional(channelVisibility),
+  default: optional(bool),
+});
+
+// schema.ChannelSettingsResponseV1
+export interface ChannelSettingsResponseV1 {
+  channel: ChannelV0;
+  open_signup_turned_off?: boolean;
+  warnings?: PermissionsWarning[];
+}
+
+export const channelSettingsResponseV1 = object<ChannelSettingsResponseV1>({
+  channel: channelV0,
+  open_signup_turned_off: optional(bool),
+  warnings: optional(array(permissionsWarning)),
+});
+
+// schema.InviteKindV2
+export type InviteKindV2 = 'member';
+
+export const inviteKindV2 = vocab<InviteKindV2>({ member: true });
+
+// schema.InviteV2
+export interface InviteV2 {
+  id: number;
+  kind: InviteKindV2;
+  created_by: number;
+  created_by_name: string;
+  created_at: string;
+  expires_at?: string;
+  max_uses?: number;
+  uses: number;
+  joiners: number;
+  closed_at?: string;
+  channels?: InviteChannelV1[];
+  landing_channels?: InviteChannelV1[];
+  other_channels?: number;
+  credential_lifetime_seconds: number;
+  legacy?: boolean;
+}
+
+export const inviteV2 = object<InviteV2>({
+  id: int,
+  kind: inviteKindV2,
+  created_by: int,
+  created_by_name: str,
+  created_at: timestamp,
+  expires_at: optional(timestamp),
+  max_uses: optional(int),
+  uses: int,
+  joiners: int,
+  closed_at: optional(timestamp),
+  channels: optional(array(inviteChannelV1)),
+  landing_channels: optional(array(inviteChannelV1)),
+  other_channels: optional(int),
+  credential_lifetime_seconds: int,
+  legacy: optional(bool),
+});
+
+// schema.CreateInviteRequestV2
+export interface CreateInviteRequestV2 {
+  kind: InviteKindV2;
+  expires_at?: string;
+  never_expires?: boolean;
+  max_uses?: number;
+  credential_lifetime_seconds?: number;
+  landing_channels?: string[];
+}
+
+export const createInviteRequestV2 = object<CreateInviteRequestV2>({
+  kind: inviteKindV2,
+  expires_at: optional(timestamp),
+  never_expires: optional(bool),
+  max_uses: optional(int),
+  credential_lifetime_seconds: optional(int),
+  landing_channels: optional(array(str)),
+});
+
+// schema.CreateInviteResponseV2
+export interface CreateInviteResponseV2 {
+  invite: InviteV2;
+  code: string;
+}
+
+export const createInviteResponseV2 = object<CreateInviteResponseV2>({
+  invite: inviteV2,
+  code: str,
+});
+
+// schema.ListInvitesResponseV2
+export interface ListInvitesResponseV2 {
+  invites: InviteV2[];
+}
+
+export const listInvitesResponseV2 = object<ListInvitesResponseV2>({
+  invites: array(inviteV2),
+});
+
+// schema.InvitePreviewV2
+export interface InvitePreviewV2 {
+  kind: InviteKindV2;
+  server_name: string;
+  inviter: string;
+  channels: string[];
+  expires_at?: string;
+  join: JoinOptionsV1;
+}
+
+export const invitePreviewV2 = object<InvitePreviewV2>({
+  kind: inviteKindV2,
+  server_name: str,
+  inviter: str,
+  channels: array(str),
+  expires_at: optional(timestamp),
+  join: joinOptionsV1,
+});
+
+// schema.ServerMemberV1
+export interface ServerMemberV1 {
+  id: number;
+  kind: PrincipalKind;
+  name: string;
+  role?: PrincipalRole;
+  created_at: string;
+  owner?: boolean;
+  voice_allowed?: boolean;
+  may_invite?: boolean;
+  invited_by?: number;
+}
+
+export const serverMemberV1 = object<ServerMemberV1>({
+  id: int,
+  kind: principalKind,
+  name: str,
+  role: optional(principalRole),
+  created_at: timestamp,
+  owner: optional(bool),
+  voice_allowed: optional(bool),
+  may_invite: optional(bool),
+  invited_by: optional(int),
+});
+
+// schema.DirectoryScope
+export type DirectoryScope = 'everyone' | 'shared_channels';
+
+export const directoryScope = vocab<DirectoryScope>({ everyone: true, shared_channels: true });
+
+// schema.ServerMembersResponseV1
+export interface ServerMembersResponseV1 {
+  members: ServerMemberV1[];
+  after?: number;
+  scope?: DirectoryScope;
+}
+
+export const serverMembersResponseV1 = object<ServerMembersResponseV1>({
+  members: array(serverMemberV1),
+  after: optional(int),
+  scope: optional(directoryScope),
+});
+
+// schema.DirectoryChangedV1
+export const directoryChangedV1Schema = 'conch.directory_changed.v1';
+
+export interface DirectoryChangedV1 {
+  schema: typeof directoryChangedV1Schema;
+}
+
+export const directoryChangedV1 = object<DirectoryChangedV1>({
+  schema: vocab<typeof directoryChangedV1Schema>({ [directoryChangedV1Schema]: true }),
+});
+
+// schema.ChannelAuthorV1
+export interface ChannelAuthorV1 {
+  principal_id: number;
+  name: string;
+  kind: PrincipalKind;
+}
+
+export const channelAuthorV1 = object<ChannelAuthorV1>({
+  principal_id: int,
+  name: str,
+  kind: principalKind,
+});
+
+// schema.ChannelAuthorsResponseV1
+export interface ChannelAuthorsResponseV1 {
+  authors: ChannelAuthorV1[];
+}
+
+export const channelAuthorsResponseV1 = object<ChannelAuthorsResponseV1>({
+  authors: array(channelAuthorV1),
+});
+
+// schema.VoicePermissionRequestV1
+export interface VoicePermissionRequestV1 {
+  voice_allowed: boolean;
+}
+
+export const voicePermissionRequestV1 = object<VoicePermissionRequestV1>({
+  voice_allowed: bool,
+});
+
+// schema.VoicePermissionResponseV1
+export interface VoicePermissionResponseV1 {
+  principal_id: number;
+  voice_allowed: boolean;
+  changed: boolean;
+}
+
+export const voicePermissionResponseV1 = object<VoicePermissionResponseV1>({
+  principal_id: int,
+  voice_allowed: bool,
+  changed: bool,
 });
 
 // schema.Error

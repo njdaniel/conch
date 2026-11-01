@@ -1,0 +1,26 @@
+{
+  "settings": {
+    "open_joining": "off",
+    "guests_enabled": false,
+    "joining_paused": false,
+    "join_voice": true,
+    "max_guests": 50,
+    "max_guests_per_address": 5,
+    "guest_idle_seconds": 7200,
+    "guest_absolute_seconds": 86400,
+    "open_channels": [
+      "general"
+    ],
+    "open_signup": false,
+    "member_link_default_expiry_seconds": 604800
+  },
+  "server_name": "conch.example",
+  "live_guests": 0,
+  "warnings": [],
+  "default_channels": [
+    {
+      "id": 7,
+      "name": "general"
+    }
+  ]
+}
