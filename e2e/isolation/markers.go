@@ -43,6 +43,13 @@ import (
 // Whatever the request itself named (A's channel name, say) is set aside
 // before the body is scanned: a refusal may quote what it refused.
 
+// A private register (community model §8, issue #981): A's public channel,
+// its name and what is written there carry their own tag (world.uName) and
+// are not registered, as a public channel is what any member may find. A's
+// private channels, everything written in them, their voice rooms and their
+// members stay markers; so, for now, do A's people's names and ids, which no
+// route shows another member until the member directory (#983) unmarks them.
+//
 // The same scan has a second register, the plaza's private markers
 // (guests.go): what was in the plaza before the guests' visits began, and
 // what was said there after that no guest may see. A body is clean when it

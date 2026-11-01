@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -519,4 +520,146 @@ func (s *Store) ListAuditEvents(ctx context.Context, afterID int64, limit int) (
 		return nil, fmt.Errorf("store: list audit events: %w", err)
 	}
 	return events, nil
+}
+
+// AuditChannelSettingsChanged records a channel-settings change (issue
+// #981): actor the operator, subject the channel, detail each setting that
+// changed as field=old->new (visibility=public->private default=true->false).
+const AuditChannelSettingsChanged = "channel_settings_changed"
+
+// ErrChannelSettingsConflict is a channel-settings change that would leave a
+// default channel private (HTTP 409 channel_settings_conflict).
+var ErrChannelSettingsConflict = errors.New("store: a default channel must be public")
+
+// ErrManageChannelsRequired is a channel-settings change by an actor that
+// does not hold manage_channels now (ADR-014).
+var ErrManageChannelsRequired = errors.New("store: changing a channel's settings needs manage_channels")
+
+// ChannelSettingsChange is what ChannelSettings is asked to change; a nil
+// field keeps its value.
+type ChannelSettingsChange struct {
+	Visibility *schema.ChannelVisibility
+	Default    *bool
+}
+
+// ChannelSettingsResult is what a channel-settings change did.
+type ChannelSettingsResult struct {
+	Channel Channel
+	// Changed is false when the request asked for what the channel was.
+	Changed bool
+	// OpenSignupTurnedOff is set when the change unmarked the last default
+	// channel while open sign-up was on, and so turned it off.
+	OpenSignupTurnedOff bool
+}
+
+// ChannelSettings changes a channel's visibility and default mark (issue
+// #981, ADR-013 O5) in one IMMEDIATE transaction. actorID is re-checked for
+// manage_channels under the write lock (0 is the system, or --auth off). A
+// result that would be a private default channel is
+// ErrChannelSettingsConflict; an unknown channel is ErrNotFound. Marking adds
+// no member and unmarking removes none; turning private keeps every member.
+// The change is audited channel_settings_changed. Unmarking the last default
+// channel while open sign-up is on turns it off in the same transaction,
+// audited join_settings_changed with reason=last_default_unmarked. A request
+// asking for what the channel is writes nothing.
+func (s *Store) ChannelSettings(ctx context.Context, actor string, actorID, channelID int64, req ChannelSettingsChange, now time.Time) (ChannelSettingsResult, error) {
+	now = now.Truncate(time.Millisecond)
+	var res ChannelSettingsResult
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		res = ChannelSettingsResult{}
+		if actorID != 0 {
+			ok, err := permittedTx(ctx, tx, actorID, schema.PermManageChannels)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return ErrManageChannelsRequired
+			}
+		}
+		cur, err := channelByIDTx(ctx, tx, channelID)
+		if err != nil {
+			return err
+		}
+		vis, def := cur.Visibility, cur.IsDefault
+		if req.Visibility != nil {
+			vis = *req.Visibility
+		}
+		if req.Default != nil {
+			def = *req.Default
+		}
+		if def && vis != schema.ChannelPublic {
+			return ErrChannelSettingsConflict
+		}
+		var changes []string
+		// Unmark before turning private, and turn public before marking: a
+		// trigger keeps every default channel public at each step.
+		if cur.IsDefault && !def {
+			if _, err := setDefaultChannelTx(ctx, tx, channelID, false, 0); err != nil {
+				return err
+			}
+		}
+		if vis != cur.Visibility {
+			if _, err := tx.ExecContext(ctx, "UPDATE channels SET visibility = ? WHERE id = ?", string(vis), channelID); err != nil {
+				return fmt.Errorf("store: channel settings %d: set visibility: %w", channelID, err)
+			}
+			changes = append(changes, fmt.Sprintf("visibility=%s->%s", cur.Visibility, vis))
+		}
+		if !cur.IsDefault && def {
+			if _, err := setDefaultChannelTx(ctx, tx, channelID, true, actorID); err != nil {
+				return err
+			}
+		}
+		if def != cur.IsDefault {
+			changes = append(changes, fmt.Sprintf("default=%t->%t", cur.IsDefault, def))
+		}
+		if len(changes) == 0 {
+			res.Channel = cur
+			return nil
+		}
+		res.Changed = true
+		if err := appendAuditEventTx(ctx, tx, actor, AuditChannelSettingsChanged, channelSubject(channelID), strings.Join(changes, " "), now); err != nil {
+			return err
+		}
+		if cur.IsDefault && !def {
+			if res.OpenSignupTurnedOff, err = lastDefaultUnmarkedTx(ctx, tx, actor, now); err != nil {
+				return err
+			}
+		}
+		res.Channel, err = channelByIDTx(ctx, tx, channelID)
+		return err
+	})
+	if err != nil {
+		return ChannelSettingsResult{}, err
+	}
+	return res, nil
+}
+
+// lastDefaultUnmarkedTx turns open sign-up off when no default channel is
+// left and it was on (community-model §2.1): a new account would start in no
+// channel. It reports whether it did.
+func lastDefaultUnmarkedTx(ctx context.Context, tx execer, actor string, now time.Time) (bool, error) {
+	var left int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM channels WHERE is_default = 1").Scan(&left); err != nil {
+		return false, fmt.Errorf("store: count default channels: %w", err)
+	}
+	if left > 0 {
+		return false, nil
+	}
+	cur, err := joinSettingsTx(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	if cur.OpenSignup == nil || !*cur.OpenSignup {
+		return false, nil
+	}
+	next := cur
+	off := false
+	next.OpenSignup = &off
+	next.OpenJoining = schema.OpenJoiningOff
+	changes, err := writeJoinSettingsTx(ctx, tx, cur, next, now)
+	if err != nil || len(changes) == 0 {
+		return false, err
+	}
+	return true, appendAuditEventTx(ctx, tx, actor, AuditJoinSettingsChanged, "server",
+		strings.Join(changes, " ")+" reason=last_default_unmarked", now)
 }

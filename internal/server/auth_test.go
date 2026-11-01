@@ -141,6 +141,9 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v1/whoami":    {classAuth, "/v1/whoami", "", 200},
 	"POST /v0/channels": {classOp, "/v0/channels", `{}`, 400},
 	"GET /v1/channels":  {classAuth, "/v1/channels", "", 200},
+	// Member channel creation and channel settings (issue #981).
+	"POST /v1/channels":              {classAuth, "/v1/channels", `{}`, 400},
+	"PUT /v1/channels/{id}/settings": {classOp, "/v1/channels/9999/settings", `{}`, 400},
 	// Both membership writes are no-ops in the fixture (alice is already a
 	// member; ghost, id 4, is not), so they change nothing and audit nothing.
 	"GET /v1/channels/{channel}/members":                   {classAuth, "/v1/channels/general/members", "", 200},
@@ -588,7 +591,7 @@ func TestRoleMatrix(t *testing.T) {
 			// reports (issue #446) and message edits (issue #845: message
 			// 9999 does not exist, so a person gets message_not_found, and an
 			// agent is refused before any lookup).
-			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" || isMessageEditRoute(rt.pattern) {
+			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" || rt.pattern == "POST /v1/channels" || isMessageEditRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// Signing out (issue #439) succeeds for any member and revokes

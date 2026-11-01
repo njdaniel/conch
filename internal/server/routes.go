@@ -24,7 +24,14 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/ws-tickets", accessAuthenticated, hf(s.handleCreateWSTicket)),
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
 		rt("POST /v0/channels", accessOperator, hf(s.handleCreateChannel)),
+		// Member channel creation (issue #981): community members only; an
+		// agent and a guest are refused before the handler runs.
+		rt("POST /v1/channels", accessAuthenticated, s.humansOnlyBecause(denyAgentChannelCreate, "agents cannot create channels", s.membersOnly(hf(s.handleCreateChannelV1)))),
 		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
+		// Channel settings (issue #981, ADR-013 O5): visibility and the
+		// default mark. Operator-only, refused before any lookup, so a
+		// non-operator learns nothing of which ids exist.
+		rt("PUT /v1/channels/{id}/settings", accessOperator, hf(s.handleChannelSettings)),
 		// Renaming a channel (issues #727, #791): operators or its managers,
 		// addressed by id since the name is what it changes. /name is a literal
 		// no {channel} route ends in, so no two patterns meet.

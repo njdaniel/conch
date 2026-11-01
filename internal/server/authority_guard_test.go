@@ -73,16 +73,14 @@ func TestEveryPermissionIsChecked(t *testing.T) {
 }
 
 // notYetGated is each permission no route or store check reads yet, with
-// the issue that wires its gate (ADR-014 design §12). The member cells of
-// rows 1, 2 and 4 gate routes that do not exist yet; rows 5 and 6 are A4's
+// the issue that wires its gate (ADR-014 design §12). The member cell of
+// row 4 gates a route that does not exist yet; rows 5 and 6 are A4's
 // to wire; rows 10 and 11 are A3b's route classes.
 var notYetGated = map[schema.Permission]string{
-	schema.PermCreatePublicChannels:  "#981, member channel creation",
-	schema.PermCreatePrivateChannels: "#981, member channel creation",
-	schema.PermSeeMemberDirectory:    "#983, the member directory",
-	schema.PermUseVoice:              "A4, the member permissions on voice",
-	schema.PermChangeServerSettings:  "A3b (#1015), the route classes",
-	schema.PermReadAuditLog:          "A3b (#1015), the route classes",
+	schema.PermSeeMemberDirectory:   "#983, the member directory",
+	schema.PermUseVoice:             "A4, the member permissions on voice",
+	schema.PermChangeServerSettings: "A3b (#1015), the route classes",
+	schema.PermReadAuditLog:         "A3b (#1015), the route classes",
 }
 
 // permissionConsts names each schema.Permission constant, so the scan can

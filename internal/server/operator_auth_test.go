@@ -526,8 +526,9 @@ type reauthDecision struct {
 // decision that disagrees, and on a class entry for a route that is not in
 // the table or is not an operator route.
 var reauthDecisions = map[string]reauthDecision{
-	"POST /v0/channels":   {reauthNone, "makes a channel: no principal, credential, link, permit or hook, no grant"},
-	"POST /v0/principals": {reauthAlways, "creates a principal"},
+	"POST /v0/channels":                                               {reauthNone, "makes a channel: no principal, credential, link, permit or hook, no grant"},
+	"PUT /v1/channels/{id}/settings":                                  {reauthNone, "changes a channel's visibility and default mark: no principal, credential, link, permit or hook, no grant"},
+	"POST /v0/principals":                                             {reauthAlways, "creates a principal"},
 	"PUT /v1/channels/{channel}/members/{principal_id}":               {reauthOperators, "grants access, and can_decide (approval-path); a manager's add is a member's write (issue #790)"},
 	"POST /v1/channels/{channel}/members":                             {reauthOperators, "grants access, as the PUT by id; a manager's add is a member's write (issue #790)"},
 	"PUT /v1/principals/{id}/role":                                    {reauthAlways, "makes or unmakes an operator or an owner (issue #790)"},
@@ -615,6 +616,7 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/totp/enroll":                                                                 {reauthNone, "setup scope only"},
 	"POST /v1/totp/confirm":                                                                {reauthNone, "setup scope only"},
 	"POST /v1/reports":                                                                     {reauthNone, "a problem report"},
+	"POST /v1/channels":                                                                    {reauthNone, "a member makes a channel: no grant beyond the creator's own membership of it"},
 	"POST /v1/approvals":                                                                   {reauthNone, "an approval request (approval-path, unchanged)"},
 	"POST /v1/approvals/{id}/decisions":                                                    {reauthNone, "a decision (approval-path, unchanged)"},
 }

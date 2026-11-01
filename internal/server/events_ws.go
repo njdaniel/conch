@@ -1119,10 +1119,12 @@ func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
 		}
 		e.channel = ch
 		return e.sendDoc(ctx, schema.ChannelDocV1{
-			Schema:    schema.ChannelSchemaV1,
-			ChannelID: ch.ID,
-			Name:      ch.Name,
-			CreatedAt: schema.NewTimestamp(ch.CreatedAt),
+			Schema:     schema.ChannelSchemaV1,
+			ChannelID:  ch.ID,
+			Name:       ch.Name,
+			CreatedAt:  schema.NewTimestamp(ch.CreatedAt),
+			Visibility: ch.Visibility,
+			Default:    ch.IsDefault,
 		})
 	}
 	return true

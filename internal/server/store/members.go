@@ -147,17 +147,166 @@ func (s *Store) CreateChannelAs(ctx context.Context, actor, name string, creator
 		if creatorID == 0 {
 			return nil
 		}
-		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO channel_members (channel_id, principal_id, added_by, created_at) VALUES (?, ?, ?, ?)",
-			id, creatorID, creatorID, now.UnixMilli()); err != nil {
-			return fmt.Errorf("store: add creator %d to channel %d: %w", creatorID, id, err)
-		}
-		return appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(id), memberDetail(creatorID), now)
+		return addChannelCreatorTx(ctx, tx, actor, id, creatorID, false, now)
 	})
 	if err != nil {
 		return Channel{}, err
 	}
 	return ch, nil
+}
+
+// addChannelCreatorTx makes creatorID the first member of the channel it
+// just created, deciding approvals (can_decide = 1), and its manager when
+// manages is set (ADR-013 O9), audited member_added and, for a manager,
+// member_manage_granted. It is the one membership write of channel
+// creation, the place a directory-signal hook joins it (issue #988).
+func addChannelCreatorTx(ctx context.Context, tx execer, actor string, channelID, creatorID int64, manages bool, now time.Time) error {
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide, manages) VALUES (?, ?, ?, ?, 1, ?)",
+		channelID, creatorID, creatorID, now.UnixMilli(), boolInt(manages)); err != nil {
+		return fmt.Errorf("store: add creator %d to channel %d: %w", creatorID, channelID, err)
+	}
+	if err := appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(channelID), memberDetail(creatorID), now); err != nil {
+		return err
+	}
+	if !manages {
+		return nil
+	}
+	return appendAuditEventTx(ctx, tx, actor, AuditMemberManageGranted, channelSubject(channelID), memberDetail(creatorID), now)
+}
+
+// AuditChannelCreateRefused counts a capped creator's refused channel
+// creation, a name collision (issue #981). Its detail carries no name, so
+// the audit trail is no copy of the existence oracle it bounds.
+const AuditChannelCreateRefused = "channel_create_refused"
+
+// ErrNotCommunityMember is a write only a member of the community may make
+// (design §1.1, isMemberTx), asked by anyone else: an agent, a guest, an
+// ended guest's identity.
+var ErrNotCommunityMember = errors.New("store: not a member of the community")
+
+// ChannelCreatePermissionError is a channel creation by a member who does
+// not hold Perm now (ADR-014: create_public_channels or
+// create_private_channels, by the visibility asked for).
+type ChannelCreatePermissionError struct{ Perm schema.Permission }
+
+func (e *ChannelCreatePermissionError) Error() string {
+	return "store: creating this channel needs " + string(e.Perm)
+}
+
+// ChannelCreate is a member's channel creation (POST /v1/channels).
+type ChannelCreate struct {
+	// CallerID is the creator, re-read under the write lock.
+	CallerID   int64
+	Name       string
+	Visibility schema.ChannelVisibility
+	// Limits bounds a creator who does not hold manage_channels, decided
+	// under the write lock; a holder is not bounded.
+	Limits RenameLimits
+}
+
+// channelCreatePermission is the permission creating a channel of
+// visibility v needs.
+func channelCreatePermission(v schema.ChannelVisibility) schema.Permission {
+	if v == schema.ChannelPublic {
+		return schema.PermCreatePublicChannels
+	}
+	return schema.PermCreatePrivateChannels
+}
+
+// CreateChannelV1 makes a channel for a member (issue #981, ADR-013
+// decision 2): in one IMMEDIATE transaction it re-reads the caller and
+// refuses one who is not a community member (ErrNotCommunityMember) or no
+// longer holds the create permission for the visibility
+// (ChannelCreatePermissionError); applies the daily bound to a caller not
+// holding manage_channels (RenameLimitedError); claims the name (ErrDuplicate
+// on any collision, ErrNameInvalid); writes the channel with its visibility,
+// audited channel_created with the creator as actor, the bounded ones marked
+// limited=1; and makes the creator its only member and its manager. A
+// collision is recorded by RecordChannelCreateRefused, after this rolls back.
+func (s *Store) CreateChannelV1(ctx context.Context, req ChannelCreate, now time.Time) (Channel, error) {
+	now = now.Truncate(time.Millisecond)
+	actor := principalActor(req.CallerID)
+	var ch Channel
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		capped, err := channelCreatorStandingTx(ctx, tx, req.CallerID, req.Visibility)
+		if err != nil {
+			return err
+		}
+		detail := ""
+		if capped {
+			if err := channelWriteLimitTx(ctx, tx, actor, AuditChannelCreated, AuditChannelCreateRefused, req.Limits, now); err != nil {
+				return err
+			}
+			detail = channelRenameLimitedDetail
+		}
+		id, err := insertChannelTx(ctx, tx, req.Name, now)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE channels SET visibility = ? WHERE id = ?", string(req.Visibility), id); err != nil {
+			return fmt.Errorf("store: create channel %d: set visibility: %w", id, err)
+		}
+		ch = Channel{ID: id, Name: req.Name, CreatedAt: now, Visibility: req.Visibility, Manages: true}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditChannelCreated, channelSubject(id),
+			fmt.Sprintf("name=%q visibility=%s", req.Name, req.Visibility)+detail, now); err != nil {
+			return err
+		}
+		return addChannelCreatorTx(ctx, tx, actor, id, req.CallerID, true, now)
+	})
+	if err != nil {
+		return Channel{}, err
+	}
+	return ch, nil
+}
+
+// RecordChannelCreateRefused atomically re-checks a capped creator's bound
+// and records a refused creation without the name. A caller that is no
+// longer a member, or no longer holds the permission, is refused as
+// CreateChannelV1 refuses it; a holder of manage_channels records nothing.
+func (s *Store) RecordChannelCreateRefused(ctx context.Context, req ChannelCreate, now time.Time) error {
+	now = now.Truncate(time.Millisecond)
+	actor := principalActor(req.CallerID)
+	return s.withImmediateTx(ctx, func(tx execer) error {
+		capped, err := channelCreatorStandingTx(ctx, tx, req.CallerID, req.Visibility)
+		if err != nil || !capped {
+			return err
+		}
+		if err := channelWriteLimitTx(ctx, tx, actor, AuditChannelCreated, AuditChannelCreateRefused, req.Limits, now); err != nil {
+			return err
+		}
+		return appendAuditEventTx(ctx, tx, actor, AuditChannelCreateRefused, "server", "", now)
+	})
+}
+
+// channelCreatorStandingTx decides, under the write lock, whether callerID
+// may create a channel of visibility v, and whether the daily bound applies
+// to it (it does not hold manage_channels).
+func channelCreatorStandingTx(ctx context.Context, tx execer, callerID int64, v schema.ChannelVisibility) (capped bool, err error) {
+	member, err := isMemberTx(ctx, tx, callerID)
+	if err != nil {
+		return false, err
+	}
+	if !member {
+		return false, ErrNotCommunityMember
+	}
+	p, err := principalByIDTx(ctx, tx, callerID)
+	if err != nil {
+		return false, err
+	}
+	perm := channelCreatePermission(v)
+	ok, err := principalPermittedTx(ctx, tx, p, perm)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, &ChannelCreatePermissionError{Perm: perm}
+	}
+	manager, err := principalPermittedTx(ctx, tx, p, schema.PermManageChannels)
+	if err != nil {
+		return false, err
+	}
+	return !manager, nil
 }
 
 // checkChannelExistsTx reports ErrNotFound when channelID does not exist.

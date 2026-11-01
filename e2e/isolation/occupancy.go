@@ -245,12 +245,17 @@ func (s *bSockets) checkOccupancyFeed(w *world, f *feed, mode string, since int)
 func (s *bSockets) checkOccupancyWhileAIsInVoice(w *world) error {
 	ann := w.a.people[0]
 	camp := w.a.chanIDs[0]
+	// ann's channels: A's, and the public channel she made (communityrows.go).
+	annsChannels := slices.Clone(w.a.chanIDs)
+	if w.a.publicID != 0 {
+		annsChannels = append(annsChannels, w.a.publicID)
+	}
 	if err := waitFor("ann's occupancy to show ann and amy in A's room", 30*time.Second, func() (bool, string) {
 		var doc schema.VoiceOccupancyV1
 		if err := ann.api.call(http.MethodGet, "/v1/voice/occupancy", nil, &doc); err != nil {
 			return false, err.Error()
 		}
-		if err := checkRows(doc, w.a.chanIDs); err != nil {
+		if err := checkRows(doc, annsChannels); err != nil {
 			return false, err.Error()
 		}
 		return counts(doc)[camp] == 2, fmt.Sprintf("%v", counts(doc))

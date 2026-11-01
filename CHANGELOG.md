@@ -60,6 +60,26 @@ There is no migration and no wire change since `alpha.8`, so rolling back to
 
 ### Added
 
+- **Members make channels; operators set a channel's visibility and default
+  mark** (#981, community model I3a).
+  - `POST /v1/channels` (`{name, visibility}`) lets any member make a public
+    or private channel, under the `create_public_channels` and
+    `create_private_channels` permissions. The creator is its only member
+    and its manager, and decides its approvals. Agents and guests are
+    refused.
+  - Every name collision answers the same 409 `channel_exists`. A member
+    without `manage_channels` may make 10 channels and try 30 times a day
+    (429 with `Retry-After`), and each refused try is audited
+    `channel_create_refused` without the name.
+  - `PUT /v1/channels/{id}/settings` (`{visibility?, default?}`) is for
+    operators holding `manage_channels`. A default channel must be public
+    (409 `channel_settings_conflict`). Turning a channel private keeps its
+    members. Unmarking the last default channel while open sign-up is on
+    turns sign-up off, and the answer says so (`open_signup_turned_off`).
+  - `GET /v1/channels` and the events socket's `conch.channel.v1` carry
+    `visibility` and `default`, and a settings change sends the channel
+    document. `POST /v0/channels` stays operator-only and makes a private
+    channel.
 - **Attach any file the server accepts** (#1035). The composer's Attach
   button (it was "Attach images") takes any file, by the picker, a paste or
   a drop.

@@ -234,6 +234,9 @@ func run(h *harness) (summary, error) {
 	if err := w.activityA(); err != nil {
 		return sum, fmt.Errorf("group A's activity: %w", err)
 	}
+	if err := w.publicA(); err != nil {
+		return sum, fmt.Errorf("group A's public channel: %w", err)
+	}
 	var v *voiceA
 	if lk != nil {
 		if v, err = w.startVoiceA(); err != nil {
