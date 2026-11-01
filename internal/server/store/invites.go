@@ -33,6 +33,13 @@ const (
 	AuditInvitesPaused           = "invites_paused"
 	AuditInvitesResumed          = "invites_resumed"
 	AuditInvitePermissionChanged = "invite_permission_changed"
+	// AuditInviteSuspended and AuditInviteResumed are written, one row per
+	// link, by a change to the permissions document that takes
+	// make_member_links from a maker, or gives it back (ADR-014 design §7.5,
+	// §8.5): actor system, subject the invite, detail reason=permission. The
+	// link is suspended, not closed.
+	AuditInviteSuspended = "invite_suspended"
+	AuditInviteResumed   = "invite_resumed"
 	// AuditJoinersDisabled and AuditInviteesDisabled summarise an operator's
 	// bulk disable (issue #438); each principal it disabled has its own
 	// principal_disabled row as well.
