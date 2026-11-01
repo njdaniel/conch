@@ -5,6 +5,7 @@
 // its own line.
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
+import { Linkified } from './Linkified';
 import { fileAttachmentPayloadSchema } from './schema/file';
 import { MESSAGE_EDIT_WINDOW_SECONDS, type MessageRevisionV1, type MessageV2 } from './schema/message';
 import type { PrincipalKind } from './schema/principal';
@@ -205,7 +206,7 @@ export function EarlierVersions({
                   <time dateTime={revision.created_at}>{when(revision.created_at)}</time>
                   {revision.revision === current ? <span className="version-current"> Current</span> : null}
                 </div>
-                <p className="version-body">{revision.body}</p>
+                <p className="version-body"><Linkified text={revision.body} /></p>
               </li>
             ))}
           </ol>

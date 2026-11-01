@@ -3,6 +3,7 @@ import * as api from './api';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar } from './Icons';
+import { Linkified } from './Linkified';
 import { ImageAttachment } from './ImageAttachment';
 import { loadStored, saveEdit } from './state/draftStore';
 import { canEdit, EditedMarker, editEnds, editWindowMs, MessageEditor } from './MessageEdit';
@@ -171,7 +172,7 @@ export function Message({
       >
         {editor ?? (approval === null ? (
           <>
-            {message.body}
+            <Linkified text={message.body} />
             <EditedMarker message={message} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} />
           </>
         ) : <ApprovalCard approval={approval} people={people} />)}
@@ -231,7 +232,7 @@ function Pending({
         tag={tag}
         {...(send.status === 'sending' ? {} : { tone: send.status })}
       >
-        {send.body}
+        <Linkified text={send.body} />
       </Line>
       {send.status === 'sending' ? null : (
         <div className="msg-actions">
