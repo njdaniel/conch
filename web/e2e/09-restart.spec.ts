@@ -7,7 +7,7 @@ import { closeSync, openSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { history, post } from './api';
-import { channelButton, expect, messages, say, signIn, statusLine, test } from './fixtures';
+import { channelButton, expect, expectStateReadable, messages, phoneSizes, say, signIn, statusLine, test } from './fixtures';
 import { call, ok, repoRoot, safePath, type World } from './world';
 
 async function healthy(world: World): Promise<boolean> {
@@ -17,6 +17,9 @@ async function healthy(world: World): Promise<boolean> {
     return false;
   }
 }
+
+// The pid of the server restart() started, so a later stop kills that one.
+let restarted: number | undefined;
 
 // restart starts conchd again as the walkthrough's last command does: the same
 // binary, address, web client and data directory, in the run's isolated home.
@@ -39,6 +42,7 @@ function restart(world: World): void {
   closeSync(log);
   // The reset at the end stops it with everything else under the root.
   server.unref();
+  restarted = server.pid;
 }
 
 // done makes an operator's call that must succeed and whose reply is not
@@ -98,7 +102,7 @@ test('P3-09 after conchd restarts the page shows Reconnecting and out of date, t
 
   // The server stops.
   const pid = world.serverPid();
-  process.kill(pid, 'SIGTERM');
+  process.kill(restarted ?? pid, 'SIGTERM');
   await expect.poll(() => healthy(world), { message: 'conchd has stopped', timeout: 30_000 }).toBe(false);
 
   await expect(statusLine(page)).toContainText('Reconnecting', { timeout: 30_000 });
@@ -148,4 +152,27 @@ test('P3-09 after conchd restarts the page shows Reconnecting and out of date, t
   expect(stored.filter((m) => m.body === typed)).toHaveLength(0);
   await say(page, 'general', typed);
   await expect(messages(page).getByText(typed)).toHaveCount(1);
+});
+
+// Issue #1030: on a phone the top bar is the only quick sign of an outage, and
+// the conversation says it is out of date as on a desktop.
+test('P1030 at 320×640 an outage shows Reconnecting whole and the stale banner, and Connected is whole again after the restart', async ({ meet, world }) => {
+  const { page } = await meet(phoneSizes[0][1]);
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  await expectStateReadable(page, 'Connected');
+  await expect(statusLine(page).locator('.status-who')).toBeVisible();
+
+  process.kill(restarted ?? world.serverPid(), 'SIGTERM');
+  await expect.poll(() => healthy(world), { message: 'conchd has stopped', timeout: 30_000 }).toBe(false);
+
+  await expect(statusLine(page)).toContainText('Reconnecting', { timeout: 30_000 });
+  await expectStateReadable(page, 'Reconnecting');
+  await expect(statusLine(page).locator('.status-who')).toBeVisible();
+  await expect(page.getByText('This conversation may be out of date')).toBeVisible();
+
+  restart(world);
+  await expect.poll(() => healthy(world), { message: 'conchd is serving again', timeout: 30_000 }).toBe(true);
+  await expect(statusLine(page)).toContainText('Connected', { timeout: 60_000 });
+  await expectStateReadable(page, 'Connected');
+  await expect(page.getByText('This conversation may be out of date')).toHaveCount(0);
 });
