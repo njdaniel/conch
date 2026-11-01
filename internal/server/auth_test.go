@@ -332,9 +332,11 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/hooks/{token}":                          {classExempt, "/v1/hooks/nope", `{}`, 404},
 	"POST /v1/approvals":                              {classAuth, "/v1/approvals", `{}`, 400},
 	"GET /v1/approvals":                               {classAuth, "/v1/approvals", "", 200},
-	"GET /v1/approvals/{id}":                          {classAuth, "/v1/approvals/9999", "", 404},
-	"POST /v1/approvals/{id}/decisions":               {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
-	"/mcp":                                            {classExempt, "/mcp", `{}`, 401},
+	// The community's member list (issue #983): any member; an agent is refused.
+	"GET /v1/directory/members":         {classAuth, "/v1/directory/members", "", 200},
+	"GET /v1/approvals/{id}":            {classAuth, "/v1/approvals/9999", "", 404},
+	"POST /v1/approvals/{id}/decisions": {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
+	"/mcp":                              {classExempt, "/mcp", `{}`, 401},
 	// limit=0 is a 400 before anything is exported or recorded, so the AuthOff
 	// audit count below is unaffected by a route that audits every success.
 	"GET /v1/audit": {classPerm, "/v1/audit?limit=0", "", 400},
@@ -621,7 +623,7 @@ func TestRoleMatrix(t *testing.T) {
 			if rt.pattern == "PUT /v1/channels/{id}/name" {
 				agentWant = http.StatusForbidden // kind is refused before channel lookup
 			}
-			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
+			if rt.pattern == "GET /v1/directory/members" || strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// Runs are started by agents only (issue #266): the humans get the

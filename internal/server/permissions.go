@@ -27,8 +27,8 @@ import (
 // yet"), so a release that ships a permission's cell before its gates
 // refuses the change rather than ignoring it.
 //
-//   - Rows 1, 2 and 4 gate routes that do not exist yet (#981, #983): they
-//     are enforced vacuously, so the personal preset can apply before them.
+//   - Rows 1 and 2 gate a route that does not exist yet (#981): they are
+//     enforced vacuously, so the personal preset can apply before them.
 //   - Rows 7-11 are enforced by the route classes of this issue and the
 //     store's standing checks of A3a (#1014).
 //   - Rows 3 (make_member_links), 5 (use_voice) and 6 (share_screen) join

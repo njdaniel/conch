@@ -527,6 +527,7 @@ var permissionGates = map[schema.Permission][][2]string{
 		{"hooks.go", "Server.handleCreateHook"},
 		{"manifests.go", "Server.handlePutManifest"},
 	},
+	schema.PermSeeMemberDirectory:   {{"directory.go", "Server.handleListDirectoryMembers"}},
 	schema.PermChangeServerSettings: {{"routes.go", "Server.routeTable"}},
 	schema.PermReadAuditLog:         {{"routes.go", "Server.routeTable"}},
 	// A4's (#1016): listed so that adding one of these to
@@ -548,7 +549,6 @@ var permissionGates = map[schema.Permission][][2]string{
 var vacuousGates = map[schema.Permission][]string{
 	schema.PermCreatePublicChannels:  {"POST /v1/channels"},
 	schema.PermCreatePrivateChannels: {"POST /v1/channels"},
-	schema.PermSeeMemberDirectory:    {"GET /v1/directory/members"},
 }
 
 // TestEnforcedPermissionsAreHonest is the safety net's own check (SF-3):
