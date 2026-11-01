@@ -3,6 +3,7 @@
 // does every call and is the only code that sees the credential.
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import * as api from './api';
+import { uploadRefusalLine } from './fileSize';
 import { ChangeName } from './ChangeName';
 import { CreateChannel } from './CreateChannel';
 import { Conversation } from './Conversation';
@@ -762,11 +763,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       return { ...attachment, status: 'failed', attempt, error: 'Your sign-in ended before the upload finished.' };
     }
     if (result.outcome === 'network') {
-      const error = 'Cannot reach the server. The image is still here; try again.';
+      const error = 'Cannot reach the server. The file is still here; try again.';
       dispatchAttachments({ ...action, type: 'uploadFailed', error });
       return { ...attachment, status: 'failed', attempt, error };
     }
-    const error = 'reason' in result ? result.reason : 'The server refused the upload';
+    const error = 'reason' in result ? uploadRefusalLine(attachment.filename, result.code, result.reason) : 'The server refused the upload';
     dispatchAttachments({ ...action, type: 'uploadFailed', error });
     return { ...attachment, status: 'failed', attempt, error };
   }, [activeSend, nameOf, dispatchAttachments]);

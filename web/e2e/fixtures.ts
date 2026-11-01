@@ -170,3 +170,29 @@ export async function say(page: Page, channel: string, body: string): Promise<vo
   await page.getByLabel(`Message #${channel}`).fill(body);
   await page.getByRole('button', { name: 'Send' }).click();
 }
+
+// expectStateReadable checks the top bar's connection state on a phone (issue
+// #1030): the word is drawn whole (not cut by an ellipsis or the clip of its
+// box), no button's box meets its box, and what is on top at its middle and
+// both ends is the word itself, not a button over it.
+export async function expectStateReadable(page: Page, word: string): Promise<void> {
+  const state = statusLine(page).locator('.conn');
+  await expect(state).toHaveText(word);
+  await expect(state).toBeVisible();
+  const found = await state.evaluate((el) => {
+    const box = el.getBoundingClientRect();
+    const buttons = [...document.querySelectorAll('header.topbar button')].map((b) => {
+      const r = b.getBoundingClientRect();
+      return { name: b.getAttribute('aria-label') ?? b.textContent, hit: r.left < box.right && r.right > box.left && r.top < box.bottom && r.bottom > box.top };
+    });
+    const topAt = (x: number) => {
+      const top = document.elementFromPoint(x, box.top + box.height / 2);
+      return top !== null && el.contains(top);
+    };
+    return { scroll: el.scrollWidth, client: el.clientWidth, width: box.width, buttons, covered: [box.left + 2, box.left + box.width / 2, box.right - 2].map((x) => !topAt(x)) };
+  });
+  expect(found.width, `${word} has a box`).toBeGreaterThan(0);
+  expect(found.scroll, `${word} is cut`).toBeLessThanOrEqual(found.client);
+  expect(found.buttons.filter((b) => b.hit), `${word} meets a button`).toEqual([]);
+  expect(found.covered, `${word} is covered`).toEqual([false, false, false]);
+}

@@ -191,6 +191,11 @@ type voiceRoomState struct {
 	// retired means the room was rotated away and its state dropped: a pass
 	// that was already reading it must not report what it finds.
 	retired bool
+	// claimer is the principal whose share claim is running in the room
+	// (claimShare, between taking the room's claims and letting them go),
+	// 0 when none is: a first claim or a holder's claim again, whether or
+	// not its share is pending. Under voicePoller.mu (issue #1061).
+	claimer int64
 	// seq counts evictions from this room and evicted records, per principal,
 	// the count at their last one. A pass notes seq before it asks LiveKit
 	// and does not put back anyone evicted after that: without it a pass in
@@ -328,6 +333,22 @@ type voicePoller struct {
 	// room, since a rotation is one of the reasons, and goes when they claim
 	// a share in that channel again.
 	shareEnded map[voiceShareEndKey]schema.VoiceShareEnded
+	// retiring holds each retired room with a share claim still running in
+	// it when the room was forgotten (a first claim or a holder's claim
+	// again), with the claimer's principal id, until that claim returns
+	// (issue #1061). The room is gone from rooms, so
+	// without this a revocation's endSharesOf could not find the claim to
+	// wait for it: a claim blocked inside LiveKit could then grant the screen
+	// after the revocation answered, with the room's deletion failed.
+	retiring map[*voiceRoomState]int64
+	// claimSeam and endSharesSeam are test seams, nil outside tests (issue
+	// #1061): claimSeam(stage) runs in claimShare at "enter", once the
+	// request has been admitted, and at "lock", just before the room's
+	// claims are taken; endSharesSeam(n) runs in endSharesOf, and in
+	// waitRunningClaims, once it has found the n rooms whose claims it will
+	// take.
+	claimSeam     func(stage string)
+	endSharesSeam func(rooms int)
 	// removed remembers recent successful removals for audit de-duplication.
 	removed map[string]time.Time
 	// contacted is whether LiveKit has answered at least once; down is the
@@ -369,6 +390,7 @@ func newVoicePoller(s *Server) *voicePoller {
 		wakeLoop:        make(chan struct{}, 1),
 		rooms:           make(map[string]*voiceRoomState),
 		shareEnded:      make(map[voiceShareEndKey]schema.VoiceShareEnded),
+		retiring:        make(map[*voiceRoomState]int64),
 		removed:         make(map[string]time.Time),
 		subs:            make(map[*voiceSub]struct{}),
 		occSubs:         make(map[*voiceOccupancySub]struct{}),
@@ -1206,6 +1228,10 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 			// Presence shows who is talking as the poller sees it, whatever
 			// was reported.
 			changed = true
+			// For finding a roster that stays on "transmitting" (issue
+			// #1041): when the poller saw the flip, as opposed to when the
+			// client reported it. Ids only; no room name.
+			slog.DebugContext(ctx, "voice: poller saw the microphone change", "channel", r.channelID, "principal", pid, "transmitting", n.transmitting)
 		}
 		events = append(events, transmitEvents(r.channelID, judged[pid])...)
 		delete(judged, pid)
@@ -1987,10 +2013,16 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) {
 	r.retired = true
 	// The room's screen share ends with it, written first: deleting the room
 	// takes its sources away. A share still pending never started, and its
-	// claim finds the room retired (claimShare).
+	// claim finds the room retired (claimShare), which withdraws what it
+	// granted. While any claim is running in the room (a holder's again
+	// too) the room stays findable in retiring until it returns, so a
+	// revocation's endSharesOf waits for the grant and its undoing.
 	var events []voiceEvent
 	if c := r.share; c != nil && !c.pending {
 		events = append(events, p.shareStoppedLocked(r.channelID, c, c.principalID, voiceShareStopRotated))
+	}
+	if r.claimer != 0 {
+		p.retiring[r] = r.claimer
 	}
 	r.share = nil
 	// Every transmission still open in the room, reported or unreported, is
@@ -2174,7 +2206,47 @@ func (s *Server) voiceEnforceHolders(ctx context.Context) []voiceRotation {
 		olds = append(olds, r.old)
 	}
 	s.voice.deleteRooms(ctx, olds)
+	// A claim still running may be inside LiveKit's answer to a grant, in a
+	// room this rotation retired, one the sweep retired first, or one whose
+	// rotation is committed but not yet forgotten. The hook answers only once
+	// every such claim has returned: each re-reads the room's liveness after
+	// its grant and withdraws what it granted if the room is gone. This
+	// covers the hooks that end no share by principal: a credential revoked,
+	// every credential revoked.
+	s.voice.waitRunningClaims()
 	return rotated
+}
+
+// waitRunningClaims waits for every share claim running when it is called,
+// in a live room or a retired one (retiring), by taking and letting go of
+// the room's claims. Which rooms a revocation affects is not known here (a
+// rotation may have been made by the sweep, or committed and not yet
+// forgotten), and claims are few and bounded by LiveKit's timeout, so it
+// waits for them all. A claim lets the claims go only after it has re-read
+// the room's liveness and withdrawn a grant made in a retired room. It holds
+// no other lock while it waits.
+func (p *voicePoller) waitRunningClaims() {
+	p.mu.Lock()
+	var rooms []*voiceRoomState
+	for _, r := range p.rooms {
+		if r.claimer != 0 {
+			rooms = append(rooms, r)
+		}
+	}
+	for r := range p.retiring {
+		rooms = append(rooms, r)
+	}
+	p.mu.Unlock()
+	if p.endSharesSeam != nil {
+		p.endSharesSeam(len(rooms))
+	}
+	slices.SortFunc(rooms, func(a, b *voiceRoomState) int {
+		return cmp.Or(cmp.Compare(a.channelID, b.channelID), cmp.Compare(a.name, b.name))
+	})
+	for _, r := range rooms {
+		r.claims.Lock()
+		r.claims.Unlock() //nolint:staticcheck // SA2001: taking the lock is the wait.
+	}
 }
 
 // withoutRotated is rooms minus those a rotation just retired.
@@ -2223,6 +2295,11 @@ func (s *Server) voiceMemberRemoved(ctx context.Context, channelID, principalID 
 	rooms, roomsErr := s.voice.channelRooms(rctx, channelID)
 	cancel()
 	rotated := s.voiceEnforceHolders(ctx)
+	// A share of theirs that the rotation did not end (the room outlived
+	// them) ends through the stop path, under the room's claims: a claim in
+	// flight is waited for and then ended, before this answers (ADR-015
+	// decision 6). After the rotation, so a rotated share keeps its reason.
+	s.voice.endSharesOf(ctx, principalID, channelID, voiceShareStopAccessLost)
 	if roomsErr != nil {
 		slog.ErrorContext(ctx, "voice: list rooms for removal failed; passes will remove", "channel", channelID, "error", roomsErr)
 		return
@@ -2254,6 +2331,9 @@ func (s *Server) voicePrincipalLostAccess(ctx context.Context, principalID int64
 	if reason != voiceReasonPrincipalOff {
 		return
 	}
+	// As in voiceMemberRemoved: a share the rotation did not end is ended
+	// under the room's claims.
+	s.voice.endSharesOf(ctx, principalID, 0, voiceShareStopAccessLost)
 	if roomsErr != nil {
 		// Which rooms to call LiveKit for is unknown. The principal still
 		// leaves presence at once, from every room the poller has them in,

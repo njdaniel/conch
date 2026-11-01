@@ -319,7 +319,8 @@ export function Lobby({
           <div role="status" aria-label="Status" className="status">
             <Avatar id={me} name={name} />
             <span className="status-who">{name}</span>
-            <span className="status-server">{origin}</span>
+            {/* A phone has no room for it (issue #1030). */}
+            {phone ? null : <span className="status-server">{origin}</span>}
             <span className={`conn conn-${connection}`}>{connectionLabel(connection)}</span>
           </div>
           <div className="topbar-actions">
@@ -344,6 +345,7 @@ export function Lobby({
               className="icon-button"
               aria-expanded={settingsOpen}
               aria-controls="settings-panel"
+              aria-label={phone ? `Settings, signed in as ${name}` : undefined}
               onClick={() => {
                 if (settingsOpen) closeSettings();
                 else setSettingsOpen(true);

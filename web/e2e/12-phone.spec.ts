@@ -6,7 +6,7 @@
 // person it adds to the fixture channels touches no other spec.
 import type { Locator, Page } from '@playwright/test';
 import { makeInvite, post } from './api';
-import { accountPassword, channelButton, conversation, expect, expectFits, mainNav, messages, phones, showView, signIn, statusLine, test } from './fixtures';
+import { accountPassword, channelButton, conversation, expect, expectFits, expectStateReadable, phoneSizes, mainNav, messages, phones, showView, signIn, statusLine, test } from './fixtures';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import type { InvitePermissionRequestV1 } from '../src/schema/generated';
 import { call, inviteUrl, ok, type World } from './world';
@@ -27,7 +27,7 @@ for (const [size, options] of phones) {
     await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
     await expect(messages(page).getByText(longWord(size))).toBeVisible();
     await expect(messages(page).getByText(longAddress(size))).toBeVisible();
-    await expect(statusLine(page)).toContainText(world.origin);
+    await expect(statusLine(page)).not.toContainText(world.origin);
     await expectFits(page, 'the lobby with general open');
     // On the shared server the voice section says voice is not set up. It is
     // the Voice view's; not in voice, the strip is not under Chat.
@@ -309,4 +309,37 @@ async function keepToken(page: Page, secrets: string[]): Promise<void> {
   const token = await page.evaluate(() => window.localStorage.getItem('conch.web.token'));
   if (token === null) throw new Error('no credential was kept');
   secrets.push(token);
+}
+
+// Issue #1030: on a phone the top bar keeps the connection state whole, with no
+// server address, for a member and for someone with four buttons (the
+// notifications bell, Invite someone, Members and Settings); who they are is in
+// the Settings button's name.
+for (const [size, options] of phoneSizes.filter(([name]) => name === '320×640' || name === '390×844')) {
+  for (const inviter of [false, true]) {
+    test(`P1030 at ${size} the top bar of ${inviter ? 'someone who invites' : 'a member'} shows the state whole and no address`, async ({ meet, secrets, world }) => {
+      const tag = `p1030-${size.slice(0, 3)}-${inviter ? 'op' : 'mem'}-${String(Date.now())}`;
+      const op = world.tokens.operator;
+      let token = world.tokens.browser;
+      let name = 'browser-test';
+      if (inviter) {
+        const person: CreatePrincipalRequest = { kind: 'human', name: tag };
+        const id = (await ok(world, op, 'POST', '/v0/principals', createPrincipalResponse, person)).principal.id;
+        const label: CreateCredentialRequestV1 = { label: tag };
+        token = (await ok(world, op, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, label)).token;
+        secrets.push(token);
+        const mayInvite: InvitePermissionRequestV1 = { may_invite: true };
+        await done(world, op, 'PUT', `/v1/principals/${String(id)}/invite-permission`, mayInvite);
+        await done(world, op, 'POST', '/v0/channels', { name: tag });
+        await done(world, op, 'PUT', `/v1/channels/${encodeURIComponent(tag)}/members/${String(id)}`);
+        name = tag;
+      }
+      const { page } = await meet(options);
+      await signIn(page, world, token, name);
+      await expect(page.getByLabel('To:')).toBeVisible();
+      await expect(statusLine(page)).not.toContainText(world.origin);
+      await expect(page.getByRole('button', { name: `Settings, signed in as ${name}` })).toBeVisible();
+      await expectStateReadable(page, 'Connected');
+    });
+  }
 }
