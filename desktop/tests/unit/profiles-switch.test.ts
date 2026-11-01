@@ -20,7 +20,7 @@ function make(boundMs = 50) {
     now,
     log: (line) => logs.push(line),
     boundMs,
-    open: (spec) => factory.create({ ...spec, token: null }),
+    open: (spec) => factory.create({ ...spec, token: null, onInvalid: () => undefined }),
   });
   return { switcher, hooks, factory, events, now, logs, log };
 }

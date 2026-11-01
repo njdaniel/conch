@@ -6,7 +6,7 @@
 //
 // Run by node (type stripping), so no import of anything but node: modules.
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -56,5 +56,7 @@ if (import.meta.main) {
   const out = resolve(here, '..', 'out');
   const manifest = buildManifest(join(out, 'ui'));
   writeFileSync(join(out, 'ui-manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
+  // The allowlist of server releases (issue #946) rides in the asar beside it.
+  copyFileSync(join(here, 'compat.json'), join(out, 'compat.json'));
   console.log(`manifest: ${String(Object.keys(manifest.files).length)} files`);
 }

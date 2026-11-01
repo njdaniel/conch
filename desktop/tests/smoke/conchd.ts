@@ -5,7 +5,7 @@
 // the browser build in web/dist at /app/, for a browser user beside the app
 // (issue #943); make web-build makes it.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -42,15 +42,27 @@ function freePort(): Promise<number> {
   });
 }
 
+// The release the app's allowlist names first (desktop/build/compat.json): a
+// disposable conchd stamped with it is one the packaged app supports, and the
+// same binary stamped with any other version is one it does not (issue #946).
+export function listedVersion(): string {
+  const doc = JSON.parse(readFileSync(join(repo, 'desktop', 'build', 'compat.json'), 'utf8')) as { servers: string[] };
+  const first = doc.servers[0];
+  if (first === undefined) throw new Error('desktop/build/compat.json lists no server release');
+  return first;
+}
+
+export const UNLISTED_VERSION = 'v9.9.9-unlisted';
+
 export const WEB_DIST = join(repo, 'web', 'dist');
 
-export async function startConchd(options: { readonly web?: boolean } = {}): Promise<Disposable> {
+export async function startConchd(options: { readonly web?: boolean; readonly version?: string } = {}): Promise<Disposable> {
   if (options.web === true && !existsSync(join(WEB_DIST, 'index.html'))) {
     throw new Error(`${WEB_DIST} has no browser build; run make web-build first`);
   }
   const dir = mkdtempSync(join(tmpdir(), 'conch-desktop-conchd-'));
   const binary = join(dir, 'conchd');
-  execFileSync('go', ['build', '-o', binary, './cmd/conchd'], { cwd: repo, stdio: 'inherit' });
+  execFileSync('go', ['build', '-ldflags', `-X main.version=${options.version ?? listedVersion()}`, '-o', binary, './cmd/conchd'], { cwd: repo, stdio: 'inherit' });
   const data = join(dir, 'data');
   const boot = execFileSync(binary, ['bootstrap-operator', '--data', data, '--name', 'smoke-operator', '--server-name', 'smokehost'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
   const operatorToken = boot.split('\n')[0]?.trim() ?? '';

@@ -10,7 +10,8 @@ import tls from 'node:tls';
 
 import { app, dialog, ipcMain, protocol, safeStorage, shell } from 'electron';
 
-import { activationFactory, Live, prober, revoker, verifier } from './profiles/activation.ts';
+import { allowUnlisted, OVERRIDE_FLAG, parseCompat } from './compat.ts';
+import { activationFactory, healthReader, Live, prober, revoker, verifier } from './profiles/activation.ts';
 import { createProfileFiles } from './profiles/files.ts';
 import { TeardownHooks } from './profiles/hooks.ts';
 import { ProfilesService } from './profiles/service.ts';
@@ -123,6 +124,14 @@ export async function start(): Promise<void> {
   const ui = join(appPath, 'out', 'ui');
   const manifest = parseManifest(await readFile(join(appPath, 'out', 'ui-manifest.json'), 'utf8'));
 
+  // The allowlist of server releases this build was tested with (issue #946).
+  // One that cannot be read supports nothing. The development flag is honoured
+  // only by an unpackaged build, and says so on the log.
+  const allowlist = parseCompat(await readFile(join(appPath, 'out', 'compat.json'), 'utf8').catch(() => ''));
+  if (allowlist === null) log('conch-desktop: compat.json is missing or malformed; no server release is supported');
+  const override = allowUnlisted(app.isPackaged, process.argv);
+  if (override) log(`conch-desktop: ${OVERRIDE_FLAG}: servers that are not on the tested list are allowed (development build)`);
+
   // The data root, private to this user. The vault lives in <root>/vault,
   // which the vault itself creates and nothing else.
   const root = app.getPath('userData');
@@ -171,6 +180,9 @@ export async function start(): Promise<void> {
       { packaged: app.isPackaged, appPath, manifest, readUi: (path) => readFile(join(ui, ...path.split('/').slice(1))), connect: createNodeConnect(log), guard: { log, gestures, owned, links }, makeFiles, now: Date.now, log },
       live,
     ),
+    compat: { servers: allowlist?.servers ?? [], override },
+    desktopVersion: app.getVersion(),
+    readHealth: healthReader(),
     probe: prober(log),
     revokeStored: revoker(log),
     verifyStored: verifier(log),

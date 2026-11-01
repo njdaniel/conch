@@ -1,7 +1,8 @@
 // Fakes for the profile tests: files in memory, a vault in memory, and
 // activations that record what was done to them.
 import type { ProfileFiles, ReadText } from '../../main/profiles/files.ts';
-import type { Account, Activation, OpenSpec } from '../../main/profiles/switch.ts';
+import type { ActivationSpec } from '../../main/profiles/service.ts';
+import type { Account, Activation } from '../../main/profiles/switch.ts';
 import type { Classification, GetResult, PutResult, RemoveResult, Vault } from '../../main/vault/vault.ts';
 
 export interface MemoryFiles extends ProfileFiles {
@@ -134,7 +135,7 @@ export function fakeVault(classification: Classification = { kind: 'protected' }
 }
 
 export interface FakeActivation extends Activation {
-  readonly spec: OpenSpec & { readonly token: string | null };
+  readonly spec: ActivationSpec;
   held: string | null;
   account: Account | null;
   readonly done: string[];
@@ -145,7 +146,7 @@ export interface FakeActivation extends Activation {
 // each, in one shared log with a counter standing in for the clock.
 export function fakeFactory(log: string[] = []) {
   const made: FakeActivation[] = [];
-  const create = (spec: OpenSpec & { readonly token: string | null }): Promise<Activation> => {
+  const create = (spec: ActivationSpec): Promise<Activation> => {
     const n = made.length;
     const activation: FakeActivation = {
       spec,

@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { BridgeReply, ConchDesktopBridge, ProfileAddResult, ProfilesView, ProfileView } from './bridge';
+import type { BridgeReply, CompatView, ConchDesktopBridge, ProfileAddResult, ProfilesView, ProfileView } from './bridge';
 import { credentials } from './credentials';
 import { DesktopShell } from './Shell';
 import { serverOrigin, setServerOrigin } from './state';
@@ -12,8 +12,12 @@ function profile(id: string, host: string, account: string | null, active: boole
   return { id, label: host, host, origin: `https://${host}`, account, active };
 }
 
+function compat(over: Partial<CompatView> = {}): CompatView {
+  return { state: 'supported', server: 'v1.0.0', desktop: '0.0.0', override: false, invalid: null, ...over };
+}
+
 function view(over: Partial<ProfilesView> = {}): ProfilesView {
-  return { profiles: [], active: null, storage: { kind: 'protected' }, recovery: false, notice: null, platform: 'linux', ...over };
+  return { profiles: [], active: null, storage: { kind: 'protected' }, recovery: false, notice: null, compat: compat(), platform: 'linux', ...over };
 }
 
 function install(overrides: Partial<ConchDesktopBridge>): void {
@@ -242,5 +246,84 @@ describe('the browser reply type', () => {
   it('is still the bridge’s', () => {
     const reply: BridgeReply = { kind: 'none' };
     expect(reply.kind).toBe('none');
+  });
+});
+
+describe('server compatibility (issue #946)', () => {
+  const on = (over: Partial<CompatView>) => view({ profiles: [profile(ID_A, 'chat.example.org', 'ada', true)], active: ID_A, compat: compat(over) });
+
+  it('shows the client on a supported server, and no warning', async () => {
+    install({ profiles: () => Promise.resolve(on({})) });
+    render(<DesktopShell>{child}</DesktopShell>);
+    await screen.findByText('the client');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(/has not been tested/)).toBeNull();
+  });
+
+  it('shows the unsupported state instead of the client, with both versions and no sign-in, and asks nothing of the server', async () => {
+    const restore = vi.fn(() => Promise.resolve({ ok: false as const, kind: 'unauthorized' as const, status: 401 }));
+    install({ profiles: () => Promise.resolve(on({ state: 'unsupported', server: 'v9.9.9', desktop: '1.2.3' })), restore });
+    render(<DesktopShell>{child}</DesktopShell>);
+    const alert = await screen.findByText(/has not been tested with this app/);
+    expect(alert.textContent).toBe('This server’s version (v9.9.9) has not been tested with this app (1.2.3).');
+    expect(screen.queryByText('the client')).toBeNull();
+    expect(screen.queryByLabelText('Password')).toBeNull();
+    expect(restore).not.toHaveBeenCalled();
+  });
+
+  it('says "unknown" for a server that named no version', async () => {
+    install({ profiles: () => Promise.resolve(on({ state: 'unsupported', server: null })) });
+    render(<DesktopShell>{child}</DesktopShell>);
+    expect((await screen.findByText(/has not been tested/)).textContent).toMatch(/version \(unknown\)/);
+  });
+
+  it('says a server that did not answer could not be checked, and Check again asks main to switch to it', async () => {
+    const profileSwitch = vi.fn(() => Promise.resolve(true));
+    install({ profiles: () => Promise.resolve(on({ state: 'unreachable' })), profileSwitch });
+    render(<DesktopShell>{child}</DesktopShell>);
+    expect((await screen.findByText(/could not be read/)).textContent).toMatch(/Nothing was signed in/);
+    expect(screen.queryByText('the client')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Check again' }));
+    await waitFor(() => {
+      expect(profileSwitch).toHaveBeenCalledWith(ID_A);
+    });
+  });
+
+  it('lets the person go to another saved server from the unsupported state', async () => {
+    const profileSwitch = vi.fn(() => Promise.resolve(true));
+    install({
+      profiles: () => Promise.resolve(view({ profiles: [profile(ID_A, 'a.example', 'ada', true), profile(ID_B, 'b.example', null, false)], active: ID_A, compat: compat({ state: 'unsupported' }) })),
+      profileSwitch,
+    });
+    render(<DesktopShell>{child}</DesktopShell>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Switch to b.example' }));
+    await waitFor(() => {
+      expect(profileSwitch).toHaveBeenCalledWith(ID_B);
+    });
+  });
+
+  it('shows the development warning persistently, and the untested version on an unlisted server it let through', async () => {
+    install({ profiles: () => Promise.resolve(on({ state: 'unlisted', server: 'v9.9.9', override: true })) });
+    render(<DesktopShell>{child}</DesktopShell>);
+    await screen.findByText('the client');
+    const note = screen.getByRole('note', { name: 'Development build' });
+    expect(note.textContent).toMatch(/not on the tested list are allowed/);
+    expect(note.textContent).toMatch(/version \(v9\.9\.9\) has not been tested with this app \(0\.0\.0\)/);
+  });
+
+  it('shows the development warning on the server list too', async () => {
+    install({ profiles: () => Promise.resolve(view({ compat: compat({ state: 'none', server: null, override: true }) })) });
+    render(<DesktopShell>{child}</DesktopShell>);
+    expect((await screen.findByRole('note', { name: 'Development build' })).textContent).toMatch(/allowed/);
+  });
+
+  it('shows an answer that was not what the app expects as an incompatibility, not a network error', async () => {
+    install({ profiles: () => Promise.resolve(on({ invalid: 'channels' })) });
+    render(<DesktopShell>{child}</DesktopShell>);
+    await screen.findByText('the client');
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toMatch(/channels/);
+    expect(alert.textContent).toMatch(/incompatib/i);
+    expect(alert.textContent).toMatch(/v1\.0\.0/);
   });
 });

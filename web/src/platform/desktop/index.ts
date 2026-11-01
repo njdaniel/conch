@@ -12,6 +12,7 @@
 // not see (an operator's re-authentication, a password change, an invite
 // code, a device link, which main will carry in later children).
 import type { Platform } from '../types';
+import { bridge } from './access';
 import { credentials } from './credentials';
 import { http } from './http';
 import { bridge } from './access';
@@ -47,6 +48,11 @@ export const platform: Platform = {
     // A new window is never made; main turns the click into the OS browser.
     externalLink: { target: '_blank', rel: 'noopener noreferrer' },
     browserVoice: false,
+    appVersion: () =>
+      (bridge()?.profiles() ?? Promise.resolve(null)).then(
+        (view) => view?.compat.desktop ?? null,
+        () => null,
+      ),
   },
   Shell: DesktopShell,
 };

@@ -22,8 +22,9 @@ import { guardSession, type GuardDeps } from '../guards.ts';
 import type { ContentsLike } from '../ipc.ts';
 import { handle, SCHEME, type Manifest } from '../scheme.ts';
 import { createWindow, partitionFor } from '../window.ts';
-import type { ProbeResult, StoredCheck } from './service.ts';
-import type { Account, Activation, OpenSpec } from './switch.ts';
+import type { HealthResult } from '../compat.ts';
+import type { ActivationSpec, ProbeResult, StoredCheck } from './service.ts';
+import type { Account, Activation } from './switch.ts';
 
 export interface ActivationEnv {
   readonly packaged: boolean;
@@ -60,13 +61,13 @@ export class Live {
 
 type Bounds = { x: number; y: number; width: number; height: number };
 
-export function activationFactory(env: ActivationEnv, live: Live): (spec: OpenSpec & { readonly token: string | null }) => Promise<Activation> {
+export function activationFactory(env: ActivationEnv, live: Live): (spec: ActivationSpec) => Promise<Activation> {
   let bounds: Bounds | undefined;
   return (spec) => {
     const { profile, token } = spec;
     const identity = new Session();
     const client = new Client({ fetch: globalThis.fetch, session: identity });
-    const service = new Service({ client, session: identity, now: env.now, log: env.log });
+    const service = new Service({ client, session: identity, now: env.now, log: env.log, onInvalid: spec.onInvalid });
     if (profile !== null) {
       identity.setOrigin(profile.origin);
       if (token !== null) identity.adopt(token);
@@ -162,6 +163,26 @@ export function prober(log: (line: string) => void): (origin: string) => Promise
       return 'unreachable';
     }
     return exchange.kind === 'answer' && exchange.status === 200 ? 'ok' : 'not-conch';
+  };
+}
+
+// healthReader asks an address what /healthz says of its release, with no
+// credential, through the same client (so the same trust and redirect rules):
+// the version it names, or none. A document that is not the health document
+// answered, but named no version; no answer at all, or any status but 200, is
+// not an answer.
+export function healthReader(): (origin: string) => Promise<HealthResult> {
+  return async (origin) => {
+    const session = new Session();
+    session.setOrigin(origin);
+    const client = new Client({ fetch: globalThis.fetch, session });
+    const exchange = await client.send({ op: 'health' });
+    session.forget();
+    if (exchange.kind === 'none') return exchange.reason === 'invalid' ? { kind: 'answered', version: null } : { kind: 'unreachable' };
+    if (exchange.kind !== 'answer' || exchange.status !== 200) return { kind: 'unreachable' };
+    const body = exchange.body;
+    const version = typeof body === 'object' && body !== null && 'version' in body && typeof body.version === 'string' ? body.version : null;
+    return { kind: 'answered', version };
   };
 }
 
