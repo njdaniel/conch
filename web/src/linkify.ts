@@ -48,8 +48,10 @@ function trim(run: string): string {
 
 // A run is never linked if it holds a control or format character (bidi
 // overrides and isolates, zero-width and joiner characters, the soft hyphen,
-// the byte order mark): they reorder or hide what the person reads.
-const invisible = /[\p{Cc}\p{Cf}]/u;
+// the byte order mark, and every other default-ignorable code point, such as
+// combining grapheme joiners and variation selectors): they reorder or hide
+// what the person reads.
+const invisible = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
 const nonAscii = /[^\x00-\x7f]/;
 
 // writtenAuthority is the host part as the sender wrote it: after the

@@ -32,6 +32,8 @@ describe('linkify', () => {
     { name: 'uppercase scheme, extra slashes, lookalike host', body: 'HTTPS:////аррӏе.com/', want: [t('HTTPS:////аррӏе.com/')] },
     { name: 'percent-encoded lookalike host after an extra slash', body: 'https:///%D0%B0pple.com/', want: [t('https:///%D0%B0pple.com/')] },
     { name: 'a punycode host written out stays text', body: 'https://xn--80ak6aa92e.com/', want: [t('https://xn--80ak6aa92e.com/')] },
+    { name: 'combining grapheme joiner in the path stays text', body: 'https://example.com/log\u034Fin', want: [t('https://example.com/log\u034Fin')] },
+    { name: 'variation selector in the path stays text', body: 'https://example.com/log\uFE0Fin', want: [t('https://example.com/log\uFE0Fin')] },
     { name: 'credentials stay text', body: 'https://bank.example@evil.example/login', want: [t('https://bank.example@evil.example/login')] },
     { name: 'user and password stay text', body: 'see https://user:pw@example.com/', want: [t('see https://user:pw@example.com/')] },
     { name: 'bidi override stays text', body: 'https://trusted.example\u202e@evil.example/login', want: [t('https://trusted.example\u202e@evil.example/login')] },
