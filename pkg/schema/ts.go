@@ -336,11 +336,20 @@ var TSTypes = []TSType{
 	{Value: Health{}},
 
 	// Reporting a problem (issue #446): what the page sends, and the id it
-	// gets back. Reading reports is for operators, in the CLI.
+	// gets back; and, for operators (issue #1029), the list, one report as
+	// read, and marking one filed.
 	{Value: ProblemReportClientV1{}},
 	{Value: DiagnosticEventV1{}},
 	{Value: CreateProblemReportRequestV1{}, Family: "create-problem-report-request-v1"},
 	{Value: CreateProblemReportResponseV1{}, Family: "create-problem-report-response-v1"},
+	{Value: ServerRequestTraceV1{}},
+	{Value: ServerSocketCloseV1{}},
+	{Value: ProblemReportServerV1{}},
+	{Value: ProblemReportRedactionV1{}},
+	{Value: ProblemReportV1{}, Family: "problem-report-v1"},
+	{Value: ProblemReportSummaryV1{}},
+	{Value: ListProblemReportsResponseV1{}, Family: "list-problem-reports-response-v1"},
+	{Value: UpdateProblemReportRequestV1{}, Family: "update-problem-report-request-v1"},
 
 	// Message reactions (issue #953, docs/design/message-reactions.md §5):
 	// a message's summary, which the events socket also sends, the batch

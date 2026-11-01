@@ -12,6 +12,11 @@ function memberRow(page: Page, name: string): Locator {
   return panel(page).locator('li').filter({ has: page.locator('.ag-name').getByText(name, { exact: true }) });
 }
 
+async function chooseFor(row: Locator, name: string, item: string): Promise<void> {
+  await row.getByRole('button', { name: `Actions for ${name}` }).click();
+  await row.getByRole('menuitem', { name: item }).click();
+}
+
 async function done(world: World, method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<void> {
   const reply = await call(world, world.tokens.operator, method, path, body);
   if (reply.status < 200 || reply.status > 299) throw new Error(`${method} ${path}: status ${String(reply.status)}`);
@@ -53,9 +58,11 @@ test('C793 an operator delegates a channel; its manager adds, removes and rename
 
   const op = await operatorPage(meet, world);
   await channelButton(op, current).click();
-  await memberRow(op, manager.name).getByRole('button', { name: `Make ${manager.name} a manager` }).click();
+  await chooseFor(memberRow(op, manager.name), manager.name, 'Make manager');
   await expect(memberRow(op, manager.name).getByText('Manager', { exact: true })).toBeVisible();
-  await expect(memberRow(op, manager.name).getByRole('button', { name: `Remove ${manager.name} as manager` })).toBeVisible();
+  await memberRow(op, manager.name).getByRole('button', { name: `Actions for ${manager.name}` }).click();
+  await expect(memberRow(op, manager.name).getByRole('menuitem', { name: 'Remove as manager' })).toBeVisible();
+  await op.keyboard.press('Escape');
 
   const mgr = (await meet()).page;
   await signIn(mgr, world, manager.token, manager.name);
@@ -78,23 +85,21 @@ test('C793 an operator delegates a channel; its manager adds, removes and rename
   await byName.getByRole('button', { name: 'Add by name' }).click();
   await expect(memberRow(mgr, target.name)).toBeVisible();
 
-  await expect(memberRow(mgr, operatorName)).toContainText('Operators can only be removed by an operator.');
-  await expect(memberRow(mgr, operatorName).getByRole('button', { name: `Remove ${operatorName}` })).toHaveCount(0);
+  await expect(memberRow(mgr, operatorName).getByRole('button', { name: `Actions for ${operatorName}` })).toHaveCount(0);
   await expect(panel(mgr).getByText('Only operators choose who manages a channel.', { exact: true })).toBeVisible();
   await expect(panel(mgr).getByText('Only operators choose who decides approvals.', { exact: true })).toBeVisible();
-  await expect(panel(mgr).getByRole('checkbox', { name: /decides approvals/ })).toHaveCount(0);
-  await expect(panel(mgr).getByRole('button', { name: /as manager$/ })).toHaveCount(0);
+  await memberRow(mgr, target.name).getByRole('button', { name: `Actions for ${target.name}` }).click();
+  await expect(memberRow(mgr, target.name).getByRole('menuitem')).toHaveText(['Remove from channel']);
+  await mgr.keyboard.press('Escape');
 
   const member = (await meet()).page;
   await signIn(member, world, plain.token, plain.name);
   await channelButton(member, current).click();
   await expect(memberRow(member, plain.name)).toBeVisible();
   await expect(panel(member).getByRole('form', { name: 'Add person by name' })).toHaveCount(0);
-  await expect(panel(member).getByRole('button', { name: /^Remove / })).toHaveCount(0);
-  await expect(panel(member).getByRole('button', { name: / manager$/ })).toHaveCount(0);
-  await expect(panel(member).getByRole('checkbox', { name: /decides approvals/ })).toHaveCount(0);
+  await expect(panel(member).getByRole('button', { name: /^Actions for / })).toHaveCount(0);
 
-  await memberRow(mgr, target.name).getByRole('button', { name: `Remove ${target.name}` }).click();
+  await chooseFor(memberRow(mgr, target.name), target.name, 'Remove from channel');
   await expect(memberRow(mgr, target.name)).toHaveCount(0);
   await expect
     .poll(async () => (await ok(world, world.tokens.operator, 'GET', `/v1/channels/${encodeURIComponent(current)}/members`, listChannelMembersResponseV1)).members.some((m) => m.principal_id === target.id))

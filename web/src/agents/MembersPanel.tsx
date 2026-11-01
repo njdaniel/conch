@@ -4,7 +4,7 @@
 // runtime and model is another person's or agent's text and is rendered as a
 // text node.
 import { useEffect, useState } from 'react';
-import { MemberControls, Members, type MemberControlsProps } from '../Members';
+import { MemberRow, Members, type MemberControlsProps } from '../Members';
 import type { RunV1 } from '../schema/run';
 import type { SessionV1 } from '../schema/session';
 import { ago } from './format';
@@ -72,7 +72,21 @@ function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen, control
 }) {
   const lead = entry.sessions.find((s) => s.status === entry.status);
   return (
-    <li className={`ag-agent state-${entry.state}`}>
+    <MemberRow key={`${String(controls.channel.id)}:${String(entry.id)}`} {...controls} principalId={entry.id} className={`ag-agent state-${entry.state}`}
+      after={
+        expanded ? (
+          entry.sessions.length === 0 ? (
+            <p className="hint">No sessions</p>
+          ) : (
+            <ul className="ag-sessions" aria-label={`Sessions of ${entry.name}`}>
+              {entry.sessions.map((s) => (
+                <SessionRow key={s.id} session={s} runs={sessionRuns[s.id] ?? []} now={now} onOpen={onOpen} />
+              ))}
+            </ul>
+          )
+        ) : null
+      }
+    >
       <button type="button" className="quiet" aria-expanded={expanded} onClick={onToggle}>
         <span aria-hidden="true">{expanded ? '▾' : '▸'}</span> <span className="ag-badge">Agent</span> <span className="ag-name">{entry.name}</span>
       </button>{' '}
@@ -80,19 +94,7 @@ function AgentRow({ entry, expanded, onToggle, sessionRuns, now, onOpen, control
       {entry.sessions.length > 1 ? <span> ({entry.sessions.length} sessions)</span> : null}
       {lead?.outcome_unknown === true ? <span> · outcome unknown</span> : null}
       {lead?.task === undefined ? null : <span> · task: {lead.task}</span>}
-      <MemberControls key={`${String(controls.channel.id)}:${String(entry.id)}`} {...controls} principalId={entry.id} />
-      {expanded ? (
-        entry.sessions.length === 0 ? (
-          <p className="hint">No sessions</p>
-        ) : (
-          <ul className="ag-sessions" aria-label={`Sessions of ${entry.name}`}>
-            {entry.sessions.map((s) => (
-              <SessionRow key={s.id} session={s} runs={sessionRuns[s.id] ?? []} now={now} onOpen={onOpen} />
-            ))}
-          </ul>
-        )
-      ) : null}
-    </li>
+    </MemberRow>
   );
 }
 

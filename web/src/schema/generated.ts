@@ -3192,6 +3192,173 @@ export const createProblemReportResponseV1 = object<CreateProblemReportResponseV
   created_at: timestamp,
 });
 
+// schema.ServerRequestTraceV1
+export interface ServerRequestTraceV1 {
+  at: string;
+  request_id: string;
+  route: string;
+  status: number;
+}
+
+export const serverRequestTraceV1 = object<ServerRequestTraceV1>({
+  at: timestamp,
+  request_id: str,
+  route: str,
+  status: int,
+});
+
+// schema.SocketCloseReason
+export type SocketCloseReason =
+  | 'client'
+  | 'server_shutdown'
+  | 'keepalive_timeout'
+  | 'revoked'
+  | 'removed'
+  | 'slow_consumer'
+  | 'session_ended'
+  | 'error';
+
+export const socketCloseReason = vocab<SocketCloseReason>({
+  client: true,
+  server_shutdown: true,
+  keepalive_timeout: true,
+  revoked: true,
+  removed: true,
+  slow_consumer: true,
+  session_ended: true,
+  error: true,
+});
+
+// schema.ServerSocketCloseV1
+export interface ServerSocketCloseV1 {
+  at: string;
+  request_id: string;
+  route: string;
+  reason: SocketCloseReason;
+  duration_seconds: number;
+  frames: number;
+}
+
+export const serverSocketCloseV1 = object<ServerSocketCloseV1>({
+  at: timestamp,
+  request_id: str,
+  route: str,
+  reason: socketCloseReason,
+  duration_seconds: int,
+  frames: int,
+});
+
+// schema.ProblemReportServerV1
+export interface ProblemReportServerV1 {
+  requests: ServerRequestTraceV1[];
+  socket_closes: ServerSocketCloseV1[];
+}
+
+export const problemReportServerV1 = object<ProblemReportServerV1>({
+  requests: array(serverRequestTraceV1),
+  socket_closes: array(serverSocketCloseV1),
+});
+
+// schema.ProblemReportRedactionV1
+export interface ProblemReportRedactionV1 {
+  channels: string[];
+  principals: string[];
+}
+
+export const problemReportRedactionV1 = object<ProblemReportRedactionV1>({
+  channels: array(str),
+  principals: array(str),
+});
+
+// schema.ProblemReportState
+export type ProblemReportState = 'open' | 'filed';
+
+export const problemReportState = vocab<ProblemReportState>({ open: true, filed: true });
+
+// schema.ProblemReportV1
+export interface ProblemReportV1 {
+  id: number;
+  state: ProblemReportState;
+  created_at: string;
+  principal_id: number;
+  server_version: string;
+  voice: HealthVoice;
+  did: string;
+  expected: string;
+  happened: string;
+  often: ProblemReportOften;
+  client: ProblemReportClientV1;
+  diagnostics: DiagnosticEventV1[];
+  server: ProblemReportServerV1;
+  issue?: string;
+  filed_at?: string;
+  redact?: ProblemReportRedactionV1;
+}
+
+export const problemReportV1 = object<ProblemReportV1>({
+  id: int,
+  state: problemReportState,
+  created_at: timestamp,
+  principal_id: int,
+  server_version: str,
+  voice: healthVoice,
+  did: str,
+  expected: str,
+  happened: str,
+  often: problemReportOften,
+  client: problemReportClientV1,
+  diagnostics: array(diagnosticEventV1),
+  server: problemReportServerV1,
+  issue: optional(str),
+  filed_at: optional(timestamp),
+  redact: optional(problemReportRedactionV1),
+});
+
+// schema.ProblemReportSummaryV1
+export interface ProblemReportSummaryV1 {
+  id: number;
+  state: ProblemReportState;
+  created_at: string;
+  principal_id: number;
+  client_name: string;
+  client_version: string;
+  server_version: string;
+  often: ProblemReportOften;
+  issue?: string;
+}
+
+export const problemReportSummaryV1 = object<ProblemReportSummaryV1>({
+  id: int,
+  state: problemReportState,
+  created_at: timestamp,
+  principal_id: int,
+  client_name: str,
+  client_version: str,
+  server_version: str,
+  often: problemReportOften,
+  issue: optional(str),
+});
+
+// schema.ListProblemReportsResponseV1
+export interface ListProblemReportsResponseV1 {
+  reports: ProblemReportSummaryV1[];
+}
+
+export const listProblemReportsResponseV1 = object<ListProblemReportsResponseV1>({
+  reports: array(problemReportSummaryV1),
+});
+
+// schema.UpdateProblemReportRequestV1
+export interface UpdateProblemReportRequestV1 {
+  state: ProblemReportState;
+  issue: string;
+}
+
+export const updateProblemReportRequestV1 = object<UpdateProblemReportRequestV1>({
+  state: problemReportState,
+  issue: str,
+});
+
 // schema.ReactionCountV1
 export interface ReactionCountV1 {
   emoji: string;
