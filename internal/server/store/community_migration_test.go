@@ -18,6 +18,9 @@ import (
 // version first, which needs no hand-written SQL for credentials, visits or
 // invites; migration 40's Go step leaves a new database alone, so the rows
 // are exactly what a server at 39 would hold.
+// Migration 41 and later: when you add a migration, extend this undo list
+// (and its twin in internal/server/community_migration_test.go) with your DDL in reverse, or this rewind
+// leaves a database newer than 39 and the test no longer runs migration 40.
 func rewindToBeforeCommunity(t *testing.T, path string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
@@ -377,8 +380,11 @@ func TestDefaultChannelMustBePublic(t *testing.T) {
 			t.Errorf("%s = %v, want the trigger's refusal", stmt, err)
 		}
 	}
-	if err := setDefaultChannelTx(ctx, s.db, ch.ID, true, 0); err != nil {
-		t.Fatal(err)
+	if madePublic, err := setDefaultChannelTx(ctx, s.db, ch.ID, true, 0); err != nil || !madePublic {
+		t.Fatalf("marking a private channel default = %v, %v; want it made public", madePublic, err)
+	}
+	if madePublic, err := setDefaultChannelTx(ctx, s.db, ch.ID, true, 0); err != nil || madePublic {
+		t.Fatalf("marking it again = %v, %v; want nothing made public", madePublic, err)
 	}
 	if _, err := s.db.Exec("UPDATE channels SET visibility = 'private' WHERE id = ?", ch.ID); err == nil {
 		t.Error("a default channel was made private")
@@ -448,5 +454,50 @@ func TestIsMemberTx(t *testing.T) {
 				t.Errorf("isMemberTx = %v, %v; want %v", got, err, c.want)
 			}
 		})
+	}
+}
+
+// Listing a private channel in the joining settings makes it public and a
+// default (until I7 refuses it), and its open_channel_added row says
+// visibility=private->public; listing one already public says nothing more,
+// and unlisting leaves it public (security review SF1, issue #979).
+func TestListingAChannelAuditsItsVisibility(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	red, err := s.CreateChannel(ctx, "red")
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := schema.OpenJoiningAccount
+	put := func(names ...string) {
+		t.Helper()
+		if _, err := s.PutJoinSettings(ctx, "system", 0, schema.PutJoinSettingsRequestV1{OpenJoining: &account, OpenChannels: &names}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	added := func() []string {
+		t.Helper()
+		var out []string
+		for _, e := range allAuditEvents(t, s) {
+			if e.Action == AuditOpenChannelAdded && e.Subject == channelSubject(red.ID) {
+				out = append(out, e.Detail)
+			}
+		}
+		return out
+	}
+	if _, err := s.CreateChannel(ctx, "blue"); err != nil {
+		t.Fatal(err)
+	}
+	put("red")
+	if got := added(); len(got) != 1 || got[0] != "visibility=private->public" {
+		t.Fatalf("open_channel_added details = %q, want one visibility=private->public", got)
+	}
+	put("blue")
+	if ch, err := s.ChannelByID(ctx, red.ID); err != nil || ch.Visibility != schema.ChannelPublic || ch.IsDefault {
+		t.Fatalf("red after unlisting = %+v, %v; want public, not default", ch, err)
+	}
+	put("red", "blue")
+	if got := added(); len(got) != 2 || got[1] != "" {
+		t.Fatalf("open_channel_added details = %q, want the second with no detail", got)
 	}
 }

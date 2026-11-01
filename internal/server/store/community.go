@@ -367,9 +367,13 @@ func closeGuestInvitesTx(ctx context.Context, tx execer, now time.Time) (int64, 
 	return int64(len(found)), nil
 }
 
+// affected is how many rows a step changed, for its count. A driver that
+// cannot say is logged and counted as 0: the count is a report, and the
+// step's own error decides whether the migration goes on.
 func affected(res sql.Result) int64 {
 	n, err := res.RowsAffected()
 	if err != nil {
+		slog.Warn("store: migration 40 could not count the rows a step changed", "error", err)
 		return 0
 	}
 	return n
@@ -382,19 +386,24 @@ func affected(res sql.Result) int64 {
 // Option B (design §3.4) the joining settings' open_channels is the set of
 // default channels; until channel settings ship (I3a) listing a channel
 // there is how it becomes public, as migration 40 made every open channel
-// public. Unmarking keeps the channel's visibility.
-func setDefaultChannelTx(ctx context.Context, tx execer, channelID int64, isDefault bool, listedBy int64) error {
-	var err error
+// public. Unmarking keeps the channel's visibility. It reports whether
+// marking it made a private channel public, which the caller audits.
+func setDefaultChannelTx(ctx context.Context, tx execer, channelID int64, isDefault bool, listedBy int64) (madePublic bool, err error) {
 	if isDefault {
+		var was string
+		if err := tx.QueryRowContext(ctx, "SELECT visibility FROM channels WHERE id = ?", channelID).Scan(&was); err != nil {
+			return false, fmt.Errorf("store: set default channel %d: %w", channelID, err)
+		}
 		_, err = tx.ExecContext(ctx,
 			"UPDATE channels SET visibility = 'public', is_default = 1, default_listed_by = ? WHERE id = ?",
 			nullableID(listedBy), channelID)
+		madePublic = was != string(schema.ChannelPublic)
 	} else {
 		_, err = tx.ExecContext(ctx,
 			"UPDATE channels SET is_default = 0, default_listed_by = NULL WHERE id = ?", channelID)
 	}
 	if err != nil {
-		return fmt.Errorf("store: set default channel %d: %w", channelID, err)
+		return false, fmt.Errorf("store: set default channel %d: %w", channelID, err)
 	}
-	return nil
+	return madePublic, nil
 }

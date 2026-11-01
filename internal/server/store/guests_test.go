@@ -449,7 +449,7 @@ func TestGuestMigrationFromSchema30(t *testing.T) {
 		{"SELECT COUNT(*) FROM invites WHERE join_as = 'account'", 1},
 		{"SELECT COUNT(*) FROM guest_visits", 0},
 		{"SELECT COUNT(*) FROM message_guest_attribution", 0},
-		{"SELECT COUNT(*) FROM open_channels", 0},
+		{"SELECT COUNT(*) FROM channels WHERE is_default = 1", 0},
 	} {
 		var n int
 		if err := s.db.QueryRow(c.q).Scan(&n); err != nil || n != c.want {

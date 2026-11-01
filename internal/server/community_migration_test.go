@@ -79,6 +79,9 @@ func TestCommunityMigrationApprovalChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Migration 41 and later: extend this undo list (and its twin,
+	// rewindToBeforeCommunity in internal/server/store) with your DDL in
+	// reverse, or the database stays newer than 39 and migration 40 never runs.
 	for _, stmt := range []string{
 		// Undo migration 40's DDL: the database is as a server at 39 held it.
 		"DROP TRIGGER channels_default_public_insert",

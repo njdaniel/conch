@@ -570,7 +570,7 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 			if nextIDs[ch.ID] {
 				continue
 			}
-			if err := setDefaultChannelTx(ctx, tx, ch.ID, false, 0); err != nil {
+			if _, err := setDefaultChannelTx(ctx, tx, ch.ID, false, 0); err != nil {
 				return err
 			}
 			if err := appendAuditEventTx(ctx, tx, actor, AuditOpenChannelRemoved, channelSubject(ch.ID), "", now); err != nil {
@@ -585,10 +585,17 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 			if curIDs[id] {
 				continue
 			}
-			if err := setDefaultChannelTx(ctx, tx, id, true, actorID); err != nil {
+			madePublic, err := setDefaultChannelTx(ctx, tx, id, true, actorID)
+			if err != nil {
 				return err
 			}
-			if err := appendAuditEventTx(ctx, tx, actor, AuditOpenChannelAdded, channelSubject(id), "", now); err != nil {
+			// Listing a private channel makes it public (until I7 refuses it):
+			// the row says so, as it changes who may find the channel.
+			detail := ""
+			if madePublic {
+				detail = "visibility=private->public"
+			}
+			if err := appendAuditEventTx(ctx, tx, actor, AuditOpenChannelAdded, channelSubject(id), detail, now); err != nil {
 				return err
 			}
 		}
