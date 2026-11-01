@@ -177,7 +177,7 @@ describe('new channel', () => {
   });
 
   // Issue #1032: what an operator sees first on a server with no channels.
-  it('shows an operator with no channels the first-run panel, and the members column says no channel is open', async () => {
+  it('shows an operator with no channels the first-run panel', async () => {
     serve(operator, (name) => made(name, 1), []);
     render(<App origin={origin} />);
     const heading = await screen.findByRole('heading', { name: 'Welcome to your server' });
@@ -192,9 +192,7 @@ describe('new channel', () => {
     expect(invite.getAttribute('aria-describedby')).toBeTruthy();
     expect(within(conversation).getByText('Make a channel first')).toBeDefined();
     expect(within(conversation).getByRole('button', { name: 'Decide how people join' })).toBeDefined();
-    const members = screen.getByRole('region', { name: 'Members list' });
-    expect(within(members).getByText('No channel open')).toBeDefined();
-    expect(within(members).queryByText('Connecting…')).toBeNull();
+    expect(within(screen.getByRole('region', { name: 'Members list' })).queryByText('Connecting…')).toBeNull();
   });
 
   it('opens the New channel form from the first-run panel, and the panel is gone once the channel is made and open', async () => {

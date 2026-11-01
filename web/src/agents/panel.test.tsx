@@ -132,6 +132,8 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 interface Server {
   sessionCreates: Json[];
   sessionStatus: () => number;
+  // The channels /v1/channels lists; two unless a test says otherwise.
+  channels: Json[];
   deletes: { id: number; keepalive: boolean | undefined }[];
   runList: Json[];
   runListUrls: string[];
@@ -170,6 +172,7 @@ function install() {
   server = {
     sessionCreates: [],
     sessionStatus: () => 201,
+    channels: [{ id: 7, name: 'general', created_at: at }, { id: 8, name: 'ops', created_at: at }],
     deletes: [],
     runList: [],
     runListUrls: [],
@@ -199,7 +202,7 @@ function install() {
       const path = url.pathname;
       const method = init?.method ?? 'GET';
       if (path === '/v1/whoami') return Promise.resolve(json(me));
-      if (path === '/v1/channels') return Promise.resolve(json({ channels: [{ id: 7, name: 'general', created_at: at }, { id: 8, name: 'ops', created_at: at }] }));
+      if (path === '/v1/channels') return Promise.resolve(json({ channels: server.channels }));
       if (path === '/v1/ws-tickets') return Promise.resolve(json({ ticket: ticketValue, expires_at: at }, 201));
       if (path === '/v1/sessions' && method === 'POST') {
         server.sessionCreates.push(JSON.parse(init?.body as string) as Json);
@@ -347,6 +350,27 @@ describe('the browser own session', () => {
     expect(panel().getByText('Could not start a session')).toBeDefined();
     expect(events()).toHaveLength(0);
     expect(server.sessionCreates).toHaveLength(1);
+  });
+});
+
+describe('with no channel open (issue #1032)', () => {
+  it('says No channel open, never Connecting', async () => {
+    server.channels = [];
+    window.sessionStorage.setItem('conch.web.token', secret);
+    render(<App origin={origin} />);
+    const members = await screen.findByRole('region', { name: 'Members list' });
+    await within(members).findByText('No channel open');
+    expect(within(members).queryByText('Connecting…')).toBeNull();
+  });
+
+  it('still says a session that could not be started', async () => {
+    server.channels = [];
+    server.sessionStatus = () => 429;
+    window.sessionStorage.setItem('conch.web.token', secret);
+    render(<App origin={origin} />);
+    const members = await screen.findByRole('region', { name: 'Members list' });
+    await within(members).findByText('Could not start a session');
+    expect(within(members).queryByText('No channel open')).toBeNull();
   });
 });
 

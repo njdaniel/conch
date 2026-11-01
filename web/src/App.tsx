@@ -1672,18 +1672,19 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               <InvitePanel origin={origin} me={auth.principal} channels={channels.channels} onUnauthorized={onUnauthorized} />
             ) : null
           }
+          firstRun={
+            // An operator on a server with no channels is shown what to do
+            // first; anyone else keeps the channel list's own line.
+            channels.loaded && channels.channels.length === 0 && auth.principal.role === 'operator' && visit === null ? (
+              <FirstRun
+                onMakeChannel={() => {
+                  setCreateAsks((n) => n + 1);
+                }}
+              />
+            ) : null
+          }
           conversation={
-            selected === null || channelId === null ? (
-              // An operator on a server with no channels is shown what to do
-              // first; anyone else keeps the channel list's own line.
-              channels.loaded && channels.channels.length === 0 && auth.principal.role === 'operator' && visit === null ? (
-                <FirstRun
-                  onMakeChannel={() => {
-                    setCreateAsks((n) => n + 1);
-                  }}
-                />
-              ) : null
-            ) : (
+            selected === null || channelId === null ? null : (
               <>
                 {agents.state.detail === null ? null : <RunDetail agents={agents} now={now} onGoToMessage={goToMessage} />}
                 {!searchOpen ? null : (

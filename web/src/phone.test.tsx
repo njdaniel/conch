@@ -104,7 +104,8 @@ function lobby({
   live = false,
   onOpen = () => undefined,
   joined = () => undefined,
-}: { channels?: ChannelsState; live?: boolean; onOpen?: (name: string) => void; joined?: () => void } = {}) {
+  firstRun,
+}: { channels?: ChannelsState; live?: boolean; onOpen?: (name: string) => void; joined?: () => void; firstRun?: ReactNode } = {}) {
   const page = (voice: ReactNode, shown: ChannelsState = channels) => (
     <Lobby
       origin="http://127.0.0.1:8080"
@@ -113,7 +114,8 @@ function lobby({
       channels={shown}
       unread={new Map()}
       connection="connected"
-      conversation={<Conversation />}
+      conversation={firstRun === undefined ? <Conversation /> : null}
+      firstRun={firstRun}
       panel={<p>Nobody</p>}
       voice={voice}
       invites={null}
@@ -188,6 +190,27 @@ describe('the bottom navigation', () => {
     cleanup();
     lobby();
     expect(tab('Chat').getAttribute('aria-current')).toBe('page');
+  });
+});
+
+describe('the first-run panel (issue #1032)', () => {
+  const none: ChannelsState = { channels: [], loaded: true, selected: null };
+  const panel = <h2 id={headingId} tabIndex={-1}>Welcome</h2>;
+
+  it('is drawn in the Channels view on a phone, where the centre is not shown, and once', () => {
+    windowOf(true);
+    lobby({ channels: none, firstRun: panel });
+    expect(screen.getAllByRole('heading', { name: 'Welcome' })).toHaveLength(1);
+    const channels = screen.getByRole('navigation', { name: 'Channels' });
+    expect(within(channels).getByRole('heading', { name: 'Welcome' })).toBeTruthy();
+    expect(tab('Channels').getAttribute('aria-current')).toBe('page');
+  });
+
+  it('stands where the conversation would on a wide window, and once', () => {
+    windowOf(false);
+    lobby({ channels: none, firstRun: panel });
+    expect(screen.getAllByRole('heading', { name: 'Welcome' })).toHaveLength(1);
+    expect(within(screen.getByRole('region', { name: 'Conversation' })).getByRole('heading', { name: 'Welcome' })).toBeTruthy();
   });
 });
 

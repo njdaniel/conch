@@ -134,9 +134,6 @@ export function MembersPanel({ agents, now, controls }: { readonly agents: Agent
   const runs = state.runs;
   const folded = joined.agents.length === 0 && runs.loaded && !runs.loading && runs.note === null && runs.list.length === 0;
 
-  // Nothing is open, so nothing is being connected to, and nothing failed
-  // (issue #1032).
-  if (controls === null && !live) return <p role="status">No channel open</p>;
   if (session.phase === 'failed') {
     return (
       <div>
@@ -146,6 +143,9 @@ export function MembersPanel({ agents, now, controls }: { readonly agents: Agent
     );
   }
   if (!live) {
+    // Nothing is open, so nothing is being connected to (issue #1032). A
+    // session that failed to start is said above, whatever is open.
+    if (controls === null) return <p role="status">No channel open</p>;
     return state.settled ? (
       <p role="status">Members unavailable</p>
     ) : (
