@@ -410,14 +410,45 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	r.claimDone = done
 	p.mu.Unlock()
 	defer func() {
-		p.mu.Lock()
-		r.claimer = 0
-		r.claimDone = nil
-		close(done)
-		delete(p.retiring, r)
-		p.mu.Unlock()
+		// A withdrawal retireRoom left owing (issue #1087) is paid here, with
+		// only the claims held, while claimer is still set, so nothing can
+		// record a debt after the last look; claimDone closes after it. A
+		// second withdrawal for a principal the claim already withdrew is
+		// harmless: withdrawAll is idempotent.
+		paid := false
+		for {
+			p.mu.Lock()
+			owed := r.owedWithdraw
+			r.owedWithdraw = 0
+			if owed == 0 {
+				r.claimer = 0
+				r.claimDone = nil
+				close(done)
+				// Only a claim that was handed the debt closes withdrawDone,
+				// and only after paying it: for any other claim it belongs
+				// to the retireRoom that opened it, which withdraws after
+				// this claim has let go (a claim that finds the room retired
+				// refuses at once). Likewise the retiring entry: a claim's
+				// own (a principal's id) goes, the sentinel 0 is retireRoom's.
+				if paid && r.withdrawDone != nil {
+					close(r.withdrawDone)
+					r.withdrawDone = nil
+				}
+				if pid, ok := p.retiring[r]; ok && pid != 0 {
+					delete(p.retiring, r)
+				}
+				p.mu.Unlock()
+				return
+			}
+			p.mu.Unlock()
+			p.withdrawAll(context.WithoutCancel(ctx), r, owed, voiceRoomPublishes(room))
+			paid = true
+		}
 	}()
 
+	if p.claimSeam != nil {
+		p.claimSeam("claimed")
+	}
 	r.order.Lock()
 	p.mu.Lock()
 	if r.retired {
