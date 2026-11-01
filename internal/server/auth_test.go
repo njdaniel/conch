@@ -192,6 +192,11 @@ var routeExpectations = map[string]routeExpectation{
 	// Member channel creation and channel settings (issue #981).
 	"POST /v1/channels":              {classAuth, "/v1/channels", `{}`, 400},
 	"PUT /v1/channels/{id}/settings": {classPerm, "/v1/channels/9999/settings", `{}`, 400},
+	// The channel directory, self-join and leave (issue #982). Join and
+	// leave name a channel that does not exist, so they change nothing.
+	"GET /v1/directory/channels":        {classAuth, "/v1/directory/channels", "", 200},
+	"POST /v1/channels/{channel}/join":  {classAuth, "/v1/channels/never-made/join", "", 404},
+	"POST /v1/channels/{channel}/leave": {classAuth, "/v1/channels/never-made/leave", "", 404},
 	// Both membership writes are no-ops in the fixture (alice is already a
 	// member; ghost, id 4, is not), so they change nothing and audit nothing.
 	"GET /v1/channels/{channel}/members":                   {classAuth, "/v1/channels/general/members", "", 200},
@@ -653,7 +658,7 @@ func TestRoleMatrix(t *testing.T) {
 			// reports (issue #446) and message edits (issue #845: message
 			// 9999 does not exist, so a person gets message_not_found, and an
 			// agent is refused before any lookup).
-			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" || rt.pattern == "POST /v1/channels" || isMessageEditRoute(rt.pattern) {
+			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" || rt.pattern == "POST /v1/channels" || isSelfMembershipRoute(rt.pattern) || isMessageEditRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// Signing out (issue #439) succeeds for any member and revokes
@@ -1523,4 +1528,14 @@ func TestUnsetAuthModeRequiresCredentials(t *testing.T) {
 			}
 		})
 	}
+}
+
+// isSelfMembershipRoute: the channel directory, self-join and leave are a
+// community member's (issue #982); an agent is refused before any lookup.
+func isSelfMembershipRoute(pattern string) bool {
+	switch pattern {
+	case "GET /v1/directory/channels", "POST /v1/channels/{channel}/join", "POST /v1/channels/{channel}/leave":
+		return true
+	}
+	return false
 }

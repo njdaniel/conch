@@ -80,6 +80,23 @@ There is no migration and no wire change since `alpha.8`, so rolling back to
     `visibility` and `default`, and a settings change sends the channel
     document. `POST /v0/channels` stays operator-only and makes a private
     channel.
+- **The channel directory; members join and leave channels themselves**
+  (#982, community model I3b).
+  - `GET /v1/directory/channels` lists every public channel and the private
+    channels the caller is in, each with `joined`, `default`, `visibility`
+    and (when joined) `manages`, and no member counts or names.
+    `?scope=all` lists every channel with its `members` count, for holders
+    of `manage_channels` only. Agents and guests are refused.
+  - `POST /v1/channels/{channel}/join` joins a public channel, as a member
+    who does not decide its approvals and with its whole history. Joining a
+    channel you are in returns your membership unchanged. A private channel
+    you are not in answers the same 404 as one that does not exist. Agents
+    and guests get 403 `channel_not_joinable`.
+  - `POST /v1/channels/{channel}/leave` leaves any channel you are in, and a
+    manager's grant goes with it. The last member of a private channel may
+    not leave it (409 `channel_last_member`). A decider who leaves takes
+    their decisions with them: pending approvals count only the deciders
+    who remain.
 - **Attach any file the server accepts** (#1035). The composer's Attach
   button (it was "Attach images") takes any file, by the picker, a paste or
   a drop.

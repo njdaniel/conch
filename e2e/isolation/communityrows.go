@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -73,4 +74,33 @@ func (w *world) publicA() error {
 	w.a.public, w.a.publicID = resp.Channel.Name, resp.Channel.ID
 	var msg schema.PostMessageResponseV2
 	return ann.api.call(http.MethodPost, "/v2/channels/"+w.a.public+"/messages", schema.PostMessageRequestV2{Body: w.uName("word-public")}, &msg)
+}
+
+// checkDirectory is the directory row's check (issue #982): B's member's
+// listing holds A's public channel, not joined and with no count, and none
+// of A's private channels; no row carries a member count.
+func checkDirectory(w *world, _ api, body []byte) error {
+	var resp schema.ChannelDirectoryResponseV1
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return err
+	}
+	public := false
+	for _, c := range resp.Channels {
+		if c.Members != nil {
+			return fmt.Errorf("the member's directory counts the members of channel %d", c.ID)
+		}
+		if slices.Contains(w.a.chanIDs, c.ID) {
+			return fmt.Errorf("the private channel %d of A's is in B's directory", c.ID)
+		}
+		if c.ID == w.a.publicID {
+			if c.Joined || c.Visibility != schema.ChannelPublic {
+				return fmt.Errorf("the public channel of A's in B's directory = %+v, want public and not joined", c)
+			}
+			public = true
+		}
+	}
+	if !public {
+		return fmt.Errorf("the public channel %d of A's is not in B's directory", w.a.publicID)
+	}
+	return nil
 }

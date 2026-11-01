@@ -228,6 +228,17 @@ func coreMatrixRows() []row {
 			public := schema.ChannelPublic
 			return put("/v1/channels/"+id(s.id)+"/settings", schema.ChannelSettingsRequestV1{Visibility: &public})
 		}),
+		// The channel directory (issue #982): B's member finds A's public
+		// channel and none of A's private ones, with no counts; the
+		// listing of every channel is manage_channels', refused to her.
+		{route: "GET /v1/directory/channels", what: "lists the channel directory", own: true, inspect: checkDirectory,
+			probe: func(*world, subject) probe { return get("/v1/directory/channels") }},
+		{route: "GET /v1/directory/channels", what: "lists every channel with ?scope=all", want: operatorOnly,
+			probe: func(*world, subject) probe { return get("/v1/directory/channels?scope=all") }},
+		// Self-join and leave (issue #982): A's private channel is the
+		// ghost's 404, whichever she asks.
+		byChannel("POST /v1/channels/{channel}/join", "joins A's private channel", func(_ *world, s subject) probe { return post(ch(s)+"/join", nil) }),
+		byChannel("POST /v1/channels/{channel}/leave", "leaves A's private channel", func(_ *world, s subject) probe { return post(ch(s)+"/leave", nil) }),
 		// Renaming a channel (issue #791) hides A's channel from B's members,
 		// including a manager of a different channel.
 		byChannel("PUT /v1/channels/{id}/name", "renames A's channel", func(_ *world, s subject) probe {

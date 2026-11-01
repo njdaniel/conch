@@ -32,6 +32,13 @@ func (s *Server) routeTable() []route {
 		// agent and a guest are refused before the handler runs.
 		rt("POST /v1/channels", accessAuthenticated, s.humansOnlyBecause(denyAgentChannelCreate, "agents cannot create channels", s.membersOnly(hf(s.handleCreateChannelV1)))),
 		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
+		// The channel directory, self-join and leave (issue #982). The
+		// directory and leave are for community members: an agent and a
+		// guest are refused before the handler runs. Join refuses them in
+		// the handler, with its own code, before any lookup.
+		rt("GET /v1/directory/channels", accessAuthenticated, s.humansOnlyBecause(denyAgentDirectory, "agents cannot list the channel directory", s.membersOnly(hf(s.handleChannelDirectory)))),
+		rt("POST /v1/channels/{channel}/join", accessAuthenticated, hf(s.handleJoinChannel)),
+		rt("POST /v1/channels/{channel}/leave", accessAuthenticated, s.humansOnlyBecause(denyAgentLeave, "an agent's channels are its operator's to change", s.membersOnly(hf(s.handleLeaveChannel)))),
 		// Channel settings (issue #981, ADR-013 O5): visibility and the
 		// default mark. manage_channels, refused before any lookup, so a
 		// caller without it learns nothing of which ids exist.

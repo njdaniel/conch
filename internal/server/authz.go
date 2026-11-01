@@ -60,6 +60,11 @@ const (
 	// denyAgentChannelCreate: channels are made by community members
 	// (issue #981); an agent is never one.
 	denyAgentChannelCreate = "agents_no_channel_create"
+	// denyAgentDirectory and denyAgentLeave: the channel directory and
+	// leaving are a community member's (issue #982); an agent's channels
+	// are set by its operator.
+	denyAgentDirectory = "agents_no_directory"
+	denyAgentLeave     = "agents_no_leave"
 )
 
 var (
