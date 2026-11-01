@@ -3,7 +3,7 @@ import { createCredentialResponseV1, createPrincipalResponse, type CreateCredent
 import { postMessageResponseV2 } from '../src/schema/message';
 import { listNetsResponseV1 } from '../src/schema/net';
 import { history, post, reply } from './api';
-import { channelButton, expect, expectFits, phones, signIn, test } from './fixtures';
+import { channelButton, expect, expectFits, phoneSizes, phones, signIn, test } from './fixtures';
 import { call, ok, principalId } from './world';
 
 let next = 0;
@@ -21,7 +21,7 @@ test('desktop reply and history use the same one-level thread', async ({ meet, w
   const root = await post(world, world.tokens.browser, 'general', unique('root'));
   const body = unique('desktop reply');
   let thread = await openThread(page, root.id);
-  const composer = thread.getByRole('textbox', { name: `Reply to message #${String(root.id)}` });
+  const composer = thread.getByRole('textbox', { name: /^Reply to (?!message )/ });
   await composer.fill(body);
   await composer.press('Enter');
   await expect(thread.getByText(body, { exact: true })).toBeVisible();
@@ -45,7 +45,7 @@ for (const [size, options] of phones) {
     const root = await post(world, world.tokens.browser, 'general', unique(`root ${size}`));
     const thread = await openThread(page, root.id);
     const body = unique(`touch ${size}`);
-    await thread.getByRole('textbox', { name: `Reply to message #${String(root.id)}` }).fill(body);
+    await thread.getByRole('textbox', { name: /^Reply to (?!message )/ }).fill(body);
     await thread.getByRole('button', { name: 'Send reply' }).click();
     await expect(thread.getByText(body, { exact: true })).toBeVisible();
     await expectFits(page, `reply ${size}`);
@@ -99,3 +99,40 @@ test('net and whisper replies keep their authorized audience', async ({ meet, se
   const outsider = await history(world, outsiderToken, 'nets-demo');
   expect(outsider.some((message) => [netRoot.id, netReply.id, whisperRoot.id, whisperReply.id].includes(message.id))).toBe(false);
 });
+
+test('a reply from a phone shows its root and the root counts it on the desktop', async ({ meet, world }) => {
+  const desktop = await meet({ viewport: { width: 1440, height: 900 } });
+  await signIn(desktop.page, world, world.tokens.browser, 'browser-test');
+  const phone = await meet(phones[0][1]);
+  await signIn(phone.page, world, world.tokens.browser, 'browser-test');
+  const rootBody = unique('anyone up for game night');
+  const root = await post(world, world.tokens.browser, 'general', rootBody);
+  const body = unique('I am in');
+  const thread = await openThread(phone.page, root.id);
+  await thread.getByRole('textbox', { name: /^Reply to (?!message )/ }).fill(body);
+  await thread.getByRole('button', { name: 'Send reply' }).click();
+  await expect(thread.getByText(body, { exact: true })).toBeVisible();
+
+  const log = desktop.page.locator('.log');
+  await expect(log.locator(`[data-message-id="${String(root.id)}"]`).getByRole('button', { name: '1 reply' })).toBeVisible();
+  const row = log.locator('.message', { hasText: body });
+  await expect(row.getByText(new RegExp(`^Replying to .+: ${rootBody}$`))).toBeVisible();
+});
+
+for (const [size, options] of phoneSizes.filter(([size]) => size === '390×844' || size === '320×640')) {
+  test(`the reply form and buttons fit at ${size}`, async ({ meet, world }) => {
+    const { page } = await meet(options);
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    const root = await post(world, world.tokens.browser, 'general', unique(`fit ${size}`));
+    const replyButton = page.getByRole('button', { name: `Reply to message ${String(root.id)}`, exact: true });
+    const target = await replyButton.boundingBox();
+    expect(target?.width ?? 0).toBeGreaterThanOrEqual(44);
+    expect(target?.height ?? 0).toBeGreaterThanOrEqual(44);
+    const thread = await openThread(page, root.id);
+    const box = await thread.boundingBox();
+    for (const control of [thread.getByRole('textbox', { name: /^Reply to (?!message )/ }), thread.getByRole('button', { name: 'Send reply' })]) {
+      const rect = await control.boundingBox();
+      expect((rect?.x ?? 0) + (rect?.width ?? 0)).toBeLessThanOrEqual((box?.x ?? 0) + (box?.width ?? 0));
+    }
+  });
+}
