@@ -14,10 +14,11 @@ import { FEED_EVENTS } from '../../shared/bridge-names.ts';
 import { whoAmIResponseV1 } from '../../../web/src/schema/principal.ts';
 import { Client } from '../api/client.ts';
 import { Feeds, type Connect } from '../api/feeds.ts';
+import type { Files } from '../files.ts';
 import { Service } from '../api/service.ts';
 import { Session } from '../api/session.ts';
 import { DocumentGate } from '../document.ts';
-import { guardSession } from '../guards.ts';
+import { guardSession, type GuardDeps } from '../guards.ts';
 import type { ContentsLike } from '../ipc.ts';
 import { handle, SCHEME, type Manifest } from '../scheme.ts';
 import { createWindow, partitionFor } from '../window.ts';
@@ -31,6 +32,11 @@ export interface ActivationEnv {
   readonly manifest: Manifest;
   readonly readUi: (path: string) => Promise<Uint8Array>;
   readonly connect: Connect;
+  // The attachments of one activation: over its own client and session.
+  // What the session's guards need: the same ones installGuards gave the web
+  // contents, so that a new partition keeps the clipboard and link rules.
+  readonly guard: GuardDeps;
+  readonly makeFiles: (client: Client, session: Session) => Files;
   readonly now: () => number;
   readonly log: (line: string) => void;
 }
@@ -41,6 +47,7 @@ export interface ActivationEnv {
 export class Live {
   service: Service | null = null;
   feeds: Feeds | null = null;
+  files: Files | null = null;
   gate: DocumentGate = new DocumentGate();
   window: BrowserWindow | null = null;
   // True while an activation's window is being destroyed on purpose, so that
@@ -86,12 +93,13 @@ export function activationFactory(env: ActivationEnv, live: Live): (spec: Activa
       ...(bounds === undefined ? {} : { bounds }),
       prepare: (made) => {
         const ses = made.webContents.session;
-        guardSession(ses, { log: env.log });
+        guardSession(ses, env.guard);
         ses.protocol.handle(SCHEME, (request) => handle(request, { manifest: env.manifest, readFile: (path) => env.readUi(path), log: env.log }));
       },
     });
     live.service = service;
     live.feeds = feeds;
+    live.files = env.makeFiles(client, identity);
     live.gate = gate;
     live.window = window;
 

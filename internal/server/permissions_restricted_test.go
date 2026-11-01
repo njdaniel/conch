@@ -565,12 +565,21 @@ func TestRestrictedOperatorFilteredNames(t *testing.T) {
 	if len(join.Settings.OpenChannels) != 1 || join.Settings.OpenChannels[0] != "channel-b" || join.Settings.OtherOpenChannels != 1 {
 		t.Fatalf("restricted operator's open channels = %v other %d, want channel-b and 1 other", join.Settings.OpenChannels, join.Settings.OtherOpenChannels)
 	}
+	// Each half of the redaction list goes to whoever reads every name in it
+	// (decided in #1015): without manage_channels no channel or net name;
+	// with manage_members, still held here, every principal's, which it can
+	// list anyway.
 	got = decodeBody[schema.ProblemReportV1](t, f.do(t, "GET", fmt.Sprintf("/v1/reports/%d", report.ID), f.opTok, ""))
-	if got.Redact != nil {
-		t.Fatalf("restricted operator's report carries the redaction list: %+v", got.Redact)
+	if got.Redact == nil || len(got.Redact.Channels) != 0 || len(got.Redact.Principals) == 0 {
+		t.Fatalf("restricted operator's redaction list = %+v, want no channels and the principals", got.Redact)
 	}
 	if got.Did == "" {
 		t.Fatal("the report's own text was lost")
+	}
+	// Without manage_members too, there is no list at all.
+	f.withhold(t, schema.PermManageMembers, schema.PermActAsMembers)
+	if got := decodeBody[schema.ProblemReportV1](t, f.do(t, "GET", fmt.Sprintf("/v1/reports/%d", report.ID), f.opTok, "")); got.Redact != nil {
+		t.Fatalf("an operator with neither permission got a redaction list: %+v", got.Redact)
 	}
 	// The owner still sees everything.
 	if got := decodeBody[schema.ProblemReportV1](t, f.do(t, "GET", fmt.Sprintf("/v1/reports/%d", report.ID), f.rootTok, "")); got.Redact == nil {

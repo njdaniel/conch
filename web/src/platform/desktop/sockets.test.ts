@@ -51,6 +51,9 @@ function install(): Subscription[] {
     profileSwitch: unexpected('profileSwitch'),
     storageRetry: unexpected('storageRetry'),
     profilesRecover: unexpected('profilesRecover'),
+    uploadFile: unexpected('uploadFile'),
+    downloadFile: unexpected('downloadFile'),
+    saveFile: unexpected('saveFile'),
   };
   Object.defineProperty(window, 'conchDesktop', { value: bridge, configurable: true, writable: true });
   return subscriptions;

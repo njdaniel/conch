@@ -75,7 +75,7 @@ func (f *standingFixture) setOperatorCells(t *testing.T, granted bool, perms ...
 	for _, p := range perms {
 		req.Changes = append(req.Changes, schema.PermissionChangeV1{Permission: p, Role: schema.PermissionRoleOperator, Granted: granted})
 	}
-	if _, err := f.s.PutPermissions(f.ctx, "system", f.owner.ID, req, time.Now()); err != nil {
+	if _, err := f.s.PutPermissions(f.ctx, principalActor(f.owner.ID), f.owner.ID, req, time.Now()); err != nil {
 		t.Fatalf("set operator cells %v %t: %v", perms, granted, err)
 	}
 }
@@ -189,7 +189,9 @@ func (f *standingFixture) putJoin(actorID int64, req schema.PutJoinSettingsReque
 
 func (f *standingFixture) openChannelListers(t *testing.T) map[int64]sql.NullInt64 {
 	t.Helper()
-	rows, err := f.s.db.QueryContext(f.ctx, "SELECT channel_id, added_by FROM open_channels")
+	// The open channels are the default channels, and their lister is
+	// channels.default_listed_by, since migration 40 (issue #979).
+	rows, err := f.s.db.QueryContext(f.ctx, "SELECT id, default_listed_by FROM channels WHERE is_default = 1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +382,7 @@ func TestJoinAsAccountKeepsOnlyVouchedChannels(t *testing.T) {
 		if err := f.putJoin(f.op.ID, schema.PutJoinSettingsRequestV1{OpenJoining: ptrMode(schema.OpenJoiningAccount), OpenChannels: &[]string{"channel-b"}}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := f.s.db.ExecContext(f.ctx, "UPDATE open_channels SET added_by = NULL"); err != nil {
+		if _, err := f.s.db.ExecContext(f.ctx, "UPDATE channels SET default_listed_by = NULL"); err != nil {
 			t.Fatal(err)
 		}
 		f.setOperatorCells(t, false, schema.PermManageChannels)
@@ -440,7 +442,7 @@ func TestMayInviteBrakeIsNotThePermission(t *testing.T) {
 			{Permission: schema.PermMakeMemberLinks, Role: schema.PermissionRoleMember, Granted: granted},
 			{Permission: schema.PermMakeMemberLinks, Role: schema.PermissionRoleOperator, Granted: granted},
 		}}
-		if _, err := f.s.PutPermissions(f.ctx, "system", f.owner.ID, req, time.Now()); err != nil {
+		if _, err := f.s.PutPermissions(f.ctx, principalActor(f.owner.ID), f.owner.ID, req, time.Now()); err != nil {
 			t.Fatalf("make_member_links %t: %v", granted, err)
 		}
 	}

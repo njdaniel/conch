@@ -145,15 +145,18 @@ func (w *world) hold(m *member, channel, room string) (holder, error) {
 	if h.sockets, err = openAll(m, channel); err != nil {
 		return h, err
 	}
-	occ, err := openOccupancy(m)
-	if err != nil {
-		return h, err
+	if m.guest == nil {
+		// A guest has no occupancy socket either (see openAll).
+		occ, err := openOccupancy(m)
+		if err != nil {
+			return h, err
+		}
+		h.sockets = append(h.sockets, occ...)
 	}
-	h.sockets = append(h.sockets, occ...)
 	if h.ticket, err = m.api.ticket(); err != nil {
 		return h, err
 	}
-	if w.lk != nil {
+	if w.lk != nil && m.guest == nil {
 		sess, err := w.session(m, channel)
 		if err != nil {
 			return h, err
@@ -186,7 +189,7 @@ func (w *world) staysOut(holders []holder, bounds voiceBounds) error {
 		if r.status != http.StatusUnauthorized {
 			return fmt.Errorf("%s's kept ticket: status %d %s, want 401", h.m.name, r.status, strings.TrimSpace(string(r.body)))
 		}
-		if w.lk == nil {
+		if w.lk == nil || h.m.guest != nil {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(stopCtx, 15*time.Second)

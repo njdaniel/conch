@@ -126,6 +126,9 @@ export function createBridge(invoke: Invoke, listen: Listen): Readonly<ConchDesk
     joinAsGuest: call('joinAsGuest'),
     createAccount: call('createAccount'),
     signOut: call('signOut'),
+    uploadFile: call('uploadFile'),
+    downloadFile: call('downloadFile'),
+    saveFile: call('saveFile'),
     // The saved server profiles (issue #945).
     profiles: call('profiles'),
     profileAdd: call('profileAdd'),

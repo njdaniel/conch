@@ -65,6 +65,9 @@ describe('secret handling in desktop/main', () => {
     // The voice endpoint (#948) makes its private runtime directories and
     // removes stale sockets from them; it writes no file's content.
     const endpointOnly = new Set(['mkdir', 'chmod', 'unlink']);
+    // The one attachment writer (#947): bytes at a path the person chose in
+    // the save dialog.
+    const chosenFileOnly = new Set(['open', 'constants']);
     const offenders: string[] = [];
     for (const f of files) {
       const text = stripComments(f.text);
@@ -78,7 +81,7 @@ describe('secret handling in desktop/main', () => {
         }
         for (const raw of named.split(',')) {
           const name = raw.trim().split(/\s+as\s+/)[0] ?? '';
-          const allowed = readOnly.has(name) || (f.rel === 'voice/endpoint.ts' && endpointOnly.has(name));
+          const allowed = readOnly.has(name) || (f.rel === 'voice/endpoint.ts' && endpointOnly.has(name)) || (f.rel === 'save-file.ts' && chosenFileOnly.has(name));
           if (name !== '' && !allowed && !writers.has(f.rel)) {
             offenders.push(`${f.rel}: ${name}`);
           }

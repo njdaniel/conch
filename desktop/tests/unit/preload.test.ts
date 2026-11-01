@@ -36,6 +36,9 @@ const named: Record<keyof ConchDesktopBridge, true> = {
   profileSwitch: true,
   storageRetry: true,
   profilesRecover: true,
+  uploadFile: true,
+  downloadFile: true,
+  saveFile: true,
 };
 
 describe('the preload', () => {
@@ -62,7 +65,7 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:serverAddress');
     await bridge.signInWithPassword({ name: 'a', password: 'b' });
     expect(invoke).toHaveBeenLastCalledWith('conch:signInWithPassword', { name: 'a', password: 'b' });
-    expect(INVOKED_FUNCTIONS).toHaveLength(25);
+    expect(INVOKED_FUNCTIONS).toHaveLength(28);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {

@@ -38,14 +38,23 @@ func legacyExec(t *testing.T, srv *Server, query string, args ...any) {
 // legacySettingRows writes join settings rows as given, and the open
 // channels, underneath the store: what a server from before issue #1005
 // could hold, which Open would turn off and no route can write now.
+//
+// Since migration 40 (issue #979) the mode is stored as open_signup and the
+// open channels are the default channels, so the rows are written as that
+// migration leaves them: open_joining account or both as open_signup true,
+// guest or off as false, and each channel a public default.
 func legacySettingRows(t *testing.T, srv *Server, rows map[string]string, channels ...store.Channel) {
 	t.Helper()
 	for k, v := range rows {
+		if k == "open_joining" {
+			k = "open_signup"
+			v = strconv.FormatBool(v == string(schema.OpenJoiningAccount) || v == string(schema.OpenJoiningBoth))
+		}
 		legacyExec(t, srv, `INSERT INTO server_settings (key, value, updated_at) VALUES (?, ?, 0)
 			ON CONFLICT (key) DO UPDATE SET value = excluded.value`, k, v)
 	}
 	for _, c := range channels {
-		legacyExec(t, srv, `INSERT OR IGNORE INTO open_channels (channel_id, added_at) VALUES (?, 0)`, c.ID)
+		legacyExec(t, srv, `UPDATE channels SET visibility = 'public', is_default = 1 WHERE id = ?`, c.ID)
 	}
 }
 

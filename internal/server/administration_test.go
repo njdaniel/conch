@@ -163,6 +163,13 @@ func TestAdministrationRouteMatrix(t *testing.T) {
 	selfRoute := func(allowed want) [7]want {
 		return [7]want{allowed, allowed, forbidden, forbidden, forbidden, forbidden, forbidden}
 	}
+	// An owner's alone by default, by a permission (ADR-014, #1015): an
+	// operator is told which permission it lacks; everyone else's answer is
+	// the owner route's, unchanged.
+	ownerByDefaultRoute := func(allowed want) [7]want {
+		denied := want{http.StatusForbidden, schema.ErrorCodePermissionDenied, true}
+		return [7]want{allowed, denied, forbidden, forbidden, forbidden, forbidden, forbidden}
+	}
 	rows := []struct {
 		name, method, path, body string
 		// nosuch is the same request on a channel that never existed, for
@@ -171,8 +178,8 @@ func TestAdministrationRouteMatrix(t *testing.T) {
 		want   [7]want
 	}{
 		{"set a role", "PUT", fmt.Sprintf("/v1/principals/%d/role", f.cand.ID), `{"role":"bogus"}`, "", ownerRoute(bad)},
-		{"export the audit log", "GET", "/v1/audit?limit=1", "", "", ownerRoute(ok)},
-		{"change the joining settings", "PUT", "/v1/join/settings", `{}`, "", ownerRoute(bad)},
+		{"export the audit log", "GET", "/v1/audit?limit=1", "", "", ownerByDefaultRoute(ok)},
+		{"change the joining settings", "PUT", "/v1/join/settings", `{}`, "", ownerByDefaultRoute(bad)},
 		{"add a member by id", "PUT", fmt.Sprintf("/v1/channels/general/members/%d", f.cand.ID), `{"bogus":true}`,
 			fmt.Sprintf("/v1/channels/nosuch/members/%d", f.cand.ID),
 			[7]want{bad, bad, bad, forbidden, forbidden, forbidden, hidden}},
