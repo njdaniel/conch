@@ -1,16 +1,21 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/njdaniel/conch/internal/server/livekit"
 )
@@ -199,6 +204,10 @@ type staticHandler struct {
 	src webSource
 	// csp is the Content-Security-Policy to send; empty means webCSP.
 	csp string
+
+	gzMu    sync.Mutex
+	gzCache map[string]gzEntry
+	gzBytes int
 }
 
 func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -263,7 +272,119 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		hd.Set("Cache-Control", "no-cache")
 	}
+	if gzippable(name) {
+		hd.Add("Vary", "Accept-Encoding")
+		if acceptsGzip(r) && r.Header.Get("Range") == "" {
+			if gz, ok := h.gzipped(name, fi, f); ok {
+				// Set the type from the name: ServeContent would otherwise
+				// sniff it from the compressed bytes.
+				hd.Set("Content-Type", mime.TypeByExtension(path.Ext(name)))
+				hd.Set("Content-Encoding", "gzip")
+				http.ServeContent(w, r, path.Base(name), fi.ModTime(), bytes.NewReader(gz))
+				return
+			}
+			// Compression declined: the read position is unknown.
+			if _, err := f.Seek(0, io.SeekStart); err != nil {
+				http.NotFound(w, r)
+				return
+			}
+		}
+	}
 	http.ServeContent(w, r, path.Base(name), fi.ModTime(), f)
+}
+
+// Compression of the client's static files (issue #1037). Only this handler
+// compresses: /app/ serves public files the build produced, never a secret or
+// anything built from a request, so a compressed size can reveal nothing
+// (BREACH needs a secret and attacker-chosen input in one compressed body).
+// No API, WebSocket, MCP or attachment route goes through here; the allowlist
+// below is a second guard that keeps a stray file of another type plain.
+const (
+	gzMinSize  = 1024     // smaller than this is not worth a gzip header
+	gzMaxSize  = 16 << 20 // larger is served plain rather than held in memory
+	gzMaxCache = 32 << 20 // total compressed bytes kept
+)
+
+// gzipExts are the text types of a built client. Images, fonts and wasm are
+// already compressed or are served as they are.
+var gzipExts = map[string]bool{
+	".html": true, ".js": true, ".mjs": true, ".css": true, ".svg": true,
+	".json": true, ".map": true, ".txt": true, ".webmanifest": true,
+}
+
+// gzippable reports whether name is a text type worth compressing whose
+// Content-Type is known from its extension alone.
+func gzippable(name string) bool {
+	ext := path.Ext(name)
+	return gzipExts[strings.ToLower(ext)] && mime.TypeByExtension(ext) != ""
+}
+
+// acceptsGzip reports whether the request lists gzip (or *) with a non-zero
+// quality in Accept-Encoding.
+func acceptsGzip(r *http.Request) bool {
+	for _, v := range r.Header.Values("Accept-Encoding") {
+		for _, part := range strings.Split(v, ",") {
+			tok, params, _ := strings.Cut(strings.TrimSpace(part), ";")
+			tok = strings.ToLower(strings.TrimSpace(tok))
+			if tok != "gzip" && tok != "*" {
+				continue
+			}
+			params = strings.ReplaceAll(strings.ToLower(params), " ", "")
+			if q, ok := strings.CutPrefix(params, "q="); ok {
+				if strings.Trim(q, "0.") == "" {
+					continue
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
+type gzEntry struct {
+	size int64
+	mod  time.Time
+	data []byte
+}
+
+// gzipped returns the gzip form of f (read from its start), cached by name
+// until the file's size or modification time changes.
+func (h *staticHandler) gzipped(name string, fi fs.FileInfo, f io.Reader) ([]byte, bool) {
+	if fi.Size() < gzMinSize || fi.Size() > gzMaxSize {
+		return nil, false
+	}
+	h.gzMu.Lock()
+	e, ok := h.gzCache[name]
+	h.gzMu.Unlock()
+	if ok && e.size == fi.Size() && e.mod.Equal(fi.ModTime()) {
+		return e.data, true
+	}
+	var buf bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil, false
+	}
+	if _, err := io.Copy(zw, io.LimitReader(f, gzMaxSize+1)); err != nil || zw.Close() != nil {
+		return nil, false
+	}
+	data := buf.Bytes()
+	if int64(len(data)) >= fi.Size() {
+		return nil, false
+	}
+	h.gzMu.Lock()
+	defer h.gzMu.Unlock()
+	if h.gzCache == nil {
+		h.gzCache = map[string]gzEntry{}
+	}
+	if old, ok := h.gzCache[name]; ok {
+		h.gzBytes -= len(old.data)
+		delete(h.gzCache, name)
+	}
+	if h.gzBytes+len(data) <= gzMaxCache {
+		h.gzCache[name] = gzEntry{size: fi.Size(), mod: fi.ModTime(), data: data}
+		h.gzBytes += len(data)
+	}
+	return data, true
 }
 
 // open opens name (slash-separated, relative) inside the source. Only a

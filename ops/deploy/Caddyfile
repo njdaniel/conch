@@ -29,6 +29,14 @@
 	admin unix//var/lib/caddy/admin.sock
 }
 
+# No `encode` directive, on purpose (issue #1037). conchd gzips the web
+# client's static files (/app/) itself, so a deployment without Caddy gets the
+# same; Caddy passes that Content-Encoding through untouched. Everything else
+# conchd answers (the REST API, WebSocket, MCP, attachments) carries tokens or
+# private messages and is deliberately never compressed, which keeps it clear
+# of BREACH-style size leaks. An `encode` here would compress exactly those
+# responses (Caddy skips only bodies already encoded), so do not add one.
+#
 # One block per instance: <instance>.<domain> -> that instance's loopback
 # port (CONCHD_LISTEN in /etc/conch/<instance>.env).
 alpha.example.com {
