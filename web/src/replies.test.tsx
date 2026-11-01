@@ -65,7 +65,7 @@ describe('one-level replies', () => {
     expect(within(thread).getByText('Replying to → net blue; the audience cannot be changed.')).toBeTruthy();
     expect(within(thread).queryByRole('button', { name: 'Reply to message 2' })).toBeNull();
     expect(within(thread).queryByText('To:')).toBeNull();
-    const composer = within(thread).getByRole('textbox', { name: 'Reply to message #1' });
+    const composer = within(thread).getByRole('textbox', { name: 'Reply to bea' });
     expect(document.activeElement).toBe(composer);
     fireEvent.change(composer, { target: { value: 'answer' } });
     fireEvent.keyDown(composer, { key: 'Enter' });
@@ -99,7 +99,7 @@ describe('one-level replies', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Reply to message 1' }));
     const thread = await screen.findByRole('region', { name: 'Thread around message 1' });
     expect(within(thread).getByText('pending reply')).toBeTruthy();
-    expect(within(thread).getByRole('textbox', { name: 'Reply to message #1' })).toHaveProperty('disabled', true);
+    expect(within(thread).getByRole('textbox', { name: 'Reply to bea' })).toHaveProperty('disabled', true);
     expect(within(thread).getByRole('button', { name: 'Send reply' })).toHaveProperty('disabled', true);
   });
 
@@ -111,7 +111,7 @@ describe('one-level replies', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Reply to message 1' }));
     await screen.findByRole('alert');
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
-    await screen.findByRole('textbox', { name: 'Reply to message #1' });
+    await screen.findByRole('textbox', { name: 'Reply to bea' });
     expect(load).toHaveBeenCalledTimes(2);
   });
 
@@ -142,7 +142,7 @@ describe('one-level replies', () => {
     const thread = await screen.findByRole('region', { name: 'Thread around message 1' });
     expect(load).toHaveBeenCalledWith('general', 1, 0);
     expect(within(thread).getByText('root')).toBeTruthy();
-    expect(within(thread).getByRole('textbox', { name: 'Reply to message #1' })).toBeTruthy();
+    expect(within(thread).getByRole('textbox', { name: 'Reply to bea' })).toBeTruthy();
     fireEvent.click(within(thread).getByRole('button', { name: 'Close thread' }));
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Open thread for message 1' }));
   });
@@ -177,9 +177,56 @@ describe('one-level replies', () => {
     vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root(), reply(2), reply(3)] } });
     const { rerender } = view([reply(3)]);
     fireEvent.click(screen.getByRole('button', { name: 'Open thread for message 1' }));
-    const box = await screen.findByRole('textbox', { name: 'Reply to message #1' });
+    const box = await screen.findByRole('textbox', { name: 'Reply to bea' });
     fireEvent.change(box, { target: { value: 'half written' } });
     rerender(conversation([root(), reply(2), reply(3)]));
-    expect(screen.getByRole('textbox', { name: 'Reply to message #1' })).toHaveProperty('value', 'half written');
+    expect(screen.getByRole('textbox', { name: 'Reply to bea' })).toHaveProperty('value', 'half written');
+  });
+});
+
+describe('what a reply answers', () => {
+  const line = (id: number) => document.querySelector(`[data-message-id="${String(id)}"]`) as HTMLElement;
+
+  it('quotes the first line of a held root, with its author', () => {
+    view([{ ...root(), body: 'anyone up for game night?\nsecond line' }, reply(2)]);
+    expect(within(line(2)).getByText('Replying to bea: anyone up for game night?')).toBeTruthy();
+    const context = within(line(2)).getByText(/^Replying to/);
+    expect(line(2).getAttribute('aria-describedby')).toBe(context.id);
+    expect(within(line(1)).queryByText(/^Replying to/)).toBeNull();
+  });
+
+  it('cuts a long first line and renders markup as text', () => {
+    view([{ ...root(), body: `<b>x</b>${'y'.repeat(100)}` }, reply(2)]);
+    const text = within(line(2)).getByText(/^Replying to/).textContent;
+    expect(text.startsWith('Replying to bea: <b>x</b>yyy')).toBe(true);
+    expect(text.endsWith('…')).toBe(true);
+    expect(Array.from(text.slice('Replying to bea: '.length)).length).toBe(81);
+    expect(line(2).querySelector('b')).toBeNull();
+  });
+
+  it('says Reply in a thread when the root is not held', () => {
+    view([reply(2)]);
+    expect(within(line(2)).getByText('Reply in a thread')).toBeTruthy();
+    expect(within(line(2)).queryByText(/^Replying to/)).toBeNull();
+  });
+
+  it('counts replies on the root: none, one, three, and one more live', () => {
+    const { rerender } = view([root()]);
+    expect(within(line(1)).queryByRole('button', { name: /repl(y|ies)$/ })).toBeNull();
+    rerender(conversation([root(), reply(2)]));
+    expect(within(line(1)).getByRole('button', { name: '1 reply' })).toBeTruthy();
+    rerender(conversation([root(), reply(2), reply(3), reply(4)]));
+    expect(within(line(1)).getByRole('button', { name: '3 replies' })).toBeTruthy();
+    rerender(conversation([root(), reply(2), reply(3), reply(4), reply(5)]));
+    expect(within(line(1)).getByRole('button', { name: '4 replies' })).toBeTruthy();
+  });
+
+  it('opens the thread from the count and labels the box by the root author', async () => {
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root(), reply(2)] } });
+    view([root(), reply(2)]);
+    fireEvent.click(within(line(1)).getByRole('button', { name: '1 reply' }));
+    const thread = await screen.findByRole('region', { name: 'Thread around message 1' });
+    expect(within(thread).getByRole('textbox', { name: 'Reply to bea' })).toBeTruthy();
+    expect(within(thread).queryByText(/^Replying to bea:/)).toBeNull();
   });
 });
