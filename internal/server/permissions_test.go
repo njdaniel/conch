@@ -542,7 +542,7 @@ var permissionGates = map[schema.Permission][][2]string{
 		{"voice.go", "Server.voiceStillEntitled"},
 		{"voice_occupancy.go", "Server.voiceOccupancyCaller"},
 		{"voice_presence.go", "Server.voiceEntitlement"},
-		{"voice_presence.go", "Server.voiceWithheld"},
+		{"voice_presence.go", "Server.voiceWithheldAmong"},
 	},
 	schema.PermShareScreen: {
 		{"voice_share.go", "Server.handleVoiceShareStart"},

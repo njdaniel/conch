@@ -451,3 +451,74 @@ func TestEnforcedPermissionsRefuseAnUnenforcedCell(t *testing.T) {
 		t.Error("a refused PUT changed the document")
 	}
 }
+
+// TestRoleChangeWithholdingUseVoiceRemovesAtOnce (#1131): a role change that
+// takes the target's use_voice removes them from voice before the PUT
+// answers, as PUT /v1/permissions does; one that keeps it leaves them be.
+func TestRoleChangeWithholdingUseVoiceRemovesAtOnce(t *testing.T) {
+	tests := []struct {
+		name       string
+		memberOff  bool // member.use_voice is off before the demotion
+		wantRemain bool
+	}{
+		{"use_voice withheld from member removes", true, false},
+		{"use_voice kept leaves them in voice", false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+			f.addPerson(t, "op2", true)
+			if tc.memberOff {
+				f.setCells(t, voiceCells, schema.PermissionRoleMember)
+			}
+			f.srv.credRecheckInterval = time.Hour
+			room := decodeSession(t, f.session(t, "op2", "ops")).Rooms[0].Room
+			id := f.identity("op2")
+			names := []string{id, id + voiceSuffixScreen, id + voiceSuffixView}
+			f.lk.setRoom(room,
+				fakeParticipant{identity: id, joinedMs: 1_000, published: true, muted: true},
+				fakeParticipant{identity: id + voiceSuffixScreen, joinedMs: 1_500},
+				fakeParticipant{identity: id + voiceSuffixView, joinedMs: 1_600})
+			f.at(0)
+			f.pass(t)
+			for _, n := range names {
+				if !f.lk.in(room, n) {
+					t.Fatalf("%s is not in voice before the demotion", n)
+				}
+			}
+			base := wsTestServer(t, f.srv)
+			sock, _, err := dialVoice(t, base, "ops", f.tokens["op2"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			readPresence(t, sock)
+
+			rec := f.do(t, "PUT", fmt.Sprintf("/v1/principals/%d/role", f.ids["op2"]), f.rootTok, `{"role":"member"}`)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("the role PUT = %d %s", rec.Code, rec.Body.Bytes())
+			}
+			// Straight after the answer: no pass has run since.
+			for _, n := range names {
+				if got := f.lk.in(room, n); got != tc.wantRemain {
+					t.Errorf("%s in voice = %v after the PUT, want %v", n, got, tc.wantRemain)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_, _, err = sock.Read(ctx)
+			closed := err != nil && ctx.Err() == nil
+			if closed == tc.wantRemain {
+				t.Errorf("voice socket closed = %v (err %v), want %v", closed, err, !tc.wantRemain)
+			}
+			removed := 0
+			for _, e := range f.audits(t, store.AuditVoiceParticipantRemoved) {
+				if strings.Contains(e.Detail, "reason="+voiceReasonVoiceOff) {
+					removed++
+				}
+			}
+			if !tc.wantRemain && removed == 0 {
+				t.Error("no voice_participant_removed row for the demotion")
+			}
+		})
+	}
+}
