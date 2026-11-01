@@ -422,7 +422,12 @@ export function Conversation({
   onUnauthorized,
   onSearch,
   onEdited,
+  historyBounded = false,
 }: {
+  // The viewer's own membership here has a history bound (history_after), so
+  // what was said before they joined is not shown (issue #1034). False when
+  // it has none or is not known yet: the page never claims hiding it cannot see.
+  readonly historyBounded?: boolean;
   // The channel's id, for keeping an open edit across a reload (issue #1039);
   // without it nothing is kept.
   readonly channelId?: number;
@@ -706,7 +711,7 @@ export function Conversation({
         {chat.history === 'ready' && shown.length === 0 && chat.pending.length === 0 ? (
           <div className="hint empty-conversation">
             <p>No messages here that you can see yet.</p>
-            <p>Messages sent before you joined aren&apos;t shown.</p>
+            {historyBounded ? <p>Messages sent before you joined aren&apos;t shown.</p> : null}
             <p>Write a message to start.</p>
           </div>
         ) : null}

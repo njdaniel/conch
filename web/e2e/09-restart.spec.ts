@@ -69,7 +69,9 @@ test('P592 an empty channel says what is not shown until its first message is se
   await channelButton(page, channel).click();
   const empty = messages(page).getByText('No messages here that you can see yet.');
   await expect(empty).toBeVisible();
-  await expect(messages(page).getByText("Messages sent before you joined aren't shown.")).toBeVisible();
+  // Added by an operator, this person has no history bound: nothing is hidden.
+  await expect(messages(page).getByText('Write a message to start.')).toBeVisible();
+  await expect(messages(page).getByText("Messages sent before you joined aren't shown.")).toHaveCount(0);
   await expect(page.getByText(/Say hello|No messages in #/)).toHaveCount(0);
   // Connected is not a pause.
   await expect(page.getByText(paused)).toHaveCount(0);

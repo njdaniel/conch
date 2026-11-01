@@ -1706,6 +1706,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 <div className="conversation-body" hidden={agents.state.detail !== null || searchOpen}>
               <Conversation
                 key={channelId}
+                historyBounded={agents.membersFor === channelId && (agents.members.find((m) => m.principal_id === auth.principal.id)?.history_after ?? 0) > 0}
                 channelId={channelId}
                 channel={selected}
                 chat={chatFor(chat, selected)}

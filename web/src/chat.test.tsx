@@ -294,11 +294,49 @@ describe('an empty channel', () => {
     await screen.findByText(emptyLine);
     const log = within(screen.getByRole('log', { name: 'Messages' }));
     expect(log.getByText(emptyLine).tagName).toBe('P');
-    expect(log.getByText("Messages sent before you joined aren't shown.")).toBeTruthy();
     expect(log.getByText('Write a message to start.')).toBeTruthy();
     // Never the claim that the channel is empty (issue #1034).
     expect(screen.queryByText(/Say hello/)).toBeNull();
     expect(screen.queryByText(/No messages in #general/)).toBeNull();
+  });
+
+  const hiding = "Messages sent before you joined aren't shown.";
+  const own = () => members.members[0] as { history_after?: number };
+
+  it('adds that earlier messages are not shown only when the own membership has a history bound', async () => {
+    own().history_after = 41;
+    try {
+      await openChat();
+      await screen.findByText(emptyLine);
+      await screen.findByText(hiding);
+    } finally {
+      delete own().history_after;
+    }
+  });
+
+  it('does not say earlier messages are hidden for an unbounded own membership', async () => {
+    await openChat();
+    await screen.findByText(emptyLine);
+    await act(async () => {});
+    expect(screen.queryByText(hiding)).toBeNull();
+  });
+
+  it('does not say it while the members are not known', async () => {
+    own().history_after = 41;
+    const real = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+      if (path.endsWith('/members')) return Promise.resolve(json({}, 500));
+      return real(input, init);
+    });
+    try {
+      await openChat();
+      await screen.findByText(emptyLine);
+      await act(async () => {});
+      expect(screen.queryByText(hiding)).toBeNull();
+    } finally {
+      delete own().history_after;
+    }
   });
 
   it('says nothing of the kind for a channel with messages', async () => {
