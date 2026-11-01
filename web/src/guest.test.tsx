@@ -228,6 +228,16 @@ describe('the front door', () => {
     expect(calls.some((c) => c.path.includes('guest'))).toBe(false);
   });
 
+  it('says its own line on the sign-in page for a name of nothing a reader can see', async () => {
+    serve({ 'GET /v1/join': () => json(frontDoor({ guest: false, account: true })), 'POST /v1/join/account': () => refusal(400, 'invalid_request', 'the name is not acceptable') });
+    render(<App origin={origin} />);
+    const door = await screen.findByRole('region', { name: 'Join' });
+    fireEvent.click(within(door).getByRole('button', { name: 'Create an account' }));
+    fillAccount('\u3164');
+    fireEvent.click(screen.getByRole('button', { name: 'Create account' }));
+    expect(await screen.findByText('A name needs at least one character you can see.')).toBeDefined();
+  });
+
   it('asks for no credential to read the front door', async () => {
     const calls = serve(both);
     render(<App origin={origin} />);
@@ -547,6 +557,16 @@ describe('Create an account during a visit', () => {
     expect(screen.getByRole('region', { name: 'Guest visit' }).textContent).toContain('Guest: Pat · a7k4');
     expect(window.sessionStorage.getItem(key)).toBe(guestToken);
     expect(window.localStorage.getItem(key)).toBeNull();
+  });
+
+  it('says its own line for a name of nothing a reader can see, not the server\u2019s', async () => {
+    serve(converting(() => refusal(400, 'invalid_request', 'the name is not acceptable')));
+    render(<App origin={origin} />);
+    await joinAsGuest();
+    await openForm();
+    fillAccount('\u3164');
+    fireEvent.click(screen.getByRole('button', { name: 'Create my account' }));
+    expect(await screen.findByText('A name needs at least one character you can see.')).toBeDefined();
   });
 
   // Design §3.3: a lost answer after a conversion that committed is
