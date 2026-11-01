@@ -74,15 +74,13 @@ func TestEveryPermissionIsChecked(t *testing.T) {
 
 // notYetGated is each permission no route or store check reads yet, with
 // the issue that wires its gate (ADR-014 design §12). The member cells of
-// rows 1, 2 and 4 gate routes that do not exist yet; rows 5 and 6 are A4's
-// to wire; rows 10 and 11 are A3b's route classes.
+// rows 1, 2 and 4 gate routes that do not exist yet; row 5 is A4's to wire.
+// Rows 10 and 11 left with A3b (#1015), whose route classes read them.
 var notYetGated = map[schema.Permission]string{
 	schema.PermCreatePublicChannels:  "#981, member channel creation",
 	schema.PermCreatePrivateChannels: "#981, member channel creation",
 	schema.PermSeeMemberDirectory:    "#983, the member directory",
 	schema.PermUseVoice:              "A4, the member permissions on voice",
-	schema.PermChangeServerSettings:  "A3b (#1015), the route classes",
-	schema.PermReadAuditLog:          "A3b (#1015), the route classes",
 }
 
 // permissionConsts names each schema.Permission constant, so the scan can
@@ -145,7 +143,8 @@ const (
 	whySignIn      = "sign-in strength (design §4.2): an account is as strong as the most power it could hold"
 	whyIdentity    = "whoami's identity class (design §4.2): what the caller is, not what it may do"
 	whyPermit      = "the conversion permits keep the role check until #1005 retires them (N3)"
-	whyGuardA3b    = "the route guard's accessOperator and manager-class branches, until A3b (#1015) moves them onto accessPermission"
+	whyFixedOp     = "the fixed operator rights (design §4.2): the route guard's accessOperator class, which A3b (#1015) left on the reports, the settings reads and reading the permissions document"
+	whyColumn      = "a change's column of the permissions document (schema.PermissionRole), not a principal's role: the operator column is owner-only (§4.3)"
 	whyHelper      = "the permissions helper itself: it maps a role onto its document column"
 	whyRoleAdmin   = "the owner-only role administration (design §4.3): it sets, validates and protects roles, it does not read the actor's"
 	whyOwnerMark   = "the owner mark: an owner is an operator with owner = 1 (ADR-010), fixed, not a permission"
@@ -159,7 +158,9 @@ const (
 var authorityAllowlist = []authorityAllowed{
 	// internal/server: handlers.
 	{"auth.go", "isOperator", kindRoleCompare, 1, whyDefinition},
-	{"auth.go", "Server.guard", kindIsOperator, 2, whyGuardA3b},
+	{"auth.go", "Server.guard", kindIsOperator, 1, whyFixedOp},
+	{"permissions.go", "Server.handlePutPermissions", kindRoleCompare, 1, whyColumn},
+	{"permissions.go", "turnedOff", kindRoleCompare, 1, whyColumn},
 	{"guests.go", "Server.guestWhoAmI", kindIsOperator, 1, whyIdentity},
 	{"invites.go", "bulkDisableTargets", kindRoleCompare, 1, whyTarget + ": a bulk disable never touches an operator"},
 	{"login.go", "Server.handleLogin", kindRoleCompare, 3, whySignIn + ": an operator's second factor"},
@@ -468,21 +469,32 @@ func scanPermissionNames(t *testing.T) map[string]bool {
 	t.Helper()
 	named := map[string]bool{}
 	authoritySources(t, func(_ *token.FileSet, rel string, file *ast.File) {
-		if rel == "store/permissions.go" {
+		// The permissions helper, and the document's own routes: they read
+		// and list the document (its safety net names every enforced
+		// permission), and gate nothing beyond the PUT, whose route names its
+		// permission in routes.go.
+		if rel == "store/permissions.go" || rel == "permissions.go" {
 			return
 		}
-		ast.Inspect(file, func(n ast.Node) bool {
-			sel, ok := n.(*ast.SelectorExpr)
-			if !ok {
-				return true
+		for _, decl := range file.Decls {
+			// whoami reports what the caller holds; it gates nothing, so a
+			// permission it names is not thereby checked anywhere.
+			if fd, ok := decl.(*ast.FuncDecl); ok && rel == "auth.go" && funcName(fd) == "Server.handleWhoAmI" {
+				continue
 			}
-			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "schema" {
-				if _, isPerm := permissionConsts[sel.Sel.Name]; isPerm {
-					named[sel.Sel.Name] = true
+			ast.Inspect(decl, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
 				}
-			}
-			return true
-		})
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "schema" {
+					if _, isPerm := permissionConsts[sel.Sel.Name]; isPerm {
+						named[sel.Sel.Name] = true
+					}
+				}
+				return true
+			})
+		}
 	})
 	return named
 }

@@ -614,6 +614,8 @@ func (p *voicePoller) shareEntitled(ctx context.Context, room store.VoiceRoom, p
 // Lock order: the room's claims, then its order, then p.mu, as every claim
 // and stop takes them. Nothing here is called with any of them held, and the
 // rooms are taken one at a time in channel order.
+//
+//nolint:unparam // every revocation ends a share as access_lost today; the reason is the stop path's own (voice_share_stopped), kept for its other ends
 func (p *voicePoller) endSharesOf(ctx context.Context, principalID, channelID int64, reason schema.VoiceShareEndReason) {
 	p.mu.Lock()
 	var rooms []*voiceRoomState

@@ -75,7 +75,7 @@ func (f *standingFixture) setOperatorCells(t *testing.T, granted bool, perms ...
 	for _, p := range perms {
 		req.Changes = append(req.Changes, schema.PermissionChangeV1{Permission: p, Role: schema.PermissionRoleOperator, Granted: granted})
 	}
-	if _, err := f.s.PutPermissions(f.ctx, "system", f.owner.ID, req, time.Now()); err != nil {
+	if _, err := f.s.PutPermissions(f.ctx, principalActor(f.owner.ID), f.owner.ID, req, time.Now()); err != nil {
 		t.Fatalf("set operator cells %v %t: %v", perms, granted, err)
 	}
 }
@@ -440,7 +440,7 @@ func TestMayInviteBrakeIsNotThePermission(t *testing.T) {
 			{Permission: schema.PermMakeMemberLinks, Role: schema.PermissionRoleMember, Granted: granted},
 			{Permission: schema.PermMakeMemberLinks, Role: schema.PermissionRoleOperator, Granted: granted},
 		}}
-		if _, err := f.s.PutPermissions(f.ctx, "system", f.owner.ID, req, time.Now()); err != nil {
+		if _, err := f.s.PutPermissions(f.ctx, principalActor(f.owner.ID), f.owner.ID, req, time.Now()); err != nil {
 			t.Fatalf("make_member_links %t: %v", granted, err)
 		}
 	}

@@ -512,6 +512,19 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 			var id int64
 			switch err := tx.QueryRowContext(ctx, "SELECT id FROM channels WHERE name = ?", name).Scan(&id); {
 			case errors.Is(err, sql.ErrNoRows):
+				// To a writer without manage_channels a name that is no
+				// channel gets the answer a channel it is not in gets
+				// (checkOpenChannelsWriterTx), so the list is not an oracle on
+				// private channels' names (the review of #1014).
+				if actorID != 0 {
+					ok, err := permittedTx(ctx, tx, actorID, schema.PermManageChannels)
+					if err != nil {
+						return err
+					}
+					if !ok {
+						return errOpenChannelNotYours()
+					}
+				}
 				return invalidSettings("an open channel names no channel on this server")
 			case err != nil:
 				return fmt.Errorf("store: put join settings: find channel: %w", err)
@@ -630,13 +643,20 @@ func checkOpenChannelsWriterTx(ctx context.Context, tx execer, actorID int64, ne
 		switch err := tx.QueryRowContext(ctx,
 			"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", id, actorID).Scan(&one); {
 		case errors.Is(err, sql.ErrNoRows):
-			return &PermissionError{Err: ErrPermissionDenied, Permission: schema.PermManageChannels,
-				Reason: "listing a channel you are not in, or opening the address to one, needs manage_channels"}
+			return errOpenChannelNotYours()
 		case err != nil:
 			return fmt.Errorf("store: put join settings: check membership: %w", err)
 		}
 	}
 	return nil
+}
+
+// errOpenChannelNotYours is the one refusal of a joining-settings writer
+// without manage_channels about a listed channel: one it is not in, or a name
+// that is no channel at all, alike.
+func errOpenChannelNotYours() error {
+	return &PermissionError{Err: ErrPermissionDenied, Permission: schema.PermManageChannels,
+		Reason: "listing a channel you are not in, or opening the address to one, needs manage_channels"}
 }
 
 // refreshOpenChannelsListerTx makes an owner's write of the joining

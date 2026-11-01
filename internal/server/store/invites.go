@@ -83,6 +83,14 @@ var (
 	ErrInviteRequestInvalid = errors.New("store: invalid invite request")
 )
 
+// inviteRefusal is an invite refusal that names the permission the maker
+// lacks (ADR-014 design §7.4): errors.Is matches sentinel, and errors.As a
+// *PermissionError gives perm. Its text is the sentinel's and the reason,
+// as the plain wrapped refusals read.
+func inviteRefusal(sentinel error, perm schema.Permission, reason string) error {
+	return &PermissionError{Err: sentinel, Permission: perm, Reason: reason}
+}
+
 // InviteState is where an invite is in its life, for listing.
 type InviteState string
 
@@ -488,14 +496,17 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 		if err != nil {
 			return fmt.Errorf("store: create invite: %w", err)
 		}
+		// Each refusal names the permission it lacks (ADR-014 design §7.4):
+		// a *PermissionError wrapping the sentinel, which errors.Is still
+		// matches. The handler tells only a caller whose role could hold it.
 		switch req.Kind {
 		case schema.InviteKindOpen:
 			if !rights.members {
-				return fmt.Errorf("%w: only an operator makes an open link", ErrInviteNotAllowed)
+				return inviteRefusal(ErrInviteNotAllowed, schema.PermManageMembers, "only an operator makes an open link")
 			}
 		default:
 			if !rights.links {
-				return fmt.Errorf("%w: you may not invite", ErrInviteNotAllowed)
+				return inviteRefusal(ErrInviteNotAllowed, schema.PermMakeMemberLinks, "you may not invite")
 			}
 		}
 		if req.Voice && !creator.VoiceAllowed {
@@ -504,7 +515,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 		// Only a holder of manage_members grants the right to invite (issue
 		// #457): a tester who may invite still cannot pass the right on.
 		if mayInvite && !rights.members {
-			return fmt.Errorf("%w: only an operator grants the right to invite", ErrInviteGrantExceedsInviter)
+			return inviteRefusal(ErrInviteGrantExceedsInviter, schema.PermManageMembers, "only an operator grants the right to invite")
 		}
 
 		channelIDs := make([]int64, 0, len(req.Channels))
@@ -517,7 +528,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 				}
 				// Not told apart from a channel the creator is not in, so
 				// naming channels does not reveal which exist.
-				return fmt.Errorf("%w: a channel you are not in", ErrInviteGrantExceedsInviter)
+				return inviteRefusal(ErrInviteGrantExceedsInviter, schema.PermManageChannels, "a channel you are not in")
 			case err != nil:
 				return fmt.Errorf("store: create invite: find channel: %w", err)
 			}
@@ -526,7 +537,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 				switch err := tx.QueryRowContext(ctx,
 					"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", id, creatorID).Scan(&one); {
 				case errors.Is(err, sql.ErrNoRows):
-					return fmt.Errorf("%w: a channel you are not in", ErrInviteGrantExceedsInviter)
+					return inviteRefusal(ErrInviteGrantExceedsInviter, schema.PermManageChannels, "a channel you are not in")
 				case err != nil:
 					return fmt.Errorf("store: create invite: check membership: %w", err)
 				}
