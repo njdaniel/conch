@@ -135,8 +135,11 @@ type eventsSub struct {
 	// (notifyChannelsChanged). It is a flag, not a queue: the frame carries
 	// nothing, so any number of changes owe the same one.
 	channelsChanged bool
-	refs            []eventRef
-	gone            bool
+	// permissionsChanged owes a human socket one conch.permissions_changed.v1
+	// (notifyPermissionsChanged, design §8.6): a flag, as channelsChanged is.
+	permissionsChanged bool
+	refs               []eventRef
+	gone               bool
 }
 
 // subscribe registers a subscriber, owed its first roster: that roster goes
@@ -178,6 +181,15 @@ func (sub *eventsSub) take() (roster, readState, channelsChanged bool, refs []ev
 	roster, readState, channelsChanged, refs = sub.roster, sub.readState, sub.channelsChanged, sub.refs
 	sub.roster, sub.readState, sub.channelsChanged, sub.refs = false, false, false, nil
 	return roster, readState, channelsChanged, refs, true
+}
+
+// takePermissions reports and clears an owed conch.permissions_changed.v1.
+func (sub *eventsSub) takePermissions() bool {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	owed := sub.permissionsChanged
+	sub.permissionsChanged = false
+	return owed && !sub.gone
 }
 
 func (sub *eventsSub) signal() {
@@ -329,6 +341,47 @@ func (h *eventsHub) notifyChannelsChanged(principalIDs ...int64) {
 	for sub := range h.subs {
 		if _, ok := want[sub.principalID]; ok && sub.human {
 			sub.channelsChanged = true
+			sub.signal()
+		}
+	}
+}
+
+// notifyPermissionsChangedAll owes every human events socket one
+// conch.permissions_changed.v1 (ADR-014 design §8.6): the permissions
+// document changed, so anyone's effective permissions may have. The document
+// is server-wide, so telling every person tells no one anything about
+// anyone. A handler calls it after a change that took effect. An agent's
+// socket is never owed it: agents hold no permissions.
+func (h *eventsHub) notifyPermissionsChangedAll() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.human {
+			sub.permissionsChanged = true
+			sub.signal()
+		}
+	}
+}
+
+// notifyPermissionsChanged owes one conch.permissions_changed.v1 to the
+// human events sockets of principalIDs alone: after a change to one
+// person's brake (may_invite, and #984's voice switch), which changes only
+// that person's permissions. A zero id matches nothing.
+func (h *eventsHub) notifyPermissionsChanged(principalIDs ...int64) {
+	want := make(map[int64]bool, len(principalIDs))
+	for _, id := range principalIDs {
+		if id != 0 {
+			want[id] = true
+		}
+	}
+	if len(want) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.human && want[sub.principalID] {
+			sub.permissionsChanged = true
 			sub.signal()
 		}
 	}
@@ -630,7 +683,10 @@ type eventsStream struct {
 	// channelsLater fires when an owed conch.channels_changed.v1 goes, one
 	// roster floor after the first change that owed it; nil while none is
 	// owed (trailing-edge coalescing, membership-live.md §3).
-	channelsLater    <-chan time.Time
+	channelsLater <-chan time.Time
+	// permissionsLater is channelsLater for conch.permissions_changed.v1:
+	// coalesced under the same roster floor (design §8.6).
+	permissionsLater <-chan time.Time
 	readStateBuilt   time.Time
 	readStateLater   <-chan time.Time
 	lastReadStates   map[int64][]byte
@@ -716,6 +772,17 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 			default:
 			}
 			if !e.stillMember(ctx) || !e.sendDoc(ctx, schema.ChannelsChangedV1{Schema: schema.ChannelsChangedSchemaV1}) {
+				return
+			}
+		case <-e.permissionsLater:
+			e.permissionsLater = nil
+			select {
+			case <-e.sub.dropped:
+				e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+				return
+			default:
+			}
+			if !e.stillMember(ctx) || !e.sendDoc(ctx, schema.PermissionsChangedV1{Schema: schema.PermissionsChangedSchemaV1}) {
 				return
 			}
 		case <-e.sub.dropped:
@@ -831,6 +898,9 @@ func (e *eventsStream) flush(ctx context.Context) bool {
 	}
 	if channelsChanged && e.channelsLater == nil {
 		e.channelsLater = time.After(e.s.eventsRosterFloor)
+	}
+	if e.sub.takePermissions() && e.permissionsLater == nil {
+		e.permissionsLater = time.After(e.s.eventsRosterFloor)
 	}
 	for _, ref := range refs {
 		if !e.sendRef(ctx, ref) {
