@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -109,6 +110,10 @@ var (
 	// every member publish, which withdrawing a share restores). 409
 	// voice_no_session, as a transmit report for an audience with no room is.
 	errVoiceShareNotChannelRoom = errors.New("voice: only a channel-wide room has a share")
+	// errVoiceShareNotAllowed: the caller no longer holds share_screen, as
+	// read under the room's claims. 403 voice_not_allowed, the answer the
+	// up-front gate (voicePresenceChannel) gives a person without voice.
+	errVoiceShareNotAllowed = errors.New("voice: the caller does not hold share_screen")
 )
 
 // voiceWithdrawKey names one participant of a person in a room's withdrawing
@@ -169,6 +174,10 @@ func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, errVoiceShareBusy):
 		writeError(w, http.StatusConflict, schema.ErrorCodeVoiceShareBusy, "someone else is sharing in this room")
+		return
+	case errors.Is(err, errVoiceShareNotAllowed):
+		// The same refusal, word for word, as voicePresenceChannel gives.
+		s.denyForbidden(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server")
 		return
 	case errors.Is(err, errVoiceShareNotConnected), errors.Is(err, errVoiceShareRoomGone), errors.Is(err, errVoiceShareNotChannelRoom):
 		writeVoiceNoSession(w)
@@ -395,6 +404,22 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	// the passes' withdrawals wait for it.
 	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
 	defer cancel()
+	// The entitlement is read again here, under the room's claims, with the
+	// claim already recorded (ADR-014, ADR-015 decision 6): the caller's
+	// authority was first read before the lock was taken, and a revocation
+	// that committed since either finds this claim and waits for it on the
+	// claims (endSharesOf), or looked before it was recorded, in which case
+	// its commit precedes this read. Either way no grant is written once a
+	// revocation has answered. A read that fails is a refusal, not a guess.
+	if err := p.shareEntitled(lctx, principalID); err != nil {
+		if held == nil {
+			p.undoClaim(r, mine)
+		} else {
+			// A holder who lost the right loses the share they hold.
+			p.endHeldShare(ctx, r, room, principalID, voiceShareStopAccessLost)
+		}
+		return schema.VoiceShareV1{}, err
+	}
 	identity := voiceIdentity(principalID)
 	found, err := p.s.lk.UpdateParticipant(lctx, room.RoomName, identity, livekit.Permission{CanPublish: true, ScreenShare: true})
 	if err != nil || !found {
@@ -477,6 +502,75 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 		return schema.VoiceShareV1{}, errVoiceShareRoomGone
 	}
 	return schema.VoiceShareV1{PrincipalID: principalID, StartedAt: schema.NewTimestamp(mine.startedAt), Audio: true}, nil
+}
+
+// shareEntitled reads principalID's share_screen now, from the permissions
+// document and the person's brakes (the store's permittedTx, as can does for
+// a handler), and answers errVoiceShareNotAllowed when they do not hold it.
+// A read that fails is an error too, never a yes. The caller holds the room's
+// claims.
+func (p *voicePoller) shareEntitled(ctx context.Context, principalID int64) error {
+	ok, err := p.s.store.Permitted(ctx, principalID, schema.PermShareScreen)
+	if err != nil {
+		return fmt.Errorf("voice: read share_screen: %w", err)
+	}
+	if !ok {
+		return errVoiceShareNotAllowed
+	}
+	return nil
+}
+
+// endSharesOf is the stop path of every revocation of share_screen or of a
+// place in a room (the permissions PUT, the voice switch, membership loss,
+// disabling): it ends principalID's share in every room the poller holds one
+// for them, only channelID's when that is not 0, with reason: the
+// voice_share_stopped row is written and the sources are withdrawn. It takes
+// each room's claims, so a claim in flight is waited for and then ended, and a
+// claim recorded after this has looked meets the revocation, already
+// committed, in its own re-read (shareEntitled). Call it after the revocation
+// is committed and before it is answered, with no lock held.
+//
+// Lock order: the room's claims, then its order, then p.mu, as every claim
+// and stop takes them. Nothing here is called with any of them held, and the
+// rooms are taken one at a time in channel order.
+func (p *voicePoller) endSharesOf(ctx context.Context, principalID, channelID int64, reason schema.VoiceShareEndReason) {
+	p.mu.Lock()
+	var rooms []*voiceRoomState
+	for _, r := range p.rooms {
+		if r.share != nil && r.share.principalID == principalID && (channelID == 0 || r.channelID == channelID) {
+			rooms = append(rooms, r)
+		}
+	}
+	p.mu.Unlock()
+	// A revocation is not cancelled by a caller who hangs up.
+	ctx = context.WithoutCancel(ctx)
+	slices.SortFunc(rooms, func(a, b *voiceRoomState) int {
+		return cmp.Or(cmp.Compare(a.channelID, b.channelID), cmp.Compare(a.name, b.name))
+	})
+	for _, r := range rooms {
+		r.claims.Lock()
+		p.endHeldShare(ctx, r, store.VoiceRoom{ChannelID: r.channelID, RoomName: r.name}, principalID, reason)
+		r.claims.Unlock()
+	}
+}
+
+// endHeldShare ends r's share if principalID holds it, as a stop does: the
+// share leaves presence and its row is written before LiveKit is asked to
+// withdraw the sources (a failure is retried by the passes, which remove the
+// sharer if the share is still published). room is r's channel-wide room. The
+// caller holds r's claims, so there is no pending claim to skip.
+func (p *voicePoller) endHeldShare(ctx context.Context, r *voiceRoomState, room store.VoiceRoom, principalID int64, reason schema.VoiceShareEndReason) {
+	r.order.Lock()
+	p.mu.Lock()
+	events := p.endShareLocked(r, principalID, reason)
+	p.mu.Unlock()
+	p.writeEvents(ctx, events...)
+	r.order.Unlock()
+	if len(events) == 0 {
+		return
+	}
+	p.notify(r.channelID)
+	p.withdrawAll(ctx, r, principalID, voiceRoomPublishes(room))
 }
 
 // grantCompanion lets principalID's companion, p<id>.screen, publish the

@@ -2223,6 +2223,11 @@ func (s *Server) voiceMemberRemoved(ctx context.Context, channelID, principalID 
 	rooms, roomsErr := s.voice.channelRooms(rctx, channelID)
 	cancel()
 	rotated := s.voiceEnforceHolders(ctx)
+	// A share of theirs that the rotation did not end (the room outlived
+	// them) ends through the stop path, under the room's claims: a claim in
+	// flight is waited for and then ended, before this answers (ADR-015
+	// decision 6). After the rotation, so a rotated share keeps its reason.
+	s.voice.endSharesOf(ctx, principalID, channelID, voiceShareStopAccessLost)
 	if roomsErr != nil {
 		slog.ErrorContext(ctx, "voice: list rooms for removal failed; passes will remove", "channel", channelID, "error", roomsErr)
 		return
@@ -2254,6 +2259,9 @@ func (s *Server) voicePrincipalLostAccess(ctx context.Context, principalID int64
 	if reason != voiceReasonPrincipalOff {
 		return
 	}
+	// As in voiceMemberRemoved: a share the rotation did not end is ended
+	// under the room's claims.
+	s.voice.endSharesOf(ctx, principalID, 0, voiceShareStopAccessLost)
 	if roomsErr != nil {
 		// Which rooms to call LiveKit for is unknown. The principal still
 		// leaves presence at once, from every room the poller has them in,
