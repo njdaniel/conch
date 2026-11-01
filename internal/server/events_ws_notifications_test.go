@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"fmt"
+	"net/http"
 	"sync/atomic"
 	"testing"
 
@@ -110,20 +112,23 @@ func TestEventsNotificationsDropMessageOnRevocation(t *testing.T) {
 	if first := ann.next(); first.schema != schema.SessionRosterSchemaV1 {
 		t.Fatalf("first frame = %v, want roster", first)
 	}
-	// The revocation lands as the first message notification is about to go
-	// out. The hook sees notification messages alone: the read state the same
-	// post queues goes first, or after the message, depending on the
-	// read-state floor, and a revocation landing on it instead would be
+	// The revocation lands as the side message's notification, already built,
+	// is about to go out. The hook picks that frame by its content: the read
+	// state the same post queues goes first, or after the message, depending
+	// on the read-state floor, and a revocation landing on it instead would be
 	// before the message is built, so the message would rightly be sent
-	// (#1104).
+	// (#1104). The private message is posted to side itself: a leak of a
+	// revoked channel's message is what this proves cannot happen.
 	var revoked atomic.Bool
 	f.srv.eventsBeforeEpochWrite = func(frame []byte) {
-		if frameSchema(frame) == schema.MessageSchemaV2 && revoked.CompareAndSwap(false, true) {
+		if frameSchema(frame) == schema.MessageSchemaV2 && bytes.Contains(frame, []byte("private side content")) && revoked.CompareAndSwap(false, true) {
 			f.srv.events.dropPrincipal(side.ID, f.p("ann").ID)
 		}
 	}
 	defer func() { f.srv.eventsBeforeEpochWrite = nil }()
-	f.mustPost(t, "olga", `{"body":"private side content"}`)
+	if res := f.callREST(t, "POST", "/v2/channels/side/messages", f.p("olga").token, `{"body":"private side content"}`); res.status != http.StatusCreated {
+		t.Fatalf("post to side = %d %s", res.status, res.body)
+	}
 	f.mustPost(t, "olga", `{"body":"public ops content"}`)
 	var frames []eventFrame
 	foundPublic, foundTombstone := false, false
