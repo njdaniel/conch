@@ -25,6 +25,13 @@ describe('linkify', () => {
     { name: 'unicode host stays text', body: 'https://例え.jp/パス.', want: [t('https://例え.jp/パス.')] },
     { name: 'lookalike host stays text', body: 'https://аррӏе.com/', want: [t('https://аррӏе.com/')] },
     { name: 'accented host stays text', body: 'https://münchen.de/', want: [t('https://münchen.de/')] },
+    // The URL parser skips extra slashes and backslashes after the scheme;
+    // the host behind them is checked all the same (codex round 2 on #1092).
+    { name: 'extra slash before a lookalike host', body: 'https:///аррӏе.com/login', want: [t('https:///аррӏе.com/login')] },
+    { name: 'backslash before a lookalike host', body: 'https://\\аррӏе.com/login', want: [t('https://\\аррӏе.com/login')] },
+    { name: 'uppercase scheme, extra slashes, lookalike host', body: 'HTTPS:////аррӏе.com/', want: [t('HTTPS:////аррӏе.com/')] },
+    { name: 'percent-encoded lookalike host after an extra slash', body: 'https:///%D0%B0pple.com/', want: [t('https:///%D0%B0pple.com/')] },
+    { name: 'a punycode host written out stays text', body: 'https://xn--80ak6aa92e.com/', want: [t('https://xn--80ak6aa92e.com/')] },
     { name: 'credentials stay text', body: 'https://bank.example@evil.example/login', want: [t('https://bank.example@evil.example/login')] },
     { name: 'user and password stay text', body: 'see https://user:pw@example.com/', want: [t('see https://user:pw@example.com/')] },
     { name: 'bidi override stays text', body: 'https://trusted.example\u202e@evil.example/login', want: [t('https://trusted.example\u202e@evil.example/login')] },

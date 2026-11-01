@@ -52,10 +52,13 @@ function trim(run: string): string {
 const invisible = /[\p{Cc}\p{Cf}]/u;
 const nonAscii = /[^\x00-\x7f]/;
 
-// writtenAuthority is the text between the scheme's slashes and the first
-// slash, backslash, question mark or hash, as the sender wrote it.
+// writtenAuthority is the host part as the sender wrote it: after the
+// scheme and every slash or backslash that follows it (the URL parser skips
+// extra ones), up to the next slash, backslash, question mark or hash.
 function writtenAuthority(text: string): string {
-  const rest = text.slice(text.indexOf('//') + 2);
+  let from = text.indexOf('//') + 2;
+  while (from < text.length && (text[from] === '/' || text[from] === '\\')) from += 1;
+  const rest = text.slice(from);
   const end = rest.search(/[/\\?#]/);
   return end < 0 ? rest : rest.slice(0, end);
 }
@@ -77,6 +80,9 @@ function href(text: string): string | null {
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.hostname === '') return null;
   // A name before an at sign is what makes one site look like another.
   if (url.username !== '' || url.password !== '') return null;
+  // Whatever way it was written, a host the parser turned into punycode was
+  // not plain ASCII: the same refusal, checked on what the link would open.
+  if (url.hostname.split('.').some((label) => label.startsWith('xn--'))) return null;
   return url.href;
 }
 
