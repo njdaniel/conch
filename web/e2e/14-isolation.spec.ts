@@ -11,12 +11,13 @@
 // test runs against a conchd with LiveKit of its own (voice-world.ts):
 // without Docker it fails when CI is set and is skipped otherwise.
 import type { BrowserContextOptions, Page } from '@playwright/test';
-import { channelButton, expect, expectFits, messages, openChannel, phones, showView, signIn, statusLine, test } from './fixtures';
+import { channelButton, consoleErrors, expect, expectFits, messages, openChannel, phones, showView, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { findLeak } from './traffic';
 import { call, type World } from './world';
 
 const desktop: BrowserContextOptions = { viewport: { width: 1280, height: 800 } };
+const desktopWide: BrowserContextOptions = { viewport: { width: 1440, height: 900 } };
 const sizes = [['desktop', desktop], ...phones] as const;
 
 const channelButtons = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('button');
@@ -307,6 +308,43 @@ test.describe('with LiveKit', () => {
   });
   test.afterAll(() => {
     stopWorld?.();
+  });
+
+  // Issue #1084 (browser UX audit 4, F7): a member removed from the channel
+  // they are viewing, in a server with voice. Once the page has handled the
+  // removal (the channel is gone from their list, #1027) it makes no request
+  // and opens no socket for that channel, voice included. A request already
+  // in flight when the removal came may still be answered 404, and that is
+  // the only error the console may hold.
+  test('F7 a member removed from the channel they are viewing makes no further request for it, and the console holds only the 404 of one in flight', async ({ meet }) => {
+    const gone = await vw.addMember(`f7-gone-${String(Date.now())}`);
+    const { page } = await meet(desktopWide);
+    const errors = consoleErrors(page);
+    await signIn(page, vw, gone.token, gone.name);
+    await channelButton(page, vw.channel).click();
+    await expect(voiceRegion(page).getByRole('button', { name: 'Join voice' })).toBeVisible();
+    // Let the voice socket open and settle before the removal.
+    await page.waitForTimeout(1_000);
+
+    const asked: string[] = [];
+    page.on('request', (req) => {
+      const url = new URL(req.url());
+      asked.push(`${req.method()} ${url.pathname}${url.search.includes(vw.channel) ? url.search.replace(/ticket=[^&]*/, '') : ''}`);
+    });
+    page.on('websocket', (ws) => {
+      const url = new URL(ws.url());
+      asked.push(`WS ${url.pathname}${url.search.replace(/ticket=[^&]*/, '')}`);
+    });
+    await vw.removeFromChannel(gone);
+    // Handled: the channel is gone from their list.
+    await expect(channelButton(page, vw.channel)).toHaveCount(0);
+    const handled = asked.length;
+    await page.waitForTimeout(5_000);
+
+    const forChannel = (line: string) => line.includes(`/channels/${vw.channel}`) || line.includes(`channel=${vw.channel}`);
+    expect(asked.slice(handled).filter(forChannel), 'requests for the lost channel after the removal was handled').toEqual([]);
+    const inFlight404 = (line: string) => line.includes('status of 404') && line.includes(`/channels/${vw.channel}/`);
+    expect(errors.filter((line) => !inFlight404(line)), 'console errors beyond the 404 of a request in flight').toEqual([]);
   });
 
   test("A14 a member of one group never sees who is in another group's voice room, after a full load and after a reconnect", async ({ meet }) => {

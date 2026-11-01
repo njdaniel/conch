@@ -5,7 +5,7 @@
 // sign-in links share, and joins no channel another spec reads.
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { makeInvite } from './api';
-import { accountPassword, expect, expectFits, fillAccount, phones, signIn, statusLine, test } from './fixtures';
+import { accountPassword, consoleErrors, expect, expectFits, fillAccount, phones, signIn, statusLine, test } from './fixtures';
 import { call, inviteUrl, ok, type World } from './world';
 
 for (const [size, options] of phones) {
@@ -138,4 +138,65 @@ test('G7a a member adds a device with a link revealed once, the other browser sw
   expect((await call(world, phoneToken, 'GET', '/v1/whoami')).status).toBe(401);
   // The link was used: none is open.
   await expect(add.getByText('None open.')).toBeVisible();
+});
+
+// Issue #1084 (browser UX audit 4, F7): a password change that leaves the page
+// signed in ends the sign-in it was made from, and the page goes on with the
+// new credential. The live socket, the voice poll and every whoami stop using
+// the old one before the change is sent, so no request that is known to fail
+// is made, and the console logs no 401 and no refused socket. Every request
+// after the change carries the new credential.
+test('F7 a password change that stays signed in logs no console error and sends nothing with the old credential after it', async ({ meet, secrets, world }) => {
+  const first = accountPassword;
+  const second = `${accountPassword} again`;
+  secrets.push(first, second);
+  const invite = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
+  const name = `f7-${String(Date.now())}`;
+  const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+  const errors = consoleErrors(page);
+  await page.goto(inviteUrl(world, invite.code));
+  await fillAccount(page, name, first);
+  await expect(statusLine(page)).toContainText('Connected');
+  const oldToken = (await page.evaluate(() => window.localStorage.getItem('conch.web.token'))) ?? '';
+  secrets.push(oldToken);
+  expect(oldToken).not.toBe('');
+
+  // Every request to the server from here, with the credential it carried.
+  const sent: { readonly line: string; readonly bearer: string }[] = [];
+  // The events socket opened from here on: the page takes up a new session.
+  const opened: string[] = [];
+  page.on('websocket', (ws) => {
+    const path = new URL(ws.url()).pathname;
+    ws.on('framereceived', () => opened.push(path));
+  });
+  page.on('request', (req) => {
+    const url = new URL(req.url());
+    if (!url.pathname.startsWith('/v1/')) return;
+    sent.push({ line: `${req.method()} ${url.pathname}`, bearer: req.headers()['authorization'] ?? '' });
+  });
+
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Password', exact: true }).click();
+  const region = page.getByRole('region', { name: 'Password' });
+  await region.getByLabel('Current password').fill(first);
+  await region.getByLabel('New password', { exact: true }).fill(second);
+  await region.getByLabel('Type it again').fill(second);
+  const changed = page.waitForResponse((r) => r.url().endsWith('/v1/password/mine') && r.request().method() === 'PUT');
+  await region.getByRole('button', { name: 'Change password' }).click();
+  expect((await changed).status()).toBe(200);
+  await expect(region.getByText('Your password is changed. Every other sign-in of yours has ended; this one goes on.')).toBeVisible();
+  const newToken = (await page.evaluate(() => window.localStorage.getItem('conch.web.token'))) ?? '';
+  secrets.push(newToken);
+  expect(newToken).not.toBe(oldToken);
+  // Back on the live loop with the new credential.
+  await expect(statusLine(page)).toContainText('Connected');
+  await page.waitForTimeout(3_000);
+
+  // After the change's own request, nothing carries the old credential.
+  const change = sent.findIndex((s) => s.line === 'PUT /v1/password/mine');
+  expect(change).toBeGreaterThanOrEqual(0);
+  const afterWithOld = sent.slice(change + 1).filter((s) => s.bearer === `Bearer ${oldToken}`);
+  expect(afterWithOld.map((s) => s.line), 'requests with the old credential after the change').toEqual([]);
+  expect(opened, 'frames of the events socket after the change').toContain('/v1/events/ws');
+  expect(errors).toEqual([]);
 });

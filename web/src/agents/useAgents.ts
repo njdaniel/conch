@@ -163,6 +163,36 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
     replaced.current = false;
   }, []);
 
+  // A write that may replace the page's credential (a password change) ends
+  // the session on the server if it does, and its events socket would be
+  // opened again for it and refused (issue #1084). So the session is let go
+  // of before the write is sent, which stops that socket; when the write
+  // replaced the credential, a new session is made with the new one, else the
+  // same session is taken up again.
+  useEffect(() => {
+    if (!active) return;
+    let paused: number | null = null;
+    return api.onCredentialReplacing((event) => {
+      if (event.phase === 'begin') {
+        if (held.current === null) return;
+        paused = held.current;
+        generation.current++;
+        setSession({ phase: 'starting' });
+        return;
+      }
+      if (paused === null) return;
+      const id = paused;
+      paused = null;
+      if (event.rotated) {
+        held.current = null;
+        replaced.current = false;
+        start('unavailable');
+      } else {
+        setSession({ phase: 'ready', id });
+      }
+    });
+  }, [active, start]);
+
   return { session, release, replace, healthy };
 }
 

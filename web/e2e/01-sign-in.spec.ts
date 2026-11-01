@@ -1,5 +1,5 @@
 // P3-01: the browser is one of the people, with a credential of its own.
-import { channelButton, expect, signIn, statusLine, test } from './fixtures';
+import { channelButton, consoleErrors, expect, signIn, statusLine, test } from './fixtures';
 import { principalId } from './world';
 
 test('P3-01 browser-test signs in by pasting the credential and sees the fixture channels', async ({ meet, world }) => {
@@ -109,4 +109,22 @@ test('F12 the main script arrives gzipped and the raw HTML holds the loading tex
   expect(scripts.length).toBeGreaterThan(0);
   expect(scripts[0]?.encoding).toBe('gzip');
   expect(scripts[0]?.vary).toContain('Accept-Encoding');
+});
+
+// Issue #1084 (browser UX audit 4, F7): a page with no credential has nothing
+// to ask whoami, so a signed-out load makes no request that is known to fail
+// and the console has no error.
+test('F7 a signed-out load asks nothing of whoami and logs no console error', async ({ meet, world }) => {
+  const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+  const errors = consoleErrors(page);
+  const asked: string[] = [];
+  page.on('request', (req) => {
+    if (new URL(req.url()).pathname === '/v1/whoami') asked.push(req.method());
+  });
+  await page.goto(world.appUrl);
+  await expect(page.getByLabel('Credential')).toBeVisible();
+  // Let any late start-up request go out before looking.
+  await page.waitForLoadState('networkidle');
+  expect(asked, 'requests to whoami').toEqual([]);
+  expect(errors).toEqual([]);
 });
