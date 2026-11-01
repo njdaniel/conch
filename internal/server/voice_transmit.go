@@ -308,7 +308,7 @@ func (p *voicePoller) reportTransmit(ctx context.Context, room store.VoiceRoom, 
 		slog.ErrorContext(ctx, "voice: could not tell whether a room was retired after a transmit report; the sweep checks", "channel", room.ChannelID, "error", err)
 		p.sweepSoon()
 	case !live:
-		p.forgetRoom(ctx, room.RoomName)
+		p.retireRoom(ctx, room) // no lock is held: the report's order is released
 	}
 	return nil
 }
