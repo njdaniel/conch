@@ -43,7 +43,7 @@ test('search paginates ordered scoped results, opens context, and loses access o
   await expect(results.getByRole('listitem')).toHaveCount(103);
   await expect(results.getByRole('listitem').last()).toContainText(`${tag} normal 1`);
 
-  await page.getByRole('button', { name: `Open context for message ${String(first.id)}`, exact: true }).click();
+  await results.locator(`[data-message-id="${String(first.id)}"]`).getByRole('button', { name: /^Open context for .+'s message, \d\d:\d\d$/ }).click();
   const context = page.getByRole('list', { name: 'Message context' });
   await expect(context.locator(`[data-message-id="${String(first.id)}"]`)).toContainText(`${tag} normal 1`);
   await expect(context.locator(`[data-message-id="${String(first.id + 1)}"]`)).toContainText(`${tag} normal 2`);

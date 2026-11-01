@@ -51,22 +51,26 @@ async function community(world: World, secrets: string[], label: string, names: 
   return { channel, people };
 }
 
+// Controls are named by author and time, never by id (issue #1040).
+const moreName = /^More actions for .+'s message, \d\d:\d\d$/;
+const editName = /^Edit .+'s message, \d\d:\d\d$/;
+
 const row = (page: Page, id: number) => messages(page).locator(`[data-message-id="${String(id)}"]`);
 
 // edit opens the message's menu, chooses Edit, and saves the new text with
 // Enter. On a touch screen it taps.
 async function edit(page: Page, id: number, text: string, touch = false): Promise<void> {
   const item = row(page, id);
-  const more = item.getByRole('button', { name: `More actions for message ${String(id)}` });
+  const more = item.getByRole('button', { name: moreName });
   if (touch) await more.tap();
   else {
     await item.hover();
     await more.click();
   }
-  const choice = page.getByRole('menu', { name: `More actions for message ${String(id)}` }).getByRole('menuitem', { name: 'Edit' });
+  const choice = page.getByRole('menu', { name: moreName }).getByRole('menuitem', { name: 'Edit' });
   if (touch) await choice.tap();
   else await choice.click();
-  const box = page.getByRole('textbox', { name: `Edit message ${String(id)}` });
+  const box = page.getByRole('textbox', { name: editName });
   await expect(box).toBeFocused();
   await box.fill(text);
   if (touch) await page.getByRole('button', { name: 'Save', exact: true }).tap();
@@ -158,7 +162,7 @@ test('Escape cancels an edit and Shift+Enter adds a line, in a real browser', as
   const item = row(page, id);
   await item.click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Edit' }).click();
-  const box = page.getByRole('textbox', { name: `Edit message ${String(id)}` });
+  const box = page.getByRole('textbox', { name: editName });
   await box.press('End');
   await box.pressSequentially(' more');
   await box.press('Shift+Enter');
@@ -166,7 +170,7 @@ test('Escape cancels an edit and Shift+Enter adds a line, in a real browser', as
   await expect(box).toHaveValue(`${body} more\nsecond line`);
   await box.press('Escape');
   await expect(box).toBeHidden();
-  await expect(item.getByRole('button', { name: `More actions for message ${String(id)}` })).toBeFocused();
+  await expect(item.getByRole('button', { name: moreName })).toBeFocused();
   await expect(item).not.toContainText('second line');
   expect((await history(world, author.token, channel)).find((m) => m.id === id)?.edited_at).toBeUndefined();
 });
@@ -182,18 +186,18 @@ test('an open edit reopens with its text after a reload (issue #1039)', async ({
   const id = await postedId(world, author.token, channel, body);
   await row(page, id).click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Edit' }).click();
-  const box = page.getByRole('textbox', { name: `Edit message ${String(id)}` });
+  const box = page.getByRole('textbox', { name: editName });
   await box.fill('half an edit, not saved');
 
   await page.reload();
   await openChannel(page, channel);
-  await expect(page.getByRole('textbox', { name: `Edit message ${String(id)}` })).toHaveValue('half an edit, not saved');
+  await expect(page.getByRole('textbox', { name: editName })).toHaveValue('half an edit, not saved');
   // Cancelling forgets it: a reload after shows no editor.
-  await page.getByRole('textbox', { name: `Edit message ${String(id)}` }).press('Escape');
+  await page.getByRole('textbox', { name: editName }).press('Escape');
   await page.reload();
   await openChannel(page, channel);
   await expect(row(page, id)).toContainText(body);
-  await expect(page.getByRole('textbox', { name: `Edit message ${String(id)}` })).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: editName })).toHaveCount(0);
 });
 
 test('a whisper’s edit reaches its recipients, and no one else', async ({ meet, secrets, world }) => {
@@ -283,7 +287,7 @@ for (const [size, options] of phoneSizes.filter(([name]) => name === '320×640' 
     const body = word('phone');
     await say(page, channel, body);
     const id = await postedId(world, author.token, channel, body);
-    const more = row(page, id).getByRole('button', { name: `More actions for message ${String(id)}` });
+    const more = row(page, id).getByRole('button', { name: moreName });
     // Shown with no hover and no focus.
     await expect(more).toBeVisible();
     expect(await more.evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
@@ -296,7 +300,7 @@ for (const [size, options] of phoneSizes.filter(([name]) => name === '320×640' 
     const choice = page.getByRole('menuitem', { name: 'Edit' });
     expect((await choice.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
     await choice.tap();
-    const editor = page.getByRole('textbox', { name: `Edit message ${String(id)}` });
+    const editor = page.getByRole('textbox', { name: editName });
     await expect(editor).toBeVisible();
     for (const name of ['Save', 'Cancel']) {
       const button = await page.getByRole('button', { name, exact: true }).boundingBox();

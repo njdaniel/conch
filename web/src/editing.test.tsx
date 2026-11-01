@@ -64,9 +64,16 @@ function conversation(messages: readonly MessageV2[], { onEdited = vi.fn(), kind
   );
 }
 
-const more = (id: number) => screen.queryByRole('button', { name: `More actions for message ${String(id)}` });
+// Controls are named by author and time, never by id (issue #1040), and two
+// messages made a moment apart may fall in different minutes: each is found
+// inside its own item, by the shape of its name.
 const item = (id: number) => document.querySelector<HTMLElement>(`[data-message-id="${String(id)}"]`);
-const box = (id: number) => screen.getByRole('textbox', { name: `Edit message ${String(id)}` });
+const within1 = (id: number) => within(item(id) ?? document.body);
+const moreName = /^More actions for ada's message, \d\d:\d\d$/;
+const editName = /^Edit ada's message, \d\d:\d\d$/;
+const more = (id: number) => within1(id).queryByRole('button', { name: moreName });
+const box = (id: number) => within1(id).getByRole('textbox', { name: editName });
+const noBox = (id: number) => within1(id).queryByRole('textbox', { name: editName });
 
 function openEditor(id: number): HTMLTextAreaElement {
   const button = more(id);
@@ -125,7 +132,7 @@ describe('the actions menu', () => {
     if (button === null) throw new Error('no button');
     fireEvent.click(button);
     expect(button.getAttribute('aria-expanded')).toBe('true');
-    const menu = screen.getByRole('menu', { name: 'More actions for message 1' });
+    const menu = screen.getByRole('menu', { name: moreName });
     expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Edit' }));
     fireEvent.keyDown(menu, { key: 'ArrowDown' });
     expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Edit' }));
@@ -140,7 +147,7 @@ describe('the actions menu', () => {
     const others = item(3);
     if (own === null || others === null) throw new Error('no items');
     expect(fireEvent.contextMenu(within(own).getByText('text 1'))).toBe(false);
-    expect(screen.getByRole('menu', { name: 'More actions for message 1' })).toBeTruthy();
+    expect(screen.getByRole('menu', { name: moreName })).toBeTruthy();
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
     // Nothing to offer on someone else's message: the browser keeps its menu.
     expect(fireEvent.contextMenu(within(others).getByText('text 3'))).toBe(true);
@@ -170,7 +177,7 @@ describe('the actions menu', () => {
     act(() => {
       vi.advanceTimersByTime(longPressMs);
     });
-    expect(screen.getByRole('menu', { name: 'More actions for message 1' })).toBeTruthy();
+    expect(screen.getByRole('menu', { name: moreName })).toBeTruthy();
   });
 
   it('closes on a press outside it', () => {
@@ -213,7 +220,7 @@ describe('the inline editor', () => {
     await waitFor(() => {
       expect(onEdited).toHaveBeenCalledWith(saved);
     });
-    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+    expect(noBox(1)).toBeNull();
     await waitFor(() => {
       expect(document.activeElement).toBe(more(1));
     });
@@ -237,7 +244,7 @@ describe('the inline editor', () => {
     fireEvent.change(editor, { target: { value: 'changed my mind' } });
     fireEvent.keyDown(editor, { key: 'Escape' });
     expect(edit).not.toHaveBeenCalled();
-    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+    expect(noBox(1)).toBeNull();
     expect(screen.getByText('as it was')).toBeTruthy();
     expect(document.activeElement).toBe(more(1));
   });
@@ -254,27 +261,27 @@ describe('the inline editor', () => {
     render(conversation([msg(1), msg(2)]));
     const first = openEditor(1);
     fireEvent.change(first, { target: { value: 'unsaved' } });
-    fireEvent.click(screen.getByRole('button', { name: 'More actions for message 2' }));
+    fireEvent.click(within1(2).getByRole('button', { name: moreName }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }));
     const ask = screen.getByRole('alertdialog', { name: 'Discard your edit?' });
     expect(document.activeElement).toBe(within(ask).getByRole('button', { name: 'Discard' }));
     fireEvent.click(within(ask).getByRole('button', { name: 'Keep editing' }));
     expect(box(1)).toHaveProperty('value', 'unsaved');
     expect(document.activeElement).toBe(box(1));
-    fireEvent.click(screen.getByRole('button', { name: 'More actions for message 2' }));
+    fireEvent.click(within1(2).getByRole('button', { name: moreName }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }));
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
-    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+    expect(noBox(1)).toBeNull();
     expect(box(2)).toHaveProperty('value', 'text 2');
   });
 
   it('opens another without asking when nothing was changed', () => {
     render(conversation([msg(1), msg(2)]));
     openEditor(1);
-    fireEvent.click(screen.getByRole('button', { name: 'More actions for message 2' }));
+    fireEvent.click(within1(2).getByRole('button', { name: moreName }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Edit' }));
     expect(screen.queryByRole('alertdialog')).toBeNull();
-    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+    expect(noBox(1)).toBeNull();
     expect(box(2)).toBeTruthy();
   });
 });
@@ -309,7 +316,7 @@ describe('refusals', () => {
     fireEvent.change(openEditor(1), { target: { value: 'new words' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByText('This message is no longer available to you.')).toBeTruthy();
-    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+    expect(noBox(1)).toBeNull();
   });
 
   it('rate_limited: says how long, and holds Save back until then', async () => {
@@ -349,7 +356,7 @@ describe('refusals', () => {
     expect(edit).toHaveBeenCalledWith('general', 1, 'too late');
     expect(screen.getByRole('alert').textContent).toBe('This message can no longer be edited: it is more than an hour old.');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+    expect(noBox(1)).toBeNull();
     expect(more(1)).toBeNull();
     // Focus goes to the message, which no longer has a ⋯.
     expect(document.activeElement).toBe(item(1));
@@ -456,7 +463,7 @@ describe('an open edit across a reload (issue #1039)', () => {
     fireEvent.change(openEditor(1), { target: { value: 'hello, half done' } });
     first.unmount();
     render(conversation([msg(1, { body: 'helo, conch', created_at: ago(editWindowMs + minute) })], { channelId: 7 }));
-    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+    expect(noBox(1)).toBeNull();
     expect(window.sessionStorage.length).toBe(0);
   });
 
@@ -467,7 +474,7 @@ describe('an open edit across a reload (issue #1039)', () => {
     const onLoadOlder = vi.fn();
     const page = render(conversation([msg(5), msg(6)], { channelId: 7, exhausted: false, onLoadOlder }));
     expect(onLoadOlder).toHaveBeenCalled();
-    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+    expect(noBox(1)).toBeNull();
     expect(window.sessionStorage.getItem('conch.web.drafts')).toContain('old one, changed');
     page.rerender(conversation([msg(1, { body: 'old one' }), msg(5), msg(6)], { channelId: 7, exhausted: false, onLoadOlder }));
     expect((box(1) as HTMLTextAreaElement).value).toBe('old one, changed');
@@ -478,7 +485,7 @@ describe('an open edit across a reload (issue #1039)', () => {
     fireEvent.change(openEditor(1), { target: { value: 'changed' } });
     first.unmount();
     render(conversation([msg(5)], { channelId: 7, exhausted: true }));
-    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+    expect(noBox(1)).toBeNull();
     expect(window.sessionStorage.length).toBe(0);
   });
 
@@ -488,7 +495,7 @@ describe('an open edit across a reload (issue #1039)', () => {
     fireEvent.keyDown(box(1), { key: 'Escape' });
     first.unmount();
     render(conversation([msg(1)], { channelId: 7 }));
-    expect(screen.queryByRole('textbox', { name: 'Edit message 1' })).toBeNull();
+    expect(noBox(1)).toBeNull();
   });
 
   it('works with storage refused', () => {

@@ -1206,6 +1206,13 @@ label {
   background: var(--raised);
 }
 
+/* The message the arrow keys are on (issue #1040): marked beyond the
+   background, which a hover shares. */
+.messages > .message:focus-visible {
+  outline: 2px solid var(--focus, currentColor);
+  outline-offset: -2px;
+}
+
 .message > .avatar {
   grid-row: 1 / span 2;
 }

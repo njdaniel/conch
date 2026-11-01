@@ -10,9 +10,15 @@ let next = 0;
 const unique = (label: string) => `r842-${label}-${Date.now().toString(36)}-${String(++next)}`;
 
 
+// Controls are named by author and time, never by id (issue #1040), so a
+// message's Reply is found inside its item.
+const replyName = /^Reply to .+'s message, \d\d:\d\d$/;
+const threadName = /^Thread around .+'s message, \d\d:\d\d$/;
+const replyTo = (page: Page, root: number) => page.getByRole('log', { name: 'Messages' }).locator(`[data-message-id="${String(root)}"]`).getByRole('button', { name: replyName });
+
 async function openThread(page: Page, root: number) {
-  await page.getByRole('button', { name: `Reply to message ${String(root)}`, exact: true }).click();
-  return page.getByRole('region', { name: `Thread around message ${String(root)}` });
+  await replyTo(page, root).click();
+  return page.getByRole('region', { name: threadName });
 }
 
 test('desktop reply and history use the same one-level thread', async ({ meet, world }) => {
@@ -21,12 +27,12 @@ test('desktop reply and history use the same one-level thread', async ({ meet, w
   const root = await post(world, world.tokens.browser, 'general', unique('root'));
   const body = unique('desktop reply');
   let thread = await openThread(page, root.id);
-  const composer = thread.getByRole('textbox', { name: /^Reply to (?!message )/ });
+  const composer = thread.getByRole('textbox', { name: /^Reply to (?!.*'s message, )/ });
   await composer.fill(body);
   await composer.press('Enter');
   await expect(thread.getByText(body, { exact: true })).toBeVisible();
   await expect(thread.getByText('Replying to #general; the audience cannot be changed.')).toBeVisible();
-  await expect(thread.getByRole('button', { name: `Reply to message ${String(root.id + 1)}` })).toHaveCount(0);
+  await expect(thread.getByRole('button', { name: replyName })).toHaveCount(0);
 
   await page.reload();
   thread = await openThread(page, root.id);
@@ -45,12 +51,12 @@ for (const [size, options] of phones) {
     const root = await post(world, world.tokens.browser, 'general', unique(`root ${size}`));
     const thread = await openThread(page, root.id);
     const body = unique(`touch ${size}`);
-    await thread.getByRole('textbox', { name: /^Reply to (?!message )/ }).fill(body);
+    await thread.getByRole('textbox', { name: /^Reply to (?!.*'s message, )/ }).fill(body);
     await thread.getByRole('button', { name: 'Send reply' }).click();
     await expect(thread.getByText(body, { exact: true })).toBeVisible();
     await expectFits(page, `reply ${size}`);
     await thread.getByRole('button', { name: 'Close thread' }).click();
-    await expect(page.getByRole('button', { name: `Reply to message ${String(root.id)}`, exact: true })).toBeFocused();
+    await expect(replyTo(page, root.id)).toBeFocused();
   });
 }
 
@@ -109,7 +115,7 @@ test('a reply from a phone shows its root and the root counts it on the desktop'
   const root = await post(world, world.tokens.browser, 'general', rootBody);
   const body = unique('I am in');
   const thread = await openThread(phone.page, root.id);
-  await thread.getByRole('textbox', { name: /^Reply to (?!message )/ }).fill(body);
+  await thread.getByRole('textbox', { name: /^Reply to (?!.*'s message, )/ }).fill(body);
   await thread.getByRole('button', { name: 'Send reply' }).click();
   await expect(thread.getByText(body, { exact: true })).toBeVisible();
 
@@ -124,13 +130,13 @@ for (const [size, options] of phoneSizes.filter(([size]) => size === '390×844' 
     const { page } = await meet(options);
     await signIn(page, world, world.tokens.browser, 'browser-test');
     const root = await post(world, world.tokens.browser, 'general', unique(`fit ${size}`));
-    const replyButton = page.getByRole('button', { name: `Reply to message ${String(root.id)}`, exact: true });
+    const replyButton = replyTo(page, root.id);
     const target = await replyButton.boundingBox();
     expect(target?.width ?? 0).toBeGreaterThanOrEqual(44);
     expect(target?.height ?? 0).toBeGreaterThanOrEqual(44);
     const thread = await openThread(page, root.id);
     const box = await thread.boundingBox();
-    for (const control of [thread.getByRole('textbox', { name: /^Reply to (?!message )/ }), thread.getByRole('button', { name: 'Send reply' })]) {
+    for (const control of [thread.getByRole('textbox', { name: /^Reply to (?!.*'s message, )/ }), thread.getByRole('button', { name: 'Send reply' })]) {
       const rect = await control.boundingBox();
       expect((rect?.x ?? 0) + (rect?.width ?? 0)).toBeLessThanOrEqual((box?.x ?? 0) + (box?.width ?? 0));
     }
@@ -149,20 +155,20 @@ for (const [size, options] of kept) {
     const root = await post(world, world.tokens.browser, 'general', unique(`kept ${size}`));
     const body = unique(`half-typed reply ${size}`);
     let thread = await openThread(page, root.id);
-    await thread.getByRole('textbox', { name: /^Reply to (?!message )/ }).fill(body);
+    await thread.getByRole('textbox', { name: /^Reply to (?!.*'s message, )/ }).fill(body);
 
     await page.reload();
     await openChannel(page, 'general');
-    thread = page.getByRole('region', { name: `Thread around message ${String(root.id)}` });
-    await expect(thread.getByRole('textbox', { name: /^Reply to (?!message )/ })).toHaveValue(body);
+    thread = page.getByRole('region', { name: threadName });
+    await expect(thread.getByRole('textbox', { name: /^Reply to (?!.*'s message, )/ })).toHaveValue(body);
     await thread.getByRole('button', { name: 'Send reply' }).click();
     await expect(thread.getByText(body, { exact: true })).toBeVisible();
 
     await page.reload();
     await openChannel(page, 'general');
-    await expect(page.getByRole('region', { name: `Thread around message ${String(root.id)}` })).toHaveCount(0);
+    await expect(page.getByRole('region', { name: threadName })).toHaveCount(0);
     thread = await openThread(page, root.id);
-    await expect(thread.getByRole('textbox', { name: /^Reply to (?!message )/ })).toHaveValue('');
+    await expect(thread.getByRole('textbox', { name: /^Reply to (?!.*'s message, )/ })).toHaveValue('');
   });
 }
 
@@ -178,12 +184,12 @@ test('a kept reply to a whisper root goes out with the root audience', async ({ 
   await signIn(page, world, world.tokens.browser, 'browser-test');
   await openChannel(page, 'nets-demo');
   let thread = await openThread(page, whisperRoot.id);
-  await thread.getByRole('textbox', { name: /^Reply to (?!message )/ }).fill(body);
+  await thread.getByRole('textbox', { name: /^Reply to (?!.*'s message, )/ }).fill(body);
 
   await page.reload();
   await openChannel(page, 'nets-demo');
-  thread = page.getByRole('region', { name: `Thread around message ${String(whisperRoot.id)}` });
-  await expect(thread.getByRole('textbox', { name: /^Reply to (?!message )/ })).toHaveValue(body);
+  thread = page.getByRole('region', { name: threadName });
+  await expect(thread.getByRole('textbox', { name: /^Reply to (?!.*'s message, )/ })).toHaveValue(body);
   await expect(thread.getByText(/Replying to → whisper to 1; the audience cannot be changed/)).toBeVisible();
   await thread.getByRole('button', { name: 'Send reply' }).click();
   await expect(thread.getByText(body, { exact: true })).toBeVisible();

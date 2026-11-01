@@ -35,7 +35,7 @@ export function ActionsMenu({
   onOpenChange,
   button,
 }: {
-  // The button's and the menu's accessible name ("More actions for message 12").
+  // The button's and the menu's accessible name ("More actions for ada's message, 21:38").
   readonly label: string;
   readonly items: readonly MenuItem[];
   readonly open: boolean;
