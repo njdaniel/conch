@@ -45,6 +45,9 @@ function install(): Subscription[] {
     joinAsGuest: unexpected('joinAsGuest'),
     createAccount: unexpected('createAccount'),
     signOut: unexpected('signOut'),
+    uploadFile: unexpected('uploadFile'),
+    downloadFile: unexpected('downloadFile'),
+    saveFile: unexpected('saveFile'),
   };
   Object.defineProperty(window, 'conchDesktop', { value: bridge, configurable: true, writable: true });
   return subscriptions;

@@ -119,6 +119,30 @@ type Channel struct {
 	// grant on this channel (ListChannelsForPrincipal, issue #789, ADR-010
 	// §3.2); false on reads that are not bound to a principal.
 	Manages bool
+	// Visibility is public or private, and IsDefault whether new members
+	// start in the channel (migration 40, ADR-013 decisions 2 and 5). A
+	// default channel is always public. Nothing reads them for
+	// authorization until channel settings and the directory ship (I3a,
+	// I3b).
+	Visibility schema.ChannelVisibility
+	IsDefault  bool
+}
+
+// channelColumns are the channel columns every Channel reader selects, in
+// scanChannel's order.
+const channelColumns = "id, name, created_at, visibility, is_default"
+
+// scanChannel reads one row of channelColumns.
+func scanChannel(scan func(dest ...any) error) (Channel, error) {
+	var c Channel
+	var created int64
+	var vis string
+	if err := scan(&c.ID, &c.Name, &created, &vis, &c.IsDefault); err != nil {
+		return Channel{}, err
+	}
+	c.CreatedAt = time.UnixMilli(created)
+	c.Visibility = schema.ChannelVisibility(vis)
+	return c, nil
 }
 
 // Message is a single rendered message in a channel, with an optional typed
@@ -239,43 +263,37 @@ func (s *Store) CreateChannel(ctx context.Context, name string) (Channel, error)
 	if err != nil {
 		return Channel{}, err
 	}
-	return Channel{ID: id, Name: name, CreatedAt: now}, nil
+	return Channel{ID: id, Name: name, CreatedAt: now, Visibility: schema.ChannelPrivate}, nil
 }
 
 // ChannelByName returns the channel with name. It returns ErrNotFound when no
 // such channel exists.
 func (s *Store) ChannelByName(ctx context.Context, name string) (Channel, error) {
-	var ch Channel
-	var createdAt int64
-	err := s.db.QueryRowContext(ctx,
-		"SELECT id, name, created_at FROM channels WHERE name = ?", name,
-	).Scan(&ch.ID, &ch.Name, &createdAt)
+	ch, err := scanChannel(s.db.QueryRowContext(ctx,
+		"SELECT "+channelColumns+" FROM channels WHERE name = ?", name).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Channel{}, fmt.Errorf("store: find channel %q: %w", name, ErrNotFound)
 	}
 	if err != nil {
 		return Channel{}, fmt.Errorf("store: find channel %q: %w", name, err)
 	}
-	ch.CreatedAt = time.UnixMilli(createdAt)
 	return ch, nil
 }
 
 // ListChannels returns every channel ordered by id ascending. It returns an
 // empty, non-nil slice when there are none.
 func (s *Store) ListChannels(ctx context.Context) ([]Channel, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id, name, created_at FROM channels ORDER BY id ASC")
+	rows, err := s.db.QueryContext(ctx, "SELECT "+channelColumns+" FROM channels ORDER BY id ASC")
 	if err != nil {
 		return nil, fmt.Errorf("store: list channels: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	channels := []Channel{}
 	for rows.Next() {
-		var ch Channel
-		var createdAt int64
-		if err := rows.Scan(&ch.ID, &ch.Name, &createdAt); err != nil {
+		ch, err := scanChannel(rows.Scan)
+		if err != nil {
 			return nil, fmt.Errorf("store: scan channel: %w", err)
 		}
-		ch.CreatedAt = time.UnixMilli(createdAt)
 		channels = append(channels, ch)
 	}
 	if err := rows.Err(); err != nil {
@@ -287,18 +305,14 @@ func (s *Store) ListChannels(ctx context.Context) ([]Channel, error) {
 // ChannelByID returns the channel with id. It returns ErrNotFound when no
 // such channel exists.
 func (s *Store) ChannelByID(ctx context.Context, id int64) (Channel, error) {
-	var ch Channel
-	var createdAt int64
-	err := s.db.QueryRowContext(ctx,
-		"SELECT id, name, created_at FROM channels WHERE id = ?", id,
-	).Scan(&ch.ID, &ch.Name, &createdAt)
+	ch, err := scanChannel(s.db.QueryRowContext(ctx,
+		"SELECT "+channelColumns+" FROM channels WHERE id = ?", id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Channel{}, fmt.Errorf("store: find channel %d: %w", id, ErrNotFound)
 	}
 	if err != nil {
 		return Channel{}, fmt.Errorf("store: find channel %d: %w", id, err)
 	}
-	ch.CreatedAt = time.UnixMilli(createdAt)
 	return ch, nil
 }
 

@@ -252,11 +252,27 @@ describe('the landing page', () => {
     expect(calls.filter((c) => c.path === '/v2/invites/redeem')).toHaveLength(1);
   });
 
-  it("shows the server's own words for a name it does not accept", async () => {
-    opened({ ...joining, 'POST /v2/invites/redeem': () => refusal(400, 'invalid_request', 'schema: principal name must not contain invisible formatting characters') });
+  it.each([
+    ['invisible characters', 'schema: principal name must not contain invisible formatting characters', 'A name cannot contain invisible characters.'],
+    ['whitespace at an end', 'schema: principal name must not begin or end with whitespace', 'A name cannot start or end with a space.'],
+    ['control characters', 'schema: principal name must not contain control characters, line or paragraph separators, or bidi controls', 'A name cannot contain control characters.'],
+    ['too long', 'schema: principal name must be at most 100 characters, got 101', 'A name can be up to 100 characters.'],
+    ['the guest prefix', 'schema: a principal name must not begin with the reserved guest prefix', 'Names that begin with “guest” are reserved.'],
+    ['nothing visible', 'schema: principal name must have a character a reader can see', 'A name needs at least one character you can see.'],
+    ['nothing visible, as the account routes say it', 'the name is not acceptable', 'A name needs at least one character you can see.'],
+    ['the plural reserved-name wording', 'names beginning with guest, or with a look-alike of it, are reserved for guests; choose another', 'Names that begin with \u201cguest\u201d are reserved.'],
+    ['invalid UTF-8', 'schema: principal name must be valid UTF-8', 'That name cannot be used. Choose another.'],
+    ['an unknown rule', 'schema: principal name is not to the server’s liking', 'That name cannot be used. Choose another.'],
+  ])('says its own plain line for a name refused for %s', async (_rule, message, line) => {
+    opened({ ...joining, 'POST /v2/invites/redeem': () => refusal(400, 'invalid_request', message) });
     await chooseName('a\u200bb');
-    expect(await screen.findByText('Principal name must not contain invisible formatting characters.')).toBeDefined();
-    expect(screen.getByLabelText<HTMLInputElement>('Your name').value).toBe('a\u200bb');
+    expect(await screen.findByText(line)).toBeDefined();
+    expect(document.body.textContent).not.toMatch(/principal|schema:/i);
+    const field = screen.getByLabelText<HTMLInputElement>('Your name');
+    expect(field.value).toBe('a\u200bb');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(field);
+    });
   });
 
   it.each<{ readonly when: string; readonly routes: Record<string, Route> }>([
