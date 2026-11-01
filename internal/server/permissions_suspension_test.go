@@ -170,6 +170,7 @@ func TestRoleChangeSuspendsSignInLinks(t *testing.T) {
 	}
 	signIn, hashSignIn := mk(schema.SignInLinkPurposeSignIn)
 	reset, hashReset := mk(schema.SignInLinkPurposeReset)
+	enroll, hashEnroll := mk(schema.SignInLinkPurposeEnrollment)
 	subj := func(id int64) string { return fmt.Sprintf("sign_in_link:%d", id) }
 	put := func(granted bool) {
 		t.Helper()
@@ -181,7 +182,7 @@ func TestRoleChangeSuspendsSignInLinks(t *testing.T) {
 	}
 
 	put(false)
-	for _, h := range []string{hashSignIn, hashReset} {
+	for _, h := range []string{hashSignIn, hashReset, hashEnroll} {
 		if _, err := f.srv.store.PreviewSignInLink(ctx, h, now); !errors.Is(err, store.ErrSignInLinkInvalid) {
 			t.Errorf("preview of a suspended link = %v, want invalid", err)
 		}
@@ -191,8 +192,8 @@ func TestRoleChangeSuspendsSignInLinks(t *testing.T) {
 		t.Errorf("redeeming a link whose maker lost act_as_members = %v, want invalid", err)
 	}
 	rows := subjects(auditRowsFor(t, f.authFixture, "sign_in_link_suspended"))
-	if len(rows) != 2 || rows[subj(signIn)] == "" || rows[subj(reset)] == "" {
-		t.Fatalf("sign_in_link_suspended rows = %v, want one each for %s and %s", rows, subj(signIn), subj(reset))
+	if len(rows) != 3 || rows[subj(signIn)] == "" || rows[subj(reset)] == "" || rows[subj(enroll)] == "" {
+		t.Fatalf("sign_in_link_suspended rows = %v, want one each for %s, %s and %s", rows, subj(signIn), subj(reset), subj(enroll))
 	}
 	for s, r := range rows {
 		if !strings.HasPrefix(r, "system ") || !strings.Contains(r, "reason=permission") {
@@ -206,7 +207,7 @@ func TestRoleChangeSuspendsSignInLinks(t *testing.T) {
 
 	put(true)
 	resumed := subjects(auditRowsFor(t, f.authFixture, "sign_in_link_resumed"))
-	if len(resumed) != 2 || resumed[subj(signIn)] == "" || resumed[subj(reset)] == "" {
+	if len(resumed) != 3 || resumed[subj(signIn)] == "" || resumed[subj(reset)] == "" || resumed[subj(enroll)] == "" {
 		t.Fatalf("sign_in_link_resumed rows = %v, want one each", resumed)
 	}
 	// After the permission is regained it works.
