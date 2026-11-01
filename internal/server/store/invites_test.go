@@ -1123,7 +1123,13 @@ func TestInvitesMigrationFromSchema23(t *testing.T) {
 			if err := rows.Scan(&id, &may, &voice, &by, &inv); err != nil {
 				t.Fatal(err)
 			}
-			if may != 0 || voice != 1 || by.Valid || inv.Valid {
+			// The community migration (40) turns link-making on for every
+			// human member (ADR-013 decision 1); the agent keeps 0.
+			wantMay := int64(1)
+			if id == 3 {
+				wantMay = 0
+			}
+			if may != wantMay || voice != 1 || by.Valid || inv.Valid {
 				t.Errorf("pass %d: principal %d: may_invite %d voice_allowed %d invited_by %v invite_id %v", pass, id, may, voice, by, inv)
 			}
 			n++
@@ -1132,12 +1138,14 @@ func TestInvitesMigrationFromSchema23(t *testing.T) {
 		if n != 3 {
 			t.Errorf("pass %d: principals = %d, want 3", pass, n)
 		}
-		// Pass 1 made one invite after migrating; pass 2 must find it, not a fresh table.
-		invites := pass - 1
-		// The permissions migration (39) writes its revision row on an upgraded
-		// database; this migration writes no setting.
+		// Pass 1 made two invites after migrating (the member's and the
+		// operator's); pass 2 must find them, not a fresh table.
+		invites := 2 * (pass - 1)
+		// The permissions migration (39) writes its revision row and the
+		// community migration (40) the community joining settings on an
+		// upgraded database; this migration writes no setting.
 		for table, want := range map[string]int{"channel_members": 2, "messages": 1, "credentials": 2, "invites": invites, "invite_channels": invites,
-			"server_settings WHERE key != '" + settingPermissionsRevision + "'": 0} {
+			"server_settings WHERE key NOT IN ('" + settingPermissionsRevision + "', '" + settingOpenSignup + "', '" + settingMemberLinkDefaultExpirySeconds + "')": 0} {
 			var got int
 			if err := s.db.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&got); err != nil || got != want {
 				t.Errorf("pass %d: %s rows = %d, %v; want %d", pass, table, got, err, want)
@@ -1146,11 +1154,12 @@ func TestInvitesMigrationFromSchema23(t *testing.T) {
 		// The migrated database takes an invite end to end.
 		if pass == 1 {
 			ada, err := s.PrincipalByID(ctx, 2)
-			if err != nil || ada.MayInvite || !ada.VoiceAllowed {
+			if err != nil || !ada.MayInvite || !ada.VoiceAllowed {
 				t.Errorf("PrincipalByID = %+v, %v", ada, err)
 			}
-			if _, err := s.CreateInvite(ctx, "system", 2, personal("general"), InviteOptions{}, time.Now()); !errors.Is(err, ErrInviteNotAllowed) {
-				t.Errorf("an existing member made an invite: %v", err)
+			// Link-making is on for an existing member since migration 40.
+			if _, err := s.CreateInvite(ctx, "system", 2, personal("general"), InviteOptions{}, time.Now()); err != nil {
+				t.Errorf("an existing member could not make an invite: %v", err)
 			}
 			if _, err := s.CreateInvite(ctx, "system", 1, personal("general"), InviteOptions{}, time.Now()); err != nil {
 				t.Errorf("the operator could not make an invite: %v", err)

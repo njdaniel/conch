@@ -69,6 +69,13 @@ var revocations = []struct {
 		f.revokeShareScreen(t)
 		f.srv.voice.endSharesOf(context.Background(), f.ids["ann"], 0, voiceShareStopAccessLost)
 	}},
+	// use_voice off for a role: the store write, then the hook the PUT runs
+	// before it answers (voiceWithheld), which removes everyone who lost voice
+	// and ends their shares.
+	{"permissions PUT/use_voice", false, func(t *testing.T, f *presenceFixture) {
+		f.revokeUseVoice(t)
+		f.srv.voiceWithheld(context.Background())
+	}},
 	{"membership loss", true, func(t *testing.T, f *presenceFixture) {
 		if _, err := f.srv.store.RemoveChannelMember(context.Background(), "system", f.ops.ID, f.ids["ann"]); err != nil {
 			t.Error(err)
@@ -125,6 +132,27 @@ var revocations = []struct {
 		f.rotateInStoreOnly(t)
 		f.srv.voicePrincipalLostAccess(context.Background(), f.ids["ann"], voiceReasonCredsRevoked)
 	}},
+}
+
+// revokeUseVoice turns use_voice (and share_screen, which needs it) off for
+// members and operators, as the owner, through the store.
+func (f *presenceFixture) revokeUseVoice(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	doc, err := f.srv.store.Permissions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changes []schema.PermissionChangeV1
+	for _, p := range []schema.Permission{schema.PermShareScreen, schema.PermUseVoice} {
+		for _, r := range []schema.PermissionRole{schema.PermissionRoleMember, schema.PermissionRoleOperator} {
+			changes = append(changes, schema.PermissionChangeV1{Permission: p, Role: r, Granted: false})
+		}
+	}
+	req := schema.PutPermissionsRequestV1{Revision: doc.Revision, Changes: changes}
+	if _, err := f.srv.store.PutPermissions(ctx, fmt.Sprintf("principal:%d", f.root.ID), f.root.ID, req, time.Now()); err != nil {
+		t.Fatalf("turn use_voice off: %v", err)
+	}
 }
 
 func (f *presenceFixture) revokeAll(t *testing.T) {
@@ -213,7 +241,7 @@ func TestVoiceShareClaimRevokedBeforeGrant(t *testing.T) {
 				if res.status == http.StatusOK {
 					t.Fatalf("a claim was granted after the revocation answered: %s", res.body)
 				}
-				if rev.name == "permissions PUT" && (res.status != http.StatusForbidden || errCode(t, res.body) != schema.ErrorCodeVoiceNotAllowed) {
+				if strings.HasPrefix(rev.name, "permissions PUT") && (res.status != http.StatusForbidden || errCode(t, res.body) != schema.ErrorCodeVoiceNotAllowed) {
 					t.Errorf("claim after the revocation: %d %s, want 403 voice_not_allowed", res.status, res.body)
 				}
 				if n := f.screenGrants("ann"); n != 0 {
@@ -279,6 +307,10 @@ func revocationWaitsForClaim(t *testing.T, rev revocationCase, again bool) {
 	claimed := make(chan wireResult, 1)
 	go func() { claimed <- f.claimShare(t, "ann", "ops") }()
 	<-granting
+	claimRoom := f.srv.voice.roomNamed(room)
+	if claimRoom == nil {
+		t.Fatal("the claim's room is not in the poller")
+	}
 	revoked := make(chan struct{})
 	go func() {
 		defer close(revoked)
@@ -290,13 +322,16 @@ func revocationWaitsForClaim(t *testing.T, rev revocationCase, again bool) {
 	if n := <-waiting; n == 0 {
 		t.Error("the revocation's stop path found no share to wait for")
 	}
-	select {
-	case <-revoked:
-		t.Error("the revocation answered while the grant was still in flight")
-	default:
-	}
 	close(release)
 	<-revoked
+	// The revocation has answered, so the claim it waited for has let go of
+	// the room's claimer, which it clears before it signals it is done.
+	f.srv.voice.mu.Lock()
+	claimer := claimRoom.claimer
+	f.srv.voice.mu.Unlock()
+	if claimer != 0 {
+		t.Errorf("the revocation answered while a claim of %d was still running", claimer)
+	}
 	// Read at the moment the revocation has answered.
 	if f.granted(t, room, "ann") {
 		t.Error("the screen is still granted when the revocation answered")
@@ -305,7 +340,7 @@ func revocationWaitsForClaim(t *testing.T, rev revocationCase, again bool) {
 		t.Errorf("the poller still holds a share for %d", holder)
 	}
 	<-claimed
-	if rev.name == "permissions PUT" {
+	if strings.HasPrefix(rev.name, "permissions PUT") {
 		want := []string{"ann started audio=true", "ann stopped principal=ann reason=access_lost"}
 		if got := f.shareRows(t); !slices.Equal(got, want) {
 			t.Errorf("share rows %q, want %q", got, want)
@@ -336,7 +371,88 @@ func TestVoiceShareReclaimAfterRevocation(t *testing.T) {
 	if got := f.shareRows(t); !slices.Equal(got, want) {
 		t.Errorf("share rows %q, want %q", got, want)
 	}
-	if strings.Contains(res.body, "share_screen") {
-		t.Errorf("the refusal names the permission: %s", res.body)
+	// One code per question, and the refusal names the permission (design
+	// §7.4): a member's role could hold share_screen.
+	if got := permissionOf(t, []byte(res.body)); got != schema.PermShareScreen {
+		t.Errorf("the refusal names %q, want share_screen: %s", got, res.body)
+	}
+}
+
+// TestVoiceShareHookWaitsOnlyForClaimsRunningAtRevocation (issue #1089): a
+// claim that queues behind a running one after the hook has taken its
+// snapshot does not lengthen the hook's wait. The hook answers once the
+// snapshot's claim returns, while the queued claim is held inside LiveKit.
+func TestVoiceShareHookWaitsOnlyForClaimsRunningAtRevocation(t *testing.T) {
+	f, room := newShareFixture(t)
+	ann := f.identity("ann")
+	grantingA, releaseA := make(chan struct{}), make(chan struct{})
+	grantingB, releaseB := make(chan struct{}), make(chan struct{})
+	var grants int
+	var gmu sync.Mutex
+	f.lk.setOnUpdate(func(_, identity string, share bool) {
+		if !share || identity != ann {
+			return
+		}
+		gmu.Lock()
+		grants++
+		n := grants
+		gmu.Unlock()
+		switch n {
+		case 1:
+			close(grantingA)
+			<-releaseA
+		case 2:
+			close(grantingB)
+			<-releaseB
+		}
+	})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseB) }) })
+	claimedA := make(chan wireResult, 1)
+	go func() { claimedA <- f.claimShare(t, "ann", "ops") }()
+	<-grantingA
+
+	// The hook takes its snapshot (A is in it), then is held at the seam
+	// until B, which starts after the snapshot, holds the room's claims.
+	atSnapshot, proceed := make(chan int, 1), make(chan struct{})
+	f.srv.voice.endSharesSeam = func(n int) {
+		atSnapshot <- n
+		<-proceed
+	}
+	hookDone := make(chan struct{})
+	go func() {
+		defer close(hookDone)
+		f.srv.voiceEnforceHolders(context.Background())
+	}()
+	if n := <-atSnapshot; n != 1 {
+		t.Fatalf("the hook's snapshot holds %d running claims, want 1", n)
+	}
+	// B starts after the snapshot and queues behind A. A finishes, B takes
+	// the room's claims and is held inside LiveKit; only then is the hook let
+	// past its snapshot. A hook that waited on the claims lock would now
+	// wait for B; one that waits on the snapshot's done channels does not.
+	claimedB := make(chan wireResult, 1)
+	go func() { claimedB <- f.claimShare(t, "ann", "ops") }()
+	close(releaseA)
+	if res := <-claimedA; res.status != http.StatusOK {
+		t.Fatalf("the first claim: %d %s, want 200", res.status, res.body)
+	}
+	select {
+	case <-grantingB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the queued claim never reached LiveKit")
+	}
+	close(proceed)
+	select {
+	case <-hookDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the hook is waiting for a claim that queued after its snapshot")
+	}
+	releaseOnce.Do(func() { close(releaseB) })
+	if res := <-claimedB; res.status != http.StatusOK {
+		t.Errorf("the queued claim: %d %s, want 200", res.status, res.body)
+	}
+	if !f.granted(t, room, "ann") {
+		t.Error("the holder's grant was lost")
 	}
 }

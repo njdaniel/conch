@@ -53,7 +53,7 @@ var Vocabularies = map[string][]string{
 	),
 	"JoinWarning": values(
 		JoinWarningLiveGuestsRemain, JoinWarningTrustedProxyUnset, JoinWarningOneAddress, JoinWarningReservedNamesInUse,
-		JoinWarningServerNameInUse,
+		JoinWarningServerNameInUse, JoinWarningNoDefaultChannel,
 	),
 	"LoginNext":       values(LoginNextSignedIn, LoginNextTOTP),
 	"NetRole":         values(NetRoleMember, NetRoleMonitor),
@@ -154,6 +154,12 @@ var Vocabularies = map[string][]string{
 	"PermissionPreset":   values(PresetPersonal, PresetGroup),
 	"PermissionsWarning": values(PermissionsWarningDefaultChannelExposesMembers, PermissionsWarningOpenSignupOn),
 	"IssuedKind":         values(IssuedCredential, IssuedHook),
+
+	// The community model (ADR-013, issue #978). InviteKindV2 and
+	// DirectoryScope are closed and client-tolerant.
+	"ChannelVisibility": values(ChannelPublic, ChannelPrivate),
+	"InviteKindV2":      values(InviteKindMember),
+	"DirectoryScope":    values(DirectoryScopeEveryone, DirectoryScopeSharedChannels),
 }
 
 // values lists a vocabulary by its constants, so an entry above cannot hold a

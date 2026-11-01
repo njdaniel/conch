@@ -98,6 +98,18 @@ export function loadEmoji(): Promise<EmojiIndex> {
   return Promise.resolve(built);
 }
 
+// The same index, now: for the one caller that cannot wait a tick (the swap of
+// a closed `:name:`, which runs inside an input event). Null if the bundled
+// catalog is not the schema's version.
+export function emojiNow(): EmojiIndex | null {
+  if (built === null) {
+    const index = buildIndex(catalog);
+    if (index.version !== EMOJI_VERSION) return null;
+    built = index;
+  }
+  return built;
+}
+
 const fold = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
 // A name the user can type for an emoji: one of Conch's aliases (":tada:",
@@ -183,6 +195,43 @@ export function completionAt(text: string, caret: number): Completion | null {
   const query = m[3] ?? '';
   if (query.length < completionMinQuery) return null;
   return { start: before.length - query.length - 1, query: query.toLowerCase() };
+}
+
+export interface ClosedShortcode {
+  // Where the opening ':' is; the closing ':' is the character before the caret.
+  readonly start: number;
+  // The name between the colons, lower-cased.
+  readonly name: string;
+}
+
+// The `:name:` that ends at the caret, if any: the same boundary and name rules
+// as completionAt (the opening colon starts the text or follows a space, a line
+// break or an opening bracket; the name holds only what a shortcode holds and is
+// at least completionMinQuery long), so "12:30:45", "a:tada:" and a link such as
+// "x.y/a:b:" (a colon inside a word) do not match. Whether the name is one is exactEmoji's call.
+export function closedShortcodeAt(text: string, caret: number): ClosedShortcode | null {
+  const before = text.slice(0, caret);
+  const m = /(^|[\s([{]):([a-z0-9_+-]*):$/i.exec(before);
+  if (m === null) return null;
+  const name = m[2] ?? '';
+  if (name.length < completionMinQuery) return null;
+  // A colon inside a link is not a shortcode, even after an opening bracket:
+  // read the token back to the nearest whitespace, as mentionAt does.
+  let from = before.length;
+  while (from > 0 && !/\s/u.test(before.charAt(from - 1))) from -= 1;
+  if (before.slice(from).includes('://')) return null;
+  return { start: before.length - name.length - 2, name: name.toLowerCase() };
+}
+
+// The emoji whose alias or shortcode is exactly `name` (the match
+// completeShortcode ranks first), or null. A skin-tone variant is found by its
+// full shortcode, as in completion.
+export function exactEmoji(index: EmojiIndex, name: string): Emoji | null {
+  const q = name.toLowerCase();
+  for (const e of index.all) {
+    if (e.shortcode === q || e.aliases.includes(q)) return e;
+  }
+  return null;
 }
 
 // The completion for `:query`, ranked as searchEmoji ranks: the exact name or

@@ -33,6 +33,13 @@ const (
 	AuditInvitesPaused           = "invites_paused"
 	AuditInvitesResumed          = "invites_resumed"
 	AuditInvitePermissionChanged = "invite_permission_changed"
+	// AuditInviteSuspended and AuditInviteResumed are written, one row per
+	// link, by a change to the permissions document that takes
+	// make_member_links from a maker, or gives it back (ADR-014 design §7.5,
+	// §8.5): actor system, subject the invite, detail reason=permission. The
+	// link is suspended, not closed.
+	AuditInviteSuspended = "invite_suspended"
+	AuditInviteResumed   = "invite_resumed"
 	// AuditJoinersDisabled and AuditInviteesDisabled summarise an operator's
 	// bulk disable (issue #438); each principal it disabled has its own
 	// principal_disabled row as well.
@@ -82,6 +89,14 @@ var (
 	// ErrInviteRequestInvalid wraps a request the schema refuses.
 	ErrInviteRequestInvalid = errors.New("store: invalid invite request")
 )
+
+// inviteRefusal is an invite refusal that names the permission the maker
+// lacks (ADR-014 design §7.4): errors.Is matches sentinel, and errors.As a
+// *PermissionError gives perm. Its text is the sentinel's and the reason,
+// as the plain wrapped refusals read.
+func inviteRefusal(sentinel error, perm schema.Permission, reason string) error {
+	return &PermissionError{Err: sentinel, Permission: perm, Reason: reason}
+}
 
 // InviteState is where an invite is in its life, for listing.
 type InviteState string
@@ -152,19 +167,23 @@ func boolInt(b bool) int {
 
 // inviteRow is one invites row.
 type inviteRow struct {
-	id           int64
-	kind         schema.InviteKind
-	codeHash     string
-	createdBy    int64
-	createdAt    int64
-	expiresAt    int64
-	maxUses      sql.NullInt64
-	uses         int64
-	closedAt     sql.NullInt64
-	voice        bool
-	mayInvite    bool
-	lifetimeMs   int64
-	joinAs       schema.InviteJoinMode
+	id         int64
+	kind       schema.InviteKind
+	codeHash   string
+	createdBy  int64
+	createdAt  int64
+	expiresAt  int64
+	maxUses    sql.NullInt64
+	uses       int64
+	closedAt   sql.NullInt64
+	voice      bool
+	mayInvite  bool
+	lifetimeMs int64
+	joinAs     schema.InviteJoinMode
+	// link is the community model's link kind (migration 40): 'legacy' for
+	// every invite made before it, which keeps working as it did; 'member'
+	// or 'guest' for the links of I6a. Nothing branches on it yet.
+	link         string
 	creatorName  string
 	creatorOff   bool
 	creatorHuman bool
@@ -218,14 +237,14 @@ func (r *inviteRow) loadMakerTx(ctx context.Context, tx execer) error {
 }
 
 const inviteColumns = `i.id, i.kind, i.code_hash, i.created_by, i.created_at, i.expires_at, i.max_uses, i.uses,
-	i.closed_at, i.voice, i.may_invite, i.credential_lifetime_ms, i.join_as,
+	i.closed_at, i.voice, i.may_invite, i.credential_lifetime_ms, i.join_as, i.link,
 	p.name, p.disabled_at IS NOT NULL, p.kind = 'human', p.may_invite, p.voice_allowed`
 
 func scanInvite(row interface{ Scan(...any) error }) (inviteRow, error) {
 	var r inviteRow
 	var kind, joinAs string
 	err := row.Scan(&r.id, &kind, &r.codeHash, &r.createdBy, &r.createdAt, &r.expiresAt, &r.maxUses, &r.uses,
-		&r.closedAt, &r.voice, &r.mayInvite, &r.lifetimeMs, &joinAs,
+		&r.closedAt, &r.voice, &r.mayInvite, &r.lifetimeMs, &joinAs, &r.link,
 		&r.creatorName, &r.creatorOff, &r.creatorHuman, &r.creatorMay, &r.creatorVoice)
 	r.kind = schema.InviteKind(kind)
 	r.joinAs = schema.InviteJoinMode(joinAs)
@@ -488,14 +507,17 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 		if err != nil {
 			return fmt.Errorf("store: create invite: %w", err)
 		}
+		// Each refusal names the permission it lacks (ADR-014 design §7.4):
+		// a *PermissionError wrapping the sentinel, which errors.Is still
+		// matches. The handler tells only a caller whose role could hold it.
 		switch req.Kind {
 		case schema.InviteKindOpen:
 			if !rights.members {
-				return fmt.Errorf("%w: only an operator makes an open link", ErrInviteNotAllowed)
+				return inviteRefusal(ErrInviteNotAllowed, schema.PermManageMembers, "only an operator makes an open link")
 			}
 		default:
 			if !rights.links {
-				return fmt.Errorf("%w: you may not invite", ErrInviteNotAllowed)
+				return inviteRefusal(ErrInviteNotAllowed, schema.PermMakeMemberLinks, "you may not invite")
 			}
 		}
 		if req.Voice && !creator.VoiceAllowed {
@@ -504,7 +526,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 		// Only a holder of manage_members grants the right to invite (issue
 		// #457): a tester who may invite still cannot pass the right on.
 		if mayInvite && !rights.members {
-			return fmt.Errorf("%w: only an operator grants the right to invite", ErrInviteGrantExceedsInviter)
+			return inviteRefusal(ErrInviteGrantExceedsInviter, schema.PermManageMembers, "only an operator grants the right to invite")
 		}
 
 		channelIDs := make([]int64, 0, len(req.Channels))
@@ -517,7 +539,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 				}
 				// Not told apart from a channel the creator is not in, so
 				// naming channels does not reveal which exist.
-				return fmt.Errorf("%w: a channel you are not in", ErrInviteGrantExceedsInviter)
+				return inviteRefusal(ErrInviteGrantExceedsInviter, schema.PermManageChannels, "a channel you are not in")
 			case err != nil:
 				return fmt.Errorf("store: create invite: find channel: %w", err)
 			}
@@ -526,7 +548,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 				switch err := tx.QueryRowContext(ctx,
 					"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", id, creatorID).Scan(&one); {
 				case errors.Is(err, sql.ErrNoRows):
-					return fmt.Errorf("%w: a channel you are not in", ErrInviteGrantExceedsInviter)
+					return inviteRefusal(ErrInviteGrantExceedsInviter, schema.PermManageChannels, "a channel you are not in")
 				case err != nil:
 					return fmt.Errorf("store: create invite: check membership: %w", err)
 				}

@@ -136,7 +136,17 @@ import {
   type VoiceTransmitReportV1,
   type VoiceTransmitState,
 } from './schema/voice';
-import { createProblemReportResponseV1, type CreateProblemReportRequestV1, type CreateProblemReportResponseV1, type DiagnosticSocket } from './schema/report';
+import {
+  createProblemReportResponseV1,
+  listProblemReportsResponseV1,
+  problemReportV1,
+  type CreateProblemReportRequestV1,
+  type CreateProblemReportResponseV1,
+  type DiagnosticSocket,
+  type ProblemReportSummaryV1,
+  type ProblemReportV1,
+  type UpdateProblemReportRequestV1,
+} from './schema/report';
 import type { Validator } from './schema/validate';
 import { call, fileQuery, operations, queryOf, type Call, type OperationId } from './platform/operations';
 import { platform } from './platform';
@@ -2227,6 +2237,30 @@ export async function sendReport(request: CreateProblemReportRequestV1): Promise
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return inviteRefused(reply.res);
   return readBody(reply.res, createProblemReportResponseV1);
+}
+
+// Problem reports, for operators (issue #1029). The server decides who may
+// read them (every route is operator-only): a caller who may not gets the
+// code "forbidden", which the page says in a line. What a report names is
+// shown as the server gave it; nothing here redacts or un-redacts.
+
+// listReports reads the reports, newest first, with no free text.
+export async function listReports(): Promise<ApiResult<ProblemReportSummaryV1[]>> {
+  const result = await authed(call('listReports'), listProblemReportsResponseV1);
+  return result.ok ? { ok: true, value: result.value.reports } : result;
+}
+
+// getReport reads one report whole.
+export function getReport(id: number): Promise<ApiResult<ProblemReportV1>> {
+  return authed(call('getReport', { id }), problemReportV1);
+}
+
+// fileReport marks a report filed, with the address of the issue it became.
+// A refusal carries the server's code (invalid_request names the rule broken;
+// forbidden is a caller who may not).
+export async function fileReport(id: number, issue: string): Promise<InviteResult<ProblemReportV1>> {
+  const request: UpdateProblemReportRequestV1 = { state: 'filed', issue };
+  return readSent(await authedSend(call('fileReport', { id }), request), problemReportV1);
 }
 
 // Screen share (issue #444, voice-control-plane.md section 12). The page

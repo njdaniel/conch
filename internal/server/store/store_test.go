@@ -586,9 +586,10 @@ func TestOwnerMarkMigration(t *testing.T) {
 	}
 
 	var auditCount int
-	// The permissions migration (39) audits permissions_initialized on an
-	// upgraded database; this migration audits nothing.
-	if err := s.db.QueryRow("SELECT COUNT(*) FROM audit_events WHERE action != ?", AuditPermissionsInitialized).Scan(&auditCount); err != nil || auditCount != 0 {
+	// The permissions migration (39) audits permissions_initialized and the
+	// community migration (40) community_migrated on an upgraded database;
+	// this migration audits nothing.
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM audit_events WHERE action NOT IN (?, ?)", AuditPermissionsInitialized, AuditCommunityMigrated).Scan(&auditCount); err != nil || auditCount != 0 {
 		t.Errorf("audit_events count = %d (%v), want 0", auditCount, err)
 	}
 }

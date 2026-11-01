@@ -106,6 +106,11 @@ export interface Services {
   };
   // The attributes of a link that leaves the app.
   externalLink: { readonly target?: '_blank'; readonly rel: string };
+  // Saves a stored file to disk where the place does it natively: the desktop
+  // shows the system save dialog and writes only where the person chooses.
+  // Absent in the browser, which saves through a download link. The page names
+  // the file by id and never a path.
+  saveFile?: (id: number) => Promise<'saved' | 'cancelled' | 'failed' | 'unauthorized'>;
   // Whether this client may publish the person's own voice. Only the browser
   // may: the desktop renderer never holds the voice grant.
   browserVoice: boolean;

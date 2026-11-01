@@ -145,6 +145,14 @@ const panel = (page: Page) => page.getByRole('region', { name: 'Members list' })
 const memberRow = (page: Page, name: string): Locator =>
   panel(page).locator('li').filter({ has: page.locator('.ag-name').getByText(name, { exact: true }) });
 
+// chooseFor opens a member row's ⋯ menu and chooses one item (issue #1094).
+async function chooseFor(row: Locator, name: string, item: string): Promise<void> {
+  await row.getByRole('button', { name: `Actions for ${name}` }).click();
+  await row.getByRole('menuitem', { name: item }).click();
+  // Removal asks first (issue #1083).
+  if (item === 'Remove from channel') await row.getByRole('button', { name: 'Yes, remove' }).click();
+}
+
 async function seedMembership(world: World, secrets: string[], suffix: string) {
   const a = `channel-a-${suffix}`;
   const b = `channel-b-${suffix}`;
@@ -205,7 +213,7 @@ test('C1027 a channel the owner adds member-1 to shows in their list with its un
   await expect(other.getByRole('img', { name: '1 unread' })).toBeVisible(live);
 
   // Removed while it is not open: it goes from the list, with no line.
-  await memberRow(owner, member).getByRole('button', { name: `Remove ${member}` }).click();
+  await chooseFor(memberRow(owner, member), member, 'Remove from channel');
   await expect(memberRow(owner, member)).toHaveCount(0);
   await expect(channelButton(other, a)).toHaveCount(0, live);
   await expect(other.getByText(/You no longer have access/)).toHaveCount(0);
@@ -216,7 +224,7 @@ test('C1027 a channel the owner adds member-1 to shows in their list with its un
   await expect(channelButton(other, a)).toBeVisible(live);
   await channelButton(other, a).click();
   await expect(other.getByText('hello from the owner')).toBeVisible();
-  await memberRow(owner, member).getByRole('button', { name: `Remove ${member}` }).click();
+  await chooseFor(memberRow(owner, member), member, 'Remove from channel');
   await expect(memberRow(owner, member)).toHaveCount(0);
   await expect(other.getByText(`You no longer have access to #${a}`)).toBeVisible(live);
   await expect(channelButton(other, a)).toHaveCount(0);

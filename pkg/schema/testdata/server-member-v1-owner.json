@@ -1,0 +1,10 @@
+{
+  "id": 1,
+  "kind": "human",
+  "name": "nick",
+  "role": "operator",
+  "created_at": "2026-07-13T12:34:56.000Z",
+  "owner": true,
+  "voice_allowed": true,
+  "may_invite": true
+}

@@ -252,6 +252,9 @@ func TestReactionConstants(t *testing.T) {
 		"VOICE_CONTROL_PIPE_NONCE_ENV":           VoiceControlPipeNonceEnv,
 		"VOICE_CONTROL_PIPE_NONCE_BYTES":         VoiceControlPipeNonceBytes,
 		"VOICE_CONTROL_PIPE_NONCE_CHARS":         VoiceControlPipeNonceChars,
+		// The community model (ADR-013, issue #978).
+		"MAX_CHANNEL_AUTHOR_IDS":             MaxChannelAuthorIDs,
+		"DEFAULT_MEMBER_LINK_EXPIRY_SECONDS": DefaultMemberLinkExpirySeconds,
 	}
 	if len(TSConstants) != len(want) {
 		t.Errorf("TSConstants has %d entries, want %d", len(TSConstants), len(want))

@@ -1,0 +1,5 @@
+{
+  "kind": "member",
+  "never_expires": true,
+  "credential_lifetime_seconds": 2592000
+}

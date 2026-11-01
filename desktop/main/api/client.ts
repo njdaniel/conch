@@ -35,7 +35,16 @@ export interface ClientDeps {
 }
 
 export type Exchange =
-  | { readonly kind: 'answer'; readonly status: number; readonly ok: boolean; readonly body?: unknown; readonly retryAfter?: number; readonly requestId?: string }
+  | {
+      readonly kind: 'answer';
+      readonly status: number;
+      readonly ok: boolean;
+      readonly body?: unknown;
+      // A download's bytes (Send.download), on a 2xx answer only.
+      readonly bytes?: Uint8Array;
+      readonly retryAfter?: number;
+      readonly requestId?: string;
+    }
   | { readonly kind: 'none'; readonly reason?: NoAnswerReason }
   | { readonly kind: 'unauthorized' };
 
@@ -52,6 +61,12 @@ export interface Send {
   // True for the one request that must outlive its identity: the revocation
   // that sign-out sends for the credential it has just forgotten.
   readonly detached?: boolean;
+  // The request body is these bytes with this declared media type, not JSON
+  // (an upload). The type is untrusted data the caller has already shaped.
+  readonly upload?: { readonly mediaType: string; readonly bytes: Uint8Array };
+  // The answer is bytes, up to maxBytes, not a JSON document (a download).
+  readonly download?: { readonly maxBytes: number };
+  readonly timeoutMs?: number;
 }
 
 const none = (reason?: NoAnswerReason): Exchange => (reason === undefined ? { kind: 'none' } : { kind: 'none', reason });
@@ -127,8 +142,11 @@ export class Client {
       if (token === null) return { kind: 'unauthorized' };
       headers.set('Authorization', `Bearer ${token}`);
     }
-    let body: string | undefined;
-    if (request.body !== undefined) {
+    let body: string | Uint8Array | undefined;
+    if (request.upload !== undefined) {
+      body = request.upload.bytes;
+      headers.set('Content-Type', request.upload.mediaType);
+    } else if (request.body !== undefined) {
       body = JSON.stringify(request.body);
       headers.set('Content-Type', 'application/json');
     }
@@ -139,10 +157,10 @@ export class Client {
       response = await this.#deps.fetch(`${capture.origin}${target}`, {
         method: op.method,
         headers,
-        ...(body === undefined ? {} : { body }),
+        ...(body === undefined ? {} : { body: body as RequestInit['body'] }),
         redirect: 'manual',
         cache: 'no-store',
-        signal: AbortSignal.any([capture.signal, AbortSignal.timeout(this.#deps.timeoutMs ?? REQUEST_TIMEOUT_MS)]),
+        signal: AbortSignal.any([capture.signal, AbortSignal.timeout(request.timeoutMs ?? this.#deps.timeoutMs ?? REQUEST_TIMEOUT_MS)]),
       });
     } catch (error) {
       if (stale()) return none('stale');
@@ -158,7 +176,7 @@ export class Client {
 
     let bytes: Uint8Array | null;
     try {
-      bytes = await readCapped(response, this.#deps.maxResponseBytes ?? MAX_RESPONSE_BYTES);
+      bytes = await readCapped(response, request.download?.maxBytes ?? this.#deps.maxResponseBytes ?? MAX_RESPONSE_BYTES);
     } catch {
       return none(stale() ? 'stale' : undefined);
     }
@@ -180,6 +198,7 @@ export class Client {
     }
 
     const ok = response.status >= 200 && response.status < 300;
+    if (ok && request.download !== undefined) return { kind: 'answer', status: response.status, ok, bytes, ...extras };
     if (bytes.byteLength === 0) {
       // No document: fine for an answer that is its status alone, not for one
       // that promises a body.

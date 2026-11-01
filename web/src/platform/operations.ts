@@ -22,6 +22,9 @@ import {
   createInviteResponseV1,
   createProblemReportRequestV1,
   createProblemReportResponseV1,
+  listProblemReportsResponseV1,
+  problemReportV1,
+  updateProblemReportRequestV1,
   createSessionRequestV1,
   createSignInLinkResponseV1,
   createDeviceLinkRequestV1,
@@ -275,6 +278,11 @@ export const operations = {
 
   // Report a problem.
   sendReport: op('POST', '/v1/reports', 'bearer', { request: check(createProblemReportRequestV1), response: check(createProblemReportResponseV1) }),
+  // Problem reports, for operators (issue #1029): the list, one report, and
+  // marking one filed.
+  listReports: op('GET', '/v1/reports', 'bearer', { response: check(listProblemReportsResponseV1) }),
+  getReport: op('GET', '/v1/reports/{id}', 'bearer', { response: check(problemReportV1) }),
+  fileReport: op('PUT', '/v1/reports/{id}', 'bearer', { request: check(updateProblemReportRequestV1), response: check(problemReportV1) }),
 } as const satisfies Record<string, Operation>;
 
 export type OperationId = keyof typeof operations;

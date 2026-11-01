@@ -119,10 +119,15 @@ const (
 	// contradict each other or the server's state: guest-only joining with
 	// guests disabled, open joining with no open channel, or enabling guests
 	// while a permanent principal still has a name in the reserved namespace.
-	// While guests are removed (issue #1005) it also answers any request for
-	// an entry point that would admit guests: PUT /v1/join/settings with
-	// guests_enabled true or open_joining guest or both, and POST
-	// /v1/invites with join_as guest or both.
+	// While guests are removed (issue #1005; ADR-013 amendment of
+	// 2026-10-30) it also answers any request for an entry point that would
+	// admit guests: PUT /v1/join/settings with guests_enabled true, which is
+	// refused and changes nothing (false is accepted), or open_joining guest
+	// or both, and POST /v1/invites with join_as guest or both. Under the
+	// community model (ADR-013, community-model §3.4 Option B) the same
+	// route answers it for join_voice false, since voice is on for every
+	// member: open_joining reads account or off from open_signup, and
+	// join_voice reads true.
 	ErrorCodeJoinPolicyConflict = "join_policy_conflict"
 )
 
@@ -250,13 +255,18 @@ const (
 	// before the server's name changed to it (issue #760). It is kept, and
 	// blocks nothing; an operator may rename it.
 	JoinWarningServerNameInUse JoinWarning = "server_name_in_use"
+	// JoinWarningNoDefaultChannel: no channel is a default channel, so a
+	// member link or open sign-up would make a member who is in nothing
+	// (ADR-013, issue #978). An addition to the closed, client-tolerant
+	// vocabulary; it refuses nothing.
+	JoinWarningNoDefaultChannel JoinWarning = "no_default_channel"
 )
 
 // Valid reports whether w is a recognized warning.
 func (w JoinWarning) Valid() bool {
 	switch w {
 	case JoinWarningLiveGuestsRemain, JoinWarningTrustedProxyUnset, JoinWarningOneAddress, JoinWarningReservedNamesInUse,
-		JoinWarningServerNameInUse:
+		JoinWarningServerNameInUse, JoinWarningNoDefaultChannel:
 		return true
 	default:
 		return false
@@ -556,6 +566,18 @@ type JoinInfoV1 struct {
 // /v1/join/settings answers it and PutJoinSettingsRequestV1 changes it.
 // OpenChannels names the channels the bare address admits to; it must not
 // be empty while OpenJoining is on. Producers send an empty slice, not nil.
+//
+// Under the community model (ADR-013, docs/design/community-model.md §3.4
+// Option B, issue #978) the shape stays on v1 with two additive fields and a
+// documented mapping, so old clients keep working: OpenJoining reads account
+// while OpenSignup is true and off otherwise, and a PUT with account or off
+// sets OpenSignup (guest and both are 409 join_policy_conflict); JoinVoice
+// reads true, and a PUT with false is 409 join_policy_conflict; OpenChannels
+// reads the default channels' names, and a PUT with it marks exactly those
+// channels default and unmarks the rest (409 channel_settings_conflict if
+// one is private); GuestsEnabled reads false while guests are removed. The
+// guest bounds are read and stored as before and govern nothing while no
+// guest can exist.
 type JoinSettingsV1 struct {
 	OpenJoining          OpenJoiningMode `json:"open_joining"`
 	GuestsEnabled        bool            `json:"guests_enabled"`
@@ -573,6 +595,18 @@ type JoinSettingsV1 struct {
 	// PutJoinSettingsRequestV1 cannot carry it. Omitted when 0, and by a
 	// server that predates it.
 	OtherOpenChannels int64 `json:"other_open_channels,omitempty"`
+	// OpenSignup is whether the bare address makes an account for anyone
+	// who asks, as a member link would (ADR-013 decision 5; owners and
+	// operators holding change_server_settings set it, ADR-014). Off by
+	// default. MemberLinkDefaultExpirySeconds is how long a member link
+	// that names no expiry lasts, DefaultMemberLinkExpirySeconds by
+	// default, 0 for no default expiry (O3), and at most
+	// MaxMemberLinkExpirySeconds: a default never exceeds what a member may
+	// ask for, and the bound keeps the duration arithmetic finite. Both are
+	// omitted by a server that predates the community model and always
+	// sent by one with it.
+	OpenSignup                     *bool  `json:"open_signup,omitempty"`
+	MemberLinkDefaultExpirySeconds *int64 `json:"member_link_default_expiry_seconds,omitempty"`
 }
 
 // DefaultJoinSettings is the policy of a server nobody has changed: the
@@ -618,7 +652,20 @@ func (s JoinSettingsV1) Validate() error {
 	if s.GuestIdleSeconds < MinGuestIdleSeconds || s.GuestIdleSeconds > s.GuestAbsoluteSeconds {
 		return fmt.Errorf("schema: guest_idle_seconds must be between %d and guest_absolute_seconds", MinGuestIdleSeconds)
 	}
+	if err := validateMemberLinkDefaultExpiry(s.MemberLinkDefaultExpirySeconds); err != nil {
+		return err
+	}
 	return validateChannelNames("open channel", s.OpenChannels, MaxOpenChannels)
+}
+
+// validateMemberLinkDefaultExpiry checks the member_link_default_expiry_seconds
+// setting when present: 0 (no default) to MaxMemberLinkExpirySeconds, the
+// same bound a member's expires_at is held to (security review of #978, S2).
+func validateMemberLinkDefaultExpiry(v *int64) error {
+	if v != nil && (*v < 0 || *v > MaxMemberLinkExpirySeconds) {
+		return fmt.Errorf("schema: member_link_default_expiry_seconds must be between 0 and %d", MaxMemberLinkExpirySeconds)
+	}
+	return nil
 }
 
 // validateChannelNames checks a list of at most max distinct, valid channel
@@ -647,7 +694,10 @@ func validateChannelNames(field string, names []string, max int) error {
 // to change; one left out keeps its value. OpenChannels replaces the whole
 // list when present; an empty list clears it. The server applies it with
 // Apply, validates the result with JoinSettingsV1.Validate, and audits each
-// field that changed, in one transaction.
+// field that changed, in one transaction. OpenSignup and
+// MemberLinkDefaultExpirySeconds are the community model's fields (ADR-013,
+// issue #978), under JoinSettingsV1's mapping; the server decodes the body
+// strictly, so a field it does not know is refused.
 type PutJoinSettingsRequestV1 struct {
 	OpenJoining          *OpenJoiningMode `json:"open_joining,omitempty"`
 	GuestsEnabled        *bool            `json:"guests_enabled,omitempty"`
@@ -658,6 +708,9 @@ type PutJoinSettingsRequestV1 struct {
 	GuestIdleSeconds     *int64           `json:"guest_idle_seconds,omitempty"`
 	GuestAbsoluteSeconds *int64           `json:"guest_absolute_seconds,omitempty"`
 	OpenChannels         *[]string        `json:"open_channels,omitempty"`
+
+	OpenSignup                     *bool  `json:"open_signup,omitempty"`
+	MemberLinkDefaultExpirySeconds *int64 `json:"member_link_default_expiry_seconds,omitempty"`
 }
 
 // Validate reports whether the request changes something and every value it
@@ -666,11 +719,15 @@ type PutJoinSettingsRequestV1 struct {
 func (r PutJoinSettingsRequestV1) Validate() error {
 	if r.OpenJoining == nil && r.GuestsEnabled == nil && r.JoiningPaused == nil && r.JoinVoice == nil &&
 		r.MaxGuests == nil && r.MaxGuestsPerAddress == nil && r.GuestIdleSeconds == nil &&
-		r.GuestAbsoluteSeconds == nil && r.OpenChannels == nil {
+		r.GuestAbsoluteSeconds == nil && r.OpenChannels == nil &&
+		r.OpenSignup == nil && r.MemberLinkDefaultExpirySeconds == nil {
 		return errors.New("schema: the request changes no setting")
 	}
 	if r.OpenJoining != nil && !r.OpenJoining.Valid() {
 		return fmt.Errorf("schema: open_joining must be one of: %s", strings.Join(Vocabularies["OpenJoiningMode"], ", "))
+	}
+	if err := validateMemberLinkDefaultExpiry(r.MemberLinkDefaultExpirySeconds); err != nil {
+		return err
 	}
 	if r.OpenChannels != nil {
 		return validateChannelNames("open channel", *r.OpenChannels, MaxOpenChannels)
@@ -713,6 +770,14 @@ func (r PutJoinSettingsRequestV1) Apply(s JoinSettingsV1) JoinSettingsV1 {
 	if r.OpenChannels != nil {
 		out.OpenChannels = append([]string{}, (*r.OpenChannels)...)
 	}
+	if r.OpenSignup != nil {
+		v := *r.OpenSignup
+		out.OpenSignup = &v
+	}
+	if r.MemberLinkDefaultExpirySeconds != nil {
+		v := *r.MemberLinkDefaultExpirySeconds
+		out.MemberLinkDefaultExpirySeconds = &v
+	}
 	if r.GuestsEnabled != nil && !*r.GuestsEnabled && r.OpenJoining == nil && out.OpenJoining == OpenJoiningGuest {
 		out.OpenJoining = OpenJoiningOff
 	}
@@ -725,11 +790,16 @@ func (r PutJoinSettingsRequestV1) Apply(s JoinSettingsV1) JoinSettingsV1 {
 // JoinSettingsResponseV1 is the answer of GET and PUT /v1/join/settings: the
 // settings, the server's label, how many visits are live, and the warnings
 // that apply (review F12, F13). Producers must send an empty slice, not nil.
+// DefaultChannels are the default channels by id and name (ADR-013, issue
+// #978), the channels Settings.OpenChannels names; it leaves out the ones
+// the reader is not in when the reader does not hold manage_channels, as
+// OpenChannels does. Omitted by a server that predates the community model.
 type JoinSettingsResponseV1 struct {
-	Settings   JoinSettingsV1 `json:"settings"`
-	ServerName string         `json:"server_name"`
-	LiveGuests int64          `json:"live_guests"`
-	Warnings   []JoinWarning  `json:"warnings"`
+	Settings        JoinSettingsV1    `json:"settings"`
+	ServerName      string            `json:"server_name"`
+	LiveGuests      int64             `json:"live_guests"`
+	Warnings        []JoinWarning     `json:"warnings"`
+	DefaultChannels []InviteChannelV1 `json:"default_channels,omitempty"`
 }
 
 // JoinGuestRequestV1 is the body of POST /v1/join/guest: Join as guest from

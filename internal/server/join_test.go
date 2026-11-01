@@ -116,7 +116,9 @@ func TestGuestEntryAddressMatrix(t *testing.T) {
 		{"guests off, address accounts only", false, schema.OpenJoiningAccount, false, schema.JoinOptionsV1{Account: true}, ""},
 		{"guests on, address guest", true, schema.OpenJoiningGuest, false, schema.JoinOptionsV1{}, closed},
 		{"guests on, address both", true, schema.OpenJoiningBoth, false, schema.JoinOptionsV1{Account: true}, ""},
-		{"guests on, address guest, paused", true, schema.OpenJoiningGuest, true, schema.JoinOptionsV1{Paused: true}, closed},
+		// A guest-only address is off since migration 40 (issue #979: open_signup
+		// false), so paused it offers nothing, as an address that is off does.
+		{"guests on, address guest, paused", true, schema.OpenJoiningGuest, true, schema.JoinOptionsV1{}, closed},
 		{"guests on, address both, paused", true, schema.OpenJoiningBoth, true, schema.JoinOptionsV1{Paused: true}, paused},
 		{"guests off, address accounts only, paused", false, schema.OpenJoiningAccount, true, schema.JoinOptionsV1{Paused: true}, paused},
 		{"guests off, address off, paused", false, schema.OpenJoiningOff, true, schema.JoinOptionsV1{}, closed},
@@ -284,8 +286,13 @@ func TestJoinSettingsRefusals(t *testing.T) {
 		t.Errorf("refused changes wrote %d rows", len(rows))
 	}
 	got := decodeBody[schema.JoinSettingsResponseV1](t, f.send(t, "GET", "/v1/join/settings", f.rootTok, "", ""))
-	if fmt.Sprint(got.Settings) != fmt.Sprint(schema.DefaultJoinSettings()) {
-		t.Errorf("after refusals the settings are %+v", got.Settings)
+	// The defaults as the community model answers them (migration 40,
+	// issue #979): join_voice true, open_signup off, the member link expiry.
+	want := schema.DefaultJoinSettings()
+	off, expiry := false, schema.DefaultMemberLinkExpirySeconds
+	want.JoinVoice, want.OpenSignup, want.MemberLinkDefaultExpirySeconds = true, &off, &expiry
+	if g, w := string(mustJSON(t, got.Settings)), string(mustJSON(t, want)); g != w {
+		t.Errorf("after refusals the settings are %s, want %s", g, w)
 	}
 
 	// The last open channel cannot go while joining is on.
@@ -654,7 +661,7 @@ func TestGuestCannotAdministerGuests(t *testing.T) {
 		assertErrorBody(t, f.send(t, c.method, c.path, g.Token, c.body, ""), http.StatusForbidden, "forbidden")
 	}
 	after := decodeBody[schema.JoinSettingsResponseV1](t, f.send(t, "GET", "/v1/join/settings", f.rootTok, "", ""))
-	if fmt.Sprint(after.Settings) != fmt.Sprint(before.Settings) || after.LiveGuests != 2 {
+	if string(mustJSON(t, after.Settings)) != string(mustJSON(t, before.Settings)) || after.LiveGuests != 2 {
 		t.Errorf("settings before %+v, after %+v", before, after)
 	}
 	for _, id := range []int64{g.Principal.ID, other.Principal.ID} {

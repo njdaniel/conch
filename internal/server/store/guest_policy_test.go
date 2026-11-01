@@ -20,16 +20,35 @@ func int64Ref(n int64) *int64 { return &n }
 // holds, a mode is off and a number is its default.
 func TestJoinSettingsFailClosed(t *testing.T) {
 	f := newInviteFixture(t)
+	// Since migration 40 (issue #979, Option B) the settings always answer
+	// open_signup and the member link expiry, and join_voice reads true.
+	show := func(s schema.JoinSettingsV1) string {
+		signup, expiry := "<nil>", "<nil>"
+		if s.OpenSignup != nil {
+			signup = fmt.Sprint(*s.OpenSignup)
+		}
+		if s.MemberLinkDefaultExpirySeconds != nil {
+			expiry = fmt.Sprint(*s.MemberLinkDefaultExpirySeconds)
+		}
+		s.OpenSignup, s.MemberLinkDefaultExpirySeconds = nil, nil
+		return fmt.Sprintf("%+v signup=%s expiry=%s", s, signup, expiry)
+	}
+	defaults := func() schema.JoinSettingsV1 {
+		d := schema.DefaultJoinSettings()
+		off, expiry := false, schema.DefaultMemberLinkExpirySeconds
+		d.JoinVoice, d.OpenSignup, d.MemberLinkDefaultExpirySeconds = true, &off, &expiry
+		return d
+	}
 	got, err := joinSettingsTx(f.ctx, f.s.db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(got) != fmt.Sprint(schema.DefaultJoinSettings()) {
-		t.Errorf("no rows = %+v, want the defaults", got)
+	if show(got) != show(defaults()) {
+		t.Errorf("no rows = %s, want the defaults %s", show(got), show(defaults()))
 	}
 	for key, value := range map[string]string{
-		settingGuestsEnabled: "yes please", settingJoiningPaused: "nah", settingJoinVoice: "maybe",
-		settingOpenJoining: "sometimes", settingMaxGuests: "lots", settingGuestIdleSeconds: "",
+		settingGuestsEnabled: "yes please", settingJoiningPaused: "nah", settingOpenSignup: "maybe",
+		settingMemberLinkDefaultExpirySeconds: "forever", settingMaxGuests: "lots", settingGuestIdleSeconds: "",
 	} {
 		if _, err := f.s.db.Exec("INSERT INTO server_settings (key, value, updated_at) VALUES (?, ?, 0)", key, value); err != nil {
 			t.Fatal(err)
@@ -39,10 +58,10 @@ func TestJoinSettingsFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := schema.DefaultJoinSettings()
+	want := defaults()
 	want.JoiningPaused = true
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Errorf("unreadable rows = %+v, want %+v", got, want)
+	if show(got) != show(want) {
+		t.Errorf("unreadable rows = %s, want %s", show(got), show(want))
 	}
 }
 

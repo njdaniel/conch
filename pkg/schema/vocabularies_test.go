@@ -222,6 +222,11 @@ var validators = map[string]func(string) bool{
 	"PermissionPreset":   validOf[PermissionPreset](),
 	"PermissionsWarning": validOf[PermissionsWarning](),
 	"IssuedKind":         validOf[IssuedKind](),
+
+	// The community model (ADR-013, issue #978).
+	"ChannelVisibility": validOf[ChannelVisibility](),
+	"InviteKindV2":      validOf[InviteKindV2](),
+	"DirectoryScope":    validOf[DirectoryScope](),
 }
 
 // namers is every …Names() func, by the type it names. TestVocabularies fails

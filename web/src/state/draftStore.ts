@@ -47,6 +47,9 @@ export interface Stored {
   readonly targets: Readonly<Record<string, StoredTarget>>;
   // Channel id to the edit open there.
   readonly edits: Readonly<Record<string, StoredEdit>>;
+  // Channel id to its half-typed replies, by thread root's message id (issue
+  // #1080). Text only: a reply goes to its root's audience, read at send time.
+  readonly replies: Readonly<Record<string, Readonly<Record<string, string>>>>;
 }
 
 // The room a stored draft leaves for the rest of a post request (the
@@ -118,7 +121,16 @@ function read(): Stored | null {
         if (isRecord(edit) && typeof edit.message === 'number' && typeof edit.text === 'string') edits[id] = { message: edit.message, text: edit.text };
       }
     }
-    return { principal: parsed.principal, drafts, targets, edits };
+    const replies: Record<string, Record<string, string>> = {};
+    if (isRecord(parsed.replies)) {
+      for (const [id, roots] of Object.entries(parsed.replies)) {
+        if (!isRecord(roots)) continue;
+        const kept: Record<string, string> = {};
+        for (const [root, text] of Object.entries(roots)) if (typeof text === 'string' && text !== '') kept[root] = text;
+        if (Object.keys(kept).length > 0) replies[id] = kept;
+      }
+    }
+    return { principal: parsed.principal, drafts, targets, edits, replies };
   } catch {
     return null;
   }
@@ -129,11 +141,13 @@ function read(): Stored | null {
 // since been sent or deleted, and the page goes on in memory.
 function write(stored: Stored): void {
   try {
-    if (Object.keys(stored.drafts).length === 0 && Object.keys(stored.targets).length === 0 && Object.keys(stored.edits).length === 0) {
+    if (Object.keys(stored.drafts).length === 0 && Object.keys(stored.targets).length === 0 && Object.keys(stored.edits).length === 0 && Object.keys(stored.replies).length === 0) {
       window.sessionStorage.removeItem(key);
       return;
     }
-    window.sessionStorage.setItem(key, JSON.stringify(stored));
+    // No replies, no key: the record stays what it was before they existed.
+    const { replies, ...rest } = stored;
+    window.sessionStorage.setItem(key, JSON.stringify(Object.keys(replies).length === 0 ? rest : stored));
   } catch {
     clearStored();
   }
@@ -154,7 +168,7 @@ export function loadStored(principal: number): Stored {
   const stored = read();
   if (stored === null || stored.principal !== principal) {
     if (stored !== null) clearStored();
-    return { principal, drafts: {}, targets: {}, edits: {} };
+    return { principal, drafts: {}, targets: {}, edits: {}, replies: {} };
   }
   return stored;
 }
@@ -165,7 +179,7 @@ export function saveDrafts(principal: number, drafts: Readonly<Record<number, st
   const was = loadStored(principal);
   const nextDrafts: Record<string, string> = {};
   for (const [id, text] of Object.entries(drafts)) if (text !== '') nextDrafts[id] = capped(text);
-  write({ principal, drafts: nextDrafts, targets: { ...targets }, edits: was.edits });
+  write({ principal, drafts: nextDrafts, targets: { ...targets }, edits: was.edits, replies: was.replies });
 }
 
 const without = <T,>(kept: Readonly<Record<string, T>>, keep: (id: string) => boolean): Record<string, T> =>
@@ -179,6 +193,17 @@ export function saveEdit(principal: number, channelId: number, edit: StoredEdit 
   write({ ...was, edits });
 }
 
+// saveReplies keeps the half-typed replies of a channel by thread root, each
+// to the draft budget, or with none forgets them.
+export function saveReplies(principal: number, channelId: number, replies: ReadonlyMap<number, string>): void {
+  const was = loadStored(principal);
+  const next = without(was.replies, (id) => id !== String(channelId));
+  const kept: Record<string, string> = {};
+  for (const [root, text] of replies) if (text !== '') kept[String(root)] = capped(text);
+  if (Object.keys(kept).length > 0) next[String(channelId)] = kept;
+  write({ ...was, replies: next });
+}
+
 // forgetChannelStored drops what is kept for a channel that was lost.
 export function forgetChannelStored(principal: number, channelId: number): void {
   pruneStored(principal, (id) => id !== channelId);
@@ -189,5 +214,5 @@ export function forgetChannelStored(principal: number, channelId: number): void 
 export function pruneStored(principal: number, keep: (channelId: number) => boolean): void {
   const was = loadStored(principal);
   const kept = (id: string) => keep(Number(id));
-  write({ principal, drafts: without(was.drafts, kept), targets: without(was.targets, kept), edits: without(was.edits, kept) });
+  write({ principal, drafts: without(was.drafts, kept), targets: without(was.targets, kept), edits: without(was.edits, kept), replies: without(was.replies, kept) });
 }

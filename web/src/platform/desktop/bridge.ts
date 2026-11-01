@@ -33,9 +33,43 @@ export interface ServerAddress {
 // http to loopback, for development) is; the rest are refused by name.
 export type ServerAddressRefusal = 'malformed' | 'scheme' | 'userinfo' | 'path' | 'unreachable' | 'unsupported';
 
-export type SetServerAddressResult =
-  | { readonly ok: true; readonly origin: string }
-  | { readonly ok: false; readonly refusal: ServerAddressRefusal };
+// A saved server, as the page may see it: display metadata only. account is
+// the name of the principal the profile is bound to (null before the first
+// sign-in).
+export interface ProfileView {
+  readonly id: string;
+  readonly label: string;
+  readonly host: string;
+  readonly origin: string;
+  readonly account: string | null;
+  readonly active: boolean;
+}
+
+// Whether credentials are kept across restarts. session-only: they are not,
+// and reason says why; unavailable: the store did not answer (Retry).
+export type StorageStatus =
+  | { readonly kind: 'protected' }
+  | { readonly kind: 'session-only'; readonly reason: 'unavailable' | 'insecure-backend' | 'unknown-backend' | 'unsafe-root' }
+  | { readonly kind: 'unavailable' };
+
+// Something the last switch or sign-out has to tell the person.
+export type ProfileNotice = 'sign-in-again' | 'could-not-verify' | 'account-mismatch' | 'revocation-unconfirmed' | 'revocation-unsent' | 'teardown-slow';
+
+export interface ProfilesView {
+  readonly profiles: readonly ProfileView[];
+  readonly active: string | null;
+  readonly storage: StorageStatus;
+  // profiles.json could not be read: only profilesRecover works.
+  readonly recovery: boolean;
+  readonly notice: ProfileNotice | null;
+  // The platform, for the storage text (DPAPI does not protect from other apps
+  // of the same user).
+  readonly platform: string;
+}
+
+export type ProfileAddResult =
+  | { readonly ok: true; readonly id: string }
+  | { readonly ok: false; readonly refusal: ServerAddressRefusal | 'certificate' | 'not-conch' | 'full' };
 
 // One call of the operation table, as the renderer asks for it.
 export interface BridgeRequest {
@@ -122,10 +156,29 @@ export interface FeedHandlers {
 
 export type Unsubscribe = () => void;
 
+// A file to upload: the bytes (base64, the bridge carries data, not binary
+// objects) with the name and media type the page declares. All of it is
+// untrusted data: main caps the size, shapes the type and the name, and sends
+// the operation itself. The channel is a path value of the table.
+export type ChannelName = string;
+
+export interface UploadRequest {
+  readonly channel: ChannelName;
+  readonly filename: string;
+  readonly mediaType: string;
+  readonly data: string;
+}
+
+// A file's bytes (base64) for a preview, or the server's refusal or no answer.
+export type DownloadReply = BridgeReply | { readonly kind: 'bytes'; readonly data: string };
+
+// What saving a file came to. cancelled is the person closing the dialog;
+// failed is anything else (no answer, too large, not writable).
+export type SaveOutcome = 'saved' | 'cancelled' | 'failed' | 'unauthorized';
+
 export interface ConchDesktopBridge {
-  // The server address.
+  // The server address of the active profile (null: none is active).
   serverAddress(): Promise<ServerAddress>;
-  setServerAddress(origin: string): Promise<SetServerAddressResult>;
 
   // Any operation of the table that the renderer may invoke. Main refuses one
   // whose entry is marked renderer: false (a credential-bearing answer, a
@@ -155,6 +208,29 @@ export interface ConchDesktopBridge {
   joinAsGuest(request: JoinGuestRequestV1): Promise<SignInOutcome>;
   createAccount(request: JoinAccountRequestV1): Promise<SignInOutcome>;
   signOut(): Promise<SignOutOutcome>;
+
+  // Attachments (issue #947). Upload sends the operation uploadFile; the
+  // answer is the server's, validated. Download gives a file's bytes for a
+  // blob preview; nothing is written or opened. Save asks main to show the
+  // native save dialog (only right after the person's own click or key) and
+  // write the file to the path the person chooses there: the page names a
+  // file by id and never a path, and gets no bytes back.
+  uploadFile(request: UploadRequest): Promise<BridgeReply>;
+  downloadFile(id: number): Promise<DownloadReply>;
+  saveFile(id: number): Promise<SaveOutcome>;
+  // The saved server profiles (issue #945). Ids are opaque to the page.
+  profiles(): Promise<ProfilesView>;
+  profileAdd(address: string): Promise<ProfileAddResult>;
+  profileRename(id: string, label: string): Promise<boolean>;
+  profileRemove(id: string): Promise<boolean>;
+  // Makes a profile (or null: the server list) the active one. The window's
+  // page is replaced; the returned promise may never settle for the page that
+  // asked.
+  profileSwitch(id: string | null): Promise<boolean>;
+  // Re-checks whether credentials can be kept, and keeps those held in memory.
+  storageRetry(): Promise<ProfilesView>;
+  // Starts an empty list when profiles.json could not be read.
+  profilesRecover(): Promise<ProfilesView>;
 }
 
 declare global {

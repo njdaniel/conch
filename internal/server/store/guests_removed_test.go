@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,11 +36,12 @@ func legacyJoinSettings(t testing.TB, s *Store, req schema.PutJoinSettingsReques
 		if req.OpenChannels == nil {
 			return nil
 		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM open_channels"); err != nil {
+		// The open channels are the default channels (migration 40).
+		if _, err := tx.ExecContext(ctx, "UPDATE channels SET is_default = 0, default_listed_by = NULL"); err != nil {
 			return err
 		}
 		for _, name := range next.OpenChannels {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO open_channels (channel_id, added_at) SELECT id, 0 FROM channels WHERE name = ?`, name); err != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE channels SET visibility = 'public', is_default = 1 WHERE name = ?`, name); err != nil {
 				return err
 			}
 		}
@@ -70,7 +72,7 @@ func legacyCreateInvite(t testing.TB, s *Store, actor string, creatorID int64, r
 // joinRows reads the joining settings rows as stored.
 func joinRows(t *testing.T, s *Store) map[string]string {
 	t.Helper()
-	rows, err := s.db.Query("SELECT key, value FROM server_settings WHERE key IN ('guests_enabled', 'open_joining')")
+	rows, err := s.db.Query("SELECT key, value FROM server_settings WHERE key IN ('guests_enabled', 'open_signup')")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,16 +100,13 @@ func TestOpenTurnsGuestsOff(t *testing.T) {
 		want    schema.OpenJoiningMode
 		detail  string // "" when nothing changes
 	}{
-		{"both, guests on", "true", schema.OpenJoiningBoth, schema.OpenJoiningAccount,
-			"open_joining=both->account guests_enabled=true->false live_guests=1 reason=guests_removed"},
-		{"guest-only, guests on", "true", schema.OpenJoiningGuest, schema.OpenJoiningOff,
-			"open_joining=guest->off guests_enabled=true->false live_guests=1 reason=guests_removed"},
+		// Since migration 40 (issue #979) the mode is stored as open_signup,
+		// which cannot say guest or both: the migration mapped them, so only
+		// guests_enabled is left for opening to turn off.
 		{"accounts, guests on", "true", schema.OpenJoiningAccount, schema.OpenJoiningAccount,
 			"guests_enabled=true->false live_guests=1 reason=guests_removed"},
 		{"off, guests on", "true", schema.OpenJoiningOff, schema.OpenJoiningOff,
 			"guests_enabled=true->false live_guests=1 reason=guests_removed"},
-		{"both, guests off", "false", schema.OpenJoiningBoth, schema.OpenJoiningAccount,
-			"open_joining=both->account live_guests=1 reason=guests_removed"},
 		{"accounts, guests off", "false", schema.OpenJoiningAccount, schema.OpenJoiningAccount, ""},
 		{"off, guests off", "false", schema.OpenJoiningOff, schema.OpenJoiningOff, ""},
 	}
@@ -129,13 +128,14 @@ func TestOpenTurnsGuestsOff(t *testing.T) {
 			}
 			// Underneath the store, as a server from before issue #1005 left
 			// them.
-			for k, v := range map[string]string{"guests_enabled": tt.enabled, "open_joining": string(tt.mode), "max_guests": "7"} {
+			signup := strconv.FormatBool(tt.mode == schema.OpenJoiningAccount)
+			for k, v := range map[string]string{"guests_enabled": tt.enabled, "open_signup": signup, "max_guests": "7"} {
 				if _, err := s.db.Exec(`INSERT INTO server_settings (key, value, updated_at) VALUES (?, ?, 0)
 					ON CONFLICT (key) DO UPDATE SET value = excluded.value`, k, v); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if _, err := s.db.Exec("INSERT INTO open_channels (channel_id, added_at) VALUES (?, 0)", ch.ID); err != nil {
+			if _, err := s.db.Exec("UPDATE channels SET visibility = 'public', is_default = 1 WHERE id = ?", ch.ID); err != nil {
 				t.Fatal(err)
 			}
 			countRows := func(s *Store) int {
@@ -162,7 +162,7 @@ func TestOpenTurnsGuestsOff(t *testing.T) {
 				if set.GuestsEnabled || set.OpenJoining != tt.want || set.MaxGuests != 7 || len(set.OpenChannels) != 1 {
 					t.Errorf("open %d: settings = %+v, want guests off, mode %s, the rest kept", i+1, set, tt.want)
 				}
-				if got := joinRows(t, s); got["guests_enabled"] != "false" || got["open_joining"] != string(tt.want) {
+				if got := joinRows(t, s); got["guests_enabled"] != "false" || got["open_signup"] != signup {
 					t.Errorf("open %d: stored rows = %v", i+1, got)
 				}
 				if live != 1 {

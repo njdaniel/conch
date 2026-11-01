@@ -135,9 +135,13 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrInvitesPaused):
 		writeInvitesPaused(w)
 	case errors.Is(err, store.ErrInviteNotAllowed):
-		s.denyForbidden(w, r, caller, schema.ErrorCodeInviteNotAllowed, "you may not make this kind of invite")
+		// Each also names the permission it lacks, to a caller whose role
+		// could hold it (ADR-014 design §7.4): one code per question.
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeInviteNotAllowed, "you may not make this kind of invite",
+			refusedPermission(caller, storeRefusalPermission(err)))
 	case errors.Is(err, store.ErrInviteGrantExceedsInviter):
-		s.denyForbidden(w, r, caller, schema.ErrorCodeInviteGrantExceedsInviter, "an invite may grant only what its maker holds, and only an operator grants the right to invite")
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeInviteGrantExceedsInviter, "an invite may grant only what its maker holds, and only an operator grants the right to invite",
+			refusedPermission(caller, storeRefusalPermission(err)))
 	case errors.Is(err, store.ErrInviteAllowanceExceeded):
 		s.denyForbidden(w, r, caller, schema.ErrorCodeInviteAllowanceExceeded, "you already have as many open personal invites as you may")
 	case errors.Is(err, store.ErrNotFound):
@@ -733,7 +737,7 @@ func (s *Server) handleInvitePermission(w http.ResponseWriter, r *http.Request) 
 	if !decodeInviteBody(w, r, &req) {
 		return
 	}
-	_, err := s.store.SetMayInvite(ctx, auditActor(ctx), id, req.MayInvite, !isOwner(caller))
+	changed, err := s.store.SetMayInvite(ctx, auditActor(ctx), id, req.MayInvite, !isOwner(caller))
 	switch {
 	case errors.Is(err, store.ErrOwnerProtected):
 		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
@@ -747,6 +751,11 @@ func (s *Server) handleInvitePermission(w http.ResponseWriter, r *http.Request) 
 		slog.ErrorContext(ctx, "invites: set invite permission failed", "principal", id, "error", err)
 		writeInternalError(w)
 	default:
+		// A brake changes one person's permissions: they alone are told
+		// (ADR-014 design §8.6).
+		if changed {
+			s.events.notifyPermissionsChanged(id)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

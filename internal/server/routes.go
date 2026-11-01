@@ -1,6 +1,10 @@
 package server
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/njdaniel/conch/pkg/schema"
+)
 
 // routeTable lists every route the server serves with its authentication
 // class. It is the single source for mux registration and the authentication
@@ -23,13 +27,13 @@ func (s *Server) routeTable() []route {
 		{pattern: "GET /v1/events/ws", access: accessAuthenticated, handler: hf(s.handleEventsWS), acceptsTicket: true},
 		rt("POST /v1/ws-tickets", accessAuthenticated, hf(s.handleCreateWSTicket)),
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
-		rt("POST /v0/channels", accessOperator, hf(s.handleCreateChannel)),
+		rt("POST /v0/channels", accessPermission, hf(s.handleCreateChannel)).needs(schema.PermManageChannels),
 		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
 		// Renaming a channel (issues #727, #791): operators or its managers,
 		// addressed by id since the name is what it changes. /name is a literal
 		// no {channel} route ends in, so no two patterns meet.
 		rt("PUT /v1/channels/{id}/name", accessChannelManager, hf(s.handleRenameChannel)),
-		rt("POST /v0/principals", accessOperator, hf(s.handleCreatePrincipal)),
+		rt("POST /v0/principals", accessPermission, hf(s.handleCreatePrincipal)).needs(schema.PermManageMembers),
 		// Renaming (issue #441): operators rename anyone, a person themselves
 		// (checked in the handler).
 		rt("PUT /v1/principals/{id}/name", accessOperatorOrSelf, hf(s.handleRenamePrincipal)),
@@ -57,11 +61,11 @@ func (s *Server) routeTable() []route {
 		rt("DELETE /v1/channels/{channel}/members/{principal_id}", accessChannelManager, hf(s.handleDeleteChannelMember)),
 		// Nets (issue #115). Management is operator-only; the list is open to
 		// authenticated callers and filtered to the nets they are on.
-		rt("POST /v1/channels/{channel}/nets", accessOperator, hf(s.handleCreateNet)),
+		rt("POST /v1/channels/{channel}/nets", accessPermission, hf(s.handleCreateNet)).needs(schema.PermManageChannels),
 		rt("GET /v1/channels/{channel}/nets", accessAuthenticated, hf(s.handleListNets)),
-		rt("DELETE /v1/channels/{channel}/nets/{net}", accessOperator, hf(s.handleArchiveNet)),
-		rt("PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}", accessOperator, hf(s.handlePutNetMember)),
-		rt("DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}", accessOperator, hf(s.handleDeleteNetMember)),
+		rt("DELETE /v1/channels/{channel}/nets/{net}", accessPermission, hf(s.handleArchiveNet)).needs(schema.PermManageChannels),
+		rt("PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}", accessPermission, hf(s.handlePutNetMember)).needs(schema.PermManageChannels),
+		rt("DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}", accessPermission, hf(s.handleDeleteNetMember)).needs(schema.PermManageChannels),
 		// Voice (issue #126). Human members only; checked in the handler.
 		rt("POST /v1/channels/{channel}/voice/session", accessAuthenticated, hf(s.handleVoiceSession)),
 		// Transmit reports (issue #135): a client reports each press and
@@ -140,13 +144,13 @@ func (s *Server) routeTable() []route {
 		rt("GET /v2/channels/{channel}/messages/{message_id}/revisions", accessAuthenticated, hf(s.handleListMessageRevisions)),
 		rt("GET /v1/read-state", accessAuthenticated, hf(s.handleListReadState)),
 		rt("PUT /v1/channels/{channel}/read-state", accessAuthenticated, hf(s.handlePutReadState)),
-		rt("PUT /v1/principals/{id}/manifest", accessOperator, hf(s.handlePutManifest)),
+		rt("PUT /v1/principals/{id}/manifest", accessPermission, hf(s.handlePutManifest)).needs(schema.PermManageMembers),
 		// Operators, or the agent the manifest belongs to (checked in the handler).
 		rt("GET /v1/principals/{id}/manifest", accessOperatorOrSelf, hf(s.handleGetManifest)),
-		rt("POST /v1/principals/{id}/credentials", accessOperator, hf(s.handleCreateCredential)),
-		rt("GET /v1/principals/{id}/credentials", accessOperator, hf(s.handleListCredentials)),
-		rt("POST /v1/credentials/{credential_id}/rotate", accessOperator, hf(s.handleRotateCredential)),
-		rt("DELETE /v1/credentials/{credential_id}", accessOperator, hf(s.handleRevokeCredential)),
+		rt("POST /v1/principals/{id}/credentials", accessPermission, hf(s.handleCreateCredential)).needs(schema.PermActAsMembers),
+		rt("GET /v1/principals/{id}/credentials", accessPermission, hf(s.handleListCredentials)).needs(schema.PermManageMembers),
+		rt("POST /v1/credentials/{credential_id}/rotate", accessPermission, hf(s.handleRotateCredential)).needs(schema.PermActAsMembers),
+		rt("DELETE /v1/credentials/{credential_id}", accessPermission, hf(s.handleRevokeCredential)).needs(schema.PermManageMembers),
 		// Signing out (issue #439): the caller revokes the credential the
 		// request came with. More specific than the route above, so the mux
 		// never hands "current" to it as an id.
@@ -166,23 +170,33 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/guest/convert", accessAuthenticated, hf(s.handleConvertGuest)),
 		rt("DELETE /v1/credentials/mine/{id}", accessAuthenticated, hf(s.handleRevokeOwnCredential)),
 		// Disabling a principal and mass revocation (issue #101).
-		rt("POST /v1/principals/{id}/disable", accessOperator, hf(s.handleDisablePrincipal)),
-		rt("POST /v1/principals/{id}/enable", accessOperator, hf(s.handleEnablePrincipal)),
+		rt("POST /v1/principals/{id}/disable", accessPermission, hf(s.handleDisablePrincipal)).needs(schema.PermManageMembers),
+		rt("POST /v1/principals/{id}/enable", accessPermission, hf(s.handleEnablePrincipal)).needs(schema.PermManageMembers),
 		// Deleting an account is disabling and hiding it (issue #445): one
 		// principal, or every principal from an invite or with a name
 		// prefix. The list shows them all, hidden ones on request. The bulk
 		// route has one segment fewer than the per-id ones, so the two never
 		// meet in the mux; POST /v0/principals is another version.
-		rt("POST /v1/principals/{id}/hide", accessOperator, hf(s.handleHidePrincipal)),
-		rt("POST /v1/principals/hide", accessOperator, hf(s.handleHidePrincipals)),
-		rt("GET /v1/principals", accessOperator, hf(s.handleListPrincipals)),
+		rt("POST /v1/principals/{id}/hide", accessPermission, hf(s.handleHidePrincipal)).needs(schema.PermManageMembers),
+		rt("POST /v1/principals/hide", accessPermission, hf(s.handleHidePrincipals)).needs(schema.PermManageMembers),
+		rt("GET /v1/principals", accessPermission, hf(s.handleListPrincipals)).needs(schema.PermManageMembers),
 		// Operators, or the principal itself: "sign out everywhere" (issue
 		// #439; checked in the handler).
 		rt("POST /v1/principals/{id}/credentials/revoke-all", accessOperatorOrSelf, hf(s.handleRevokeAllCredentials)),
-		rt("GET /v1/audit", accessOwner, hf(s.handleExportAudit)),
-		rt("POST /v1/hooks", accessOperator, hf(s.handleCreateHook)),
-		rt("GET /v1/hooks", accessOperator, hf(s.handleListHooks)),
-		rt("DELETE /v1/hooks/{id}", accessOperator, hf(s.handleRevokeHook)),
+		// The audit export needs read_audit_log (ADR-014 design §7.2), an
+		// owner's alone by default, and a recent proof from anyone but an
+		// owner (reauthNonOwners): the trail names every member and every
+		// private channel.
+		rt("GET /v1/audit", accessPermission, hf(s.handleExportAudit)).wasOwnerRoute().needs(schema.PermReadAuditLog),
+		// The permissions document (ADR-014, docs/design/admin-roles.md
+		// §8.2): any operator reads it; changing it needs
+		// change_server_settings, and the operator column an owner (checked in
+		// the handler and the store). See permissions.go.
+		rt("GET /v1/permissions", accessOperator, hf(s.handleGetPermissions)),
+		rt("PUT /v1/permissions", accessPermission, hf(s.handlePutPermissions)).needs(schema.PermChangeServerSettings),
+		rt("POST /v1/hooks", accessPermission, hf(s.handleCreateHook)).needs(schema.PermActAsMembers),
+		rt("GET /v1/hooks", accessPermission, hf(s.handleListHooks)).needs(schema.PermManageMembers),
+		rt("DELETE /v1/hooks/{id}", accessPermission, hf(s.handleRevokeHook)).needs(schema.PermManageMembers),
 		// Invites (issue #437). Making, listing and closing one's own are for
 		// people (an agent gets 403 human_required, in the handler). Preview
 		// and redeem are exempt: whoever holds a code may ask what it grants
@@ -213,14 +227,17 @@ func (s *Server) routeTable() []route {
 		// The bulk end has one segment fewer than the per-id one, so the two
 		// never meet in the mux.
 		rt("GET /v1/join/settings", accessOperator, hf(s.handleGetJoinSettings)),
-		rt("PUT /v1/join/settings", accessOwner, hf(s.handlePutJoinSettings)),
-		rt("GET /v1/guests", accessOperator, hf(s.handleListGuests)),
-		rt("POST /v1/guests/{id}/end", accessOperator, hf(s.handleEndGuest)),
-		rt("POST /v1/guests/end", accessOperator, hf(s.handleEndGuests)),
+		// Changing them needs change_server_settings (ADR-014 design §7.2),
+		// an owner's alone by default; a member is told "owner required",
+		// as before.
+		rt("PUT /v1/join/settings", accessPermission, hf(s.handlePutJoinSettings)).wasOwnerRoute().needs(schema.PermChangeServerSettings),
+		rt("GET /v1/guests", accessPermission, hf(s.handleListGuests)).needs(schema.PermManageMembers),
+		rt("POST /v1/guests/{id}/end", accessPermission, hf(s.handleEndGuest)).needs(schema.PermManageMembers),
+		rt("POST /v1/guests/end", accessPermission, hf(s.handleEndGuests)).needs(schema.PermManageMembers),
 		// A conversion permit (issue #711): an operator lets one live guest
 		// create an account although its origin's policy is closed. See
 		// conversion.go.
-		rt("POST /v1/guests/{id}/conversion-permit", accessOperator, hf(s.handleCreateConversionPermit)),
+		rt("POST /v1/guests/{id}/conversion-permit", accessPermission, hf(s.handleCreateConversionPermit)).needs(schema.PermManageMembers),
 		rt("POST /v2/invites/redeem", accessExempt, hf(s.handleRedeemInviteV2)),
 		// Password sign-in (issue #707): exempt, as the invite routes are,
 		// and limited before any hashing; over HTTPS or loopback only. A
@@ -241,21 +258,21 @@ func (s *Server) routeTable() []route {
 		// an invite, disabling them or everyone a person invited, the right to
 		// invite, and the pause switch. Operators only; GET /v1/invites and
 		// DELETE /v1/invites/{id} above serve operators everyone's invites.
-		rt("GET /v1/invites/{id}/principals", accessOperator, hf(s.handleInviteJoiners)),
-		rt("POST /v1/invites/{id}/disable-joiners", accessOperator, hf(s.handleDisableJoiners)),
-		rt("POST /v1/principals/{id}/disable-invitees", accessOperator, hf(s.handleDisableInvitees)),
-		rt("PUT /v1/principals/{id}/invite-permission", accessOperator, hf(s.handleInvitePermission)),
+		rt("GET /v1/invites/{id}/principals", accessPermission, hf(s.handleInviteJoiners)).needs(schema.PermManageMembers),
+		rt("POST /v1/invites/{id}/disable-joiners", accessPermission, hf(s.handleDisableJoiners)).needs(schema.PermManageMembers),
+		rt("POST /v1/principals/{id}/disable-invitees", accessPermission, hf(s.handleDisableInvitees)).needs(schema.PermManageMembers),
+		rt("PUT /v1/principals/{id}/invite-permission", accessPermission, hf(s.handleInvitePermission)).needs(schema.PermManageMembers),
 		rt("GET /v1/invites/settings", accessOperator, hf(s.handleGetInviteSettings)),
-		rt("PUT /v1/invites/settings", accessOperator, hf(s.handlePutInviteSettings)),
+		rt("PUT /v1/invites/settings", accessPermission, hf(s.handlePutInviteSettings)).needs(schema.PermManageMembers),
 		// Sign-in links (issue #493): an operator makes a one-time link that
 		// signs a member back into the same account. Preview and redeem are
 		// exempt, as an invite's are, and limited the same way. See
 		// sign_in_links.go.
-		rt("POST /v1/principals/{id}/sign-in-links", accessOperator, hf(s.handleCreateSignInLink)),
+		rt("POST /v1/principals/{id}/sign-in-links", accessPermission, hf(s.handleCreateSignInLink)).needs(schema.PermActAsMembers),
 		rt("POST /v1/sign-in-links/preview", accessExempt, hf(s.handlePreviewSignInLink)),
 		rt("POST /v1/sign-in-links/redeem", accessExempt, hf(s.handleRedeemSignInLink)),
 		// Closing one that leaked, without disabling its person.
-		rt("DELETE /v1/sign-in-links/{id}", accessOperator, hf(s.handleCloseSignInLink)),
+		rt("DELETE /v1/sign-in-links/{id}", accessPermission, hf(s.handleCloseSignInLink)).needs(schema.PermManageMembers),
 		// Problem reports (issue #446). Sending one is for people (an agent
 		// gets 403 human_required, in the handler); reading and filing them
 		// is for operators. conchd never sends a report anywhere.
@@ -363,4 +380,10 @@ var recentAuthRoutes = map[string]reauthRule{
 	// An invite makes principals; an operator's has no allowance and may be
 	// open to anyone. A member's invites are not in the class.
 	"POST /v1/invites": reauthOperators,
+	// The permissions document grants rights (ADR-014 design §7.2).
+	"PUT /v1/permissions": reauthAlways,
+	// The audit export names every member and private channel: a holder of
+	// read_audit_log who is not an owner proves itself first; an owner, who
+	// read it before ADR-014 without one, still does not.
+	"GET /v1/audit": reauthNonOwners,
 }

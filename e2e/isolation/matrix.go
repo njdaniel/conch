@@ -564,6 +564,14 @@ func coreMatrixRows() []row {
 				return post("/v1/principals/"+id(s.id)+"/credentials/revoke-all", nil)
 			}},
 		operator("GET /v1/audit", "reads the audit log", nil, func(*world, subject) probe { return get("/v1/audit") }),
+		// The permissions document (issue #1015): a member neither reads the
+		// matrix nor changes it (ADR-014 O10); the restricted operator's
+		// rows are restricted.go's.
+		operator("GET /v1/permissions", "reads the permissions document", nil, func(*world, subject) probe { return get("/v1/permissions") }),
+		operator("PUT /v1/permissions", "turns a permission on for members", nil, func(*world, subject) probe {
+			return put("/v1/permissions", schema.PutPermissionsRequestV1{Revision: 1,
+				Changes: []schema.PermissionChangeV1{{Permission: schema.PermCreatePrivateChannels, Role: schema.PermissionRoleMember, Granted: true}}})
+		}),
 		operator("POST /v1/hooks", "makes a hook into A's channel", aChannel, func(w *world, s subject) probe {
 			return post("/v1/hooks", schema.CreateHookRequest{Channel: s.name, Principal: w.prober.id})
 		}),

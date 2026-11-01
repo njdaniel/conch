@@ -138,7 +138,7 @@ func (s *Store) CreateChannelAs(ctx context.Context, actor, name string, creator
 		if err != nil {
 			return err
 		}
-		ch = Channel{ID: id, Name: name, CreatedAt: now}
+		ch = Channel{ID: id, Name: name, CreatedAt: now, Visibility: schema.ChannelPrivate}
 		// Quoted, as a rename's names are, so a name with spaces in it reads
 		// as one field.
 		if err := appendAuditEventTx(ctx, tx, actor, AuditChannelCreated, channelSubject(id), fmt.Sprintf("name=%q", name), now); err != nil {
@@ -917,7 +917,7 @@ func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]Chan
 // slice when there are none.
 func (s *Store) ListChannelsForPrincipal(ctx context.Context, principalID int64) ([]Channel, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.name, c.created_at, m.manages FROM channels c
+		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, m.manages FROM channels c
 		 JOIN channel_members m ON m.channel_id = c.id
 		 WHERE m.principal_id = ? ORDER BY c.id ASC`, principalID)
 	if err != nil {
@@ -926,13 +926,11 @@ func (s *Store) ListChannelsForPrincipal(ctx context.Context, principalID int64)
 	defer func() { _ = rows.Close() }()
 	channels := []Channel{}
 	for rows.Next() {
-		var ch Channel
-		var createdAt int64
 		var manages int
-		if err := rows.Scan(&ch.ID, &ch.Name, &createdAt, &manages); err != nil {
+		ch, err := scanChannel(func(dest ...any) error { return rows.Scan(append(dest, &manages)...) })
+		if err != nil {
 			return nil, fmt.Errorf("store: list channels of principal %d: %w", principalID, err)
 		}
-		ch.CreatedAt = time.UnixMilli(createdAt)
 		ch.Manages = manages == 1
 		channels = append(channels, ch)
 	}

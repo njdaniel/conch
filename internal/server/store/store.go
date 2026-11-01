@@ -946,6 +946,37 @@ END`,
 	PRIMARY KEY (role, permission)
 )`,
 	},
+	// 40 (communityMigration): One community (issue #979, ADR-013,
+	// docs/design/community-model.md §6). These are the DDL steps: a
+	// channel's visibility (step 1) and its default mark (step 2), with two
+	// triggers in place of the cross-column CHECK an ADD COLUMN cannot carry
+	// (a default channel is public); default_listed_by, who listed a default
+	// channel, in place of open_channels.added_by (the lister rule of
+	// ADR-014 §7.3; a principal id with no REFERENCES clause, which cannot
+	// dangle because principals are never deleted); the record of the
+	// history bounds step 5 clears; and invites.link (step 8), 'legacy' for
+	// every existing invite. The Go step (migrateToCommunity) runs the
+	// preflight and steps 3 to 11 in this same transaction. open_channels
+	// stays, unread, until a later migration drops it (I13).
+	{
+		`ALTER TABLE channels ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('public', 'private'))`,
+		`ALTER TABLE channels ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1))`,
+		`ALTER TABLE channels ADD COLUMN default_listed_by INTEGER`,
+		`CREATE TRIGGER channels_default_public_insert BEFORE INSERT ON channels
+WHEN NEW.is_default = 1 AND NEW.visibility <> 'public'
+BEGIN SELECT RAISE(ABORT, 'a default channel must be public'); END`,
+		`CREATE TRIGGER channels_default_public_update BEFORE UPDATE OF is_default, visibility ON channels
+WHEN NEW.is_default = 1 AND NEW.visibility <> 'public'
+BEGIN SELECT RAISE(ABORT, 'a default channel must be public'); END`,
+		`CREATE TABLE legacy_history_bounds (
+	channel_id    INTEGER NOT NULL,
+	principal_id  INTEGER NOT NULL,
+	history_after INTEGER NOT NULL,
+	cleared_at    INTEGER NOT NULL,
+	PRIMARY KEY (channel_id, principal_id)
+)`,
+		`ALTER TABLE invites ADD COLUMN link TEXT NOT NULL DEFAULT 'legacy' CHECK (link IN ('legacy', 'member', 'guest'))`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
@@ -963,6 +994,9 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 
 	// The permissions document starts at revision 1 (issue #1013).
 	permissionsMigration: initializePermissions,
+
+	// One community: the preflight and steps 3 to 11 (issue #979).
+	communityMigration: migrateToCommunity,
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.

@@ -12,7 +12,6 @@ import type {
   BridgeReply,
   BridgeRequest,
   ServerAddress,
-  SetServerAddressResult,
   SignInOutcome,
   SignInRefusal,
   SignOutOutcome,
@@ -21,7 +20,6 @@ import { operations, type OperationId } from '../../../web/src/platform/operatio
 import type { WhoAmIResponseV1 } from '../../../web/src/schema/principal.ts';
 import { whoAmIResponseV1 } from '../../../web/src/schema/principal.ts';
 import { Client, type Exchange } from './client.ts';
-import { parseServerAddress } from './origin.ts';
 import type { Session } from './session.ts';
 
 export const REVOKE_TIMEOUT_MS = 5_000;
@@ -56,7 +54,8 @@ export type SignInStep =
 const DEDICATED: ReadonlySet<OperationId> = new Set<OperationId>(['logout']);
 
 // Operations whose answer is a stream of bytes or whose request is one: the
-// bridge carries JSON only. (Attachments are #947.)
+// bridge's generic request carries JSON only. (Attachments have their own
+// functions, main/files.ts.)
 const NOT_JSON: ReadonlySet<OperationId> = new Set<OperationId>(['uploadFile', 'fileBytes']);
 
 export function invocable(id: OperationId): boolean {
@@ -100,6 +99,25 @@ function failed(exchange: Exchange): SignInOutcome {
   }
 }
 
+// replyOf is what the renderer is told of an exchange: the server's answer
+// already validated, or the reason there was none. Bytes never go this way.
+export function replyOf(exchange: Exchange): BridgeReply {
+  switch (exchange.kind) {
+    case 'none':
+      return exchange.reason === undefined ? { kind: 'none' } : { kind: 'none', reason: exchange.reason };
+    case 'unauthorized':
+      return { kind: 'unauthorized' };
+    case 'answer':
+      return {
+        kind: 'reply',
+        status: exchange.status,
+        ...(exchange.body === undefined ? {} : { body: exchange.body }),
+        ...(exchange.retryAfter === undefined ? {} : { retryAfter: exchange.retryAfter }),
+        ...(exchange.requestId === undefined ? {} : { requestId: exchange.requestId }),
+      };
+  }
+}
+
 export class Service {
   readonly #deps: ServiceDeps;
 
@@ -109,17 +127,6 @@ export class Service {
 
   serverAddress(): ServerAddress {
     return { origin: this.#deps.session.origin };
-  }
-
-  setServerAddress(input: string): SetServerAddressResult {
-    const parsed = parseServerAddress(input);
-    if (!parsed.ok) return parsed;
-    const { session } = this.#deps;
-    const before = session.capture();
-    session.setOrigin(parsed.origin);
-    // A sign-in the change ended is revoked at the server that issued it.
-    if (before.token !== null && !session.signedIn) void this.#revoke(before.origin, before.token);
-    return { ok: true, origin: parsed.origin };
   }
 
   async request(request: BridgeRequest): Promise<BridgeReply> {
@@ -133,21 +140,8 @@ export class Service {
       ...(request.query === undefined ? {} : { query: request.query }),
       ...(request.body === undefined ? {} : { body: request.body }),
     });
-    switch (exchange.kind) {
-      case 'none':
-        this.#note(id, exchange.reason);
-        return exchange.reason === undefined ? { kind: 'none' } : { kind: 'none', reason: exchange.reason };
-      case 'unauthorized':
-        return { kind: 'unauthorized' };
-      case 'answer':
-        return {
-          kind: 'reply',
-          status: exchange.status,
-          ...(exchange.body === undefined ? {} : { body: exchange.body }),
-          ...(exchange.retryAfter === undefined ? {} : { retryAfter: exchange.retryAfter }),
-          ...(exchange.requestId === undefined ? {} : { requestId: exchange.requestId }),
-        };
-    }
+    if (exchange.kind === 'none') this.#note(id, exchange.reason);
+    return replyOf(exchange);
   }
 
   #note(id: OperationId, reason: string | undefined): void {

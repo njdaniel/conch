@@ -1,8 +1,8 @@
-import type { Locator, Page } from '@playwright/test';
+import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import { createChannelResponse, listChannelMembersResponseV1, type CreateChannelRequest } from '../src/schema/channel';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { whoAmIResponseV1 } from '../src/schema/principal';
-import { channelButton, expect, signIn, statusLine, test } from './fixtures';
+import { channelButton, expect, showView, signIn, statusLine, test } from './fixtures';
 import { call, ok, type World } from './world';
 
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Channels' });
@@ -10,6 +10,13 @@ const panel = (page: Page) => page.getByRole('region', { name: 'Members list' })
 
 function memberRow(page: Page, name: string): Locator {
   return panel(page).locator('li').filter({ has: page.locator('.ag-name').getByText(name, { exact: true }) });
+}
+
+async function chooseFor(row: Locator, name: string, item: string): Promise<void> {
+  await row.getByRole('button', { name: `Actions for ${name}` }).click();
+  await row.getByRole('menuitem', { name: item }).click();
+  // Removal asks first (issue #1083).
+  if (item === 'Remove from channel') await row.getByRole('button', { name: 'Yes, remove' }).click();
 }
 
 async function done(world: World, method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<void> {
@@ -53,9 +60,11 @@ test('C793 an operator delegates a channel; its manager adds, removes and rename
 
   const op = await operatorPage(meet, world);
   await channelButton(op, current).click();
-  await memberRow(op, manager.name).getByRole('button', { name: `Make ${manager.name} a manager` }).click();
+  await chooseFor(memberRow(op, manager.name), manager.name, 'Make manager');
   await expect(memberRow(op, manager.name).getByText('Manager', { exact: true })).toBeVisible();
-  await expect(memberRow(op, manager.name).getByRole('button', { name: `Remove ${manager.name} as manager` })).toBeVisible();
+  await memberRow(op, manager.name).getByRole('button', { name: `Actions for ${manager.name}` }).click();
+  await expect(memberRow(op, manager.name).getByRole('menuitem', { name: 'Remove as manager' })).toBeVisible();
+  await op.keyboard.press('Escape');
 
   const mgr = (await meet()).page;
   await signIn(mgr, world, manager.token, manager.name);
@@ -78,23 +87,21 @@ test('C793 an operator delegates a channel; its manager adds, removes and rename
   await byName.getByRole('button', { name: 'Add by name' }).click();
   await expect(memberRow(mgr, target.name)).toBeVisible();
 
-  await expect(memberRow(mgr, operatorName)).toContainText('Operators can only be removed by an operator.');
-  await expect(memberRow(mgr, operatorName).getByRole('button', { name: `Remove ${operatorName}` })).toHaveCount(0);
+  await expect(memberRow(mgr, operatorName).getByRole('button', { name: `Actions for ${operatorName}` })).toHaveCount(0);
   await expect(panel(mgr).getByText('Only operators choose who manages a channel.', { exact: true })).toBeVisible();
   await expect(panel(mgr).getByText('Only operators choose who decides approvals.', { exact: true })).toBeVisible();
-  await expect(panel(mgr).getByRole('checkbox', { name: /decides approvals/ })).toHaveCount(0);
-  await expect(panel(mgr).getByRole('button', { name: /as manager$/ })).toHaveCount(0);
+  await memberRow(mgr, target.name).getByRole('button', { name: `Actions for ${target.name}` }).click();
+  await expect(memberRow(mgr, target.name).getByRole('menuitem')).toHaveText(['Remove from channel']);
+  await mgr.keyboard.press('Escape');
 
   const member = (await meet()).page;
   await signIn(member, world, plain.token, plain.name);
   await channelButton(member, current).click();
   await expect(memberRow(member, plain.name)).toBeVisible();
   await expect(panel(member).getByRole('form', { name: 'Add person by name' })).toHaveCount(0);
-  await expect(panel(member).getByRole('button', { name: /^Remove / })).toHaveCount(0);
-  await expect(panel(member).getByRole('button', { name: / manager$/ })).toHaveCount(0);
-  await expect(panel(member).getByRole('checkbox', { name: /decides approvals/ })).toHaveCount(0);
+  await expect(panel(member).getByRole('button', { name: /^Actions for / })).toHaveCount(0);
 
-  await memberRow(mgr, target.name).getByRole('button', { name: `Remove ${target.name}` }).click();
+  await chooseFor(memberRow(mgr, target.name), target.name, 'Remove from channel');
   await expect(memberRow(mgr, target.name)).toHaveCount(0);
   await expect
     .poll(async () => (await ok(world, world.tokens.operator, 'GET', `/v1/channels/${encodeURIComponent(current)}/members`, listChannelMembersResponseV1)).members.some((m) => m.principal_id === target.id))
@@ -108,3 +115,81 @@ test('C793 an operator delegates a channel; its manager adds, removes and rename
   await expect(channelButton(mgr, renamed)).toHaveAttribute('aria-current', 'true');
   await expect(channelButton(member, renamed)).toHaveAttribute('aria-current', 'true');
 });
+
+// Issue #1083 (browser UX audit 4, F6): removing someone from a channel asks
+// first, from the row's menu item. Cancel and Escape leave them in; the yes
+// removes them, and they lose the channel. On a phone the buttons are at
+// least 44 px tall.
+const removeSizes: readonly (readonly [string, BrowserContextOptions, boolean])[] = [
+  ['1440×900', { viewport: { width: 1440, height: 900 } }, false],
+  ['390×844', { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }, true],
+];
+
+for (const [size, options, phone] of removeSizes) {
+  test(`F6 at ${size} removing someone from a channel asks first, and they lose the channel`, async ({ meet, secrets, world }) => {
+    const suffix = Date.now().toString(36).slice(-5);
+    const channel = `f6-${suffix}${phone ? 'p' : 'w'}`;
+    const request: CreateChannelRequest = { name: channel };
+    await ok(world, world.tokens.operator, 'POST', '/v0/channels', createChannelResponse, request);
+    const target = await person(world, secrets, `f6-${suffix}${phone ? 'p' : 'w'}`, [channel]);
+
+    const gone = (await meet()).page;
+    await signIn(gone, world, target.token, target.name);
+    await channelButton(gone, channel).click();
+    await expect(gone.getByRole('heading', { name: channel, exact: true })).toBeVisible();
+
+    const { page } = await meet(options);
+    await page.goto(world.appUrl);
+    await page.getByLabel('Credential').fill(world.tokens.operator);
+    await page.getByRole('button', { name: 'Use credential' }).click();
+    await page.getByRole('button', { name: 'Continue anyway' }).click();
+    await expect(statusLine(page)).toContainText('Connected');
+    if (phone) await showView(page, 'Channels');
+    await channelButton(page, channel).click();
+    if (phone) {
+      await showView(page, 'Chat');
+      const members = page.getByRole('button', { name: 'Members' });
+      if ((await members.getAttribute('aria-expanded')) !== 'true') await members.tap();
+    }
+    const press = async (locator: Locator) => (phone ? locator.tap() : locator.click());
+    const row = memberRow(page, target.name);
+    const more = row.getByRole('button', { name: `Actions for ${target.name}` });
+    const still = async () => (await ok(world, world.tokens.operator, 'GET', `/v1/channels/${encodeURIComponent(channel)}/members`, listChannelMembersResponseV1)).members.some((m) => m.principal_id === target.id);
+
+    // The menu item asks; nothing is sent. Focus is on Cancel.
+    await press(more);
+    await press(row.getByRole('menuitem', { name: 'Remove from channel' }));
+    const question = row.getByRole('group', { name: `Remove ${target.name} from #${channel}? They lose this channel and its history.` });
+    await expect(question).toBeVisible();
+    const cancel = question.getByRole('button', { name: 'Cancel' });
+    const yes = question.getByRole('button', { name: 'Yes, remove' });
+    await expect(cancel).toBeFocused();
+    if (phone) {
+      for (const button of [cancel, yes]) expect((await button.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    expect(await still()).toBe(true);
+
+    // Escape cancels, and focus goes back to the row's ⋯.
+    await page.keyboard.press('Escape');
+    await expect(question).toHaveCount(0);
+    await expect(more).toBeFocused();
+    expect(await still()).toBe(true);
+
+    // Cancel cancels.
+    await press(more);
+    await press(row.getByRole('menuitem', { name: 'Remove from channel' }));
+    await press(cancel);
+    await expect(question).toHaveCount(0);
+    await expect(more).toBeFocused();
+    expect(await still()).toBe(true);
+    await expect(row).toBeVisible();
+
+    // Yes removes; the person loses the channel.
+    await press(more);
+    await press(row.getByRole('menuitem', { name: 'Remove from channel' }));
+    await press(yes);
+    await expect(row).toHaveCount(0);
+    await expect.poll(still).toBe(false);
+    await expect(channelButton(gone, channel)).toHaveCount(0, { timeout: 10_000 });
+  });
+}
