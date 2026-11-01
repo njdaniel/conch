@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -90,11 +91,69 @@ var revocations = []struct {
 		f.srv.credentialRevoked(context.Background(), id)
 	}},
 	{"all credentials revoked", true, func(t *testing.T, f *presenceFixture) {
-		if _, err := f.srv.store.RevokeAllCredentials(context.Background(), "system", f.ids["ann"]); err != nil {
-			t.Error(err)
-		}
+		f.revokeAll(t)
 		f.srv.voicePrincipalLostAccess(context.Background(), f.ids["ann"], voiceReasonCredsRevoked)
 	}},
+	// The sweep rotates the room between the revocation's commit and its
+	// hook, so the hook's own rotation finds nothing to do.
+	{"credential revoked/sweep first", true, func(t *testing.T, f *presenceFixture) {
+		id := f.credID(t, "ann")
+		if err := f.srv.store.RevokeCredential(context.Background(), "system", id); err != nil {
+			t.Error(err)
+		}
+		f.sweepRotates(t)
+		f.srv.credentialRevoked(context.Background(), id)
+	}},
+	{"all credentials revoked/sweep first", true, func(t *testing.T, f *presenceFixture) {
+		f.revokeAll(t)
+		f.sweepRotates(t)
+		f.srv.voicePrincipalLostAccess(context.Background(), f.ids["ann"], voiceReasonCredsRevoked)
+	}},
+	// Someone's rotation is committed in the store but the room is not yet
+	// forgotten when the hook runs: only the claim's own re-read of the
+	// room's liveness can find it.
+	{"credential revoked/rotation not yet forgotten", true, func(t *testing.T, f *presenceFixture) {
+		id := f.credID(t, "ann")
+		if err := f.srv.store.RevokeCredential(context.Background(), "system", id); err != nil {
+			t.Error(err)
+		}
+		f.rotateInStoreOnly(t)
+		f.srv.credentialRevoked(context.Background(), id)
+	}},
+	{"all credentials revoked/rotation not yet forgotten", true, func(t *testing.T, f *presenceFixture) {
+		f.revokeAll(t)
+		f.rotateInStoreOnly(t)
+		f.srv.voicePrincipalLostAccess(context.Background(), f.ids["ann"], voiceReasonCredsRevoked)
+	}},
+}
+
+func (f *presenceFixture) revokeAll(t *testing.T) {
+	t.Helper()
+	if _, err := f.srv.store.RevokeAllCredentials(context.Background(), "system", f.ids["ann"]); err != nil {
+		t.Error(err)
+	}
+}
+
+// sweepRotates runs the sweep's rotation (rotateInvalid): the room is
+// rotated in the store and forgotten, and nothing is deleted in LiveKit.
+func (f *presenceFixture) sweepRotates(t *testing.T) {
+	t.Helper()
+	if _, err := f.srv.voice.rotateInvalid(context.Background()); err != nil {
+		t.Error(err)
+	}
+}
+
+// rotateInStoreOnly commits ops's rotation in the store and nothing else, as
+// a rotation looks between RotateVoiceRoom and forgetRoom.
+func (f *presenceFixture) rotateInStoreOnly(t *testing.T) {
+	t.Helper()
+	stored, err := f.srv.store.ChannelVoiceRoom(context.Background(), f.ops.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.srv.store.RotateVoiceRoom(context.Background(), stored.ID, store.VoiceRotateRevoked); err != nil {
+		t.Error(err)
+	}
 }
 
 // revocationCase is one row of revocations with DeleteRoom answering or not.

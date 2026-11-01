@@ -462,6 +462,13 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 			p.withdrawAll(ctx, r, principalID, voiceRoomPublishes(room))
 			return schema.VoiceShareV1{}, errVoiceShareRoomGone
 		}
+		// As for a first claim below: a rotation committed while the grant
+		// was in flight, and not yet forgotten, is read from the store, and
+		// what was just granted is taken back before the claims are let go,
+		// so a revocation waiting on them (waitRunningClaims) answers after.
+		if gone := p.roomRotatedUnder(ctx, lctx, r, room, principalID); gone {
+			return schema.VoiceShareV1{}, errVoiceShareRoomGone
+		}
 		return schema.VoiceShareV1{PrincipalID: principalID, StartedAt: schema.NewTimestamp(held.startedAt), Audio: true}, nil
 	}
 
@@ -510,6 +517,18 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	// the grant too, but a DeleteRoom that fails leaves the room until the
 	// sweep, up to 30 s, and the grant must not last that long. A rotation
 	// that commits after this read forgets the room itself.
+	if gone := p.roomRotatedUnder(ctx, lctx, r, room, principalID); gone {
+		return schema.VoiceShareV1{}, errVoiceShareRoomGone
+	}
+	return schema.VoiceShareV1{PrincipalID: principalID, StartedAt: schema.NewTimestamp(mine.startedAt), Audio: true}, nil
+}
+
+// roomRotatedUnder reads from the store whether room was rotated while a
+// claim's grant was in flight. If it was, what was granted is taken back and
+// the room is forgotten (its share ends, reason=rotated), and it reports
+// true. A failed read is logged and left to the sweep. The caller holds r's
+// claims.
+func (p *voicePoller) roomRotatedUnder(ctx, lctx context.Context, r *voiceRoomState, room store.VoiceRoom, principalID int64) bool {
 	live, err := p.s.store.VoiceRoomLive(lctx, room.ID)
 	switch {
 	case err != nil:
@@ -518,9 +537,9 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	case !live:
 		p.withdrawAll(ctx, r, principalID, voiceRoomPublishes(room))
 		p.forgetRoom(ctx, room.RoomName)
-		return schema.VoiceShareV1{}, errVoiceShareRoomGone
+		return true
 	}
-	return schema.VoiceShareV1{PrincipalID: principalID, StartedAt: schema.NewTimestamp(mine.startedAt), Audio: true}, nil
+	return false
 }
 
 // shareEntitled reads, under the room's claims, everything a share in room
