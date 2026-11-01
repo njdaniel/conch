@@ -52,6 +52,25 @@ function readRelease(): number {
   }
 }
 
+// The voice trace (issue #1041): with this key set in the tab's session
+// storage, each step of a press is appended, with the time in ms, to
+// window.conchVoiceTrace (the page makes no console call: hygiene.test.ts). Off
+// unless a person or a test sets it.
+const traceStore = 'conch.web.voice.trace';
+
+function traceSink(): ((line: string) => void) | undefined {
+  try {
+    if (window.sessionStorage.getItem(traceStore) === null) return undefined;
+  } catch {
+    return undefined;
+  }
+  const kept: string[] = [];
+  Object.defineProperty(window, 'conchVoiceTrace', { value: kept, configurable: true });
+  return (line) => {
+    kept.push(line);
+  };
+}
+
 function writeRelease(ms: number): void {
   try {
     window.sessionStorage.setItem(releaseStore, String(ms));
@@ -231,6 +250,7 @@ export function useVoice({
       outputSelection: canChooseOutput(),
       output: readOutput(),
       gate: { tail: readRelease() },
+      trace: traceSink(),
     });
   }
   const client = clientRef.current;

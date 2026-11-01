@@ -317,6 +317,10 @@ export interface VoiceEnv {
   // Releases the share whose claim started at startedAt (issue #487).
   readonly stopShare: (channel: string, startedAt: string) => Promise<unknown>;
   readonly gate?: GateOptions;
+  // A timestamped line for each step of a press and its release, for finding
+  // why a roster stayed on "transmitting" (issue #1041). Each line is an event
+  // name and nothing else: no room, token or person. Absent unless asked for.
+  readonly trace?: (line: string) => void;
   // The microphone chosen earlier in this tab, if any (issue #658).
   readonly microphone?: Microphone | null;
   // The voice processing chosen for each microphone (issue #659); without
@@ -892,14 +896,21 @@ export class VoiceClient {
     this.levelTimer = null;
   }
 
+  private trace(event: string): void {
+    this.env.trace?.(`${String(this.now())} ${event}`);
+  }
+
   private onGate(open: boolean): void {
     const talk = this.talk;
     const edge = ++this.edge;
+    this.trace(open ? 'gate open' : 'gate shut');
     if (open) {
       this.steps = this.steps.then(() => this.opened(talk, edge));
     } else {
       // The track is muted at once, and `stopped` reported once it is.
-      const muted = (this.room?.setSending(false) ?? Promise.resolve()).catch(() => undefined);
+      const muted = (this.room?.setSending(false) ?? Promise.resolve()).catch(() => undefined).then(() => {
+        this.trace('track muted');
+      });
       this.steps = this.steps.then(() => this.shut(talk, muted));
     }
     // Transmitting begins once the track is unmuted (opened), and ends here,
@@ -918,6 +929,7 @@ export class VoiceClient {
       this.reports.push('started', resolve);
     });
     await this.within(answered, reportWait);
+    this.trace('started answered or waited out');
     const room = this.room;
     if (talk !== this.talk || edge !== this.edge || room === null) return;
     // Said when the unmute lands, however late: past reportWait the steps go
@@ -925,6 +937,7 @@ export class VoiceClient {
     // shut, or the connection gone, meanwhile.
     await this.within(
       room.setSending(true).then(() => {
+        this.trace('track unmuted');
         if (talk === this.talk && edge === this.edge && room === this.room) this.set({ transmitting: true });
       }),
       reportWait,
@@ -933,7 +946,10 @@ export class VoiceClient {
 
   private async shut(talk: number, muted: Promise<void>): Promise<void> {
     await this.within(muted, reportWait);
-    if (talk === this.talk) this.reports.push('stopped');
+    if (talk === this.talk) {
+      this.trace('stopped reported');
+      this.reports.push('stopped');
+    }
   }
 
   // within resolves when p settles, however it settles, or after ms.

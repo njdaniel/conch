@@ -11,6 +11,10 @@ import type { PostMessageRequestV2 } from '../src/schema/generated';
 import { channelButton, conversation, expect, expectFits, mainNav, messages, openChannel, phones, showView, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
+// The longest the roster may take to stop saying "transmitting" after the
+// first press since a join is released: see the test that uses it.
+const firstPressBound = 200 + 1500 + 1000;
+
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 
 test('P3-F9c voice is not set up on a server without LiveKit, and the page asks for no microphone', async ({ meet, world }) => {
@@ -1208,6 +1212,73 @@ test.describe('with LiveKit', () => {
       }
     });
   }
+
+  // Issue #1041 (browser UX audit 3, F16): after a person's first press since
+  // joining, the other page's roster kept saying "transmitting" for seconds.
+  // Twenty fresh joins, each with one 1.5 s first press, and how long the
+  // other page took to stop saying it.
+  //
+  // The bound is not 1 s. The page mutes 200 ms after the release (the tail),
+  // and conchd shows the mute when its next pass sees it: a pass comes every
+  // 100 ms to 1.5 s at random, on purpose (voicePassGap), so the roster clears
+  // between about 0.3 s and 1.8 s after the release, and in 40 fresh joins
+  // measured while this was investigated about one in eight took over a
+  // second. What this guards is the F16 symptom, seconds past that: the bound
+  // is the longest the design allows (tail 0.2 s plus the longest gap 1.5 s)
+  // and a second of slack for a loaded machine.
+  test('the first press after a fresh join stops showing as transmitting within the poller\'s longest gap of the release', async ({ browser }) => {
+    test.setTimeout(300_000);
+    // Members of their own: earlier tests remove the fixture's from the channel.
+    const listener = await vw.addMember('zed');
+    const talker = await vw.addMember('yan');
+    const b = await person(browser, listener);
+    const heard = voiceRegion(b.page).getByRole('list', { name: 'In voice' });
+    try {
+      await voiceRegion(b.page).getByRole('button', { name: 'Join voice' }).click();
+      await expect(voiceRegion(b.page)).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      const clears: number[] = [];
+      for (let i = 0; i < 20; i++) {
+        // The page's own trace of the press (voice/connection.ts) is in
+        // window.conchVoiceTrace, shown if the bound fails.
+        const a = await person(browser, talker, undefined, (page) => {
+          void page.addInitScript(() => {
+            sessionStorage.setItem('conch.web.voice.trace', '1');
+          });
+        });
+        try {
+          const voice = voiceRegion(a.page);
+          await voice.getByRole('button', { name: 'Join voice' }).click();
+          await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+          await expect(heard).toContainText('yan', { timeout: 15_000 });
+          await a.page.getByRole('heading', { name: 'Conch' }).click();
+          await a.page.keyboard.down('Backquote');
+          await expect(heard).toContainText('yan (transmitting)', { timeout: 15_000 });
+          await new Promise((r) => setTimeout(r, 1500));
+          const released = Date.now();
+          await a.page.keyboard.up('Backquote');
+          let cleared = -1;
+          while (Date.now() - released < 12_000) {
+            if (!/yan\s*\(\s*transmitting/.test(await heard.innerText())) {
+              cleared = Date.now() - released;
+              break;
+            }
+            await new Promise((r) => setTimeout(r, 20));
+          }
+          clears.push(cleared);
+          if (cleared < 0 || cleared > firstPressBound) console.log(`run ${String(i)} cleared after ${String(cleared)} ms; the page's trace:\n${(await a.page.evaluate(() => (window as unknown as { conchVoiceTrace?: string[] }).conchVoiceTrace ?? [])).join('\n')}`);
+          await voice.getByRole('button', { name: 'Leave voice' }).click();
+          await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+          await expect(heard).not.toContainText('yan', { timeout: 15_000 });
+        } finally {
+          await a.context.close();
+        }
+      }
+      console.log(`first-press clear times (ms): ${clears.join(' ')}`);
+      expect(clears.filter((c) => c < 0 || c > firstPressBound), `clear times after release, ms: ${clears.join(' ')}`).toEqual([]);
+    } finally {
+      await b.context.close();
+    }
+  });
 
   test('restarting LiveKit brings the page back by itself', async ({ browser }) => {
     const a = await person(browser, 'alice');
