@@ -49,7 +49,11 @@ const (
 	settingGuestAbsoluteSeconds = "guest_absolute_seconds"
 )
 
-var joinSettingKeys = []string{settingOpenJoining, settingGuestsEnabled, settingJoiningPaused, settingJoinVoice,
+// joinSettingKeys are the rows joinSettingsTx reads. Since migration 40
+// (issue #979, design §3.4 Option B) open_joining and join_voice are not
+// stored: open_joining reads from open_signup, join_voice reads true, and the
+// open channels are the default channels.
+var joinSettingKeys = []string{settingOpenSignup, settingMemberLinkDefaultExpirySeconds, settingGuestsEnabled, settingJoiningPaused,
 	settingMaxGuests, settingMaxGuestsPerAddress, settingGuestIdleSeconds, settingGuestAbsoluteSeconds}
 
 // Audit actions of the entry policy (design §7.3). None carries a client
@@ -259,6 +263,8 @@ func inviteJoinOptions(m schema.InviteJoinMode, s schema.JoinSettingsV1, live in
 // pause as on, a mode as off, a number as its default.
 func joinSettingsTx(ctx context.Context, tx execer) (schema.JoinSettingsV1, error) {
 	out := schema.DefaultJoinSettings()
+	signup := false
+	expiry := schema.DefaultMemberLinkExpirySeconds
 	args := make([]any, len(joinSettingKeys))
 	marks := make([]string, len(joinSettingKeys))
 	for i, k := range joinSettingKeys {
@@ -276,19 +282,17 @@ func joinSettingsTx(ctx context.Context, tx execer) (schema.JoinSettingsV1, erro
 			return schema.JoinSettingsV1{}, fmt.Errorf("store: read join settings: %w", err)
 		}
 		switch k {
-		case settingOpenJoining:
-			if m := schema.OpenJoiningMode(v); m.Valid() {
-				out.OpenJoining = m
-			}
+		case settingOpenSignup:
+			b, err := strconv.ParseBool(v)
+			signup = err == nil && b
+		case settingMemberLinkDefaultExpirySeconds:
+			readInt(v, &expiry)
 		case settingGuestsEnabled:
 			b, err := strconv.ParseBool(v)
 			out.GuestsEnabled = err == nil && b
 		case settingJoiningPaused:
 			b, err := strconv.ParseBool(v)
 			out.JoiningPaused = err != nil || b
-		case settingJoinVoice:
-			b, err := strconv.ParseBool(v)
-			out.JoinVoice = err == nil && b
 		case settingMaxGuests:
 			readInt(v, &out.MaxGuests)
 		case settingMaxGuestsPerAddress:
@@ -306,6 +310,15 @@ func joinSettingsTx(ctx context.Context, tx execer) (schema.JoinSettingsV1, erro
 	if err != nil {
 		return schema.JoinSettingsV1{}, fmt.Errorf("store: read join settings: %w", err)
 	}
+	// Option B's mapping (design §3.4): the mode follows open_signup, voice
+	// is always on, and the community fields are always answered.
+	out.OpenSignup = &signup
+	out.MemberLinkDefaultExpirySeconds = &expiry
+	out.OpenJoining = schema.OpenJoiningOff
+	if signup {
+		out.OpenJoining = schema.OpenJoiningAccount
+	}
+	out.JoinVoice = true
 	channels, err := openChannelsTx(ctx, tx)
 	if err != nil {
 		return schema.JoinSettingsV1{}, err
@@ -323,10 +336,11 @@ func readInt(v string, dst *int64) {
 	}
 }
 
-// openChannelsTx returns the bare address's channels, by id.
+// openChannelsTx returns the bare address's channels, by id: the default
+// channels (migration 40, design §3.4 Option B).
 func openChannelsTx(ctx context.Context, tx execer) ([]schema.InviteChannelV1, error) {
 	rows, err := tx.QueryContext(ctx,
-		`SELECT c.id, c.name FROM open_channels o JOIN channels c ON c.id = o.channel_id ORDER BY c.id`)
+		`SELECT id, name FROM channels WHERE is_default = 1 ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: read open channels: %w", err)
 	}
@@ -346,20 +360,21 @@ func openChannelsTx(ctx context.Context, tx execer) ([]schema.InviteChannelV1, e
 }
 
 // AuditJoinChannelDropped records an address join that left out a listed
-// open channel because whoever listed it (open_channels.added_by) no
-// longer holds manage_channels (ADR-014 design §7.3, §8.5). Actor system,
-// subject the channel, detail "reason=permission".
+// open channel because whoever listed it (channels.default_listed_by, before
+// migration 40 open_channels.added_by) no longer holds manage_channels
+// (ADR-014 design §7.3, §8.5). Actor system, subject the channel, detail
+// "reason=permission".
 const AuditJoinChannelDropped = "join_channel_dropped"
 
 // admittingOpenChannelsTx splits the bare address's channels into those an
 // address join lands in now and those it drops (ADR-014 design §7.3, SF-2):
 // a channel is kept only while whoever listed it is an owner or holds
-// manage_channels, read in tx. A row with no added_by was written before
+// manage_channels, read in tx. A channel with no lister was listed before
 // the column was filled, when only an owner could write the list, and
 // counts as an owner's.
 func admittingOpenChannelsTx(ctx context.Context, tx execer) (kept, dropped []schema.InviteChannelV1, err error) {
 	rows, err := tx.QueryContext(ctx,
-		`SELECT c.id, c.name, o.added_by FROM open_channels o JOIN channels c ON c.id = o.channel_id ORDER BY c.id`)
+		`SELECT id, name, default_listed_by FROM channels WHERE is_default = 1 ORDER BY id`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("store: read open channels: %w", err)
 	}
@@ -494,7 +509,10 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 		if err != nil {
 			return err
 		}
-		next := withoutGuests(req.Apply(cur.Settings))
+		next, err := communityJoinSettings(req, withoutGuests(req.Apply(cur.Settings)))
+		if err != nil {
+			return err
+		}
 		if next.OpenJoining == schema.OpenJoiningGuest && !next.GuestsEnabled {
 			return conflict("the bare address cannot be guest-only while guests are disabled")
 		}
@@ -512,6 +530,19 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 			var id int64
 			switch err := tx.QueryRowContext(ctx, "SELECT id FROM channels WHERE name = ?", name).Scan(&id); {
 			case errors.Is(err, sql.ErrNoRows):
+				// To a writer without manage_channels a name that is no
+				// channel gets the answer a channel it is not in gets
+				// (checkOpenChannelsWriterTx), so the list is not an oracle on
+				// private channels' names (the review of #1014).
+				if actorID != 0 {
+					ok, err := permittedTx(ctx, tx, actorID, schema.PermManageChannels)
+					if err != nil {
+						return err
+					}
+					if !ok {
+						return errOpenChannelNotYours()
+					}
+				}
 				return invalidSettings("an open channel names no channel on this server")
 			case err != nil:
 				return fmt.Errorf("store: put join settings: find channel: %w", err)
@@ -552,8 +583,8 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 			if nextIDs[ch.ID] {
 				continue
 			}
-			if _, err := tx.ExecContext(ctx, "DELETE FROM open_channels WHERE channel_id = ?", ch.ID); err != nil {
-				return fmt.Errorf("store: put join settings: remove open channel: %w", err)
+			if _, err := setDefaultChannelTx(ctx, tx, ch.ID, false, 0); err != nil {
+				return err
 			}
 			if err := appendAuditEventTx(ctx, tx, actor, AuditOpenChannelRemoved, channelSubject(ch.ID), "", now); err != nil {
 				return err
@@ -567,11 +598,17 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 			if curIDs[id] {
 				continue
 			}
-			if _, err := tx.ExecContext(ctx, "INSERT INTO open_channels (channel_id, added_by, added_at) VALUES (?, ?, ?)",
-				id, nullableID(actorID), now.UnixMilli()); err != nil {
-				return fmt.Errorf("store: put join settings: add open channel: %w", err)
+			madePublic, err := setDefaultChannelTx(ctx, tx, id, true, actorID)
+			if err != nil {
+				return err
 			}
-			if err := appendAuditEventTx(ctx, tx, actor, AuditOpenChannelAdded, channelSubject(id), "", now); err != nil {
+			// Listing a private channel makes it public (until I7 refuses it):
+			// the row says so, as it changes who may find the channel.
+			detail := ""
+			if madePublic {
+				detail = "visibility=private->public"
+			}
+			if err := appendAuditEventTx(ctx, tx, actor, AuditOpenChannelAdded, channelSubject(id), detail, now); err != nil {
 				return err
 			}
 		}
@@ -630,13 +667,20 @@ func checkOpenChannelsWriterTx(ctx context.Context, tx execer, actorID int64, ne
 		switch err := tx.QueryRowContext(ctx,
 			"SELECT 1 FROM channel_members WHERE channel_id = ? AND principal_id = ?", id, actorID).Scan(&one); {
 		case errors.Is(err, sql.ErrNoRows):
-			return &PermissionError{Err: ErrPermissionDenied, Permission: schema.PermManageChannels,
-				Reason: "listing a channel you are not in, or opening the address to one, needs manage_channels"}
+			return errOpenChannelNotYours()
 		case err != nil:
 			return fmt.Errorf("store: put join settings: check membership: %w", err)
 		}
 	}
 	return nil
+}
+
+// errOpenChannelNotYours is the one refusal of a joining-settings writer
+// without manage_channels about a listed channel: one it is not in, or a name
+// that is no channel at all, alike.
+func errOpenChannelNotYours() error {
+	return &PermissionError{Err: ErrPermissionDenied, Permission: schema.PermManageChannels,
+		Reason: "listing a channel you are not in, or opening the address to one, needs manage_channels"}
 }
 
 // refreshOpenChannelsListerTx makes an owner's write of the joining
@@ -655,35 +699,68 @@ func refreshOpenChannelsListerTx(ctx context.Context, tx execer, actorID int64, 
 	}
 	for id := range nextIDs {
 		if _, err := tx.ExecContext(ctx,
-			"UPDATE open_channels SET added_by = ? WHERE channel_id = ? AND added_by IS NOT ?", actorID, id, actorID); err != nil {
+			"UPDATE channels SET default_listed_by = ? WHERE id = ? AND is_default = 1 AND default_listed_by IS NOT ?", actorID, id, actorID); err != nil {
 			return fmt.Errorf("store: put join settings: refresh open channel lister: %w", err)
 		}
 	}
 	return nil
 }
 
+// communityJoinSettings applies Option B's write mapping (design §3.4) to
+// next, the settings req makes: open_joining account or off and open_signup
+// say the same thing, so a request naming both must agree, and either one
+// sets the other; join_voice is always on. The route-level refusals of a
+// join_voice false and of a private open channel are I7's (issue #987);
+// until then join_voice false is not stored, and listing a channel makes it
+// public (setDefaultChannelTx), as migration 40 made every open channel.
+func communityJoinSettings(req schema.PutJoinSettingsRequestV1, next schema.JoinSettingsV1) (schema.JoinSettingsV1, error) {
+	if req.OpenSignup != nil {
+		mode := schema.OpenJoiningOff
+		if *req.OpenSignup {
+			mode = schema.OpenJoiningAccount
+		}
+		if req.OpenJoining != nil && *req.OpenJoining != mode {
+			return next, conflict("open_joining and open_signup disagree; name one")
+		}
+		next.OpenJoining = mode
+	}
+	signup := next.OpenJoining == schema.OpenJoiningAccount || next.OpenJoining == schema.OpenJoiningBoth
+	next.OpenSignup = &signup
+	next.JoinVoice = true
+	return next, nil
+}
+
 // writeJoinSettingsTx writes each of the settings that differs between c and
-// n, and returns them as field=old->new, in a fixed order.
+// n, and returns them as field=old->new, in a fixed order. The mode is
+// reported as open_joining, the field clients know, and stored as
+// open_signup (migration 40); join_voice is no longer stored.
 func writeJoinSettingsTx(ctx context.Context, tx execer, c, n schema.JoinSettingsV1, now time.Time) ([]string, error) {
 	var changes []string
-	for _, f := range []struct{ key, old, val string }{
-		{settingOpenJoining, string(c.OpenJoining), string(n.OpenJoining)},
-		{settingGuestsEnabled, strconv.FormatBool(c.GuestsEnabled), strconv.FormatBool(n.GuestsEnabled)},
-		{settingJoiningPaused, strconv.FormatBool(c.JoiningPaused), strconv.FormatBool(n.JoiningPaused)},
-		{settingJoinVoice, strconv.FormatBool(c.JoinVoice), strconv.FormatBool(n.JoinVoice)},
-		{settingMaxGuests, strconv.FormatInt(c.MaxGuests, 10), strconv.FormatInt(n.MaxGuests, 10)},
-		{settingMaxGuestsPerAddress, strconv.FormatInt(c.MaxGuestsPerAddress, 10), strconv.FormatInt(n.MaxGuestsPerAddress, 10)},
-		{settingGuestIdleSeconds, strconv.FormatInt(c.GuestIdleSeconds, 10), strconv.FormatInt(n.GuestIdleSeconds, 10)},
-		{settingGuestAbsoluteSeconds, strconv.FormatInt(c.GuestAbsoluteSeconds, 10), strconv.FormatInt(n.GuestAbsoluteSeconds, 10)},
+	expiry := func(s schema.JoinSettingsV1) string {
+		if s.MemberLinkDefaultExpirySeconds == nil {
+			return strconv.FormatInt(schema.DefaultMemberLinkExpirySeconds, 10)
+		}
+		return strconv.FormatInt(*s.MemberLinkDefaultExpirySeconds, 10)
+	}
+	for _, f := range []struct{ field, key, old, val, stored string }{
+		{"open_joining", settingOpenSignup, string(c.OpenJoining), string(n.OpenJoining),
+			strconv.FormatBool(n.OpenJoining == schema.OpenJoiningAccount || n.OpenJoining == schema.OpenJoiningBoth)},
+		{settingMemberLinkDefaultExpirySeconds, settingMemberLinkDefaultExpirySeconds, expiry(c), expiry(n), expiry(n)},
+		{settingGuestsEnabled, settingGuestsEnabled, strconv.FormatBool(c.GuestsEnabled), strconv.FormatBool(n.GuestsEnabled), strconv.FormatBool(n.GuestsEnabled)},
+		{settingJoiningPaused, settingJoiningPaused, strconv.FormatBool(c.JoiningPaused), strconv.FormatBool(n.JoiningPaused), strconv.FormatBool(n.JoiningPaused)},
+		{settingMaxGuests, settingMaxGuests, strconv.FormatInt(c.MaxGuests, 10), strconv.FormatInt(n.MaxGuests, 10), strconv.FormatInt(n.MaxGuests, 10)},
+		{settingMaxGuestsPerAddress, settingMaxGuestsPerAddress, strconv.FormatInt(c.MaxGuestsPerAddress, 10), strconv.FormatInt(n.MaxGuestsPerAddress, 10), strconv.FormatInt(n.MaxGuestsPerAddress, 10)},
+		{settingGuestIdleSeconds, settingGuestIdleSeconds, strconv.FormatInt(c.GuestIdleSeconds, 10), strconv.FormatInt(n.GuestIdleSeconds, 10), strconv.FormatInt(n.GuestIdleSeconds, 10)},
+		{settingGuestAbsoluteSeconds, settingGuestAbsoluteSeconds, strconv.FormatInt(c.GuestAbsoluteSeconds, 10), strconv.FormatInt(n.GuestAbsoluteSeconds, 10), strconv.FormatInt(n.GuestAbsoluteSeconds, 10)},
 	} {
 		if f.old == f.val {
 			continue
 		}
-		changes = append(changes, f.key+"="+f.old+"->"+f.val)
+		changes = append(changes, f.field+"="+f.old+"->"+f.val)
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO server_settings (key, value, updated_at) VALUES (?, ?, ?)
 			 ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-			f.key, f.val, now.UnixMilli()); err != nil {
+			f.key, f.stored, now.UnixMilli()); err != nil {
 			return nil, fmt.Errorf("store: write join settings: %s: %w", f.key, err)
 		}
 	}

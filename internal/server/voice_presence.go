@@ -536,11 +536,6 @@ func (s *Server) voiceEntitlement(ctx context.Context, identity string, channelI
 		return id, voiceReasonDisabled, nil
 	case p.Kind != store.PrincipalHuman:
 		return id, voiceReasonNotHuman, nil
-	case !p.VoiceAllowed:
-		// Checked by every voice route on the way in (voicePresenceChannel);
-		// checked here too so that a person whose voice is taken away later
-		// loses the room, and a share of theirs, at the next pass.
-		return id, voiceReasonVoiceOff, nil
 	}
 	if p.GuestState != "" && p.GuestState != schema.GuestStateConverted {
 		live, err := s.store.GuestLive(ctx, id)
@@ -550,6 +545,20 @@ func (s *Server) voiceEntitlement(ctx context.Context, identity string, channelI
 		case !live:
 			return id, voiceReasonGuestEnded, nil
 		}
+	}
+	// use_voice, read on every pass as every voice route reads it on the way
+	// in (voicePresenceChannel): the role's cell and the person's brake
+	// together (design §7.3), so a person whose voice is taken away later, by
+	// either, loses the room, and a share of theirs, at the next pass. HeldBy
+	// reads the document for the principal read above; a guest holds nothing
+	// (permittedTx answers false for every guest, the review of #1013), after
+	// the guest checks, so an ended visit keeps its own reason.
+	held, err := s.store.HeldBy(ctx, p, schema.PermUseVoice)
+	switch {
+	case err != nil:
+		return id, "", err
+	case !held[0]:
+		return id, voiceReasonVoiceOff, nil
 	}
 	member, err := s.store.IsChannelMember(ctx, channelID, id)
 	switch {
@@ -1041,6 +1050,11 @@ func (p *voicePoller) pollRoom(ctx context.Context, r *voiceRoomState) error {
 		r.marked = true
 		p.mu.Unlock()
 	}
+	// The share's holder is asked again on every pass, as use_voice is
+	// (design §7.3): the pass above judged the person's place in the room,
+	// this judges their right to share in it. A pass that returned early
+	// with an error (LiveKit could not be asked) skips it until the next.
+	p.sharesWithheld(ctx, r)
 	return nil
 }
 
@@ -2437,42 +2451,62 @@ func (s *Server) voiceMemberRemoved(ctx context.Context, channelID, principalID 
 	s.voice.evict(ctx, withoutRotated(rooms, rotated), principalID, voiceReasonMemberRemoved)
 }
 
-// voicePrincipalLostAccess runs after a principal was disabled or had every
-// credential revoked: their presence and occupancy sockets close and the
-// invariant is checked. A disabled principal is also removed, by name, from
-// the rooms of its channels that were not rotated. reason is
-// voiceReasonPrincipalOff or voiceReasonCredsRevoked.
+// voicePrincipalLostAccess runs after a principal was disabled, had every
+// credential revoked or lost use_voice: their presence and occupancy sockets
+// close and the invariant is checked. A disabled principal, or one who lost
+// voice, is also removed, by name (and their companion and viewer with
+// them), from the rooms of its channels that were not rotated: losing voice
+// rotates no room, since the person still holds their credentials and their
+// place (ADR-014 design §7.5). reason is voiceReasonPrincipalOff,
+// voiceReasonCredsRevoked or voiceReasonVoiceOff.
 func (s *Server) voicePrincipalLostAccess(ctx context.Context, principalID int64, reason string) {
 	s.voice.dropPrincipalAll(principalID)
 	if s.lk == nil {
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
-	var rooms []store.VoiceRoom
-	var roomsErr error
-	if reason == voiceReasonPrincipalOff {
-		// Bounded like the read in voiceMemberRemoved, and failing the same
-		// way when the time runs out.
+	if reason == voiceReasonPrincipalOff || reason == voiceReasonVoiceOff {
+		s.voiceEvictLost(ctx, reason, []int64{principalID})
+		return
+	}
+	s.voiceEnforceHolders(ctx)
+}
+
+// voiceEvictLost is the LiveKit half of the hook for people who lost their
+// place in voice by name (disabled, or without use_voice): each one's rooms
+// are read (bounded, like the read in voiceMemberRemoved), the invariant is
+// checked once for all of them (voiceEnforceHolders), and then each has any
+// share the rotation did not end ended under the room's claims and is
+// removed, with their companion and viewer, from the rooms that were not
+// rotated. Their sockets are already dropped; ctx is not cancellable and
+// s.lk is set.
+func (s *Server) voiceEvictLost(ctx context.Context, reason string, principals []int64) {
+	type loss struct {
+		rooms []store.VoiceRoom
+		err   error
+	}
+	losses := make([]loss, len(principals))
+	for i, pid := range principals {
+		// Failing the same way when the time runs out.
 		rctx, cancel := context.WithTimeout(ctx, s.voice.hookReadTimeout)
-		rooms, roomsErr = s.voice.memberRooms(rctx, principalID)
+		losses[i].rooms, losses[i].err = s.voice.memberRooms(rctx, pid)
 		cancel()
 	}
 	rotated := s.voiceEnforceHolders(ctx)
-	if reason != voiceReasonPrincipalOff {
-		return
+	for i, pid := range principals {
+		// As in voiceMemberRemoved: a share the rotation did not end is
+		// ended under the room's claims.
+		s.voice.endSharesOf(ctx, pid, 0, voiceShareStopAccessLost)
+		if losses[i].err != nil {
+			// Which rooms to call LiveKit for is unknown. The principal still
+			// leaves presence at once, from every room the poller has them in,
+			// and the next pass removes them by entitlement.
+			slog.ErrorContext(ctx, "voice: list rooms for removal failed; passes will remove", "principal", pid, "error", losses[i].err)
+			s.voice.forgetEverywhere(ctx, pid)
+			continue
+		}
+		s.voice.evict(ctx, withoutRotated(losses[i].rooms, rotated), pid, reason)
 	}
-	// As in voiceMemberRemoved: a share the rotation did not end is ended
-	// under the room's claims.
-	s.voice.endSharesOf(ctx, principalID, 0, voiceShareStopAccessLost)
-	if roomsErr != nil {
-		// Which rooms to call LiveKit for is unknown. The principal still
-		// leaves presence at once, from every room the poller has them in,
-		// and the next pass removes them by entitlement.
-		slog.ErrorContext(ctx, "voice: list rooms for removal failed; passes will remove", "principal", principalID, "error", roomsErr)
-		s.voice.forgetEverywhere(ctx, principalID)
-		return
-	}
-	s.voice.evict(ctx, withoutRotated(rooms, rotated), principalID, reason)
 }
 
 // voiceCredentialRevoked runs after credentialID was revoked or replaced: its
@@ -2484,4 +2518,83 @@ func (s *Server) voiceCredentialRevoked(ctx context.Context, credentialID int64)
 		return
 	}
 	s.voiceEnforceHolders(ctx)
+}
+
+// voicePrincipals is everyone the poller has anywhere in voice, each once, in
+// id order: in a room's presence, as a companion or a viewer, holding the
+// room's share or a claim for it, with a claim running in a room just
+// retired, or watching on a presence or occupancy socket. It is whom a change that may have taken use_voice from a whole
+// column asks again (voiceWithheld). It reads p.mu only.
+func (p *voicePoller) voicePrincipals() []int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	seen := map[int64]bool{}
+	for _, r := range p.rooms {
+		for pid := range r.participants {
+			seen[pid] = true
+		}
+		for pid := range r.companions {
+			seen[pid] = true
+		}
+		if r.share != nil {
+			seen[r.share.principalID] = true
+		}
+		if r.claimer != 0 {
+			seen[r.claimer] = true
+		}
+	}
+	for _, pid := range p.retiring {
+		if pid != 0 {
+			seen[pid] = true
+		}
+	}
+	// Watchers who are in no room: a presence socket on a channel or the
+	// occupancy socket has no other check of use_voice than this.
+	for sub := range p.subs {
+		seen[sub.principalID] = true
+	}
+	for sub := range p.occSubs {
+		seen[sub.principalID] = true
+	}
+	out := make([]int64, 0, len(seen))
+	for pid := range seen {
+		if pid != 0 {
+			out = append(out, pid)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// voiceWithheld runs after a change to the permissions that may have taken
+// use_voice from a whole column (ADR-014 design §7.5): everyone the poller
+// has in voice or watching it who no longer holds it leaves at once, before
+// the change is answered. Their presence and occupancy sockets close first,
+// with or without LiveKit; then, with LiveKit, one check of the invariant
+// serves them all (voiceEvictLost), the same removal as a person who lost
+// voice by name (voice_not_allowed). Rooms are not rotated. Someone who
+// connects afterwards on a token signed before the change is found by the
+// next pass (voiceEntitlement), so the bound is one pass plus one join-token
+// lifetime. A person whose right cannot be read (each read is bounded by the
+// hook's read timeout) leaves too: the check fails closed, and they can join
+// again once it can be read.
+func (s *Server) voiceWithheld(ctx context.Context) {
+	ctx = context.WithoutCancel(ctx)
+	var lost []int64
+	for _, pid := range s.voice.voicePrincipals() {
+		rctx, cancel := context.WithTimeout(ctx, s.voice.hookReadTimeout)
+		holds, err := s.store.Permitted(rctx, pid, schema.PermUseVoice)
+		cancel()
+		if err != nil {
+			slog.ErrorContext(ctx, "voice: read use_voice failed; removing from voice", "principal", pid, "error", err)
+		} else if holds {
+			continue
+		}
+		lost = append(lost, pid)
+		s.voice.dropPrincipalAll(pid)
+	}
+	if s.lk == nil || len(lost) == 0 {
+		return
+	}
+	s.voiceEvictLost(ctx, voiceReasonVoiceOff, lost)
 }

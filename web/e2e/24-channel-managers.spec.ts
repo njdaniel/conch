@@ -1,8 +1,8 @@
-import type { Locator, Page } from '@playwright/test';
+import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import { createChannelResponse, listChannelMembersResponseV1, type CreateChannelRequest } from '../src/schema/channel';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { whoAmIResponseV1 } from '../src/schema/principal';
-import { channelButton, expect, signIn, statusLine, test } from './fixtures';
+import { channelButton, expect, showView, signIn, statusLine, test } from './fixtures';
 import { call, ok, type World } from './world';
 
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Channels' });
@@ -15,6 +15,8 @@ function memberRow(page: Page, name: string): Locator {
 async function chooseFor(row: Locator, name: string, item: string): Promise<void> {
   await row.getByRole('button', { name: `Actions for ${name}` }).click();
   await row.getByRole('menuitem', { name: item }).click();
+  // Removal asks first (issue #1083).
+  if (item === 'Remove from channel') await row.getByRole('button', { name: 'Yes, remove' }).click();
 }
 
 async function done(world: World, method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<void> {
@@ -113,3 +115,81 @@ test('C793 an operator delegates a channel; its manager adds, removes and rename
   await expect(channelButton(mgr, renamed)).toHaveAttribute('aria-current', 'true');
   await expect(channelButton(member, renamed)).toHaveAttribute('aria-current', 'true');
 });
+
+// Issue #1083 (browser UX audit 4, F6): removing someone from a channel asks
+// first, from the row's menu item. Cancel and Escape leave them in; the yes
+// removes them, and they lose the channel. On a phone the buttons are at
+// least 44 px tall.
+const removeSizes: readonly (readonly [string, BrowserContextOptions, boolean])[] = [
+  ['1440×900', { viewport: { width: 1440, height: 900 } }, false],
+  ['390×844', { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }, true],
+];
+
+for (const [size, options, phone] of removeSizes) {
+  test(`F6 at ${size} removing someone from a channel asks first, and they lose the channel`, async ({ meet, secrets, world }) => {
+    const suffix = Date.now().toString(36).slice(-5);
+    const channel = `f6-${suffix}${phone ? 'p' : 'w'}`;
+    const request: CreateChannelRequest = { name: channel };
+    await ok(world, world.tokens.operator, 'POST', '/v0/channels', createChannelResponse, request);
+    const target = await person(world, secrets, `f6-${suffix}${phone ? 'p' : 'w'}`, [channel]);
+
+    const gone = (await meet()).page;
+    await signIn(gone, world, target.token, target.name);
+    await channelButton(gone, channel).click();
+    await expect(gone.getByRole('heading', { name: channel, exact: true })).toBeVisible();
+
+    const { page } = await meet(options);
+    await page.goto(world.appUrl);
+    await page.getByLabel('Credential').fill(world.tokens.operator);
+    await page.getByRole('button', { name: 'Use credential' }).click();
+    await page.getByRole('button', { name: 'Continue anyway' }).click();
+    await expect(statusLine(page)).toContainText('Connected');
+    if (phone) await showView(page, 'Channels');
+    await channelButton(page, channel).click();
+    if (phone) {
+      await showView(page, 'Chat');
+      const members = page.getByRole('button', { name: 'Members' });
+      if ((await members.getAttribute('aria-expanded')) !== 'true') await members.tap();
+    }
+    const press = async (locator: Locator) => (phone ? locator.tap() : locator.click());
+    const row = memberRow(page, target.name);
+    const more = row.getByRole('button', { name: `Actions for ${target.name}` });
+    const still = async () => (await ok(world, world.tokens.operator, 'GET', `/v1/channels/${encodeURIComponent(channel)}/members`, listChannelMembersResponseV1)).members.some((m) => m.principal_id === target.id);
+
+    // The menu item asks; nothing is sent. Focus is on Cancel.
+    await press(more);
+    await press(row.getByRole('menuitem', { name: 'Remove from channel' }));
+    const question = row.getByRole('group', { name: `Remove ${target.name} from #${channel}? They lose this channel and its history.` });
+    await expect(question).toBeVisible();
+    const cancel = question.getByRole('button', { name: 'Cancel' });
+    const yes = question.getByRole('button', { name: 'Yes, remove' });
+    await expect(cancel).toBeFocused();
+    if (phone) {
+      for (const button of [cancel, yes]) expect((await button.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    expect(await still()).toBe(true);
+
+    // Escape cancels, and focus goes back to the row's ⋯.
+    await page.keyboard.press('Escape');
+    await expect(question).toHaveCount(0);
+    await expect(more).toBeFocused();
+    expect(await still()).toBe(true);
+
+    // Cancel cancels.
+    await press(more);
+    await press(row.getByRole('menuitem', { name: 'Remove from channel' }));
+    await press(cancel);
+    await expect(question).toHaveCount(0);
+    await expect(more).toBeFocused();
+    expect(await still()).toBe(true);
+    await expect(row).toBeVisible();
+
+    // Yes removes; the person loses the channel.
+    await press(more);
+    await press(row.getByRole('menuitem', { name: 'Remove from channel' }));
+    await press(yes);
+    await expect(row).toHaveCount(0);
+    await expect.poll(still).toBe(false);
+    await expect(channelButton(gone, channel)).toHaveCount(0, { timeout: 10_000 });
+  });
+}
