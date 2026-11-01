@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { fetchFileBytes, getFileMeta } from './api';
+import { platform } from './platform';
 import { formatSize } from './fileSize';
 import { maxImageEncodedBytes, validateImage } from './image';
 
@@ -128,6 +129,17 @@ export function ImageAttachment({
     const own = generation.current;
     setDownloading(true);
     setDownloadError(null);
+    // The desktop saves through main's native dialog; the bytes never come
+    // back to the page and it names no path.
+    const save = platform.services.saveFile;
+    if (save !== undefined) {
+      const saved = await save(fileId);
+      if (generation.current !== own) return;
+      setDownloading(false);
+      if (saved === 'unauthorized') onUnauthorized();
+      if (saved === 'failed' || saved === 'unauthorized') setDownloadError('Download unavailable. Try again.');
+      return;
+    }
     const result = await fetchFileBytes(fileId);
     if (generation.current !== own) return;
     setDownloading(false);

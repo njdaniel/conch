@@ -141,7 +141,27 @@ async function need(): Promise<ConchDesktopBridge> {
   return b;
 }
 
-const later = (what: string) => (): Promise<never> => Promise.reject(new TypeError(`${what} is not available in the desktop app yet`));
+// base64 of a blob's bytes, and back: the bridge carries data, not binary
+// objects.
+async function toBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let text = '';
+  for (let at = 0; at < bytes.length; at += 0x8000) text += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
+  return btoa(text);
+}
+
+function fromBase64(data: string): Uint8Array<ArrayBuffer> {
+  const text = atob(data);
+  const bytes = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i);
+  return bytes;
+}
+
+// The query value of a call, "filename" for an upload.
+function filenameOf(call: Call): string | null {
+  const name = new URLSearchParams(call.query ?? '').get('filename');
+  return name === null || name === '' ? null : name;
+}
 
 export const http: HttpTransport = {
   async get(call, token) {
@@ -182,6 +202,21 @@ export const http: HttpTransport = {
     return fromReply(await (await need()).request(requestOf(call)));
   },
 
-  upload: later('Attachments'),
-  download: later('Attachments'),
+  async upload(call, _token, mediaType, bytes, signal) {
+    const b = await need();
+    const channel = call.params?.['channel'];
+    const filename = filenameOf(call);
+    if (call.op !== 'uploadFile' || typeof channel !== 'string' || filename === null) return noAnswer('unsupported');
+    const data = await withSignal(toBase64(bytes), signal);
+    return fromReply(await withSignal(b.uploadFile({ channel, filename, mediaType, data }), signal));
+  },
+
+  async download(call) {
+    const b = await need();
+    const id = call.params?.['id'];
+    if (call.op !== 'fileBytes' || typeof id !== 'number') return noAnswer('unsupported');
+    const reply = await b.downloadFile(id);
+    if (reply.kind === 'bytes') return new Response(fromBase64(reply.data), { status: 200, headers: { 'Content-Type': 'application/octet-stream' } });
+    return fromReply(reply);
+  },
 };

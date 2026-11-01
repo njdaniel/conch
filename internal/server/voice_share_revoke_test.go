@@ -69,6 +69,13 @@ var revocations = []struct {
 		f.revokeShareScreen(t)
 		f.srv.voice.endSharesOf(context.Background(), f.ids["ann"], 0, voiceShareStopAccessLost)
 	}},
+	// use_voice off for a role: the store write, then the hook the PUT runs
+	// before it answers (voiceWithheld), which removes everyone who lost voice
+	// and ends their shares.
+	{"permissions PUT/use_voice", false, func(t *testing.T, f *presenceFixture) {
+		f.revokeUseVoice(t)
+		f.srv.voiceWithheld(context.Background())
+	}},
 	{"membership loss", true, func(t *testing.T, f *presenceFixture) {
 		if _, err := f.srv.store.RemoveChannelMember(context.Background(), "system", f.ops.ID, f.ids["ann"]); err != nil {
 			t.Error(err)
@@ -125,6 +132,27 @@ var revocations = []struct {
 		f.rotateInStoreOnly(t)
 		f.srv.voicePrincipalLostAccess(context.Background(), f.ids["ann"], voiceReasonCredsRevoked)
 	}},
+}
+
+// revokeUseVoice turns use_voice (and share_screen, which needs it) off for
+// members and operators, as the owner, through the store.
+func (f *presenceFixture) revokeUseVoice(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	doc, err := f.srv.store.Permissions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changes []schema.PermissionChangeV1
+	for _, p := range []schema.Permission{schema.PermShareScreen, schema.PermUseVoice} {
+		for _, r := range []schema.PermissionRole{schema.PermissionRoleMember, schema.PermissionRoleOperator} {
+			changes = append(changes, schema.PermissionChangeV1{Permission: p, Role: r, Granted: false})
+		}
+	}
+	req := schema.PutPermissionsRequestV1{Revision: doc.Revision, Changes: changes}
+	if _, err := f.srv.store.PutPermissions(ctx, fmt.Sprintf("principal:%d", f.root.ID), f.root.ID, req, time.Now()); err != nil {
+		t.Fatalf("turn use_voice off: %v", err)
+	}
 }
 
 func (f *presenceFixture) revokeAll(t *testing.T) {
@@ -213,7 +241,7 @@ func TestVoiceShareClaimRevokedBeforeGrant(t *testing.T) {
 				if res.status == http.StatusOK {
 					t.Fatalf("a claim was granted after the revocation answered: %s", res.body)
 				}
-				if rev.name == "permissions PUT" && (res.status != http.StatusForbidden || errCode(t, res.body) != schema.ErrorCodeVoiceNotAllowed) {
+				if strings.HasPrefix(rev.name, "permissions PUT") && (res.status != http.StatusForbidden || errCode(t, res.body) != schema.ErrorCodeVoiceNotAllowed) {
 					t.Errorf("claim after the revocation: %d %s, want 403 voice_not_allowed", res.status, res.body)
 				}
 				if n := f.screenGrants("ann"); n != 0 {
@@ -312,7 +340,7 @@ func revocationWaitsForClaim(t *testing.T, rev revocationCase, again bool) {
 		t.Errorf("the poller still holds a share for %d", holder)
 	}
 	<-claimed
-	if rev.name == "permissions PUT" {
+	if strings.HasPrefix(rev.name, "permissions PUT") {
 		want := []string{"ann started audio=true", "ann stopped principal=ann reason=access_lost"}
 		if got := f.shareRows(t); !slices.Equal(got, want) {
 			t.Errorf("share rows %q, want %q", got, want)
@@ -343,8 +371,10 @@ func TestVoiceShareReclaimAfterRevocation(t *testing.T) {
 	if got := f.shareRows(t); !slices.Equal(got, want) {
 		t.Errorf("share rows %q, want %q", got, want)
 	}
-	if strings.Contains(res.body, "share_screen") {
-		t.Errorf("the refusal names the permission: %s", res.body)
+	// One code per question, and the refusal names the permission (design
+	// §7.4): a member's role could hold share_screen.
+	if got := permissionOf(t, []byte(res.body)); got != schema.PermShareScreen {
+		t.Errorf("the refusal names %q, want share_screen: %s", got, res.body)
 	}
 }
 

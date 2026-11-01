@@ -26,6 +26,9 @@ export const BRIDGE_FUNCTIONS = [
   'joinAsGuest',
   'createAccount',
   'signOut',
+  'uploadFile',
+  'downloadFile',
+  'saveFile',
 ] as const satisfies readonly (keyof ConchDesktopBridge)[];
 
 export type BridgeFunction = (typeof BRIDGE_FUNCTIONS)[number];

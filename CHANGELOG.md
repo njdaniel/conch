@@ -8,6 +8,44 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Upgrade notice: one community (issue #979)
+
+The first start on this version converts the server to the community model
+(ADR-013), in one migration that runs before the server takes traffic. Take
+the usual backup first (docs/deploy.md does).
+
+- **Channels.** Every channel that was open to the bare address becomes a
+  public **default** channel, which new members start in. Every other
+  channel stays **private**, with exactly its current members.
+- **Making a channel public.** The channel settings route (#981) is not here
+  yet. Until it ships, listing a channel among the joining settings' open
+  channels makes it public **and** a default channel, and the audit row says
+  `visibility=private->public`. Taking it off the list again makes it no
+  longer a default, but it stays public: it is not made private again.
+- **Members.** Every member, a disabled account included, is added to every
+  default channel, with no right to decide approvals. Anyone already in a
+  channel keeps the rights they had there.
+- **History bounds are cleared.** A member who could see a channel's
+  messages only from when they joined now sees its whole history. The old
+  bounds are kept in the database (`legacy_history_bounds`) and nothing
+  reads them. Until open sign-up's change (#987) ships, someone who joins
+  through the bare address afterwards still starts with a bound from when
+  they joined.
+- **Voice and making invite links are on for every member.** Until member
+  links (#985) replace invites, that means any member can make a single-use
+  invite to any channel they are in.
+- **Joining.** The bare address now either makes accounts (open sign-up on,
+  where it admitted accounts before) or admits nobody. It no longer admits
+  guests. Voice for new accounts is always on.
+- **Guests.** Guests were switched off by #1005. The migration ends any guest
+  visit still active and closes every invite that could admit a guest, each
+  audited. The guest records themselves are kept.
+- **Rollback** is the previous binary plus the backup taken before the
+  upgrade: the previous binary refuses the converted database.
+
+The server log reports what the migration found and what it changed, and the
+audit trail has one `community_migrated` row with the counts.
+
 ## [0.1.0-alpha.9] - 2026-11-01
 
 These are the core-flow fixes from browser UX audit 3 (first run, the

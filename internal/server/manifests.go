@@ -41,6 +41,26 @@ func (s *Server) handlePutManifest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_manifest", err.Error())
 		return
 	}
+	// Without manage_channels a manifest grants only channels the caller is
+	// in (ADR-014 design §7.3), and an id that is no channel gets the answer
+	// a channel it is not in gets, so channel ids cannot be enumerated (the
+	// security review of #1015).
+	if caller, authed := callerFrom(ctx); authed && len(req.Channels) > 0 {
+		sight, err := s.channelSightFor(ctx, caller)
+		if err != nil {
+			slog.ErrorContext(ctx, "manifests: read channel sight failed", "principal", caller.ID, "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+		for _, g := range req.Channels {
+			if !sight.sees(g.ChannelID) {
+				s.denyForbiddenFor(w, r, caller, schema.ErrorCodePermissionDenied,
+					"a manifest granting a channel you are not in needs the manage_channels permission",
+					refusedPermission(caller, schema.PermManageChannels))
+				return
+			}
+		}
+	}
 
 	manifest, created, err := s.store.PutAgentManifest(ctx, auditActor(ctx), id, req)
 	var noChannel *store.ChannelNotFoundError

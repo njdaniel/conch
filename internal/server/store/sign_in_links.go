@@ -49,6 +49,12 @@ const (
 	AuditSignInLinkCreated  = "sign_in_link_created"
 	AuditSignInLinkRedeemed = "sign_in_link_redeemed"
 	AuditSignInLinkClosed   = "sign_in_link_closed"
+	// AuditSignInLinkSuspended and AuditSignInLinkResumed are the same for
+	// sign-in, reset and enrolment links when act_as_members changes for
+	// their maker (ADR-014 design §7.5, §8.5): actor system, subject the
+	// link, detail reason=permission.
+	AuditSignInLinkSuspended = "sign_in_link_suspended"
+	AuditSignInLinkResumed   = "sign_in_link_resumed"
 	// AuditDeviceLinkIssued is a member making a device link for
 	// themselves (design §7.3).
 	AuditDeviceLinkIssued = "device_link_issued"
