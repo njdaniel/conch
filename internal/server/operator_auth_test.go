@@ -560,6 +560,7 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/invites/{id}/disable-joiners":                           {reauthAlways, "ends people in bulk"},
 	"POST /v1/principals/{id}/disable-invitees":                       {reauthAlways, "ends people in bulk"},
 	"PUT /v1/principals/{id}/invite-permission":                       {reauthAlways, "grants invite permission"},
+	"PUT /v1/principals/{id}/voice-permission":                        {reauthAlways, "switches a person's voice"},
 	"GET /v1/invites/settings":                                        {reauthNone, "a settings read"},
 	"PUT /v1/invites/settings":                                        {reauthAlways, "opens or closes joining through invites"},
 	"POST /v1/principals/{id}/sign-in-links":                          {reauthAlways, "creates a link"},

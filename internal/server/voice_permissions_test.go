@@ -47,8 +47,8 @@ func (f *presenceFixture) addPerson(t *testing.T, name string, op bool) {
 	f.ids[name], f.tokens[name] = p.ID, tok
 }
 
-// brake turns who's voice_allowed off, underneath the store: no route does
-// yet (#984).
+// brake turns who's voice_allowed off, underneath the store (PUT
+// /v1/principals/{id}/voice-permission, #984, is the route that does it).
 func (f *presenceFixture) brake(t *testing.T, who string) {
 	t.Helper()
 	legacyExec(t, f.srv, "UPDATE principals SET voice_allowed = 0 WHERE id = ?", f.ids[who])

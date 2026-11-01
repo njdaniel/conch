@@ -53,10 +53,9 @@ func (f *presenceFixture) screenGrants(who string) int {
 
 // revocations are the paths that take ann's place or right to share, each
 // run as the code that runs it does: the store write that commits, then the
-// hook that answers. No route flips voice_allowed after a join, so the voice
-// switch has no row of its own: it is read by the same Permitted call as the
-// permissions PUT (brakeWithholds) and would end shares through the same
-// endSharesOf, which the first row runs. rotates marks the paths that rotate
+// hook that answers. The voice switch (PUT /v1/principals/{id}/voice-permission,
+// issue #984) is run through the real route, which answers only after its
+// hook has withdrawn the grant. rotates marks the paths that rotate
 // the room, which each test runs with LiveKit's DeleteRoom answering and
 // failing: a failed deletion leaves the old room, and any grant in it, until
 // the sweep.
@@ -75,6 +74,14 @@ var revocations = []struct {
 	{"permissions PUT/use_voice", false, func(t *testing.T, f *presenceFixture) {
 		f.revokeUseVoice(t)
 		f.srv.voiceWithheld(context.Background())
+	}},
+	// The per-person voice switch, through the route: the store write, then
+	// the immediate hook, both before it answers.
+	{"permissions PUT/voice-permission route", false, func(t *testing.T, f *presenceFixture) {
+		rec := f.do(t, http.MethodPut, fmt.Sprintf("/v1/principals/%d/voice-permission", f.ids["ann"]), f.rootTok, `{"voice_allowed":false}`)
+		if rec.Code != http.StatusOK {
+			t.Errorf("voice-permission = %d %s, want 200", rec.Code, rec.Body)
+		}
 	}},
 	{"membership loss", true, func(t *testing.T, f *presenceFixture) {
 		if _, err := f.srv.store.RemoveChannelMember(context.Background(), "system", f.ops.ID, f.ids["ann"]); err != nil {

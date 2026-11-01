@@ -262,6 +262,8 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/invites/{id}/disable-joiners", accessPermission, hf(s.handleDisableJoiners)).needs(schema.PermManageMembers),
 		rt("POST /v1/principals/{id}/disable-invitees", accessPermission, hf(s.handleDisableInvitees)).needs(schema.PermManageMembers),
 		rt("PUT /v1/principals/{id}/invite-permission", accessPermission, hf(s.handleInvitePermission)).needs(schema.PermManageMembers),
+		// A person's voice switch (issue #984): immediate effect on live media.
+		rt("PUT /v1/principals/{id}/voice-permission", accessPermission, hf(s.handleVoicePermission)).needs(schema.PermManageMembers),
 		rt("GET /v1/invites/settings", accessOperator, hf(s.handleGetInviteSettings)),
 		rt("PUT /v1/invites/settings", accessPermission, hf(s.handlePutInviteSettings)).needs(schema.PermManageMembers),
 		// Sign-in links (issue #493): an operator makes a one-time link that
@@ -365,6 +367,7 @@ var recentAuthRoutes = map[string]reauthRule{
 	"POST /v1/invites/{id}/disable-joiners":                        reauthAlways,
 	"POST /v1/principals/{id}/disable-invitees":                    reauthAlways,
 	"PUT /v1/principals/{id}/invite-permission":                    reauthAlways,
+	"PUT /v1/principals/{id}/voice-permission":                     reauthAlways,
 	"PUT /v1/invites/settings":                                     reauthAlways,
 	"POST /v1/principals/{id}/sign-in-links":                       reauthAlways,
 	// Guest entry (issue #710): opening or closing joining to guests, and

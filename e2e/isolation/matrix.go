@@ -601,6 +601,9 @@ func coreMatrixRows() []row {
 		operator("PUT /v1/principals/{id}/invite-permission", "takes an A tester's right to invite", aMember, func(_ *world, s subject) probe {
 			return put("/v1/principals/"+id(s.id)+"/invite-permission", schema.InvitePermissionRequestV1{})
 		}),
+		operator("PUT /v1/principals/{id}/voice-permission", "switches an A tester's voice off", aMember, func(_ *world, s subject) probe {
+			return put("/v1/principals/"+id(s.id)+"/voice-permission", schema.VoicePermissionRequestV1{VoiceAllowed: false})
+		}),
 		operator("GET /v1/invites/settings", "reads the invite settings", nil, func(*world, subject) probe { return get("/v1/invites/settings") }),
 		operator("PUT /v1/invites/settings", "pauses invites", nil, func(*world, subject) probe {
 			return put("/v1/invites/settings", schema.InviteSettingsV1{Paused: true})
