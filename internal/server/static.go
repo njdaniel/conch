@@ -275,7 +275,7 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if gzippable(name) {
 		hd.Add("Vary", "Accept-Encoding")
-		if acceptsGzip(r) && r.Header.Get("Range") == "" {
+		if acceptsGzip(r) && plainPreconditions(r) {
 			if gz, ok := h.gzipped(name, fi, f); ok {
 				// Set the type from the name: ServeContent would otherwise
 				// sniff it from the compressed bytes.
@@ -348,20 +348,58 @@ func acceptsGzip(r *http.Request) bool {
 }
 
 // quality is the q parameter in an Accept-Encoding entry's parameters: 1 when
-// absent, 0 when malformed.
+// absent, 0 when it is not a qvalue as RFC 9110 12.4.2 spells one ("0",
+// "0.5", "1.000"; never NaN, an exponent or a bare q).
 func quality(params string) float64 {
 	for _, p := range strings.Split(params, ";") {
-		k, v, ok := strings.Cut(p, "=")
-		if !ok || !strings.EqualFold(strings.TrimSpace(k), "q") {
+		k, v, hasValue := strings.Cut(p, "=")
+		if !strings.EqualFold(strings.TrimSpace(k), "q") {
 			continue
 		}
-		q, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
-		if err != nil || q < 0 || q > 1 {
+		v = strings.TrimSpace(v)
+		if !hasValue || !isQValue(v) {
+			return 0
+		}
+		q, err := strconv.ParseFloat(v, 64)
+		if err != nil {
 			return 0
 		}
 		return q
 	}
 	return 1
+}
+
+// isQValue reports whether v is ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] ).
+func isQValue(v string) bool {
+	if v == "" || (v[0] != '0' && v[0] != '1') {
+		return false
+	}
+	if len(v) == 1 {
+		return true
+	}
+	if v[1] != '.' || len(v) > 5 {
+		return false
+	}
+	for _, c := range v[2:] {
+		if c < '0' || c > '9' || (v[0] == '1' && c != '0') {
+			return false
+		}
+	}
+	return true
+}
+
+// plainPreconditions reports whether the request carries none of the headers
+// that make ServeContent answer something other than the whole file with its
+// own status: a range, or a precondition whose failure is a 412 that would go
+// out with the compressed representation's headers and no body. Those are
+// rare for a static client and are served plain.
+func plainPreconditions(r *http.Request) bool {
+	for _, h := range []string{"Range", "If-Range", "If-Match", "If-Unmodified-Since"} {
+		if r.Header.Get(h) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 // gzEntry is one file's compressed form; nil data means "serve it plain"
@@ -370,6 +408,19 @@ type gzEntry struct {
 	size int64
 	mod  time.Time
 	data []byte
+}
+
+// gzCompress writes src to dst gzipped. A variable so tests can count and
+// hold compressions.
+var gzCompress = func(dst io.Writer, src io.Reader) error {
+	zw, err := gzip.NewWriterLevel(dst, gzip.BestCompression)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(zw, src); err != nil {
+		return err
+	}
+	return zw.Close()
 }
 
 // gzWorkers bounds the compressions running at once. A request that finds
@@ -387,9 +438,15 @@ func (h *staticHandler) gzipped(name string, fi fs.FileInfo, f io.Reader) ([]byt
 	}
 	h.gzMu.Lock()
 	e, ok := h.gzCache[name]
+	full := len(h.gzCache) >= gzMaxEntries
 	h.gzMu.Unlock()
 	if ok && e.size == fi.Size() && e.mod.Equal(fi.ModTime()) {
 		return e.data, e.data != nil
+	}
+	if !ok && full {
+		// A name the cache cannot remember is served plain, never
+		// compressed again on every request.
+		return nil, false
 	}
 	select {
 	case gzWorkers <- struct{}{}:
@@ -398,11 +455,7 @@ func (h *staticHandler) gzipped(name string, fi fs.FileInfo, f io.Reader) ([]byt
 		return nil, false
 	}
 	var buf bytes.Buffer
-	zw, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
-	if err != nil {
-		return nil, false
-	}
-	if _, err := io.Copy(zw, io.LimitReader(f, gzMaxSize+1)); err != nil || zw.Close() != nil {
+	if err := gzCompress(&buf, io.LimitReader(f, gzMaxSize+1)); err != nil {
 		return nil, false
 	}
 	data := buf.Bytes()
@@ -419,6 +472,7 @@ func (h *staticHandler) gzipped(name string, fi fs.FileInfo, f io.Reader) ([]byt
 		delete(h.gzCache, name)
 	}
 	if len(h.gzCache) >= gzMaxEntries {
+		// Filled by another request meanwhile: answer, remember nothing.
 		return data, data != nil
 	}
 	if h.gzBytes+len(data) > gzMaxCache {

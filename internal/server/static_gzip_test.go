@@ -7,14 +7,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -96,6 +99,12 @@ func TestStaticGzip(t *testing.T) {
 		{"refusal as 0.000", "/app/assets/big.js", "GET", "gzip; q=0.000", "", false, true},
 		{"malformed q refuses", "/app/assets/big.js", "GET", "gzip;q=yes", "", false, true},
 		{"wildcard refused", "/app/assets/big.js", "GET", "*;q=0", "", false, true},
+		{"NaN q refuses, wildcard notwithstanding", "/app/assets/big.js", "GET", "gzip;q=NaN, *;q=1", "", false, true},
+		{"bare q refuses", "/app/assets/big.js", "GET", "gzip;q", "", false, true},
+		{"q above 1 refuses", "/app/assets/big.js", "GET", "gzip;q=1.5", "", false, true},
+		{"exponent q refuses", "/app/assets/big.js", "GET", "gzip;q=1e0", "", false, true},
+		{"four decimals refuse", "/app/assets/big.js", "GET", "gzip;q=0.5000", "", false, true},
+		{"q=1.000 accepts", "/app/assets/big.js", "GET", "gzip;q=1.000", "", true, true},
 		{"low but non-zero q", "/app/assets/big.js", "GET", "gzip;q=0.001", "", true, true},
 		{"large js has its length", "/app/assets/large.js", "GET", "gzip", "", true, true},
 		{"incompressible stays plain", "/app/assets/noise.js", "GET", "gzip", "", false, true},
@@ -319,5 +328,158 @@ func TestGzipNeverOnPrivateResponses(t *testing.T) {
 	defer func() { _ = conn.CloseNow() }()
 	if ext := wsResp.Header.Get("Sec-WebSocket-Extensions"); ext != "" {
 		t.Errorf("events socket: Sec-WebSocket-Extensions = %q, want none", ext)
+	}
+}
+
+// gzGet requests path from ts with Accept-Encoding gzip and the given extra
+// headers, and returns the response's Content-Encoding, status and body.
+func gzGet(t *testing.T, ts *httptest.Server, path string, hdr map[string]string) (string, int, []byte) {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), "GET", ts.URL+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept-Encoding", "gzip")
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("%s: read body: %v", path, err)
+	}
+	return resp.Header.Get("Content-Encoding"), resp.StatusCode, body
+}
+
+// TestStaticGzipPreconditionsArePlain: a request ServeContent may answer with
+// 412 or a part is served plain, so no compressed representation's headers go
+// out without its body.
+func TestStaticGzipPreconditionsArePlain(t *testing.T) {
+	ts := gzSources[0].server(t)
+	for _, hdr := range []map[string]string{
+		{"If-Match": `"missing"`},
+		{"If-Unmodified-Since": "Mon, 02 Jan 2006 15:04:05 GMT"},
+		{"If-Range": `"x"`},
+	} {
+		ce, status, body := gzGet(t, ts, "/app/assets/big.js", hdr)
+		if ce != "" {
+			t.Errorf("%v: Content-Encoding = %q, want none", hdr, ce)
+		}
+		if status == http.StatusOK && string(body) != bigJS {
+			t.Errorf("%v: 200 with a body that is not the file", hdr)
+		}
+	}
+}
+
+// holdCompressions replaces gzCompress with one that counts its calls and,
+// while hold is open, blocks until it is closed, announcing each start.
+func holdCompressions(t *testing.T) (calls *atomic.Int32, started chan struct{}, release func()) {
+	t.Helper()
+	calls = &atomic.Int32{}
+	started = make(chan struct{}, 16)
+	hold := make(chan struct{})
+	orig := gzCompress
+	gzCompress = func(dst io.Writer, src io.Reader) error {
+		calls.Add(1)
+		started <- struct{}{}
+		<-hold
+		return orig(dst, src)
+	}
+	var once sync.Once
+	release = func() { once.Do(func() { close(hold) }) }
+	t.Cleanup(func() { release(); gzCompress = orig })
+	return calls, started, release
+}
+
+// TestStaticGzipCompressionsAreBounded: with both workers busy, a request for
+// another cold file is answered plain at once, without compressing.
+func TestStaticGzipCompressionsAreBounded(t *testing.T) {
+	ts := gzSources[0].server(t)
+	calls, started, release := holdCompressions(t)
+	type result struct {
+		ce   string
+		body []byte
+	}
+	held := make(chan result, 2)
+	for _, p := range []string{"/app/assets/big.js", "/app/assets/large.js"} {
+		go func() {
+			ce, _, body := gzGet(t, ts, p, nil)
+			held <- result{ce, body}
+		}()
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the first two compressions never started")
+		}
+	}
+	for range 3 {
+		ce, status, body := gzGet(t, ts, "/app/", nil)
+		if status != http.StatusOK || ce != "" || !strings.HasPrefix(string(body), "<html>") {
+			t.Fatalf("with both workers busy: %d %q, want 200 plain index", status, ce)
+		}
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("compressions = %d, want 2 (the busy requests must not compress)", n)
+	}
+	release()
+	for range 2 {
+		if r := <-held; r.ce != "gzip" {
+			t.Errorf("a held request came back %q, want gzip", r.ce)
+		}
+	}
+}
+
+// TestStaticGzipRemembersPlain: a file gzip cannot shrink is compressed once
+// and then served plain from the cache's memory, never compressed again.
+func TestStaticGzipRemembersPlain(t *testing.T) {
+	ts := gzSources[0].server(t)
+	calls, _, release := holdCompressions(t)
+	release()
+	for range 3 {
+		ce, _, body := gzGet(t, ts, "/app/assets/noise.js", nil)
+		if ce != "" || string(body) != string(noiseJS) {
+			t.Fatalf("noise.js: %q, want plain file", ce)
+		}
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("compressions = %d, want 1", n)
+	}
+	for range 2 {
+		if ce, _, _ := gzGet(t, ts, "/app/assets/big.js", nil); ce != "gzip" {
+			t.Fatalf("big.js: %q, want gzip", ce)
+		}
+	}
+	if n := calls.Load(); n != 2 {
+		t.Errorf("compressions after a cached gzip hit = %d, want 2", n)
+	}
+}
+
+// TestStaticGzipFullCacheServesPlain: once the cache holds gzMaxEntries names,
+// a new name is served plain without being compressed.
+func TestStaticGzipFullCacheServesPlain(t *testing.T) {
+	calls, _, release := holdCompressions(t)
+	release()
+	h := &staticHandler{gzCache: map[string]gzEntry{}}
+	for i := range gzMaxEntries {
+		h.gzCache[fmt.Sprintf("assets/x%d.js", i)] = gzEntry{}
+	}
+	fsys := fstest.MapFS{"assets/big.js": &fstest.MapFile{Data: []byte(bigJS)}}
+	fi, err := fs.Stat(fsys, "assets/big.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if _, ok := h.gzipped("assets/big.js", fi, strings.NewReader(bigJS)); ok {
+			t.Fatal("a full cache compressed a new name")
+		}
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("compressions = %d, want 0", n)
 	}
 }
