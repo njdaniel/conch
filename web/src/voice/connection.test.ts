@@ -236,9 +236,11 @@ function setup(
   };
   // What the share asked conchd, in order.
   const shares: string[] = [];
+  const trace: string[] = [];
   const client = new VoiceClient(
     {
       clock,
+      trace: (line) => trace.push(line),
       random: () => 0.999999,
       createSession: (channel) => {
         asked.push(channel);
@@ -277,7 +279,7 @@ function setup(
     },
     () => clock.now,
   );
-  return { client, clock, rooms, asked, reports, reportedIn, shares, log, answer };
+  return { client, clock, rooms, asked, reports, reportedIn, shares, log, answer, trace };
 }
 
 async function joined(t = setup()) {
@@ -320,6 +322,44 @@ describe('joining', () => {
 });
 
 describe('talking', () => {
+  // Issue #1041: the trace names each step of a press, in order, with the time
+  // in ms, and carries nothing of the room.
+  it('traces a press and its release, in order, without the room or the token', async () => {
+    const t = await joined();
+    t.client.press();
+    await settle();
+    t.client.release();
+    t.clock.advance(defaultTail);
+    await settle();
+    expect(t.trace.map((l) => l.replace(/^\d+ /, ''))).toEqual([
+      'gate open',
+      'started answered or waited out',
+      'track unmuted',
+      'gate shut',
+      'track muted',
+      'stopped reported',
+    ]);
+    for (const line of t.trace) {
+      expect(line).toMatch(/^\d+ [a-z ]+$/);
+      expect(line).not.toContain(roomName);
+      expect(line).not.toContain(token);
+    }
+  });
+
+  // A trace that throws (here, the array it writes to is frozen) changes
+  // nothing: the release still mutes the track and reports stopped.
+  it('a trace that throws does not stop a release from muting and reporting', async () => {
+    const t = await joined();
+    Object.freeze(t.trace);
+    t.client.press();
+    await settle();
+    t.client.release();
+    t.clock.advance(defaultTail);
+    await settle();
+    expect(t.rooms[0]?.sending).toEqual([true, false]);
+    expect(t.reports).toEqual(['started', 'stopped']);
+  });
+
   it('a press opens the track and reports started; a release closes it after the tail and reports stopped', async () => {
     const t = await joined();
     t.client.press();
