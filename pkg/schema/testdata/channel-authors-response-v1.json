@@ -1,0 +1,14 @@
+{
+  "authors": [
+    {
+      "principal_id": 4,
+      "name": "bob",
+      "kind": "human"
+    },
+    {
+      "principal_id": 5,
+      "name": "leviathan",
+      "kind": "agent"
+    }
+  ]
+}

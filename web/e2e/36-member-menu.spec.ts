@@ -85,6 +85,7 @@ for (const [size, options, phone] of sizes) {
 
     await press(more);
     await press(row.getByRole('menuitem', { name: 'Remove from channel' }));
+    await press(row.getByRole('button', { name: 'Yes, remove' }));
     await expect(memberRow(page, name)).toHaveCount(0);
     await expect
       .poll(async () => (await ok(world, world.tokens.operator, 'GET', `/v1/channels/${encodeURIComponent(channel)}/members`, listChannelMembersResponseV1)).members.some((m) => m.principal_id === id))

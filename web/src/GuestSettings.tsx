@@ -46,6 +46,8 @@ export function warningLine(warning: JoinWarning, live: number): string {
       return 'An account has a name kept for guests. Guests cannot be allowed until it is renamed.';
     case 'server_name_in_use':
       return 'An account holds the server’s name, or one that looks the same. It is kept; you may rename it.';
+    case 'no_default_channel':
+      return 'No channel is a default channel, so someone who joins through a link or the address lands in no channel.';
   }
 }
 
