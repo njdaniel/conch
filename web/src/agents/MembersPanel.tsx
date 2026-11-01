@@ -143,6 +143,9 @@ export function MembersPanel({ agents, now, controls }: { readonly agents: Agent
     );
   }
   if (!live) {
+    // Nothing is open, so nothing is being connected to (issue #1032). A
+    // session that failed to start is said above, whatever is open.
+    if (controls === null) return <p role="status">No channel open</p>;
     return state.settled ? (
       <p role="status">Members unavailable</p>
     ) : (

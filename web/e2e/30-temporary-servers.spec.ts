@@ -193,3 +193,76 @@ test('G30c on a normal server setup still asks for the authenticator, with no Sk
     server.process.kill('SIGTERM');
   }
 });
+
+// Issue #1032: the owner's first sign-in on a server with no channels shows the
+// first-run panel, not an empty centre and an endless "Connecting…"; making the
+// first channel opens it and the panel goes.
+test('G30d a new owner on a server with no channels sees the first-run panel, and the first channel replaces it', async ({ meet, secrets }) => {
+  test.setTimeout(150_000);
+  const server = await startServer('first-run', { CONCHD_OPERATOR_TOTP: 'optional' });
+  try {
+    secrets.push(server.token, password);
+    const { page } = await meet();
+    // The page is loaded at the clean address first, so the setup token is
+    // never in the document's own navigation entry (as in G30a).
+    await page.goto(server.appUrl);
+    await setUpFromLink(page, server);
+    await skipAndSignIn(page);
+    secrets.push((await tabToken(page)) ?? '');
+
+    const heading = page.getByRole('heading', { name: "You're not in any channels yet" });
+    await expect(heading).toBeVisible();
+    await expect(heading).toBeFocused();
+    await expect(page.getByRole('button', { name: 'Make a channel' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Invite someone' }).last()).toBeDisabled();
+    await expect(page.getByText('Needs a channel first')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Decide how people join' })).toBeVisible();
+    const members = page.getByRole('region', { name: 'Members list' });
+    await expect(members.getByText('No channel open')).toBeVisible();
+    await expect(page.getByText('Connecting…')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Make a channel' }).click();
+    const field = page.getByLabel('Channel name');
+    await expect(field).toBeFocused();
+    await field.fill('channel-a');
+    await page.getByRole('button', { name: 'Create channel' }).click();
+    await expect(page.getByRole('heading', { name: 'channel-a', exact: true })).toBeVisible();
+    await expect(heading).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Make a channel' })).toHaveCount(0);
+  } finally {
+    server.process.kill('SIGTERM');
+  }
+});
+
+// Issue #1032, on a phone: with no channel the page opens on Channels and the
+// centre is not shown, so the first-run panel is drawn there, once.
+test('G30e on a phone a new owner sees the first-run panel in the Channels view and can make the first channel', async ({ meet, secrets }) => {
+  test.setTimeout(150_000);
+  const server = await startServer('first-run-phone', { CONCHD_OPERATOR_TOTP: 'optional' });
+  try {
+    secrets.push(server.token, password);
+    const { page } = await meet({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+    await page.goto(server.appUrl);
+    await setUpFromLink(page, server);
+    await skipAndSignIn(page);
+    secrets.push((await tabToken(page)) ?? '');
+
+    const heading = page.getByRole('heading', { name: "You're not in any channels yet" });
+    await expect(heading).toHaveCount(1);
+    await expect(heading).toBeVisible();
+    await expect(heading).toBeFocused();
+    await expect(page.getByRole('button', { name: 'Decide how people join' })).toBeVisible();
+    await expect(page.getByText('Needs a channel first')).toBeVisible();
+    await expect(page.getByText('Connecting…')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Make a channel' }).click();
+    const field = page.getByLabel('Channel name');
+    await expect(field).toBeFocused();
+    await field.fill('channel-a');
+    await page.getByRole('button', { name: 'Create channel' }).click();
+    await expect(page.getByRole('heading', { name: 'channel-a', exact: true })).toBeVisible();
+    await expect(heading).toHaveCount(0);
+  } finally {
+    server.process.kill('SIGTERM');
+  }
+});

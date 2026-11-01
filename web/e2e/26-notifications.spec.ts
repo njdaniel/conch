@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import { post } from './api';
-import { expect, signIn, test } from './fixtures';
+import { conversation, expect, signIn, test } from './fixtures';
 import { call, principalId } from './world';
 
 async function instrument(page: Page, permission: NotificationPermission = 'denied'): Promise<void> {
@@ -128,4 +128,39 @@ test('mentions-only and denied fallback preserve scoped audiences and revoke ale
   await expect(centerButton(page)).toHaveText('Notifications');
   await openCenter(page);
   await expect(alertItems(page)).toHaveCount(0);
+});
+
+// Issue #1043: names complete from the channel's members, and a message that
+// names the viewer is marked on its row.
+test('@mention completes from the channel and the person named sees the mark', async ({ meet, world }) => {
+  const sender = await meet();
+  await signIn(sender.page, world, world.tokens.browser, 'browser-test');
+  await expect(conversation(sender.page).getByRole('heading', { name: 'general' })).toBeVisible();
+
+  const box = sender.page.getByRole('textbox', { name: 'Message #general' });
+  const tag = `e1043-${Date.now().toString(36)}`;
+  await box.fill(`${tag} hello @jam`);
+  const list = sender.page.getByRole('listbox', { name: 'Mention suggestions' });
+  await expect(list.getByRole('option')).toHaveText(['@jamie-test']);
+  await sender.page.keyboard.press('Enter');
+  await expect(box).toHaveValue(`${tag} hello @jamie-test `);
+  await expect(list).toBeHidden();
+  // Nobody outside the channel is offered.
+  await box.fill('@no-such-person-here');
+  await expect(list).toBeHidden();
+  await box.fill(`${tag} hello @jamie-test `);
+
+  const viewer = await meet();
+  await signIn(viewer.page, world, world.tokens.guest, 'jamie-test');
+  await expect(conversation(viewer.page).getByRole('heading', { name: 'general' })).toBeVisible();
+  await sender.page.getByRole('button', { name: 'Send' }).click();
+  const row = conversation(viewer.page).getByRole('listitem').filter({ hasText: tag });
+  await expect(row).toHaveCount(1);
+  await expect(row).toHaveClass(/mentions-you/);
+  await expect(row).toContainText('Mentions you');
+
+  await post(world, world.tokens.browser, 'general', `${tag} no name here`);
+  const plain = conversation(viewer.page).getByRole('listitem').filter({ hasText: `${tag} no name here` });
+  await expect(plain).toHaveCount(1);
+  await expect(plain).not.toHaveClass(/mentions-you/);
 });

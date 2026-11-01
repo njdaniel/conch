@@ -3,6 +3,7 @@
 // does every call and is the only code that sees the credential.
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from 'react';
 import * as api from './api';
+import { uploadRefusalLine } from './fileSize';
 import { ChangeName } from './ChangeName';
 import { CreateChannel } from './CreateChannel';
 import { Conversation } from './Conversation';
@@ -10,6 +11,7 @@ import { GuestVisit } from './Guest';
 import { displayName, visitOf } from './guestName';
 import { channelWords, Invite, refusalLine, waitWords } from './Invite';
 import { InvitePanel } from './InvitePanel';
+import { FirstRun } from './FirstRun';
 import { Lobby } from './Lobby';
 import { ReportProblem } from './Report';
 import { OperatorWarning } from './OperatorWarning';
@@ -468,6 +470,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     [loseChannel],
   );
   const [searchOpen, setSearchOpen] = useState(false);
+  // Asks from the first-run panel for the New channel form (issue #1032).
+  const [createAsks, setCreateAsks] = useState(0);
   const restoreSearchFocus = useRef(false);
   useEffect(() => {
     if (searchOpen) {
@@ -759,11 +763,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       return { ...attachment, status: 'failed', attempt, error: 'Your sign-in ended before the upload finished.' };
     }
     if (result.outcome === 'network') {
-      const error = 'Cannot reach the server. The image is still here; try again.';
+      const error = 'Cannot reach the server. The file is still here; try again.';
       dispatchAttachments({ ...action, type: 'uploadFailed', error });
       return { ...attachment, status: 'failed', attempt, error };
     }
-    const error = 'reason' in result ? result.reason : 'The server refused the upload';
+    const error = 'reason' in result ? uploadRefusalLine(attachment.filename, result.code, result.reason) : 'The server refused the upload';
     dispatchAttachments({ ...action, type: 'uploadFailed', error });
     return { ...attachment, status: 'failed', attempt, error };
   }, [activeSend, nameOf, dispatchAttachments]);
@@ -1656,6 +1660,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             // The server allows operators alone; anyone else is not offered it.
             auth.principal.role === 'operator' ? (
               <CreateChannel
+                asks={createAsks}
                 onCreated={(channel) => {
                   dispatchChannels({ type: 'created', channel });
                 }}
@@ -1666,6 +1671,17 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           invites={
             auth.principal.may_invite === true ? (
               <InvitePanel origin={origin} me={auth.principal} channels={channels.channels} onUnauthorized={onUnauthorized} />
+            ) : null
+          }
+          firstRun={
+            // An operator on a server with no channels is shown what to do
+            // first; anyone else keeps the channel list's own line.
+            channels.loaded && channels.channels.length === 0 && auth.principal.role === 'operator' && visit === null ? (
+              <FirstRun
+                onMakeChannel={() => {
+                  setCreateAsks((n) => n + 1);
+                }}
+              />
             ) : null
           }
           conversation={
@@ -1691,6 +1707,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 <div className="conversation-body" hidden={agents.state.detail !== null || searchOpen}>
               <Conversation
                 key={channelId}
+                historyBounded={agents.membersFor === channelId && (agents.members.find((m) => m.principal_id === auth.principal.id)?.history_after ?? 0) > 0}
                 channelId={channelId}
                 channel={selected}
                 chat={chatFor(chat, selected)}
