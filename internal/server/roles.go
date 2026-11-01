@@ -46,6 +46,12 @@ func (s *Server) handleSetRole(w http.ResponseWriter, r *http.Request) {
 		writeUnauthenticated(w)
 		return
 	}
+	// Whether the target held use_voice before the change; read before it
+	// commits. A failed read counts as held, so the check after runs.
+	heldVoice, err := s.store.Permitted(ctx, id, schema.PermUseVoice)
+	if err != nil {
+		heldVoice = true
+	}
 	res, err := s.store.SetRole(ctx, auditActor(ctx), caller.ID, id, store.Role(req.Role), req.Owner)
 	switch {
 	case errors.Is(err, store.ErrNotOwner):
@@ -83,6 +89,12 @@ func (s *Server) handleSetRole(w http.ResponseWriter, r *http.Request) {
 		// the document (the security review of #1061, S1). The credential
 		// revocation above returns before any share is ended.
 		s.events.notifyPermissionsChanged(id)
+		if heldVoice {
+			// use_voice may have gone with the role: remove the target from
+			// voice now, as PUT /v1/permissions does (#1016), not at the
+			// poller's next pass. A no-op if they still hold it.
+			s.voiceWithheldFor(ctx, id)
+		}
 		s.endShareIfWithheld(ctx, id)
 	}
 	writeJSON(w, http.StatusOK, res.RoleChangeResponseV1)
