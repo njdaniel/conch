@@ -136,6 +136,18 @@ test('A8 a joiner without voice is told so, and the page asks for no voice route
   expect(asked, 'requests to the voice routes').toEqual([]);
 });
 
+// Issue #1082 (audit 4 F5): a name the server's rules refuse is said in the
+// page's own words, never the server's "Principal name ..." line.
+test('F5 a name with an invisible character gets a plain line on the name field', async ({ meet, world }) => {
+  const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
+  const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+  await page.goto(inviteUrl(world, made.code));
+  await fillAccount(page, 'ali​ce');
+  await expect(page.getByText('A name cannot contain invisible characters.')).toBeVisible();
+  await expect(page.getByLabel('Your name')).toBeFocused();
+  await expect(page.locator('body')).not.toContainText(/principal|schema:/i);
+});
+
 test('A8 a personal link opened again says it can no longer be used', async ({ meet, secrets, world }) => {
   const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
   const first = await meet(desktop);
