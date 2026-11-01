@@ -516,6 +516,16 @@ var permissionGates = map[schema.Permission][][2]string{
 		{"store/invites.go", "makerRightsTx"},
 		{"store/guest_policy.go", "admittingOpenChannelsTx"},
 		{"store/guest_policy.go", "checkOpenChannelsWriterTx"},
+		// The name filters of A3a (other_hooks, other_open_channels,
+		// other_channels), through channelSightFor.
+		{"auth.go", "Server.channelSightFor"},
+		{"hooks.go", "Server.handleListHooks"},
+		{"join.go", "Server.joinSettingsResponse"},
+		{"invites.go", "Server.handleListInvites"},
+		// A hook or a manifest into a channel the caller is not in (the
+		// security review of #1015).
+		{"hooks.go", "Server.handleCreateHook"},
+		{"manifests.go", "Server.handlePutManifest"},
 	},
 	schema.PermChangeServerSettings: {{"routes.go", "Server.routeTable"}},
 	schema.PermReadAuditLog:         {{"routes.go", "Server.routeTable"}},
@@ -564,6 +574,11 @@ func TestEnforcedPermissionsAreHonest(t *testing.T) {
 				if sel, ok := n.(*ast.SelectorExpr); ok {
 					if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "schema" {
 						named[sel.Sel.Name] = true
+					}
+					// channelSightFor is manage_channels asked for the
+					// channel names an answer may show.
+					if sel.Sel.Name == "channelSightFor" {
+						named["PermManageChannels"] = true
 					}
 				}
 				return true
@@ -627,8 +642,16 @@ func TestPermissionsPutEndsAWithheldShare(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The PUT's own stop path runs, once, for ann's one room: nothing else
+	// (a poller pass) may be what ended the share. The seam is set before
+	// the request and read after it, and nothing runs a pass meanwhile.
+	var stops []int
+	f.srv.voice.endSharesSeam = func(rooms int) { stops = append(stops, rooms) }
 	if rec := f.do(t, "PUT", "/v1/permissions", f.rootTok, string(body)); rec.Code != http.StatusOK {
 		t.Fatalf("the owner's PUT = %d %s", rec.Code, rec.Body)
+	}
+	if !slices.Equal(stops, []int{1}) {
+		t.Errorf("the PUT ran the stop path %v times (rooms each), want once for ann's one room", stops)
 	}
 	// Read at the moment the PUT has answered.
 	if f.granted(t, room, "ann") {
@@ -636,6 +659,64 @@ func TestPermissionsPutEndsAWithheldShare(t *testing.T) {
 	}
 	if holder := f.shareState(room); holder != 0 {
 		t.Errorf("the poller still holds a share for %d", holder)
+	}
+}
+
+// Without manage_channels a hook or a manifest reaches only channels the
+// caller is in, and a channel that never existed is answered alike, so
+// neither route tells private channels' names or ids (the security review
+// of #1015). Under the defaults operators hold manage_channels and nothing
+// changes.
+func TestHookAndManifestAreNotChannelOracles(t *testing.T) {
+	f := newRestrictedFixture(t, Config{})
+	hook := func(channel string) *httpResult {
+		t.Helper()
+		body, err := json.Marshal(schema.CreateHookRequest{Channel: channel, Principal: f.agent.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := f.do(t, "POST", "/v1/hooks", f.opTok, string(body))
+		return &httpResult{code: rec.Code, body: rec.Body.Bytes()}
+	}
+	manifest := func(channelID int64) *httpResult {
+		t.Helper()
+		body, err := json.Marshal(schema.PutAgentManifestRequestV1{DisplayName: "agent-1", Tier: schema.AgentTierA, Capabilities: schema.Capabilities(),
+			Channels: []schema.ChannelGrant{{ChannelID: channelID, Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := f.do(t, "PUT", fmt.Sprintf("/v1/principals/%d/manifest", f.agent.ID), f.opTok, string(body))
+		return &httpResult{code: rec.Code, body: rec.Body.Bytes()}
+	}
+	// The defaults: channel-a, which operator-1 is not in, is reachable.
+	if res := hook("channel-a"); res.code != http.StatusCreated {
+		t.Fatalf("a hook into channel-a under the defaults = %d %s", res.code, res.body)
+	}
+	if res := hook("no-such-channel"); res.code != http.StatusBadRequest || res.errorCode(t) != "channel_not_found" {
+		t.Fatalf("a hook into no channel under the defaults = %d %s", res.code, res.body)
+	}
+
+	f.withhold(t, schema.PermManageChannels)
+	private, ghost := hook("channel-a"), hook("no-such-channel")
+	if private.code != http.StatusForbidden || private.errorCode(t) != schema.ErrorCodePermissionDenied || !strings.Contains(string(private.body), `"permission":"manage_channels"`) {
+		t.Fatalf("a hook into channel-a without manage_channels = %d %s, want 403 permission_denied manage_channels", private.code, private.body)
+	}
+	if ghost.code != private.code || string(ghost.body) != string(private.body) {
+		t.Errorf("a hook into no channel = %d %s, into channel-a = %d %s: they must be alike", ghost.code, ghost.body, private.code, private.body)
+	}
+	if res := hook("channel-b"); res.code != http.StatusCreated {
+		t.Errorf("a hook into its own channel = %d %s, want 201", res.code, res.body)
+	}
+
+	private, ghost = manifest(f.chanA.ID), manifest(987654321)
+	if private.code != http.StatusForbidden || private.errorCode(t) != schema.ErrorCodePermissionDenied {
+		t.Fatalf("a manifest granting channel-a without manage_channels = %d %s, want 403 permission_denied", private.code, private.body)
+	}
+	if ghost.code != private.code || string(ghost.body) != string(private.body) {
+		t.Errorf("a manifest granting no channel = %d %s, granting channel-a = %d %s: they must be alike", ghost.code, ghost.body, private.code, private.body)
+	}
+	if res := manifest(f.chanB.ID); res.code != http.StatusOK && res.code != http.StatusCreated {
+		t.Errorf("a manifest granting its own channel = %d %s", res.code, res.body)
 	}
 }
 

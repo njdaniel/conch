@@ -39,14 +39,41 @@ func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	caller, authed := callerFrom(ctx)
 	channel, err := s.store.ChannelByName(ctx, req.Channel)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusBadRequest, "channel_not_found", "channel not found")
-		return
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		slog.ErrorContext(ctx, "hooks: find channel failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	// Without manage_channels a hook goes only into a channel the caller is
+	// in (ADR-014 design §7.3), and a name that is no channel gets the
+	// answer a channel it is not in gets, so the route is not an oracle on
+	// private channels' names (the security review of #1015).
+	if authed {
+		all, ok := s.canOrFail(w, r, caller, schema.PermManageChannels)
+		if !ok {
+			return
+		}
+		if !all {
+			in := false
+			if err == nil {
+				if in, err = s.store.IsChannelMember(ctx, channel.ID, caller.ID); err != nil {
+					slog.ErrorContext(ctx, "hooks: check channel membership failed", "error", err)
+					writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+					return
+				}
+			}
+			if !in {
+				s.denyForbiddenFor(w, r, caller, schema.ErrorCodePermissionDenied,
+					"a hook into a channel you are not in needs the manage_channels permission",
+					refusedPermission(caller, schema.PermManageChannels))
+				return
+			}
+		}
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusBadRequest, "channel_not_found", "channel not found")
 		return
 	}
 	principal, err := s.store.PrincipalByID(ctx, req.Principal)
@@ -58,7 +85,6 @@ func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	caller, authed := callerFrom(ctx)
 	forbidOwner := authed && !isOwner(caller)
 	if forbidOwner && principal.IsOwner() {
 		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")

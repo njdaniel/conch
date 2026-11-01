@@ -203,6 +203,14 @@ func (w *world) restrictedPhase() (int, error) {
 	if err := w.op.call(http.MethodPut, member(approver.id), schema.PutChannelMemberRequestV1{CanDecide: &yes}, nil); err != nil {
 		return 0, err
 	}
+	// A second operator in R's channel, whom a manager may not remove.
+	op2, err := w.newPerson(name("operator2"), rchan)
+	if err != nil {
+		return 0, err
+	}
+	if err := w.op.call(http.MethodPut, "/v1/principals/"+itoa(op2.id)+"/role", schema.RoleChangeRequestV1{Role: schema.RoleOperator}, nil); err != nil {
+		return 0, err
+	}
 	if err := w.op.call(http.MethodPut, member(owner), nil, nil); err != nil {
 		return 0, err
 	}
@@ -318,6 +326,7 @@ func (w *world) restrictedPhase() (int, error) {
 		{"makes its member a manager", http.MethodPut, member(rmember.id), schema.PutChannelMemberRequestV1{Manages: &yes}, http.StatusForbidden, "forbidden"},
 		{"adds an agent", http.MethodPut, member(outsider.Principal.ID), nil, http.StatusNotFound, "principal_not_found"},
 		{"removes the approver", http.MethodDelete, member(approver.id), nil, http.StatusForbidden, "forbidden"},
+		{"removes another operator", http.MethodDelete, member(op2.id), nil, http.StatusForbidden, "forbidden"},
 		{"removes the owner", http.MethodDelete, member(owner), nil, http.StatusForbidden, "forbidden"},
 	} {
 		status, body, err := r.api.do(c.method, c.path, c.body)
@@ -336,8 +345,8 @@ func (w *world) restrictedPhase() (int, error) {
 	if err != nil {
 		return rows, err
 	}
-	if after-before < 4 {
-		return rows, fmt.Errorf("the restricted operator's refusals in its own channel wrote %d access_denied rows with permission=manage_channels, want 4", after-before)
+	if after-before < 5 {
+		return rows, fmt.Errorf("the restricted operator's refusals in its own channel wrote %d access_denied rows with permission=manage_channels, want 5", after-before)
 	}
 
 	// Links: A's channel, an open link, the right to invite.
@@ -457,6 +466,41 @@ func (w *world) restrictedPhase() (int, error) {
 	}
 	if !slices.Contains(names, rchan) || slices.Contains(names, aChan) {
 		return rows, fmt.Errorf("the restricted operator's joiner is in %v: want R's channel and not A's", names)
+	}
+	rows += 2
+
+	// With manage_members and act_as_members back but manage_channels still
+	// cut, a hook or a manifest into A's channel is refused as one into a
+	// channel that never existed (the security review of #1015).
+	if err := w.setOperatorCells(true, schema.PermManageMembers, schema.PermActAsMembers); err != nil {
+		return rows, err
+	}
+	hookInto := func(channel string) (int, []byte, error) {
+		return r.api.do(http.MethodPost, "/v1/hooks", schema.CreateHookRequest{Channel: channel, Principal: bot.id})
+	}
+	s1, b1, err = hookInto(aChan)
+	if err := refusedNaming("the restricted operator: a hook into A's channel", s1, b1, err, schema.ErrorCodePermissionDenied, schema.PermManageChannels); err != nil {
+		return rows, err
+	}
+	if s2, b2, err = hookInto(ghost); err != nil {
+		return rows, err
+	}
+	if err := sameAnswer("the restricted operator: a hook into A's channel", s1, b1, s2, b2); err != nil {
+		return rows, err
+	}
+	grant := func(channelID int64) (int, []byte, error) {
+		return r.api.do(http.MethodPut, "/v1/principals/"+itoa(bot.id)+"/manifest", schema.PutAgentManifestRequestV1{DisplayName: bot.name, Tier: schema.AgentTierA,
+			Capabilities: schema.Capabilities(), Channels: []schema.ChannelGrant{{ChannelID: channelID, Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead}}}})
+	}
+	s1, b1, err = grant(w.a.chanIDs[0])
+	if err := refusedNaming("the restricted operator: a manifest granting A's channel", s1, b1, err, schema.ErrorCodePermissionDenied, schema.PermManageChannels); err != nil {
+		return rows, err
+	}
+	if s2, b2, err = grant(999999999); err != nil {
+		return rows, err
+	}
+	if err := sameAnswer("the restricted operator: a manifest granting A's channel", s1, b1, s2, b2); err != nil {
+		return rows, err
 	}
 	rows += 2
 
