@@ -7,6 +7,7 @@ declare module 'node:fs' {
   export function existsSync(path: string): boolean;
   export function mkdtempSync(prefix: string): string;
   export function readFileSync(path: string, encoding: 'utf8'): string;
+  export function readFileSync(path: string): Uint8Array<ArrayBuffer>;
   export function rmSync(path: string, options: { recursive: boolean; force: boolean }): void;
   export function openSync(path: string, flags: 'a'): number;
   export function closeSync(fd: number): void;
