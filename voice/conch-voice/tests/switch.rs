@@ -15,6 +15,7 @@ use std::time::Duration;
 use conch_voice::Error;
 use conch_voice::receive::{BoxedSink, Speakers};
 use conch_voice::sdk::DisconnectReason;
+use conch_voice::session::Timings;
 use conch_voice::transmit::BoxedMic;
 use conch_voice_audio::{FRAME_LEN, Frame, MicRead, MicSource, SpeakerSink};
 use conch_voice_control::LineCommand::{Down, Mute, Up};
@@ -353,9 +354,16 @@ async fn in_open_mode_a_new_microphone_needs_a_whole_hang_of_quiet_and_a_fresh_o
     // One sound for every microphone the session opens, loud while the test says so.
     let (make, loud) = Switch::make();
     let open: OpenNamedMic = Arc::new(move |_| Ok(Some(make())));
+    // The hang is timed by the microphone's frames, not the wall clock: a loaded machine
+    // that runs the transmit task late would otherwise let the clock say the hang had
+    // passed before the frames did (issue #1098).
     let setup = Setup {
         talk_mode: TalkMode::Open,
         open_mic: Some(open),
+        timings: Timings {
+            transmit_clock: loud.clock(),
+            ..support::quick()
+        },
         ..Setup::default()
     };
     let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
