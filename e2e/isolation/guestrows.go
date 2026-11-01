@@ -144,6 +144,9 @@ func guestRows() []row {
 			probe: func(*world, subject) probe { return get("/v1/whoami") }},
 		{route: "GET /v1/channels", what: "lists her channels", own: true, inspect: onlyThePlaza,
 			probe: func(*world, subject) probe { return get("/v1/channels") }},
+		// The channel directory is a community member's (issue #982): a
+		// guest's channels are its link's.
+		refused("GET /v1/directory/channels", "lists the channel directory", notAllowed, func(*world) probe { return get("/v1/directory/channels") }),
 		{route: "GET /v1/credentials/mine", what: "lists her sign-ins", own: true, inspect: oneSignIn,
 			probe: func(*world, subject) probe { return get("/v1/credentials/mine") }},
 		{route: "GET /v1/channels/{channel}/voice", what: "reads the plaza's voice presence", own: true,

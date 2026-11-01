@@ -619,6 +619,8 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/totp/confirm":                                                                {reauthNone, "setup scope only"},
 	"POST /v1/reports":                                                                     {reauthNone, "a problem report"},
 	"POST /v1/channels":                                                                    {reauthNone, "a member makes a channel: no grant beyond the creator's own membership of it"},
+	"POST /v1/channels/{channel}/join":                                                     {reauthNone, "a member joins a public channel themselves, with can_decide = 0: no grant"},
+	"POST /v1/channels/{channel}/leave":                                                    {reauthNone, "a member ends their own membership"},
 	"POST /v1/approvals":                                                                   {reauthNone, "an approval request (approval-path, unchanged)"},
 	"POST /v1/approvals/{id}/decisions":                                                    {reauthNone, "a decision (approval-path, unchanged)"},
 }

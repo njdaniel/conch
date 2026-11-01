@@ -45,6 +45,17 @@ func coreAgentRows() []row {
 		byID("POST /v1/channels", "makes a channel with A's private channel's name", aChannel, answer{http.StatusForbidden, "forbidden"}, func(_ *world, s subject) probe {
 			return post("/v1/channels", schema.CreateChannelRequestV1{Name: s.name, Visibility: schema.ChannelPrivate})
 		}),
+		// The channel directory, self-join and leave are a community
+		// member's (issue #982): an agent is refused before any lookup,
+		// the same for A's private channel as for one never made.
+		{route: "GET /v1/directory/channels", what: "lists the channel directory", want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(*world, subject) probe { return get("/v1/directory/channels") }},
+		byID("POST /v1/channels/{channel}/join", "joins A's private channel", aChannel, answer{http.StatusForbidden, schema.ErrorCodeChannelNotJoinable}, func(_ *world, s subject) probe {
+			return post(ch(s)+"/join", nil)
+		}),
+		byID("POST /v1/channels/{channel}/leave", "leaves A's private channel", aChannel, answer{http.StatusForbidden, "forbidden"}, func(_ *world, s subject) probe {
+			return post(ch(s)+"/leave", nil)
+		}),
 		byChannel("GET /v2/channels/{channel}/messages", "reads A's channel", func(_ *world, s subject) probe { return get("/v2/channels/" + s.name + "/messages") }),
 		byChannel("POST /v2/channels/{channel}/messages", "posts to A's channel", func(_ *world, s subject) probe {
 			return post("/v2/channels/"+s.name+"/messages", schema.PostMessageRequestV2{Body: "hello"})
