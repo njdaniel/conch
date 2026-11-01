@@ -97,7 +97,9 @@ func TestJoinAsAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Principal.Name != "newcomer" || a.Principal.Role != RoleMember || a.Principal.VoiceAllowed || a.Principal.MayInvite ||
+	// Voice is on for every account since migration 40 (join_voice reads
+	// true, ADR-013 decision 5).
+	if a.Principal.Name != "newcomer" || a.Principal.Role != RoleMember || !a.Principal.VoiceAllowed || a.Principal.MayInvite ||
 		len(a.Channels) != 2 || !a.Credential.Renews || a.Token == "" {
 		t.Fatalf("account = %+v", a)
 	}

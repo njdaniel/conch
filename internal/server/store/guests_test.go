@@ -31,10 +31,11 @@ type guestFixture struct {
 
 // allowAddressAccounts opens the bare address to accounts, underneath the
 // settings route: the policy a bare-address visit converts under (issue
-// #711), for the tests whose subject is not the policy itself.
+// #711), for the tests whose subject is not the policy itself. Since
+// migration 40 the mode is stored as open_signup (issue #979).
 func allowAddressAccounts(t *testing.T, s *Store) {
 	t.Helper()
-	if _, err := s.db.Exec(`INSERT INTO server_settings (key, value, updated_at) VALUES ('open_joining', 'account', 0)
+	if _, err := s.db.Exec(`INSERT INTO server_settings (key, value, updated_at) VALUES ('open_signup', 'true', 0)
 		ON CONFLICT (key) DO UPDATE SET value = excluded.value`); err != nil {
 		t.Fatal(err)
 	}

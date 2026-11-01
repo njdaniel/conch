@@ -8,6 +8,36 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Upgrade notice: one community (issue #979)
+
+The first start on this version converts the server to the community model
+(ADR-013), in one migration that runs before the server takes traffic. Take
+the usual backup first (docs/deploy.md does).
+
+- **Channels.** Every channel that was open to the bare address becomes a
+  public **default** channel, which new members start in. Every other
+  channel stays **private**, with exactly its current members. Making one
+  public later is one call per channel.
+- **Members.** Every member, a disabled account included, is added to every
+  default channel, with no right to decide approvals. Anyone already in a
+  channel keeps the rights they had there.
+- **History bounds are cleared.** A member who could see a channel's
+  messages only from when they joined now sees its whole history. The old
+  bounds are kept in the database (`legacy_history_bounds`) and nothing
+  reads them.
+- **Voice and making invite links are on for every member.**
+- **Joining.** The bare address now either makes accounts (open sign-up on,
+  where it admitted accounts before) or admits nobody. It no longer admits
+  guests. Voice for new accounts is always on.
+- **Guests.** Guests were switched off by #1005. The migration ends any guest
+  visit still active and closes every invite that could admit a guest, each
+  audited. The guest records themselves are kept.
+- **Rollback** is the previous binary plus the backup taken before the
+  upgrade: the previous binary refuses the converted database.
+
+The server log reports what the migration found and what it changed, and the
+audit trail has one `community_migrated` row with the counts.
+
 ## [0.1.0-alpha.9] - 2026-11-01
 
 These are the core-flow fixes from browser UX audit 3 (first run, the
