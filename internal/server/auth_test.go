@@ -147,6 +147,7 @@ var routePermissions = map[string]schema.Permission{
 	"POST /v1/invites/{id}/disable-joiners":                           schema.PermManageMembers,
 	"POST /v1/principals/{id}/disable-invitees":                       schema.PermManageMembers,
 	"PUT /v1/principals/{id}/invite-permission":                       schema.PermManageMembers,
+	"PUT /v1/principals/{id}/voice-permission":                        schema.PermManageMembers,
 	"PUT /v1/invites/settings":                                        schema.PermManageMembers,
 	"DELETE /v1/sign-in-links/{id}":                                   schema.PermManageMembers,
 	"POST /v1/principals/{id}/credentials":                            schema.PermActAsMembers,
@@ -398,6 +399,7 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/invites/{id}/disable-joiners":     {classPerm, "/v1/invites/9999/disable-joiners", `{"dry_run":true}`, 404},
 	"POST /v1/principals/{id}/disable-invitees": {classPerm, "/v1/principals/9999/disable-invitees", `{"dry_run":true}`, 404},
 	"PUT /v1/principals/{id}/invite-permission": {classPerm, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
+	"PUT /v1/principals/{id}/voice-permission":  {classPerm, "/v1/principals/9999/voice-permission", `{"voice_allowed":false}`, 404},
 	"GET /v1/invites/settings":                  {classOp, "/v1/invites/settings", "", 200},
 	"PUT /v1/invites/settings":                  {classPerm, "/v1/invites/settings", `{"paused":false}`, 200},
 	// Sign-in links (issue #493). The create names a principal that does not
