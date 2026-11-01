@@ -53,7 +53,7 @@ const paused = 'Sending is paused until the server is back. Your draft is kept.'
 // Issue #592: a channel with nothing in it says so, until the first message.
 // Before P3-09, on a channel and a person of its own made through the API, so
 // the fixture people's lists are left as they are.
-test('P592 an empty channel says so until its first message is sent', async ({ meet, secrets, world }) => {
+test('P592 an empty channel says what is not shown until its first message is sent', async ({ meet, secrets, world }) => {
   const channel = `p592-empty-${String(Date.now())}`;
   const op = world.tokens.operator;
   const person: CreatePrincipalRequest = { kind: 'human', name: channel };
@@ -67,8 +67,10 @@ test('P592 an empty channel says so until its first message is sent', async ({ m
   const { page } = await meet();
   await signIn(page, world, token, channel);
   await channelButton(page, channel).click();
-  const empty = messages(page).getByText(`No messages in #${channel} yet. Say hello.`);
+  const empty = messages(page).getByText('No messages here that you can see yet.');
   await expect(empty).toBeVisible();
+  await expect(messages(page).getByText("Messages sent before you joined aren't shown.")).toBeVisible();
+  await expect(page.getByText(/Say hello|No messages in #/)).toHaveCount(0);
   // Connected is not a pause.
   await expect(page.getByText(paused)).toHaveCount(0);
 

@@ -193,3 +193,43 @@ test('G30c on a normal server setup still asks for the authenticator, with no Sk
     server.process.kill('SIGTERM');
   }
 });
+
+// Issue #1032: the owner's first sign-in on a server with no channels shows the
+// first-run panel, not an empty centre and an endless "Connecting…"; making the
+// first channel opens it and the panel goes.
+test('G30d a new owner on a server with no channels sees the first-run panel, and the first channel replaces it', async ({ meet, secrets }) => {
+  test.setTimeout(150_000);
+  const server = await startServer('first-run', { CONCHD_OPERATOR_TOTP: 'optional' });
+  try {
+    secrets.push(server.token, password);
+    const { page } = await meet();
+    // The page is loaded at the clean address first, so the setup token is
+    // never in the document's own navigation entry (as in G30a).
+    await page.goto(server.appUrl);
+    await setUpFromLink(page, server);
+    await skipAndSignIn(page);
+    secrets.push((await tabToken(page)) ?? '');
+
+    const heading = page.getByRole('heading', { name: 'Welcome to your server' });
+    await expect(heading).toBeVisible();
+    await expect(heading).toBeFocused();
+    await expect(page.getByRole('button', { name: 'Make your first channel' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Invite someone' }).last()).toBeDisabled();
+    await expect(page.getByText('Make a channel first')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Decide how people join' })).toBeVisible();
+    const members = page.getByRole('region', { name: 'Members list' });
+    await expect(members.getByText('No channel open')).toBeVisible();
+    await expect(page.getByText('Connecting…')).toHaveCount(0);
+
+    await page.getByRole('button', { name: 'Make your first channel' }).click();
+    const field = page.getByLabel('Channel name');
+    await expect(field).toBeFocused();
+    await field.fill('channel-a');
+    await page.getByRole('button', { name: 'Create channel' }).click();
+    await expect(page.getByRole('heading', { name: 'channel-a', exact: true })).toBeVisible();
+    await expect(heading).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Make your first channel' })).toHaveCount(0);
+  } finally {
+    server.process.kill('SIGTERM');
+  }
+});

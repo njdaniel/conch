@@ -704,7 +704,11 @@ export function Conversation({
           </button>
         ) : null}
         {chat.history === 'ready' && shown.length === 0 && chat.pending.length === 0 ? (
-          <p className="hint">No messages in #{channel} yet. Say hello.</p>
+          <div className="hint empty-conversation">
+            <p>No messages here that you can see yet.</p>
+            <p>Messages sent before you joined aren&apos;t shown.</p>
+            <p>Write a message to start.</p>
+          </div>
         ) : null}
         <ol className="messages">
           {shown.map((message, i) => (

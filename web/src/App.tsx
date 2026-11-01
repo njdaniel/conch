@@ -10,6 +10,7 @@ import { GuestVisit } from './Guest';
 import { displayName, visitOf } from './guestName';
 import { channelWords, Invite, refusalLine, waitWords } from './Invite';
 import { InvitePanel } from './InvitePanel';
+import { FirstRun } from './FirstRun';
 import { Lobby } from './Lobby';
 import { ReportProblem } from './Report';
 import { OperatorWarning } from './OperatorWarning';
@@ -468,6 +469,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     [loseChannel],
   );
   const [searchOpen, setSearchOpen] = useState(false);
+  // Asks from the first-run panel for the New channel form (issue #1032).
+  const [createAsks, setCreateAsks] = useState(0);
   const restoreSearchFocus = useRef(false);
   useEffect(() => {
     if (searchOpen) {
@@ -1656,6 +1659,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             // The server allows operators alone; anyone else is not offered it.
             auth.principal.role === 'operator' ? (
               <CreateChannel
+                asks={createAsks}
                 onCreated={(channel) => {
                   dispatchChannels({ type: 'created', channel });
                 }}
@@ -1669,7 +1673,17 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             ) : null
           }
           conversation={
-            selected === null || channelId === null ? null : (
+            selected === null || channelId === null ? (
+              // An operator on a server with no channels is shown what to do
+              // first; anyone else keeps the channel list's own line.
+              channels.loaded && channels.channels.length === 0 && auth.principal.role === 'operator' && visit === null ? (
+                <FirstRun
+                  onMakeChannel={() => {
+                    setCreateAsks((n) => n + 1);
+                  }}
+                />
+              ) : null
+            ) : (
               <>
                 {agents.state.detail === null ? null : <RunDetail agents={agents} now={now} onGoToMessage={goToMessage} />}
                 {!searchOpen ? null : (

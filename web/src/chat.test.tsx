@@ -287,12 +287,18 @@ describe('a live edit', () => {
 });
 
 describe('an empty channel', () => {
-  const emptyLine = 'No messages in #general yet. Say hello.';
+  const emptyLine = 'No messages here that you can see yet.';
 
   it('says so once its history has loaded with nothing in it', async () => {
     await openChat();
     await screen.findByText(emptyLine);
-    expect(within(screen.getByRole('log', { name: 'Messages' })).getByText(emptyLine).tagName).toBe('P');
+    const log = within(screen.getByRole('log', { name: 'Messages' }));
+    expect(log.getByText(emptyLine).tagName).toBe('P');
+    expect(log.getByText("Messages sent before you joined aren't shown.")).toBeTruthy();
+    expect(log.getByText('Write a message to start.')).toBeTruthy();
+    // Never the claim that the channel is empty (issue #1034).
+    expect(screen.queryByText(/Say hello/)).toBeNull();
+    expect(screen.queryByText(/No messages in #general/)).toBeNull();
   });
 
   it('says nothing of the kind for a channel with messages', async () => {
