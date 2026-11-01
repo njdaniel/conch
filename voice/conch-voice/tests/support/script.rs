@@ -161,6 +161,16 @@ impl Switched {
         self.frames.load(Ordering::SeqCst)
     }
 
+    /// A clock for the transmit task (`Timings::transmit_clock`) that counts the frames
+    /// this microphone has delivered, 10 ms each, as [`Played::clock`] does for a script:
+    /// the hang measured by the clock then passes at the frame the detector counts it in,
+    /// however late a loaded machine runs the task (issue #1098). Not for a test of a
+    /// stalled device: what that tests is the real clock.
+    pub fn clock(self: &Arc<Self>) -> TxClock {
+        let switched = Arc::clone(self);
+        TxClock::from_fn(move || Duration::from_millis(switched.frames() * u64::from(FRAME_MS)))
+    }
+
     /// Waits until `count` more frames have been read: time as the level detector counts
     /// it, however late the task that reads them is.
     pub async fn frames_pass(&self, count: u64) {

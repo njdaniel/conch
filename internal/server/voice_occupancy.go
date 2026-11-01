@@ -236,8 +236,9 @@ func (s *Server) voiceOccupancyCaller(w http.ResponseWriter, r *http.Request) (s
 		writeError(w, http.StatusForbidden, errForbidden.Code, "agents do not use voice")
 		return store.Principal{}, false
 	}
-	if !caller.VoiceAllowed {
-		s.denyForbidden(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server")
+	// use_voice, the role's cell and the person's brake together (design
+	// §7.3); one code, whichever said no.
+	if !s.requireVoicePermission(w, r, caller, schema.PermUseVoice) {
 		return store.Principal{}, false
 	}
 	return caller, true
