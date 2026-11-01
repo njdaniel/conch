@@ -368,11 +368,24 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	if !voiceRoomPublishes(room) {
 		return schema.VoiceShareV1{}, errVoiceShareNotChannelRoom
 	}
+	if p.claimSeam != nil {
+		p.claimSeam("enter")
+	}
 	p.mu.Lock()
 	r := p.roomLocked(room)
 	p.mu.Unlock()
+	if p.claimSeam != nil {
+		p.claimSeam("lock")
+	}
 	r.claims.Lock()
 	defer r.claims.Unlock()
+	// Runs before the claims are let go: a revocation waiting on them in
+	// endSharesOf finds this claim finished, and the room leaves retiring.
+	defer func() {
+		p.mu.Lock()
+		delete(p.retiring, r)
+		p.mu.Unlock()
+	}()
 
 	r.order.Lock()
 	p.mu.Lock()
@@ -411,7 +424,7 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	// claims (endSharesOf), or looked before it was recorded, in which case
 	// its commit precedes this read. Either way no grant is written once a
 	// revocation has answered. A read that fails is a refusal, not a guess.
-	if err := p.shareEntitled(lctx, principalID); err != nil {
+	if err := p.shareEntitled(lctx, room, principalID); err != nil {
 		if held == nil {
 			p.undoClaim(r, mine)
 		} else {
@@ -454,10 +467,11 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 		// the grant with it, and the share never started.
 		p.mu.Unlock()
 		r.order.Unlock()
-		// The person's grant went with the room, or is the sweep's to
-		// find; the companion was just granted the screen and is taken
-		// back at once.
-		p.withdrawCompanionNow(ctx, r, principalID)
+		// What was just granted is taken back at once, the person's own
+		// grant as well as the companion's: a DeleteRoom that failed leaves
+		// the room, and the grant in it, until the sweep. A revocation that
+		// rotated the room waits for this in endSharesOf (retiring).
+		p.withdrawAll(ctx, r, principalID, voiceRoomPublishes(room))
 		return schema.VoiceShareV1{}, errVoiceShareRoomGone
 	}
 	p.mu.Unlock()
@@ -504,18 +518,42 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	return schema.VoiceShareV1{PrincipalID: principalID, StartedAt: schema.NewTimestamp(mine.startedAt), Audio: true}, nil
 }
 
-// shareEntitled reads principalID's share_screen now, from the permissions
-// document and the person's brakes (the store's permittedTx, as can does for
-// a handler), and answers errVoiceShareNotAllowed when they do not hold it.
-// A read that fails is an error too, never a yes. The caller holds the room's
-// claims.
-func (p *voicePoller) shareEntitled(ctx context.Context, principalID int64) error {
+// shareEntitled reads, under the room's claims, everything a share in room
+// rests on (issue #1061), so a revocation that committed before this read is
+// seen by it:
+//   - share_screen, from the permissions document and the person's brakes
+//     (the store's permittedTx, as can does for a handler):
+//     errVoiceShareNotAllowed when it is not held;
+//   - the person's place in the room, as the passes read it
+//     (voiceEntitlement: disabled, a guest whose visit ended, voice off, not
+//     a channel member) and the room still live (a rotation commits its
+//     retirement before forgetting the room): errVoiceShareRoomGone, the
+//     answer a claim in a room that has gone gets.
+//
+// A read that fails is an error too, never a yes.
+func (p *voicePoller) shareEntitled(ctx context.Context, room store.VoiceRoom, principalID int64) error {
 	ok, err := p.s.store.Permitted(ctx, principalID, schema.PermShareScreen)
 	if err != nil {
 		return fmt.Errorf("voice: read share_screen: %w", err)
 	}
 	if !ok {
 		return errVoiceShareNotAllowed
+	}
+	_, reason, err := p.s.voiceEntitlement(ctx, voiceIdentity(principalID), room.ChannelID)
+	switch {
+	case err != nil:
+		return fmt.Errorf("voice: read the sharer's place: %w", err)
+	case reason == voiceReasonVoiceOff:
+		return errVoiceShareNotAllowed
+	case reason != "":
+		return errVoiceShareRoomGone
+	}
+	live, err := p.s.store.VoiceRoomLive(ctx, room.ID)
+	switch {
+	case err != nil:
+		return fmt.Errorf("voice: read the room: %w", err)
+	case !live:
+		return errVoiceShareRoomGone
 	}
 	return nil
 }
@@ -541,7 +579,17 @@ func (p *voicePoller) endSharesOf(ctx context.Context, principalID, channelID in
 			rooms = append(rooms, r)
 		}
 	}
+	// A retired room whose pending claim is theirs: it is no longer in rooms,
+	// but the claim may be inside LiveKit's answer, and is waited for too.
+	for r, pid := range p.retiring {
+		if pid == principalID && (channelID == 0 || r.channelID == channelID) {
+			rooms = append(rooms, r)
+		}
+	}
 	p.mu.Unlock()
+	if p.endSharesSeam != nil {
+		p.endSharesSeam(len(rooms))
+	}
 	// A revocation is not cancelled by a caller who hangs up.
 	ctx = context.WithoutCancel(ctx)
 	slices.SortFunc(rooms, func(a, b *voiceRoomState) int {
