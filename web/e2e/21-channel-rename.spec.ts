@@ -95,12 +95,13 @@ test('C728 an operator renames the open channel; a second page moves too; a relo
   for (const page of [a, b]) await page.evaluate(() => Object.assign(window, { c728: 'not reloaded' }));
 
   // A renames from the channel list.
-  await nav(a).getByRole('button', { name: `Rename #${from}` }).click();
+  await nav(a).getByRole('button', { name: `Actions for ${from}` }).click();
+  await nav(a).getByRole('menuitem', { name: 'Rename channel…' }).click();
   const form = a.getByRole('form', { name: 'Rename channel' });
   await expect(form.getByLabel('New name')).toHaveValue(from);
   await form.getByLabel('New name').fill(to);
   await form.getByRole('button', { name: 'Rename channel' }).click();
-  await expect(nav(a).getByText(`Renamed to #${to}`)).toBeVisible();
+  await expect(form).toHaveCount(0);
   await showsOpen(a, to);
   await expect(channelButton(a, from)).toHaveCount(0);
   expect(asked.filter((r) => r.startsWith('PUT') && r.endsWith('/name'))).toEqual([`PUT /v1/channels/${String(channel.id)}/name`]);
@@ -155,7 +156,8 @@ test('C728 a rename refused because the channel was renamed meanwhile says so, m
   await expect(statusLine(page)).toContainText('Connected');
   await channelButton(page, from).click();
   await showsOpen(page, from);
-  await nav(page).getByRole('button', { name: `Rename #${from}` }).click();
+  await nav(page).getByRole('button', { name: `Actions for ${from}` }).click();
+  await nav(page).getByRole('menuitem', { name: 'Rename channel…' }).click();
   const form = page.getByRole('form', { name: 'Rename channel' });
 
   // Another operator renames it first, as a script would.

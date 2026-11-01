@@ -496,7 +496,7 @@ describe('the member list the socket sends', () => {
     socket.send(memberList(granted));
     await panel().findByRole('form', { name: 'Add person by name' });
     expect(nav().getByText('manages')).toBeDefined();
-    expect(nav().getByRole('button', { name: 'Rename #general' })).toBeDefined();
+    expect(nav().getByRole('button', { name: 'Actions for general' })).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     expect(screen.getByText('You manage #general.')).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -506,7 +506,7 @@ describe('the member list the socket sends', () => {
       expect(panel().queryByRole('form', { name: 'Add person by name' })).toBeNull();
     });
     expect(nav().queryByText('manages')).toBeNull();
-    expect(nav().queryByRole('button', { name: 'Rename #general' })).toBeNull();
+    expect(nav().queryByRole('button', { name: 'Actions for general' })).toBeNull();
     expect(panel().getByText('Only operators and this channel\'s managers add people.')).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     expect(screen.getByText('You are a member.')).toBeDefined();

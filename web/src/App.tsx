@@ -17,7 +17,7 @@ import { ReportProblem } from './Report';
 import { OperatorWarning } from './OperatorWarning';
 import { RenameChannel } from './RenameChannel';
 import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeLinkFromAddress } from './route';
-import type { ChannelDocV1 } from './schema/channel';
+import type { ChannelDocV1, ChannelV0 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import type { ReadStateV1 } from './schema/readstate';
 import { SignIn } from './SignIn';
@@ -473,6 +473,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const [searchOpen, setSearchOpen] = useState(false);
   // Asks from the first-run panel for the New channel form (issue #1032).
   const [createAsks, setCreateAsks] = useState(0);
+  // A channel's ⋯ menu asked for the invite panel with that channel ticked
+  // (issue #1135): the channel and a count, so asking twice opens it twice.
+  const [inviteAsk, setInviteAsk] = useState<{ readonly channel: string; readonly n: number } | undefined>(undefined);
   const restoreSearchFocus = useRef(false);
   useEffect(() => {
     if (searchOpen) {
@@ -1656,22 +1659,27 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               onOpen={onOpen}
             />
           }
-          renameChannel={
-            // Operators and this channel's managers may rename. Keyed by id:
-            // opening another channel starts the form over, and a rename of
-            // this one keeps it.
-            visit === null && (auth.principal.role === 'operator' || currentChannel?.manages === true) && channelId !== null && selected !== null ? (
-              <RenameChannel
-                key={channelId}
-                channel={{ id: channelId, name: selected }}
-                onRenamed={(channel) => {
-                  renamed(channel.id, channel.name);
-                }}
-                onStale={refind}
-                onUnauthorized={onUnauthorized}
-              />
-            ) : null
-          }
+          // Operators and each channel's managers may rename it, from that
+          // row's ⋯ menu (issues #728, #1135). A visit gets no rename.
+          canRename={(channel) => visit === null && (auth.principal.role === 'operator' || channel.manages === true)}
+          renderRename={(channel, close) => (
+            <RenameChannel
+              channel={channel}
+              onRenamed={(renamedTo) => {
+                renamed(renamedTo.id, renamedTo.name);
+              }}
+              onStale={refind}
+              onUnauthorized={onUnauthorized}
+              onClose={close}
+            />
+          )}
+          {...(auth.principal.may_invite === true
+            ? {
+                onInviteTo: (channel: ChannelV0) => {
+                  setInviteAsk((ask) => ({ channel: channel.name, n: (ask?.n ?? 0) + 1 }));
+                },
+              }
+            : {})}
           newChannel={
             // The server allows operators alone; anyone else is not offered it.
             auth.principal.role === 'operator' ? (
@@ -1686,7 +1694,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           }
           invites={
             auth.principal.may_invite === true ? (
-              <InvitePanel origin={origin} me={auth.principal} channels={channels.channels} onUnauthorized={onUnauthorized} />
+              <InvitePanel origin={origin} me={auth.principal} channels={channels.channels} request={inviteAsk} onUnauthorized={onUnauthorized} />
             ) : null
           }
           firstRun={

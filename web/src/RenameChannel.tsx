@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
+import { useEffect, useId, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { serverLine } from './Invite';
 import type { ChannelV0 } from './schema/channel';
@@ -36,8 +36,8 @@ function refusalLine(result: Refusal): string {
   return (result.code === undefined ? undefined : refusals[result.code]) ?? 'The server could not rename the channel. Try again.';
 }
 
-// "Rename" (issue #728): an operator or this channel's manager renames it from the
-// channel list, one request per submit, however often the button is pressed.
+// "Rename channel…" (issues #728, #1135): an operator or this channel's manager
+// renames it from the channel's ⋯ menu, in place under its row, one request per submit, however often the button is pressed.
 // It sends the name the list shows now with the new one, so a rename someone
 // else made meanwhile is refused rather than undone. Nothing changes on the
 // page until the server has said yes; the channel's answer is handed to
@@ -47,9 +47,13 @@ export function RenameChannel({
   onRenamed,
   onStale,
   onUnauthorized,
+  onClose,
 }: {
-  // The open channel, as the list holds it now.
+  // The channel being renamed, as the list holds it now.
   readonly channel: Pick<ChannelV0, 'id' | 'name'>;
+  // Escape, Cancel and a rename made close the form; the caller puts focus
+  // back on the channel's ⋯ (issue #1135).
+  readonly onClose: () => void;
   readonly onRenamed: (channel: ChannelV0) => void;
   // The server says the channel is no longer called what the list says, or
   // is not found: the list is read again, and this is what it is called now
@@ -57,19 +61,21 @@ export function RenameChannel({
   readonly onStale: (id: number) => Promise<string | null>;
   readonly onUnauthorized: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   const [value, setValue] = useState(channel.name);
   const [busy, setBusy] = useState(false);
   const [line, setLine] = useState<Line | null>(null);
   // The request in flight, held outside state: two submits in one tick both
   // see the state of the render before them, and the second must send nothing.
   const sending = useRef(false);
-  const toggle = useRef<HTMLButtonElement>(null);
+  const field = useRef<HTMLInputElement>(null);
+  // Several rows may each hold a form at once: each names its own field.
+  const fieldId = useId();
   // An answer that comes after the control is gone (another channel opened,
   // signed out) changes nothing here; the list still learns of a rename made.
   const live = useRef(true);
   useEffect(() => {
     live.current = true;
+    field.current?.focus();
     return () => {
       live.current = false;
     };
@@ -92,10 +98,7 @@ export function RenameChannel({
         onRenamed(result.value);
         if (!live.current) return;
         setBusy(false);
-        setOpen(false);
-        setLine({ text: `Renamed to #${result.value.name}`, refused: false });
-        // The form is hidden with focus in it: focus goes back to its button.
-        toggle.current?.focus();
+        onClose();
         return;
       }
       if (result.failure === 'unauthorized') {
@@ -115,24 +118,20 @@ export function RenameChannel({
   }
 
   return (
-    <div className="rename-channel">
-      <button
-        ref={toggle}
-        type="button"
-        aria-expanded={open}
-        aria-controls="rename-channel-form"
-        onClick={() => {
-          setOpen(!open);
-          setValue(channel.name);
-          setLine(null);
-        }}
-      >
-        Rename #{channel.name}
-      </button>
-      <form id="rename-channel-form" aria-label="Rename channel" hidden={!open} onSubmit={submit}>
-        <label htmlFor="rename-channel-field">New name</label>
+    <div
+      className="rename-channel"
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape' || event.nativeEvent.isComposing || event.defaultPrevented) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onClose();
+      }}
+    >
+      <form aria-label="Rename channel" onSubmit={submit}>
+        <label htmlFor={fieldId}>New name</label>
         <input
-          id="rename-channel-field"
+          ref={field}
+          id={fieldId}
           type="text"
           autoComplete="off"
           value={value}
@@ -143,6 +142,9 @@ export function RenameChannel({
         />
         <button type="submit" disabled={busy || value.trim() === ''}>
           Rename channel
+        </button>
+        <button type="button" onClick={onClose}>
+          Cancel
         </button>
       </form>
       <p role="status" className={line?.refused === true ? 'notice' : 'hint'}>
