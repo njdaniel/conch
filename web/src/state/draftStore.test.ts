@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { capped, clearStored, draftBudgetBytes, forgetChannelStored, loadStored, pruneStored, saveDrafts, saveEdit } from './draftStore';
+import { capped, clearStored, draftBudgetBytes, forgetChannelStored, loadStored, pruneStored, saveDrafts, saveEdit, saveReplies } from './draftStore';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -29,7 +29,7 @@ describe('the drafts kept across a reload', () => {
 
   it('is given to nobody else, and removed when another person signs in', () => {
     saveDrafts(2, { 7: 'first person’s' });
-    expect(loadStored(3)).toEqual({ principal: 3, drafts: {}, targets: {}, edits: {} });
+    expect(loadStored(3)).toEqual({ principal: 3, drafts: {}, targets: {}, edits: {}, replies: {} });
     expect(window.sessionStorage.length).toBe(0);
   });
 
@@ -82,7 +82,7 @@ describe('the drafts kept across a reload', () => {
     // The net under a whisper, and whether it had come back before, are kept.
     expect(loadStored(2).targets).toEqual({ '7': { net: 5, whisper: [3, 4], protected: true }, '8': { net: 5, whisper: null, protected: false } });
     pruneStored(2, (id) => id === 7);
-    expect(loadStored(2)).toEqual({ principal: 2, drafts: { '7': 'x' }, targets: { '7': { net: 5, whisper: [3, 4], protected: true } }, edits: {} });
+    expect(loadStored(2)).toEqual({ principal: 2, drafts: { '7': 'x' }, targets: { '7': { net: 5, whisper: [3, 4], protected: true } }, edits: {}, replies: {} });
   });
 
   it('removes the old snapshot when a write fails, so sent text does not come back', () => {
@@ -116,5 +116,49 @@ describe('the drafts kept across a reload', () => {
       clearStored();
     }).not.toThrow();
     expect(loadStored(2).drafts).toEqual({});
+  });
+});
+
+describe('the replies kept across a reload (issue #1080)', () => {
+  it('saves by channel and root, text only, and loads for the same person', () => {
+    saveReplies(2, 7, new Map([[1, 'first'], [5, 'second']]));
+    saveReplies(2, 8, new Map([[3, 'other']]));
+    expect(loadStored(2).replies).toEqual({ '7': { '1': 'first', '5': 'second' }, '8': { '3': 'other' } });
+    expect(window.sessionStorage.getItem('conch.web.drafts')).not.toMatch(/audience|whisper|net/);
+  });
+
+  it('survives saving the drafts, and is forgotten when emptied', () => {
+    saveReplies(2, 7, new Map([[1, 'first']]));
+    saveDrafts(2, { 7: 'x' });
+    expect(loadStored(2).replies).toEqual({ '7': { '1': 'first' } });
+    saveReplies(2, 7, new Map([[1, '']]));
+    saveDrafts(2, {});
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it('is pruned with its channel, and gone at sign-out and for another person', () => {
+    saveReplies(2, 7, new Map([[1, 'a']]));
+    saveReplies(2, 8, new Map([[1, 'b']]));
+    pruneStored(2, (id) => id === 8);
+    expect(loadStored(2).replies).toEqual({ '8': { '1': 'b' } });
+    forgetChannelStored(2, 8);
+    expect(window.sessionStorage.length).toBe(0);
+    saveReplies(2, 7, new Map([[1, 'a']]));
+    expect(loadStored(3).replies).toEqual({});
+    saveReplies(2, 7, new Map([[1, 'a']]));
+    clearStored();
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it('keeps each reply to the draft budget', () => {
+    saveReplies(2, 7, new Map([[1, 'a'.repeat(draftBudgetBytes + 100)]]));
+    expect(loadStored(2).replies['7']?.['1']?.length).toBe(draftBudgetBytes - 2);
+  });
+
+  it('with storage refused does not throw', () => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('refused'); });
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('refused'); });
+    expect(() => { saveReplies(2, 7, new Map([[1, 'a']])); }).not.toThrow();
+    expect(loadStored(2).replies).toEqual({});
   });
 });

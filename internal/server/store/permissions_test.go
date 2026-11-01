@@ -1098,9 +1098,16 @@ func TestPermissionsMigration(t *testing.T) {
 				if err := s.db.QueryRow("SELECT value FROM server_settings WHERE key = 'permissions_revision'").Scan(&rev); err != nil || rev != "1" {
 					t.Errorf("pass %d: permissions_revision = %q, %v; want 1", pass, rev, err)
 				}
-				evs, err := s.ListAuditEvents(ctx, 0, 100)
+				all, err := s.ListAuditEvents(ctx, 0, 100)
 				if err != nil {
 					t.Fatal(err)
+				}
+				// The community migration (40) writes its own row after this one.
+				var evs []AuditEvent
+				for _, e := range all {
+					if e.Action != AuditCommunityMigrated {
+						evs = append(evs, e)
+					}
 				}
 				if len(evs) != 1 || evs[0].Action != AuditPermissionsInitialized || evs[0].Actor != "system" ||
 					evs[0].Subject != "server" || evs[0].Detail != tt.detail {

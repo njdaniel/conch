@@ -1,3 +1,4 @@
+import { cloneElement } from 'react';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
@@ -14,9 +15,10 @@ function chat(messages: readonly MessageV2[], pending: readonly PendingSend[] = 
   return { byId: new Map(messages.map((message) => [message.id, message])), pending, sentIds: new Set(), history: 'ready', older: 'idle', exhausted: true, trimmed: false, dropped: 0, nextLocalId: 3 };
 }
 
-function conversation(messages: readonly MessageV2[], pending: readonly PendingSend[] = [], onReplySend = vi.fn(), live: 'open' | 'reconnecting' = 'open') {
+function conversation(messages: readonly MessageV2[], pending: readonly PendingSend[] = [], onReplySend = vi.fn(), live: 'open' | 'reconnecting' = 'open', channelId?: number) {
   return (
     <Conversation
+      channelId={channelId}
       channel="general"
       chat={chat(messages, pending)}
       live={live}
@@ -39,8 +41,8 @@ function conversation(messages: readonly MessageV2[], pending: readonly PendingS
   );
 }
 
-function view(messages: readonly MessageV2[], pending: readonly PendingSend[] = [], onReplySend = vi.fn(), live: 'open' | 'reconnecting' = 'open') {
-  return render(conversation(messages, pending, onReplySend, live));
+function view(messages: readonly MessageV2[], pending: readonly PendingSend[] = [], onReplySend = vi.fn(), live: 'open' | 'reconnecting' = 'open', channelId?: number) {
+  return render(conversation(messages, pending, onReplySend, live, channelId));
 }
 
 beforeEach(() => {
@@ -48,6 +50,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  window.sessionStorage.clear();
   cleanup();
   vi.restoreAllMocks();
 });
@@ -228,5 +231,112 @@ describe('what a reply answers', () => {
     const thread = await screen.findByRole('region', { name: 'Thread around message 1' });
     expect(within(thread).getByRole('textbox', { name: 'Reply to bea' })).toBeTruthy();
     expect(within(thread).queryByText(/^Replying to bea:/)).toBeNull();
+  });
+});
+
+describe('a half-typed reply kept across a reload (issue #1080)', () => {
+  const keep = (replies: Record<string, Record<string, string>>) => { window.sessionStorage.setItem('conch.web.drafts', JSON.stringify({ principal: 2, drafts: {}, targets: {}, edits: {}, replies })); };
+  const kept = () => (JSON.parse(window.sessionStorage.getItem('conch.web.drafts') ?? '{}') as { replies?: unknown }).replies;
+  const root2 = (): MessageV2 => ({ ...root(), id: 5, body: 'second root' });
+
+  it('keeps what is typed, by root, and nothing else', async () => {
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root()] } });
+    view([root()], [], vi.fn(), 'open', 7);
+    fireEvent.click(screen.getByRole('button', { name: 'Reply to message 1' }));
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Reply to bea' }), { target: { value: 'half typed' } });
+    await waitFor(() => { expect(kept()).toEqual({ '7': { '1': 'half typed' } }); });
+  });
+
+  it('restores the text into the thread, reopened, and sends it as a reply to that root', async () => {
+    keep({ '7': { '1': 'half typed' } });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root()] } });
+    const onReplySend = vi.fn();
+    view([root()], [], onReplySend, 'open', 7);
+    const box = await screen.findByRole('textbox', { name: 'Reply to bea' });
+    expect(box).toHaveProperty('value', 'half typed');
+    fireEvent.click(screen.getByRole('button', { name: 'Send reply' }));
+    expect(onReplySend).toHaveBeenCalledWith('half typed', 1, undefined);
+    await waitFor(() => { expect(kept()).toBeUndefined(); });
+  });
+
+  it('brings back two drafts, each under its own root', async () => {
+    keep({ '7': { '1': 'first', '5': 'second' } });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root(), root2()] } });
+    view([root(), root2()], [], vi.fn(), 'open', 7);
+    expect(await screen.findByRole('textbox', { name: 'Reply to bea' })).toHaveProperty('value', 'second');
+    fireEvent.click(screen.getByRole('button', { name: 'Reply to message 1' }));
+    await waitFor(() => { expect(screen.getByRole('textbox', { name: 'Reply to bea' })).toHaveProperty('value', 'first'); });
+  });
+
+  it('drops a draft whose root is not held, silently, and opens nothing', async () => {
+    keep({ '7': { '9': 'orphan' } });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [] } });
+    view([root()], [], vi.fn(), 'open', 7);
+    await waitFor(() => { expect(kept()).toBeUndefined(); });
+    expect(screen.queryByRole('region', { name: /Thread around/ })).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('forgets the draft when the text is emptied or the thread is closed', async () => {
+    keep({ '7': { '1': 'half typed' } });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root()] } });
+    view([root()], [], vi.fn(), 'open', 7);
+    fireEvent.change(await screen.findByRole('textbox', { name: 'Reply to bea' }), { target: { value: '' } });
+    await waitFor(() => { expect(kept()).toBeUndefined(); });
+  });
+
+  it('writes and deletes nothing while the history loads, then settles: the orphan goes, the root restores', async () => {
+    keep({ '7': { '1': 'half typed', '9': 'orphan', '2': 'to a reply' } });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root(), reply(2)] } });
+    const before = window.sessionStorage.getItem('conch.web.drafts');
+    const loading = (messages: readonly MessageV2[]) => cloneElement(conversation(messages, [], vi.fn(), 'open', 7), { chat: { ...chat(messages), history: 'loading' as const } });
+    const { rerender } = render(loading([]));
+    await Promise.resolve();
+    expect(window.sessionStorage.getItem('conch.web.drafts')).toBe(before);
+    expect(screen.queryByRole('region', { name: /Thread around/ })).toBeNull();
+    rerender(loading([root(), reply(2)]));
+    expect(window.sessionStorage.getItem('conch.web.drafts')).toBe(before);
+    rerender(conversation([root(), reply(2)], [], vi.fn(), 'open', 7));
+    expect(await screen.findByRole('textbox', { name: 'Reply to bea' })).toHaveProperty('value', 'half typed');
+    await waitFor(() => { expect(kept()).toEqual({ '7': { '1': 'half typed' } }); });
+  });
+
+  it('restores a kept edit and a kept reply in one channel, neither overwriting the other', async () => {
+    const mine: MessageV2 = { schema: 'conch.message.v2', id: 3, channel_id: 7, author_id: 2, created_at: new Date().toISOString(), body: 'my words' };
+    window.sessionStorage.setItem('conch.web.drafts', JSON.stringify({ principal: 2, drafts: {}, targets: {}, edits: { '7': { message: 3, text: 'my edited words' } }, replies: { '7': { '1': 'half typed' } } }));
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root()] } });
+    render(cloneElement(conversation([root(), mine], [], vi.fn(), 'open', 7), { onEdited: vi.fn() }));
+    expect(await screen.findByRole('textbox', { name: 'Reply to bea' })).toHaveProperty('value', 'half typed');
+    expect(await screen.findByDisplayValue('my edited words')).toBeTruthy();
+    await waitFor(() => {
+      const stored = JSON.parse(window.sessionStorage.getItem('conch.web.drafts') ?? '{}') as { edits?: unknown; replies?: unknown };
+      expect(stored.edits).toEqual({ '7': { message: 3, text: 'my edited words' } });
+      expect(stored.replies).toEqual({ '7': { '1': 'half typed' } });
+    });
+  });
+
+  it('closing a thread with text still in it forgets that draft across a remount, keeping the other', async () => {
+    keep({ '7': { '1': 'first', '5': 'second' } });
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root(), root2()] } });
+    const first = view([root(), root2()], [], vi.fn(), 'open', 7);
+    expect(await screen.findByRole('textbox', { name: 'Reply to bea' })).toHaveProperty('value', 'second');
+    fireEvent.click(screen.getByRole('button', { name: 'Close thread' }));
+    await waitFor(() => { expect(kept()).toEqual({ '7': { '1': 'first' } }); });
+    first.unmount();
+    view([root(), root2()], [], vi.fn(), 'open', 7);
+    expect(await screen.findByRole('textbox', { name: 'Reply to bea' })).toHaveProperty('value', 'first');
+    expect(kept()).toEqual({ '7': { '1': 'first' } });
+  });
+
+  it('keeps no audience, and works with storage refused', async () => {
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root({ kind: 'net', net_id: 4 })] } });
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('refused'); });
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('refused'); });
+    view([root({ kind: 'net', net_id: 4 })], [], vi.fn(), 'open', 7);
+    fireEvent.click(screen.getByRole('button', { name: 'Reply to message 1' }));
+    const box = await screen.findByRole('textbox', { name: 'Reply to bea' });
+    fireEvent.change(box, { target: { value: 'still works' } });
+    expect(box).toHaveProperty('value', 'still works');
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

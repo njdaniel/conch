@@ -477,6 +477,6 @@ func (s *Server) voiceDropIfRetired(ctx context.Context, room store.VoiceRoom) {
 	if live {
 		return
 	}
-	s.voice.forgetRoom(ctx, room.RoomName)
+	s.voice.retireRoom(ctx, room)
 	s.voice.deleteRooms(ctx, []store.VoiceRoom{room})
 }

@@ -684,7 +684,13 @@ const seamForbidden: readonly (readonly [string, RegExp])[] = [
 // route.ts alone reads location.origin: it builds the address without its
 // fragment for the history entry, and an invite link, from the address bar
 // itself, not from the server's origin (issue #440).
-const seamExceptions: Readonly<Record<string, readonly string[]>> = { 'the page origin or protocol': ['./route.ts'] };
+// The desktop adapter is a platform implementation too: its copyText is the
+// page's own clipboard write, which main permits for the app window right
+// after a click (issue #947).
+const seamExceptions: Readonly<Record<string, readonly string[]>> = {
+  'the page origin or protocol': ['./route.ts'],
+  'the clipboard': ['./platform/desktop/index.ts'],
+};
 
 describe('the platform seam', () => {
   it('finds the browser implementation', () => {
