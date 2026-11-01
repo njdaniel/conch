@@ -81,7 +81,6 @@ var notYetGated = map[schema.Permission]string{
 	schema.PermCreatePrivateChannels: "#981, member channel creation",
 	schema.PermSeeMemberDirectory:    "#983, the member directory",
 	schema.PermUseVoice:              "A4, the member permissions on voice",
-	schema.PermShareScreen:           "A4, the member permissions on voice",
 	schema.PermChangeServerSettings:  "A3b (#1015), the route classes",
 	schema.PermReadAuditLog:          "A3b (#1015), the route classes",
 }
