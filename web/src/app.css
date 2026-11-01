@@ -2708,9 +2708,24 @@ button.link {
     grid-template-rows: minmax(0, 1fr);
   }
 
+  /* The connection state is the only sign of an outage on a phone, so it gets
+     a row of its own under the brand and the buttons (issue #1030): at 320 px
+     four buttons leave no room beside it. The word comes first and is never
+     cut; the name shrinks after it. */
   .topbar {
-    gap: var(--s2);
-    padding: var(--s2) var(--s3);
+    flex-wrap: wrap;
+    gap: 0 var(--s2);
+    padding: var(--s1) var(--s3);
+  }
+
+  .topbar .status {
+    line-height: 1;
+    order: 3;
+    flex: 1 1 100%;
+  }
+
+  .topbar .conn {
+    order: -1;
   }
 
   .brand {
@@ -3395,4 +3410,20 @@ button.link {
   color: var(--muted);
   min-height: 0;
   margin: 0.25rem 0;
+}
+
+.attachment-file {
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.attachment-size {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.draft-attachment-size {
+  white-space: nowrap;
 }

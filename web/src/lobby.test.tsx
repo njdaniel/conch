@@ -62,7 +62,7 @@ describe('Settings', () => {
   it('opens as a panel with focus on its heading; Escape closes it and focus goes back to Settings', async () => {
     windowOf(true);
     lobby();
-    const button = screen.getByRole('button', { name: 'Settings' });
+    const button = screen.getByRole('button', { name: /^Settings/ });
     expect(button.getAttribute('aria-expanded')).toBe('false');
     expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
     fireEvent.click(button);
@@ -83,7 +83,7 @@ describe('Settings', () => {
   it('closes on its close button and on a click outside, each time giving focus back', () => {
     windowOf(true);
     const { container } = lobby();
-    const button = screen.getByRole('button', { name: 'Settings' });
+    const button = screen.getByRole('button', { name: /^Settings/ });
     fireEvent.click(button);
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Settings' })).getByRole('button', { name: 'Close' }));
     expect(screen.queryByRole('dialog', { name: 'Settings' })).toBeNull();
@@ -99,13 +99,13 @@ describe('Settings', () => {
   it('asks before signing out, and Escape there leaves the question and the panel', () => {
     windowOf(true);
     lobby();
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Settings/ }));
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
     const cancel = screen.getByRole('button', { name: 'Cancel' });
     expect(document.activeElement).toBe(cancel);
     fireEvent.keyDown(cancel, { key: 'Escape' });
     expect(screen.queryByRole('button', { name: 'Yes, sign out' })).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Settings/ }));
     expect(screen.getByRole('button', { name: 'Sign out' })).toBeDefined();
   });
 });
@@ -168,7 +168,7 @@ describe('what is playing', () => {
     expect(events).toEqual(['mount conversation', 'mount voice']);
     fireEvent.click(screen.getByRole('button', { name: 'Members' }));
     fireEvent.click(screen.getByRole('button', { name: 'Members' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Settings/ }));
     fireEvent.keyDown(screen.getByRole('dialog', { name: 'Settings' }), { key: 'Escape' });
     size.resize(false);
     fireEvent.click(screen.getByRole('button', { name: 'Members' }));

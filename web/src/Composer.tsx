@@ -2,7 +2,8 @@ import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState
 import { EmojiPicker } from './EmojiPicker';
 import { completeShortcode, completionAt, insertAt, loadEmoji, type Emoji, type EmojiIndex } from './emoji/emoji';
 import { Glyph } from './Icons';
-import { validateImage, type ImageValidationResult } from './image';
+import { formatSize, isPreviewType } from './fileSize';
+import { validateImage } from './image';
 import type { Audience } from './schema/message';
 import { audienceScope, maxDraftAttachments, type DraftAttachment, type NewDraftAttachment } from './state/attachments';
 import type { Target, TargetAction } from './state/drafts';
@@ -56,18 +57,21 @@ function DraftPreview({ attachment, busy, onRemove, onCancel, onRetry }: {
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [broken, setBroken] = useState(false);
+  const image = isPreviewType(attachment.mediaType);
   useEffect(() => {
+    if (!image) return;
     const made = URL.createObjectURL(attachment.bytes);
     setUrl(made);
     return () => {
       URL.revokeObjectURL(made);
     };
-  }, [attachment.bytes]);
+  }, [attachment.bytes, image]);
 
   return (
     <li className="draft-attachment">
-      {url !== null && !broken ? <img src={url} alt="" onError={() => { setBroken(true); }} /> : <span className="draft-image-fallback" aria-hidden="true">Image</span>}
+      {!image ? <span className="draft-image-fallback" aria-hidden="true">File</span> : url !== null && !broken ? <img src={url} alt="" onError={() => { setBroken(true); }} /> : <span className="draft-image-fallback" aria-hidden="true">Image</span>}
       <span className="draft-attachment-name">{attachment.filename}</span>
+      {image ? null : <span className="hint draft-attachment-size">{formatSize(attachment.size)}</span>}
       {attachment.status === 'uploading' ? (
         <>
           <progress aria-label={`Uploading ${attachment.filename}`} />
@@ -84,17 +88,6 @@ function DraftPreview({ attachment, busy, onRemove, onCancel, onRetry }: {
       <button type="button" onClick={onRemove} disabled={busy} aria-label={`Remove ${attachment.filename}`}>Remove</button>
     </li>
   );
-}
-
-function validationLine(file: File, result: ImageValidationResult): string | null {
-  if (result.ok) return null;
-  const name = file.name === '' ? 'The image' : file.name;
-  switch (result.failure) {
-    case 'unsupported': return `${name}: only PNG and JPEG images can be attached.`;
-    case 'invalid': return `${name}: the image is damaged or is not really a PNG or JPEG.`;
-    case 'too-large': return `${name}: the image dimensions are too large.`;
-    case 'unavailable': return `${name}: this browser cannot check image previews.`;
-  }
 }
 
 // The composer: who the message goes to, the box to write in, and Send. The
@@ -279,24 +272,30 @@ export function Composer({
     const frozenScope = scope;
     const slots = Math.max(0, maxDraftAttachments - attachments.length);
     const accepted = incoming.slice(0, slots);
-    const countError = incoming.length > slots ? `Only ${String(maxDraftAttachments)} images can be attached to one message.` : null;
+    const countError = incoming.length > slots ? `Only ${String(maxDraftAttachments)} files can be attached to one message.` : null;
     if (accepted.length === 0) {
       setInputError(countError);
       return;
     }
     const checked = await Promise.all(accepted.map(async (file) => ({ file, result: await validateImage(file) })));
     if (generation !== validationGeneration.current || scopeNow.current !== frozenScope) return;
-    const valid: NewDraftAttachment[] = [];
-    const errors: string[] = countError === null ? [] : [countError];
-    for (const { file, result } of checked) {
-      const line = validationLine(file, result);
-      if (line !== null) errors.push(line);
-      else if (result.ok) valid.push({
-        filename: file.name === '' ? `image.${result.value.format === 'png' ? 'png' : 'jpg'}` : file.name,
-        mediaType: result.value.format === 'png' ? 'image/png' : 'image/jpeg',
+    // A PNG or JPEG that passes the sniff is an image, with a preview. Any
+    // other file, and an image that fails the sniff, goes as a plain file.
+    const valid: NewDraftAttachment[] = checked.map(({ file, result }) => {
+      if (result.ok) {
+        return {
+          filename: file.name === '' ? `image.${result.value.format === 'png' ? 'png' : 'jpg'}` : file.name,
+          mediaType: result.value.format === 'png' ? 'image/png' : 'image/jpeg',
+          bytes: file,
+        };
+      }
+      return {
+        filename: file.name === '' ? 'file' : file.name,
+        mediaType: isPreviewType(file.type) || file.type === '' ? 'application/octet-stream' : file.type,
         bytes: file,
-      });
-    }
+      };
+    });
+    const errors: string[] = countError === null ? [] : [countError];
     if (valid.length > 0) fileDraft.add(valid);
     setInputError(errors.length === 0 ? null : errors.join(' '));
   }
@@ -381,7 +380,7 @@ export function Composer({
         </fieldset>
       ) : null}
       {attachments.length > 0 ? (
-        <ul className="draft-attachments" aria-label="Images to send" aria-busy={uploading}>
+        <ul className="draft-attachments" aria-label="Files to send" aria-busy={uploading}>
           {attachments.map((attachment) => (
             <DraftPreview
               key={attachment.clientId}
@@ -416,10 +415,9 @@ export function Composer({
       <input
         ref={picker}
         type="file"
-        accept="image/png,image/jpeg"
         multiple
         className="image-file-input"
-        aria-label="Choose images"
+        aria-label="Choose files"
         tabIndex={-1}
         onChange={(event) => {
           const input = event.currentTarget;
@@ -429,9 +427,9 @@ export function Composer({
           });
         }}
       />
-      <button type="button" className="attach-image" aria-label="Attach images" disabled={!enabled || busy} onClick={() => { picker.current?.click(); }}>
+      <button type="button" className="attach-image" aria-label="Attach" disabled={!enabled || busy} onClick={() => { picker.current?.click(); }}>
         <Glyph name="image" />
-        <span className="label">Attach images</span>
+        <span className="label">Attach</span>
       </button>
       <textarea
         id="composer-text"

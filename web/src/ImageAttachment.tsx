@@ -1,24 +1,22 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { fetchFileBytes, getFileMeta } from './api';
-import { maxImageEncodedBytes, validateImage, type ImageValidationResult } from './image';
+import { formatSize } from './fileSize';
+import { maxImageEncodedBytes, validateImage } from './image';
 
 interface AttachmentView {
   readonly filename: string;
   readonly url: string | null;
   readonly note: string | null;
+  // The file's size once its metadata is read. A file with a size and no note
+  // is not a previewable image: it shows as a file chip (name, size, Download).
+  readonly size: number | null;
 }
 
-function validationNote(result: Exclude<ImageValidationResult, { readonly ok: true }>): string {
-  switch (result.failure) {
-    case 'unsupported':
-      return 'This file format is not supported for image preview.';
-    case 'too-large':
-      return 'This image is too large to preview.';
-    case 'unavailable':
-      return 'Image preview is not available in this browser.';
-    case 'invalid':
-      return 'The file is broken or is not a valid PNG or JPEG.';
-  }
+// A declared type that is plainly not an image is not fetched to be sniffed.
+// An unknown or generic type still is, so an image sent by another client
+// keeps its preview.
+function maybeImage(mediaType: string): boolean {
+  return mediaType === '' || mediaType === 'application/octet-stream' || mediaType.startsWith('image/');
 }
 
 function ignoreUnauthorized() {}
@@ -40,7 +38,7 @@ export function ImageAttachment({
   const trigger = useRef<HTMLButtonElement>(null);
   const dialog = useRef<HTMLDivElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
-  const [view, setView] = useState<AttachmentView>({ filename: `File ${String(fileId)}`, url: null, note: 'Loading attachment…' });
+  const [view, setView] = useState<AttachmentView>({ filename: `File ${String(fileId)}`, url: null, note: 'Loading attachment…', size: null });
   const [open, setOpen] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
@@ -58,40 +56,41 @@ export function ImageAttachment({
     setOpen(false);
     setDownloading(false);
     setDownloadError(null);
-    setView({ filename: `File ${String(fileId)}`, url: null, note: 'Loading attachment…' });
+    setView({ filename: `File ${String(fileId)}`, url: null, note: 'Loading attachment…', size: null });
 
     void (async () => {
       const metadata = await getFileMeta(fileId);
       if (stale()) return;
       if (!metadata.ok) {
         if (metadata.failure === 'unauthorized') onUnauthorized();
-        setView({ filename: `File ${String(fileId)}`, url: null, note: 'Attachment unavailable. Try downloading it again.' });
+        setView({ filename: `File ${String(fileId)}`, url: null, note: 'Attachment unavailable. Try downloading it again.', size: null });
         return;
       }
       const filename = metadata.value.filename;
-      if (metadata.value.size > maxImageEncodedBytes) {
-        setView({ filename, url: null, note: 'This image is too large to preview.' });
+      const size = metadata.value.size;
+      if (size > maxImageEncodedBytes || !maybeImage(metadata.value.media_type)) {
+        setView({ filename, url: null, note: null, size });
         return;
       }
-      setView({ filename, url: null, note: 'Loading attachment…' });
+      setView({ filename, url: null, note: 'Loading attachment…', size });
       const bytes = await fetchFileBytes(fileId);
       if (stale()) return;
       if (!bytes.ok) {
         if (bytes.failure === 'unauthorized') onUnauthorized();
-        setView({ filename, url: null, note: 'Attachment unavailable. Try downloading it again.' });
+        setView({ filename, url: null, note: 'Attachment unavailable. Try downloading it again.', size });
         return;
       }
       const validated = await validateImage(bytes.value);
       if (stale()) return;
       if (!validated.ok) {
-        setView({ filename, url: null, note: validationNote(validated) });
+        setView({ filename, url: null, note: null, size });
         return;
       }
       let url: string;
       try {
         url = URL.createObjectURL(bytes.value);
       } catch {
-        setView({ filename, url: null, note: 'Image preview is not available in this browser.' });
+        setView({ filename, url: null, note: 'Image preview is not available in this browser.', size });
         return;
       }
       if (stale()) {
@@ -99,7 +98,7 @@ export function ImageAttachment({
         return;
       }
       objectURL.current = url;
-      setView({ filename, url, note: null });
+      setView({ filename, url, note: null, size });
     })().catch(() => {
       if (!stale()) setView((current) => ({ ...current, url: null, note: 'Attachment unavailable. Try downloading it again.' }));
     });
@@ -137,7 +136,7 @@ export function ImageAttachment({
       if (result.failure === 'unauthorized' || result.failure === 'unavailable') {
         clearPreview();
         setOpen(false);
-        setView((current) => ({ ...current, url: null, note: 'Attachment unavailable. Try downloading it again.' }));
+        setView((current) => ({ ...current, url: null, note: 'Attachment unavailable. Try downloading it again.', size: null }));
       }
       setDownloadError('Download unavailable. Try again.');
       return;
@@ -179,6 +178,8 @@ export function ImageAttachment({
     }
   }
 
+  const chipSize = view.url === null && view.note === null ? view.size : null;
+  const chip = chipSize !== null;
   const preview = view.url === null ? null : (
     <>
       <button ref={trigger} type="button" className="attachment-thumbnail" aria-label={`Enlarge ${view.filename}`} onClick={() => { setOpen(true); }}>
@@ -212,9 +213,10 @@ export function ImageAttachment({
   );
 
   return (
-    <figure className={view.url === null ? 'attachment attachment-fallback' : 'attachment attachment-image'}>
+    <figure className={view.url !== null ? 'attachment attachment-image' : chip ? 'attachment attachment-file' : 'attachment attachment-fallback'}>
       {preview}
       <figcaption className="attachment-filename">{view.filename}</figcaption>
+      {chipSize === null ? null : <span className="attachment-size">{formatSize(chipSize)}</span>}
       {view.note === null ? null : <span className="attachment-note">{view.note}</span>}
       {view.url !== null ? null : (
         <button type="button" className="attachment-download" disabled={downloading} onClick={() => { void download(); }}>
