@@ -60,6 +60,10 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
   // Counts the sessions asked for; an answer for an older one is ended at once.
   const generation = useRef(0);
   const replaced = useRef(false);
+  // The generation of the creation in flight, if any, and the generations a
+  // credential's replacement made out of date (issue #1084).
+  const creating = useRef<number | null>(null);
+  const dropped = useRef(new Set<number>());
   // Set by release: the session was ended on purpose (sign-out), so the
   // server's closing of its socket is not a reason to make another.
   const released = useRef(false);
@@ -92,11 +96,16 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
   const start = useCallback(
     (why: 'ended' | 'unavailable') => {
       const mine = ++generation.current;
+      creating.current = mine;
       setSession({ phase: 'starting' });
       void api.createSession(sessionClient).then((result) => {
+        if (creating.current === mine) creating.current = null;
         if (mine !== generation.current) {
-          // Signed out, or replaced, while it was being made.
-          if (result.ok) void api.endSession(result.value.id);
+          // Signed out, or replaced, while it was being made. One made for a
+          // credential being replaced is left: the replacement ends it on the
+          // server, or it lapses, and asking to end it is a request that may
+          // be refused (issue #1084).
+          if (result.ok && !dropped.current.has(mine)) void api.endSession(result.value.id);
           return;
         }
         if (result.ok) {
@@ -171,25 +180,48 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
   // same session is taken up again.
   useEffect(() => {
     if (!active) return;
+    // The writes out now, whether any replaced the credential, the session
+    // let go of (null when none was held), and whether a creation in flight
+    // was let go of: the page resumes once every write has settled.
+    const outstanding = new Set<number>();
+    let rotated = false;
     let paused: number | null = null;
+    let fresh = false;
+    const rotatedNow = () => {
+      held.current = null;
+      replaced.current = false;
+      start('unavailable');
+    };
     return api.onCredentialReplacing((event) => {
       if (event.phase === 'begin') {
-        if (held.current === null) return;
-        paused = held.current;
-        generation.current++;
-        setSession({ phase: 'starting' });
+        if (outstanding.size === 0) {
+          paused = held.current;
+          fresh = creating.current !== null;
+          rotated = false;
+          dropped.current.add(generation.current);
+          generation.current++;
+          setSession({ phase: 'starting' });
+        }
+        outstanding.add(event.id);
         return;
       }
-      if (paused === null) return;
-      const id = paused;
-      paused = null;
-      if (event.rotated) {
-        held.current = null;
-        replaced.current = false;
-        start('unavailable');
-      } else {
-        setSession({ phase: 'ready', id });
+      if (event.late) {
+        // Answered after the wait with a new credential: what was taken up
+        // again belongs to the old one.
+        if (outstanding.size > 0) rotated = true;
+        else rotatedNow();
+        return;
       }
+      if (!outstanding.delete(event.id)) return;
+      if (event.rotated) rotated = true;
+      if (outstanding.size > 0) return;
+      const id = paused;
+      const again = fresh;
+      paused = null;
+      fresh = false;
+      if (rotated) rotatedNow();
+      else if (id !== null) setSession({ phase: 'ready', id });
+      else if (again) start('unavailable');
     });
   }, [active, start]);
 
