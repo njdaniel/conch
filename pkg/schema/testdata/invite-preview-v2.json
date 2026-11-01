@@ -1,0 +1,13 @@
+{
+  "kind": "member",
+  "server_name": "conch.example",
+  "inviter": "ada",
+  "channels": [
+    "general"
+  ],
+  "expires_at": "2026-11-06T12:00:00.000Z",
+  "join": {
+    "guest": false,
+    "account": true
+  }
+}

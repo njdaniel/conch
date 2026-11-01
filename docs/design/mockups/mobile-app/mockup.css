@@ -1,0 +1,251 @@
+/* Conch phone app: illustrative flow prototype (issue #1107).
+   Plain CSS, no dependency, no network. Sizes inside the phone are in em of
+   the phone's own font size, which the "Text size" control scales, so the
+   layout follows Dynamic Type or Android font scale. A target is at least
+   44 px high and wide at every text size and grows past that as its text wraps. */
+
+:root {
+  color-scheme: dark;
+  --bg: #14161a;
+  --surface: #1d2026;
+  --raised: #282c34;
+  --line: #3b414d;
+  --text: #eceef2;
+  --muted: #a9b0bd;
+  --accent: #6cb6ff;
+  --on-accent: #08182a;
+  --ok: #62d68f;
+  --warn: #e8bb4a;
+  --danger: #ff8077;
+  --on-danger: #2a0805;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #0d0f12; color: var(--text); font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* ---- the bench around the phone ---- */
+.ribbon { margin: 0; padding: 10px 16px; background: #3a2e05; color: #ffe9a8; border-bottom: 1px solid #6b5710; font-size: 14px; }
+.bench { display: flex; flex-wrap: wrap; gap: 24px; padding: 16px; align-items: flex-start; }
+.controls { flex: 1 1 280px; max-width: 360px; display: grid; gap: 12px; }
+.controls fieldset { margin: 0; padding: 10px 12px 12px; border: 1px solid var(--line); border-radius: 8px; display: grid; gap: 6px; }
+.controls legend { padding: 0 6px; font-weight: 600; }
+.controls label { font-size: 14px; color: var(--muted); }
+.controls .check { display: flex; gap: 8px; align-items: center; color: var(--text); min-height: 28px; }
+.controls select, .controls button { font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--raised); color: var(--text); min-height: 36px; }
+.controls button { cursor: pointer; }
+.stage { flex: 1 1 400px; min-width: 0; display: grid; gap: 8px; justify-items: start; }
+.caption { margin: 0; font-weight: 600; }
+.hint { margin: 0; color: var(--muted); font-size: 14px; }
+
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+/* ---- the phone ---- */
+.phone {
+  --scale: 1;
+  --w: 390px; --h: 844px;
+  --sat: 47px; --sar: 0px; --sab: 34px; --sal: 0px;
+  position: relative;
+  width: var(--w); height: var(--h);
+  flex: none;
+  overflow: hidden;
+  display: flex; flex-direction: column;
+  padding: var(--sat) var(--sar) var(--sab) var(--sal);
+  background: var(--bg); color: var(--text);
+  border: 2px solid #3a3f49; border-radius: 34px;
+  font-size: calc(16px * var(--scale));
+  line-height: 1.35;
+}
+.phone[data-land] { border-radius: 26px; }
+.phone[data-kb] { padding-bottom: 0; }
+.phone button, .phone input, .phone textarea, .phone select { font: inherit; color: inherit; }
+.phone h1, .phone h2, .phone h3, .phone p, .phone ul, .phone dl, .phone dd { margin: 0; padding: 0; }
+.phone ul { list-style: none; }
+.phone [hidden] { display: none !important; }
+
+.safe-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 20; border-style: solid; border-color: rgba(255, 90, 90, .28); display: none; }
+.phone[data-safe-show] .safe-overlay { display: block; }
+.home-bar { position: absolute; left: 50%; bottom: 8px; width: 34%; height: 5px; margin-left: -17%; border-radius: 3px; background: #c9ccd3; opacity: .55; pointer-events: none; z-index: 21; }
+.phone[data-kb] .home-bar { display: none; }
+
+.keyboard { flex: none; background: #2b2e35; border-top: 1px solid #444; color: var(--muted); display: grid; place-items: center; font-size: 14px; padding: 8px; text-align: center; }
+
+/* ---- structure of every screen ---- */
+.app { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.top { flex: none; display: flex; align-items: center; gap: .25em; padding: .25em .5em; border-bottom: 1px solid var(--line); min-height: 3em; }
+.top h1 { flex: 1; min-width: 0; font-size: 1.1em; font-weight: 650; overflow-wrap: anywhere; }
+.top h1:focus { outline: none; }
+.top h1:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.top .sub { display: block; font-size: .8em; font-weight: 400; color: var(--muted); }
+.content { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.pad { padding: .75em 1em 1em; display: grid; gap: .75em; align-content: start; }
+.dock { flex: none; }
+.nav { flex: none; display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--line); background: var(--surface); }
+.phone[data-land] .nav button { flex-direction: row; gap: .4em; }
+.phone[data-kb] .nav { display: none; }
+
+.btn, .ibtn, .nav button, .row-btn {
+  min-height: 44px; min-width: 44px;
+  border-radius: .6em; border: 1px solid var(--line); background: var(--raised);
+  padding: .4em .8em; cursor: pointer; text-align: center; touch-action: manipulation;
+  display: inline-flex; align-items: center; justify-content: center; gap: .4em;
+  overflow-wrap: anywhere;
+}
+.ibtn { padding: .4em; background: transparent; border-color: transparent; }
+.btn.primary { background: var(--accent); color: var(--on-accent); border-color: var(--accent); font-weight: 650; }
+.btn.danger { background: var(--danger); color: var(--on-danger); border-color: var(--danger); font-weight: 650; }
+.btn.quiet { background: transparent; }
+.btn[aria-pressed="true"] { background: #1f3f63; border-color: var(--accent); }
+.btn[disabled], .btn[aria-disabled="true"] { opacity: .55; cursor: not-allowed; }
+.btn.block { display: flex; width: 100%; }
+.nav button { border: 0; border-radius: 0; background: transparent; flex-direction: column; gap: .1em; font-size: .85em; position: relative; padding-block: .3em; }
+.nav button[aria-current="page"] { color: var(--accent); font-weight: 650; box-shadow: inset 0 3px 0 var(--accent); }
+.dot { width: .6em; height: .6em; border-radius: 50%; background: var(--ok); display: inline-block; }
+.nav .dot { position: absolute; top: .4em; right: calc(50% - 1.6em); }
+.glyph { font-size: 1.2em; line-height: 1; }
+
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: .8em; padding: .75em .9em; display: grid; gap: .4em; }
+.card h2 { font-size: 1em; }
+.muted { color: var(--muted); font-size: .9em; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: .15em .75em; font-size: .9em; }
+.kv dt { color: var(--muted); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.badge { display: inline-block; border: 1px solid var(--line); border-radius: 1em; padding: 0 .55em; font-size: .75em; color: var(--muted); white-space: nowrap; }
+.badge.hot { border-color: var(--accent); color: var(--accent); }
+
+.field { display: grid; gap: .25em; }
+.field label { font-size: .9em; color: var(--muted); }
+.field input, .field textarea { min-height: 44px; border-radius: .6em; border: 1px solid var(--line); background: var(--surface); padding: .4em .7em; width: 100%; }
+.field input[aria-invalid="true"] { border-color: var(--danger); }
+.err { color: var(--danger); font-size: .9em; }
+
+/* banners */
+.banner { padding: .5em 1em; font-size: .9em; display: flex; gap: .5em; align-items: center; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+.banner.warn { background: #3a2f0b; color: #ffe9a8; }
+.banner.bad { background: #3a1512; color: #ffd0cb; }
+.banner.info { background: #12293f; color: #cfe6ff; }
+.banner .btn { min-height: 44px; }
+
+/* channel list */
+.list li { border-bottom: 1px solid var(--line); }
+.row-btn { width: 100%; justify-content: flex-start; text-align: left; border: 0; border-radius: 0; background: transparent; padding: .5em 1em; gap: .6em; }
+.row-btn .grow { flex: 1; min-width: 0; display: grid; }
+.row-btn .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-btn .sub { font-size: .8em; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pill { background: var(--accent); color: var(--on-accent); border-radius: 1em; padding: 0 .55em; font-size: .8em; font-weight: 700; }
+.group-h { padding: .6em 1em .2em; font-size: .8em; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+
+/* chat */
+.log { padding: .5em 1em; display: grid; gap: .6em; align-content: end; min-height: 100%; }
+.msg { display: grid; gap: .1em; }
+.msg .who { font-size: .85em; color: var(--muted); display: flex; gap: .5em; min-width: 0; align-items: baseline; }
+.msg .who b { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+.msg .body { overflow-wrap: anywhere; white-space: pre-wrap; }
+.msg .body a { color: var(--accent); }
+.msg .mention { background: #1f3f63; border-radius: .3em; padding: 0 .2em; }
+.msg.mine .body { background: #1f3f63; border-radius: .6em; padding: .3em .6em; justify-self: end; }
+.msg .state { font-size: .85em; display: flex; gap: .5em; align-items: center; flex-wrap: wrap; }
+.msg .state.bad { color: var(--danger); }
+.chip { border: 1px solid var(--line); border-radius: .5em; padding: .25em .5em; font-size: .9em; width: fit-content; max-width: 100%; overflow-wrap: anywhere; }
+.reply-ctx { border-left: 3px solid var(--line); padding-left: .5em; color: var(--muted); font-size: .85em; overflow-wrap: anywhere; }
+.msg-actions { display: flex; gap: .25em; }
+.composer { border-top: 1px solid var(--line); background: var(--surface); padding: .35em .5em; display: grid; gap: .25em; }
+.composer .aud { font-size: .8em; color: var(--muted); overflow-wrap: anywhere; }
+.composer .line { display: flex; gap: .35em; align-items: flex-end; }
+.composer textarea { flex: 1; min-width: 0; min-height: 44px; max-height: 6em; resize: none; border-radius: .6em; border: 1px solid var(--line); background: var(--bg); padding: .5em .7em; }
+.composer .send { flex: none; }
+
+/* voice strip */
+.strip { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: .25em; padding: .25em .5em; background: var(--surface); border-top: 1px solid var(--line); align-items: center; }
+.strip .where { justify-content: flex-start; text-align: left; min-width: 0; border-color: transparent; background: transparent; }
+.strip .where .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.strip.collapsed { grid-template-columns: 1fr; }
+.strip .talk[data-on="true"], .talkbig[data-on="true"] { background: var(--ok); color: #04210f; border-color: var(--ok); font-weight: 700; }
+
+/* voice view */
+.talkbig { min-height: 88px; width: 100%; font-size: 1.2em; font-weight: 650; border-radius: 1em; user-select: none; -webkit-user-select: none; touch-action: none; }
+.status-lines { display: grid; gap: .15em; }
+.status-lines .l { display: flex; gap: .5em; align-items: center; }
+.ring { width: .8em; height: .8em; border-radius: 50%; border: 2px solid var(--muted); flex: none; }
+.ring[data-on="true"] { background: var(--ok); border-color: var(--ok); }
+.ring[data-on="true"].pulse { animation: pulse 1.2s ease-in-out infinite; }
+.phone[data-motion="reduce"] .ring.pulse { animation: none; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 .4em rgba(98, 214, 143, .25); } }
+.toggles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 7em), 1fr)); gap: .4em; }
+.roster li { display: flex; gap: .5em; align-items: center; padding: .3em 0; border-bottom: 1px solid var(--line); min-width: 0; }
+.roster .nm { overflow-wrap: anywhere; flex: 1; min-width: 0; }
+.voice-land { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: .75em; align-items: start; }
+
+/* sheets and dialogs */
+.scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .55); z-index: 10; display: flex; align-items: flex-end; }
+.phone[data-land] .scrim { align-items: center; justify-content: center; }
+.sheet { width: 100%; max-height: 92%; overflow-y: auto; background: var(--surface); border-radius: 1em 1em 0 0; padding: 1em; display: grid; gap: .75em; border-top: 1px solid var(--line); animation: rise .2s ease-out; }
+.phone[data-land] .sheet { max-width: 30em; border-radius: 1em; }
+.phone[data-motion="reduce"] .sheet { animation: none; }
+@keyframes rise { from { transform: translateY(1.5em); opacity: 0; } }
+.sheet h2 { font-size: 1.1em; }
+.sheet .acts { display: grid; gap: .4em; }
+.phone[data-kb] .scrim { bottom: 0; }
+
+.toast { position: absolute; left: .75em; right: .75em; bottom: 5.5em; z-index: 15; background: #e6e8ed; color: #15181d; border-radius: .7em; padding: .6em .9em; font-size: .9em; }
+.phone[data-land] .toast { bottom: 3.5em; }
+
+.web-bar { background: #2a2d34; color: var(--muted); font-size: .8em; padding: .35em .75em; text-align: center; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+
+/* Stop animation by the system setting too, unless the control says allow. */
+@media (prefers-reduced-motion: reduce) {
+  .phone:not([data-motion="allow"]) .ring.pulse { animation: none; }
+  .phone:not([data-motion="allow"]) .sheet { animation: none; }
+}
+
+/* Narrow bench window: the phone keeps its size and the stage wraps below the
+   controls; the page scrolls. */
+
+
+.contents { display: contents; }
+.sheet .check { display: flex; gap: .5em; align-items: center; min-height: 44px; }
+.sheet fieldset { border: 1px solid var(--line); border-radius: .6em; padding: .4em .8em; margin: 0; }
+.sheet legend { padding: 0 .3em; color: var(--muted); font-size: .9em; }
+.vo-aud { display: none; }
+
+/* Landscape with the keyboard up: only the log and the composer keep the
+   screen. The header and the voice strip are hidden; the composer's audience
+   line says where voice is, in words. */
+.phone[data-land][data-kb] .top,
+.phone[data-land][data-kb] .strip { display: none; }
+.phone[data-land][data-kb] .vo-aud { display: inline; }
+.phone[data-land] .composer .aud { font-size: .75em; }
+
+.app, .dock, .content { min-width: 0; }
+.composer { grid-template-columns: minmax(0, 1fr); }
+.composer .line { min-width: 0; }
+.composer textarea { flex: 1 1 0; width: 0; }
+.nav button { overflow-wrap: normal; padding-inline: .15em; }
+.stage { flex: 0 1 auto; }
+.phone[data-large] .voice-land { grid-template-columns: minmax(0, 1fr); }
+.voice-land > .pad { padding: 0; min-width: 0; }
+
+/* Landscape: the three views are a rail on the leading edge, which gives the
+   height back to the log; the strip and the composer stay in the column. */
+.app.land { flex-direction: row; }
+.app.land .main { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.app.land .nav { display: flex; flex-direction: column; border-top: 0; border-right: 1px solid var(--line); min-width: 5.5em; }
+.app.land .nav button { flex: 1 1 0; flex-direction: column; }
+.phone[data-kb] .app.land .nav { display: none; }
+/* Keyboard up at large text: only the log and the composer keep the screen. */
+.phone[data-kb][data-large] .top,
+.phone[data-kb][data-large] .strip { display: none; }
+.phone[data-kb][data-large] .vo-aud { display: inline; }
+
+/* Landscape at the largest text: no fixed chrome. The header, the log, the
+   composer and the strip are one document that scrolls (as the browser client
+   does under 560 px of height), so nothing can cover Send. */
+.phone[data-land][data-large] .app.land .main { display: block; overflow-y: auto; overscroll-behavior: contain; }
+.phone[data-land][data-large] .app.land .content { overflow: visible; }
+.phone[data-land][data-large] .app.land .log { min-height: 0; }
+.phone[data-land][data-large][data-kb] .top { display: flex; }
+.pad { grid-template-columns: minmax(0, 1fr); }
+.phone p, .phone label, .phone dd, .phone dt, .phone h1, .phone h2, .phone li { overflow-wrap: anywhere; }
+.roster li { flex-wrap: wrap; }
+.roster .badge { white-space: normal; }
+.card { min-width: 0; }

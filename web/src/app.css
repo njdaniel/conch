@@ -1449,6 +1449,11 @@ label {
   border-color: transparent;
 }
 
+.actions-menu [role='menuitem'][aria-disabled='true'] {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
 .actions-menu [role='menuitem']:focus-visible,
 .actions-menu [role='menuitem']:hover {
   background: var(--hover);
@@ -1938,17 +1943,39 @@ label {
   margin-bottom: var(--s4);
 }
 
-.member-controls {
-  display: flex;
-  flex-basis: 100%;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s1) var(--s2);
-  margin-top: var(--s1);
+/* A member row: the ⋯ button sits at the row's right edge, as on a message;
+   a refusal line takes the row's width under the name. */
+.member-row {
+  position: relative;
 }
 
-.member-controls button,
-.member-controls label {
+.member-row.has-actions {
+  padding-right: 2.75rem;
+}
+
+.member-row .message-menu {
+  top: 0;
+}
+
+/* The question removal asks (issue #1083): under the name, the row's width,
+   buttons a finger can hit. */
+.member-confirm {
+  flex-basis: 100%;
+  min-width: 0;
+}
+
+.member-confirm p {
+  margin: var(--s1) 0 var(--s2);
+  font-size: var(--small);
+  overflow-wrap: anywhere;
+}
+
+.member-confirm button {
+  min-height: 2.75rem;
+}
+
+.member-line {
+  flex-basis: 100%;
   font-size: 0.75rem;
 }
 
@@ -3588,4 +3615,24 @@ button.link {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--s2);
+}
+
+/* Settings → Reports (issue #1029): a report is other people's text, shown
+   as it was written, wrapped rather than widening the drawer. */
+.report-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.report-technical {
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+}
+
+.report-view h4 {
+  margin: var(--s2) 0 var(--s1);
+  font-size: 0.9rem;
 }

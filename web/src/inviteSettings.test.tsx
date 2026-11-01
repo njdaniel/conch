@@ -90,6 +90,12 @@ async function opened() {
   return { region, box };
 }
 
+// pause ticks the box and answers the question it asks.
+function pause(region: HTMLElement, box: HTMLInputElement) {
+  fireEvent.click(box);
+  fireEvent.click(within(region).getByRole('button', { name: 'Yes, pause' }));
+}
+
 const puts = (calls: Call[]) => calls.filter((c) => c.method === 'PUT' && c.path === '/v1/invites/settings');
 
 beforeEach(() => {
@@ -113,6 +119,46 @@ describe('Settings → Joining: pause all invites', () => {
     expect(within(region).getByText(line)).toBeDefined();
   });
 
+  it('ticking the box asks, and sends nothing, until the answer is yes', async () => {
+    const calls = serve({ 'GET /v1/invites/settings': () => json({ paused: false }), 'PUT /v1/invites/settings': () => json({ paused: true }) });
+    const { region, box } = await opened();
+    fireEvent.click(box);
+    const group = within(region).getByRole('group', {
+      name: 'Pause every invite? No one can make, preview or use an invite until you switch this back, including links already sent.',
+    });
+    expect(box.checked).toBe(false);
+    expect(document.activeElement).toBe(within(group).getByRole('button', { name: 'Cancel' }));
+    expect(puts(calls)).toEqual([]);
+    fireEvent.click(within(group).getByRole('button', { name: 'Yes, pause' }));
+    await within(region).findByText(pausedLine);
+    expect(puts(calls).map((c) => c.body)).toEqual([{ paused: true }]);
+    expect(within(region).queryByRole('group', { name: /^Pause every invite/ })).toBeNull();
+    expect(box.checked).toBe(true);
+  });
+
+  it.each([
+    { how: 'Cancel', leave: (region: HTMLElement) => fireEvent.click(within(region).getByRole('button', { name: 'Cancel' })) },
+    { how: 'Escape', leave: (region: HTMLElement) => fireEvent.keyDown(within(region).getByRole('button', { name: 'Cancel' }), { key: 'Escape' }) },
+  ])('$how leaves the box unticked, sends nothing and returns focus to the box', async ({ leave }) => {
+    const calls = serve({ 'GET /v1/invites/settings': () => json({ paused: false }), 'PUT /v1/invites/settings': () => json({ paused: true }) });
+    const { region, box } = await opened();
+    fireEvent.click(box);
+    leave(region);
+    expect(within(region).queryByRole('group', { name: /^Pause every invite/ })).toBeNull();
+    expect(box.checked).toBe(false);
+    expect(document.activeElement).toBe(box);
+    expect(puts(calls)).toEqual([]);
+  });
+
+  it('un-ticking a paused switch resumes at once, with no question', async () => {
+    const calls = serve({ 'GET /v1/invites/settings': () => json({ paused: true }), 'PUT /v1/invites/settings': () => json({ paused: false }) });
+    const { region, box } = await opened();
+    fireEvent.click(box);
+    expect(within(region).queryByRole('group', { name: /^Pause every invite/ })).toBeNull();
+    await within(region).findByText(/Invites are on/);
+    expect(puts(calls).map((c) => c.body)).toEqual([{ paused: false }]);
+  });
+
   it('resume sends paused false and shows the answer', async () => {
     const calls = serve({ 'GET /v1/invites/settings': () => json({ paused: true }), 'PUT /v1/invites/settings': () => json({ paused: false }) });
     const { region, box } = await opened();
@@ -125,8 +171,8 @@ describe('Settings → Joining: pause all invites', () => {
   it('pause sends paused true, and shows the server’s answer rather than the click', async () => {
     // The server answers with the value it already had: the box does not follow the click.
     const calls = serve({ 'GET /v1/invites/settings': () => json({ paused: false }), 'PUT /v1/invites/settings': () => json({ paused: false }) });
-    const { box } = await opened();
-    fireEvent.click(box);
+    const { region, box } = await opened();
+    pause(region, box);
     await waitFor(() => {
       expect(puts(calls)).toHaveLength(1);
     });
@@ -140,7 +186,7 @@ describe('Settings → Joining: pause all invites', () => {
   it('pause shows the paused line', async () => {
     serve({ 'GET /v1/invites/settings': () => json({ paused: false }), 'PUT /v1/invites/settings': () => json({ paused: true }) });
     const { region, box } = await opened();
-    fireEvent.click(box);
+    pause(region, box);
     await within(region).findByText(pausedLine);
     expect(box.checked).toBe(true);
   });
@@ -316,7 +362,7 @@ describe('Settings → Joining: pause all invites', () => {
   it('another refusal keeps the old value and says so', async () => {
     serve({ 'GET /v1/invites/settings': () => json({ paused: false }), 'PUT /v1/invites/settings': () => refusal(500, 'internal') });
     const { region, box } = await opened();
-    fireEvent.click(box);
+    pause(region, box);
     await within(region).findByText('The server refused. Invites were not changed.');
     expect(box.checked).toBe(false);
   });
