@@ -439,7 +439,7 @@ describe('in the lobby', () => {
     expect(video).not.toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Members' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Settings/ }));
     fireEvent.keyDown(screen.getByRole('dialog', { name: 'Settings' }), { key: 'Escape' });
     fireEvent.click(within(voice()).getByRole('button', { name: 'Voice options' }));
     size.resize(false);

@@ -597,3 +597,151 @@ describe('images for a newer whisper while the last is on its way (issue #1066)'
     expect(server.posts[1]?.request).toEqual({ body: 'next.png', audience: toBot, payload: { schema: 'conch.file_attachment.v1', data: { file_ids: [70] } } });
   });
 });
+
+// Issue #1067: images kept across a sign-in that ended by itself follow the
+// channel's id and the audience they were added for, as kept text does
+// (issue #1039): never to a channel that only has the old name, never to a
+// wider audience than the draft's.
+describe('images kept across a sign-in that ended (issue #1067)', () => {
+  const bot = { principal_id: 3, created_at: at, name: 'bot', kind: 'agent' };
+  const ada = { principal_id: 2, created_at: at, name: 'ada', kind: 'human' };
+  const to = () => screen.getByLabelText<HTMLSelectElement>('To:');
+  const admitted = new WeakSet<FakeSocket>();
+
+  async function letIn() {
+    await waitFor(() => {
+      for (const socket of FakeSocket.all) {
+        if (admitted.has(socket)) continue;
+        admitted.add(socket);
+        socket.open();
+      }
+      expect(document.querySelector<HTMLTextAreaElement>('textarea')?.disabled).toBe(false);
+    });
+  }
+
+  // The credential stops working when ops is opened; the person signs back in
+  // with the same one. meanwhile runs while they are signed out; netsHeld,
+  // when given, holds every nets answer after that until it resolves.
+  async function expireThenSignIn(meanwhile: () => void = () => {}, netsHeld?: Promise<void>) {
+    const real = globalThis.fetch;
+    let expired = true;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new NativeURL(typeof input === 'string' ? input : input instanceof NativeURL ? input.href : input.url, origin);
+      if (expired && url.pathname === '/v2/channels/ops/messages') return Promise.resolve(json({}, 401));
+      if (!expired && netsHeld !== undefined && /\/nets$/.test(url.pathname)) return netsHeld.then(() => real(input, init));
+      return real(input, init);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+    await screen.findByLabelText('Credential');
+    expired = false;
+    meanwhile();
+    FakeSocket.all = [];
+    fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
+    await screen.findByRole('log', { name: 'Messages' });
+  }
+
+  async function openChannel(name: string) {
+    fireEvent.click(await screen.findByRole('button', { name }));
+    await letIn();
+  }
+
+  async function whisperToBot(withNet = false) {
+    server.members = [ada, bot];
+    await openChat();
+    await screen.findByRole('option', { name: 'net alpha' });
+    if (withNet) fireEvent.change(to(), { target: { value: 'net:5' } });
+    fireEvent.change(to(), { target: { value: 'whisper' } });
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'bot [agent]' }));
+    choose(image('secret.png'));
+    await screen.findByText('secret.png');
+  }
+
+  it('an image kept for channel 7 is offered only there after a rename and a new channel of the old name', async () => {
+    await openChat();
+    choose(image('kept.png'));
+    await screen.findByText('kept.png');
+    await expireThenSignIn(() => {
+      server.channels = [
+        { id: 9, name: 'general', created_at: at },
+        { id: 7, name: 'original', created_at: at },
+        { id: 8, name: 'ops', created_at: at },
+      ];
+      server.history.original = [];
+    });
+    await openChannel('general');
+    expect(screen.queryByText('kept.png')).toBeNull();
+    await openChannel('original');
+    await screen.findByText('kept.png');
+    clickSend();
+    await waitFor(() => { expect(server.posts).toHaveLength(1); });
+    expect(server.uploads.map((u) => u.channel)).toEqual(['original']);
+    expect(server.posts.map((p) => p.channel)).toEqual(['original']);
+  });
+
+  it('an image kept for a channel that is gone is dropped', async () => {
+    await openChat();
+    choose(image('gone.png'));
+    await screen.findByText('gone.png');
+    await expireThenSignIn(() => {
+      server.channels = [{ id: 8, name: 'ops', created_at: at }, { id: 9, name: 'general', created_at: at }];
+    });
+    await openChannel('general');
+    expect(screen.queryByText('gone.png')).toBeNull();
+    expect(document.body.textContent).not.toContain('gone.png');
+  });
+
+  it('an image kept from a whisper draft comes back held, then goes to the same people and never to the channel', async () => {
+    await whisperToBot();
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await expireThenSignIn(() => {}, held);
+    await openChannel('general');
+    await screen.findByText(/Checking who this draft goes to/);
+    expect(screen.queryByText('secret.png')).toBeNull();
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Send' }).disabled).toBe(true);
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await screen.findByText('secret.png');
+    await waitFor(() => {
+      expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Send' }).disabled).toBe(false);
+    });
+    clickSend();
+    await screen.findByText('Sent');
+    expect(server.posts).toHaveLength(1);
+    expect(server.posts[0]?.request.audience).toEqual({ kind: 'principals', principal_ids: [3] });
+    expect(server.posts[0]?.request.payload).toEqual({ schema: 'conch.file_attachment.v1', data: { file_ids: [70] } });
+  });
+
+  it('an image kept from a whisper whose recipient is gone stays unsendable, and the channel never gets it', async () => {
+    await whisperToBot();
+    await expireThenSignIn(() => {
+      server.members = [ada];
+    });
+    await openChannel('general');
+    await screen.findByText(/no longer available/);
+    expect(screen.queryByText('secret.png')).toBeNull();
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Send' }).disabled).toBe(true);
+    fireEvent.change(to(), { target: { value: 'channel' } });
+    expect(screen.queryByText('secret.png')).toBeNull();
+    expect(server.uploads).toHaveLength(0);
+    expect(server.posts).toHaveLength(0);
+  });
+
+  it('an image kept under a whisper that sits on a net keeps the net under it', async () => {
+    await whisperToBot(true);
+    await expireThenSignIn();
+    await openChannel('general');
+    await screen.findByText('secret.png');
+    expect(JSON.parse(window.sessionStorage.getItem('conch.web.drafts') ?? '{}')).toMatchObject({
+      targets: { '7': { net: 5, whisper: [3], protected: true } },
+    });
+    clickSend();
+    await screen.findByText('Sent');
+    expect(server.posts[0]?.request.audience).toEqual({ kind: 'principals', principal_ids: [3] });
+  });
+});

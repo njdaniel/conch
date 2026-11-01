@@ -82,3 +82,31 @@ test('G6 the front door says the server is invite-only, and refuses a wrong pass
   await expect(page.getByLabel('Password', { exact: true })).toBeFocused();
   expect(await page.evaluate(() => window.sessionStorage.length + window.localStorage.length)).toBe(0);
 });
+
+// Issue #1037 (browser UX audit 3, F12): conchd gzips the client's script, and
+// the page shows a loading line, in the HTML itself, until the script runs.
+test('F12 the main script arrives gzipped and the raw HTML holds the loading text', async ({ meet, world }) => {
+  const { page } = await meet();
+  const scripts: { encoding: string | undefined; vary: string | undefined }[] = [];
+  page.on('response', (response) => {
+    const { pathname } = new URL(response.url());
+    if (/\/assets\/index-[^/]*\.js$/.test(pathname)) {
+      const headers = response.headers();
+      scripts.push({ encoding: headers['content-encoding'], vary: headers['vary'] });
+    }
+  });
+
+  // The raw HTML, before any script has run (the request context runs none).
+  const raw = await page.request.get(world.appUrl);
+  expect(raw.ok()).toBe(true);
+  expect(await raw.text()).toMatch(/<div id="root">[\s\S]*Loading Conch…/);
+
+  await page.goto(world.appUrl);
+  // Once loaded, the sign-in form has taken the loading line's place.
+  await expect(page.getByLabel('Credential')).toBeVisible();
+  await expect(page.getByText('Loading Conch…')).toHaveCount(0);
+
+  expect(scripts.length).toBeGreaterThan(0);
+  expect(scripts[0]?.encoding).toBe('gzip');
+  expect(scripts[0]?.vary).toContain('Accept-Encoding');
+});
