@@ -207,6 +207,23 @@ impl Stub {
         self.requests.lock().unwrap().clone()
     }
 
+    /// Waits until the stub has recorded `count` requests, for at most `limit`, and returns
+    /// the requests recorded by then. A client's call can end (a timeout, say) before the
+    /// stub's own task has read and recorded the request it was sent: on a loaded machine
+    /// that task may run well after the client has given up. Counting requests right after
+    /// the calls would then race the stub, so a test that counts waits for the stub's own
+    /// events with this instead of sleeping.
+    pub async fn requests_after(&self, count: usize, limit: Duration) -> Vec<Request> {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            let requests = self.requests();
+            if requests.len() >= count || tokio::time::Instant::now() >= deadline {
+                return requests;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// The one request the stub should have received. More than one means something
     /// was sent twice.
     pub fn only_request(&self) -> Request {
