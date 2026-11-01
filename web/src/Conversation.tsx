@@ -5,7 +5,7 @@ import { guestName } from './guestName';
 import { Avatar } from './Icons';
 import { Linkified } from './Linkified';
 import { ImageAttachment } from './ImageAttachment';
-import { loadStored, saveEdit } from './state/draftStore';
+import { loadStored, saveEdit, saveReplies } from './state/draftStore';
 import { canEdit, EditedMarker, editEnds, editWindowMs, MessageEditor } from './MessageEdit';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
@@ -516,7 +516,15 @@ export function Conversation({
     opener.current = from;
     setOpenThread(id);
   }, []);
-  const [replyDrafts, setReplyDrafts] = useState<ReadonlyMap<number, string>>(new Map());
+  // The replies half-typed in this channel come back from the tab's kept
+  // drafts (issue #1080): text by thread root, nothing else.
+  const [replyDrafts, setReplyDrafts] = useState<ReadonlyMap<number, string>>(() => {
+    const kept = new Map<number, string>();
+    if (channelId === undefined) return kept;
+    for (const [root, text] of Object.entries(loadStored(viewer).replies[String(channelId)] ?? {})) kept.set(Number(root), text);
+    return kept;
+  });
+  const [repliesSettled, setRepliesSettled] = useState(replyDrafts.size === 0);
   const openNow = useRef(openThread);
   const chatNow = useRef(chat);
   openNow.current = openThread;
@@ -638,6 +646,25 @@ export function Conversation({
     if (!editSettled || channelId === undefined) return;
     saveEdit(viewer, channelId, editMessage === null ? null : { message: editMessage, text: editText });
   }, [editSettled, channelId, viewer, editMessage, editText]);
+
+  // Once the history is here, a kept reply whose root is not held (or is not
+  // a root) is dropped without a word, and the thread of the newest root that
+  // still holds one reopens, as an open edit does. Nothing is written before.
+  useEffect(() => {
+    if (repliesSettled || chat.history !== 'ready') return;
+    const kept = new Map<number, string>();
+    for (const [root, text] of replyDrafts) {
+      const held = chat.byId.get(root);
+      if (held !== undefined && held.thread_root_id === undefined && text !== '') kept.set(root, text);
+    }
+    setReplyDrafts(kept);
+    if (kept.size > 0 && openNow.current === null) setOpenThread(Math.max(...kept.keys()));
+    setRepliesSettled(true);
+  }, [repliesSettled, chat.history, chat.byId, replyDrafts]);
+  useEffect(() => {
+    if (!repliesSettled || channelId === undefined) return;
+    saveReplies(viewer, channelId, replyDrafts);
+  }, [repliesSettled, channelId, viewer, replyDrafts]);
 
   const shown = ordered(chat);
   const replyCounts = useMemo(() => {
