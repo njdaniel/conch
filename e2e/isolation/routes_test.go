@@ -69,7 +69,7 @@ func TestEveryRouteHasARow(t *testing.T) {
 // its route serves.
 func TestRowsAskTheirRoute(t *testing.T) {
 	w := &world{tag: "t",
-		a: &group{channels: []string{"alpha-t-camp", "alpha-t-den"}, chanIDs: []int64{1, 2}, people: []*member{{id: 3}}, agent: &member{id: 4},
+		a: &group{channels: []string{"alpha-t-camp", "alpha-t-den"}, chanIDs: []int64{1, 2}, people: []*member{{id: 3}}, agent: &member{id: 4}, hidden: &member{id: 21, name: "hidden-21"},
 			invites: []int64{5, 6}, netName: "alpha-t-net", root: 7},
 		b: &group{channels: []string{"bravo-t-yard"}, chanIDs: []int64{8}, people: []*member{{id: 9}}, approval: 10, agentSession: 11},
 	}

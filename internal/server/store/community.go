@@ -58,6 +58,12 @@ const memberPopulation = `SELECT p.id FROM principals p
 	WHERE p.kind = 'human' AND p.hidden_at IS NULL
 	  AND NOT EXISTS (SELECT 1 FROM guest_visits g WHERE g.principal_id = p.id AND g.state IN ('active', 'ended'))`
 
+// memberPredicateSQL is isMemberTx's test as a SQL condition on a principals
+// row aliased p, so that the directory lists exactly the people isMemberTx
+// admits. It is the one spelling of design §1.1.
+const memberPredicateSQL = `p.kind = 'human' AND p.disabled_at IS NULL AND p.hidden_at IS NULL
+	  AND NOT EXISTS (SELECT 1 FROM guest_visits g WHERE g.principal_id = p.id AND g.state IN ('active', 'ended'))`
+
 // isMemberTx reports whether principalID is a member of the community
 // (design §1.1): a human, enabled, not hidden, with no guest visit active or
 // ended. A converted guest is a member; an ended guest is a dead identity,
@@ -68,9 +74,7 @@ const memberPopulation = `SELECT p.id FROM principals p
 func isMemberTx(ctx context.Context, tx execer, principalID int64) (bool, error) {
 	var member bool
 	err := tx.QueryRowContext(ctx,
-		`SELECT EXISTS (SELECT 1 FROM principals p
-			WHERE p.id = ? AND p.kind = 'human' AND p.disabled_at IS NULL AND p.hidden_at IS NULL
-			  AND NOT EXISTS (SELECT 1 FROM guest_visits g WHERE g.principal_id = p.id AND g.state IN ('active', 'ended')))`,
+		`SELECT EXISTS (SELECT 1 FROM principals p WHERE p.id = ? AND `+memberPredicateSQL+`)`,
 		principalID).Scan(&member)
 	if err != nil {
 		return false, fmt.Errorf("store: is member: %w", err)

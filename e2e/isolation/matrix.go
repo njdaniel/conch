@@ -146,7 +146,44 @@ func aSignInLink(w *world) subject   { return subject{kind: "sign_in_link", id: 
 func aSignInCode(w *world) subject { return subject{kind: "sign_in_link", name: w.a.signInCode} }
 func aReport(w *world) subject     { return subject{kind: "report", id: w.a.reportID} }
 func aMemberName(w *world) subject { return subject{kind: "principal", name: w.a.people[0].name} }
+
+// aHidden is the principal of A's that the operator hid, by id; aHiddenName
+// by the name hiding gave it.
+func aHidden(w *world) subject     { return subject{kind: "principal", id: w.a.hidden.id} }
+func aHiddenName(w *world) subject { return subject{kind: "principal", name: w.a.hidden.name} }
 func aWord(w *world) subject       { return subject{name: w.aName("word-root")} }
+
+// checkDirectoryOfB checks a member of B's list of the community: every one of
+// A's people is in it, A's hidden principal is not, the scope is everyone, and
+// a member sees none of the operator fields.
+func checkDirectoryOfB(w *world, _ api, body []byte) error {
+	var page schema.ServerMembersResponseV1
+	if err := json.Unmarshal(body, &page); err != nil {
+		return fmt.Errorf("the directory is not a member list: %w", err)
+	}
+	if err := page.Validate(); err != nil {
+		return err
+	}
+	if page.Scope != schema.DirectoryScopeEveryone {
+		return fmt.Errorf("the directory's scope is %q, want everyone", page.Scope)
+	}
+	listed := map[int64]bool{}
+	for _, m := range page.Members {
+		listed[m.ID] = true
+		if m.VoiceAllowed != nil || m.MayInvite != nil || m.InvitedBy != nil || m.Owner {
+			return fmt.Errorf("a member sees the operator fields of %s", m.Name)
+		}
+	}
+	for _, m := range append(slices.Clone(w.a.people), w.a.agent, w.b.agent) {
+		if !listed[m.id] {
+			return fmt.Errorf("%s (%d) is not in the directory", m.name, m.id)
+		}
+	}
+	if listed[w.a.hidden.id] {
+		return fmt.Errorf("the hidden principal %d of A's is in the directory", w.a.hidden.id)
+	}
+	return nil
+}
 
 // ghost is the subject of the comparison request: nothing by that name or id
 // was ever made.
@@ -367,11 +404,25 @@ func coreMatrixRows() []row {
 		byChannel("DELETE /v1/channels/{channel}/members/{principal_id}", "removes an A member from A's channel", func(w *world, s subject) probe {
 			return del(ch(s) + "/members/" + id(w.a.people[0].id))
 		}),
-		{route: "PUT /v1/channels/{channel}/members/{principal_id}", what: "has B's manager add an A tester by id to B's channel", pick: aMember, manager: true,
+		// A manager adds any member (issue #983, ADR-013 O10), so A's people are
+		// no longer refused to B's manager. What stays refused, with the one
+		// 404 of a principal never issued, is whoever is not a member: A's
+		// hidden principal, a ghost id and a ghost name answer identical bytes.
+		{route: "PUT /v1/channels/{channel}/members/{principal_id}", what: "has B's manager add A's hidden principal by id to B's channel", pick: aHidden, manager: true,
 			want: answer{http.StatusNotFound, "principal_not_found"},
 			probe: func(w *world, s subject) probe {
 				return put("/v1/channels/"+bChannel(w)+"/members/"+id(s.id), nil)
 			}},
+		{route: "POST /v1/channels/{channel}/members", what: "has B's manager add A's hidden principal by name to B's channel", pick: aHiddenName, manager: true,
+			want: answer{http.StatusNotFound, "principal_not_found"},
+			probe: func(w *world, s subject) probe {
+				return post("/v1/channels/"+bChannel(w)+"/members", schema.AddChannelMemberRequestV1{Name: s.name})
+			}},
+		// The community's member list: a member of B sees A's people (which
+		// are not markers after the split, design section 8), and not the
+		// hidden one, and none of the operator fields.
+		{route: "GET /v1/directory/members", what: "lists the community's members", own: true, inspect: checkDirectoryOfB,
+			probe: func(*world, subject) probe { return get("/v1/directory/members") }},
 		operator("POST /v1/channels/{channel}/nets", "makes a net in A's channel", aChannel, func(_ *world, s subject) probe {
 			return post(ch(s)+"/nets", schema.CreateNetRequestV1{Name: "b-net"})
 		}),

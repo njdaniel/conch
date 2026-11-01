@@ -42,7 +42,7 @@ func (w *world) session(m *member, channel string) (schema.VoiceSessionResponseV
 	for _, g := range resp.Rooms {
 		w.h.secret("a voice join token", g.Token)
 		w.h.hide("a voice room name", g.Room)
-		if strings.HasPrefix(m.name, "alpha-") {
+		if w.isA(m.name) {
 			w.marks.secret("A's voice join token", g.Token)
 			w.marks.secret("A's voice room", g.Room)
 		}

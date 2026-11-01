@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/njdaniel/conch/e2e/internal/lkit"
@@ -52,6 +53,11 @@ type group struct {
 	chanIDs  []int64
 	people   []*member // humans, in the order they joined
 	agent    *member
+	// hidden is a principal the operator made and hid (A only): the
+	// community directory lists it to no one, and a manager's add of it is
+	// the one 404 of a principal never issued. Its id and the name it was
+	// given when hidden are not markers: the directory makes names public.
+	hidden *member
 
 	openInviteID int64  // A's open link
 	openCode     string // its code
@@ -82,11 +88,16 @@ func (g *group) main() string { return g.channels[0] }
 
 // world is the server and the two groups.
 type world struct {
-	h     *harness
-	d     *conchdProc
-	op    api
-	tag   string // A's run tag: in every string A writes
-	btag  string // B's, different, so that B's text holds no piece of A's
+	h    *harness
+	d    *conchdProc
+	op   api
+	tag  string // A's run tag: in every string A writes
+	btag string // B's, different, so that B's text holds no piece of A's
+	// ntag is in the name of every person and agent of A's (aPerson): the
+	// private register of markers.go stops at A's private channels and
+	// what is written in them, and A's principals are known to the whole
+	// community (design section 8), so their names hold no piece of A's text.
+	ntag  string
 	marks *markers
 	a, b  *group
 	// spares are second credentials of the members the matrix runs as, by
@@ -123,6 +134,7 @@ func newWorld(h *harness, d *conchdProc, lk *liveKit) *world {
 	w.btag = newTag(w.tag)
 	w.ptag = newTag(w.tag, w.btag)
 	w.qtag = newTag(w.tag, w.btag, w.ptag)
+	w.ntag = newTag(w.tag, w.btag, w.ptag, w.qtag)
 	// No password is ever in conchd's output: the log scan at the end of the
 	// run looks for every one the run sends.
 	for _, pw := range passwords {
@@ -147,6 +159,14 @@ func (w *world) aName(s string) string {
 	sum := sha256.Sum256([]byte(w.tag + "/" + s))
 	return "alpha-" + w.tag + "-" + hex.EncodeToString(sum[:4])
 }
+
+// aPerson is the name of a person or agent of A's: not a marker (the
+// directory lists A's people to all of B), so it shares no run of six
+// characters with anything aName makes.
+func (w *world) aPerson(s string) string { return "folk-" + w.ntag + "-" + s }
+
+// isA reports whether name is one of A's people.
+func (w *world) isA(name string) bool { return strings.HasPrefix(name, "folk-"+w.ntag+"-") }
 
 // bName is a string B writes; B's text is not scanned, so it may be plain.
 func (w *world) bName(s string) string { return "bravo-" + w.btag + "-" + s }
@@ -190,7 +210,7 @@ func (w *world) buildGroups() error {
 	w.marks.secret("A's open link", open.Code)
 	w.marks.id("invite", "A's open link", open.Invite.ID)
 	for _, n := range []string{"ann", "abe", "amy"} {
-		m, err := w.redeem(open.Code, w.aName(n))
+		m, err := w.redeem(open.Code, w.aPerson(n))
 		if err != nil {
 			return err
 		}
@@ -256,11 +276,21 @@ func (w *world) buildGroups() error {
 	}
 
 	// A's agent, made by the operator, with a grant in A's first channel.
-	agent, err := w.newAgent(w.aName("bot"), w.a)
+	agent, err := w.newAgent(w.aPerson("bot"), w.a)
 	if err != nil {
 		return err
 	}
 	w.a.agent = agent
+
+	// A principal of A's that the operator hid: it is in no directory.
+	var gone schema.CreatePrincipalResponse
+	if err := w.op.call(http.MethodPost, "/v0/principals", schema.CreatePrincipalRequest{Kind: schema.PrincipalHuman, Name: w.aPerson("gone")}, &gone); err != nil {
+		return err
+	}
+	if err := w.op.call(http.MethodPost, fmt.Sprintf("/v1/principals/%d/hide", gone.Principal.ID), nil, nil); err != nil {
+		return err
+	}
+	w.a.hidden = &member{name: schema.HiddenPrincipalNamePrefix + strconv.FormatInt(gone.Principal.ID, 10), id: gone.Principal.ID}
 
 	// ann may invite too, and makes a personal invite to A's second channel
 	// that nobody uses: an invite of A's made by a tester.
@@ -308,15 +338,14 @@ func (w *world) redeem(code, name string) (*member, error) {
 	return m, nil
 }
 
-// registerMember makes an A member's name, id, credential id and token
-// markers. B's are not markers.
+// registerMember makes an A member's credential id and token markers. B's
+// are not markers, and neither are A's names and ids: the community's member
+// list shows them to every member (design section 8, issue #983).
 func (w *world) registerMember(m *member) {
-	if len(m.name) < 6 || m.name[:6] != "alpha-" {
+	if !w.isA(m.name) {
 		return
 	}
-	w.marks.str("A's member name", m.name)
 	w.marks.secret("an A credential", m.token)
-	w.marks.id("principal", "A's member "+m.name, m.id)
 	w.marks.id("credential", m.name+"'s credential", m.credID)
 }
 
@@ -551,7 +580,7 @@ func (w *world) activityA() error {
 
 // report sends a problem report as m whose text carries word.
 func (w *world) report(m *member, word string) (int64, error) {
-	if m.name[:6] == "alpha-" {
+	if w.isA(m.name) {
 		w.marks.str("A's report", word)
 	}
 	var resp schema.CreateProblemReportResponseV1

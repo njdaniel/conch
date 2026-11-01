@@ -43,10 +43,10 @@ var ErrNotMember = errors.New("store: not a member of the channel")
 // ErrNotAddable is returned when a membership add names a target that cannot
 // be added by that path or actor (issue #789, ADR-010 §3.2, §3.3): for a
 // manager, any principal that is unknown, hidden, disabled, an agent, a guest,
-// an operator or owner, or outside the manager's channels; for
-// AddChannelMemberByName, any name that is not an enabled, non-hidden,
-// non-guest human (and within the manager's bound when the actor is a
-// manager). Every case returns this one error so a caller cannot tell them
+// or an operator or owner (issue #983: sharing a channel with the manager is
+// no longer required); for AddChannelMemberByName, any name that is not an
+// enabled, non-hidden, non-guest human (and not an operator or owner when the
+// actor is a manager). Every case returns this one error so a caller cannot tell them
 // apart; it matches ErrPrincipalNotFound so handlers map it to 404
 // principal_not_found.
 var ErrNotAddable error = notAddableError{}
@@ -233,9 +233,12 @@ func memberActorStandingTx(ctx context.Context, tx execer, channelID, actorID in
 }
 
 // checkManagerAddTargetTx checks whether managerID may add targetID to a
-// channel (issue #789, ADR-010 §3.2): targetID must be an enabled, non-hidden,
-// non-guest human member (not an operator or owner) who already shares at
-// least one channel with managerID. Every refused case returns ErrNotAddable.
+// channel (issue #789, ADR-010 §3.2; issue #983, ADR-013 O10): targetID must
+// be a member of the community (isMemberTx's test) who is not an operator or
+// owner and whom the manager may know. The ADR-010 bound, that the target
+// already shares a channel with the manager, is gone. Every refused case
+// returns ErrNotAddable, so a caller cannot tell an unknown id from a hidden
+// person.
 func checkManagerAddTargetTx(ctx context.Context, tx execer, managerID, targetID int64) error {
 	target, found, err := queryPrincipal(ctx, tx, targetID)
 	if err != nil {
@@ -244,16 +247,17 @@ func checkManagerAddTargetTx(ctx context.Context, tx execer, managerID, targetID
 	if !found || target.HiddenAt != nil || target.DisabledAt != nil || target.Kind != PrincipalHuman || target.guestTarget() || target.Role != RoleMember || target.Owner {
 		return ErrNotAddable
 	}
-	var shared bool
-	if err := tx.QueryRowContext(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM channel_members m1
-			JOIN channel_members m2 ON m2.channel_id = m1.channel_id
-			WHERE m1.principal_id = ? AND m2.principal_id = ?
-		)`, managerID, targetID).Scan(&shared); err != nil {
-		return fmt.Errorf("store: check shared channel between %d and %d: %w", managerID, targetID, err)
+	// Who the manager may know bounds who they may add (design §13.11): with
+	// see_member_directory, any member; without it, their channel-mates only.
+	seeAll, err := permittedTx(ctx, tx, managerID, schema.PermSeeMemberDirectory)
+	if err != nil {
+		return err
 	}
-	if !shared {
+	known, err := mayKnowTx(ctx, tx, managerID, targetID, seeAll)
+	if err != nil {
+		return err
+	}
+	if !known {
 		return ErrNotAddable
 	}
 	return nil
@@ -413,7 +417,7 @@ func (s *Store) putChannelMember(ctx context.Context, actor string, actorID, cha
 // returns the existing ChannelMember with added=false and writes nothing,
 // preserving any existing can_decide or manages flags. Any target that is
 // unknown, hidden, disabled, an agent, a guest, or (for a manager actor) an
-// operator/owner or outside the manager's channels returns ErrNotAddable.
+// operator/owner returns ErrNotAddable.
 func (s *Store) AddChannelMemberByName(ctx context.Context, actor string, channelID, addedBy int64, name string) (ChannelMember, bool, error) {
 	now := time.Now().Truncate(time.Millisecond)
 	var member ChannelMember

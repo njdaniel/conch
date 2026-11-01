@@ -179,6 +179,9 @@ func (s *Server) routeTable() []route {
 		// meet in the mux; POST /v0/principals is another version.
 		rt("POST /v1/principals/{id}/hide", accessPermission, hf(s.handleHidePrincipal)).needs(schema.PermManageMembers),
 		rt("POST /v1/principals/hide", accessPermission, hf(s.handleHidePrincipals)).needs(schema.PermManageMembers),
+		// The community's member list (issue #983): any member; see_member_directory
+		// decides everyone versus the may-know list, manage_members the operator fields.
+		rt("GET /v1/directory/members", accessAuthenticated, s.directoryRoute(hf(s.handleListDirectoryMembers))),
 		rt("GET /v1/principals", accessPermission, hf(s.handleListPrincipals)).needs(schema.PermManageMembers),
 		// Operators, or the principal itself: "sign out everywhere" (issue
 		// #439; checked in the handler).
