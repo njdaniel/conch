@@ -160,19 +160,23 @@ func boolInt(b bool) int {
 
 // inviteRow is one invites row.
 type inviteRow struct {
-	id           int64
-	kind         schema.InviteKind
-	codeHash     string
-	createdBy    int64
-	createdAt    int64
-	expiresAt    int64
-	maxUses      sql.NullInt64
-	uses         int64
-	closedAt     sql.NullInt64
-	voice        bool
-	mayInvite    bool
-	lifetimeMs   int64
-	joinAs       schema.InviteJoinMode
+	id         int64
+	kind       schema.InviteKind
+	codeHash   string
+	createdBy  int64
+	createdAt  int64
+	expiresAt  int64
+	maxUses    sql.NullInt64
+	uses       int64
+	closedAt   sql.NullInt64
+	voice      bool
+	mayInvite  bool
+	lifetimeMs int64
+	joinAs     schema.InviteJoinMode
+	// link is the community model's link kind (migration 40): 'legacy' for
+	// every invite made before it, which keeps working as it did; 'member'
+	// or 'guest' for the links of I6a. Nothing branches on it yet.
+	link         string
 	creatorName  string
 	creatorOff   bool
 	creatorHuman bool
@@ -226,14 +230,14 @@ func (r *inviteRow) loadMakerTx(ctx context.Context, tx execer) error {
 }
 
 const inviteColumns = `i.id, i.kind, i.code_hash, i.created_by, i.created_at, i.expires_at, i.max_uses, i.uses,
-	i.closed_at, i.voice, i.may_invite, i.credential_lifetime_ms, i.join_as,
+	i.closed_at, i.voice, i.may_invite, i.credential_lifetime_ms, i.join_as, i.link,
 	p.name, p.disabled_at IS NOT NULL, p.kind = 'human', p.may_invite, p.voice_allowed`
 
 func scanInvite(row interface{ Scan(...any) error }) (inviteRow, error) {
 	var r inviteRow
 	var kind, joinAs string
 	err := row.Scan(&r.id, &kind, &r.codeHash, &r.createdBy, &r.createdAt, &r.expiresAt, &r.maxUses, &r.uses,
-		&r.closedAt, &r.voice, &r.mayInvite, &r.lifetimeMs, &joinAs,
+		&r.closedAt, &r.voice, &r.mayInvite, &r.lifetimeMs, &joinAs, &r.link,
 		&r.creatorName, &r.creatorOff, &r.creatorHuman, &r.creatorMay, &r.creatorVoice)
 	r.kind = schema.InviteKind(kind)
 	r.joinAs = schema.InviteJoinMode(joinAs)
