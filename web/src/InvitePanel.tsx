@@ -81,11 +81,16 @@ export function InvitePanel({
   origin,
   me,
   channels,
+  request,
   onUnauthorized,
 }: {
   readonly origin: string;
   readonly me: WhoAmIResponseV1;
   readonly channels: readonly ChannelV0[];
+  // Opens the panel from outside with one channel ticked (issue #1135: a
+  // channel's ⋯ menu, "Invite people"). `n` counts the asks, so the same
+  // channel asked twice opens it twice.
+  readonly request?: { readonly channel: string; readonly n: number } | undefined;
   readonly onUnauthorized: () => void;
 }) {
   const operator = me.role === 'operator';
@@ -152,6 +157,27 @@ export function InvitePanel({
       document.removeEventListener('visibilitychange', onChange);
     };
   }, [open, refresh]);
+
+  // Asked for from outside: open, with just that channel ticked, and take
+  // focus into the panel once it is shown.
+  const body = useRef<HTMLDivElement>(null);
+  const [focusAsk, setFocusAsk] = useState(0);
+  const asked = request?.n ?? 0;
+  const askedChannel = request?.channel;
+  useEffect(() => {
+    if (asked === 0 || askedChannel === undefined) return;
+    setOpen(true);
+    setPicked(new Set([askedChannel]));
+    // An earlier invite's link grants other channels: forget it, and its state.
+    setLink(null);
+    setCopied('no');
+    setProblem(null);
+    setResume(false);
+    setFocusAsk(asked);
+  }, [asked, askedChannel]);
+  useEffect(() => {
+    if (focusAsk > 0) body.current?.querySelector<HTMLElement>('input, button')?.focus();
+  }, [focusAsk]);
 
   // Closing the panel forgets the link it showed.
   useEffect(() => {
@@ -247,6 +273,7 @@ export function InvitePanel({
           Settings and Members, and focus goes back to its button. */}
       <div
         id="invites-body"
+        ref={body}
         hidden={!open}
         onKeyDown={(event) => {
           if (event.key !== 'Escape' || event.defaultPrevented) return;

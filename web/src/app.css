@@ -534,7 +534,7 @@ label {
   gap: var(--s1);
 }
 
-.channel-list button {
+.channel-list li > button {
   flex: 1;
   min-width: 0;
   justify-content: flex-start;
@@ -550,18 +550,18 @@ label {
 }
 
 /* The # is not part of the button's name ('#' / '' gives it no alt text). */
-.channel-list button::before {
+.channel-list li > button::before {
   content: '#';
   content: '#' / '';
   margin-right: 0.15rem;
 }
 
-.channel-list button:hover:not(:disabled) {
+.channel-list li > button:hover:not(:disabled) {
   color: var(--text);
   background: var(--raised);
 }
 
-.channel-list button[aria-current='true'] {
+.channel-list li > button[aria-current='true'] {
   color: var(--text);
   font-weight: 600;
   background: var(--accent-bg);
@@ -595,6 +595,25 @@ label {
 .channel-list .in-voice .icon {
   width: 0.85rem;
   height: 0.85rem;
+}
+
+/* A row's ⋯ menu (issue #1135): after the badges, in the row's line, not
+   floated over the row as on a message. The menu drops from it. The rename
+   form takes a line of its own under the row. */
+.channel-list li {
+  flex-wrap: wrap;
+}
+
+.channel-list .message-menu {
+  position: relative;
+  top: auto;
+  right: auto;
+  flex: none;
+}
+
+.channel-list .rename-channel {
+  flex: 1 0 100%;
+  margin-top: 0;
 }
 
 .centre {
@@ -3078,7 +3097,7 @@ button.link {
     border-color: var(--accent);
   }
 
-  .lobby.phone .channel-list button {
+  .lobby.phone .channel-list li > button {
     min-height: 3rem;
     padding: var(--s2) var(--s3);
     color: var(--text);
@@ -3087,7 +3106,7 @@ button.link {
     border-left: 0;
   }
 
-  .lobby.phone .channel-list button[aria-current='true'] {
+  .lobby.phone .channel-list li > button[aria-current='true'] {
     background: transparent;
   }
 

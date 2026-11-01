@@ -473,6 +473,80 @@ describe('invite someone', () => {
     await screen.findByRole('button', { name: 'general' });
     expect(screen.queryByRole('button', { name: 'Invite someone' })).toBeNull();
     expect(screen.queryByRole('region', { name: 'Invites' })).toBeNull();
+    // Nor does any channel row carry a ⋯ (issue #1135).
+    expect(screen.queryByRole('button', { name: /^Actions for/ })).toBeNull();
+  });
+
+  // Issue #1135: a channel's ⋯ menu opens this panel with that channel ticked.
+  it('opens from a channel\'s ⋯ menu with that channel ticked and the others not, and makes the invite to it', async () => {
+    const calls = serve({
+      ...as(memberToken, inviter, channelList('general', 'ops')),
+      'GET /v1/invites': () => json({ invites: [] }),
+      'POST /v1/invites': () => json({ invite: inviteOf(7, 2), code: newCode }, 201),
+    });
+    window.localStorage.setItem(key, memberToken);
+    render(<App origin={origin} />);
+    const nav = within(await screen.findByRole('navigation', { name: 'Channels' }));
+    await nav.findByRole('button', { name: 'ops' });
+    const panel = screen.getByRole('region', { name: 'Invites' });
+    expect(within(panel).getByRole('button', { name: 'Invite someone' }).getAttribute('aria-expanded')).toBe('false');
+
+    fireEvent.click(nav.getByRole('button', { name: 'Actions for ops' }));
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Invite people']);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
+
+    expect(within(panel).getByRole('button', { name: 'Invite someone' }).getAttribute('aria-expanded')).toBe('true');
+    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#ops' }).checked).toBe(true);
+    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#general' }).checked).toBe(false);
+    await waitFor(() => {
+      expect(panel.contains(document.activeElement)).toBe(true);
+    });
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+    await waitFor(() => {
+      expect(calls.filter((c) => c.method === 'POST' && c.path === '/v1/invites').map((c) => (c.body as { channels: string[] }).channels)).toEqual([['ops']]);
+    });
+  });
+
+  it('asked for another channel after an invite was made, drops the old link and its copy state', async () => {
+    serve({
+      ...as(memberToken, inviter, channelList('private', 'public')),
+      'GET /v1/invites': () => json({ invites: [] }),
+      'POST /v1/invites': () => json({ invite: inviteOf(7, 2), code: newCode }, 201),
+    });
+    window.localStorage.setItem(key, memberToken);
+    render(<App origin={origin} />);
+    const nav = within(await screen.findByRole('navigation', { name: 'Channels' }));
+    await nav.findByRole('button', { name: 'public' });
+    const panel = screen.getByRole('region', { name: 'Invites' });
+    fireEvent.click(nav.getByRole('button', { name: 'Actions for private' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+    await within(panel).findByRole('textbox', { name: 'Invite link' });
+
+    fireEvent.click(nav.getByRole('button', { name: 'Actions for public' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
+    expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).toBeNull();
+    expect(within(panel).queryByRole('group', { name: 'New invite link' })).toBeNull();
+    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#public' }).checked).toBe(true);
+    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#private' }).checked).toBe(false);
+    await act(async () => {});
+  });
+
+  it('asked again for another channel, re-ticks only that one', async () => {
+    serve({ ...as(memberToken, inviter, channelList('general', 'ops')), 'GET /v1/invites': () => json({ invites: [] }) });
+    window.localStorage.setItem(key, memberToken);
+    render(<App origin={origin} />);
+    const nav = within(await screen.findByRole('navigation', { name: 'Channels' }));
+    await nav.findByRole('button', { name: 'ops' });
+    const panel = screen.getByRole('region', { name: 'Invites' });
+    for (const [chosen, other] of [['ops', 'general'], ['general', 'ops']] as const) {
+      fireEvent.click(nav.getByRole('button', { name: `Actions for ${chosen}` }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
+      expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: `#${chosen}` }).checked).toBe(true);
+      expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: `#${other}` }).checked).toBe(false);
+    }
+    await act(async () => {});
   });
 
   // Issue #536: the form opens over the page, so Escape closes it.
