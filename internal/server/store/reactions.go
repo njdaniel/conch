@@ -458,8 +458,10 @@ func (s *Store) RemoveReaction(ctx context.Context, channelID int64, reader Read
 // reaction key from message messageID of channelID, or, when key is empty,
 // every reaction of target on it, and answers the message's summary for the
 // moderator. reader is the moderator, who must be a current member who can see
-// the message, operators included; that the moderator is an operator or a
-// manager of the channel is the caller's (the route class). target is any
+// the message, operators included. That the moderator holds manage_channels
+// or manages the channel is decided by the route class and asked again here,
+// inside the write (ADR-014 design §7.2.1, the review of #1014), else
+// ErrManagerRefused and nothing is removed. target is any
 // principal id: nothing is looked up about it, so an unknown or absent one
 // removes nothing, and it is not an account action, so no membership,
 // credential or role changes. One audit row, reaction_moderated, is written
@@ -474,6 +476,11 @@ func (s *Store) ModerateReactions(ctx context.Context, channelID int64, reader R
 		return ReactionChange{}, errors.New("store: moderate reactions: a target principal is required")
 	}
 	return s.reactionWrite(ctx, channelID, reader, messageID, clock, func(tx execer, _ ReactionTarget, at time.Time) (bool, error) {
+		// A demotion or a cut of manage_channels racing the request is met
+		// here, under the write lock, not on the guard's earlier answer.
+		if _, err := memberActorStandingTx(ctx, tx, channelID, reader.PrincipalID); err != nil {
+			return false, err
+		}
 		query := "DELETE FROM message_reactions WHERE message_id = ? AND channel_id = ? AND principal_id = ?"
 		args := []any{messageID, channelID, targetID}
 		detail := fmt.Sprintf("channel=%d principal=%d", channelID, targetID)

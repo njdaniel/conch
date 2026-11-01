@@ -589,6 +589,23 @@ func TestSetRacingMembershipRemoval(t *testing.T) {
 func TestModerateReactions(t *testing.T) {
 	f := newBoundFixture(t)
 	ctx := context.Background()
+	// The store asks the moderator's standing again inside the write
+	// (ADR-014 design §7.2.1, #1015): a member who manages nothing, as alice
+	// is at first, is refused and nothing is removed.
+	f.set(t, f.ch.ID, f.dave, f.postWide, "🎈")
+	if _, err := f.s.ModerateReactions(ctx, f.ch.ID, rdr(f.alice), f.postWide, f.dave.ID, "", reactionNow); !errors.Is(err, ErrManagerRefused) {
+		t.Fatalf("moderating as a member who manages nothing = %v, want ErrManagerRefused", err)
+	}
+	if got := auditCount(t, f.s, AuditReactionModerated); got != 0 {
+		t.Fatalf("a refused moderation wrote %d reaction_moderated rows", got)
+	}
+	if _, err := f.s.RemoveReaction(ctx, f.ch.ID, rdr(f.dave), f.postWide, rkey(t, "🎈"), reactionNow); err != nil {
+		t.Fatal(err)
+	}
+	manages := true
+	if _, err := f.s.PutChannelMember(ctx, "system", f.ch.ID, f.alice.ID, 0, nil, &manages); err != nil {
+		t.Fatal(err)
+	}
 	f.set(t, f.ch.ID, f.dave, f.postWide, thumbs)
 	f.set(t, f.ch.ID, f.dave, f.postWide, party)
 	f.set(t, f.ch.ID, f.agt, f.postWide, thumbs)
