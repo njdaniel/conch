@@ -191,6 +191,11 @@ type voiceRoomState struct {
 	// retired means the room was rotated away and its state dropped: a pass
 	// that was already reading it must not report what it finds.
 	retired bool
+	// claimer is the principal whose share claim is running in the room
+	// (claimShare, between taking the room's claims and letting them go),
+	// 0 when none is: a first claim or a holder's claim again, whether or
+	// not its share is pending. Under voicePoller.mu (issue #1061).
+	claimer int64
 	// seq counts evictions from this room and evicted records, per principal,
 	// the count at their last one. A pass notes seq before it asks LiveKit
 	// and does not put back anyone evicted after that: without it a pass in
@@ -328,9 +333,10 @@ type voicePoller struct {
 	// room, since a rotation is one of the reasons, and goes when they claim
 	// a share in that channel again.
 	shareEnded map[voiceShareEndKey]schema.VoiceShareEnded
-	// retiring holds each retired room whose share claim was still pending
-	// when the room was forgotten, with the claimer's principal id, until
-	// that claim returns (issue #1061). The room is gone from rooms, so
+	// retiring holds each retired room with a share claim still running in
+	// it when the room was forgotten (a first claim or a holder's claim
+	// again), with the claimer's principal id, until that claim returns
+	// (issue #1061). The room is gone from rooms, so
 	// without this a revocation's endSharesOf could not find the claim to
 	// wait for it: a claim blocked inside LiveKit could then grant the screen
 	// after the revocation answered, with the room's deletion failed.
@@ -2003,13 +2009,15 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) {
 	// The room's screen share ends with it, written first: deleting the room
 	// takes its sources away. A share still pending never started, and its
 	// claim finds the room retired (claimShare), which withdraws what it
-	// granted. Until that claim returns the room stays findable in retiring,
-	// so a revocation's endSharesOf waits for it.
+	// granted. While any claim is running in the room (a holder's again
+	// too) the room stays findable in retiring until it returns, so a
+	// revocation's endSharesOf waits for the grant and its undoing.
 	var events []voiceEvent
 	if c := r.share; c != nil && !c.pending {
 		events = append(events, p.shareStoppedLocked(r.channelID, c, c.principalID, voiceShareStopRotated))
-	} else if c != nil {
-		p.retiring[r] = c.principalID
+	}
+	if r.claimer != 0 {
+		p.retiring[r] = r.claimer
 	}
 	r.share = nil
 	// Every transmission still open in the room, reported or unreported, is

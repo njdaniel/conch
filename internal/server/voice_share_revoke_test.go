@@ -165,72 +165,83 @@ func TestVoiceShareClaimRevokedBeforeGrant(t *testing.T) {
 // in a room just retired by the revocation's own rotation), and must not
 // answer while the grant is still in flight. When it answers, nothing is
 // granted and nobody holds the share, even where DeleteRoom failed and the
-// old room is still there with ann in it.
+// old room is still there with ann in it. "again" is a holder's claim again:
+// ann holds the share, and it is the grant again that is in flight, with no
+// pending share for the stop path to find.
 func TestVoiceShareRevocationWaitsForClaimInFlight(t *testing.T) {
-	for _, rev := range revocationCases() {
-		t.Run(rev.name, func(t *testing.T) {
-			f, room := newShareFixture(t)
-			rev.setUp(f, room)
-			ann := f.identity("ann")
-			granting, release := make(chan struct{}), make(chan struct{})
-			var once sync.Once
-			f.lk.setOnUpdate(func(_, identity string, share bool) {
-				if share && identity == ann {
-					once.Do(func() {
-						close(granting)
-						<-release
-					})
-				}
+	for _, kind := range []string{"first", "again"} {
+		for _, rev := range revocationCases() {
+			t.Run(kind+"/"+rev.name, func(t *testing.T) {
+				revocationWaitsForClaim(t, rev, kind == "again")
 			})
-			waiting := make(chan int, 1)
-			f.srv.voice.endSharesSeam = func(rooms int) {
-				select {
-				case waiting <- rooms: // the first call only
-				default:
-				}
-			}
-			claimed := make(chan wireResult, 1)
-			go func() { claimed <- f.claimShare(t, "ann", "ops") }()
-			<-granting
-			revoked := make(chan struct{})
-			go func() {
-				defer close(revoked)
-				rev.do(t, f)
-			}()
-			// The revocation has committed and its hook has reached the stop
-			// path; it must have found the claim, and cannot answer while
-			// the grant is held inside LiveKit.
-			if n := <-waiting; n == 0 {
-				t.Error("the revocation's stop path found no share to wait for")
-			}
-			select {
-			case <-revoked:
-				t.Error("the revocation answered while the grant was still in flight")
-			default:
-			}
-			close(release)
-			<-revoked
-			// Read at the moment the revocation has answered.
-			if f.granted(t, room, "ann") {
-				t.Error("the screen is still granted when the revocation answered")
-			}
-			if holder := f.shareState(room); holder != 0 {
-				t.Errorf("the poller still holds a share for %d", holder)
-			}
-			<-claimed
-			if rev.name == "permissions PUT" {
-				want := []string{"ann started audio=true", "ann stopped principal=ann reason=access_lost"}
-				if got := f.shareRows(t); !slices.Equal(got, want) {
-					t.Errorf("share rows %q, want %q", got, want)
-				}
-			}
-			f.srv.voice.mu.Lock()
-			left := len(f.srv.voice.retiring)
-			f.srv.voice.mu.Unlock()
-			if left != 0 {
-				t.Errorf("%d retired rooms are still held for their claims", left)
-			}
-		})
+		}
+	}
+}
+
+func revocationWaitsForClaim(t *testing.T, rev revocationCase, again bool) {
+	f, room := newShareFixture(t)
+	rev.setUp(f, room)
+	if again {
+		f.mustClaim(t, "ann")
+	}
+	ann := f.identity("ann")
+	granting, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	f.lk.setOnUpdate(func(_, identity string, share bool) {
+		if share && identity == ann {
+			once.Do(func() {
+				close(granting)
+				<-release
+			})
+		}
+	})
+	waiting := make(chan int, 1)
+	f.srv.voice.endSharesSeam = func(rooms int) {
+		select {
+		case waiting <- rooms: // the first call only
+		default:
+		}
+	}
+	claimed := make(chan wireResult, 1)
+	go func() { claimed <- f.claimShare(t, "ann", "ops") }()
+	<-granting
+	revoked := make(chan struct{})
+	go func() {
+		defer close(revoked)
+		rev.do(t, f)
+	}()
+	// The revocation has committed and its hook has reached the stop
+	// path; it must have found the claim, and cannot answer while
+	// the grant is held inside LiveKit.
+	if n := <-waiting; n == 0 {
+		t.Error("the revocation's stop path found no share to wait for")
+	}
+	select {
+	case <-revoked:
+		t.Error("the revocation answered while the grant was still in flight")
+	default:
+	}
+	close(release)
+	<-revoked
+	// Read at the moment the revocation has answered.
+	if f.granted(t, room, "ann") {
+		t.Error("the screen is still granted when the revocation answered")
+	}
+	if holder := f.shareState(room); holder != 0 {
+		t.Errorf("the poller still holds a share for %d", holder)
+	}
+	<-claimed
+	if rev.name == "permissions PUT" {
+		want := []string{"ann started audio=true", "ann stopped principal=ann reason=access_lost"}
+		if got := f.shareRows(t); !slices.Equal(got, want) {
+			t.Errorf("share rows %q, want %q", got, want)
+		}
+	}
+	f.srv.voice.mu.Lock()
+	left := len(f.srv.voice.retiring)
+	f.srv.voice.mu.Unlock()
+	if left != 0 {
+		t.Errorf("%d retired rooms are still held for their claims", left)
 	}
 }
 

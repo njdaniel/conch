@@ -379,10 +379,15 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	}
 	r.claims.Lock()
 	defer r.claims.Unlock()
-	// Runs before the claims are let go: a revocation waiting on them in
-	// endSharesOf finds this claim finished, and the room leaves retiring.
+	// The room knows a claim of principalID's is running until it returns,
+	// so a rotation keeps the room findable (retiring) and a revocation's
+	// endSharesOf waits for it. Cleared before the claims are let go.
+	p.mu.Lock()
+	r.claimer = principalID
+	p.mu.Unlock()
 	defer func() {
 		p.mu.Lock()
+		r.claimer = 0
 		delete(p.retiring, r)
 		p.mu.Unlock()
 	}()
@@ -575,12 +580,14 @@ func (p *voicePoller) endSharesOf(ctx context.Context, principalID, channelID in
 	p.mu.Lock()
 	var rooms []*voiceRoomState
 	for _, r := range p.rooms {
-		if r.share != nil && r.share.principalID == principalID && (channelID == 0 || r.channelID == channelID) {
+		theirs := (r.share != nil && r.share.principalID == principalID) || r.claimer == principalID
+		if theirs && (channelID == 0 || r.channelID == channelID) {
 			rooms = append(rooms, r)
 		}
 	}
-	// A retired room whose pending claim is theirs: it is no longer in rooms,
-	// but the claim may be inside LiveKit's answer, and is waited for too.
+	// A retired room with a claim of theirs still running: it is no longer in
+	// rooms, but the claim may be inside LiveKit's answer, and is waited for
+	// too.
 	for r, pid := range p.retiring {
 		if pid == principalID && (channelID == 0 || r.channelID == channelID) {
 			rooms = append(rooms, r)
