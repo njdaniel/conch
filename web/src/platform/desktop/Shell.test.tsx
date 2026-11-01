@@ -25,6 +25,9 @@ function install(overrides: Partial<ConchDesktopBridge>): void {
     joinAsGuest: never,
     createAccount: never,
     signOut: never,
+    uploadFile: never,
+    downloadFile: never,
+    saveFile: never,
     ...overrides,
   };
   Object.defineProperty(window, 'conchDesktop', { value: bridge, configurable: true, writable: true });

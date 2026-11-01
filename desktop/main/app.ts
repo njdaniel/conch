@@ -4,11 +4,11 @@
 // and the live feeds main holds for the page (D2-4). The renderer itself
 // still makes no network request.
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 import tls from 'node:tls';
 
-import { app, ipcMain, protocol, session, type BrowserWindow } from 'electron';
+import { app, dialog, ipcMain, protocol, session, shell, type BrowserWindow } from 'electron';
 
 import { FEED_EVENTS } from '../shared/bridge-names.ts';
 import { Client } from './api/client.ts';
@@ -19,8 +19,12 @@ import { createNodeConnect } from './api/socket.ts';
 import { transportVerdict, trustSystemRoots } from './api/trust.ts';
 import { debuggingVerdict } from './debugging.ts';
 import { DocumentGate } from './document.ts';
+import { Files } from './files.ts';
+import { Gestures } from './gestures.ts';
 import { installGuards, guardSession } from './guards.ts';
 import { Ipc } from './ipc.ts';
+import { saveChosenFile } from './save-file.ts';
+import { Links } from './links.ts';
 import { handle, parseManifest, SCHEME, SCHEME_PRIVILEGES } from './scheme.ts';
 import { createWindow, PARTITION } from './window.ts';
 
@@ -43,7 +47,37 @@ export async function start(): Promise<void> {
     return;
   }
   app.enableSandbox();
-  installGuards(app, { log });
+  let window: BrowserWindow | null = null;
+  const owned = () => (window === null || window.isDestroyed() ? null : window.webContents);
+  // What the person has just done, and the one way out of the window: a link
+  // they clicked, validated, to the OS browser (issue #947).
+  const gestures = new Gestures(Date.now);
+  const links = new Links({
+    gestures,
+    owned,
+    openExternal: (url) => shell.openExternal(url),
+    confirm: async (host, url) => {
+      const parent = window === null || window.isDestroyed() ? null : window;
+      const options = {
+        type: 'question' as const,
+        message: 'Open this link in your browser?',
+        detail: `${host}\n\n${url}`,
+        buttons: ['Open', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      };
+      const answer = await (parent === null ? dialog.showMessageBox(options) : dialog.showMessageBox(parent, options));
+      return answer.response === 0;
+    },
+    tell: (message) => {
+      const parent = window === null || window.isDestroyed() ? null : window;
+      const options = { type: 'warning' as const, message: 'Conch did not open that link', detail: message, buttons: ['OK'] };
+      void (parent === null ? dialog.showMessageBox(options) : dialog.showMessageBox(parent, options));
+    },
+    log,
+  });
+  installGuards(app, { log, gestures, owned, links });
   app.on('window-all-closed', () => {
     app.quit();
   });
@@ -70,8 +104,6 @@ export async function start(): Promise<void> {
   const client = new Client({ fetch: globalThis.fetch, session: identity });
   const service = new Service({ client, session: identity, now: Date.now, log });
   const gate = new DocumentGate();
-  let window: BrowserWindow | null = null;
-  const owned = () => (window === null || window.isDestroyed() ? null : window.webContents);
   // A feed event goes to the owned web contents, and only while the document
   // that subscribed is the one it shows.
   const feeds = new Feeds({
@@ -87,6 +119,21 @@ export async function start(): Promise<void> {
   gate.onEnd((current) => {
     feeds.endDocument(current);
   });
-  new Ipc({ owned, gate, service, feeds, now: Date.now, log }).register(ipcMain);
+  const files = new Files({
+    client,
+    session: identity,
+    chooseSavePath: async (suggested) => {
+      const options = { title: 'Save attachment', defaultPath: suggested, properties: ['showOverwriteConfirmation' as const, 'createDirectory' as const] };
+      const parent = window === null || window.isDestroyed() ? null : window;
+      const chosen = await (parent === null ? dialog.showSaveDialog(options) : dialog.showSaveDialog(parent, options));
+      return chosen.canceled || chosen.filePath === '' ? null : chosen.filePath;
+    },
+    writeFile: saveChosenFile,
+    downloadsDir: () => app.getPath('downloads'),
+    join,
+    isAbsolute,
+    log,
+  });
+  new Ipc({ owned, gate, service, feeds, files, gestures, now: Date.now, log }).register(ipcMain);
   window = createWindow(app.isPackaged, appPath, gate);
 }

@@ -18,6 +18,8 @@ import { channelOf, INVOKED_FUNCTIONS, type Envelope, type InvokedFunction } fro
 import { parseFeedRequest, type Feeds } from './api/feeds.ts';
 import { targetOf, isOperationId } from './api/target.ts';
 import { invocable, type Service, type SignInStep } from './api/service.ts';
+import { isFileId, parseUpload, MAX_UPLOAD_BYTES, type Files } from './files.ts';
+import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
 import { HOST, SCHEME } from './scheme.ts';
 
@@ -38,7 +40,7 @@ export interface InvokeEvent {
   readonly senderFrame: FrameLike | null;
 }
 
-export type Refusal = 'sender' | 'destroyed' | 'frame' | 'subframe' | 'origin' | 'generation' | 'name' | 'rate' | 'size' | 'shape' | 'error';
+export type Refusal = 'sender' | 'destroyed' | 'frame' | 'subframe' | 'origin' | 'generation' | 'name' | 'rate' | 'size' | 'shape' | 'gesture' | 'error';
 
 export interface IpcDeps {
   // The one web contents that may call main.
@@ -46,6 +48,9 @@ export interface IpcDeps {
   readonly gate: DocumentGate;
   readonly service: Service;
   readonly feeds: Pick<Feeds, 'subscribe' | 'ack' | 'unsubscribe'>;
+  readonly files: Pick<Files, 'upload' | 'download' | 'save'>;
+  // The person's own input to the owned web contents (main/gestures.ts).
+  readonly gestures: Pick<Gestures, 'take'>;
   readonly now: () => number;
   readonly log: (line: string) => void;
 }
@@ -116,6 +121,9 @@ interface Spec {
   // valid call.
   readonly parse: (args: readonly unknown[]) => readonly unknown[] | null;
   readonly run: (to: Handlers, args: readonly unknown[]) => unknown;
+  // True for a function that is only for the person's own act: it runs only
+  // right after a click or key in the window, never from a script alone.
+  readonly gesture?: true;
 }
 
 // What a function runs against: the service, the feeds, and the document
@@ -123,6 +131,7 @@ interface Spec {
 interface Handlers {
   readonly service: Service;
   readonly feeds: IpcDeps['feeds'];
+  readonly files: IpcDeps['files'];
   readonly document: number;
 }
 
@@ -225,6 +234,30 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     run: ({ feeds, document }, [id, request]) => feeds.subscribe(document, id as number, request as FeedRequest),
   },
   feedAck: { limit: 60_000, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.ack(document, id as number) },
+  // Attachments (issue #947). The bytes cross as base64 text, capped; a
+  // download is bytes for a preview, a save is the person's act alone.
+  uploadFile: {
+    limit: 30,
+    maxBytes: Math.ceil((MAX_UPLOAD_BYTES * 4) / 3) + 8 * 1024,
+    parse: (args) => {
+      const parsed = args.length === 1 ? parseUpload(args[0]) : null;
+      return parsed === null ? null : [parsed];
+    },
+    run: ({ files }, [upload]) => files.upload(upload as Parameters<IpcDeps['files']['upload']>[0]),
+  },
+  downloadFile: {
+    limit: 300,
+    maxBytes: 32,
+    parse: (args) => (args.length === 1 && isFileId(args[0]) ? args : null),
+    run: ({ files }, [id]) => files.download(id as number),
+  },
+  saveFile: {
+    limit: 30,
+    maxBytes: 32,
+    parse: (args) => (args.length === 1 && isFileId(args[0]) ? args : null),
+    run: ({ files }, [id]) => files.save(id as number),
+    gesture: true,
+  },
   feedUnsubscribe: { limit: 600, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.unsubscribe(document, id as number) },
 };
 
@@ -259,8 +292,9 @@ export class Ipc {
     if (JSON.stringify(args).length > spec.maxBytes + 2) return this.#refuse('size');
     const parsed = spec.parse(args);
     if (parsed === null) return this.#refuse('shape');
+    if (spec.gesture === true && this.#deps.gestures.take(this.#deps.owned(), LINK_GESTURE_MS) === null) return this.#refuse('gesture');
     try {
-      const to: Handlers = { service: this.#deps.service, feeds: this.#deps.feeds, document: this.#deps.gate.generation };
+      const to: Handlers = { service: this.#deps.service, feeds: this.#deps.feeds, files: this.#deps.files, document: this.#deps.gate.generation };
       return { ok: true, value: await spec.run(to, parsed) };
     } catch {
       // A bug in a function is not the renderer's to learn about.

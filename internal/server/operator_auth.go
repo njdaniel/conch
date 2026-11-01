@@ -443,7 +443,9 @@ func writeSetupTokenInvalid(w http.ResponseWriter) {
 // other than themself (an operator-or-self route, such as signing everyone
 // out); or only when the caller is an operator (a route anyone may use but
 // that, from an operator, creates what the class covers, such as an invite,
-// which makes principals; a member's use is unaffected).
+// which makes principals; a member's use is unaffected); or for anyone but
+// an owner (ADR-014 design §7.2: the audit export, which an owner read
+// without a proof before ADR-014 and still does).
 type reauthRule int
 
 const (
@@ -451,6 +453,7 @@ const (
 	reauthAlways
 	reauthOnOthers
 	reauthOperators
+	reauthNonOwners
 )
 
 type requestCredentialKey struct{}
@@ -492,6 +495,11 @@ func (s *Server) recentAuthGate(rule reauthRule, next http.Handler) http.Handler
 			}
 		case reauthOperators:
 			if !isOperator(caller) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		case reauthNonOwners:
+			if isOwner(caller) {
 				next.ServeHTTP(w, r)
 				return
 			}

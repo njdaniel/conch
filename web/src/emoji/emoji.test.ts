@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EMOJI_VERSION, MAX_REACTION_KEY_BYTES, MAX_REACTION_KEY_CODE_POINTS } from '../schema/reaction';
-import { buildIndex, completeShortcode, completionAt, insertAt, loadEmoji, searchEmoji, shortcodeOf } from './emoji';
+import { buildIndex, closedShortcodeAt, completeShortcode, completionAt, exactEmoji, insertAt, loadEmoji, searchEmoji, shortcodeOf } from './emoji';
 
 const index = await loadEmoji();
 
@@ -93,6 +93,53 @@ describe('completionAt', () => {
     ['no colon', 8],
   ])('%j at %i is not a completion', (text, caret) => {
     expect(completionAt(text, caret)).toBeNull();
+  });
+});
+
+describe('closedShortcodeAt', () => {
+  it.each([
+    ['x :tada:', 8, { start: 2, name: 'tada' }],
+    [':+1:', 4, { start: 0, name: '+1' }],
+    ['a\n:Thumbsup:', 12, { start: 2, name: 'thumbsup' }],
+    ['(:heart:', 8, { start: 1, name: 'heart' }],
+    ['go :fire: and more', 9, { start: 3, name: 'fire' }],
+    ['hi :notaname:', 13, { start: 3, name: 'notaname' }],
+  ])('%j at %i', (text, caret, want) => {
+    expect(closedShortcodeAt(text, caret)).toEqual(want);
+  });
+
+  it.each([
+    ['12:30:45', 8],
+    ['a:tada:', 7],
+    ['http://a:b:', 11],
+    ['https://x.y/a:b:', 16],
+    ['https://example.com/?q=(:heart:', 31],
+    ['https://example.com/?q=[:heart:', 31],
+    ['https://example.com/?q={:heart:', 31],
+    ['x :t:', 5],
+    ['x ::', 4],
+    ['x :tada', 7],
+    ['x : tada:', 9],
+    ['x :tada: ', 9],
+  ])('%j at %i is not a closed shortcode', (text, caret) => {
+    expect(closedShortcodeAt(text, caret)).toBeNull();
+  });
+});
+
+describe('exactEmoji', () => {
+  it.each([
+    ['tada', '🎉'],
+    ['+1', '👍'],
+    ['thumbsup', '👍'],
+    ['THUMBS_UP', '👍'],
+    ['heart', '❤️'],
+    ['red_heart', '❤️'],
+  ])(':%s: is %s', (name, key) => {
+    expect(exactEmoji(index, name)?.key).toBe(key);
+  });
+
+  it.each(['notaname', 'tad', 'thumbs', ''])(':%s: is no emoji', (name) => {
+    expect(exactEmoji(index, name)).toBeNull();
   });
 });
 

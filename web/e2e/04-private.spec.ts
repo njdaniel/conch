@@ -149,6 +149,8 @@ const memberRow = (page: Page, name: string): Locator =>
 async function chooseFor(row: Locator, name: string, item: string): Promise<void> {
   await row.getByRole('button', { name: `Actions for ${name}` }).click();
   await row.getByRole('menuitem', { name: item }).click();
+  // Removal asks first (issue #1083).
+  if (item === 'Remove from channel') await row.getByRole('button', { name: 'Yes, remove' }).click();
 }
 
 async function seedMembership(world: World, secrets: string[], suffix: string) {

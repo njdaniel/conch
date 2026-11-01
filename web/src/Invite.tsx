@@ -11,6 +11,7 @@ import * as api from './api';
 import { CreateAccount, type AccountProblem } from './CreateAccount';
 import type { InvitePreviewV1 } from './schema/invite';
 import type { WhoAmIResponseV1 } from './schema/principal';
+import { isNameMessage, nameRefusalLine } from './nameRefusal';
 import { ServerVersion } from './ServerVersion';
 import { noticeText } from './state/auth';
 import { fallbackChannel } from './state/channels';
@@ -79,6 +80,9 @@ export function accountRefusal(result: Refusal): AccountProblem | null {
     case 'password_unacceptable':
       return { line: 'That password is too common, a repeated pattern such as aaaa, blank, or has your name in it. Choose another.', field: 'password' };
     case 'invalid_request':
+      // A refusal of the name never shows the server's own words: they speak
+      // of a "principal name" (issue #1082).
+      if (isNameMessage(result.message)) return { line: nameRefusalLine(result.message), field: 'name' };
       return { line: serverLine(result.message, 'The server did not accept that name or password. Check both and try again.'), field: 'name' };
     case 'joining_closed':
       return { line: 'Accounts cannot be made here now.' };

@@ -63,7 +63,10 @@ describe('the desktop bridge type', () => {
       joinAsGuest: true,
       createAccount: true,
       signOut: true,
+      uploadFile: true,
+      downloadFile: true,
+      saveFile: true,
     };
-    expect(Object.keys(named)).toHaveLength(17);
+    expect(Object.keys(named)).toHaveLength(20);
   });
 });

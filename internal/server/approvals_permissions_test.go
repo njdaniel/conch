@@ -28,6 +28,29 @@ import (
 // the quorum it had, by its one approver, and the audit export carries the
 // whole chain, refusals included.
 func TestRestrictedOperatorManagerCannotChangeApproversFullChain(t *testing.T) {
+	// The seeded row: manage_channels off for operators, through the store.
+	restrictedManagerApprovalChain(t, func(t *testing.T, f *restrictedFixture) {
+		f.withhold(t, schema.PermManageChannels)
+	})
+}
+
+// Issue #1015 (A3b, design §7.7): the same chain, with manage_channels cut
+// by the owner through the real PUT /v1/permissions, which the approval then
+// outlives unchanged.
+func TestPermissionsPutCannotChangeApproversFullChain(t *testing.T) {
+	restrictedManagerApprovalChain(t, func(t *testing.T, f *restrictedFixture) {
+		res := f.putPermissions(t, f.rootTok, schema.PutPermissionsRequestV1{Revision: revisionOf(t, f), Changes: []schema.PermissionChangeV1{
+			{Permission: schema.PermManageChannels, Role: schema.PermissionRoleOperator, Granted: false},
+		}})
+		if res.code != http.StatusOK {
+			t.Fatalf("the owner's PUT = %d %s", res.code, res.body)
+		}
+	})
+}
+
+// restrictedManagerApprovalChain runs the chain after cut has taken
+// manage_channels from operators.
+func restrictedManagerApprovalChain(t *testing.T, cut func(t *testing.T, f *restrictedFixture)) {
 	ctx := context.Background()
 	var mu sync.Mutex
 	var notified []string
@@ -50,8 +73,7 @@ func TestRestrictedOperatorManagerCannotChangeApproversFullChain(t *testing.T) {
 	})
 	defer f.srv.approvals.Close()
 
-	// The seeded row: manage_channels off for operators.
-	f.withhold(t, schema.PermManageChannels)
+	cut(t, f)
 	if ok, err := f.srv.store.Permitted(ctx, f.op.ID, schema.PermManageChannels); err != nil || ok {
 		t.Fatalf("operator-1 holds manage_channels = %v, %v; want not", ok, err)
 	}

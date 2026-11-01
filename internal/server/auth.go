@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/njdaniel/conch/internal/server/store"
@@ -69,8 +70,16 @@ const (
 	// holding manages = 1 (issues #790, #791, ADR-010 §3.2, §5.2).
 	accessChannelManager
 	// accessOperatorOrSelf: authenticated; the handler additionally requires
-	// the operator role or that the caller is the principal named in the path.
+	// manage_members or that the caller is the principal named in the path.
 	accessOperatorOrSelf
+	// accessPermission: valid credential whose principal holds the route's
+	// permission (route.perm) by can() (ADR-014, docs/design/admin-roles.md
+	// §7.2). An owner always does; an agent never does. A caller whose role
+	// cannot hold it (a member or an agent: rows 7-11 are fixed off for
+	// them) gets the answer the route gave before ADR-014, byte for byte
+	// (403 forbidden, route.memberRefusal); an operator without it gets 403
+	// permission_denied naming it.
+	accessPermission
 	// accessExempt: the middleware does not authenticate the route. Only
 	// routes that carry their own authentication (or none by design) may use it.
 	accessExempt
@@ -86,6 +95,33 @@ type route struct {
 	// #270). It is false unless a route says otherwise, and on a route that
 	// is false the parameter is never read.
 	acceptsTicket bool
+	// perm is the permission an accessPermission route needs (needs); unset
+	// on every other class.
+	perm schema.Permission
+	// memberRefusal is the message an accessPermission route gives a caller
+	// whose role cannot hold perm: what it said before ADR-014, when the
+	// route was an operator route ("operator role required", the default)
+	// or an owner route ("owner required").
+	memberRefusal string
+}
+
+// needs makes rt an accessPermission route needing perm. It is a method on
+// the rt(...) value so that routes.go still lists every route as rt("...",
+// the form the end-to-end checks read it in.
+func (rt route) needs(perm schema.Permission) route {
+	rt.access = accessPermission
+	rt.perm = perm
+	if rt.memberRefusal == "" {
+		rt.memberRefusal = "operator role required"
+	}
+	return rt
+}
+
+// wasOwnerRoute keeps the member answer of a route that was accessOwner
+// before ADR-014 ("owner required"), so that it does not change.
+func (rt route) wasOwnerRoute() route {
+	rt.memberRefusal = "owner required"
+	return rt
 }
 
 type callerKey struct{}
@@ -198,6 +234,16 @@ func refusedPermission(caller store.Principal, perm schema.Permission) schema.Pe
 		return ""
 	}
 	return perm
+}
+
+// storeRefusalPermission is the permission a store refusal names (a *PermissionError
+// in err's chain), or "" for one that names none.
+func storeRefusalPermission(err error) schema.Permission {
+	var perr *store.PermissionError
+	if errors.As(err, &perr) {
+		return perr.Permission
+	}
+	return ""
 }
 
 func isOwner(p store.Principal) bool { return p.IsOwner() }
@@ -347,8 +393,43 @@ func (s *Server) guard(rt route) http.Handler {
 				writeUnauthenticated(w)
 				return
 			}
+			// The fixed operator rights (design §4.2): the reports and the
+			// settings reads, and reading the permissions document.
 			if !isOperator(caller) {
 				s.denyForbidden(w, r, caller, "forbidden", "operator role required")
+				return
+			}
+			handler.ServeHTTP(w, r)
+		})
+	case accessPermission:
+		perm, memberRefusal := rt.perm, rt.memberRefusal
+		if !perm.Valid() {
+			// A permission route that names no permission is a wiring bug
+			// (TestRouteTable pins every one): it refuses everyone.
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeInternalError(w)
+			})
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			caller, ok := callerFrom(r.Context())
+			if !ok {
+				writeUnauthenticated(w)
+				return
+			}
+			allowed, ok := s.canOrFail(w, r, caller, perm)
+			if !ok {
+				return
+			}
+			if !allowed {
+				// A member or an agent cannot hold rows 7-11, so it is told
+				// what the route always told it; an operator is told which
+				// permission it lacks.
+				if named := refusedPermission(caller, perm); named != "" {
+					s.denyForbiddenFor(w, r, caller, schema.ErrorCodePermissionDenied,
+						fmt.Sprintf("this needs the %s permission, which you do not hold on this server", named), named)
+					return
+				}
+				s.denyForbidden(w, r, caller, "forbidden", memberRefusal)
 				return
 			}
 			handler.ServeHTTP(w, r)
@@ -393,7 +474,15 @@ func (s *Server) guard(rt route) http.Handler {
 				writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 				return
 			}
-			if !isOperator(caller) {
+			// The operator branch is a holder of manage_channels (design §7.2):
+			// an operator without it is a member here, so a channel it is
+			// not in is the uniform 404 and one it does not manage a 403, as
+			// for any member, never an answer that tells the two apart.
+			manageAll, ok := s.canOrFail(w, r, caller, schema.PermManageChannels)
+			if !ok {
+				return
+			}
+			if !manageAll {
 				member, err := s.store.IsChannelMember(r.Context(), channel.ID, caller.ID)
 				if err != nil {
 					slog.ErrorContext(r.Context(), "auth: check channel membership failed", "error", err)
@@ -502,13 +591,16 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		writeUnauthenticated(w)
 		return
 	}
-	voice := voiceAllowed(caller)
-	invites, err := s.mayInvite(r.Context(), caller)
+	// What the caller holds now (design §8.3): may_invite and voice_allowed
+	// are the effective answers, role AND brake, read from the same list.
+	perms, revision, err := s.store.EffectivePermissions(r.Context(), caller.ID)
 	if err != nil {
-		slog.ErrorContext(r.Context(), "whoami: check invite right failed", "principal", caller.ID, "error", err)
+		slog.ErrorContext(r.Context(), "whoami: read permissions failed", "principal", caller.ID, "error", err)
 		writeInternalError(w)
 		return
 	}
+	voice := voiceAllowed(caller) && slices.Contains(perms, schema.PermUseVoice)
+	invites := slices.Contains(perms, schema.PermMakeMemberLinks)
 	resp := schema.WhoAmIResponseV1{
 		ID:            caller.ID,
 		Kind:          schema.PrincipalKind(caller.Kind),
@@ -518,6 +610,10 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 		ServerVersion: s.cfg.Version,
 		MayInvite:     invites,
 		VoiceAllowed:  &voice,
+		// The caller's own list, never the matrix (O10): a member learns
+		// what they may do, not how the server is set.
+		Permissions:         perms,
+		PermissionsRevision: revision,
 	}
 	// ADR-011 item 2.3: everyone is told, absent in normal mode.
 	if s.cfg.temporary() {
@@ -544,10 +640,7 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	// A holder of manage_members has no allowance, and is told no count
 	// (ADR-014 design §7.3, N1); anyone else who may invite, a restricted
 	// operator included, is told what is left.
-	unbounded, ok := s.canOrFail(w, r, caller, schema.PermManageMembers)
-	if !ok {
-		return
-	}
+	unbounded := slices.Contains(perms, schema.PermManageMembers)
 	if resp.MayInvite && !unbounded {
 		ctx := r.Context()
 		n, err := s.store.InvitesRemaining(ctx, caller.ID, store.InviteOptions{Allowance: s.cfg.InviteAllowance}, s.now())
@@ -562,18 +655,11 @@ func (s *Server) handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// voiceAllowed is what whoami says about voice (issue #468): what the
-// person's access grants, and false for an agent, which every voice route
-// refuses whatever its grant says (voicePresenceChannel).
+// voiceAllowed is the brake half of what whoami says about voice (issue
+// #468): what the person's access grants, and false for an agent, which
+// every voice route refuses whatever its grant says (voicePresenceChannel).
+// whoami ANDs it with use_voice (design §8.3); may_invite is
+// make_member_links, read from the same effective list.
 func voiceAllowed(p store.Principal) bool {
 	return p.Kind == store.PrincipalHuman && p.VoiceAllowed
-}
-
-// mayInvite is what whoami says about making invites (issue #437): whether
-// p holds make_member_links, the right the store's CreateInvite checks for
-// a personal invite (ADR-014 design §5, §7.3). Under the default document
-// that is every operator and every member whose may_invite brake is off.
-// Only people make invites, so an agent is told false.
-func (s *Server) mayInvite(ctx context.Context, p store.Principal) (bool, error) {
-	return s.can(ctx, p, schema.PermMakeMemberLinks)
 }

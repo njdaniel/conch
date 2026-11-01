@@ -328,7 +328,7 @@ func withholdOperator(t *testing.T, f *inviteFixture, perms ...schema.Permission
 	for _, p := range perms {
 		req.Changes = append(req.Changes, schema.PermissionChangeV1{Permission: p, Role: schema.PermissionRoleOperator, Granted: false})
 	}
-	if _, err := f.srv.store.PutPermissions(ctx, "system", f.root.ID, req, time.Now()); err != nil {
+	if _, err := f.srv.store.PutPermissions(ctx, fmt.Sprintf("principal:%d", f.root.ID), f.root.ID, req, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 }

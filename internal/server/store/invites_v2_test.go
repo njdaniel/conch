@@ -888,7 +888,7 @@ func withhold(t *testing.T, f *inviteFixture, perms ...schema.Permission) {
 	for _, p := range perms {
 		req.Changes = append(req.Changes, schema.PermissionChangeV1{Permission: p, Role: schema.PermissionRoleOperator, Granted: false})
 	}
-	if _, err := f.s.PutPermissions(f.ctx, "system", f.op.ID, req, time.Now()); err != nil {
+	if _, err := f.s.PutPermissions(f.ctx, principalActor(f.op.ID), f.op.ID, req, time.Now()); err != nil {
 		t.Fatalf("withhold %v: %v", perms, err)
 	}
 }

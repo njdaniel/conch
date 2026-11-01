@@ -52,6 +52,31 @@ test('desktop: the picker inserts at the caret, and :short completes by keyboard
   await expect(box).toHaveValue(`${tag} yay 🎉`);
 });
 
+// Issue #1081: the closing colon of a known :name: swaps it for the emoji.
+test('desktop: typing the closing colon swaps :tada: for the emoji, and Enter sends it', async ({ meet, world }) => {
+  const { page } = await meet();
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const tag = unique('colon');
+  const box = composer(page);
+  await box.click();
+  await page.keyboard.type(`${tag} x :tada:`);
+  await expect(box).toHaveValue(`${tag} x 🎉`);
+  await expect(page.getByRole('listbox', { name: 'Emoji suggestions' })).toBeHidden();
+  await page.keyboard.press('Enter');
+  await expect(messages(page).getByText(`${tag} x 🎉`, { exact: true })).toBeVisible();
+  await expect(box).toHaveValue('');
+
+  // An unknown name stays as typed; one Backspace after a swap gives it back.
+  await page.keyboard.type(`${tag} :notaname:`);
+  await expect(box).toHaveValue(`${tag} :notaname:`);
+  await box.fill('');
+  await page.keyboard.type(':+1:');
+  await expect(box).toHaveValue('👍');
+  await page.keyboard.press('Backspace');
+  await expect(box).toHaveValue(':+1:');
+});
+
 test('desktop: Enter in the picker search box picks, and never sends the draft', async ({ meet, world }) => {
   const { page } = await meet();
   await signIn(page, world, world.tokens.browser, 'browser-test');

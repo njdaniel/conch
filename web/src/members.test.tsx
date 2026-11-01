@@ -85,12 +85,88 @@ function choose(name: string, item: string) {
   fireEvent.click(within(openMenu(name)).getByRole('menuitem', { name: item }));
 }
 
+// confirmRemoval answers the question "Remove from channel" asks.
+function confirmRemoval(name: string) {
+  fireEvent.click(within(row(name)).getByRole('button', { name: 'Yes, remove' }));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(api.listMembers).mockResolvedValue({ ok: true, value: [] });
 });
 
 afterEach(cleanup);
+
+describe('removing someone from a channel asks first (issue #1083)', () => {
+  it.each([
+    { who: 'an operator', role: 'operator' as const, target: 'bot', id: 4, channelName: 'general' },
+    { who: 'an operator, of a person', role: 'operator' as const, target: 'avery', id: 3, channelName: 'general' },
+    { who: 'a channel manager', role: 'member' as const, target: 'ada', id: 2, channelName: 'general' },
+  ])('$who: the menu item shows the question, with focus on Cancel, and sends nothing', ({ role, target, channelName }) => {
+    draw(props(role));
+    choose(target, 'Remove from channel');
+    expect(api.removeChannelMember).not.toHaveBeenCalled();
+    expect(screen.queryByRole('menu')).toBeNull();
+    const group = within(row(target)).getByRole('group', { name: `Remove ${target} from #${channelName}? They lose this channel and its history.` });
+    expect(within(group).getByRole('button', { name: 'Yes, remove' })).toBeDefined();
+    expect(document.activeElement).toBe(within(group).getByRole('button', { name: 'Cancel' }));
+  });
+
+  it.each([
+    { how: 'Cancel', leave: (name: string) => fireEvent.click(within(row(name)).getByRole('button', { name: 'Cancel' })) },
+    { how: 'Escape', leave: (name: string) => fireEvent.keyDown(within(row(name)).getByRole('button', { name: 'Cancel' }), { key: 'Escape' }) },
+  ])('$how leaves the person in the channel, sends nothing and returns focus to the row’s ⋯ button', ({ leave }) => {
+    draw(props('operator'));
+    choose('avery', 'Remove from channel');
+    leave('avery');
+    expect(within(row('avery')).queryByRole('group')).toBeNull();
+    expect(api.removeChannelMember).not.toHaveBeenCalled();
+    expect(refreshMembers).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(within(row('avery')).getByRole('button', { name: 'Actions for avery' }));
+  });
+
+  it.each([
+    { who: 'an operator', role: 'operator' as const, target: 'avery', id: 3 },
+    { who: 'a channel manager', role: 'member' as const, target: 'ada', id: 2 },
+  ])('$who: "Yes, remove" sends one request', async ({ role, target, id }) => {
+    vi.mocked(api.removeChannelMember).mockResolvedValue({ ok: true, value: null });
+    draw(props(role));
+    choose(target, 'Remove from channel');
+    confirmRemoval(target);
+    await waitFor(() => {
+      expect(refreshMembers).toHaveBeenCalledTimes(1);
+    });
+    expect(api.removeChannelMember).toHaveBeenCalledTimes(1);
+    expect(api.removeChannelMember).toHaveBeenCalledWith('general', id);
+    expect(within(row(target)).queryByRole('group')).toBeNull();
+  });
+
+  it('a refusal after the yes shows the same line as before, in the row', async () => {
+    vi.mocked(api.removeChannelMember).mockResolvedValue({ ok: false, failure: 'invalid', code: 'forbidden', message: 'the owner membership is protected' });
+    draw(props('operator'));
+    choose('avery', 'Remove from channel');
+    confirmRemoval('avery');
+    expect((await within(row('avery')).findByText('the owner membership is protected')).getAttribute('role')).toBe('status');
+  });
+
+  it('making a manager and the approver item do not ask', async () => {
+    vi.mocked(api.putChannelMember).mockResolvedValue({ ok: true, value: null });
+    draw(props('operator'));
+    choose('avery', 'Make manager');
+    expect(within(row('avery')).queryByRole('group')).toBeNull();
+    await waitFor(() => {
+      expect(api.putChannelMember).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(refreshMembers).toHaveBeenCalledTimes(1);
+    });
+    choose('avery', 'Stop deciding approvals');
+    expect(within(row('avery')).queryByRole('group')).toBeNull();
+    await waitFor(() => {
+      expect(api.putChannelMember).toHaveBeenCalledTimes(2);
+    });
+  });
+});
 
 describe('administration controls', () => {
   it('gives an operator add and, in each row, a menu with the items the target allows', () => {
@@ -262,6 +338,7 @@ describe('membership writes', () => {
       expect(api.putChannelMember).toHaveBeenCalledWith('general', 3, { manages: true });
     });
     choose('bot', 'Remove from channel');
+    confirmRemoval('bot');
     await waitFor(() => {
       expect(api.removeChannelMember).toHaveBeenCalledWith('general', 4);
     });
@@ -283,6 +360,7 @@ describe('membership writes', () => {
     vi.mocked(api.removeChannelMember).mockResolvedValue({ ok: false, failure: 'unauthorized' });
     draw(props('member'));
     choose('ada', 'Remove from channel');
+    confirmRemoval('ada');
     await waitFor(() => {
       expect(onUnauthorized).toHaveBeenCalledTimes(1);
     });
@@ -328,6 +406,7 @@ describe('a pending action', () => {
     await refuseLater(pending, { ok: true, value: null });
     for (const item of within(screen.getByRole('menu', { name: 'Actions for avery' })).getAllByRole('menuitem')) expect(item.getAttribute('aria-disabled')).toBeNull();
     fireEvent.click(within(screen.getByRole('menu', { name: 'Actions for avery' })).getByRole('menuitem', { name: 'Remove from channel' }));
+    confirmRemoval('avery');
     await waitFor(() => {
       expect(api.removeChannelMember).toHaveBeenCalledWith('general', 3);
     });
@@ -376,10 +455,12 @@ describe('pending administration actions on a channel switch', () => {
     vi.mocked(api.removeChannelMember).mockReturnValueOnce(pending.promise).mockResolvedValue({ ok: true, value: null });
     const view = draw(props('member'));
     choose('ada', 'Remove from channel');
+    confirmRemoval('ada');
     expect(api.removeChannelMember).toHaveBeenCalledTimes(1);
 
     view.rerender(controlsView(switched('member')));
     choose('ada', 'Remove from channel');
+    confirmRemoval('ada');
     expect(api.removeChannelMember).toHaveBeenCalledTimes(2);
     await refuseLater(pending, { ok: false, failure: 'invalid', message: 'old channel remove refusal' });
     expect(screen.queryByText('old channel remove refusal')).toBeNull();

@@ -70,7 +70,7 @@ test.describe('the packaged shell', () => {
       'object',
       [
         'createAccount', 'joinAsGuest', 'keepCredential', 'redeemInvite', 'redeemInviteAsGuest', 'redeemSetupToken', 'redeemSignInLink', 'request', 'restore', 'resetPassword',
-        'serverAddress', 'setServerAddress', 'signInWithCode', 'signInWithCredential', 'signInWithPassword', 'signOut', 'subscribe',
+        'serverAddress', 'setServerAddress', 'signInWithCode', 'signInWithCredential', 'signInWithPassword', 'signOut', 'subscribe', 'uploadFile', 'downloadFile', 'saveFile',
       ].sort(),
       true,
     ]);

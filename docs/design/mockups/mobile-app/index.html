@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Conch phone app: illustrative flow prototype</title>
+<link rel="stylesheet" href="mockup.css">
+</head>
+<body>
+<p class="ribbon" id="ribbon">
+  <strong>Illustrative prototype (issue #1107).</strong>
+  Sample people and messages. No network, no audio, no microphone, no notifications, no real server.
+  It shows interaction and layout only; it is not evidence that any phone, OS or media path works.
+</p>
+
+<div class="bench">
+  <form class="controls" id="controls" aria-label="Prototype controls">
+    <fieldset>
+      <legend>Screen</legend>
+      <label for="screen">Go to</label>
+      <select id="screen"></select>
+      <p class="hint" id="screen-note"></p>
+    </fieldset>
+    <fieldset>
+      <legend>Device</legend>
+      <label for="size">Size and orientation</label>
+      <select id="size">
+        <option value="360x740">360 × 740 portrait</option>
+        <option value="390x844" selected>390 × 844 portrait</option>
+        <option value="740x360">740 × 360 landscape</option>
+        <option value="844x390">844 × 390 landscape</option>
+      </select>
+      <label for="scale">Text size</label>
+      <select id="scale">
+        <option value="1">100%</option>
+        <option value="1.3">130%</option>
+        <option value="1.6">160%</option>
+        <option value="2">200% (largest Dynamic Type or font scale)</option>
+      </select>
+      <label for="motion">Motion</label>
+      <select id="motion">
+        <option value="system">Follow this computer's setting</option>
+        <option value="reduce">Reduce motion</option>
+        <option value="allow">Allow motion</option>
+      </select>
+      <label class="check"><input type="checkbox" id="safe" checked> Apply safe areas</label>
+      <label class="check"><input type="checkbox" id="safe-show"> Draw safe areas</label>
+      <label class="check"><input type="checkbox" id="kb"> On-screen keyboard open</label>
+    </fieldset>
+    <fieldset>
+      <legend>Scenario</legend>
+      <label class="check"><input type="checkbox" id="installed" checked> App is installed (an invite link opens it)</label>
+      <label for="conn">Connection</label>
+      <select id="conn">
+        <option value="connected">Connected</option>
+        <option value="reconnecting">Reconnecting</option>
+        <option value="offline">Offline (no network)</option>
+      </select>
+      <label for="mic">Microphone permission</label>
+      <select id="mic">
+        <option value="ask">Not asked yet</option>
+        <option value="allowed">Allowed</option>
+        <option value="denied">Denied in system settings</option>
+      </select>
+      <label for="notif">Notification permission</label>
+      <select id="notif">
+        <option value="ask">Not asked yet</option>
+        <option value="allowed">Allowed</option>
+        <option value="denied">Denied in system settings</option>
+      </select>
+      <label for="grant">Server voice grant</label>
+      <select id="grant">
+        <option value="speak">May speak</option>
+        <option value="listen">Listen only (no publish grant)</option>
+      </select>
+      <label class="check"><input type="checkbox" id="failnext"> Make the next send fail</label>
+      <button type="button" id="interrupt">Simulate lock, call or app switch</button>
+      <button type="button" id="reset">Reset the prototype</button>
+    </fieldset>
+  </form>
+
+  <div class="stage">
+    <p class="caption" id="caption"></p>
+    <div class="phone" id="phone" role="group" aria-label="Phone screen (illustrative)"></div>
+    <p class="hint">Keyboard use of the phone: Tab and Shift+Tab move through the controls in reading order. Hold to talk is held with the pointer, or with Space or Enter held down.</p>
+  </div>
+</div>
+
+<div id="live" class="sr" role="status" aria-live="polite"></div>
+<div id="alert" class="sr" role="alert"></div>
+<script src="mockup.js"></script>
+</body>
+</html>

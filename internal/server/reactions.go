@@ -59,6 +59,10 @@ var (
 	errReactionNotPermitted = &schema.Error{Code: schema.ErrorCodeReactionNotPermitted, Message: "you may not react to this message"}
 	errTooManyReactions     = &schema.Error{Code: schema.ErrorCodeTooManyReactions, Message: "this message or you have reached the limit of reactions"}
 	errReactionsRequireAuth = &schema.Error{Code: schema.ErrorCodeReactionsRequireAuth, Message: "reactions require authentication"}
+	// errModerationRefused is the store's own re-check of a moderator
+	// (ADR-014 design §7.2.1): the route class's answer to someone who
+	// neither holds manage_channels nor manages the channel.
+	errModerationRefused = &schema.Error{Code: "forbidden", Message: "operator role or channel manager required"}
 )
 
 // Reaction write limit (§7.4): 60 a minute per person with a burst of 20, a
@@ -122,6 +126,9 @@ func reactionStoreError(ctx context.Context, err error) *schema.Error {
 		// Removed from the channel (or disabled) after the gate: the answer a
 		// stranger gets.
 		return errChannelNotFound
+	case errors.Is(err, store.ErrManagerRefused):
+		// Lost manage_channels or the manager's mark after the gate.
+		return errModerationRefused
 	case errors.Is(err, store.ErrMessageNotFound):
 		return errMessageNotFound
 	case errors.Is(err, store.ErrReactionNotPermitted):

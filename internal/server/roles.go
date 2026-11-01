@@ -76,5 +76,14 @@ func (s *Server) handleSetRole(w http.ResponseWriter, r *http.Request) {
 	} else if res.Changed {
 		s.events.notifyRosters()
 	}
+	if res.Changed {
+		// A role is a column of the permissions document: the target's
+		// permissions may have changed, and a share it may no longer hold
+		// ends now, since the voice passes read the person's brake and not
+		// the document (the security review of #1061, S1). The credential
+		// revocation above returns before any share is ended.
+		s.events.notifyPermissionsChanged(id)
+		s.endShareIfWithheld(ctx, id)
+	}
 	writeJSON(w, http.StatusOK, res.RoleChangeResponseV1)
 }

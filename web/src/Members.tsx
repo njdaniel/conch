@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode, type SyntheticEvent } from 'react';
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { Avatar } from './Icons';
 import { memberName } from './guestName';
@@ -194,6 +194,15 @@ export function MemberRow({
   const [line, setLine] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const more = useRef<HTMLButtonElement>(null);
+  // Removal asks first (issue #1083): "Remove from channel" opens this
+  // question in the row, with focus on Cancel; Escape and Cancel put focus
+  // back on the row's ⋯ button.
+  const [confirming, setConfirming] = useState(false);
+  const cancel = useRef<HTMLButtonElement>(null);
+  const questionId = useId();
+  useEffect(() => {
+    if (confirming) cancel.current?.focus();
+  }, [confirming]);
 
   const operator = viewer.role === 'operator';
   const manager = !operator && !viewer.guest && channel.manages === true;
@@ -201,6 +210,7 @@ export function MemberRow({
 
   async function run(request: PutChannelMemberRequestV1 | null) {
     if (busy || member === undefined) return;
+    setConfirming(false);
     setBusy(true);
     setLine(null);
     const result = request === null ? await api.removeChannelMember(channel.name, member.principal_id) : await api.putChannelMember(channel.name, member.principal_id, request);
@@ -223,7 +233,17 @@ export function MemberRow({
   const items: MenuItem[] = [];
   if (member !== undefined && (operator || manager)) {
     const removable = operator || (member.role === 'member' && member.kind === 'human' && member.can_decide === false);
-    if (removable) items.push({ key: 'remove', label: 'Remove from channel', disabled: busy, onSelect: () => void run(null) });
+    if (removable) {
+      items.push({
+        key: 'remove',
+        label: 'Remove from channel',
+        disabled: busy,
+        onSelect: () => {
+          setLine(null);
+          setConfirming(true);
+        },
+      });
+    }
     if (operator && human) {
       items.push({
         key: 'manager',
@@ -243,6 +263,14 @@ export function MemberRow({
     setMenuOpen(true);
   });
 
+  function leave(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== 'Escape' || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setConfirming(false);
+    more.current?.focus();
+  }
+
   return (
     <li className={`${className} member-row${items.length > 0 ? ' has-actions' : ''}`} {...openers}>
       {children}
@@ -252,6 +280,33 @@ export function MemberRow({
       {items.length === 0 || member === undefined ? null : (
         <ActionsMenu label={`Actions for ${displayName(member)}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
       )}
+      {confirming && member !== undefined ? (
+        <div role="group" aria-labelledby={questionId} className="member-confirm" onKeyDown={leave}>
+          <p id={questionId}>{`Remove ${displayName(member)} from #${channel.name}? They lose this channel and its history.`}</p>
+          <div className="actions">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                more.current?.focus();
+                void run(null);
+              }}
+            >
+              Yes, remove
+            </button>
+            <button
+              ref={cancel}
+              type="button"
+              onClick={() => {
+                setConfirming(false);
+                more.current?.focus();
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
       {line === null ? null : <span role="status" className="member-line">{line}</span>}
     </li>
   );

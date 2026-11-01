@@ -1957,6 +1957,23 @@ label {
   top: 0;
 }
 
+/* The question removal asks (issue #1083): under the name, the row's width,
+   buttons a finger can hit. */
+.member-confirm {
+  flex-basis: 100%;
+  min-width: 0;
+}
+
+.member-confirm p {
+  margin: var(--s1) 0 var(--s2);
+  font-size: var(--small);
+  overflow-wrap: anywhere;
+}
+
+.member-confirm button {
+  min-height: 2.75rem;
+}
+
 .member-line {
   flex-basis: 100%;
   font-size: 0.75rem;
