@@ -280,8 +280,10 @@ func TestGuestEndClosesItsSockets(t *testing.T) {
 			defer stop()
 			g := newGuest(t, f.srv, "", e.idle, time.Hour, f.ops.ID)
 			base := wsTestServer(t, f.srv)
-			families := []string{"/v0/ws?channel=ops", "/v1/ws?channel=ops", "/v2/ws?channel=ops", "/v1/events/ws?channel=ops",
-				"/v1/voice/ws?channel=ops", "/v1/voice/occupancy/ws"}
+			// No voice sockets: since A4 (#1016) voice is use_voice, and
+			// permittedTx answers false for every guest, so a guest is
+			// refused both (TestVoiceGuestHoldsNoVoice).
+			families := []string{"/v0/ws?channel=ops", "/v1/ws?channel=ops", "/v2/ws?channel=ops", "/v1/events/ws?channel=ops"}
 			var guestLogs []*frameLog
 			for _, path := range families {
 				guestLogs = append(guestLogs, recordFrames(dialAs(t, ctx, base, path, g.Token)))
@@ -401,8 +403,9 @@ func TestGuestMediaTeardown(t *testing.T) {
 		g := newGuest(t, f.srv, "", time.Hour, 300*time.Millisecond, f.ops.ID)
 		room := f.inUse(t, f.ops)
 		identity := voiceIdentity(g.Principal.ID)
+		// No pass before the deadline: a live guest holds no voice since A4
+		// (#1016) and the first pass would remove it as voice_not_allowed.
 		f.lk.setRoom(room, fakeParticipant{identity: identity, joinedMs: 1_000, published: true})
-		f.pass(t)
 		time.Sleep(400 * time.Millisecond)
 		f.clock.Advance(testPassGap)
 		f.pass(t)

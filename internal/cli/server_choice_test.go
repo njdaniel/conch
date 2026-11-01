@@ -20,9 +20,20 @@ import (
 // deadDefault points defaultServer at a port nothing listens on, so a test
 // that falls through to the default gets a refused connection rather than
 // whatever happens to run on this machine's 8080. It returns that server.
+//
+// The port is picked on 127.0.0.2, not 127.0.0.1. A port freed on 127.0.0.1
+// goes back into the pool every httptest.NewServer draws from, so under load
+// this test's own named servers, or another package's, could take it and the
+// "dead" default would answer (issue #1104). Nothing else in the tests binds
+// a specific address other than 127.0.0.1, and every address in 127.0.0.0/8
+// is loopback on Linux. Where 127.0.0.2 is not available the pick falls back
+// to 127.0.0.1.
 func deadDefault(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		l, err = net.Listen("tcp", "127.0.0.1:0")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

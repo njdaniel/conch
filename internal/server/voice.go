@@ -54,6 +54,12 @@ func (s *Server) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
 
 	resp, grants, err := s.voiceSession(ctx, caller, channel)
 	switch {
+	case errors.Is(err, errVoiceNotAllowed):
+		// Lost use_voice while LiveKit was being asked: the answer a person
+		// without voice gets up front.
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server",
+			refusedPermission(caller, schema.PermUseVoice))
+		return
 	case errors.Is(err, errVoiceNoLongerEntitled):
 		// Removed, disabled or signed out while LiveKit was being asked: the
 		// same answer as if it had happened before the request.
@@ -173,16 +179,39 @@ func (s *Server) voicePresenceChannel(w http.ResponseWriter, r *http.Request, na
 		writeError(w, http.StatusForbidden, errForbidden.Code, "agents do not use voice")
 		return store.Channel{}, store.Principal{}, false
 	}
-	// A person whose invite did not grant voice (issue #437). Checked here,
-	// after membership and after the agent refusal, so that every voice
-	// route inherits it in the same order: a non-member still gets the 404,
-	// and only a member learns that voice is withheld. The caller is the
-	// principal as resolved for this request, so the grant is read fresh.
-	if !caller.VoiceAllowed {
-		s.denyForbidden(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server")
+	// A person who does not hold use_voice (ADR-014 design §7.3): the role's
+	// cell, or the person's brake (voice_allowed, issue #437), which can()
+	// ANDs in for members and operators and skips for owners. Checked here,
+	// after membership and after the agent refusal, so that every voice route
+	// inherits it in the same order: a non-member still gets the 404, and only
+	// a member learns that voice is withheld. One code, whichever check said
+	// no. The caller is the principal as resolved for this request and the
+	// document is read now, so the grant is fresh. A guest holds nothing
+	// (permittedTx answers false for every guest, the security review of
+	// #1013), so a guest whose visit allowed voice no longer has it; guests
+	// are removed for now (#1005), so this only narrows access.
+	if !s.requireVoicePermission(w, r, caller, schema.PermUseVoice) {
 		return store.Channel{}, store.Principal{}, false
 	}
 	return channel, caller, true
+}
+
+// requireVoicePermission answers a caller who does not hold perm (use_voice
+// or share_screen) with 403 voice_not_allowed carrying the permission, to a
+// caller whose role could hold it (design §7.4), and reports whether the
+// request may go on. A failed read is a 500: the check fails closed. It is
+// the one place the voice routes ask can().
+func (s *Server) requireVoicePermission(w http.ResponseWriter, r *http.Request, caller store.Principal, perm schema.Permission) bool {
+	holds, ok := s.canOrFail(w, r, caller, perm)
+	if !ok {
+		return false
+	}
+	if !holds {
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server",
+			refusedPermission(caller, perm))
+		return false
+	}
+	return true
 }
 
 // handleVoicePresence serves GET /v1/channels/{channel}/voice: the whole voice
@@ -208,9 +237,16 @@ func (s *Server) handleVoicePresence(w http.ResponseWriter, r *http.Request) {
 // being entitled between the handler's checks and the signing of a token.
 var errVoiceNoLongerEntitled = errors.New("voice: caller is no longer entitled")
 
+// errVoiceNotAllowed is the refusal when what stopped them was use_voice:
+// answered as the up-front check answers a person without voice, 403
+// voice_not_allowed, not as a removal.
+var errVoiceNotAllowed = errors.New("voice: caller no longer holds use_voice")
+
 // voiceStillEntitled re-checks, immediately before a token is signed, what the
-// handler checked on the way in: the caller is a member of the channel and the
-// credential it used is still live (which also covers a disabled principal).
+// handler checked on the way in: the caller is a member of the channel, the
+// credential it used is still live (which also covers a disabled principal)
+// and it still holds use_voice, which a change of the role's cell or of the
+// person's brake can take away in that time (errVoiceNotAllowed).
 // Asking LiveKit to create the room can take seconds, and a removal that lands
 // in that time must not be answered with a fresh token. A window of
 // microseconds remains; closing it for good is the poller's job (issue #127),
@@ -221,7 +257,17 @@ func (s *Server) voiceStillEntitled(ctx context.Context, p store.Principal, ch s
 		return false, err
 	}
 	if credID, ok := credentialIDFrom(ctx); ok {
-		return s.store.CredentialLive(ctx, credID)
+		live, err := s.store.CredentialLive(ctx, credID)
+		if err != nil || !live {
+			return false, err
+		}
+	}
+	holds, err := s.can(ctx, p, schema.PermUseVoice)
+	if err != nil {
+		return false, err
+	}
+	if !holds {
+		return false, errVoiceNotAllowed
 	}
 	return true, nil
 }
@@ -431,6 +477,6 @@ func (s *Server) voiceDropIfRetired(ctx context.Context, room store.VoiceRoom) {
 	if live {
 		return
 	}
-	s.voice.forgetRoom(ctx, room.RoomName)
+	s.voice.retireRoom(ctx, room)
 	s.voice.deleteRooms(ctx, []store.VoiceRoom{room})
 }
