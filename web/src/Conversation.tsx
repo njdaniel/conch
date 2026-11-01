@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import * as api from './api';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
@@ -126,6 +126,8 @@ export function Message({
   onOpen,
   onReply,
   onOpenThread,
+  replies,
+  context,
   thread,
   actions,
   editor,
@@ -143,6 +145,11 @@ export function Message({
   readonly onOpen?: (id: number) => void;
   readonly onReply?: (id: number, opener: HTMLElement) => void;
   readonly onOpenThread?: (id: number, opener: HTMLElement) => void;
+  // How many replies the page holds to this message, when it is a root.
+  readonly replies?: number;
+  // What a reply answers, drawn above it in the log: the root as held, or
+  // null when the page does not hold it. Undefined draws nothing.
+  readonly context?: ReplyContext | null;
   readonly thread?: ReactNode;
   // The message's actions menu (issue #845): only what the viewer may do
   // here, and none at all draws no menu.
@@ -163,8 +170,13 @@ export function Message({
   const named = approval === null && editor === undefined && mentions(message.body, people.get(viewer)?.name ?? '');
   const classes = ['message', ...(cont ? ['cont'] : []), ...(named ? ['mentions-you'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
   return (
-    <li className={classes.join(' ')} data-message-id={message.id} tabIndex={-1} {...openers}>
+    <li className={classes.join(' ')} data-message-id={message.id} tabIndex={-1} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
       {named ? <span className="vh">Mentions you. </span> : null}
+      {context === undefined ? null : (
+        <p className="reply-context" id={`reply-context-${String(message.id)}`}>
+          {context === null ? 'Reply in a thread' : `Replying to ${context.author}: ${context.excerpt}`}
+        </p>
+      )}
       <Line
         time={clock(message.created_at)}
         author={authorOf(message, people)}
@@ -200,9 +212,34 @@ export function Message({
       {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for message ${String(message.thread_root_id)}`} onClick={(event) => {
         onOpenThread(message.thread_root_id as number, event.currentTarget);
       }}>Open thread</button>}
+      {replies === undefined || replies === 0 || onOpenThread === undefined ? null : <button type="button" className="message-action reply-count" onClick={(event) => {
+        onOpenThread(message.id, event.currentTarget);
+      }}>{replies === 1 ? '1 reply' : `${String(replies)} replies`}</button>}
       {thread}
     </li>
   );
+}
+
+// ReplyContext is what a reply in the log quotes of its root.
+export interface ReplyContext {
+  readonly author: string;
+  readonly excerpt: string;
+}
+
+const excerptLength = 80;
+
+// excerptOf is the first line of a body, cut to about excerptLength characters.
+// It is drawn as text: markup in it shows as the characters it is.
+export function excerptOf(body: string): string {
+  const line = (body.split('\n').find((part) => part.trim() !== '') ?? '').trim();
+  const chars = Array.from(line);
+  return chars.length <= excerptLength ? line : `${chars.slice(0, excerptLength).join('').trimEnd()}…`;
+}
+
+// replyContext quotes the root from the copy this page holds, which the
+// server sent to this viewer only if they may read it; no copy, no quote.
+function replyContext(root: MessageV2 | undefined, people: ReadonlyMap<number, Person>): ReplyContext | null {
+  return root === undefined ? null : { author: authorOf(root, people), excerpt: excerptOf(root.body) };
 }
 
 function Pending({
@@ -374,7 +411,7 @@ function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, d
           onDraft('');
         }}>
           <p className="hint">Replying to {rootMessage.audience === undefined ? `#${channel}` : audienceLabel(rootMessage.audience, viewer, nets)}; the audience cannot be changed.</p>
-          <label htmlFor={`reply-${String(rootId)}`}>Reply to message #{rootId}</label>
+          <label htmlFor={`reply-${String(rootId)}`}>Reply to {authorOf(rootMessage, people)}</label>
           <div className="reply-box">
             <textarea id={`reply-${String(rootId)}`} autoFocus rows={2} value={draft} disabled={live !== 'open'} onChange={(event) => {
               onDraft(event.target.value);
@@ -603,6 +640,13 @@ export function Conversation({
   }, [editSettled, channelId, viewer, editMessage, editText]);
 
   const shown = ordered(chat);
+  const replyCounts = useMemo(() => {
+    const counts = new Map<number, number>();
+    for (const held of chat.byId.values()) {
+      if (held.thread_root_id !== undefined) counts.set(held.thread_root_id, (counts.get(held.thread_root_id) ?? 0) + 1);
+    }
+    return counts;
+  }, [chat.byId]);
   const threadAnchor = openThread === null ? null : shown.some((message) => message.id === openThread) ? openThread : shown.find((message) => message.thread_root_id === openThread)?.id ?? null;
   const hasOlder = canLoadOlder(chat);
   const loadingOlder = chat.older === 'loading';
@@ -722,6 +766,8 @@ export function Conversation({
         <ol className="messages">
           {shown.map((message, i) => (
             <Message
+              replies={replyCounts.get(message.id) ?? 0}
+              {...(message.thread_root_id === undefined ? {} : { context: replyContext(chat.byId.get(message.thread_root_id), people) })}
               key={message.id}
               message={message}
               people={people}
