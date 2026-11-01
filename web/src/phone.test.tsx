@@ -220,7 +220,7 @@ describe('switching views', () => {
     const onOpen = vi.fn();
     lobby({ joined, onOpen });
     for (const name of ['Channels', 'Voice', 'Chat', 'Voice']) fireEvent.click(tab(name));
-    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: /^Settings/ }));
     fireEvent.keyDown(screen.getByRole('button', { name: 'Sign out' }), { key: 'Escape' });
     fireEvent.click(screen.getByRole('button', { name: 'Members' }));
     expect(joined).not.toHaveBeenCalled();
@@ -447,5 +447,25 @@ describe('the height follows the visual viewport', () => {
     expect(height()).toBe('844px');
     view.unmount();
     expect(height()).toBe('');
+  });
+});
+
+// Issue #1030: the phone's top bar has no room for the server address, and the
+// person's name is one tap away, in the Settings button's name.
+describe('the top bar', () => {
+  it('on a phone has no server address, and Settings names the person', () => {
+    windowOf(true);
+    lobby();
+    const bar = screen.getByRole('status', { name: 'Status' });
+    expect(bar.textContent).not.toContain('127.0.0.1');
+    expect(bar.textContent).toContain('Connected');
+    expect(screen.getByRole('button', { name: 'Settings, signed in as ada' })).toBeTruthy();
+  });
+
+  it('off a phone keeps the address and the plain Settings name', () => {
+    windowOf(false);
+    lobby();
+    expect(screen.getByRole('status', { name: 'Status' }).textContent).toContain('127.0.0.1');
+    expect(screen.getByRole('button', { name: 'Settings' }).getAttribute('aria-label')).toBeNull();
   });
 });
