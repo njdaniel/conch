@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/njdaniel/conch/internal/server/store"
@@ -109,11 +110,19 @@ func TestEventsNotificationsDropMessageOnRevocation(t *testing.T) {
 	if first := ann.next(); first.schema != schema.SessionRosterSchemaV1 {
 		t.Fatalf("first frame = %v, want roster", first)
 	}
-	f.srv.eventsBeforeWrite = func() {
-		f.srv.events.dropPrincipal(side.ID, f.p("ann").ID)
-		f.srv.eventsBeforeWrite = nil
+	// The revocation lands as the first message notification is about to go
+	// out. The hook sees notification messages alone: the read state the same
+	// post queues goes first, or after the message, depending on the
+	// read-state floor, and a revocation landing on it instead would be
+	// before the message is built, so the message would rightly be sent
+	// (#1104).
+	var revoked atomic.Bool
+	f.srv.eventsBeforeEpochWrite = func(frame []byte) {
+		if frameSchema(frame) == schema.MessageSchemaV2 && revoked.CompareAndSwap(false, true) {
+			f.srv.events.dropPrincipal(side.ID, f.p("ann").ID)
+		}
 	}
-	defer func() { f.srv.eventsBeforeWrite = nil }()
+	defer func() { f.srv.eventsBeforeEpochWrite = nil }()
 	f.mustPost(t, "olga", `{"body":"private side content"}`)
 	f.mustPost(t, "olga", `{"body":"public ops content"}`)
 	var frames []eventFrame
