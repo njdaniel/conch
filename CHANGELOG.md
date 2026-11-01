@@ -58,14 +58,17 @@ There is no migration and no wire change since `alpha.8`, so rolling back to
 - **Kept images follow their channel across a re-sign-in** (#1067). They
   were kept by channel name, so an image could come back in a different
   channel that had taken the old name while you were signed out.
-- **Revoking someone's access ends a screen share that is still being
-  granted** (#1061). Before, a share being granted at that moment could
-  outlive the revocation by up to 1.5 s. The revocations covered are: the
-  permissions change, removal from the channel, disabling, and revoking a
-  credential or all of them. The server now answers the revocation only
-  once any share being granted has been taken back. This holds even if
-  LiveKit fails to delete the old room. Two hardening follow-ups are #1087
-  and #1089.
+- **Revoking someone's access waits for a screen share still being
+  granted** (#1061). This covers removal from the channel, disabling, and
+  revoking a credential or all of them. If one of these lands while that
+  person's screen share is being granted, the server answers only after
+  the grant has finished and it has asked LiveKit to take it back. Before,
+  such a grant could outlive the revocation.
+  - If LiveKit fails both to delete the old room and to take the grant back,
+    the grant can still remain until the sweep. The follow-ups are #1087 and
+    #1089.
+  - The same stop path is ready for the permissions page that is coming in
+    #1015. This release has no route to change permissions.
 
 ### Diagnostics
 
