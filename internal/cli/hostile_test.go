@@ -256,6 +256,13 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "admin guest end", args: func(u, _ string) []string { return []string{"admin", "guest", "end", "--server", u, "9"} }},
 		{key: "admin guest end-all", args: func(u, _ string) []string { return []string{"admin", "guest", "end-all", "--server", u} }},
 		{key: "admin guest permit", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "guest", "permit", "--server", u, "9"} }},
+		{key: "admin permissions show", args: func(u, _ string) []string { return []string{"admin", "permissions", "show", "--server", u} }},
+		{key: "admin permissions set", args: func(u, _ string) []string {
+			return []string{"admin", "permissions", "set", "--server", u, "--members", "off", "use_voice"}
+		}},
+		{key: "admin permissions preset", args: func(u, _ string) []string {
+			return []string{"admin", "permissions", "preset", "--server", u, "--yes", "personal"}
+		}},
 		{key: "whoami", args: func(u, _ string) []string { return []string{"whoami", "--server", u} }},
 		{key: "rename", whoamiOK: true, args: func(u, _ string) []string { return []string{"rename", "--server", u, "bob"} }},
 		{key: "report", quietWhenOK: true, args: func(u, _ string) []string {
@@ -335,12 +342,12 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Method + " " + r.URL.Path
 		if !ok && (!whoamiOK || key != "GET /v1/whoami") {
-			write(w, http.StatusForbidden, schema.Error{Code: "bad" + esc + "[31m" + rlo, Message: hostile})
+			write(w, http.StatusForbidden, schema.Error{Code: "bad" + esc + "[31m" + rlo, Message: hostile, Permission: schema.Permission(hostile)})
 			return
 		}
 		switch key {
 		case "GET /v1/whoami":
-			write(w, http.StatusOK, schema.WhoAmIResponseV1{ID: 42, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile)})
+			write(w, http.StatusOK, schema.WhoAmIResponseV1{ID: 42, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), Permissions: []schema.Permission{schema.Permission(hostile), schema.PermUseVoice}, PermissionsRevision: 1})
 		case "POST /v2/channels/general/messages":
 			write(w, http.StatusCreated, schema.PostMessageResponseV2{Message: schema.MessageV2{ID: 1, Body: hostile, CreatedAt: ts}})
 		case "GET /v2/channels/general/messages":
@@ -527,6 +534,8 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.EndGuestResponseV1{Guest: schema.GuestAdminV1{ID: 9, Handle: hostile, State: schema.GuestStateEnded}})
 		case "POST /v1/guests/end":
 			write(w, http.StatusOK, schema.EndGuestsResponseV1{DryRun: true, Count: 1, Guests: []schema.GuestRefV1{{ID: 9, Handle: hostile}}, Remaining: 2})
+		case "GET /v1/permissions", "PUT /v1/permissions":
+			write(w, http.StatusOK, hostilePermissions(ts))
 		case "POST /v1/guests/9/conversion-permit":
 			write(w, http.StatusCreated, schema.CreateSignInLinkResponseV1{SignInLink: schema.SignInLinkV1{ID: 3, PrincipalID: 9, CreatedBy: 42, CreatedAt: ts, ExpiresAt: ts}, Code: walkSignInCode})
 		default:
@@ -535,6 +544,31 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// hostilePermissions is a permissions document whose every name is hostile:
+// an unknown permission, preset, warning and role, and issued items with
+// bogus ids and kinds.
+func hostilePermissions(ts schema.Timestamp) schema.PermissionsResponseV1 {
+	return schema.PermissionsResponseV1{
+		Revision: 3,
+		Rows: []schema.PermissionRowV1{
+			{Permission: schema.Permission(hostile), Member: true, Operator: true, MemberFixed: true, OperatorFixed: true},
+			{Permission: schema.PermUseVoice, Member: true, Operator: true},
+			{Permission: schema.PermActAsMembers, Operator: true, MemberFixed: true},
+		},
+		Preset:    schema.PermissionPreset(hostile),
+		Presets:   []schema.PermissionPresetV1{{Preset: schema.PresetPersonal, Member: []schema.Permission{schema.Permission(hostile)}}, {Preset: schema.PresetGroup, Member: []schema.Permission{schema.PermUseVoice}}},
+		Editable:  []schema.PermissionRole{schema.PermissionRole(hostile)},
+		Warnings:  []schema.PermissionsWarning{schema.PermissionsWarning(hostile), schema.PermissionsWarningOpenSignupOn},
+		UpdatedAt: ts,
+		IssuedToOthers: []schema.IssuedByOperatorV1{
+			{Kind: schema.IssuedKind(hostile), ID: 7, PrincipalID: 9, IssuedBy: 42, IssuedAt: ts},
+			{Kind: schema.IssuedCredential, ID: -1, PrincipalID: 9, IssuedBy: 42, IssuedAt: ts},
+			{Kind: schema.IssuedHook, ID: 0, PrincipalID: 9, IssuedBy: 42, IssuedAt: ts},
+			{Kind: schema.IssuedCredential, ID: 8, PrincipalID: 9, IssuedBy: 42, IssuedAt: ts},
+		},
+	}
 }
 
 // hostileReport is a problem report whose every string is hostile.

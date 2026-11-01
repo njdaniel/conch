@@ -151,6 +151,9 @@ Usage:
   conch admin guest end [--server <url>] [--json] <id>
   conch admin guest end-all [--server <url>] [--json] [--origin address|invite] [--invite <id>] [--dry-run | --yes]
   conch admin guest permit [--server <url>] [--json] [--expires <duration|RFC3339>] <id>
+  conch admin permissions show [--server <url>] [--json]
+  conch admin permissions set [--server <url>] [--json] [--members on|off] [--operators on|off] <permission>
+  conch admin permissions preset [--server <url>] [--json] [--yes] personal|group
   conch admin reports list [--server <url>] [--json] [--limit <n>]
   conch admin reports show [--server <url>] [--json] [--markdown] <id>
   conch admin reports file [--server <url>] [--json] <id> <issue-url>
@@ -1108,7 +1111,31 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			return err
 		}
 	}
-	return writeIdentity(stdout, who)
+	if err := writeIdentity(stdout, who); err != nil {
+		return err
+	}
+	return writeWhoAmIPermissions(stdout, who)
+}
+
+// writeWhoAmIPermissions prints what the caller holds (ADR-014), in catalog
+// order, each by the name the server sent: one this client does not know
+// reads as well as one it does. A server that predates permissions sends
+// neither them nor a revision, and nothing is printed; one that sends a
+// revision and no permissions means the caller holds none.
+func writeWhoAmIPermissions(w io.Writer, who schema.WhoAmIResponseV1) error {
+	if len(who.Permissions) == 0 {
+		if who.PermissionsRevision == 0 {
+			return nil
+		}
+		_, err := fmt.Fprintln(w, "permissions: none")
+		return err
+	}
+	names := make([]string, len(who.Permissions))
+	for i, p := range who.Permissions {
+		names[i] = safeLine(string(p))
+	}
+	_, err := fmt.Fprintf(w, "permissions: %s\n", strings.Join(names, ", "))
+	return err
 }
 
 // writeIdentity prints what a server with guests and passwords adds to
