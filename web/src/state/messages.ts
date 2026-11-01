@@ -68,6 +68,13 @@ export interface ChannelChat {
   // Frames that failed the schema and were not shown.
   readonly dropped: number;
   readonly nextLocalId: number;
+  // The distinct edited_at values seen for each message (issue #1031): the
+  // page's count of its edits, from its own saves, frames and re-reads. A page
+  // opened after the edits cannot know them; the server stays the authority.
+  readonly edits: ReadonlyMap<number, ReadonlySet<string>>;
+  // Messages a refusal has ended (the edit limit, the window or not editable):
+  // never offered Edit again for the page's life.
+  readonly final: ReadonlySet<number>;
 }
 
 export interface ChatState {
@@ -86,6 +93,8 @@ const emptyChannel: ChannelChat = {
   trimmed: false,
   dropped: 0,
   nextLocalId: 1,
+  edits: new Map(),
+  final: new Set(),
 };
 
 export type ChatAction =
@@ -101,6 +110,9 @@ export type ChatAction =
   // answer, or the events socket's conch.message_edited.v1. Applied only to a
   // message held, under the client rule (isLater); never appended.
   | { readonly type: 'edited'; readonly channel: string; readonly message: MessageV2 }
+  // The server refused an edit for good (issue #1031): the limit, the window
+  // closed or not editable. The message is final for the page's life.
+  | { readonly type: 'editFinal'; readonly channel: string; readonly id: number }
   // A frame that was not a message of this schema or channel.
   | { readonly type: 'dropped'; readonly channel: string }
   | {
@@ -174,8 +186,27 @@ function newest(held: ReadonlyMap<number, MessageV2>, page: readonly MessageV2[]
   });
 }
 
+// track counts each distinct edited_at seen on the incoming copies, whether or
+// not the copy replaces the one held: an older copy is still a real edit.
+function track(c: ChannelChat, incoming: readonly MessageV2[]): ChannelChat {
+  let edits: Map<number, ReadonlySet<string>> | null = null;
+  for (const message of incoming) {
+    const at = message.edited_at;
+    if (at === undefined || (edits ?? c.edits).get(message.id)?.has(at) === true) continue;
+    edits ??= new Map(c.edits);
+    edits.set(message.id, new Set(edits.get(message.id)).add(at));
+  }
+  return edits === null ? c : { ...c, edits };
+}
+
+// editsKnown is how many edits of a message the page has seen.
+export function editsKnown(chat: ChannelChat, id: number): number {
+  return chat.edits.get(id)?.size ?? 0;
+}
+
 // hold merges and keeps only the newest maxHeld.
-function hold(c: ChannelChat, incoming: readonly MessageV2[]): ChannelChat {
+function hold(base: ChannelChat, incoming: readonly MessageV2[]): ChannelChat {
+  const c = track(base, incoming);
   const merged = merge(c.byId, incoming);
   if (merged.size <= maxHeld) return merged === c.byId ? c : { ...c, byId: merged };
   const newest = [...merged.keys()].sort((a, b) => a - b).slice(merged.size - maxHeld);
@@ -231,7 +262,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return update(state, action.channel, (c) =>
         reconcile(
           {
-            ...hold({ ...c, byId: new Map() }, newest(c.byId, action.messages)),
+            ...hold(track({ ...c, byId: new Map() }, action.messages), newest(c.byId, action.messages)),
             history: 'ready',
             older: 'idle',
             trimmed: false,
@@ -261,6 +292,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       });
     case 'edited':
       return known(state, action.channel, (c) => (c.byId.has(action.message.id) ? hold(c, [action.message]) : c));
+    case 'editFinal':
+      return known(state, action.channel, (c) => (c.final.has(action.id) ? c : { ...c, final: new Set(c.final).add(action.id) }));
     case 'dropped':
       return update(state, action.channel, (c) => ({ ...c, dropped: c.dropped + 1 }));
     case 'sending':
@@ -338,7 +371,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case 'olderLoaded':
       // Merged without hold's trim: canLoadOlder kept this page within maxHeld.
       return known(state, action.channel, (c) => ({
-        ...c,
+        ...track(c, action.messages),
         byId: merge(c.byId, action.messages),
         older: 'idle',
         exhausted: !action.more,

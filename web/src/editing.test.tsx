@@ -24,7 +24,7 @@ function msg(id: number, fields: Partial<MessageV2> = {}): MessageV2 {
 const people = (kind: Person['kind'] = 'human') => new Map<number, Person>([[viewer, { name: 'ada', kind }], [3, { name: 'bea', kind: 'human' }]]);
 
 function chat(messages: readonly MessageV2[], pending: readonly PendingSend[] = [], exhausted = true): ChannelChat {
-  return { byId: new Map(messages.map((m) => [m.id, m])), pending, sentIds: new Set(), history: 'ready', older: 'idle', exhausted, trimmed: false, dropped: 0, nextLocalId: 9 };
+  return { byId: new Map(messages.map((m) => [m.id, m])), pending, sentIds: new Set(), history: 'ready', older: 'idle', exhausted, trimmed: false, dropped: 0, nextLocalId: 9, edits: new Map(), final: new Set() };
 }
 
 interface Options {
@@ -353,6 +353,90 @@ describe('refusals', () => {
     expect(more(1)).toBeNull();
     // Focus goes to the message, which no longer has a ⋯.
     expect(document.activeElement).toBe(item(1));
+  });
+});
+
+// The edit limit (issue #1031): the page counts the edits it has seen, and a
+// refusal ends the message's edits for good.
+describe('the edit limit', () => {
+  const stamps = (n: number) => new Set(Array.from({ length: n }, (_, i) => `2026-10-14T10:${String(i + 1).padStart(2, '0')}:00Z`));
+  const known = (n: number): ChannelChat => ({ ...chat([msg(1, { edited_at: '2026-10-14T10:09:00Z' })]), edits: new Map([[1, stamps(n)]]) });
+  const rendered = (held: ChannelChat, onEditFinal: (id: number) => void = vi.fn()) => (
+    <Conversation
+      channel="general"
+      chat={held}
+      live="open"
+      people={people()}
+      nets={new Map()}
+      viewer={viewer}
+      draft=""
+      target={{ net: null, whisper: null, refusal: null, note: null }}
+      monitored={new Set()}
+      onDraft={() => undefined}
+      onTarget={() => undefined}
+      onSend={() => undefined}
+      onReplySend={() => undefined}
+      onRetrySend={() => undefined}
+      onDismissSend={() => undefined}
+      onLoadOlder={() => undefined}
+      onReload={() => undefined}
+      onBottom={() => undefined}
+      onEdited={vi.fn()}
+      onEditFinal={onEditFinal}
+    />
+  );
+
+  it('offers Edit with nine known edits and not with ten', () => {
+    const { unmount } = render(rendered(known(9)));
+    expect(more(1)).not.toBeNull();
+    unmount();
+    render(rendered(known(10)));
+    expect(more(1)).toBeNull();
+  });
+
+  it('a page opened after the edits, knowing none, still offers Edit', () => {
+    render(rendered(chat([msg(1, { edited_at: '2026-10-14T10:09:00Z' })])));
+    expect(more(1)).not.toBeNull();
+  });
+
+  it('a message marked final is not offered Edit', () => {
+    render(rendered({ ...chat([msg(1)]), final: new Set([1]) }));
+    expect(more(1)).toBeNull();
+  });
+
+  it.each(['message_edit_limit_reached', 'message_edit_window_closed'])('%s tells the page the message is final, keeping the text', async (code) => {
+    vi.spyOn(api, 'editMessage').mockResolvedValue({ ok: false, failure: 'refused', code });
+    const final = vi.fn();
+    render(rendered(chat([msg(1)]), final));
+    fireEvent.change(openEditor(1), { target: { value: 'new words' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await screen.findByRole('alert');
+    expect(final).toHaveBeenCalledWith(1);
+    expect(box(1)).toHaveProperty('value', 'new words');
+  });
+
+  it('a 429 with ten known edits says the limit, not the rate, and ends the edits', async () => {
+    const held = known(9);
+    vi.spyOn(api, 'editMessage').mockResolvedValue({ ok: false, failure: 'refused', code: 'rate_limited', retryAfter: 5 });
+    const final = vi.fn();
+    const { rerender } = render(rendered(held, final));
+    fireEvent.change(openEditor(1), { target: { value: 'new words' } });
+    // The tenth edit arrives from another tab while the editor is open.
+    rerender(rendered({ ...held, edits: new Map([[1, stamps(10)]]) }, final));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('This message has been edited the most times allowed.');
+    expect(final).toHaveBeenCalledWith(1);
+    expect(screen.getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
+  });
+
+  it('a 429 with fewer known edits still says the rate', async () => {
+    vi.spyOn(api, 'editMessage').mockResolvedValue({ ok: false, failure: 'refused', code: 'rate_limited', retryAfter: 5 });
+    const final = vi.fn();
+    render(rendered(known(3), final));
+    fireEvent.change(openEditor(1), { target: { value: 'new words' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('Too many edits. Try again in 5 seconds.');
+    expect(final).not.toHaveBeenCalled();
   });
 });
 

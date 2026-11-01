@@ -196,6 +196,34 @@ test('an open edit reopens with its text after a reload (issue #1039)', async ({
   await expect(page.getByRole('textbox', { name: `Edit message ${String(id)}` })).toHaveCount(0);
 });
 
+test('the menu stops offering Edit after ten known edits, with no reload and no refusal (issue #1031)', async ({ meet, secrets, world }) => {
+  const { channel, people } = await community(world, secrets, 'limit', ['limiter']);
+  const [author] = people as [Someone];
+  const { page } = await meet();
+  await signIn(page, world, author.token, author.name);
+  await openChannel(page, channel);
+  const body = word('limit');
+  await say(page, channel, body);
+  const id = await postedId(world, author.token, channel, body);
+
+  // Nine edits as another tab of the author's would make them, over the API;
+  // the page sees each as a frame.
+  for (let n = 1; n <= 9; n++) {
+    const reply = await call(world, author.token, 'PUT', `/v2/channels/${encodeURIComponent(channel)}/messages/${String(id)}/body`, { body: `${body} v${String(n)}` });
+    expect(reply.status).toBe(200);
+  }
+  await expect(row(page, id)).toContainText(`${body} v9`);
+  // Nine known: Edit is still offered, and the tenth is made in the page.
+  await edit(page, id, `${body} v10`);
+  await expect(row(page, id)).toContainText(`${body} v10`);
+
+  // Ten known: no Edit, so no ⋯ at all, and the server was not asked.
+  await row(page, id).hover();
+  await expect(row(page, id).getByRole('button', { name: `More actions for message ${String(id)}` })).toHaveCount(0);
+  await row(page, id).click({ button: 'right' });
+  await expect(page.getByRole('menuitem', { name: 'Edit' })).toHaveCount(0);
+});
+
 test('a whisper’s edit reaches its recipients, and no one else', async ({ meet, secrets, world }) => {
   const { channel, people } = await community(world, secrets, 'whisper', ['whisperer', 'hearer', 'outsider']);
   const [author, hearer, outsider] = people as [Someone, Someone, Someone];

@@ -11,7 +11,7 @@ const reply = (id: number, body = `reply ${String(id)}`): MessageV2 => ({ schema
 const people = new Map([[2, { name: 'ada', kind: 'human' as const }], [3, { name: 'bea', kind: 'human' as const }]]);
 
 function chat(messages: readonly MessageV2[], pending: readonly PendingSend[] = []): ChannelChat {
-  return { byId: new Map(messages.map((message) => [message.id, message])), pending, sentIds: new Set(), history: 'ready', older: 'idle', exhausted: true, trimmed: false, dropped: 0, nextLocalId: 3 };
+  return { byId: new Map(messages.map((message) => [message.id, message])), pending, sentIds: new Set(), history: 'ready', older: 'idle', exhausted: true, trimmed: false, dropped: 0, nextLocalId: 3, edits: new Map(), final: new Set() };
 }
 
 function conversation(messages: readonly MessageV2[], pending: readonly PendingSend[] = [], onReplySend = vi.fn(), live: 'open' | 'reconnecting' = 'open') {

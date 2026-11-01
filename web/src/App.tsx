@@ -539,6 +539,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     const name = nameOf(message.channel_id);
     if (name !== null) dispatchChat({ type: 'edited', channel: name, message });
   }, [nameOf, dispatchChat]);
+  const editFinal = useCallback((id: number) => {
+    if (selected !== null) dispatchChat({ type: 'editFinal', channel: selected, id });
+  }, [selected, dispatchChat]);
   const onMessageEdited = useCallback((message: MessageV2) => {
     setEditEvent(message);
     edited(message);
@@ -1739,6 +1742,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                   dispatchChat({ type: 'discard', channel: selected, localId, ...(pending?.requestId === undefined ? {} : { requestId: pending.requestId }) });
                 }}
                 onEdited={edited}
+                onEditFinal={editFinal}
                 onLoadOlder={live.loadOlder}
                 onReload={live.retry}
                 onSearch={() => {

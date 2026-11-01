@@ -6,14 +6,14 @@ import { Avatar } from './Icons';
 import { Linkified } from './Linkified';
 import { ImageAttachment } from './ImageAttachment';
 import { loadStored, saveEdit } from './state/draftStore';
-import { canEdit, EditedMarker, editEnds, editWindowMs, MessageEditor } from './MessageEdit';
+import { canEdit, EditedMarker, editEnds, editsLeft, editWindowMs, MessageEditor } from './MessageEdit';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
 import { fileAttachmentPayloadSchema, fileAttachmentV1, type FileAttachmentV1 } from './schema/file';
-import type { Audience, MessageV2 } from './schema/message';
+import { MAX_MESSAGE_EDITS, type Audience, type MessageV2 } from './schema/message';
 import type { Target, TargetAction } from './state/drafts';
 import type { ChannelChat, PendingSend } from './state/messages';
-import { canLoadOlder, isLater, lastId, oldestId, ordered } from './state/messages';
+import { canLoadOlder, editsKnown, isLater, lastId, oldestId, ordered } from './state/messages';
 import type { LiveStatus, Person } from './useLiveChannel';
 import { mentions } from './useNotifications';
 
@@ -463,6 +463,7 @@ export function Conversation({
   onUnauthorized,
   onSearch,
   onEdited,
+  onEditFinal,
   historyBounded = false,
 }: {
   // The viewer's own membership here has a history bound (history_after), so
@@ -496,6 +497,8 @@ export function Conversation({
   // An edit of the viewer's own message saved (issue #845): the server's copy,
   // for the page to hold. Without it nothing here offers Edit.
   readonly onEdited?: (message: MessageV2) => void;
+  // A refusal ended a message's edits for good (issue #1031).
+  readonly onEditFinal?: (id: number) => void;
 }) {
   const log = useRef<HTMLDivElement>(null);
   // Whether the reader is at the bottom, so new messages follow them.
@@ -581,6 +584,9 @@ export function Conversation({
     const item = log.current?.querySelector<HTMLElement>(`[data-message-id="${String(id)}"]`);
     (item?.querySelector<HTMLElement>('.more-actions') ?? item)?.focus();
   }, [edit]);
+  // Whether the page still offers Edit on a message beyond who and when
+  // (issue #1031): not at ten known edits, nor after a final refusal.
+  const editable = (message: MessageV2) => canEdit(message, viewer, viewerKind, now) && editsLeft(editsKnown(chat, message.id), chat.final.has(message.id));
   const note = useCallback((id: number, line: string | null) => {
     setNotices((previous) => {
       if (line === null && !previous.has(id)) return previous;
@@ -779,7 +785,7 @@ export function Conversation({
               onUnauthorized={onUnauthorized}
               onReply={openFrom}
               onOpenThread={openFrom}
-              actions={onEdited !== undefined && canEdit(message, viewer, viewerKind, now) ? [{ key: 'edit', label: 'Edit', onSelect: () => { startEdit(message.id); } }] : []}
+              actions={onEdited !== undefined && editable(message) ? [{ key: 'edit', label: 'Edit', onSelect: () => { startEdit(message.id); } }] : []}
               notice={notices.get(message.id) ?? null}
               {...(edit?.id !== message.id || onEdited === undefined ? {} : {
                 editor: (
@@ -802,6 +808,8 @@ export function Conversation({
                       closeEdit(message.id);
                     }}
                     onUnauthorized={onUnauthorized}
+                    atLimit={editsKnown(chat, message.id) >= MAX_MESSAGE_EDITS}
+                    onFinal={() => { onEditFinal?.(message.id); }}
                     discard={edit.next === null ? undefined : {
                       onDiscard: () => {
                         const next = edit.next;

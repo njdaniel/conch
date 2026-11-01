@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { MessageV2 } from '../schema/message';
 import type { DraftAttachment } from './attachments';
-import { chatFor, chatReducer, initialChat, isLater, lastId, ordered, maxHeld, pageSize, canLoadOlder, oldestId, parseFrame, type ChatAction, type ChatState } from './messages';
+import { chatFor, chatReducer, editsKnown, initialChat, isLater, lastId, ordered, maxHeld, pageSize, canLoadOlder, oldestId, parseFrame, type ChatAction, type ChatState } from './messages';
 
 const msg = (id: number, body = `m${String(id)}`): MessageV2 => ({
   schema: 'conch.message.v2',
@@ -499,5 +499,56 @@ describe('a lost channel (issue #1027)', () => {
     expect(chatFor(state, 'ops')).toEqual(chatFor(initialChat, 'ops'));
     expect(ordered(chatFor(state, 'dev')).map((x) => x.id)).toEqual([3]);
     expect(chatReducer(state, { type: 'forget', channel: 'nowhere' })).toBe(state);
+  });
+});
+
+// Counting edits (issue #1031): the distinct edited_at values seen for a
+// message, however they arrive.
+describe('known edits', () => {
+  const edited = (id: number, n: number): MessageV2 => ({ ...msg(id), edited_at: `2026-10-14T10:${String(n).padStart(2, '0')}:00Z` });
+  const known = (state: ChatState, id = 1) => editsKnown(chatFor(state, 'ops'), id);
+  const start: ChatAction = { type: 'historyLoaded', channel: 'ops', messages: [msg(1)], more: false };
+
+  it('counts own saves, frames and a re-read once each', () => {
+    const state = run(
+      start,
+      { type: 'edited', channel: 'ops', message: edited(1, 1) },
+      { type: 'received', channel: 'ops', message: edited(1, 2) },
+      { type: 'historyLoaded', channel: 'ops', messages: [edited(1, 2)], more: false },
+    );
+    expect(known(state)).toBe(2);
+  });
+
+  it('does not count the same edit twice: a replay, the save and its frame, an older page', () => {
+    const state = run(
+      start,
+      { type: 'edited', channel: 'ops', message: edited(1, 1) },
+      { type: 'received', channel: 'ops', message: edited(1, 1) },
+      { type: 'edited', channel: 'ops', message: edited(1, 1) },
+      { type: 'olderLoaded', channel: 'ops', messages: [edited(1, 1)], more: false },
+    );
+    expect(known(state)).toBe(1);
+  });
+
+  it('counts an edit that arrives out of order, and a message never edited as none', () => {
+    const state = run(start, { type: 'edited', channel: 'ops', message: edited(1, 2) }, { type: 'edited', channel: 'ops', message: edited(1, 1) });
+    expect(known(state)).toBe(2);
+    expect(chatFor(state, 'ops').byId.get(1)?.edited_at).toBe('2026-10-14T10:02:00Z');
+    expect(known(state, 2)).toBe(0);
+  });
+
+  it('keeps counting across a re-read that replaces the messages', () => {
+    const state = run(
+      start,
+      ...[1, 2, 3].map((n): ChatAction => ({ type: 'edited', channel: 'ops', message: edited(1, n) })),
+      { type: 'historyLoaded', channel: 'ops', messages: [edited(1, 3)], more: false },
+    );
+    expect(known(state)).toBe(3);
+  });
+
+  it('marks a message final once, and ignores a channel it does not hold', () => {
+    const state = run(start, { type: 'editFinal', channel: 'ops', id: 1 }, { type: 'editFinal', channel: 'ops', id: 1 });
+    expect([...chatFor(state, 'ops').final]).toEqual([1]);
+    expect(chatFor(run({ type: 'editFinal', channel: 'ops', id: 1 }), 'ops').final.size).toBe(0);
   });
 });
