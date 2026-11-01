@@ -896,8 +896,14 @@ export class VoiceClient {
     this.levelTimer = null;
   }
 
+  // A trace that throws must not change what a press does: it is caught here,
+  // and the line is lost.
   private trace(event: string): void {
-    this.env.trace?.(`${String(this.now())} ${event}`);
+    try {
+      this.env.trace?.(`${String(this.now())} ${event}`);
+    } catch {
+      // The trace is diagnostic only.
+    }
   }
 
   private onGate(open: boolean): void {
@@ -908,7 +914,9 @@ export class VoiceClient {
       this.steps = this.steps.then(() => this.opened(talk, edge));
     } else {
       // The track is muted at once, and `stopped` reported once it is.
-      const muted = (this.room?.setSending(false) ?? Promise.resolve()).catch(() => undefined).then(() => {
+      const muted = (this.room?.setSending(false) ?? Promise.resolve()).catch(() => undefined);
+      // Observed apart, so shut waits on the mute itself and not one step later.
+      void muted.then(() => {
         this.trace('track muted');
       });
       this.steps = this.steps.then(() => this.shut(talk, muted));

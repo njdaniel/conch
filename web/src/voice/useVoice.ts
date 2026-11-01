@@ -65,7 +65,11 @@ function traceSink(): ((line: string) => void) | undefined {
     return undefined;
   }
   const kept: string[] = [];
-  Object.defineProperty(window, 'conchVoiceTrace', { value: kept, configurable: true });
+  try {
+    Object.defineProperty(window, 'conchVoiceTrace', { value: kept, configurable: true });
+  } catch {
+    return undefined;
+  }
   return (line) => {
     kept.push(line);
   };

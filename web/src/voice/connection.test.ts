@@ -346,6 +346,20 @@ describe('talking', () => {
     }
   });
 
+  // A trace that throws (here, the array it writes to is frozen) changes
+  // nothing: the release still mutes the track and reports stopped.
+  it('a trace that throws does not stop a release from muting and reporting', async () => {
+    const t = await joined();
+    Object.freeze(t.trace);
+    t.client.press();
+    await settle();
+    t.client.release();
+    t.clock.advance(defaultTail);
+    await settle();
+    expect(t.rooms[0]?.sending).toEqual([true, false]);
+    expect(t.reports).toEqual(['started', 'stopped']);
+  });
+
   it('a press opens the track and reports started; a release closes it after the tail and reports stopped', async () => {
     const t = await joined();
     t.client.press();
