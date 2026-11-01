@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1169,5 +1170,80 @@ func TestPermissionsRevisionUnreadable(t *testing.T) {
 	}
 	if _, err := f.put("owner", schema.PutPermissionsRequestV1{Revision: 1, Changes: []schema.PermissionChangeV1{member(schema.PermUseVoice, false)}}); err == nil {
 		t.Errorf("PutPermissions over an unreadable revision succeeded")
+	}
+}
+
+// The audit actor of a change is the writer who was checked (the review of
+// #1013): any other is refused before anything is written.
+func TestPutPermissionsActorIsTheWriter(t *testing.T) {
+	f := newPermFixture(t)
+	req := schema.PutPermissionsRequestV1{Revision: f.revision(), Changes: []schema.PermissionChangeV1{member(schema.PermCreatePrivateChannels, false)}}
+	for _, actor := range []string{"system", principalActor(f.ids["operator-1"]), ""} {
+		if _, err := f.s.PutPermissions(f.ctx, actor, f.ids["owner"], req, time.Now()); !errors.Is(err, ErrPermissionsInvalid) {
+			t.Errorf("the owner's change attributed to %q = %v, want ErrPermissionsInvalid", actor, err)
+		}
+	}
+	if f.revision() != req.Revision {
+		t.Error("a refused change moved the revision")
+	}
+}
+
+// IssuedToOthers joins the audit trail (design §7.5, O13): live credentials
+// and hooks a non-owner issued to someone else. What an operator issued to
+// itself, what was revoked since, what an owner issued, and what no row
+// names the issuer of (as before e48b6e3) are left out.
+func TestIssuedToOthers(t *testing.T) {
+	f := newPermFixture(t)
+	op := principalActor(f.ids["operator-1"])
+	cred := func(actor string, to int64, label string) int64 {
+		t.Helper()
+		c, _, err := f.s.CreateCredential(f.ctx, actor, to, label, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.ID
+	}
+	included := cred(op, f.ids["member-1"], "to member-1")
+	cred(op, f.ids["operator-1"], "its own")
+	revoked := cred(op, f.ids["member-no-voice"], "revoked since")
+	if err := f.s.RevokeCredential(f.ctx, "system", revoked); err != nil {
+		t.Fatal(err)
+	}
+	cred(principalActor(f.ids["owner"]), f.ids["member-1"], "the owner's")
+	cred("system", f.ids["member-1"], "no issuer on record")
+	ch, err := f.s.ChannelByName(f.ctx, "channel-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hook, err := f.s.CreateHook(f.ctx, op, "issued-to-others-hook-token", ch.ID, f.ids["member-1"])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := f.s.IssuedToOthers(f.ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	type item struct {
+		kind schema.IssuedKind
+		id   int64
+	}
+	var items []item
+	for _, it := range got {
+		if it.IssuedBy != f.ids["operator-1"] || it.PrincipalID != f.ids["member-1"] || it.IssuedAt.Time().IsZero() {
+			t.Errorf("an item with the wrong issuer, holder or time: %+v", it)
+		}
+		items = append(items, item{it.Kind, it.ID})
+	}
+	want := []item{{schema.IssuedCredential, included}, {schema.IssuedHook, hook.ID}}
+	if !slices.Equal(items, want) {
+		t.Fatalf("issued to others = %+v, want %+v", items, want)
+	}
+	// Revoking the hook takes it off the list.
+	if err := f.s.RevokeHook(f.ctx, "system", hook.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = f.s.IssuedToOthers(f.ctx, time.Now()); err != nil || len(got) != 1 || got[0].ID != included {
+		t.Errorf("after revoking the hook = %+v, %v", got, err)
 	}
 }

@@ -311,6 +311,15 @@ func run(h *harness) (summary, error) {
 	}
 	sum.timings = append(sum.timings, gt...)
 
+	// The restricted operator (issue #1015, ADR-014 design §7.7 item 1):
+	// the owner cuts the operator column through the real PUT, the
+	// restricted operator's rows run, and the column is given back.
+	rn, err := w.restrictedPhase()
+	if err != nil {
+		return sum, fmt.Errorf("the restricted operator: %w", err)
+	}
+	h.say("ok   restricted operator: %d rows; with manage_members, act_as_members and manage_channels cut through PUT /v1/permissions, every permission route named its permission, A's channel answered as one that never existed, its own channel gave it a manager's rights, and what it made before the cut was judged again", rn)
+
 	// B's sockets have been open through all of it: a second control, and
 	// every frame since they opened is scanned again.
 	if c, err = w.controlB(2); err != nil {

@@ -551,7 +551,9 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/principals/hide":                                        {reauthAlways, "removes people in bulk"},
 	"GET /v1/principals":                                              {reauthNone, "a list"},
 	"POST /v1/principals/{id}/credentials/revoke-all":                 {reauthOnOthers, "bulk revoke of someone else; signing oneself out is not"},
-	"GET /v1/audit":                                                   {reauthNone, "audit export"},
+	"GET /v1/audit":                                                   {reauthNonOwners, "audit export: names every member and private channel; an owner read it without a proof before ADR-014 and still does (#1015)"},
+	"GET /v1/permissions":                                             {reauthNone, "a read of the permissions document"},
+	"PUT /v1/permissions":                                             {reauthAlways, "grants rights (ADR-014 §7.2)"},
 	"POST /v1/hooks":                                                  {reauthAlways, "creates a hook"},
 	"GET /v1/hooks":                                                   {reauthNone, "a list"},
 	"DELETE /v1/hooks/{id}":                                           {reauthNone, "closes a hook, as an invite close"},
@@ -626,7 +628,7 @@ func TestRecentAuthClass(t *testing.T) {
 	inTable := map[string]route{}
 	for _, rt := range f.srv.routes {
 		inTable[rt.pattern] = rt
-		decide := rt.access == accessOperator || rt.access == accessOperatorOrSelf || rt.access == accessOwner ||
+		decide := rt.access == accessOperator || rt.access == accessOperatorOrSelf || rt.access == accessOwner || rt.access == accessPermission ||
 			((rt.access == accessAuthenticated || rt.access == accessChannelManager) && routeMethod(rt.pattern) != http.MethodGet)
 		if !decide {
 			if _, ok := recentAuthRoutes[rt.pattern]; ok {
@@ -670,13 +672,22 @@ func TestRecentAuthGate(t *testing.T) {
 	// The gate is held to a session with no proof: the sign-in's own
 	// (issue #1033) is let run out first.
 	f.advance(schema.RecentAuthLifetimeSeconds * time.Second)
-	for pattern := range recentAuthRoutes {
+	for pattern, rule := range recentAuthRoutes {
 		exp := routeExpectations[pattern]
 		path := exp.path
 		if pattern == "POST /v1/principals/{id}/credentials/revoke-all" {
 			path = fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", f.alice.ID)
 		}
 		rec := f.send(t, routeMethod(pattern), path, session, exp.body, "")
+		// The session is the owner's: a route in the class for anyone but an
+		// owner lets it through (TestAuditExportNeedsAProofFromNonOwners has
+		// the operator's side).
+		if rule == reauthNonOwners {
+			if rec.Code != exp.allowed {
+				t.Errorf("%s on the owner's session with no proof = %d %s, want %d", pattern, rec.Code, rec.Body, exp.allowed)
+			}
+			continue
+		}
 		if rec.Code != http.StatusForbidden || decodeBody[schema.Error](t, rec).Code != schema.ErrorCodeReauthRequired {
 			t.Errorf("%s on a session with no proof = %d %s, want 403 reauth_required", pattern, rec.Code, rec.Body)
 		}

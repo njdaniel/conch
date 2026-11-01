@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -578,6 +579,13 @@ type PermissionsWrite struct {
 // revision on by one and appends one permissions_changed audit row, all in
 // the same transaction.
 func (s *Store) PutPermissions(ctx context.Context, actor string, actorID int64, req schema.PutPermissionsRequestV1, now time.Time) (PermissionsWrite, error) {
+	// The change is attributed to the writer who is checked, and to no one
+	// else (the security review of #1013): an audit actor that is not
+	// actorID's is refused before anything is read. Actor 0 has no audit
+	// actor of its own and no row, and is refused below as before.
+	if actorID != 0 && actor != principalActor(actorID) {
+		return PermissionsWrite{}, &PermissionError{Err: ErrPermissionsInvalid, Reason: "the audit actor is not the writer"}
+	}
 	if err := req.Validate(); err != nil {
 		return PermissionsWrite{}, &PermissionError{Err: ErrPermissionsInvalid, Reason: strings.TrimPrefix(err.Error(), "schema: ")}
 	}
@@ -805,4 +813,128 @@ func initializePermissions(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	return appendAuditEventTx(ctx, tx, "system", AuditPermissionsInitialized, "server", detail, now)
+}
+
+// issuedDetail reads the credential or hook a credential_created,
+// credential_rotated or hook_created audit row names: its detail starts
+// "credential=<id>" or "hook=<id>" (credentialDetail, hookDetail).
+var issuedDetail = regexp.MustCompile(`^(credential|hook)=([0-9]+)\b`)
+
+// IssuedToOthers lists the live credentials and hooks that someone other
+// than an owner issued to a principal other than themself (ADR-014 design
+// §7.5, O13): what the answer to a PUT that turns act_as_members off for
+// operators lists, so that the owner can revoke them. Taking the permission
+// away ends none of them.
+//
+// It is joined from the audit trail, the only record of who issued what:
+// credential_created, credential_rotated and hook_created rows (written with
+// their actor since e48b6e3, 2026-10-08), whose actor and subject are both
+// "principal:<id>" and differ. An item issued before those rows existed has
+// no row and is absent. An owner's own issues are left out: owners keep
+// act_as_members. An item is live while it is not revoked (and, for a
+// credential, not expired at now) and still belongs to the subject. Each
+// item is listed once, at its first issuing row, oldest first.
+func (s *Store) IssuedToOthers(ctx context.Context, now time.Time) ([]schema.IssuedByOperatorV1, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("store: issued to others: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx,
+		`SELECT actor, subject, detail, created_at FROM audit_events
+		 WHERE action IN ('credential_created', 'credential_rotated', 'hook_created')
+		   AND actor LIKE 'principal:%' AND subject LIKE 'principal:%' AND actor <> subject
+		 ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("store: issued to others: read audit rows: %w", err)
+	}
+	type issued struct {
+		kind             schema.IssuedKind
+		id, target, from int64
+		at               int64
+	}
+	var found []issued
+	for rows.Next() {
+		var actor, subject, detail string
+		var at int64
+		if err := rows.Scan(&actor, &subject, &detail, &at); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("store: issued to others: scan audit row: %w", err)
+		}
+		from, ok1 := principalOfActor(actor)
+		target, ok2 := principalOfActor(subject)
+		m := issuedDetail.FindStringSubmatch(detail)
+		if !ok1 || !ok2 || m == nil {
+			continue
+		}
+		id, err := strconv.ParseInt(m[2], 10, 64)
+		if err != nil {
+			continue
+		}
+		kind := schema.IssuedKind(m[1])
+		found = append(found, issued{kind: kind, id: id, target: target, from: from, at: at})
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("store: issued to others: read audit rows: %w", err)
+	}
+	_ = rows.Close()
+
+	out := []schema.IssuedByOperatorV1{}
+	seen := map[string]bool{}
+	owners := map[int64]bool{}
+	for _, it := range found {
+		key := string(it.kind) + ":" + strconv.FormatInt(it.id, 10)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		owner, known := owners[it.from]
+		if !known {
+			p, ok, err := queryPrincipal(ctx, tx, it.from)
+			if err != nil {
+				return nil, fmt.Errorf("store: issued to others: read issuer: %w", err)
+			}
+			owner = ok && p.IsOwner()
+			owners[it.from] = owner
+		}
+		if owner {
+			continue
+		}
+		var holder int64
+		var query string
+		args := []any{it.id}
+		switch it.kind {
+		case schema.IssuedCredential:
+			query = `SELECT principal_id FROM credentials WHERE id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`
+			args = append(args, now.UnixMilli())
+		case schema.IssuedHook:
+			query = `SELECT principal_id FROM hooks WHERE id = ? AND revoked_at IS NULL`
+		default:
+			continue
+		}
+		switch err := tx.QueryRowContext(ctx, query, args...).Scan(&holder); {
+		case errors.Is(err, sql.ErrNoRows):
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("store: issued to others: read %s %d: %w", it.kind, it.id, err)
+		}
+		if holder != it.target {
+			continue
+		}
+		out = append(out, schema.IssuedByOperatorV1{Kind: it.kind, ID: it.id, PrincipalID: it.target, IssuedBy: it.from,
+			IssuedAt: schema.NewTimestamp(time.UnixMilli(it.at))})
+	}
+	return out, nil
+}
+
+// principalOfActor reads the id of an audit actor or subject of the form
+// "principal:<id>", positive.
+func principalOfActor(s string) (int64, bool) {
+	rest, ok := strings.CutPrefix(s, "principal:")
+	if !ok {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(rest, 10, 64)
+	return id, err == nil && id > 0
 }
