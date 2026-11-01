@@ -1,4 +1,4 @@
-import { createEvent, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { createEvent, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { useReducer, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Composer, ComposerAttachmentProvider } from './Composer';
@@ -21,7 +21,9 @@ function image(name: string, type = 'image/png'): File {
   return new File([png()], name, { type });
 }
 
-function Harness({ onSend }: { readonly onSend: (body: string, audience: Audience | undefined, attachments?: readonly unknown[]) => void }) {
+type Folk = ReadonlyMap<number, { readonly name: string; readonly kind: 'human' | 'agent' }>;
+
+function Harness({ onSend, people = new Map([[2, { name: 'ada', kind: 'human' as const }]]) }: { readonly onSend: (body: string, audience: Audience | undefined, attachments?: readonly unknown[]) => void; readonly people?: Folk }) {
   const [draft, setDraft] = useState('');
   const [attachments, dispatch] = useReducer(attachmentDraftsReducer, initialAttachmentDrafts);
   return (
@@ -38,7 +40,7 @@ function Harness({ onSend }: { readonly onSend: (body: string, audience: Audienc
         target={target}
         nets={new Map()}
         monitored={new Set()}
-        people={new Map([[2, { name: 'ada', kind: 'human' }]])}
+        people={people}
         viewer={2}
         draft={draft}
         enabled
@@ -79,7 +81,7 @@ describe('composer image drafts', () => {
     await screen.findByText('paste.png');
     fireEvent.drop(container.querySelector('form') as HTMLFormElement, { dataTransfer: { files: [image('drop.png')], types: ['Files'] } });
     await screen.findByText('drop.png');
-    fireEvent.change(screen.getByLabelText('Choose images'), { target: { files: [image('picker.png', 'image/jpeg')] } });
+    fireEvent.change(screen.getByLabelText('Choose files'), { target: { files: [image('picker.png', 'image/jpeg')] } });
     await screen.findByText('picker.png');
 
     expect(screen.getAllByRole('listitem')).toHaveLength(3);
@@ -94,7 +96,7 @@ describe('composer image drafts', () => {
     const box = screen.getByLabelText('Message #general');
     const allowed = fireEvent.paste(box, { clipboardData: { files: [], items: [{ kind: 'string' }] } });
     expect(allowed).toBe(true);
-    expect(screen.queryByRole('list', { name: 'Images to send' })).toBeNull();
+    expect(screen.queryByRole('list', { name: 'Files to send' })).toBeNull();
 
     fireEvent.change(box, { target: { value: 'かな' } });
     const composing = createEvent.keyDown(box, { key: 'Enter' });
@@ -108,14 +110,14 @@ describe('composer image drafts', () => {
   it('uses filenames for an image-only body and keeps a caption when present', async () => {
     const onSend = vi.fn();
     render(<Harness onSend={onSend} />);
-    fireEvent.change(screen.getByLabelText('Choose images'), { target: { files: [image('shot.png')] } });
+    fireEvent.change(screen.getByLabelText('Choose files'), { target: { files: [image('shot.png')] } });
     await screen.findByText('shot.png');
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
     expect(onSend).toHaveBeenLastCalledWith('shot.png', undefined, [expect.objectContaining({ filename: 'shot.png' })]);
 
     cleanup();
     render(<Harness onSend={onSend} />);
-    fireEvent.change(screen.getByLabelText('Choose images'), { target: { files: [image('captioned.png')] } });
+    fireEvent.change(screen.getByLabelText('Choose files'), { target: { files: [image('captioned.png')] } });
     await screen.findByText('captioned.png');
     fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'look at this' } });
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
@@ -124,7 +126,7 @@ describe('composer image drafts', () => {
 
   it('removes previews and revokes their object URLs on removal and unmount', async () => {
     const view = render(<Harness onSend={vi.fn()} />);
-    fireEvent.change(screen.getByLabelText('Choose images'), { target: { files: [image('one.png'), image('two.png')] } });
+    fireEvent.change(screen.getByLabelText('Choose files'), { target: { files: [image('one.png'), image('two.png')] } });
     await screen.findByText('two.png');
     fireEvent.click(screen.getByRole('button', { name: 'Remove one.png' }));
     expect(screen.queryByText('one.png')).toBeNull();
@@ -133,35 +135,130 @@ describe('composer image drafts', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:draft-2');
   });
 
-  it('rejects unsupported, corrupt and excessive-dimension images without previews', async () => {
+  it('sends an image that fails the check, and any other file, as a file chip with no preview', async () => {
     render(<Harness onSend={vi.fn()} />);
-    const picker = screen.getByLabelText('Choose images');
+    const picker = screen.getByLabelText('Choose files');
     fireEvent.change(picker, { target: { files: [new File(['<svg/>'], 'fake.png', { type: 'image/png' })] } });
-    await screen.findByRole('alert');
-    expect(screen.getByRole('alert').textContent).toContain('only PNG and JPEG');
+    await screen.findByText('fake.png');
+    expect(screen.queryByRole('alert')).toBeNull();
     expect(createObjectURL).not.toHaveBeenCalled();
 
     decode.mockRejectedValueOnce(new Error('broken raster'));
     fireEvent.change(picker, { target: { files: [image('corrupt.png')] } });
-    await waitFor(() => {
-      expect(screen.getByRole('alert').textContent).toContain('damaged');
-    });
-    expect(screen.queryByText('corrupt.png')).toBeNull();
+    await screen.findByText('corrupt.png');
 
     fireEvent.change(picker, { target: { files: [new File([png(8193, 1)], 'huge.png', { type: 'image/png' })] } });
-    await waitFor(() => {
-      expect(screen.getByRole('alert').textContent).toContain('dimensions are too large');
-    });
-    expect(screen.queryByText('huge.png')).toBeNull();
+    await screen.findByText('huge.png');
+
+    fireEvent.change(picker, { target: { files: [new File(['%PDF-1.4'], 'notes.pdf', { type: 'application/pdf' }), new File(['PK'], 'a.zip', { type: '' })] } });
+    await screen.findByText('notes.pdf');
+    await screen.findByText('a.zip');
+    expect(screen.getByText('8 B')).toBeDefined();
+    expect(screen.getAllByRole('listitem')).toHaveLength(5);
+    expect(document.querySelectorAll('li.draft-attachment img')).toHaveLength(0);
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('names its button Attach and puts no type filter on the picker', () => {
+    render(<Harness onSend={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Attach' })).toBeDefined();
+    expect(screen.getByLabelText('Choose files').hasAttribute('accept')).toBe(false);
+  });
+
+  it('takes a pasted or dropped file of any type', async () => {
+    const { container } = render(<Harness onSend={vi.fn()} />);
+    fireEvent.paste(screen.getByLabelText('Message #general'), { clipboardData: { files: [new File(['x'], 'pasted.txt', { type: 'text/plain' })] } });
+    await screen.findByText('pasted.txt');
+    fireEvent.drop(container.querySelector('form') as HTMLFormElement, { dataTransfer: { files: [new File(['y'], 'dropped.zip', { type: 'application/zip' })], types: ['Files'] } });
+    await screen.findByText('dropped.zip');
   });
 
   it('accepts only the remaining count and explains the limit', async () => {
     render(<Harness onSend={vi.fn()} />);
     const files = Array.from({ length: 11 }, (_, index) => image(`${String(index)}.png`));
-    fireEvent.change(screen.getByLabelText('Choose images'), { target: { files } });
+    fireEvent.change(screen.getByLabelText('Choose files'), { target: { files } });
     await screen.findByText('9.png');
     expect(screen.getAllByRole('listitem')).toHaveLength(10);
     expect(screen.queryByText('10.png')).toBeNull();
-    expect(screen.getByRole('alert').textContent).toContain('Only 10 images');
+    expect(screen.getByRole('alert').textContent).toContain('Only 10 files');
+  });
+});
+
+describe('@mention completion', () => {
+  // The viewer is 2 (owner): they are not offered to themselves.
+  const channel: Folk = new Map([
+    [1, { name: 'member-1', kind: 'human' }],
+    [2, { name: 'owner', kind: 'human' }],
+    [3, { name: 'member-2', kind: 'human' }],
+    [4, { name: 'helper', kind: 'agent' }],
+  ]);
+  const box = () => screen.getByLabelText<HTMLTextAreaElement>('Message #general');
+  const type = (text: string) => {
+    fireEvent.change(box(), { target: { value: text, selectionStart: text.length, selectionEnd: text.length } });
+  };
+  const options = () => within(screen.getByRole('listbox')).getAllByRole('option').map((o) => o.textContent);
+
+  it('offers channel members as a listbox, and only them', () => {
+    render(<Harness onSend={vi.fn()} people={channel} />);
+    type('hi @me');
+    expect(screen.getByRole('listbox', { name: 'Mention suggestions' })).toBeTruthy();
+    expect(options()).toEqual(['@member-1', '@member-2']);
+    expect(box().getAttribute('aria-controls')).toBe('composer-mention-list');
+    expect(box().getAttribute('aria-activedescendant')).toBe('composer-mention-option-0');
+    type('hi @stranger');
+    expect(screen.queryByRole('listbox')).toBeNull();
+  });
+
+  it('works by keyboard: arrows move, Enter and Tab insert, Escape closes', () => {
+    const onSend = vi.fn();
+    render(<Harness onSend={onSend} people={channel} />);
+    type('@');
+    expect(options()).toEqual(['@helper', '@member-1', '@member-2']);
+    fireEvent.keyDown(box(), { key: 'ArrowDown' });
+    expect(within(screen.getByRole('listbox')).getAllByRole('option')[1]?.getAttribute('aria-selected')).toBe('true');
+    fireEvent.keyDown(box(), { key: 'ArrowUp' });
+    fireEvent.keyDown(box(), { key: 'ArrowUp' });
+    expect(within(screen.getByRole('listbox')).getAllByRole('option').at(-1)?.getAttribute('aria-selected')).toBe('true');
+    fireEvent.keyDown(box(), { key: 'Escape' });
+    expect(screen.queryByRole('listbox')).toBeNull();
+    type('@member-2');
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(box().value).toBe('@member-2 ');
+    expect(onSend).not.toHaveBeenCalled();
+    type('x @hel');
+    fireEvent.keyDown(box(), { key: 'Tab' });
+    expect(box().value).toBe('x @helper ');
+  });
+
+  it('keeps one popup at a time: with the caret on a :short, the emoji list wins', async () => {
+    const onSend = vi.fn();
+    render(<Harness onSend={onSend} people={channel} />);
+    // A mention token earlier in the text, the caret on `:fire`: both could match.
+    type('@member-2 hi :fire');
+    await screen.findByRole('listbox', { name: 'Emoji suggestions' });
+    expect(screen.getAllByRole('listbox')).toHaveLength(1);
+    expect(box().getAttribute('aria-controls')).toBe('composer-emoji-list');
+    fireEvent.keyDown(box(), { key: 'Escape' });
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(box().value).toBe('@member-2 hi :fire');
+    type('@member-2 hi :fir');
+    await screen.findByRole('listbox', { name: 'Emoji suggestions' });
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(box().value).not.toContain(':fir');
+    expect(box().value.startsWith('@member-2 hi ')).toBe(true);
+    expect(box().value).not.toContain('@member-2 @');
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('shows only the mention list with the caret on a mention and no :short', () => {
+    const onSend = vi.fn();
+    render(<Harness onSend={onSend} people={channel} />);
+    type(':fire x @mem');
+    expect(screen.getAllByRole('listbox')).toHaveLength(1);
+    expect(screen.getByRole('listbox', { name: 'Mention suggestions' })).toBeTruthy();
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(box().value).toBe(':fire x @member-1 ');
+    expect(onSend).not.toHaveBeenCalled();
   });
 });

@@ -264,6 +264,7 @@ func (p *voicePoller) reportTransmit(ctx context.Context, room store.VoiceRoom, 
 		r.order.Unlock()
 		return nil
 	}
+	slog.DebugContext(ctx, "voice: transmit report applied", "channel", room.ChannelID, "principal", principalID, "started", started)
 
 	// Not tied to the caller: a client that hangs up now must not leave a
 	// reported state with no row. Bounded all the same, because the room's

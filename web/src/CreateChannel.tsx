@@ -32,7 +32,11 @@ function refusalLine(result: { readonly failure: api.ApiFailure; readonly code?:
 export function CreateChannel({
   onCreated,
   onUnauthorized,
+  asks = 0,
 }: {
+  // Counts requests from elsewhere on the page to open the form (issue
+  // #1032); each one opens it and puts focus in the name field.
+  readonly asks?: number;
   readonly onCreated: (channel: ChannelV0) => void;
   readonly onUnauthorized: () => void;
 }) {
@@ -52,6 +56,22 @@ export function CreateChannel({
       live.current = false;
     };
   }, []);
+
+  const field = useRef<HTMLInputElement>(null);
+  const seen = useRef(asks);
+  // The form is shown, and the field takes focus, in the render after a
+  // request: the effect below runs once the field is no longer hidden.
+  const [focusAsk, setFocusAsk] = useState(0);
+  useEffect(() => {
+    if (asks === seen.current) return;
+    seen.current = asks;
+    setOpen(true);
+    setLine(null);
+    setFocusAsk((n) => n + 1);
+  }, [asks]);
+  useEffect(() => {
+    if (focusAsk > 0) field.current?.focus();
+  }, [focusAsk]);
 
   function submit(event: SyntheticEvent) {
     event.preventDefault();
@@ -98,6 +118,7 @@ export function CreateChannel({
         <label htmlFor="create-channel-field">Channel name</label>
         <input
           id="create-channel-field"
+          ref={field}
           type="text"
           autoComplete="off"
           value={value}

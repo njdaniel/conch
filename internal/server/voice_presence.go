@@ -1228,6 +1228,10 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 			// Presence shows who is talking as the poller sees it, whatever
 			// was reported.
 			changed = true
+			// For finding a roster that stays on "transmitting" (issue
+			// #1041): when the poller saw the flip, as opposed to when the
+			// client reported it. Ids only; no room name.
+			slog.DebugContext(ctx, "voice: poller saw the microphone change", "channel", r.channelID, "principal", pid, "transmitting", n.transmitting)
 		}
 		events = append(events, transmitEvents(r.channelID, judged[pid])...)
 		delete(judged, pid)

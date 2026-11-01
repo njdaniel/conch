@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import type { Page } from '@playwright/test';
 import { createCredentialResponseV1, createPrincipalResponse } from '../src/schema/credential';
 import { fileAttachmentPayloadSchema, fileAttachmentV1 } from '../src/schema/file';
@@ -87,9 +88,9 @@ function activeDraftObjectURLs(page: Page): Promise<number> {
   });
 }
 
-async function pasteFiles(page: Page, files: readonly { name: string; type: string; bytes: Uint8Array<ArrayBuffer> }[]): Promise<void> {
+async function pasteFiles(page: Page, files: readonly { name: string; type: string; bytes: Uint8Array<ArrayBuffer> }[], box = 'Message #general'): Promise<void> {
   const incoming = files.map((file) => ({ ...file, bytes: Array.from(file.bytes) }));
-  await page.getByLabel('Message #general').evaluate((textarea, files) => {
+  await page.getByLabel(box).evaluate((textarea, files) => {
     const transfer = new DataTransfer();
     for (const file of files) transfer.items.add(new File([new Uint8Array(file.bytes)], file.name, { type: file.type }));
     textarea.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: transfer }));
@@ -140,8 +141,8 @@ test('picker previews without uploading, sends a captioned image, and restores i
     if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/files')) uploads.push(request.url());
   });
 
-  await page.getByLabel('Choose images').setInputFiles(pickerFile);
-  await expect(page.getByRole('list', { name: 'Images to send' }).getByText('browser-image.png')).toBeVisible();
+  await page.getByLabel('Choose files').setInputFiles(pickerFile);
+  await expect(page.getByRole('list', { name: 'Files to send' }).getByText('browser-image.png')).toBeVisible();
   expect(uploads).toEqual([]);
   const caption = unique('browser-caption');
   await page.getByLabel('Message #general').fill(caption);
@@ -166,7 +167,7 @@ test('image and text drafts survive channel and audience switches without upload
   page.on('request', (request) => {
     if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/files')) uploads.push(request.url());
   });
-  await page.getByLabel('Choose images').setInputFiles({ ...pickerFile, name: 'switch.png' });
+  await page.getByLabel('Choose files').setInputFiles({ ...pickerFile, name: 'switch.png' });
   await expect(page.getByText('switch.png')).toBeVisible();
   await page.getByLabel('Message #general').fill('unsent switch caption');
 
@@ -190,7 +191,7 @@ test('mobile picker sends an image-only message with a filename fallback', async
   await signIn(page, world, world.tokens.browser, 'browser-test');
   await expect(page.getByLabel('Message #general')).toBeEnabled();
   const name = `${unique('mobile')}.png`;
-  await page.getByLabel('Choose images').setInputFiles({ ...pickerFile, name });
+  await page.getByLabel('Choose files').setInputFiles({ ...pickerFile, name });
   await expect(page.getByText(name)).toBeVisible();
   await expectFits(page, phones[0][0]);
   await page.getByRole('button', { name: 'Send', exact: true }).click();
@@ -212,9 +213,9 @@ test('paste and drop share removable drafts, and a cancelled upload retries with
     return event.defaultPrevented;
   });
   expect(ordinaryPaste).toBe(false);
-  await expect(page.getByRole('list', { name: 'Images to send' })).toHaveCount(0);
+  await expect(page.getByRole('list', { name: 'Files to send' })).toHaveCount(0);
 
-  const drafts = page.getByRole('list', { name: 'Images to send' });
+  const drafts = page.getByRole('list', { name: 'Files to send' });
   await pasteFiles(page, [{ name: 'pasted.png', type: 'image/png', bytes: png }]);
   await expect(drafts.getByText('pasted.png')).toBeVisible();
   await dropFiles(page, [{ name: 'dropped.png', type: 'image/png', bytes: png }]);
@@ -251,26 +252,30 @@ test('paste and drop share removable drafts, and a cancelled upload retries with
   expect(uploads).toBe(1);
 });
 
-test('content validation rejects active and corrupt formats and dimension bombs, while server refusals keep drafts', async ({ meet, world }) => {
+test('content that fails the image check goes as a file with no preview', async ({ meet, world }) => {
   const { page } = await meet();
   await signIn(page, world, world.tokens.browser, 'browser-test');
   await expect(page.getByLabel('Message #general')).toBeEnabled();
-  const picker = page.getByLabel('Choose images');
+  const picker = page.getByLabel('Choose files');
   const alert = page.locator('form.composer').getByRole('alert');
   const rejected = [
-    { name: 'script.svg', mimeType: 'image/png', buffer: text('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'), line: 'script.svg: only PNG and JPEG images can be attached.' },
-    { name: 'page.html', mimeType: 'image/jpeg', buffer: text('<html><img src=x onerror=alert(1)></html>'), line: 'page.html: only PNG and JPEG images can be attached.' },
-    { name: 'moving.gif', mimeType: 'image/gif', buffer: text('GIF89a'), line: 'moving.gif: only PNG and JPEG images can be attached.' },
-    { name: 'modern.webp', mimeType: 'image/webp', buffer: text('RIFF0000WEBPVP8 '), line: 'modern.webp: only PNG and JPEG images can be attached.' },
-    { name: 'short.png', mimeType: 'image/png', buffer: png.slice(0, 20), line: 'short.png: the image is damaged or is not really a PNG or JPEG.' },
-    { name: 'axis.png', mimeType: 'image/png', buffer: pngWithDimensions(8193, 1), line: 'axis.png: the image dimensions are too large.' },
-    { name: 'pixels.png', mimeType: 'image/png', buffer: pngWithDimensions(5000, 5001), line: 'pixels.png: the image dimensions are too large.' },
-    { name: 'decoder.png', mimeType: 'image/png', buffer: png.slice(0, 33), line: 'decoder.png: the image is damaged or is not really a PNG or JPEG.' },
+    { name: 'script.svg', mimeType: 'image/png', buffer: text('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>') },
+    { name: 'page.html', mimeType: 'image/jpeg', buffer: text('<html><img src=x onerror=alert(1)></html>') },
+    { name: 'moving.gif', mimeType: 'image/gif', buffer: text('GIF89a') },
+    { name: 'modern.webp', mimeType: 'image/webp', buffer: text('RIFF0000WEBPVP8 ') },
+    { name: 'short.png', mimeType: 'image/png', buffer: png.slice(0, 20) },
+    { name: 'axis.png', mimeType: 'image/png', buffer: pngWithDimensions(8193, 1) },
+    { name: 'pixels.png', mimeType: 'image/png', buffer: pngWithDimensions(5000, 5001) },
+    { name: 'decoder.png', mimeType: 'image/png', buffer: png.slice(0, 33) },
   ];
-  for (const { line, ...file } of rejected) {
+  for (const file of rejected) {
     await picker.setInputFiles(file);
-    await expect(alert).toHaveText(line);
-    await expect(page.getByRole('list', { name: 'Images to send' })).toHaveCount(0);
+    const item = page.getByRole('list', { name: 'Files to send' }).getByRole('listitem').filter({ hasText: file.name });
+    await expect(item).toBeVisible();
+    await expect(item.locator('img')).toHaveCount(0);
+    await expect(alert).toHaveCount(0);
+    await item.getByRole('button', { name: `Remove ${file.name}` }).click();
+    await expect(page.getByRole('list', { name: 'Files to send' })).toHaveCount(0);
   }
 
   const uploadTypes: (string | null)[] = [];
@@ -292,9 +297,9 @@ test('content validation rejects active and corrupt formats and dimension bombs,
   const largeCaption = unique('large-caption');
   await page.getByLabel('Message #general').fill(largeCaption);
   await page.getByRole('button', { name: 'Send', exact: true }).click();
-  await expect(page.getByRole('alert', { name: '' }).filter({ hasText: 'a file may be at most 10485760 bytes' })).toBeVisible();
+  await expect(page.getByRole('alert', { name: '' }).filter({ hasText: `${largeName} is too large: this server takes files up to 10 MB.` })).toBeVisible();
   await expect(page.getByLabel('Message #general')).toHaveValue(largeCaption);
-  await expect(page.getByText(largeName)).toBeVisible();
+  await expect(page.getByText(largeName, { exact: true })).toBeVisible();
   await page.getByRole('button', { name: `Remove ${largeName}` }).click();
 
   await page.route('**/v2/channels/general/files?*', async (route) => {
@@ -325,7 +330,7 @@ test('uncertain sends reconcile across complete history walks and never duplicat
     if (route.request().method() === 'POST' && route.request().postData()?.includes(first) === true) await route.abort('connectionreset');
     else await route.continue();
   });
-  await page.getByLabel('Choose images').setInputFiles({ ...pickerFile, name: 'uncertain.png' });
+  await page.getByLabel('Choose files').setInputFiles({ ...pickerFile, name: 'uncertain.png' });
   await page.getByLabel('Message #general').fill(first);
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   const pending = messages(page).getByRole('listitem').filter({ hasText: first });
@@ -348,7 +353,7 @@ test('uncertain sends reconcile across complete history walks and never duplicat
       await route.abort('connectionreset');
     } else await route.continue();
   });
-  await page.getByLabel('Choose images').setInputFiles({ ...pickerFile, name: 'uncertain-after.png' });
+  await page.getByLabel('Choose files').setInputFiles({ ...pickerFile, name: 'uncertain-after.png' });
   await page.getByLabel('Message #general').fill(second);
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(messages(page).getByRole('listitem').filter({ hasText: second }).filter({ hasText: 'Sent' })).toHaveCount(1);
@@ -408,7 +413,7 @@ test('two clients deliver only authorized previews to members, nets and whispers
   }
 
   const after = unique('wide-after');
-  await senderPage.getByLabel('Choose images').setInputFiles({ ...pickerFile, name: 'after.png' });
+  await senderPage.getByLabel('Choose files').setInputFiles({ ...pickerFile, name: 'after.png' });
   await senderPage.getByLabel(`Message #${channel}`).fill(after);
   await senderPage.getByRole('button', { name: 'Send', exact: true }).click();
   for (const page of [memberPage, wrongPage]) {
@@ -439,7 +444,7 @@ test('revocation clears cached previews and a second credential restores the com
   await expect(page.getByRole('button', { name: 'Enlarge existing.png' })).toBeVisible();
   await expect.poll(() => activeObjectURLs(page)).toBe(1);
   const caption = unique('restore-caption');
-  await page.getByLabel('Choose images').setInputFiles({ ...pickerFile, name: 'restored.png' });
+  await page.getByLabel('Choose files').setInputFiles({ ...pickerFile, name: 'restored.png' });
   await page.getByLabel(`Message #${channel}`).fill(caption);
   let release = () => {};
   const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -481,7 +486,7 @@ test('changing server origin invalidates an in-flight upload without retargeting
   await signIn(page, world, author.token, author.name);
   await channelButton(page, channel).click();
   const caption = unique('origin-caption');
-  await page.getByLabel('Choose images').setInputFiles({ ...pickerFile, name: 'origin.png' });
+  await page.getByLabel('Choose files').setInputFiles({ ...pickerFile, name: 'origin.png' });
   await page.getByLabel(`Message #${channel}`).fill(caption);
   let release = () => {};
   const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -528,13 +533,11 @@ test('history decodes JPEG, rejects spoofed active content, revokes URLs and sup
   const decoded = page.locator('figure.attachment').filter({ hasText: jpgName }).locator('img[src^="blob:"]');
   await expect(decoded).toHaveJSProperty('naturalWidth', 3);
   await expect(decoded).toHaveJSProperty('naturalHeight', 2);
-  for (const [name, note] of [
-    [svgName, 'This file format is not supported for image preview.'],
-    [htmlName, 'This file format is not supported for image preview.'],
-    [hugeName, 'This image is too large to preview.'],
-  ] as const) {
+  for (const name of [svgName, htmlName, hugeName]) {
     const figure = page.locator('figure.attachment').filter({ hasText: name });
-    await expect(figure).toContainText(note);
+    await expect(figure).toContainText(name);
+    await expect(figure.locator('.attachment-size')).toBeVisible();
+    await expect(figure).not.toContainText('not supported');
     await expect(figure.getByRole('button', { name: 'Download' })).toBeVisible();
     await expect(figure.getByRole('button', { name: /Enlarge/ })).toHaveCount(0);
   }
@@ -574,4 +577,48 @@ test('history decodes JPEG, rejects spoofed active content, revokes URLs and sup
   await page.reload();
   await expect(page.getByRole('button', { name: `Enlarge ${jpgName}` })).toBeVisible();
   await expect.poll(() => activeObjectURLs(page)).toBe(1);
+});
+
+test('any file is attached by picker, paste and drop, shows as a chip to others, and downloads byte for byte', async ({ meet, secrets, world }) => {
+  const channel = unique('files');
+  await done(world, 'POST', '/v0/channels', { name: channel });
+  const sender = await person(world, secrets, unique('sender'), [channel]);
+  const member = await person(world, secrets, unique('member'), [channel]);
+  const senderPage = (await meet()).page;
+  const memberPage = (await meet()).page;
+  await Promise.all([signIn(senderPage, world, sender.token, sender.name), signIn(memberPage, world, member.token, member.name)]);
+  await channelButton(senderPage, channel).click();
+  await channelButton(memberPage, channel).click();
+
+  const pdf = buffer.from(new TextEncoder().encode('%PDF-1.4\n% notes\n'.repeat(40)));
+  const zip = buffer.from(Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 0, 1, 2, 3, 250, 251, 252, 253]));
+  const note = buffer.from(new TextEncoder().encode('plain text file\n'));
+  const sha = async (bytes: Uint8Array<ArrayBuffer>) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+
+  await expect(senderPage.getByRole('button', { name: 'Attach', exact: true })).toBeVisible();
+  await senderPage.getByLabel('Choose files').setInputFiles({ name: 'notes.pdf', mimeType: 'application/pdf', buffer: pdf });
+  await pasteFiles(senderPage, [{ name: 'bundle.zip', type: 'application/zip', bytes: zip }], `Message #${channel}`);
+  await dropFiles(senderPage, [{ name: 'readme.txt', type: 'text/plain', bytes: note }]);
+  const drafts = senderPage.getByRole('list', { name: 'Files to send' });
+  for (const name of ['notes.pdf', 'bundle.zip', 'readme.txt']) await expect(drafts.getByText(name)).toBeVisible();
+  await expect(drafts.locator('img')).toHaveCount(0);
+  await expect(senderPage.locator('form.composer').getByRole('alert')).toHaveCount(0);
+
+  const body = unique('files-caption');
+  await senderPage.getByLabel(`Message #${channel}`).fill(body);
+  await senderPage.getByRole('button', { name: 'Send', exact: true }).click();
+
+  const expected = new Map([['notes.pdf', await sha(pdf)], ['bundle.zip', await sha(zip)], ['readme.txt', await sha(note)]]);
+  for (const page of [senderPage, memberPage]) {
+    await expect(messages(page).getByText(body)).toBeVisible();
+    for (const [name, digest] of expected) {
+      const chip = page.locator('figure.attachment-file').filter({ hasText: name });
+      await expect(chip).toBeVisible();
+      await expect(chip.locator('.attachment-size')).toBeVisible();
+      await expect(chip).not.toContainText('not supported');
+      const [download] = await Promise.all([page.waitForEvent('download'), chip.getByRole('button', { name: 'Download' }).click()]);
+      expect(download.suggestedFilename()).toBe(name);
+      expect(await sha(buffer.from(readFileSync(await download.path())))).toBe(digest);
+    }
+  }
 });

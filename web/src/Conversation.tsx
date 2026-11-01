@@ -14,6 +14,7 @@ import type { Target, TargetAction } from './state/drafts';
 import type { ChannelChat, PendingSend } from './state/messages';
 import { canLoadOlder, isLater, lastId, oldestId, ordered } from './state/messages';
 import type { LiveStatus, Person } from './useLiveChannel';
+import { mentions } from './useNotifications';
 
 // HH:MM in the reader's own time zone.
 export function clock(when: string | number): string {
@@ -165,9 +166,11 @@ export function Message({
   const openers = useOpeners(items.length > 0, () => {
     setMenuOpen(true);
   });
-  const classes = ['message', ...(cont ? ['cont'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
+  const named = approval === null && editor === undefined && mentions(message.body, people.get(viewer)?.name ?? '');
+  const classes = ['message', ...(cont ? ['cont'] : []), ...(named ? ['mentions-you'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
   return (
     <li className={classes.join(' ')} data-message-id={message.id} tabIndex={-1} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
+      {named ? <span className="vh">Mentions you. </span> : null}
       {context === undefined ? null : (
         <p className="reply-context" id={`reply-context-${String(message.id)}`}>
           {context === null ? 'Reply in a thread' : `Replying to ${context.author}: ${context.excerpt}`}
@@ -459,7 +462,12 @@ export function Conversation({
   onUnauthorized,
   onSearch,
   onEdited,
+  historyBounded = false,
 }: {
+  // The viewer's own membership here has a history bound (history_after), so
+  // what was said before they joined is not shown (issue #1034). False when
+  // it has none or is not known yet: the page never claims hiding it cannot see.
+  readonly historyBounded?: boolean;
   // The channel's id, for keeping an open edit across a reload (issue #1039);
   // without it nothing is kept.
   readonly channelId?: number;
@@ -748,7 +756,11 @@ export function Conversation({
           </button>
         ) : null}
         {chat.history === 'ready' && shown.length === 0 && chat.pending.length === 0 ? (
-          <p className="hint">No messages in #{channel} yet. Say hello.</p>
+          <div className="hint empty-conversation">
+            <p>No messages here that you can see yet.</p>
+            {historyBounded ? <p>Messages sent before you joined aren&apos;t shown.</p> : null}
+            <p>Write a message to start.</p>
+          </div>
         ) : null}
         <ol className="messages">
           {shown.map((message, i) => (

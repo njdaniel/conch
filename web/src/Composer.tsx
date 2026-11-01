@@ -2,7 +2,9 @@ import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState
 import { EmojiPicker } from './EmojiPicker';
 import { completeShortcode, completionAt, insertAt, loadEmoji, type Emoji, type EmojiIndex } from './emoji/emoji';
 import { Glyph } from './Icons';
-import { validateImage, type ImageValidationResult } from './image';
+import { formatSize, isPreviewType } from './fileSize';
+import { completeMention, mentionAt } from './mention';
+import { validateImage } from './image';
 import type { Audience } from './schema/message';
 import { audienceScope, maxDraftAttachments, type DraftAttachment, type NewDraftAttachment } from './state/attachments';
 import type { Target, TargetAction } from './state/drafts';
@@ -56,18 +58,21 @@ function DraftPreview({ attachment, busy, onRemove, onCancel, onRetry }: {
 }) {
   const [url, setUrl] = useState<string | null>(null);
   const [broken, setBroken] = useState(false);
+  const image = isPreviewType(attachment.mediaType);
   useEffect(() => {
+    if (!image) return;
     const made = URL.createObjectURL(attachment.bytes);
     setUrl(made);
     return () => {
       URL.revokeObjectURL(made);
     };
-  }, [attachment.bytes]);
+  }, [attachment.bytes, image]);
 
   return (
     <li className="draft-attachment">
-      {url !== null && !broken ? <img src={url} alt="" onError={() => { setBroken(true); }} /> : <span className="draft-image-fallback" aria-hidden="true">Image</span>}
+      {!image ? <span className="draft-image-fallback" aria-hidden="true">File</span> : url !== null && !broken ? <img src={url} alt="" onError={() => { setBroken(true); }} /> : <span className="draft-image-fallback" aria-hidden="true">Image</span>}
       <span className="draft-attachment-name">{attachment.filename}</span>
+      {image ? null : <span className="hint draft-attachment-size">{formatSize(attachment.size)}</span>}
       {attachment.status === 'uploading' ? (
         <>
           <progress aria-label={`Uploading ${attachment.filename}`} />
@@ -84,17 +89,6 @@ function DraftPreview({ attachment, busy, onRemove, onCancel, onRetry }: {
       <button type="button" onClick={onRemove} disabled={busy} aria-label={`Remove ${attachment.filename}`}>Remove</button>
     </li>
   );
-}
-
-function validationLine(file: File, result: ImageValidationResult): string | null {
-  if (result.ok) return null;
-  const name = file.name === '' ? 'The image' : file.name;
-  switch (result.failure) {
-    case 'unsupported': return `${name}: only PNG and JPEG images can be attached.`;
-    case 'invalid': return `${name}: the image is damaged or is not really a PNG or JPEG.`;
-    case 'too-large': return `${name}: the image dimensions are too large.`;
-    case 'unavailable': return `${name}: this browser cannot check image previews.`;
-  }
 }
 
 // The composer: who the message goes to, the box to write in, and Send. The
@@ -216,6 +210,16 @@ export function Composer({
   const suggesting = completion !== null && suggestions.length > 0 && dismissed !== completionKey;
   const activeSuggestion = Math.min(suggestion, Math.max(0, suggestions.length - 1));
   const optionId = (i: number) => `composer-emoji-option-${String(i)}`;
+  // `@pre` at the caret offers this channel's members (not the viewer to
+  // themselves). One popup at a time: a `:short` wins.
+  const naming = editable && !emojiOpen && completion === null ? mentionAt(draft, caret) : null;
+  const namingKey = naming === null ? null : `@${String(naming.start)}:${naming.query}`;
+  const candidates = naming === null ? [] : completeMention(others.map(([, person]) => person.name), naming.query);
+  const mentioning = naming !== null && candidates.length > 0 && dismissed !== namingKey;
+  const activeCandidate = Math.min(suggestion, Math.max(0, candidates.length - 1));
+  const mentionId = (i: number) => `composer-mention-option-${String(i)}`;
+  const popup = mentioning ? 'composer-mention-list' : suggesting ? 'composer-emoji-list' : undefined;
+  const activeOption = mentioning ? mentionId(activeCandidate) : suggesting ? optionId(activeSuggestion) : undefined;
   useLayoutEffect(() => {
     const at = caretAfter.current;
     const box = textarea.current;
@@ -230,6 +234,14 @@ export function Composer({
   function insertEmoji(key: string, from: number, to: number): void {
     if (!editable) return;
     const done = insertAt(draft, from, to, key);
+    caretAfter.current = done.caret;
+    setSuggestion(0);
+    onDraft(done.text);
+    setInsertions((n) => n + 1);
+  }
+  function insertMention(name: string, from: number, to: number): void {
+    if (!editable) return;
+    const done = insertAt(draft, from, to, `@${name} `);
     caretAfter.current = done.caret;
     setSuggestion(0);
     onDraft(done.text);
@@ -279,24 +291,30 @@ export function Composer({
     const frozenScope = scope;
     const slots = Math.max(0, maxDraftAttachments - attachments.length);
     const accepted = incoming.slice(0, slots);
-    const countError = incoming.length > slots ? `Only ${String(maxDraftAttachments)} images can be attached to one message.` : null;
+    const countError = incoming.length > slots ? `Only ${String(maxDraftAttachments)} files can be attached to one message.` : null;
     if (accepted.length === 0) {
       setInputError(countError);
       return;
     }
     const checked = await Promise.all(accepted.map(async (file) => ({ file, result: await validateImage(file) })));
     if (generation !== validationGeneration.current || scopeNow.current !== frozenScope) return;
-    const valid: NewDraftAttachment[] = [];
-    const errors: string[] = countError === null ? [] : [countError];
-    for (const { file, result } of checked) {
-      const line = validationLine(file, result);
-      if (line !== null) errors.push(line);
-      else if (result.ok) valid.push({
-        filename: file.name === '' ? `image.${result.value.format === 'png' ? 'png' : 'jpg'}` : file.name,
-        mediaType: result.value.format === 'png' ? 'image/png' : 'image/jpeg',
+    // A PNG or JPEG that passes the sniff is an image, with a preview. Any
+    // other file, and an image that fails the sniff, goes as a plain file.
+    const valid: NewDraftAttachment[] = checked.map(({ file, result }) => {
+      if (result.ok) {
+        return {
+          filename: file.name === '' ? `image.${result.value.format === 'png' ? 'png' : 'jpg'}` : file.name,
+          mediaType: result.value.format === 'png' ? 'image/png' : 'image/jpeg',
+          bytes: file,
+        };
+      }
+      return {
+        filename: file.name === '' ? 'file' : file.name,
+        mediaType: isPreviewType(file.type) || file.type === '' ? 'application/octet-stream' : file.type,
         bytes: file,
-      });
-    }
+      };
+    });
+    const errors: string[] = countError === null ? [] : [countError];
     if (valid.length > 0) fileDraft.add(valid);
     setInputError(errors.length === 0 ? null : errors.join(' '));
   }
@@ -381,7 +399,7 @@ export function Composer({
         </fieldset>
       ) : null}
       {attachments.length > 0 ? (
-        <ul className="draft-attachments" aria-label="Images to send" aria-busy={uploading}>
+        <ul className="draft-attachments" aria-label="Files to send" aria-busy={uploading}>
           {attachments.map((attachment) => (
             <DraftPreview
               key={attachment.clientId}
@@ -412,14 +430,29 @@ export function Composer({
           ))}
         </ul>
       ) : null}
+      {mentioning ? (
+        <ul id="composer-mention-list" className="emoji-suggestions" role="listbox" aria-label="Mention suggestions">
+          {candidates.map((name, i) => (
+            <li
+              key={name}
+              id={mentionId(i)}
+              role="option"
+              aria-selected={i === activeCandidate}
+              onMouseDown={(event) => { event.preventDefault(); }}
+              onClick={() => { insertMention(name, naming.start, caret); }}
+            >
+              @{name}
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <div className={paused ? 'composer-box paused' : 'composer-box'}>
       <input
         ref={picker}
         type="file"
-        accept="image/png,image/jpeg"
         multiple
         className="image-file-input"
-        aria-label="Choose images"
+        aria-label="Choose files"
         tabIndex={-1}
         onChange={(event) => {
           const input = event.currentTarget;
@@ -429,9 +462,9 @@ export function Composer({
           });
         }}
       />
-      <button type="button" className="attach-image" aria-label="Attach images" disabled={!enabled || busy} onClick={() => { picker.current?.click(); }}>
+      <button type="button" className="attach-image" aria-label="Attach" disabled={!enabled || busy} onClick={() => { picker.current?.click(); }}>
         <Glyph name="image" />
-        <span className="label">Attach images</span>
+        <span className="label">Attach</span>
       </button>
       <textarea
         id="composer-text"
@@ -442,8 +475,8 @@ export function Composer({
         readOnly={busy}
         aria-describedby={paused ? pausedId : undefined}
         aria-autocomplete="list"
-        aria-controls={suggesting ? 'composer-emoji-list' : undefined}
-        aria-activedescendant={suggesting ? optionId(activeSuggestion) : undefined}
+        aria-controls={popup}
+        aria-activedescendant={activeOption}
         onChange={(event) => {
           setCaret(event.target.selectionStart);
           setSuggestion(0);
@@ -452,6 +485,25 @@ export function Composer({
         onSelect={(event) => { setCaret(event.currentTarget.selectionStart); }}
         onPaste={paste}
         onKeyDown={(event) => {
+          if (mentioning && !event.nativeEvent.isComposing) {
+            const n = candidates.length;
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault();
+              setSuggestion((activeCandidate + (event.key === 'ArrowDown' ? 1 : n - 1)) % n);
+              return;
+            }
+            if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+              event.preventDefault();
+              const name = candidates[activeCandidate];
+              if (name !== undefined) insertMention(name, naming.start, caret);
+              return;
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              setDismissed(namingKey);
+              return;
+            }
+          }
           if (suggesting && !event.nativeEvent.isComposing) {
             const n = suggestions.length;
             if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
