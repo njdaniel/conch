@@ -1,4 +1,4 @@
-import { createEvent, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { createEvent, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useReducer, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Composer, ComposerAttachmentProvider } from './Composer';
@@ -21,7 +21,9 @@ function image(name: string, type = 'image/png'): File {
   return new File([png()], name, { type });
 }
 
-function Harness({ onSend }: { readonly onSend: (body: string, audience: Audience | undefined, attachments?: readonly unknown[]) => void }) {
+type Folk = ReadonlyMap<number, { readonly name: string; readonly kind: 'human' | 'agent' }>;
+
+function Harness({ onSend, people = new Map([[2, { name: 'ada', kind: 'human' as const }]]) }: { readonly onSend: (body: string, audience: Audience | undefined, attachments?: readonly unknown[]) => void; readonly people?: Folk }) {
   const [draft, setDraft] = useState('');
   const [attachments, dispatch] = useReducer(attachmentDraftsReducer, initialAttachmentDrafts);
   return (
@@ -38,7 +40,7 @@ function Harness({ onSend }: { readonly onSend: (body: string, audience: Audienc
         target={target}
         nets={new Map()}
         monitored={new Set()}
-        people={new Map([[2, { name: 'ada', kind: 'human' }]])}
+        people={people}
         viewer={2}
         draft={draft}
         enabled
@@ -163,5 +165,58 @@ describe('composer image drafts', () => {
     expect(screen.getAllByRole('listitem')).toHaveLength(10);
     expect(screen.queryByText('10.png')).toBeNull();
     expect(screen.getByRole('alert').textContent).toContain('Only 10 images');
+  });
+});
+
+describe('@mention completion', () => {
+  // The viewer is 2 (owner): they are not offered to themselves.
+  const channel: Folk = new Map([
+    [1, { name: 'member-1', kind: 'human' }],
+    [2, { name: 'owner', kind: 'human' }],
+    [3, { name: 'member-2', kind: 'human' }],
+    [4, { name: 'helper', kind: 'agent' }],
+  ]);
+  const box = () => screen.getByLabelText<HTMLTextAreaElement>('Message #general');
+  const type = (text: string) => {
+    fireEvent.change(box(), { target: { value: text, selectionStart: text.length, selectionEnd: text.length } });
+  };
+  const options = () => within(screen.getByRole('listbox')).getAllByRole('option').map((o) => o.textContent);
+
+  it('offers channel members as a listbox, and only them', () => {
+    render(<Harness onSend={vi.fn()} people={channel} />);
+    type('hi @me');
+    expect(screen.getByRole('listbox', { name: 'Mention suggestions' })).toBeTruthy();
+    expect(options()).toEqual(['@member-1', '@member-2']);
+    expect(box().getAttribute('aria-controls')).toBe('composer-mention-list');
+    expect(box().getAttribute('aria-activedescendant')).toBe('composer-mention-option-0');
+    type('hi @stranger');
+    expect(screen.queryByRole('listbox')).toBeNull();
+  });
+
+  it('works by keyboard: arrows move, Enter and Tab insert, Escape closes', () => {
+    const onSend = vi.fn();
+    render(<Harness onSend={onSend} people={channel} />);
+    type('@');
+    expect(options()).toEqual(['@helper', '@member-1', '@member-2']);
+    fireEvent.keyDown(box(), { key: 'ArrowDown' });
+    expect(within(screen.getByRole('listbox')).getAllByRole('option')[1]?.getAttribute('aria-selected')).toBe('true');
+    fireEvent.keyDown(box(), { key: 'ArrowUp' });
+    fireEvent.keyDown(box(), { key: 'ArrowUp' });
+    expect(within(screen.getByRole('listbox')).getAllByRole('option').at(-1)?.getAttribute('aria-selected')).toBe('true');
+    fireEvent.keyDown(box(), { key: 'Escape' });
+    expect(screen.queryByRole('listbox')).toBeNull();
+    type('@member-2');
+    fireEvent.keyDown(box(), { key: 'Enter' });
+    expect(box().value).toBe('@member-2 ');
+    expect(onSend).not.toHaveBeenCalled();
+    type('x @hel');
+    fireEvent.keyDown(box(), { key: 'Tab' });
+    expect(box().value).toBe('x @helper ');
+  });
+
+  it('keeps one popup at a time: a :short wins over @', () => {
+    render(<Harness onSend={vi.fn()} people={channel} />);
+    type('@member-2 :fi');
+    expect(screen.queryByRole('listbox', { name: 'Mention suggestions' })).toBeNull();
   });
 });
