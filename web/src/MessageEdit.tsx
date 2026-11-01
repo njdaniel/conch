@@ -163,7 +163,7 @@ export function EarlierVersions({
       return;
     }
     if (event.key !== 'Tab') return;
-    const controls = dialog.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
+    const controls = dialog.current?.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])');
     if (controls === undefined || controls.length === 0) return;
     const first = controls[0];
     const last = controls[controls.length - 1];

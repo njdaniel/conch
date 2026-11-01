@@ -22,7 +22,17 @@ describe('linkify', () => {
     { name: 'scheme alone stays text', body: 'http:// and https://', want: [t('http:// and https://')] },
     { name: 'scheme glued to a word stays text', body: 'xhttps://example.com', want: [t('xhttps://example.com')] },
     { name: 'tags stay characters', body: '<b>https://example.com/a</b>', want: [t('<b>'), l('https://example.com/a'), t('</b>')] },
-    { name: 'unicode host', body: 'https://例え.jp/パス.', want: [l('https://例え.jp/パス', 'https://xn--r8jz45g.jp/%E3%83%91%E3%82%B9'), t('.')] },
+    { name: 'unicode host stays text', body: 'https://例え.jp/パス.', want: [t('https://例え.jp/パス.')] },
+    { name: 'lookalike host stays text', body: 'https://аррӏе.com/', want: [t('https://аррӏе.com/')] },
+    { name: 'accented host stays text', body: 'https://münchen.de/', want: [t('https://münchen.de/')] },
+    { name: 'credentials stay text', body: 'https://bank.example@evil.example/login', want: [t('https://bank.example@evil.example/login')] },
+    { name: 'user and password stay text', body: 'see https://user:pw@example.com/', want: [t('see https://user:pw@example.com/')] },
+    { name: 'bidi override stays text', body: 'https://trusted.example\u202e@evil.example/login', want: [t('https://trusted.example\u202e@evil.example/login')] },
+    { name: 'isolate stays text', body: 'https://example.com/a\u2066b', want: [t('https://example.com/a\u2066b')] },
+    { name: 'zero width stays text', body: 'https://exa\u200bmple.com/', want: [t('https://exa\u200bmple.com/')] },
+    { name: 'soft hyphen stays text', body: 'https://example.com/a\u00adb', want: [t('https://example.com/a\u00adb')] },
+    { name: 'a byte order mark ends the run, as space does', body: 'https://example.com/a\ufeffb', want: [l('https://example.com/a'), t('\ufeffb')] },
+    { name: 'ascii host with a non-ascii path still links', body: 'https://example.com/パス', want: [l('https://example.com/パス', 'https://example.com/%E3%83%91%E3%82%B9')] },
     { name: 'newline ends a link', body: 'https://example.com/a\nnext', want: [l('https://example.com/a'), t('\nnext')] },
   ];
   it.each(cases)('$name', ({ body, want }) => {

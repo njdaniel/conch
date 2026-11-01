@@ -46,8 +46,28 @@ function trim(run: string): string {
   return run.slice(0, end);
 }
 
+// A run is never linked if it holds a control or format character (bidi
+// overrides and isolates, zero-width and joiner characters, the soft hyphen,
+// the byte order mark): they reorder or hide what the person reads.
+const invisible = /[\p{Cc}\p{Cf}]/u;
+const nonAscii = /[^\x00-\x7f]/;
+
+// writtenAuthority is the text between the scheme's slashes and the first
+// slash, backslash, question mark or hash, as the sender wrote it.
+function writtenAuthority(text: string): string {
+  const rest = text.slice(text.indexOf('//') + 2);
+  const end = rest.search(/[/\\?#]/);
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
 function href(text: string): string | null {
-  if (text.length > maxLink) return null;
+  if (text.length > maxLink || invisible.test(text)) return null;
+  // Only a plain ASCII host links. A host written in other scripts can be a
+  // lookalike of another name, so it stays text, at the cost of real IDN
+  // domains not linking. A percent sign in the host is refused for the same
+  // reason: the parser would decode it into one.
+  const authority = writtenAuthority(text);
+  if (nonAscii.test(authority) || authority.includes('%')) return null;
   let url: URL;
   try {
     url = new URL(text);
@@ -55,6 +75,8 @@ function href(text: string): string | null {
     return null;
   }
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.hostname === '') return null;
+  // A name before an at sign is what makes one site look like another.
+  if (url.username !== '' || url.password !== '') return null;
   return url.href;
 }
 
