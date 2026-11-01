@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/njdaniel/conch/e2e/internal/lkit"
+	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -71,6 +73,10 @@ type group struct {
 	// agentSession is the group agent's own session (B only).
 	agentSession int64
 	reportID     int64
+	// memberLinkID and memberLinkCode are a member link of the group (A
+	// only): made by ann, through POST /v2/invites.
+	memberLinkID   int64
+	memberLinkCode string
 	// signInLink is an operator's sign-in link for one of the group's people,
 	// and signInCode its code, which B presents to the password routes as a
 	// proof and a reset (issue #708): neither may take it.
@@ -275,14 +281,39 @@ func (w *world) buildGroups() error {
 	w.a.invites = append(w.a.invites, pi.Invite.ID)
 	w.marks.secret("A's personal invite code", pi.Code)
 	w.marks.id("invite", "ann's personal invite", pi.Invite.ID)
+
+	// ann also makes a member link, as a member does now (POST /v2/invites):
+	// the link the member-link rows name.
+	var link schema.CreateInviteResponseV2
+	if err := ann.api.call(http.MethodPost, "/v2/invites", schema.CreateInviteRequestV2{Kind: schema.InviteKindMember}, &link); err != nil {
+		return fmt.Errorf("ann makes a member link: %w", err)
+	}
+	w.h.secret("an invite code", link.Code)
+	w.a.memberLinkID, w.a.memberLinkCode = link.Invite.ID, link.Code
+	w.marks.secret("A's member link code", link.Code)
+	w.marks.id("invite", "ann's member link", link.Invite.ID)
 	return nil
 }
 
-// invite makes an invite as a and registers its code as a secret.
+// invite makes an invite as a and registers its code as a secret. It is one
+// made as invites were before the community model: POST /v1/invites is
+// retired (issue #985, 409 invite_kind_retired), so the invite is made
+// through the store, opened beside the running server, as a's principal. The
+// routes that read, preview, redeem and close such an invite are unchanged,
+// and member links are made over POST /v2/invites (the rows of memberlinks).
 func (w *world) invite(a api, req schema.CreateInviteRequestV1) (schema.CreateInviteResponseV1, error) {
 	var resp schema.CreateInviteResponseV1
-	if err := a.call(http.MethodPost, "/v1/invites", req, &resp); err != nil {
+	var who schema.WhoAmIResponseV1
+	if err := a.call(http.MethodGet, "/v1/whoami", nil, &who); err != nil {
 		return resp, err
+	}
+	err := w.underStore(func(ctx context.Context, st *store.Store) error {
+		var err error
+		resp, err = st.CreateInvite(ctx, "system", who.ID, req, store.InviteOptions{}, time.Now())
+		return err
+	})
+	if err != nil {
+		return resp, fmt.Errorf("make an invite beside the server: %w", err)
 	}
 	w.h.secret("an invite code", resp.Code)
 	return resp, nil

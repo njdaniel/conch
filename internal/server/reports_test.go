@@ -296,11 +296,11 @@ func TestReportRedaction(t *testing.T) {
 		}
 	}
 	// An invite, made and looked at.
-	rec = f.do(t, "POST", "/v1/invites", f.rootTok, fmt.Sprintf(`{"kind":"open","channels":[%q]}`, channelName))
+	rec = f.do(t, "POST", "/v2/invites", f.rootTok, `{"kind":"member"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("invite = %d %s", rec.Code, rec.Body)
 	}
-	code := decodeBody[schema.CreateInviteResponseV1](t, rec).Code
+	code := decodeBody[schema.CreateInviteResponseV2](t, rec).Code
 	secrets = append(secrets, code)
 	f.do(t, "POST", "/v1/invites/preview", "", fmt.Sprintf(`{"code":%q}`, code))
 

@@ -172,7 +172,7 @@ Flags for serve:
                          per-address cap on guest visits. Unset, the header is
                          never read and every request counts as coming from its connection's
                          peer: behind a proxy, from the proxy.
-  --invite-allowance     how many open personal invites one person who may invite can hold
+  --invite-allowance     how many open member links one person who may invite can hold
                          at once; operators have no allowance (env CONCHD_INVITE_ALLOWANCE,
                          default 5)
   --server-name          the server's label on its front door, GET /v1/join, at most 64
@@ -296,7 +296,7 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	sessionStale := fs.Duration("session-stale", staleDefault, "how long without a heartbeat before a session shows as stale")
 	sessionOffline := fs.Duration("session-offline", offlineDefault, "how long without a heartbeat before a session shows as offline")
 	trustedProxiesRaw := fs.String("trusted-proxies", os.Getenv("CONCHD_TRUSTED_PROXIES"), "comma-separated CIDRs of reverse proxies whose X-Forwarded-For is believed")
-	inviteAllowance := fs.Int("invite-allowance", store.DefaultPersonalInviteAllowance, "open personal invites one inviter may hold at once")
+	inviteAllowance := fs.Int("invite-allowance", store.DefaultPersonalInviteAllowance, "open member links one member may hold at once")
 	if raw := os.Getenv("CONCHD_INVITE_ALLOWANCE"); raw != "" {
 		v, err := strconv.Atoi(raw)
 		if err != nil {

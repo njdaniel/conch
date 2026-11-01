@@ -377,7 +377,7 @@ func TestAdminInviteMemberRefused(t *testing.T) {
 		{"invite-permission", []string{"principal", "invite-permission", "2", "on"}, "forbidden"},
 		{"disable-invitees", []string{"principal", "disable-invitees", "1", "--yes"}, "forbidden"},
 		// Making an invite is a person's route; this member may not.
-		{"create", []string{"invite", "create", "--personal", "--channel", "ops", "--expires", "1h"}, schema.ErrorCodeInviteNotAllowed},
+		{"create", []string{"invite", "create", "--personal", "--channel", "ops", "--expires", "1h"}, schema.ErrorCodeInviteKindRetired},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

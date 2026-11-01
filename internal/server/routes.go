@@ -189,7 +189,19 @@ func (s *Server) routeTable() []route {
 		// and use it. They carry the code in the body only, are rate-limited
 		// per client address before any store work, and the store decides
 		// everything else. See invites.go.
+		// POST /v1/invites stays for holders of manage_members until the
+		// clients move to v2 and is 409 invite_kind_retired for everyone else
+		// (issue #985, see handleCreateInvite). A
+		// member link is made with POST /v2/invites, listed with GET
+		// /v2/invites, previewed (exempt, as v1's) with POST /v2/invites/preview
+		// and its joiners read by its maker or an operator with GET
+		// /v2/invites/{id}/joiners. The joiners route has no membersOnly: a
+		// guest there is a 404 invite_not_found, as for a ghost id.
 		rt("POST /v1/invites", accessAuthenticated, s.membersOnly(hf(s.handleCreateInvite))),
+		rt("POST /v2/invites", accessAuthenticated, s.membersOnly(hf(s.handleCreateMemberLink))),
+		rt("GET /v2/invites", accessAuthenticated, s.membersOnly(hf(s.handleListMemberLinks))),
+		rt("POST /v2/invites/preview", accessExempt, hf(s.handlePreviewMemberLink)),
+		rt("GET /v2/invites/{id}/joiners", accessAuthenticated, hf(s.handleMemberLinkJoiners)),
 		rt("GET /v1/invites", accessAuthenticated, hf(s.handleListInvites)),
 		rt("DELETE /v1/invites/{id}", accessAuthenticated, hf(s.handleCloseInvite)),
 		rt("POST /v1/invites/preview", accessExempt, hf(s.handlePreviewInvite)),
@@ -360,7 +372,8 @@ var recentAuthRoutes = map[string]reauthRule{
 	// Signing out everywhere is anyone's for themself; an operator doing it
 	// to someone else is the bulk revoke of the rule.
 	"POST /v1/principals/{id}/credentials/revoke-all": reauthOnOthers,
-	// An invite makes principals; an operator's has no allowance and may be
-	// open to anyone. A member's invites are not in the class.
+	// An invite makes principals; an operator's has no allowance and may never
+	// expire. A member's links are not in the class.
 	"POST /v1/invites": reauthOperators,
+	"POST /v2/invites": reauthOperators,
 }

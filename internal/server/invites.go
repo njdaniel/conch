@@ -105,10 +105,23 @@ func (s *Server) inviteCaller(w http.ResponseWriter, r *http.Request) (store.Pri
 
 // handleCreateInvite serves POST /v1/invites: the caller makes an invite. The
 // code is in the 201 body and nowhere else, sent no-store.
+//
+// It is kept for holders of manage_members (operators by default) until the
+// browser and the CLI make member links (issues #990, #994); everyone else is
+// answered 409 invite_kind_retired before the body is read (issue #985), so
+// no member can invite an outsider into a private channel they belong to.
 func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	caller, ok := s.inviteCaller(w, r)
 	if !ok {
+		return
+	}
+	operator, ok := s.canOrFail(w, r, caller, schema.PermManageMembers)
+	if !ok {
+		return
+	}
+	if !operator {
+		writeError(w, http.StatusConflict, schema.ErrorCodeInviteKindRetired, inviteKindRetiredMessage)
 		return
 	}
 	if limit, ok, retry := s.inviteLimits.takeCreate(caller.ID, s.now()); !ok {

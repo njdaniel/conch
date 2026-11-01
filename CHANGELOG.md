@@ -31,9 +31,26 @@ the usual backup first (docs/deploy.md does).
   reads them. Until open sign-up's change (#987) ships, someone who joins
   through the bare address afterwards still starts with a bound from when
   they joined.
-- **Voice and making invite links are on for every member.** Until member
-  links (#985) replace invites, that means any member can make a single-use
-  invite to any channel they are in.
+- **Voice and making invite links are on for every member.** Every member
+  can now make member links (`POST /v2/invites`, issue #985), which land the
+  newcomer in the default channels and grant nothing else. An operator
+  switches the right off for one person with
+  `PUT /v1/principals/{id}/invite-permission`, which also closes that
+  person's open links.
+- **`POST /v1/invites` is refused for members.** It answers
+  `409 invite_kind_retired` and makes nothing for anyone without
+  `manage_members`. Operators (who hold it by default) can still use it, so
+  the browser and `conch admin invite create` keep working until they move to
+  member links (#990, #994); a later release retires it for everyone. Make a
+  member link with `POST /v2/invites`, and read it with `GET /v2/invites`,
+  `POST /v2/invites/preview` and `GET /v2/invites/{id}/joiners`. Invites made
+  before the upgrade keep working, and are listed, previewed and closed as
+  before.
+- **`--invite-allowance` now counts member links.** The number of open member
+  links one person may hold (default 5, an uncapped link counts as open;
+  operators have no limit). Invites made before the upgrade are not counted.
+  A link that names no expiry lasts 7 days, and only an operator can make one
+  that never expires.
 - **Joining.** The bare address now either makes accounts (open sign-up on,
   where it admitted accounts before) or admits nobody. It no longer admits
   guests. Voice for new accounts is always on.

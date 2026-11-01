@@ -574,7 +574,8 @@ var reauthDecisions = map[string]reauthDecision{
 
 	// Every write anyone authenticated may make: in the class only where an
 	// operator's use creates a principal or a link (rule: reauthOperators).
-	"POST /v1/invites":                              {reauthOperators, "an operator's invite makes principals, with no allowance"},
+	"POST /v1/invites":                              {reauthOperators, "an operator's invite makes principals, with no allowance (members are refused, issue #985)"},
+	"POST /v2/invites":                              {reauthOperators, "an operator's member link makes principals, with no allowance, and may never expire"},
 	"DELETE /v1/invites/{id}":                       {reauthNone, "closes an invite"},
 	"POST /v1/ws-tickets":                           {reauthNone, "a one-use socket ticket for the caller's own credential, no principal or link"},
 	"POST /v0/channels/{channel}/messages":          {reauthNone, "a message"},
@@ -700,7 +701,7 @@ func TestRecentAuthGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertErrorBody(t, f.send(t, "POST", "/v1/invites", aliceSession, `{}`, ""), http.StatusBadRequest, "invalid_request")
+	assertErrorBody(t, f.send(t, "POST", "/v2/invites", aliceSession, `{}`, ""), http.StatusBadRequest, "invalid_request")
 	if rec := f.reauthOp(t, session, rootPassword, f.code(secret)); rec.Code != http.StatusOK {
 		t.Fatalf("reauth = %d %s", rec.Code, rec.Body)
 	}
@@ -733,7 +734,7 @@ func (f *operatorFixture) signInWithCode(t *testing.T, secret []byte) (string, t
 // re-authentication class (audit 3 F8).
 func (f *operatorFixture) inviteNow(t *testing.T, token string) *httptest.ResponseRecorder {
 	t.Helper()
-	return f.send(t, "POST", "/v1/invites", token, inviteJSON(t, personal("general")), "")
+	return f.send(t, "POST", "/v2/invites", token, `{"kind":"member"}`, "")
 }
 
 // A full sign-in with password and code is the recent proof for its first
