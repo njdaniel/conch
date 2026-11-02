@@ -73,16 +73,19 @@ export function AdminConsole({ who, origin, channels, names, permissionsChanged,
   ];
 
   const current = sections.find((s) => s.id === page) ?? null;
+  // The id, not the section: the sections are made afresh on every render, and
+  // an effect that depended on them would take focus back on each one.
+  const currentId = current?.id ?? null;
 
   // A page takes focus when it opens; the list gets it back on Back.
   useEffect(() => {
     if (!phone) return;
-    if (current !== null) heading.current?.focus();
+    if (currentId !== null) heading.current?.focus();
     else if (opener.current !== null) {
       list.current?.querySelector<HTMLElement>(`[data-section="${opener.current}"]`)?.focus();
       opener.current = null;
     }
-  }, [phone, current]);
+  }, [phone, currentId]);
 
   if (!phone) {
     return (

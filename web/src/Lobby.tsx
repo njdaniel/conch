@@ -85,6 +85,7 @@ export function Lobby({
   banner,
   visit,
   admin,
+  onSettingsOpen,
   overlay,
 }: {
   readonly origin: string;
@@ -146,6 +147,8 @@ export function Lobby({
   // The server's own settings, for an operator (issue #714): joining and
   // guests, in Settings.
   readonly admin?: ReactNode;
+  // Called each time Settings opens, so what it shows from whoami is fresh.
+  readonly onSettingsOpen?: () => void;
   // A question over the whole page, Settings included (issue #714: a recent
   // proof of the password). While it is shown everything else is inert and
   // stays as it was, so what was being typed is kept.
@@ -272,6 +275,9 @@ export function Lobby({
   // Focus goes back to Settings once the panel has closed: until then the
   // button is inert behind it, and cannot take focus.
   const settingsClosed = useRef(false);
+  useEffect(() => {
+    if (settingsOpen) onSettingsOpen?.();
+  }, [settingsOpen, onSettingsOpen]);
   useEffect(() => {
     if (settingsOpen) {
       if (toJoining.current) toJoining.current = false;

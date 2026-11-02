@@ -92,6 +92,10 @@ function SetupCard({
       setBusy(false);
       if (result.ok) {
         setAsked(null);
+        // A preset the members already match moves no revision, and the card
+        // would come back: the choice is made, so it is put away for good.
+        api.dismissSetupCard(origin, who.id);
+        setDismissed(true);
         onApplied(result.value);
         return;
       }
@@ -139,7 +143,7 @@ function SetupCard({
         <div role="group" aria-label={`Apply ${presetLabels[asked]}`} className="signout-confirm">
           <p>
             {changes.on.length === 0 && changes.off.length === 0
-              ? `${presetLabels[asked]} changes nothing for members right now; it records your choice.`
+              ? `${presetLabels[asked]} already matches what members may do, so nothing changes.`
               : `${presetLabels[asked]} changes what members may do.`}
           </p>
           {changes.on.length === 0 ? null : <p>Members gain: {names(changes.on)}.</p>}

@@ -427,8 +427,11 @@ export function useAgents({
           if (interrupted) {
             interrupted = false;
             onChannelsChanged?.();
-            onPermissionsChanged?.();
           }
+          // Every subscription that is established reads the permissions
+          // again, the first of a feed too: a feed made after a channel was
+          // selected has missed whatever changed before it, and no event says so.
+          onPermissionsChanged?.();
           break;
         case 'waiting':
           interrupted = true;

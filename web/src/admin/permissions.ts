@@ -6,7 +6,6 @@
 // Unknown permission values are tolerated: a permission a newer server
 // names is shown by its name and never sent anywhere.
 import type { ApiFailure } from '../api';
-import { serverLine } from '../Invite';
 import type { Permission } from '../schema/permission';
 import type { WhoAmIResponseV1 } from '../schema/principal';
 
@@ -78,9 +77,9 @@ export interface Refusal {
 }
 
 // refusalLine is the line for a refused or failed call, from the server's
-// code and the permission it names (design §7.4), never from its message
-// except where the server writes the rule that was broken. nothing says what
-// was left as it was.
+// code and the permission it names (design §7.4). The server's message is
+// other people's text as far as this page is concerned: it is never shown.
+// nothing says what was left as it was.
 export function refusalLine(result: Refusal, nothing: string): string {
   if (result.failure === 'network') return `Cannot reach the server. ${nothing}`;
   switch (result.code) {
@@ -95,9 +94,11 @@ export function refusalLine(result: Refusal, nothing: string): string {
     case 'permissions_stale':
       return `The permissions changed since this page read them. ${nothing}`;
     case 'permissions_conflict':
+      return `That change would break a rule of the permissions. ${nothing}`;
     case 'join_policy_conflict':
+      return `Those joining settings cannot stand together. ${nothing}`;
     case 'invalid_request':
-      return serverLine(result.message, `The server refused. ${nothing}`);
+      return `The server did not take that. ${nothing}`;
     default:
       return `The server refused. ${nothing}`;
   }

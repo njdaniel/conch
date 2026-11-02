@@ -59,6 +59,10 @@ export function InviteSettings({
   useEffect(() => {
     if (asking) cancel.current?.focus();
   }, [asking]);
+  // Losing the permission closes a question that was open.
+  useEffect(() => {
+    if (disabledReason !== undefined) setAsking(false);
+  }, [disabledReason]);
   // The number of the newest read or change; an older one's answer is dropped.
   const latest = useRef(0);
   // A change in flight, and whether a read waits for it to answer.
@@ -105,7 +109,7 @@ export function InviteSettings({
   }, [open, asked, read]);
 
   function change(want: boolean) {
-    if (busy || paused === null) return;
+    if (busy || paused === null || disabledReason !== undefined) return;
     const n = ++latest.current;
     writing.current = true;
     setBusy(true);
@@ -181,7 +185,7 @@ export function InviteSettings({
             Pause all invites
           </label>
           {disabledReason === undefined ? null : <p className="hint">{disabledReason}</p>}
-          {asking && !paused ? (
+          {asking && !paused && disabledReason === undefined ? (
             <div role="group" aria-labelledby={`${id}-ask`} className="signout-confirm" onKeyDown={leave}>
               <p id={`${id}-ask`}>
                 Pause every invite? No one can make, preview or use an invite until you switch this back, including links already sent.

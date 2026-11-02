@@ -7,6 +7,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { AdminConsole } from './AdminConsole';
+import { InviteSettings } from './InviteSettings';
 import { canDo, memberLine, permissionName, refusalLine } from './admin/permissions';
 import { presetChanges } from './admin/ServerSection';
 import { channelsLine } from './admin/InvitesList';
@@ -25,6 +27,7 @@ const ticketValue = 'conch_wst_TICKETTICKETTICKETTICKETTICKETTICKETTICKET';
 const password = 'the owner passphrase here';
 
 const memberRights: Permission[] = ['create_public_channels', 'create_private_channels', 'make_member_links', 'see_member_directory', 'use_voice', 'share_screen'];
+const personalRights: Permission[] = ['use_voice', 'share_screen'];
 const operatorRights: Permission[] = [...memberRights, 'manage_members', 'act_as_members', 'manage_channels'];
 const auth = { scope: 'full', password_set: true, totp_enrolled: false, setup_complete: true, expires_at: later, idle_expires_at: later } as const;
 
@@ -86,8 +89,9 @@ function permissionsDoc(revision: number, memberOn: readonly Permission[] = memb
     revision,
     rows: rows(memberOn),
     presets: [
-      { preset: 'personal', member: memberRights },
-      { preset: 'group', member: ['create_public_channels', 'create_private_channels', 'make_member_links', 'use_voice'] },
+      // pkg/schema PresetMemberPermissions, as the server sends it.
+      { preset: 'personal', member: personalRights },
+      { preset: 'group', member: memberRights },
     ],
     editable: ['member'],
     warnings: [],
@@ -307,6 +311,37 @@ describe('the Server section', () => {
   });
 });
 
+describe('refusals use the page’s words, never the server’s', () => {
+  const hostile = '<img src=x onerror=alert(1)> pay me at evil.example now';
+
+  it('does not show the message of a join_policy_conflict or an invalid_request', async () => {
+    for (const code of ['join_policy_conflict', 'invalid_request', 'permissions_conflict'] as const) {
+      serve(settingsOperator, { 'PUT /v1/join/settings': () => refusal(code === 'permissions_conflict' ? 409 : 409, code, hostile) });
+      const { container } = await signedIn(operatorToken);
+      const region = await joining();
+      fireEvent.click(within(region).getByLabelText('Pause joining from the address'));
+      fireEvent.click(within(region).getByRole('button', { name: 'Save joining' }));
+      await within(region).findByText(/Nothing was changed\.$/);
+      expect(container.innerHTML).not.toContain('evil.example');
+      expect(container.querySelector('img')).toBeNull();
+      cleanup();
+      window.sessionStorage.clear();
+    }
+  });
+
+  it('does not show the message of a refused preset', async () => {
+    serve(owner, {
+      'GET /v1/permissions': () => json(permissionsDoc(1)),
+      'PUT /v1/permissions': () => refusal(409, 'permissions_conflict', hostile),
+    });
+    const { container } = await signedIn(ownerToken);
+    fireEvent.click(await screen.findByRole('button', { name: 'Personal server' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Apply Personal server' })).getByRole('button', { name: 'Apply Personal server' }));
+    expect(await screen.findByText('That change would break a rule of the permissions. Nothing was changed.')).toBeDefined();
+    expect(container.innerHTML).not.toContain('evil.example');
+  });
+});
+
 describe('the setup card', () => {
   async function card(routes: Record<string, Route> = {}, revision = 1) {
     const calls = serve(owner, { 'GET /v1/permissions': () => json(permissionsDoc(revision)), ...routes });
@@ -321,32 +356,38 @@ describe('the setup card', () => {
     expect(screen.queryByText('How will this server be used?')).toBeNull();
   });
 
-  it('shows what Group changes, applies it against the revision read, and disappears when the revision moves', async () => {
-    const calls = await card({ 'PUT /v1/permissions': () => json(permissionsDoc(2, ['create_public_channels', 'create_private_channels', 'make_member_links', 'use_voice'])) });
+  it('shows what Personal changes, applies it against the revision read, and disappears when the revision moves', async () => {
+    const calls = await card({ 'PUT /v1/permissions': () => json(permissionsDoc(2, personalRights)) });
     expect(await screen.findByText('How will this server be used?')).toBeDefined();
-    fireEvent.click(screen.getByRole('button', { name: 'Group server' }));
-    const ask = screen.getByRole('group', { name: 'Apply Group server' });
-    expect(ask.textContent).toContain('Members lose: see everyone on the server, share their screen.');
-    expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
-    fireEvent.click(within(ask).getByRole('button', { name: 'Apply Group server' }));
-    await waitFor(() => {
-      expect(screen.queryByText('How will this server be used?')).toBeNull();
-    });
-    expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ revision: 1, preset: 'group' });
-    // The summary lines follow the document.
-    expect(await screen.findByText(/only people they share a channel with/)).toBeDefined();
-  });
-
-  it('applies Personal', async () => {
-    const calls = await card({ 'PUT /v1/permissions': () => json(permissionsDoc(2)) });
-    fireEvent.click(await screen.findByRole('button', { name: 'Personal server' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Personal server' }));
     const ask = screen.getByRole('group', { name: 'Apply Personal server' });
-    expect(ask.textContent).toContain('changes nothing for members right now');
+    expect(ask.textContent).toContain('Members lose: create public channels, create private channels, make member links, see everyone on the server.');
+    expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
     fireEvent.click(within(ask).getByRole('button', { name: 'Apply Personal server' }));
     await waitFor(() => {
       expect(screen.queryByText('How will this server be used?')).toBeNull();
     });
     expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ revision: 1, preset: 'personal' });
+    // The summary lines follow the document.
+    expect(await screen.findByText(/only people they share a channel with/)).toBeDefined();
+  });
+
+  it('applies Group, which the members already match: nothing changes, the revision stays, and the card is put away for good', async () => {
+    const calls = await card({ 'PUT /v1/permissions': () => json(permissionsDoc(1)) });
+    fireEvent.click(await screen.findByRole('button', { name: 'Group server' }));
+    const ask = screen.getByRole('group', { name: 'Apply Group server' });
+    expect(ask.textContent).toContain('already matches what members may do, so nothing changes.');
+    expect(ask.textContent).not.toContain('record');
+    fireEvent.click(within(ask).getByRole('button', { name: 'Apply Group server' }));
+    await waitFor(() => {
+      expect(screen.queryByText('How will this server be used?')).toBeNull();
+    });
+    expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ revision: 1, preset: 'group' });
+    // The server is still at revision 1, and a fresh page does not ask again.
+    cleanup();
+    await card({}, 1);
+    await screen.findByText(/Members see:/);
+    expect(screen.queryByText('How will this server be used?')).toBeNull();
   });
 
   it('applies nothing when the question is cancelled', async () => {
@@ -522,7 +563,9 @@ describe('gating by permission', () => {
       [{ failure: 'network' }, 'Cannot reach the server. X'],
       [{ failure: 'invalid', code: 'permission_denied' }, 'You do not hold the permission for that. X'],
       [{ failure: 'invalid', code: 'reauth_required' }, 'It needs your password first. X'],
-      [{ failure: 'invalid', code: 'invalid_request', message: 'schema: bad thing' }, 'Bad thing.'],
+      [{ failure: 'invalid', code: 'invalid_request', message: 'schema: bad thing' }, 'The server did not take that. X'],
+      [{ failure: 'invalid', code: 'permissions_conflict', message: 'schema: bad thing' }, 'That change would break a rule of the permissions. X'],
+      [{ failure: 'invalid', code: 'join_policy_conflict', message: 'schema: bad thing' }, 'Those joining settings cannot stand together. X'],
       [{ failure: 'invalid', code: 'something_new' }, 'The server refused. X'],
     ];
     for (const [result, line] of cases) expect(refusalLine(result, 'X')).toBe(line);
@@ -530,7 +573,144 @@ describe('gating by permission', () => {
 
   it('works out what a preset changes in the members’ column', () => {
     const doc = permissionsDoc(1);
-    expect(presetChanges(doc, 'personal')).toEqual({ on: [], off: [] });
-    expect(presetChanges(doc, 'group')).toEqual({ on: [], off: ['see_member_directory', 'share_screen'] });
+    expect(presetChanges(doc, 'group')).toEqual({ on: [], off: [] });
+    expect(presetChanges(doc, 'personal')).toEqual({ on: [], off: ['create_public_channels', 'create_private_channels', 'make_member_links', 'see_member_directory'] });
+  });
+});
+
+describe('staying current', () => {
+  const whoamiCalls = (calls: readonly Call[]) => calls.filter((c) => c.path === '/v1/whoami').length;
+
+  it('reads whoami and the permissions again when Settings opens, with no channel selected', async () => {
+    const calls = serve(owner, { 'GET /v1/permissions': () => json(permissionsDoc(2)) });
+    window.sessionStorage.setItem(key, ownerToken);
+    render(<App origin={origin} />);
+    const button = await screen.findByRole('button', { name: 'Settings' });
+    await screen.findByRole('heading', { name: 'Server administration', hidden: true });
+    const who = whoamiCalls(calls);
+    const docs = calls.filter((c) => c.path === '/v1/permissions').length;
+    fireEvent.click(button);
+    await waitFor(() => {
+      expect(whoamiCalls(calls)).toBeGreaterThan(who);
+      expect(calls.filter((c) => c.path === '/v1/permissions').length).toBeGreaterThan(docs);
+    });
+    // No socket was opened (none of FakeSocket's is open): only opening
+    // Settings did it.
+  });
+
+  it('reads whoami again when a feed opens for the first time, with nothing interrupted', async () => {
+    const calls = serve(member);
+    window.sessionStorage.setItem(key, memberToken);
+    window.location.hash = '#/c/channel-a';
+    render(<App origin={origin} />);
+    await screen.findByRole('button', { name: 'Settings' });
+    await waitFor(() => {
+      expect(FakeSocket.all.some((s) => s.url.includes('/v1/events/ws?'))).toBe(true);
+    });
+    const before = whoamiCalls(calls);
+    for (const s of FakeSocket.all) s.open();
+    await waitFor(() => {
+      expect(whoamiCalls(calls)).toBeGreaterThan(before);
+    });
+  });
+
+  it('drops an answer to an earlier whoami read that arrives after a later one’s', async () => {
+    const held: ((rights: Permission[]) => void)[] = [];
+    let holding = false;
+    serve(member, {
+      'GET /v1/whoami': () => {
+        if (!holding) return json(member);
+        return new Promise<Response>((resolve) => {
+          held.push((rights) => {
+            resolve(json({ ...member, permissions: rights }));
+          });
+        });
+      },
+    });
+    window.sessionStorage.setItem(key, memberToken);
+    window.location.hash = '#/c/channel-a';
+    render(<App origin={origin} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    await screen.findByText('You can create channels and make member links. Voice is on.');
+    await waitFor(() => {
+      expect(FakeSocket.all.some((s) => s.url.includes('/v1/events/ws?'))).toBe(true);
+    });
+    for (const s of FakeSocket.all) s.open();
+    // Let the reads the open itself made finish before holding the next two.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    holding = true;
+    const events = FakeSocket.all.find((s) => s.url.includes('/v1/events/ws?'));
+    events?.send({ schema: 'conch.permissions_changed.v1' });
+    events?.send({ schema: 'conch.permissions_changed.v1' });
+    await waitFor(() => {
+      expect(held).toHaveLength(2);
+    });
+    const [first, second] = held;
+    // The later read (B) answers first with the newer rights; the earlier (A)
+    // answers after it with the older ones.
+    await act(async () => {
+      second?.(['create_public_channels']);
+      await Promise.resolve();
+    });
+    expect(await screen.findByText('You can create public channels. Voice is off.')).toBeDefined();
+    await act(async () => {
+      first?.(['use_voice']);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(screen.getByText('You can create public channels. Voice is off.')).toBeDefined();
+    expect(screen.queryByText('You can read and write in the channels you are in. Voice is on.')).toBeNull();
+  });
+});
+
+describe('the invite brake when the permission goes', () => {
+  it('closes an open question and never sends the pause', async () => {
+    const calls = serve(owner);
+    // Signing in pins the credential the component's calls use.
+    window.sessionStorage.setItem(key, ownerToken);
+    render(<App origin={origin} />);
+    await screen.findByRole('button', { name: 'Settings' });
+    cleanup();
+    // One function throughout: a new one on each render would read afresh.
+    const stop = () => undefined;
+    const view = render(<InviteSettings open onUnauthorized={stop} />);
+    fireEvent.click(await screen.findByLabelText('Pause all invites'));
+    expect(await screen.findByRole('group', { name: /^Pause every invite\?/ })).toBeDefined();
+    view.rerender(<InviteSettings open disabledReason="Needs the permission to manage members." onUnauthorized={stop} />);
+    expect(screen.queryByRole('group', { name: /^Pause every invite\?/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Yes, pause' })).toBeNull();
+    expect(screen.getByLabelText<HTMLInputElement>('Pause all invites').disabled).toBe(true);
+    // Back again, the question is not still pending.
+    view.rerender(<InviteSettings open onUnauthorized={stop} />);
+    expect(screen.queryByRole('group', { name: /^Pause every invite\?/ })).toBeNull();
+    expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
+  });
+});
+
+describe('the console on a phone', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('keeps focus in a field when the parent renders again', async () => {
+    serve(owner);
+    window.sessionStorage.setItem(key, ownerToken);
+    render(<App origin={origin} />);
+    await screen.findByRole('button', { name: 'Settings' });
+    cleanup();
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: true, addEventListener: () => undefined, removeEventListener: () => undefined })),
+    );
+    const props = { who: owner, origin, permissionsChanged: 0, onUnauthorized: () => undefined };
+    const view = render(<AdminConsole {...props} channels={[]} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Server' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Joining' }));
+    const field = await screen.findByLabelText('Default link expiry (hours, 0 for none)');
+    field.focus();
+    expect(document.activeElement).toBe(field);
+    // A message arrives: the parent renders again with new objects.
+    view.rerender(<AdminConsole {...props} channels={[]} names={new Map([[1, 'owner']])} />);
+    view.rerender(<AdminConsole {...props} channels={[]} />);
+    expect(document.activeElement).toBe(field);
   });
 });
