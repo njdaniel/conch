@@ -15,7 +15,6 @@ import type { Platform } from '../types';
 import { bridge } from './access';
 import { credentials } from './credentials';
 import { http } from './http';
-import { bridge } from './access';
 import { DesktopShell } from './Shell';
 import { sockets } from './sockets';
 import { serverOrigin } from './state';
