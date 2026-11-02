@@ -414,6 +414,23 @@ func setRoleTx(ctx context.Context, tx execer, actor string, actorID, targetID i
 		return RoleChangeResult{}, fmt.Errorf("store: set role: %w", err)
 	}
 
+	// Any role change drops every recent-auth proof the principal holds: a
+	// proof earned under one role's rules (a member's password alone) must
+	// not satisfy the other's (an operator's password and code), and a
+	// demoted operator's proof ends with the role. The sessions themselves
+	// stand: they carry no role, which is read live on every request, and
+	// an operator route needing a fresh proof now answers reauth_required
+	// (issue #1054; ADR-012). Same transaction as the role write.
+	proofsRes, err := tx.ExecContext(ctx,
+		"UPDATE credentials SET recent_auth_until = NULL WHERE principal_id = ? AND recent_auth_until IS NOT NULL", targetID)
+	if err != nil {
+		return RoleChangeResult{}, fmt.Errorf("store: set role: clear recent-auth proofs: %w", err)
+	}
+	proofsCleared, err := proofsRes.RowsAffected()
+	if err != nil {
+		return RoleChangeResult{}, fmt.Errorf("store: set role: clear recent-auth proofs: %w", err)
+	}
+
 	var invitesClosed, credsRevoked, hooksRevoked int
 	if !target.Owner && wantOwner {
 		if credsRevoked, err = revokePrincipalCredentialsTx(ctx, tx, actor, targetID, "owner mark set", SessionEndedByRevocation, now, runs); err != nil {
@@ -463,8 +480,8 @@ func setRoleTx(ctx context.Context, tx execer, actor string, actorID, targetID i
 	if len(managesIDs) > 0 {
 		managesText = strings.Join(managesIDs, ",")
 	}
-	detail := fmt.Sprintf("from=%s to=%s owner=%t manages=%s invites_closed=%d credentials_revoked=%d hooks_revoked=%d",
-		target.Role, role, wantOwner, managesText, invitesClosed, credsRevoked, hooksRevoked)
+	detail := fmt.Sprintf("from=%s to=%s owner=%t manages=%s invites_closed=%d credentials_revoked=%d hooks_revoked=%d proofs_cleared=%d",
+		target.Role, role, wantOwner, managesText, invitesClosed, credsRevoked, hooksRevoked, proofsCleared)
 	if err := appendAuditEventTx(ctx, tx, actor, AuditPrincipalRoleChanged, principalActor(targetID), detail, now); err != nil {
 		return RoleChangeResult{}, err
 	}
