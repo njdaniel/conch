@@ -57,6 +57,9 @@ const (
 	denyNetNotOn          = "net_not_on"
 	denyAgentOnHumanRoute = "agents_use_mcp"
 	denyAgentVoice        = "agents_no_voice"
+	// denyAgentChannelCreate: channels are made by community members
+	// (issue #981); an agent is never one.
+	denyAgentChannelCreate = "agents_no_channel_create"
 )
 
 var (
