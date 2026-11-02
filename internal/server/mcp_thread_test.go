@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/njdaniel/conch/internal/server/store"
@@ -40,6 +41,10 @@ func TestMCPThreadReplyMatchesREST(t *testing.T) {
 	f.manifest(t, "gboth", nil, schema.ChannelPermissionRead, schema.ChannelPermissionPost,
 		schema.ChannelPermissionPostNet, schema.ChannelPermissionWhisper)
 	f.seat(t, "net1", "gboth", schema.NetRoleMember)
+	f.add(t, "gmon", store.PrincipalAgent, true)
+	f.manifest(t, "gmon", nil, schema.ChannelPermissionRead, schema.ChannelPermissionPost,
+		schema.ChannelPermissionPostNet, schema.ChannelPermissionWhisper)
+	f.seat(t, "net1", "gmon", schema.NetRoleMonitor)
 	other, err := f.srv.store.CreateChannel(context.Background(), "other")
 	if err != nil {
 		t.Fatal(err)
@@ -65,24 +70,41 @@ func TestMCPThreadReplyMatchesREST(t *testing.T) {
 		who  string
 		root int64
 		want string
+		// reason is the access_denied reason the refusal writes, "" for none.
+		reason string
 	}{
-		{"channel-wide root", "gboth", wide, ok},
-		{"channel-wide root, post grant only", "aria", wide, ok},
-		{"net root, on the net", "gboth", netRoot, ok},
-		{"net root, no post_net grant", "aria", netRoot, "forbidden"},
-		{"net root, net the agent is not on", "gboth", net2Root, noThread},
-		{"whisper root, addressed to the agent", "gboth", toGboth, ok},
-		{"whisper root, not addressed to the agent", "gboth", toWes, noThread},
-		{"whisper root, post grant only, not addressed", "aria", toWes, noThread},
-		{"a reply is not a root", "gboth", reply, noThread},
-		{"root that does not exist", "gboth", 999999, noThread},
-		{"root in another channel", "gboth", otherMsg.ID, noThread},
+		{"channel-wide root", "gboth", wide, ok, ""},
+		{"channel-wide root, post grant only", "aria", wide, ok, ""},
+		{"net root, on the net", "gboth", netRoot, ok, ""},
+		{"net root, no post_net grant", "aria", netRoot, "forbidden", denyAudienceGrant},
+		{"net root, monitor seat", "gmon", netRoot, "forbidden", denyNetMonitorOnly},
+		{"net root, net the agent is not on", "gboth", net2Root, noThread, ""},
+		{"whisper root, addressed to the agent", "gboth", toGboth, ok, ""},
+		{"whisper root, not addressed to the agent", "gboth", toWes, noThread, ""},
+		{"whisper root, post grant only, not addressed", "aria", toWes, noThread, ""},
+		{"a reply is not a root", "gboth", reply, noThread, ""},
+		{"root that does not exist", "gboth", 999999, noThread, ""},
+		{"root in another channel", "gboth", otherMsg.ID, noThread, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			before := f.messageCount(t)
+			beforeDenials := len(f.denials(t))
 			viaMCP, mcpMsg := f.mcpReply(t, tt.who, tt.root, "re")
 			afterMCP := f.messageCount(t)
+			// Exactly the denial the refusal writes, and none for an answer
+			// that is a success or a plain "thread not found".
+			events := f.denials(t)[beforeDenials:]
+			wantEvents := 0
+			if tt.reason != "" {
+				wantEvents = 1
+			}
+			if len(events) != wantEvents {
+				t.Fatalf("access_denied events = %d, want %d: %+v", len(events), wantEvents, events)
+			}
+			if tt.reason != "" && (events[0].Subject != "mcp:post_message" || !strings.Contains(events[0].Detail, tt.reason)) {
+				t.Errorf("denial = %+v, want subject mcp:post_message and reason %s", events[0], tt.reason)
+			}
 			rest := f.postReply(t, tt.who, tt.root)
 
 			if got := viaMCP.result(); got != tt.want {

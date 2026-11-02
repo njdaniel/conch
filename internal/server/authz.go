@@ -484,7 +484,7 @@ func (a *agentScope) channelForAudience(ctx context.Context, name string, aud sc
 // of it, deciding nothing about its manifest: a reply's grant depends on its
 // root's audience, which is not known yet. An unknown channel and one the
 // agent is not a member of are the same answer.
-func (a *agentScope) memberChannel(ctx context.Context, name string) (*grantedChannel, *schema.Error) {
+func (a *agentScope) memberChannel(ctx context.Context, name string) (*replyChannel, *schema.Error) {
 	channel, err := a.s.store.ChannelByName(ctx, name)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil, errChannelNotFound
@@ -502,20 +502,28 @@ func (a *agentScope) memberChannel(ctx context.Context, name string) (*grantedCh
 		a.s.auditAgentDenial(ctx, a.identity.principalID, a.subject, a.capability, channel.ID, denyNotMember)
 		return nil, errChannelNotFound
 	}
-	return &grantedChannel{scope: a, channel: channel}, nil
+	return &replyChannel{scope: a, channel: channel}, nil
 }
 
-// replyRoot reads the root of a reply as the agent. Only a grant from
-// memberChannel is used for this, and it decides nothing about the manifest:
-// postReplyMCP does that from the root it returns. An unseen, missing,
+// replyChannel is a channel the agent is a member of and nothing more: its
+// manifest has not been consulted. It is deliberately not a grantedChannel and
+// exposes only the two operations a reply needs, so that no tool can read or
+// post through a lookup that was never authorized. postReplyMCP decides the
+// manifest from the root's audience, between replyRoot and insertReply.
+type replyChannel struct {
+	scope   *agentScope
+	channel store.Channel
+}
+
+// replyRoot reads the root of a reply as the agent. An unseen, missing,
 // other-channel or reply root is store.ErrThreadNotFound.
-func (g *grantedChannel) replyRoot(ctx context.Context, rootID int64) (store.Message, error) {
+func (g *replyChannel) replyRoot(ctx context.Context, rootID int64) (store.Message, error) {
 	return g.scope.s.store.ReplyRootMessage(ctx, g.channel.ID, g.scope.reader(), rootID)
 }
 
 // insertReply stores the agent's reply to rootID and returns it with the
 // recipients resolved at post time. The author is the agent.
-func (g *grantedChannel) insertReply(ctx context.Context, rootID int64, body string, payload *schema.Payload) (store.Message, []int64, error) {
+func (g *replyChannel) insertReply(ctx context.Context, rootID int64, body string, payload *schema.Payload) (store.Message, []int64, error) {
 	return g.scope.s.store.InsertReplyMessage(ctx, store.ReplyPost{
 		ChannelID: g.channel.ID, AuthorID: g.scope.identity.principalID, RootID: rootID, Body: body, Payload: payload,
 	}, g.scope.reader())
