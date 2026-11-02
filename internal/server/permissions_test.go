@@ -527,10 +527,19 @@ var permissionGates = map[schema.Permission][][2]string{
 		// security review of #1015).
 		{"hooks.go", "Server.handleCreateHook"},
 		{"manifests.go", "Server.handlePutManifest"},
+		// Channel settings, and the bound on a creator who does not hold
+		// it (issue #981).
+		{"channels.go", "Server.handleChannelSettings"},
+		{"store/queries.go", "Store.ChannelSettings"},
+		{"store/members.go", "channelCreatorStandingTx"},
 	},
-	schema.PermSeeMemberDirectory:   {{"directory.go", "Server.handleListDirectoryMembers"}},
-	schema.PermChangeServerSettings: {{"routes.go", "Server.routeTable"}},
-	schema.PermReadAuditLog:         {{"routes.go", "Server.routeTable"}},
+	schema.PermSeeMemberDirectory: {{"directory.go", "Server.handleListDirectoryMembers"}},
+	// Member channel creation (issue #981): the store decides the
+	// permission for the visibility asked, under its write lock.
+	schema.PermCreatePublicChannels:  {{"store/members.go", "channelCreatePermission"}},
+	schema.PermCreatePrivateChannels: {{"store/members.go", "channelCreatePermission"}},
+	schema.PermChangeServerSettings:  {{"routes.go", "Server.routeTable"}},
+	schema.PermReadAuditLog:          {{"routes.go", "Server.routeTable"}},
 	// A4 (#1016): every voice route reads use_voice through
 	// voicePresenceChannel (session, transmit, companion, presence, the
 	// socket, the share routes) or voiceOccupancyCaller; the poller and the
@@ -552,10 +561,7 @@ var permissionGates = map[schema.Permission][][2]string{
 	},
 }
 
-var vacuousGates = map[schema.Permission][]string{
-	schema.PermCreatePublicChannels:  {"POST /v1/channels"},
-	schema.PermCreatePrivateChannels: {"POST /v1/channels"},
-}
+var vacuousGates = map[schema.Permission][]string{}
 
 // TestEnforcedPermissionsAreHonest is the safety net's own check (SF-3):
 // every permission in enforcedPermissions is asked by each of its gates, or

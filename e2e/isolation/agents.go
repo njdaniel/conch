@@ -44,6 +44,11 @@ func coreAgentRows() []row {
 		// whoever it is.
 		{route: "GET /v1/directory/members", what: "asks for the community's members", want: answer{http.StatusForbidden, "forbidden"},
 			probe: func(*world, subject) probe { return get("/v1/directory/members") }},
+		// Channels are made by community members (issue #981): an agent is
+		// refused before any name is looked at.
+		byID("POST /v1/channels", "makes a channel with A's private channel's name", aChannel, answer{http.StatusForbidden, "forbidden"}, func(_ *world, s subject) probe {
+			return post("/v1/channels", schema.CreateChannelRequestV1{Name: s.name, Visibility: schema.ChannelPrivate})
+		}),
 		byChannel("GET /v2/channels/{channel}/messages", "reads A's channel", func(_ *world, s subject) probe { return get("/v2/channels/" + s.name + "/messages") }),
 		byChannel("POST /v2/channels/{channel}/messages", "posts to A's channel", func(_ *world, s subject) probe {
 			return post("/v2/channels/"+s.name+"/messages", schema.PostMessageRequestV2{Body: "hello"})

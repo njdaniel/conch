@@ -82,6 +82,10 @@ type group struct {
 	// proof and a reset (issue #708): neither may take it.
 	signInLink int64
 	signInCode string
+	// public is A's public channel, made by ann through POST /v1/channels
+	// (issue #981), and publicID its id; neither is a marker.
+	public   string
+	publicID int64
 }
 
 func (g *group) main() string { return g.channels[0] }
@@ -117,6 +121,9 @@ type world struct {
 	p          *plaza
 	priv       *markers
 	ptag, qtag string
+	// utag is in A's public channel's name and what is written there
+	// (communityrows.go): A's, but not a marker (design §8).
+	utag string
 	// addrs counts the client addresses handed out (newAddr).
 	addrs int
 }
@@ -135,6 +142,7 @@ func newWorld(h *harness, d *conchdProc, lk *liveKit) *world {
 	w.ptag = newTag(w.tag, w.btag)
 	w.qtag = newTag(w.tag, w.btag, w.ptag)
 	w.ntag = newTag(w.tag, w.btag, w.ptag, w.qtag)
+	w.utag = newTag(w.tag, w.btag, w.ptag, w.qtag, w.ntag)
 	// No password is ever in conchd's output: the log scan at the end of the
 	// run looks for every one the run sends.
 	for _, pw := range passwords {
@@ -167,6 +175,10 @@ func (w *world) aPerson(s string) string { return "folk-" + w.ntag + "-" + s }
 
 // isA reports whether name is one of A's people.
 func (w *world) isA(name string) bool { return strings.HasPrefix(name, "folk-"+w.ntag+"-") }
+
+// uName is a string A writes in public (design §8): its own tag, so no piece
+// of it is a piece of A's private text.
+func (w *world) uName(s string) string { return "public-" + w.utag + "-" + s }
 
 // bName is a string B writes; B's text is not scanned, so it may be plain.
 func (w *world) bName(s string) string { return "bravo-" + w.btag + "-" + s }
