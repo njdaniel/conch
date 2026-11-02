@@ -161,6 +161,9 @@ export function InvitePanel({
   // Asked for from outside: open, with just that channel ticked, and take
   // focus into the panel once it is shown.
   const body = useRef<HTMLDivElement>(null);
+  // Counts the invites asked for and the times the panel was re-aimed or
+  // finished with; an answer from an older count is dropped.
+  const generation = useRef(0);
   const [focusAsk, setFocusAsk] = useState(0);
   const asked = request?.n ?? 0;
   const askedChannel = request?.channel;
@@ -168,7 +171,10 @@ export function InvitePanel({
     if (asked === 0 || askedChannel === undefined) return;
     setOpen(true);
     setPicked(new Set([askedChannel]));
-    // An earlier invite's link grants other channels: forget it, and its state.
+    // An earlier invite's link grants other channels: forget it, and its state,
+    // and let an answer still on its way change nothing.
+    generation.current++;
+    setBusy(false);
     setLink(null);
     setCopied('no');
     setProblem(null);
@@ -212,7 +218,11 @@ export function InvitePanel({
     setProblem(null);
     setResume(false);
     setLink(null);
+    const mine = ++generation.current;
     void api.createInvite(request).then((result) => {
+      // Asked for another channel (or Done) meanwhile: this answer is for what
+      // was ticked then, and shows nothing.
+      if (mine !== generation.current) return;
       setBusy(false);
       if (result.ok) {
         setLink({ url: inviteLink(origin, result.value.code), kind: result.value.invite.kind });
@@ -316,6 +326,7 @@ export function InvitePanel({
                   // panel, so Escape still closes it. The list is read again,
                   // since the link may have been used while it was shown.
                   makeButton.current?.focus();
+                  generation.current++;
                   setLink(null);
                   refresh();
                 }}

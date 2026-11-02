@@ -533,6 +533,32 @@ describe('invite someone', () => {
     await act(async () => {});
   });
 
+  it('asked for another channel while an invite is still being made, ignores the late answer', async () => {
+    let answer: (res: Response) => void = () => undefined;
+    serve({
+      ...as(memberToken, inviter, channelList('private', 'public')),
+      'GET /v1/invites': () => json({ invites: [] }),
+      'POST /v1/invites': () => new Promise<Response>((resolve) => (answer = resolve)),
+    });
+    window.localStorage.setItem(key, memberToken);
+    render(<App origin={origin} />);
+    const nav = within(await screen.findByRole('navigation', { name: 'Channels' }));
+    await nav.findByRole('button', { name: 'public' });
+    const panel = screen.getByRole('region', { name: 'Invites' });
+    fireEvent.click(nav.getByRole('button', { name: 'Actions for private' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+
+    fireEvent.click(nav.getByRole('button', { name: 'Actions for public' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
+    answer(json({ invite: inviteOf(7, 2), code: newCode }, 201));
+    await act(async () => {});
+    expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).toBeNull();
+    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#public' }).checked).toBe(true);
+    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#private' }).checked).toBe(false);
+    expect(within(panel).getByRole('button', { name: 'Make invite' }).hasAttribute('disabled')).toBe(false);
+  });
+
   it('asked again for another channel, re-ticks only that one', async () => {
     serve({ ...as(memberToken, inviter, channelList('general', 'ops')), 'GET /v1/invites': () => json({ invites: [] }) });
     window.localStorage.setItem(key, memberToken);
