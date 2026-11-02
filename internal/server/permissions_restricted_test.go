@@ -542,6 +542,7 @@ func TestRestrictedOperatorFilteredNames(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	makeChannelsPublic(t, f.srv.store, "channel-a", "channel-b")
 	if _, err := f.srv.store.PutJoinSettings(ctx, "system", f.root.ID, schema.PutJoinSettingsRequestV1{OpenChannels: &[]string{"channel-a", "channel-b"}}); err != nil {
 		t.Fatal(err)
 	}

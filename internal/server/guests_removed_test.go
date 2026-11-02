@@ -261,6 +261,9 @@ func TestGuestsRemovedNoGuestEntryPoint(t *testing.T) {
 	} {
 		t.Run("settings "+tt.name, func(t *testing.T) {
 			f := newInviteFixture(t, Config{})
+			// red is public, so only the guest rules decide (issue #987
+			// refuses a private open channel).
+			f.makePublic(t, "red")
 			rec := f.putJoin(t, tt.req)
 			if tt.status == http.StatusConflict {
 				assertErrorBody(t, rec, http.StatusConflict, schema.ErrorCodeJoinPolicyConflict)

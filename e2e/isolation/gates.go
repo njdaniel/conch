@@ -86,6 +86,16 @@ func trySettings(what string, req schema.PutJoinSettingsRequestV1, want answer) 
 	}}
 }
 
+// tryPrivateOpenChannel has the operator try to open the address to one of
+// A's private channels: a default channel must be public, and listing a
+// private one is refused, never made public (issue #987).
+func tryPrivateOpenChannel() tryEntry {
+	return tryEntry{what: "is let into A's private channel by the operator, who lists it", want: answer{http.StatusConflict, schema.ErrorCodeChannelSettingsConflict},
+		do: func(w *world, _ api) (int, []byte, error) {
+			return w.op.do(http.MethodPut, "/v1/join/settings", schema.PutJoinSettingsRequestV1{OpenChannels: &[]string{w.p.channel, w.a.channels[0]}})
+		}}
+}
+
 func tryAccount(want answer) tryEntry {
 	return tryEntry{what: "creates an account at the bare address", want: want, do: func(w *world, from api) (int, []byte, error) {
 		return w.entry(from, http.MethodPost, "/v1/join/account", schema.JoinAccountRequestV1{Name: w.pubName(fmt.Sprintf("joiner-%d", w.addrs)), Password: joinPassword})
@@ -137,6 +147,11 @@ func gates() []gate {
 				trySettings("turns guests on", schema.PutJoinSettingsRequestV1{GuestsEnabled: &yes}, policyConflict),
 				trySettings("makes the address guest-only", schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningGuest)}, policyConflict),
 				trySettings("opens the address to guests and accounts", schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningBoth)}, policyConflict),
+				// Issue #987: voice is every member's, a default channel is
+				// public, and the bare address still admits no guest after
+				// the refused attempts to let guests in.
+				trySettings("turns voice off for joiners", schema.PutJoinSettingsRequestV1{JoinVoice: &no}, policyConflict),
+				tryPrivateOpenChannel(), tryGuest(guestsDisabled),
 				tryPreview(schema.InviteJoinBoth, schema.JoinOptionsV1{Account: true}), tryPreview(schema.InviteJoinGuest, schema.JoinOptionsV1{}),
 				tryAccount(answer{}), tryInviteAccount(schema.InviteJoinBoth, answer{})},
 			check: guestsStay},

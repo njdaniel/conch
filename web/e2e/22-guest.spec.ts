@@ -15,18 +15,22 @@
 import { expect, test } from './fixtures';
 import { joinSettingsResponseV1, type PutJoinSettingsRequestV1 } from '../src/schema/guest';
 import { createInviteResponseV1, type CreateInviteRequestV1 } from '../src/schema/invite';
-import { call, inviteUrl, loadWorld, ok, type World } from './world';
+import { call, inviteUrl, loadWorld, ok, setChannelVisibility, type World } from './world';
 
 async function setJoining(world: World, request: PutJoinSettingsRequestV1): Promise<void> {
   await ok(world, world.tokens.operator, 'PUT', '/v1/join/settings', joinSettingsResponseV1, request);
 }
 
+// general is made public for the bare address (a default channel must be,
+// issue #987), and private again after.
 test.beforeAll(async () => {
+  await setChannelVisibility(loadWorld(), 'general', 'public');
   await setJoining(loadWorld(), { open_joining: 'account', open_channels: ['general'] });
 });
 
 test.afterAll(async () => {
   await setJoining(loadWorld(), { open_joining: 'off', open_channels: [] });
+  await setChannelVisibility(loadWorld(), 'general', 'private');
 });
 
 test('G6 the bare address offers an account and no guest entry', async ({ meet, world }) => {
