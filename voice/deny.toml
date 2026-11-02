@@ -63,4 +63,5 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "zip extraction never runs: LK_CUSTOM_WEBRTC is always set (#480, drop with #481)" },
     { id = "RUSTSEC-2026-0368", reason = "zip extraction never runs: LK_CUSTOM_WEBRTC is always set (#480, drop with #481)" },
     { id = "RUSTSEC-2026-0369", reason = "zip extraction never runs: LK_CUSTOM_WEBRTC is always set (#480, drop with #481)" },
+    { id = "RUSTSEC-2026-0429", reason = "zip extraction never runs: LK_CUSTOM_WEBRTC is always set (#480, drop with #481; #1167)" },
 ]
