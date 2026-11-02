@@ -66,3 +66,43 @@ func (w *world) checkMemberLinkPreview(body []byte) error {
 	}
 	return nil
 }
+
+// checkMemberLinkRedemption redeems A's member link as a newcomer (issue
+// #986) and requires that the newcomer lands in the default channels as they
+// are now and in nothing else: never in a private channel of A's, which the
+// link's maker, ann, is in.
+func (w *world) checkMemberLinkRedemption() error {
+	// From an address of its own, so the redemption spends nothing of the
+	// per-address budget the groups' loopback shares with later phases.
+	name := w.bName("newcomer")
+	var resp schema.RedeemInviteResponseV1
+	if err := w.newcomer(name+" (joining)").call(http.MethodPost, "/v2/invites/redeem",
+		schema.RedeemInviteRequestV2{Code: w.a.memberLinkCode, Name: name, Password: joinPassword}, &resp); err != nil {
+		return fmt.Errorf("redeem A's member link: %w", err)
+	}
+	w.h.secret(name+"'s credential", resp.Token)
+	m := &member{name: name, id: resp.Principal.ID, token: resp.Token, credID: resp.Credential.ID, password: true}
+	m.api = w.as(m)
+	var settings schema.JoinSettingsV1
+	if err := w.op.call(http.MethodGet, "/v1/join/settings", nil, &settings); err != nil {
+		return err
+	}
+	var chans schema.ListChannelsResponse
+	if err := m.api.call(http.MethodGet, "/v1/channels", nil, &chans); err != nil {
+		return err
+	}
+	got := []string{}
+	for _, c := range chans.Channels {
+		if slices.Contains(w.a.channels, c.Name) {
+			return fmt.Errorf("the newcomer through A's member link is in %q, a private channel of A's", c.Name)
+		}
+		got = append(got, c.Name)
+	}
+	want := append([]string{}, settings.OpenChannels...)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		return fmt.Errorf("the newcomer through A's member link is in %v, want the default channels %v", got, want)
+	}
+	return nil
+}

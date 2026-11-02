@@ -223,7 +223,7 @@ func run(h *harness) (summary, error) {
 	if err := w.buildGroups(); err != nil {
 		return sum, fmt.Errorf("the groups: %w", err)
 	}
-	h.say("ok   the groups: A (%d people and an agent) joined through an open link; B (%d people) through personal invites, the second made by a B tester, and one the operator made by hand, with an agent",
+	h.say("ok   the groups: A (%d people and an agent) joined through the operator's member link; B (%d people) through member links, the second made by a B tester, and one the operator made by hand, with an agent",
 		len(w.a.people), len(w.b.people))
 
 	bob := w.b.people[1]
@@ -281,6 +281,11 @@ func run(h *harness) (summary, error) {
 		return sum, err
 	}
 	h.say("ok   MCP: %d tool calls as B's agent about A's objects and ghosts, each refused alike and with nothing of A (%s)", n, strings.Join(codes, ", "))
+
+	if err := w.checkMemberLinkRedemption(); err != nil {
+		return sum, fmt.Errorf("member-link redemption: %w", err)
+	}
+	h.say("ok   member link: a newcomer through A's member link landed in the default channels as they are now and in none of A's private channels")
 
 	if n, err = w.channelsChangedRows(bsock); err != nil {
 		return sum, fmt.Errorf("the channel-list signal: %w", err)

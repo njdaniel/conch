@@ -382,7 +382,7 @@ func TestRestrictedOperatorInvites(t *testing.T) {
 		}
 	})
 
-	t.Run("open links and may_invite grants are suspended without manage_members", func(t *testing.T) {
+	t.Run("open links are suspended without manage_members", func(t *testing.T) {
 		f := newRestrictedFixture(t, Config{AuthMode: AuthRequired})
 		yes := true
 		open, err := f.srv.store.CreateInvite(ctx, "system", f.op.ID,
@@ -403,8 +403,12 @@ func TestRestrictedOperatorInvites(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if red.Principal.MayInvite {
-			t.Fatal("a may_invite grant landed although its maker no longer holds manage_members")
+		// The joiner's may_invite is the community model's brake, on for every
+		// member whatever the link or its maker (issue #986; ADR-014 design
+		// §5: "every path that makes a member writes may_invite = 1"); a link
+		// grants nothing beyond it, so nothing is suspended here.
+		if !red.Principal.MayInvite {
+			t.Fatal("the joiner's may_invite brake is off; every member's is on")
 		}
 		// Suspended, not closed: it works again when the permission comes back.
 		f.setOperatorCells(t, true, schema.PermManageMembers, schema.PermActAsMembers)
