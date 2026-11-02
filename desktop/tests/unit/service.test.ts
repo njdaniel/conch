@@ -74,7 +74,7 @@ async function ready(handler: Handler = conchd) {
   servers.push(fake);
   const logs: string[] = [];
   const s = stack((line) => logs.push(line));
-  expect(s.service.setServerAddress(fake.origin)).toEqual({ ok: true, origin: fake.origin });
+  s.session.setOrigin(fake.origin);
   return { fake, logs, ...s };
 }
 
@@ -188,7 +188,7 @@ describe('sign-in', () => {
     let now = 1_000;
     const session = new Session();
     const service = new Service({ client: new Client({ fetch: globalThis.fetch, session }), session, now: () => now, log: () => undefined });
-    service.setServerAddress(fake.origin);
+    session.setOrigin(fake.origin);
     await service.signInWithCredential(CANARY_TOKEN);
     now += PASTED_TTL_MS;
     expect(service.keepCredential(CANARY_TOKEN)).toBe(false);
@@ -216,9 +216,6 @@ describe('sign-in', () => {
     await service.signIn('login', { name: 'ada', password: CANARY_PASSWORD });
     await new Promise((r) => setTimeout(r, 50));
     expect(revoked).toBe(0);
-    expect(service.setServerAddress('http://127.0.0.1:1')).toMatchObject({ ok: true });
-    await new Promise((r) => setTimeout(r, 100));
-    expect(revoked).toBe(1);
   });
 
   it('restores a sign-in main holds, and says unauthorized when it holds none', async () => {
@@ -277,6 +274,54 @@ describe('sign-out', () => {
   });
 });
 
+describe('answers that are not what this app understands (issue #946)', () => {
+  // A server whose channels list and whoami are not the documents promised.
+  const odd: Handler = (request, res) => {
+    switch (`${request.method} ${request.url}`) {
+      case 'GET /v1/whoami':
+        sendJson(res, 200, { id: 'not-a-number' });
+        return;
+      case 'GET /v1/channels':
+        sendJson(res, 200, { nothing: true });
+        return;
+      case 'GET /v1/read-state':
+        sendJson(res, 200, { nothing: true });
+        return;
+      default:
+        sendJson(res, 404, { code: 'not_found', message: 'no such route' });
+    }
+  };
+
+  async function watched() {
+    const fake = await startHttp(odd);
+    servers.push(fake);
+    const session = new Session();
+    session.setOrigin(fake.origin);
+    session.adopt(CANARY_TOKEN);
+    const seen: string[] = [];
+    const service = new Service({ client: new Client({ fetch: globalThis.fetch, session }), session, now: Date.now, log: () => undefined, onInvalid: (op) => seen.push(op) });
+    return { service, seen };
+  }
+
+  it('reports a required family that answered with the wrong document, and the page still gets "no answer"', async () => {
+    const { service, seen } = await watched();
+    expect(await service.request({ operation: 'listChannels' })).toEqual({ kind: 'none', reason: 'invalid' });
+    expect(seen).toEqual(['listChannels']);
+  });
+
+  it('reports whoami when a sign-in check or a restore gets a document that is not an account', async () => {
+    const { service, seen } = await watched();
+    expect(await service.restore()).toMatchObject({ ok: false, kind: 'network', reason: 'invalid' });
+    expect(seen).toEqual(['whoami']);
+  });
+
+  it('does not report a plain refusal, a 404, or no answer', async () => {
+    const { service, seen } = await watched();
+    await service.request({ operation: 'listMembers', params: { channel: 'general' } });
+    expect(seen).toEqual([]);
+  });
+});
+
 describe('the request function', () => {
   it('does not run an operation the renderer may not invoke, a socket, or logout', async () => {
     const { service, fake } = await ready();
@@ -286,12 +331,4 @@ describe('the request function', () => {
     expect(fake.seen).toHaveLength(0);
   });
 
-  it('changes server only through the address rules, and a change ends the sign-in', async () => {
-    const { service, session } = await ready();
-    await paste(service);
-    expect(service.setServerAddress('http://example.org')).toEqual({ ok: false, refusal: 'scheme' });
-    expect(session.signedIn).toBe(true);
-    expect(service.setServerAddress('http://127.0.0.1:1')).toMatchObject({ ok: true });
-    expect(session.signedIn).toBe(false);
-  });
 });

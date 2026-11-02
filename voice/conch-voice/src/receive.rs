@@ -516,13 +516,33 @@ mod tests {
         assert_eq!(played.load(Ordering::Relaxed), 5 + MAX_PER_LOOK as u64);
     }
 
+    /// One frame per tick, from the first tick at once. Counted against the clock, not
+    /// against a window of 200 ms: a loaded machine that runs the task late delivers fewer
+    /// frames in a window (issue #1098), but never more than one per tick since the task
+    /// began, and never fewer than it takes to reach the count asked for, which is waited
+    /// for rather than slept for.
     #[tokio::test]
     async fn a_sink_with_no_clock_is_given_a_frame_every_tick() {
+        const WANTED: u64 = 10;
         let played = Arc::new(AtomicU64::new(0));
+        let began = tokio::time::Instant::now();
         let _receiver = spawn(&[440.0], Box::new(TimedSink(Arc::clone(&played)))).unwrap();
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        while played.load(Ordering::Relaxed) < WANTED {
+            assert!(
+                began.elapsed() < Duration::from_secs(30),
+                "{} frames in 30 s",
+                played.load(Ordering::Relaxed)
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        // Read before the clock is, so the clock can only be later: a frame is never early.
         let n = played.load(Ordering::Relaxed);
-        assert!((10..=25).contains(&n), "{n} frames in 200 ms");
+        let ticks = 1 + began.elapsed().as_millis() / u128::from(conch_voice_audio::FRAME_MS);
+        assert!(
+            u128::from(n) <= ticks,
+            "{n} frames in {:?}: more than one a tick",
+            began.elapsed()
+        );
     }
 
     fn counting(tones: &[f32]) -> BoxedSink {

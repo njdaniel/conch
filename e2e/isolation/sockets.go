@@ -148,6 +148,11 @@ var socketVariants = []struct {
 func openAll(m *member, channel string) ([]*feed, error) {
 	var out []*feed
 	for _, v := range socketVariants {
+		// A guest holds no voice (ADR-014 A4, #1016: permittedTx answers
+		// false for every guest), so it has no voice socket to hold.
+		if m.guest != nil && v.path == "/v1/voice/ws" {
+			continue
+		}
 		what := fmt.Sprintf("%s's %s on %s (ticket=%v)", m.name, v.path, channel, v.ticket)
 		f, r, err := dialSocket(m.api, what, v.path, url.Values{"channel": {channel}}, v.ticket)
 		if err != nil {

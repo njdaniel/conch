@@ -12,7 +12,6 @@ import type {
   BridgeReply,
   BridgeRequest,
   ServerAddress,
-  SetServerAddressResult,
   SignInOutcome,
   SignInRefusal,
   SignOutOutcome,
@@ -21,7 +20,6 @@ import { operations, type OperationId } from '../../../web/src/platform/operatio
 import type { WhoAmIResponseV1 } from '../../../web/src/schema/principal.ts';
 import { whoAmIResponseV1 } from '../../../web/src/schema/principal.ts';
 import { Client, type Exchange } from './client.ts';
-import { parseServerAddress } from './origin.ts';
 import type { Session } from './session.ts';
 
 export const REVOKE_TIMEOUT_MS = 5_000;
@@ -36,6 +34,9 @@ export interface ServiceDeps {
   readonly now: () => number;
   // One line; never a body, a header or a credential.
   readonly log: (line: string) => void;
+  // Told when an answer of an operation was not the document the table
+  // promises (issue #946: shown as an incompatibility, not a network error).
+  readonly onInvalid?: (op: OperationId) => void;
 }
 
 // The operations that give a credential, by the bridge function that sends
@@ -131,17 +132,6 @@ export class Service {
     return { origin: this.#deps.session.origin };
   }
 
-  setServerAddress(input: string): SetServerAddressResult {
-    const parsed = parseServerAddress(input);
-    if (!parsed.ok) return parsed;
-    const { session } = this.#deps;
-    const before = session.capture();
-    session.setOrigin(parsed.origin);
-    // A sign-in the change ended is revoked at the server that issued it.
-    if (before.token !== null && !session.signedIn) void this.#revoke(before.origin, before.token);
-    return { ok: true, origin: parsed.origin };
-  }
-
   async request(request: BridgeRequest): Promise<BridgeReply> {
     const id = request.operation;
     // The IPC layer has refused these already; a second check costs nothing.
@@ -153,7 +143,12 @@ export class Service {
       ...(request.query === undefined ? {} : { query: request.query }),
       ...(request.body === undefined ? {} : { body: request.body }),
     });
-    if (exchange.kind === 'none') this.#note(id, exchange.reason);
+    if (exchange.kind === 'none') {
+      this.#note(id, exchange.reason);
+      // An answer of a required family that is not the document this app was
+      // built for is an incompatibility, not a network error (issue #946).
+      if (exchange.reason === 'invalid') this.#deps.onInvalid?.(id);
+    }
     return replyOf(exchange);
   }
 
@@ -170,6 +165,7 @@ export class Service {
     if (exchange.kind === 'answer' && exchange.ok && whoAmIResponseV1(exchange.body).length === 0) {
       return { who: exchange.body as WhoAmIResponseV1 };
     }
+    if (exchange.kind === 'none' && exchange.reason === 'invalid') this.#deps.onInvalid?.('whoami');
     return { outcome: failed(exchange) };
   }
 
@@ -188,6 +184,7 @@ export class Service {
     const { session } = this.#deps;
     const capture = session.capture();
     const exchange = await this.#deps.client.send({ op: 'whoami', token: credential, capture });
+    if (exchange.kind === 'none' && exchange.reason === 'invalid') this.#deps.onInvalid?.('whoami');
     if (exchange.kind !== 'answer' || !exchange.ok || whoAmIResponseV1(exchange.body).length > 0) return failed(exchange);
     if (!session.current(capture)) return { ok: false, kind: 'network', reason: 'stale' };
     session.holdPasted(credential, this.#deps.now() + PASTED_TTL_MS);

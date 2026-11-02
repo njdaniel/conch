@@ -50,6 +50,8 @@ type adminOpts struct {
 	// join holds the flags of `join` and `guest` (issue #715), in
 	// admin_guest.go.
 	join joinOpts
+	// permissions holds the flags of `permissions set` (issue #1022).
+	permissions permissionsOpts
 }
 
 // principalOpts holds the flags of the principal list, hide and sign-in-link
@@ -79,6 +81,9 @@ type adminRun struct {
 	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
+	// prompt asks the person a question; it shares stdin with the
+	// re-authentication prompt.
+	prompt *prompter
 }
 
 // adminCommand is one `conch admin <group> <verb>`.
@@ -190,13 +195,19 @@ var adminCommands = []adminCommand{
 	{group: "guest", verb: "end", args: []string{"id"}, idAt: 1, run: adminGuestEnd},
 	{group: "guest", verb: "end-all", flags: "[--origin address|invite] [--invite <id>] [--dry-run | --yes] ", bind: bindGuestEndAll, run: adminGuestEndAll},
 	{group: "guest", verb: "permit", args: []string{"id"}, idAt: 1, flags: "[--expires <duration|RFC3339>] ", bind: bindGuestPermit, run: adminGuestPermit},
+	// The permissions document (ADR-014, issue #1022), in admin_permissions.go.
+	{group: "permissions", verb: "show", run: adminPermissionsShow},
+	{group: "permissions", verb: "set", args: []string{"permission"}, flags: "[--members on|off] [--operators on|off] ",
+		bind: bindPermissionsSet, run: adminPermissionsSet},
+	{group: "permissions", verb: "preset", args: []string{"personal|group"}, flags: "[--yes] ",
+		bind: bindYes, run: adminPermissionsPreset},
 	// Problem reports (issue #446), in admin_report.go.
 	{group: "reports", verb: "list", flags: "[--limit <n>] ", bind: bindReportsList, run: adminReportsList},
 	{group: "reports", verb: "show", args: []string{"id"}, idAt: 1, flags: "[--markdown] ", bind: bindReportsShow, run: adminReportsShow},
 	{group: "reports", verb: "file", args: []string{"id", "issue-url"}, idAt: 1, run: adminReportsFile},
 }
 
-const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link"
+const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions"
 
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {
@@ -287,7 +298,10 @@ func runAdminCommand(ctx context.Context, c adminCommand, args []string, stdin i
 	// sensitive commands need a recent proof on it (design §5.3): the server
 	// says reauth_required, the person proves it, and the request is sent
 	// again. A script credential is never asked.
-	askToReauth(client, newPrompter(ctx, stdin, stderr), stderr)
+	// One prompter serves the proof and any confirmation, so a piped stdin
+	// is read through one buffer.
+	r.prompt = newPrompter(ctx, stdin, stderr)
+	askToReauth(client, r.prompt, stderr)
 	r.client = client
 	return c.run(ctx, r)
 }

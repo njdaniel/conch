@@ -436,7 +436,7 @@ func (s *Store) adminPrincipals(ctx context.Context, cond string, args []any, li
 }
 
 func adminPrincipalsTx(ctx context.Context, q execer, cond string, args []any, limit int, now time.Time) ([]schema.PrincipalAdminV1, error) {
-	query := `SELECT p.id, p.kind, p.name, p.role, p.owner, p.created_at, p.disabled_at, p.hidden_at, p.invited_by, p.invite_id,
+	query := `SELECT p.id, p.kind, p.name, p.role, p.owner, p.created_at, p.disabled_at, p.hidden_at, p.invited_by, p.invite_id, p.may_invite, p.voice_allowed,
 		(SELECT COUNT(*) FROM credentials c
 		 WHERE c.principal_id = p.id AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
 		   AND (c.idle_ms IS NULL OR COALESCE(c.last_used_at, c.created_at) + c.idle_ms > ?)
@@ -457,8 +457,9 @@ func adminPrincipalsTx(ctx context.Context, q execer, cond string, args []any, l
 			createdAt                               int64
 			disabledAt, hiddenAt, invitedBy, invite sql.NullInt64
 			guest                                   sql.NullString
+			mayInvite, voiceAllowed                 bool
 		)
-		if err := rows.Scan(&p.ID, &kind, &p.Name, &role, &p.Owner, &createdAt, &disabledAt, &hiddenAt, &invitedBy, &invite, &p.LiveCredentials, &guest); err != nil {
+		if err := rows.Scan(&p.ID, &kind, &p.Name, &role, &p.Owner, &createdAt, &disabledAt, &hiddenAt, &invitedBy, &invite, &mayInvite, &voiceAllowed, &p.LiveCredentials, &guest); err != nil {
 			return nil, fmt.Errorf("store: list principals: %w", err)
 		}
 		p.Kind = schema.PrincipalKind(kind)
@@ -467,6 +468,10 @@ func adminPrincipalsTx(ctx context.Context, q execer, cond string, args []any, l
 		p.DisabledAt = msToTimestampPtr(disabledAt)
 		p.HiddenAt = msToTimestampPtr(hiddenAt)
 		p.GuestState = schema.GuestState(guest.String)
+		// Both brakes belong to people; an agent holds neither (omitted).
+		if p.Kind == schema.PrincipalHuman {
+			p.VoiceAllowed, p.MayInvite = &voiceAllowed, &mayInvite
+		}
 		if invitedBy.Valid {
 			p.InvitedBy = &invitedBy.Int64
 		}

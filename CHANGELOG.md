@@ -17,11 +17,16 @@ the usual backup first (docs/deploy.md does).
 - **Channels.** Every channel that was open to the bare address becomes a
   public **default** channel, which new members start in. Every other
   channel stays **private**, with exactly its current members.
-- **Making a channel public.** The channel settings route (#981) is not here
-  yet. Until it ships, listing a channel among the joining settings' open
-  channels makes it public **and** a default channel, and the audit row says
-  `visibility=private->public`. Taking it off the list again makes it no
-  longer a default, but it stays public: it is not made private again.
+- **Making a channel public or private.** An operator holding
+  `manage_channels` sets a channel's visibility and its default mark with
+  `PUT /v1/channels/{id}/settings` (#981; see Added). Listing a channel among
+  the joining settings' open channels still makes it public **and** a
+  default channel, and the audit row says `visibility=private->public`.
+  Taking it off that list makes it no longer a default but leaves it public;
+  the settings route is how to make it private again.
+- **Making a channel.** Any member can now make a public or private channel
+  with `POST /v1/channels` and is its manager (#981; see Added).
+  `POST /v0/channels` stays operator-only and makes a private channel.
 - **Members.** Every member, a disabled account included, is added to every
   default channel, with no right to decide approvals. Anyone already in a
   channel keeps the rights they had there.
@@ -60,6 +65,29 @@ the usual backup first (docs/deploy.md does).
 
 The server log reports what the migration found and what it changed, and the
 audit trail has one `community_migrated` row with the counts.
+
+### Added
+
+- **Members make channels; operators set a channel's visibility and default
+  mark** (#981, community model I3a).
+  - `POST /v1/channels` (`{name, visibility}`) lets any member make a public
+    or private channel, under the `create_public_channels` and
+    `create_private_channels` permissions. The creator is its only member
+    and its manager, and decides its approvals. Agents and guests are
+    refused.
+  - Every name collision answers the same 409 `channel_exists`. A member
+    without `manage_channels` may make 10 channels and try 30 times a day
+    (429 with `Retry-After`), and each refused try is audited
+    `channel_create_refused` without the name.
+  - `PUT /v1/channels/{id}/settings` (`{visibility?, default?}`) is for
+    operators holding `manage_channels`. A default channel must be public
+    (409 `channel_settings_conflict`). Turning a channel private keeps its
+    members. Unmarking the last default channel while open sign-up is on
+    turns sign-up off, and the answer says so (`open_signup_turned_off`).
+  - `GET /v1/channels` and the events socket's `conch.channel.v1` carry
+    `visibility` and `default`, and a settings change sends the channel
+    document. `POST /v0/channels` stays operator-only and makes a private
+    channel.
 
 ## [0.1.0-alpha.9] - 2026-11-01
 

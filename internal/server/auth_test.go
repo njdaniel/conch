@@ -147,6 +147,7 @@ var routePermissions = map[string]schema.Permission{
 	"POST /v1/invites/{id}/disable-joiners":                           schema.PermManageMembers,
 	"POST /v1/principals/{id}/disable-invitees":                       schema.PermManageMembers,
 	"PUT /v1/principals/{id}/invite-permission":                       schema.PermManageMembers,
+	"PUT /v1/principals/{id}/voice-permission":                        schema.PermManageMembers,
 	"PUT /v1/invites/settings":                                        schema.PermManageMembers,
 	"DELETE /v1/sign-in-links/{id}":                                   schema.PermManageMembers,
 	"POST /v1/principals/{id}/credentials":                            schema.PermActAsMembers,
@@ -154,6 +155,7 @@ var routePermissions = map[string]schema.Permission{
 	"POST /v1/hooks":                                                  schema.PermActAsMembers,
 	"POST /v1/principals/{id}/sign-in-links":                          schema.PermActAsMembers,
 	"POST /v0/channels":                                               schema.PermManageChannels,
+	"PUT /v1/channels/{id}/settings":                                  schema.PermManageChannels,
 	"POST /v1/channels/{channel}/nets":                                schema.PermManageChannels,
 	"DELETE /v1/channels/{channel}/nets/{net}":                        schema.PermManageChannels,
 	"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    schema.PermManageChannels,
@@ -188,6 +190,9 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v1/permissions": {classOp, "/v1/permissions", "", 200},
 	"PUT /v1/permissions": {classPerm, "/v1/permissions", `{}`, 400},
 	"GET /v1/channels":    {classAuth, "/v1/channels", "", 200},
+	// Member channel creation and channel settings (issue #981).
+	"POST /v1/channels":              {classAuth, "/v1/channels", `{}`, 400},
+	"PUT /v1/channels/{id}/settings": {classPerm, "/v1/channels/9999/settings", `{}`, 400},
 	// Both membership writes are no-ops in the fixture (alice is already a
 	// member; ghost, id 4, is not), so they change nothing and audit nothing.
 	"GET /v1/channels/{channel}/members":                   {classAuth, "/v1/channels/general/members", "", 200},
@@ -332,9 +337,11 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/hooks/{token}":                          {classExempt, "/v1/hooks/nope", `{}`, 404},
 	"POST /v1/approvals":                              {classAuth, "/v1/approvals", `{}`, 400},
 	"GET /v1/approvals":                               {classAuth, "/v1/approvals", "", 200},
-	"GET /v1/approvals/{id}":                          {classAuth, "/v1/approvals/9999", "", 404},
-	"POST /v1/approvals/{id}/decisions":               {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
-	"/mcp":                                            {classExempt, "/mcp", `{}`, 401},
+	// The community's member list (issue #983): any member; an agent is refused.
+	"GET /v1/directory/members":         {classAuth, "/v1/directory/members", "", 200},
+	"GET /v1/approvals/{id}":            {classAuth, "/v1/approvals/9999", "", 404},
+	"POST /v1/approvals/{id}/decisions": {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
+	"/mcp":                              {classExempt, "/mcp", `{}`, 401},
 	// limit=0 is a 400 before anything is exported or recorded, so the AuthOff
 	// audit count below is unaffected by a route that audits every success.
 	"GET /v1/audit": {classPerm, "/v1/audit?limit=0", "", 400},
@@ -407,6 +414,7 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/invites/{id}/disable-joiners":     {classPerm, "/v1/invites/9999/disable-joiners", `{"dry_run":true}`, 404},
 	"POST /v1/principals/{id}/disable-invitees": {classPerm, "/v1/principals/9999/disable-invitees", `{"dry_run":true}`, 404},
 	"PUT /v1/principals/{id}/invite-permission": {classPerm, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
+	"PUT /v1/principals/{id}/voice-permission":  {classPerm, "/v1/principals/9999/voice-permission", `{"voice_allowed":false}`, 404},
 	"GET /v1/invites/settings":                  {classOp, "/v1/invites/settings", "", 200},
 	"PUT /v1/invites/settings":                  {classPerm, "/v1/invites/settings", `{"paused":false}`, 200},
 	// Sign-in links (issue #493). The create names a principal that does not
@@ -632,7 +640,7 @@ func TestRoleMatrix(t *testing.T) {
 			if rt.pattern == "PUT /v1/channels/{id}/name" {
 				agentWant = http.StatusForbidden // kind is refused before channel lookup
 			}
-			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
+			if rt.pattern == "GET /v1/directory/members" || strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// Runs are started by agents only (issue #266): the humans get the
@@ -660,7 +668,7 @@ func TestRoleMatrix(t *testing.T) {
 			// reports (issue #446) and message edits (issue #845: message
 			// 9999 does not exist, so a person gets message_not_found, and an
 			// agent is refused before any lookup).
-			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" || isMessageEditRoute(rt.pattern) {
+			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" || rt.pattern == "POST /v1/channels" || isMessageEditRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// Signing out (issue #439) succeeds for any member and revokes

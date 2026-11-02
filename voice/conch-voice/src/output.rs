@@ -610,6 +610,17 @@ impl Output {
     /// so a reader sees it when it happens. With a queued output this hands the line over
     /// and returns at once, whatever the reader is doing.
     pub fn show(&mut self, event: &Event<'_>) {
+        self.show_as(event, false);
+    }
+
+    /// As [`Output::show`], for an event that ends the output (the connection stopped, or
+    /// closed): with a queued output it is not dropped for a reader that let the queue
+    /// fill, but written once the reader reads on (#1144).
+    pub fn show_last(&mut self, event: &Event<'_>) {
+        self.show_as(event, true);
+    }
+
+    fn show_as(&mut self, event: &Event<'_>, last: bool) {
         if let Some(screen) = &mut self.screen {
             // What the screen gives back has had every line through the same filter as a
             // plain line below.
@@ -640,6 +651,7 @@ impl Output {
                 let _ = writeln!(out, "{line}");
                 let _ = out.flush();
             }
+            Sink::Queued(queue) if last => queue.push_last(line),
             Sink::Queued(queue) => queue.push(line),
         }
     }
@@ -1012,6 +1024,58 @@ mod tests {
             "500 lines were not written: standard output was not being read"
         );
         assert_eq!(lines[QUEUE_LINES + 2], "connected");
+    }
+
+    /// The closing line is queued while the reader is stalled and lines were dropped; the
+    /// reader then reads on within the flush limit. The closing line is the last one.
+    async fn closed_while_stalled(json: bool) -> Vec<String> {
+        use crate::lines::tests::Stallable;
+        let writer = Stallable::stalled();
+        let mut output = Output::queued(json, Box::new(writer.clone()));
+        output.show(&Event::Connection(&Connection::Connecting));
+        writer.until_waiting();
+        for _ in 0..QUEUE_LINES + 500 {
+            output.show(&Event::UnknownCommand);
+        }
+        output.show_last(&Event::Connection(&Connection::Closed));
+        let unstall = writer.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            unstall.stall(false);
+        });
+        assert!(output.flush(Duration::from_secs(10)).await);
+        writer.text().lines().map(str::to_owned).collect()
+    }
+
+    #[tokio::test]
+    async fn in_json_mode_the_closing_line_is_the_last_written_after_dropped_lines() {
+        let lines = closed_while_stalled(true).await;
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(r#"{"event":"connection","state":"closed"}"#),
+            "{:?}",
+            &lines[lines.len().saturating_sub(3)..]
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.contains("output_dropped"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn in_plain_mode_the_closing_line_is_the_last_written_after_dropped_lines() {
+        let lines = closed_while_stalled(false).await;
+        assert_eq!(lines.last().map(String::as_str), Some("left voice"));
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.contains("were not written"))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

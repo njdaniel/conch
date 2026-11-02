@@ -12,9 +12,11 @@
 // name a channel, a URL, a header or a method.
 import type { IpcMain } from 'electron';
 
-import type { BridgeRequest, FeedRequest } from '../../web/src/platform/desktop/bridge.ts';
+import type { BridgeReply, BridgeRequest, FeedRequest, SignInOutcome } from '../../web/src/platform/desktop/bridge.ts';
 import { operations } from '../../web/src/platform/operations.ts';
 import { channelOf, INVOKED_FUNCTIONS, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
+import { isProfileId } from './profiles/ids.ts';
+import { MISMATCH, type ProfilesService } from './profiles/service.ts';
 import { parseFeedRequest, type Feeds } from './api/feeds.ts';
 import { targetOf, isOperationId } from './api/target.ts';
 import { invocable, type Service, type SignInStep } from './api/service.ts';
@@ -51,9 +53,21 @@ export interface IpcDeps {
   readonly files: Pick<Files, 'upload' | 'download' | 'save'>;
   // The person's own input to the owned web contents (main/gestures.ts).
   readonly gestures: Pick<Gestures, 'take'>;
+  // The saved server profiles (issue #945).
+  readonly profiles: ProfilesApi;
   readonly now: () => number;
   readonly log: (line: string) => void;
 }
+
+export type ProfilesApi = Pick<
+  ProfilesService,
+  'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted'
+>;
+
+// What a sign-in step answers when the server's release is not one the app may
+// sign in to (issue #946): nothing was sent.
+const INCOMPATIBLE: SignInOutcome = { ok: false, kind: 'network', reason: 'incompatible' };
+const INCOMPATIBLE_REPLY: BridgeReply = { kind: 'none', reason: 'incompatible' };
 
 const ORIGIN_PREFIX = `${SCHEME}://${HOST}/`;
 
@@ -132,6 +146,7 @@ interface Handlers {
   readonly service: Service;
   readonly feeds: IpcDeps['feeds'];
   readonly files: IpcDeps['files'];
+  readonly profiles: ProfilesApi;
   readonly document: number;
 }
 
@@ -152,8 +167,27 @@ function signIn(step: SignInStep): Spec {
       const [body] = args;
       return args.length === 1 && isRecord(body) && operations[step].request?.(body).length === 0 ? [body] : null;
     },
-    run: ({ service }, [body]) => service.signIn(step, body as Record<string, unknown>),
+    run: async ({ service, profiles }, [body]) =>
+      profiles.signInPermitted() ? bound(profiles, await service.signIn(step, body as Record<string, unknown>)) : INCOMPATIBLE,
   };
+}
+
+// The account a sign-in gave is bound to the active profile and its credential
+// kept (or held in memory only); one that belongs to another account is
+// refused, and its credential has been forgotten.
+async function bound(profiles: ProfilesApi, outcome: SignInOutcome): Promise<SignInOutcome> {
+  if (!outcome.ok || outcome.who === null) return outcome;
+  const { who } = outcome;
+  const kept = await profiles.signedIn({ id: who.id, name: who.name, lasting: who.role === 'member' && who.guest === undefined, guest: who.guest !== undefined });
+  return kept
+    ? outcome
+    : {
+        ok: false,
+        kind: 'invalid',
+        status: 409,
+        code: MISMATCH,
+        message: 'This saved server belongs to a different account. Add the server again as a new entry to sign in as someone else.',
+      };
 }
 
 // request parses a BridgeRequest: its keys, the operation, whether the
@@ -182,12 +216,6 @@ export function parseRequest(value: unknown): BridgeRequest | null {
 
 export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   serverAddress: { limit: 120, maxBytes: 0, parse: none, run: ({ service }) => service.serverAddress() },
-  setServerAddress: {
-    limit: 30,
-    maxBytes: 4 * 1024,
-    parse: (args) => (args.length === 1 && typeof args[0] === 'string' ? args : null),
-    run: ({ service }, [origin]) => service.setServerAddress(origin as string),
-  },
   request: {
     limit: 1200,
     maxBytes: 1024 * 1024,
@@ -195,20 +223,31 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
       const parsed = args.length === 1 ? parseRequest(args[0]) : null;
       return parsed === null ? null : [parsed];
     },
-    run: ({ service }, [request]) => service.request(request as BridgeRequest),
+    // On a server the app may not sign in to (issue #946), nothing but the
+    // health check goes out: a preview of an invite or a sign-in link carries
+    // a secret code, and the page has no use for anything else there.
+    run: ({ service, profiles }, [request]) =>
+      profiles.signInPermitted() || (request as BridgeRequest).operation === 'health'
+        ? service.request(request as BridgeRequest)
+        : Promise.resolve(INCOMPATIBLE_REPLY),
   },
   restore: { limit: 120, maxBytes: 0, parse: none, run: ({ service }) => service.restore() },
   signInWithCredential: {
     limit: 30,
     maxBytes: 8 * 1024,
     parse: (args) => (args.length === 1 && typeof args[0] === 'string' && /^\S{1,4096}$/u.test(args[0]) ? args : null),
-    run: ({ service }, [credential]) => service.signInWithCredential(credential as string),
+    run: ({ service, profiles }, [credential]) => (profiles.signInPermitted() ? service.signInWithCredential(credential as string) : INCOMPATIBLE),
   },
   keepCredential: {
     limit: 30,
     maxBytes: 8 * 1024,
     parse: (args) => (args.length === 1 && typeof args[0] === 'string' && /^\S{1,4096}$/u.test(args[0]) ? args : null),
-    run: ({ service }, [credential]) => service.keepCredential(credential as string),
+    run: async ({ service, profiles }, [credential]) => {
+      if (!profiles.signInPermitted()) return false;
+      if (!service.keepCredential(credential as string)) return false;
+      // The credential is in force: bind it to the profile and keep it.
+      return profiles.keptCredential();
+    },
   },
   signInWithPassword: signIn('login'),
   signInWithCode: signIn('loginTotp'),
@@ -219,7 +258,36 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   resetPassword: signIn('resetPassword'),
   joinAsGuest: signIn('joinGuest'),
   createAccount: signIn('joinAccount'),
-  signOut: { limit: 120, maxBytes: 0, parse: none, run: ({ service }) => service.signOut() },
+  signOut: { limit: 120, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.signOut() },
+  // The saved server profiles (issue #945). Ids are 32 hex characters; a
+  // label is plain text of at most 64 characters (main trims and checks it).
+  profiles: { limit: 120, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.view() },
+  profileAdd: {
+    limit: 30,
+    maxBytes: 4 * 1024,
+    parse: (args) => (args.length === 1 && typeof args[0] === 'string' ? args : null),
+    run: ({ profiles }, [address]) => profiles.add(address as string),
+  },
+  profileRename: {
+    limit: 30,
+    maxBytes: 1024,
+    parse: (args) => (args.length === 2 && isProfileId(args[0]) && typeof args[1] === 'string' && args[1].length <= 256 ? args : null),
+    run: ({ profiles }, [id, label]) => profiles.rename(id as string, label as string),
+  },
+  profileRemove: {
+    limit: 30,
+    maxBytes: 128,
+    parse: (args) => (args.length === 1 && isProfileId(args[0]) ? args : null),
+    run: ({ profiles }, [id]) => profiles.remove(id as string),
+  },
+  profileSwitch: {
+    limit: 30,
+    maxBytes: 128,
+    parse: (args) => (args.length === 1 && (args[0] === null || isProfileId(args[0])) ? args : null),
+    run: ({ profiles }, [id]) => profiles.switchTo(id as string | null),
+  },
+  storageRetry: { limit: 30, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.retry() },
+  profilesRecover: { limit: 10, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.recover() },
   // The feeds (issue #943). A reconnecting feed subscribes at most once a
   // second, and an acknowledgement follows each batch of frames; past these
   // a batch waits, and a feed that waits too long is closed and resubscribes.
@@ -294,7 +362,13 @@ export class Ipc {
     if (parsed === null) return this.#refuse('shape');
     if (spec.gesture === true && this.#deps.gestures.take(this.#deps.owned(), LINK_GESTURE_MS) === null) return this.#refuse('gesture');
     try {
-      const to: Handlers = { service: this.#deps.service, feeds: this.#deps.feeds, files: this.#deps.files, document: this.#deps.gate.generation };
+      const to: Handlers = {
+        service: this.#deps.service,
+        feeds: this.#deps.feeds,
+        files: this.#deps.files,
+        profiles: this.#deps.profiles,
+        document: this.#deps.gate.generation,
+      };
       return { ok: true, value: await spec.run(to, parsed) };
     } catch {
       // A bug in a function is not the renderer's to learn about.

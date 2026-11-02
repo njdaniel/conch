@@ -33,9 +33,66 @@ export interface ServerAddress {
 // http to loopback, for development) is; the rest are refused by name.
 export type ServerAddressRefusal = 'malformed' | 'scheme' | 'userinfo' | 'path' | 'unreachable' | 'unsupported';
 
-export type SetServerAddressResult =
-  | { readonly ok: true; readonly origin: string }
-  | { readonly ok: false; readonly refusal: ServerAddressRefusal };
+// A saved server, as the page may see it: display metadata only. account is
+// the name of the principal the profile is bound to (null before the first
+// sign-in).
+export interface ProfileView {
+  readonly id: string;
+  readonly label: string;
+  readonly host: string;
+  readonly origin: string;
+  readonly account: string | null;
+  readonly active: boolean;
+}
+
+// Whether credentials are kept across restarts. session-only: they are not,
+// and reason says why; unavailable: the store did not answer (Retry).
+export type StorageStatus =
+  | { readonly kind: 'protected' }
+  | { readonly kind: 'session-only'; readonly reason: 'unavailable' | 'insecure-backend' | 'unknown-backend' | 'unsafe-root' }
+  | { readonly kind: 'unavailable' };
+
+// Something the last switch or sign-out has to tell the person.
+export type ProfileNotice = 'sign-in-again' | 'could-not-verify' | 'account-mismatch' | 'revocation-unconfirmed' | 'revocation-unsent' | 'teardown-slow';
+
+// Whether the active server's release is one this app was tested with
+// (issue #946). none: no server is active. supported: it is on the list.
+// unlisted: it is not, and the development flag let it through. unsupported:
+// it answered with a version that is not on the list (or none); unreachable:
+// it did not answer /healthz. Only supported and unlisted may sign in.
+export type CompatState = 'none' | 'supported' | 'unlisted' | 'unsupported' | 'unreachable';
+
+export interface CompatView {
+  readonly state: CompatState;
+  // The server's version as /healthz named it; null when it named none or
+  // something that is not a version.
+  readonly server: string | null;
+  // This app's own version.
+  readonly desktop: string;
+  // The development flag is in force: a persistent warning, in any state.
+  readonly override: boolean;
+  // The first required response family (for example "channels") whose answer
+  // was not what this app was built for: an incompatibility, not a network
+  // error. null when none has been seen.
+  readonly invalid: string | null;
+}
+
+export interface ProfilesView {
+  readonly profiles: readonly ProfileView[];
+  readonly active: string | null;
+  readonly storage: StorageStatus;
+  // profiles.json could not be read: only profilesRecover works.
+  readonly recovery: boolean;
+  readonly notice: ProfileNotice | null;
+  readonly compat: CompatView;
+  // The platform, for the storage text (DPAPI does not protect from other apps
+  // of the same user).
+  readonly platform: string;
+}
+
+export type ProfileAddResult =
+  | { readonly ok: true; readonly id: string }
+  | { readonly ok: false; readonly refusal: ServerAddressRefusal | 'certificate' | 'not-conch' | 'full' };
 
 // One call of the operation table, as the renderer asks for it.
 export interface BridgeRequest {
@@ -56,7 +113,9 @@ export interface BridgeRequest {
 // for an identity that has since ended; unsupported is an operation the
 // desktop shell cannot do yet; no-server is a request made before an address
 // was set.
-export type NoAnswerReason = 'certificate' | 'redirect' | 'oversize' | 'invalid' | 'stale' | 'unsupported' | 'no-server';
+// incompatible is a sign-in main refused because the server's release is not
+// one this app was tested with (issue #946).
+export type NoAnswerReason = 'certificate' | 'redirect' | 'oversize' | 'invalid' | 'stale' | 'unsupported' | 'no-server' | 'incompatible';
 
 // What main answers. A reply is the server's answer with its body already
 // validated against the operation's response validator (body is undefined for
@@ -143,9 +202,8 @@ export type DownloadReply = BridgeReply | { readonly kind: 'bytes'; readonly dat
 export type SaveOutcome = 'saved' | 'cancelled' | 'failed' | 'unauthorized';
 
 export interface ConchDesktopBridge {
-  // The server address.
+  // The server address of the active profile (null: none is active).
   serverAddress(): Promise<ServerAddress>;
-  setServerAddress(origin: string): Promise<SetServerAddressResult>;
 
   // Any operation of the table that the renderer may invoke. Main refuses one
   // whose entry is marked renderer: false (a credential-bearing answer, a
@@ -185,6 +243,19 @@ export interface ConchDesktopBridge {
   uploadFile(request: UploadRequest): Promise<BridgeReply>;
   downloadFile(id: number): Promise<DownloadReply>;
   saveFile(id: number): Promise<SaveOutcome>;
+  // The saved server profiles (issue #945). Ids are opaque to the page.
+  profiles(): Promise<ProfilesView>;
+  profileAdd(address: string): Promise<ProfileAddResult>;
+  profileRename(id: string, label: string): Promise<boolean>;
+  profileRemove(id: string): Promise<boolean>;
+  // Makes a profile (or null: the server list) the active one. The window's
+  // page is replaced; the returned promise may never settle for the page that
+  // asked.
+  profileSwitch(id: string | null): Promise<boolean>;
+  // Re-checks whether credentials can be kept, and keeps those held in memory.
+  storageRetry(): Promise<ProfilesView>;
+  // Starts an empty list when profiles.json could not be read.
+  profilesRecover(): Promise<ProfilesView>;
 }
 
 declare global {

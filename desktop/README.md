@@ -37,6 +37,13 @@ voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 | `main/voice/endpoint.ts` | the helper's Linux events endpoint: the verified `$XDG_RUNTIME_DIR`, `conch/<profile-id>` (0700), the stale sweep, the `sun_path` budget, the socket and the attach (#948) |
 | `main/voice/spawn.ts` | the bundled `conch-voice` and its trusted-path checks, the environment built from empty by an allowlist, the spawn options (#948) |
 | `main/voice/supervisor.ts` | one helper per instance: start, commands and acks, the stop escalation and the reap, helper loss as one typed state (#948) |
+| `main/instance.ts` | one instance per data root (`requestSingleInstanceLock`), and the data root made 0700 with its ancestors checked (#945) |
+| `main/profiles/store.ts`, `files.ts`, `ids.ts` | the saved servers: random 128-bit ids, the (origin, principal) binding rule, `profiles.json` (non-secret, 0600, atomic) and the profile directories (#945) |
+| `main/profiles/switch.ts`, `hooks.ts` | the switch sequence (media hooks, sockets, requests, renderer, helper hooks, then the next profile, each bounded) and the hook interface #771 and #772 register on (#945) |
+| `main/profiles/service.ts` | which profile is active, where its credential lives (the vault, or main's memory when storage is not protected), sign-out and remove; the compatibility gate of #946 is in `tokenFor`, before the vault is read or the server is asked about a credential (#945, #946) |
+| `main/compat.ts`, `build/compat.json` | the allowlist of server releases (exact versions, never a `>=` range), the verdict on what `/healthz` said, the required response families, and the development flag (#946) |
+| `main/profiles/activation.ts` | one activation in Electron: its own Session, Client, Service, feeds, gate and window in a fresh in-memory partition (#945) |
+| `main/vault/electron-storage.ts` | the one adapter from Electron's `safeStorage` to the vault (#945) |
 | `main/document.ts` | which frame shows the current document (the document generation) |
 | `main/app.ts`, `main/main.ts` | startup |
 | `preload/bridge.ts`, `preload/index.ts` | `window.conchDesktop`: a frozen object whose keys are exactly the functions of `web/src/platform/desktop/bridge.ts`; the page-side copy is not frozen, so nothing may rely on that |
@@ -50,6 +57,27 @@ voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 
 Generated, git-ignored: `node_modules/`, `out/` (bundles, the web client, the
 manifest), `dist/` (the unpacked app).
+
+## Server compatibility (issue #946)
+
+Before a saved server's credential is read, or the server asked about it, main
+reads `/healthz` and compares its `version` with `build/compat.json`. A version
+on the list proceeds. Any other (or none) shows "This server's version (X) has
+not been tested with this app (Y)" and offers no sign-in: the page shows no
+client, and main refuses every sign-in step, whatever the page sends. A server
+that does not answer `/healthz` is the same, with its own wording. Nothing is
+forgotten or revoked for it; the stored sign-in waits for a supported server.
+After sign-in, an answer of a required family (`REQUIRED_FAMILIES` in
+`main/compat.ts`) that is not the document this app was built for is shown as
+an incompatibility, not a network error.
+
+`build/compat.json` is a checked-in list, copied into the app by
+`build/manifest.ts`; the release tooling that generates it is #774. Development
+against an unlisted server: `electron . --allow-unlisted-server` in an
+**unpackaged** run. It shows a persistent warning. A packaged app ignores the
+flag (`allowUnlisted`, tested), and a server that did not answer is never let
+through. The smoke test stamps a disposable conchd with the first listed release
+(and, for the unsupported case, with another) by `-ldflags`.
 
 ## Build, run, test
 
@@ -218,6 +246,21 @@ request, a 2 MiB frame header ends the socket in about 20 ms, and a socket whose
 server ignores the close frame has no close event until it is destroyed. If the
 dispatcher is not an `Agent`, main says so once in its log and opens a plain
 `WebSocket`, which still has the after-the-fact size check and the count.
+
+### Saved servers (issue #945)
+
+A profile is a random 32-hex id mapped to a canonical origin and, after the
+first sign-in, the account (principal id) it is bound to. Signing in as another
+account on a bound profile is refused and its credential forgotten; a second
+account of a server is a second entry. A switch or a sign-out destroys the
+window and makes new web contents in a new in-memory partition, with a new
+Session, Client, feeds and gate, so nothing of one profile's (a pending
+response, a late socket frame, a draft, a preference) reaches another's. Only a
+member's sign-in is kept: in the vault when storage is protected, otherwise in
+main's memory for this run, with the reason shown and a Retry. The data root is
+`app.getPath('userData')` (0700); `profiles.json` is metadata only. Two
+instances on one root: the second focuses the first and exits. A `profiles.json`
+that cannot be read gives a recovery screen and changes nothing until asked.
 
 ### Which HTTP stack (Q6)
 

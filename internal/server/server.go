@@ -208,6 +208,13 @@ type Server struct {
 	// events socket writes: a test blocks in it to be a subscriber that is
 	// stuck in a write.
 	eventsBeforeWrite func()
+	// eventsBeforeEpochWrite, when set by a test, runs before every frame an
+	// events socket writes that is held to a read-state epoch (a read state
+	// or a notification message), with the encoded frame. A test that must
+	// land a revocation between a frame's build and its write picks the frame
+	// it means by its schema; eventsBeforeWrite also sees the rosters and the
+	// other frames, whose number and order depend on timing.
+	eventsBeforeEpochWrite func(frame []byte)
 	// reactionBeforeRead, when set by a test, runs in an events socket
 	// just before it reads a message's reactions for a reference: a test
 	// lands a removal in that window. Nil in conchd.

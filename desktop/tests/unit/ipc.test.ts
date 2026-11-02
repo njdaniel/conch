@@ -4,7 +4,7 @@ import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
-import { checkCaller, Ipc, parseRequest, plain, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
+import { checkCaller, Ipc, parseRequest, plain, type ProfilesApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
 import { INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
 
 function frame(token = 'frame-1', over: Partial<FrameLike> = {}): FrameLike {
@@ -19,6 +19,8 @@ interface Fixture {
   readonly calls: [string, unknown][];
   readonly logs: string[];
   readonly clock: { now: number };
+  // Whether main's compatibility verdict lets a sign-in happen (issue #946).
+  readonly permit: { value: boolean };
   readonly input: { recent: boolean };
   event(over?: Partial<InvokeEvent>): InvokeEvent;
 }
@@ -36,13 +38,15 @@ function fixture(): Fixture {
   };
   const service = new Proxy({} as Service, { get: (_t, name: string) => record(name) });
   const feeds = new Proxy({} as Feeds, { get: (_t, name: string) => record(`feeds.${name}`) });
+  const permit = { value: true };
+  const profiles = new Proxy({} as ProfilesApi, { get: (_t, name: string) => (name === 'signInPermitted' ? () => permit.value : record(`profiles.${name}`)) });
   const logs: string[] = [];
   const clock = { now: 1_000_000 };
   const input = { recent: false };
   const files = new Proxy({} as Files, { get: (_t, name: string) => record(`files.${name}`) });
   const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, now: () => clock.now, log: (line) => logs.push(line) });
-  return { ipc, gate, contents, main, calls, logs, clock, input, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
+  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, now: () => clock.now, log: (line) => logs.push(line) });
+  return { ipc, gate, contents, main, calls, logs, clock, permit, input, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
 describe('every invocation is checked before anything else', () => {
@@ -75,7 +79,17 @@ describe('every invocation is checked before anything else', () => {
 
   it('refuses everything when the window is gone', async () => {
     const f = fixture();
-    const ipc = new Ipc({ owned: () => null, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, gestures: { take: () => null }, now: () => 0, log: () => undefined });
+    const ipc = new Ipc({
+      owned: () => null,
+      gate: f.gate,
+      service: {} as Service,
+      feeds: {} as Feeds,
+      files: {} as Files,
+      gestures: { take: () => null },
+      profiles: {} as ProfilesApi,
+      now: () => 0,
+      log: () => undefined,
+    });
     expect(await ipc.invoke(f.event(), 'serverAddress', [])).toEqual({ ok: false, kind: 'refused' });
   });
 
@@ -107,9 +121,9 @@ describe('arguments', () => {
   it.each([
     ['serverAddress', [1]],
     ['signOut', ['x']],
-    ['setServerAddress', []],
-    ['setServerAddress', [5]],
-    ['setServerAddress', ['a', 'b']],
+    ['profileAdd', []],
+    ['profileAdd', [5]],
+    ['profileAdd', ['a', 'b']],
     ['signInWithCredential', ['has space']],
     ['signInWithCredential', ['']],
     ['signInWithCredential', ['x'.repeat(5000)]],
@@ -190,6 +204,36 @@ describe('arguments', () => {
     ]);
   });
 
+  it.each([
+    ['signInWithPassword', [{ name: 'ada', password: 'pw' }]],
+    ['signInWithCode', [{ challenge: 'c', code: '123456' }]],
+    ['redeemInvite', [{ code: 'abc', name: 'ada', password: 'pw' }]],
+    ['joinAsGuest', [{ label: 'ada' }]],
+    ['createAccount', [{ name: 'ada', password: 'pw' }]],
+    ['signInWithCredential', ['conch_pasted']],
+    ['keepCredential', ['conch_pasted']],
+  ] as const)('does not carry %s when the server is not one the app may sign in to (issue #946)', async (name, args) => {
+    const f = fixture();
+    f.permit.value = false;
+    const outcome = await f.ipc.invoke(f.event(), name, args);
+    if (name === 'keepCredential') expect(outcome).toEqual({ ok: true, value: false });
+    else expect(outcome).toEqual({ ok: true, value: { ok: false, kind: 'network', reason: 'incompatible' } });
+    expect(f.calls).toEqual([]);
+  });
+
+  it.each([
+    ['an invite preview', { operation: 'previewInvite', body: { code: 'secret-invite-code' } }],
+    ['a sign-in link preview', { operation: 'previewSignInLink', body: { code: 'secret-link-code' } }],
+    ['a channel list', { operation: 'listChannels' }],
+  ] as const)('sends no request but the health check when the server is not one the app may sign in to: %s (issue #946)', async (_name, request) => {
+    const f = fixture();
+    f.permit.value = false;
+    expect(await f.ipc.invoke(f.event(), 'request', [request])).toEqual({ ok: true, value: { kind: 'none', reason: 'incompatible' } });
+    expect(f.calls).toEqual([]);
+    expect(await f.ipc.invoke(f.event(), 'request', [{ operation: 'health' }])).toEqual({ ok: true, value: { ran: 'request' } });
+    expect(f.calls).toEqual([['request', [{ operation: 'health' }]]]);
+  });
+
   it('passes a feed call to the feeds with the caller’s document generation, and the parameters it parsed', async () => {
     const f = fixture();
     const document = f.gate.generation;
@@ -224,7 +268,7 @@ describe('arguments', () => {
       cursor = next;
     }
     for (const arg of [() => 1, new Map(), new Date(), new Uint8Array(2), Symbol('s'), 10n, Number.NaN, deep, new Array<number>(20_000).fill(1)]) {
-      expect(await f.ipc.invoke(f.event(), 'setServerAddress', [arg]), typeof arg).toEqual({ ok: false, kind: 'refused' });
+      expect(await f.ipc.invoke(f.event(), 'profileAdd', [arg]), typeof arg).toEqual({ ok: false, kind: 'refused' });
     }
     expect(plain({ a: [1, 'b', null, true] })).toBe(true);
     expect(plain(Object.create(null))).toBe(true);
@@ -233,7 +277,7 @@ describe('arguments', () => {
 
   it('refuses an argument over its byte cap', async () => {
     const f = fixture();
-    expect(await f.ipc.invoke(f.event(), 'setServerAddress', ['a'.repeat(5000)])).toEqual({ ok: false, kind: 'refused' });
+    expect(await f.ipc.invoke(f.event(), 'profileAdd', ['a'.repeat(5000)])).toEqual({ ok: false, kind: 'refused' });
     expect(f.logs.at(-1)).toContain('(size)');
     expect(await f.ipc.invoke(f.event(), 'signInWithPassword', [{ name: 'a', password: 'p'.repeat(20_000) }])).toEqual({ ok: false, kind: 'refused' });
   });
@@ -255,14 +299,15 @@ describe('arguments', () => {
     const ipc = new Ipc({
       owned: () => f.contents,
       gate: f.gate,
-      service: { setServerAddress: () => { throw new Error('boom secret-arg'); } } as unknown as Service,
+      service: {} as Service,
       feeds: {} as Feeds,
       files: {} as Files,
       gestures: { take: () => null },
+      profiles: { add: () => { throw new Error('boom secret-arg'); } } as unknown as ProfilesApi,
       now: () => 0,
       log: (line) => f.logs.push(line),
     });
-    expect(await ipc.invoke(f.event(), 'setServerAddress', ['secret-arg'])).toEqual({ ok: false, kind: 'refused' });
+    expect(await ipc.invoke(f.event(), 'profileAdd', ['secret-arg'])).toEqual({ ok: false, kind: 'refused' });
     expect(f.logs.join('\n')).not.toContain('secret-arg');
   });
 });
@@ -273,7 +318,7 @@ describe('the registry', () => {
     const channels: string[] = [];
     f.ipc.register({ handle: (channel) => void channels.push(channel) });
     expect(channels.sort()).toEqual(INVOKED_FUNCTIONS.map((n) => `conch:${n}`).sort());
-    expect(channels).toHaveLength(22);
+    expect(channels).toHaveLength(INVOKED_FUNCTIONS.length);
   });
 
   it('parses a request the way the table says', () => {

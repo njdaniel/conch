@@ -146,7 +146,7 @@ func guestRows() []row {
 			probe: func(*world, subject) probe { return get("/v1/channels") }},
 		{route: "GET /v1/credentials/mine", what: "lists her sign-ins", own: true, inspect: oneSignIn,
 			probe: func(*world, subject) probe { return get("/v1/credentials/mine") }},
-		{route: "GET /v1/channels/{channel}/voice", what: "reads the plaza's voice presence", own: true,
+		{route: "GET /v1/channels/{channel}/voice", what: "reads the plaza's voice presence (a guest holds no voice since A4, #1016)", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
 			probe: func(w *world, _ subject) probe { return get("/v1/channels/" + pch(w) + "/voice") }},
 		{route: "POST /v1/reports", what: "reports a problem", own: true,
 			probe: func(*world, subject) probe {
@@ -220,6 +220,9 @@ func guestRows() []row {
 		}),
 		refused("PUT /v1/principals/{id}/invite-permission", "lets herself invite", operatorOnly, func(w *world) probe {
 			return put("/v1/principals/"+id(w.prober.id)+"/invite-permission", schema.InvitePermissionRequestV1{MayInvite: true})
+		}),
+		refused("PUT /v1/principals/{id}/voice-permission", "switches her own voice on", operatorOnly, func(w *world) probe {
+			return put("/v1/principals/"+id(w.prober.id)+"/voice-permission", schema.VoicePermissionRequestV1{VoiceAllowed: true})
 		}),
 		refused("PUT /v1/join/settings", "opens the bare address wider", operatorOnly, func(*world) probe {
 			return put("/v1/join/settings", schema.PutJoinSettingsRequestV1{MaxGuests: ptr(int64(schema.MaxMaxGuests))})

@@ -202,6 +202,21 @@ type voiceRoomState struct {
 	// the claims lock, so a claim that queues after the wait began cannot
 	// lengthen it (issue #1089). Under voicePoller.mu.
 	claimDone chan struct{}
+	// owedWithdraw is a principal whose screen grant a claim running in this
+	// room must withdraw before it returns: retireRoom found the room's share
+	// held by them while a claim was running, and the claim may have read the
+	// room's liveness before the rotation committed (issue #1087). The claim
+	// pays it in its defer, under the room's claims, before it clears claimer
+	// and closes claimDone. 0 when none. Under voicePoller.mu.
+	owedWithdraw int64
+	// withdrawDone is open from the moment forgetRoom ends a held share, with
+	// no claim running, until its caller (retireRoom) has withdrawn the
+	// sharer's grants, and the room is in retiring meanwhile (with the value
+	// 0, which is no principal's id). waitRunningClaims waits on it, so a
+	// hook answers only once the withdrawal is made, whichever forget won the
+	// room's order. Separate from claimDone, which a claim on a retired room
+	// sets and clears for itself (issue #1087). Under voicePoller.mu.
+	withdrawDone chan struct{}
 	// seq counts evictions from this room and evicted records, per principal,
 	// the count at their last one. A pass notes seq before it asks LiveKit
 	// and does not put back anyone evicted after that: without it a pass in
@@ -350,7 +365,10 @@ type voicePoller struct {
 	// claimSeam and endSharesSeam are test seams, nil outside tests (issue
 	// #1061): claimSeam(stage) runs in claimShare at "enter", once the
 	// request has been admitted, and at "lock", just before the room's
-	// claims are taken; endSharesSeam(n) runs in endSharesOf, and in
+	// claims are taken, at "claimed" (issue #1087), with the claims held and
+	// the room knowing the claim is running, before the holder check, and at
+	// "retire", in retireRoom between forgetRoom's return and its look at
+	// claimer; endSharesSeam(n) runs in endSharesOf, and in
 	// waitRunningClaims, once it has found the n rooms whose claims it will
 	// take.
 	claimSeam     func(stage string)
@@ -518,11 +536,6 @@ func (s *Server) voiceEntitlement(ctx context.Context, identity string, channelI
 		return id, voiceReasonDisabled, nil
 	case p.Kind != store.PrincipalHuman:
 		return id, voiceReasonNotHuman, nil
-	case !p.VoiceAllowed:
-		// Checked by every voice route on the way in (voicePresenceChannel);
-		// checked here too so that a person whose voice is taken away later
-		// loses the room, and a share of theirs, at the next pass.
-		return id, voiceReasonVoiceOff, nil
 	}
 	if p.GuestState != "" && p.GuestState != schema.GuestStateConverted {
 		live, err := s.store.GuestLive(ctx, id)
@@ -532,6 +545,20 @@ func (s *Server) voiceEntitlement(ctx context.Context, identity string, channelI
 		case !live:
 			return id, voiceReasonGuestEnded, nil
 		}
+	}
+	// use_voice, read on every pass as every voice route reads it on the way
+	// in (voicePresenceChannel): the role's cell and the person's brake
+	// together (design §7.3), so a person whose voice is taken away later, by
+	// either, loses the room, and a share of theirs, at the next pass. HeldBy
+	// reads the document for the principal read above; a guest holds nothing
+	// (permittedTx answers false for every guest, the review of #1013), after
+	// the guest checks, so an ended visit keeps its own reason.
+	held, err := s.store.HeldBy(ctx, p, schema.PermUseVoice)
+	switch {
+	case err != nil:
+		return id, "", err
+	case !held[0]:
+		return id, voiceReasonVoiceOff, nil
 	}
 	member, err := s.store.IsChannelMember(ctx, channelID, id)
 	switch {
@@ -809,7 +836,7 @@ func (p *voicePoller) runSweep(ctx context.Context) bool {
 	// it for as long as it still lists it.
 	var stale []store.VoiceRoom
 	for _, rr := range retired {
-		p.forgetRoom(ctx, rr.RoomName)
+		p.retireRoom(ctx, rr)
 		if _, ok := inLiveKit[rr.RoomName]; ok {
 			stale = append(stale, rr)
 		}
@@ -1023,6 +1050,11 @@ func (p *voicePoller) pollRoom(ctx context.Context, r *voiceRoomState) error {
 		r.marked = true
 		p.mu.Unlock()
 	}
+	// The share's holder is asked again on every pass, as use_voice is
+	// (design §7.3): the pass above judged the person's place in the room,
+	// this judges their right to share in it. A pass that returned early
+	// with an error (LiveKit could not be asked) skips it until the next.
+	p.sharesWithheld(ctx, r)
 	return nil
 }
 
@@ -1973,7 +2005,7 @@ func (p *voicePoller) rotateInvalid(ctx context.Context) ([]voiceRotation, error
 			continue // someone else rotated it first
 		}
 		slog.InfoContext(ctx, "voice: room rotated", "channel", v.Room.ChannelID, "reason", v.Reason)
-		p.forgetRoom(ctx, v.Room.RoomName)
+		p.retireRoom(ctx, v.Room)
 		done = append(done, voiceRotation{old: v.Room, next: next})
 	}
 	if failure != nil {
@@ -2002,10 +2034,21 @@ func (p *voicePoller) sweepSoon() {
 // channel's subscribers: presence shows the new room, empty, until people
 // rejoin. Whoever the poller had in the room is recorded as having left. The
 // state is marked retired so a pass already reading the room reports nothing.
-func (p *voicePoller) forgetRoom(ctx context.Context, name string) {
+//
+// It reports the state it retired and who held the room's share, as started
+// (0 when nobody did, or when another forget got there first), so a caller
+// that holds no claims can withdraw the sources (retireRoom). It takes no
+// claims itself: claimShare calls it with the room's claims held.
+//
+// A non-zero holder from a forget with no claim running is an obligation: the
+// room is in retiring with withdrawDone open, and whoever got the holder must
+// close withdrawDone (withdrawFinished) or hand the debt to a claim
+// (owedWithdraw), or every later hook hangs in waitRunningClaims. retireRoom
+// is the only caller that is not a claim allowed to forget a room.
+func (p *voicePoller) forgetRoom(ctx context.Context, name string) (*voiceRoomState, int64) {
 	r := p.roomNamed(name)
 	if r == nil {
-		return
+		return nil, 0
 	}
 	// Under the room's order (voiceRoomState.order): a report whose row is
 	// being written gets it into the log before the rows that close what it
@@ -2016,7 +2059,7 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) {
 	if r.retired {
 		// Forgotten by someone else while this waited its turn.
 		p.mu.Unlock()
-		return
+		return nil, 0
 	}
 	delete(p.rooms, name)
 	r.retired = true
@@ -2027,11 +2070,17 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) {
 	// too) the room stays findable in retiring until it returns, so a
 	// revocation's endSharesOf waits for the grant and its undoing.
 	var events []voiceEvent
+	var holder int64
 	if c := r.share; c != nil && !c.pending {
 		events = append(events, p.shareStoppedLocked(r.channelID, c, c.principalID, voiceShareStopRotated))
+		holder = c.principalID
 	}
 	if r.claimer != 0 {
 		p.retiring[r] = r.claimer
+	} else if holder != 0 {
+		// The caller owes the withdrawal (retireRoom); a hook waits for it.
+		r.withdrawDone = make(chan struct{})
+		p.retiring[r] = 0
 	}
 	r.share = nil
 	// Every transmission still open in the room, reported or unreported, is
@@ -2066,6 +2115,82 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) {
 	p.writeEvents(ctx, events...)
 	p.notify(channelID)
 	p.notifyOccupancy()
+	return r, holder
+}
+
+// retireRoom forgets a room a rotation retired and, if a share was held in
+// it, withdraws the sharer's and the companion's screen grant (withdrawAll)
+// whether or not DeleteRoom will succeed (issue #1087): a failed deletion
+// leaves the old room, and the grant in it, until the sweep. The share's row
+// (reason=rotated) is written by forgetRoom, first. The withdrawal runs under
+// the room's claims, taken after forgetRoom has returned, so with no order or
+// p.mu held: the lock order (claims, order, p.mu) is kept. A claim running in
+// the room is left to pay the withdrawal (owedWithdraw). Call it with no lock
+// held, and never from a claim. It is also what the forgets made on behalf of
+// a rotation that committed elsewhere call (voiceDropIfRetired, a transmit
+// report): whichever forget wins the room's order ends the share, so it must
+// be the one to withdraw.
+func (p *voicePoller) retireRoom(ctx context.Context, room store.VoiceRoom) {
+	r, holder := p.forgetRoom(ctx, room.RoomName)
+	if r == nil || holder == 0 {
+		return
+	}
+	// forgetRoom opened withdrawDone for us (no claim was running then);
+	// however this returns, it is closed, and only then does a hook waiting
+	// on it (waitRunningClaims) go on. Unless a claim took the debt over: its
+	// defer closes it, after it has paid.
+	owed := false
+	defer func() {
+		if !owed {
+			p.withdrawFinished(r)
+		}
+	}()
+	// The nil-LiveKit guard is unreachable (every caller runs with LiveKit
+	// configured); kept so a withdrawal is never attempted without it.
+	if p.s.lk == nil {
+		return
+	}
+	// A claim running in the room, whoever's it is, owes the withdrawal: the
+	// debt is recorded under p.mu, the lock that also clears claimer, so
+	// either the claim sees it in its defer (claimShare) and pays it under
+	// the claims before claimDone closes, or claimer is already clear and the
+	// claims are free to take here. The claim is not waited for, so a sweep
+	// is never held by LiveKit's answer to a grant. One that starts after
+	// this read finds the room retired before it grants. The room is also
+	// put in retiring (the claim's defer removes it): a claim that looked the
+	// room up before forgetRoom and set claimer after it is in neither rooms
+	// nor retiring, and waitRunningClaims and endSharesOf would skip it.
+	if p.claimSeam != nil {
+		p.claimSeam("retire")
+	}
+	p.mu.Lock()
+	if r.claimer != 0 {
+		r.owedWithdraw = holder
+		p.retiring[r] = r.claimer
+		owed = true
+		p.mu.Unlock()
+		return
+	}
+	p.mu.Unlock()
+	ctx = context.WithoutCancel(ctx)
+	r.claims.Lock()
+	defer r.claims.Unlock()
+	p.withdrawAll(ctx, r, holder, voiceRoomPublishes(room))
+}
+
+// withdrawFinished closes r's withdrawDone, if open, and takes r out of
+// retiring unless a claim is registered there (its entry, a principal's id
+// and not 0, is the claim's to delete). Nothing is held when it is called.
+func (p *voicePoller) withdrawFinished(r *voiceRoomState) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if r.withdrawDone != nil {
+		close(r.withdrawDone)
+		r.withdrawDone = nil
+	}
+	if pid, ok := p.retiring[r]; ok && pid == 0 {
+		delete(p.retiring, r)
+	}
 }
 
 // deleteRooms deletes retired rooms in LiveKit, which disconnects everyone in
@@ -2233,7 +2358,10 @@ func (s *Server) voiceEnforceHolders(ctx context.Context) []voiceRotation {
 // by the sweep, or committed and not yet forgotten), so it waits for them
 // all. A claim closes its channel only after it has re-read the room's
 // liveness and withdrawn a grant made in a retired room, and before it lets
-// the room's claims go. A claim that starts after the snapshot is not waited
+// the room's claims go. It also waits for a withdrawal a forget owes for a
+// share it ended (withdrawDone, issue #1087), so a hook never answers while a
+// rotated room's grant is still being taken back, whichever path forgot the
+// room. A claim that starts after the snapshot is not waited
 // for: its re-read of the revocation (shareEntitled) refuses it, so it cannot
 // lengthen the wait however many queue. It takes no claims lock and holds no
 // lock while it waits, so it sits outside the lock order (claims, order,
@@ -2242,6 +2370,8 @@ func (p *voicePoller) waitRunningClaims() {
 	p.mu.Lock()
 	var done []chan struct{}
 	for _, r := range p.rooms {
+		// No withdrawDone here: forgetRoom takes the room out of rooms before
+		// it opens one, so it is found in retiring below.
 		if r.claimer != 0 && r.claimDone != nil {
 			done = append(done, r.claimDone)
 		}
@@ -2249,6 +2379,9 @@ func (p *voicePoller) waitRunningClaims() {
 	for r := range p.retiring {
 		if r.claimDone != nil {
 			done = append(done, r.claimDone)
+		}
+		if r.withdrawDone != nil {
+			done = append(done, r.withdrawDone)
 		}
 	}
 	p.mu.Unlock()
@@ -2318,42 +2451,62 @@ func (s *Server) voiceMemberRemoved(ctx context.Context, channelID, principalID 
 	s.voice.evict(ctx, withoutRotated(rooms, rotated), principalID, voiceReasonMemberRemoved)
 }
 
-// voicePrincipalLostAccess runs after a principal was disabled or had every
-// credential revoked: their presence and occupancy sockets close and the
-// invariant is checked. A disabled principal is also removed, by name, from
-// the rooms of its channels that were not rotated. reason is
-// voiceReasonPrincipalOff or voiceReasonCredsRevoked.
+// voicePrincipalLostAccess runs after a principal was disabled, had every
+// credential revoked or lost use_voice: their presence and occupancy sockets
+// close and the invariant is checked. A disabled principal, or one who lost
+// voice, is also removed, by name (and their companion and viewer with
+// them), from the rooms of its channels that were not rotated: losing voice
+// rotates no room, since the person still holds their credentials and their
+// place (ADR-014 design §7.5). reason is voiceReasonPrincipalOff,
+// voiceReasonCredsRevoked or voiceReasonVoiceOff.
 func (s *Server) voicePrincipalLostAccess(ctx context.Context, principalID int64, reason string) {
 	s.voice.dropPrincipalAll(principalID)
 	if s.lk == nil {
 		return
 	}
 	ctx = context.WithoutCancel(ctx)
-	var rooms []store.VoiceRoom
-	var roomsErr error
-	if reason == voiceReasonPrincipalOff {
-		// Bounded like the read in voiceMemberRemoved, and failing the same
-		// way when the time runs out.
+	if reason == voiceReasonPrincipalOff || reason == voiceReasonVoiceOff {
+		s.voiceEvictLost(ctx, reason, []int64{principalID})
+		return
+	}
+	s.voiceEnforceHolders(ctx)
+}
+
+// voiceEvictLost is the LiveKit half of the hook for people who lost their
+// place in voice by name (disabled, or without use_voice): each one's rooms
+// are read (bounded, like the read in voiceMemberRemoved), the invariant is
+// checked once for all of them (voiceEnforceHolders), and then each has any
+// share the rotation did not end ended under the room's claims and is
+// removed, with their companion and viewer, from the rooms that were not
+// rotated. Their sockets are already dropped; ctx is not cancellable and
+// s.lk is set.
+func (s *Server) voiceEvictLost(ctx context.Context, reason string, principals []int64) {
+	type loss struct {
+		rooms []store.VoiceRoom
+		err   error
+	}
+	losses := make([]loss, len(principals))
+	for i, pid := range principals {
+		// Failing the same way when the time runs out.
 		rctx, cancel := context.WithTimeout(ctx, s.voice.hookReadTimeout)
-		rooms, roomsErr = s.voice.memberRooms(rctx, principalID)
+		losses[i].rooms, losses[i].err = s.voice.memberRooms(rctx, pid)
 		cancel()
 	}
 	rotated := s.voiceEnforceHolders(ctx)
-	if reason != voiceReasonPrincipalOff {
-		return
+	for i, pid := range principals {
+		// As in voiceMemberRemoved: a share the rotation did not end is
+		// ended under the room's claims.
+		s.voice.endSharesOf(ctx, pid, 0, voiceShareStopAccessLost)
+		if losses[i].err != nil {
+			// Which rooms to call LiveKit for is unknown. The principal still
+			// leaves presence at once, from every room the poller has them in,
+			// and the next pass removes them by entitlement.
+			slog.ErrorContext(ctx, "voice: list rooms for removal failed; passes will remove", "principal", pid, "error", losses[i].err)
+			s.voice.forgetEverywhere(ctx, pid)
+			continue
+		}
+		s.voice.evict(ctx, withoutRotated(losses[i].rooms, rotated), pid, reason)
 	}
-	// As in voiceMemberRemoved: a share the rotation did not end is ended
-	// under the room's claims.
-	s.voice.endSharesOf(ctx, principalID, 0, voiceShareStopAccessLost)
-	if roomsErr != nil {
-		// Which rooms to call LiveKit for is unknown. The principal still
-		// leaves presence at once, from every room the poller has them in,
-		// and the next pass removes them by entitlement.
-		slog.ErrorContext(ctx, "voice: list rooms for removal failed; passes will remove", "principal", principalID, "error", roomsErr)
-		s.voice.forgetEverywhere(ctx, principalID)
-		return
-	}
-	s.voice.evict(ctx, withoutRotated(rooms, rotated), principalID, reason)
 }
 
 // voiceCredentialRevoked runs after credentialID was revoked or replaced: its
@@ -2365,4 +2518,83 @@ func (s *Server) voiceCredentialRevoked(ctx context.Context, credentialID int64)
 		return
 	}
 	s.voiceEnforceHolders(ctx)
+}
+
+// voicePrincipals is everyone the poller has anywhere in voice, each once, in
+// id order: in a room's presence, as a companion or a viewer, holding the
+// room's share or a claim for it, with a claim running in a room just
+// retired, or watching on a presence or occupancy socket. It is whom a change that may have taken use_voice from a whole
+// column asks again (voiceWithheld). It reads p.mu only.
+func (p *voicePoller) voicePrincipals() []int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	seen := map[int64]bool{}
+	for _, r := range p.rooms {
+		for pid := range r.participants {
+			seen[pid] = true
+		}
+		for pid := range r.companions {
+			seen[pid] = true
+		}
+		if r.share != nil {
+			seen[r.share.principalID] = true
+		}
+		if r.claimer != 0 {
+			seen[r.claimer] = true
+		}
+	}
+	for _, pid := range p.retiring {
+		if pid != 0 {
+			seen[pid] = true
+		}
+	}
+	// Watchers who are in no room: a presence socket on a channel or the
+	// occupancy socket has no other check of use_voice than this.
+	for sub := range p.subs {
+		seen[sub.principalID] = true
+	}
+	for sub := range p.occSubs {
+		seen[sub.principalID] = true
+	}
+	out := make([]int64, 0, len(seen))
+	for pid := range seen {
+		if pid != 0 {
+			out = append(out, pid)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// voiceWithheld runs after a change to the permissions that may have taken
+// use_voice from a whole column (ADR-014 design §7.5): everyone the poller
+// has in voice or watching it who no longer holds it leaves at once, before
+// the change is answered. Their presence and occupancy sockets close first,
+// with or without LiveKit; then, with LiveKit, one check of the invariant
+// serves them all (voiceEvictLost), the same removal as a person who lost
+// voice by name (voice_not_allowed). Rooms are not rotated. Someone who
+// connects afterwards on a token signed before the change is found by the
+// next pass (voiceEntitlement), so the bound is one pass plus one join-token
+// lifetime. A person whose right cannot be read (each read is bounded by the
+// hook's read timeout) leaves too: the check fails closed, and they can join
+// again once it can be read.
+func (s *Server) voiceWithheld(ctx context.Context) {
+	ctx = context.WithoutCancel(ctx)
+	var lost []int64
+	for _, pid := range s.voice.voicePrincipals() {
+		rctx, cancel := context.WithTimeout(ctx, s.voice.hookReadTimeout)
+		holds, err := s.store.Permitted(rctx, pid, schema.PermUseVoice)
+		cancel()
+		if err != nil {
+			slog.ErrorContext(ctx, "voice: read use_voice failed; removing from voice", "principal", pid, "error", err)
+		} else if holds {
+			continue
+		}
+		lost = append(lost, pid)
+		s.voice.dropPrincipalAll(pid)
+	}
+	if s.lk == nil || len(lost) == 0 {
+		return
+	}
+	s.voiceEvictLost(ctx, voiceReasonVoiceOff, lost)
 }
