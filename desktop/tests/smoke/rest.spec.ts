@@ -6,7 +6,7 @@
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test';
 
 import { makePki, sendJson, startHttps, type Fake, type Pki } from '../unit/support.ts';
-import { startConchd, type Disposable } from './conchd.ts';
+import { listedVersion, startConchd, type Disposable } from './conchd.ts';
 import { launch, livePage, type Launched } from './launch.ts';
 
 // A conch credential has this shape; none may be anywhere the renderer or the
@@ -262,7 +262,7 @@ test.describe('TLS in the packaged app', () => {
   test.beforeAll(async () => {
     pki = makePki();
     https = await startHttps(pki, (_request, res) => {
-      sendJson(res, 200, { status: 'ok', version: 'smoke', db: 'ok', voice: 'not_configured' });
+      sendJson(res, 200, { status: 'ok', version: listedVersion(), db: 'ok', voice: 'not_configured' });
     });
   });
 

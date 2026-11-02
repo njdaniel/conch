@@ -28,7 +28,14 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/ws-tickets", accessAuthenticated, hf(s.handleCreateWSTicket)),
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
 		rt("POST /v0/channels", accessPermission, hf(s.handleCreateChannel)).needs(schema.PermManageChannels),
+		// Member channel creation (issue #981): community members only; an
+		// agent and a guest are refused before the handler runs.
+		rt("POST /v1/channels", accessAuthenticated, s.humansOnlyBecause(denyAgentChannelCreate, "agents cannot create channels", s.membersOnly(hf(s.handleCreateChannelV1)))),
 		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
+		// Channel settings (issue #981, ADR-013 O5): visibility and the
+		// default mark. manage_channels, refused before any lookup, so a
+		// caller without it learns nothing of which ids exist.
+		rt("PUT /v1/channels/{id}/settings", accessPermission, hf(s.handleChannelSettings)).needs(schema.PermManageChannels),
 		// Renaming a channel (issues #727, #791): operators or its managers,
 		// addressed by id since the name is what it changes. /name is a literal
 		// no {channel} route ends in, so no two patterns meet.
@@ -179,6 +186,9 @@ func (s *Server) routeTable() []route {
 		// meet in the mux; POST /v0/principals is another version.
 		rt("POST /v1/principals/{id}/hide", accessPermission, hf(s.handleHidePrincipal)).needs(schema.PermManageMembers),
 		rt("POST /v1/principals/hide", accessPermission, hf(s.handleHidePrincipals)).needs(schema.PermManageMembers),
+		// The community's member list (issue #983): any member; see_member_directory
+		// decides everyone versus the may-know list, manage_members the operator fields.
+		rt("GET /v1/directory/members", accessAuthenticated, s.directoryRoute(hf(s.handleListDirectoryMembers))),
 		rt("GET /v1/principals", accessPermission, hf(s.handleListPrincipals)).needs(schema.PermManageMembers),
 		// Operators, or the principal itself: "sign out everywhere" (issue
 		// #439; checked in the handler).
@@ -262,6 +272,8 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/invites/{id}/disable-joiners", accessPermission, hf(s.handleDisableJoiners)).needs(schema.PermManageMembers),
 		rt("POST /v1/principals/{id}/disable-invitees", accessPermission, hf(s.handleDisableInvitees)).needs(schema.PermManageMembers),
 		rt("PUT /v1/principals/{id}/invite-permission", accessPermission, hf(s.handleInvitePermission)).needs(schema.PermManageMembers),
+		// A person's voice switch (issue #984): immediate effect on live media.
+		rt("PUT /v1/principals/{id}/voice-permission", accessPermission, hf(s.handleVoicePermission)).needs(schema.PermManageMembers),
 		rt("GET /v1/invites/settings", accessOperator, hf(s.handleGetInviteSettings)),
 		rt("PUT /v1/invites/settings", accessPermission, hf(s.handlePutInviteSettings)).needs(schema.PermManageMembers),
 		// Sign-in links (issue #493): an operator makes a one-time link that
@@ -365,6 +377,7 @@ var recentAuthRoutes = map[string]reauthRule{
 	"POST /v1/invites/{id}/disable-joiners":                        reauthAlways,
 	"POST /v1/principals/{id}/disable-invitees":                    reauthAlways,
 	"PUT /v1/principals/{id}/invite-permission":                    reauthAlways,
+	"PUT /v1/principals/{id}/voice-permission":                     reauthAlways,
 	"PUT /v1/invites/settings":                                     reauthAlways,
 	"POST /v1/principals/{id}/sign-in-links":                       reauthAlways,
 	// Guest entry (issue #710): opening or closing joining to guests, and
