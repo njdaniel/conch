@@ -1,12 +1,14 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { Fragment, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Glyph } from './Icons';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
+import type { SettingsChange } from './ChannelSettingsAsk';
 import type { ChannelV0 } from './schema/channel';
 import { badgeText } from './useReadState';
 import { nobody, type InVoice } from './voice/useOccupancy';
 
 const badgeId = (channel: number) => `unread-${String(channel)}`;
 const voiceId = (channel: number) => `in-voice-${String(channel)}`;
+const privateId = (channel: number) => `private-${String(channel)}`;
 const managesId = (channel: number) => `manages-${String(channel)}`;
 
 // The count after a channel's name, with a name of its own ("3 unread") that the
@@ -52,6 +54,8 @@ function ChannelRow({
   voiced,
   mayRename,
   renderRename,
+  mayManage,
+  renderSettings,
   onInvite,
   register,
   onMove,
@@ -65,6 +69,8 @@ function ChannelRow({
   readonly voiced: number;
   readonly mayRename: boolean;
   readonly renderRename: ((channel: ChannelV0, close: () => void) => ReactNode) | undefined;
+  readonly mayManage: boolean;
+  readonly renderSettings: ((channel: ChannelV0, change: SettingsChange, close: () => void) => ReactNode) | undefined;
   readonly onInvite: ((channel: ChannelV0) => void) | undefined;
   readonly register: (name: string, el: HTMLButtonElement | null) => void;
   readonly onMove: (event: KeyboardEvent, from: number) => void;
@@ -72,6 +78,11 @@ function ChannelRow({
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
+  // The settings change being confirmed or sent (issue #1183), in place under the row.
+  const [change, setChange] = useState<SettingsChange | null>(null);
+  const row = useRef<HTMLLIElement>(null);
+  const isPrivate = channel.visibility === 'private';
+  const isDefault = channel.default === true;
   const more = useRef<HTMLButtonElement>(null);
   const main = useRef<HTMLButtonElement | null>(null);
   // The grant to rename was revoked while the form was open: it goes, and
@@ -81,8 +92,18 @@ function ChannelRow({
     setRenaming(false);
     main.current?.focus();
   }, [mayRename, renaming]);
-  // What describes the button: a manager grant, who is in its voice, then its unread.
-  const described = [channel.manages === true ? managesId(channel.id) : null, voiced > 0 ? voiceId(channel.id) : null, unread > 0 ? badgeId(channel.id) : null].filter(
+  // The grant to manage channels went while a change was open: it goes,
+  // unsent, and focus, if it was in it, goes to the row's button.
+  useEffect(() => {
+    if (change === null || mayManage) return;
+    // The focused control was in the confirmation, which is gone with this
+    // commit, so focus is on the body now; elsewhere on the page it stays.
+    const lost = document.activeElement === document.body || row.current?.contains(document.activeElement) === true;
+    setChange(null);
+    if (lost) main.current?.focus();
+  }, [mayManage, change]);
+  // What describes the button: private, a manager grant, who is in its voice, then its unread.
+  const described = [isPrivate ? privateId(channel.id) : null, channel.manages === true ? managesId(channel.id) : null, voiced > 0 ? voiceId(channel.id) : null, unread > 0 ? badgeId(channel.id) : null].filter(
     (x) => x !== null,
   );
 
@@ -101,7 +122,28 @@ function ChannelRow({
       key: 'rename',
       label: 'Rename channel…',
       onSelect: () => {
+        setChange(null);
         setRenaming(true);
+      },
+    });
+  }
+  if (mayManage && renderSettings !== undefined) {
+    items.push({
+      key: 'visibility',
+      label: isPrivate ? 'Make public' : 'Make private',
+      ...(!isPrivate && isDefault ? { disabled: true, reason: 'A default channel must be public. Stop it being a default channel first.' } : {}),
+      onSelect: () => {
+        setRenaming(false);
+        setChange({ kind: 'visibility', to: isPrivate ? 'public' : 'private' });
+      },
+    });
+    items.push({
+      key: 'default',
+      label: isDefault ? 'Stop being a default channel' : 'Make default channel',
+      ...(!isDefault && isPrivate ? { disabled: true, reason: 'A default channel must be public. Make it public first.' } : {}),
+      onSelect: () => {
+        setRenaming(false);
+        setChange({ kind: 'default', to: !isDefault });
       },
     });
   }
@@ -110,7 +152,7 @@ function ChannelRow({
   });
 
   return (
-    <li className={items.length > 0 ? 'has-actions' : undefined} {...openers}>
+    <li ref={row} className={[items.length > 0 ? 'has-actions' : '', isPrivate ? 'private' : ''].filter((c) => c !== '').join(' ') || undefined} {...openers}>
       <button
         type="button"
         ref={(el) => {
@@ -128,8 +170,14 @@ function ChannelRow({
         }}
         title={channel.name}
       >
+        {isPrivate ? <Glyph name="lock" /> : null}
         <span className="channel-name">{channel.name}</span>
       </button>
+      {isPrivate ? (
+        <span id={privateId(channel.id)} hidden>
+          private channel
+        </span>
+      ) : null}
       {channel.manages === true ? (
         <span id={managesId(channel.id)} className="ag-badge manages">
           manages
@@ -146,6 +194,18 @@ function ChannelRow({
             // The ⋯ may be gone (the grant was revoked meanwhile): the row's button then.
             (more.current ?? main.current)?.focus();
           })
+        : null}
+      {change !== null && mayManage && renderSettings !== undefined
+        ? // Keyed on the change: another menu item remounts the confirmation, so
+          // what the row holds and what is shown never disagree.
+          (
+            <Fragment key={`${change.kind}:${String(change.to)}`}>
+              {renderSettings(channel, change, () => {
+                setChange(null);
+                (more.current ?? main.current)?.focus();
+              })}
+            </Fragment>
+          )
         : null}
     </li>
   );
@@ -164,6 +224,8 @@ export function ChannelList({
   empty = 'No channels yet: an operator needs to add you to one',
   canRename,
   renderRename,
+  canManage = false,
+  renderSettings,
   onInvite,
   onOpen,
 }: {
@@ -182,6 +244,12 @@ export function ChannelList({
   // The rename form for a channel, shown in place under its row; `close`
   // hides it and returns focus to the row's ⋯.
   readonly renderRename?: (channel: ChannelV0, close: () => void) => ReactNode;
+  // Whether this viewer holds manage_channels (whoami says so; the server still
+  // decides). Only then does a row's ⋯ offer to make its channel public or
+  // private, or a default, and `renderSettings` draws the confirmation or the
+  // answer in place under the row (issue #1183).
+  readonly canManage?: boolean;
+  readonly renderSettings?: (channel: ChannelV0, change: SettingsChange, close: () => void) => ReactNode;
   // Opens the invite panel with that channel ticked; absent for a viewer who
   // may not invite, who is then offered no Invite people.
   readonly onInvite?: (channel: ChannelV0) => void;
@@ -233,6 +301,8 @@ export function ChannelList({
           voiced={occupancy.get(channel.id) ?? 0}
           mayRename={canRename?.(channel) === true}
           renderRename={renderRename}
+          mayManage={canManage}
+          renderSettings={renderSettings}
           onInvite={onInvite}
           register={register}
           onMove={move}

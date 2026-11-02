@@ -15,6 +15,7 @@ import { FirstRun } from './FirstRun';
 import { Lobby } from './Lobby';
 import { ReportProblem } from './Report';
 import { OperatorWarning } from './OperatorWarning';
+import { ChannelSettingsAsk } from './ChannelSettingsAsk';
 import { RenameChannel } from './RenameChannel';
 import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeLinkFromAddress } from './route';
 import type { ChannelDocV1, ChannelV0 } from './schema/channel';
@@ -25,7 +26,7 @@ import { YourSignIns } from './SignIns';
 import { SignInLink } from './SignInLink';
 import { AddDevice } from './AddDevice';
 import { AdminConsole } from './AdminConsole';
-import { memberLine } from './admin/permissions';
+import { canDo, memberLine } from './admin/permissions';
 import { Reauth } from './Reauth';
 import { PasswordSettings } from './Settings';
 import { Setup } from './Setup';
@@ -450,8 +451,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const onChannel = useCallback(
     (doc: ChannelDocV1) => {
       renamed(doc.channel_id, doc.name);
+      dispatchChannels({ type: 'settings', id: doc.channel_id, visibility: doc.visibility, default: doc.default });
     },
-    [renamed],
+    [renamed, dispatchChannels],
   );
   const onManages = useCallback(
     (id: number, manages: boolean) => {
@@ -1696,6 +1698,21 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 renamed(renamedTo.id, renamedTo.name);
               }}
               onStale={refind}
+              onUnauthorized={onUnauthorized}
+              onClose={close}
+            />
+          )}
+          // Holders of manage_channels make a channel public or private, a
+          // default or not, from its ⋯ menu (issue #1183). whoami says who
+          // holds it; the server decides each change.
+          canManage={visit === null && canDo(auth.principal, 'manage_channels')}
+          renderSettings={(channel, change, close) => (
+            <ChannelSettingsAsk
+              channel={channel}
+              change={change}
+              onApplied={(now) => {
+                dispatchChannels({ type: 'settings', id: now.id, visibility: now.visibility, default: now.default });
+              }}
               onUnauthorized={onUnauthorized}
               onClose={close}
             />

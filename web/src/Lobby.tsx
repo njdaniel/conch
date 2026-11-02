@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
+import type { SettingsChange } from './ChannelSettingsAsk';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
@@ -72,6 +73,8 @@ export function Lobby({
   newChannel,
   canRename,
   renderRename,
+  canManage,
+  renderSettings,
   onInviteTo,
   account,
   signIns,
@@ -119,6 +122,8 @@ export function Lobby({
   // that channel ticked (absent for a person who may not invite).
   readonly canRename?: (channel: ChannelV0) => boolean;
   readonly renderRename?: (channel: ChannelV0, close: () => void) => ReactNode;
+  readonly canManage?: boolean;
+  readonly renderSettings?: (channel: ChannelV0, change: SettingsChange, close: () => void) => ReactNode;
   readonly onInviteTo?: (channel: ChannelV0) => void;
   // The caller's standing and own account settings, in Settings.
   readonly account?: ReactNode;
@@ -382,6 +387,8 @@ export function Lobby({
                   empty={newChannel === null || newChannel === undefined ? undefined : 'No channels yet'}
                   {...(canRename === undefined ? {} : { canRename })}
                   {...(renderRename === undefined ? {} : { renderRename })}
+                  {...(canManage === undefined ? {} : { canManage })}
+                  {...(renderSettings === undefined ? {} : { renderSettings })}
                   {...(onInviteTo === undefined ? {} : { onInvite: onInviteTo })}
                   onOpen={(name) => {
                     onOpen(name);
