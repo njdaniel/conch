@@ -205,10 +205,15 @@ func adminPermissionsPreset(ctx context.Context, r *adminRun) error {
 		}
 		return r.say("the member column already matches the %s preset; nothing to change\n", preset)
 	}
-	if !r.opts.asJSON {
-		if err := r.say("the %s preset changes the member column:\n%s\n", preset, strings.Join(diff, "\n")); err != nil {
+	preview := fmt.Sprintf("the %s preset changes the member column:\n%s\n", preset, strings.Join(diff, "\n"))
+	if r.opts.asJSON {
+		// Standard output carries the response document alone; the person
+		// still sees what they are asked to approve.
+		if _, err := fmt.Fprint(r.stderr, preview); err != nil {
 			return err
 		}
+	} else if err := r.say("%s", preview); err != nil {
+		return err
 	}
 	if !r.opts.invite.yes {
 		ok, err := r.prompt.confirm(fmt.Sprintf("Apply the %s preset?", preset))

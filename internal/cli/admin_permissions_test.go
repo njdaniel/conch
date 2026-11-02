@@ -560,3 +560,49 @@ func TestAdminPermissionsHostileServer(t *testing.T) {
 		})
 	}
 }
+
+// With --json the preset's diff goes to stderr before the question, stdout
+// holds the response document alone, and a declined preset sends no PUT.
+func TestAdminPermissionsPresetJSON(t *testing.T) {
+	const diff = "the personal preset changes the member column:\n  create_public_channels: members on -> off\n"
+	tests := []struct {
+		name       string
+		args       []string
+		stdin      string
+		wantErr    string
+		wantStdout bool // a JSON document on stdout
+		wantRev    string
+	}{
+		{name: "declined", args: []string{"--json", "personal"}, stdin: "n\n", wantErr: "not applied", wantRev: "revision: 1\n"},
+		{name: "confirmed", args: []string{"--json", "personal"}, stdin: "y\n", wantStdout: true, wantRev: "revision: 2\n"},
+		{name: "--yes", args: []string{"--json", "--yes", "personal"}, wantStdout: true, wantRev: "revision: 2\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newPermsEnv(t)
+			stdout, stderr, err := e.admin(t, e.operatorToken, tt.stdin, append([]string{"permissions", "preset"}, tt.args...)...)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(ErrorLine(err), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(stderr, diff) {
+				t.Errorf("stderr = %q, want it to start with the preview", stderr)
+			}
+			if tt.wantStdout {
+				var doc schema.PermissionsResponseV1
+				if err := json.Unmarshal([]byte(stdout), &doc); err != nil || doc.Revision != 2 || doc.Preset != schema.PresetPersonal {
+					t.Errorf("stdout = %q (%v), want the applied document alone", stdout, err)
+				}
+			} else if stdout != "" {
+				t.Errorf("stdout = %q, want nothing", stdout)
+			}
+			out, _, err := e.admin(t, e.operatorToken, "", "permissions", "show")
+			if err != nil || !strings.HasPrefix(out, tt.wantRev) {
+				t.Errorf("show = %q, %v; want %s", out, err, tt.wantRev)
+			}
+		})
+	}
+}
