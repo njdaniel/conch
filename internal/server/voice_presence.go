@@ -2579,9 +2579,20 @@ func (p *voicePoller) voicePrincipals() []int64 {
 // hook's read timeout) leaves too: the check fails closed, and they can join
 // again once it can be read.
 func (s *Server) voiceWithheld(ctx context.Context) {
+	s.voiceWithheldAmong(ctx, s.voice.voicePrincipals())
+}
+
+// voiceWithheldFor is voiceWithheld for one principal: after a change to that
+// principal alone (a role change). It is the same removal.
+func (s *Server) voiceWithheldFor(ctx context.Context, principalID int64) {
+	s.voiceWithheldAmong(ctx, []int64{principalID})
+}
+
+// voiceWithheldAmong removes those of pids who no longer hold use_voice.
+func (s *Server) voiceWithheldAmong(ctx context.Context, pids []int64) {
 	ctx = context.WithoutCancel(ctx)
 	var lost []int64
-	for _, pid := range s.voice.voicePrincipals() {
+	for _, pid := range pids {
 		rctx, cancel := context.WithTimeout(ctx, s.voice.hookReadTimeout)
 		holds, err := s.store.Permitted(rctx, pid, schema.PermUseVoice)
 		cancel()
