@@ -171,6 +171,23 @@ export async function say(page: Page, channel: string, body: string): Promise<vo
   await page.getByRole('button', { name: 'Send' }).click();
 }
 
+// consoleErrors collects what a page writes to its console as an error (issue
+// #1084). The browser logs a failed request there ("Failed to load resource")
+// whatever the page does with the answer, so a page that handles a state
+// without asking for what is known to fail leaves the list empty. Call it
+// before the page loads; each line is the message and, for a failed request,
+// the address it was for.
+export function consoleErrors(page: Page): string[] {
+  const found: string[] = [];
+  page.on('console', (m) => {
+    if (m.type() === 'error') found.push(`${m.text()} ${m.location().url}`.trim());
+  });
+  page.on('pageerror', (err) => {
+    found.push(`pageerror: ${err.message}`);
+  });
+  return found;
+}
+
 // expectStateReadable checks the top bar's connection state on a phone (issue
 // #1030): the word is drawn whole (not cut by an ellipsis or the clip of its
 // box), no button's box meets its box, and what is on top at its middle and

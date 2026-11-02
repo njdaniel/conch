@@ -199,6 +199,61 @@ let pinned: Held | null = null;
 const replacing = new Map<string, Promise<void>>();
 const replaced = new Set<string>();
 
+// The writes that replace the credential in force (a password change among
+// them) that are out now. The server revokes the old credential as it
+// answers, which closes every socket opened with it (1008) and ends its
+// session, and a ticket, a whoami or a presence read that follows from those
+// closes, asked for with it, is a request known to fail: the browser logs it
+// as an error whatever the page does with the answer (issue #1084). So while
+// one is out, no socket is opened (connect waits, and then asks for its ticket
+// with the credential the write left, the new one), and a socket closed 1008
+// by the replacement is told to its owner as lost, not refused, since an
+// owner's answer to a refusal is to ask the server who it is, and why, with
+// the credential that was just revoked.
+// A hold is dropped when its write is answered or after replacingWait,
+// whichever is first, so a write that never answers does not hold the page up.
+const requestHolds = new Set<Promise<void>>();
+
+// The reason conchd gives when it closes a socket (1008) because the
+// credential it was opened with has been revoked.
+const credentialInvalid = 'credential no longer valid';
+
+// A write that may replace this page's credential is about to be sent
+// ('begin'), and it has been answered ('end'; rotated says the page now holds
+// the new credential, so what was made with the old one is gone). A write not
+// answered by replacingWait ends with rotated false ('end' for the same id),
+// and, should it answer later with a new credential, ends again with late
+// true. Each write has its own id. The browser's own session listens: it is
+// the one thing the old credential's revocation ends on the server, and its
+// events socket would otherwise be opened again for it, refused 404 (issue
+// #1084).
+export type ReplacingEvent =
+  | { readonly phase: 'begin'; readonly id: number }
+  | { readonly phase: 'end'; readonly id: number; readonly rotated: boolean; readonly late: boolean };
+
+let replacingIds = 0;
+
+const replacingListeners = new Set<(event: ReplacingEvent) => void>();
+
+// onCredentialReplacing calls listener for each ReplacingEvent, and returns
+// the function that stops it.
+export function onCredentialReplacing(listener: (event: ReplacingEvent) => void): () => void {
+  replacingListeners.add(listener);
+  return () => {
+    replacingListeners.delete(listener);
+  };
+}
+
+function tellReplacing(event: ReplacingEvent): void {
+  for (const listener of [...replacingListeners]) listener(event);
+}
+
+// holdSockets resolves once no replacing write is out (a hold that has waited
+// replacingWait is dropped, see whileReplacing).
+async function holdSockets(): Promise<void> {
+  while (requestHolds.size > 0) await Promise.all([...requestHolds]);
+}
+
 // pin sets the credential this page signs in with, as a new sign-in (or none).
 function pin(held: Held | null): void {
   pinned = held;
@@ -217,7 +272,42 @@ function rotate(from: Held, next: Held): void {
 // before work sends anything.
 function whileReplacing<T>(from: Held | null, work: () => Promise<T>): Promise<T> {
   if (from === null) return work();
+  // No socket is opened until the write is answered (see requestHolds), and
+  // what holds a session of the old credential is told to let go of it
+  // first (see onCredentialReplacing).
+  let release = (): void => undefined;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const id = ++replacingIds;
+  let expired = false;
+  let answered = false;
+  // Not answered in time: the hold is dropped and the listeners told, so the
+  // page's sockets and session go on with what they have.
+  const timer = setTimeout(() => {
+    if (answered) return;
+    expired = true;
+    requestHolds.delete(hold);
+    release();
+    tellReplacing({ phase: 'end', id, rotated: false, late: false });
+  }, replacingWait);
+  requestHolds.add(hold);
+  tellReplacing({ phase: 'begin', id });
   const done = Promise.resolve().then(work);
+  void done
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    .then(() => {
+      answered = true;
+      clearTimeout(timer);
+      const rotated = replaced.has(from.token);
+      if (!expired) tellReplacing({ phase: 'end', id, rotated, late: false });
+      else if (rotated) tellReplacing({ phase: 'end', id, rotated, late: true });
+      requestHolds.delete(hold);
+      release();
+    });
   const settled = done.then(
     () => undefined,
     () => undefined,
@@ -1992,6 +2082,9 @@ async function connect(name: SocketName, id: OperationId, query: Readonly<Record
   // Lost until it opens: a ticket refused or a socket that never opens is
   // followed by another try.
   lost[name] = true;
+  await holdSockets();
+  // The credential this socket is opened with, which a replacement may end.
+  const opened = current();
   let address = query;
   if (platform.sockets.ticket) {
     const ticket = await requestTicket();
@@ -2017,7 +2110,13 @@ async function connect(name: SocketName, id: OperationId, query: Readonly<Record
   socket.onclose = (event: CloseEvent) => {
     lost[name] = true;
     record({ kind: 'socket_close', socket: kind, code: event.code });
-    events.onClose(event.code, event.reason);
+    // Closed because its credential was revoked, by a replacement that is out
+    // or has been kept: an abnormal close, which the owner opens again after
+    // its wait. Any other 1008 (the channel lost, the session ended) keeps
+    // its reason, which its owner acts on.
+    const replacedMeanwhile = requestHolds.size > 0 || (opened !== null && replaced.has(opened.token));
+    if (event.code === 1008 && event.reason === credentialInvalid && replacedMeanwhile) events.onClose(1006, '');
+    else events.onClose(event.code, event.reason);
   };
   const handle: FeedSocket = {
     close: () => {
