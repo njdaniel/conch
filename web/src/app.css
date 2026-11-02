@@ -522,6 +522,8 @@ label {
 
 .channel-list {
   display: grid;
+  /* A row is never wider than the column: its name is cut instead. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 2px;
   margin: 0;
   padding: 0;
@@ -535,20 +537,27 @@ label {
 }
 
 .channel-list li > button {
-  /* A name keeps at least this much before the badges and the ⋯ wrap to a
-     line below it, rather than the name breaking letter by letter. */
-  flex: 1 1 6rem;
+  /* The name takes what the badges and the ⋯ leave, on one line, and is cut
+     with an ellipsis when that is too little (the whole name is the button's
+     name and its title), so a row stays one line however narrow the column. */
+  flex: 1 1 0;
   min-width: 0;
   justify-content: flex-start;
   padding: 0.4rem 0.6rem;
   text-align: left;
-  overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 0.95rem;
   background: transparent;
   border: 0;
   border-left: 3px solid transparent;
   border-radius: var(--radius-sm);
+}
+
+.channel-list .channel-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* The # is not part of the button's name ('#' / '' gives it no alt text). */

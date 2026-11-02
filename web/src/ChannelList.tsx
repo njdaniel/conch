@@ -126,8 +126,9 @@ function ChannelRow({
         onKeyDown={(event) => {
           onMove(event, index);
         }}
+        title={channel.name}
       >
-        {channel.name}
+        <span className="channel-name">{channel.name}</span>
       </button>
       {channel.manages === true ? (
         <span id={managesId(channel.id)} className="ag-badge manages">
