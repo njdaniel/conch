@@ -55,6 +55,28 @@ export type StorageStatus =
 // Something the last switch or sign-out has to tell the person.
 export type ProfileNotice = 'sign-in-again' | 'could-not-verify' | 'account-mismatch' | 'revocation-unconfirmed' | 'revocation-unsent' | 'teardown-slow';
 
+// Whether the active server's release is one this app was tested with
+// (issue #946). none: no server is active. supported: it is on the list.
+// unlisted: it is not, and the development flag let it through. unsupported:
+// it answered with a version that is not on the list (or none); unreachable:
+// it did not answer /healthz. Only supported and unlisted may sign in.
+export type CompatState = 'none' | 'supported' | 'unlisted' | 'unsupported' | 'unreachable';
+
+export interface CompatView {
+  readonly state: CompatState;
+  // The server's version as /healthz named it; null when it named none or
+  // something that is not a version.
+  readonly server: string | null;
+  // This app's own version.
+  readonly desktop: string;
+  // The development flag is in force: a persistent warning, in any state.
+  readonly override: boolean;
+  // The first required response family (for example "channels") whose answer
+  // was not what this app was built for: an incompatibility, not a network
+  // error. null when none has been seen.
+  readonly invalid: string | null;
+}
+
 export interface ProfilesView {
   readonly profiles: readonly ProfileView[];
   readonly active: string | null;
@@ -62,6 +84,7 @@ export interface ProfilesView {
   // profiles.json could not be read: only profilesRecover works.
   readonly recovery: boolean;
   readonly notice: ProfileNotice | null;
+  readonly compat: CompatView;
   // The platform, for the storage text (DPAPI does not protect from other apps
   // of the same user).
   readonly platform: string;
@@ -90,7 +113,9 @@ export interface BridgeRequest {
 // for an identity that has since ended; unsupported is an operation the
 // desktop shell cannot do yet; no-server is a request made before an address
 // was set.
-export type NoAnswerReason = 'certificate' | 'redirect' | 'oversize' | 'invalid' | 'stale' | 'unsupported' | 'no-server';
+// incompatible is a sign-in main refused because the server's release is not
+// one this app was tested with (issue #946).
+export type NoAnswerReason = 'certificate' | 'redirect' | 'oversize' | 'invalid' | 'stale' | 'unsupported' | 'no-server' | 'incompatible';
 
 // What main answers. A reply is the server's answer with its body already
 // validated against the operation's response validator (body is undefined for
