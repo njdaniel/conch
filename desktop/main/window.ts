@@ -13,9 +13,16 @@ import { INITIAL_URL } from './scheme.ts';
 // outlives the process. The scheme handler and the guards are installed on it.
 export const PARTITION = 'conch-ui';
 
+// Each activation of a profile gets a partition of its own, named for its
+// generation and never reused: a switch or a sign-out creates new web contents
+// in a fresh in-memory session and destroys the old one (issue #945).
+export function partitionFor(generation: number): string {
+  return `${PARTITION}-${String(generation)}`;
+}
+
 // webPreferences is the whole list, pinned by a unit test: a key added here is
 // a decision to make in review, not a default to inherit.
-export function webPreferences(packaged: boolean, preload: string): WebPreferences {
+export function webPreferences(packaged: boolean, preload: string, partition: string = PARTITION): WebPreferences {
   return {
     nodeIntegration: false,
     contextIsolation: true,
@@ -36,7 +43,7 @@ export function webPreferences(packaged: boolean, preload: string): WebPreferenc
     enableBlinkFeatures: '',
     devTools: !packaged,
     preload,
-    partition: PARTITION,
+    partition,
   };
 }
 
@@ -44,18 +51,28 @@ export function preloadPath(appPath: string): string {
   return join(appPath, 'out', 'preload', 'index.cjs');
 }
 
-export function createWindow(packaged: boolean, appPath: string, gate: DocumentGate): BrowserWindow {
+export interface WindowOptions {
+  readonly partition?: string;
+  readonly bounds?: { readonly x: number; readonly y: number; readonly width: number; readonly height: number };
+  // Called with the window after it is made and before its first load: the
+  // session's handlers are installed here.
+  readonly prepare?: (window: BrowserWindow) => void;
+}
+
+export function createWindow(packaged: boolean, appPath: string, gate: DocumentGate, options: WindowOptions = {}): BrowserWindow {
   const window = new BrowserWindow({
     width: 1100,
     height: 760,
+    ...(options.bounds ?? {}),
     minWidth: 360,
     minHeight: 480,
     title: 'Conch',
     show: false,
-    webPreferences: webPreferences(packaged, preloadPath(appPath)),
+    webPreferences: webPreferences(packaged, preloadPath(appPath), options.partition),
   });
   // The document generation begins at each navigation, before the first load.
   trackDocument(window.webContents, gate);
+  options.prepare?.(window);
   window.once('ready-to-show', () => {
     window.show();
   });

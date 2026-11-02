@@ -149,7 +149,7 @@ func guestRows() []row {
 		refused("GET /v1/directory/channels", "lists the channel directory", notAllowed, func(*world) probe { return get("/v1/directory/channels") }),
 		{route: "GET /v1/credentials/mine", what: "lists her sign-ins", own: true, inspect: oneSignIn,
 			probe: func(*world, subject) probe { return get("/v1/credentials/mine") }},
-		{route: "GET /v1/channels/{channel}/voice", what: "reads the plaza's voice presence", own: true,
+		{route: "GET /v1/channels/{channel}/voice", what: "reads the plaza's voice presence (a guest holds no voice since A4, #1016)", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
 			probe: func(w *world, _ subject) probe { return get("/v1/channels/" + pch(w) + "/voice") }},
 		{route: "POST /v1/reports", what: "reports a problem", own: true,
 			probe: func(*world, subject) probe {
