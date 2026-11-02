@@ -552,7 +552,7 @@ var permissionGates = map[schema.Permission][][2]string{
 		{"voice.go", "Server.voiceStillEntitled"},
 		{"voice_occupancy.go", "Server.voiceOccupancyCaller"},
 		{"voice_presence.go", "Server.voiceEntitlement"},
-		{"voice_presence.go", "Server.voiceWithheld"},
+		{"voice_presence.go", "Server.voiceWithheldAmong"},
 	},
 	schema.PermShareScreen: {
 		{"voice_share.go", "Server.handleVoiceShareStart"},
@@ -791,6 +791,38 @@ func TestInviteRefusalsNameThePermission(t *testing.T) {
 				t.Fatal(err)
 			}
 			rec := f.do(t, "POST", "/v1/invites", c.tok, string(body))
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("invite = %d %s, want 403", rec.Code, rec.Body)
+			}
+			if e := decodeBody[schema.Error](t, rec); e.Code != c.code || e.Permission != c.perm {
+				t.Errorf("refusal = %s, want code %q permission %q", rec.Body, c.code, c.perm)
+			}
+		})
+	}
+}
+
+// The same for the member link (issue #985): POST /v2/invites.
+func TestMemberLinkRefusalsNameThePermission(t *testing.T) {
+	f := newRestrictedFixture(t, Config{})
+	f.cut(t)
+	for _, c := range []struct {
+		name string
+		tok  string
+		body string
+		code string
+		perm schema.Permission
+	}{
+		{"a link that never expires, without manage_members", f.opTok, `{"kind":"member","never_expires":true}`,
+			schema.ErrorCodeInviteNotAllowed, schema.PermManageMembers},
+		{"a landing channel it is not in, without manage_channels", f.opTok, `{"kind":"member","landing_channels":["channel-a"]}`,
+			schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageChannels},
+		// A member is never told of an operator permission; its own right
+		// to make links (its brake) it is told.
+		{"a member who may not invite", f.memberTok, `{"kind":"member"}`,
+			schema.ErrorCodeInviteNotAllowed, schema.PermMakeMemberLinks},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rec := f.do(t, "POST", "/v2/invites", c.tok, c.body)
 			if rec.Code != http.StatusForbidden {
 				t.Fatalf("invite = %d %s, want 403", rec.Code, rec.Body)
 			}

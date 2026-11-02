@@ -139,6 +139,7 @@ func aIntervention(w *world) subject { return subject{kind: "intervention", id: 
 func aApproval(w *world) subject     { return subject{kind: "approval", id: w.a.approval} }
 func aOpenLink(w *world) subject     { return subject{kind: "invite", id: w.a.openInviteID} }
 func aPersonal(w *world) subject     { return subject{kind: "invite", id: w.a.invites[1]} }
+func aMemberLink(w *world) subject   { return subject{kind: "invite", id: w.a.memberLinkID} }
 func aSignInLink(w *world) subject   { return subject{kind: "sign_in_link", id: w.a.signInLink} }
 
 // aSignInCode is the code of A's sign-in link, by name: the password rows
@@ -654,6 +655,33 @@ func coreMatrixRows() []row {
 			probe: func(_ *world, s subject) probe {
 				return post("/v1/invites", schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{s.name}})
 			}},
+		// Member links (issue #985). A member without manage_channels who names
+		// a landing channel gets one answer for A's private channel and for one
+		// that never existed (the ghost row), and a tester whose brake is off
+		// is told so, whatever channel it names.
+		{route: "POST /v2/invites", what: "makes a link landing in A's channel", pick: aChannel,
+			want: answer{http.StatusForbidden, schema.ErrorCodeInviteGrantExceedsInviter}, mayNot: answer{http.StatusForbidden, schema.ErrorCodeInviteNotAllowed},
+			probe: func(_ *world, s subject) probe {
+				return post("/v2/invites", schema.CreateInviteRequestV2{Kind: schema.InviteKindMember, LandingChannels: []string{s.name}})
+			}},
+		own("GET /v2/invites", "lists her links", func(*world, subject) probe { return get("/v2/invites") }),
+		// The joiners of a link are its maker's and the operators': B's member
+		// gets the answer of an id that never existed, for a member link, a
+		// legacy open link and a legacy personal invite alike.
+		{route: "GET /v2/invites/{id}/joiners", what: "lists who joined through A's member link", pick: aMemberLink, want: answer{http.StatusNotFound, schema.ErrorCodeInviteNotFound},
+			probe: func(_ *world, s subject) probe { return get("/v2/invites/" + id(s.id) + "/joiners") }},
+		{route: "GET /v2/invites/{id}/joiners", what: "lists who joined through A's open link", pick: aOpenLink, want: answer{http.StatusNotFound, schema.ErrorCodeInviteNotFound},
+			probe: func(_ *world, s subject) probe { return get("/v2/invites/" + id(s.id) + "/joiners") }},
+		{route: "GET /v2/invites/{id}/joiners", what: "lists who joined through an A tester's personal invite", pick: aPersonal, want: answer{http.StatusNotFound, schema.ErrorCodeInviteNotFound},
+			probe: func(_ *world, s subject) probe { return get("/v2/invites/" + id(s.id) + "/joiners") }},
+		// A holder of a member link's code is shown the inviter's name, the
+		// server's and the default channels, and nothing else (design §3.3).
+		{route: "POST /v2/invites/preview", what: "previews A's member link", own: true, noGhost: "the preview is the code holder's, by design",
+			pick: func(w *world) subject { return subject{kind: "principal", name: w.a.people[0].name} },
+			probe: func(w *world, _ subject) probe {
+				return post("/v2/invites/preview", schema.InvitePreviewRequestV1{Code: w.a.memberLinkCode})
+			},
+			inspect: func(w *world, _ api, body []byte) error { return w.checkMemberLinkPreview(body) }},
 		own("GET /v1/invites", "lists her invites", func(*world, subject) probe { return get("/v1/invites") }),
 		{route: "DELETE /v1/invites/{id}", what: "closes A's open link", pick: aOpenLink, want: answer{http.StatusNotFound, schema.ErrorCodeInviteNotFound},
 			probe: func(_ *world, s subject) probe { return del("/v1/invites/" + id(s.id)) }},

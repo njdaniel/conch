@@ -332,7 +332,7 @@ func TestSignInLinkRateLimits(t *testing.T) {
 		limits := looseInviteLimits()
 		limits.createPerPrincipal = inviteLimit{"create_per_principal", 2, time.Hour}
 		f.srv.setInviteLimits(limits)
-		f.createInvite(t, f.rootTok, openLink("general"))
+		f.createMemberLink(t, f.rootTok, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
 		f.createSignInLink(t, f.alice.ID, schema.CreateSignInLinkRequestV1{})
 		rec := f.send(t, "POST", signInLinkPath(f.alice.ID), f.rootTok, "{}", "")
 		assertErrorBody(t, rec, http.StatusTooManyRequests, schema.ErrorCodeRateLimited)

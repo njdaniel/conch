@@ -105,6 +105,10 @@ func (s *Server) inviteCaller(w http.ResponseWriter, r *http.Request) (store.Pri
 
 // handleCreateInvite serves POST /v1/invites: the caller makes an invite. The
 // code is in the 201 body and nowhere else, sent no-store.
+//
+// It is unchanged beside POST /v2/invites (issue #985); refusing members here
+// moves to #990 with the browser's switch to member links, and #1134 retires
+// the route.
 func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	caller, ok := s.inviteCaller(w, r)

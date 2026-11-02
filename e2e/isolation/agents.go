@@ -76,6 +76,14 @@ func coreAgentRows() []row {
 		byID("POST /v1/runs/{id}/activity", "adds activity to A's run", aRun, runNotFound, func(_ *world, s subject) probe {
 			return post("/v1/runs/"+id(s.id)+"/activity", schema.AppendActivityRequestV1{Kind: schema.ActivityKindRunStarted, Summary: "s"})
 		}),
+		// The joiners of a link answer an agent as they answer any caller who
+		// is not its maker or an operator: as for an id that never existed.
+		byID("GET /v2/invites/{id}/joiners", "lists who joined through A's member link", aMemberLink, answer{http.StatusNotFound, schema.ErrorCodeInviteNotFound}, func(_ *world, s subject) probe {
+			return get("/v2/invites/" + id(s.id) + "/joiners")
+		}),
+		byID("GET /v2/invites/{id}/joiners", "lists who joined through A's open link", aOpenLink, answer{http.StatusNotFound, schema.ErrorCodeInviteNotFound}, func(_ *world, s subject) probe {
+			return get("/v2/invites/" + id(s.id) + "/joiners")
+		}),
 		byID("GET /v1/runs/{id}", "reads A's run", aRun, runNotFound, func(_ *world, s subject) probe { return get("/v1/runs/" + id(s.id)) }),
 		byID("GET /v1/runs/{id}/activity", "reads A's run's activity", aRun, runNotFound, func(_ *world, s subject) probe { return get("/v1/runs/" + id(s.id) + "/activity") }),
 		byID("GET /v1/runs/{id}/interventions", "reads A's run's interventions", aRun, runNotFound, func(_ *world, s subject) probe {

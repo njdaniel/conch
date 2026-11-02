@@ -374,6 +374,28 @@ func (w *world) restrictedPhase() (int, error) {
 	}
 	rows += 3
 
+	// Member links (issue #985): A's channel as a landing channel, and a link
+	// that never expires.
+	linkAs := func(req schema.CreateInviteRequestV2) (int, []byte, error) {
+		return r.api.do(http.MethodPost, "/v2/invites", req)
+	}
+	s1, b1, err = linkAs(schema.CreateInviteRequestV2{Kind: schema.InviteKindMember, LandingChannels: []string{aChan}})
+	if err := refusedNaming("the restricted operator: a link landing in A's channel", s1, b1, err, schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageChannels); err != nil {
+		return rows, err
+	}
+	s2, b2, err = linkAs(schema.CreateInviteRequestV2{Kind: schema.InviteKindMember, LandingChannels: []string{ghost}})
+	if err != nil {
+		return rows, err
+	}
+	if err := sameAnswer("the restricted operator: a link landing in A's channel", s1, b1, s2, b2); err != nil {
+		return rows, err
+	}
+	status, body, err = linkAs(schema.CreateInviteRequestV2{Kind: schema.InviteKindMember, NeverExpires: true})
+	if err := refusedNaming("the restricted operator: a link that never expires", status, body, err, schema.ErrorCodeInviteNotAllowed, schema.PermManageMembers); err != nil {
+		return rows, err
+	}
+	rows += 2
+
 	// The joining settings naming A's channel, once R may change settings.
 	if err := w.setOperatorCells(true, schema.PermChangeServerSettings); err != nil {
 		return rows, err

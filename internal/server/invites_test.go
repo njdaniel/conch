@@ -227,6 +227,26 @@ func TestCreateInviteRefusals(t *testing.T) {
 	}
 }
 
+// POST /v1/invites is unchanged beside POST /v2/invites (issue #985): a member
+// with the right still makes a personal invite, and the allowance is one
+// number for v1 personal invites and v2 links together.
+func TestMemberStillCreatesV1InviteAndSharesTheAllowance(t *testing.T) {
+	f := newInviteFixture(t, Config{InviteAllowance: 2})
+	if _, err := f.srv.store.SetMayInvite(context.Background(), "system", f.alice.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	rec := f.send(t, "POST", "/v1/invites", f.aliceTok, inviteJSON(t, personal("red")), "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("member's v1 personal invite = %d %s", rec.Code, rec.Body)
+	}
+	f.createMemberLink(t, f.aliceTok, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
+	// Both used the allowance: neither route makes a third.
+	assertErrorBody(t, f.send(t, "POST", "/v1/invites", f.aliceTok, inviteJSON(t, personal("red")), ""), http.StatusForbidden, schema.ErrorCodeInviteAllowanceExceeded)
+	assertErrorBody(t, f.send(t, "POST", "/v2/invites", f.aliceTok, `{"kind":"member"}`, ""), http.StatusForbidden, schema.ErrorCodeInviteAllowanceExceeded)
+	// A member still may not make an open link or name a channel they are not in.
+	assertErrorBody(t, f.send(t, "POST", "/v1/invites", f.aliceTok, inviteJSON(t, openLink("red")), ""), http.StatusForbidden, schema.ErrorCodeInviteNotAllowed)
+}
+
 // The code is in the create response and nowhere else: not in the list, not
 // in the audit trail, not in a log line.
 func TestInviteCodeShownOnce(t *testing.T) {
@@ -592,10 +612,10 @@ func TestWhoAmIVoiceAndInvitesRemaining(t *testing.T) {
 	plainCode := f.createInvite(t, f.rootTok, openLink("red")).Code
 	inviter := decodeBody[schema.RedeemInviteResponseV1](t, f.redeem(t, inviterCode, "inviter"))
 	plain := decodeBody[schema.RedeemInviteResponseV1](t, f.redeem(t, plainCode, "plain"))
-	// One open personal invite counts against the allowance, and a closed one
+	// One open member link counts against the allowance, and a closed one
 	// does not.
-	f.createInvite(t, inviter.Token, personal("red"))
-	closed := f.createInvite(t, inviter.Token, personal("red"))
+	f.createMemberLink(t, inviter.Token, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
+	closed := f.createMemberLink(t, inviter.Token, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
 	if _, err := f.srv.store.CloseInvite(ctx, "system", f.root.ID, closed.Invite.ID, f.clock); err != nil {
 		t.Fatal(err)
 	}
@@ -634,8 +654,8 @@ func TestWhoAmIVoiceAndInvitesRemaining(t *testing.T) {
 	}
 }
 
-// What whoami says is left follows what CreateInvite allows: it goes down
-// with each personal invite, is 0 (and sent) exactly when the next is
+// What whoami says is left follows what CreateMemberLink allows: it goes down
+// with each member link (an uncapped one is open too), is 0 (and sent) exactly when the next is
 // refused, comes back as invites close or expire, and goes away with the
 // right to invite.
 func TestWhoAmIInvitesRemainingFollowsCreate(t *testing.T) {
@@ -654,15 +674,21 @@ func TestWhoAmIInvitesRemainingFollowsCreate(t *testing.T) {
 		want *int64
 	}{
 		{"before any", func(*testing.T) {}, int64Ptr(2)},
-		{"after one", func(t *testing.T) { f.createInvite(t, f.aliceTok, personal("red")) }, int64Ptr(1)},
-		{"after an operator's invite, which is not counted", func(t *testing.T) { f.createInvite(t, f.rootTok, personal("red")) }, int64Ptr(1)},
-		{"after two", func(t *testing.T) { f.createInvite(t, f.aliceTok, personal("red")) }, int64Ptr(0)},
+		{"after one", func(t *testing.T) {
+			f.createMemberLink(t, f.aliceTok, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
+		}, int64Ptr(1)},
+		{"after an operator's link, which is not counted", func(t *testing.T) {
+			f.createMemberLink(t, f.rootTok, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
+		}, int64Ptr(1)},
+		{"after two", func(t *testing.T) {
+			f.createMemberLink(t, f.aliceTok, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
+		}, int64Ptr(0)},
 		{"after a refused third", func(t *testing.T) {
-			rec := f.send(t, "POST", "/v1/invites", f.aliceTok, inviteJSON(t, personal("red")), "")
+			rec := f.send(t, "POST", "/v2/invites", f.aliceTok, `{"kind":"member"}`, "")
 			assertErrorBody(t, rec, http.StatusForbidden, schema.ErrorCodeInviteAllowanceExceeded)
 		}, int64Ptr(0)},
 		{"after closing one", func(t *testing.T) {
-			list := decodeBody[schema.ListInvitesResponseV1](t, f.send(t, "GET", "/v1/invites", f.aliceTok, "", ""))
+			list := decodeBody[schema.ListInvitesResponseV2](t, f.send(t, "GET", "/v2/invites", f.aliceTok, "", ""))
 			id := list.Invites[0].ID
 			if rec := f.send(t, "DELETE", fmt.Sprintf("/v1/invites/%d", id), f.aliceTok, "", ""); rec.Code != http.StatusNoContent {
 				t.Fatalf("close = %d %s", rec.Code, rec.Body)
@@ -831,4 +857,23 @@ func TestInviteSecretsStayOut(t *testing.T) {
 	if !strings.Contains(logs.buf.String(), "198.51.100.0/24") {
 		t.Errorf("the rate-limit log line does not name the client's network: %s", logs.buf.String())
 	}
+}
+
+// An operator, who holds manage_members, still makes a v1 invite, and a
+// member's v2 link is a different route with a different rule.
+func TestOperatorStillCreatesV1Invite(t *testing.T) {
+	f := newInviteFixture(t, Config{})
+	for _, req := range []schema.CreateInviteRequestV1{personal("general"), openLink("red")} {
+		rec := f.send(t, "POST", "/v1/invites", f.rootTok, inviteJSON(t, req), "")
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("operator's v1 invite = %d %s", rec.Code, rec.Body)
+		}
+		if got := decodeBody[schema.CreateInviteResponseV1](t, rec); schema.ValidateInviteCode(got.Code) != nil {
+			t.Errorf("code %q", got.Code)
+		}
+	}
+	if n := len(f.auditOf(t, store.AuditInviteCreated)); n != 2 {
+		t.Errorf("%d invite_created rows, want 2", n)
+	}
+	assertErrorBody(t, f.send(t, "POST", "/v1/invites", f.rootTok, `{}`, ""), http.StatusBadRequest, "invalid_request")
 }

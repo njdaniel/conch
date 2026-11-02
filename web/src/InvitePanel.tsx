@@ -81,11 +81,16 @@ export function InvitePanel({
   origin,
   me,
   channels,
+  request,
   onUnauthorized,
 }: {
   readonly origin: string;
   readonly me: WhoAmIResponseV1;
   readonly channels: readonly ChannelV0[];
+  // Opens the panel from outside with one channel ticked (issue #1135: a
+  // channel's ⋯ menu, "Invite people"). `n` counts the asks, so the same
+  // channel asked twice opens it twice.
+  readonly request?: { readonly channel: string; readonly n: number } | undefined;
   readonly onUnauthorized: () => void;
 }) {
   const operator = me.role === 'operator';
@@ -153,6 +158,33 @@ export function InvitePanel({
     };
   }, [open, refresh]);
 
+  // Asked for from outside: open, with just that channel ticked, and take
+  // focus into the panel once it is shown.
+  const body = useRef<HTMLDivElement>(null);
+  // Counts the invites asked for and the times the panel was re-aimed or
+  // finished with; an answer from an older count is dropped.
+  const generation = useRef(0);
+  const [focusAsk, setFocusAsk] = useState(0);
+  const asked = request?.n ?? 0;
+  const askedChannel = request?.channel;
+  useEffect(() => {
+    if (asked === 0 || askedChannel === undefined) return;
+    setOpen(true);
+    setPicked(new Set([askedChannel]));
+    // An earlier invite's link grants other channels: forget it, and its state,
+    // and let an answer still on its way change nothing.
+    generation.current++;
+    setBusy(false);
+    setLink(null);
+    setCopied('no');
+    setProblem(null);
+    setResume(false);
+    setFocusAsk(asked);
+  }, [asked, askedChannel]);
+  useEffect(() => {
+    if (focusAsk > 0) body.current?.querySelector<HTMLElement>('input, button')?.focus();
+  }, [focusAsk]);
+
   // Closing the panel forgets the link it showed.
   useEffect(() => {
     if (!open) setLink(null);
@@ -186,7 +218,11 @@ export function InvitePanel({
     setProblem(null);
     setResume(false);
     setLink(null);
+    const mine = ++generation.current;
     void api.createInvite(request).then((result) => {
+      // Asked for another channel (or Done) meanwhile: this answer is for what
+      // was ticked then, and shows nothing.
+      if (mine !== generation.current) return;
       setBusy(false);
       if (result.ok) {
         setLink({ url: inviteLink(origin, result.value.code), kind: result.value.invite.kind });
@@ -247,6 +283,7 @@ export function InvitePanel({
           Settings and Members, and focus goes back to its button. */}
       <div
         id="invites-body"
+        ref={body}
         hidden={!open}
         onKeyDown={(event) => {
           if (event.key !== 'Escape' || event.defaultPrevented) return;
@@ -289,6 +326,7 @@ export function InvitePanel({
                   // panel, so Escape still closes it. The list is read again,
                   // since the link may have been used while it was shown.
                   makeButton.current?.focus();
+                  generation.current++;
                   setLink(null);
                   refresh();
                 }}

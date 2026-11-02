@@ -107,11 +107,12 @@ test('C793 an operator delegates a channel; its manager adds, removes and rename
     .poll(async () => (await ok(world, world.tokens.operator, 'GET', `/v1/channels/${encodeURIComponent(current)}/members`, listChannelMembersResponseV1)).members.some((m) => m.principal_id === target.id))
     .toBe(false);
 
-  await nav(mgr).getByRole('button', { name: `Rename #${current}` }).click();
+  await nav(mgr).getByRole('button', { name: `Actions for ${current}` }).click();
+  await nav(mgr).getByRole('menuitem', { name: 'Rename channel…' }).click();
   const rename = nav(mgr).getByRole('form', { name: 'Rename channel' });
   await rename.getByLabel('New name').fill(renamed);
   await rename.getByRole('button', { name: 'Rename channel' }).click();
-  await expect(nav(mgr).getByText(`Renamed to #${renamed}`)).toBeVisible();
+  await expect(nav(mgr).getByRole('form', { name: 'Rename channel' })).toHaveCount(0);
   await expect(channelButton(mgr, renamed)).toHaveAttribute('aria-current', 'true');
   await expect(channelButton(member, renamed)).toHaveAttribute('aria-current', 'true');
 });
