@@ -147,6 +147,7 @@ var routePermissions = map[string]schema.Permission{
 	"POST /v1/invites/{id}/disable-joiners":                           schema.PermManageMembers,
 	"POST /v1/principals/{id}/disable-invitees":                       schema.PermManageMembers,
 	"PUT /v1/principals/{id}/invite-permission":                       schema.PermManageMembers,
+	"PUT /v1/principals/{id}/voice-permission":                        schema.PermManageMembers,
 	"PUT /v1/invites/settings":                                        schema.PermManageMembers,
 	"DELETE /v1/sign-in-links/{id}":                                   schema.PermManageMembers,
 	"POST /v1/principals/{id}/credentials":                            schema.PermActAsMembers,
@@ -341,9 +342,11 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/hooks/{token}":                          {classExempt, "/v1/hooks/nope", `{}`, 404},
 	"POST /v1/approvals":                              {classAuth, "/v1/approvals", `{}`, 400},
 	"GET /v1/approvals":                               {classAuth, "/v1/approvals", "", 200},
-	"GET /v1/approvals/{id}":                          {classAuth, "/v1/approvals/9999", "", 404},
-	"POST /v1/approvals/{id}/decisions":               {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
-	"/mcp":                                            {classExempt, "/mcp", `{}`, 401},
+	// The community's member list (issue #983): any member; an agent is refused.
+	"GET /v1/directory/members":         {classAuth, "/v1/directory/members", "", 200},
+	"GET /v1/approvals/{id}":            {classAuth, "/v1/approvals/9999", "", 404},
+	"POST /v1/approvals/{id}/decisions": {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
+	"/mcp":                              {classExempt, "/mcp", `{}`, 401},
 	// limit=0 is a 400 before anything is exported or recorded, so the AuthOff
 	// audit count below is unaffected by a route that audits every success.
 	"GET /v1/audit": {classPerm, "/v1/audit?limit=0", "", 400},
@@ -357,11 +360,20 @@ var routeExpectations = map[string]routeExpectation{
 	// whatever it is sent (#713): 409 password_required, for every caller
 	// and under AuthOff alike. People only: an agent gets 403 and AuthOff
 	// 401 on the three authenticated routes (both special-cased below).
-	"POST /v1/invites":         {classAuth, "/v1/invites", `{}`, 400},
-	"GET /v1/invites":          {classAuth, "/v1/invites", "", 200},
-	"DELETE /v1/invites/{id}":  {classAuth, "/v1/invites/9999", "", 404},
-	"POST /v1/invites/preview": {classExempt, "/v1/invites/preview", `{}`, 404},
-	"POST /v1/invites/redeem":  {classExempt, "/v1/invites/redeem", `{}`, 409},
+	// POST /v1/invites is retired (issue #985): 409 invite_kind_retired for
+	// every person. Member links (v2): an empty create is a 400, the list is
+	// the caller's own, preview sends no code, and the joiners of an invite
+	// that does not exist are a 404 for a person and for an agent alike (no
+	// route refuses an agent by name: that would say which ids exist).
+	"POST /v1/invites":             {classAuth, "/v1/invites", `{}`, 400},
+	"GET /v1/invites":              {classAuth, "/v1/invites", "", 200},
+	"DELETE /v1/invites/{id}":      {classAuth, "/v1/invites/9999", "", 404},
+	"POST /v1/invites/preview":     {classExempt, "/v1/invites/preview", `{}`, 404},
+	"POST /v1/invites/redeem":      {classExempt, "/v1/invites/redeem", `{}`, 409},
+	"POST /v2/invites":             {classAuth, "/v2/invites", `{}`, 400},
+	"GET /v2/invites":              {classAuth, "/v2/invites", "", 200},
+	"POST /v2/invites/preview":     {classExempt, "/v2/invites/preview", `{}`, 404},
+	"GET /v2/invites/{id}/joiners": {classAuth, "/v2/invites/9999/joiners", "", 404},
 	// Guest entry (issue #710). The front door is open to anyone. Join as
 	// guest and the guest redemption answer a bearer token, so they are 403
 	// https_required to this fixture's plain HTTP from a test address before
@@ -407,6 +419,7 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/invites/{id}/disable-joiners":     {classPerm, "/v1/invites/9999/disable-joiners", `{"dry_run":true}`, 404},
 	"POST /v1/principals/{id}/disable-invitees": {classPerm, "/v1/principals/9999/disable-invitees", `{"dry_run":true}`, 404},
 	"PUT /v1/principals/{id}/invite-permission": {classPerm, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
+	"PUT /v1/principals/{id}/voice-permission":  {classPerm, "/v1/principals/9999/voice-permission", `{"voice_allowed":false}`, 404},
 	"GET /v1/invites/settings":                  {classOp, "/v1/invites/settings", "", 200},
 	"PUT /v1/invites/settings":                  {classPerm, "/v1/invites/settings", `{"paused":false}`, 200},
 	// Sign-in links (issue #493). The create names a principal that does not
@@ -481,6 +494,7 @@ func isFileRoute(pattern string) bool {
 func isInviteRoute(pattern string) bool {
 	switch pattern {
 	case "POST /v1/invites", "GET /v1/invites", "DELETE /v1/invites/{id}",
+		"POST /v2/invites", "GET /v2/invites",
 		"GET /v1/invites/{id}/principals", "POST /v1/invites/{id}/disable-joiners",
 		"POST /v1/principals/{id}/disable-invitees", "PUT /v1/principals/{id}/invite-permission",
 		"GET /v1/invites/settings", "PUT /v1/invites/settings",
@@ -572,7 +586,8 @@ func TestRoutesRequireAuth(t *testing.T) {
 	f := newAuthFixture(t, AuthRequired)
 	exemptList := map[string]bool{"GET /healthz": true, "POST /v1/hooks/{token}": true, "/mcp": true,
 		"POST /v1/invites/preview": true, "POST /v1/invites/redeem": true, "POST /v2/invites/redeem": true,
-		"GET /v1/join": true, "POST /v1/join/guest": true, "POST /v1/invites/redeem-guest": true, "POST /v1/join/account": true,
+		"POST /v2/invites/preview": true,
+		"GET /v1/join":             true, "POST /v1/join/guest": true, "POST /v1/invites/redeem-guest": true, "POST /v1/join/account": true,
 		"POST /v1/login": true, "POST /v1/password/reset": true,
 		"POST /v1/sign-in-links/preview": true, "POST /v1/sign-in-links/redeem": true,
 		"POST /v1/login/totp": true, "POST /v1/setup/redeem": true}
@@ -630,7 +645,7 @@ func TestRoleMatrix(t *testing.T) {
 			if rt.pattern == "PUT /v1/channels/{id}/name" {
 				agentWant = http.StatusForbidden // kind is refused before channel lookup
 			}
-			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
+			if rt.pattern == "GET /v1/directory/members" || strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// Runs are started by agents only (issue #266): the humans get the
@@ -746,7 +761,7 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if isMessageEditRoute(rt.pattern) {
 					want = http.StatusBadRequest // message_edit_requires_auth: no one to be the author
 				}
-				if isInviteRoute(rt.pattern) {
+				if isInviteRoute(rt.pattern) || rt.pattern == "GET /v2/invites/{id}/joiners" {
 					want = http.StatusUnauthorized // like whoami: no one to make or own an invite
 				}
 				if rt.pattern == "POST /v1/reports" {

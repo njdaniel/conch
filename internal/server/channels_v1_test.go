@@ -170,17 +170,48 @@ func TestCreateChannelV1Refusals(t *testing.T) {
 	}
 }
 
+// settingsChange is the change TestChannelSettingsRefusals asks of a target,
+// by its name, and what an authorized caller leaves: the visibility, the
+// default mark and the channel_settings_changed detail. Each is a real
+// change. The ghost id is asked the private-not-joined change, so the two
+// requests a non-operator sends differ only in the id.
+var settingsChange = map[string]struct {
+	body       string
+	visibility schema.ChannelVisibility
+	isDefault  bool
+	detail     string
+}{
+	"public joined":      {`{"visibility":"private"}`, schema.ChannelPrivate, false, "visibility=public->private"},
+	"public not joined":  {`{"default":true}`, schema.ChannelPublic, true, "default=false->true"},
+	"private joined":     {`{"visibility":"public","default":true}`, schema.ChannelPublic, true, "visibility=private->public default=false->true"},
+	"private not joined": {`{"visibility":"public"}`, schema.ChannelPublic, false, "visibility=private->public"},
+	"nonexistent":        {`{"visibility":"public"}`, "", false, ""},
+}
+
 // TestChannelSettingsRefusals: PUT /v1/channels/{id}/settings by every caller
-// class at every target. An operator holding manage_channels changes any
-// channel and gets channel_not_found for an id that never existed; every
-// other caller gets one answer whatever the id, so no answer tells a
-// non-operator, or a restricted operator, that a private channel exists.
+// class at every target, each asking a real change. An operator holding
+// manage_channels makes it, and it is stored and audited; an id that never
+// existed is channel_not_found. Every other caller gets one answer whatever
+// the id, so no answer tells a non-operator, or a restricted operator, that a
+// private channel exists, and nothing it asked is stored or audited.
 func TestChannelSettingsRefusals(t *testing.T) {
+	ctx := context.Background()
 	for _, c := range channelV1Callers {
 		t.Run(c.name, func(t *testing.T) {
 			f := newChannelV1Fixture(t)
 			if c.restricted {
 				f.withhold(t, schema.PermManageChannels)
+			}
+			// The state before, per existing target.
+			was := map[int64]store.Channel{}
+			for _, tg := range channelV1Targets {
+				if _, id := tg.channel(f); tg.existing {
+					ch, err := f.srv.store.ChannelByID(ctx, id)
+					if err != nil {
+						t.Fatal(err)
+					}
+					was[id] = ch
+				}
 			}
 			refusal := map[string]struct {
 				status int
@@ -197,9 +228,11 @@ func TestChannelSettingsRefusals(t *testing.T) {
 			want, refused := refusal[c.name]
 			before := len(f.audit(t))
 			var first string
+			callerActor := map[string]string{"owner": fmt.Sprintf("principal:%d", f.root.ID), "operator": fmt.Sprintf("principal:%d", f.op.ID)}[c.name]
 			for _, tg := range channelV1Targets {
 				_, id := tg.channel(f)
-				rec := f.do(t, http.MethodPut, fmt.Sprintf("/v1/channels/%d/settings", id), c.token(f), `{"default":false}`)
+				change := settingsChange[tg.name]
+				rec := f.do(t, http.MethodPut, fmt.Sprintf("/v1/channels/%d/settings", id), c.token(f), change.body)
 				switch {
 				case refused:
 					assertErrorBody(t, rec, want.status, want.code)
@@ -212,13 +245,65 @@ func TestChannelSettingsRefusals(t *testing.T) {
 					if rec.Code != http.StatusOK {
 						t.Fatalf("%s: settings = %d %s, want 200", tg.name, rec.Code, rec.Body)
 					}
+					got := decodeBody[schema.ChannelSettingsResponseV1](t, rec).Channel
+					if got.Visibility != change.visibility || got.Default != change.isDefault {
+						t.Errorf("%s: answered %+v, want %s default=%t", tg.name, got, change.visibility, change.isDefault)
+					}
 				default:
 					assertErrorBody(t, rec, http.StatusNotFound, "channel_not_found")
 				}
 			}
+			// What is stored, per existing target: the change for an
+			// authorized caller, the state before for a refused one.
+			for _, tg := range channelV1Targets {
+				_, id := tg.channel(f)
+				if !tg.existing {
+					continue
+				}
+				ch, err := f.srv.store.ChannelByID(ctx, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantVis, wantDef := was[id].Visibility, was[id].IsDefault
+				if !refused {
+					wantVis, wantDef = settingsChange[tg.name].visibility, settingsChange[tg.name].isDefault
+				}
+				if ch.Visibility != wantVis || ch.IsDefault != wantDef {
+					t.Errorf("%s: stored %s default=%t, want %s default=%t", tg.name, ch.Visibility, ch.IsDefault, wantVis, wantDef)
+				}
+			}
+			// The audit rows: one channel_settings_changed per change, by
+			// the caller, for an authorized caller; none for a refused one,
+			// and no joining-settings row either way (no default channel
+			// was unmarked).
+			rows := map[string]string{}
 			for _, e := range f.audit(t)[before:] {
-				if e.Action == store.AuditChannelSettingsChanged {
-					t.Errorf("an unchanged or refused setting was audited: %+v", e)
+				switch e.Action {
+				case store.AuditChannelSettingsChanged:
+					if refused {
+						t.Errorf("a refused change was audited: %+v", e)
+						continue
+					}
+					if e.Actor != callerActor {
+						t.Errorf("settings row by %s, want %s: %+v", e.Actor, callerActor, e)
+					}
+					rows[e.Subject] = e.Detail
+				case store.AuditJoinSettingsChanged:
+					t.Errorf("the joining settings changed: %+v", e)
+				}
+			}
+			if !refused {
+				for _, tg := range channelV1Targets {
+					_, id := tg.channel(f)
+					if !tg.existing {
+						continue
+					}
+					if got, want := rows[fmt.Sprintf("channel:%d", id)], settingsChange[tg.name].detail; got != want {
+						t.Errorf("%s: settings row detail %q, want %q", tg.name, got, want)
+					}
+				}
+				if len(rows) != len(was) {
+					t.Errorf("settings rows for %d channels, want %d", len(rows), len(was))
 				}
 			}
 		})

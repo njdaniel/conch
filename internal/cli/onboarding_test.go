@@ -116,6 +116,17 @@ func (e *onboardEnv) mustRun(t *testing.T, token, stdin string, args ...string) 
 func (e *onboardEnv) openJoining(t *testing.T) {
 	t.Helper()
 	e.mustRun(t, e.operatorToken, "", "admin", "channel", "create", "lobby")
+	// A default channel must be public (issue #987); the CLI has no
+	// visibility command yet, so the store makes it so.
+	ctx := context.Background()
+	lobby, err := e.st.ChannelByName(ctx, "lobby")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := schema.ChannelPublic
+	if _, err := e.st.ChannelSettings(ctx, "system", 0, lobby.ID, store.ChannelSettingsChange{Visibility: &pub}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
 	out, _ := e.mustRun(t, e.operatorToken, "", "admin", "join", "set", "--open-joining", "account", "--open-channel", "lobby")
 	if !strings.Contains(out, "open joining: account\nguests: off\n") || !strings.Contains(out, "open channels: lobby\n") {
 		t.Fatalf("join set printed %q", out)

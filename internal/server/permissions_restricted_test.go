@@ -319,22 +319,26 @@ func TestRestrictedOperatorInvites(t *testing.T) {
 	now := time.Now()
 	invite := func(t *testing.T, f *restrictedFixture, tok, body string) *httptest.ResponseRecorder {
 		t.Helper()
-		return f.do(t, "POST", "/v1/invites", tok, body)
+		return f.do(t, "POST", "/v2/invites", tok, body)
 	}
 
 	t.Run("creation", func(t *testing.T) {
 		f := newRestrictedFixture(t, Config{AuthMode: AuthRequired})
-		// Defaults: an operator names any channel, makes open links and grants may_invite.
-		if rec := invite(t, f, f.opTok, `{"kind":"personal","channels":["channel-a"],"may_invite":true}`); rec.Code != http.StatusCreated {
-			t.Fatalf("default operator's invite = %d %s", rec.Code, rec.Body)
+		// Defaults: an operator names any landing channel and makes a link
+		// that never expires.
+		if rec := invite(t, f, f.opTok, `{"kind":"member","landing_channels":["channel-a"],"never_expires":true}`); rec.Code != http.StatusCreated {
+			t.Fatalf("default operator's link = %d %s", rec.Code, rec.Body)
 		}
 		f.withhold(t, schema.PermManageChannels, schema.PermActAsMembers, schema.PermManageMembers)
-		assertErrorBody(t, invite(t, f, f.opTok, `{"kind":"personal","channels":["channel-a"]}`), http.StatusForbidden, schema.ErrorCodeInviteGrantExceedsInviter)
-		assertErrorBody(t, invite(t, f, f.opTok, `{"kind":"personal","channels":["no-such-channel"]}`), http.StatusForbidden, schema.ErrorCodeInviteGrantExceedsInviter)
-		assertErrorBody(t, invite(t, f, f.opTok, `{"kind":"open","channels":["channel-b"]}`), http.StatusForbidden, schema.ErrorCodeInviteNotAllowed)
-		assertErrorBody(t, invite(t, f, f.opTok, `{"kind":"personal","channels":["channel-b"],"may_invite":true}`), http.StatusForbidden, schema.ErrorCodeInviteGrantExceedsInviter)
-		if rec := invite(t, f, f.opTok, `{"kind":"personal","channels":["channel-b"]}`); rec.Code != http.StatusCreated {
-			t.Fatalf("restricted operator's invite to its own channel = %d %s", rec.Code, rec.Body)
+		// Without manage_channels any landing channel, one that exists or
+		// not, is the same refusal, and without manage_members a link that
+		// never expires is refused.
+		assertErrorBody(t, invite(t, f, f.opTok, `{"kind":"member","landing_channels":["channel-a"]}`), http.StatusForbidden, schema.ErrorCodeInviteGrantExceedsInviter)
+		assertErrorBody(t, invite(t, f, f.opTok, `{"kind":"member","landing_channels":["no-such-channel"]}`), http.StatusForbidden, schema.ErrorCodeInviteGrantExceedsInviter)
+		assertErrorBody(t, invite(t, f, f.opTok, `{"kind":"member","landing_channels":["channel-b"]}`), http.StatusForbidden, schema.ErrorCodeInviteGrantExceedsInviter)
+		assertErrorBody(t, invite(t, f, f.opTok, `{"kind":"member","never_expires":true}`), http.StatusForbidden, schema.ErrorCodeInviteNotAllowed)
+		if rec := invite(t, f, f.opTok, `{"kind":"member"}`); rec.Code != http.StatusCreated {
+			t.Fatalf("restricted operator's link = %d %s", rec.Code, rec.Body)
 		}
 	})
 
@@ -462,10 +466,10 @@ func TestRestrictedOperatorInvites(t *testing.T) {
 		if !who.MayInvite || who.InvitesRemaining == nil || *who.InvitesRemaining != 1 {
 			t.Fatalf("restricted operator whoami may_invite %t remaining %v, want true and 1", who.MayInvite, who.InvitesRemaining)
 		}
-		if rec := invite(t, f, f.opTok, `{"kind":"personal","channels":["channel-b"]}`); rec.Code != http.StatusCreated {
-			t.Fatalf("first invite = %d %s", rec.Code, rec.Body)
+		if rec := invite(t, f, f.opTok, `{"kind":"member"}`); rec.Code != http.StatusCreated {
+			t.Fatalf("first link = %d %s", rec.Code, rec.Body)
 		}
-		assertErrorBody(t, invite(t, f, f.opTok, `{"kind":"personal","channels":["channel-b"]}`), http.StatusForbidden, schema.ErrorCodeInviteAllowanceExceeded)
+		assertErrorBody(t, invite(t, f, f.opTok, `{"kind":"member"}`), http.StatusForbidden, schema.ErrorCodeInviteAllowanceExceeded)
 	})
 }
 
@@ -538,6 +542,7 @@ func TestRestrictedOperatorFilteredNames(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	makeChannelsPublic(t, f.srv.store, "channel-a", "channel-b")
 	if _, err := f.srv.store.PutJoinSettings(ctx, "system", f.root.ID, schema.PutJoinSettingsRequestV1{OpenChannels: &[]string{"channel-a", "channel-b"}}); err != nil {
 		t.Fatal(err)
 	}

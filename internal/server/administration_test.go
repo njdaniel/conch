@@ -492,12 +492,16 @@ func TestSetRoleRoute(t *testing.T) {
 		}
 	})
 	t.Run("demote to member closes their invites", func(t *testing.T) {
-		tok, err := newCredentialToken(t, f, f.cand.ID)
-		if err != nil {
-			t.Fatal(err)
+		// A legacy open link, as an operator made one before the community
+		// model (POST /v1/invites is retired), and a member link, which a
+		// demotion leaves standing.
+		if _, err := f.srv.store.CreateInvite(ctx, "system", f.cand.ID,
+			schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"general"}}, store.InviteOptions{}, time.Now()); err != nil {
+			t.Fatalf("operator invite: %v", err)
 		}
-		if rec := f.do(t, "POST", "/v1/invites", tok, `{"kind":"open","channels":["general"]}`); rec.Code != http.StatusCreated {
-			t.Fatalf("operator invite = %d %s", rec.Code, rec.Body)
+		if _, err := f.srv.store.CreateMemberLink(ctx, "system", f.cand.ID,
+			schema.CreateInviteRequestV2{Kind: schema.InviteKindMember}, store.InviteOptions{}, time.Now()); err != nil {
+			t.Fatalf("operator member link: %v", err)
 		}
 		rec := set(t, f.rootTok, f.cand.ID, `{"role":"member"}`)
 		if rec.Code != http.StatusOK {
@@ -549,13 +553,6 @@ func TestSetRoleRoute(t *testing.T) {
 
 // httptestRecorder names the recorder f.do returns, for the helpers above.
 type httptestRecorder = httptest.ResponseRecorder
-
-// newCredentialToken issues a fresh script credential for id.
-func newCredentialToken(t *testing.T, f *adminFixture, id int64) (string, error) {
-	t.Helper()
-	_, tok, err := f.srv.store.CreateCredential(context.Background(), "system", id, "test", nil)
-	return tok, err
-}
 
 // TestAdministrationViews: whoami's owner, the channel list's manages, and
 // the member list's manages, role and can_decide per viewer (§7).
@@ -646,6 +643,83 @@ func checkMemberView(t *testing.T, who string, viewerID int64, privileged bool, 
 	}
 }
 
+// TestManagerAddsAnyMember: a manager adds any member who is not an operator
+// or owner, by id and by name, whether or not they share a channel with the
+// manager (issue #983, ADR-013 O10; ADR-010's shared-channel bound is gone).
+func TestManagerAddsAnyMember(t *testing.T) {
+	ctx := context.Background()
+	f := newAdminFixture(t)
+	stranger, err := f.srv.store.CreatePrincipal(ctx, store.PrincipalHuman, "stranger-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := f.do(t, "PUT", fmt.Sprintf("/v1/channels/general/members/%d", f.outsider.ID), f.mgrTok, ""); rec.Code != http.StatusNoContent {
+		t.Errorf("by id: %d %s, want 204", rec.Code, rec.Body)
+	}
+	if rec := f.do(t, "POST", "/v1/channels/general/members", f.mgrTok, fmt.Sprintf(`{"name":%q}`, stranger.Name)); rec.Code != http.StatusCreated {
+		t.Errorf("by name: %d %s, want 201", rec.Code, rec.Body)
+	}
+	for _, p := range []store.Principal{f.outsider, stranger} {
+		if in, err := f.srv.store.IsChannelMember(ctx, f.general.ID, p.ID); err != nil || !in {
+			t.Errorf("%s is not in general: %v %v", p.Name, in, err)
+		}
+	}
+	if n := len(auditRows(t, f.authFixture, store.AuditMemberAddRefused)); n != 0 {
+		t.Errorf("member_add_refused rows = %d, want 0", n)
+	}
+}
+
+// TestManagerAddWithDirectoryOff: with see_member_directory off for members
+// (the personal preset, ADR-014), a member-role manager may add only people
+// they share a channel with. Anyone else answers the bytes of a principal
+// never issued, by id and by name, so the add is no oracle for who exists
+// (the security review of #983).
+func TestManagerAddWithDirectoryOff(t *testing.T) {
+	ctx := context.Background()
+	f := newAdminFixture(t)
+	st := f.srv.store
+	doc, err := st.Permissions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutPermissions(ctx, fmt.Sprintf("principal:%d", f.root.ID), f.root.ID, schema.PutPermissionsRequestV1{
+		Revision: doc.Revision,
+		Changes:  []schema.PermissionChangeV1{{Permission: schema.PermSeeMemberDirectory, Role: schema.PermissionRoleMember, Granted: false}},
+	}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	stranger, err := st.CreatePrincipal(ctx, store.PrincipalHuman, "stranger-off")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mate, err := st.CreatePrincipal(ctx, store.PrincipalHuman, "mate-off")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{f.mgr.ID, mate.ID} {
+		if _, err := st.AddChannelMember(ctx, "system", f.lobby.ID, id, 0); err != nil && !errors.Is(err, store.ErrDuplicate) {
+			t.Fatal(err)
+		}
+	}
+	ghostByID := f.do(t, "PUT", fmt.Sprintf("/v1/channels/general/members/%d", int64(1)<<40), f.mgrTok, "")
+	ghostByName := f.do(t, "POST", "/v1/channels/general/members", f.mgrTok, `{"name":"nobody-holds-this-name"}`)
+	if ghostByID.Code != http.StatusNotFound || ghostByName.Code != http.StatusNotFound {
+		t.Fatalf("ghost adds: %d %d, want 404", ghostByID.Code, ghostByName.Code)
+	}
+	if rec := f.do(t, "PUT", fmt.Sprintf("/v1/channels/general/members/%d", stranger.ID), f.mgrTok, ""); rec.Code != ghostByID.Code || rec.Body.String() != ghostByID.Body.String() {
+		t.Errorf("stranger by id: %d %s, want the ghost's %d %s", rec.Code, rec.Body, ghostByID.Code, ghostByID.Body)
+	}
+	if rec := f.do(t, "POST", "/v1/channels/general/members", f.mgrTok, fmt.Sprintf(`{"name":%q}`, stranger.Name)); rec.Code != ghostByName.Code || rec.Body.String() != ghostByName.Body.String() {
+		t.Errorf("stranger by name: %d %s, want the ghost's %d %s", rec.Code, rec.Body, ghostByName.Code, ghostByName.Body)
+	}
+	if in, err := st.IsChannelMember(ctx, f.general.ID, stranger.ID); err != nil || in {
+		t.Errorf("stranger is in general: %v %v", in, err)
+	}
+	if rec := f.do(t, "PUT", fmt.Sprintf("/v1/channels/general/members/%d", mate.ID), f.mgrTok, ""); rec.Code != http.StatusNoContent {
+		t.Errorf("channel-mate by id: %d %s, want 204", rec.Code, rec.Body)
+	}
+}
+
 // TestManagerAddRefusals: a manager's add, by id or by name, of anyone it
 // may not add is the 404 of a principal never issued, byte for byte; each
 // refusal is audited member_add_refused with no name or target; past the
@@ -681,12 +755,18 @@ func TestManagerAddRefusals(t *testing.T) {
 	if _, err := st.AddChannelMember(ctx, "system", f.lobby.ID, f.own2.ID, 0); err != nil {
 		t.Fatal(err)
 	}
+	// An ended guest is a dead identity, never a member (design §1.1); it is
+	// seeded through the store, as no route starts a visit now.
+	endedGuest := newGuest(t, f.srv, "lobby-visitor-ended", time.Hour, 2*time.Hour, f.lobby.ID).Principal
+	if _, err := st.EndGuestVisit(ctx, "system", endedGuest.ID, schema.GuestEndOperator); err != nil {
+		t.Fatal(err)
+	}
 	targets := []struct {
 		name string
 		p    store.Principal
 	}{
-		{"hidden", vanished}, {"disabled", disabled}, {"agent", agent}, {"guest", guest},
-		{"operator", f.op2}, {"owner", f.own2}, {"member sharing no channel", f.outsider},
+		{"hidden", vanished}, {"disabled", disabled}, {"agent", agent}, {"guest", guest}, {"ended guest", endedGuest},
+		{"operator", f.op2}, {"owner", f.own2},
 	}
 
 	refusedRows := func() []store.AuditEvent { return auditRows(t, f.authFixture, store.AuditMemberAddRefused) }
@@ -737,7 +817,7 @@ func TestManagerAddRefusals(t *testing.T) {
 		t.Errorf("unknown target with can_decide = %d %s, want %d %s", rec.Code, rec.Body, refID.Code, refID.Body)
 	}
 	refused++
-	for _, targetID := range []int64{999999, vanished.ID} {
+	for _, targetID := range []int64{1 << 40, vanished.ID} { // an id beyond the sequence, and a hidden one
 		if rec := f.do(t, "PUT", fmt.Sprintf("/v1/channels/general/members/%d", targetID), f.mgrTok, `{`); rec.Code != refID.Code || rec.Body.String() != refID.Body.String() {
 			t.Errorf("unaddable target %d with malformed body = %d %s, want %d %s", targetID, rec.Code, rec.Body, refID.Code, refID.Body)
 		}

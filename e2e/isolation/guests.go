@@ -268,6 +268,12 @@ func (w *world) buildPlaza() error {
 		return err
 	}
 	p.chanID = created.Channel.ID
+	// A default channel is public (issue #987): the plaza is made so before
+	// the bare address opens to it.
+	pub := schema.ChannelPublic
+	if err := w.op.call(http.MethodPut, fmt.Sprintf("/v1/channels/%d/settings", p.chanID), schema.ChannelSettingsRequestV1{Visibility: &pub}, nil); err != nil {
+		return err
+	}
 
 	// The bare address opens to accounts in the plaza; guests are off.
 	if _, err := w.joinSettings(schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningAccount), GuestsEnabled: ptr(false),

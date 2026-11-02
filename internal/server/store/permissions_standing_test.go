@@ -179,6 +179,12 @@ func newJoinFixture(t *testing.T) *standingFixture {
 	t.Helper()
 	f := newStandingFixture(t)
 	f.setOperatorCells(t, true, schema.PermChangeServerSettings)
+	// The tests here are about who may list a channel, not its visibility:
+	// every channel is public, as a default channel must be (issue #987
+	// refuses a private one).
+	if _, err := f.s.db.ExecContext(f.ctx, "UPDATE channels SET visibility = 'public'"); err != nil {
+		t.Fatal(err)
+	}
 	return f
 }
 
@@ -262,6 +268,29 @@ func TestPutJoinSettingsChecksTheResultingState(t *testing.T) {
 	t.Run("its own channels only", func(t *testing.T) {
 		if err := f.putJoin(f.op.ID, schema.PutJoinSettingsRequestV1{OpenChannels: &[]string{"channel-b"}, JoiningPaused: boolRef(false)}); err != nil {
 			t.Fatalf("opening over channel-b, which it is in: %v", err)
+		}
+	})
+
+	// A writer without manage_channels learns nothing about a private
+	// channel it is not in: the writer check answers before the public
+	// check, so naming one gets the same permission_denied as naming a
+	// channel that does not exist, never channel_settings_conflict (issue
+	// #987; security review of #1177). A holder of manage_channels, who may
+	// see every channel, gets the conflict.
+	t.Run("a private channel it is not in", func(t *testing.T) {
+		g := newJoinFixture(t)
+		if _, err := g.s.db.ExecContext(g.ctx, "UPDATE channels SET visibility = 'private' WHERE name = 'channel-a'"); err != nil {
+			t.Fatal(err)
+		}
+		g.setOperatorCells(t, false, schema.PermManageChannels)
+		for _, name := range []string{"channel-a", "no-such-channel"} {
+			err := g.putJoin(g.op.ID, schema.PutJoinSettingsRequestV1{OpenJoining: account, OpenChannels: &[]string{name}})
+			if !isDenied(err) || errors.Is(err, ErrChannelSettingsConflict) {
+				t.Fatalf("naming %s = %v, want permission_denied naming manage_channels and no conflict", name, err)
+			}
+		}
+		if err := g.putJoin(g.owner.ID, schema.PutJoinSettingsRequestV1{OpenJoining: account, OpenChannels: &[]string{"channel-a"}}); !errors.Is(err, ErrChannelSettingsConflict) {
+			t.Fatalf("the owner naming private channel-a = %v, want ErrChannelSettingsConflict", err)
 		}
 	})
 }

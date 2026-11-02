@@ -224,6 +224,9 @@ func guestRows() []row {
 		refused("PUT /v1/principals/{id}/invite-permission", "lets herself invite", operatorOnly, func(w *world) probe {
 			return put("/v1/principals/"+id(w.prober.id)+"/invite-permission", schema.InvitePermissionRequestV1{MayInvite: true})
 		}),
+		refused("PUT /v1/principals/{id}/voice-permission", "switches her own voice on", operatorOnly, func(w *world) probe {
+			return put("/v1/principals/"+id(w.prober.id)+"/voice-permission", schema.VoicePermissionRequestV1{VoiceAllowed: true})
+		}),
 		refused("PUT /v1/join/settings", "opens the bare address wider", operatorOnly, func(*world) probe {
 			return put("/v1/join/settings", schema.PutJoinSettingsRequestV1{MaxGuests: ptr(int64(schema.MaxMaxGuests))})
 		}),
@@ -329,6 +332,10 @@ func entryRows() []row {
 			probe: func(*world, subject) probe {
 				return post("/v1/invites/preview", schema.InvitePreviewRequestV1{Code: unknownInvite})
 			}},
+		{route: "POST /v2/invites/preview", what: "previews a code nobody gave her", want: answer{http.StatusNotFound, schema.ErrorCodeInviteInvalid},
+			probe: func(*world, subject) probe {
+				return post("/v2/invites/preview", schema.InvitePreviewRequestV1{Code: unknownInvite})
+			}},
 		{route: "POST /v1/sign-in-links/preview", what: "previews a sign-in link nobody gave her", want: answer{http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
 			probe: func(*world, subject) probe {
 				return post("/v1/sign-in-links/preview", schema.SignInLinkPreviewRequestV1{Code: unknownLink})
@@ -410,15 +417,23 @@ func oneSignIn(w *world, _ api, body []byte) error {
 
 // offersAccounts requires that the front door offers an account and no
 // visit: guests are removed for now (issue #1005).
-func offersAccounts(_ *world, _ api, body []byte) error {
+func offersAccounts(w *world, _ api, body []byte) error {
 	var info schema.JoinInfoV1
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&info); err != nil {
 		return err
 	}
-	if info.Join.Guest || info.Join.GuestsFull || !info.Join.Account || info.ServerName != "conch" || !info.PasswordLogin {
-		return fmt.Errorf("the front door says %+v, want an account and no visit at conch", info)
+	// Issue #987: never a guest, voice always.
+	if info.Join.Guest || info.Join.GuestsFull || !info.Join.Account || !info.Voice || info.ServerName != "conch" || !info.PasswordLogin {
+		return fmt.Errorf("the front door says %+v, want an account, voice and no visit at conch", info)
+	}
+	// It names no channel at all (DisallowUnknownFields above), and so none
+	// of A's private channels; said again in bytes, for the record.
+	for _, name := range w.a.channels {
+		if bytes.Contains(body, []byte(name)) {
+			return fmt.Errorf("the front door names %q, a private channel of A's: %s", name, body)
+		}
 	}
 	return nil
 }

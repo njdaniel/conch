@@ -36,6 +36,10 @@ import {
   health,
   interventionV1,
   inviteSettingsV1,
+  inviteJoinersResponseV1,
+  listInvitesResponseV2,
+  permissionsResponseV1,
+  putPermissionsRequestV1,
   invitePreviewRequestV1,
   invitePreviewV1,
   joinAccountRequestV1,
@@ -215,6 +219,11 @@ export const operations = {
   // The invite's code grants an account, once, to whoever holds it.
   createInvite: op('POST', '/v1/invites', 'bearer', { request: check(createInviteRequestV1), response: check(createInviteResponseV1), renderer: false, credentials: ['code'] }),
   listInvites: op('GET', '/v1/invites', 'bearer', { response: check(listInvitesResponseV1) }),
+  // Member links and the permissions document (ADR-014).
+  listMemberLinks: op('GET', '/v2/invites', 'bearer', { response: check(listInvitesResponseV2) }),
+  memberLinkJoiners: op('GET', '/v2/invites/{id}/joiners', 'bearer', { response: check(inviteJoinersResponseV1) }),
+  getPermissions: op('GET', '/v1/permissions', 'bearer', { response: check(permissionsResponseV1) }),
+  putPermissions: op('PUT', '/v1/permissions', 'bearer', { request: check(putPermissionsRequestV1), response: check(permissionsResponseV1) }),
   closeInvite: op('DELETE', '/v1/invites/{id}', 'bearer'),
   previewInvite: op('POST', '/v1/invites/preview', 'none', { request: check(invitePreviewRequestV1), response: check(invitePreviewV1) }),
   redeemInvite: op('POST', '/v2/invites/redeem', 'none', { request: check(redeemInviteRequestV2), response: check(redeemInviteResponseV1), renderer: false, credentials: token }),
