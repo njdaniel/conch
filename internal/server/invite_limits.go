@@ -97,18 +97,22 @@ func defaultInviteLimits() inviteLimits {
 	}
 }
 
-// testRelaxedPerAddressBurst is the per-address burst of a server started
-// with Config.TestRelaxInviteLimits: more attempts than any suite makes within
-// one window, which is all that "relaxed" has to mean.
-const testRelaxedPerAddressBurst = 1_000_000
+// testRelaxedBurst is the burst of each limit a server started with
+// Config.TestRelaxInviteLimits raises: more attempts than any suite makes
+// within one window, which is all that "relaxed" has to mean.
+const testRelaxedBurst = 1_000_000
 
-// testRelaxedInviteLimits are the defaults with the two per-address limits
-// raised. The server-wide and per-principal limits stay as they are: the
-// browser suite redeems from one address, not in bulk.
+// testRelaxedInviteLimits are the defaults with the two per-address limits and
+// the per-principal create limit raised. The browser suite redeems everything
+// from one address, and makes nearly every invite and sign-in link as one
+// operator, so either budget would be shared across its specs (issues #609,
+// #1161). The server-wide redemption limit stays as it is: the suite does not
+// redeem in bulk.
 func testRelaxedInviteLimits() inviteLimits {
 	l := defaultInviteLimits()
-	l.previewPerAddress.burst = testRelaxedPerAddressBurst
-	l.redeemPerAddress.burst = testRelaxedPerAddressBurst
+	l.previewPerAddress.burst = testRelaxedBurst
+	l.redeemPerAddress.burst = testRelaxedBurst
+	l.createPerPrincipal.burst = testRelaxedBurst
 	return l
 }
 

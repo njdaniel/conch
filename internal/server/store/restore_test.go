@@ -95,7 +95,7 @@ func newRestoreWorld(t *testing.T) *restoreWorld {
 	both, on, channels := schema.OpenJoiningBoth, true, []string{"ops"}
 	legacyJoinSettings(t, w.s, schema.PutJoinSettingsRequestV1{GuestsEnabled: &on, OpenJoining: &both, OpenChannels: &channels})
 	inv := legacyCreateInvite(t, w.s, principalActor(w.op.ID), w.op.ID,
-		schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"ops"}, JoinAs: schema.InviteJoinBoth}, InviteOptions{}, w.now)
+		schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"ops"}, JoinAs: schema.InviteJoinBoth}, w.now)
 	w.inviteCode = inv.Code
 	// The operator signed in with a code once before the backup.
 	w.totpStepB = totpFloor(w.now) - schema.TOTPWindowSteps - 10

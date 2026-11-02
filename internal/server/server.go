@@ -73,7 +73,7 @@ type Config struct {
 	// clientaddr.go). Empty, the header is never read and the client is the
 	// connection's peer.
 	TrustedProxies []netip.Prefix
-	// InviteAllowance is how many outstanding personal invites one inviter
+	// InviteAllowance is how many open member links one maker
 	// who is not an operator may hold. Zero or less means
 	// store.DefaultPersonalInviteAllowance.
 	InviteAllowance int
@@ -86,9 +86,10 @@ type Config struct {
 	// loopback. Without it such an address stops the server at start.
 	MetricsAllowRemote bool
 	// TestRelaxInviteLimits raises the per-address rate limits of the invite and
-	// sign-in-link routes (invite_limits.go) so that a browser suite, which
-	// redeems everything from one address, does not share one budget across
-	// its specs (issue #609). It is for test servers only: Listen refuses it
+	// sign-in-link routes, and the per-principal limit on making invites and
+	// sign-in links (invite_limits.go), so that a browser suite, which redeems
+	// everything from one address and makes nearly everything as one operator,
+	// does not share one budget across its specs (issues #609, #1161). It is for test servers only: Listen refuses it
 	// unless every address the server binds is loopback and no trusted proxy
 	// is set, and logs a warning when it is on. Off, the default, the limits are the production ones.
 	TestRelaxInviteLimits bool
