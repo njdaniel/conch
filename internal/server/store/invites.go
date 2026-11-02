@@ -1013,7 +1013,7 @@ func (s *Store) CloseInvite(ctx context.Context, actor string, closerID, inviteI
 			reason = InviteCloseOperator
 		}
 		return appendAuditEventTx(ctx, tx, actor, AuditInviteClosed, inviteSubject(inviteID),
-			inviteClosedDetail(inviteID, r.kind, r.uses, reason), now)
+			inviteClosedDetail(inviteID, r.kind, r.link, r.uses, reason), now)
 	})
 	if err != nil {
 		return false, err
@@ -1021,7 +1021,13 @@ func (s *Store) CloseInvite(ctx context.Context, actor string, closerID, inviteI
 	return changed, nil
 }
 
-func inviteClosedDetail(id int64, kind schema.InviteKind, uses int64, reason string) string {
+// inviteClosedDetail is the invite_closed row's detail. A member link says
+// link=member, since its kind is open like a legacy open link's; a legacy
+// invite's row reads as it always did.
+func inviteClosedDetail(id int64, kind schema.InviteKind, link string, uses int64, reason string) string {
+	if link == linkMember {
+		return fmt.Sprintf("invite=%d kind=%s link=%s uses=%d reason=%s", id, kind, link, uses, reason)
+	}
 	return fmt.Sprintf("invite=%d kind=%s uses=%d reason=%s", id, kind, uses, reason)
 }
 
@@ -1058,10 +1064,25 @@ var (
 )
 
 // selectDemotedInvites: demoting an operator closes the invites that stood
-// on the role (their legacy open links, or every legacy kind when kind is
-// empty) and leaves their member links standing.
-func selectDemotedInvites(kind schema.InviteKind) inviteSelector {
-	return inviteSelector{kind: kind, where: "link <> 'member'"}
+// on the role: their legacy open links (every legacy kind when kind is
+// empty), and the member links a member in their new state could not hold.
+// A member holds make_member_links only with the may_invite brake on
+// (brakeOn), and even then cannot make a link that never expires. So with
+// the brake off every member link goes, and with it on only the
+// never-expiring ones do; the rest stand, as for any member who may invite.
+// Closing at demotion, not when the brake is next turned off, is what stops
+// a link made under the role from outliving it and coming back with the
+// brake (issue #1165). The where text is built from constants only.
+func selectDemotedInvites(kind schema.InviteKind, brakeOn bool) inviteSelector {
+	legacy := "link <> 'member'"
+	if kind != "" {
+		legacy += " AND kind = '" + string(kind) + "'"
+	}
+	member := "link = 'member'"
+	if brakeOn {
+		member += fmt.Sprintf(" AND expires_at >= %d", schema.NoExpiryMillis)
+	}
+	return inviteSelector{where: "((" + legacy + ") OR (" + member + "))"}
 }
 
 // closeCreatorInvitesTx closes every open invite creatorID made that sel
@@ -1070,7 +1091,7 @@ func selectDemotedInvites(kind schema.InviteKind) inviteSelector {
 // closing. closed_by is left empty, since no principal closed them by hand.
 // The caller holds the write lock.
 func closeCreatorInvitesTx(ctx context.Context, tx execer, actor string, creatorID int64, sel inviteSelector, reason string, now time.Time) error {
-	q := `SELECT id, kind, uses FROM invites
+	q := `SELECT id, kind, link, uses FROM invites
 		 WHERE created_by = ? AND closed_at IS NULL AND expires_at > ? AND (max_uses IS NULL OR uses < max_uses)`
 	args := []any{creatorID, now.UnixMilli()}
 	extra, extraArgs := sel.clause()
@@ -1083,13 +1104,14 @@ func closeCreatorInvitesTx(ctx context.Context, tx execer, actor string, creator
 	type open struct {
 		id   int64
 		kind schema.InviteKind
+		link string
 		uses int64
 	}
 	var found []open
 	for rows.Next() {
 		var o open
 		var k string
-		if err := rows.Scan(&o.id, &k, &o.uses); err != nil {
+		if err := rows.Scan(&o.id, &k, &o.link, &o.uses); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("store: list open invites: scan: %w", err)
 		}
@@ -1108,7 +1130,7 @@ func closeCreatorInvitesTx(ctx context.Context, tx execer, actor string, creator
 			return fmt.Errorf("store: close invite %d: %w", o.id, err)
 		}
 		if err := appendAuditEventTx(ctx, tx, actor, AuditInviteClosed, inviteSubject(o.id),
-			inviteClosedDetail(o.id, o.kind, o.uses, reason), now); err != nil {
+			inviteClosedDetail(o.id, o.kind, o.link, o.uses, reason), now); err != nil {
 			return err
 		}
 	}
