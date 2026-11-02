@@ -437,10 +437,13 @@ func setRoleTx(ctx context.Context, tx execer, actor string, actorID, targetID i
 		if target.MayInvite {
 			kind = schema.InviteKindOpen
 		}
-		if invitesClosed, err = countOpenCreatorInvitesTx(ctx, tx, targetID, kind, now); err != nil {
+		// Their member links stand: a member who may invite still holds them
+		// (and one the brake binds has them suspended, not closed).
+		sel := selectDemotedInvites(kind)
+		if invitesClosed, err = countOpenCreatorInvitesTx(ctx, tx, targetID, sel, now); err != nil {
 			return RoleChangeResult{}, err
 		}
-		if err := closeCreatorInvitesTx(ctx, tx, actor, targetID, kind, InviteClosePermissionRevoked, now); err != nil {
+		if err := closeCreatorInvitesTx(ctx, tx, actor, targetID, sel, InviteClosePermissionRevoked, now); err != nil {
 			return RoleChangeResult{}, err
 		}
 		if err := closeOpenSignInLinksTx(ctx, tx, actor, targetID, true, SignInLinkCloseOperator, now); err != nil {
@@ -501,14 +504,13 @@ func populateRoleChangeResultTx(ctx context.Context, tx execer, targetID int64, 
 	}, nil
 }
 
-func countOpenCreatorInvitesTx(ctx context.Context, tx execer, creatorID int64, kind schema.InviteKind, now time.Time) (int, error) {
+func countOpenCreatorInvitesTx(ctx context.Context, tx execer, creatorID int64, sel inviteSelector, now time.Time) (int, error) {
 	q := `SELECT COUNT(*) FROM invites
 		 WHERE created_by = ? AND closed_at IS NULL AND expires_at > ? AND (max_uses IS NULL OR uses < max_uses)`
 	args := []any{creatorID, now.UnixMilli()}
-	if kind != "" {
-		q += " AND kind = ?"
-		args = append(args, string(kind))
-	}
+	extra, extraArgs := sel.clause()
+	q += extra
+	args = append(args, extraArgs...)
 	var n int
 	if err := tx.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("store: count open invites: %w", err)

@@ -84,7 +84,7 @@ describe('new channel', () => {
     expect(creates(calls)).toEqual([{ method: 'POST', path: '/v0/channels', body: { name: 'book-club' } }]);
     const button = within(nav()).getByRole('button', { name: 'book-club' });
     expect(button.getAttribute('aria-current')).toBe('true');
-    expect(within(nav()).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['general', 'book-club']);
+    expect(within(nav()).getAllByRole('listitem').map((li) => li.querySelector('li > button')?.textContent)).toEqual(['general', 'book-club']);
     // The form closes and is empty for the next one; focus is back on its button.
     expect(form.hidden).toBe(true);
     expect(field(form).value).toBe('');
@@ -118,7 +118,7 @@ describe('new channel', () => {
     expect(said.getAttribute('role')).toBe('status');
     expect(form.hidden).toBe(false);
     expect(field(form).value).toBe('book club ');
-    expect(within(nav()).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['general']);
+    expect(within(nav()).getAllByRole('listitem').map((li) => li.querySelector('li > button')?.textContent)).toEqual(['general']);
     expect(creates(calls)).toHaveLength(1);
     // The same name may be sent again as it stands, once more.
     expect(within(form).getByRole('button', { name: 'Create channel' }).hasAttribute('disabled')).toBe(false);
