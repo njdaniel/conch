@@ -24,8 +24,8 @@ import { SignIn } from './SignIn';
 import { YourSignIns } from './SignIns';
 import { SignInLink } from './SignInLink';
 import { AddDevice } from './AddDevice';
-import { ReportsSection } from './admin/ReportsSection';
-import { GuestSettings } from './GuestSettings';
+import { AdminConsole } from './AdminConsole';
+import { memberLine } from './admin/permissions';
 import { Reauth } from './Reauth';
 import { PasswordSettings } from './Settings';
 import { Setup } from './Setup';
@@ -550,6 +550,25 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     setEditEvent(message);
     edited(message);
   }, [edited]);
+  // The server's word that the permissions changed (ADR-014 design §8.6):
+  // whoami is read again, and what the console shows from them via the tick.
+  const [permissionsTick, setPermissionsTick] = useState(0);
+  // whoami read again, newest request wins: an answer to an earlier read that
+  // arrives after a later one's is dropped, so it cannot restore older
+  // permissions.
+  const whoReads = useRef(0);
+  const readWho = useCallback(() => {
+    const mine = ++whoReads.current;
+    void api.whoAmI().then((result) => {
+      if (mine !== whoReads.current) return;
+      if (result.ok) dispatchAuth({ type: 'refreshed', principal: result.value });
+      else if (result.failure === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
+    });
+  }, []);
+  const permissionsChanged = useCallback(() => {
+    setPermissionsTick((n) => n + 1);
+    readWho();
+  }, [readWho]);
   const agents = useAgents({
     signedIn,
     channel: channelId === null ? null : selected,
@@ -564,6 +583,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onMessage: setMessageEvent,
     onMessageEdited,
     onChannelsChanged: refreshChannels,
+    onPermissionsChanged: permissionsChanged,
   });
   // The people the page knows by name, for Settings → Reports (issue #1029):
   // the open channel's members. A sender it does not know is "person #id".
@@ -1111,12 +1131,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
 
   // whoami read again after a change to the person's own account (a
   // password set or changed).
-  const refreshWho = useCallback(() => {
-    void api.whoAmI().then((result) => {
-      if (result.ok) dispatchAuth({ type: 'refreshed', principal: result.value });
-      else if (result.failure === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
-    });
-  }, []);
+  const refreshWho = readWho;
 
   // End visit: the session is ended first, as for a sign-out, then the
   // visit. Only the server's word that it ended signs the guest out here.
@@ -1576,6 +1591,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               <div className="standing">
                 <h3>Who can administer</h3>
                 <p>{administrationLine(auth.principal, channels.channels, visit !== null)}</p>
+                {/* A member's rights, read from whoami (design §10.1). */}
+                {auth.principal.role === 'member' && visit === null && memberLine(auth.principal) !== null ? (
+                  <p className="hint">{memberLine(auth.principal)}</p>
+                ) : null}
               </div>
               <NotificationSettings
                 policy={notifications.policy}
@@ -1633,13 +1652,18 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 ),
               }
             : {})}
+          onSettingsOpen={readWho}
           admin={
             auth.principal.role === 'operator' ? (
-              <>
-                <GuestSettings channels={channels.channels} onUnauthorized={onUnauthorized} />
-                {/* The names the page knows are the open channel's members. */}
-                <ReportsSection names={memberNames} onUnauthorized={onUnauthorized} />
-              </>
+              // The names the page knows are the open channel's members.
+              <AdminConsole
+                who={auth.principal}
+                origin={origin}
+                channels={channels.channels}
+                names={memberNames}
+                permissionsChanged={permissionsTick}
+                onUnauthorized={onUnauthorized}
+              />
             ) : null
           }
           overlay={

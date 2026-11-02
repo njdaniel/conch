@@ -56,6 +56,15 @@ import {
 } from './schema/guest';
 import { health } from './schema/health';
 import {
+  inviteJoinersResponseV1,
+  listInvitesResponseV2,
+  permissionsResponseV1,
+  type InviteJoinerV1,
+  type InviteV2,
+  type PermissionsResponseV1,
+  type PutPermissionsRequestV1,
+} from './schema/permission';
+import {
   createInviteResponseV1,
   inviteSettingsV1,
   invitePreviewV1,
@@ -1095,6 +1104,36 @@ export async function putInviteSettings(request: InviteSettingsV1): Promise<Invi
   return readSent(await authedSend(call('putInviteSettings'), request), inviteSettingsV1);
 }
 
+// permissions reads the permissions document (GET /v1/permissions, an
+// operator's): the revision, the grid, the presets and the warnings.
+export function permissions(): Promise<ApiResult<PermissionsResponseV1>> {
+  return authed(call('getPermissions'), permissionsResponseV1);
+}
+
+// putPermissions changes the document (PUT /v1/permissions): a preset or
+// cells, against the revision that was read. It needs change_server_settings
+// and a recent proof (reauth_required), as authedSend asks for. A refusal
+// carries the server's code, and for permission_denied the permission.
+export async function putPermissions(request: PutPermissionsRequestV1): Promise<InviteResult<PermissionsResponseV1>> {
+  return readSent(await authedSend(call('putPermissions'), request), permissionsResponseV1);
+}
+
+// memberLinks reads the member links the caller may see (GET /v2/invites),
+// newest first: every link with manage_members, else the caller's own. Without
+// manage_channels a link names only the caller's channels and counts the
+// rest in other_channels.
+export async function memberLinks(): Promise<ApiResult<InviteV2[]>> {
+  const result = await authed(call('listMemberLinks'), listInvitesResponseV2);
+  return result.ok ? { ok: true, value: result.value.invites } : result;
+}
+
+// memberLinkJoiners reads who came through one link (GET
+// /v2/invites/{id}/joiners), to its maker or a holder of manage_members.
+export async function memberLinkJoiners(id: number): Promise<ApiResult<InviteJoinerV1[]>> {
+  const result = await authed(call('memberLinkJoiners', { id }), inviteJoinersResponseV1);
+  return result.ok ? { ok: true, value: result.value.joiners } : result;
+}
+
 // listGuests reads the live guest visits, newest first: one page.
 export async function listGuests(): Promise<ApiResult<GuestAdminV1[]>> {
   const result = await authed(call('listGuests'), listGuestsResponseV1);
@@ -1125,6 +1164,9 @@ export type InviteResult<T> =
       readonly code?: string;
       readonly message?: string;
       readonly retryAfter?: number;
+      // The permission a permission_denied refusal names (ADR-014 design
+      // §7.4), as the server wrote it.
+      readonly permission?: string;
     };
 
 export type InviteRefusal = Extract<InviteResult<never>, { ok: false }>;
@@ -1144,6 +1186,7 @@ async function inviteRefused(res: Response): Promise<InviteRefusal> {
     failure: 'invalid',
     ...(doc === undefined ? {} : { code: doc.code }),
     ...(message === '' ? {} : { message }),
+    ...(doc?.permission === undefined ? {} : { permission: doc.permission }),
     ...(Number.isFinite(retryAfter) && retryAfter >= 0 ? { retryAfter } : {}),
   };
 }
@@ -2039,6 +2082,26 @@ export function writeNotificationPreferences(origin: string, account: number, pr
     platform.credentials.writePreference(notificationPreferencesKey(origin, account), JSON.stringify(preferences));
   } catch {
     // Storage can be unavailable; the in-memory preference still applies.
+  }
+}
+
+// The setup card's "Decide later" (ADR-014 design §10.2): a per-browser,
+// per-account, non-secret mark that keeps the card from showing again.
+const setupCardKey = (origin: string, account: number) => `conch.web.setup-card.v1.${origin}.${String(account)}`;
+
+export function setupCardDismissed(origin: string, account: number): boolean {
+  try {
+    return platform.credentials.readPreference(setupCardKey(origin, account)) === 'dismissed';
+  } catch {
+    return false;
+  }
+}
+
+export function dismissSetupCard(origin: string, account: number): void {
+  try {
+    platform.credentials.writePreference(setupCardKey(origin, account), 'dismissed');
+  } catch {
+    // Storage can be unavailable; the card stays dismissed until the page reloads.
   }
 }
 

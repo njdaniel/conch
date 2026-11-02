@@ -56,6 +56,10 @@ release that Nick publishes.
     behind it (an operator holding `manage_channels`, or a member still in the
     channel), until it expires or an operator closes it.
 
+### Security
+
+- Any role change (a promotion, a demotion, an owner-mark change) now clears every recent-auth proof of that person, so a member's password-only re-authentication no longer satisfies an operator route that needs password and code (#1054). Their sessions stand; they re-authenticate on the next sensitive action. The `principal_role_changed` audit row gains `proofs_cleared=N`.
+
 ## [0.1.0-alpha.10] - 2026-11-02
 
 This is the move to one community (ADR-013): member permissions, members
