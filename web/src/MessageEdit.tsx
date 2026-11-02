@@ -7,7 +7,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode 
 import * as api from './api';
 import { Linkified } from './Linkified';
 import { fileAttachmentPayloadSchema } from './schema/file';
-import { MESSAGE_EDIT_WINDOW_SECONDS, type MessageRevisionV1, type MessageV2 } from './schema/message';
+import { MAX_MESSAGE_EDITS, MESSAGE_EDIT_WINDOW_SECONDS, type MessageRevisionV1, type MessageV2 } from './schema/message';
 import type { PrincipalKind } from './schema/principal';
 
 export const editWindowMs = MESSAGE_EDIT_WINDOW_SECONDS * 1000;
@@ -20,6 +20,13 @@ export function canEdit(message: MessageV2, viewer: number, kind: PrincipalKind 
   if (message.author_id !== viewer || kind !== 'human') return false;
   if (message.payload !== undefined && message.payload.schema !== fileAttachmentPayloadSchema) return false;
   return now - Date.parse(message.created_at) <= editWindowMs;
+}
+
+// editsLeft says whether the page still counts an edit available: fewer than
+// MAX_MESSAGE_EDITS known (issue #1031), and no refusal has ended the message.
+// A page opened after the edits cannot know them: the server answers then.
+export function editsLeft(known: number, final: boolean): boolean {
+  return !final && known < MAX_MESSAGE_EDITS;
 }
 
 // editEnds is when the window of a message closes, in ms since the epoch.
@@ -225,19 +232,24 @@ export function EarlierVersions({
 // editor (the message is gone from the person) or leaves Save of no use.
 type Refusal = { readonly line: string; readonly gone?: true; readonly final?: true; readonly wait?: number };
 
-function refusalOf(result: Exclude<api.EditResult, { readonly ok: true }>): Refusal {
+const limitLine = 'This message has been edited the most times allowed.';
+
+// atLimit: the page knows MAX_MESSAGE_EDITS edits of the message, so a 429
+// is the burst spent on a message that cannot be edited again anyway.
+function refusalOf(result: Exclude<api.EditResult, { readonly ok: true }>, atLimit: boolean): Refusal {
   if (result.failure !== 'refused') return { line: "Couldn't save. Your text is kept." };
   switch (result.code) {
     case 'message_edit_window_closed':
       return { line: 'This message can no longer be edited: it is more than an hour old.', final: true };
     case 'message_edit_limit_reached':
-      return { line: 'This message has been edited the most times allowed.', final: true };
+      return { line: limitLine, final: true };
     case 'message_not_editable':
       return { line: "This message can't be edited.", final: true };
     case 'message_not_found':
     case 'channel_not_found':
       return { line: 'This message is no longer available to you.', gone: true };
     case 'rate_limited': {
+      if (atLimit) return { line: limitLine, final: true };
       const wait = Math.max(1, result.retryAfter ?? 1);
       return { line: `Too many edits. Try again in ${String(wait)} ${wait === 1 ? 'second' : 'seconds'}.`, wait };
     }
@@ -260,6 +272,8 @@ export function MessageEditor({
   onCancel,
   onSaved,
   onGone,
+  onFinal,
+  atLimit = false,
   onUnauthorized,
   discard,
   label,
@@ -276,6 +290,10 @@ export function MessageEditor({
   // The message is no longer the person's to edit: the editor closes and the
   // line is shown under the message.
   readonly onGone: (line: string) => void;
+  // A refusal ended the message's edits for good: the page stops offering Edit.
+  readonly onFinal?: (() => void) | undefined;
+  // Ten edits are known already (issue #1031).
+  readonly atLimit?: boolean;
   readonly onUnauthorized?: (() => void) | undefined;
   // Asked when another message's Edit was chosen with unsaved text here.
   readonly discard?: { readonly onDiscard: () => void; readonly onKeep: () => void } | undefined;
@@ -285,6 +303,10 @@ export function MessageEditor({
   const [saving, setSaving] = useState(false);
   const [refusal, setRefusal] = useState<Refusal | null>(null);
   const [waiting, setWaiting] = useState(false);
+  // atLimit as of now: a save in flight classifies its answer by this, not by
+  // the value it started with.
+  const limited = useRef(atLimit);
+  limited.current = atLimit;
   const hint = useId();
   const error = useId();
   const live = useRef(true);
@@ -301,6 +323,15 @@ export function MessageEditor({
     el.focus();
     el.setSelectionRange(el.value.length, el.value.length);
   }, []);
+
+  // A rate refusal showing when the tenth edit becomes known is the limit.
+  const finalNow = useRef(onFinal);
+  finalNow.current = onFinal;
+  useEffect(() => {
+    if (!atLimit || refusal?.wait === undefined) return;
+    setRefusal({ line: limitLine, final: true });
+    finalNow.current?.();
+  }, [atLimit, refusal]);
 
   // A rate limit holds Save back for as long as the server said.
   const wait = refusal?.wait;
@@ -340,11 +371,12 @@ export function MessageEditor({
       onUnauthorized?.();
       return;
     }
-    const next = refusalOf(result);
+    const next = refusalOf(result, limited.current);
     if (next.gone === true) {
       onGone(next.line);
       return;
     }
+    if (next.final === true) onFinal?.();
     setRefusal(next);
   }
 
