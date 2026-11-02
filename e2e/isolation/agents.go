@@ -40,6 +40,10 @@ func coreAgentRows() []row {
 	runNotFound := answer{http.StatusNotFound, "run_not_found"}
 	interNotFound := answer{http.StatusNotFound, "intervention_not_found"}
 	return []row{
+		// The community's member list is for people: an agent is refused,
+		// whoever it is.
+		{route: "GET /v1/directory/members", what: "asks for the community's members", want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(*world, subject) probe { return get("/v1/directory/members") }},
 		// Channels are made by community members (issue #981): an agent is
 		// refused before any name is looked at.
 		byID("POST /v1/channels", "makes a channel with A's private channel's name", aChannel, answer{http.StatusForbidden, "forbidden"}, func(_ *world, s subject) probe {
