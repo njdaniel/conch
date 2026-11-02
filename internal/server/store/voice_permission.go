@@ -52,7 +52,7 @@ func (s *Store) SetVoiceAllowed(ctx context.Context, actor string, callerID, pri
 			if err := tx.QueryRowContext(ctx, "SELECT role, owner FROM principals WHERE id = ?", callerID).Scan(&role, &owner); err != nil {
 				return fmt.Errorf("store: set voice_allowed: read caller: %w", err)
 			}
-			forbidOwner = !(Role(role) == RoleOperator && owner)
+			forbidOwner = Role(role) != RoleOperator || !owner
 		}
 		var (
 			kind   string
