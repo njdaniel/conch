@@ -709,6 +709,13 @@ func TestManagerPutChannelMemberMatrix(t *testing.T) {
 		t.Errorf("manager add audit event = %+v (%v)", ev, err)
 	}
 
+	// 1b. A member who shares no channel with the manager is added all the
+	// same (issue #983: the shared-channel bound is gone).
+	added, err = f.s.PutChannelMember(ctx, principalActor(f.manager.ID), f.ch1.ID, f.unsharedMem.ID, f.manager.ID, nil)
+	if err != nil || !added {
+		t.Fatalf("manager PutChannelMember(unsharedMem) = %v, %v; want true, nil", added, err)
+	}
+
 	// 2. Adding an already-present member (including an approver or fellow manager) is a no-op and preserves their flags.
 	for _, existingID := range []int64{f.sharedMem.ID, f.approver.ID, f.fellowMgr.ID} {
 		beforeAudit := countRows(t, f.s, "audit_events")
@@ -732,7 +739,6 @@ func TestManagerPutChannelMemberMatrix(t *testing.T) {
 		name     string
 		targetID int64
 	}{
-		{"human member outside manager's channels", f.unsharedMem.ID},
 		{"plain operator in shared channel", f.operator.ID},
 		{"owner in shared channel", f.owner.ID},
 		{"agent in shared channel", f.agent.ID},
@@ -741,6 +747,7 @@ func TestManagerPutChannelMemberMatrix(t *testing.T) {
 		{"disabled human in shared channel", f.disabled.ID},
 		{"hidden human in shared channel", f.hidden.ID},
 		{"unknown principal ID", 99999},
+		{"id beyond the sequence", 1 << 40},
 	}
 	// Remove operator, owner, agent from ch1 first so we test adding them when not already in ch1 (though they share ch2).
 	_, _ = f.s.RemoveChannelMember(ctx, "system", f.ch1.ID, f.operator.ID)
@@ -818,6 +825,16 @@ func TestAddChannelMemberByNameMatrix(t *testing.T) {
 		t.Fatalf("manager AddChannelMemberByName(sharedMem) = %+v, %v, %v", cm, added, err)
 	}
 
+	// 1b. A member who shares no channel with the manager is added by name
+	// all the same (issue #983).
+	cm, added, err = f.s.AddChannelMemberByName(ctx, principalActor(f.manager.ID), ch3.ID, f.manager.ID, f.unsharedMem.Name)
+	if err != nil || !added || cm.PrincipalID != f.unsharedMem.ID || cm.CanDecide || cm.Manages {
+		t.Fatalf("manager AddChannelMemberByName(unsharedMem) = %+v, %v, %v; want added", cm, added, err)
+	}
+	if _, err := f.s.RemoveChannelMember(ctx, "system", ch3.ID, f.unsharedMem.ID); err != nil {
+		t.Fatal(err)
+	}
+
 	// 2. Operator adds unsharedMem and operator by name to ch3 -> always inserts can_decide=0, manages=0.
 	for _, target := range []Principal{f.unsharedMem, f.operator} {
 		cm, added, err := f.s.AddChannelMemberByName(ctx, principalActor(f.owner.ID), ch3.ID, f.owner.ID, target.Name)
@@ -825,7 +842,7 @@ func TestAddChannelMemberByNameMatrix(t *testing.T) {
 			t.Fatalf("owner AddChannelMemberByName(%s) = %+v, %v, %v; want CanDecide=false, Manages=false", target.Name, cm, added, err)
 		}
 	}
-	// Remove unsharedMem from ch3 so it remains outside f.manager's channels for step 4.
+	// Remove unsharedMem from ch3 again.
 	if _, err := f.s.RemoveChannelMember(ctx, "system", ch3.ID, f.unsharedMem.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -853,7 +870,7 @@ func TestAddChannelMemberByNameMatrix(t *testing.T) {
 		name    string
 	}{
 		{"manager: unknown name", f.manager.ID, "no-such-person"},
-		{"manager: unshared member", f.manager.ID, f.unsharedMem.Name},
+		{"manager: name nobody holds", f.manager.ID, "never-issued-name"},
 		{"manager: plain operator", f.manager.ID, f.operator.Name},
 		{"manager: owner", f.manager.ID, f.owner.Name},
 		{"manager: agent", f.manager.ID, f.agent.Name},

@@ -533,6 +533,7 @@ var permissionGates = map[schema.Permission][][2]string{
 		{"store/queries.go", "Store.ChannelSettings"},
 		{"store/members.go", "channelCreatorStandingTx"},
 	},
+	schema.PermSeeMemberDirectory: {{"directory.go", "Server.handleListDirectoryMembers"}},
 	// Member channel creation (issue #981): the store decides the
 	// permission for the visibility asked, under its write lock.
 	schema.PermCreatePublicChannels:  {{"store/members.go", "channelCreatePermission"}},
@@ -560,9 +561,7 @@ var permissionGates = map[schema.Permission][][2]string{
 	},
 }
 
-var vacuousGates = map[schema.Permission][]string{
-	schema.PermSeeMemberDirectory: {"GET /v1/directory/members"},
-}
+var vacuousGates = map[schema.Permission][]string{}
 
 // TestEnforcedPermissionsAreHonest is the safety net's own check (SF-3):
 // every permission in enforcedPermissions is asked by each of its gates, or
