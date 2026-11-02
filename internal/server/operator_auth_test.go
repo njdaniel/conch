@@ -1261,3 +1261,61 @@ func TestSoleOperatorWithBothFactorsCanSignOut(t *testing.T) {
 		t.Errorf("disabling root with another operator able to sign in = %v", err)
 	}
 }
+
+// A role change drops the principal's recent-auth proofs (issue #1054): a
+// member's password-only proof must not satisfy an operator route, which
+// needs password and code, and a demoted operator's proof ends with the
+// role. Sessions are not ended: they carry no role, and the route's own
+// check asks for the fresh proof.
+func TestRoleChangeClearsRecentAuthProof(t *testing.T) {
+	setRole := func(t *testing.T, f *operatorFixture, role string) {
+		t.Helper()
+		rec := f.send(t, "PUT", fmt.Sprintf("/v1/principals/%d/role", f.alice.ID), f.rootTok, fmt.Sprintf(`{"role":%q}`, role), "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("set role %s = %d %s", role, rec.Code, rec.Body)
+		}
+	}
+	login := func(t *testing.T, f *operatorFixture) string {
+		t.Helper()
+		rec := f.login(t, "alice", alicePassword, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("login alice = %d %s", rec.Code, rec.Body)
+		}
+		return decodeBody[schema.LoginResponseV1](t, rec).Token
+	}
+	t.Run("promotion then fresh operator proof then demotion", func(t *testing.T) {
+		f := newOperatorFixture(t)
+		session := login(t, f)
+		f.nextStep()
+		if rec := f.reauthOp(t, session, alicePassword, ""); rec.Code != http.StatusOK {
+			t.Fatalf("member reauth = %d %s", rec.Code, rec.Body)
+		}
+		if f.whoamiAuth(t, session).RecentAuthUntil == nil {
+			t.Fatal("the member's re-authentication made no proof")
+		}
+		setRole(t, f, "operator")
+		if got := f.whoamiAuth(t, session).RecentAuthUntil; got != nil {
+			t.Errorf("the promoted operator still holds a proof to %v", got)
+		}
+		assertErrorBody(t, f.inviteNow(t, session), http.StatusForbidden, schema.ErrorCodeReauthRequired)
+
+		// A fresh operator re-authentication, password and code, works.
+		secret := f.enrolOperator(t, f.alice.ID)
+		if got := f.status(t, session); got != http.StatusOK {
+			t.Fatalf("the member's session = %d after promotion and enrolment, want 200 (sessions stand)", got)
+		}
+		assertErrorBody(t, f.inviteNow(t, session), http.StatusForbidden, schema.ErrorCodeReauthRequired)
+		if rec := f.reauthOp(t, session, alicePassword, f.code(secret)); rec.Code != http.StatusOK {
+			t.Fatalf("operator reauth = %d %s", rec.Code, rec.Body)
+		}
+		if rec := f.inviteNow(t, session); rec.Code >= 300 {
+			t.Errorf("operator route after a fresh re-authentication = %d %s", rec.Code, rec.Body)
+		}
+
+		// Demotion clears that proof too.
+		setRole(t, f, "member")
+		if got := f.whoamiAuth(t, session).RecentAuthUntil; got != nil {
+			t.Errorf("the demoted member still holds a proof to %v", got)
+		}
+	})
+}
