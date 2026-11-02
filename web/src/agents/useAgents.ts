@@ -187,6 +187,7 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
     let rotated = false;
     let paused: number | null = null;
     let fresh = false;
+    let recovering = false;
     const rotatedNow = () => {
       held.current = null;
       replaced.current = false;
@@ -197,6 +198,11 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
         if (outstanding.size === 0) {
           paused = held.current;
           fresh = creating.current !== null;
+          // A recovery waiting out its backoff (replace) is let go of too:
+          // its timer is cancelled, and it runs when the writes settle.
+          recovering = timer.current !== null;
+          if (timer.current !== null) window.clearTimeout(timer.current);
+          timer.current = null;
           rotated = false;
           dropped.current.add(generation.current);
           generation.current++;
@@ -217,10 +223,13 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
       if (outstanding.size > 0) return;
       const id = paused;
       const again = fresh;
+      const recover = recovering;
       paused = null;
       fresh = false;
+      recovering = false;
       if (rotated) rotatedNow();
       else if (id !== null) setSession({ phase: 'ready', id });
+      else if (recover) start('ended');
       else if (again) start('unavailable');
     });
   }, [active, start]);

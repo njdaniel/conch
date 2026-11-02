@@ -153,6 +153,70 @@ describe('the own session across a credential replacement', () => {
     expect(result.current.session).toEqual({ phase: 'ready', id: 2 });
   });
 
+  // A replacement session that ends again soon is made after a backoff
+  // (replace). A write that begins meanwhile cancels that wait; when it fails
+  // or runs out the recovery is made then, not lost.
+  describe('during the wait before a replacement session is made', () => {
+    async function waiting() {
+      mocks.createSession.mockResolvedValueOnce(made(1)).mockResolvedValueOnce(made(2)).mockResolvedValueOnce(made(3));
+      const rendered = await ready(1);
+      act(() => {
+        rendered.result.current.replace();
+      });
+      await vi.waitFor(() => {
+        expect(rendered.result.current.session).toEqual({ phase: 'ready', id: 2 });
+      });
+      // Healthy, then ended again within the backoff's reach: the next
+      // replacement waits a second.
+      act(() => {
+        rendered.result.current.healthy();
+        rendered.result.current.replace();
+      });
+      expect(rendered.result.current.session).toEqual({ phase: 'starting' });
+      expect(mocks.createSession).toHaveBeenCalledTimes(2);
+      return rendered;
+    }
+
+    it('makes the session when a write fails', async () => {
+      const { result } = await waiting();
+      begin(1);
+      end(1, false);
+      await vi.waitFor(() => {
+        expect(result.current.session).toEqual({ phase: 'ready', id: 3 });
+      });
+      expect(mocks.createSession).toHaveBeenCalledTimes(3);
+    });
+
+    it('makes the session once, when a write runs out, and a new one if it answers later with a new credential', async () => {
+      const { result } = await waiting();
+      begin(1);
+      // The deadline: the api ends the write unreplaced.
+      end(1, false);
+      await vi.waitFor(() => {
+        expect(result.current.session).toEqual({ phase: 'ready', id: 3 });
+      });
+      // The cancelled wait does not make another when its second passes.
+      await new Promise((r) => setTimeout(r, 1_200));
+      expect(mocks.createSession).toHaveBeenCalledTimes(3);
+      mocks.createSession.mockResolvedValueOnce(made(4));
+      end(1, true, true);
+      await vi.waitFor(() => {
+        expect(result.current.session).toEqual({ phase: 'ready', id: 4 });
+      });
+    });
+
+    it('makes a new session when the write rotates', async () => {
+      const { result } = await waiting();
+      begin(1);
+      end(1, true);
+      await vi.waitFor(() => {
+        expect(result.current.session).toEqual({ phase: 'ready', id: 3 });
+      });
+      await new Promise((r) => setTimeout(r, 1_200));
+      expect(mocks.createSession).toHaveBeenCalledTimes(3);
+    });
+  });
+
   it('takes the session up again when a write is not answered, and makes a new one if it answers later with a new credential', async () => {
     mocks.createSession.mockResolvedValueOnce(made(1)).mockResolvedValueOnce(made(2));
     const { result } = await ready(1);
