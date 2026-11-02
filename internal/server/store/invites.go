@@ -439,33 +439,19 @@ func usableInviteTx(ctx context.Context, tx execer, codeHash string, now time.Ti
 	return r, kept, dropped, nil
 }
 
-// outstandingPersonalInvitesTx counts creatorID's personal invites that are
-// still open at now: not closed, not used up and not expired. It is the one
-// rule the allowance is counted by, for CreateInvite and InvitesRemaining
-// alike, so what whoami says is left and what CreateInvite allows cannot
-// disagree.
-func outstandingPersonalInvitesTx(ctx context.Context, tx execer, creatorID int64, now time.Time) (int, error) {
-	var n int
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM invites
-		 WHERE created_by = ? AND kind = 'personal' AND closed_at IS NULL AND expires_at > ? AND uses < max_uses`,
-		creatorID, now.UnixMilli()).Scan(&n); err != nil {
-		return 0, fmt.Errorf("count outstanding personal invites: %w", err)
-	}
-	return n, nil
-}
-
-// outstandingMemberLinksTx counts creatorID's member links that are still open
-// at now: not closed, not expired, and not used up. A link with no use cap is
-// never used up, so it counts as open (max_uses IS NULL OR uses < max_uses),
-// which the personal-only query above never had to say. It is the one rule
-// the allowance is counted by, for CreateMemberLink and InvitesRemaining
-// alike, and it counts member links only: a legacy open invite is not one.
+// outstandingMemberLinksTx counts creatorID's member links and personal
+// invites that are still open at now: not closed, not expired, and not used
+// up. A link with no use cap is never used up, so it counts as open
+// (max_uses IS NULL OR uses < max_uses). It is the one rule the allowance is
+// counted by, for CreateMemberLink, the v1 CreateInvite and InvitesRemaining
+// alike, so a member cannot hold the allowance twice, once as v1 personal
+// invites and once as v2 links. A legacy open invite is neither, and is not
+// counted.
 func outstandingMemberLinksTx(ctx context.Context, tx execer, creatorID int64, now time.Time) (int, error) {
 	var n int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM invites
-		 WHERE created_by = ? AND link = 'member' AND closed_at IS NULL AND expires_at > ?
+		 WHERE created_by = ? AND (link = 'member' OR kind = 'personal') AND closed_at IS NULL AND expires_at > ?
 		   AND (max_uses IS NULL OR uses < max_uses)`,
 		creatorID, now.UnixMilli()).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count outstanding member links: %w", err)
@@ -473,12 +459,11 @@ func outstandingMemberLinksTx(ctx context.Context, tx execer, creatorID int64, n
 	return n, nil
 }
 
-// InvitesRemaining reports how many more member links principalID may make at
-// now under opts: the allowance less their open member links, never below
-// zero (an operator may have lowered the allowance since). It does not ask
-// whether they may invite at all, and operators have no allowance: the caller
-// decides whether the number applies. The legacy personal-invite allowance
-// (outstandingPersonalInvitesTx) is not counted: POST /v1/invites is retired.
+// InvitesRemaining reports how many more member links or personal invites principalID may make at
+// now under opts: the allowance less their open member links and personal
+// invites, never below zero (an operator may have lowered the allowance
+// since). It does not ask whether they may invite at all, and operators have
+// no allowance: the caller decides whether the number applies.
 func (s *Store) InvitesRemaining(ctx context.Context, principalID int64, opts InviteOptions, now time.Time) (int, error) {
 	outstanding, err := outstandingMemberLinksTx(ctx, s.db, principalID, now.Truncate(time.Millisecond))
 	if err != nil {
@@ -605,7 +590,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 		// The allowance binds anyone without manage_members, a restricted
 		// operator included (ADR-014 design §7.3, N1).
 		if req.Kind == schema.InviteKindPersonal && !rights.members {
-			outstanding, err := outstandingPersonalInvitesTx(ctx, tx, creatorID, now)
+			outstanding, err := outstandingMemberLinksTx(ctx, tx, creatorID, now)
 			if err != nil {
 				return fmt.Errorf("store: create invite: %w", err)
 			}

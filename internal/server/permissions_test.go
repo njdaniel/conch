@@ -755,9 +755,47 @@ func TestJoinSettingsNameOracleClosed(t *testing.T) {
 }
 
 // Invite refusals name the permission they lack, to a caller whose role
-// could hold it (design §7.4). POST /v1/invites is closed to a caller without
-// manage_members (issue #985), so the refusals are the member link's.
+// could hold it (design §7.4): the same codes as before.
 func TestInviteRefusalsNameThePermission(t *testing.T) {
+	f := newRestrictedFixture(t, Config{})
+	f.cut(t)
+	yes := true
+	for _, c := range []struct {
+		name string
+		tok  string
+		req  schema.CreateInviteRequestV1
+		code string
+		perm schema.Permission
+	}{
+		{"an open link without manage_members", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"channel-b"}},
+			schema.ErrorCodeInviteNotAllowed, schema.PermManageMembers},
+		{"granting may_invite without manage_members", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-b"}, MayInvite: &yes},
+			schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageMembers},
+		{"a channel it is not in, without manage_channels", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-a"}},
+			schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageChannels},
+		// A member is never told of an operator permission; its own right
+		// to make links (its brake) it is told.
+		{"a member who may not invite", f.memberTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-b"}},
+			schema.ErrorCodeInviteNotAllowed, schema.PermMakeMemberLinks},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			body, err := json.Marshal(c.req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := f.do(t, "POST", "/v1/invites", c.tok, string(body))
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("invite = %d %s, want 403", rec.Code, rec.Body)
+			}
+			if e := decodeBody[schema.Error](t, rec); e.Code != c.code || e.Permission != c.perm {
+				t.Errorf("refusal = %s, want code %q permission %q", rec.Body, c.code, c.perm)
+			}
+		})
+	}
+}
+
+// The same for the member link (issue #985): POST /v2/invites.
+func TestMemberLinkRefusalsNameThePermission(t *testing.T) {
 	f := newRestrictedFixture(t, Config{})
 	f.cut(t)
 	for _, c := range []struct {

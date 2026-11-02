@@ -580,10 +580,8 @@ func coreMatrixRows() []row {
 		operator("DELETE /v1/hooks/{id}", "revokes a hook", nil, func(*world, subject) probe { return del("/v1/hooks/1") }),
 
 		// Invites.
-		// POST /v1/invites is retired (issue #985): the same 409 whatever channel
-		// the body names, and nothing is made.
 		{route: "POST /v1/invites", what: "invites someone to A's channel", pick: aChannel,
-			want: answer{http.StatusConflict, schema.ErrorCodeInviteKindRetired},
+			want: answer{http.StatusForbidden, schema.ErrorCodeInviteGrantExceedsInviter}, mayNot: answer{http.StatusForbidden, schema.ErrorCodeInviteNotAllowed},
 			probe: func(_ *world, s subject) probe {
 				return post("/v1/invites", schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{s.name}})
 			}},

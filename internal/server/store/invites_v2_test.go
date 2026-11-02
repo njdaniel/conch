@@ -300,15 +300,22 @@ func TestMemberLinkAllowance(t *testing.T) {
 		return f.s.CreateMemberLink(f.ctx, "system", p.ID, req, opts, f.now)
 	}
 	one := int64(1)
-	// A legacy personal invite and a legacy open invite of the same kind as a
-	// member link do not count, even one the member holds.
-	f.mustCreate(f.alice, personal("general"))
+	// A legacy open invite of the same kind as a member link does not count,
+	// even one the member holds; a personal invite does, so the allowance is
+	// one number for both routes.
 	legacyOpen := f.mustCreate(f.op, open("general"))
 	if _, err := f.s.db.Exec("UPDATE invites SET created_by = ? WHERE id = ?", f.alice.ID, legacyOpen.Invite.ID); err != nil {
 		t.Fatal(err)
 	}
 	if left, _ := f.s.InvitesRemaining(f.ctx, f.alice.ID, opts, f.now); left != 2 {
-		t.Fatalf("remaining with a legacy open invite and a personal one = %d, want 2", left)
+		t.Fatalf("remaining with a legacy open invite = %d, want 2", left)
+	}
+	personalInvite := f.mustCreate(f.alice, personal("general"))
+	if left, _ := f.s.InvitesRemaining(f.ctx, f.alice.ID, opts, f.now); left != 1 {
+		t.Fatalf("remaining with a personal invite = %d, want 1", left)
+	}
+	if _, err := f.s.CloseInvite(f.ctx, "system", f.alice.ID, personalInvite.Invite.ID, f.now); err != nil {
+		t.Fatal(err)
 	}
 	first, err := create(f.alice, memberLink()) // uncapped
 	if err != nil {
@@ -389,10 +396,9 @@ func TestInvitesRemainingCountsMemberLinks(t *testing.T) {
 		{"one expired", 0, []func(*inviteFixture){expiredOne}, DefaultPersonalInviteAllowance},
 		{"one closed", 0, []func(*inviteFixture){closedOne}, DefaultPersonalInviteAllowance},
 		{"one of each", 0, []func(*inviteFixture){openOne, usedOne, expiredOne, closedOne}, DefaultPersonalInviteAllowance - 1},
-		{"legacy invites do not count", 0, []func(*inviteFixture){func(f *inviteFixture) {
-			f.mustCreate(f.alice, personal("general"))
-			f.mustCreate(f.op, open("general"))
-		}}, DefaultPersonalInviteAllowance},
+		{"a personal invite counts", 0, []func(*inviteFixture){func(f *inviteFixture) { f.mustCreate(f.alice, personal("general")) }}, DefaultPersonalInviteAllowance - 1},
+		{"a legacy open invite does not", 0, []func(*inviteFixture){func(f *inviteFixture) { f.mustCreate(f.op, open("general")) }}, DefaultPersonalInviteAllowance},
+		{"personal invites and links share it", 2, []func(*inviteFixture){openOne, func(f *inviteFixture) { f.mustCreate(f.alice, personal("general")) }}, 0},
 		{"others' links do not count", 0, []func(*inviteFixture){func(f *inviteFixture) { f.mustLink(f.op, memberLink()) }}, DefaultPersonalInviteAllowance},
 		{"the allowance is a parameter", 2, []func(*inviteFixture){openOne}, 1},
 		{"used up", 2, []func(*inviteFixture){openOne, openOne}, 0},

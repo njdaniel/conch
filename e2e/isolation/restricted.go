@@ -349,36 +349,52 @@ func (w *world) restrictedPhase() (int, error) {
 		return rows, fmt.Errorf("the restricted operator's refusals in its own channel wrote %d access_denied rows with permission=manage_channels, want 5", after-before)
 	}
 
-	// Member links (POST /v1/invites is closed to a caller without
-	// manage_members, issue #985): A's channel as a landing channel, and a
-	// link that never expires.
+	// Links: A's channel, an open link, the right to invite.
+	inviteAs := func(req schema.CreateInviteRequestV1) (int, []byte, error) {
+		return r.api.do(http.MethodPost, "/v1/invites", req)
+	}
+	s1, b1, err := inviteAs(schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{aChan}})
+	if err := refusedNaming("the restricted operator: a link naming A's channel", s1, b1, err, schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageChannels); err != nil {
+		return rows, err
+	}
+	s2, b2, err := inviteAs(schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{ghost}})
+	if err != nil {
+		return rows, err
+	}
+	if err := sameAnswer("the restricted operator: a link naming A's channel", s1, b1, s2, b2); err != nil {
+		return rows, err
+	}
+	status, body, err := inviteAs(schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{rchan}})
+	if err := refusedNaming("the restricted operator: an open link", status, body, err, schema.ErrorCodeInviteNotAllowed, schema.PermManageMembers); err != nil {
+		return rows, err
+	}
+	status, body, err = inviteAs(schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{rchan}, MayInvite: &yes})
+	if err := refusedNaming("the restricted operator: a link granting may_invite", status, body, err, schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageMembers); err != nil {
+		return rows, err
+	}
+	rows += 3
+
+	// Member links (issue #985): A's channel as a landing channel, and a link
+	// that never expires.
 	linkAs := func(req schema.CreateInviteRequestV2) (int, []byte, error) {
 		return r.api.do(http.MethodPost, "/v2/invites", req)
 	}
-	s1, b1, err := linkAs(schema.CreateInviteRequestV2{Kind: schema.InviteKindMember, LandingChannels: []string{aChan}})
+	s1, b1, err = linkAs(schema.CreateInviteRequestV2{Kind: schema.InviteKindMember, LandingChannels: []string{aChan}})
 	if err := refusedNaming("the restricted operator: a link landing in A's channel", s1, b1, err, schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageChannels); err != nil {
 		return rows, err
 	}
-	s2, b2, err := linkAs(schema.CreateInviteRequestV2{Kind: schema.InviteKindMember, LandingChannels: []string{ghost}})
+	s2, b2, err = linkAs(schema.CreateInviteRequestV2{Kind: schema.InviteKindMember, LandingChannels: []string{ghost}})
 	if err != nil {
 		return rows, err
 	}
 	if err := sameAnswer("the restricted operator: a link landing in A's channel", s1, b1, s2, b2); err != nil {
 		return rows, err
 	}
-	status, body, err := linkAs(schema.CreateInviteRequestV2{Kind: schema.InviteKindMember, NeverExpires: true})
+	status, body, err = linkAs(schema.CreateInviteRequestV2{Kind: schema.InviteKindMember, NeverExpires: true})
 	if err := refusedNaming("the restricted operator: a link that never expires", status, body, err, schema.ErrorCodeInviteNotAllowed, schema.PermManageMembers); err != nil {
 		return rows, err
 	}
-	// The v1 route is closed to it altogether.
-	status, body, err = r.api.do(http.MethodPost, "/v1/invites", schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{rchan}})
-	if err != nil {
-		return rows, err
-	}
-	if e, err := errorOf(body); status != http.StatusConflict || err != nil || e.Code != schema.ErrorCodeInviteKindRetired {
-		return rows, fmt.Errorf("the restricted operator: POST /v1/invites = %d %s, want 409 invite_kind_retired", status, body)
-	}
-	rows += 3
+	rows += 2
 
 	// The joining settings naming A's channel, once R may change settings.
 	if err := w.setOperatorCells(true, schema.PermChangeServerSettings); err != nil {

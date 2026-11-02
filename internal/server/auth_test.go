@@ -626,9 +626,6 @@ func TestRoleMatrix(t *testing.T) {
 			if rt.pattern == "PUT /v1/channels/{id}/name" {
 				memberWant = exp.allowed // a non-member cannot discover the channel id
 			}
-			if rt.pattern == "POST /v1/invites" {
-				memberWant = http.StatusConflict // retired for anyone without manage_members (issue #985)
-			}
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
 			agentWant := memberWant

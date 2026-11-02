@@ -27,11 +27,8 @@ import (
 type inviteFixture struct {
 	*authFixture
 	red, blue store.Channel
-	// opNoMembers is the token of an operator whose manage_members a test
-	// withheld.
-	opNoMembers string
-	mu          sync.Mutex
-	clock       time.Time
+	mu        sync.Mutex
+	clock     time.Time
 }
 
 func looseInviteLimits() inviteLimits {
@@ -174,58 +171,24 @@ func boolPtr(b bool) *bool { return &b }
 // fakeInviteCode is well-formed and matches no invite.
 var fakeInviteCode = schema.InviteCodePrefix + strings.Repeat("Q", 43)
 
-// POST /v1/invites stays for holders of manage_members until the clients
-// make member links (issue #985, design §3.3) and is 409 invite_kind_retired
-// for everyone else, whatever the body says and whatever they may do: nothing
-// is made, audited or counted. An agent and a caller with no credential are
-// refused as before. Member links are made with POST /v2/invites
-// (invites_v2_test.go).
-func TestCreateInviteRetiredForMembers(t *testing.T) {
-	grantAlice := func(t *testing.T, f *inviteFixture) {
-		t.Helper()
-		if _, err := f.srv.store.SetMayInvite(context.Background(), "system", f.alice.ID, true); err != nil {
-			t.Fatal(err)
-		}
+// POST /v1/invites is unchanged beside POST /v2/invites (issue #985): a member
+// with the right still makes a personal invite, and the allowance is one
+// number for v1 personal invites and v2 links together.
+func TestMemberStillCreatesV1InviteAndSharesTheAllowance(t *testing.T) {
+	f := newInviteFixture(t, Config{InviteAllowance: 2})
+	if _, err := f.srv.store.SetMayInvite(context.Background(), "system", f.alice.ID, true); err != nil {
+		t.Fatal(err)
 	}
-	tests := []struct {
-		name     string
-		setup    func(*testing.T, *inviteFixture)
-		who      string // root, alice, bot or "" (no credential)
-		body     string
-		want     int
-		wantCode string
-	}{
-		{"non-owner operator without manage_members", func(t *testing.T, f *inviteFixture) {
-			c := f.linkCallers(t)
-			f.opNoMembers = c.op2
-			withholdOperator(t, f, schema.PermActAsMembers, schema.PermManageMembers)
-		}, "op2", inviteJSON(t, personal("general")), 409, schema.ErrorCodeInviteKindRetired},
-		{"member with the right, personal", grantAlice, "alice", inviteJSON(t, personal("red")), 409, schema.ErrorCodeInviteKindRetired},
-		{"member without the right", nil, "alice", inviteJSON(t, personal("red")), 409, schema.ErrorCodeInviteKindRetired},
-		{"member names a channel they are not in", grantAlice, "alice", inviteJSON(t, personal("blue")), 409, schema.ErrorCodeInviteKindRetired},
-		{"agent", nil, "bot", inviteJSON(t, personal("general")), 403, schema.ErrorCodeHumanRequired},
-		{"no credential", nil, "", inviteJSON(t, personal("general")), 401, "unauthenticated"},
+	rec := f.send(t, "POST", "/v1/invites", f.aliceTok, inviteJSON(t, personal("red")), "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("member's v1 personal invite = %d %s", rec.Code, rec.Body)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newInviteFixture(t, Config{})
-			if tt.setup != nil {
-				tt.setup(t, f)
-			}
-			tok := map[string]string{"root": f.rootTok, "alice": f.aliceTok, "bot": f.botTok, "op2": f.opNoMembers}[tt.who]
-			rec := f.send(t, "POST", "/v1/invites", tok, tt.body, "")
-			assertErrorBody(t, rec, tt.want, tt.wantCode)
-			if strings.Contains(rec.Body.String(), schema.InviteCodePrefix) {
-				t.Errorf("a refusal carries a code: %s", rec.Body)
-			}
-			if n := len(f.auditOf(t, store.AuditInviteCreated)); n != 0 {
-				t.Errorf("%d invite_created rows after a refusal, want none", n)
-			}
-			if got := decodeBody[schema.ListInvitesResponseV1](t, f.send(t, "GET", "/v1/invites", f.rootTok, "", "")); len(got.Invites) != 0 {
-				t.Errorf("an invite was made: %+v", got.Invites)
-			}
-		})
-	}
+	f.createMemberLink(t, f.aliceTok, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
+	// Both used the allowance: neither route makes a third.
+	assertErrorBody(t, f.send(t, "POST", "/v1/invites", f.aliceTok, inviteJSON(t, personal("red")), ""), http.StatusForbidden, schema.ErrorCodeInviteAllowanceExceeded)
+	assertErrorBody(t, f.send(t, "POST", "/v2/invites", f.aliceTok, `{"kind":"member"}`, ""), http.StatusForbidden, schema.ErrorCodeInviteAllowanceExceeded)
+	// A member still may not make an open link or name a channel they are not in.
+	assertErrorBody(t, f.send(t, "POST", "/v1/invites", f.aliceTok, inviteJSON(t, openLink("red")), ""), http.StatusForbidden, schema.ErrorCodeInviteNotAllowed)
 }
 
 // The code is in the create response and nowhere else: not in the list, not
@@ -661,7 +624,6 @@ func TestWhoAmIInvitesRemainingFollowsCreate(t *testing.T) {
 		{"after an operator's link, which is not counted", func(t *testing.T) {
 			f.createMemberLink(t, f.rootTok, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
 		}, int64Ptr(1)},
-		{"after a legacy invite of hers, which is not counted", func(t *testing.T) { f.createInvite(t, f.aliceTok, personal("red")) }, int64Ptr(1)},
 		{"after two", func(t *testing.T) {
 			f.createMemberLink(t, f.aliceTok, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
 		}, int64Ptr(0)},

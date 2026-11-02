@@ -37,18 +37,16 @@ the usual backup first (docs/deploy.md does).
   switches the right off for one person with
   `PUT /v1/principals/{id}/invite-permission`, which also closes that
   person's open links.
-- **`POST /v1/invites` is refused for members.** It answers
-  `409 invite_kind_retired` and makes nothing for anyone without
-  `manage_members`. Operators (who hold it by default) can still use it, so
-  the browser and `conch admin invite create` keep working until they move to
-  member links (#990, #994); a later release retires it for everyone. Make a
-  member link with `POST /v2/invites`, and read it with `GET /v2/invites`,
-  `POST /v2/invites/preview` and `GET /v2/invites/{id}/joiners`. Invites made
-  before the upgrade keep working, and are listed, previewed and closed as
-  before.
+- **Member links.** Make one with `POST /v2/invites`, and read it with
+  `GET /v2/invites`, `POST /v2/invites/preview` and
+  `GET /v2/invites/{id}/joiners`. `POST /v1/invites` is unchanged for now: the
+  browser and `conch admin invite create` still use it until they move to
+  member links (#990, #994), and a later release retires it (#1134). Invites
+  made before the upgrade keep working, and are listed, previewed and closed
+  as before.
 - **`--invite-allowance` now counts member links.** The number of open member
-  links one person may hold (default 5, an uncapped link counts as open;
-  operators have no limit). Invites made before the upgrade are not counted.
+  links and personal invites together that one person may hold (default 5, an
+  uncapped link counts as open; operators have no limit).
   A link that names no expiry lasts 7 days, and only an operator can make one
   that never expires.
 - **Joining.** The bare address now either makes accounts (open sign-up on,

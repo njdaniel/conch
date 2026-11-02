@@ -22,8 +22,7 @@ import (
 // Nothing here logs, audits or echoes an invite code. The code is in the 201
 // body of a create and nowhere else, sent no-store.
 
-// inviteKindRetiredMessage answers POST /v1/invites from a caller without
-// manage_members, and a v2 request that names a v1 kind. It carries no digit, so it can never be read as an id (the
+// inviteKindRetiredMessage answers a v2 request that names a v1 kind. It carries no digit, so it can never be read as an id (the
 // isolation check holds every refusal to that).
 const inviteKindRetiredMessage = "this route makes no personal or open invite now; make a member link instead"
 
