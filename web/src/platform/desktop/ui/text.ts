@@ -50,3 +50,16 @@ export const noticeLines: Readonly<Record<ProfileNotice, string>> = {
   'revocation-unsent': 'Signed out on this computer. The server could not be reached, so the app cannot prove the sign-in was ended there; it was forgotten here.',
   'teardown-slow': 'Something that was using the old sign-in did not stop in time. It was left behind, and the new server was started without it.',
 };
+
+// What the app says of the server's release (issue #946). X is the server's
+// version as /healthz named it, or "unknown"; Y is this app's own.
+export const untested = (server: string | null, desktop: string): string =>
+  `This server’s version (${server ?? 'unknown'}) has not been tested with this app (${desktop}).`;
+
+export const unreadable = (desktop: string): string =>
+  `This server’s version could not be read because it did not answer, so it cannot be checked against this app (${desktop}). Nothing was signed in.`;
+
+export const overrideLine = 'Development build: servers that are not on the tested list are allowed (--allow-unlisted-server). A packaged app has no such option.';
+
+export const incompatibleLine = (family: string, server: string | null, desktop: string): string =>
+  `This server’s ${family} answers are not what this app (${desktop}) expects, so its version (${server ?? 'unknown'}) is incompatible with it. This is not a network problem; use a server version that has been tested with this app.`;
