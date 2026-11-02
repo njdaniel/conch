@@ -179,14 +179,12 @@ func TestOpenSignupMakesAMemberLinkMember(t *testing.T) {
 	if a.invitedBy.Valid || !b.invitedBy.Valid {
 		t.Errorf("invited_by: sign-up %v, link %v; want none and the maker", a.invitedBy, b.invitedBy)
 	}
-	// A member link's joiner gets voice and may_invite from the link today,
-	// and a member link stores neither: redemption with voice and the brake
-	// on is #986's (I6b, design §2.1). Open sign-up is held to the design's
-	// member (both on), and everything else must match.
-	if a.mayInvite != 1 || a.voice != 1 {
-		t.Errorf("sign-up may_invite = %d, voice_allowed = %d; want both 1", a.mayInvite, a.voice)
+	// Both are the design's member, compared on their real flags (issue
+	// #986): voice and the may_invite brake on, for each.
+	if a.mayInvite != 1 || a.voice != 1 || b.mayInvite != 1 || b.voice != 1 {
+		t.Errorf("may_invite, voice_allowed: sign-up %d, %d; link %d, %d; want all 1", a.mayInvite, a.voice, b.mayInvite, b.voice)
 	}
-	a.invitedBy, b.invitedBy, b.mayInvite, b.voice = sql.NullInt64{}, sql.NullInt64{}, a.mayInvite, a.voice
+	a.invitedBy, b.invitedBy = sql.NullInt64{}, sql.NullInt64{}
 	if a != b {
 		t.Errorf("the sign-up member differs from the member link's:\n sign-up %+v\n link    %+v", a, b)
 	}

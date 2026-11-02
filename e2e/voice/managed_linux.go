@@ -42,7 +42,7 @@ import (
 // joining again; leaving; quitting while the key is held; one account in two
 // TUIs (the second is warned, then displaces the first, which says so);
 // retry; a removal from the channel, after which the TUI says why voice
-// stopped and text still works; a member whose invite withheld voice, and a
+// stopped and text still works; a member whose voice an operator turned off, and a
 // TUI whose stored login has become another account's, each refused by the
 // helper with the reason in the TUI and nothing captured or joined; LiveKit
 // restarted under a TUI in voice, which reconnects by itself and is heard

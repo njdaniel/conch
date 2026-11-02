@@ -594,7 +594,9 @@ func TestWhoAmIMayInvite(t *testing.T) {
 	check("member", f.aliceTok, false)
 	check("agent", f.botTok, false)
 	check("joiner granted by an operator's invite", may.Token, true)
-	check("joiner", plain.Token, false)
+	// Every joiner has the may_invite brake on, whatever the invite said
+	// (issue #986).
+	check("joiner", plain.Token, true)
 	if _, err := f.srv.store.SetMayInvite(ctx, "system", f.alice.ID, true); err != nil {
 		t.Fatal(err)
 	}
@@ -612,6 +614,14 @@ func TestWhoAmIVoiceAndInvitesRemaining(t *testing.T) {
 	plainCode := f.createInvite(t, f.rootTok, openLink("red")).Code
 	inviter := decodeBody[schema.RedeemInviteResponseV1](t, f.redeem(t, inviterCode, "inviter"))
 	plain := decodeBody[schema.RedeemInviteResponseV1](t, f.redeem(t, plainCode, "plain"))
+	// Every joiner has voice and the brake on (issue #986): an operator
+	// takes both away from plain, the member without voice below.
+	if _, err := f.srv.store.SetVoiceAllowed(ctx, "system", f.root.ID, plain.Principal.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.srv.store.SetMayInvite(ctx, "system", plain.Principal.ID, false); err != nil {
+		t.Fatal(err)
+	}
 	// One open member link counts against the allowance, and a closed one
 	// does not.
 	f.createMemberLink(t, inviter.Token, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
@@ -752,7 +762,7 @@ func TestInviteEndToEnd(t *testing.T) {
 		tokens = append(tokens, res.Token)
 
 		who := decodeBody[schema.WhoAmIResponseV1](t, f.send(t, "GET", "/v1/whoami", res.Token, "", ""))
-		if who.ID != res.Principal.ID || who.Name != name || who.Kind != schema.PrincipalHuman || who.Role != schema.RoleMember || who.MayInvite {
+		if who.ID != res.Principal.ID || who.Name != name || who.Kind != schema.PrincipalHuman || who.Role != schema.RoleMember || !who.MayInvite {
 			t.Errorf("whoami %s = %+v", name, who)
 		}
 		chans := decodeBody[schema.ListChannelsResponse](t, f.send(t, "GET", "/v1/channels", res.Token, "", ""))
