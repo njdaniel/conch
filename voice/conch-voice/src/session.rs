@@ -1166,7 +1166,13 @@ impl<T: Transport> Session<T> {
 
     fn show(&mut self, connection: Connection) {
         if self.shown.as_ref() != Some(&connection) {
-            self.out.show(&Event::Connection(&connection));
+            let event = Event::Connection(&connection);
+            // The two that end the output are not dropped for a reader that fell behind.
+            if matches!(connection, Connection::Stopped { .. } | Connection::Closed) {
+                self.out.show_last(&event);
+            } else {
+                self.out.show(&event);
+            }
             self.shown = Some(connection);
         }
     }

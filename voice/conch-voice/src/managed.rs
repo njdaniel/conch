@@ -478,6 +478,9 @@ enum Keep {
     /// [`ANSWER_LINES`], since the owner waits for each and fails the session without
     /// it (§7), and since after a gap the answer to `get_state` is how it resynchronises.
     Answer,
+    /// The final state: has a place of its own, so a full queue does not drop it, and the
+    /// owner that reads on still gets the last word (#1144).
+    Last,
 }
 
 /// The events' pipe, as the owner's presence is read from it: a write or flush that fails
@@ -581,6 +584,7 @@ impl Events {
             Ok(line) => match keep {
                 Keep::IfThereIsRoom => self.queue.push(line),
                 Keep::Answer => self.queue.push_reserved(line),
+                Keep::Last => self.queue.push_last(line),
             },
             // A state that does not hold together is a fault here, not something to send:
             // the owner sees the gap in seq and asks again.
@@ -687,7 +691,7 @@ impl Owner {
     /// Tells the owner the final state, and gives it [`FINAL_STATE_LIMIT`] to be written.
     /// Nothing is written after it: this is the end of the owner.
     pub async fn finish(mut self, last: &Snapshot) {
-        self.events.state(last, Keep::IfThereIsRoom);
+        self.events.state(last, Keep::Last);
         if !self.events.flush(FINAL_STATE_LIMIT).await {
             log::warn!("managed: the final state was not read before leaving");
         }
@@ -2670,6 +2674,49 @@ mod tests {
             VOICE_CONTROL_EVENT_QUEUE_LINES as i64 + 12,
             "a gap of ten"
         );
+    }
+
+    /// The final state is not dropped for a reader that let the queue fill, answers
+    /// included: it is written, last, once the reader reads on (#1144).
+    #[tokio::test]
+    async fn the_final_state_is_kept_behind_a_full_queue_and_a_full_reserve() {
+        use crate::lines::tests::Stallable;
+        use conch_voice_api::VoiceControlEvent;
+        let writer = Stallable::stalled();
+        let mut owner = Owner::new(quiet_events(Box::new(writer.clone())), Watchdog::off());
+        owner.events.hello();
+        writer.until_waiting();
+        for _ in 0..VOICE_CONTROL_EVENT_QUEUE_LINES + 10 {
+            owner.events.state(&starting(), Keep::IfThereIsRoom);
+        }
+        for id in 0..ANSWER_LINES as i64 + 3 {
+            owner.ack(id, None);
+        }
+        // The reader is not reading: the flush gives up at its limit, and the line stays.
+        let last = Snapshot::new(
+            VoiceControlPhase::Stopped,
+            Some(VoiceControlReason::OwnerLost),
+            None,
+            Capture::Off,
+            fresh_status(false, false),
+            KeyView::Unknown,
+        );
+        owner.finish(&last).await;
+        writer.stall(false);
+        let total = 1 + VOICE_CONTROL_EVENT_QUEUE_LINES + ANSWER_LINES + 1;
+        writer.until_lines(total);
+        let text = writer.text();
+        let seqs = seqs_of(&text);
+        assert_eq!(seqs.len(), total, "{seqs:?}");
+        assert!(seqs.windows(2).all(|pair| pair[1] > pair[0]), "{seqs:?}");
+        let Some(VoiceControlEvent::State(state)) = text
+            .lines()
+            .last()
+            .map(|line| conch_voice_api::parse_event(line.as_bytes()).unwrap())
+        else {
+            panic!("the last line is not a state: {text}");
+        };
+        assert_eq!(state.phase, VoiceControlPhase::Stopped);
     }
 
     /// With the queue full, an ack and the state that answers `get_state` are still
