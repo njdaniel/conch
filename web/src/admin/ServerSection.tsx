@@ -81,11 +81,15 @@ function SetupCard({
   const [busy, setBusy] = useState(false);
   const [line, setLine] = useState<Line | null>(null);
   const canChange = canDo(who, 'change_server_settings');
+  // Losing the permission closes a question that was open.
+  useEffect(() => {
+    if (!canChange) setAsked(null);
+  }, [canChange]);
   if (dismissed) return null;
   const changes = asked === null ? null : presetChanges(doc, asked);
 
   function apply(preset: PermissionPreset) {
-    if (busy) return;
+    if (busy || !canChange) return;
     setBusy(true);
     setLine(null);
     void api.putPermissions({ revision: doc.revision, preset }).then((result) => {
@@ -139,7 +143,7 @@ function SetupCard({
           Decide later
         </button>
       </div>
-      {asked === null || changes === null ? null : (
+      {asked === null || changes === null || !canChange ? null : (
         <div role="group" aria-label={`Apply ${presetLabels[asked]}`} className="signout-confirm">
           <p>
             {changes.on.length === 0 && changes.off.length === 0
@@ -151,7 +155,7 @@ function SetupCard({
           <div className="actions">
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || !canChange}
               aria-busy={busy}
               onClick={() => {
                 apply(asked);

@@ -145,8 +145,12 @@ export function JoiningPanel({
     if (busy || loaded === null) return;
     const was = loaded.settings;
     const chosen = [...openChannels].sort();
+    // Only an edited expiry is checked and sent. One the server holds that is
+    // not a whole number of hours (5400 s shows as 1.5) goes back untouched,
+    // by not being sent at all.
+    const edited = was.member_link_default_expiry_seconds !== undefined && expiry !== hoursOf(was.member_link_default_expiry_seconds);
     const hours = Number(expiry);
-    if (was.member_link_default_expiry_seconds !== undefined && (expiry.trim() === '' || !Number.isInteger(hours) || hours < 0)) {
+    if (edited && (expiry.trim() === '' || !Number.isInteger(hours) || hours < 0)) {
       setLine({ text: 'The default link expiry is a whole number of hours, or 0 for none.', refused: true });
       return;
     }
@@ -158,9 +162,7 @@ export function JoiningPanel({
         : signup === was.open_signup
           ? {}
           : { open_signup: signup }),
-      ...(was.member_link_default_expiry_seconds === undefined || hours * 3600 === was.member_link_default_expiry_seconds
-        ? {}
-        : { member_link_default_expiry_seconds: hours * 3600 }),
+      ...(edited && hours * 3600 !== was.member_link_default_expiry_seconds ? { member_link_default_expiry_seconds: hours * 3600 } : {}),
       ...(paused === was.joining_paused ? {} : { joining_paused: paused }),
       ...(chosen.join('\n') === [...was.open_channels].sort().join('\n') ? {} : { open_channels: chosen }),
     };

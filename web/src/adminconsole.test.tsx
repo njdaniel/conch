@@ -254,6 +254,26 @@ describe('the Server section', () => {
     expect(within(region).getByLabelText<HTMLInputElement>(/Open sign-up/).disabled).toBe(false);
   });
 
+  it('saves an unrelated change when the server’s default link expiry is not a whole number of hours, leaving the expiry untouched', async () => {
+    const calls = serve(settingsOperator, {
+      'GET /v1/join/settings': () => json({ ...joinSettings, settings: { ...joinSettings.settings, member_link_default_expiry_seconds: 5400 } }),
+      'PUT /v1/join/settings': () => json({ ...joinSettings, settings: { ...joinSettings.settings, joining_paused: true, member_link_default_expiry_seconds: 5400 } }),
+    });
+    await signedIn(operatorToken);
+    const region = await joining();
+    expect(within(region).getByLabelText<HTMLInputElement>('Default link expiry (hours, 0 for none)').value).toBe('1.5');
+    fireEvent.click(within(region).getByLabelText('Pause joining from the address'));
+    fireEvent.click(within(region).getByRole('button', { name: 'Save joining' }));
+    expect(await within(region).findByText('Saved.')).toBeDefined();
+    // A patch: the field is not named, so the server keeps its 5400 s.
+    expect(calls.find((c) => c.method === 'PUT')?.body).toEqual({ joining_paused: true });
+    // An edited one is still checked.
+    fireEvent.change(within(region).getByLabelText('Default link expiry (hours, 0 for none)'), { target: { value: '1.25' } });
+    fireEvent.click(within(region).getByRole('button', { name: 'Save joining' }));
+    expect(await within(region).findByText('The default link expiry is a whole number of hours, or 0 for none.')).toBeDefined();
+    expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(1);
+  });
+
   it('sends only what changed to PUT /v1/join/settings for an operator who holds change_server_settings', async () => {
     const calls = serve(settingsOperator, {
       'PUT /v1/join/settings': () => json({ ...joinSettings, settings: { ...joinSettings.settings, open_signup: true, member_link_default_expiry_seconds: 86400 } }),
@@ -408,6 +428,38 @@ describe('the setup card', () => {
     await card();
     await screen.findByText(/Members see:/);
     expect(screen.queryByText('How will this server be used?')).toBeNull();
+  });
+
+  it('closes the confirmation when change_server_settings goes, and sends no write, even after it returns', async () => {
+    let who: WhoAmIResponseV1 = owner;
+    const calls = serve(() => who, { 'GET /v1/permissions': () => json(permissionsDoc(1)) });
+    window.sessionStorage.setItem(key, ownerToken);
+    window.location.hash = '#/c/channel-a';
+    render(<App origin={origin} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Personal server' }));
+    expect(screen.getByRole('group', { name: 'Apply Personal server' })).toBeDefined();
+    await waitFor(() => {
+      expect(FakeSocket.all.some((s) => s.url.includes('/v1/events/ws?'))).toBe(true);
+    });
+    for (const s of FakeSocket.all) s.open();
+    const events = FakeSocket.all.find((s) => s.url.includes('/v1/events/ws?'));
+    // Another owner clears this one's owner mark.
+    who = { ...operator, id: owner.id };
+    events?.send({ schema: 'conch.permissions_changed.v1' });
+    await waitFor(() => {
+      expect(screen.queryByRole('group', { name: 'Apply Personal server' })).toBeNull();
+    });
+    expect(screen.queryByRole('button', { name: 'Apply Personal server' })).toBeNull();
+    expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Personal server' }).disabled).toBe(true);
+    // The permission comes back: the question is not still pending.
+    who = owner;
+    events?.send({ schema: 'conch.permissions_changed.v1' });
+    await waitFor(() => {
+      expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Personal server' }).disabled).toBe(false);
+    });
+    expect(screen.queryByRole('group', { name: 'Apply Personal server' })).toBeNull();
+    expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(0);
   });
 
   it('offers the presets, disabled with the reason, to an operator without change_server_settings', async () => {
