@@ -56,6 +56,8 @@ function conversation(messages: readonly MessageV2[], onUnauthorized?: () => voi
     trimmed: false,
     dropped: 0,
     nextLocalId: 1,
+    edits: new Map(),
+    final: new Set(),
   };
   return render(
     <Conversation
