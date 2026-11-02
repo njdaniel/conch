@@ -773,7 +773,7 @@ func TestEventsChannelRenamed(t *testing.T) {
 		t.Fatalf("rename = %d %s", rec.Code, rec.Body)
 	}
 
-	want := schema.ChannelDocV1{Schema: schema.ChannelSchemaV1, ChannelID: f.ops.ID, Name: "ops-renamed", CreatedAt: schema.NewTimestamp(f.ops.CreatedAt)}
+	want := schema.ChannelDocV1{Schema: schema.ChannelSchemaV1, ChannelID: f.ops.ID, Name: "ops-renamed", CreatedAt: schema.NewTimestamp(f.ops.CreatedAt), Visibility: schema.ChannelPrivate}
 	for i, c := range renamedSocks {
 		if fr := c.next(); fr.schema != schema.ChannelSchemaV1 || fr.channel != want {
 			t.Fatalf("socket %d: frame after the rename = %v, want %+v", i, fr, want)

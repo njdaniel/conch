@@ -19,6 +19,8 @@ interface Fixture {
   readonly calls: [string, unknown][];
   readonly logs: string[];
   readonly clock: { now: number };
+  // Whether main's compatibility verdict lets a sign-in happen (issue #946).
+  readonly permit: { value: boolean };
   readonly input: { recent: boolean };
   event(over?: Partial<InvokeEvent>): InvokeEvent;
 }
@@ -36,14 +38,15 @@ function fixture(): Fixture {
   };
   const service = new Proxy({} as Service, { get: (_t, name: string) => record(name) });
   const feeds = new Proxy({} as Feeds, { get: (_t, name: string) => record(`feeds.${name}`) });
-  const profiles = new Proxy({} as ProfilesApi, { get: (_t, name: string) => record(`profiles.${name}`) });
+  const permit = { value: true };
+  const profiles = new Proxy({} as ProfilesApi, { get: (_t, name: string) => (name === 'signInPermitted' ? () => permit.value : record(`profiles.${name}`)) });
   const logs: string[] = [];
   const clock = { now: 1_000_000 };
   const input = { recent: false };
   const files = new Proxy({} as Files, { get: (_t, name: string) => record(`files.${name}`) });
   const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
   const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, now: () => clock.now, log: (line) => logs.push(line) });
-  return { ipc, gate, contents, main, calls, logs, clock, input, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
+  return { ipc, gate, contents, main, calls, logs, clock, permit, input, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
 describe('every invocation is checked before anything else', () => {
@@ -199,6 +202,36 @@ describe('arguments', () => {
       ['signIn', ['login', { name: 'ada', password: 'pw' }]],
       ['signIn', ['joinAccount', { name: 'ada', password: 'pw' }]],
     ]);
+  });
+
+  it.each([
+    ['signInWithPassword', [{ name: 'ada', password: 'pw' }]],
+    ['signInWithCode', [{ challenge: 'c', code: '123456' }]],
+    ['redeemInvite', [{ code: 'abc', name: 'ada', password: 'pw' }]],
+    ['joinAsGuest', [{ label: 'ada' }]],
+    ['createAccount', [{ name: 'ada', password: 'pw' }]],
+    ['signInWithCredential', ['conch_pasted']],
+    ['keepCredential', ['conch_pasted']],
+  ] as const)('does not carry %s when the server is not one the app may sign in to (issue #946)', async (name, args) => {
+    const f = fixture();
+    f.permit.value = false;
+    const outcome = await f.ipc.invoke(f.event(), name, args);
+    if (name === 'keepCredential') expect(outcome).toEqual({ ok: true, value: false });
+    else expect(outcome).toEqual({ ok: true, value: { ok: false, kind: 'network', reason: 'incompatible' } });
+    expect(f.calls).toEqual([]);
+  });
+
+  it.each([
+    ['an invite preview', { operation: 'previewInvite', body: { code: 'secret-invite-code' } }],
+    ['a sign-in link preview', { operation: 'previewSignInLink', body: { code: 'secret-link-code' } }],
+    ['a channel list', { operation: 'listChannels' }],
+  ] as const)('sends no request but the health check when the server is not one the app may sign in to: %s (issue #946)', async (_name, request) => {
+    const f = fixture();
+    f.permit.value = false;
+    expect(await f.ipc.invoke(f.event(), 'request', [request])).toEqual({ ok: true, value: { kind: 'none', reason: 'incompatible' } });
+    expect(f.calls).toEqual([]);
+    expect(await f.ipc.invoke(f.event(), 'request', [{ operation: 'health' }])).toEqual({ ok: true, value: { ran: 'request' } });
+    expect(f.calls).toEqual([['request', [{ operation: 'health' }]]]);
   });
 
   it('passes a feed call to the feeds with the caller’s document generation, and the parameters it parsed', async () => {
