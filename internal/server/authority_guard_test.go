@@ -197,6 +197,7 @@ var authorityAllowlist = []authorityAllowed{
 	{"store/permissions.go", "principalHolds", kindRoleSwitch, 1, whyHelper},
 	{"store/queries.go", "Principal.IsOwner", kindRoleCompare, 1, whyOwnerMark},
 	{"store/queries.go", "ownerProtectedTx", kindRoleCompare, 1, whyTarget + ": nobody but an owner acts on an owner"},
+	{"store/voice_permission.go", "Store.SetVoiceAllowed", kindRoleCompare, 1, whyOwnerMark + ": the caller side of owner protection, read under the write lock"},
 	{"store/roles.go", "Store.BootstrapOperatorWith", kindRoleSQL, 1, whyRoleAdmin + ": the first operator"},
 	{"store/roles.go", "reportPromotedOwners", kindRoleSQL, 1, whyRoleAdmin + ": the migration's report of owners"},
 	{"store/roles.go", "setRoleTx", kindRoleCompare, 7, whyRoleAdmin},

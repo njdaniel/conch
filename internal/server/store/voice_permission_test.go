@@ -105,7 +105,7 @@ func TestSetVoiceAllowedRechecksTheCaller(t *testing.T) {
 			if tt.before != nil {
 				tt.before(t, w)
 			}
-			changed, err := w.s.SetVoiceAllowed(ctx, "principal:x", tt.caller(w), w.target.ID, false, true)
+			changed, err := w.s.SetVoiceAllowed(ctx, "principal:x", tt.caller(w), w.target.ID, false)
 			if tt.denied {
 				var perr *PermissionError
 				if !errors.Is(err, ErrPermissionDenied) || !errors.As(err, &perr) || perr.Permission != schema.PermManageMembers {
@@ -131,20 +131,20 @@ func TestSetVoiceAllowedRechecksTheCaller(t *testing.T) {
 	}
 }
 
-// TestSetVoiceAllowedOwnerProtected: with forbidOwner an owner target is
-// refused inside the transaction (ADR-010), whatever the handler checked
-// before: unchanged, no change-audit row. Without it the owner is switched.
+// TestSetVoiceAllowedOwnerProtected: a non-owner caller's write to an owner
+// target is refused inside the transaction (ADR-010), whatever the handler
+// checked before: unchanged, no change-audit row. Without it the owner is switched.
 func TestSetVoiceAllowedOwnerProtected(t *testing.T) {
 	ctx := context.Background()
 	w := newVoiceSwitchWorld(t)
-	changed, err := w.s.SetVoiceAllowed(ctx, "principal:x", w.operator.ID, w.owner.ID, false, true)
+	changed, err := w.s.SetVoiceAllowed(ctx, "principal:x", w.operator.ID, w.owner.ID, false)
 	if !errors.Is(err, ErrOwnerProtected) || changed {
 		t.Fatalf("changed=%t err=%v, want ErrOwnerProtected", changed, err)
 	}
 	if !w.voice(t, w.owner.ID) || w.changeRows(t) != 0 {
 		t.Errorf("the refused write changed the owner (voice %t, %d rows)", w.voice(t, w.owner.ID), w.changeRows(t))
 	}
-	if changed, err := w.s.SetVoiceAllowed(ctx, w.ownerActor, w.owner.ID, w.owner.ID, false, false); err != nil || !changed {
+	if changed, err := w.s.SetVoiceAllowed(ctx, w.ownerActor, w.owner.ID, w.owner.ID, false); err != nil || !changed {
 		t.Fatalf("an owner on an owner: changed=%t err=%v", changed, err)
 	}
 	if w.voice(t, w.owner.ID) || w.changeRows(t) != 1 {
@@ -162,7 +162,7 @@ func TestSetVoiceAllowedAuditFailureRollsBack(t *testing.T) {
 		BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
 		t.Fatal(err)
 	}
-	changed, err := w.s.SetVoiceAllowed(ctx, w.ownerActor, w.owner.ID, w.target.ID, false, false)
+	changed, err := w.s.SetVoiceAllowed(ctx, w.ownerActor, w.owner.ID, w.target.ID, false)
 	if err == nil || changed {
 		t.Fatalf("changed=%t err=%v, want the injected failure", changed, err)
 	}
@@ -172,7 +172,33 @@ func TestSetVoiceAllowedAuditFailureRollsBack(t *testing.T) {
 	if _, err := w.s.db.Exec("DROP TRIGGER fail_voice_audit"); err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := w.s.SetVoiceAllowed(ctx, w.ownerActor, w.owner.ID, w.target.ID, false, false); err != nil || !changed {
+	if changed, err := w.s.SetVoiceAllowed(ctx, w.ownerActor, w.owner.ID, w.target.ID, false); err != nil || !changed {
 		t.Fatalf("after the cause is gone: changed=%t err=%v", changed, err)
+	}
+}
+
+// TestSetVoiceAllowedOwnerMarkReadUnderTheLock: the caller's owner status is
+// read in the transaction. Owner A passed the guard as an owner, then another
+// owner clears A's owner mark (A stays an operator with manage_members);
+// A's write to owner B is refused, B's voice is unchanged and no row is
+// written.
+func TestSetVoiceAllowedOwnerMarkReadUnderTheLock(t *testing.T) {
+	ctx := context.Background()
+	w := newVoiceSwitchWorld(t)
+	a := w.operator
+	b := w.owner
+	if _, err := w.s.db.Exec("UPDATE principals SET owner = 1 WHERE id = ?", a.ID); err != nil {
+		t.Fatal(err)
+	}
+	// The mark is cleared after the request's snapshot of A was taken.
+	if _, err := w.s.db.Exec("UPDATE principals SET owner = 0 WHERE id = ?", a.ID); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := w.s.SetVoiceAllowed(ctx, fmt.Sprintf("principal:%d", a.ID), a.ID, b.ID, false)
+	if !errors.Is(err, ErrOwnerProtected) || changed {
+		t.Fatalf("changed=%t err=%v, want ErrOwnerProtected", changed, err)
+	}
+	if !w.voice(t, b.ID) || w.changeRows(t) != 0 {
+		t.Errorf("the stale owner mark changed B (voice %t, %d rows)", w.voice(t, b.ID), w.changeRows(t))
 	}
 }

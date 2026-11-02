@@ -49,7 +49,7 @@ func (s *Server) handleVoicePermission(w http.ResponseWriter, r *http.Request) {
 	if authed {
 		callerID = caller.ID
 	}
-	changed, err := s.store.SetVoiceAllowed(ctx, auditActor(ctx), callerID, id, allowed, authed && !isOwner(caller))
+	changed, err := s.store.SetVoiceAllowed(ctx, auditActor(ctx), callerID, id, allowed)
 	switch {
 	case errors.Is(err, store.ErrOwnerProtected):
 		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")

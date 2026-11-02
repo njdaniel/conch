@@ -417,7 +417,7 @@ func TestVoicePermissionTokenMintedBeforeTheFlip(t *testing.T) {
 func TestVoicePermissionFlipUnderRequests(t *testing.T) {
 	flip := func(t *testing.T, f *presenceFixture) {
 		t.Helper()
-		if _, err := f.srv.store.SetVoiceAllowed(context.Background(), "system", 0, f.ids["ann"], false, false); err != nil {
+		if _, err := f.srv.store.SetVoiceAllowed(context.Background(), "system", 0, f.ids["ann"], false); err != nil {
 			t.Errorf("flip: %v", err)
 		}
 	}

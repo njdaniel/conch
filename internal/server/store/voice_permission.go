@@ -25,13 +25,15 @@ var ErrNotAPerson = errors.New("store: not a person")
 // already stands. callerID is the writer whose manage_members is rechecked in
 // the transaction (ErrPermissionDenied); 0 means no caller (authentication off). A hidden or unknown id is ErrPrincipalNotFound (one answer,
 // so the route does not tell them apart), an agent is ErrNotAPerson, and
-// forbidOwner makes an owner target ErrOwnerProtected (ADR-010), re-checked
-// inside the transaction. It does not touch live media: the caller runs the
+// A caller who is not an owner gets ErrOwnerProtected for an owner target
+// (ADR-010); whether the caller is an owner is read here, under the write
+// lock, from callerID, never from the request's snapshot of them. It does not touch live media: the caller runs the
 // poller's immediate hook after it commits.
-func (s *Store) SetVoiceAllowed(ctx context.Context, actor string, callerID, principalID int64, allowed bool, forbidOwner bool) (changed bool, err error) {
+func (s *Store) SetVoiceAllowed(ctx context.Context, actor string, callerID, principalID int64, allowed bool) (changed bool, err error) {
 	now := time.Now().Truncate(time.Millisecond)
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		changed = false
+		forbidOwner := false // no caller (authentication off): no owner protection
 		// The caller's authority is asked again under the write lock, before
 		// the target is touched (admin-roles §7.1): a caller who lost
 		// manage_members since the route guard brakes nobody. callerID 0 is
@@ -45,6 +47,12 @@ func (s *Store) SetVoiceAllowed(ctx context.Context, actor string, callerID, pri
 				return &PermissionError{Err: ErrPermissionDenied, Permission: schema.PermManageMembers,
 					Reason: "switching a person's voice needs manage_members"}
 			}
+			var role string
+			var owner bool
+			if err := tx.QueryRowContext(ctx, "SELECT role, owner FROM principals WHERE id = ?", callerID).Scan(&role, &owner); err != nil {
+				return fmt.Errorf("store: set voice_allowed: read caller: %w", err)
+			}
+			forbidOwner = !(Role(role) == RoleOperator && owner)
 		}
 		var (
 			kind   string
