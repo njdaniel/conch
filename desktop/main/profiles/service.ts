@@ -7,12 +7,15 @@
 // storage is protected, main's memory when it is not); the binding of a
 // profile to the account that first signed in; and the order of sign-out.
 //
-// The compatibility gate of #946 (the allowlist of server releases, which
-// decides whether a profile may sign in automatically) belongs in
-// tokenFor(): it is the one place a stored credential is turned into a
-// session at activation.
-import type { ProfileAddResult, ProfileNotice, ProfilesView, StorageStatus } from '../../../web/src/platform/desktop/bridge.ts';
+// The compatibility gate of #946 is in tokenFor(), the one place a stored
+// credential is turned into a session at activation: before the vault is read
+// or the server is asked about a credential, /healthz must name a release on
+// the allowlist (or the development flag must allow it). The same verdict
+// decides whether a sign-in may happen in the window at all.
+import type { CompatView, ProfileAddResult, ProfileNotice, ProfilesView, StorageStatus } from '../../../web/src/platform/desktop/bridge.ts';
+import type { OperationId } from '../../../web/src/platform/operations.ts';
 import { parseServerAddress } from '../api/origin.ts';
+import { judge, permits, REQUIRED_FAMILIES, type CompatPolicy, type HealthResult, type Verdict } from '../compat.ts';
 import type { Classification, PutResult, Vault } from '../vault/vault.ts';
 import type { TeardownHooks } from './hooks.ts';
 import { MAX_PROFILES, type Principal, type Profile, type ProfileStore } from './store.ts';
@@ -23,6 +26,16 @@ import { Switcher, type Account, type Activation, type OpenSpec, type SwitchRepo
 export const VAULT_BOUND_MS = 5_000;
 export const REVOKE_BOUND_MS = 6_000;
 export const VERIFY_BOUND_MS = 10_000;
+
+export const HEALTH_BOUND_MS = 8_000;
+
+// What an activation is opened with: the profile, the credential main found
+// for it (null: signed out), and the way it reports an answer of a required
+// family that was not the document this app was built for.
+export interface ActivationSpec extends OpenSpec {
+  readonly token: string | null;
+  readonly onInvalid: (op: OperationId) => void;
+}
 
 export type ProbeResult = 'ok' | 'certificate' | 'unreachable' | 'not-conch';
 
@@ -35,7 +48,12 @@ export interface ProfilesDeps {
   readonly store: ProfileStore;
   readonly vault: Vault;
   readonly hooks: TeardownHooks;
-  readonly createActivation: (spec: OpenSpec & { readonly token: string | null }) => Promise<Activation>;
+  readonly createActivation: (spec: ActivationSpec) => Promise<Activation>;
+  // The allowlist and the development flag (issue #946), this app's own
+  // version, and a way to ask an origin what /healthz says (no credential).
+  readonly compat: CompatPolicy;
+  readonly desktopVersion: string;
+  readonly readHealth: (origin: string) => Promise<HealthResult>;
   // Asks an address whether it is a Conch server, with no credential.
   readonly probe: (origin: string) => Promise<ProbeResult>;
   // Tells a server that a credential main holds for a profile that is not
@@ -51,6 +69,7 @@ export interface ProfilesDeps {
   readonly vaultBoundMs?: number;
   readonly revokeBoundMs?: number;
   readonly verifyBoundMs?: number;
+  readonly healthBoundMs?: number;
 }
 
 export const MISMATCH = 'profile_account_mismatch';
@@ -94,6 +113,10 @@ export class ProfilesService {
   readonly #signedOut = new Set<string>();
   #storage: Classification = { kind: 'temporarilyUnavailable' };
   #notice: ProfileNotice | null = null;
+  // The verdict on the active profile's server, and the first required family
+  // that answered with something this app does not understand.
+  #verdict: Verdict | null = null;
+  #invalid: string | null = null;
 
   constructor(deps: ProfilesDeps) {
     this.#deps = deps;
@@ -102,7 +125,14 @@ export class ProfilesService {
       now: deps.now,
       log: deps.log,
       ...(deps.stepBoundMs === undefined ? {} : { boundMs: deps.stepBoundMs }),
-      open: async (spec) => deps.createActivation({ ...spec, token: await this.tokenFor(spec.profile, spec.generation) }),
+      open: async (spec) =>
+        deps.createActivation({
+          ...spec,
+          token: await this.tokenFor(spec.profile, spec.generation),
+          onInvalid: (op) => {
+            this.#reportInvalid(op, spec.generation);
+          },
+        }),
     });
   }
 
@@ -128,7 +158,18 @@ export class ProfilesService {
   // session-only credential of this run), then the vault. A stored credential
   // that cannot be used is "sign in again" and nothing else.
   async tokenFor(profile: Profile | null, generation: number): Promise<string | null> {
+    // Whatever was said of the last server is not said of this one.
+    this.#verdict = null;
+    this.#invalid = null;
     if (profile === null) return null;
+    // The server's release first. A server that is not on the allowlist (or
+    // did not say) gets no automatic sign-in: its stored credential is not
+    // read, not sent to it, and not removed; a credential held in memory is
+    // not handed over either.
+    const verdict = await this.#compatible(profile);
+    if (!this.#switcher.isCurrent(generation)) return null;
+    this.#verdict = verdict;
+    if (!permits(verdict.state)) return null;
     const kept = this.#held.get(profile.id);
     if (kept !== undefined) return kept;
     if (this.#signedOut.has(profile.id)) {
@@ -163,6 +204,39 @@ export class ProfilesService {
         this.#storage = got;
         return null;
     }
+  }
+
+  async #compatible(profile: Profile): Promise<Verdict> {
+    const asked = await within(
+      this.#deps.readHealth(profile.origin).catch((): HealthResult => ({ kind: 'unreachable' })),
+      this.#deps.healthBoundMs ?? HEALTH_BOUND_MS,
+    );
+    return judge(this.#deps.compat, asked.done ? asked.value : { kind: 'unreachable' });
+  }
+
+  // reportInvalid records the first answer of a required family that was not
+  // the document this app was built for, from the activation now current.
+  #reportInvalid(op: OperationId, generation: number): void {
+    const family = REQUIRED_FAMILIES[op];
+    if (family === undefined || this.#invalid !== null || !this.#switcher.isCurrent(generation)) return;
+    this.#invalid = family;
+    this.#deps.log(`conch-desktop: a ${family} answer was not what this app version understands`);
+  }
+
+  // signInPermitted: whether a sign-in may happen in the active window, which
+  // is only when its server is on the allowlist (or the flag lets it through).
+  signInPermitted(): boolean {
+    return this.#verdict !== null && permits(this.#verdict.state);
+  }
+
+  #compatView(): CompatView {
+    return {
+      state: this.#verdict?.state ?? 'none',
+      server: this.#verdict?.server ?? null,
+      desktop: this.#deps.desktopVersion,
+      override: this.#deps.compat.override,
+      invalid: this.#invalid,
+    };
   }
 
   // verified checks, before any window holds a stored credential, that the
@@ -227,6 +301,7 @@ export class ProfilesService {
       storage: storageOf(this.#storage),
       recovery: store.corrupt,
       notice: this.#notice,
+      compat: this.#compatView(),
       platform,
     };
   }

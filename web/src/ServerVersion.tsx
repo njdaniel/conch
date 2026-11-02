@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import * as api from './api';
+import { platform } from './platform';
 
 // What a temporary server says of itself, fixed and with no dismiss
 // (ADR-011 item 2.3).
@@ -24,8 +25,13 @@ export function TemporaryBanner() {
 export function ServerVersion({ className, quiet = false }: { className?: string; quiet?: boolean } = {}) {
   const [version, setVersion] = useState<string | null>(null);
   const [mode, setMode] = useState(false);
+  // The desktop app's own version, beside the server's; the browser has none.
+  const [app, setApp] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
+    void platform.services.appVersion?.().then((v) => {
+      if (live) setApp(v);
+    });
     void api.serverHealth().then((h) => {
       if (!live || h === null) return;
       setVersion(h.version);
@@ -36,10 +42,21 @@ export function ServerVersion({ className, quiet = false }: { className?: string
     };
   }, []);
   const banner = mode && !quiet ? <TemporaryBanner /> : null;
+  const shown = version === null || version === '' ? null : version;
   const text =
-    version === null || version === '' ? null : (
+    shown === null && app === null ? null : (
       <span className="version">
-        Version <code>{version}</code>
+        {shown === null ? null : (
+          <>
+            Version <code>{shown}</code>
+          </>
+        )}
+        {shown !== null && app !== null ? ' · ' : null}
+        {app === null ? null : (
+          <>
+            App <code>{app}</code>
+          </>
+        )}
       </span>
     );
   if (className === undefined) {
