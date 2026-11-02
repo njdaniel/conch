@@ -158,7 +158,8 @@ test('F15 arrow keys move between messages, and a keyboard alone edits and repli
   await signIn(page, world, member.token, member.name);
   await openChannel(page, channel);
   await say(page, channel, 'f15 mine to edit');
-  const items = messages(page).locator('.messages > li');
+  // Sent messages only: the pending line is replaced by the stored one, and the stop moves with it.
+  const items = messages(page).locator('.messages > li[data-message-id]');
   await expect(items).toHaveCount(2);
 
   // Tab into the log lands on the newest message; ArrowUp and Home go up.
