@@ -973,23 +973,62 @@ fn signal(child: &Child, name: &str) {
     assert!(status.success(), "kill -{name} failed");
 }
 
-/// How long the client has to leave once it was told to, with a pipe nobody reads. It
-/// leaves in about a second on an idle machine, but first it works through the thirty
-/// thousand lines queued before the signal or the end of input, and a machine with a load
-/// of fifty gives it the processor for a fraction of the time. A client stuck on the pipe
-/// would never leave, so this bounds whether it is stuck, not how fast it is.
-const LEAVE_WITHIN: Duration = Duration::from_secs(60);
+/// The longest the test waits for anything about the client before it gives up and kills
+/// it: a watchdog for cleanup, not a measure of how fast the client is.
+const WATCHDOG: Duration = Duration::from_secs(60);
 
-/// How many bytes the child has read so far, by the kernel's count (`rchar` in
-/// `/proc/<pid>/io`, which counts what was read from a pipe). `None` where the kernel does
-/// not say, and the caller then goes on without waiting.
-fn bytes_read(child: &Child) -> Option<u64> {
-    let io = std::fs::read_to_string(format!("/proc/{}/io", child.id())).ok()?;
-    io.lines()
-        .find_map(|line| line.strip_prefix("rchar: "))?
-        .trim()
-        .parse()
-        .ok()
+/// How long the client may take to leave once it has gone quiet with a full pipe nobody
+/// reads. Its own bounded waits add up to about 3.5 s (a connection attempt 2 s alongside
+/// the reports' 3 s, then the last lines' 1 s, and the gate's half second), measured the
+/// same under a load of seventy. A wait of its own that is not bounded, or one on the
+/// pipe, takes longer than that or for ever: this is the "within a few seconds" the test
+/// stands for. The time is the client's own waits, which the processor's load barely
+/// stretches, because the test starts counting only when the client is idle.
+const LEAVE_WITHIN: Duration = Duration::from_secs(10);
+
+/// How many of the child's threads are running or waiting for a processor right now, by the
+/// kernel (the state in `/proc/<pid>/task/<tid>/stat`). A thread blocked on a pipe, on a
+/// timer or on its input is asleep. Linux only, as the client is: the test fails, saying so,
+/// where `/proc` is not there.
+fn awake_threads(child: &Child) -> usize {
+    let dir = format!("/proc/{}/task", child.id());
+    let tasks = std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("this test needs /proc: {e}"));
+    tasks
+        .filter_map(Result::ok)
+        .filter_map(|task| std::fs::read_to_string(task.path().join("stat")).ok())
+        .filter(|stat| {
+            // `pid (comm) S ...`: the name can hold anything, so the state is what follows
+            // the last closing parenthesis.
+            let state = stat.rsplit_once(')').map(|(_, rest)| rest.trim_start());
+            matches!(state.and_then(|rest| rest.chars().next()), Some('R' | 'D'))
+        })
+        .count()
+}
+
+/// Waits until the client has done everything it was sent and is waiting: for a stretch of `quiet`,
+/// no thread of it is awake (sampled every few milliseconds, so a client that is only
+/// waiting for the processor, which is awake, does not pass). With a full pipe nobody reads
+/// that is the state the test is about: the input is read and answered, the queue is full
+/// and its writer is blocked on the pipe. Nothing is guessed from how long it ought to take,
+/// so a loaded machine only makes this take longer. Panics if the client leaves, or if it
+/// is not quiet within [`WATCHDOG`].
+fn wait_until_quiet(child: &mut Child, quiet: Duration, what: &str) {
+    let began = Instant::now();
+    let mut since = Instant::now();
+    while since.elapsed() < quiet {
+        assert!(
+            began.elapsed() < WATCHDOG,
+            "{what}: the client was not quiet within {WATCHDOG:?}"
+        );
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "{what}: the client left by itself"
+        );
+        if awake_threads(child) > 0 {
+            since = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// Waits for a child to exit by itself, for at most `within`. `None` if it did not.
@@ -1064,25 +1103,10 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
             let junk = b"junk\n".repeat(30_000);
             stdin.write_all(&junk).unwrap();
             stdin.flush().unwrap();
-            // Not a guess at how long the client needs: it is waited for until the kernel
-            // says it has read all of it. A client starved of the processor reads it late,
-            // and a fixed wait would then tell it to leave while it was still at the
-            // junk, which is not what is being tried.
-            let began = Instant::now();
-            while bytes_read(&child).is_some_and(|read| read < junk.len() as u64) {
-                assert!(
-                    began.elapsed() < Duration::from_secs(60)
-                        && child.try_wait().unwrap().is_none(),
-                    "{way}: the client did not read what it was sent"
-                );
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            // And a moment for it to have answered them and filled the pipe.
-            std::thread::sleep(Duration::from_millis(1500));
-            assert!(
-                child.try_wait().unwrap().is_none(),
-                "the client left by itself"
-            );
+            // Not a guess at how long the client needs: it is waited for until it has gone
+            // quiet. It has then read and answered all of it, and with nobody reading, the
+            // pipe and the queue behind it are full and their writer is blocked.
+            wait_until_quiet(&mut child, Duration::from_millis(300), way);
 
             if way == "the end of standard input" {
                 drop(stdin);
@@ -1091,7 +1115,7 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
                 // Standard input stays open: it is the signal that is being tried.
                 std::mem::forget(stdin);
             }
-            let exited = exit_within(&mut child, LEAVE_WITHIN);
+            let exited = exit_within(&mut child, WATCHDOG);
             if exited.is_none() {
                 child.kill().unwrap();
                 child.wait().unwrap();
@@ -1109,7 +1133,7 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
 
         let (code, took) = exited.unwrap_or_else(|| {
             panic!(
-                "{way}: still running {LEAVE_WITHIN:?} later, with nobody reading its standard output"
+                "{way}: still running {WATCHDOG:?} later, with nobody reading its standard output"
             )
         });
         eprintln!("{way}: left after {took:?}");
