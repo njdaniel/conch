@@ -7,7 +7,7 @@ import { chromium, expect, test, type Browser, type Page } from '@playwright/tes
 
 import { makePki, sendJson, startHttps, type Fake, type Pki } from '../unit/support.ts';
 import { startConchd, type Disposable } from './conchd.ts';
-import { launch, type Launched } from './launch.ts';
+import { launch, livePage, type Launched } from './launch.ts';
 
 // A conch credential has this shape; none may be anywhere the renderer or the
 // log can see, except a pasted one while it is being typed.
@@ -50,6 +50,8 @@ async function heap(page: Page): Promise<string> {
   const chunks: string[] = [];
   cdp.on('HeapProfiler.addHeapSnapshotChunk', ({ chunk }) => chunks.push(chunk));
   await cdp.send('HeapProfiler.enable');
+  // Twice: a value the first pass finds held only by a finalizer goes in the second.
+  await cdp.send('HeapProfiler.collectGarbage');
   await cdp.send('HeapProfiler.collectGarbage');
   await cdp.send('HeapProfiler.takeHeapSnapshot', { reportProgress: false });
   await cdp.detach();
@@ -71,11 +73,15 @@ async function invoke(page: Page, name: string, ...args: unknown[]): Promise<unk
 }
 
 // Sign out is in Settings and asks first, as it does in the browser.
-async function signOutThroughSettings(page: Page): Promise<void> {
+// Signing out replaces the window (a new web contents, a fresh session), so it
+// gives the page that took the old one's place.
+async function signOutThroughSettings(browser: Browser, page: Page): Promise<Page> {
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'Sign out', exact: true }).click();
   await page.getByRole('button', { name: 'Yes, sign out', exact: true }).click();
-  await expect(page.getByLabel('Credential')).toBeVisible();
+  const next = await livePage(browser, page);
+  await expect(next.getByLabel('Credential')).toBeVisible();
+  return next;
 }
 
 test.describe('the packaged app against a real conchd', () => {
@@ -114,6 +120,8 @@ test.describe('the packaged app against a real conchd', () => {
   test('takes the address, then the existing sign-in views, and signs a member in with a password', async () => {
     await page.getByLabel('Server address').fill(server.origin);
     await page.getByRole('button', { name: 'Continue' }).click();
+    // Adding the server makes it the active profile: a new window.
+    page = await livePage(browser, page);
     await page.getByLabel('Name', { exact: true }).fill(server.member.name);
     await page.getByLabel('Password', { exact: true }).fill(server.member.password);
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
@@ -143,7 +151,8 @@ test.describe('the packaged app against a real conchd', () => {
     expect(await invoke(page, 'request', { operation: 'messagesSocket' })).toBe('rejected: refused');
     expect(await invoke(page, 'request', { operation: 'listMessages', params: { channel: '../v1/credentials' } })).toBe('rejected: refused');
     expect(await invoke(page, 'request', { url: 'https://example.com/', method: 'GET' })).toBe('rejected: refused');
-    expect(await invoke(page, 'setServerAddress', { origin: 'x' })).toBe('rejected: refused');
+    expect(await invoke(page, 'profileSwitch', 'not-an-id')).toBe('rejected: refused');
+    expect(await invoke(page, 'profileRemove', 'A'.repeat(32))).toBe('rejected: refused');
     expect(await invoke(page, 'signInWithPassword', { name: 1 })).toBe('rejected: refused');
     const lines = app.output().slice(before.length).split('\n').filter((l) => l.includes('refused an IPC call'));
     expect(lines.length).toBeGreaterThanOrEqual(8);
@@ -170,28 +179,36 @@ test.describe('the packaged app against a real conchd', () => {
   });
 
   test('signs out through the API and forgets locally', async () => {
-    await signOutThroughSettings(page);
+    page = await signOutThroughSettings(browser, page);
     expect(await invoke(page, 'restore')).toMatchObject({ ok: false, kind: 'unauthorized' });
     expect(await invoke(page, 'request', { operation: 'listChannels' })).toEqual({ kind: 'unauthorized' });
   });
 
   test('signs in with a pasted credential, which main keeps and the page does not, in its DOM, storage or memory', async () => {
-    await page.getByLabel('Credential').fill(server.member.token);
+    // Typed, not filled: fill() leaves the value in Playwright's own utility
+    // world in the same renderer, which the heap scan would then find.
+    await page.getByLabel('Credential').click();
+    await page.keyboard.type(server.member.token);
     await page.getByRole('button', { name: 'Use credential' }).click();
     await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
+    // The page keeps the credential without waiting for main (credentials.write
+    // hands it over and goes on): scan only once main says it is in force, so
+    // the scan does not race the handoff itself.
+    await expect.poll(async () => ((await invoke(page, 'restore')) as { ok?: boolean }).ok).toBe(true);
     const seen = await renderer(page);
     expect(seen).not.toContain(server.member.token);
     expect(app.output()).not.toContain(server.member.token);
     // Nor in the page's memory: the client pinned the stand-in.
     expect(await heap(page)).not.toContain(server.member.token);
-    await signOutThroughSettings(page);
+    page = await signOutThroughSettings(browser, page);
   });
 
   // An operator's pasted credential is checked, then waits behind the
   // operator warning. Declined, it was never in force: nothing runs as the
   // operator, and a reload does not sign the window in.
   async function pasteOperator(): Promise<void> {
-    await page.getByLabel('Credential').fill(server.operatorToken);
+    await page.getByLabel('Credential').click();
+    await page.keyboard.type(server.operatorToken);
     await page.getByRole('button', { name: 'Use credential' }).click();
     await expect(page.getByRole('heading', { name: 'This is an operator credential' })).toBeVisible();
     expect(await invoke(page, 'restore')).toMatchObject({ ok: false, kind: 'unauthorized' });
@@ -200,6 +217,8 @@ test.describe('the packaged app against a real conchd', () => {
 
   test('an operator credential declined at the warning is never in force, and a reload does not find it', async () => {
     await pasteOperator();
+    // Declining signs nobody out of anything: the client only drops what it
+    // held, so the window stays.
     await page.getByRole('button', { name: 'Sign out', exact: true }).click();
     await expect(page.getByLabel('Credential')).toBeVisible();
     expect(await invoke(page, 'restore')).toMatchObject({ ok: false, kind: 'unauthorized' });
@@ -219,13 +238,20 @@ test.describe('the packaged app against a real conchd', () => {
   });
 
   test('an operator credential is in force once the person continues past the warning, and the page holds only the stand-in', async () => {
+    // This server's saved entry is bound to the member who signed in above, and
+    // another account never takes its place: the operator signs in on a second
+    // entry for the same server (issue #945).
+    await page.getByRole('button', { name: 'Servers' }).click();
+    await page.getByLabel('Server address').fill(server.origin);
+    await page.getByRole('button', { name: 'Continue' }).click();
+    page = await livePage(browser, page);
     await pasteOperator();
     await page.getByRole('button', { name: 'Continue anyway' }).click();
     await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
-    expect(await invoke(page, 'restore')).toMatchObject({ ok: true });
+    await expect.poll(async () => ((await invoke(page, 'restore')) as { ok?: boolean }).ok).toBe(true);
     expect(await renderer(page)).not.toContain(server.operatorToken);
     expect(await heap(page)).not.toContain(server.operatorToken);
-    await signOutThroughSettings(page);
+    page = await signOutThroughSettings(browser, page);
   });
 });
 
@@ -266,10 +292,12 @@ test.describe('TLS in the packaged app', () => {
 
   test('trusts it when the CA is in the trust store the app loads (the private-CA procedure)', async () => {
     const app = launch({ debugPort: true, env: { SSL_CERT_FILE: pki.caPath } });
-    const { browser, page } = await enter(app);
+    const { browser, page: first } = await enter(app);
     try {
-      await expect(page.getByRole('alert')).toHaveText('');
+      // The address was good: the saved server is now the active one, in a new window.
+      const page = await livePage(browser, first);
       await expect(page.getByRole('heading', { name: 'Server address' })).toHaveCount(0);
+      await expect(page.getByRole('banner', { name: 'Server' })).toContainText('localhost');
       await expect.poll(() => https.seen.some((s) => s.url === '/healthz')).toBe(true);
     } finally {
       await browser.close();
