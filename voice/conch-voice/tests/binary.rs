@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use support::reaped::Reaped;
 use support::stub::{FAKE_JOIN, FAKE_LOGIN, FAKE_ROOM, Reply, Stub, join_token, room_name};
 
 const BIN: &str = env!("CARGO_BIN_EXE_conch-voice");
@@ -364,14 +365,14 @@ impl NotLiveKit {
 
 /// Collects a child's output on threads of their own, so that neither pipe fills.
 struct Running {
-    child: Child,
+    child: Reaped,
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
 }
 
 impl Running {
     fn start(command: &mut Command) -> Self {
-        let mut child = command.spawn().unwrap();
+        let mut child = Reaped::spawn(command).unwrap();
         let stdout = Arc::new(Mutex::new(String::new()));
         let stderr = Arc::new(Mutex::new(String::new()));
         let (out, kept) = (child.stdout.take().unwrap(), Arc::clone(&stdout));
@@ -846,8 +847,7 @@ fn on_a_terminal_line(private: &Path, line: &str, token: bool) -> (Option<i32>, 
     if token {
         command.env("CONCH_TOKEN", FAKE_LOGIN);
     }
-    let mut child = command
-        .spawn()
+    let mut child = Reaped::spawn(&mut command)
         .expect("script(1) from util-linux is needed to give the binary a terminal");
     let stdin = child.stdin.take();
     let mut terminal = child.stdout.take().unwrap();
@@ -1038,7 +1038,7 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
             // What it logs about the joins that fail is not what this is about.
             .stderr(Stdio::null());
         let (exited, room, unread) = tokio::task::spawn_blocking(move || {
-            let mut child = command.spawn().unwrap();
+            let mut child = Reaped::spawn(&mut command).unwrap();
             // The command holds the client's end too: the pipe ends when the client's does.
             drop(command);
             let mut stdin = child.stdin.take().unwrap();
