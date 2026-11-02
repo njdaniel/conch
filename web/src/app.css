@@ -535,7 +535,9 @@ label {
 }
 
 .channel-list li > button {
-  flex: 1;
+  /* A name keeps at least this much before the badges and the ⋯ wrap to a
+     line below it, rather than the name breaking letter by letter. */
+  flex: 1 1 6rem;
   min-width: 0;
   justify-content: flex-start;
   padding: 0.4rem 0.6rem;
@@ -602,6 +604,15 @@ label {
    form takes a line of its own under the row. */
 .channel-list li {
   flex-wrap: wrap;
+}
+
+/* Tighter than a message's, in the narrow channel column; a phone keeps its
+   44 px target. */
+@media (min-width: 700px) {
+  .channel-list .more-actions {
+    min-width: 1.75rem;
+    padding: 0 var(--s1);
+  }
 }
 
 .channel-list .message-menu {
