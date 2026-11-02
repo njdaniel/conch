@@ -15,7 +15,7 @@ function msg(id: number, fields: Partial<MessageV2> = {}): MessageV2 {
 }
 
 function chat(messages: readonly MessageV2[]): ChannelChat {
-  return { byId: new Map(messages.map((m) => [m.id, m])), pending: [], sentIds: new Set(), history: 'ready', older: 'idle', exhausted: true, trimmed: false, dropped: 0, nextLocalId: 9 };
+  return { byId: new Map(messages.map((m) => [m.id, m])), pending: [], sentIds: new Set(), history: 'ready', older: 'idle', exhausted: true, trimmed: false, dropped: 0, nextLocalId: 9, edits: new Map(), final: new Set() };
 }
 
 function conversation(messages: readonly MessageV2[]) {

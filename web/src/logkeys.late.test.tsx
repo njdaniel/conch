@@ -24,7 +24,7 @@ function msg(id: number, fields: Partial<MessageV2> = {}): MessageV2 {
 
 function mount() {
   const messages = [msg(1, { payload: { schema: 'conch.file_attachment.v1', data: { file_ids: [17] } } }), msg(2)];
-  const chat: ChannelChat = { byId: new Map(messages.map((m) => [m.id, m])), pending: [], sentIds: new Set(), history: 'ready', older: 'idle', exhausted: true, trimmed: false, dropped: 0, nextLocalId: 1 };
+  const chat: ChannelChat = { byId: new Map(messages.map((m) => [m.id, m])), pending: [], sentIds: new Set(), history: 'ready', older: 'idle', exhausted: true, trimmed: false, dropped: 0, nextLocalId: 1, edits: new Map(), final: new Set() };
   return render(
     <Conversation
       channel="general"
