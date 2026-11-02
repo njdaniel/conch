@@ -492,12 +492,16 @@ func TestSetRoleRoute(t *testing.T) {
 		}
 	})
 	t.Run("demote to member closes their invites", func(t *testing.T) {
-		tok, err := newCredentialToken(t, f, f.cand.ID)
-		if err != nil {
-			t.Fatal(err)
+		// A legacy open link, as an operator made one before the community
+		// model (POST /v1/invites is retired), and a member link, which a
+		// demotion leaves standing.
+		if _, err := f.srv.store.CreateInvite(ctx, "system", f.cand.ID,
+			schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"general"}}, store.InviteOptions{}, time.Now()); err != nil {
+			t.Fatalf("operator invite: %v", err)
 		}
-		if rec := f.do(t, "POST", "/v1/invites", tok, `{"kind":"open","channels":["general"]}`); rec.Code != http.StatusCreated {
-			t.Fatalf("operator invite = %d %s", rec.Code, rec.Body)
+		if _, err := f.srv.store.CreateMemberLink(ctx, "system", f.cand.ID,
+			schema.CreateInviteRequestV2{Kind: schema.InviteKindMember}, store.InviteOptions{}, time.Now()); err != nil {
+			t.Fatalf("operator member link: %v", err)
 		}
 		rec := set(t, f.rootTok, f.cand.ID, `{"role":"member"}`)
 		if rec.Code != http.StatusOK {
@@ -549,13 +553,6 @@ func TestSetRoleRoute(t *testing.T) {
 
 // httptestRecorder names the recorder f.do returns, for the helpers above.
 type httptestRecorder = httptest.ResponseRecorder
-
-// newCredentialToken issues a fresh script credential for id.
-func newCredentialToken(t *testing.T, f *adminFixture, id int64) (string, error) {
-	t.Helper()
-	_, tok, err := f.srv.store.CreateCredential(context.Background(), "system", id, "test", nil)
-	return tok, err
-}
 
 // TestAdministrationViews: whoami's owner, the channel list's manages, and
 // the member list's manages, role and can_decide per viewer (§7).

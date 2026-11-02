@@ -329,6 +329,10 @@ func entryRows() []row {
 			probe: func(*world, subject) probe {
 				return post("/v1/invites/preview", schema.InvitePreviewRequestV1{Code: unknownInvite})
 			}},
+		{route: "POST /v2/invites/preview", what: "previews a code nobody gave her", want: answer{http.StatusNotFound, schema.ErrorCodeInviteInvalid},
+			probe: func(*world, subject) probe {
+				return post("/v2/invites/preview", schema.InvitePreviewRequestV1{Code: unknownInvite})
+			}},
 		{route: "POST /v1/sign-in-links/preview", what: "previews a sign-in link nobody gave her", want: answer{http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
 			probe: func(*world, subject) probe {
 				return post("/v1/sign-in-links/preview", schema.SignInLinkPreviewRequestV1{Code: unknownLink})

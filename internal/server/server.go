@@ -73,7 +73,7 @@ type Config struct {
 	// clientaddr.go). Empty, the header is never read and the client is the
 	// connection's peer.
 	TrustedProxies []netip.Prefix
-	// InviteAllowance is how many outstanding personal invites one inviter
+	// InviteAllowance is how many open member links one maker
 	// who is not an operator may hold. Zero or less means
 	// store.DefaultPersonalInviteAllowance.
 	InviteAllowance int
