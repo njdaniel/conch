@@ -30,8 +30,8 @@ export type ChannelsAction =
   | { readonly type: 'renamed'; readonly id: number; readonly name: string }
   // A channel's visibility and default mark (issue #1183), by its id: the
   // operator's own answer, or the events socket's conch.channel.v1. What the
-  // server says replaces what is held: an absent field is public, or not a
-  // default.
+  // server says replaces what is held; a field it omits keeps the value held
+  // (a reader takes an absent visibility as private, so nothing is guessed).
   | { readonly type: 'settings'; readonly id: number; readonly visibility: ChannelVisibility | undefined; readonly default: boolean | undefined }
   // The caller's manager grant in one channel, from its accepted member list.
   | { readonly type: 'managed'; readonly id: number; readonly manages: boolean }
@@ -98,14 +98,16 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
     case 'settings': {
       const held = state.channels.find((channel) => channel.id === action.id);
       if (held === undefined) return state;
-      if (held.visibility === action.visibility && held.default === action.default) return state;
+      const visibility = action.visibility ?? held.visibility;
+      const isDefault = action.default ?? held.default;
+      if (held.visibility === visibility && held.default === isDefault) return state;
       const next: ChannelV0 = {
         id: held.id,
         name: held.name,
         created_at: held.created_at,
         ...(held.manages === undefined ? {} : { manages: held.manages }),
-        ...(action.visibility === undefined ? {} : { visibility: action.visibility }),
-        ...(action.default === undefined ? {} : { default: action.default }),
+        ...(visibility === undefined ? {} : { visibility }),
+        ...(isDefault === undefined ? {} : { default: isDefault }),
       };
       return { ...state, channels: state.channels.map((channel) => (channel.id === action.id ? next : channel)) };
     }

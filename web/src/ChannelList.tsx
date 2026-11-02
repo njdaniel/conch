@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { Fragment, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { Glyph } from './Icons';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { SettingsChange } from './ChannelSettingsAsk';
@@ -140,6 +140,7 @@ function ChannelRow({
     items.push({
       key: 'default',
       label: isDefault ? 'Stop being a default channel' : 'Make default channel',
+      ...(!isDefault && isPrivate ? { disabled: true, reason: 'A default channel must be public. Make it public first.' } : {}),
       onSelect: () => {
         setRenaming(false);
         setChange({ kind: 'default', to: !isDefault });
@@ -195,10 +196,16 @@ function ChannelRow({
           })
         : null}
       {change !== null && mayManage && renderSettings !== undefined
-        ? renderSettings(channel, change, () => {
-            setChange(null);
-            (more.current ?? main.current)?.focus();
-          })
+        ? // Keyed on the change: another menu item remounts the confirmation, so
+          // what the row holds and what is shown never disagree.
+          (
+            <Fragment key={`${change.kind}:${String(change.to)}`}>
+              {renderSettings(channel, change, () => {
+                setChange(null);
+                (more.current ?? main.current)?.focus();
+              })}
+            </Fragment>
+          )
         : null}
     </li>
   );

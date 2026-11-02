@@ -104,7 +104,7 @@ for (const [size, options, phone] of sizes) {
       await expectFits(page, `${size}: a private channel's row`);
       await expectFits(seen.page, `${size}: a private channel's row, the member's`);
 
-      // A default channel must be public: Make private is disabled, with why.
+      // Make it public again, asked first.
       await press(more);
       await expect(row.getByRole('menuitem')).toContainText(['Make public', 'Make default channel']);
       await press(row.getByRole('menuitem', { name: 'Make public' }));
@@ -114,6 +114,7 @@ for (const [size, options, phone] of sizes) {
       await expect(row.locator('svg')).toHaveCount(0);
       await expect(memberRow.locator('svg')).toHaveCount(0);
 
+      // A default channel must be public: Make private is disabled, with why.
       await press(more);
       await press(row.getByRole('menuitem', { name: 'Make default channel' }));
       await expect(ask).toHaveCount(0);
@@ -128,8 +129,7 @@ for (const [size, options, phone] of sizes) {
       await expect(row.getByRole('menuitem', { name: 'Make private' })).not.toHaveAttribute('aria-disabled', 'true');
     } finally {
       // As found: public and not a default.
-      await settings(world, made.id, { default: false });
-      await settings(world, made.id, { visibility: 'public' });
+      await settings(world, made.id, { visibility: 'public', default: false });
       const left = (await ok(world, world.tokens.operator, 'GET', '/v1/channels', listChannelsResponse)).channels.find((c) => c.id === made.id);
       expect(left?.visibility).toBe('public');
       expect(left?.default ?? false).toBe(false);

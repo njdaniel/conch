@@ -481,6 +481,23 @@ describe('a rename made elsewhere', () => {
     expect(renames()).toEqual([]);
   });
 
+  it('a frame that makes the channel private puts the lock on its row, and one that makes it public takes it off (issue #1183)', async () => {
+    const { events } = await open();
+    const described = () => {
+      const ids = (within(nav()).getByRole('button', { name: 'general' }).getAttribute('aria-describedby') ?? '').split(' ');
+      return ids.map((id) => document.getElementById(id)?.textContent ?? '').join(' ');
+    };
+    expect(described()).not.toContain('private channel');
+    events.send({ schema: 'conch.channel.v1', channel_id: 7, name: 'general', created_at: at, visibility: 'private' });
+    await waitFor(() => {
+      expect(described()).toContain('private channel');
+    });
+    events.send({ schema: 'conch.channel.v1', channel_id: 7, name: 'general', created_at: at, visibility: 'public' });
+    await waitFor(() => {
+      expect(described()).not.toContain('private channel');
+    });
+  });
+
   it('a channel document for another channel, or one that does not validate, changes nothing', async () => {
     const { events } = await open();
     events.send({ schema: 'conch.channel.v1', channel_id: 8, name: 'ops-room', created_at: at });

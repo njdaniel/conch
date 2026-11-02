@@ -96,6 +96,9 @@ describe('the lock', () => {
     const back = channelsReducer(flipped, { type: 'settings', id: 3, visibility: 'public', default: false });
     expect(back.channels[2]).toEqual({ ...plain, visibility: 'public', default: false });
     expect(channelsReducer(back, { type: 'settings', id: 3, visibility: 'public', default: false })).toBe(back);
+    // A frame that omits a field keeps what is held.
+    expect(channelsReducer(back, { type: 'settings', id: 3, visibility: undefined, default: undefined })).toBe(back);
+    expect(channelsReducer(back, { type: 'settings', id: 3, visibility: 'private', default: undefined }).channels[2]).toEqual({ ...plain, visibility: 'private', default: false });
     expect(channelsReducer(back, { type: 'settings', id: 99, visibility: 'private', default: true })).toBe(back);
   });
 });
@@ -125,6 +128,32 @@ describe('the menu items', () => {
     fireEvent.click(item);
     expect(screen.queryByRole('group')).toBeNull();
     expect(settings).not.toHaveBeenCalled();
+  });
+});
+
+describe('a private channel offered as a default', () => {
+  it('is shown disabled with the reason, and choosing it sends nothing', () => {
+    render(view(channels, true));
+    const item = within(menuOf('secret')).getByRole('menuitem', { name: 'Make default channel' });
+    expect(item.getAttribute('aria-disabled')).toBe('true');
+    expect(document.getElementById(item.getAttribute('aria-describedby') ?? '')?.textContent).toBe('A default channel must be public. Make it public first.');
+    fireEvent.click(item);
+    expect(screen.queryByRole('group')).toBeNull();
+    expect(settings).not.toHaveBeenCalled();
+  });
+});
+
+describe('picking another item while a confirmation is open', () => {
+  it('shows the new one, and the old question is gone', () => {
+    settings.mockReturnValue(new Promise(() => undefined));
+    render(view(channels, true));
+    fireEvent.click(within(menuOf('plain')).getByRole('menuitem', { name: 'Make private' }));
+    expect(screen.getByText('Make #plain private? Only its current members will see it.')).toBeDefined();
+    fireEvent.click(within(menuOf('plain')).getByRole('menuitem', { name: 'Make default channel' }));
+    expect(screen.queryByText('Make #plain private? Only its current members will see it.')).toBeNull();
+    expect(screen.getAllByRole('group')).toHaveLength(1);
+    expect(settings).toHaveBeenCalledTimes(1);
+    expect(settings).toHaveBeenCalledWith(3, { default: true });
   });
 });
 
@@ -220,10 +249,10 @@ describe('a refusal', () => {
     expect(unauthorized).toBe(0);
   });
 
-  it('for making a private channel a default says so in its own words', async () => {
+  it('for a default mark the server refuses as a conflict (the channel went private meanwhile) says so in its own words', async () => {
     settings.mockResolvedValue({ ok: false, failure: 'invalid', code: 'channel_settings_conflict', message: hostile });
     render(view(channels, true));
-    fireEvent.click(within(menuOf('secret')).getByRole('menuitem', { name: 'Make default channel' }));
+    fireEvent.click(within(menuOf('plain')).getByRole('menuitem', { name: 'Make default channel' }));
     expect((await screen.findByRole('status')).textContent).toBe('A private channel cannot be a default channel. Make it public first.');
   });
 
