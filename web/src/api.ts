@@ -87,12 +87,15 @@ import {
   listChannelMembersResponseV1,
   listChannelsResponse,
   renameChannelResponseV1,
+  channelSettingsResponseV1,
   type AddChannelMemberRequestV1,
   type ChannelMemberV1,
   type ChannelV0,
   type CreateChannelRequest,
   type PutChannelMemberRequestV1,
   type RenameChannelRequestV1,
+  type ChannelSettingsRequestV1,
+  type ChannelSettingsResponseV1,
 } from './schema/channel';
 import { fileAttachmentPayloadSchema, fileV1, type FileAttachmentV1, type FileV1 } from './schema/file';
 import {
@@ -1715,6 +1718,16 @@ export async function renameChannel(id: number, from: string, name: string): Pro
   if (!reply.res.ok) return inviteRefused(reply.res);
   const renamed = await readBody(reply.res, renameChannelResponseV1);
   return renamed.ok ? { ok: true, value: renamed.value.channel } : renamed;
+}
+
+// channelSettings makes a channel public or private, a default or not
+// (PUT /v1/channels/{id}/settings, issue #1183): for holders of manage_channels,
+// after a recent proof (reauth_required, which authedSend asks for). A refusal
+// carries the server's code: channel_settings_conflict (a default channel must
+// be public), permission_denied, channel_not_found. The answer is the channel
+// as it now is, and whether unmarking the last default turned open sign-up off.
+export async function channelSettings(id: number, request: ChannelSettingsRequestV1): Promise<InviteResult<ChannelSettingsResponseV1>> {
+  return readSent(await authedSend(call('channelSettings', { id }), request), channelSettingsResponseV1);
 }
 
 // How every channel-addressed route answers a name that is not a channel of
