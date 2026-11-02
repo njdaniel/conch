@@ -399,7 +399,7 @@ func (w *world) buildCohort() (*feed, error) {
 	if p.nickHeld, err = w.hold(p.nick, p.channel, ""); err != nil {
 		return nil, err
 	}
-	if w.lk != nil {
+	if w.lk != nil && p.nick.guest == nil {
 		// A guest's grant is to join the plaza's room, and nothing more.
 		claims, err := videoGrant(p.nickHeld.grant)
 		if err != nil {
@@ -471,6 +471,9 @@ func (w *world) buildCohort() (*feed, error) {
 // this check's trials LiveKit stopped listing a bare one well before its
 // deadline came.
 func (w *world) joinVoice(m *member, room string) error {
+	if m.guest != nil {
+		return nil // a guest holds no voice since A4 (#1016)
+	}
 	sess, err := w.session(m, w.p.channel)
 	if err != nil {
 		return err

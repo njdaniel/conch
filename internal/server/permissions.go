@@ -31,15 +31,20 @@ import (
 //     are enforced vacuously, so the personal preset can apply before them.
 //   - Rows 7-11 are enforced by the route classes of this issue and the
 //     store's standing checks of A3a (#1014).
-//   - Rows 3 (make_member_links), 5 (use_voice) and 6 (share_screen) join
-//     in A4 (#1016), which ships in the same release.
+//   - Rows 3 (make_member_links), 5 (use_voice) and 6 (share_screen) joined
+//     in A4 (#1016), which ships in the same release: the store's making and
+//     redeeming of links, every voice route, the poller's passes and the
+//     share routes read them.
 //
 // TestEnforcedPermissionsAreHonest fails when a permission is listed here
 // while one of its gates still reads only the role or the brake.
 var enforcedPermissions = []schema.Permission{
 	schema.PermCreatePublicChannels,
 	schema.PermCreatePrivateChannels,
+	schema.PermMakeMemberLinks,
 	schema.PermSeeMemberDirectory,
+	schema.PermUseVoice,
+	schema.PermShareScreen,
 	schema.PermManageMembers,
 	schema.PermActAsMembers,
 	schema.PermManageChannels,
@@ -169,7 +174,8 @@ func (s *Server) permissionsWarnings(ctx context.Context, doc store.PermissionsD
 //     (403 permission_denied).
 //
 // A write that changed something tells every human events socket
-// (conch.permissions_changed.v1), ends any share whose share_screen is now
+// (conch.permissions_changed.v1), removes from voice everyone whose use_voice
+// is now withheld (voiceWithheld), ends any share whose share_screen is now
 // withheld, and, when it turned act_as_members off for operators, answers
 // issued_to_others.
 func (s *Server) handlePutPermissions(w http.ResponseWriter, r *http.Request) {
@@ -220,6 +226,12 @@ func (s *Server) handlePutPermissions(w http.ResponseWriter, r *http.Request) {
 		// The document is server-wide, so telling everyone it changed
 		// tells no one anything about anyone (design §8.6).
 		s.events.notifyPermissionsChangedAll()
+		// Before the answer, in this order: everyone who lost use_voice
+		// leaves voice (their shares end with them), then whoever lost
+		// only share_screen loses the share (design §7.5).
+		if lostVoice(out.Changes) {
+			s.voiceWithheld(ctx)
+		}
 		if lostShare(out.Changes) {
 			s.endWithheldShares(ctx)
 		}
@@ -318,6 +330,14 @@ func (s *Server) writePermissionsRefusal(w http.ResponseWriter, r *http.Request,
 func turnedOff(changes []store.PermissionCellChange, role schema.PermissionRole, perm schema.Permission) bool {
 	return slices.ContainsFunc(changes, func(c store.PermissionCellChange) bool {
 		return c.Role == role && c.Permission == perm && !c.Granted
+	})
+}
+
+// lostVoice reports whether changes may have withheld use_voice from
+// someone: use_voice turned off in a column.
+func lostVoice(changes []store.PermissionCellChange) bool {
+	return slices.ContainsFunc(changes, func(c store.PermissionCellChange) bool {
+		return !c.Granted && c.Permission == schema.PermUseVoice
 	})
 }
 
