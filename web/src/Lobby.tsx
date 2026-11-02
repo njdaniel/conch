@@ -4,7 +4,7 @@ import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
-import { JoiningSettings, type JoiningRequest } from './joiningSettings';
+import { JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
 import { MicTestShown, phoneViews, useAppHeight, usePhone, VoiceLive, VoiceStrip, type PhoneView } from './phone';
 import type { ChannelV0 } from './schema/channel';
 import { StageHost } from './stage';
@@ -85,6 +85,7 @@ export function Lobby({
   banner,
   visit,
   admin,
+  onSettingsOpen,
   overlay,
 }: {
   readonly origin: string;
@@ -146,6 +147,8 @@ export function Lobby({
   // The server's own settings, for an operator (issue #714): joining and
   // guests, in Settings.
   readonly admin?: ReactNode;
+  // Called each time Settings opens, so what it shows from whoami is fresh.
+  readonly onSettingsOpen?: () => void;
   // A question over the whole page, Settings included (issue #714: a recent
   // proof of the password). While it is shown everything else is inert and
   // stays as it was, so what was being typed is kept.
@@ -273,6 +276,9 @@ export function Lobby({
   // button is inert behind it, and cannot take focus.
   const settingsClosed = useRef(false);
   useEffect(() => {
+    if (settingsOpen) onSettingsOpen?.();
+  }, [settingsOpen, onSettingsOpen]);
+  useEffect(() => {
     if (settingsOpen) {
       if (toJoining.current) toJoining.current = false;
       else settingsHeading.current?.focus();
@@ -317,6 +323,7 @@ export function Lobby({
 
   return (
     <JoiningSettings.Provider value={joining}>
+    <SettingsOpen.Provider value={settingsOpen}>
       <div ref={lobbyEl} className={phone ?`lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}>
         {/* While Settings is open the rest of the page is inert: the panel is
             modal, and focus cannot wander behind its backdrop. */}
@@ -500,7 +507,7 @@ export function Lobby({
             })}
           </section>
           {admin === undefined || admin === null ? null : (
-            <section aria-label="Server" className="drawer-section">
+            <section aria-label="Administration" className="drawer-section">
               {admin}
             </section>
           )}
@@ -577,6 +584,7 @@ export function Lobby({
         </div>
         {overlay}
       </div>
+    </SettingsOpen.Provider>
     </JoiningSettings.Provider>
   );
 }
