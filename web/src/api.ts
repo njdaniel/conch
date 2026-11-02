@@ -1118,6 +1118,28 @@ export async function putPermissions(request: PutPermissionsRequestV1): Promise<
   return readSent(await authedSend(call('putPermissions'), request), permissionsResponseV1);
 }
 
+// signOutPrincipalEverywhere revokes every credential of another person
+// (POST /v1/principals/{id}/credentials/revoke-all), as the permissions
+// console's issued_to_others list offers it. Unlike signOutEverywhere it does
+// not forget the credential held here: if the person is the caller, the next
+// request is refused and the page signs out as for any revoked credential. It
+// needs manage_members and a recent proof; a refusal carries the server's code.
+export async function signOutPrincipalEverywhere(principal: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('revokeAll', { principal })));
+}
+
+// revokeIssuedCredential revokes one credential an operator issued to someone
+// else (DELETE /v1/credentials/{id}); manage_members and a recent proof.
+export async function revokeIssuedCredential(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('revokeCredential', { id })));
+}
+
+// revokeIssuedHook revokes one hook an operator bound to someone else
+// (DELETE /v1/hooks/{id}); manage_members and a recent proof.
+export async function revokeIssuedHook(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('revokeHook', { id })));
+}
+
 // memberLinks reads the member links the caller may see (GET /v2/invites),
 // newest first: every link with manage_members, else the caller's own. Without
 // manage_channels a link names only the caller's channels and counts the
