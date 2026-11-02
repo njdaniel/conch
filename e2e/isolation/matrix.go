@@ -209,6 +209,25 @@ func coreMatrixRows() []row {
 		operator("POST /v0/channels", "makes a channel with A's channel's name", aChannel, func(_ *world, s subject) probe {
 			return post("/v0/channels", schema.CreateChannelRequest{Name: s.name})
 		}),
+		// Member channel creation (issue #981) is the documented existence
+		// oracle on private names (community model §5, R2): A's private
+		// channel's name collides, and the answer is the one 409 every
+		// collision gets, counted against B's daily attempts and audited
+		// without the name.
+		{route: "POST /v1/channels", what: "makes a channel with A's private channel's name", pick: aChannel,
+			want:    answer{http.StatusConflict, "channel_exists"},
+			noGhost: "the documented oracle: a name nobody holds is created, not refused; the 409 is bounded and audited instead",
+			after:   checkCreateRefusedAudited,
+			probe: func(_ *world, s subject) probe {
+				return post("/v1/channels", schema.CreateChannelRequestV1{Name: s.name, Visibility: schema.ChannelPrivate})
+			}},
+		// Channel settings (issue #981) are an operator's: refused before
+		// the id is looked up, the same for A's private channel as for one
+		// that never existed.
+		operator("PUT /v1/channels/{id}/settings", "changes A's private channel's settings", aChannel, func(_ *world, s subject) probe {
+			public := schema.ChannelPublic
+			return put("/v1/channels/"+id(s.id)+"/settings", schema.ChannelSettingsRequestV1{Visibility: &public})
+		}),
 		// Renaming a channel (issue #791) hides A's channel from B's members,
 		// including a manager of a different channel.
 		byChannel("PUT /v1/channels/{id}/name", "renames A's channel", func(_ *world, s subject) probe {

@@ -210,6 +210,15 @@ func channelRenameStandingTx(ctx context.Context, tx execer, channelID, callerID
 }
 
 func channelRenameLimitTx(ctx context.Context, tx execer, actor string, lim RenameLimits, now time.Time) error {
+	return channelWriteLimitTx(ctx, tx, actor, AuditChannelRenamed, AuditChannelRenameRefused, lim, now)
+}
+
+// channelWriteLimitTx is the daily bound on a channel name write, renaming
+// or creating (issues #791, #981), counted from the audit trail over
+// RenameWindow: lim.Renames counts actor's done rows marked limited=1, and
+// lim.Attempts those plus its refused rows. Over either it answers
+// RenameLimitedError with the time a slot frees. A zero bound is no bound.
+func channelWriteLimitTx(ctx context.Context, tx execer, actor, done, refused string, lim RenameLimits, now time.Time) error {
 	var until time.Time
 	for _, c := range []struct {
 		limit   int
@@ -222,21 +231,21 @@ func channelRenameLimitTx(ctx context.Context, tx execer, actor string, lim Rena
 			continue
 		}
 		where := `FROM audit_events WHERE actor = ? AND created_at > ? AND action = ? AND detail LIKE '% limited=1'`
-		args := []any{actor, now.Add(-RenameWindow).UnixMilli(), AuditChannelRenamed}
+		args := []any{actor, now.Add(-RenameWindow).UnixMilli(), done}
 		if c.attempt {
 			where = `FROM audit_events WHERE actor = ? AND created_at > ? AND (action = ? OR (action = ? AND detail LIKE '% limited=1'))`
-			args = []any{actor, now.Add(-RenameWindow).UnixMilli(), AuditChannelRenameRefused, AuditChannelRenamed}
+			args = []any{actor, now.Add(-RenameWindow).UnixMilli(), refused, done}
 		}
 		var count int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) `+where, args...).Scan(&count); err != nil {
-			return fmt.Errorf("store: count channel renames of %s: %w", actor, err)
+			return fmt.Errorf("store: count %s of %s: %w", done, actor, err)
 		}
 		if count < c.limit {
 			continue
 		}
 		var freeing int64
 		if err := tx.QueryRowContext(ctx, `SELECT created_at `+where+` ORDER BY created_at, id LIMIT 1 OFFSET ?`, append(args, count-c.limit)...).Scan(&freeing); err != nil {
-			return fmt.Errorf("store: count channel renames of %s: %w", actor, err)
+			return fmt.Errorf("store: count %s of %s: %w", done, actor, err)
 		}
 		if free := time.UnixMilli(freeing).Add(RenameWindow); free.After(until) {
 			until = free
