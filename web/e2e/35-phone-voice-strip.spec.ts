@@ -367,31 +367,19 @@ test.describe('the phone voice strip with LiveKit', () => {
         await voice.getByRole('button', { name: 'Watch', exact: true }).tap();
         await expect(shareView(page)).toContainText('alice is sharing', { timeout: 30_000 });
         const options = voice.getByRole('button', { name: 'Voice options' });
-        // Voice options is a toggle, so each tap here is made only while the
-        // button says the options are shut (and the open microphone's only
-        // while it is not chosen), and is checked by what it should show; a
-        // tap that landed on nothing is made again (issue #1163).
-        await expect(async () => {
-          if ((await options.getAttribute('aria-expanded')) !== 'true') await options.tap();
-          await expect(voice.getByLabel('Push to talk')).toBeVisible({ timeout: 3000 });
-        }).toPass({ timeout: 30_000 });
+        await options.tap();
+        await expect(voice.getByLabel('Push to talk')).toBeVisible();
         // With the open microphone, the strip shows its level where Hold to
         // talk was: the meter is drawn whole inside its slot, in one row.
-        await expect(async () => {
-          if (!(await voice.getByLabel('Open microphone').isChecked())) await voice.getByLabel('Open microphone').tap();
-          await expect(voice.getByLabel('Open microphone')).toBeChecked({ timeout: 3000 });
-        }).toPass({ timeout: 30_000 });
+        await voice.getByLabel('Open microphone').tap();
+        await expect(voice.getByLabel('Open microphone')).toBeChecked();
         await showView(page, 'Chat');
         await expectOpenMicrophone(p);
         await voice.getByRole('button', { name: fourControls[0] }).tap();
-        await expect(async () => {
-          if (!(await voice.getByLabel('Push to talk').isChecked())) await voice.getByLabel('Push to talk').tap();
-          await expect(voice.getByLabel('Push to talk')).toBeChecked({ timeout: 3000 });
-        }).toPass({ timeout: 30_000 });
-        await expect(async () => {
-          if ((await options.getAttribute('aria-expanded')) === 'true') await options.tap();
-          await expect(voice.getByLabel('Push to talk')).toBeHidden({ timeout: 3000 });
-        }).toPass({ timeout: 30_000 });
+        await voice.getByLabel('Push to talk').tap();
+        await expect(voice.getByLabel('Push to talk')).toBeChecked();
+        await options.tap();
+        await expect(voice.getByLabel('Push to talk')).toBeHidden();
         // The strip's Leave voice leaves.
         await showView(page, 'Chat');
         await voice.getByRole('button', { name: 'Leave voice' }).tap();
