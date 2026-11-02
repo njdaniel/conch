@@ -60,6 +60,16 @@ const (
 	InviteClosePermissionRevoked = "permission_revoked"
 )
 
+// The values of invites.link (migration 40, community model §2.1): 'legacy'
+// for an invite made before the community model, which keeps its old rules;
+// 'member' for a member link (stored with the published kind 'open'). 'guest'
+// is in the column's CHECK for the later guest issue (#1004); nothing writes
+// it, and every rule that does not name it treats it as no member link.
+const (
+	linkLegacy = "legacy"
+	linkMember = "member"
+)
+
 // DefaultPersonalInviteAllowance is how many outstanding personal invites one
 // inviter may hold when the caller names no other number. Operators have none.
 const DefaultPersonalInviteAllowance = 5
@@ -180,9 +190,10 @@ type inviteRow struct {
 	mayInvite  bool
 	lifetimeMs int64
 	joinAs     schema.InviteJoinMode
-	// link is the community model's link kind (migration 40): 'legacy' for
-	// every invite made before it, which keeps working as it did; 'member'
-	// or 'guest' for the links of I6a. Nothing branches on it yet.
+	// link is the community model's link kind (migration 40): linkLegacy for
+	// every invite made before it, which keeps working as it did; linkMember
+	// for a member link. Every rule that used to switch on kind switches on
+	// it for a member link (design §2.1).
 	link         string
 	creatorName  string
 	creatorOff   bool
@@ -275,7 +286,11 @@ func (r inviteRow) makerStillAllowed() bool {
 	if r.creatorOff || !r.creatorHuman {
 		return false
 	}
-	if r.kind == schema.InviteKindPersonal {
+	// A member link, like a personal invite, stands behind make_member_links:
+	// held by a member only with the may_invite brake on, and never by an
+	// agent, a disabled, a hidden or an ended guest (principalHolds). A role
+	// cell turned off suspends it; the brake closes it for good (SetMayInvite).
+	if r.link == linkMember || r.kind == schema.InviteKindPersonal {
 		return r.maker.links
 	}
 	return r.maker.members
@@ -331,10 +346,27 @@ func inviteChannelsTx(ctx context.Context, tx execer, inviteID int64) ([]schema.
 // (r.maker, loaded by loadMakerTx) an invite keeps every named channel that
 // exists. Otherwise it keeps only the channels its maker is still a member
 // of, so an invite never outlives its maker's access (ADR-014 design §7.3).
+//
+// A member link has no per-channel grant: it lands its joiner in the default
+// channels as they are now, which may be none. A link whose maker named
+// landing channels (O5) lands in those instead, and only while its maker
+// still holds manage_channels; without it nothing is kept and every landing
+// channel is dropped, so the link fails closed (usableInviteTx).
 func effectiveChannelsTx(ctx context.Context, tx execer, r inviteRow) (kept, dropped []schema.InviteChannelV1, err error) {
 	all, err := inviteChannelsTx(ctx, tx, r.id)
 	if err != nil {
 		return nil, nil, err
+	}
+	if r.link == linkMember {
+		switch {
+		case len(all) == 0:
+			kept, err = openChannelsTx(ctx, tx)
+			return kept, nil, err
+		case r.maker.channels:
+			return all, nil, nil
+		default:
+			return nil, all, nil
+		}
 	}
 	if r.maker.channels {
 		return all, nil, nil
@@ -406,35 +438,41 @@ func usableInviteTx(ctx context.Context, tx execer, codeHash string, now time.Ti
 	if err != nil {
 		return inviteRow{}, nil, nil, err
 	}
-	if len(kept) == 0 {
+	// A member link with no default channels is good: its joiner is a member
+	// in no channel. One whose landing channels were all dropped is not.
+	if len(kept) == 0 && (r.link != linkMember || len(dropped) > 0) {
 		return inviteRow{}, nil, nil, ErrInviteInvalid
 	}
 	return r, kept, dropped, nil
 }
 
-// outstandingPersonalInvitesTx counts creatorID's personal invites that are
-// still open at now: not closed, not used up and not expired. It is the one
-// rule the allowance is counted by, for CreateInvite and InvitesRemaining
-// alike, so what whoami says is left and what CreateInvite allows cannot
-// disagree.
-func outstandingPersonalInvitesTx(ctx context.Context, tx execer, creatorID int64, now time.Time) (int, error) {
+// outstandingMemberLinksTx counts creatorID's member links and personal
+// invites that are still open at now: not closed, not expired, and not used
+// up. A link with no use cap is never used up, so it counts as open
+// (max_uses IS NULL OR uses < max_uses). It is the one rule the allowance is
+// counted by, for CreateMemberLink, the v1 CreateInvite and InvitesRemaining
+// alike, so a member cannot hold the allowance twice, once as v1 personal
+// invites and once as v2 links. A legacy open invite is neither, and is not
+// counted.
+func outstandingMemberLinksTx(ctx context.Context, tx execer, creatorID int64, now time.Time) (int, error) {
 	var n int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM invites
-		 WHERE created_by = ? AND kind = 'personal' AND closed_at IS NULL AND expires_at > ? AND uses < max_uses`,
+		 WHERE created_by = ? AND (link = 'member' OR kind = 'personal') AND closed_at IS NULL AND expires_at > ?
+		   AND (max_uses IS NULL OR uses < max_uses)`,
 		creatorID, now.UnixMilli()).Scan(&n); err != nil {
-		return 0, fmt.Errorf("count outstanding personal invites: %w", err)
+		return 0, fmt.Errorf("count outstanding member links: %w", err)
 	}
 	return n, nil
 }
 
-// InvitesRemaining reports how many more personal invites principalID may
-// make at now under opts: the allowance less their open personal invites,
-// never below zero (an operator may have lowered the allowance since). It
-// does not ask whether they may invite at all, and operators have no
-// allowance: the caller decides whether the number applies.
+// InvitesRemaining reports how many more member links or personal invites principalID may make at
+// now under opts: the allowance less their open member links and personal
+// invites, never below zero (an operator may have lowered the allowance
+// since). It does not ask whether they may invite at all, and operators have
+// no allowance: the caller decides whether the number applies.
 func (s *Store) InvitesRemaining(ctx context.Context, principalID int64, opts InviteOptions, now time.Time) (int, error) {
-	outstanding, err := outstandingPersonalInvitesTx(ctx, s.db, principalID, now.Truncate(time.Millisecond))
+	outstanding, err := outstandingMemberLinksTx(ctx, s.db, principalID, now.Truncate(time.Millisecond))
 	if err != nil {
 		return 0, fmt.Errorf("store: invites remaining: %w", err)
 	}
@@ -559,7 +597,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 		// The allowance binds anyone without manage_members, a restricted
 		// operator included (ADR-014 design §7.3, N1).
 		if req.Kind == schema.InviteKindPersonal && !rights.members {
-			outstanding, err := outstandingPersonalInvitesTx(ctx, tx, creatorID, now)
+			outstanding, err := outstandingMemberLinksTx(ctx, tx, creatorID, now)
 			if err != nil {
 				return fmt.Errorf("store: create invite: %w", err)
 			}
@@ -954,19 +992,57 @@ func inviteClosedDetail(id int64, kind schema.InviteKind, uses int64, reason str
 	return fmt.Sprintf("invite=%d kind=%s uses=%d reason=%s", id, kind, uses, reason)
 }
 
-// closeCreatorInvitesTx closes every open invite creatorID made, of kind (or
-// of every kind when kind is empty), writing one invite_closed row each with
-// reason. Open means usable at now: not closed, not used up and not expired;
-// the others need no closing. closed_by is left empty, since no principal
-// closed them by hand. The caller holds the write lock.
-func closeCreatorInvitesTx(ctx context.Context, tx execer, actor string, creatorID int64, kind schema.InviteKind, reason string, now time.Time) error {
+// inviteSelector says which of a maker's open invites a close or a count
+// touches: those of kind (every kind when empty) that also satisfy where, a
+// fixed SQL condition from the values below, never caller input.
+type inviteSelector struct {
+	kind  schema.InviteKind
+	where string
+}
+
+// clause is the selector's SQL, to append to a WHERE, and its arguments.
+func (sel inviteSelector) clause() (string, []any) {
+	var q string
+	var args []any
+	if sel.kind != "" {
+		q += " AND kind = ?"
+		args = append(args, string(sel.kind))
+	}
+	if sel.where != "" {
+		q += " AND " + sel.where
+	}
+	return q, args
+}
+
+// The selections of the three callers (community model §2.1). A member link
+// is told from a legacy invite of the same kind by its link column.
+var (
+	// selectEveryInvite: a maker who was disabled loses every invite.
+	selectEveryInvite = inviteSelector{}
+	// selectBrakedInvites: the may_invite brake going off closes the maker's
+	// member links and, as before, their legacy personal invites.
+	selectBrakedInvites = inviteSelector{where: "(kind = 'personal' OR link = 'member')"}
+)
+
+// selectDemotedInvites: demoting an operator closes the invites that stood
+// on the role (their legacy open links, or every legacy kind when kind is
+// empty) and leaves their member links standing.
+func selectDemotedInvites(kind schema.InviteKind) inviteSelector {
+	return inviteSelector{kind: kind, where: "link <> 'member'"}
+}
+
+// closeCreatorInvitesTx closes every open invite creatorID made that sel
+// selects, writing one invite_closed row each with reason. Open means usable
+// at now: not closed, not used up and not expired; the others need no
+// closing. closed_by is left empty, since no principal closed them by hand.
+// The caller holds the write lock.
+func closeCreatorInvitesTx(ctx context.Context, tx execer, actor string, creatorID int64, sel inviteSelector, reason string, now time.Time) error {
 	q := `SELECT id, kind, uses FROM invites
 		 WHERE created_by = ? AND closed_at IS NULL AND expires_at > ? AND (max_uses IS NULL OR uses < max_uses)`
 	args := []any{creatorID, now.UnixMilli()}
-	if kind != "" {
-		q += " AND kind = ?"
-		args = append(args, string(kind))
-	}
+	extra, extraArgs := sel.clause()
+	q += extra
+	args = append(args, extraArgs...)
 	rows, err := tx.QueryContext(ctx, q+" ORDER BY id", args...)
 	if err != nil {
 		return fmt.Errorf("store: list open invites: %w", err)
@@ -1200,12 +1276,13 @@ func (s *Store) SetInvitesPaused(ctx context.Context, actor string, paused bool)
 	return changed, nil
 }
 
-// SetMayInvite grants or takes away a human's right to make personal invites.
+// SetMayInvite grants or takes away a human's right to make member links (and,
+// as before, personal invites).
 // Operators can always invite whatever it says. An agent cannot hold it
 // (ErrInviteNotAllowed). It audits invite_permission_changed in the same
 // transaction and does nothing when the value already stands. Taking the right
-// away from someone who is not an operator also closes the personal invites
-// they left open, in the same transaction, each audited as invite_closed with
+// away from someone the brake binds also closes the member links and personal
+// invites they left open, in the same transaction, each audited as invite_closed with
 // reason=permission_revoked (issue #438): giving the right back does not
 // revive them. It returns ErrPrincipalNotFound for an unknown id.
 func (s *Store) SetMayInvite(ctx context.Context, actor string, principalID int64, may bool, forbidOwner ...bool) (changed bool, err error) {
@@ -1265,7 +1342,7 @@ func (s *Store) SetMayInvite(ctx context.Context, actor string, principalID int6
 		if err != nil || !binds {
 			return err
 		}
-		return closeCreatorInvitesTx(ctx, tx, actor, principalID, schema.InviteKindPersonal, InviteClosePermissionRevoked, now)
+		return closeCreatorInvitesTx(ctx, tx, actor, principalID, selectBrakedInvites, InviteClosePermissionRevoked, now)
 	})
 	if err != nil {
 		return false, err

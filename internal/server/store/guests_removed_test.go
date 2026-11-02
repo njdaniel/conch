@@ -54,11 +54,11 @@ func legacyJoinSettings(t testing.TB, s *Store, req schema.PutJoinSettingsReques
 
 // legacyCreateInvite makes an invite as CreateInvite did before issue
 // #1005: one whose join_as may admit guests.
-func legacyCreateInvite(t testing.TB, s *Store, actor string, creatorID int64, req schema.CreateInviteRequestV1, opts InviteOptions, now time.Time) schema.CreateInviteResponseV1 {
+func legacyCreateInvite(t testing.TB, s *Store, actor string, creatorID int64, req schema.CreateInviteRequestV1, now time.Time) schema.CreateInviteResponseV1 {
 	t.Helper()
 	mode := req.EffectiveJoinAs()
 	req.JoinAs = schema.InviteJoinAccount
-	resp, err := s.CreateInvite(context.Background(), actor, creatorID, req, opts, now)
+	resp, err := s.CreateInvite(context.Background(), actor, creatorID, req, InviteOptions{}, now)
 	if err != nil {
 		t.Fatalf("CreateInvite: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestGuestsRemovedRefusals(t *testing.T) {
 	f := newInviteFixture(t)
 	req := open("general")
 	req.JoinAs = schema.InviteJoinBoth
-	inv := legacyCreateInvite(t, f.s, "system", f.op.ID, req, InviteOptions{}, f.now)
+	inv := legacyCreateInvite(t, f.s, "system", f.op.ID, req, f.now)
 	legacyJoinSettings(t, f.s, schema.PutJoinSettingsRequestV1{OpenJoining: &account, OpenChannels: &[]string{"general"}})
 	if _, err := f.s.JoinAsGuest(f.ctx, GuestEntry{}); !errors.Is(err, ErrGuestsDisabled) {
 		t.Errorf("JoinAsGuest = %v, want ErrGuestsDisabled", err)
