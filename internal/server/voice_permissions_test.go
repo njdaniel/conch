@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -493,9 +494,31 @@ func TestRoleChangeWithholdingUseVoiceRemovesAtOnce(t *testing.T) {
 			}
 			readPresence(t, sock)
 
-			rec := f.do(t, "PUT", fmt.Sprintf("/v1/principals/%d/role", f.ids["op2"]), f.rootTok, `{"role":"member"}`)
+			base0 := len(f.lk.calls())
+			req := httptest.NewRequest("PUT", fmt.Sprintf("/v1/principals/%d/role", f.ids["op2"]), strings.NewReader(`{"role":"member"}`))
+			req.Header.Set("Authorization", "Bearer "+f.rootTok)
+			rec := httptest.NewRecorder()
+			f.srv.Handler().ServeHTTP(&orderWriter{ResponseWriter: rec, lk: f.lk}, req)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("the role PUT = %d %s", rec.Code, rec.Body.Bytes())
+			}
+			// The removals precede the first byte of the response.
+			removedBefore := map[string]bool{}
+			respAt := 0
+			for _, c := range f.lk.calls()[base0:] {
+				switch c.method {
+				case "RemoveParticipant":
+					if respAt == 0 {
+						removedBefore[c.identity] = true
+					}
+				case "http-response":
+					respAt = c.seq
+				}
+			}
+			for _, n := range names {
+				if got := removedBefore[n]; got == tc.wantRemain {
+					t.Errorf("%s removed before the response = %v, want %v", n, got, !tc.wantRemain)
+				}
 			}
 			// Straight after the answer: no pass has run since.
 			for _, n := range names {
