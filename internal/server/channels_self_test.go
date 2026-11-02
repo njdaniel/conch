@@ -2,12 +2,15 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -78,8 +81,9 @@ func leaveWant(caller, target string) selfAnswer {
 	return selfAnswer{http.StatusNotFound, "channel_not_found"}
 }
 
-// checkSelfAnswer checks rec against want, and that every refusal of one
-// status and code within a caller class has the same bytes.
+// checkSelfAnswer checks rec against want: its status, the error code a
+// refusal names, and that every refusal of one status and code within a
+// caller class has the same bytes.
 func checkSelfAnswer(t *testing.T, label string, got int, body string, want selfAnswer, seen map[selfAnswer]string) {
 	t.Helper()
 	if got != want.status {
@@ -87,6 +91,15 @@ func checkSelfAnswer(t *testing.T, label string, got int, body string, want self
 		return
 	}
 	if want.code == "" {
+		return
+	}
+	var e schema.Error
+	if err := json.Unmarshal([]byte(body), &e); err != nil {
+		t.Errorf("%s: the refusal %s is not an error document: %v", label, body, err)
+		return
+	}
+	if e.Code != want.code {
+		t.Errorf("%s = %d with code %q, want code %q", label, got, e.Code, want.code)
 		return
 	}
 	if first, ok := seen[want]; ok && first != body {
@@ -294,6 +307,102 @@ func TestJoinChannel(t *testing.T) {
 	}
 	if m := decodeBody[schema.JoinChannelResponseV1](t, rec).Member; m.CanDecide == nil || !*m.CanDecide {
 		t.Errorf("member-1's channel-b membership = %+v, want can_decide kept", m)
+	}
+}
+
+// TestLeaveChannelClosesTheLeaversSockets: a leave does what a removal does
+// before it answers. The leaver's message, events and voice presence sockets
+// on the channel close with a policy violation, nothing posted after the
+// leave reaches them, and they are out of the channel's voice room, removed
+// before the response is written. Their sockets on another channel, and
+// another member's sockets on this one, stay open and keep receiving.
+func TestLeaveChannelClosesTheLeaversSockets(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	base := wsTestServer(t, f.srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	ann, ann2 := f.tokens["ann"], f.tokens["ann2"]
+
+	annOps := startReader(ctx, dialAs(t, ctx, base, "/v1/ws?channel=ops", ann))
+	annOps2 := startReader(ctx, dialAs(t, ctx, base, "/v1/ws?channel=ops2", ann))
+	ann2Ops := startReader(ctx, dialAs(t, ctx, base, "/v1/ws?channel=ops", ann2))
+	annEvents := dialEvents(t, base, "/v1/events/ws?channel=ops", ann)
+	ann2Events := dialEvents(t, base, "/v1/events/ws?channel=ops", ann2)
+	room := f.inUse(t, f.ops)
+	f.lk.setRoom(room, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000, published: true},
+		fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
+	f.pass(t)
+	annVoice, _, err := dialVoice(t, base, "ops", ann)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readPresence(t, annVoice)
+	ann2Voice, _, err := dialVoice(t, base, "ops", ann2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readPresence(t, ann2Voice)
+
+	before := f.postAs(t, ann2, "ops", "before the leave")
+	annOps.waitForID(t, before)
+	ann2Ops.waitForID(t, before)
+
+	calls := len(f.lk.calls())
+	if code := f.doOrdered(t, http.MethodPost, "/v1/channels/ops/leave", ann); code != http.StatusNoContent {
+		t.Fatalf("leave = %d", code)
+	}
+	removedAt, respAt := 0, 0
+	for _, c := range f.lk.calls()[calls:] {
+		switch {
+		case c.method == "RemoveParticipant" && c.identity == f.identity("ann") && c.room == room:
+			removedAt = c.seq
+		case c.method == "http-response":
+			respAt = c.seq
+		}
+	}
+	if removedAt == 0 || respAt == 0 || removedAt > respAt {
+		t.Errorf("ann's RemoveParticipant (seq %d) did not come before the response (seq %d)", removedAt, respAt)
+	}
+	if got := f.who(t, f.ops); got != "ann2" {
+		t.Errorf("ops voice right after the leave = %q, want ann2 only", got)
+	}
+
+	after := f.postAs(t, ann2, "ops", "after the leave")
+	elsewhere := f.postAs(t, ann, "ops2", "still in ops2")
+
+	err = annOps.waitClosed(t)
+	if websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+		t.Errorf("ann's ops message socket: close = %v, want policy violation", err)
+	}
+	for _, id := range annOps.seen() {
+		if id >= after {
+			t.Errorf("ann's ops message socket received message %d, posted after she left", id)
+		}
+	}
+	if ce := annEvents.closed(); ce.Code != websocket.StatusPolicyViolation {
+		t.Errorf("ann's ops events socket: close = %v, want policy violation", ce)
+	}
+	if code := expectClosed(t, annVoice); code != websocket.StatusPolicyViolation {
+		t.Errorf("ann's ops voice socket: close status = %d, want policy violation", code)
+	}
+
+	// The others are untouched: ann2 still receives on ops, over all three
+	// sockets, and ann still receives on ops2.
+	ann2Ops.waitForID(t, after)
+	ann2Events.until("ann2's member list without ann", isMembers(membersLack(f.ids["ann"])))
+	f.lk.setRoom(room, fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000, published: true})
+	f.clock.Advance(testPassGap)
+	f.pass(t)
+	if s := readPresence(t, ann2Voice); !s.Available {
+		t.Errorf("ann2's voice frame after the leave: %+v", s)
+	}
+	annOps2.waitForID(t, elsewhere)
+	for name, r := range map[string]*wsReader{"ann2's ops message socket": ann2Ops, "ann's ops2 message socket": annOps2} {
+		select {
+		case <-r.done:
+			t.Errorf("%s was closed", name)
+		default:
+		}
 	}
 }
 
