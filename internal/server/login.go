@@ -136,8 +136,8 @@ func defaultLoginLimits() loginLimits {
 func loginLimitsFor(cfg Config) loginLimits {
 	l := defaultLoginLimits()
 	if cfg.TestRelaxInviteLimits {
-		l.failuresPerAddress.burst = testRelaxedPerAddressBurst
-		l.nameProbesPerAddress.burst = testRelaxedPerAddressBurst
+		l.failuresPerAddress.burst = testRelaxedBurst
+		l.nameProbesPerAddress.burst = testRelaxedBurst
 	}
 	return l
 }
