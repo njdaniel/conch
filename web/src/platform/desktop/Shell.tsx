@@ -9,6 +9,10 @@
 // in a new in-memory session and destroys this one, so nothing of one server's
 // reaches the next.
 //
+// A server whose release is not on the tested list (or that did not answer
+// /healthz) gets no client and no sign-in, only the reason (./ui/Compat; issue
+// #946); main refuses the sign-in too.
+//
 // Once a profile is active, if main already holds a sign-in for it (the page
 // was reloaded, or the vault gave it back) the stand-in credential is restored
 // before the client starts, so that the client's own restore finds it.
@@ -17,11 +21,12 @@ import { signedIn } from './credentials';
 import { bridge } from './access';
 import type { ProfilesView } from './bridge';
 import { setServerOrigin } from './state';
+import { blocks, DevelopmentNote, Unsupported } from './ui/Compat';
 import { ProfileBar } from './ui/ProfileBar';
 import { Recovery } from './ui/Recovery';
 import { ServerList } from './ui/ServerList';
 
-type Phase = 'loading' | 'recovery' | 'list' | 'ready' | 'missing';
+type Phase = 'loading' | 'recovery' | 'list' | 'blocked' | 'ready' | 'missing';
 
 export function DesktopShell({ children }: { readonly children: ReactNode }) {
   const [phase, setPhase] = useState<Phase>('loading');
@@ -44,6 +49,7 @@ export function DesktopShell({ children }: { readonly children: ReactNode }) {
     }
     const active = next.profiles.find((p) => p.id === next.active);
     if (active === undefined) setPhase('list');
+    else if (blocks(next.compat)) setPhase('blocked');
     else await enter(active.origin);
   }
 
@@ -94,10 +100,12 @@ export function DesktopShell({ children }: { readonly children: ReactNode }) {
       </main>
     );
   }
+  if (phase === 'blocked') return <Unsupported view={view} onView={setView} />;
   if (phase === 'recovery') return <Recovery onView={(next) => void show(next)} />;
   return (
     <main className="signin desktop-chooser">
       <h1>Conch</h1>
+      {view.compat.override ? <DevelopmentNote compat={view.compat} /> : null}
       <h2>Server address</h2>
       <p className="hint">The address of the Conch server you use. Your sign-in is kept by the app; whether it lasts after the app closes is said below.</p>
       <ServerList view={view} onView={setView} />
