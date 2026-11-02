@@ -343,14 +343,17 @@ test.describe('the phone voice strip with LiveKit', () => {
 
       // The state button opens the Voice view, where everything the strip
       // left out is, and works.
-      for (const p of phones) {
+      for (const [turn, p] of phones.entries()) {
         const { page } = p;
         await showView(page, 'Chat');
         const voice = voiceRegion(page);
         await voice.getByRole('button', { name: fourControls[0] }).tap();
         await expect(mainNav(page).getByRole('button', { name: 'Voice', exact: true })).toHaveAttribute('aria-current', 'page');
-        // (The phone before this one has left by now.)
-        await expect(voice.getByRole('list', { name: /^[23] in voice$/ })).toContainText('You');
+        // Each phone before this one has left, and presence says so a few
+        // seconds later: the roster is above the controls, so a person waits
+        // for it to settle before reaching for one, as this does (the CI
+        // flake of issue #1163: a row went while Voice options was tapped).
+        await expect(voice.getByRole('list', { name: `${String(3 - turn)} in voice` })).toContainText('You', { timeout: 30_000 });
         await expect(voice).toContainText('Connected in #voice-room');
         await expect(voice.getByText('Microphone in use')).toBeVisible();
         await voice.getByRole('button', { name: 'Deafen' }).tap();
@@ -364,17 +367,31 @@ test.describe('the phone voice strip with LiveKit', () => {
         await voice.getByRole('button', { name: 'Watch', exact: true }).tap();
         await expect(shareView(page)).toContainText('alice is sharing', { timeout: 30_000 });
         const options = voice.getByRole('button', { name: 'Voice options' });
-        await options.tap();
-        await expect(voice.getByLabel('Push to talk')).toBeVisible();
+        // Voice options is a toggle, so each tap here is made only while the
+        // button says the options are shut (and the open microphone's only
+        // while it is not chosen), and is checked by what it should show; a
+        // tap that landed on nothing is made again (issue #1163).
+        await expect(async () => {
+          if ((await options.getAttribute('aria-expanded')) !== 'true') await options.tap();
+          await expect(voice.getByLabel('Push to talk')).toBeVisible({ timeout: 3000 });
+        }).toPass({ timeout: 30_000 });
         // With the open microphone, the strip shows its level where Hold to
         // talk was: the meter is drawn whole inside its slot, in one row.
-        await voice.getByLabel('Open microphone').tap();
+        await expect(async () => {
+          if (!(await voice.getByLabel('Open microphone').isChecked())) await voice.getByLabel('Open microphone').tap();
+          await expect(voice.getByLabel('Open microphone')).toBeChecked({ timeout: 3000 });
+        }).toPass({ timeout: 30_000 });
         await showView(page, 'Chat');
         await expectOpenMicrophone(p);
         await voice.getByRole('button', { name: fourControls[0] }).tap();
-        await voice.getByLabel('Push to talk').tap();
-        await options.tap();
-        await expect(voice.getByLabel('Push to talk')).toBeHidden();
+        await expect(async () => {
+          if (!(await voice.getByLabel('Push to talk').isChecked())) await voice.getByLabel('Push to talk').tap();
+          await expect(voice.getByLabel('Push to talk')).toBeChecked({ timeout: 3000 });
+        }).toPass({ timeout: 30_000 });
+        await expect(async () => {
+          if ((await options.getAttribute('aria-expanded')) === 'true') await options.tap();
+          await expect(voice.getByLabel('Push to talk')).toBeHidden({ timeout: 3000 });
+        }).toPass({ timeout: 30_000 });
         // The strip's Leave voice leaves.
         await showView(page, 'Chat');
         await voice.getByRole('button', { name: 'Leave voice' }).tap();
