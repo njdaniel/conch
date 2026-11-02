@@ -1026,6 +1026,58 @@ mod tests {
         assert_eq!(lines[QUEUE_LINES + 2], "connected");
     }
 
+    /// The closing line is queued while the reader is stalled and lines were dropped; the
+    /// reader then reads on within the flush limit. The closing line is the last one.
+    async fn closed_while_stalled(json: bool) -> Vec<String> {
+        use crate::lines::tests::Stallable;
+        let writer = Stallable::stalled();
+        let mut output = Output::queued(json, Box::new(writer.clone()));
+        output.show(&Event::Connection(&Connection::Connecting));
+        writer.until_waiting();
+        for _ in 0..QUEUE_LINES + 500 {
+            output.show(&Event::UnknownCommand);
+        }
+        output.show_last(&Event::Connection(&Connection::Closed));
+        let unstall = writer.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            unstall.stall(false);
+        });
+        assert!(output.flush(Duration::from_secs(10)).await);
+        writer.text().lines().map(str::to_owned).collect()
+    }
+
+    #[tokio::test]
+    async fn in_json_mode_the_closing_line_is_the_last_written_after_dropped_lines() {
+        let lines = closed_while_stalled(true).await;
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(r#"{"event":"connection","state":"closed"}"#),
+            "{:?}",
+            &lines[lines.len().saturating_sub(3)..]
+        );
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.contains("output_dropped"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn in_plain_mode_the_closing_line_is_the_last_written_after_dropped_lines() {
+        let lines = closed_while_stalled(false).await;
+        assert_eq!(lines.last().map(String::as_str), Some("left voice"));
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.contains("were not written"))
+                .count(),
+            1
+        );
+    }
+
     #[tokio::test]
     async fn a_direct_output_has_nothing_to_wait_for_when_flushed() {
         let written = Buffer::default();
