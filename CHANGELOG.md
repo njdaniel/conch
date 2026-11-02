@@ -47,6 +47,14 @@ release that Nick publishes.
     member link as an `open` invite into the default channels as they are
     now, with voice, no right to invite passed on, joining as an account, and
     its expiry (or the never-expires sentinel).
+  - For an invite made before the upgrade, `GET /v1/invites` still shows the
+    voice and right to invite it was made with, and its list and preview show
+    only its own channels, not the default channels its joiner now also
+    lands in. Redemption follows the rules above, not those fields.
+  - Such an invite keeps today's rules for its own channels, including one
+    made private since: it still lands its joiner there while its maker stands
+    behind it (an operator holding `manage_channels`, or a member still in the
+    channel), until it expires or an operator closes it.
 
 ## [0.1.0-alpha.10] - 2026-11-02
 
