@@ -34,6 +34,9 @@ type mcpPostMessageInput struct {
 	Body     string           `json:"body" jsonschema:"rendered human-readable message body"`
 	Payload  *mcpPayloadInput `json:"payload,omitempty" jsonschema:"optional typed machine payload"`
 	Audience *mcpAudience     `json:"audience,omitempty" jsonschema:"optional audience; omit to post to the whole channel. To reply in kind, reuse the audience of the message being answered"`
+	// ThreadRootID replies in a thread. A reply takes its root's audience, so
+	// it cannot be combined with audience.
+	ThreadRootID int64 `json:"thread_root_id,omitempty" jsonschema:"optional id of the message to reply to; the reply takes that message's audience, so do not also give an audience. Threads are one level deep: the id must be a message that is not itself a reply"`
 }
 
 type mcpReadChannelInput struct {
@@ -111,6 +114,12 @@ type mcpMessageOutput struct {
 	// absent for a message never edited. An agent polling by id never sees
 	// an edit as a new message: the id does not change.
 	EditedAt string `json:"edited_at,omitempty"`
+	// ThreadRootID is the message this one replies to; absent for a message
+	// that is not a reply (issue #25).
+	ThreadRootID int64 `json:"thread_root_id,omitempty"`
+	// GuestAuthor is the guest attribution a message carries when it was
+	// posted during a guest visit; absent otherwise (ADR-009 section 4.4).
+	GuestAuthor *schema.GuestAttributionV1 `json:"guest_author,omitempty"`
 }
 
 type mcpPostMessageOutput struct {
@@ -144,7 +153,7 @@ func addAgentTool[In, Out any](s *Server, server *mcp.Server, identity mcpIdenti
 // mcpServerFor builds the MCP server for one authenticated request.
 func (s *Server) mcpServerFor(identity mcpIdentity) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "conchd", Version: s.cfg.Version}, nil)
-	addAgentTool(s, server, identity, &mcp.Tool{Name: "post_message", Description: "Post a message to a Conch channel as the authenticated agent. Without an audience it goes to the whole channel; with one it goes only to a net or to the listed principals."},
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "post_message", Description: "Post a message to a Conch channel as the authenticated agent. Without an audience it goes to the whole channel; with one it goes only to a net or to the listed principals. With thread_root_id it is a reply in that message's thread, to the root's audience."},
 		func(ctx context.Context, scope *agentScope, in mcpPostMessageInput) (*mcp.CallToolResult, mcpPostMessageOutput, error) {
 			out, serr := s.postMessageMCP(ctx, scope, in)
 			if serr != nil {
@@ -286,6 +295,10 @@ func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPo
 	// given, which says nothing about any channel or net; then the request as
 	// given; then the audience is normalized with the author, and the store
 	// judges the normalized form.
+	if in.ThreadRootID != 0 && in.Audience != nil {
+		// As over REST: malformed whatever the root is; nothing is looked up.
+		return schema.PostMessageResponseV2{}, errThreadAudience
+	}
 	var audience *schema.Audience
 	if in.Audience != nil {
 		audience = &schema.Audience{Kind: schema.AudienceKind(in.Audience.Kind), NetID: in.Audience.NetID, PrincipalIDs: in.Audience.PrincipalIDs}
@@ -296,9 +309,12 @@ func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPo
 			return schema.PostMessageResponseV2{}, &schema.Error{Code: "invalid_audience", Message: "a whisper needs at least one recipient other than the author"}
 		}
 	}
-	req := schema.PostMessageRequestV2{AuthorID: authorID, Body: in.Body, Payload: schemaPayload, Audience: audience}
+	req := schema.PostMessageRequestV2{AuthorID: authorID, Body: in.Body, Payload: schemaPayload, Audience: audience, ThreadRootID: in.ThreadRootID}
 	if err := req.Validate(); err != nil {
 		return schema.PostMessageResponseV2{}, &schema.Error{Code: "invalid_request", Message: err.Error()}
+	}
+	if in.ThreadRootID > 0 {
+		return s.postReplyMCP(ctx, scope, in.Channel, in.ThreadRootID, in.Body, schemaPayload)
 	}
 	if audience != nil {
 		return s.postScopedMessageMCP(ctx, scope, in.Channel, in.Body, schemaPayload, audience.Normalize(authorID))

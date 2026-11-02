@@ -119,6 +119,9 @@ func mcpProbes() []mcpProbe {
 	return []mcpProbe{
 		{"read_channel", aChannel, func(_ *world, s subject) map[string]any { return map[string]any{"channel": s.name} }},
 		{"post_message", aChannel, func(_ *world, s subject) map[string]any { return map[string]any{"channel": s.name, "body": "hello"} }},
+		{"post_message", aChannel, func(_ *world, s subject) map[string]any {
+			return map[string]any{"channel": s.name, "body": "hello", "thread_root_id": 1}
+		}},
 		{"check_decision", aApproval, func(_ *world, s subject) map[string]any { return map[string]any{"approval_id": s.id} }},
 		{"await_decision", aApproval, func(_ *world, s subject) map[string]any { return map[string]any{"approval_id": s.id, "timeout_ms": 1} }},
 		{"heartbeat", aSession, func(_ *world, s subject) map[string]any { return map[string]any{"session_id": s.id} }},
