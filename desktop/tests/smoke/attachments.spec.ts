@@ -11,7 +11,7 @@
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test';
 
 import { startConchd, type Disposable } from './conchd.ts';
-import { launch, type Launched } from './launch.ts';
+import { launch, livePage, type Launched } from './launch.ts';
 
 // A 1x1 PNG.
 const PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
@@ -52,6 +52,8 @@ test.describe('attachments, links and the clipboard in the packaged app', () => 
     ({ browser, page } = await attach(app));
     await page.getByLabel('Server address').fill(server.origin);
     await page.getByRole('button', { name: 'Continue' }).click();
+    // Adding the server makes it the active profile: a new window.
+    page = await livePage(browser, page);
     await page.getByLabel('Name', { exact: true }).fill(server.member.name);
     await page.getByLabel('Password', { exact: true }).fill(server.member.password);
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
