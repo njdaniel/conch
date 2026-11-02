@@ -396,12 +396,12 @@ func TestHideClosesSocketsAndVoice(t *testing.T) {
 	if _, err := f.srv.store.AddChannelMember(ctx, "system", f.ops.ID, f.root.ID, 0); err != nil {
 		t.Fatal(err)
 	}
-	rec := f.do(t, "POST", "/v1/invites", f.rootTok, inviteJSON(t, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"ops"}, Voice: true}))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	link, err := f.srv.store.CreateInvite(ctx, "system", f.root.ID,
+		schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"ops"}, Voice: true}, store.InviteOptions{}, time.Now())
+	if err != nil {
+		t.Fatalf("create: %v", err)
 	}
-	link := decodeBody[schema.CreateInviteResponseV1](t, rec)
-	rec = secureDo(t, f.authFixture, "POST", "/v2/invites/redeem", "", redeemJSON(t, link.Code, "wren"))
+	rec := secureDo(t, f.authFixture, "POST", "/v2/invites/redeem", "", redeemJSON(t, link.Code, "wren"))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("redeem = %d %s", rec.Code, rec.Body)
 	}

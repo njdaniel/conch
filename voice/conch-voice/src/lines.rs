@@ -15,6 +15,10 @@
 //! - A queue may keep a few places beyond its bound for lines that must not be dropped
 //!   ([`LineQueue::push_reserved`]). Such a line waits behind the lines already queued, and
 //!   is dropped only when those places are taken too, so the queue still has a bound.
+//! - A queue also keeps [`LAST_LINES`] places for the lines that end the output (the final
+//!   state, the line that says the client left): [`LineQueue::push_last`]. They are taken by
+//!   nothing else, so a reader that is slow, and has let the queue fill, still gets the
+//!   last word once it reads on (#1144). They are still bounded by the flush limit at exit.
 //! - A flush waits for what is queued to be written, but only up to a limit. A flush that
 //!   times out is not an error: the process goes on, or exits.
 //!
@@ -22,7 +26,7 @@
 //! a panic): a thread makes the write and the caller gives up on it after a limit.
 
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -30,6 +34,9 @@ use std::time::{Duration, Instant};
 /// How many lines may wait for the writer before lines are dropped: far more than a client
 /// produces in the time a reader that is reading takes to read them.
 pub const QUEUE_LINES: usize = 1024;
+
+/// How many places a queue keeps beyond its bound and its reserve, for [`LineQueue::push_last`].
+pub const LAST_LINES: usize = 4;
 
 /// How often a flush that found the queue full looks again.
 const FLUSH_RETRY: Duration = Duration::from_millis(5);
@@ -61,6 +68,8 @@ pub struct LineQueue {
     /// the queue, which does not wait, so it keeps lines from several threads in order
     /// without making any of them wait for output.
     dropped: Mutex<u64>,
+    /// Set once a last line is queued: no marker is queued after it.
+    ended: AtomicBool,
     /// `None` for a queue that drops without saying so (`spawn_unmarked`).
     marker: Option<Marker>,
 }
@@ -91,7 +100,8 @@ impl LineQueue {
         reserve: usize,
         marker: Option<Marker>,
     ) -> Self {
-        let (queue, items) = sync_channel(capacity.saturating_add(reserve));
+        let (queue, items) =
+            sync_channel(capacity.saturating_add(reserve).saturating_add(LAST_LINES));
         let waiting = Arc::new(AtomicUsize::new(0));
         let taken = Arc::clone(&waiting);
         std::thread::spawn(move || write_all(out, &items, &taken));
@@ -101,6 +111,7 @@ impl LineQueue {
             capacity,
             reserve,
             dropped: Mutex::new(0),
+            ended: AtomicBool::new(false),
             marker,
         }
     }
@@ -116,6 +127,25 @@ impl LineQueue {
     /// taken too. It never waits. The caller is the one who knows why the reserve is enough.
     pub fn push_reserved(&self, line: String) {
         self.put(line, self.capacity.saturating_add(self.reserve));
+    }
+
+    /// Queues a line that ends the output: it has a place that no other line may take
+    /// ([`LAST_LINES`]), so it is queued behind whatever waits, however full the queue is,
+    /// and dropped only when the places are taken. It never waits. If lines were dropped
+    /// before it, the marker that says so is queued first, in these places too, and from
+    /// then on no marker is queued after it: the last line is the last line written,
+    /// whatever a flush or a later push finds owing.
+    pub fn push_last(&self, line: String) {
+        let mut dropped = self.dropped.lock().unwrap_or_else(PoisonError::into_inner);
+        let limit = self
+            .capacity
+            .saturating_add(self.reserve)
+            .saturating_add(LAST_LINES);
+        self.owe_nothing(&mut dropped, limit);
+        self.ended.store(true, Ordering::SeqCst);
+        if let Err(TrySendError::Full(_)) = self.offer(Item::Line(line), limit) {
+            *dropped = dropped.saturating_add(1);
+        }
     }
 
     /// Queues a line if fewer than `limit` items wait, and otherwise drops and counts it.
@@ -164,7 +194,7 @@ impl LineQueue {
             // Nothing is ever owed: the lines say for themselves that some are missing.
             return true;
         };
-        if *dropped == 0 {
+        if *dropped == 0 || self.ended.load(Ordering::SeqCst) {
             return true;
         }
         match self.offer(Item::Line(marker(*dropped)), limit) {
@@ -552,6 +582,30 @@ pub(crate) mod tests {
         assert!(lines.flush_blocking(Duration::from_secs(10)));
         assert_eq!(writer.text(), "a\nb\nc\nkept 1\nkept 2\nd\nkept 3\n");
         assert_eq!(lines.dropped(), 3);
+    }
+
+    #[test]
+    fn a_last_line_is_queued_behind_a_full_queue_and_its_places_are_its_own() {
+        let writer = Stallable::stalled();
+        let lines = LineQueue::spawn_unmarked(Box::new(writer.clone()), 2, 1);
+        lines.push("a".into());
+        writer.until_waiting();
+        for line in ["b", "c", "lost"] {
+            lines.push(line.into());
+        }
+        lines.push_reserved("answer".into());
+        // The queue and its reserve are full; a last line still has a place.
+        lines.push_reserved("lost".into());
+        for n in 1..=LAST_LINES {
+            lines.push_last(format!("last {n}"));
+        }
+        lines.push_last("lost".into());
+        assert_eq!(lines.dropped(), 3);
+
+        writer.stall(false);
+        assert!(lines.flush_blocking(Duration::from_secs(10)));
+        let wanted: String = (1..=LAST_LINES).map(|n| format!("last {n}\n")).collect();
+        assert_eq!(writer.text(), format!("a\nb\nc\nanswer\n{wanted}"));
     }
 
     #[test]

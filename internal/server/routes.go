@@ -213,7 +213,17 @@ func (s *Server) routeTable() []route {
 		// and use it. They carry the code in the body only, are rate-limited
 		// per client address before any store work, and the store decides
 		// everything else. See invites.go.
+		// POST /v1/invites is unchanged until #990 and #1134 (issue #985). A
+		// member link is made with POST /v2/invites, listed with GET
+		// /v2/invites, previewed (exempt, as v1's) with POST /v2/invites/preview
+		// and its joiners read by its maker or an operator with GET
+		// /v2/invites/{id}/joiners. The joiners route has no membersOnly: a
+		// guest there is a 404 invite_not_found, as for a ghost id.
 		rt("POST /v1/invites", accessAuthenticated, s.membersOnly(hf(s.handleCreateInvite))),
+		rt("POST /v2/invites", accessAuthenticated, s.membersOnly(hf(s.handleCreateMemberLink))),
+		rt("GET /v2/invites", accessAuthenticated, s.membersOnly(hf(s.handleListMemberLinks))),
+		rt("POST /v2/invites/preview", accessExempt, hf(s.handlePreviewMemberLink)),
+		rt("GET /v2/invites/{id}/joiners", accessAuthenticated, hf(s.handleMemberLinkJoiners)),
 		rt("GET /v1/invites", accessAuthenticated, hf(s.handleListInvites)),
 		rt("DELETE /v1/invites/{id}", accessAuthenticated, hf(s.handleCloseInvite)),
 		rt("POST /v1/invites/preview", accessExempt, hf(s.handlePreviewInvite)),
@@ -272,6 +282,8 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/invites/{id}/disable-joiners", accessPermission, hf(s.handleDisableJoiners)).needs(schema.PermManageMembers),
 		rt("POST /v1/principals/{id}/disable-invitees", accessPermission, hf(s.handleDisableInvitees)).needs(schema.PermManageMembers),
 		rt("PUT /v1/principals/{id}/invite-permission", accessPermission, hf(s.handleInvitePermission)).needs(schema.PermManageMembers),
+		// A person's voice switch (issue #984): immediate effect on live media.
+		rt("PUT /v1/principals/{id}/voice-permission", accessPermission, hf(s.handleVoicePermission)).needs(schema.PermManageMembers),
 		rt("GET /v1/invites/settings", accessOperator, hf(s.handleGetInviteSettings)),
 		rt("PUT /v1/invites/settings", accessPermission, hf(s.handlePutInviteSettings)).needs(schema.PermManageMembers),
 		// Sign-in links (issue #493): an operator makes a one-time link that
@@ -375,6 +387,7 @@ var recentAuthRoutes = map[string]reauthRule{
 	"POST /v1/invites/{id}/disable-joiners":                        reauthAlways,
 	"POST /v1/principals/{id}/disable-invitees":                    reauthAlways,
 	"PUT /v1/principals/{id}/invite-permission":                    reauthAlways,
+	"PUT /v1/principals/{id}/voice-permission":                     reauthAlways,
 	"PUT /v1/invites/settings":                                     reauthAlways,
 	"POST /v1/principals/{id}/sign-in-links":                       reauthAlways,
 	// Guest entry (issue #710): opening or closing joining to guests, and
@@ -387,9 +400,10 @@ var recentAuthRoutes = map[string]reauthRule{
 	// Signing out everywhere is anyone's for themself; an operator doing it
 	// to someone else is the bulk revoke of the rule.
 	"POST /v1/principals/{id}/credentials/revoke-all": reauthOnOthers,
-	// An invite makes principals; an operator's has no allowance and may be
-	// open to anyone. A member's invites are not in the class.
+	// An invite makes principals; an operator's has no allowance and may never
+	// expire. A member's links are not in the class.
 	"POST /v1/invites": reauthOperators,
+	"POST /v2/invites": reauthOperators,
 	// The permissions document grants rights (ADR-014 design §7.2).
 	"PUT /v1/permissions": reauthAlways,
 	// The audit export names every member and private channel: a holder of

@@ -739,7 +739,7 @@ func TestInviteSettingsRoute(t *testing.T) {
 			t.Fatal("not paused after pausing")
 		}
 	}
-	assertErrorBody(t, f.send(t, "POST", "/v1/invites", f.rootTok, inviteJSON(t, openLink("red")), ""), http.StatusServiceUnavailable, schema.ErrorCodeInvitesPaused)
+	assertErrorBody(t, f.send(t, "POST", "/v2/invites", f.rootTok, `{"kind":"member"}`, ""), http.StatusServiceUnavailable, schema.ErrorCodeInvitesPaused)
 	assertErrorBody(t, f.preview(t, link.Code), http.StatusServiceUnavailable, schema.ErrorCodeInvitesPaused)
 	assertErrorBody(t, f.redeem(t, link.Code, "late"), http.StatusServiceUnavailable, schema.ErrorCodeInvitesPaused)
 
@@ -785,18 +785,16 @@ func TestInvitesPauseSurvivesRestart(t *testing.T) {
 	}
 
 	srv, st := start()
-	_, _, rootTok, err := st.BootstrapOperator(ctx, "root")
+	root, _, rootTok, err := st.BootstrapOperator(ctx, "root")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateChannel(ctx, "red"); err != nil {
-		t.Fatal(err)
-	}
-	rec := call(srv, "POST", "/v1/invites", rootTok, inviteJSON(t, openLink("red")))
+	rec := call(srv, "POST", "/v2/invites", rootTok, `{"kind":"member"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create = %d %s", rec.Code, rec.Body)
 	}
-	code := decodeBody[schema.CreateInviteResponseV1](t, rec).Code
+	_ = root
+	code := decodeBody[schema.CreateInviteResponseV2](t, rec).Code
 	if rec := call(srv, "PUT", "/v1/invites/settings", rootTok, `{"paused":true}`); rec.Code != http.StatusOK {
 		t.Fatalf("pause = %d %s", rec.Code, rec.Body)
 	}
@@ -832,12 +830,12 @@ func TestDisableJoinersClosesSocketsAndVoice(t *testing.T) {
 	if _, err := f.srv.store.AddChannelMember(ctx, "system", f.ops.ID, f.root.ID, 0); err != nil {
 		t.Fatal(err)
 	}
-	rec := f.do(t, "POST", "/v1/invites", f.rootTok, inviteJSON(t, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"ops"}, Voice: true}))
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	link, err := f.srv.store.CreateInvite(ctx, "system", f.root.ID,
+		schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"ops"}, Voice: true}, store.InviteOptions{}, time.Now())
+	if err != nil {
+		t.Fatalf("create: %v", err)
 	}
-	link := decodeBody[schema.CreateInviteResponseV1](t, rec)
-	rec = secureDo(t, f.authFixture, "POST", "/v2/invites/redeem", "", redeemJSON(t, link.Code, "wren"))
+	rec := secureDo(t, f.authFixture, "POST", "/v2/invites/redeem", "", redeemJSON(t, link.Code, "wren"))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("redeem = %d %s", rec.Code, rec.Body)
 	}

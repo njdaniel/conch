@@ -230,7 +230,7 @@ func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalI
 	// Redemption already refuses a disabled maker's invites; closing them
 	// makes the invite list say so too (issue #438), and enabling the
 	// principal again does not revive them.
-	if err := closeCreatorInvitesTx(ctx, tx, actor, principalID, "", InviteCloseCreatorDisabled, now); err != nil {
+	if err := closeCreatorInvitesTx(ctx, tx, actor, principalID, selectEveryInvite, InviteCloseCreatorDisabled, now); err != nil {
 		return false, err
 	}
 	// Likewise the sign-in links for them or made by them (issue #493).
