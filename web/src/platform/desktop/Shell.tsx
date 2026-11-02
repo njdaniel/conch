@@ -1,41 +1,31 @@
-// The desktop shell's gate in front of the client: the "Server address" step.
-// The desktop window has no server of its own to be served from, so before the
-// existing sign-in views can run the person says which server to talk to. Main
-// checks the address (https, or http for this machine only) and keeps it; the
-// client below then runs unchanged against it.
+// The desktop shell's gate in front of the client. The desktop window has no
+// server of its own to be served from, so before the existing sign-in views can
+// run the person says which server to talk to. Main keeps the saved servers
+// (profiles) and the one that is active; this window shows the active one's
+// client under a strip with its host and account (./ui/ProfileBar), or, with
+// none active, the list of servers to switch to or add (./ui/ServerList).
 //
-// Once an address is set, if main already holds a sign-in for it (the page was
-// reloaded) the stand-in credential is restored before the client starts, so
-// that the client's own restore finds it.
-import { useEffect, useId, useRef, useState, type ReactNode, type SyntheticEvent } from 'react';
+// A switch or a sign-out replaces this whole page: main creates a new window
+// in a new in-memory session and destroys this one, so nothing of one server's
+// reaches the next.
+//
+// Once a profile is active, if main already holds a sign-in for it (the page
+// was reloaded, or the vault gave it back) the stand-in credential is restored
+// before the client starts, so that the client's own restore finds it.
+import { useEffect, useState, type ReactNode } from 'react';
 import { signedIn } from './credentials';
 import { bridge } from './access';
-import type { ServerAddressRefusal } from './bridge';
+import type { ProfilesView } from './bridge';
 import { setServerOrigin } from './state';
+import { ProfileBar } from './ui/ProfileBar';
+import { Recovery } from './ui/Recovery';
+import { ServerList } from './ui/ServerList';
 
-// Written in two parts: the page's source holds no absolute URL.
-const example = ['https:', 'chat.example.org'].join('//');
-
-const refusalLines: Readonly<Record<ServerAddressRefusal, string>> = {
-  malformed: `That is not a web address. Write it like ${example}`,
-  scheme: 'Use a secure (https) address. A plain http address is accepted only for this computer (localhost, 127.0.0.1 or [::1]).',
-  userinfo: 'Leave the user name and password out of the address.',
-  path: 'Give the server’s address alone: no path, query or #fragment after the host.',
-  unreachable: 'That server could not be reached.',
-  unsupported: 'That address is not supported.',
-};
-
-const certificateLine =
-  'This computer does not trust that server’s certificate, so nothing was sent. If the server uses a private certificate authority, install it in the system’s certificate store (see desktop/README.md), then try again.';
-
-type Phase = 'loading' | 'address' | 'ready' | 'missing';
+type Phase = 'loading' | 'recovery' | 'list' | 'ready' | 'missing';
 
 export function DesktopShell({ children }: { readonly children: ReactNode }) {
   const [phase, setPhase] = useState<Phase>('loading');
-  const [line, setLine] = useState('');
-  const [busy, setBusy] = useState(false);
-  const field = useRef<HTMLInputElement>(null);
-  const id = useId();
+  const [view, setView] = useState<ProfilesView | null>(null);
 
   // enter makes the client's stand-in credential if main holds a sign-in.
   async function enter(origin: string): Promise<void> {
@@ -46,6 +36,17 @@ export function DesktopShell({ children }: { readonly children: ReactNode }) {
     setPhase('ready');
   }
 
+  async function show(next: ProfilesView): Promise<void> {
+    setView(next);
+    if (next.recovery) {
+      setPhase('recovery');
+      return;
+    }
+    const active = next.profiles.find((p) => p.id === next.active);
+    if (active === undefined) setPhase('list');
+    else await enter(active.origin);
+  }
+
   useEffect(() => {
     let live = true;
     const b = bridge();
@@ -54,11 +55,9 @@ export function DesktopShell({ children }: { readonly children: ReactNode }) {
       return;
     }
     void b
-      .serverAddress()
-      .then(async (address) => {
-        if (!live) return;
-        if (address.origin === null) setPhase('address');
-        else await enter(address.origin);
+      .profiles()
+      .then(async (first) => {
+        if (live) await show(first);
       })
       .catch(() => {
         if (live) setPhase('missing');
@@ -66,52 +65,17 @@ export function DesktopShell({ children }: { readonly children: ReactNode }) {
     return () => {
       live = false;
     };
+    // show only uses setters and the bridge; it is meant to run once.
   }, []);
 
-  useEffect(() => {
-    if (phase === 'address') field.current?.focus();
-  }, [phase, line]);
-
-  async function submit(event: SyntheticEvent): Promise<void> {
-    event.preventDefault();
-    const b = bridge();
-    const typed = field.current?.value.trim() ?? '';
-    if (b === undefined || busy) return;
-    if (typed === '') {
-      field.current?.focus();
-      return;
-    }
-    setBusy(true);
-    setLine('');
-    try {
-      const set = await b.setServerAddress(typed);
-      if (!set.ok) {
-        setLine(refusalLines[set.refusal]);
-        return;
-      }
-      // Ask the server who it is before the client starts, so that a
-      // certificate that is not trusted, or an address that is no Conch
-      // server, is said here and not as a sign-in that never answers.
-      const reply = await b.request({ operation: 'health' });
-      if (reply.kind === 'none') {
-        if (reply.reason === 'certificate') setLine(certificateLine);
-        else if (reply.reason === 'invalid' || reply.reason === 'oversize' || reply.reason === 'redirect') setLine(`${set.origin} answered, but not as a Conch server.`);
-        else setLine(`Could not reach ${set.origin}. Check the address and the connection.`);
-        return;
-      }
-      if (reply.kind === 'reply' && reply.status !== 200) {
-        setLine(`${set.origin} answered, but not as a Conch server.`);
-        return;
-      }
-      await enter(set.origin);
-    } catch {
-      setLine('The desktop app could not check that address.');
-    } finally {
-      setBusy(false);
-    }
+  if (phase === 'ready' && view !== null) {
+    return (
+      <>
+        <ProfileBar initial={view} />
+        {children}
+      </>
+    );
   }
-
-  if (phase === 'ready') return <>{children}</>;
   if (phase === 'loading') {
     return (
       <main className="signin">
@@ -120,7 +84,7 @@ export function DesktopShell({ children }: { readonly children: ReactNode }) {
       </main>
     );
   }
-  if (phase === 'missing') {
+  if (phase === 'missing' || view === null) {
     return (
       <main className="signin">
         <h1>Conch</h1>
@@ -130,25 +94,13 @@ export function DesktopShell({ children }: { readonly children: ReactNode }) {
       </main>
     );
   }
+  if (phase === 'recovery') return <Recovery onView={(next) => void show(next)} />;
   return (
-    <main className="signin">
+    <main className="signin desktop-chooser">
       <h1>Conch</h1>
       <h2>Server address</h2>
-      <p className="hint">The address of the Conch server you use. Your sign-in is kept by the app and is gone when it closes.</p>
-      <p role="alert" className="notice">
-        {line}
-      </p>
-      <form
-        onSubmit={(event) => {
-          void submit(event);
-        }}
-      >
-        <label htmlFor={id}>Server address</label>
-        <input id={id} ref={field} type="text" inputMode="url" autoComplete="off" spellCheck={false} placeholder={example} />
-        <button type="submit" disabled={busy}>
-          Continue
-        </button>
-      </form>
+      <p className="hint">The address of the Conch server you use. Your sign-in is kept by the app; whether it lasts after the app closes is said below.</p>
+      <ServerList view={view} onView={setView} />
     </main>
   );
 }

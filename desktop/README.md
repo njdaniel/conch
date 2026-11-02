@@ -37,6 +37,12 @@ voice in the UI (#771: the supervisor that runs `conch-voice` exists, in
 | `main/voice/endpoint.ts` | the helper's Linux events endpoint: the verified `$XDG_RUNTIME_DIR`, `conch/<profile-id>` (0700), the stale sweep, the `sun_path` budget, the socket and the attach (#948) |
 | `main/voice/spawn.ts` | the bundled `conch-voice` and its trusted-path checks, the environment built from empty by an allowlist, the spawn options (#948) |
 | `main/voice/supervisor.ts` | one helper per instance: start, commands and acks, the stop escalation and the reap, helper loss as one typed state (#948) |
+| `main/instance.ts` | one instance per data root (`requestSingleInstanceLock`), and the data root made 0700 with its ancestors checked (#945) |
+| `main/profiles/store.ts`, `files.ts`, `ids.ts` | the saved servers: random 128-bit ids, the (origin, principal) binding rule, `profiles.json` (non-secret, 0600, atomic) and the profile directories (#945) |
+| `main/profiles/switch.ts`, `hooks.ts` | the switch sequence (media hooks, sockets, requests, renderer, helper hooks, then the next profile, each bounded) and the hook interface #771 and #772 register on (#945) |
+| `main/profiles/service.ts` | which profile is active, where its credential lives (the vault, or main's memory when storage is not protected), sign-out and remove; the place #946's compatibility gate goes (`tokenFor`) (#945) |
+| `main/profiles/activation.ts` | one activation in Electron: its own Session, Client, Service, feeds, gate and window in a fresh in-memory partition (#945) |
+| `main/vault/electron-storage.ts` | the one adapter from Electron's `safeStorage` to the vault (#945) |
 | `main/document.ts` | which frame shows the current document (the document generation) |
 | `main/app.ts`, `main/main.ts` | startup |
 | `preload/bridge.ts`, `preload/index.ts` | `window.conchDesktop`: a frozen object whose keys are exactly the functions of `web/src/platform/desktop/bridge.ts`; the page-side copy is not frozen, so nothing may rely on that |
@@ -218,6 +224,21 @@ request, a 2 MiB frame header ends the socket in about 20 ms, and a socket whose
 server ignores the close frame has no close event until it is destroyed. If the
 dispatcher is not an `Agent`, main says so once in its log and opens a plain
 `WebSocket`, which still has the after-the-fact size check and the count.
+
+### Saved servers (issue #945)
+
+A profile is a random 32-hex id mapped to a canonical origin and, after the
+first sign-in, the account (principal id) it is bound to. Signing in as another
+account on a bound profile is refused and its credential forgotten; a second
+account of a server is a second entry. A switch or a sign-out destroys the
+window and makes new web contents in a new in-memory partition, with a new
+Session, Client, feeds and gate, so nothing of one profile's (a pending
+response, a late socket frame, a draft, a preference) reaches another's. Only a
+member's sign-in is kept: in the vault when storage is protected, otherwise in
+main's memory for this run, with the reason shown and a Retry. The data root is
+`app.getPath('userData')` (0700); `profiles.json` is metadata only. Two
+instances on one root: the second focuses the first and exits. A `profiles.json`
+that cannot be read gives a recovery screen and changes nothing until asked.
 
 ### Which HTTP stack (Q6)
 
