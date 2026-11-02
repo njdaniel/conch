@@ -366,8 +366,12 @@ describe('the presets', () => {
     expect(group.textContent).toContain('the members’ column matches this');
     const warnings = within(region).getByRole('list', { name: 'Warnings about these permissions' });
     expect(within(warnings).getAllByRole('listitem')).toHaveLength(2);
-    // Warnings are not refusals: the presets still work.
+    // Warnings are not refusals: the preset that changes something still works.
     expect(within(region).getByRole<HTMLButtonElement>('button', { name: 'Use Personal preset' }).disabled).toBe(false);
+    // The one already applied changes nothing, and says so.
+    const same = within(region).getByRole<HTMLButtonElement>('button', { name: 'Use Group preset' });
+    expect(same.disabled).toBe(true);
+    expect(same.title).toBe('Already applied.');
   });
 
   it('takes the preset table from the server’s answer, never from a copy', async () => {
@@ -590,8 +594,10 @@ describe('turning Act as members on for operators', () => {
     who = owner;
     socket.send(changed);
     await waitFor(() => {
-      expect(within(region).getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(false);
+      expect(locked(cell(region, 'act_as_members', 'operator'))).toBe(false);
     });
+    // The edit was dropped while the permission was gone: nothing is left to save.
+    expect(within(region).getByRole<HTMLButtonElement>('button', { name: 'Save changes' }).disabled).toBe(true);
     expect(within(region).queryByRole('group', { name: 'Confirm Act as members' })).toBeNull();
     expect(puts(calls)).toHaveLength(0);
   });
@@ -622,7 +628,8 @@ describe('what operators issued to others', () => {
     expect(within(list).getAllByRole('listitem')).toHaveLength(3);
     expect(list.textContent).toContain('Credential #41 for person #7');
     expect(list.textContent).toContain('Hook #9 for person #8');
-    expect(within(list).getAllByRole('button', { name: /^Sign out everywhere/ })).toHaveLength(2);
+    // One for each person, not each credential: #41 and #42 are one person's.
+    expect(within(list).getAllByRole('button', { name: /^Sign out everywhere/ })).toHaveLength(1);
     expect(within(list).getByRole('button', { name: 'Revoke hook #9' })).toBeDefined();
     // A hook is not a credential: no sign-out for it.
     expect(within(list).queryByRole('button', { name: 'Sign out everywhere, person #8' })).toBeNull();
@@ -649,15 +656,41 @@ describe('what operators issued to others', () => {
     expect(within(list).getByText('Nothing issued by operators is left on this list.')).toBeDefined();
   });
 
-  it('signs a person out everywhere, which clears their credentials from the list', async () => {
+  it('asks before signing a person out everywhere, then does it and clears their credentials from the list', async () => {
     const { calls, list } = await turnedOff({ 'POST /v1/principals/7/credentials/revoke-all': () => json({ revoked: 2 }) });
-    fireEvent.click(within(list).getAllByRole('button', { name: 'Sign out everywhere, person #7' })[0] as HTMLElement);
+    fireEvent.click(within(list).getByRole('button', { name: 'Sign out everywhere, person #7' }));
+    const ask = within(list).getByRole('group', { name: 'Confirm' });
+    expect(ask.textContent).toContain('Sign person #7 out everywhere?');
+    expect(calls.some((c) => c.path === '/v1/principals/7/credentials/revoke-all')).toBe(false);
+    fireEvent.click(within(ask).getByRole('button', { name: 'Cancel' }));
+    expect(calls.some((c) => c.path === '/v1/principals/7/credentials/revoke-all')).toBe(false);
+    fireEvent.click(within(list).getByRole('button', { name: 'Sign out everywhere, person #7' }));
+    fireEvent.click(within(within(list).getByRole('group', { name: 'Confirm' })).getByRole('button', { name: 'Yes, sign out everywhere' }));
     await waitFor(() => {
       expect(within(list).getAllByRole('listitem')).toHaveLength(1);
     });
     expect(calls.some((c) => c.method === 'POST' && c.path === '/v1/principals/7/credentials/revoke-all')).toBe(true);
     // This browser is still signed in: it was another person's.
     expect(window.sessionStorage.getItem(key)).toBe(ownerToken);
+  });
+
+  it('marks the viewer’s own row, and asks before revoking the viewer’s own credential', async () => {
+    const own: IssuedByOperatorV1[] = [{ kind: 'credential', id: 50, principal_id: owner.id, issued_by: 2, issued_at: at }];
+    const calls = serve(owner, {
+      'GET /v1/permissions': () => json(permissionsDoc(2)),
+      'PUT /v1/permissions': () => json({ ...permissionsDoc(3, { operator: operatorRights.filter((p) => p !== 'act_as_members') }), issued_to_others: own }),
+      'DELETE /v1/credentials/50': () => new Response(null, { status: 204 }),
+    });
+    const region = await open(ownerToken);
+    fireEvent.click(cell(region, 'act_as_members', 'operator'));
+    fireEvent.click(within(region).getByRole('button', { name: 'Save changes' }));
+    const list = await within(region).findByRole('region', { name: 'Issued to others by operators' });
+    expect(list.textContent).toContain('(this is you)');
+    fireEvent.click(within(list).getByRole('button', { name: 'Revoke credential #50' }));
+    expect(calls.some((c) => c.method === 'DELETE')).toBe(false);
+    expect(within(list).getByRole('group', { name: 'Confirm' }).textContent).toContain('Revoke your own credential #50?');
+    fireEvent.click(within(within(list).getByRole('group', { name: 'Confirm' })).getByRole('button', { name: 'Yes, revoke' }));
+    expect(await within(list).findByText('Revoked credential #50.')).toBeDefined();
   });
 
   it('says in its own words when a revoke is refused', async () => {
@@ -704,35 +737,111 @@ describe('staying current', () => {
 
   it('keeps the newest answer when an earlier read answers late', async () => {
     let n = 0;
-    let release: (r: Response) => void = () => undefined;
-    const slow = new Promise<Response>((resolve) => {
-      release = resolve;
-    });
+    const releases: ((r: Response) => void)[] = [];
     serve(owner, {
       'GET /v1/permissions': () => {
         n++;
-        // The first two reads (Server and this section) answer at once; the
-        // third is held back, then the fourth overtakes it.
-        if (n === 3) return slow;
-        return json(n >= 4 ? permissionsDoc(4, { member: ['use_voice'] }) : permissionsDoc(2));
+        // The first two reads (Server and this section) answer at once. The
+        // next two, one for each section, are held back; the two after them
+        // (the second signal) answer at once, so they overtake.
+        if (n === 3 || n === 4) return new Promise<Response>((resolve) => releases.push(resolve));
+        return json(n >= 5 ? permissionsDoc(4, { member: ['use_voice'] }) : permissionsDoc(2));
       },
     });
     const region = await open(ownerToken);
     const socket = await events();
     socket.send(changed);
     await waitFor(() => {
-      expect(n).toBeGreaterThanOrEqual(3);
+      expect(releases).toHaveLength(2);
     });
     socket.send(changed);
     await waitFor(() => {
       expect(cell(region, 'create_public_channels', 'member').checked).toBe(false);
     });
-    // The old answer arrives after the newer one, and changes nothing.
+    // The old answers arrive after the newer one, and change nothing.
+    await act(async () => {
+      for (const release of releases) release(json(permissionsDoc(3)));
+      await Promise.resolve();
+    });
+    expect(cell(region, 'create_public_channels', 'member').checked).toBe(false);
+  });
+
+  it('drops an edit to a cell that a re-read has locked, and closes the confirmation', async () => {
+    let live = permissionsDoc(2, { operator: operatorRights.filter((p) => p !== 'act_as_members') });
+    let who: WhoAmIResponseV1 = owner;
+    const calls = serve(() => who, { 'GET /v1/permissions': () => json(live) });
+    const region = await open(ownerToken);
+    fireEvent.click(cell(region, 'act_as_members', 'operator'));
+    fireEvent.click(cell(region, 'use_voice', 'member'));
+    fireEvent.click(within(region).getByRole('button', { name: 'Save changes' }));
+    expect(within(region).getByRole('group', { name: 'Confirm Act as members' })).toBeDefined();
+    const socket = await events();
+    // The owner mark has gone: only the member column is editable now.
+    live = permissionsDoc(2, { operator: operatorRights.filter((p) => p !== 'act_as_members'), editable: ['member'] });
+    who = settingsOperator;
+    socket.send(changed);
+    await waitFor(() => {
+      expect(within(region).queryByRole('group', { name: 'Confirm Act as members' })).toBeNull();
+    });
+    expect(within(region).getByText(/Act as members for operators is no longer yours to change/)).toBeDefined();
+    expect(cell(region, 'act_as_members', 'operator').checked).toBe(false);
+    // The member edit is still there, and only it would be sent.
+    expect(cell(region, 'use_voice', 'member').checked).toBe(false);
+    expect(within(region).getByText('1 unsaved change')).toBeDefined();
+    expect(puts(calls)).toHaveLength(0);
+  });
+
+  it('says it is reading again after a stale answer, then that it has', async () => {
+    let release: (r: Response) => void = () => undefined;
+    let held = false;
+    serve(owner, {
+      'GET /v1/permissions': () => {
+        if (!held) return json(permissionsDoc(2));
+        return new Promise<Response>((resolve) => {
+          release = resolve;
+        });
+      },
+      'PUT /v1/permissions': () => {
+        held = true;
+        return refusal(409, 'permissions_stale');
+      },
+    });
+    const region = await open(ownerToken);
+    fireEvent.click(cell(region, 'use_voice', 'member'));
+    fireEvent.click(within(region).getByRole('button', { name: 'Save changes' }));
+    expect(await within(region).findByText(/Reading them again…/)).toBeDefined();
     await act(async () => {
       release(json(permissionsDoc(3)));
       await Promise.resolve();
     });
-    expect(cell(region, 'create_public_channels', 'member').checked).toBe(false);
+    expect(await within(region).findByText(/They have been read again; check your changes and save again\./)).toBeDefined();
+    expect(within(region).queryByText(/Reading them again…/)).toBeNull();
+  });
+
+  it('does not call a permissions_conflict "not enforced" unless the message says so', async () => {
+    serve(owner, {
+      'GET /v1/permissions': () => json(permissionsDoc(2)),
+      'PUT /v1/permissions': () => refusal(409, 'permissions_conflict', 'share_screen needs something else'),
+    });
+    const region = await open(ownerToken);
+    fireEvent.click(cell(region, 'make_member_links', 'member'));
+    fireEvent.click(within(region).getByRole('button', { name: 'Save changes' }));
+    expect(await within(region).findByText('That change would break a rule of the permissions. Nothing was saved.')).toBeDefined();
+    expect(region.textContent).not.toContain('does not enforce');
+  });
+
+  it('clears the notice of what moved when changes are discarded', async () => {
+    let live = permissionsDoc(2);
+    serve(owner, { 'GET /v1/permissions': () => json(live) });
+    const region = await open(ownerToken);
+    fireEvent.click(cell(region, 'use_voice', 'member'));
+    const socket = await events();
+    live = permissionsDoc(3, { member: memberRights.filter((p) => p !== 'make_member_links') });
+    socket.send(changed);
+    expect(await within(region).findByText(/Since you read them/)).toBeDefined();
+    fireEvent.click(within(region).getByRole('button', { name: 'Discard changes' }));
+    expect(within(region).queryByText(/Since you read them/)).toBeNull();
+    expect(within(region).queryByText(/The permissions changed on the server/)).toBeNull();
   });
 
   it('works out what moved between two documents', () => {
@@ -749,6 +858,24 @@ describe('the Server section’s summary lines', () => {
     await waitFor(() => {
       expect(document.activeElement).toBe(cell(region, 'see_member_directory', 'member'));
     });
+  });
+});
+
+describe('the table on a wide window', () => {
+  it('keeps focus on a cell when the parent renders again', async () => {
+    serve(owner, { 'GET /v1/permissions': () => json(permissionsDoc(2)) });
+    window.sessionStorage.setItem(key, ownerToken);
+    render(<App origin={origin} />);
+    await screen.findByRole('button', { name: 'Settings' });
+    cleanup();
+    const props = { origin, permissionsChanged: 0, onUnauthorized: () => undefined, channels: [] as [] };
+    const view = render(<AdminConsole {...props} who={owner} />);
+    const input = await screen.findByRole<HTMLInputElement>('checkbox', { name: 'Use voice, Members' });
+    input.focus();
+    expect(document.activeElement).toBe(input);
+    view.rerender(<AdminConsole {...props} who={owner} names={new Map([[1, 'owner']])} />);
+    view.rerender(<AdminConsole {...props} who={{ ...owner }} />);
+    expect(document.activeElement).toBe(input);
   });
 });
 

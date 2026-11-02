@@ -141,7 +141,7 @@ function ruleBreak(rows: readonly PermissionRowV1[], valueOf: (row: PermissionRo
 // permissionIn finds the first permission the page knows by name in the
 // server's message. The message itself is never shown.
 function permissionIn(message: string | undefined): Permission | null {
-  if (message === undefined) return null;
+  if (message === undefined || !message.includes('does not enforce')) return null;
   for (const name of Object.keys(info)) if (known(name) && message.includes(name)) return name;
   return null;
 }
@@ -336,6 +336,8 @@ export function PermissionsSection({ who, refresh, names, focus, onUnauthorized 
   const docRef = useRef<PermissionsResponseV1 | null>(null);
   const editsRef = useRef(edits);
   editsRef.current = edits;
+  const whoRef = useRef(who);
+  whoRef.current = who;
   const handled = useRef(0);
 
   const canWrite = canDo(who, 'change_server_settings');
@@ -345,7 +347,8 @@ export function PermissionsSection({ who, refresh, names, focus, onUnauthorized 
     setDoc(next);
   }, []);
 
-  const read = useCallback(() => {
+  // read asks again; `after`, if given, is the line to say once the answer is in.
+  const read = useCallback((after?: string) => {
     const mine = ++reads.current;
     void api.permissions().then((result) => {
       if (mine !== reads.current) return;
@@ -354,22 +357,34 @@ export function PermissionsSection({ who, refresh, names, focus, onUnauthorized 
         const next = result.value;
         // An edit the document now holds is no longer a change.
         const kept: Record<string, boolean> = {};
+        const dropped: string[] = [];
         for (const [key, value] of Object.entries(editsRef.current)) {
           const [permission, role] = key.split(':');
           const row = next.rows.find((r) => r.permission === permission);
-          if (row !== undefined && (role === 'member' || role === 'operator') && cellOf(row, role) !== value) kept[key] = value;
+          if (row === undefined || (role !== 'member' && role !== 'operator') || cellOf(row, role) === value) continue;
+          // A cell that is no longer the caller's to change loses its edit:
+          // it could not be sent, and must not wait to be.
+          if (lockedReason(next, whoRef.current, row, role, cellOf(row, role), false) !== null) {
+            dropped.push(`${labelOf(row.permission)} for ${roleLabels[role].toLowerCase()} is no longer yours to change, so your edit to it was dropped`);
+            continue;
+          }
+          kept[key] = value;
         }
         setEdits(kept);
         take(next);
         setReadLine(null);
-        if (before !== null && before.revision !== next.revision) {
-          setMoved(movedCells(before, next));
+        if (after !== undefined) setLine({ text: after, refused: true });
+        if (before !== null && (before.revision !== next.revision || dropped.length > 0)) {
+          setMoved([...(before.revision === next.revision ? [] : movedCells(before, next)), ...dropped]);
           setStale(Object.keys(kept).length > 0);
         } else if (Object.keys(kept).length === 0) {
           setStale(false);
         }
       } else if (result.failure === 'unauthorized') onUnauthorized();
-      else setReadLine(result.failure === 'network' ? 'Cannot reach the server.' : 'Could not read the permissions.');
+      else {
+        if (after !== undefined) setLine(null);
+        setReadLine(result.failure === 'network' ? 'Cannot reach the server.' : 'Could not read the permissions.');
+      }
     });
   }, [onUnauthorized, take]);
 
@@ -380,9 +395,10 @@ export function PermissionsSection({ who, refresh, names, focus, onUnauthorized 
   }, [shown, refresh, read]);
 
   // Losing the permission closes a confirmation that was open: it never sends.
+  const operatorEditable = doc?.editable.includes('operator') ?? false;
   useEffect(() => {
-    if (!canWrite) setConfirming(false);
-  }, [canWrite]);
+    if (!canWrite || !operatorEditable) setConfirming(false);
+  }, [canWrite, operatorEditable]);
 
   // A link from the Server section brings a cell into view, once.
   const focusN = focus?.n ?? 0;
@@ -461,8 +477,9 @@ export function PermissionsSection({ who, refresh, names, focus, onUnauthorized 
     const nothing = 'Nothing was saved.';
     if (result.code === 'permissions_stale') {
       // Never retried blind: read again, say what changed, decide again.
-      setLine({ text: `${refusalLine(result, nothing)} It has been read again; check your changes and save again.`, refused: true });
-      read();
+      const said = refusalLine(result, nothing);
+      setLine({ text: `${said} Reading them again…`, refused: true });
+      read(`${said} They have been read again; check your changes and save again.`);
       return;
     }
     if (result.code === 'permissions_conflict' && doc !== null) {
@@ -556,8 +573,8 @@ export function PermissionsSection({ who, refresh, names, focus, onUnauthorized 
               )}
               <button
                 type="button"
-                disabled={!canPreset || busy || dirty}
-                title={dirty ? 'Save or discard your changes first.' : undefined}
+                disabled={!canPreset || busy || dirty || here || changes === null || (changes.on.length === 0 && changes.off.length === 0)}
+                title={dirty ? 'Save or discard your changes first.' : here || changes === null || (changes.on.length === 0 && changes.off.length === 0) ? 'Already applied.' : undefined}
                 onClick={() => {
                   applyPreset(p.preset);
                 }}
@@ -616,6 +633,7 @@ export function PermissionsSection({ who, refresh, names, focus, onUnauthorized 
           onClick={() => {
             setEdits({});
             setStale(false);
+            setMoved(null);
             setConfirming(false);
             setLine(null);
             setFlagged(null);
@@ -626,7 +644,7 @@ export function PermissionsSection({ who, refresh, names, focus, onUnauthorized 
         {dirty ? <span className="hint">{String(patch.length)} unsaved {patch.length === 1 ? 'change' : 'changes'}</span> : null}
       </div>
 
-      {confirming && canWrite && turnsOnActAs ? (
+      {confirming && canWrite && operatorEditable && turnsOnActAs ? (
         <div role="group" aria-label="Confirm Act as members" className="signout-confirm">
           <p>Operators {actAsMembersSentence}. Turn it on for operators?</p>
           <div className="actions">
@@ -692,7 +710,16 @@ function IssuedList({
   const canRevoke = canDo(who, 'manage_members');
   const [busy, setBusy] = useState<string | null>(null);
   const [line, setLine] = useState<Line>(null);
-  const person = (id: number) => names?.get(id) ?? `person #${String(id)}`;
+  // The question open: signing a person out everywhere, or revoking one of the
+  // viewer's own. Nothing is sent before it is answered yes.
+  const [asking, setAsking] = useState<{ readonly text: string; readonly yes: string; readonly go: () => void } | null>(null);
+  const person = (id: number) => (id === who.id ? `${names?.get(id) ?? `person #${String(id)}`} (this is you)` : (names?.get(id) ?? `person #${String(id)}`));
+  const plain = (id: number) => names?.get(id) ?? `person #${String(id)}`;
+
+  // Losing manage_members closes the question: it never sends.
+  useEffect(() => {
+    if (!canRevoke) setAsking(null);
+  }, [canRevoke]);
 
   function run(key: string, call: () => Promise<Awaited<ReturnType<typeof api.revokeIssuedHook>>>, gone: (item: IssuedByOperatorV1) => boolean, done: string) {
     if (busy !== null || !canRevoke) return;
@@ -706,6 +733,15 @@ function IssuedList({
       } else if (result.failure === 'unauthorized') onUnauthorized();
       else setLine({ text: refusalLine(result, 'Nothing was revoked.'), refused: true });
     });
+  }
+
+  // The first credential of each person carries their one Sign out everywhere.
+  const firstOf = new Set<string>();
+  const leaders = new Set<string>();
+  for (const item of items) {
+    if (item.kind !== 'credential' || firstOf.has(String(item.principal_id))) continue;
+    firstOf.add(String(item.principal_id));
+    leaders.add(`${item.kind}-${String(item.id)}`);
   }
 
   return (
@@ -724,13 +760,19 @@ function IssuedList({
                 {item.kind === 'credential' ? 'Credential' : 'Hook'} #{item.id} for {person(item.principal_id)}, issued by {person(item.issued_by)} on {when(item.issued_at)}
               </span>
               <span className="actions">
-                {item.kind === 'credential' ? (
+                {leaders.has(key) ? (
                   <button
                     type="button"
                     disabled={!canRevoke || busy !== null}
-                    aria-label={`Sign out everywhere, ${person(item.principal_id)}`}
+                    aria-label={`Sign out everywhere, ${plain(item.principal_id)}`}
                     onClick={() => {
-                      run(`all-${String(item.principal_id)}`, () => api.signOutPrincipalEverywhere(item.principal_id), (i) => i.kind === 'credential' && i.principal_id === item.principal_id, `Signed ${person(item.principal_id)} out everywhere.`);
+                      setAsking({
+                        text: `Sign ${person(item.principal_id)} out everywhere? Every credential of theirs ends, on every device${item.principal_id === who.id ? ', and you are signed out here too' : ''}.`,
+                        yes: 'Yes, sign out everywhere',
+                        go: () => {
+                          run(`all-${String(item.principal_id)}`, () => api.signOutPrincipalEverywhere(item.principal_id), (i) => i.kind === 'credential' && i.principal_id === item.principal_id, `Signed ${plain(item.principal_id)} out everywhere.`);
+                        },
+                      });
                     }}
                   >
                     Sign out everywhere
@@ -741,7 +783,12 @@ function IssuedList({
                   disabled={!canRevoke || busy !== null}
                   aria-label={`Revoke ${item.kind} #${String(item.id)}`}
                   onClick={() => {
-                    run(key, () => (item.kind === 'credential' ? api.revokeIssuedCredential(item.id) : api.revokeIssuedHook(item.id)), (i) => i.kind === item.kind && i.id === item.id, `Revoked ${item.kind} #${String(item.id)}.`);
+                    const go = () => {
+                      run(key, () => (item.kind === 'credential' ? api.revokeIssuedCredential(item.id) : api.revokeIssuedHook(item.id)), (i) => i.kind === item.kind && i.id === item.id, `Revoked ${item.kind} #${String(item.id)}.`);
+                    };
+                    if (item.principal_id === who.id) {
+                      setAsking({ text: `Revoke your own ${item.kind} #${String(item.id)}? It stops working at once.`, yes: 'Yes, revoke', go });
+                    } else go();
                   }}
                 >
                   Revoke
@@ -751,6 +798,33 @@ function IssuedList({
           );
         })}
       </ul>
+      {asking === null || !canRevoke ? null : (
+        <div role="group" aria-label="Confirm" className="signout-confirm">
+          <p>{asking.text}</p>
+          <div className="actions">
+            <button
+              type="button"
+              className="danger"
+              disabled={busy !== null || !canRevoke}
+              onClick={() => {
+                const go = asking.go;
+                setAsking(null);
+                go();
+              }}
+            >
+              {asking.yes}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setAsking(null);
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
       <p role="status" className={line?.refused === true ? 'notice' : 'hint'}>
         {line?.text ?? ''}
       </p>

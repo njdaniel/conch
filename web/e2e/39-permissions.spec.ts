@@ -44,13 +44,14 @@ async function operatorIn(page: Page, world: World, token: string): Promise<void
   await expect(statusLine(page)).toContainText('Connected');
 }
 
-async function makeOperator(world: World, name: string): Promise<string> {
+async function makeOperator(world: World, name: string): Promise<{ readonly id: number; readonly token: string }> {
   const request: CreatePrincipalRequest = { kind: 'human', name };
   const id = (await ok(world, world.tokens.operator, 'POST', '/v0/principals', createPrincipalResponse, request)).principal.id;
   const made = await call(world, world.tokens.operator, 'PUT', `/v1/principals/${String(id)}/role`, { role: 'operator' });
   expect(made.status, `making ${name} an operator: ${JSON.stringify(made.body)}`).toBeLessThan(300);
   const credential: CreateCredentialRequestV1 = { label: name };
-  return (await ok(world, world.tokens.operator, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, credential)).token;
+  const token = (await ok(world, world.tokens.operator, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, credential)).token;
+  return { id, token };
 }
 
 const desktop: BrowserContextOptions = { viewport: { width: 1440, height: 900 } };
@@ -100,17 +101,22 @@ test('A1019 at 1440×900 a fixed cell explains itself on keyboard focus', async 
 test('A1019 at 1440×900 the owner turns Act as members off for operators, sees what operators issued, and revokes one', async ({ meet, secrets, world }) => {
   const before = await read(world);
   const name = `operator-${stamp}`;
-  const issuer = await makeOperator(world, name);
-  secrets.push(issuer);
-  // The operator issues a credential to someone else, as operators may while
-  // they hold Act as members.
-  const target: CreatePrincipalRequest = { kind: 'human', name: `member-${stamp}` };
-  const targetId = (await ok(world, issuer, 'POST', '/v0/principals', createPrincipalResponse, target)).principal.id;
-  const label: CreateCredentialRequestV1 = { label: `issued-${stamp}` };
-  const made = await ok(world, issuer, 'POST', `/v1/principals/${String(targetId)}/credentials`, createCredentialResponseV1, label);
-  secrets.push(made.token);
-  const id = made.credential.id;
+  // The people made here are left disabled, whatever happens.
+  const people: number[] = [];
   try {
+    const issuerMade = await makeOperator(world, name);
+    people.push(issuerMade.id);
+    const issuer = issuerMade.token;
+    secrets.push(issuer);
+    // The operator issues a credential to someone else, as operators may while
+    // they hold Act as members.
+    const target: CreatePrincipalRequest = { kind: 'human', name: `member-${stamp}` };
+    const targetId = (await ok(world, issuer, 'POST', '/v0/principals', createPrincipalResponse, target)).principal.id;
+    people.push(targetId);
+    const label: CreateCredentialRequestV1 = { label: `issued-${stamp}` };
+    const made = await ok(world, issuer, 'POST', `/v1/principals/${String(targetId)}/credentials`, createCredentialResponseV1, label);
+    secrets.push(made.token);
+    const id = made.credential.id;
     const { page } = await meet(desktop);
     await operatorIn(page, world, world.tokens.operator);
     await page.getByRole('button', { name: 'Settings' }).click();
@@ -140,6 +146,10 @@ test('A1019 at 1440×900 the owner turns Act as members off for operators, sees 
     expect((await read(world)).rows.find((r) => r.permission === 'act_as_members')?.operator).toBe(true);
   } finally {
     await restore(world, before);
+    for (const person of people) {
+      const off = await call(world, world.tokens.operator, 'POST', `/v1/principals/${String(person)}/disable`);
+      expect(off.status, `disabling person ${String(person)}: ${JSON.stringify(off.body)}`).toBeLessThan(300);
+    }
   }
 });
 
