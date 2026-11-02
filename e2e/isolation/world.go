@@ -19,9 +19,11 @@ import (
 )
 
 // The world: one server, an operator, and two groups that know nothing of
-// each other. Group A joins through an open link the operator puts out;
-// group B through personal invites, the second made by a B tester the
-// operator let invite. Each group then does what a group does: posts,
+// each other (design §8). Both join through member links (POST /v2/invites,
+// issue #986): group A through the operator's link landing in A's private
+// channels; group B through the operator's link landing in B's channels,
+// and a second member link a B tester made, whose joiner the operator then
+// adds to B's channels. Each group then does what a group does: posts,
 // replies in a thread, whispers, posts to a net, uploads a file, starts a
 // session and a run, asks for an intervention and an approval, sends a
 // problem report, and (with LiveKit) talks in voice and shares a screen.
@@ -61,7 +63,7 @@ type group struct {
 	// given when hidden are not markers: the directory makes names public.
 	hidden *member
 
-	openInviteID int64  // A's open link
+	openInviteID int64  // the operator's member link of A's, landing in A's channels
 	openCode     string // its code
 	invites      []int64
 
@@ -218,15 +220,15 @@ func (w *world) buildGroups() error {
 		w.marks.id("channel", "A's channel "+name, w.a.chanIDs[i])
 	}
 
-	// A: one open link, three joiners.
-	open, err := w.invite(w.op, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: w.a.channels, Voice: true})
+	// A: the operator's member link landing in A's channels, three joiners.
+	open, err := w.memberLink(w.op, w.a.channels)
 	if err != nil {
 		return err
 	}
 	w.a.openInviteID, w.a.openCode = open.Invite.ID, open.Code
 	w.a.invites = append(w.a.invites, open.Invite.ID)
-	w.marks.secret("A's open link", open.Code)
-	w.marks.id("invite", "A's open link", open.Invite.ID)
+	w.marks.secret("A's link", open.Code)
+	w.marks.id("invite", "A's link", open.Invite.ID)
 	for _, n := range []string{"ann", "abe", "amy"} {
 		m, err := w.redeem(open.Code, w.aPerson(n))
 		if err != nil {
@@ -235,9 +237,12 @@ func (w *world) buildGroups() error {
 		w.a.people = append(w.a.people, m)
 	}
 
-	// B: the operator invites bea, who may invite; bea invites bob.
-	may := true
-	first, err := w.invite(w.op, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: w.b.channels, Voice: true, MayInvite: &may})
+	// B: the operator's member link landing in B's channels brings bea, who
+	// may invite, as every member may; bea's own member link brings bob. A
+	// member names no landing channel, so bob lands in the default channels
+	// (none here), and the operator adds him to B's, without the right to
+	// decide, as a joiner has.
+	first, err := w.memberLink(w.op, w.b.channels)
 	if err != nil {
 		return err
 	}
@@ -248,13 +253,19 @@ func (w *world) buildGroups() error {
 	if err != nil {
 		return err
 	}
-	second, err := w.invite(bea.api, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: w.b.channels, Voice: true})
+	second, err := w.memberLink(bea.api, nil)
 	if err != nil {
 		return err
 	}
 	bob, err := w.redeem(second.Code, w.bName("bob"))
 	if err != nil {
 		return err
+	}
+	no := false
+	for _, c := range w.b.channels {
+		if err := w.op.call(http.MethodPut, fmt.Sprintf("/v1/channels/%s/members/%d", c, bob.id), schema.PutChannelMemberRequestV1{CanDecide: &no}, nil); err != nil {
+			return fmt.Errorf("add bob to %s: %w", c, err)
+		}
 	}
 	w.b.people = []*member{bea, bob}
 	w.b.invites = []int64{first.Invite.ID, second.Invite.ID}
@@ -337,12 +348,24 @@ func (w *world) buildGroups() error {
 	return nil
 }
 
-// invite makes an invite as a and registers its code as a secret. It is one
-// made as invites were before the community model: POST /v1/invites is
-// retired (issue #985, 409 invite_kind_retired), so the invite is made
-// through the store, opened beside the running server, as a's principal. The
-// routes that read, preview, redeem and close such an invite are unchanged,
-// and member links are made over POST /v2/invites (the rows of memberlinks).
+// memberLink makes a member link as a (POST /v2/invites, issue #986),
+// landing in channels when they are given (only an operator may name them),
+// and registers its code as a secret.
+func (w *world) memberLink(a api, channels []string) (schema.CreateInviteResponseV2, error) {
+	var resp schema.CreateInviteResponseV2
+	if err := a.call(http.MethodPost, "/v2/invites", schema.CreateInviteRequestV2{Kind: schema.InviteKindMember, LandingChannels: channels}, &resp); err != nil {
+		return resp, fmt.Errorf("make a member link: %w", err)
+	}
+	w.h.secret("an invite code", resp.Code)
+	return resp, nil
+}
+
+// invite makes a legacy invite as a, one made as invites were before the
+// community model, and registers its code as a secret: the world keeps one,
+// ann's personal invite, as an upgraded server does. It is made through the
+// store, opened beside the running server, as a's principal. The routes
+// that read, preview, redeem and close such an invite are unchanged, and
+// member links are made over POST /v2/invites (memberLink).
 func (w *world) invite(a api, req schema.CreateInviteRequestV1) (schema.CreateInviteResponseV1, error) {
 	var resp schema.CreateInviteResponseV1
 	var who schema.WhoAmIResponseV1

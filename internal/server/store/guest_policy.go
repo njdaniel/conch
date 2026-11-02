@@ -997,21 +997,33 @@ func (s *Store) JoinAsAccount(ctx context.Context, name, record string, now time
 }
 
 // addOpenSignupMembershipsTx adds pid, a member open sign-up just made, to
-// channels, the default channels its lister still stands behind, as a member
-// link's redemption does (issue #987, design §2.1): no history bound, and no
-// right to decide the channel's approvals (issue #450; the column's default
-// of 1 is for members an operator adds). Each is audited member_added, as
-// "system". It is open sign-up's one membership write, the place the
-// directory signal (#988, design §13.11 O14) hooks.
+// channels, the default channels its lister still stands behind, through
+// addJoinerMembershipsTx, and audits each member_added as actor.
 func addOpenSignupMembershipsTx(ctx context.Context, tx execer, actor string, pid int64, channels []schema.InviteChannelV1, now time.Time) error {
+	if err := addJoinerMembershipsTx(ctx, tx, pid, sql.NullInt64{}, channels, now); err != nil {
+		return fmt.Errorf("store: join as an account: %w", err)
+	}
 	for _, c := range channels {
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO channel_members (channel_id, principal_id, created_at, can_decide) VALUES (?, ?, ?, 0)`,
-			c.ID, pid, now.UnixMilli()); err != nil {
-			return fmt.Errorf("store: join as an account: add member: %w", err)
-		}
 		if err := appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(c.ID), memberDetail(pid), now); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// addJoinerMembershipsTx is the one membership write of a member who has
+// just joined, through open sign-up or through a member link or a legacy
+// invite (issues #986, #987; design §2.1): pid joins each of channels with
+// no history bound and no right to decide the channel's approvals (issue
+// #450; the column's default of 1 is for members an operator adds), added
+// by addedBy (an invite's maker; none for open sign-up). It is the place the
+// directory signal (#988, design §13.11 O14) hooks. Callers audit.
+func addJoinerMembershipsTx(ctx context.Context, tx execer, pid int64, addedBy sql.NullInt64, channels []schema.InviteChannelV1, now time.Time) error {
+	for _, c := range channels {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide) VALUES (?, ?, ?, ?, 0)`,
+			c.ID, pid, addedBy, now.UnixMilli()); err != nil {
+			return fmt.Errorf("add member: %w", err)
 		}
 	}
 	return nil

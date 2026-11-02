@@ -50,6 +50,31 @@ release that Nick publishes.
     they return, come through guest links (#1004).
   - The settings answer carries `default_channels` and warns
     `no_default_channel` when no channel is a default channel.
+- **Redeeming a link makes a full member** (#986, ADR-013).
+  `POST /v2/invites/redeem` with a member link lands the joiner in the
+  default channels as they are at that moment (none is fine), or in the
+  link's landing channels, with the whole history, no right to decide
+  approvals, voice on and the right to make member links on.
+  - An invite made before the upgrade still lands in its own channels its
+    maker still stands behind, and now also in the default channels. One with
+    none of its own channels left is still refused.
+  - Every joiner has voice and may make member links, whatever the invite
+    said: both are switches an operator turns off for one person
+    (`PUT /v1/principals/{id}/voice-permission`, `.../invite-permission`).
+    Before, an invite could withhold voice, and only an operator's invite
+    could pass on the right to invite.
+  - For old clients, `GET /v1/invites` and `POST /v1/invites/preview` show a
+    member link as an `open` invite into the default channels as they are
+    now, with voice, no right to invite passed on, joining as an account, and
+    its expiry (or the never-expires sentinel).
+  - For an invite made before the upgrade, `GET /v1/invites` still shows the
+    voice and right to invite it was made with, and its list and preview show
+    only its own channels, not the default channels its joiner now also
+    lands in. Redemption follows the rules above, not those fields.
+  - Such an invite keeps today's rules for its own channels, including one
+    made private since: it still lands its joiner there while its maker stands
+    behind it (an operator holding `manage_channels`, or a member still in the
+    channel), until it expires or an operator closes it.
 
 ### Security
 
