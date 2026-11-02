@@ -352,6 +352,8 @@ for (const [size, options] of sizes) {
       await page.getByRole('button', { name: 'Continue anyway' }).click();
       await expect(statusLine(page)).toContainText('Connected');
       await page.getByRole('button', { name: 'Settings' }).click();
+      // On a phone the administration sections are a list (issue #1018).
+      if (isPhone) await page.getByRole('button', { name: 'Server', exact: true }).tap();
       await page.getByRole('button', { name: 'Joining' }).click();
       const region = page.getByRole('region', { name: 'Joining' });
       const box = region.getByLabel('Pause all invites');

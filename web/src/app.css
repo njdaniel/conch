@@ -3682,3 +3682,104 @@ button.link {
   margin: var(--s2) 0 var(--s1);
   font-size: 0.9rem;
 }
+
+/* The administration console (ADR-014 design §10, issue #1018): sections one
+   under another in the Settings drawer; on a phone a list of sections, each
+   opening as its own page with a Back control. Nothing scrolls sideways, and
+   every button is at least 44px high there. */
+.admin-console {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.admin-console h3 {
+  margin: var(--s2) 0;
+  font-size: 1rem;
+}
+
+.admin-section + .admin-section {
+  margin-top: var(--s3);
+}
+
+.server-section {
+  display: grid;
+  gap: var(--s2);
+}
+
+.server-section p,
+.server-section ul {
+  margin: 0;
+}
+
+.summary-lines {
+  list-style: none;
+  padding: 0;
+}
+
+.setup-card {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+.setup-card h4 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.setup-card .actions,
+.invites-list .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.invites-list li {
+  display: grid;
+  gap: var(--s1);
+}
+
+.section-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.section-list button,
+.admin-console .back {
+  width: 100%;
+  min-height: 2.75rem;
+  text-align: left;
+}
+
+.admin-console .back {
+  margin-bottom: var(--s2);
+}
+
+.admin-console .link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+@media (max-width: 699px) {
+  .admin-console button,
+  .admin-console input[type='text'] {
+    min-height: 2.75rem;
+  }
+
+  .admin-console label:has(input[type='checkbox']),
+  .admin-console label:has(input[type='radio']) {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    min-height: 2.75rem;
+  }
+}

@@ -23,20 +23,30 @@
 // sends the same change again; a cancel leaves the switch as it was.
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import * as api from './api';
-import { serverLine } from './Invite';
+import { refusalLine as byCode } from './admin/permissions';
 
 type Line = { readonly text: string; readonly refused: boolean };
 
-function refusalLine(result: { readonly failure: api.ApiFailure; readonly code?: string; readonly message?: string }): string {
-  if (result.code === 'reauth_required') return 'It needs your password first. Invites were not changed.';
-  if (result.code === 'invalid_request') return serverLine(result.message, 'The server refused. Invites were not changed.');
-  return 'The server refused. Invites were not changed.';
+function refusalLine(result: { readonly failure: api.ApiFailure; readonly code?: string; readonly message?: string; readonly permission?: string }): string {
+  return byCode(result, 'Invites were not changed.');
 }
 
 // asked counts the times an operator was sent here from a refused invite
 // (issue #909): each is read afresh, as an opening is, since the section may
 // have stayed open on an older answer.
-export function InviteSettings({ open, asked = 0, onUnauthorized }: { readonly open: boolean; readonly asked?: number; readonly onUnauthorized: () => void }) {
+export function InviteSettings({
+  open,
+  asked = 0,
+  disabledReason,
+  onUnauthorized,
+}: {
+  readonly open: boolean;
+  readonly asked?: number;
+  // Why the switch cannot be used by this caller, when it cannot (the console
+  // gates it on manage_members; the server decides again).
+  readonly disabledReason?: string;
+  readonly onUnauthorized: () => void;
+}) {
   const id = useId();
   // What the server last reported; null while it is not known.
   const [paused, setPaused] = useState<boolean | null>(null);
@@ -49,6 +59,10 @@ export function InviteSettings({ open, asked = 0, onUnauthorized }: { readonly o
   useEffect(() => {
     if (asking) cancel.current?.focus();
   }, [asking]);
+  // Losing the permission closes a question that was open.
+  useEffect(() => {
+    if (disabledReason !== undefined) setAsking(false);
+  }, [disabledReason]);
   // The number of the newest read or change; an older one's answer is dropped.
   const latest = useRef(0);
   // A change in flight, and whether a read waits for it to answer.
@@ -95,7 +109,7 @@ export function InviteSettings({ open, asked = 0, onUnauthorized }: { readonly o
   }, [open, asked, read]);
 
   function change(want: boolean) {
-    if (busy || paused === null) return;
+    if (busy || paused === null || disabledReason !== undefined) return;
     const n = ++latest.current;
     writing.current = true;
     setBusy(true);
@@ -155,7 +169,7 @@ export function InviteSettings({ open, asked = 0, onUnauthorized }: { readonly o
             <input
               type="checkbox"
               checked={paused}
-              disabled={busy}
+              disabled={busy || disabledReason !== undefined}
               aria-describedby={`${id}-state`}
               ref={box}
               onChange={(event) => {
@@ -170,7 +184,8 @@ export function InviteSettings({ open, asked = 0, onUnauthorized }: { readonly o
             />{' '}
             Pause all invites
           </label>
-          {asking && !paused ? (
+          {disabledReason === undefined ? null : <p className="hint">{disabledReason}</p>}
+          {asking && !paused && disabledReason === undefined ? (
             <div role="group" aria-labelledby={`${id}-ask`} className="signout-confirm" onKeyDown={leave}>
               <p id={`${id}-ask`}>
                 Pause every invite? No one can make, preview or use an invite until you switch this back, including links already sent.
