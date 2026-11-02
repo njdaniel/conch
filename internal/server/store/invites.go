@@ -1033,10 +1033,12 @@ func inviteClosedDetail(id int64, kind schema.InviteKind, link string, uses int6
 
 // inviteSelector says which of a maker's open invites a close or a count
 // touches: those of kind (every kind when empty) that also satisfy where, a
-// fixed SQL condition from the values below, never caller input.
+// fixed SQL condition from the values below whose ? placeholders take args.
+// No caller value is ever part of the SQL text.
 type inviteSelector struct {
 	kind  schema.InviteKind
 	where string
+	args  []any
 }
 
 // clause is the selector's SQL, to append to a WHERE, and its arguments.
@@ -1049,6 +1051,7 @@ func (sel inviteSelector) clause() (string, []any) {
 	}
 	if sel.where != "" {
 		q += " AND " + sel.where
+		args = append(args, sel.args...)
 	}
 	return q, args
 }
@@ -1067,22 +1070,34 @@ var (
 // on the role: their legacy open links (every legacy kind when kind is
 // empty), and the member links a member in their new state could not hold.
 // A member holds make_member_links only with the may_invite brake on
-// (brakeOn), and even then cannot make a link that never expires. So with
+// (brakeOn), and even then cannot ask for a link that never expires. So with
 // the brake off every member link goes, and with it on only the
 // never-expiring ones do; the rest stand, as for any member who may invite.
 // Closing at demotion, not when the brake is next turned off, is what stops
 // a link made under the role from outliving it and coming back with the
-// brake (issue #1165). The where text is built from constants only.
+// brake (issue #1165).
+//
+// Two near cases are left as they are, on purpose. When the default member
+// link expiry is 0, a member's own default link never expires either; such
+// a link is closed here all the same, which errs on the closed side. And the
+// member allowance binds making a link, not holding one, as when an
+// operator lowers it: a demoted maker over it keeps the links they have,
+// each one a member could make, and makes no more until under it. Landing
+// channels need no close: redemption drops each one the maker can no longer
+// manage, and a link left with none is refused (effectiveChannelsTx).
 func selectDemotedInvites(kind schema.InviteKind, brakeOn bool) inviteSelector {
+	var args []any
 	legacy := "link <> 'member'"
 	if kind != "" {
-		legacy += " AND kind = '" + string(kind) + "'"
+		legacy += " AND kind = ?"
+		args = append(args, string(kind))
 	}
 	member := "link = 'member'"
 	if brakeOn {
-		member += fmt.Sprintf(" AND expires_at >= %d", schema.NoExpiryMillis)
+		member += " AND expires_at >= ?"
+		args = append(args, schema.NoExpiryMillis)
 	}
-	return inviteSelector{where: "((" + legacy + ") OR (" + member + "))"}
+	return inviteSelector{where: "((" + legacy + ") OR (" + member + "))", args: args}
 }
 
 // closeCreatorInvitesTx closes every open invite creatorID made that sel
