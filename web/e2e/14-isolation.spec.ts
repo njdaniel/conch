@@ -19,7 +19,7 @@ import { call, type World } from './world';
 const desktop: BrowserContextOptions = { viewport: { width: 1280, height: 800 } };
 const sizes = [['desktop', desktop], ...phones] as const;
 
-const channelButtons = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('button');
+const channelButtons = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('button', { name: /^(?!Actions for )/ });
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 
 type Api = (token: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown) => Promise<{ status: number; body: unknown }>;
