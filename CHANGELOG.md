@@ -8,6 +8,29 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Open sign-up makes a full member, and the bare address never admits a
+  guest** (#987, ADR-013). The joining settings stay on
+  `GET/PUT /v1/join/settings`, with one switch, `open_signup`, in place of the
+  four joining modes.
+  - While open sign-up is on, `POST /v1/join/account` makes the member a
+    member link makes: the default channels with the whole of their history
+    (no history bound), no right to decide approvals, voice on, and the
+    right to make member links on. Before, such an account started with a
+    history bound in each channel and no right to invite. `joining_paused`
+    still pauses it, and turning it on needs at least one default channel.
+  - `open_channels` now refuses a private channel with
+    `409 channel_settings_conflict`, where it used to make the channel public.
+    Make a channel public first with `PUT /v1/channels/{id}/settings`.
+  - `join_voice: false` is refused with `409 join_policy_conflict`: every
+    member may use voice. `conch admin join set --voice off` gets that answer.
+  - `POST /v1/join/guest` always answers `403 guests_disabled`, and
+    `GET /v1/join` never offers a guest and always offers voice. Guests, when
+    they return, come through guest links (#1004).
+  - The settings answer carries `default_channels` and warns
+    `no_default_channel` when no channel is a default channel.
+
 ## [0.1.0-alpha.10] - 2026-11-02
 
 This is the move to one community (ADR-013): member permissions, members

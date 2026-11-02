@@ -132,39 +132,33 @@ func TestRedeemInviteGuestFullSpendsNothing(t *testing.T) {
 	}
 }
 
-// The predicates the previews and the writes share.
+// What the bare address offers (issue #987): an account while open sign-up
+// is on, not paused and with a default channel; never a guest, whatever
+// guests_enabled and the mode say.
 func TestGuestEntryPredicates(t *testing.T) {
-	on := schema.DefaultJoinSettings()
-	on.GuestsEnabled, on.OpenJoining, on.MaxGuests, on.MaxGuestsPerAddress = true, schema.OpenJoiningBoth, 2, 1
+	with := func(mode schema.OpenJoiningMode, guests, paused bool, channels ...string) schema.JoinSettingsV1 {
+		s := schema.DefaultJoinSettings()
+		s.OpenJoining, s.GuestsEnabled, s.JoiningPaused, s.MaxGuests = mode, guests, paused, 2
+		s.OpenChannels = append([]string{}, channels...)
+		return s
+	}
 	tests := []struct {
-		name                     string
-		set                      schema.JoinSettingsV1
-		channels, live, fromAddr int
-		want                     schema.JoinOptionsV1
+		name string
+		set  schema.JoinSettingsV1
+		want schema.JoinOptionsV1
 	}{
-		// An account is offered wherever the mode offers one, the address
-		// has a channel and joining is not paused (issue #711); the guest
-		// caps and the guest switch do not touch it.
-		{"open", on, 1, 0, 0, schema.JoinOptionsV1{Guest: true, Account: true}},
-		{"no channel", on, 0, 0, 0, schema.JoinOptionsV1{}},
-		{"server cap", on, 1, 2, 0, schema.JoinOptionsV1{GuestsFull: true, Account: true}},
-		{"address cap", on, 1, 1, 1, schema.JoinOptionsV1{GuestsFull: true, Account: true}},
-		{"uncapped", func() schema.JoinSettingsV1 { s := on; s.MaxGuests = 0; return s }(), 1, 9000, 0, schema.JoinOptionsV1{Guest: true, Account: true}},
-		{"paused", func() schema.JoinSettingsV1 { s := on; s.JoiningPaused = true; return s }(), 1, 0, 0, schema.JoinOptionsV1{Paused: true}},
-		{"accounts only", func() schema.JoinSettingsV1 { s := on; s.OpenJoining = schema.OpenJoiningAccount; return s }(), 1, 0, 0, schema.JoinOptionsV1{Account: true}},
-		{"accounts only, no channel", func() schema.JoinSettingsV1 { s := on; s.OpenJoining = schema.OpenJoiningAccount; return s }(), 0, 0, 0, schema.JoinOptionsV1{}},
-		{"accounts only, paused", func() schema.JoinSettingsV1 {
-			s := on
-			s.OpenJoining, s.JoiningPaused = schema.OpenJoiningAccount, true
-			return s
-		}(), 1, 0, 0, schema.JoinOptionsV1{Paused: true}},
-		{"guests only", func() schema.JoinSettingsV1 { s := on; s.OpenJoining = schema.OpenJoiningGuest; return s }(), 1, 0, 0, schema.JoinOptionsV1{Guest: true}},
-		{"guests off", func() schema.JoinSettingsV1 { s := on; s.GuestsEnabled = false; return s }(), 1, 0, 0, schema.JoinOptionsV1{Account: true}},
-		{"off", func() schema.JoinSettingsV1 { s := on; s.OpenJoining = schema.OpenJoiningOff; return s }(), 1, 0, 0, schema.JoinOptionsV1{}},
+		{"open sign-up", with(schema.OpenJoiningAccount, false, false, "general"), schema.JoinOptionsV1{Account: true}},
+		{"open sign-up, guests seeded on", with(schema.OpenJoiningAccount, true, false, "general"), schema.JoinOptionsV1{Account: true}},
+		{"both, guests seeded on", with(schema.OpenJoiningBoth, true, false, "general"), schema.JoinOptionsV1{Account: true}},
+		{"guest-only, guests seeded on", with(schema.OpenJoiningGuest, true, false, "general"), schema.JoinOptionsV1{}},
+		{"open sign-up, no default channel", with(schema.OpenJoiningAccount, false, false), schema.JoinOptionsV1{}},
+		{"open sign-up, paused", with(schema.OpenJoiningAccount, false, true, "general"), schema.JoinOptionsV1{Paused: true}},
+		{"off", with(schema.OpenJoiningOff, false, false, "general"), schema.JoinOptionsV1{}},
+		{"off and paused", with(schema.OpenJoiningOff, false, true, "general"), schema.JoinOptionsV1{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := AddressJoinOptions(tt.set, tt.channels, tt.live, tt.fromAddr); got != tt.want {
+			if got := AddressJoinOptions(tt.set); got != tt.want {
 				t.Errorf("AddressJoinOptions = %+v, want %+v", got, tt.want)
 			}
 		})

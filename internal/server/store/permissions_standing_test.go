@@ -179,6 +179,12 @@ func newJoinFixture(t *testing.T) *standingFixture {
 	t.Helper()
 	f := newStandingFixture(t)
 	f.setOperatorCells(t, true, schema.PermChangeServerSettings)
+	// The tests here are about who may list a channel, not its visibility:
+	// every channel is public, as a default channel must be (issue #987
+	// refuses a private one).
+	if _, err := f.s.db.ExecContext(f.ctx, "UPDATE channels SET visibility = 'public'"); err != nil {
+		t.Fatal(err)
+	}
 	return f
 }
 

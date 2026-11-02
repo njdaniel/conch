@@ -39,8 +39,36 @@ func (f *authFixture) putJoin(t *testing.T, req schema.PutJoinSettingsRequestV1)
 	return f.do(t, "PUT", "/v1/join/settings", f.rootTok, inviteJSON(t, req))
 }
 
+// makeChannelsPublic makes the channels named public, as the system: a
+// default channel must be public, and listing a private one is refused
+// (issue #987).
+func makeChannelsPublic(t *testing.T, st *store.Store, names ...string) {
+	t.Helper()
+	pub := schema.ChannelPublic
+	for _, name := range names {
+		ch, err := st.ChannelByName(context.Background(), name)
+		if err != nil {
+			t.Fatalf("channel %q: %v", name, err)
+		}
+		if _, err := st.ChannelSettings(context.Background(), "system", 0, ch.ID, store.ChannelSettingsChange{Visibility: &pub}, time.Now()); err != nil {
+			t.Fatalf("make %q public: %v", name, err)
+		}
+	}
+}
+
+func (f *authFixture) makePublic(t *testing.T, names ...string) {
+	t.Helper()
+	makeChannelsPublic(t, f.srv.store, names...)
+}
+
+// mustPutJoin puts req and fails the test unless it is accepted. The
+// channels req lists are made public first: the tests that use it are about
+// joining, not visibility.
 func (f *authFixture) mustPutJoin(t *testing.T, req schema.PutJoinSettingsRequestV1) schema.JoinSettingsResponseV1 {
 	t.Helper()
+	if req.OpenChannels != nil {
+		f.makePublic(t, *req.OpenChannels...)
+	}
 	rec := f.putJoin(t, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("put join settings = %d %s", rec.Code, rec.Body)
