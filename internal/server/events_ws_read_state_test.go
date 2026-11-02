@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync/atomic"
 	"testing"
 
 	"github.com/njdaniel/conch/internal/server/store"
@@ -101,10 +103,14 @@ func TestEventsReadStateDropsAnInvalidatedWrite(t *testing.T) {
 	if first := conn.next(); first.schema != schema.SessionRosterSchemaV1 {
 		t.Fatalf("first frame = %v, want roster", first)
 	}
-	writes := 0
-	f.srv.eventsBeforeWrite = func() {
-		writes++
-		if writes != 1 {
+	// Only read-state frames are counted and only the first is invalidated.
+	// The hook sees them alone: eventsBeforeWrite also runs for the message
+	// notification the same post queues, and whether that goes out before,
+	// after or instead of the read state depends on the read-state floor and
+	// on how the socket's wakes fall, which a loaded machine changes (#958).
+	var writes atomic.Int32
+	f.srv.eventsBeforeEpochWrite = func(frame []byte) {
+		if frameSchema(frame) != schema.ReadStateSchemaV1 || writes.Add(1) != 1 {
 			return
 		}
 		f.srv.events.mu.Lock()
@@ -115,14 +121,25 @@ func TestEventsReadStateDropsAnInvalidatedWrite(t *testing.T) {
 		}
 		f.srv.events.mu.Unlock()
 	}
-	defer func() { f.srv.eventsBeforeWrite = nil }()
+	defer func() { f.srv.eventsBeforeEpochWrite = nil }()
 	f.mustPost(t, "olga", `{"body":"invalidate the first build"}`)
 	if got := untilReadState(t, conn, f.ops.ID).Unread; got != 1 {
 		t.Fatalf("unread after the clean rebuild = %d, want 1", got)
 	}
-	if writes != 2 {
-		t.Fatalf("write attempts = %d, want the invalidated attempt and one clean write", writes)
+	if got := writes.Load(); got != 2 {
+		t.Fatalf("read-state write attempts = %d, want the invalidated attempt and one clean write", got)
 	}
+}
+
+// frameSchema is the schema an encoded events frame names.
+func frameSchema(frame []byte) string {
+	var head struct {
+		Schema string `json:"schema"`
+	}
+	if err := json.Unmarshal(frame, &head); err != nil {
+		return ""
+	}
+	return head.Schema
 }
 
 func TestEventsReadStateSkipsRevokedMember(t *testing.T) {

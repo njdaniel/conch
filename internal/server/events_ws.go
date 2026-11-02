@@ -860,6 +860,17 @@ func (e *eventsStream) stillMember(ctx context.Context) bool {
 		closeWS(ctx, e.conn, schema.SocketCloseError, websocket.StatusInternalError, "membership check failed")
 		return false
 	case !member:
+		// A principal that was hidden or disabled lost its membership and
+		// its credential in one store change; this check can run between
+		// that change and the hub's drop. The close then says what
+		// closeDropped says (the credential), not the membership, so the
+		// reason does not depend on which of the two got there first.
+		if e.credID != 0 {
+			if live, err := e.s.store.CredentialLive(cctx, e.credID); err == nil && !live {
+				closeWS(ctx, e.conn, schema.SocketCloseRevoked, websocket.StatusPolicyViolation, reasonCredentialInvalid)
+				return false
+			}
+		}
 		closeWS(ctx, e.conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "no longer a member of this channel")
 		return false
 	case e.s.agentMayNoLongerRead(cctx, e.principalID, e.channel.ID):
@@ -991,6 +1002,9 @@ func (e *eventsStream) sendReadStates(ctx context.Context) bool {
 }
 
 func (e *eventsStream) writeReadState(ctx context.Context, epoch uint64, raw []byte) bool {
+	if hook := e.s.eventsBeforeEpochWrite; hook != nil {
+		hook(raw)
+	}
 	e.readStateWriting = epoch
 	defer func() { e.readStateWriting = 0 }()
 	return e.write(ctx, raw)

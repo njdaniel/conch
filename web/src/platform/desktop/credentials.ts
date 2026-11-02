@@ -11,8 +11,10 @@
 // is not held here, and an operator's that the person declined at the warning
 // is never put in force: a reload does not find it.
 //
-// Nothing here touches web storage. Preferences are kept in memory for the
-// session: saved profiles scope them in #945.
+// Nothing here touches web storage. Preferences are kept in memory of this
+// page only. A switch or a sign-out replaces the page (main makes new web
+// contents in a new in-memory session), so a saved server's preferences and
+// drafts are never visible in another's (issue #945).
 import type { CredentialStore, Held, Place } from '../types';
 import { bridge } from './access';
 

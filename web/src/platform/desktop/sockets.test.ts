@@ -23,7 +23,6 @@ function install(): Subscription[] {
   const unexpected = (name: string) => () => Promise.reject(new Error(`unexpected bridge call: ${name}`));
   const bridge: ConchDesktopBridge = {
     serverAddress: unexpected('serverAddress'),
-    setServerAddress: unexpected('setServerAddress'),
     request: unexpected('request'),
     subscribe: (feed, handlers) => {
       const sub: Subscription = { feed, handlers, unsubscribed: 0 };
@@ -45,6 +44,13 @@ function install(): Subscription[] {
     joinAsGuest: unexpected('joinAsGuest'),
     createAccount: unexpected('createAccount'),
     signOut: unexpected('signOut'),
+    profiles: unexpected('profiles'),
+    profileAdd: unexpected('profileAdd'),
+    profileRename: unexpected('profileRename'),
+    profileRemove: unexpected('profileRemove'),
+    profileSwitch: unexpected('profileSwitch'),
+    storageRetry: unexpected('storageRetry'),
+    profilesRecover: unexpected('profilesRecover'),
     uploadFile: unexpected('uploadFile'),
     downloadFile: unexpected('downloadFile'),
     saveFile: unexpected('saveFile'),
