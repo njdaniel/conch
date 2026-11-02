@@ -219,6 +219,9 @@ func TestDirectoryRows(t *testing.T) {
 // bytes for everyone else; an agent carries none of them.
 func TestDirectoryOperatorFields(t *testing.T) {
 	f := newDirectoryFixture(t)
+	// cand joined through a link of mgr's: invited_by is set underneath the
+	// store, as a redeemed link leaves it.
+	legacyExec(t, f.srv, "UPDATE principals SET invited_by = ? WHERE id = ?", f.mgr.ID, f.cand.ID)
 	for _, tc := range []struct {
 		who      string
 		token    string
@@ -239,7 +242,17 @@ func TestDirectoryOperatorFields(t *testing.T) {
 					t.Errorf("%s present = %v, want %v", field, has, tc.operator)
 				}
 			}
+			seenCand := false
 			for _, m := range page.Members {
+				if m.ID == f.cand.ID {
+					seenCand = true
+					if tc.operator && (m.InvitedBy == nil || *m.InvitedBy != f.mgr.ID) {
+						t.Errorf("cand's invited_by = %v, want %d", m.InvitedBy, f.mgr.ID)
+					}
+				}
+				if !tc.operator && m.InvitedBy != nil {
+					t.Errorf("%s: a viewer without manage_members sees invited_by %d", m.Name, *m.InvitedBy)
+				}
 				filled := m.VoiceAllowed != nil && m.MayInvite != nil
 				switch {
 				case m.Kind == schema.PrincipalAgent:
@@ -251,6 +264,12 @@ func TestDirectoryOperatorFields(t *testing.T) {
 				case m.Owner != (tc.operator && (m.ID == f.root.ID || m.ID == f.own2.ID)):
 					t.Errorf("%s: owner = %v", m.Name, m.Owner)
 				}
+			}
+			if !seenCand {
+				t.Error("cand is not listed")
+			}
+			if has := strings.Contains(rec.Body.String(), `"invited_by"`); has != tc.operator {
+				t.Errorf("invited_by present = %v, want %v", has, tc.operator)
 			}
 		})
 	}
@@ -271,11 +290,20 @@ func TestDirectoryOperatorFields(t *testing.T) {
 			t.Fatal(err)
 		}
 		rec, page := f.list(t, f.op2Tok, "")
+		if strings.Contains(rec.Body.String(), `"invited_by"`) {
+			t.Errorf("operator without manage_members sees invited_by: %s", rec.Body)
+		}
 		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"voice_allowed"`) || len(page.Members) == 0 {
 			t.Errorf("operator without manage_members: %d %s", rec.Code, rec.Body)
 		}
-		if _, page := f.list(t, f.rootTok, ""); page.Members[0].VoiceAllowed == nil {
+		_, owner := f.list(t, f.rootTok, "")
+		if owner.Members[0].VoiceAllowed == nil {
 			t.Error("the owner lost the operator fields")
+		}
+		for _, m := range owner.Members {
+			if m.ID == f.cand.ID && (m.InvitedBy == nil || *m.InvitedBy != f.mgr.ID) {
+				t.Errorf("the owner sees cand's invited_by = %v, want %d", m.InvitedBy, f.mgr.ID)
+			}
 		}
 	})
 }
@@ -357,30 +385,41 @@ func TestDirectoryHonoursSeeMemberDirectory(t *testing.T) {
 	if rec.Code != http.StatusOK || page.Scope != schema.DirectoryScopeSharedChannels {
 		t.Fatalf("member with the directory off: %d scope=%q", rec.Code, page.Scope)
 	}
-	mine, err := f.srv.store.ListChannelsForPrincipal(ctx, f.alice.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sharesWithAlice := func(id int64) bool {
-		for _, c := range mine {
-			if in, err := f.srv.store.IsChannelMember(ctx, c.ID, id); err == nil && in {
-				return true
-			}
+	// Exactly herself and what shares a channel with her: all of them in
+	// general (root, the agent bot, mgr and the converted guest), and no
+	// stranger (not cand, outsider, op2, own2 or ghost).
+	want := []int64{f.alice.ID, f.root.ID, f.bot.ID, f.mgr.ID, f.converted.ID}
+	slices.Sort(want)
+	ids := func(p schema.ServerMembersResponseV1) []int64 {
+		var out []int64
+		for _, m := range p.Members {
+			out = append(out, m.ID)
 		}
-		return false
+		return out
 	}
-	self := false
-	for _, m := range page.Members {
-		if m.ID == f.alice.ID {
-			self = true
-			continue
-		}
-		if !sharesWithAlice(m.ID) {
-			t.Errorf("member with the directory off lists %s, who shares no channel with her", m.Name)
-		}
+	if got := ids(page); !slices.Equal(got, want) {
+		t.Errorf("member with the directory off: ids %v (%v), want %v", got, directoryNames(page), want)
 	}
-	if !self || slices.Contains(directoryNames(page), "ghost") {
-		t.Errorf("member with the directory off: %v, want herself and her channel-mates, not ghost", directoryNames(page))
+	// The same set, one row a page.
+	var walked []int64
+	after := int64(0)
+	for pages := 0; pages <= len(want); pages++ {
+		q := "?limit=1"
+		if after != 0 {
+			q += fmt.Sprintf("&after=%d", after)
+		}
+		rec, p := f.list(t, f.aliceTok, q)
+		if rec.Code != http.StatusOK || len(p.Members) != 1 || p.Scope != schema.DirectoryScopeSharedChannels {
+			t.Fatalf("restricted page %d: %d %s", pages, rec.Code, rec.Body)
+		}
+		walked = append(walked, p.Members[0].ID)
+		if p.After == 0 {
+			break
+		}
+		after = p.After
+	}
+	if !slices.Equal(walked, want) {
+		t.Errorf("paged restricted ids %v, want %v", walked, want)
 	}
 	if _, page := f.list(t, f.op2Tok, ""); page.Scope != schema.DirectoryScopeEveryone || len(page.Members) < 10 {
 		t.Errorf("operator with the directory off for members: scope=%q %v", page.Scope, directoryNames(page))
