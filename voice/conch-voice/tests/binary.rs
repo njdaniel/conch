@@ -977,56 +977,56 @@ fn signal(child: &Child, name: &str) {
 /// it: a watchdog for cleanup, not a measure of how fast the client is.
 const WATCHDOG: Duration = Duration::from_secs(60);
 
-/// How long the client may take to leave once it has gone quiet with a full pipe nobody
-/// reads. Its own bounded waits add up to about 3.5 s (a connection attempt 2 s alongside
+/// How long the client may take to leave once its standard output is blocked on the full
+/// pipe. Its own bounded waits add up to about 3.5 s (a connection attempt 2 s alongside
 /// the reports' 3 s, then the last lines' 1 s, and the gate's half second), measured the
 /// same under a load of seventy. A wait of its own that is not bounded, or one on the
 /// pipe, takes longer than that or for ever: this is the "within a few seconds" the test
-/// stands for. The time is the client's own waits, which the processor's load barely
-/// stretches, because the test starts counting only when the client is idle.
+/// stands for.
 const LEAVE_WITHIN: Duration = Duration::from_secs(10);
 
-/// How many of the child's threads are running or waiting for a processor right now, by the
-/// kernel (the state in `/proc/<pid>/task/<tid>/stat`). A thread blocked on a pipe, on a
-/// timer or on its input is asleep. Linux only, as the client is: the test fails, saying so,
-/// where `/proc` is not there.
-fn awake_threads(child: &Child) -> usize {
+/// Whether a thread of the child is blocked writing to a pipe right now: the kernel's
+/// `wchan`, the place in the kernel it sleeps at, in `/proc/<pid>/task/<tid>/wchan`
+/// (`anon_pipe_write` or `pipe_wait_writable`, by kernel). The client's only writes to a
+/// pipe that can fill are those to its standard output (the test's standard input and
+/// the stub are read or answered, not blocked on), so this is its writer, on a full pipe
+/// nobody reads. A kernel that shows `0` for every wait makes this never true; the caller
+/// then fails with that said.
+fn blocked_writing_a_pipe(child: &Child) -> bool {
     let dir = format!("/proc/{}/task", child.id());
-    let tasks = std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("this test needs /proc: {e}"));
-    tasks
-        .filter_map(Result::ok)
-        .filter_map(|task| std::fs::read_to_string(task.path().join("stat")).ok())
-        .filter(|stat| {
-            // `pid (comm) S ...`: the name can hold anything, so the state is what follows
-            // the last closing parenthesis.
-            let state = stat.rsplit_once(')').map(|(_, rest)| rest.trim_start());
-            matches!(state.and_then(|rest| rest.chars().next()), Some('R' | 'D'))
-        })
-        .count()
+    let Ok(tasks) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    tasks.filter_map(Result::ok).any(|task| {
+        std::fs::read_to_string(task.path().join("wchan"))
+            .is_ok_and(|wchan| wchan.contains("pipe_write") || wchan.contains("pipe_wait_writable"))
+    })
 }
 
-/// Waits until the client has done everything it was sent and is waiting: for a stretch of `quiet`,
-/// no thread of it is awake (sampled every few milliseconds, so a client that is only
-/// waiting for the processor, which is awake, does not pass). With a full pipe nobody reads
-/// that is the state the test is about: the input is read and answered, the queue is full
-/// and its writer is blocked on the pipe. Nothing is guessed from how long it ought to take,
-/// so a loaded machine only makes this take longer. Panics if the client leaves, or if it
-/// is not quiet within [`WATCHDOG`].
-fn wait_until_quiet(child: &mut Child, quiet: Duration, what: &str) {
+/// Waits until the client's standard output is blocked on a full pipe, which is the state
+/// this test is about: seen on two samples in a row, a few milliseconds apart, so that a
+/// write that is merely in progress does not count. Nothing is guessed from how long it
+/// ought to take, so a loaded machine only makes this take longer. `Err` with what to say
+/// if the client leaves, or the pipe is not blocked within [`WATCHDOG`]; the caller kills
+/// and reaps the child before it fails.
+fn wait_until_output_is_blocked(child: &mut Child) -> Result<(), String> {
     let began = Instant::now();
-    let mut since = Instant::now();
-    while since.elapsed() < quiet {
-        assert!(
-            began.elapsed() < WATCHDOG,
-            "{what}: the client was not quiet within {WATCHDOG:?}"
-        );
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "{what}: the client left by itself"
-        );
-        if awake_threads(child) > 0 {
-            since = Instant::now();
+    let mut seen = false;
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return Err("the client left by itself".to_owned());
         }
+        if began.elapsed() > WATCHDOG {
+            return Err(format!(
+                "no thread of the client was blocked writing a pipe within {WATCHDOG:?} \
+                 (the kernel must show a wait channel in /proc/<pid>/task/<tid>/wchan)"
+            ));
+        }
+        let blocked = blocked_writing_a_pipe(child);
+        if blocked && seen {
+            return Ok(());
+        }
+        seen = blocked;
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -1103,10 +1103,14 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
             let junk = b"junk\n".repeat(30_000);
             stdin.write_all(&junk).unwrap();
             stdin.flush().unwrap();
-            // Not a guess at how long the client needs: it is waited for until it has gone
-            // quiet. It has then read and answered all of it, and with nobody reading, the
-            // pipe and the queue behind it are full and their writer is blocked.
-            wait_until_quiet(&mut child, Duration::from_millis(300), way);
+            // Not a guess at how long the client needs: it is waited for until its writer
+            // is blocked on the full pipe nobody reads. A readiness that fails kills and
+            // reaps the client before the test does.
+            if let Err(why) = wait_until_output_is_blocked(&mut child) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{way}: {why}");
+            }
 
             if way == "the end of standard input" {
                 drop(stdin);
