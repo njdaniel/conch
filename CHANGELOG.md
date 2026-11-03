@@ -123,6 +123,7 @@ There is no migration and no wire change since `alpha.10`, so rolling back to
 
 ### Security
 
+- Demoting an operator now closes, in the same transaction and with an `invite_closed` row each, the member links a member could not hold: every member link when their `may_invite` brake is off, and the never-expiring ones when it is on. Before (alpha.10), links made under the role survived a demotion with the brake off, and turning the brake on later brought back links a member could never make (#1165). `invite_closed` for a member link now says `link=member`.
 - Any role change (a promotion, a demotion, an owner-mark change) now clears every recent-auth proof of that person, so a member's password-only re-authentication no longer satisfies an operator route that needs password and code (#1054). Their sessions stand; they re-authenticate on the next sensitive action. The `principal_role_changed` audit row gains `proofs_cleared=N`.
 
 ### Docs
