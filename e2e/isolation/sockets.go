@@ -292,8 +292,6 @@ func (s *bSockets) frames() int {
 // further ccQuiet has passed (the frame is coalesced under the 250 ms roster
 // floor, so one owed to anyone else would have gone too).
 
-const directoryChangedWire = `{"schema":"conch.directory_changed.v1"}`
-
 // directoryChanged counts f's conch.directory_changed.v1 frames, and fails
 // on one that is not exactly the wire form (D3).
 func directoryChanged(f *feed) (int, error) {

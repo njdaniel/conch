@@ -336,7 +336,7 @@ func run(h *harness) (summary, error) {
 	if err != nil {
 		return sum, fmt.Errorf("the personal preset: %w", err)
 	}
-	h.say("ok   personal preset: %d rows; with personal applied through PUT /v1/permissions a member's link (v1 and v2) was refused invite_not_allowed naming make_member_links and its channel creation permission_denied naming the permission of the visibility; group gave both back", pn)
+	h.say("ok   personal preset: %d rows; with personal applied through PUT /v1/permissions a member's link (v1 and v2) was refused invite_not_allowed naming make_member_links and its channel creation permission_denied naming the permission of the visibility; the directory narrowed to the people a member may know (bob's and zed's names and ids in none of the routes alice reads, carol known through her link, the authors route naming the departed author alone), conch.directory_changed.v1 reached exactly the viewers whose answer changed; group gave link and channel creation back, widened the directory and signalled it", pn)
 
 	// B's sockets have been open through all of it: a second control, and
 	// every frame since they opened is scanned again.
