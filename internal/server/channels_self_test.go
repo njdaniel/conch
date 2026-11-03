@@ -371,6 +371,58 @@ func TestChannelDirectoryManagers(t *testing.T) {
 	}
 }
 
+// TestDisabledManagerNotListed: a disabled manager is named as a manager
+// neither by ?scope=all's managers nor by the members route's manages, and
+// enabling them restores both, the stored bit untouched. A hidden manager
+// loses the membership, so is named by neither (issue #1210).
+func TestDisabledManagerNotListed(t *testing.T) {
+	ctx := context.Background()
+	f := newChannelV1Fixture(t)
+	owner := fmt.Sprintf("principal:%d", f.root.ID)
+	town := f.pubJoined
+
+	// listed reports what both views say of member-2 on town-square.
+	listed := func(t *testing.T) (inManagers, manages bool) {
+		t.Helper()
+		for _, m := range f.directoryOf(t, f.opTok, "?scope=all")[town.Name].Managers {
+			if m.PrincipalID == f.member2.ID {
+				inManagers = true
+			}
+		}
+		rec := f.do(t, http.MethodGet, "/v1/channels/"+town.Name+"/members", f.rootTok, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("members = %d %s", rec.Code, rec.Body)
+		}
+		for _, m := range decodeBody[schema.ListChannelMembersResponseV1](t, rec).Members {
+			if m.PrincipalID == f.member2.ID {
+				manages = m.Manages != nil && *m.Manages
+			}
+		}
+		return inManagers, manages
+	}
+	if in, m := listed(t); !in || !m {
+		t.Fatalf("before: managers %v, manages %v; want both", in, m)
+	}
+	if _, err := f.srv.store.DisablePrincipal(ctx, owner, f.member2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if in, m := listed(t); in || m {
+		t.Errorf("disabled: managers %v, manages %v; want neither", in, m)
+	}
+	if _, err := f.srv.store.EnablePrincipal(ctx, owner, f.member2.ID); err != nil {
+		t.Fatal(err)
+	}
+	if in, m := listed(t); !in || !m {
+		t.Errorf("re-enabled: managers %v, manages %v; want both", in, m)
+	}
+	if _, err := f.srv.store.HidePrincipal(ctx, owner, f.member2.ID, store.HideOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if in, m := listed(t); in || m {
+		t.Errorf("hidden: managers %v, manages %v; want neither", in, m)
+	}
+}
+
 // TestJoinChannel: a self-join writes can_decide = 0 and no history bound,
 // shows the whole history, is audited with the member as actor, and is
 // idempotent: a second join returns the same membership and writes
