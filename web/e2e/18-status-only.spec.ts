@@ -89,12 +89,11 @@ test('S622 closing an invite and signing out leave no failed request', async ({ 
     .poll(async () => (await roster(world, world.tokens.guest, 'general')).filter((s) => s.name === person.name && s.state === 'online').length)
     .toBe(1);
 
-  // Close an invite: made in the panel, then closed.
+  // Close a member link: made in the panel, then closed.
   const panel = page.getByRole('region', { name: 'Invites' });
   await panel.getByRole('button', { name: 'Invite someone' }).click();
-  await panel.getByRole('checkbox', { name: '#general' }).check();
-  await panel.getByRole('button', { name: 'Make invite' }).click();
-  const list = panel.getByRole('list', { name: 'Your invites' });
+  await panel.getByRole('button', { name: 'Make link' }).click();
+  const list = panel.getByRole('list', { name: 'Your links' });
   await expect(list.getByRole('listitem')).toHaveCount(1);
   await list.getByRole('button', { name: 'Close' }).click();
   await expect(list.getByRole('listitem').first()).toContainText('Closed');

@@ -129,9 +129,10 @@ for (const [size, options, phone] of sizes) {
     await press(row.getByRole('menuitem', { name: 'Invite people' }));
 
     const panel = page.getByRole('region', { name: 'Invites' });
-    await expect(panel.getByRole('checkbox', { name: `#${second}` })).toBeChecked();
-    await expect(panel.getByRole('checkbox', { name: `#${first}` })).not.toBeChecked();
-    await expect(panel.getByRole('button', { name: 'Make invite' })).toBeEnabled();
+    // A member link names no channel (issue #990): the panel opens, with its
+    // form, and nothing is ticked.
+    await expect(panel.getByRole('checkbox', { name: /^#/ })).toHaveCount(0);
+    await expect(panel.getByRole('button', { name: 'Make link' })).toBeEnabled();
     await expectFits(page, `${size}: the invite panel opened from a channel`);
   });
 }

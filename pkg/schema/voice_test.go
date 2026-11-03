@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -32,6 +33,10 @@ func TestVoiceGoldenFixtures(t *testing.T) {
 		{name: "presence, one participant sharing with sound", file: "voice-presence-v1-sharing.json", new: func() any { return new(VoicePresenceV1) }},
 		{name: "share claim", file: "voice-share-v1.json", new: func() any { return new(VoiceShareV1) }},
 		{name: "presence, as the sharer reads it after an operator stopped the share", file: "voice-presence-v1-share-ended.json", new: func() any { return new(VoicePresenceV1) }},
+		// The camera (ADR-015, issue #1238).
+		{name: "camera claim", file: "voice-camera-v1.json", new: func() any { return new(VoiceCameraV1) }},
+		{name: "presence, two cameras and a share", file: "voice-presence-v1-camera.json", new: func() any { return new(VoicePresenceV1) }},
+		{name: "presence, as the person reads it after an operator stopped their camera", file: "voice-presence-v1-camera-ended.json", new: func() any { return new(VoicePresenceV1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -60,6 +65,9 @@ func TestVoiceErrorCodes(t *testing.T) {
 		{ErrorCodeVoiceNotAllowed, "voice_not_allowed"},
 		{ErrorCodeVoiceShareBusy, "voice_share_busy"},
 		{ErrorCodeVoiceShareStale, "voice_share_stale"},
+		{ErrorCodeVoiceCameraFull, "voice_camera_full"},
+		{ErrorCodeVoiceCameraStale, "voice_camera_stale"},
+		{ErrorCodeVoiceCameraRateLimited, "voice_camera_rate_limited"},
 	}
 	for _, tt := range tests {
 		if tt.got != tt.want {
@@ -229,6 +237,16 @@ func TestVoiceParticipantValidate(t *testing.T) {
 			mutate:  func(p *VoiceParticipant) { p.SharingAudio = true },
 			wantErr: "voice participant 3 cannot have sharing_audio without sharing",
 		},
+
+		// The camera (ADR-015, design §5): camera needs can_publish.
+		{name: "valid, camera", mutate: func(p *VoiceParticipant) { p.Camera = true }},
+		{name: "valid, camera and silent", mutate: func(p *VoiceParticipant) { p.Transmitting, p.Camera = false, true }},
+		{name: "valid, camera and sharing with sound", mutate: func(p *VoiceParticipant) { p.Sharing, p.SharingAudio, p.Camera = true, true, true }},
+		{
+			name:    "listen-only but camera",
+			mutate:  func(p *VoiceParticipant) { p.CanPublish, p.Transmitting, p.Camera = false, false, true },
+			wantErr: "voice participant 3 cannot have a camera without can_publish",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -284,6 +302,36 @@ func TestVoicePresenceRoomValidate(t *testing.T) {
 			name:    "a participant's share is checked in the room",
 			mutate:  func(r *VoicePresenceRoom) { r.Participants[1].SharingAudio = true },
 			wantErr: "voice participant 7 cannot have sharing_audio without sharing",
+		},
+
+		// The camera (ADR-015, design §5): camera needs can_publish, and
+		// there is no one-per-room rule and no cap in the schema (N3).
+		{name: "valid, one participant with a camera", mutate: func(r *VoicePresenceRoom) { r.Participants[1].Camera = true }},
+		{
+			name: "valid, both participants with cameras, one of them sharing",
+			mutate: func(r *VoicePresenceRoom) {
+				r.Participants[0].Camera, r.Participants[0].Sharing = true, true
+				r.Participants[1].Camera = true
+			},
+		},
+		{
+			name:    "a participant's camera is checked in the room",
+			mutate:  func(r *VoicePresenceRoom) { r.Participants[1].CanPublish, r.Participants[1].Camera = false, true },
+			wantErr: "voice participant 7 cannot have a camera without can_publish",
+		},
+		{
+			// The cap (9) is the server's constant, so a room over it is
+			// still a valid document: a later cap must not fail every
+			// frame of a server, or an older client, that validates.
+			name: "valid, ten participants with cameras: the schema has no cap",
+			mutate: func(r *VoicePresenceRoom) {
+				r.Participants = nil
+				for id := int64(1); id <= 10; id++ {
+					p := validVoiceParticipant()
+					p.PrincipalID, p.Transmitting, p.Camera = id, false, true
+					r.Participants = append(r.Participants, p)
+				}
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -379,6 +427,53 @@ func TestVoicePresenceV1Validate(t *testing.T) {
 			name:    "share ended with an unknown reason",
 			mutate:  func(p *VoicePresenceV1) { p.ShareEnded = validVoiceShareEnded(); p.ShareEnded.Reason = "kicked" },
 			wantErr: `voice share end reason "kicked" is not one of`,
+		},
+
+		// The camera (ADR-015, design §5): camera_ended has a known reason,
+		// both times, an end no earlier than its start, and voice configured.
+		{name: "valid, the person's own camera ended", mutate: func(p *VoicePresenceV1) { p.CameraEnded = validVoiceCameraEnded() }},
+		{
+			name:   "valid, camera ended while unavailable",
+			mutate: func(p *VoicePresenceV1) { p.Available, p.Rooms, p.CameraEnded = false, nil, validVoiceCameraEnded() },
+		},
+		{
+			name: "valid, both a share and a camera ended",
+			mutate: func(p *VoicePresenceV1) {
+				p.ShareEnded, p.CameraEnded = validVoiceShareEnded(), validVoiceCameraEnded()
+			},
+		},
+		{
+			name: "camera ended when not configured",
+			mutate: func(p *VoicePresenceV1) {
+				p.Configured, p.Available, p.Rooms, p.CameraEnded = false, false, nil, validVoiceCameraEnded()
+			},
+			wantErr: "voice presence cannot carry camera_ended when not configured",
+		},
+		{
+			name:    "camera ended with an unknown reason",
+			mutate:  func(p *VoicePresenceV1) { p.CameraEnded = validVoiceCameraEnded(); p.CameraEnded.Reason = "kicked" },
+			wantErr: `voice camera end reason "kicked" is not one of`,
+		},
+		{
+			name: "camera ended without started_at",
+			mutate: func(p *VoicePresenceV1) {
+				p.CameraEnded = validVoiceCameraEnded()
+				p.CameraEnded.StartedAt = Timestamp{}
+			},
+			wantErr: "voice camera end started_at is required",
+		},
+		{
+			name:    "camera ended without ended_at",
+			mutate:  func(p *VoicePresenceV1) { p.CameraEnded = validVoiceCameraEnded(); p.CameraEnded.EndedAt = Timestamp{} },
+			wantErr: "voice camera end ended_at is required",
+		},
+		{
+			name: "camera ended before it started",
+			mutate: func(p *VoicePresenceV1) {
+				p.CameraEnded = validVoiceCameraEnded()
+				p.CameraEnded.EndedAt = NewTimestamp(p.CameraEnded.StartedAt.Time().Add(-time.Millisecond))
+			},
+			wantErr: "voice camera end ended_at is before started_at",
 		},
 	}
 	for _, tt := range tests {
@@ -484,6 +579,7 @@ func TestVoicePresenceTypesAreReached(t *testing.T) {
 		reflect.TypeOf(VoicePresenceRoom{}),
 		reflect.TypeOf(VoiceParticipant{}),
 		reflect.TypeOf(VoiceShareEnded{}),
+		reflect.TypeOf(VoiceCameraEnded{}),
 		reflect.TypeOf(Audience{}),
 		reflect.TypeOf(Timestamp{}),
 	} {
@@ -617,6 +713,10 @@ func TestVoicePresenceFieldsAreAnExactList(t *testing.T) {
 		// Why the reader's own share ended (issue #487): in the sharer's
 		// document alone, and naming nobody.
 		"share_ended", "reason", "started_at", "ended_at",
+		// The camera (ADR-015, issue #1238): whether a participant holds a
+		// camera claim, and why the reader's own ended, in their document
+		// alone, with the same three fields as share_ended.
+		"camera", "camera_ended",
 	}
 	for _, k := range want {
 		if !got[k] {
@@ -1163,5 +1263,233 @@ func TestParseVoiceShareClaim(t *testing.T) {
 	}
 	if VoiceShareClaimParam != "started_at" {
 		t.Errorf("VoiceShareClaimParam = %q", VoiceShareClaimParam)
+	}
+}
+
+// The camera (ADR-015, issue #1238): the claim, the end reasons, why the
+// person's own camera ended, and the route parameters. Each follows the
+// share's test of the same name.
+
+func TestVoiceCameraV1Validate(t *testing.T) {
+	valid := func() VoiceCameraV1 {
+		return VoiceCameraV1{PrincipalID: 3, StartedAt: NewTimestamp(time.Date(2026, 11, 3, 12, 0, 4, 125e6, time.UTC))}
+	}
+	tests := []struct {
+		name    string
+		mutate  func(*VoiceCameraV1)
+		wantErr string
+	}{
+		{name: "valid", mutate: func(*VoiceCameraV1) {}},
+		{name: "zero principal", mutate: func(c *VoiceCameraV1) { c.PrincipalID = 0 }, wantErr: "voice camera principal_id must be positive, got 0"},
+		{name: "negative principal", mutate: func(c *VoiceCameraV1) { c.PrincipalID = -1 }, wantErr: "voice camera principal_id must be positive, got -1"},
+		{name: "zero started_at", mutate: func(c *VoiceCameraV1) { c.StartedAt = Timestamp{} }, wantErr: "voice camera started_at is required"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := valid()
+			tt.mutate(&c)
+			assertValidation(t, c.Validate(), tt.wantErr)
+		})
+	}
+}
+
+// TestVoiceCameraEncoding: the claim's fields are an exact list, with no
+// room and no token at any depth: it grants the connection the caller
+// already has, and nothing in it helps anyone join a room. Unlike the share
+// it has no audio: a camera is one video track.
+func TestVoiceCameraEncoding(t *testing.T) {
+	raw, err := json.Marshal(VoiceCameraV1{PrincipalID: 3, StartedAt: voiceJoinedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"principal_id":3,"started_at":"2026-10-09T11:58:02.250Z"}`; string(raw) != want {
+		t.Errorf("claim = %s, want %s", raw, want)
+	}
+	got := map[string]bool{}
+	walkStructFields(reflect.TypeOf(VoiceCameraV1{}), map[reflect.Type]bool{}, func(_ reflect.Type, f reflect.StructField) {
+		if tag := strings.Split(f.Tag.Get("json"), ",")[0]; tag != "" && tag != "-" {
+			got[tag] = true
+		}
+	})
+	want := map[string]bool{"principal_id": true, "started_at": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("a camera claim carries %v, want exactly %v", got, want)
+	}
+	// Forward compatibility: a later field is tolerated.
+	var back VoiceCameraV1
+	if err := json.Unmarshal([]byte(`{"principal_id":3,"started_at":"2026-10-09T11:58:02.250Z","a_later_field":true}`), &back); err != nil {
+		t.Fatal(err)
+	}
+	if err := back.Validate(); err != nil {
+		t.Errorf("Validate() = %v, want nil", err)
+	}
+}
+
+// TestVoiceParticipantCameraIsOptional: a participant with no camera is
+// encoded exactly as before ADR-015, so a document with no camera is byte for
+// byte what an older server sent, and an older document reads as no camera.
+func TestVoiceParticipantCameraIsOptional(t *testing.T) {
+	raw, err := json.Marshal(validVoiceParticipant())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "camera") {
+		t.Errorf("a participant with no camera encodes as %s, want no camera field", raw)
+	}
+	var back VoiceParticipant
+	if err := json.Unmarshal([]byte(`{"principal_id":3,"can_publish":true,"transmitting":false,"joined_at":"2026-10-09T12:00:00.000Z"}`), &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.Camera {
+		t.Errorf("an older participant decodes with a camera: %+v", back)
+	}
+	with := validVoiceParticipant()
+	with.Camera = true
+	raw, err = json.Marshal(with)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"camera":true`) {
+		t.Errorf("a participant with a camera encodes as %s, want camera:true", raw)
+	}
+}
+
+func validVoiceCameraEnded() *VoiceCameraEnded {
+	return &VoiceCameraEnded{
+		Reason:    VoiceCameraEndOperator,
+		StartedAt: NewTimestamp(time.Date(2026, 11, 3, 12, 0, 4, 125e6, time.UTC)),
+		EndedAt:   NewTimestamp(time.Date(2026, 11, 3, 12, 3, 40, 500e6, time.UTC)),
+	}
+}
+
+func TestVoiceCameraEndReasonValues(t *testing.T) {
+	tests := []struct {
+		reason VoiceCameraEndReason
+		want   string
+		valid  bool
+	}{
+		{VoiceCameraEndSelf, "self", true},
+		{VoiceCameraEndOperator, "operator", true},
+		{VoiceCameraEndLeft, "left", true},
+		{VoiceCameraEndAccessLost, "access_lost", true},
+		{VoiceCameraEndRotated, "rotated", true},
+		{VoiceCameraEndIdle, "idle", true},
+		{"", "", false},
+		{"Operator", "Operator", false},
+		{"kicked", "kicked", false},
+		{"full", "full", false},
+	}
+	for _, tt := range tests {
+		if string(tt.reason) != tt.want {
+			t.Errorf("reason = %q, want %q", tt.reason, tt.want)
+		}
+		if got := tt.reason.Valid(); got != tt.valid {
+			t.Errorf("%q.Valid() = %v, want %v", tt.reason, got, tt.valid)
+		}
+	}
+	// The vocabulary is the share's, value for value, but its own type: a
+	// reason added to one is not added to the other by accident.
+	if got, want := Vocabularies["VoiceCameraEndReason"], Vocabularies["VoiceShareEndReason"]; !slices.Equal(got, want) {
+		t.Errorf("camera end reasons %v, share end reasons %v: the design lists the same six", got, want)
+	}
+}
+
+func TestVoiceCameraEndedValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*VoiceCameraEnded)
+		wantErr string
+	}{
+		{name: "valid", mutate: func(*VoiceCameraEnded) {}},
+		{name: "valid, ended the moment it started", mutate: func(e *VoiceCameraEnded) { e.EndedAt = e.StartedAt }},
+		{name: "empty reason", mutate: func(e *VoiceCameraEnded) { e.Reason = "" }, wantErr: `voice camera end reason "" is not one of`},
+		{name: "a reason in the wrong case", mutate: func(e *VoiceCameraEnded) { e.Reason = "Self" }, wantErr: `voice camera end reason "Self" is not one of`},
+		{name: "zero started_at", mutate: func(e *VoiceCameraEnded) { e.StartedAt = Timestamp{} }, wantErr: "voice camera end started_at is required"},
+		{name: "zero ended_at", mutate: func(e *VoiceCameraEnded) { e.EndedAt = Timestamp{} }, wantErr: "voice camera end ended_at is required"},
+		{
+			name:    "ended before it started",
+			mutate:  func(e *VoiceCameraEnded) { e.EndedAt = NewTimestamp(e.StartedAt.Time().Add(-time.Millisecond)) },
+			wantErr: "voice camera end ended_at is before started_at",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := validVoiceCameraEnded()
+			tt.mutate(e)
+			assertValidation(t, e.Validate(), tt.wantErr)
+		})
+	}
+}
+
+// TestVoicePresenceCameraEndedIsOptional: a document without camera_ended,
+// which is every reader's but the person's whose camera ended, is encoded
+// exactly as before ADR-015, and an older document reads as no camera ended.
+func TestVoicePresenceCameraEndedIsOptional(t *testing.T) {
+	raw, err := json.Marshal(validVoicePresenceV1())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "camera") {
+		t.Errorf("presence with no camera encodes as %s, want no camera fields", raw)
+	}
+	var back VoicePresenceV1
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.CameraEnded != nil {
+		t.Errorf("an older document decodes with camera_ended %+v", back.CameraEnded)
+	}
+	// The older fixtures, as published, decode with no camera anywhere.
+	for _, file := range []string{"voice-presence-v1.json", "voice-presence-v1-sharing.json", "voice-presence-v1-share-ended.json"} {
+		var p VoicePresenceV1
+		readFixture(t, file, &p)
+		if p.CameraEnded != nil {
+			t.Errorf("%s decodes with camera_ended", file)
+		}
+		for _, r := range p.Rooms {
+			for _, q := range r.Participants {
+				if q.Camera {
+					t.Errorf("%s decodes principal %d with a camera", file, q.PrincipalID)
+				}
+			}
+		}
+	}
+}
+
+// TestParseVoiceCameraClaim: the camera's claim parameter reads the started_at
+// a claim gave, in any RFC 3339 form, as the same instant at millisecond
+// precision, and refuses anything else, as the share's does. Both camera
+// routes share the one name, and the DELETE's principal parameter is its own.
+func TestParseVoiceCameraClaim(t *testing.T) {
+	want := NewTimestamp(time.Date(2026, 11, 3, 12, 0, 4, 125e6, time.UTC))
+	tests := []struct {
+		name    string
+		in      string
+		wantErr string
+	}{
+		{name: "as the claim wrote it", in: "2026-11-03T12:00:04.125Z"},
+		{name: "another offset", in: "2026-11-03T14:00:04.125+02:00"},
+		{name: "finer precision", in: "2026-11-03T12:00:04.125999Z"},
+		{name: "empty", in: "", wantErr: "invalid timestamp"},
+		{name: "not a time", in: "yesterday", wantErr: "invalid timestamp"},
+		{name: "a number", in: "1793707204125", wantErr: "invalid timestamp"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseVoiceCameraClaim(tt.in)
+			assertValidation(t, err, tt.wantErr)
+			if tt.wantErr == "" && got != want {
+				t.Errorf("ParseVoiceCameraClaim(%q) = %v, want %v", tt.in, got.Time(), want.Time())
+			}
+		})
+	}
+	if VoiceCameraClaimParam != "started_at" {
+		t.Errorf("VoiceCameraClaimParam = %q", VoiceCameraClaimParam)
+	}
+	if VoiceCameraClaimParam != VoiceShareClaimParam {
+		t.Errorf("the camera names its claim by %q, the share by %q; the design gives both the one parameter", VoiceCameraClaimParam, VoiceShareClaimParam)
+	}
+	if VoiceCameraPrincipalParam != "principal" {
+		t.Errorf("VoiceCameraPrincipalParam = %q", VoiceCameraPrincipalParam)
 	}
 }

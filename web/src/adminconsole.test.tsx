@@ -536,6 +536,110 @@ describe('the invites', () => {
     expect(await within(region).findByText('You need the permission to manage members for that. The link was not closed.')).toBeDefined();
   });
 
+  describe('Disable joiners', () => {
+    const disableRoute = (count: number): Route => (c) => json({ dry_run: (c.body as { dry_run: boolean }).dry_run, count, principal_ids: [30, 31] });
+    const sent = (calls: Call[]) => calls.filter((c) => c.path === '/v1/invites/7/disable-joiners').map((c) => c.body);
+
+    it('is offered to a holder of manage_members only, and only where someone joined', async () => {
+      serve(owner, { 'GET /v2/invites': () => json({ invites: [link, { ...link, id: 8, joiners: 0 }] }) });
+      await signedIn(ownerToken);
+      const list = await within(await joining()).findByRole('list', { name: 'Member links' });
+      expect(within(list).getByRole('button', { name: 'Disable joiners of link 7' })).toBeDefined();
+      expect(within(list).queryByRole('button', { name: 'Disable joiners of link 8' })).toBeNull();
+      cleanup();
+      serve({ ...member, permissions: [...memberRights, 'make_member_links'] }, { 'GET /v2/invites': () => json({ invites: [{ ...link, created_by: 3 }] }) });
+      window.sessionStorage.clear();
+      await signedIn(memberToken);
+      expect(screen.queryByRole('button', { name: /Disable joiners/ })).toBeNull();
+    });
+
+    it('does a dry run, then asks, then sends once, and the link is closed too', async () => {
+      let closed = false;
+      const calls = serve(owner, {
+        'GET /v2/invites': () => json({ invites: [closed ? { ...link, closed_at: at } : link] }),
+        'POST /v1/invites/7/disable-joiners': (c) => {
+          if (!(c.body as { dry_run: boolean }).dry_run) closed = true;
+          return disableRoute(2)(c);
+        },
+      });
+      await signedIn(ownerToken);
+      const region = await joining();
+      fireEvent.click(await within(region).findByRole('button', { name: 'Disable joiners of link 7' }));
+      const ask = await within(region).findByRole('group', { name: 'Disable joiners of link 7' });
+      expect(ask.textContent).toContain('signs out and disables 2 people');
+      expect(ask.textContent).toContain('closes the link too');
+      expect(sent(calls)).toEqual([{ dry_run: true }]);
+      fireEvent.click(within(ask).getByRole('button', { name: 'Disable 2 people' }));
+      expect(await within(region).findByText('Disabled 2 people.')).toBeDefined();
+      expect(sent(calls)).toEqual([{ dry_run: true }, { dry_run: false }]);
+      expect(within(region).queryByRole('group', { name: 'Disable joiners of link 7' })).toBeNull();
+      await waitFor(() => {
+        expect(within(region).queryByRole('button', { name: 'Close link 7' })).toBeNull();
+      });
+    });
+
+    it('sends nothing when the question is cancelled, and hands focus back', async () => {
+      const calls = serve(owner, { 'GET /v2/invites': () => json({ invites: [link] }), 'POST /v1/invites/7/disable-joiners': disableRoute(2) });
+      await signedIn(ownerToken);
+      const region = await joining();
+      const open = await within(region).findByRole('button', { name: 'Disable joiners of link 7' });
+      fireEvent.click(open);
+      fireEvent.click(await within(region).findByRole('button', { name: 'Cancel' }));
+      expect(within(region).queryByRole('group', { name: 'Disable joiners of link 7' })).toBeNull();
+      expect(document.activeElement).toBe(open);
+      expect(sent(calls)).toEqual([{ dry_run: true }]);
+    });
+
+    it('closes the question when manage_members goes, and sends nothing more', async () => {
+      let rights: Permission[] = [...(owner.permissions ?? [])];
+      const calls = serve(() => ({ ...owner, owner: false, permissions: rights, permissions_revision: rights.length }), {
+        'GET /v2/invites': () => json({ invites: [link] }),
+        'POST /v1/invites/7/disable-joiners': disableRoute(2),
+      });
+      await signedIn(ownerToken);
+      const region = await joining();
+      fireEvent.click(await within(region).findByRole('button', { name: 'Disable joiners of link 7' }));
+      await within(region).findByRole('group', { name: 'Disable joiners of link 7' });
+      await waitFor(() => {
+        expect(FakeSocket.all.some((s) => s.url.includes('/v1/events/ws?'))).toBe(true);
+      });
+      for (const s of FakeSocket.all) s.open();
+      rights = rights.filter((r) => r !== 'manage_members');
+      FakeSocket.all.find((s) => s.url.includes('/v1/events/ws?'))?.send({ schema: 'conch.permissions_changed.v1' });
+      await waitFor(() => {
+        expect(within(region).queryByRole('group', { name: 'Disable joiners of link 7' })).toBeNull();
+      });
+      expect(within(region).queryByRole('button', { name: /Disable joiners/ })).toBeNull();
+      expect(sent(calls)).toEqual([{ dry_run: true }]);
+    });
+
+    it.each([
+      ['permission_denied', { permission: 'manage_members' }, 'You need the permission to manage members for that. No one was disabled.'],
+      ['invite_not_found', {}, 'The server refused. No one was disabled.'],
+      ['invalid_request', {}, 'The server did not take that. No one was disabled.'],
+    ])('shows a refusal of the send by its code: %s', async (code, more, words) => {
+      const calls = serve(owner, {
+        'GET /v2/invites': () => json({ invites: [link] }),
+        'POST /v1/invites/7/disable-joiners': (c) => ((c.body as { dry_run: boolean }).dry_run ? disableRoute(2)(c) : refusal(403, code, 'no', more)),
+      });
+      await signedIn(ownerToken);
+      const region = await joining();
+      fireEvent.click(await within(region).findByRole('button', { name: 'Disable joiners of link 7' }));
+      fireEvent.click(await within(region).findByRole('button', { name: 'Disable 2 people' }));
+      expect(await within(region).findByText(words)).toBeDefined();
+      expect(sent(calls)).toHaveLength(2);
+    });
+
+    it('shows a refusal of the dry run, and asks nothing', async () => {
+      serve(owner, { 'GET /v2/invites': () => json({ invites: [link] }), 'POST /v1/invites/7/disable-joiners': () => refusal(403, 'forbidden') });
+      await signedIn(ownerToken);
+      const region = await joining();
+      fireEvent.click(await within(region).findByRole('button', { name: 'Disable joiners of link 7' }));
+      expect(await within(region).findByText('The server does not allow you to do that. No one was disabled.')).toBeDefined();
+      expect(within(region).queryByRole('group', { name: 'Disable joiners of link 7' })).toBeNull();
+    });
+  });
+
   it('counts a single other channel in the singular', () => {
     expect(channelsLine({ ...link, kind: 'member', channels: [], other_channels: 1 })).toBe('Only 1 other channel');
     expect(channelsLine({ ...link, kind: 'member', channels: [{ id: 1, name: 'channel-a' }], other_channels: undefined })).toBe('#channel-a');
@@ -616,6 +720,14 @@ describe('gating by permission', () => {
 
   it('says nothing of rights where whoami carries none', () => {
     expect(memberLine({ ...member, permissions: undefined })).toBeNull();
+  });
+
+  it('words the camera permission (ADR-015)', () => {
+    expect(permissionName('use_camera')).toBe('use a camera');
+    expect(memberLine({ ...member, permissions: ['use_voice', 'use_camera'] })).toBe('You can turn on your camera. Voice is on.');
+    expect(memberLine({ ...member, permissions: ['use_voice', 'share_screen', 'use_camera'] })).toBe('You can share your screen and turn on your camera. Voice is on.');
+    expect(canDo({ ...member, permissions: ['use_voice'] }, 'use_camera')).toBe(false);
+    expect(canDo(owner, 'use_camera')).toBe(true);
   });
 
   it('words each refusal by its code', () => {
@@ -761,7 +873,7 @@ describe('the console on a phone', () => {
       'matchMedia',
       vi.fn(() => ({ matches: true, addEventListener: () => undefined, removeEventListener: () => undefined })),
     );
-    const props = { who: owner, origin, permissionsChanged: 0, onChannelsChanged: () => undefined, onUnauthorized: () => undefined };
+    const props = { who: owner, origin, permissionsChanged: 0, directoryChanged: 0, onChannelsChanged: () => undefined, onUnauthorized: () => undefined };
     const view = render(<AdminConsole {...props} channels={[]} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Server' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Joining' }));

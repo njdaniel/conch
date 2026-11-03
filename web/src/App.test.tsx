@@ -342,9 +342,16 @@ describe('lobby', () => {
     expect(within(voice).getByRole('button', { name: 'Join voice in #general' }).hasAttribute('disabled')).toBe(true);
   });
 
-  it('shows in the list how many are in each channel\'s voice, from one socket, and only the strip offers to join (issue #596)', async () => {
+  it('shows in the list how many are in each channel\'s voice and who, from one socket, and only the strip offers to join (issues #596, #1103)', async () => {
     const sockets = socketsOf();
-    const fetchMock = serve({ ...asMember, '/v1/ws-tickets': () => json({ ticket: ticketValue, expires_at: created_at }, 201) });
+    // ops's members, read once for the names of the people in its voice
+    // (issue #1103); the viewer, ada (2), is named without a read.
+    const opsMembers = { members: [member, { principal_id: 5, name: 'eve', kind: 'human', created_at }, { principal_id: 6, name: 'fay', kind: 'human', created_at }].map((p) => ('principal_id' in p ? p : { principal_id: p.id, name: p.name, kind: p.kind, created_at })) };
+    const fetchMock = serve({
+      ...asMember,
+      '/v1/ws-tickets': () => json({ ticket: ticketValue, expires_at: created_at }, 201),
+      '/v1/channels/ops/members': () => json(opsMembers),
+    });
     render(<App origin={origin} />);
     signIn();
     const voice = await screen.findByRole('region', { name: 'Voice' });
@@ -363,9 +370,9 @@ describe('lobby', () => {
           configured: true,
           available: true,
           channels: [
-            { channel_id: 1, in_voice: 1 },
-            { channel_id: 2, in_voice: 3 },
-            { channel_id: 3, in_voice: 0 },
+            { channel_id: 1, in_voice: 1, principal_ids: [2] },
+            { channel_id: 2, in_voice: 3, principal_ids: [2, 5, 6] },
+            { channel_id: 3, in_voice: 0, principal_ids: [] },
           ],
         }),
       });
@@ -377,8 +384,29 @@ describe('lobby', () => {
     expect(within(list).queryAllByRole('img', { name: /in voice/ })).toHaveLength(2);
     expect(list.textContent).toContain('3');
     expect(screen.getByRole('button', { name: 'ops' }).textContent).toBe('ops');
+    // Who is there, by name, nested under each channel (issue #1103): the
+    // viewer as You, and ops's people once its members have been read.
+    const inOps = within(list).getByRole('list', { name: 'In voice in #ops' });
+    await waitFor(() => {
+      expect(within(inOps).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['You', 'eve', 'fay']);
+    });
+    expect(within(within(list).getByRole('list', { name: 'In voice in #general' })).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['You']);
+    expect(within(list).queryByRole('list', { name: 'In voice in #dev' })).toBeNull();
+    // One read of ops's members for the names, and none of dev's (nobody
+    // there); general's is the page's own, for the channel on screen.
+    const membersReads = () => fetchMock.mock.calls.map(([input]) => (typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url)).filter((p) => p.endsWith('/members'));
+    expect(membersReads().filter((p) => p !== '/v1/channels/general/members')).toEqual(['/v1/channels/ops/members']);
     // Still nothing outside the strip offers to join, or names voice.
     expect(controlsOutside(voice, /join|voice/i)).toEqual([]);
+    // A name opens the channel, and nothing more.
+    fireEvent.click(within(inOps).getByRole('button', { name: 'eve' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'ops' }).getAttribute('aria-current')).toBe('true');
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'general' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
+    });
 
     // The strip, not in voice, says where the others are, and opens it.
     expect(voice.querySelector('.voice-elsewhere')?.textContent).toBe('3 in voice in #ops Open #ops');

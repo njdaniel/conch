@@ -29,11 +29,14 @@ export interface MembersSectionProps {
   readonly origin: string;
   // Counts the times the server said the permissions changed.
   readonly refresh: number;
+  // Counts the server's words that the directory changed
+  // (conch.directory_changed.v1): the list is read again while shown.
+  readonly directoryTick: number;
   readonly channelIds: string;
   readonly onUnauthorized: () => void;
 }
 
-export function MembersSection({ who, origin, refresh, channelIds, onUnauthorized }: MembersSectionProps) {
+export function MembersSection({ who, origin, refresh, directoryTick, channelIds, onUnauthorized }: MembersSectionProps) {
   const shown = useContext(SettingsOpen);
   const addPerson = useContext(AddPerson);
   const phone = usePhone();
@@ -45,6 +48,7 @@ export function MembersSection({ who, origin, refresh, channelIds, onUnauthorize
       origin={origin}
       channelIds={channelIds}
       permissionsTick={refresh}
+      directoryTick={directoryTick}
       title="Members"
       level={4}
       showTitle={!phone}

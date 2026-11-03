@@ -63,6 +63,7 @@ export function Lobby({
   channels,
   unread,
   occupancy,
+  voiceNames,
   notificationCenter,
   connection,
   conversation,
@@ -100,8 +101,10 @@ export function Lobby({
   readonly temporary?: boolean;
   readonly channels: ChannelsState;
   readonly unread: ReadonlyMap<string, number>;
-  // How many are in each channel's voice (issue #596), shown in the list.
+  // Who is in each channel's voice (issues #596, #1103), shown in the list,
+  // and the names the page has for them by principal id.
   readonly occupancy?: InVoice;
+  readonly voiceNames?: ReadonlyMap<number, string>;
   readonly notificationCenter?: ReactNode;
   readonly connection: ConnectionState;
   readonly conversation: ReactNode;
@@ -393,6 +396,8 @@ export function Lobby({
                   selected={channels.selected}
                   unread={unread}
                   occupancy={occupancy}
+                  voiceNames={voiceNames}
+                  viewer={me}
                   empty={newChannel === null || newChannel === undefined ? undefined : 'No channels yet'}
                   {...(canRename === undefined ? {} : { canRename })}
                   {...(renderRename === undefined ? {} : { renderRename })}

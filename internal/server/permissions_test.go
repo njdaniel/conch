@@ -157,6 +157,70 @@ func TestPermissionsGet(t *testing.T) {
 	}
 }
 
+// TestPermissionsGetAnswersTheFullCatalog (ADR-015 C2, #1238): conchd
+// answers every permission of the catalog, in order, use_camera last and off
+// for both roles with nothing fixed. The schema's fixture rule accepts a
+// shorter document, because one from an older server must stay valid; this
+// is what stops this server from ever shipping a short catalog.
+func TestPermissionsGetAnswersTheFullCatalog(t *testing.T) {
+	f := newRestrictedFixture(t, Config{})
+	doc := decodeBody[schema.PermissionsResponseV1](t, f.do(t, "GET", "/v1/permissions", f.rootTok, ""))
+	if len(doc.Rows) != len(schema.Permissions) {
+		t.Fatalf("%d rows, want every one of the %d permissions", len(doc.Rows), len(schema.Permissions))
+	}
+	for i, row := range doc.Rows {
+		if row.Permission != schema.Permissions[i] {
+			t.Errorf("row %d is %s, want %s", i, row.Permission, schema.Permissions[i])
+		}
+	}
+	last := doc.Rows[len(doc.Rows)-1]
+	want := schema.PermissionRowV1{Permission: schema.PermUseCamera}
+	if last != want {
+		t.Errorf("the last row = %+v, want use_camera off for both and nothing fixed", last)
+	}
+	// Operators and members do not hold it; the owner does. whoami says so.
+	for _, tc := range []struct {
+		who  string
+		tok  string
+		held bool
+	}{
+		{"owner", f.rootTok, true},
+		{"operator", f.opTok, false},
+		{"member", f.memberTok, false},
+	} {
+		who := decodeBody[schema.WhoAmIResponseV1](t, f.do(t, "GET", "/v1/whoami", tc.tok, ""))
+		if got := slices.Contains(who.Permissions, schema.PermUseCamera); got != tc.held {
+			t.Errorf("%s holds use_camera = %v, want %v (permissions %v)", tc.who, got, tc.held, who.Permissions)
+		}
+	}
+}
+
+// TestPermissionsPutRefusesUseCameraUntilEnforced (ADR-015 C2, #1238): no
+// route reads use_camera yet, so the PUT's safety net refuses a change to
+// either of its cells, 409 permissions_conflict naming it, and changes
+// nothing. C3 lists it in enforcedPermissions and retires this test.
+func TestPermissionsPutRefusesUseCameraUntilEnforced(t *testing.T) {
+	if slices.Contains(enforcedPermissions, schema.PermUseCamera) {
+		t.Fatal("use_camera is enforced now: retire this test and let the PUT accept the cell")
+	}
+	f := newRestrictedFixture(t, Config{})
+	for _, role := range []schema.PermissionRole{schema.PermissionRoleOperator, schema.PermissionRoleMember} {
+		t.Run(string(role), func(t *testing.T) {
+			before := revisionOf(t, f)
+			res := f.putPermissions(t, f.rootTok, schema.PutPermissionsRequestV1{Revision: before, Changes: []schema.PermissionChangeV1{
+				{Permission: schema.PermUseCamera, Role: role, Granted: true},
+			}})
+			if res.code != http.StatusConflict || res.errorCode(t) != schema.ErrorCodePermissionsConflict ||
+				!strings.Contains(string(res.body), "this server does not enforce use_camera yet") {
+				t.Fatalf("turning use_camera on for %s = %d %s, want 409 permissions_conflict \"this server does not enforce use_camera yet\"", role, res.code, res.body)
+			}
+			if revisionOf(t, f) != before {
+				t.Error("a refused PUT changed the document")
+			}
+		})
+	}
+}
+
 func TestPermissionsPut(t *testing.T) {
 	member := func(p schema.Permission, on bool) schema.PermissionChangeV1 {
 		return schema.PermissionChangeV1{Permission: p, Role: schema.PermissionRoleMember, Granted: on}
@@ -762,9 +826,12 @@ func TestJoinSettingsNameOracleClosed(t *testing.T) {
 	}
 }
 
-// Invite refusals name the permission they lack, to a caller whose role
-// could hold it (design §7.4): the same codes as before.
-func TestInviteRefusalsNameThePermission(t *testing.T) {
+// POST /v1/invites refuses whoever lacks manage_members with 409
+// invite_kind_retired (issue #990): a member, an operator whose manage_members
+// is off, whatever the body asks. The refusals that name a permission are the
+// member link's (TestMemberLinkRefusalsNameThePermission), and the refusal
+// here names none, so it says nothing of the roles a caller could hold.
+func TestInviteV1RefusesWhoLacksManageMembers(t *testing.T) {
 	f := newRestrictedFixture(t, Config{})
 	f.cut(t)
 	yes := true
@@ -772,19 +839,11 @@ func TestInviteRefusalsNameThePermission(t *testing.T) {
 		name string
 		tok  string
 		req  schema.CreateInviteRequestV1
-		code string
-		perm schema.Permission
 	}{
-		{"an open link without manage_members", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"channel-b"}},
-			schema.ErrorCodeInviteNotAllowed, schema.PermManageMembers},
-		{"granting may_invite without manage_members", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-b"}, MayInvite: &yes},
-			schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageMembers},
-		{"a channel it is not in, without manage_channels", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-a"}},
-			schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageChannels},
-		// A member is never told of an operator permission; its own right
-		// to make links (its brake) it is told.
-		{"a member who may not invite", f.memberTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-b"}},
-			schema.ErrorCodeInviteNotAllowed, schema.PermMakeMemberLinks},
+		{"an open link without manage_members", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"channel-b"}}},
+		{"granting may_invite without manage_members", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-b"}, MayInvite: &yes}},
+		{"a channel it is not in, without manage_channels", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-a"}}},
+		{"a member who may not invite", f.memberTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-b"}}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			body, err := json.Marshal(c.req)
@@ -792,11 +851,11 @@ func TestInviteRefusalsNameThePermission(t *testing.T) {
 				t.Fatal(err)
 			}
 			rec := f.do(t, "POST", "/v1/invites", c.tok, string(body))
-			if rec.Code != http.StatusForbidden {
-				t.Fatalf("invite = %d %s, want 403", rec.Code, rec.Body)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("invite = %d %s, want 409", rec.Code, rec.Body)
 			}
-			if e := decodeBody[schema.Error](t, rec); e.Code != c.code || e.Permission != c.perm {
-				t.Errorf("refusal = %s, want code %q permission %q", rec.Body, c.code, c.perm)
+			if e := decodeBody[schema.Error](t, rec); e.Code != schema.ErrorCodeInviteKindRetired || e.Permission != "" {
+				t.Errorf("refusal = %s, want code %q and no permission", rec.Body, schema.ErrorCodeInviteKindRetired)
 			}
 		})
 	}

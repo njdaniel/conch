@@ -8,8 +8,104 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.12] - 2026-11-03
+
+This is a pre-1.0 release (`v0.1.0-alpha.12`): the API and the wire shapes
+can still change between alphas. **One breaking change: members can no longer
+use `POST /v1/invites`** (#990). Read the upgrade notice before upgrading.
+
+This finishes the community model for people who are not operators. A server
+can hide its members from each other, and the web app, the TUI and the CLI
+all learn the community: a channel directory, a people pane, member links and
+joining, an admin console with Roles and permissions, Members and Channels
+sections, and a sign-in-only front page. Operators can list and revoke hooks
+from the CLI and disable a link's joiners from the web, and adding someone to
+a channel by id can never take away a member's right to decide approvals.
+Upgrade with `conch-server upgrade v0.1.0-alpha.12` from your workstation, or
+with `conch-upgrade.sh` on the droplet (docs/deploy.md step 11).
+
+There is no migration since `alpha.11`, so rolling back to `alpha.11` is a
+plain downgrade. The wire changes are additive only, listed after Added, and
+an `alpha.11` client ignores them. Behaviour does change: read the upgrade
+notice below, and Changed.
+
+**Upgrade notice.**
+- **A private server should apply the `personal` preset first.** Hiding
+  members (#988) works through the member cell of `see_member_directory`,
+  which the `group` defaults leave on. See "Upgrade notice: roles and
+  permissions (ADR-014)" at the end of this section.
+- **Members can no longer use the v1 invite route.** `POST /v1/invites`
+  answers a caller without `manage_members` with 409 `invite_kind_retired`
+  (#990). Scripts that make invites as a member must use `POST /v2/invites`
+  (`conch admin invite create` already does).
+
 ### Added
 
+- **Hide members from each other** (#988, community model I14a). Switching
+  the member cell of `see_member_directory` off, through `PUT /v1/permissions`
+  or the `personal` preset, makes the directory show a member only the people
+  they share a channel with, themselves, and those they invited. Operators
+  always see everyone. Adding someone to a channel, and reading a channel's
+  authors, answer the same 404 `principal_not_found` for a person you may not
+  know as for one who does not exist.
+  - `GET /v1/channels/{channel}/authors?ids=` names the authors of messages
+    in a channel the caller is in, for up to 100 ids, and only those the
+    caller may see.
+  - The events socket sends `conch.directory_changed.v1` (a frame with no
+    fields) to whoever may know the person who changed: when someone is
+    created, renamed, disabled, enabled, hidden or given a new role, and when
+    the permission is switched. Frames are coalesced.
+- **The web app follows the community** (#991, #993). A channel directory
+  lists public channels and your private ones, with a lock, and a member
+  joins or leaves from it (leaving a private channel asks first). Members
+  create channels as `create_public_channels` and `create_private_channels`
+  allow. A people panel lists who you may know. It, the channel's member list
+  and the add-people picker refresh on `conch.directory_changed.v1`, so the
+  Refresh button is gone.
+- **Member links and a sign-in-only front page in the web app** (#990). The
+  front page offers Sign in, and "Create an account" only while open sign-up
+  is on; otherwise it says "This server is invite-only" and never offers a
+  guest visit. Every member has an Invite people panel: make a member link
+  with an optional expiry and use limit, see your own links with their uses
+  and joiners, and close them. "Never expires" shows only to holders of
+  `manage_members`, and the panel says so when an operator has turned your
+  invite brake off. A link opens a landing page that previews and redeems it
+  through the v2 routes.
+- **The web admin console grows three sections.**
+  - Roles and permissions (#1019): the permissions matrix, with locked cells
+    explained, the presets with what each changes, and the warnings.
+  - Channels (#1021), for holders of `manage_channels`: every channel with
+    its lock, default mark, member count and who manages it, and a menu to
+    add a person, rename, make private or public, make or stop being a
+    default channel, grant or remove managing, and remove a person.
+  - Members (#1020): the member list and a person menu that offers only the
+    actions the viewer may take on that person (nobody but an owner acts on
+    an owner, no sign-in link for an operator, owner or agent, and so on).
+  - "Disable joiners of link N" on each Invites row that has joiners, for
+    holders of `manage_members`: it counts first, asks, then disables (#1228).
+- **The CLI learns the community model** (#994, #1228).
+  - `conch channels list|join|leave|create` (`list --all` for operators,
+    `create --private`).
+  - `conch admin invite create|list|joiners|close` work on member links, with
+    `--expires`, `--uses`, `--never-expires` and `--credential-days`. The old
+    flags (`--open`, `--personal`, `--channel`, `--voice`, `--may-invite`,
+    `--join-as`, `--max-uses`) still parse, then fail with a line naming what
+    replaces them.
+  - `conch admin channel settings <channel> [--public|--private]
+    [--default on|off]`, `conch admin principal voice <id> on|off`, and
+    `conch admin directory members`.
+  - `conch admin join set --open-signup on|off --link-expiry`, and a
+    `status` that shows open sign-up, the default channels and
+    `no_default_channel`.
+  - `conch admin hook list` and `conch admin hook revoke <id>`. The list shows
+    each hook's id, state, channel, maker and label, and never a token.
+  - Refusals print the CLI's own words by error code, never the server's
+    text, and a 429 shows its wait.
+- **The TUI learns the community model** (#995, #1199). `ctrl+d` or
+  `/channels` opens the channel directory (join, leave, create), `ctrl+p` or
+  `/people` the community pane, and `v` on a person's row, for operators,
+  switches their voice. Holders of `manage_channels` press `a` in the
+  directory for the every-channel view with member counts.
 - **Add a person to a channel by id, without ever changing an existing
   member** (#1206). `POST /v1/channels/{channel}/members` now takes `id` as
   well as `name` (exactly one), and an operator may send `can_decide` for a
@@ -17,7 +113,138 @@ release that Nick publishes.
   and the answer is 200 with their membership, so an add can never take a
   right to decide approvals away, as `PUT .../members/{id}` with
   `can_decide: false` does. A channel manager sending `can_decide` is
-  refused with 403, as on the PUT.
+  refused with 403, as on the PUT. The web console's "Add to a channel" uses
+  it and no longer reads the members first (#1227).
+- **The web sidebar names who is in each channel's voice** (#1103). Under
+  each channel, up to 5 people in its voice room are named, then "+M more";
+  you are "You", and someone the page cannot name is "Member N". A name only
+  opens the channel; it never joins voice. Phone rows are 44 px. The ids come
+  from `conch.voice_occupancy.v1` (below), and the page names them from the
+  channel's member list, so it shows only people the viewer may already know.
+
+**Wire changes since `alpha.11`, all additive.**
+- `managers` on the `?scope=all` channel listing (`ChannelListingV1`, #1202):
+  the people who manage that channel, sent only to holders of
+  `manage_channels` and omitted from the member view.
+- `id` and `can_decide` on `AddChannelMemberRequestV1` (#1206); `name` becomes
+  optional. The old request is byte-identical.
+- `principal_ids` on `VoiceChannelOccupancy` in `conch.voice_occupancy.v1`
+  (#1103): the distinct people in the channel-wide room, ascending, `[]` for
+  nobody, always sent by conchd. Ids only, no names. A client that does not
+  know it ignores it, and the published fixture (no ids) stays valid.
+- The route `GET /v1/channels/{channel}/authors` and the
+  `conch.directory_changed.v1` events frame (#988); their shapes were
+  already in `pkg/schema`.
+- None from the CLI and TUI size caps (#1198, #1203) or the exported page
+  maxima (#1221).
+
+### Changed
+
+- **The browser joins voice with the open microphone** (#1244), where it
+  started in push to talk. The person's choice is kept per browser, and an
+  "Open mic" toggle beside the talk control switches it in one tap, on the
+  desktop voice bar and on the phone strip.
+- **`POST /v1/invites` is for operators who manage members only** (#990).
+  A caller without `manage_members` now gets 409 `invite_kind_retired`:
+  members make member links with `POST /v2/invites`. An operator holding
+  `manage_members` keeps v1 until #1134 retires it.
+- **The last person in a private channel can no longer leave while only
+  non-members remain** (#1150). An agent, a disabled or hidden person or a
+  visiting guest no longer counts as someone left to run it. Public channels
+  are unchanged.
+- **A disabled person is not listed as a manager** (#1210), in the
+  `?scope=all` listing or a channel's members, until they are enabled again.
+  It is display only: who may manage is decided as before.
+- **Web: a rename refused with `channel_exists` reads "That name is taken"**,
+  never hinting that the name belongs to a private channel you cannot see
+  (#1195).
+- **The web app no longer offers a guest visit or the per-channel invite
+  tick**, and no longer calls the old `POST /v0/channels` (#990, #991).
+
+### Security
+
+- **Demoting an operator closes the member links a member could not hold**
+  (#1165). It happens in the same transaction, with an `invite_closed` row
+  each: every member link when their `may_invite` brake is off, and the
+  never-expiring ones when it is on. Before, links made under the role
+  survived a demotion with the brake off, and turning the brake on later
+  brought back links a member could never make. `invite_closed` for a member
+  link now says `link=member`.
+- **The CLI and TUI cap the response body of every list read** against a
+  hostile server: the community lists (#1198), and the rest, including
+  messages, reports, runs, activity, interventions, nets and credentials
+  (#1203). The thread loop also stops at the page limit.
+- A guard test lists every store function that reads principals and fails on
+  one that bypasses the "may know" predicate, so hidden members stay hidden
+  as routes are added (#988).
+
+### Docs
+
+- **Docs for running a personal or a group server** (#1023, ADR-014).
+  `docs/deploy.md` has a new part, "Running a personal or a group server",
+  with the console path first and the `conch admin` command after for the
+  roles and the owner mark, the preset (what each changes), member links and
+  the invite brake, channel privacy and default channels, hiding members, and
+  what an operator can and cannot see. README gains an administration
+  paragraph. Docs only: no code, wire or migration change.
+
+### Tests
+
+- Test-only and flake fixes, with no change to behaviour: a channel-refresh
+  test race (#1185), a notifications test (#1180), the voice binary,
+  slow-server and leave tests (#1141), voice tests that left clients running
+  (#1157), the e2e wait for the post-restart message (#1156), a leave-sockets
+  test (#1207), the phone navigation and voice strip specs (#1214, #1232), and
+  two web unit tests (#1002, #1235).
+- The isolation e2e gains a restricted row for every permission gate, a
+  personal-preset phase and the hide-members rows (#1017, #1190), and the
+  schema exports the message, run and report page maxima that the server and
+  the client share (#1221).
+
+### Upgrade notice: roles and permissions (ADR-014)
+
+For anyone who runs a personal server, or moves one across `alpha.8` to
+`alpha.10`.
+
+- **The migration changes nothing.** Migration 39 (`alpha.8`) adds the
+  `role_permissions` table, empty, so every permission reads as its default
+  and behaviour is the same until an owner changes a cell.
+- **Apply `personal` once, before members can see each other.** The member
+  directory (`alpha.10`, #983) shows every member to every member by default.
+  On a personal server, apply the preset (`conch admin permissions preset
+  personal`, or the setup card in Settings → Server) before the release with
+  the directory reaches it. A server already on `alpha.10` or later that never
+  applied it is showing its members to each other now: apply it now. This release (`alpha.12`)
+  also draws the directory in the web client (Community
+  members, Browse channels), so a personal server upgrading to it must have
+  applied the preset first. Browse channels lists every public channel to
+  members; the preset doesn't turn that off.
+- **Rolling back forgets a preset.** A binary from before `alpha.8` refuses a
+  database that has migration 39, so rolling back restores the pre-upgrade
+  backup (docs/deploy.md step 11; the rollback script does it), and a preset
+  applied since the upgrade goes with it.
+- **Owners skip brakes.** A voice or member-link switch stored on an owner
+  no longer counts: an owner whose voice or link-making was switched off has
+  them again.
+- **Open sign-up members can make links.** Members who join through open
+  sign-up hold the member-link switch, so, while members hold
+  `make_member_links`, they can make member links straight away, and they
+  keep that after open sign-up is switched off. Close their links or remove
+  the people a link brought in (ADR-013 decision 5).
+- **Members who made links see the people who joined through them**
+  (#988). With the directory off, a member sees themself, the people in
+  their channels and the people who joined through a link they made. That
+  is recorded at join and never cleared, so on a server that ran the
+  defaults first it stays after link-making is switched off; `conch admin
+  principal list` shows "invited by" to find them. The
+  server now sends the `default_channel_exposes_members` warning when
+  members lack the directory and a default channel exists. Before this
+  release it didn't, so check for default channels yourself on a server
+  that runs an earlier one.
+- **The preset leaves the channel directory on.** There is no permission
+  for it: on a personal server a member's **Browse channels** still lists
+  every public channel, and any member may join one. Keep a personal
+  server's channels private.
 
 ## [0.1.0-alpha.11] - 2026-11-02
 
@@ -134,7 +361,6 @@ There is no migration and no wire change since `alpha.10`, so rolling back to
 
 ### Security
 
-- Demoting an operator now closes, in the same transaction and with an `invite_closed` row each, the member links a member could not hold: every member link when their `may_invite` brake is off, and the never-expiring ones when it is on. Before (alpha.10), links made under the role survived a demotion with the brake off, and turning the brake on later brought back links a member could never make (#1165). `invite_closed` for a member link now says `link=member`.
 - Any role change (a promotion, a demotion, an owner-mark change) now clears every recent-auth proof of that person, so a member's password-only re-authentication no longer satisfies an operator route that needs password and code (#1054). Their sessions stand; they re-authenticate on the next sensitive action. The `principal_role_changed` audit row gains `proofs_cleared=N`.
 
 ### Docs

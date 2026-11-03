@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { AdminConsole } from './AdminConsole';
 import { actAsMembersNotEnded, actAsMembersSentence, auditSentence, managersBlock, movedCells, ownersLine, PermissionMatrix } from './admin/PermissionsSection';
-import type { IssuedByOperatorV1, Permission, PermissionsResponseV1 } from './schema/permission';
+import type { IssuedByOperatorV1, KnownPermission, Permission, PermissionsResponseV1 } from './schema/permission';
 import type { WhoAmIResponseV1 } from './schema/principal';
 
 const origin = 'http://127.0.0.1:8080';
@@ -21,7 +21,7 @@ const operatorToken = 'conch_operator_session_token';
 const ticketValue = 'conch_wst_TICKETTICKETTICKETTICKETTICKETTICKETTICKET';
 const password = 'the owner passphrase here';
 
-const catalog: Permission[] = [
+const catalog: KnownPermission[] = [
   'create_public_channels',
   'create_private_channels',
   'make_member_links',
@@ -33,9 +33,13 @@ const catalog: Permission[] = [
   'manage_channels',
   'change_server_settings',
   'read_audit_log',
+  'use_camera',
 ];
 const memberRights: Permission[] = catalog.slice(0, 6);
 const operatorRights: Permission[] = catalog.slice(0, 9);
+// Rows 7 to 11 are operator-only, so their member cell is fixed; row 12
+// (use_camera, ADR-015) is configurable in both columns and off by default.
+const memberFixed = (permission: Permission, i: number) => i >= 6 && permission !== 'use_camera';
 const personalRights: Permission[] = ['use_voice', 'share_screen'];
 const auth = { scope: 'full', password_set: true, totp_enrolled: false, setup_complete: true, expires_at: later, idle_expires_at: later } as const;
 
@@ -72,7 +76,7 @@ function permissionsDoc(
       permission,
       member: member.includes(permission),
       operator: op.includes(permission),
-      ...(i >= 6 ? { member_fixed: true } : {}),
+      ...(memberFixed(permission, i) ? { member_fixed: true } : {}),
       ...(permission === 'see_member_directory' ? { operator_fixed: true } : {}),
     })),
     ...(current === undefined ? {} : { preset: current.preset }),
@@ -221,6 +225,7 @@ describe('the matrix', () => {
       'Manage channels',
       'Change server settings',
       'Read the audit log',
+      'Use a camera',
     ]);
     expect(within(region).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['Permission', 'Members', 'Operators', 'Owners']);
     // The sentences the design fixes.
@@ -261,6 +266,42 @@ describe('the matrix', () => {
     expect(screen.queryByText(/unsaved/)).toBeNull();
   });
 
+  it('shows the camera row (ADR-015) with its words, off for both and open in both columns', async () => {
+    serve(owner, { 'GET /v1/permissions': () => json(permissionsDoc(2)) });
+    const region = await open(ownerToken);
+    const header = within(region).getByRole('rowheader', { name: /Use a camera/ });
+    expect(header.querySelector('strong')?.textContent).toBe('Use a camera');
+    expect(header.textContent).toContain('Turn on a camera in voice. Needs voice.');
+    for (const role of ['member', 'operator'] as const) {
+      const input = cell(region, 'use_camera', role);
+      expect(input.checked).toBe(false);
+      expect(locked(input)).toBe(false);
+    }
+  });
+
+  it('words the server’s refusal of a camera on where voice is off, naming the cell', async () => {
+    // Voice is off in both columns; the operator cell of use_camera is on,
+    // so precedence holds and the dependency is the rule the page finds
+    // broken when the server answers 409 permissions_conflict.
+    serve(owner, {
+      'GET /v1/permissions': () =>
+        json(
+          permissionsDoc(2, {
+            operator: [...operatorRights.filter((p) => p !== 'use_voice' && p !== 'share_screen'), 'use_camera'],
+            member: memberRights.filter((p) => p !== 'use_voice' && p !== 'share_screen'),
+          }),
+        ),
+      'PUT /v1/permissions': () => refusal(409, 'permissions_conflict', 'use_camera requires use_voice for member'),
+    });
+    const region = await open(ownerToken);
+    fireEvent.click(cell(region, 'use_camera', 'member'));
+    fireEvent.click(within(region).getByRole('button', { name: 'Save changes' }));
+    expect(await within(region).findByText('“Use a camera” needs “Use voice” in the same column. Nothing was saved.')).toBeDefined();
+    expect(cell(region, 'use_camera', 'member').closest('tr')?.className).toContain('flagged');
+    // The edit is kept for the person to decide.
+    expect(cell(region, 'use_camera', 'member').checked).toBe(true);
+  });
+
   it('shows an unknown permission by its name, read-only', () => {
     const doc = permissionsDoc(2);
     const future = { permission: 'future_thing' as Permission, member: true, operator: true };
@@ -289,8 +330,8 @@ describe('the matrix', () => {
   });
 });
 
-function info(p: Permission): string {
-  const words: Record<Permission, string> = {
+function info(p: KnownPermission): string {
+  const words: Record<KnownPermission, string> = {
     create_public_channels: 'Create public channels',
     create_private_channels: 'Create private channels',
     make_member_links: 'Make member links',
@@ -302,6 +343,7 @@ function info(p: Permission): string {
     manage_channels: 'Manage channels',
     change_server_settings: 'Change server settings',
     read_audit_log: 'Read the audit log',
+    use_camera: 'Use a camera',
   };
   return words[p];
 }
@@ -382,6 +424,34 @@ describe('the presets', () => {
     const region = await open(ownerToken);
     const personal = within(region).getByRole('region', { name: 'Personal preset' });
     expect(personal.textContent).toContain('Would turn off: Create public channels, Create private channels, Make member links, See the member directory, Share a screen.');
+  });
+
+  // Issue #1051: PermissionPreset and PermissionsWarning are client-tolerant.
+  // A newer server's preset or warning reads, and is shown by its name.
+  it('shows a preset and a warning this page has no words for by their names', async () => {
+    serve(owner, {
+      'GET /v1/permissions': () =>
+        json(
+          permissionsDoc(2, {
+            presets: [
+              { preset: 'personal', member: personalRights },
+              { preset: 'group', member: memberRights },
+              { preset: 'future_preset', member: ['use_voice', 'fly_the_server'] },
+            ],
+            warnings: ['open_signup_on', 'future_warning'],
+          }),
+        ),
+    });
+    const region = await open(ownerToken);
+    const card = within(region).getByRole('region', { name: 'future_preset preset' });
+    expect(within(card).getByRole('heading').textContent).toBe('future_preset');
+    expect(card.textContent).toContain('Would turn on: fly_the_server.');
+    expect(within(card).getByRole<HTMLButtonElement>('button', { name: 'Use future_preset preset' }).disabled).toBe(false);
+    const warnings = within(region).getByRole('list', { name: 'Warnings about these permissions' });
+    expect(within(warnings).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+      'Members cannot make member links, yet open sign-up is on, so the server’s address still admits anyone.',
+      'future_warning',
+    ]);
   });
 
   it('applies a preset through PUT /v1/permissions with the revision read, and shows the answer', async () => {
@@ -635,6 +705,28 @@ describe('what operators issued to others', () => {
     expect(within(list).queryByRole('button', { name: 'Sign out everywhere, person #8' })).toBeNull();
   });
 
+  // Issue #1051: IssuedKind is client-tolerant. A kind a newer server added
+  // is listed by its name; this page has no route to revoke it by, so it
+  // offers none, and never sends it to another kind's route.
+  it('shows an issued kind this page has no words for by its name, and does not revoke it', async () => {
+    const { calls, list } = await turnedOff({
+      'PUT /v1/permissions': () =>
+        json({
+          ...permissionsDoc(3, { operator: operatorRights.filter((p) => p !== 'act_as_members') }),
+          issued_to_others: [...issued, { kind: 'future_kind', id: 77, principal_id: 8, issued_by: 2, issued_at: at }],
+        }),
+    });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(4);
+    expect(list.textContent).toContain('future_kind #77 for person #8');
+    const revoke = within(list).getByRole<HTMLButtonElement>('button', { name: 'Revoke future_kind #77' });
+    expect(revoke.disabled).toBe(true);
+    expect(revoke.title).toBe('This page has no words for this kind, so it cannot revoke it here.');
+    fireEvent.click(revoke);
+    expect(calls.filter((c) => c.method === 'DELETE')).toHaveLength(0);
+    // The known ones beside it still work as before.
+    expect(within(list).getByRole<HTMLButtonElement>('button', { name: 'Revoke hook #9' }).disabled).toBe(false);
+  });
+
   it('revokes a credential and a hook by their routes, and the item goes', async () => {
     const { calls, list } = await turnedOff({
       'DELETE /v1/credentials/41': () => new Response(null, { status: 204 }),
@@ -868,7 +960,7 @@ describe('the table on a wide window', () => {
     render(<App origin={origin} />);
     await screen.findByRole('button', { name: 'Settings' });
     cleanup();
-    const props = { origin, permissionsChanged: 0, onChannelsChanged: () => undefined, onUnauthorized: () => undefined, channels: [] as [] };
+    const props = { origin, permissionsChanged: 0, directoryChanged: 0, onChannelsChanged: () => undefined, onUnauthorized: () => undefined, channels: [] as [] };
     const view = render(<AdminConsole {...props} who={owner} />);
     const input = await screen.findByRole<HTMLInputElement>('checkbox', { name: 'Use voice, Members' });
     input.focus();
@@ -885,7 +977,7 @@ describe('the phone layout', () => {
       'matchMedia',
       vi.fn(() => ({ matches: true, addEventListener: () => undefined, removeEventListener: () => undefined })),
     );
-    return { origin, permissionsChanged: 0, onChannelsChanged: () => undefined, onUnauthorized: () => undefined, channels: [] as [] };
+    return { origin, permissionsChanged: 0, directoryChanged: 0, onChannelsChanged: () => undefined, onUnauthorized: () => undefined, channels: [] as [] };
   }
 
   async function phonePage(who: WhoAmIResponseV1, routes: Record<string, Route> = {}) {

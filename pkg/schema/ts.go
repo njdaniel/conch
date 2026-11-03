@@ -4,9 +4,10 @@ package schema
 // web/src/schema/generated.ts, and the list of fixture families its test
 // checks, generated.families.ts (issue #348). Everything else comes from the
 // Go types themselves: field names from the json tags, and the values of a
-// closed vocabulary from Vocabularies. Run `go generate ./pkg/schema` after
-// changing a table or a type listed in one; scripts/schema-ts-check.sh fails
-// while the committed files are stale.
+// closed vocabulary from Vocabularies; TSVocabularyModes says which of those
+// the client tolerates a value it does not know in. Run `go generate
+// ./pkg/schema` after changing a table or a type listed in one;
+// scripts/schema-ts-check.sh fails while the committed files are stale.
 
 // TSType is a Go struct the web client uses, written as a TypeScript
 // interface and a validator.
@@ -186,6 +187,8 @@ var TSTypes = []TSType{
 	{Value: VoicePresenceRoom{}},
 	// Why the reader's own share ended (issue #487), in their presence alone.
 	{Value: VoiceShareEnded{}},
+	// Why the reader's own camera ended (ADR-015, issue #1238), likewise.
+	{Value: VoiceCameraEnded{}},
 	{Value: VoicePresenceV1{}, Family: "voice-presence-v1", Schema: VoicePresenceSchemaV1},
 	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
 	// Companion and viewer participants (issue #933).
@@ -194,6 +197,9 @@ var TSTypes = []TSType{
 	// Screen share (issue #443): the claim the page is given when the room's
 	// share is its own. Presence says who shares (VoiceParticipant above).
 	{Value: VoiceShareV1{}, Family: "voice-share-v1"},
+	// The camera claim (ADR-015, issue #1238): the page may publish a camera
+	// while conchd holds it. Presence says who has one (VoiceParticipant).
+	{Value: VoiceCameraV1{}, Family: "voice-camera-v1"},
 	// Voice occupancy (issue #596): how many are in each channel's voice,
 	// streamed on a socket of its own so the channel list can show it.
 	{Value: VoiceChannelOccupancy{}},
@@ -442,4 +448,133 @@ var TSUnions = []TSUnion{
 			string(LoginNextTOTP):     {"challenge", "challenge_expires_at"},
 		},
 	},
+}
+
+// TSVocabularyMode is what a vocabulary's generated validator does with a
+// value it does not know (issue #1051). Every vocabulary is closed on the
+// server, which refuses an unknown value; the modes differ in what a client
+// built before a value shipped does with a document that carries it.
+type TSVocabularyMode int
+
+const (
+	// TSStrict: the validator refuses the value, as Go's Valid() does, so the
+	// whole document is refused and the page says so, rather than acting on
+	// a state, kind or reason it cannot act on. The TypeScript type is the
+	// union of the known values. Adding a value to a strict vocabulary is a
+	// change an older client refuses: the type's own contract decides whether
+	// that is an addition or a new version.
+	TSStrict TSVocabularyMode = iota
+	// TSTolerant: the validator keeps the value, so a bundle built before it
+	// shipped still reads the document, and the page shows the value by its
+	// name. Only for a type whose own contract says that a client does so,
+	// and never for a union's tag, which picks a variant. The TypeScript
+	// type is the known values' union or any other string, and the generated
+	// Known<Name> is the known values alone, for a page's labels.
+	TSTolerant
+)
+
+// TSVocabularyModes classifies every vocabulary in Vocabularies, with the
+// reason, so a value added to a tolerant one is an addition an older client
+// reads (ADR-013 §3.3, ADR-014 decision 7), and one added to a strict one is
+// refused by every older client, as Go refuses it. cmd/schema-ts refuses a
+// vocabulary that is not here; ts_test.go fails on one that is here and not
+// in Vocabularies. A new vocabulary is strict unless its type's contract
+// says a client shows a value it does not know by its name.
+var TSVocabularyModes = map[string]TSVocabularyMode{
+	// Tolerant: the Go type's contract says a client shows a value it does
+	// not know by its name, so the vocabulary grows without a version bump.
+	// Roles and permissions (permission.go, ADR-014 decision 7): a twelfth
+	// permission, a guest column, a later preset, warning or issued kind.
+	"Permission":         TSTolerant,
+	"PermissionRole":     TSTolerant,
+	"PermissionPreset":   TSTolerant,
+	"PermissionsWarning": TSTolerant,
+	"IssuedKind":         TSTolerant,
+	// Joining and the community model (guest.go, invite_v2.go, ADR-013):
+	// a later warning, link kind or directory scope.
+	"JoinWarning":    TSTolerant,
+	"InviteKindV2":   TSTolerant,
+	"DirectoryScope": TSTolerant,
+
+	// Strict: a union's tag. tagged() picks the variant by it and has no
+	// shape for a value it does not know.
+	"AudienceKind":         TSStrict,
+	"EscalationTargetKind": TSStrict,
+	"LoginNext":            TSStrict,
+
+	// Strict: a state, kind, mode, role, outcome or reason the page switches
+	// on to decide what to show or offer. A value it does not know it cannot
+	// act on, so the document is refused and the page says so, rather than
+	// read as some known value. PrincipalRole in particular: ADR-010 refused
+	// a third value because every client switches on it.
+	"ActivityKind":          TSStrict,
+	"ApprovalState":         TSStrict,
+	"ChannelVisibility":     TSStrict,
+	"CredentialScope":       TSStrict,
+	"GuestEndReason":        TSStrict,
+	"GuestOrigin":           TSStrict,
+	"GuestState":            TSStrict,
+	"HealthVoice":           TSStrict,
+	"IdentityClass":         TSStrict,
+	"InterventionKind":      TSStrict,
+	"InterventionState":     TSStrict,
+	"InviteJoinMode":        TSStrict,
+	"InviteKind":            TSStrict,
+	"InviteeDepth":          TSStrict,
+	"NetRole":               TSStrict,
+	"OpenJoiningMode":       TSStrict,
+	"OptionKind":            TSStrict,
+	"Outcome":               TSStrict,
+	"PrincipalKind":         TSStrict,
+	"PrincipalRole":         TSStrict,
+	"PrincipalState":        TSStrict,
+	"ProblemReportOften":    TSStrict,
+	"ProblemReportState":    TSStrict,
+	"RunState":              TSStrict,
+	"ServerMode":            TSStrict,
+	"SessionState":          TSStrict,
+	"SessionStatus":         TSStrict,
+	"SignInLinkPurpose":     TSStrict,
+	"SocketCloseReason":     TSStrict,
+	"VoiceCompanionPublish": TSStrict,
+	// A new share end reason is a new version of presence, by its contract
+	// (voice.go; webcam-video.md §10 keeps the camera's reasons the same way).
+	"VoiceShareEndReason":  TSStrict,
+	"VoiceCameraEndReason": TSStrict,
+	"VoiceTransmitState":   TSStrict,
+
+	// Strict: written by the page itself in a problem report (issue #446);
+	// the server validates what it is sent, and the page sends only what it
+	// knows.
+	"DiagnosticEventKind":      TSStrict,
+	"DiagnosticSocket":         TSStrict,
+	"DiagnosticVoiceStateName": TSStrict,
+
+	// Strict: the managed voice-helper control protocol (issue #948). The
+	// desktop owner and the conch-voice it bundles ship together, the
+	// protocol is versioned by its schema name, and a value either side does
+	// not know is a protocol error, not something to show.
+	"VoiceControlBlock":       TSStrict,
+	"VoiceControlCapture":     TSStrict,
+	"VoiceControlCommandKind": TSStrict,
+	"VoiceControlCredential":  TSStrict,
+	"VoiceControlErrorCode":   TSStrict,
+	"VoiceControlEventKind":   TSStrict,
+	"VoiceControlPipeKind":    TSStrict,
+	"VoiceControlPlayback":    TSStrict,
+	"VoiceControlPhase":       TSStrict,
+	"VoiceControlPTT":         TSStrict,
+	"VoiceControlPTTProblem":  TSStrict,
+	"VoiceControlReason":      TSStrict,
+	"VoiceControlTalkMode":    TSStrict,
+	"VoiceDevicesConfig":      TSStrict,
+	"VoiceDevicesPipeWire":    TSStrict,
+
+	// Strict: agent manifests and the Leviathan payload, which no generated
+	// client reads today. Strict is the default; a vocabulary becomes
+	// tolerant when a client reads it and its contract says so.
+	"AgentTier":         TSStrict,
+	"Capability":        TSStrict,
+	"ChannelPermission": TSStrict,
+	"TradeSide":         TSStrict,
 }

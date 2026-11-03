@@ -135,9 +135,10 @@ func (k *Kit) Prepare(ctx context.Context) (lkBin, skip string, err error) {
 	if goos := runtime.GOOS; goos != "linux" {
 		return "", "the live half runs LiveKit on the Docker host network, which only Linux has (this is " + goos + ")", nil
 	}
-	pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if out, err := Docker(pctx, "info", "--format", "{{.ServerVersion}}"); err != nil {
+	if out, err := probeDocker(ctx, dockerProbeTry, dockerProbeTotal, dockerProbeGap); err != nil {
+		if ctx.Err() != nil {
+			return "", "", errInterrupted
+		}
 		return "", "Docker is not available: " + OneLine(out, err), nil
 	}
 	ictx, icancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -166,6 +167,37 @@ func (k *Kit) Prepare(ctx context.Context) (lkBin, skip string, err error) {
 		return "", "", fmt.Errorf("lk %s: %w", LKVersion, err)
 	}
 	return lkBin, "", nil
+}
+
+// The Docker probe's bounds. The first call after the daemon boots can take a
+// while on a loaded CI runner, so a call that is still silent after try is
+// killed and asked again, until total has passed. An answer that is an error
+// (no docker binary, a daemon that refuses) is final at once.
+const (
+	dockerProbeTry   = 20 * time.Second
+	dockerProbeTotal = 60 * time.Second
+	dockerProbeGap   = 3 * time.Second
+)
+
+// probeDocker runs docker info, retrying only a call that timed out, and
+// returns the last call's output and error.
+func probeDocker(ctx context.Context, try, total, gap time.Duration) (string, error) {
+	tctx, cancel := context.WithTimeout(ctx, total)
+	defer cancel()
+	for {
+		actx, acancel := context.WithTimeout(tctx, try)
+		out, err := Docker(actx, "info", "--format", "{{.ServerVersion}}")
+		timedOut := actx.Err() != nil
+		acancel()
+		if err == nil || !timedOut || tctx.Err() != nil {
+			return out, err
+		}
+		select {
+		case <-tctx.Done():
+			return out, err
+		case <-time.After(gap):
+		}
+	}
 }
 
 // LooksOffline reports whether a failed pull is about reaching the registry,
