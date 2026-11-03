@@ -158,6 +158,10 @@ export const operations = {
   revokeAll: op('POST', '/v1/principals/{principal}/credentials/revoke-all', 'bearer', { response: check(revokeAllCredentialsResponseV1) }),
   listOwnCredentials: op('GET', '/v1/credentials/mine', 'bearer', { response: check(listOwnCredentialsResponseV1) }),
   endOwnCredential: op('DELETE', '/v1/credentials/mine/{id}', 'bearer'),
+  // An operator revokes a credential or a hook issued to someone else
+  // (manage_members), as the permissions console's issued_to_others list does.
+  revokeCredential: op('DELETE', '/v1/credentials/{id}', 'bearer'),
+  revokeHook: op('DELETE', '/v1/hooks/{id}', 'bearer'),
   reauth: op('POST', '/v1/reauth', 'bearer', { request: check(reauthRequestV1), response: check(reauthResponseV1), secret: true, renderer: false }),
   changePassword: op('PUT', '/v1/password/mine', 'bearer', {
     request: check(changePasswordRequestV1),
