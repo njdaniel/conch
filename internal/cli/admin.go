@@ -438,7 +438,10 @@ func adminPrincipalList(ctx context.Context, r *adminRun) error {
 	}
 	filter := PrincipalListFilter{State: o.state, NamePrefix: o.prefix, Kind: r.opts.kind, InviteID: o.inviteID, Limit: schema.MaxListPrincipalsLimit}
 	all := []schema.PrincipalAdminV1{}
-	for {
+	for n := 0; ; n++ {
+		if n == maxListPages {
+			return errors.New("cli: admin principal list: the server's pages do not end")
+		}
 		page, err := r.client.ListPrincipals(ctx, filter)
 		if err != nil {
 			return err

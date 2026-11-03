@@ -20,11 +20,11 @@ func (c *Client) ChannelDirectory(ctx context.Context, all bool) (schema.Channel
 	if all {
 		endpoint.RawQuery = "scope=all"
 	}
-	var result schema.ChannelDirectoryResponseV1
+	var result channelDirectoryDoc
 	if err := c.roundTrip(ctx, "list channels", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ChannelDirectoryResponseV1{}, err
 	}
-	return result, nil
+	return result.ChannelDirectoryResponseV1, nil
 }
 
 // JoinChannel joins a public channel, or says the caller is already in it.
@@ -76,11 +76,11 @@ func (c *Client) DirectoryMembers(ctx context.Context, after int64, limit int) (
 		query.Set("limit", strconv.Itoa(limit))
 	}
 	endpoint.RawQuery = query.Encode()
-	var result schema.ServerMembersResponseV1
+	var result directoryMembersDoc
 	if err := c.roundTrip(ctx, "list the community", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ServerMembersResponseV1{}, err
 	}
-	return result, nil
+	return result.ServerMembersResponseV1, nil
 }
 
 // SetVoicePermission turns a person's voice on or off.
@@ -106,19 +106,19 @@ func (c *Client) CreateMemberLink(ctx context.Context, request schema.CreateInvi
 // ListMemberLinks returns the caller's own member links, or every link for an
 // operator, newest first.
 func (c *Client) ListMemberLinks(ctx context.Context) (schema.ListInvitesResponseV2, error) {
-	var result schema.ListInvitesResponseV2
+	var result memberLinksDoc
 	if err := c.roundTrip(ctx, "list member links", http.MethodGet, c.resolve("v2", "invites"), nil, &result); err != nil {
 		return schema.ListInvitesResponseV2{}, err
 	}
-	return result, nil
+	return result.ListInvitesResponseV2, nil
 }
 
 // MemberLinkJoiners returns the members who joined through a link.
 func (c *Client) MemberLinkJoiners(ctx context.Context, id int64) (schema.InviteJoinersResponseV1, error) {
 	endpoint := c.resolve("v2", "invites", strconv.FormatInt(id, 10), "joiners")
-	var result schema.InviteJoinersResponseV1
+	var result joinersDoc
 	if err := c.roundTrip(ctx, "list link joiners", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.InviteJoinersResponseV1{}, err
 	}
-	return result, nil
+	return result.InviteJoinersResponseV1, nil
 }

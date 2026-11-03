@@ -1585,13 +1585,13 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                     : {
                         channel: currentChannel,
                         channels: channels.channels,
-                        viewer: { role: auth.principal.role, guest: visit !== null },
+                        viewer: { id: auth.principal.id, role: auth.principal.role, guest: visit !== null },
                         onUnauthorized,
                       }
                 }
               />
               {auth.principal.kind === 'human' && visit === null ? (
-                <CommunityMembers viewer={auth.principal.id} permissionsTick={permissionsTick} channelIds={channels.channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
+                <CommunityMembers viewer={auth.principal.id} who={auth.principal} origin={origin} permissionsTick={permissionsTick} channelIds={channels.channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
               ) : null}
             </>
           }
@@ -1671,6 +1671,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 channels={channels.channels}
                 names={memberNames}
                 permissionsChanged={permissionsTick}
+                onChannelsChanged={refreshChannels}
                 onUnauthorized={onUnauthorized}
               />
             ) : null
@@ -1724,6 +1725,15 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               onClose={close}
             />
           )}
+          {...(auth.principal.may_invite === true && channels.channels.length > 0
+            ? {
+                onAddPerson: () => {
+                  // The member-link panel with the open channel ticked, or the first.
+                  const channel = channels.channels.find((c) => c.name === selected) ?? channels.channels[0];
+                  if (channel !== undefined) setInviteAsk((ask) => ({ channel: channel.name, n: (ask?.n ?? 0) + 1 }));
+                },
+              }
+            : {})}
           {...(auth.principal.may_invite === true
             ? {
                 onInviteTo: () => {
