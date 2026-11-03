@@ -15,6 +15,7 @@ import { createCredentialResponseV1, createPrincipalResponse, type CreateCredent
 import { serverMembersResponseV1 } from '../src/schema/principal';
 import { post } from './api';
 import { channelButton, expect, expectFits, showView, signIn, statusLine, test } from './fixtures';
+import { watchTraffic } from './watch';
 import { call, ok, type World } from './world';
 
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Channels' });
@@ -51,17 +52,6 @@ async function make(world: World, token: string, name: string, visibility: 'publ
 const directoryOf = async (world: World, token: string) => (await ok(world, token, 'GET', '/v1/directory/channels', channelDirectoryResponseV1)).channels.map((c) => c.name);
 const listOf = async (world: World, token: string) => (await ok(world, token, 'GET', '/v1/channels', listChannelsResponse)).channels.map((c) => c.name);
 
-// What the page was sent in the API's answers, to check that a private
-// channel's name never reached a member who is not in it.
-function watchAnswers(page: Page): () => Promise<string> {
-  const reads: Promise<string>[] = [];
-  page.on('response', (res) => {
-    if (!/^\/v[0-9]+\//.test(new URL(res.url()).pathname)) return;
-    reads.push(res.text().catch(() => ''));
-  });
-  return async () => (await Promise.all(reads)).join('\n');
-}
-
 async function openMembers(page: Page): Promise<Locator> {
   const toggle = page.getByRole('button', { name: 'Members' });
   if ((await toggle.getAttribute('aria-expanded')) === 'false') await toggle.click();
@@ -84,7 +74,7 @@ for (const [size, options, phone] of sizes) {
     await post(world, owner.token, priv, `${tag} private words`);
 
     const { page } = await meet(options);
-    const answers = watchAnswers(page);
+    const traffic = watchTraffic(page);
     await signIn(page, world, newcomer.token, newcomer.name);
     await showView(page, 'Channels');
     // In no channel yet, and told what to do; not told of anyone's.
@@ -115,7 +105,7 @@ for (const [size, options, phone] of sizes) {
     // The community panel: the owner is listed, the newcomer is "You", and an
     // agent is marked as one. The directory lists no one else.
     const people = await openMembers(page);
-    const community = people.getByRole('list', { name: 'Community members' });
+    const community = people.getByRole('list', { name: 'People' });
     await expect(community.getByRole('listitem').filter({ hasText: owner.name })).toBeVisible();
     await expect(community.getByRole('listitem').filter({ hasText: newcomer.name }).getByText('You')).toBeVisible();
     const listed = await ok(world, newcomer.token, 'GET', '/v1/directory/members', serverMembersResponseV1);
@@ -132,7 +122,9 @@ for (const [size, options, phone] of sizes) {
     expect(await listOf(world, newcomer.token)).toEqual([]);
 
     // Nothing of the private channel reached this page, in any answer.
-    expect(await answers(), 'the private channel appeared in an answer the newcomer was sent').not.toContain(priv);
+    // In no API answer and on no socket frame either.
+    expect((await traffic.text()).length, 'the page was sent something').toBeGreaterThan(0);
+    expect(await traffic.text(), 'the private channel appeared in an answer or a socket frame the newcomer was sent').not.toContain(priv);
     await expect(page.locator('body')).not.toContainText(priv);
   });
 

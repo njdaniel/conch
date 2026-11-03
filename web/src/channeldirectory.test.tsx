@@ -174,6 +174,9 @@ describe('Join', () => {
     const button = within(rowOf('ideas')).getByRole('button', { name: 'Join ideas' });
     fireEvent.click(button);
     fireEvent.click(button);
+    // A browser drops the focus of a button that has just been disabled (jsdom
+    // does not): focus is on the page, as it is for a person.
+    expect(document.activeElement).toBe(document.body);
     expect(join).toHaveBeenCalledTimes(1);
     expect(join).toHaveBeenCalledWith('ideas');
     expect(button.hasAttribute('disabled')).toBe(true);
@@ -185,6 +188,9 @@ describe('Join', () => {
     expect(seen.joined).toEqual([channel]);
     expect(seen.chat).toBe(1);
     expect(await screen.findByText('Joined #ideas')).toBeDefined();
+    // The pressed button was disabled while the request ran, which drops focus
+    // to the page: it comes back to the row's control.
+    expect(document.activeElement).toBe(within(rowOf('ideas')).getByRole('button', { name: 'Join ideas' }));
   });
 
   it.each([
@@ -244,11 +250,30 @@ describe('Leave', () => {
     leave.mockResolvedValue({ ok: false, failure: 'invalid', code: 'channel_last_member', message: 'you are the last member of this private channel: someone else must be added before you leave' });
     await opened();
     fireEvent.click(within(rowOf('vault')).getByRole('button', { name: 'Leave vault' }));
-    fireEvent.click(within(screen.getByRole('group', { name: 'Leave vault?' })).getByRole('button', { name: 'Yes, leave' }));
+    const yes = within(screen.getByRole('group', { name: 'Leave vault?' })).getByRole('button', { name: 'Yes, leave' });
+    fireEvent.click(yes);
     const said = await screen.findByText('You are the last member of this private channel. Add someone else before you leave.');
     expect(said.getAttribute('role')).toBe('status');
+    // The confirmation that held focus is gone: focus is on the row's Leave.
+    expect(document.activeElement).toBe(within(rowOf('vault')).getByRole('button', { name: 'Leave vault' }));
     expect(seen.left).toEqual([]);
     expect(within(rowOf('vault')).getByRole('button', { name: 'Leave vault' })).toBeDefined();
+  });
+});
+
+describe('an open "Leave #x?"', () => {
+  it('closes and sends nothing when the channel stops being one the person is in', async () => {
+    const out = await opened();
+    fireEvent.click(within(rowOf('vault')).getByRole('button', { name: 'Leave vault' }));
+    expect(screen.getByRole('group', { name: 'Leave vault?' })).toBeDefined();
+    // Removed from it meanwhile: the next answer lists it as not joined.
+    directory.mockResolvedValue({ ok: true, value: [general, ideas, { ...vault, joined: false }] });
+    out.rerender(view([asChannel(general)]));
+    await waitFor(() => {
+      expect(screen.queryByRole('group', { name: 'Leave vault?' })).toBeNull();
+    });
+    expect(leave).not.toHaveBeenCalled();
+    expect(within(rowOf('vault')).getByRole('button', { name: 'Join vault' })).toBeDefined();
   });
 });
 
@@ -261,6 +286,16 @@ describe('the channels reducer', () => {
     expect(next.lost).toBeUndefined();
     expect(channelsReducer(state, { type: 'left', name: 'general' }).selected).toBe('ideas');
     expect(channelsReducer(state, { type: 'left', name: 'nope' })).toBe(state);
+  });
+
+  it('clears the loss notice for the channel left, even when the refresh already dropped it', () => {
+    // channels_changed landed before the 204: the channel is gone and called lost.
+    const lost: ChannelsState = { channels: [asChannel(general)], loaded: true, selected: 'general', lost: 'ideas' };
+    const next = channelsReducer(lost, { type: 'left', name: 'ideas' });
+    expect(next.lost).toBeUndefined();
+    expect(next.channels).toEqual(lost.channels);
+    // A loss of another channel is left alone.
+    expect(channelsReducer(lost, { type: 'left', name: 'other' })).toBe(lost);
   });
 });
 
@@ -276,12 +311,17 @@ describe('the community member panel', () => {
   it('lists every member the server sent, marks agents and shows roles, with no guests and no counts', async () => {
     people.mockResolvedValue({ ok: true, value: { members: [ada, bob, bot] } });
     panel();
-    const list = await screen.findByRole('list', { name: 'Community members' });
+    const list = await screen.findByRole('list', { name: 'People' });
     const items = within(list).getAllByRole('listitem');
     expect(items.map((li) => li.querySelector('.community-name')?.textContent)).toEqual(['ada', 'bob', 'builder']);
     expect(within(items[0] as HTMLElement).getByText('Operator')).toBeDefined();
     expect(within(items[1] as HTMLElement).getByText('You')).toBeDefined();
     expect(within(items[1] as HTMLElement).queryByText('Operator')).toBeNull();
+    // A plain member's role is shown too.
+    expect(within(items[1] as HTMLElement).getByText('Member')).toBeDefined();
+    // The section is named by its heading; the list is its own, "People".
+    expect(screen.getByRole('region', { name: 'Community members' })).toBeDefined();
+    expect(screen.queryByRole('list', { name: 'Community members' })).toBeNull();
     expect(within(items[2] as HTMLElement).getByText('Agent')).toBeDefined();
     expect(within(items[0] as HTMLElement).queryByText('Agent')).toBeNull();
     expect(screen.queryByText(/guest/i)).toBeNull();
@@ -292,7 +332,7 @@ describe('the community member panel', () => {
     const detailed: ServerMemberV1 = { ...bob, owner: false, voice_allowed: false, may_invite: true, invited_by: 1 };
     people.mockResolvedValue({ ok: true, value: { members: [ada, detailed] } });
     panel();
-    const list = await screen.findByRole('list', { name: 'Community members' });
+    const list = await screen.findByRole('list', { name: 'People' });
     const [first, second] = within(list).getAllByRole('listitem');
     expect(first?.textContent).toBe('adaOperator');
     expect(second?.textContent).toContain('voice off');
@@ -312,13 +352,45 @@ describe('the community member panel', () => {
     panel();
     const said = await screen.findByText('Cannot load the community members.');
     expect(said.getAttribute('role')).toBe('status');
-    expect(screen.queryByRole('list', { name: 'Community members' })).toBeNull();
+    expect(screen.queryByRole('list', { name: 'People' })).toBeNull();
+  });
+
+  it('drops operator fields after a live permission change when the next answer lacks them', async () => {
+    const detailed: ServerMemberV1 = { ...bob, owner: false, voice_allowed: false, may_invite: true, invited_by: 1 };
+    people.mockResolvedValueOnce({ ok: true, value: { members: [ada, detailed] } });
+    const out = panel();
+    await screen.findByText(/invited by ada/);
+    people.mockResolvedValueOnce({ ok: true, value: { members: [ada, bob] } });
+    out.rerender(<CommunityMembers viewer={2} channelIds="1" permissionsTick={1} onUnauthorized={() => seen.unauthorized++} />);
+    await waitFor(() => {
+      expect(screen.queryByText(/invited by/)).toBeNull();
+    });
+    expect(screen.queryByText(/voice off/)).toBeNull();
+    expect(people).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads again once when the tab comes back, not twice (focus does not also reload)', async () => {
+    people.mockResolvedValue({ ok: true, value: { members: [bob] } });
+    panel();
+    await screen.findByRole('list', { name: 'People' });
+    expect(people).toHaveBeenCalledTimes(1);
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await waitFor(() => {
+      expect(people).toHaveBeenCalledTimes(2);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(people).toHaveBeenCalledTimes(2);
   });
 
   it('is read again when the person’s own channels change, and on Refresh; a 401 signs out', async () => {
     people.mockResolvedValue({ ok: true, value: { members: [bob] } });
     const out = panel('1');
-    await screen.findByRole('list', { name: 'Community members' });
+    await screen.findByRole('list', { name: 'People' });
     expect(people).toHaveBeenCalledTimes(1);
     out.rerender(<CommunityMembers viewer={2} channelIds="1,2" onUnauthorized={() => seen.unauthorized++} />);
     await waitFor(() => {

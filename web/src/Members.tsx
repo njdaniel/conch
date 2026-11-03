@@ -374,7 +374,7 @@ function CommunityRow({ person, byId, viewer }: { readonly person: ServerMemberV
       <span className="community-name">{person.name}</span>
       {person.id === viewer ? <span className="ag-badge">You</span> : null}
       {person.kind === 'agent' ? <span className="ag-badge">Agent</span> : null}
-      {person.kind === 'human' && person.role === 'operator' ? <span className="ag-badge">Operator</span> : null}
+      {person.kind === 'human' && person.role !== undefined ? <span className="ag-badge">{person.role === 'operator' ? 'Operator' : 'Member'}</span> : null}
       {person.owner === true ? <span className="ag-badge">Owner</span> : null}
       {person.voice_allowed === undefined ? null : <span className="hint">{person.voice_allowed ? ' · voice on' : ' · voice off'}</span>}
       {person.may_invite === undefined ? null : <span className="hint">{person.may_invite ? ' · can invite' : ' · cannot invite'}</span>}
@@ -389,7 +389,20 @@ function CommunityRow({ person, byId, viewer }: { readonly person: ServerMemberV
 // they ask; whatever the server leaves out (a viewer who may only know the
 // people they share a channel with is told so) is not guessed at. There are no
 // guests in it: the directory lists none.
-export function CommunityMembers({ viewer, channelIds, onUnauthorized }: { readonly viewer: number; readonly channelIds: string; readonly onUnauthorized: () => void }) {
+export function CommunityMembers({
+  viewer,
+  channelIds,
+  permissionsTick = 0,
+  onUnauthorized,
+}: {
+  readonly viewer: number;
+  readonly channelIds: string;
+  // Counts live changes of the person's own permissions (conch.permissions_changed.v1):
+  // what they may see here may have changed, so the list is read again.
+  readonly permissionsTick?: number;
+  readonly onUnauthorized: () => void;
+}) {
+  const headingId = useId();
   const [answer, setAnswer] = useState<ServerMembersResponseV1 | 'failed' | null>(null);
   const seq = useRef(0);
   const live = useRef(true);
@@ -419,17 +432,15 @@ export function CommunityMembers({ viewer, channelIds, onUnauthorized }: { reado
   }, []);
   useEffect(() => {
     load();
-  }, [load, channelIds]);
+  }, [load, channelIds, permissionsTick]);
   // The server sends no word that the community changed (a person hidden, a
-  // role changed), so the list is read again when the window comes back.
+  // role changed), so the list is read again when the tab comes back.
   useEffect(() => {
     const back = () => {
       if (document.visibilityState === 'visible') load();
     };
-    window.addEventListener('focus', back);
     document.addEventListener('visibilitychange', back);
     return () => {
-      window.removeEventListener('focus', back);
       document.removeEventListener('visibilitychange', back);
     };
   }, [load]);
@@ -437,8 +448,8 @@ export function CommunityMembers({ viewer, channelIds, onUnauthorized }: { reado
   const byId = new Map<number, ServerMemberV1>();
   if (answer !== null && answer !== 'failed') for (const m of answer.members) byId.set(m.id, m);
   return (
-    <section aria-label="Community members" className="community-members">
-      <h3>Community members</h3>
+    <section aria-labelledby={headingId} className="community-members">
+      <h3 id={headingId}>Community members</h3>
       {answer === null ? (
         <p className="empty">Loading…</p>
       ) : answer === 'failed' ? (
@@ -451,7 +462,7 @@ export function CommunityMembers({ viewer, channelIds, onUnauthorized }: { reado
           {answer.members.length === 0 ? (
             <p className="empty">Nobody to show</p>
           ) : (
-            <ul aria-label="Community members">
+            <ul aria-label="People">
               {answer.members.map((person) => (
                 <CommunityRow key={person.id} person={person} byId={byId} viewer={viewer} />
               ))}

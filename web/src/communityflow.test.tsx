@@ -172,7 +172,7 @@ describe('a member’s page', () => {
 
   it('lists the community in its panel with the agent marked, beside the channel’s own people', async () => {
     render(<App origin={origin} />);
-    const list = await screen.findByRole('list', { name: 'Community members' });
+    const list = await screen.findByRole('list', { name: 'People' });
     const items = within(list).getAllByRole('listitem');
     expect(items.map((li) => li.querySelector('.community-name')?.textContent)).toEqual(['nick', 'ada', 'builder']);
     expect(within(items[2] as HTMLElement).getByText('Agent')).toBeDefined();

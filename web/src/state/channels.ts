@@ -123,8 +123,11 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
     }
     case 'left': {
       const channels = state.channels.filter((c) => c.name !== action.name);
-      if (channels.length === state.channels.length) return state;
-      return { ...state, channels, selected: state.selected === action.name ? fallback(channels) : state.selected };
+      // The channels_changed refresh may land before the 204 and have called the
+      // channel lost already: leaving is not a loss, so that notice goes too.
+      const cleared: ChannelsState = state.lost === action.name ? { channels: state.channels, loaded: state.loaded, selected: state.selected } : state;
+      if (channels.length === state.channels.length) return cleared;
+      return { ...cleared, channels, selected: state.selected === action.name ? fallback(channels) : state.selected };
     }
     case 'lost': {
       const channels = state.channels.filter((c) => c.name !== action.name);

@@ -1591,7 +1591,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 }
               />
               {auth.principal.kind === 'human' && visit === null ? (
-                <CommunityMembers viewer={auth.principal.id} channelIds={channels.channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
+                <CommunityMembers viewer={auth.principal.id} permissionsTick={permissionsTick} channelIds={channels.channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
               ) : null}
             </>
           }
