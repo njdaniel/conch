@@ -187,6 +187,15 @@ describe('administration controls', () => {
     expect(screen.getAllByText('Approver')).toHaveLength(2);
   });
 
+  it('gives the viewer own row no menu and leaves the native one alone (issue #1020: no self-removal, the last owner too)', () => {
+    // olivia is the viewer: an operator whose own row would otherwise offer all three items.
+    draw({ ...props('operator'), viewer: { id: 1, role: 'operator', guest: false } });
+    expect(within(row('olivia')).queryByRole('button', { name: 'Actions for olivia' })).toBeNull();
+    expect(fireEvent.contextMenu(row('olivia'))).toBe(true);
+    // Another person row still has its menu.
+    expect(labels(openMenu('ada'))).toContain('Remove from channel');
+  });
+
   it('gives a manager add and a menu of only the removals the rules allow, with no per-row explanations', () => {
     draw(props('member'));
     expect(screen.getByRole('form', { name: 'Add person by name' })).toBeDefined();
@@ -197,8 +206,11 @@ describe('administration controls', () => {
     expect(screen.queryByText('Operators can only be removed by an operator.')).toBeNull();
     expect(screen.queryByText('Approvers are removed by an operator.')).toBeNull();
     expect(screen.queryByText('Agents are managed by operators.')).toBeNull();
-    expect(screen.getByText('Only operators choose who manages a channel.')).toBeDefined();
-    expect(screen.getByText('Only operators choose who decides approvals.')).toBeDefined();
+    // One line, not three (issue #1020, F23).
+    expect(screen.getByText('Only operators choose who manages a channel or decides approvals.')).toBeDefined();
+    expect(screen.queryByText('Only operators choose who manages a channel.')).toBeNull();
+    expect(screen.queryByText('Only operators choose who decides approvals.')).toBeNull();
+    expect(document.querySelectorAll('.hint').length).toBe(1);
     expect(screen.queryByRole('checkbox')).toBeNull();
   });
 
@@ -207,10 +219,10 @@ describe('administration controls', () => {
     expect(screen.queryByRole('form', { name: 'Add person by name' })).toBeNull();
     expect(screen.queryByRole('button', { name: /^(Add|Remove|Make|Actions)/ })).toBeNull();
     expect(screen.queryByRole('checkbox')).toBeNull();
-    expect(screen.getByText('Only operators and this channel\'s managers add people.')).toBeDefined();
-    expect(screen.getByText('Only operators choose who manages a channel.')).toBeDefined();
-    expect(screen.getByText('Only operators choose who decides approvals.')).toBeDefined();
+    // At most one explanatory line (issue #1020, F23).
+    expect(document.querySelectorAll('.hint').length).toBeLessThanOrEqual(1);
     if (guest) expect(screen.getByText('A guest visit cannot do this; create an account and ask an operator.')).toBeDefined();
+    else expect(screen.getByText('Only operators and this channel\'s managers add people.')).toBeDefined();
     // The native menu is left alone on a row with no actions.
     expect(fireEvent.contextMenu(row('ada'))).toBe(true);
   });

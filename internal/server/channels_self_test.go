@@ -249,6 +249,128 @@ func TestChannelDirectory(t *testing.T) {
 	}
 }
 
+// TestChannelDirectoryManagers (issue #1202): ?scope=all names each
+// channel's managers, as the member list's manages bits say, in principal
+// id order and as an array even when empty; the member view never carries
+// the field; and the list follows a grant, a withdrawal and a removal.
+func TestChannelDirectoryManagers(t *testing.T) {
+	ctx := context.Background()
+	f := newChannelV1Fixture(t)
+	owner := fmt.Sprintf("principal:%d", f.root.ID)
+	channels := []store.Channel{f.pubJoined, f.pubOther, f.chanA, f.chanB}
+
+	// managersWant reads the member list and keeps the managers, as the
+	// console did one channel at a time before the field existed.
+	managersWant := func(t *testing.T, c store.Channel) []schema.ChannelAuthorV1 {
+		t.Helper()
+		members, err := f.srv.store.ListChannelMembers(ctx, c.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []schema.ChannelAuthorV1{}
+		for _, m := range members {
+			if m.Manages {
+				want = append(want, schema.ChannelAuthorV1{PrincipalID: m.PrincipalID, Name: m.Name, Kind: schema.PrincipalKind(m.Kind)})
+			}
+		}
+		return want
+	}
+	// rawAll reads ?scope=all as JSON, so the presence of the key is seen,
+	// not only the decoded slice.
+	rawAll := func(t *testing.T, token, query string) map[string]map[string]json.RawMessage {
+		t.Helper()
+		rec := f.do(t, http.MethodGet, "/v1/directory/channels"+query, token, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("directory%s = %d %s", query, rec.Code, rec.Body)
+		}
+		var body struct {
+			Channels []map[string]json.RawMessage `json:"channels"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		rows := map[string]map[string]json.RawMessage{}
+		for _, c := range body.Channels {
+			var name string
+			if err := json.Unmarshal(c["name"], &name); err != nil {
+				t.Fatal(err)
+			}
+			rows[name] = c
+		}
+		return rows
+	}
+	check := func(t *testing.T, when string) {
+		t.Helper()
+		all := f.directoryOf(t, f.opTok, "?scope=all")
+		raw := rawAll(t, f.opTok, "?scope=all")
+		for _, c := range channels {
+			want := managersWant(t, c)
+			got, ok := all[c.Name]
+			if !ok {
+				t.Errorf("%s: ?scope=all lacks %s", when, c.Name)
+				continue
+			}
+			if got.Managers == nil {
+				t.Errorf("%s: ?scope=all %s carries no managers array: %s", when, c.Name, raw[c.Name]["managers"])
+				continue
+			}
+			if !slices.Equal(got.Managers, want) {
+				t.Errorf("%s: ?scope=all %s managers = %+v, want %+v", when, c.Name, got.Managers, want)
+			}
+			if _, present := raw[c.Name]["managers"]; !present {
+				t.Errorf("%s: ?scope=all %s omits managers on the wire", when, c.Name)
+			}
+		}
+		// The member view (any caller, the operator included) never names
+		// managers, even of the channels the caller manages.
+		for who, token := range map[string]string{"member-1": f.memberTok, "member-2": f.member2Tok, "operator-1": f.opTok, "owner": f.rootTok} {
+			for name, row := range rawAll(t, token, "") {
+				if v, present := row["managers"]; present {
+					t.Errorf("%s: %s's member view names %s's managers: %s", when, who, name, v)
+				}
+			}
+		}
+	}
+
+	// town-square: member-2 manages it; back-porch and channel-a: nobody but
+	// their creator, if a creator manages; channel-b: as made.
+	check(t, "as made")
+	if got := f.directoryOf(t, f.opTok, "?scope=all")[f.pubJoined.Name].Managers; !slices.ContainsFunc(got, func(m schema.ChannelAuthorV1) bool {
+		return m.PrincipalID == f.member2.ID && m.Name == f.member2.Name && m.Kind == schema.PrincipalHuman
+	}) {
+		t.Errorf("town-square's managers %+v lack member-2 (%d), its manager", got, f.member2.ID)
+	}
+
+	// A grant: member-1 comes to manage channel-b.
+	yes, no := true, false
+	if _, err := f.srv.store.PutChannelMember(ctx, owner, f.chanB.ID, f.member.ID, f.root.ID, nil, &yes); err != nil {
+		t.Fatal(err)
+	}
+	check(t, "after the grant")
+	if got := f.directoryOf(t, f.opTok, "?scope=all")[f.chanB.Name].Managers; !slices.ContainsFunc(got, func(m schema.ChannelAuthorV1) bool { return m.PrincipalID == f.member.ID }) {
+		t.Errorf("channel-b's managers %+v lack member-1 after the grant", got)
+	}
+
+	// The grant withdrawn: member-1 stays a member and stops managing.
+	if _, err := f.srv.store.PutChannelMember(ctx, owner, f.chanB.ID, f.member.ID, f.root.ID, nil, &no); err != nil {
+		t.Fatal(err)
+	}
+	check(t, "after the withdrawal")
+	if got := f.directoryOf(t, f.opTok, "?scope=all")[f.chanB.Name].Managers; slices.ContainsFunc(got, func(m schema.ChannelAuthorV1) bool { return m.PrincipalID == f.member.ID }) {
+		t.Errorf("channel-b's managers %+v still name member-1 after the withdrawal", got)
+	}
+
+	// A removal: member-2 leaves town-square with the membership, and with it
+	// the manager grant.
+	if _, err := f.srv.store.RemoveChannelMember(ctx, owner, f.pubJoined.ID, f.member2.ID, f.root.ID); err != nil {
+		t.Fatal(err)
+	}
+	check(t, "after the removal")
+	if got := f.directoryOf(t, f.opTok, "?scope=all")[f.pubJoined.Name].Managers; slices.ContainsFunc(got, func(m schema.ChannelAuthorV1) bool { return m.PrincipalID == f.member2.ID }) {
+		t.Errorf("town-square's managers %+v still name member-2 after the removal", got)
+	}
+}
+
 // TestJoinChannel: a self-join writes can_decide = 0 and no history bound,
 // shows the whole history, is audited with the member as actor, and is
 // idempotent: a second join returns the same membership and writes
@@ -328,6 +450,12 @@ func TestLeaveChannelClosesTheLeaversSockets(t *testing.T) {
 	ann2Ops := startReader(ctx, dialAs(t, ctx, base, "/v1/ws?channel=ops", ann2))
 	annEvents := dialEvents(t, base, "/v1/events/ws?channel=ops", ann)
 	ann2Events := dialEvents(t, base, "/v1/events/ws?channel=ops", ann2)
+	// The member list a socket is measured against is read when its first
+	// roster is built, which is after the handshake. Wait for that roster, or
+	// a leave that lands first is in the baseline and no members frame follows.
+	anyRoster := isRoster(func(schema.SessionRosterV1) bool { return true })
+	annEvents.until("ann's first roster", anyRoster)
+	ann2Events.until("ann2's first roster", anyRoster)
 	room := f.inUse(t, f.ops)
 	f.lk.setRoom(room, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000, published: true},
 		fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})
@@ -446,6 +574,16 @@ func TestLeaveChannel(t *testing.T) {
 	if in, err := f.srv.store.IsChannelMember(ctx, f.chanA.ID, f.root.ID); err != nil || !in {
 		t.Errorf("the owner left channel-a after the refusal: %v, %v", in, err)
 	}
+	// An agent in the channel is not "someone else": the last human still
+	// can't leave (#1150).
+	bot, err := f.srv.store.CreatePrincipal(ctx, store.PrincipalAgent, "leave-bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.srv.store.AddChannelMember(ctx, owner, f.chanA.ID, bot.ID, f.root.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertErrorBody(t, f.do(t, http.MethodPost, "/v1/channels/"+f.chanA.Name+"/leave", f.rootTok, ""), http.StatusConflict, schema.ErrorCodeChannelLastMember)
 	// Once someone else is in channel-a, the owner may leave it.
 	if _, err := f.srv.store.AddChannelMember(ctx, owner, f.chanA.ID, f.member.ID, f.root.ID); err != nil {
 		t.Fatal(err)

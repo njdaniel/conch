@@ -8,7 +8,7 @@ mod support;
 
 use std::time::Duration;
 
-use conch_voice::session::Input;
+use conch_voice::session::{Input, Timings};
 use conch_voice_control::LineCommand::{Down, Quit};
 
 use support::fake::Call;
@@ -83,7 +83,18 @@ async fn leaving_with_no_press_open_reports_nothing() {
 #[tokio::test]
 async fn leaving_while_the_room_is_being_joined_mutes_the_track_and_leaves_the_room() {
     let mut hold = None;
-    let rig = Rig::start_with(Stub::start().await, Setup::default(), |sdk| {
+    // The attempt is given a minute to finish once the client is leaving, not the few
+    // hundred milliseconds of the other tests: this test lets it finish when it chooses,
+    // and on a loaded machine "a little later" can be later than a short limit, which would
+    // then abandon the attempt (as designed) and leave nothing to mute or close.
+    let setup = Setup {
+        timings: Timings {
+            attempt_limit: Duration::from_secs(60),
+            ..quick()
+        },
+        ..Setup::default()
+    };
+    let rig = Rig::start_with(Stub::start().await, setup, |sdk| {
         hold = Some(sdk.hold_publish());
     })
     .await;
