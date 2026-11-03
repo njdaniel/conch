@@ -37,6 +37,10 @@ import (
 //     in A4 (#1016), which ships in the same release: the store's making and
 //     redeeming of links, every voice route, the poller's passes and the
 //     share routes read them.
+//   - Row 12 (use_camera) joined with webcam C3 (#1240), enforced
+//     vacuously: nothing reads it until C4 (#1241) adds
+//     POST /v1/channels/{channel}/voice/camera, whose route asks it. Until
+//     then an owner may turn the cell on, and it grants nothing.
 //
 // TestEnforcedPermissionsAreHonest fails when a permission is listed here
 // while one of its gates still reads only the role or the brake.
@@ -52,6 +56,7 @@ var enforcedPermissions = []schema.Permission{
 	schema.PermManageChannels,
 	schema.PermChangeServerSettings,
 	schema.PermReadAuditLog,
+	schema.PermUseCamera,
 }
 
 // handleGetPermissions serves GET /v1/permissions: the document, for any

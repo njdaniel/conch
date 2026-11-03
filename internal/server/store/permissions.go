@@ -220,11 +220,11 @@ func readPermissionsRevisionTx(ctx context.Context, tx execer) (int64, time.Time
 //  2. an owner holds everything, and no brake applies to it (§4.3);
 //  3. anyone else holds what its role holds (roleHolds: fixed cells in
 //     code, else the stored cell or its default), only while no brake on
-//     it withholds it (voice_allowed withholds use_voice and share_screen
-//     from members and operators, and may_invite withholds
+//     it withholds it (voice_allowed withholds use_voice, share_screen and
+//     use_camera from members and operators, and may_invite withholds
 //     make_member_links from members only, §5), and only while it holds
-//     every permission perm requires (share_screen needs use_voice,
-//     act_as_members needs manage_members), brakes included.
+//     every permission perm requires (share_screen and use_camera need
+//     use_voice, act_as_members needs manage_members), brakes included.
 func principalHolds(p Principal, d permissionDoc, perm schema.Permission) bool {
 	if !perm.Valid() {
 		return false
@@ -316,8 +316,9 @@ func selfOrAdministratorTx(ctx context.Context, tx execer, actorID, targetID int
 
 // brakeWithholds reports whether a per-person brake on p withholds perm
 // (design §5), whatever the document says of perm: voice_allowed = 0
-// withholds use_voice and share_screen from members and operators, and
-// may_invite = 0 withholds make_member_links from members only. An owner
+// withholds use_voice, share_screen and use_camera from members and
+// operators (ADR-015 amends ADR-014 decision 4; there is no camera-only
+// brake), and may_invite = 0 withholds make_member_links from members only. An owner
 // skips brakes (§4.3). It is the one statement of the brakes: principalHolds
 // ANDs it in, and SetMayInvite asks it alone, so a permission switched off
 // by the document (reversible) is never taken for the brake (final).
@@ -326,7 +327,7 @@ func brakeWithholds(p Principal, perm schema.Permission) bool {
 		return false
 	}
 	switch perm {
-	case schema.PermUseVoice, schema.PermShareScreen:
+	case schema.PermUseVoice, schema.PermShareScreen, schema.PermUseCamera:
 		return !p.VoiceAllowed
 	case schema.PermMakeMemberLinks:
 		return PermissionRoleOf(p) == schema.PermissionRoleMember && !p.MayInvite
