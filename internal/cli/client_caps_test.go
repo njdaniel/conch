@@ -135,6 +135,10 @@ func TestListReadsRefuseOversizedBody(t *testing.T) {
 			_, err := c.VoiceOccupancy(ctx)
 			return err
 		}, "invalid voice occupancy"},
+		{"hooks", "hooks", maxHooksBody, func(c *Client) error {
+			_, err := c.ListHooks(ctx)
+			return err
+		}, ""},
 	}
 	for _, tt := range tests {
 		for _, over := range []bool{true, false} {

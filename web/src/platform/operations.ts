@@ -23,6 +23,11 @@ import {
   createInterventionRequestV1,
   createInviteRequestV1,
   createInviteResponseV1,
+  createInviteRequestV2,
+  createInviteResponseV2,
+  disableJoinersRequestV1,
+  disableJoinersResponseV1,
+  invitePreviewV2,
   createProblemReportRequestV1,
   createProblemReportResponseV1,
   listProblemReportsResponseV1,
@@ -242,6 +247,10 @@ export const operations = {
   // Member links and the permissions document (ADR-014).
   listMemberLinks: op('GET', '/v2/invites', 'bearer', { response: check(listInvitesResponseV2) }),
   memberLinkJoiners: op('GET', '/v2/invites/{id}/joiners', 'bearer', { response: check(inviteJoinersResponseV1) }),
+  // A member link's code is in the answer of its creation, as an invite's was.
+  createMemberLink: op('POST', '/v2/invites', 'bearer', { request: check(createInviteRequestV2), response: check(createInviteResponseV2), renderer: false, credentials: ['code'] }),
+  previewMemberLink: op('POST', '/v2/invites/preview', 'none', { request: check(invitePreviewRequestV1), response: check(invitePreviewV2) }),
+  disableJoiners: op('POST', '/v1/invites/{id}/disable-joiners', 'bearer', { request: check(disableJoinersRequestV1), response: check(disableJoinersResponseV1) }),
   getPermissions: op('GET', '/v1/permissions', 'bearer', { response: check(permissionsResponseV1) }),
   putPermissions: op('PUT', '/v1/permissions', 'bearer', { request: check(putPermissionsRequestV1), response: check(permissionsResponseV1) }),
   closeInvite: op('DELETE', '/v1/invites/{id}', 'bearer'),
