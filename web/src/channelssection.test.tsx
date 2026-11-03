@@ -108,7 +108,14 @@ async function tick(): Promise<void> {
   FakeSocket.all.find((s) => s.url.includes('/v1/events/ws?'))?.send({ schema: 'conch.permissions_changed.v1' });
 }
 
-const later10 = () => new Promise<void>((resolve) => setTimeout(resolve, 30));
+// settled drains what is already in motion: every promise the fetch stub and
+// the section chain, then React's scheduled effects. It waits on that work, not
+// on a number of milliseconds, so a slow runner cannot reorder it. Use it to
+// show that something did not happen after the work that could have caused it.
+const settled = () =>
+  act(async () => {
+    for (let hop = 0; hop < 3; hop++) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  });
 
 function serve(who: WhoAmIResponseV1 | (() => WhoAmIResponseV1), opts: { preset?: 'personal' | 'group'; rows?: ChannelListingV1[]; routes?: Record<string, Route> } = {}): Call[] {
   const calls: Call[] = [];
@@ -205,7 +212,7 @@ describe('who is offered the section', () => {
     await waitFor(() => {
       expect(calls.some((c) => c.path === '/v1/whoami')).toBe(true);
     });
-    await later10();
+    await settled();
     // The channel list's New channel form is the only one; the console's is not drawn.
     expect(screen.getAllByLabelText('Channel name')).toHaveLength(1);
     expect(document.querySelector('.channels-section')).toBeNull();
@@ -244,7 +251,7 @@ describe('who is offered the section', () => {
     await waitFor(() => {
       expect(rowOf(region, 'channel-a').textContent).toContain('Managed by owner');
     });
-    await later10();
+    await settled();
     expect(calls.filter((c) => c.query === '?scope=all')).toHaveLength(1);
     expect(membersOfP(calls)).toEqual([]);
     // The permissions change: the list is read again, and still no members.
@@ -252,7 +259,7 @@ describe('who is offered the section', () => {
     await waitFor(() => {
       expect(calls.filter((c) => c.query === '?scope=all').length).toBeGreaterThanOrEqual(2);
     });
-    await later10();
+    await settled();
     expect(membersOfP(calls)).toEqual([]);
     expect(rowOf(region, 'channel-a').textContent).toContain('Managed by owner');
     expect(rowOf(region, 'channel-p').textContent).toContain('No managers');
@@ -466,7 +473,7 @@ describe('a personal server', () => {
     await waitFor(() => {
       expect(calls.some((c) => c.path === '/v1/permissions')).toBe(true);
     });
-    await later10();
+    await settled();
     const m = await menu(rowOf(region, 'channel-a'), 'channel-a');
     expect(within(m).getAllByRole('menuitem')[0]?.textContent).toBe('Add person…');
   });
@@ -555,7 +562,7 @@ describe('a read does not blank what is open', () => {
     await waitFor(() => {
       expect(calls.filter((c) => c.query === '?scope=all').length).toBeGreaterThan(reads);
     });
-    await later10();
+    await settled();
     // The very button, still there, still focused, never replaced by "Reading the people…".
     expect(within(row).getByRole('button', { name: 'Remove member-1 from channel-a' })).toBe(remove);
     expect(document.activeElement).toBe(remove);
@@ -594,7 +601,7 @@ describe('a read does not blank what is open', () => {
     });
     // The second read's answer arrives last, with the older list: it is not shown.
     release(json({ channels: [channelA, channelP] }));
-    await later10();
+    await settled();
     expect(row.textContent).toContain('Managed by owner');
   });
 });
@@ -656,8 +663,8 @@ describe('losing manage_channels', () => {
       expect(screen.queryByRole('region', { name: 'Channels' })).toBeNull();
     });
     const after = calls.length;
-    await later10();
-    await later10();
+    await settled();
+    await settled();
     expect(calls.slice(after).filter((c) => c.query === '?scope=all' || /\/members$/.test(c.path))).toEqual([]);
   });
 
@@ -674,7 +681,7 @@ describe('losing manage_channels', () => {
     await waitFor(() => {
       expect(screen.queryByRole('region', { name: 'Channels' })).toBeNull();
     });
-    await later10();
+    await settled();
     expect(sent(calls, 'DELETE', /members/)).toEqual([]);
   });
 
@@ -698,10 +705,14 @@ describe('losing manage_channels', () => {
     await waitFor(() => {
       expect(screen.queryByRole('region', { name: 'Channels' })).toBeNull();
     });
+    // The section is gone from the page; let it finish learning that (the
+    // effect that closes its reads runs after the commit the waitFor saw), and
+    // let any read it rightly sent before then land, so the count below starts
+    // from the moment the grant is known to have gone.
+    await settled();
     const after = calls.length;
     release(new Response(null, { status: 204 }));
-    await later10();
-    await later10();
+    await settled();
     expect(calls.slice(after).filter((c) => c.query === '?scope=all' || /\/members$/.test(c.path))).toEqual([]);
   });
 });
@@ -734,7 +745,7 @@ describe('the section follows the directory frame (issue #1226)', () => {
     const before = reads(calls);
     // A rerender with the same tick reads nothing.
     view.rerender(console(true, 0));
-    await later10();
+    await settled();
     expect(reads(calls)).toBe(before);
     rows.push({ ...channelP, id: 3, name: 'channel-new' });
     view.rerender(console(true, 1));
@@ -747,13 +758,13 @@ describe('the section follows the directory frame (issue #1226)', () => {
   it('sends nothing while hidden', async () => {
     const calls = serve(owner);
     await signedIn();
-    await later10();
+    await settled();
     const seen = calls.length;
     const view = render(console(false, 0));
-    await later10();
+    await settled();
     view.rerender(console(false, 1));
     view.rerender(console(false, 2));
-    await later10();
+    await settled();
     expect(calls.slice(seen).filter((c) => c.path === '/v1/directory/channels' || /\/members$/.test(c.path))).toEqual([]);
   });
 
@@ -772,7 +783,7 @@ describe('the section follows the directory frame (issue #1226)', () => {
     await waitFor(() => {
       expect(reads(calls)).toBe(before + 1);
     });
-    await later10();
+    await settled();
     expect(within(row).getByRole('button', { name: 'Remove member-1 from channel-a' })).toBe(remove);
     expect(document.activeElement).toBe(remove);
     expect(within(row).queryByText('Reading the people…')).toBeNull();
