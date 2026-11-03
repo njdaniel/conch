@@ -333,8 +333,10 @@ type CreateChannelResponseV1 struct {
 // ChannelListingV1 is one row of the directory, GET /v1/directory/channels:
 // a public channel, or a private channel the caller is in. Joined says
 // whether the caller is a member; Manages whether they manage it (only when
-// Joined). Members is the member count, present only on the operator's
-// ?scope=all listing; the member view carries no counts and no names.
+// Joined). Members is the member count, and Managers the channel's managers
+// (issue #1202; each the ChannelAuthorV1 reference, id, name and kind, an
+// array even when empty), both present only on the operator's ?scope=all
+// listing; the member view carries no counts and no names.
 type ChannelListingV1 struct {
 	ID         int64             `json:"id"`
 	Name       string            `json:"name"`
