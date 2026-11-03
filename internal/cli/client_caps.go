@@ -41,9 +41,13 @@ const (
 	maxDirectoryMembersBody = schema.MaxListPrincipalsLimit*listRowBound + listSlack
 	maxPrincipalsBody       = schema.MaxListPrincipalsLimit*listRowBound + listSlack
 	maxGuestsBody           = schema.MaxListGuestsLimit*guestRowBound + listSlack
-	// maxHooksBody: the hook list is not paged (issue #1228), so it is read to
-	// the ceiling; a hook row is a channel name, a label and a few scalars.
-	maxHooksBody = listRowCeiling*listRowBound + listSlack
+	// hookRowBound bounds a hook row, which carries two names (its channel
+	// and its label, each at most 100 characters, escaped up to six bytes a
+	// character for <, > and &) beside ids and times: about 1.3 KiB at worst.
+	hookRowBound = 2 << 10
+	// maxHooksBody: the hook list is not paged and keeps revoked hooks (issue
+	// #1228), so it is read to listRowCeiling rows of hookRowBound.
+	maxHooksBody = listRowCeiling*hookRowBound + listSlack
 )
 
 // The list responses, each with its size bounded. They decode as the schema

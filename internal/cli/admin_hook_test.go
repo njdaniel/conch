@@ -129,7 +129,7 @@ func TestAdminHookUsageErrors(t *testing.T) {
 		{"revoke wants a number", []string{"hook", "revoke", "abc"}, "positive integer"},
 		{"revoke wants a positive id", []string{"hook", "revoke", "0"}, "positive integer"},
 		{"list takes no id", []string{"hook", "list", "3"}, "expected <>"},
-		{"unknown verb", []string{"hook", "create"}, "hook"},
+		{"unknown verb", []string{"hook", "create"}, `admin hook: unknown subcommand "create"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
