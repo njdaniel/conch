@@ -124,7 +124,7 @@ func designHolds(rows []storedRow, s permSubject, p schema.Permission) bool {
 	if !designRoleHolds(rows, r, p) {
 		return false
 	}
-	if (p == schema.PermUseVoice || p == schema.PermShareScreen) && !s.voice {
+	if (p == schema.PermUseVoice || p == schema.PermShareScreen || p == schema.PermUseCamera) && !s.voice {
 		return false
 	}
 	if p == schema.PermMakeMemberLinks && r == schema.PermissionRoleMember && !s.invite {
@@ -427,6 +427,117 @@ func TestPermittedPinned(t *testing.T) {
 	}
 }
 
+// TestPermittedUseCamera (webcam C3, #1240; design §3.2): use_camera is held
+// only while the role's cell is on, use_voice is held and voice_allowed is
+// on. An owner holds it whatever the brakes and cells; an agent, a guest, a
+// disabled or a hidden principal and an unknown id never do. The rows the
+// review named are the ADR-014 traps: an absent row is false, voice_allowed
+// off is false, use_voice off is false, and the owner is true whatever.
+func TestPermittedUseCamera(t *testing.T) {
+	f := newPermFixture(t)
+	type cellState int
+	const (
+		absent cellState = iota
+		off
+		on
+	)
+	// rows writes role's use_camera cell and, when voice is off, the
+	// column's use_voice (and share_screen, which needs it). A member's cell
+	// on is written with the operator's on too, or precedence alone would
+	// answer false and hide what is being tested.
+	rows := func(role string, c cellState, voice bool) []storedRow {
+		var r []storedRow
+		switch c {
+		case off:
+			r = append(r, storedRow{role, "use_camera", 0})
+		case on:
+			r = append(r, storedRow{role, "use_camera", 1})
+			if role == "member" {
+				r = append(r, storedRow{"operator", "use_camera", 1})
+			}
+		}
+		if !voice {
+			r = append(r, storedRow{role, "use_voice", 0}, storedRow{role, "share_screen", 0})
+		}
+		return r
+	}
+	for _, role := range []string{"operator", "member"} {
+		for _, c := range []cellState{absent, off, on} {
+			for _, voice := range []bool{true, false} {
+				for _, allowed := range []bool{true, false} {
+					who := role + "-1"
+					if !allowed {
+						who = role + "-no-voice"
+					}
+					name := fmt.Sprintf("%s cell=%s use_voice=%t voice_allowed=%t", role, []string{"absent", "off", "on"}[c], voice, allowed)
+					want := c == on && voice && allowed
+					t.Run(name, func(t *testing.T) {
+						f.setRows(rows(role, c, voice))
+						if got, err := f.s.Permitted(f.ctx, f.ids[who], schema.PermUseCamera); err != nil || got != want {
+							t.Errorf("%s holds use_camera = %v, %v; want %v", who, got, err, want)
+						}
+					})
+				}
+			}
+		}
+	}
+	// The owner, whatever the cells and brakes; everyone else who holds
+	// nothing, even with both cells on.
+	everything := []storedRow{{"operator", "use_camera", 1}, {"member", "use_camera", 1}}
+	for _, tt := range []struct {
+		name string
+		rows []storedRow
+		who  string
+		want bool
+	}{
+		{"an absent row is false (operator)", nil, "operator-1", false},
+		{"an absent row is false (member)", nil, "member-1", false},
+		{"voice_allowed off is false", everything, "member-no-voice", false},
+		{"use_voice off is false", append([]storedRow{{"member", "use_voice", 0}, {"member", "share_screen", 0}}, everything...), "member-1", false},
+		{"the owner is true with no row", nil, "owner", true},
+		{"the owner is true with the cells off", []storedRow{{"operator", "use_camera", 0}, {"member", "use_camera", 0}}, "owner", true},
+		{"the owner is true whatever the brakes", nil, "owner-braked", true},
+		{"an agent holds nothing", everything, "agent-1", false},
+		{"a guest holds nothing", everything, "guest-1", false},
+		{"a disabled operator holds nothing", everything, "operator-disabled", false},
+		{"a disabled member holds nothing", everything, "member-disabled", false},
+		{"a hidden member holds nothing", everything, "member-hidden", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f.setRows(tt.rows)
+			if got, err := f.s.Permitted(f.ctx, f.ids[tt.who], schema.PermUseCamera); err != nil || got != tt.want {
+				t.Errorf("%s holds use_camera = %v, %v; want %v", tt.who, got, err, tt.want)
+			}
+		})
+	}
+	if got, err := f.s.Permitted(f.ctx, 0, schema.PermUseCamera); err != nil || got {
+		t.Errorf("an unknown id holds use_camera = %v, %v; want false", got, err)
+	}
+}
+
+// The voice brake withholds use_camera in its own right (ADR-015 amends
+// ADR-014 decision 4), not only through use_voice's dependency: the brake is
+// one statement, and a camera that later stops requiring use_voice must
+// still be braked. An owner skips it; may_invite does not touch it.
+func TestBrakeWithholdsUseCamera(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		p    Principal
+		want bool
+	}{
+		{"a member with voice off", Principal{Role: RoleMember, VoiceAllowed: false, MayInvite: true}, true},
+		{"an operator with voice off", Principal{Role: RoleOperator, VoiceAllowed: false, MayInvite: true}, true},
+		{"a member with voice on", Principal{Role: RoleMember, VoiceAllowed: true, MayInvite: true}, false},
+		{"a member with links off", Principal{Role: RoleMember, VoiceAllowed: true, MayInvite: false}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := brakeWithholds(tt.p, schema.PermUseCamera); got != tt.want {
+				t.Errorf("brakeWithholds(%s, use_camera) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
 // Reads apply fixed cells in code and never return a row the build does not
 // know; answers are new slices, never the schema's own.
 func TestPermissionsRead(t *testing.T) {
@@ -707,6 +818,15 @@ func TestPutPermissions(t *testing.T) {
 			writer: "operator-no-voice",
 			req:    changes(member(schema.PermShareScreen, true)),
 			want:   result{ErrPermissionDenied, schema.PermShareScreen},
+		},
+		{
+			// The owner turned the operator cell on; an operator whose own
+			// voice brake withholds use_camera may not grant it to members.
+			name:   "operator turns on the camera its own voice brake withholds",
+			setup:  []schema.PermissionChangeV1{grantSettings, operatorCell(schema.PermUseCamera, true)},
+			writer: "operator-no-voice",
+			req:    changes(member(schema.PermUseCamera, true)),
+			want:   result{ErrPermissionDenied, schema.PermUseCamera},
 		},
 		{
 			name:   "operator turns on a member cell the operator column lacks",
