@@ -40,7 +40,7 @@ var gateRows = map[string]string{
 	"routes.go Server.routeTable":                      "the restricted operator on a permission route: ",
 	"invites.go Server.handleListInvites":              "the restricted operator's invite list",
 	"sessions.go Server.handleListSessions":            "the restricted operator sees the session's runtime",
-	"store/invites.go makerRightsTx":                   "the restricted operator: an open link",
+	"store/invites.go makerRightsTx":                   "the restricted operator: a link landing in A's channel",
 	"store/invites.go Store.CloseInvite":               "R closes A's open link",
 	"store/sign_in_links.go makerMayActAsTx":           "the restricted operator's sign-in link after the cut",
 	"auth.go Server.guard":                             "on A's channel = %d %s, want 404",

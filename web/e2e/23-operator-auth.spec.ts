@@ -358,9 +358,8 @@ test('G7a a sign-in with a code is the recent proof: an invite made at once asks
 
   const panel = page.getByRole('region', { name: 'Invites' });
   await panel.getByRole('button', { name: 'Invite someone' }).click();
-  await panel.getByRole('checkbox', { name: `#${channel}` }).check();
-  const made = page.waitForResponse((r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/v1/invites');
-  await panel.getByRole('button', { name: 'Make invite' }).click();
+  const made = page.waitForResponse((r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/v2/invites');
+  await panel.getByRole('button', { name: 'Make link' }).click();
   const reply = await made;
   expect(reply.status()).toBeGreaterThanOrEqual(200);
   expect(reply.status()).toBeLessThan(300);
