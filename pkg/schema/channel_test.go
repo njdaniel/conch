@@ -126,8 +126,11 @@ func TestCommunityChannelGoldenFixtures(t *testing.T) {
 		{"channel-listing-v1-manages.json", func() any { return new(ChannelListingV1) }},
 		{"channel-listing-v1-not-joined.json", func() any { return new(ChannelListingV1) }},
 		{"channel-listing-v1-scope-all.json", func() any { return new(ChannelListingV1) }},
+		{"channel-listing-v1-scope-all-managers.json", func() any { return new(ChannelListingV1) }},
+		{"channel-listing-v1-scope-all-no-managers.json", func() any { return new(ChannelListingV1) }},
 		{"channel-directory-response-v1.json", func() any { return new(ChannelDirectoryResponseV1) }},
 		{"channel-directory-response-v1-empty.json", func() any { return new(ChannelDirectoryResponseV1) }},
+		{"channel-directory-response-v1-scope-all.json", func() any { return new(ChannelDirectoryResponseV1) }},
 		{"join-channel-response-v1.json", func() any { return new(JoinChannelResponseV1) }},
 		{"channel-settings-request-v1.json", func() any { return new(ChannelSettingsRequestV1) }},
 		{"channel-settings-request-v1-default.json", func() any { return new(ChannelSettingsRequestV1) }},
@@ -286,6 +289,33 @@ func TestChannelDocV1Visibility(t *testing.T) {
 	assertValidation(t, d.Validate(), "")
 	d.Visibility = "secret"
 	assertValidation(t, d.Validate(), "channel visibility must be one of: public, private")
+}
+
+// TestChannelListingV1ManagersPresence (issue #1202): managers is omitted
+// when nil (the member view) and kept as an empty array when the producer
+// sets an empty slice (a ?scope=all row nobody manages), so a client can
+// tell "no managers" from a server that does not send the field.
+func TestChannelListingV1ManagersPresence(t *testing.T) {
+	tests := []struct {
+		name     string
+		managers []ChannelAuthorV1
+		want     string
+	}{
+		{"nil is omitted", nil, `{"id":9,"name":"belgium","created_at":"2026-10-29T18:00:00.000Z","visibility":"private","joined":false}`},
+		{"empty is sent", []ChannelAuthorV1{}, `{"id":9,"name":"belgium","created_at":"2026-10-29T18:00:00.000Z","visibility":"private","joined":false,"managers":[]}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := ChannelListingV1{ID: 9, Name: "belgium", CreatedAt: NewTimestamp(time.Date(2026, 10, 29, 18, 0, 0, 0, time.UTC)), Visibility: ChannelPrivate, Managers: tt.managers}
+			got, err := json.Marshal(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("got %s, want %s", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestChannelDirectoryResponseV1EmptyEncodesArray(t *testing.T) {

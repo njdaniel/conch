@@ -4,6 +4,9 @@ import { Avatar } from './Icons';
 import { memberName } from './guestName';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { Entry } from './agents/join';
+import { PersonActions } from './admin/PersonActions';
+import { memberActions } from './memberActions';
+import type { PermissionRowV1 } from './schema/permission';
 import type { ChannelMemberV1, ChannelV0, PutChannelMemberRequestV1 } from './schema/channel';
 import type { ServerMemberV1, ServerMembersResponseV1, WhoAmIResponseV1 } from './schema/principal';
 
@@ -15,7 +18,8 @@ export interface MemberControlsProps {
   readonly channel: ChannelV0;
   readonly channels: readonly ChannelV0[];
   readonly members: readonly ChannelMemberV1[];
-  readonly viewer: Pick<WhoAmIResponseV1, 'role'> & { readonly guest: boolean };
+  // id is the viewer's own: their own row offers no action on themself.
+  readonly viewer: Pick<WhoAmIResponseV1, 'role'> & { readonly guest: boolean; readonly id?: number };
   readonly refreshMembers: () => void;
   readonly onUnauthorized: () => void;
 }
@@ -231,7 +235,7 @@ export function MemberRow({
   // a human, change the two standings; a manager removes only a plain human
   // member who does not decide approvals. The server still decides.
   const items: MenuItem[] = [];
-  if (member !== undefined && (operator || manager)) {
+  if (member !== undefined && (operator || manager) && member.principal_id !== viewer.id) {
     const removable = operator || (member.role === 'member' && member.kind === 'human' && member.can_decide === false);
     if (removable) {
       items.push({
@@ -340,14 +344,10 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
     <>
       <h3>People</h3>
       {canAdd ? <AddPeople key={controls.channel.id} {...controls} /> : null}
-      {!canAdd ? <p className="hint">Only operators and this channel&apos;s managers add people.</p> : null}
       {controls.viewer.guest ? <p className="hint">A guest visit cannot do this; create an account and ask an operator.</p> : null}
-      {!operator ? (
-        <>
-          <p className="hint">Only operators choose who manages a channel.</p>
-          <p className="hint">Only operators choose who decides approvals.</p>
-        </>
-      ) : null}
+      {/* One line at most (issue #1020): what this viewer cannot do, in one. */}
+      {!canAdd && !controls.viewer.guest ? <p className="hint">Only operators and this channel&apos;s managers add people.</p> : null}
+      {canAdd && !operator && !controls.viewer.guest ? <p className="hint">Only operators choose who manages a channel or decides approvals.</p> : null}
       {people.length === 0 ? (
         <p className="empty">Nobody</p>
       ) : (
@@ -366,10 +366,46 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
 // are drawn only when the row carries them: the server sends them to a holder
 // of manage_members alone, so the page cannot show a member what it was not
 // told. The controls that act on them are another issue's (#992).
-function CommunityRow({ person, byId, viewer }: { readonly person: ServerMemberV1; readonly byId: ReadonlyMap<number, ServerMemberV1>; readonly viewer: number }) {
+// With `manage`, the row has the ⋯ menu of memberActions.ts (issue #1020): the
+// actions this viewer may take on this person, opened by its button, a
+// right-click on the row (the native menu is suppressed on a row with actions
+// only) or a long press.
+export interface RowManage {
+  readonly who: WhoAmIResponseV1;
+  readonly origin: string;
+  readonly rows: readonly PermissionRowV1[] | null;
+  // Reads the permissions document again, when a menu opens.
+  readonly readRows: () => void;
+  readonly onChanged: (done?: string) => void;
+  readonly onUnauthorized: () => void;
+}
+
+function CommunityRow({
+  person,
+  byId,
+  viewer,
+  manage,
+}: {
+  readonly person: ServerMemberV1;
+  readonly byId: ReadonlyMap<number, ServerMemberV1>;
+  readonly viewer: number;
+  readonly manage?: RowManage | undefined;
+}) {
   const inviter = person.invited_by === undefined ? undefined : byId.get(person.invited_by);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const more = useRef<HTMLButtonElement>(null);
+  const has = manage !== undefined && memberActions(manage.who, person).length > 0;
+  // The row is inside the Settings drawer, a dialog, when it is the Members section.
+  const openers = useOpeners(
+    has,
+    () => {
+      setMenuOpen(true);
+    },
+    // A press inside the question or form a menu item opened is not a new menu.
+    { insideDialog: true, skip: '.person-panel' },
+  );
   return (
-    <li className="community-member">
+    <li className={`community-member${has ? ' member-row has-actions' : ''}`} {...openers}>
       <Avatar id={person.id} name={person.name} />
       <span className="community-name">{person.name}</span>
       {person.id === viewer ? <span className="ag-badge">You</span> : null}
@@ -379,6 +415,20 @@ function CommunityRow({ person, byId, viewer }: { readonly person: ServerMemberV
       {person.voice_allowed === undefined ? null : <span className="hint">{person.voice_allowed ? ' · voice on' : ' · voice off'}</span>}
       {person.may_invite === undefined ? null : <span className="hint">{person.may_invite ? ' · can invite' : ' · cannot invite'}</span>}
       {person.invited_by === undefined ? null : <span className="hint">{` · invited by ${inviter?.name ?? `#${String(person.invited_by)}`}`}</span>}
+      {manage === undefined ? null : (
+        <PersonActions
+          who={manage.who}
+          person={person}
+          origin={manage.origin}
+          rows={manage.rows}
+          readRows={manage.readRows}
+          open={menuOpen}
+          onOpenChange={setMenuOpen}
+          button={more}
+          onChanged={manage.onChanged}
+          onUnauthorized={manage.onUnauthorized}
+        />
+      )}
     </li>
   );
 }
@@ -393,9 +443,29 @@ export function CommunityMembers({
   viewer,
   channelIds,
   permissionsTick = 0,
+  who,
+  origin = '',
+  title = 'Community members',
+  level = 3,
+  showTitle = true,
+  active = true,
+  header,
   onUnauthorized,
 }: {
   readonly viewer: number;
+  // With whoami, each row has the ⋯ menu of the actions this viewer may take
+  // on that person (issue #1020, memberActions.ts). Without it the list is
+  // read-only. origin builds the links the menu makes.
+  readonly who?: WhoAmIResponseV1;
+  readonly origin?: string;
+  // The heading: the console's Members section names itself and takes h4.
+  readonly title?: string;
+  readonly level?: 3 | 4;
+  // False where the page already names the section (a phone's section page).
+  readonly showTitle?: boolean;
+  // False while the Settings drawer that holds the console is shut: nothing is read.
+  readonly active?: boolean;
+  readonly header?: ReactNode;
   readonly channelIds: string;
   // Counts live changes of the person's own permissions (conch.permissions_changed.v1):
   // what they may see here may have changed, so the list is read again.
@@ -404,7 +474,15 @@ export function CommunityMembers({
 }) {
   const headingId = useId();
   const [answer, setAnswer] = useState<ServerMembersResponseV1 | 'failed' | null>(null);
+  // The permissions document's rows, for the voice line beside the voice
+  // switch (design §5); every operator may read it.
+  const [rows, setRows] = useState<readonly PermissionRowV1[] | null>(null);
+  // What the last change said, at the list's level: the row may be gone.
+  const [note, setNote] = useState('');
+  const noteLine = useRef<HTMLParagraphElement>(null);
+  const wantsFocus = useRef(false);
   const seq = useRef(0);
+  const rowReads = useRef(0);
   const live = useRef(true);
   const latest = useRef(onUnauthorized);
   latest.current = onUnauthorized;
@@ -430,26 +508,46 @@ export function CommunityMembers({
       setAnswer('failed');
     });
   }, []);
+  // The permissions document is read when a person's menu opens, so a switch
+  // that would do nothing says so (the voice line); not with the list.
+  const readRows = useCallback(() => {
+    const mine = ++rowReads.current;
+    void api.permissions().then((doc) => {
+      if (mine === rowReads.current && live.current) setRows(doc.ok ? doc.value.rows : null);
+    });
+  }, []);
   useEffect(() => {
-    load();
-  }, [load, channelIds, permissionsTick]);
+    if (active) load();
+  }, [load, channelIds, permissionsTick, active]);
   // The server sends no word that the community changed (a person hidden, a
   // role changed), so the list is read again when the tab comes back.
   useEffect(() => {
     const back = () => {
-      if (document.visibilityState === 'visible') load();
+      if (active && document.visibilityState === 'visible') load();
     };
     document.addEventListener('visibilitychange', back);
     return () => {
       document.removeEventListener('visibilitychange', back);
     };
-  }, [load]);
+  }, [load, active]);
+
+  // After a change, if the row that had focus went with the list's next read,
+  // focus would drop to the page: the status line takes it.
+  useEffect(() => {
+    if (!wantsFocus.current || answer === null) return;
+    wantsFocus.current = false;
+    if (document.activeElement === null || document.activeElement === document.body || !document.body.contains(document.activeElement)) noteLine.current?.focus();
+  }, [answer]);
 
   const byId = new Map<number, ServerMemberV1>();
   if (answer !== null && answer !== 'failed') for (const m of answer.members) byId.set(m.id, m);
   return (
-    <section aria-labelledby={headingId} className="community-members">
-      <h3 id={headingId}>Community members</h3>
+    <section {...(showTitle ? { 'aria-labelledby': headingId } : { 'aria-label': title })} className="community-members">
+      {!showTitle ? null : level === 4 ? <h4 id={headingId}>{title}</h4> : <h3 id={headingId}>{title}</h3>}
+      {header}
+      <p ref={noteLine} role="status" className="hint" tabIndex={-1}>
+        {note}
+      </p>
       {answer === null ? (
         <p className="empty">Loading…</p>
       ) : answer === 'failed' ? (
@@ -464,7 +562,19 @@ export function CommunityMembers({
           ) : (
             <ul aria-label="People">
               {answer.members.map((person) => (
-                <CommunityRow key={person.id} person={person} byId={byId} viewer={viewer} />
+                <CommunityRow
+                  key={person.id}
+                  person={person}
+                  byId={byId}
+                  viewer={viewer}
+                  manage={who === undefined ? undefined : { who, origin, rows, readRows, onChanged: (done) => {
+                      setNote(done ?? '');
+                      wantsFocus.current = true;
+                      load();
+                    }, onUnauthorized: () => {
+                      latest.current();
+                    } }}
+                />
               ))}
             </ul>
           )}

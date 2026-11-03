@@ -88,8 +88,7 @@ test('C793 an operator delegates a channel; its manager adds, removes and rename
   await expect(memberRow(mgr, target.name)).toBeVisible();
 
   await expect(memberRow(mgr, operatorName).getByRole('button', { name: `Actions for ${operatorName}` })).toHaveCount(0);
-  await expect(panel(mgr).getByText('Only operators choose who manages a channel.', { exact: true })).toBeVisible();
-  await expect(panel(mgr).getByText('Only operators choose who decides approvals.', { exact: true })).toBeVisible();
+  await expect(panel(mgr).getByText('Only operators choose who manages a channel or decides approvals.', { exact: true })).toBeVisible();
   await memberRow(mgr, target.name).getByRole('button', { name: `Actions for ${target.name}` }).click();
   await expect(memberRow(mgr, target.name).getByRole('menuitem')).toHaveText(['Remove from channel']);
   await mgr.keyboard.press('Escape');

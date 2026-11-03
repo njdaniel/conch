@@ -628,9 +628,11 @@ func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoin
 		return nil
 	}
 	var answer io.Reader = resp.Body
+	var capped *cappedReader
 	if l, ok := out.(interface{ maxBody() int64 }); ok {
 		// A document with a known size bound is read no further than it.
-		answer = &cappedReader{r: resp.Body, left: l.maxBody() + 1, limit: l.maxBody()}
+		capped = &cappedReader{r: resp.Body, left: l.maxBody() + 1, limit: l.maxBody()}
+		answer = capped
 	}
 	if err := json.NewDecoder(answer).Decode(out); err != nil {
 		var tooLarge *bodyTooLargeError
@@ -638,6 +640,13 @@ func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoin
 			return fmt.Errorf("cli: %s: %w", what, tooLarge)
 		}
 		return fmt.Errorf("cli: decode %s response: %w", what, err)
+	}
+	if capped != nil && capped.left <= 0 {
+		// The decoder pulled cap+1 bytes and found its value complete without
+		// surfacing the reader's error. The cap is on the body the decoder
+		// reads, trailing bytes such as the encoder's newline included, so this
+		// is still over it.
+		return fmt.Errorf("cli: %s: %w", what, &bodyTooLargeError{limit: capped.limit})
 	}
 	return nil
 }
@@ -957,11 +966,11 @@ func (c *Client) ListPrincipals(ctx context.Context, filter PrincipalListFilter)
 		query.Set("limit", strconv.Itoa(filter.Limit))
 	}
 	endpoint.RawQuery = query.Encode()
-	var result schema.ListPrincipalsResponseV1
+	var result principalsDoc
 	if err := c.roundTrip(ctx, "list principals", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ListPrincipalsResponseV1{}, err
 	}
-	return result, nil
+	return result.ListPrincipalsResponseV1, nil
 }
 
 // HidePrincipal disables and hides a principal, which frees its name.
