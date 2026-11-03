@@ -22,6 +22,7 @@ import type { Permission } from './schema/permission';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { canDo } from './admin/permissions';
 import { ChannelsSection } from './admin/ChannelsSection';
+import { MembersSection } from './admin/MembersSection';
 import { PermissionsSection } from './admin/PermissionsSection';
 import { ReportsSection } from './admin/ReportsSection';
 import { ServerSection } from './admin/ServerSection';
@@ -64,8 +65,7 @@ export function AdminConsole({ who, origin, channels, names, permissionsChanged,
     if (sentHere > 0) setPage('server');
   }, [sentHere]);
 
-  // The sections that exist, in order. A8 adds its row between Roles and
-  // permissions and Channels when it merges.
+  // The sections that exist, in order.
   const sections: readonly Section[] = [
     {
       id: 'server',
@@ -95,6 +95,15 @@ export function AdminConsole({ who, origin, channels, names, permissionsChanged,
           {...(jump === undefined ? {} : { focus: jump })}
           onUnauthorized={onUnauthorized}
         />
+      ),
+    },
+    // Members (A8, #1020): the directory with the operator fields, and the
+    // one menu of what the viewer may do to each person.
+    {
+      id: 'members',
+      label: 'Members',
+      render: () => (
+        <MembersSection who={who} origin={origin} refresh={permissionsChanged} channelIds={channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
       ),
     },
     // Channels (A9, #1021): only for a holder of manage_channels, who is the
