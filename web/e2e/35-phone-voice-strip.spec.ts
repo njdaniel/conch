@@ -173,6 +173,9 @@ test.describe('the phone voice strip with LiveKit', () => {
       const screen = p.page.viewportSize()?.width ?? 0;
       expect.soft(box.x, `${where}: ${String(name)} starts at ${String(box.x)} px`).toBeGreaterThanOrEqual(0);
       expect.soft(box.x + box.width, `${where}: ${String(name)} ends at ${String(box.x + box.width)} px of ${String(screen)}`).toBeLessThanOrEqual(screen);
+      // Room to spare: CI's fonts are wider than a developer's, and the state
+      // button's name is what grows (issue #1244), so the row keeps 8 px.
+      expect.soft(box.x + box.width, `${where}: ${String(name)} ends at ${String(box.x + box.width)} px, less than 8 px short of ${String(screen)}`).toBeLessThanOrEqual(screen - 8);
       expect.soft(await hit(control), `${where}: a tap at the centre of ${String(name)} reaches it`).toBe(true);
       expect.soft(box.width, `${where}: ${String(name)} is ${String(box.width)} px wide`).toBeGreaterThanOrEqual(44);
       expect.soft(box.height, `${where}: ${String(name)} is ${String(box.height)} px high`).toBeGreaterThanOrEqual(44);

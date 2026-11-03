@@ -3206,20 +3206,26 @@ button.link {
   }
 
   /* With the open microphone the slot is the icon and the level: its words
-     are only read out (as .vh), and the meter keeps at least 3rem, so it is
+     are only read out (as .vh), and the meter keeps at least 2.25rem, so it is
      never pushed out of the slot and clipped. */
   .voice.strip .open-mic {
     flex: 1 1 auto;
-    min-width: 3.5rem;
+    min-width: 3rem;
     min-height: 2.75rem;
     padding-inline: 0.25rem;
   }
 
   /* The mode switch beside it (issue #1244) takes a 44 px target of the row,
      so at 320 px the slot gives up its microphone glyph: the switch says what
-     it is, and the level still has the 3rem it needs. */
+     it is, and the level still has the room it needs. The state button is at
+     most 30% of the row here (38% elsewhere): wider fonts than the ones this
+     was measured with take their room from it, not from the controls. */
   .voice.strip .open-mic .icon {
     display: none;
+  }
+
+  .voice.strip .voice-open {
+    max-width: 30%;
   }
 
   .voice.strip .open-mic-label {
@@ -3234,7 +3240,7 @@ button.link {
   .voice.strip .open-mic meter {
     flex: 1 1 auto;
     width: auto;
-    min-width: 3rem;
+    min-width: 2.25rem;
   }
 
   .voice-notes[hidden] {
