@@ -290,6 +290,81 @@ func TestRoomCalls(t *testing.T) {
 			want:      true,
 		},
 		{
+			name: "UpdateParticipant bundled, microphone and camera", method: "UpdateParticipant",
+			response: `{"identity":"p7"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7", Permission{CanPublish: true, Camera: true})
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7", "permission": map[string]any{
+				"can_subscribe": true, "can_publish": true, "can_publish_data": false,
+				"can_publish_sources": []any{"MICROPHONE", "CAMERA"},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
+		{
+			name: "UpdateParticipant bundled, screen share and camera", method: "UpdateParticipant",
+			response: `{"identity":"p7"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7", Permission{CanPublish: true, ScreenShare: true, Camera: true})
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7", "permission": map[string]any{
+				"can_subscribe": true, "can_publish": true, "can_publish_data": false,
+				"can_publish_sources": []any{"MICROPHONE", "SCREEN_SHARE", "SCREEN_SHARE_AUDIO", "CAMERA"},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
+		{
+			name: "UpdateParticipant bundled, listen-only (no camera term) is unchanged", method: "UpdateParticipant",
+			response: `{"identity":"p7"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7", Permission{Camera: false})
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7", "permission": map[string]any{
+				"can_subscribe": true, "can_publish": false, "can_publish_data": false,
+				"can_publish_sources": []any{"MICROPHONE"},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
+		{
+			name: "UpdateParticipant per source, camera", method: "UpdateParticipant",
+			response: `{"identity":"p7.screen"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7.screen", SourcePermission(true, true, SourceCamera))
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7.screen", "permission": map[string]any{
+				"can_subscribe": true, "can_publish": true, "can_publish_data": false,
+				"can_publish_sources": []any{"CAMERA"},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
+		{
+			name: "UpdateParticipant per source, screen and camera, no subscribe", method: "UpdateParticipant",
+			response: `{"identity":"p7.screen"}`,
+			call: func(c *Client) (any, error) {
+				return c.UpdateParticipant(context.Background(), "conch-a", "p7.screen", SourcePermission(false, true, SourceScreenShare, SourceCamera))
+			},
+			wantBody: map[string]any{"room": "conch-a", "identity": "p7.screen", "permission": map[string]any{
+				"can_subscribe": false, "can_publish": true, "can_publish_data": false,
+				"can_publish_sources": []any{"SCREEN_SHARE", "CAMERA"},
+				"hidden":              false, "recorder": false, "can_update_metadata": false, "agent": false,
+				"can_subscribe_metrics": false, "can_manage_agent_session": false,
+			}},
+			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
+			want:      true,
+		},
+		{
 			// The per-source form (issue #932): a companion's grant, never the
 			// microphone-only bundle.
 			name: "UpdateParticipant per source, nothing", method: "UpdateParticipant",
@@ -811,7 +886,7 @@ func TestDeleteRoomTreatsNotFoundAsDone(t *testing.T) {
 
 // TestUpdateParticipantRefusesWideSourcePermissions: a per-source permission
 // that may publish with no sources (LiveKit reads that as every source), or
-// that names anything but the screen-share sources, is refused before any
+// that names anything but the screen-share and camera sources, is refused before any
 // request is made.
 func TestUpdateParticipantRefusesWideSourcePermissions(t *testing.T) {
 	srv, rec := fakeLiveKit(t, 200, `{"identity":"p7.screen"}`)
@@ -822,8 +897,9 @@ func TestUpdateParticipantRefusesWideSourcePermissions(t *testing.T) {
 		"the microphone":                  SourcePermission(true, true, Source("MICROPHONE")),
 		"an empty source":                 SourcePermission(true, true, Source("")),
 		"a lower-case source":             SourcePermission(true, true, Source("screen_share")),
-		"a good source beside a bad one":  SourcePermission(true, true, SourceScreenShare, Source("CAMERA")),
-		"a bad source, not publishing":    SourcePermission(true, false, Source("CAMERA")),
+		"a lower-case camera":             SourcePermission(true, true, Source("camera")),
+		"a good source beside a bad one":  SourcePermission(true, true, SourceCamera, Source("SCREEN_SHARE_X")),
+		"a bad source, not publishing":    SourcePermission(true, false, Source("UNKNOWN")),
 	} {
 		found, err := c.UpdateParticipant(context.Background(), "conch-a", "p7.screen", perm)
 		if found || err == nil || errors.Is(err, ErrUnavailable) {
