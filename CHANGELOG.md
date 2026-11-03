@@ -19,6 +19,24 @@ release that Nick publishes.
   `can_decide: false` does. A channel manager sending `can_decide` is
   refused with 403, as on the PUT.
 
+### Changed
+
+- **The browser joins voice with the open microphone** (#1244), where it
+  started in push to talk. The person's choice is kept per browser, and an
+  "Open mic" toggle beside the talk control switches it in one tap, on the
+  desktop voice bar and on the phone strip.
+
+- **`POST /v1/invites` is for operators who manage members only** (#990).
+  A caller without `manage_members` now gets 409 `invite_kind_retired`:
+  members make member links with `POST /v2/invites`. This replaces the
+  earlier "unchanged for now" note. An operator holding `manage_members`
+  keeps v1 until #1134 retires it. The web app's invite panel makes,
+  lists and closes member links, and shows each link's joiners.
+
+### Security
+
+- Demoting an operator now closes, in the same transaction and with an `invite_closed` row each, the member links a member could not hold: every member link when their `may_invite` brake is off, and the never-expiring ones when it is on. Before (alpha.10), links made under the role survived a demotion with the brake off, and turning the brake on later brought back links a member could never make (#1165). `invite_closed` for a member link now says `link=member`.
+
 ## [0.1.0-alpha.11] - 2026-11-02
 
 This finishes the joining side of the one-community model: open sign-up and
@@ -134,7 +152,6 @@ There is no migration and no wire change since `alpha.10`, so rolling back to
 
 ### Security
 
-- Demoting an operator now closes, in the same transaction and with an `invite_closed` row each, the member links a member could not hold: every member link when their `may_invite` brake is off, and the never-expiring ones when it is on. Before (alpha.10), links made under the role survived a demotion with the brake off, and turning the brake on later brought back links a member could never make (#1165). `invite_closed` for a member link now says `link=member`.
 - Any role change (a promotion, a demotion, an owner-mark change) now clears every recent-auth proof of that person, so a member's password-only re-authentication no longer satisfies an operator route that needs password and code (#1054). Their sessions stand; they re-authenticate on the next sensitive action. The `principal_role_changed` audit row gains `proofs_cleared=N`.
 
 ### Docs

@@ -214,7 +214,7 @@ func (w *world) convertSam() (*member, int64, error) {
 	}
 
 	// Nothing gained: no invites, the plaza alone.
-	status, body, err := member.api.do(http.MethodPost, "/v1/invites", schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{p.channel}})
+	status, body, err := member.api.do(http.MethodPost, "/v2/invites", schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
 	if err != nil {
 		return nil, 0, err
 	}

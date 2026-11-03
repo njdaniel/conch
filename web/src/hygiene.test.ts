@@ -390,7 +390,7 @@ describe('the invite code', () => {
       .map(([path]) => path);
     expect(calling).toEqual(['./platform/operations.ts']);
     const asking = Object.entries(sources)
-      .filter(([path, code]) => !path.startsWith('./platform/') && /\b(previewInvite|redeemInvite|redeemInviteGuest|createInvite|listInvites|closeInvite)'/.test(code))
+      .filter(([path, code]) => !path.startsWith('./platform/') && /\b(previewInvite|previewMemberLink|redeemInvite|redeemInviteGuest|createInvite|createMemberLink|listInvites|closeInvite)'/.test(code))
       .map(([path]) => path);
     expect(asking).toEqual(['./api.ts']);
   });

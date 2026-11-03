@@ -493,12 +493,19 @@ test.describe('with LiveKit', () => {
       await page.keyboard.press('Space');
       await expect(mode).toHaveAttribute('aria-pressed', 'false');
       await expect(voice).toContainText('Not transmitting');
-      // The open microphone may have reported a transmission of the tone in
-      // the moment it was on; let it land before the count below starts.
-      await new Promise((r) => setTimeout(r, 2000));
       const actor = `principal:${String(vw.alice.id)}`;
       await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
       const transmits = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit')).map((e) => e.action);
+      // The open microphone may have reported a transmission of the tone in
+      // the moment it was on. Count from once every start has its stop and
+      // the count holds still, not after a fixed wait.
+      const settled = async () => {
+        const first = (await transmits()).length;
+        await new Promise((r) => setTimeout(r, 500));
+        const again = (await transmits()).length;
+        return first === again && first % 2 === 0;
+      };
+      await expect.poll(settled, { timeout: 15_000 }).toBe(true);
       const before = (await transmits()).length;
       const pair = ['voice_transmit_started', 'voice_transmit_stopped'];
       const heard = voiceRegion(b.page).getByRole('list', { name: 'In voice' });
