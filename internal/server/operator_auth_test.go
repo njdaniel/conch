@@ -590,6 +590,8 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/channels/{channel}/voice/transmit":    {reauthNone, "a transmit report"},
 	"POST /v1/channels/{channel}/voice/share":       {reauthNone, "a screen share"},
 	"DELETE /v1/channels/{channel}/voice/share":     {reauthNone, "stops a share"},
+	"POST /v1/channels/{channel}/voice/camera":      {reauthNone, "a camera"},
+	"DELETE /v1/channels/{channel}/voice/camera":    {reauthNone, "stops a camera"},
 	"POST /v1/channels/{channel}/voice/companion":   {reauthNone, "a companion's or viewer's join token"},
 	"DELETE /v1/channels/{channel}/voice/companion": {reauthNone, "removes the caller's own companion"},
 	"POST /v1/sessions":                             {reauthNone, "a session of the caller's own credential"},

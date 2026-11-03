@@ -367,6 +367,59 @@ func (s *Server) voiceChannelRoom(ctx context.Context, channelID int64) (store.V
 	return store.VoiceRoom{}, false, nil
 }
 
+// claimRunning records that a claim of principalID's (a share's or a
+// camera's, issue #1241: both are made under the room's claims, one at a
+// time) is running in r, and returns what the claim defers, to run before it
+// lets the claims go. While it runs, a rotation keeps the room findable
+// (retiring) and a revocation's endSharesOf or endCamerasOf waits for it. The
+// caller holds r's claims.
+func (p *voicePoller) claimRunning(ctx context.Context, r *voiceRoomState, principalID int64) func() {
+	p.mu.Lock()
+	r.claimer = principalID
+	done := make(chan struct{})
+	r.claimDone = done
+	p.mu.Unlock()
+	return func() {
+		// A withdrawal retireRoom left owing (issue #1087) is paid here, with
+		// only the claims held, while claimer is still set, so nothing can
+		// record a debt after the last look; claimDone closes after it. A
+		// second withdrawal for a principal the claim already withdrew is
+		// harmless: withdrawAll is idempotent. Claims are made only in a
+		// channel-wide room, where every member may publish.
+		paid := false
+		for {
+			p.mu.Lock()
+			owed := r.owedWithdraw
+			r.owedWithdraw = nil
+			if len(owed) == 0 {
+				r.claimer = 0
+				r.claimDone = nil
+				close(done)
+				// Only a claim that was handed the debt closes withdrawDone,
+				// and only after paying it: for any other claim it belongs
+				// to the retireRoom that opened it, which withdraws after
+				// this claim has let go (a claim that finds the room retired
+				// refuses at once). Likewise the retiring entry: a claim's
+				// own (a principal's id) goes, the sentinel 0 is retireRoom's.
+				if paid && r.withdrawDone != nil {
+					close(r.withdrawDone)
+					r.withdrawDone = nil
+				}
+				if pid, ok := p.retiring[r]; ok && pid != 0 {
+					delete(p.retiring, r)
+				}
+				p.mu.Unlock()
+				return
+			}
+			p.mu.Unlock()
+			for _, pid := range owed {
+				p.withdrawAll(context.WithoutCancel(ctx), r, pid, true)
+			}
+			paid = true
+		}
+	}
+}
+
 // claimShare makes principalID the holder of room's share and has LiveKit
 // let their connection publish the screen-share sources. A holder who claims
 // again is granted the sources again (their connection may be a new one,
@@ -401,50 +454,7 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	}
 	r.claims.Lock()
 	defer r.claims.Unlock()
-	// The room knows a claim of principalID's is running until it returns,
-	// so a rotation keeps the room findable (retiring) and a revocation's
-	// endSharesOf waits for it. Cleared before the claims are let go.
-	p.mu.Lock()
-	r.claimer = principalID
-	done := make(chan struct{})
-	r.claimDone = done
-	p.mu.Unlock()
-	defer func() {
-		// A withdrawal retireRoom left owing (issue #1087) is paid here, with
-		// only the claims held, while claimer is still set, so nothing can
-		// record a debt after the last look; claimDone closes after it. A
-		// second withdrawal for a principal the claim already withdrew is
-		// harmless: withdrawAll is idempotent.
-		paid := false
-		for {
-			p.mu.Lock()
-			owed := r.owedWithdraw
-			r.owedWithdraw = 0
-			if owed == 0 {
-				r.claimer = 0
-				r.claimDone = nil
-				close(done)
-				// Only a claim that was handed the debt closes withdrawDone,
-				// and only after paying it: for any other claim it belongs
-				// to the retireRoom that opened it, which withdraws after
-				// this claim has let go (a claim that finds the room retired
-				// refuses at once). Likewise the retiring entry: a claim's
-				// own (a principal's id) goes, the sentinel 0 is retireRoom's.
-				if paid && r.withdrawDone != nil {
-					close(r.withdrawDone)
-					r.withdrawDone = nil
-				}
-				if pid, ok := p.retiring[r]; ok && pid != 0 {
-					delete(p.retiring, r)
-				}
-				p.mu.Unlock()
-				return
-			}
-			p.mu.Unlock()
-			p.withdrawAll(context.WithoutCancel(ctx), r, owed, voiceRoomPublishes(room))
-			paid = true
-		}
-	}()
+	defer p.claimRunning(ctx, r, principalID)()
 
 	if p.claimSeam != nil {
 		p.claimSeam("claimed")
@@ -495,7 +505,7 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 		}
 		return schema.VoiceShareV1{}, err
 	}
-	found, err := p.setPublishPermission(lctx, room.RoomName, principalID, voiceRolePerson, publishInput{canPublish: true, share: true})
+	found, err := p.setPublishPermission(lctx, r, principalID, voiceRolePerson, publishInput{canPublish: true, share: true})
 	if err != nil || !found {
 		if held == nil {
 			p.undoClaim(r, mine)
@@ -596,18 +606,33 @@ func (p *voicePoller) roomRotatedUnder(ctx, lctx context.Context, r *voiceRoomSt
 	}
 	switch {
 	case err != nil:
-		slog.ErrorContext(ctx, "voice: could not tell whether a room was retired after a share; the grant is withdrawn and the sweep checks", "channel", room.ChannelID, "error", err)
-		// The share the claim recorded ends with the grant (reason=rotated:
-		// the room could not be shown live), so nothing is held that has no
-		// sources; the withdrawal is made whether or not a share was found.
-		if !p.endHeldShare(ctx, r, room, principalID, voiceShareStopRotated) {
+		slog.ErrorContext(ctx, "voice: could not tell whether a room was retired after a claim; the grant is withdrawn and the sweep checks", "channel", room.ChannelID, "error", err)
+		// What the claimer holds in the room ends with the grant
+		// (reason=rotated: the room could not be shown live), the share and
+		// the camera both (issue #1241), so nothing is held that has no
+		// sources; the withdrawal is made whether or not either was found.
+		share := p.endHeldShare(ctx, r, room, principalID, voiceShareStopRotated)
+		camera := p.endHeldCamera(ctx, r, principalID, voiceCameraStopRotated)
+		if !share && !camera {
 			p.withdrawAll(ctx, r, principalID, voiceRoomPublishes(room))
 		}
 		p.sweepSoon()
 		return true
 	case !live:
-		p.withdrawAll(ctx, r, principalID, voiceRoomPublishes(room))
-		p.forgetRoom(ctx, room.RoomName)
+		// The room is forgotten first, so that it is retired before anything
+		// is written: the camera term then reads nothing held, and no
+		// withdrawal below grants again what the rotation ends (issue #1241).
+		// Forgetting ends every claim in the room (reason=rotated) and names
+		// whose grants are left; the claimer's is taken back with theirs, under
+		// the claims this claim holds. If another path forgot the room first,
+		// what it owes is this claim's to pay (claimRunning).
+		_, holders := p.forgetRoom(ctx, room.RoomName)
+		if !slices.Contains(holders, principalID) {
+			holders = append(holders, principalID)
+		}
+		for _, pid := range holders {
+			p.withdrawAll(ctx, r, pid, voiceRoomPublishes(room))
+		}
 		return true
 	}
 	return false
@@ -776,7 +801,7 @@ func (p *voicePoller) grantCompanion(ctx context.Context, r *voiceRoomState, roo
 	// Its own canSubscribe, as the pass listed it: LiveKit replaces the
 	// permission whole, and a publish-only companion must not be handed the
 	// right to receive everyone's voice by being given its screen.
-	if _, err := p.setPublishPermission(ctx, room.RoomName, principalID, voiceRoleScreen, publishInput{canSubscribe: c.screenSubscribes, share: true}); err != nil {
+	if _, err := p.setPublishPermission(ctx, r, principalID, voiceRoleScreen, publishInput{canSubscribe: c.screenSubscribes, share: true}); err != nil {
 		slog.WarnContext(ctx, "voice: granting the screen to a companion failed; the next claim restores it", "channel", room.ChannelID, "principal", principalID, "error", err)
 	}
 }
@@ -789,11 +814,11 @@ func (p *voicePoller) grantCompanion(ctx context.Context, r *voiceRoomState, roo
 // for a person, publishPermission would write the microphone bundle, not a
 // per-source permission, so a caller must use withdrawLocked for one. The caller
 // holds the room's claims. It reports whether LiveKit answered.
-func (p *voicePoller) withdrawCompanion(ctx context.Context, roomName string, channelID, principalID int64, role voiceRole, canSubscribe bool) bool {
+func (p *voicePoller) withdrawCompanion(ctx context.Context, r *voiceRoomState, principalID int64, role voiceRole, canSubscribe bool) bool {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
 	defer cancel()
-	if _, err := p.setPublishPermission(ctx, roomName, principalID, role, publishInput{canSubscribe: canSubscribe}); err != nil {
-		slog.WarnContext(ctx, "voice: withdrawing a companion's screen-share sources failed; passes retry", "channel", channelID, "principal", principalID, "participant", role.label(), "error", err)
+	if _, err := p.setPublishPermission(ctx, r, principalID, role, publishInput{canSubscribe: canSubscribe}); err != nil {
+		slog.WarnContext(ctx, "voice: withdrawing a companion's screen-share sources failed; passes retry", "channel", r.channelID, "principal", principalID, "participant", role.label(), "error", err)
 		return false
 	}
 	return true
@@ -828,7 +853,7 @@ func (p *voicePoller) withdrawCompanionNow(ctx context.Context, r *voiceRoomStat
 	if !known {
 		slog.WarnContext(lctx, "voice: looking up a companion to revoke it failed; revoking without its subscribe permission", "channel", r.channelID, "principal", principalID, "error", err)
 	}
-	if p.withdrawCompanion(ctx, r.name, r.channelID, principalID, voiceRoleScreen, known && part.CanSubscribe) {
+	if p.withdrawCompanion(ctx, r, principalID, voiceRoleScreen, known && part.CanSubscribe) {
 		p.withdrawConfirmed(r, voiceWithdrawKey{principalID, voiceRoleScreen})
 		return
 	}
@@ -846,7 +871,7 @@ func (p *voicePoller) withdrawCompanionNow(ctx context.Context, r *voiceRoomStat
 // their companion (looked up, listed or not), so that none of them keeps a screen grant after the share
 // is gone, with or without a pass to follow. The caller holds the room's claims.
 func (p *voicePoller) withdrawAll(ctx context.Context, r *voiceRoomState, principalID int64, canPublish bool) {
-	if p.withdrawLocked(ctx, r.name, r.channelID, principalID, canPublish) {
+	if p.withdrawLocked(ctx, r, principalID, canPublish) {
 		p.withdrawConfirmed(r, voiceWithdrawKey{principalID, voiceRolePerson})
 	}
 	p.withdrawCompanionNow(ctx, r, principalID)
@@ -964,11 +989,11 @@ func (p *voicePoller) endShareLocked(r *voiceRoomState, principalID int64, reaso
 // share. The caller holds the room's claims (voiceRoomState.claims). A
 // participant who is not there has nothing to withdraw. A failure is logged,
 // and the passes try again. It reports whether LiveKit answered.
-func (p *voicePoller) withdrawLocked(ctx context.Context, roomName string, channelID, principalID int64, canPublish bool) bool {
+func (p *voicePoller) withdrawLocked(ctx context.Context, r *voiceRoomState, principalID int64, canPublish bool) bool {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
 	defer cancel()
-	if _, err := p.setPublishPermission(ctx, roomName, principalID, voiceRolePerson, publishInput{canPublish: canPublish}); err != nil {
-		slog.WarnContext(ctx, "voice: withdrawing screen-share sources failed; passes retry", "channel", channelID, "principal", principalID, "error", err)
+	if _, err := p.setPublishPermission(ctx, r, principalID, voiceRolePerson, publishInput{canPublish: canPublish}); err != nil {
+		slog.WarnContext(ctx, "voice: withdrawing screen-share sources failed; passes retry", "channel", r.channelID, "principal", principalID, "error", err)
 		return false
 	}
 	return true
@@ -1182,9 +1207,9 @@ func (p *voicePoller) withdrawShares(ctx context.Context, r *voiceRoomState, lis
 		}
 		key, done := voiceWithdrawKey{w.principalID, w.role}, false
 		if w.role == voiceRolePerson {
-			done = p.withdrawLocked(ctx, r.name, r.channelID, w.principalID, w.canPublish)
+			done = p.withdrawLocked(ctx, r, w.principalID, w.canPublish)
 		} else {
-			done = p.withdrawCompanion(ctx, r.name, r.channelID, w.principalID, w.role, w.canSubscribe)
+			done = p.withdrawCompanion(ctx, r, w.principalID, w.role, w.canSubscribe)
 		}
 		if done {
 			p.withdrawConfirmed(r, key)

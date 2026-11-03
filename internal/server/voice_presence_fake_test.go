@@ -77,6 +77,32 @@ type fakeParticipant struct {
 	// noSubscribe is a participant whose permission does not let it receive,
 	// as a publish-only companion's does (issue #932).
 	noSubscribe bool
+	// camera is a published camera track (video under the camera source,
+	// issue #1241), muted when cameraMuted; cameraGranted whether the
+	// permission names the camera. LiveKit refuses a camera that is not
+	// granted; a test may still set one here to force what should be
+	// impossible. allSources lists the permission's sources as [], which
+	// LiveKit reads as every source.
+	camera, cameraMuted bool
+	cameraGranted       bool
+	allSources          bool
+	// tracks are further published tracks, as a test declares them: the
+	// mismatched kinds of webcam-video §4.5. One whose source the
+	// permission no longer allows is unpublished, as LiveKit does.
+	tracks []fakeTrack
+}
+
+// fakeTrack is one published track the scripted LiveKit lists as it is
+// given: LiveKit's id, type and source names.
+type fakeTrack struct {
+	sid, typ, source string
+	muted            bool
+}
+
+// fakeAllows reports whether a permission of canPublish and sources (nil or
+// empty is every source, as LiveKit reads it) lets a track of source publish.
+func fakeAllows(canPublish bool, sources []string, source string) bool {
+	return canPublish && (len(sources) == 0 || slices.Contains(sources, source))
 }
 
 // lkCall is one request the scripted LiveKit received (or an "http-response"
@@ -137,6 +163,9 @@ type scriptedLiveKit struct {
 	// onUpdate runs while UpdateParticipant is being answered, before it
 	// takes effect: the moment between a claim's grant and its answer.
 	onUpdate func(room, identity string, share bool)
+	// onUpdateCamera is onUpdate for the camera source (issue #1241): it runs
+	// at the same moment with whether the permission names the camera.
+	onUpdateCamera func(room, identity string, camera bool)
 	// updates is every UpdateParticipant request received, in order, with the
 	// permission it carried (issue #932). updateFail names identities whose
 	// UpdateParticipant fails while others succeed.
@@ -308,7 +337,8 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		// taken away unpublishes its tracks at once.
 		f.record(method, req.Room, req.Identity)
 		share := slices.Contains(req.Permission.Sources, "SCREEN_SHARE")
-		status, hook := f.updateStatus, f.onUpdate
+		camera := fakeAllows(req.Permission.CanPublish, req.Permission.Sources, "CAMERA")
+		status, hook, camHook := f.updateStatus, f.onUpdate, f.onUpdateCamera
 		f.updates = append(f.updates, fakeUpdate{req.Room, req.Identity, req.Permission.CanPublish, req.Permission.CanSubscribe, req.Permission.Sources})
 		if f.updateFail[req.Identity] {
 			status = http.StatusInternalServerError
@@ -316,6 +346,9 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		if hook != nil {
 			hook(req.Room, req.Identity, share)
+		}
+		if camHook != nil {
+			camHook(req.Room, req.Identity, camera)
 		}
 		if status != 0 {
 			writeFakeJSON(w, status, map[string]any{"code": "internal"})
@@ -332,6 +365,17 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 			if !share {
 				p.screen, p.screenAudio = false, false
 			}
+			p.cameraGranted, p.allSources = camera, req.Permission.CanPublish && len(req.Permission.Sources) == 0
+			if !camera {
+				p.camera = false
+			}
+			kept := p.tracks[:0:0]
+			for _, t := range p.tracks {
+				if fakeAllows(req.Permission.CanPublish, req.Permission.Sources, t.source) {
+					kept = append(kept, t)
+				}
+			}
+			p.tracks = kept
 		})
 		writeFakeJSON(w, http.StatusOK, map[string]any{"identity": req.Identity, "state": "ACTIVE"})
 	case "DeleteRoom":
@@ -369,6 +413,12 @@ func fakeParticipantJSON(p fakeParticipant) map[string]any {
 	if p.shareGranted {
 		sources = append(sources, "SCREEN_SHARE", "SCREEN_SHARE_AUDIO")
 	}
+	if p.cameraGranted {
+		sources = append(sources, "CAMERA")
+	}
+	if p.allSources {
+		sources = []string{}
+	}
 	part["permission"] = map[string]any{"can_subscribe": !p.noSubscribe, "can_publish": !p.listenOnly, "can_publish_data": false, "can_publish_sources": sources}
 	var tracks []map[string]any
 	if p.published {
@@ -379,6 +429,12 @@ func fakeParticipantJSON(p fakeParticipant) map[string]any {
 	}
 	if p.screenAudio {
 		tracks = append(tracks, map[string]any{"type": "AUDIO", "source": "SCREEN_SHARE_AUDIO", "muted": false})
+	}
+	if p.camera {
+		tracks = append(tracks, map[string]any{"sid": "TR_cam_" + p.identity, "type": "VIDEO", "source": "CAMERA", "muted": p.cameraMuted})
+	}
+	for _, t := range p.tracks {
+		tracks = append(tracks, map[string]any{"sid": t.sid, "type": t.typ, "source": t.source, "muted": t.muted})
 	}
 	if tracks != nil {
 		part["tracks"] = tracks

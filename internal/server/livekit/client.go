@@ -110,6 +110,54 @@ type Participant struct {
 	// LiveKit reports it; false when LiveKit reported no permission, so a
 	// caller that restores a grant from it never widens one.
 	CanSubscribe bool
+	// CameraGranted is true when the participant's current permission lets it
+	// publish a camera (ADR-015): it may publish, and its list of sources
+	// names the camera or is empty, which LiveKit reads as every source, as
+	// for ShareSourcesGranted. False when LiveKit reported no permission.
+	CameraGranted bool
+	// Cameras is every published track whose declared source is the camera
+	// and whose type is video, muted or not (docs/design/webcam-video.md
+	// §4.5): the only tracks that are a camera.
+	Cameras []Track
+	// Mismatched is every published track whose type disagrees with its
+	// declared source (§4.5, S1): one that is not audio under the
+	// microphone, one that is not video under the camera, and any video
+	// track under a source that is neither the camera nor the screen share
+	// (the screen share's sound, or a source LiveKit does not name). LiveKit
+	// enforces a track's declared source, and nothing read so far says it
+	// checks the kind, so each of these is unclaimed whatever is granted. A
+	// screen-share track is still read by its source alone
+	// (ScreenSharePublished, ScreenShareAudioPublished).
+	Mismatched []Track
+}
+
+// Track is one published track as conchd judges it: LiveKit's id for it, and
+// its declared source and type in conchd's own lower-case spelling of
+// LiveKit's enums ("camera", "microphone", "screen_share",
+// "screen_share_audio" or "unknown"; "audio", "video", "data" or "unknown"),
+// never text LiveKit sent, so that either can go into an audit row as it is.
+// SID is LiveKit's and is never written anywhere: it only tells one track
+// from another.
+type Track struct {
+	SID    string
+	Source string
+	Type   string
+	Muted  bool
+}
+
+// CameraPublished reports whether the participant has a camera track
+// published, muted or not.
+func (p Participant) CameraPublished() bool { return len(p.Cameras) > 0 }
+
+// CameraLive reports whether the participant has an unmuted camera track
+// published: a muted one sends nothing, and does not count as a camera on.
+func (p Participant) CameraLive() bool {
+	for _, t := range p.Cameras {
+		if !t.Muted {
+			return true
+		}
+	}
+	return false
 }
 
 // Sharing reports whether the participant has either screen-share source
@@ -174,6 +222,7 @@ type wireParticipant struct {
 	JoinedAtMs   flexInt `json:"joinedAtMs"`
 	SnakeJoinedM flexInt `json:"joined_at_ms"`
 	Tracks       []struct {
+		SID    string   `json:"sid"`
 		Type   flexEnum `json:"type"`
 		Source flexEnum `json:"source"`
 		Muted  bool     `json:"muted"`
@@ -192,31 +241,47 @@ func (p wireParticipant) participant() Participant {
 	}
 	mics, muted := 0, 0
 	for _, t := range p.Tracks {
-		// A screen share is recognised by its source alone, whatever
+		track := Track{SID: t.SID, Source: sourceName(t.Source), Type: typeName(t.Type), Muted: t.Muted}
+		// Kind and source together (docs/design/webcam-video.md §4.5, S1).
+		// A screen share is still recognised by its source alone, whatever
 		// its type: a source that is not allowed is refused by LiveKit
-		// whatever the type says, so a track of an unexpected type
-		// under a share source is still a share.
-		switch {
-		case t.Source.is(sourceScreenShare, 3):
+		// whatever the type says, so a track of an unexpected type under a
+		// share source is still a share. Video under the share's sound is a
+		// mismatch as well, since no sound path carries video.
+		switch track.Source {
+		case "screen_share":
 			part.ScreenSharePublished = true
 			continue
-		case t.Source.is(sourceScreenShareAudio, 4):
+		case "screen_share_audio":
 			part.ScreenShareAudioPublished = true
+		case "camera":
+			if track.Type == "video" {
+				part.Cameras = append(part.Cameras, track)
+			} else {
+				// A sound path outside push-to-talk and transmitting.
+				part.Mismatched = append(part.Mismatched, track)
+			}
+			continue
+		case "microphone":
+			if track.Type != "audio" {
+				// A camera smuggled under the join grant.
+				part.Mismatched = append(part.Mismatched, track)
+				continue
+			}
+			mics++
+			if t.Muted {
+				muted++
+			}
 			continue
 		}
-		// protojson drops default values: an AUDIO type (0) is usually
-		// absent, so only an explicit non-audio type disqualifies a track.
-		if !t.Source.is(sourceMicrophone, 2) || (!t.Type.absent() && !t.Type.is("AUDIO", 0)) {
-			continue
-		}
-		mics++
-		if t.Muted {
-			muted++
+		if track.Type == "video" {
+			part.Mismatched = append(part.Mismatched, track)
 		}
 	}
 	part.MicrophonePublished = mics > 0
 	part.MicrophoneMuted = mics > 0 && muted == mics
 	part.ShareSourcesGranted = p.Permission.grantsShare()
+	part.CameraGranted = p.Permission.grantsCamera()
 	part.CanPublish = p.Permission != nil && (p.Permission.CanPublish || p.Permission.SnakeCanPublish)
 	part.CanSubscribe = p.Permission != nil && (p.Permission.CanSubscribe || p.Permission.SnakeSubscribe)
 	return part
@@ -436,6 +501,57 @@ type participantPermission struct {
 	SnakeSubscribe  bool       `json:"can_subscribe"`
 	Sources         []flexEnum `json:"canPublishSources"`
 	SnakeSources    []flexEnum `json:"can_publish_sources"`
+}
+
+// sourceName is conchd's name for a track's declared source: LiveKit's
+// TrackSource, by name or number, in lower case. An absent source is
+// TrackSource's default, UNKNOWN (0), and so is anything it does not name.
+func sourceName(f flexEnum) string {
+	switch {
+	case f.is(sourceCamera, 1):
+		return "camera"
+	case f.is(sourceMicrophone, 2):
+		return "microphone"
+	case f.is(sourceScreenShare, 3):
+		return "screen_share"
+	case f.is(sourceScreenShareAudio, 4):
+		return "screen_share_audio"
+	}
+	return "unknown"
+}
+
+// typeName is conchd's name for a track's type: LiveKit's TrackType, by name
+// or number, in lower case. protojson drops default values, so an absent type
+// is AUDIO (0); anything it does not name is "unknown".
+func typeName(f flexEnum) string {
+	switch {
+	case f.absent(), f.is("AUDIO", 0):
+		return "audio"
+	case f.is("VIDEO", 1):
+		return "video"
+	case f.is("DATA", 2):
+		return "data"
+	}
+	return "unknown"
+}
+
+// grantsCamera reports whether the permission lets its holder publish a
+// camera. As for grantsShare, an empty list of sources grants every source,
+// and a nil permission grants nothing that can be seen.
+func (pp *participantPermission) grantsCamera() bool {
+	if pp == nil || (!pp.CanPublish && !pp.SnakeCanPublish) {
+		return false
+	}
+	sources := append(append([]flexEnum(nil), pp.Sources...), pp.SnakeSources...)
+	if len(sources) == 0 {
+		return true
+	}
+	for _, s := range sources {
+		if s.is(sourceCamera, 1) {
+			return true
+		}
+	}
+	return false
 }
 
 // grantsShare reports whether the permission lets its holder publish either

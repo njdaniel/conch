@@ -8,10 +8,13 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/njdaniel/conch/e2e/internal/lkit"
+	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
@@ -277,6 +280,13 @@ func (w *world) mediaB(v *voiceA) error {
 		return fmt.Errorf("bea asks for a voice session in A's channel: %w", err)
 	}
 
+	// A's camera, live while B looks (issue #1241).
+	cam, err := w.startCameraA(v)
+	defer cam.stop()
+	if err != nil {
+		return fmt.Errorf("group A's camera: %w", err)
+	}
+
 	// B's own grant names B's room, and only it.
 	sb, err := w.session(bea, w.b.main())
 	if err != nil {
@@ -345,10 +355,16 @@ func (w *world) mediaB(v *voiceA) error {
 	} else if screen, audio := lkit.ShareTracks(p); !screen || !audio {
 		return fmt.Errorf("ann's share ended while B looked: sources %v", p.Sources())
 	}
+	// cam's camera is live while bob looks, too.
+	if ok, p, saw := lk.has(v.room, cam.cam.id); !ok {
+		return fmt.Errorf("cam left A's room while B looked: %s", saw)
+	} else if !cameraTrack(p) {
+		return fmt.Errorf("cam's camera ended while B looked: sources %v", p.Sources())
+	}
 	for _, who := range []struct {
 		name string
 		id   int64
-	}{{"ann", ann.id}, {"amy", w.a.people[2].id}} {
+	}{{"ann", ann.id}, {"amy", w.a.people[2].id}, {"cam", cam.cam.id}} {
 		if got := linesNaming(viewer, who.id); len(got) > 0 {
 			return fmt.Errorf("bob's lk in B's room was told of %s: %s", who.name, w.h.redact(got[0]))
 		}
@@ -379,8 +395,8 @@ func (w *world) mediaB(v *voiceA) error {
 			return fmt.Errorf("a B member is in A's room: %s", saw)
 		}
 	}
-	w.h.say("ok   media: bea's grant names B's room alone; the same token bent to A's room is refused by LiveKit (401); bob, subscribed to everything in B's room, hears bea and is told nothing of ann's screen, sound or microphone, or of amy (by identity or by LiveKit SID)")
-	return nil
+	w.h.say("ok   media: bea's grant names B's room alone; the same token bent to A's room is refused by LiveKit (401); bob, subscribed to everything in B's room, hears bea and is told nothing of ann's screen, sound or microphone, of cam's camera, or of amy (by identity or by LiveKit SID)")
+	return w.cameraRowsA(v, cam)
 }
 
 // videoGrant decodes a LiveKit token's video grant (without checking its
@@ -441,4 +457,377 @@ func withRoom(token, room string) (string, error) {
 		return "", err
 	}
 	return parts[0] + "." + base64.RawURLEncoding.EncodeToString(out) + "." + parts[2], nil
+}
+
+// ---------------------------------------------------------------------------
+// The camera (issue #1241, ADR-015; docs/design/webcam-video.md §11.3)
+//
+// With the camera turned on for both columns by the owner, cam, a member of
+// A's channel, first tries to publish a camera on the join grant alone (the
+// "modified client": LiveKit refuses the source), then claims one and
+// publishes it, and it is live while B looks from B's own room (mediaB: B is
+// told nothing of it). Then the two mismatched kinds (S1): a video track
+// declared as a microphone under the join grant, and a sound declared as a
+// camera under a claim; each is either refused by LiveKit or found by a pass,
+// which removes its publisher within the bound and audits it naming the
+// declared source and type. Last, the owner turns the camera off for both
+// columns, through the real PUT, and cam's camera is withdrawn before the PUT
+// answers, which also puts the world back as the later phases expect it.
+
+// cameraA is what A holds of the camera.
+type cameraA struct {
+	cam   *member
+	camLK *lkit.Headless
+}
+
+// camera source and type numbers, as LiveKit's room API may write them.
+const (
+	lkSourceCamera     = 1
+	lkSourceMicrophone = 2
+)
+
+// trackOf reports whether t is declared as source (by name or number) and is
+// of kind typ ("AUDIO" or "VIDEO"; an absent type is AUDIO, protojson's
+// default).
+func trackOf(t lkit.Track, source string, sourceNum int, typ string) bool {
+	src := fmt.Sprint(t.Source)
+	if src != source && src != itoa(int64(sourceNum)) {
+		return false
+	}
+	kind := fmt.Sprint(t.Type)
+	switch typ {
+	case "AUDIO":
+		return t.Type == nil || kind == "AUDIO" || kind == "0"
+	case "VIDEO":
+		return kind == "VIDEO" || kind == "1"
+	}
+	return false
+}
+
+// cameraTrack is whether LiveKit lists a video track declared as the camera.
+func cameraTrack(p lkit.Participant) bool {
+	for _, t := range p.Tracks {
+		if trackOf(t, "CAMERA", lkSourceCamera, "VIDEO") {
+			return true
+		}
+	}
+	return false
+}
+
+// sourceGate is a relay filter that rewrites the source of lk's track called
+// name to source (LiveKit's number) and, gated, holds that add_track request
+// back until Release: how lk joins, waits while conchd grants the camera,
+// and then publishes on the same connection, as a browser does. It is the
+// share's filter (lkit.ShareFilter) for any source.
+type sourceGate struct {
+	match  func(name string) bool
+	source uint64
+	gate   chan struct{} // nil: never wait
+	once   sync.Once
+	held   chan struct{}
+}
+
+func newSourceGate(gated bool, source uint64, match func(name string) bool) *sourceGate {
+	g := &sourceGate{match: match, source: source, held: make(chan struct{})}
+	if gated {
+		g.gate = make(chan struct{})
+	}
+	return g
+}
+
+// Release lets a held track through.
+func (g *sourceGate) Release() {
+	if g.gate != nil {
+		close(g.gate)
+	}
+}
+
+// Held is closed once the first matching track has reached the filter.
+func (g *sourceGate) Held() <-chan struct{} { return g.held }
+
+// Filter is the relay filter (Kit.StartLK).
+func (g *sourceGate) Filter(ctx context.Context, frame []byte) []byte {
+	out, rewrote := lkit.RewriteAddTrackSource(frame, func(name string) (uint64, bool) {
+		if g.match(name) {
+			return g.source, true
+		}
+		return 0, false
+	})
+	if !rewrote {
+		return frame
+	}
+	g.once.Do(func() { close(g.held) })
+	if g.gate != nil {
+		select {
+		case <-g.gate:
+		case <-ctx.Done():
+		}
+	}
+	return out
+}
+
+// claimCamera claims a camera in channel as m, and requires the claim's
+// answer to be well formed and m's.
+func claimCamera(m *member, channel string) error {
+	var c schema.VoiceCameraV1
+	if err := m.api.call(http.MethodPost, "/v1/channels/"+channel+"/voice/camera", nil, &c); err != nil {
+		return err
+	}
+	if c.PrincipalID != m.id {
+		return fmt.Errorf("the camera claim names principal %d, want %d", c.PrincipalID, m.id)
+	}
+	return c.Validate()
+}
+
+// startCameraA turns the camera on for both columns, has cam refused a
+// camera on the join grant, then claim one and publish it.
+func (w *world) startCameraA(v *voiceA) (*cameraA, error) {
+	lk := w.lk
+	camp := w.a.main()
+	if err := w.setCameraCells(true); err != nil {
+		return nil, err
+	}
+	cam, err := w.newPerson(w.aPerson("cam"), camp)
+	if err != nil {
+		return nil, err
+	}
+	// The modified client: a camera published on the join grant, with no
+	// claim. lk publishes its demo video as a camera; LiveKit refuses the
+	// source (the grant names the microphone alone), and lk gives up when
+	// its publish is never answered.
+	s, err := w.session(cam, camp)
+	if err != nil {
+		return nil, err
+	}
+	rogue, err := w.h.kit.StartLK(lk.lkBin, lk.hostPort(), s.Rooms[0].Token, nil, "--publish-demo")
+	if err != nil {
+		return nil, err
+	}
+	if err := waitFor("cam's camera without a claim to be refused", 45*time.Second, func() (bool, string) {
+		if ok, p, _ := lk.has(v.room, cam.id); ok && cameraTrack(p) {
+			return false, "LiveKit lists cam's camera"
+		}
+		return rogue.Exited(), "lk is still trying to publish"
+	}); err != nil {
+		rogue.Stop()
+		return nil, err
+	}
+	if ok, p, _ := lk.has(v.room, cam.id); ok && cameraTrack(p) {
+		rogue.Stop()
+		return nil, fmt.Errorf("LiveKit published cam's camera on the join grant: sources %v", p.Sources())
+	}
+	rogue.Stop()
+	if err := waitFor("cam's refused participant to leave A's room", 30*time.Second, func() (bool, string) {
+		return lk.gone(v.room, cam.id)
+	}); err != nil {
+		return nil, err
+	}
+
+	// The claim, and the camera published on the same connection once it is
+	// granted.
+	s, err = w.session(cam, camp)
+	if err != nil {
+		return nil, err
+	}
+	gate := newSourceGate(true, lkSourceCamera, func(name string) bool { return name == "demo" })
+	camLK, err := w.h.kit.StartLK(lk.lkBin, lk.hostPort(), s.Rooms[0].Token, gate.Filter, "--publish-demo")
+	if err != nil {
+		return nil, err
+	}
+	c := &cameraA{cam: cam, camLK: camLK}
+	if err := waitFor("LiveKit to list cam in A's room", 60*time.Second, func() (bool, string) {
+		ok, _, saw := lk.has(v.room, cam.id)
+		if !ok && camLK.Exited() {
+			return false, "lk exited: " + camLK.Tail()
+		}
+		return ok, saw
+	}); err != nil {
+		return c, err
+	}
+	select {
+	case <-gate.Held():
+	case <-time.After(30 * time.Second):
+		return c, errors.New("cam's lk did not try to publish its camera within 30 s")
+	}
+	if err := claimCamera(cam, camp); err != nil {
+		return c, fmt.Errorf("cam claims a camera: %w", err)
+	}
+	gate.Release()
+	if err := waitFor("LiveKit to list cam's camera", 30*time.Second, func() (bool, string) {
+		ok, p, saw := lk.has(v.room, cam.id)
+		if !ok {
+			return false, saw
+		}
+		return cameraTrack(p), fmt.Sprintf("sources %v", p.Sources())
+	}); err != nil {
+		return c, err
+	}
+	w.h.say("ok   camera: cam's camera on the join grant alone was refused by LiveKit; claimed, it is published in A's room (LiveKit lists a video track declared camera)")
+	return c, nil
+}
+
+// stop ends cam's participant.
+func (c *cameraA) stop() {
+	if c != nil && c.camLK != nil {
+		c.camLK.Stop()
+	}
+}
+
+// cameraRowsA runs the mismatched kinds and the cell's cut against A's live
+// camera.
+func (w *world) cameraRowsA(v *voiceA, c *cameraA) error {
+	lk := w.lk
+	camp := w.a.main()
+	findings := []string{}
+
+	// One mismatched kind each: whoever publishes it, and how.
+	dir, err := w.h.mkdir("camera-")
+	if err != nil {
+		return err
+	}
+	camAudio := filepath.Join(dir, "camera-audio.ogg")
+	if err := lkit.WriteSilentOpus(camAudio, 900); err != nil {
+		return err
+	}
+	for _, k := range []struct {
+		what, who   string
+		claim       bool
+		source      uint64
+		match       func(string) bool
+		options     []string
+		trackSource string
+		srcNum      int
+		trackType   string
+	}{
+		{"a video track declared as the microphone, under the join grant", "vid", false, lkSourceMicrophone,
+			func(n string) bool { return n == "demo" }, []string{"--publish-demo"}, "microphone", lkSourceMicrophone, "video"},
+		{"a sound declared as the camera, under a claim", "snd", true, lkSourceCamera,
+			func(n string) bool { return strings.HasSuffix(n, "camera-audio.ogg") }, []string{"--publish", camAudio}, "camera", lkSourceCamera, "audio"},
+	} {
+		m, err := w.newPerson(w.aPerson(k.who), camp)
+		if err != nil {
+			return err
+		}
+		s, err := w.session(m, camp)
+		if err != nil {
+			return err
+		}
+		gate := newSourceGate(k.claim, k.source, k.match)
+		hl, err := w.h.kit.StartLK(lk.lkBin, lk.hostPort(), s.Rooms[0].Token, gate.Filter, k.options...)
+		if err != nil {
+			return err
+		}
+		if err := waitFor("LiveKit to list "+k.who+" in A's room", 60*time.Second, func() (bool, string) {
+			ok, _, saw := lk.has(v.room, m.id)
+			if !ok && hl.Exited() {
+				return false, "lk exited: " + hl.Tail()
+			}
+			return ok, saw
+		}); err != nil {
+			hl.Stop()
+			return err
+		}
+		if k.claim {
+			select {
+			case <-gate.Held():
+			case <-time.After(30 * time.Second):
+				hl.Stop()
+				return fmt.Errorf("%s's lk did not try to publish within 30 s", k.who)
+			}
+			if err := claimCamera(m, camp); err != nil {
+				hl.Stop()
+				return fmt.Errorf("%s claims a camera: %w", k.who, err)
+			}
+			gate.Release()
+		}
+		// Either LiveKit refuses the track (lk gives up and the track is never
+		// listed), or it lists it, and then a pass must remove the publisher
+		// within the bound: a pass (1.5 s) and a removal (4 s).
+		listedAt := time.Time{}
+		err = waitFor(k.what+" to be refused by LiveKit or removed by a pass", 45*time.Second, func() (bool, string) {
+			ok, p, saw := lk.has(v.room, m.id)
+			if ok {
+				for _, t := range p.Tracks {
+					if trackOf(t, strings.ToUpper(k.trackSource), k.srcNum, strings.ToUpper(k.trackType)) && listedAt.IsZero() {
+						listedAt = time.Now()
+					}
+				}
+			}
+			if !listedAt.IsZero() {
+				return !ok, "LiveKit lists the mismatched track: " + saw
+			}
+			return hl.Exited(), "lk is still trying to publish"
+		})
+		hl.Stop()
+		if err != nil {
+			return err
+		}
+		if listedAt.IsZero() {
+			findings = append(findings, "K8: LiveKit refused "+k.what)
+			continue
+		}
+		took := time.Since(listedAt)
+		if took > 6*time.Second {
+			return fmt.Errorf("%s was listed for %s before its publisher was removed, past the bound (a pass and a removal, 5.5 s)", k.what, took.Round(time.Millisecond))
+		}
+		rows, err := w.auditRows(store.AuditVoiceCameraUnclaimed)
+		if err != nil {
+			return err
+		}
+		want := fmt.Sprintf("track_source=%s track_type=%s", k.trackSource, k.trackType)
+		found := 0
+		for _, r := range rows {
+			if r.Actor == "principal:"+itoa(m.id) && strings.Contains(r.Detail, want) && strings.Contains(r.Detail, "source=observed") {
+				found++
+			}
+		}
+		if found != 1 {
+			return fmt.Errorf("%s: %d voice_camera_unclaimed rows naming %s, want 1", k.what, found, want)
+		}
+		removed, err := w.auditRows(store.AuditVoiceParticipantRemoved)
+		if err != nil {
+			return err
+		}
+		if !slices.ContainsFunc(removed, func(r schema.AuditEventV1) bool {
+			return strings.Contains(r.Detail, "principal="+itoa(m.id)+" ") && strings.Contains(r.Detail, "reason=camera_unclaimed")
+		}) {
+			return fmt.Errorf("%s: no voice_participant_removed row with reason=camera_unclaimed for its publisher", k.what)
+		}
+		findings = append(findings, fmt.Sprintf("K8: LiveKit accepted %s; the pass removed its publisher %s after LiveKit listed it, and audited it once", k.what, took.Round(time.Millisecond)))
+	}
+	for _, f := range findings {
+		w.h.say("     finding: %s", f)
+	}
+
+	// The owner turns the camera off for both columns, through the real PUT:
+	// cam's claim ends (access_lost) and its camera is withdrawn before the
+	// PUT answers.
+	start := time.Now()
+	if err := w.setCameraCells(false); err != nil {
+		return err
+	}
+	answered := time.Since(start)
+	if ok, p, saw := lk.has(v.room, c.cam.id); !ok {
+		return fmt.Errorf("cam left A's room when the camera was turned off: %s", saw)
+	} else if cameraTrack(p) {
+		// LiveKit unpublishes a withdrawn source at once (measured for a
+		// share, K3): poll briefly, within the bound of one pass.
+		if err := waitFor("cam's camera to be withdrawn", 2*time.Second, func() (bool, string) {
+			_, p, _ := lk.has(v.room, c.cam.id)
+			return !cameraTrack(p), fmt.Sprintf("sources %v", p.Sources())
+		}); err != nil {
+			return fmt.Errorf("the camera's cell off: %w", err)
+		}
+	}
+	stopped, err := w.auditRows(store.AuditVoiceCameraStopped)
+	if err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(stopped, func(r schema.AuditEventV1) bool {
+		return strings.Contains(r.Detail, "principal="+itoa(c.cam.id)+" ") && strings.Contains(r.Detail, "reason=access_lost")
+	}) {
+		return errors.New("the camera's cell off wrote no voice_camera_stopped row with reason=access_lost for cam")
+	}
+	w.h.say("ok   camera: with the cell off for both columns through PUT /v1/permissions, cam's camera was withdrawn by the PUT's hook (it answered in %s) and its claim ended access_lost", answered.Round(time.Millisecond))
+	return nil
 }

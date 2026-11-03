@@ -56,6 +56,7 @@ var permissionConsts = map[string]schema.Permission{
 	"PermManageChannels":        schema.PermManageChannels,
 	"PermChangeServerSettings":  schema.PermChangeServerSettings,
 	"PermReadAuditLog":          schema.PermReadAuditLog,
+	"PermUseCamera":             schema.PermUseCamera,
 }
 
 // permissionRoute finds a route of the permission class and its permission.
@@ -126,6 +127,24 @@ func sameAnswer(what string, s1 int, b1 []byte, s2 int, b2 []byte) error {
 // through the real PUT.
 func (w *world) setOperatorCells(granted bool, perms ...schema.Permission) error {
 	return w.setCells(schema.PermissionRoleOperator, granted, perms...)
+}
+
+// setCameraCells turns use_camera on or off for both columns in one PUT, as
+// the owner: on needs the operator's cell with the member's (member implies
+// operator, admin-roles §4.4.1), and so does off.
+func (w *world) setCameraCells(on bool) error {
+	var doc schema.PermissionsResponseV1
+	if err := w.op.call(http.MethodGet, "/v1/permissions", nil, &doc); err != nil {
+		return err
+	}
+	req := schema.PutPermissionsRequestV1{Revision: doc.Revision, Changes: []schema.PermissionChangeV1{
+		{Permission: schema.PermUseCamera, Role: schema.PermissionRoleOperator, Granted: on},
+		{Permission: schema.PermUseCamera, Role: schema.PermissionRoleMember, Granted: on},
+	}}
+	if err := w.op.call(http.MethodPut, "/v1/permissions", req, nil); err != nil {
+		return fmt.Errorf("the owner turns use_camera %v for both columns: %w", map[bool]string{true: "on", false: "off"}[on], err)
+	}
+	return nil
 }
 
 // setCells sets the cells of role's column for perms, as the owner, through
@@ -398,6 +417,10 @@ func (w *world) restrictedPhase() (int, error) {
 		{"DELETE .../reactors/{principal_id}", http.MethodDelete, "/v2/channels/" + aChan + "/messages/1/reactors/1", "/v2/channels/" + ghost + "/messages/1/reactors/1"},
 		{"GET /v1/channels/{channel}/members", http.MethodGet, "/v1/channels/" + aChan + "/members", "/v1/channels/" + ghost + "/members"},
 		{"GET /v1/channels/{channel}/nets", http.MethodGet, "/v1/channels/" + aChan + "/nets", "/v1/channels/" + ghost + "/nets"},
+		// Stopping an A member's camera (issue #1241): R lost
+		// manage_channels and is not in A's channel.
+		{"DELETE /v1/channels/{channel}/voice/camera?principal=", http.MethodDelete,
+			"/v1/channels/" + aChan + "/voice/camera?principal=" + itoa(w.a.people[0].id), "/v1/channels/" + ghost + "/voice/camera?principal=" + itoa(w.a.people[0].id)},
 	} {
 		var body any
 		if c.method == http.MethodPost || c.method == http.MethodPut {
@@ -439,6 +462,10 @@ func (w *world) restrictedPhase() (int, error) {
 		{"removes the approver", http.MethodDelete, member(approver.id), nil, http.StatusForbidden, "forbidden"},
 		{"removes another operator", http.MethodDelete, member(op2.id), nil, http.StatusForbidden, "forbidden"},
 		{"removes the owner", http.MethodDelete, member(owner), nil, http.StatusForbidden, "forbidden"},
+		// A camera's stop is manage_channels' alone, stricter than the
+		// share's (ADR-015, N1): a manager of the channel without it is
+		// refused, naming it for an operator, whose cell it is.
+		{"stops a member's camera", http.MethodDelete, "/v1/channels/" + rchan + "/voice/camera?principal=" + itoa(rmember.id), nil, http.StatusForbidden, schema.ErrorCodePermissionDenied},
 	} {
 		status, body, err := r.api.do(c.method, c.path, c.body)
 		if err != nil {
@@ -450,14 +477,19 @@ func (w *world) restrictedPhase() (int, error) {
 		if e, err := errorOf(body); err != nil || e.Code != c.code {
 			return rows, fmt.Errorf("the restricted operator %s in its own channel = %s, want code %s", c.what, body, c.code)
 		}
+		if c.code == schema.ErrorCodePermissionDenied {
+			if err := refusedNaming("the restricted operator stops a member's camera in its own channel", status, body, nil, c.code, schema.PermManageChannels); err != nil {
+				return rows, err
+			}
+		}
 		rows++
 	}
 	after, err := w.auditDenials(r.id, schema.PermManageChannels)
 	if err != nil {
 		return rows, err
 	}
-	if after-before < 5 {
-		return rows, fmt.Errorf("the restricted operator's refusals in its own channel wrote %d access_denied rows with permission=manage_channels, want 5", after-before)
+	if after-before < 6 {
+		return rows, fmt.Errorf("the restricted operator's refusals in its own channel wrote %d access_denied rows with permission=manage_channels, want 6", after-before)
 	}
 
 	// The v1 route refuses a caller without manage_members whatever it names
@@ -943,6 +975,7 @@ func (w *world) voiceMemberRows(rchan string, talker, stranger *member) (rows in
 		{"a member without use_voice at the voice presence", http.MethodGet, voice, nil},
 		{"a member without use_voice at voice occupancy", http.MethodGet, "/v1/voice/occupancy", nil},
 		{"a member without use_voice at the share claim", http.MethodPost, voice + "/share", nil},
+		{"a member without use_voice at the camera claim", http.MethodPost, voice + "/camera", nil},
 	} {
 		status, body, err := talker.api.do(c.method, c.path, c.body)
 		if err := refusedNaming(c.what, status, body, err, schema.ErrorCodeVoiceNotAllowed, schema.PermUseVoice); err != nil {
@@ -985,6 +1018,34 @@ func (w *world) voiceMemberRows(rchan string, talker, stranger *member) (rows in
 	}
 	if err := w.setCells(schema.PermissionRoleMember, true, schema.PermShareScreen); err != nil {
 		return rows, "", fmt.Errorf("give the member column back: %w", err)
+	}
+	// use_camera is off for members by default (ADR-015): the claim is
+	// refused naming it, 403 permission_denied, the camera's own code. Like
+	// the share's, the claim sits behind "voice is not configured".
+	if w.lk == nil {
+		skipped += "; the camera claim of a member without use_camera"
+	} else {
+		status, body, err := talker.api.do(http.MethodPost, voice+"/camera", nil)
+		if err := refusedNaming("a member without use_camera at the camera claim", status, body, err, schema.ErrorCodePermissionDenied, schema.PermUseCamera); err != nil {
+			return rows, "", err
+		}
+		rows++
+		// The control: with the camera on for both columns (the operator's
+		// first: precedence), the claim is judged on its merits (no voice
+		// session), not refused for the right; then both go back off.
+		if err := w.setCameraCells(true); err != nil {
+			return rows, "", err
+		}
+		status, body, err = talker.api.do(http.MethodPost, voice+"/camera", nil)
+		if err != nil {
+			return rows, "", err
+		}
+		if status != http.StatusConflict || errorCode(body) != schema.ErrorCodeVoiceNoSession {
+			return rows, "", fmt.Errorf("the control: with use_camera on the camera claim of a member with no session = %d %s, want 409 %s", status, body, schema.ErrorCodeVoiceNoSession)
+		}
+		if err := w.setCameraCells(false); err != nil {
+			return rows, "", err
+		}
 	}
 	if w.lk != nil {
 		// The control: with the column back the claim is judged on its merits

@@ -97,6 +97,8 @@ func (s *Server) handleSetRole(w http.ResponseWriter, r *http.Request) {
 			s.voiceWithheldFor(ctx, id)
 		}
 		s.endShareIfWithheld(ctx, id)
+		// And a camera it may no longer hold (ADR-015 decision 6).
+		s.endCameraIfWithheld(ctx, id)
 	}
 	writeJSON(w, http.StatusOK, res.RoleChangeResponseV1)
 }

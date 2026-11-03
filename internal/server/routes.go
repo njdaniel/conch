@@ -93,6 +93,11 @@ func (s *Server) routeTable() []route {
 		// it. Checked in the handlers; see voice_share.go.
 		rt("POST /v1/channels/{channel}/voice/share", accessAuthenticated, hf(s.handleVoiceShareStart)),
 		rt("DELETE /v1/channels/{channel}/voice/share", accessAuthenticated, hf(s.handleVoiceShareStop)),
+		// Camera (ADR-015, issue #1241): a member who holds a session and
+		// use_camera claims a camera; the person or a holder of manage_channels
+		// stops it. Checked in the handlers; see voice_camera.go.
+		rt("POST /v1/channels/{channel}/voice/camera", accessAuthenticated, hf(s.handleVoiceCameraStart)),
+		rt("DELETE /v1/channels/{channel}/voice/camera", accessAuthenticated, hf(s.handleVoiceCameraStop)),
 		// Companion and viewer participants (issue #933): the second
 		// participant of a person in voice. Human members who hold voice;
 		// checked in the handlers; see voice_companion.go.

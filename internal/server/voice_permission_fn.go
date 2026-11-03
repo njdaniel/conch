@@ -22,10 +22,19 @@ import (
 //
 // share says the caller is granting the room's screen share to this
 // participant (a claim), not withdrawing it. Every withdrawal and rollback
-// passes false: they are made because the person does not, or must no longer,
-// hold the share, and a caller that is taking back a grant while the claim is
-// still recorded (a room rotated under it) must not be handed the share
-// again by a read of that claim.
+// of the share passes false: they are made because the person does not, or
+// must no longer, hold the share, and a caller that is taking back a grant
+// while the claim is still recorded (a room rotated under it) must not be
+// handed the share again by a read of that claim. A write the camera makes (a
+// camera's grant, its stop, a pass's camera withdrawal) is not about the
+// share, and passes what the person holds now: shareHeldLocked, read under
+// the room's claims, the one place that term is worked out for them, so a
+// camera's stop never drops a share (issue #1241).
+//
+// A listen-only person (canPublish false) is written the join token's own
+// listen-only grant: canPublish false with the microphone named, which LiveKit
+// reads as nothing to publish (docs/design/webcam-video.md §4.3's "none";
+// decided in #1241, so a withdrawal is exactly what the token granted).
 type publishInput struct {
 	canPublish   bool
 	canSubscribe bool
@@ -70,13 +79,18 @@ func publishPermission(role voiceRole, in publishInput, camera bool) livekit.Per
 //
 // The caller holds the room's claims (voiceRoomState.claims), which is what
 // serializes every write of one participant's permission. The camera term is
-// the constant false until C4 (#1241): no camera claim exists yet. C4 reads it
-// here, at the moment of writing, from the person's current claims in the
-// room, never from a snapshot a pass carried in, and threads the room
-// (r *voiceRoomState) through setPublishPermission, withdrawLocked and
-// withdrawCompanion to do so. found is false, with a nil error, when nobody by
-// that identity is in the room.
-func (p *voicePoller) setPublishPermission(ctx context.Context, roomName string, principalID int64, role voiceRole, in publishInput) (found bool, err error) {
-	const camera = false
-	return p.s.lk.UpdateParticipant(ctx, roomName, voiceParticipantIdentity(principalID, role), publishPermission(role, in, camera))
+// read here, at the moment of writing, from the person's current claims in r
+// (cameraHeldLocked, issue #1241), never from a snapshot a pass carried in,
+// so that a share's grant or withdrawal never takes a camera down, and one
+// claimed between a pass's plan and its withdrawal stands. r is the room the
+// caller holds the claims of, passed down and never looked up again by name:
+// a late write for a room a rotation forgot must read that room's claims
+// (none: cameraHeldLocked is false once it is retired), not its successor's.
+// found is false, with a nil error, when nobody by that identity is in the
+// room.
+func (p *voicePoller) setPublishPermission(ctx context.Context, r *voiceRoomState, principalID int64, role voiceRole, in publishInput) (found bool, err error) {
+	p.mu.Lock()
+	camera := p.cameraHeldLocked(r, principalID)
+	p.mu.Unlock()
+	return p.s.lk.UpdateParticipant(ctx, r.name, voiceParticipantIdentity(principalID, role), publishPermission(role, in, camera))
 }
