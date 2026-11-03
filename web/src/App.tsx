@@ -1595,7 +1595,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                         channel: currentChannel,
                         channels: channels.channels,
                         viewer: { role: auth.principal.role, guest: visit !== null },
-                        directoryTick: directory.tick,
+                        // A reconnect owes no frame for what changed while it was down, so the
+                        // picker also re-reads on the permission tick every socket open bumps.
+                        directoryTick: directory.tick + permissionsTick,
                         onUnauthorized,
                       }
                 }
