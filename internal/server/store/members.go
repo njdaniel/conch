@@ -1088,7 +1088,7 @@ func scanChannelMember(scan func(dest ...any) error) (ChannelMember, error) {
 
 func channelMemberTx(ctx context.Context, tx execer, channelID, principalID int64) (ChannelMember, error) {
 	row := tx.QueryRowContext(ctx,
-		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind, p.role, m.can_decide, m.manages, m.history_after, v.handle, v.label
+		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind, p.role, m.can_decide, (m.manages AND `+listedManagerSQL+`), m.history_after, v.handle, v.label
 		 FROM channel_members m
 		 JOIN principals p ON p.id = m.principal_id
 		 LEFT JOIN guest_visits v ON v.principal_id = m.principal_id AND v.state = 'active'
@@ -1106,7 +1106,7 @@ func channelMemberTx(ctx context.Context, tx execer, channelID, principalID int6
 // foreign key, and principals are never deleted.
 func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]ChannelMember, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind, p.role, m.can_decide, m.manages, m.history_after, v.handle, v.label
+		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind, p.role, m.can_decide, (m.manages AND `+listedManagerSQL+`), m.history_after, v.handle, v.label
 		 FROM channel_members m
 		 JOIN principals p ON p.id = m.principal_id
 		 LEFT JOIN guest_visits v ON v.principal_id = m.principal_id AND v.state = 'active'
