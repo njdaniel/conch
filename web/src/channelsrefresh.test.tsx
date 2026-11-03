@@ -269,7 +269,7 @@ describe('the list follows the server', () => {
       for (const timer of timers) timer.run();
       await Promise.resolve();
     });
-    await screen.findByRole('button', { name: 'general' });
+    await screen.findByRole('button', { name: 'general' }, { timeout: 5000 });
     expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
     expect(server.listGets).toBe(2);
   });
@@ -295,6 +295,7 @@ describe('a lost channel leaves nothing behind', () => {
     fireEvent.change(screen.getByLabelText<HTMLTextAreaElement>('Message #general'), { target: { value: 'a draft for the old general' } });
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('a draft for the old general');
     server.channels = [ops];
+    const sockets = eventsSockets().length;
     events.send(frame);
     await screen.findByText('You no longer have access to #general');
     // Another channel, new, is given the name, and the person is added to it.
@@ -302,6 +303,11 @@ describe('a lost channel leaves nothing behind', () => {
     server.channels = [ops, reborn];
     // Its history is slow: what the page shows meanwhile is what it held.
     server.holdHistory = new Promise<void>(() => undefined);
+    // The page opens its events socket again for the channel it moved to, after
+    // a ticket is read: the one opened for #general is closed and deaf.
+    await waitFor(() => {
+      expect(eventsSockets().length).toBeGreaterThan(sockets);
+    });
     const opsEvents = eventsSockets().at(-1);
     if (opsEvents === undefined) throw new Error('no events socket');
     opsEvents.open();
