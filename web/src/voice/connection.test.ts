@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
-import { VoiceClient, chosenGone, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type Microphone, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import { VoiceClient, chosenGone, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { resumeLimit, type Captured, type KeptScreen } from './share';
 import { defaultTail } from './gate';
 import { FakeClock, settle } from './fakes';
@@ -190,6 +190,9 @@ class StubRoom implements Room {
   };
 }
 
+// The mode the harness starts in: push to talk, which most of these tests are of (issue #1244 made the open microphone the default).
+const pushToTalk: ModeStore = { get: () => 'ptt', set: () => undefined };
+
 const okSession = (canPublish = true): VoiceSessionResult => ({
   ok: true,
   value: {
@@ -240,6 +243,7 @@ function setup(
   const client = new VoiceClient(
     {
       clock,
+      mode: pushToTalk,
       trace: (line) => trace.push(line),
       random: () => 0.999999,
       createSession: (channel) => {
@@ -723,6 +727,7 @@ describe('what is sent, and when', () => {
     const rooms: StubRoom[] = [];
     const client = new VoiceClient({
       clock,
+      mode: pushToTalk,
       random: () => 0.5,
       createSession: () => Promise.resolve(okSession()),
       report: () => Promise.resolve('ok'),

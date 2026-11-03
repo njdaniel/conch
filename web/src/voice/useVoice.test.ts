@@ -29,6 +29,9 @@ const fake = vi.hoisted(() => ({
   session: (): Promise<unknown> => new Promise(() => undefined),
   report: (): Promise<string> => Promise.resolve('ok'),
   room: (): unknown => ({}),
+  // Issue #1244: the microphone mode kept in the browser, and what was kept.
+  mode: null as 'ptt' | 'open' | null,
+  kept: [] as string[],
 }));
 
 vi.mock('../api', () => ({
@@ -53,6 +56,11 @@ vi.mock('../api', () => ({
   },
   claimVoiceShare: () => new Promise(() => undefined),
   stopVoiceShare: () => new Promise(() => undefined),
+  readVoiceMode: () => fake.mode,
+  writeVoiceMode: (mode: 'ptt' | 'open') => {
+    fake.mode = mode;
+    fake.kept.push(mode);
+  },
 }));
 vi.mock('./sdk', () => ({ newLiveKitRoom: () => fake.room(), canChooseOutput: () => true }));
 
@@ -129,6 +137,8 @@ beforeEach(() => {
   fake.reads = [];
   fake.down = false;
   fake.read = () => new Promise(() => undefined);
+  fake.mode = null;
+  fake.kept = [];
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -210,6 +220,8 @@ describe('losing focus', () => {
     fake.session = () =>
       Promise.resolve({ ok: true, value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-10-16T00:00:15.000Z' }] } });
     fake.room = () => talkingRoom(sending);
+    // These are of Hold to talk, which is the mode chosen.
+    fake.mode = 'ptt';
     const view = hook({ channel: 'c' });
     act(() => {
       view.result.current.join();
@@ -741,5 +753,37 @@ describe('a rename', () => {
     await flush();
     expect(result.current.state.channel).toBe('c2');
     expect(live().map((o) => o.channel)).toEqual(['c']);
+  });
+});
+
+// Issue #1244: a browser that has never chosen is in open microphone, and the
+// choice, once made, is kept and read again by the next page.
+describe('the microphone mode', () => {
+  it('is open microphone for a browser that never chose', () => {
+    const view = hook();
+    expect(view.result.current.state.mode).toBe('open');
+  });
+
+  it('is the one kept: push to talk after it was chosen', () => {
+    fake.mode = 'ptt';
+    const view = hook();
+    expect(view.result.current.state.mode).toBe('ptt');
+  });
+
+  it('is kept when chosen, and read by the next page, either way', () => {
+    const first = hook();
+    act(() => {
+      first.result.current.client.setMode('ptt');
+    });
+    expect(fake.kept).toEqual(['ptt']);
+    first.unmount();
+    const second = hook();
+    expect(second.result.current.state.mode).toBe('ptt');
+    act(() => {
+      second.result.current.client.setMode('open');
+    });
+    second.unmount();
+    expect(hook().result.current.state.mode).toBe('open');
+    expect(fake.kept).toEqual(['ptt', 'open']);
   });
 });

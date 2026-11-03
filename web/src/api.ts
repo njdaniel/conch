@@ -2334,6 +2334,29 @@ export function writeNotificationPreferences(origin: string, account: number, pr
   }
 }
 
+// The microphone mode the person chose for voice (issue #1244): a per-browser,
+// non-secret preference. Absent, unreadable or anything else is no choice (null),
+// and the voice client then starts in open microphone.
+// web/e2e/fixtures.ts's rememberPushToTalk writes this key by name: rename both.
+const voiceModeKey = 'conch.web.voice.mode.v1';
+
+export function readVoiceMode(): 'ptt' | 'open' | null {
+  try {
+    const kept = platform.credentials.readPreference(voiceModeKey);
+    return kept === 'ptt' || kept === 'open' ? kept : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeVoiceMode(mode: 'ptt' | 'open'): void {
+  try {
+    platform.credentials.writePreference(voiceModeKey, mode);
+  } catch {
+    // Storage can be unavailable; the choice lasts until the page reloads.
+  }
+}
+
 // The setup card's "Decide later" (ADR-014 design §10.2): a per-browser,
 // per-account, non-secret mark that keeps the card from showing again.
 const setupCardKey = (origin: string, account: number) => `conch.web.setup-card.v1.${origin}.${String(account)}`;
