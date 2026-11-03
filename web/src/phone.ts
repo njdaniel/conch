@@ -22,6 +22,12 @@ export const MicTestShown = createContext(true);
 // Null in the Voice view and at 700 px and wider, where the section is whole.
 export const VoiceStrip = createContext<(() => void) | null>(null);
 
+// Opens the conversation from somewhere in the channels column that opened a
+// channel itself (the directory's Join, issue #991): on a phone, back to Chat
+// with focus on the heading, as choosing a channel in the list does; elsewhere
+// nothing, since the conversation is already beside the list.
+export const ShowChat = createContext<() => void>(() => undefined);
+
 // The phone layout (issue #929): below this width the lobby shows one of
 // three views at a time, with a bottom navigation. The same width is in
 // app.css; at and above it nothing here applies.

@@ -321,7 +321,8 @@ describe('lobby', () => {
     signIn();
     await screen.findByRole('button', { name: 'general' });
     const list = screen.getByRole('navigation', { name: 'Channels' });
-    expect(list.querySelectorAll('button')).toHaveLength(3);
+    // Two channels, a voice-less one aside, and Browse channels.
+    expect(list.querySelectorAll('button')).toHaveLength(4);
     expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
     expect(within(screen.getByRole('region', { name: 'Conversation' })).getByRole('heading', { level: 2 }).textContent).toBe('general');
     const status = screen.getByRole('status', { name: 'Status' });
@@ -478,7 +479,7 @@ describe('lobby', () => {
     serve({ ...asMember, '/v1/channels': () => json({ channels: [] }) });
     render(<App origin={origin} />);
     signIn();
-    await screen.findByText('No channels yet: an operator needs to add you to one');
+    await screen.findByText('No channels yet');
     expect(screen.getByRole('region', { name: 'Conversation' }).textContent).toBe('');
   });
 

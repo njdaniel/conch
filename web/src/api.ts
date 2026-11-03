@@ -83,7 +83,9 @@ import { listRunsResponseV1, runV1, type RunV1 } from './schema/run';
 import { sessionV1, type CreateSessionRequestV1, type SessionV1 } from './schema/session';
 import {
   channelMemberV1,
-  createChannelResponse,
+  channelDirectoryResponseV1,
+  createChannelResponseV1,
+  joinChannelResponseV1,
   listChannelMembersResponseV1,
   listChannelsResponse,
   renameChannelResponseV1,
@@ -91,7 +93,10 @@ import {
   type AddChannelMemberRequestV1,
   type ChannelMemberV1,
   type ChannelV0,
-  type CreateChannelRequest,
+  type ChannelListingV1,
+  type CreateChannelRequestV1,
+  type JoinChannelResponseV1,
+  type ChannelVisibility,
   type PutChannelMemberRequestV1,
   type RenameChannelRequestV1,
   type ChannelSettingsRequestV1,
@@ -129,8 +134,11 @@ import {
 import { listReadStateResponseV1, readStateV1, type MarkReadRequestV1, type ReadStateV1 } from './schema/readstate';
 import {
   renamePrincipalResponseV1,
+  serverMembersResponseV1,
   whoAmIResponseV1,
   type PrincipalV0,
+  type ServerMemberV1,
+  type ServerMembersResponseV1,
   type RenamePrincipalRequestV1,
   type RenamePrincipalResponseV1,
   type WhoAmIResponseV1,
@@ -1709,19 +1717,66 @@ export async function listChannels(): Promise<ApiResult<ChannelV0[]>> {
   return { ok: true, value: result.value.channels };
 }
 
-// createChannel makes a channel (issue #695). The server allows operators
-// alone (403 forbidden for anyone else) and makes the caller its only member,
-// so it is one of theirs from then on. A refusal carries the server's code and
-// line as an invite call's does: channel_exists for a name already used,
-// invalid_request with the rule a name broke. It is never repeated here.
-export async function createChannel(name: string): Promise<InviteResult<ChannelV0>> {
-  const request: CreateChannelRequest = { name };
+// createChannel makes a public or private channel (POST /v1/channels, issues
+// #981 and #991): any member the server lets create one, who becomes its only
+// member and its manager. A refusal carries the server's code, never repeated
+// here: channel_exists for every collision (it never says whose channel is in
+// the way), rate_limited with its Retry-After, permission_denied, forbidden,
+// invalid_request for a name that breaks the rule.
+export async function createChannel(name: string, visibility: ChannelVisibility): Promise<InviteResult<ChannelV0>> {
+  const request: CreateChannelRequestV1 = { name, visibility };
   const reply = await authedPost(call('createChannel'), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return inviteRefused(reply.res);
-  const created = await readBody(reply.res, createChannelResponse);
+  const created = await readBody(reply.res, createChannelResponseV1);
   return created.ok ? { ok: true, value: created.value.channel } : created;
+}
+
+// channelDirectory reads the channel directory (GET /v1/directory/channels,
+// issue #982): every public channel and the caller's own private ones, as the
+// server answers. A member count is sent only to a holder of manage_channels
+// who asks for scope=all, which this never does, and no page reads one.
+export async function channelDirectory(): Promise<ApiResult<ChannelListingV1[]>> {
+  const result = await authed(call('channelDirectory'), channelDirectoryResponseV1);
+  return result.ok ? { ok: true, value: result.value.channels } : result;
+}
+
+// joinChannel joins a public channel (POST /v1/channels/{channel}/join, issue
+// #982). A private channel the caller is not in is the same channel_not_found
+// as one that never was.
+export async function joinChannel(name: string): Promise<InviteResult<JoinChannelResponseV1>> {
+  return readSent(await authedPost(call('joinChannel', { channel: name })), joinChannelResponseV1);
+}
+
+// leaveChannel leaves a channel (POST /v1/channels/{channel}/leave). The last
+// member of a private channel is refused with channel_last_member.
+export async function leaveChannel(name: string): Promise<InviteResult<null>> {
+  return readDone(await authedPost(call('leaveChannel', { channel: name })));
+}
+
+const directoryLimit = 100;
+const maxDirectoryPages = 50;
+
+// directoryMembers reads the community's member list (GET
+// /v1/directory/members, issue #983), every page of it, in the server's order.
+// What it holds is what the server answered: operator fields only if the
+// server sent them, and the scope it says it applied.
+export async function directoryMembers(): Promise<ApiResult<ServerMembersResponseV1>> {
+  const members: ServerMemberV1[] = [];
+  let scope: ServerMembersResponseV1['scope'];
+  let after = 0;
+  for (let page = 0; page < maxDirectoryPages; page++) {
+    const query = `limit=${String(directoryLimit)}${after === 0 ? '' : `&after=${String(after)}`}`;
+    const result = await authed(call('directoryMembers', {}, query), serverMembersResponseV1);
+    if (!result.ok) return result;
+    members.push(...result.value.members);
+    scope = result.value.scope;
+    const next = result.value.after;
+    if (next === undefined || next <= after) break;
+    after = next;
+  }
+  return { ok: true, value: { members, ...(scope === undefined ? {} : { scope }) } };
 }
 
 // renameChannel renames a channel by its id (issue #728): operators and this

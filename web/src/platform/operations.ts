@@ -15,8 +15,11 @@ import {
   confirmTOTPRequestV1,
   convertGuestRequestV1,
   convertGuestResponseV1,
-  createChannelRequest,
-  createChannelResponse,
+  createChannelRequestV1,
+  createChannelResponseV1,
+  channelDirectoryResponseV1,
+  joinChannelResponseV1,
+  serverMembersResponseV1,
   createInterventionRequestV1,
   createInviteRequestV1,
   createInviteResponseV1,
@@ -243,7 +246,13 @@ export const operations = {
   // People and channels.
   renamePrincipal: op('PUT', '/v1/principals/{id}/name', 'bearer', { request: check(renamePrincipalRequestV1), response: check(renamePrincipalResponseV1) }),
   listChannels: op('GET', '/v1/channels', 'bearer', { response: check(listChannelsResponse) }),
-  createChannel: op('POST', '/v0/channels', 'bearer', { request: check(createChannelRequest), response: check(createChannelResponse) }),
+  createChannel: op('POST', '/v1/channels', 'bearer', { request: check(createChannelRequestV1), response: check(createChannelResponseV1) }),
+  // The directory, self-join and leave (issues #982, #991), and the
+  // community's member list (issue #983).
+  channelDirectory: op('GET', '/v1/directory/channels', 'bearer', { response: check(channelDirectoryResponseV1) }),
+  joinChannel: op('POST', '/v1/channels/{channel}/join', 'bearer', { response: check(joinChannelResponseV1) }),
+  leaveChannel: op('POST', '/v1/channels/{channel}/leave', 'bearer'),
+  directoryMembers: op('GET', '/v1/directory/members', 'bearer', { response: check(serverMembersResponseV1) }),
   renameChannel: op('PUT', '/v1/channels/{id}/name', 'bearer', { request: check(renameChannelRequestV1), response: check(renameChannelResponseV1) }),
   channelSettings: op('PUT', '/v1/channels/{id}/settings', 'bearer', { request: check(channelSettingsRequestV1), response: check(channelSettingsResponseV1) }),
   listMembers: op('GET', '/v1/channels/{channel}/members', 'bearer', { response: check(listChannelMembersResponseV1) }),

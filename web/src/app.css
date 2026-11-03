@@ -4052,3 +4052,106 @@ button.link {
   font-size: 0.8rem;
   overflow-wrap: anywhere;
 }
+
+/* Issue #991: the lock of a private channel, in the directory and before the
+   conversation's heading; its word, "Private", is for a screen reader. */
+.private-mark {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  color: var(--muted);
+}
+
+.private-mark .icon {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+/* "Browse channels" and its list, under the channel list: rows wrap rather
+   than widen the column. */
+.channel-directory {
+  display: grid;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  justify-items: start;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.channel-directory > section {
+  width: 100%;
+  min-width: 0;
+}
+
+.channel-directory ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.channel-directory .directory-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.channel-directory .directory-row .channel-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-directory .directory-row > p,
+.channel-directory .directory-ask {
+  flex: 1 0 100%;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-directory .directory-row > p:empty {
+  display: none;
+}
+
+.create-channel fieldset {
+  flex-basis: 100%;
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.create-channel fieldset label {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+
+.create-channel fieldset input[type='radio'] {
+  flex: none;
+  min-width: 0;
+}
+
+.community-members {
+  margin-top: var(--s3);
+}
+
+.community-members ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s1);
+}
+
+.community-members .community-member {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  overflow-wrap: anywhere;
+}
