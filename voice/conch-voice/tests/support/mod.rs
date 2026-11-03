@@ -13,6 +13,7 @@
 pub mod fake;
 pub mod keyboard;
 pub mod managed;
+pub mod reaped;
 pub mod script;
 pub mod stub;
 
