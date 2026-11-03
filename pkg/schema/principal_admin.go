@@ -29,6 +29,14 @@ const (
 	MinHideNamePrefixLength = 3
 	// MaxListPrincipalsLimit is the largest page of the principal list.
 	MaxListPrincipalsLimit = 200
+	// MaxListMessagesLimit is the largest page of a message list, thread or
+	// search, on both the REST and the MCP reads.
+	MaxListMessagesLimit = 100
+	// MaxListRunsLimit is the largest page of the run reads (runs, activity,
+	// interventions).
+	MaxListRunsLimit = 100
+	// MaxListReportsLimit is the largest page of the problem report list.
+	MaxListReportsLimit = 200
 	// DefaultListPrincipalsLimit is the page size when none is asked for.
 	DefaultListPrincipalsLimit = 100
 )
