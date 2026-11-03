@@ -166,36 +166,84 @@ func (s *Store) LeaveChannel(ctx context.Context, channelID, principalID int64, 
 // ChannelListing is one row of the channel directory (GET
 // /v1/directory/channels): a channel, whether the viewer is in it, and,
 // on the scope=all listing only, its member count (Members is -1 on the
-// member view, which carries no counts).
+// member view, which carries no counts) and its managers (Managers is nil
+// on the member view, and non-nil, empty when nobody manages the channel,
+// on the scope=all listing; issue #1202).
 type ChannelListing struct {
 	Channel
-	Joined  bool
-	Members int64
+	Joined   bool
+	Members  int64
+	Managers []ChannelManager
+}
+
+// ChannelManager is one manager of a channel as the scope=all directory
+// names them: the member whose manages bit is set, with the principal's
+// current name and kind, as the member list carries them.
+type ChannelManager struct {
+	ID   int64
+	Name string
+	Kind PrincipalKind
 }
 
 // ChannelDirectory lists the channel directory for viewerID, ordered by id
 // ascending: with all unset, every public channel and the private channels
 // the viewer is in, with no counts (design §5, "The channel list"); with all
 // set (the ?scope=all listing of a holder of manage_channels, R4), every
-// channel with its member count. Joined and Manages are the viewer's own
-// membership either way; reading the listing reads no channel's content.
-// It returns an empty, non-nil slice when there is nothing to list.
+// channel with its member count and its managers, in principal id order.
+// Joined and Manages are the viewer's own membership either way; reading
+// the listing reads no channel's content. It returns an empty, non-nil
+// slice when there is nothing to list.
 func (s *Store) ChannelDirectory(ctx context.Context, viewerID int64, all bool) ([]ChannelListing, error) {
-	query := `SELECT c.id, c.name, c.created_at, c.visibility, c.is_default,
-	                 m.principal_id IS NOT NULL, COALESCE(m.manages, 0), -1
-	          FROM channels c
-	          LEFT JOIN channel_members m ON m.channel_id = c.id AND m.principal_id = ?
-	          WHERE c.visibility = 'public' OR m.principal_id IS NOT NULL
-	          ORDER BY c.id ASC`
 	if all {
-		query = `SELECT c.id, c.name, c.created_at, c.visibility, c.is_default,
-		                m.principal_id IS NOT NULL, COALESCE(m.manages, 0),
-		                (SELECT COUNT(*) FROM channel_members n WHERE n.channel_id = c.id)
-		         FROM channels c
-		         LEFT JOIN channel_members m ON m.channel_id = c.id AND m.principal_id = ?
-		         ORDER BY c.id ASC`
+		return s.channelDirectoryAll(ctx, viewerID)
 	}
-	rows, err := s.db.QueryContext(ctx, query, viewerID)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default,
+		        m.principal_id IS NOT NULL, COALESCE(m.manages, 0)
+		 FROM channels c
+		 LEFT JOIN channel_members m ON m.channel_id = c.id AND m.principal_id = ?
+		 WHERE c.visibility = 'public' OR m.principal_id IS NOT NULL
+		 ORDER BY c.id ASC`, viewerID)
+	if err != nil {
+		return nil, fmt.Errorf("store: channel directory: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	listing := []ChannelListing{}
+	for rows.Next() {
+		var joined bool
+		var manages int
+		ch, err := scanChannel(func(dest ...any) error {
+			return rows.Scan(append(dest, &joined, &manages)...)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("store: channel directory: %w", err)
+		}
+		ch.Manages = joined && manages == 1
+		listing = append(listing, ChannelListing{Channel: ch, Joined: joined, Members: -1})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: channel directory: %w", err)
+	}
+	return listing, nil
+}
+
+// channelDirectoryAll is ChannelDirectory's scope=all listing: every
+// channel with its member count and its managers, from one query, one row
+// per channel and manager (a channel nobody manages is one row with a null
+// manager), grouped here. One query, so the counts and the managers are
+// one snapshot, and the listing costs the same however many channels there
+// are.
+func (s *Store) channelDirectoryAll(ctx context.Context, viewerID int64) ([]ChannelListing, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default,
+		        m.principal_id IS NOT NULL, COALESCE(m.manages, 0),
+		        (SELECT COUNT(*) FROM channel_members n WHERE n.channel_id = c.id),
+		        g.principal_id, p.name, p.kind
+		 FROM channels c
+		 LEFT JOIN channel_members m ON m.channel_id = c.id AND m.principal_id = ?
+		 LEFT JOIN channel_members g ON g.channel_id = c.id AND g.manages = 1
+		 LEFT JOIN principals p ON p.id = g.principal_id
+		 ORDER BY c.id ASC, g.principal_id ASC`, viewerID)
 	if err != nil {
 		return nil, fmt.Errorf("store: channel directory: %w", err)
 	}
@@ -205,15 +253,23 @@ func (s *Store) ChannelDirectory(ctx context.Context, viewerID int64, all bool) 
 		var l ChannelListing
 		var joined bool
 		var manages int
+		var managerID sql.NullInt64
+		var managerName, managerKind sql.NullString
 		ch, err := scanChannel(func(dest ...any) error {
-			return rows.Scan(append(dest, &joined, &manages, &l.Members)...)
+			return rows.Scan(append(dest, &joined, &manages, &l.Members, &managerID, &managerName, &managerKind)...)
 		})
 		if err != nil {
 			return nil, fmt.Errorf("store: channel directory: %w", err)
 		}
-		ch.Manages = joined && manages == 1
-		l.Channel, l.Joined = ch, joined
-		listing = append(listing, l)
+		if n := len(listing); n == 0 || listing[n-1].ID != ch.ID {
+			ch.Manages = joined && manages == 1
+			l.Channel, l.Joined, l.Managers = ch, joined, []ChannelManager{}
+			listing = append(listing, l)
+		}
+		if managerID.Valid {
+			last := &listing[len(listing)-1]
+			last.Managers = append(last.Managers, ChannelManager{ID: managerID.Int64, Name: managerName.String, Kind: PrincipalKind(managerKind.String)})
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: channel directory: %w", err)

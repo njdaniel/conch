@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -154,6 +155,39 @@ func TestChannelDirectoryStore(t *testing.T) {
 		if l, ok := got[name]; !ok || l.Members != n {
 			t.Errorf("scope=all %s = %+v (listed %v), want %d members", name, l, ok, n)
 		}
+	}
+
+	// Managers (issue #1202): nil on the member view; on scope=all an empty,
+	// non-nil slice for a channel nobody manages, and the managers in
+	// principal id order, with name and kind, for one that has them.
+	for name, l := range names(member) {
+		if l.Managers != nil {
+			t.Errorf("member view of %s names managers: %+v", name, l.Managers)
+		}
+	}
+	for name, l := range got {
+		if l.Managers == nil || len(l.Managers) != 0 {
+			t.Errorf("scope=all %s managers = %#v, want an empty, non-nil slice", name, l.Managers)
+		}
+	}
+	bob, _ := s.CreatePrincipal(ctx, PrincipalHuman, "bob")
+	yes := true
+	for _, id := range []int64{bob.ID, alice.ID} {
+		if _, err := s.PutChannelMember(ctx, "system", mine.ID, id, 0, nil, &yes); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all, err = s.ChannelDirectory(ctx, alice.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = names(all)
+	want := []ChannelManager{{ID: alice.ID, Name: "alice", Kind: PrincipalHuman}, {ID: bob.ID, Name: "bob", Kind: PrincipalHuman}}
+	if l := got[mine.Name]; !reflect.DeepEqual(l.Managers, want) || l.Members != 2 || !l.Manages {
+		t.Errorf("scope=all mine = %+v, want managers %+v, 2 members, managed by alice", l, want)
+	}
+	if l := got[open.Name]; len(l.Managers) != 0 {
+		t.Errorf("scope=all open gained managers: %+v", l.Managers)
 	}
 }
 
