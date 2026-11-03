@@ -714,9 +714,12 @@ describe('the section follows the directory frame (issue #1226)', () => {
     await screen.findByRole('button', { name: 'Settings' });
     cleanup();
   }
+  // Stable callbacks: a new function per rerender would re-read on its own, so
+  // only the tick may cause a read.
+  const noop = () => undefined;
   const console = (shown: boolean, directoryChanged: number) => (
     <SettingsOpen.Provider value={shown}>
-      <AdminConsole who={owner} origin={origin} channels={[]} permissionsChanged={0} directoryChanged={directoryChanged} onChannelsChanged={() => undefined} onUnauthorized={() => undefined} />
+      <AdminConsole who={owner} origin={origin} channels={[]} permissionsChanged={0} directoryChanged={directoryChanged} onChannelsChanged={noop} onUnauthorized={noop} />
     </SettingsOpen.Provider>
   );
   const reads = (calls: readonly Call[]) => calls.filter((c) => c.query === '?scope=all').length;
@@ -729,6 +732,10 @@ describe('the section follows the directory frame (issue #1226)', () => {
     const region = await screen.findByRole('region', { name: 'Channels' });
     await within(region).findByRole('list', { name: 'Every channel' });
     const before = reads(calls);
+    // A rerender with the same tick reads nothing.
+    view.rerender(console(true, 0));
+    await later10();
+    expect(reads(calls)).toBe(before);
     rows.push({ ...channelP, id: 3, name: 'channel-new' });
     view.rerender(console(true, 1));
     await waitFor(() => {
