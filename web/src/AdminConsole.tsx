@@ -2,8 +2,8 @@
 // area of Settings an operator or the owner sees, and a member does not. It is
 // a list of sections, each one an issue of its own:
 //
-//   Server (this issue), Roles and permissions (A7, #1019), Members (A8,
-//   #1020) and Channels (A9, #1021), then Reports (#1029).
+//   Server (#1018), Roles and permissions (A7, #1019), Members (A8, #1020)
+//   and Channels (A9, #1021), then Reports (#1029).
 //
 // A section whose issue has not merged is omitted, never shown as working: a
 // later issue adds its row to `sections` below and nothing else here moves.
@@ -18,7 +18,9 @@ import { useContext, useEffect, useId, useRef, useState, type ReactNode } from '
 import { JoiningSettings } from './joiningSettings';
 import { usePhone } from './phone';
 import type { ChannelV0 } from './schema/channel';
+import type { Permission } from './schema/permission';
 import type { WhoAmIResponseV1 } from './schema/principal';
+import { PermissionsSection } from './admin/PermissionsSection';
 import { ReportsSection } from './admin/ReportsSection';
 import { ServerSection } from './admin/ServerSection';
 
@@ -47,6 +49,9 @@ export function AdminConsole({ who, origin, channels, names, permissionsChanged,
   const heading = useRef<HTMLHeadingElement>(null);
   const opener = useRef<string | null>(null);
   const list = useRef<HTMLUListElement>(null);
+  // A request from the Server section's summary lines to bring a cell of the
+  // matrix into view; n counts them so each is met once.
+  const [jump, setJump] = useState<{ readonly permission: Permission; readonly n: number } | undefined>(undefined);
 
   // An operator sent to Joining from a refused invite lands on the Server
   // section, whichever page the phone was on.
@@ -55,14 +60,37 @@ export function AdminConsole({ who, origin, channels, names, permissionsChanged,
     if (sentHere > 0) setPage('server');
   }, [sentHere]);
 
-  // The sections that exist, in order. A7 to A9 add theirs between Server and
-  // Reports when they merge.
+  // The sections that exist, in order. A8 and A9 add theirs between Roles and
+  // permissions and Reports when they merge.
   const sections: readonly Section[] = [
     {
       id: 'server',
       label: 'Server',
       render: () => (
-        <ServerSection who={who} origin={origin} channels={channels} refresh={permissionsChanged} onUnauthorized={onUnauthorized} />
+        <ServerSection
+          who={who}
+          origin={origin}
+          channels={channels}
+          refresh={permissionsChanged}
+          onOpenRoles={(permission) => {
+            setJump((now) => ({ permission, n: (now?.n ?? 0) + 1 }));
+            setPage('roles');
+          }}
+          onUnauthorized={onUnauthorized}
+        />
+      ),
+    },
+    {
+      id: 'roles',
+      label: 'Roles and permissions',
+      render: () => (
+        <PermissionsSection
+          who={who}
+          refresh={permissionsChanged}
+          {...(names === undefined ? {} : { names })}
+          {...(jump === undefined ? {} : { focus: jump })}
+          onUnauthorized={onUnauthorized}
+        />
       ),
     },
     {

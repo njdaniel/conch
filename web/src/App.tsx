@@ -5,6 +5,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import * as api from './api';
 import { uploadRefusalLine } from './fileSize';
 import { ChangeName } from './ChangeName';
+import { ChannelDirectory } from './ChannelDirectory';
 import { CreateChannel } from './CreateChannel';
 import { Conversation } from './Conversation';
 import { GuestVisit } from './Guest';
@@ -15,6 +16,7 @@ import { FirstRun } from './FirstRun';
 import { Lobby } from './Lobby';
 import { ReportProblem } from './Report';
 import { OperatorWarning } from './OperatorWarning';
+import { ChannelSettingsAsk } from './ChannelSettingsAsk';
 import { RenameChannel } from './RenameChannel';
 import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeLinkFromAddress } from './route';
 import type { ChannelDocV1 } from './schema/channel';
@@ -25,7 +27,7 @@ import { YourSignIns } from './SignIns';
 import { SignInLink } from './SignInLink';
 import { AddDevice } from './AddDevice';
 import { AdminConsole } from './AdminConsole';
-import { memberLine } from './admin/permissions';
+import { canDo, memberLine } from './admin/permissions';
 import { Reauth } from './Reauth';
 import { PasswordSettings } from './Settings';
 import { Setup } from './Setup';
@@ -56,6 +58,7 @@ import { SearchPanel } from './SearchPanel';
 import { useReadState } from './useReadState';
 import { useChannelRefresh } from './useChannelRefresh';
 import { MembersPanel } from './agents/MembersPanel';
+import { CommunityMembers } from './Members';
 import { RunDetail } from './agents/RunDetail';
 import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
@@ -450,8 +453,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const onChannel = useCallback(
     (doc: ChannelDocV1) => {
       renamed(doc.channel_id, doc.name);
+      dispatchChannels({ type: 'settings', id: doc.channel_id, visibility: doc.visibility, default: doc.default });
     },
-    [renamed],
+    [renamed, dispatchChannels],
   );
   const onManages = useCallback(
     (id: number, manages: boolean) => {
@@ -1571,20 +1575,25 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           notificationCenter={<NotificationCenter alerts={notifications.alerts} onOpen={notifications.openAlert} onClear={notifications.clearAlerts} />}
           connection={connection}
           panel={
-            <MembersPanel
-              agents={agents}
-              now={now}
-              controls={
-                currentChannel === null
-                  ? null
-                  : {
-                      channel: currentChannel,
-                      channels: channels.channels,
-                      viewer: { role: auth.principal.role, guest: visit !== null },
-                      onUnauthorized,
-                    }
-              }
-            />
+            <>
+              <MembersPanel
+                agents={agents}
+                now={now}
+                controls={
+                  currentChannel === null
+                    ? null
+                    : {
+                        channel: currentChannel,
+                        channels: channels.channels,
+                        viewer: { role: auth.principal.role, guest: visit !== null },
+                        onUnauthorized,
+                      }
+                }
+              />
+              {auth.principal.kind === 'human' && visit === null ? (
+                <CommunityMembers viewer={auth.principal.id} permissionsTick={permissionsTick} channelIds={channels.channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
+              ) : null}
+            </>
           }
           account={
             <>
@@ -1700,6 +1709,21 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               onClose={close}
             />
           )}
+          // Holders of manage_channels make a channel public or private, a
+          // default or not, from its ⋯ menu (issue #1183). whoami says who
+          // holds it; the server decides each change.
+          canManage={visit === null && canDo(auth.principal, 'manage_channels')}
+          renderSettings={(channel, change, close) => (
+            <ChannelSettingsAsk
+              channel={channel}
+              change={change}
+              onApplied={(now) => {
+                dispatchChannels({ type: 'settings', id: now.id, visibility: now.visibility, default: now.default });
+              }}
+              onUnauthorized={onUnauthorized}
+              onClose={close}
+            />
+          )}
           {...(auth.principal.may_invite === true
             ? {
                 onInviteTo: () => {
@@ -1708,15 +1732,36 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               }
             : {})}
           newChannel={
-            // The server allows operators alone; anyone else is not offered it.
-            auth.principal.role === 'operator' ? (
-              <CreateChannel
-                asks={createAsks}
-                onCreated={(channel) => {
-                  dispatchChannels({ type: 'created', channel });
-                }}
-                onUnauthorized={onUnauthorized}
-              />
+            // Any member browses the directory and, where whoami says they may,
+            // makes a public or private channel; the server decides each.
+            auth.principal.kind === 'human' && visit === null ? (
+              <>
+                <ChannelDirectory
+                  channels={channels.channels}
+                  onJoined={(channel) => {
+                    setSearchOpen(false);
+                    dispatchChannels({ type: 'created', channel });
+                  }}
+                  onLeft={(name) => {
+                    const left = channelsNow.current.channels.find((c) => c.name === name);
+                    if (left !== undefined) dropChannel(left.id, left.name);
+                    dispatchChannels({ type: 'left', name });
+                  }}
+                  onOpen={onOpen}
+                  onUnauthorized={onUnauthorized}
+                />
+                {canDo(auth.principal, 'create_public_channels') || canDo(auth.principal, 'create_private_channels') ? (
+                  <CreateChannel
+                    asks={createAsks}
+                    canPublic={canDo(auth.principal, 'create_public_channels')}
+                    canPrivate={canDo(auth.principal, 'create_private_channels')}
+                    onCreated={(channel) => {
+                      dispatchChannels({ type: 'created', channel });
+                    }}
+                    onUnauthorized={onUnauthorized}
+                  />
+                ) : null}
+              </>
             ) : null
           }
           invites={
@@ -1762,6 +1807,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 historyBounded={agents.membersFor === channelId && (agents.members.find((m) => m.principal_id === auth.principal.id)?.history_after ?? 0) > 0}
                 channelId={channelId}
                 channel={selected}
+                {...(currentChannel?.visibility === undefined ? {} : { visibility: currentChannel.visibility })}
                 chat={chatFor(chat, selected)}
                 live={live.status}
                 people={live.people}

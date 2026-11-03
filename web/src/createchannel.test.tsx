@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 
-// Making a channel from the channel list (issue #695), against a stand-in
+// Making a channel from the channel list (issues #695, #991), against a stand-in
 // conchd that records each request's method, path and body.
 const origin = 'http://127.0.0.1:8080';
 const secret = 'conch_secret_token_value';
@@ -11,10 +11,10 @@ const created_at = '2026-10-21T00:00:00Z';
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 
 type Call = { readonly method: string; readonly path: string; readonly body: unknown };
-type Who = { id: number; kind: string; name: string; role: string };
+type Who = { id: number; kind: string; name: string; role: string; permissions?: string[] };
 
 const operator: Who = { id: 1, kind: 'human', name: 'nick', role: 'operator' };
-const member: Who = { id: 2, kind: 'human', name: 'ada', role: 'member' };
+const member: Who = { id: 2, kind: 'human', name: 'ada', role: 'member', permissions: ['create_public_channels', 'create_private_channels'] };
 const general = { id: 1, name: 'general', created_at };
 
 // serve answers whoami and the channel list for the one credential, and hands
@@ -30,8 +30,8 @@ function serve(me: Who, create: (name: string) => Promise<Response>, channels = 
       calls.push({ method, path, body });
       if (new Headers(init?.headers).get('Authorization') !== `Bearer ${secret}`) return Promise.resolve(json({}, 401));
       if (path === '/v1/whoami') return Promise.resolve(json(me));
-      if (path === '/v1/channels') return Promise.resolve(json({ channels }));
-      if (method === 'POST' && path === '/v0/channels') return create((body as { name: string }).name);
+      if (method === 'GET' && path === '/v1/channels') return Promise.resolve(json({ channels }));
+      if (method === 'POST' && path === '/v1/channels') return create((body as { name: string }).name);
       return Promise.resolve(json({}, 404));
     }),
   );
@@ -39,11 +39,12 @@ function serve(me: Who, create: (name: string) => Promise<Response>, channels = 
 }
 
 const made = (name: string, id = 2) => Promise.resolve(json({ channel: { id, name, created_at } }, 201));
-const refused = (status: number, code: string, message = 'no') => () => Promise.resolve(json({ code, message }, status));
+const refused = (status: number, code: string, message = 'no', headers: Record<string, string> = {}) => () =>
+  Promise.resolve(new Response(JSON.stringify({ code, message }), { status, headers }));
 
 const nav = () => screen.getByRole('navigation', { name: 'Channels' });
 const field = (form: HTMLElement) => within(form).getByLabelText<HTMLInputElement>('Channel name');
-const creates = (calls: readonly Call[]) => calls.filter((c) => c.method === 'POST' && c.path === '/v0/channels');
+const creates = (calls: readonly Call[]) => calls.filter((c) => c.method === 'POST' && c.path === '/v1/channels');
 
 // open signs in as whoever the stored credential is (an operator's is kept for
 // this tab) and opens the form.
@@ -81,7 +82,7 @@ describe('new channel', () => {
     type(form, 'book-club');
     fireEvent.click(within(form).getByRole('button', { name: 'Create channel' }));
     await screen.findByText('Created #book-club');
-    expect(creates(calls)).toEqual([{ method: 'POST', path: '/v0/channels', body: { name: 'book-club' } }]);
+    expect(creates(calls)).toEqual([{ method: 'POST', path: '/v1/channels', body: { name: 'book-club', visibility: 'public' } }]);
     const button = within(nav()).getByRole('button', { name: 'book-club' });
     expect(button.getAttribute('aria-current')).toBe('true');
     expect(within(nav()).getAllByRole('listitem').map((li) => li.querySelector('li > button')?.textContent)).toEqual(['general', 'book-club']);
@@ -100,13 +101,21 @@ describe('new channel', () => {
   });
 
   it.each([
-    ['a name already taken', refused(409, 'channel_exists'), 'There is already a channel with that name, perhaps one you are not in. Choose another name.'],
+    // The one line, whatever the collision, and never the server's own words.
+    ['a name already taken', refused(409, 'channel_exists', 'a channel with this name, or one that looks the same, already exists'), 'That name is taken'],
     [
-      'a name the server will not take, with its rule',
+      "a name the server will not take, with the page's own rule",
       refused(400, 'invalid_request', 'schema: channel name must not begin or end with whitespace'),
-      'Channel name must not begin or end with whitespace.',
+      'That name cannot be used: it needs a letter you can see, at most 100 characters, and no spaces at either end or control characters.',
     ],
-    ['a refusal of a member', refused(403, 'forbidden', 'operator role required'), 'Only an operator can create channels.'],
+    ['a refusal of a non-member', refused(403, 'forbidden', 'only a member of the community may create a channel'), 'Only members of this community can make channels.'],
+    ['a missing permission', refused(403, 'permission_denied', 'you may not create a public channel'), 'You do not have permission to make a public channel.'],
+    [
+      'the daily cap, with its Retry-After',
+      refused(429, 'rate_limited', 'you may create channels at most 10 times, and try at most 30 times, a day', { 'Retry-After': '7300' }),
+      'You have reached the daily limit for making channels. Try again in 3 hours.',
+    ],
+    ['the daily cap, without one', refused(429, 'rate_limited'), 'You have reached the daily limit for making channels. Try again in a few minutes.'],
     ['no answer at all', () => Promise.reject(new TypeError('failed')), 'Cannot reach the server. Try again.'],
     ['a server failure', refused(500, 'internal_error'), 'The server could not create the channel. Try again.'],
   ])('says so for %s, keeps the name as typed and lists nothing new', async (_case, answer, line) => {
@@ -223,12 +232,39 @@ describe('new channel', () => {
     expect(screen.getByRole('button', { name: 'Settings' }).getAttribute('aria-expanded')).toBe('true');
   });
 
-  it('is not offered to a member, whose list still says who can add them', async () => {
+  it('is offered to a member with a visibility choice, and sends the one chosen', async () => {
     window.sessionStorage.clear();
     window.localStorage.setItem(key, secret);
-    const calls = serve(member, (name) => made(name), []);
+    const calls = serve(member, (name) => made(name));
+    const form = await open();
+    expect(within(form).getByRole<HTMLInputElement>('radio', { name: /^Public/ }).checked).toBe(true);
+    fireEvent.click(within(form).getByRole('radio', { name: /^Private/ }));
+    type(form, 'quiet-room');
+    fireEvent.click(within(form).getByRole('button', { name: 'Create channel' }));
+    await screen.findByText('Created #quiet-room');
+    expect(creates(calls)).toEqual([{ method: 'POST', path: '/v1/channels', body: { name: 'quiet-room', visibility: 'private' } }]);
+    // It is opened, as the creator's own.
+    expect(within(nav()).getByRole('button', { name: 'quiet-room' }).getAttribute('aria-current')).toBe('true');
+  });
+
+  it('offers only the visibility a member holds the permission for', async () => {
+    window.sessionStorage.clear();
+    window.localStorage.setItem(key, secret);
+    const calls = serve({ ...member, permissions: ['create_private_channels'] }, (name) => made(name));
+    const form = await open();
+    expect(within(form).queryByRole('radio')).toBeNull();
+    type(form, 'only-private');
+    fireEvent.click(within(form).getByRole('button', { name: 'Create channel' }));
+    await screen.findByText('Created #only-private');
+    expect(creates(calls)[0]?.body).toEqual({ name: 'only-private', visibility: 'private' });
+  });
+
+  it('is not offered to a member who holds neither create permission', async () => {
+    window.sessionStorage.clear();
+    window.localStorage.setItem(key, secret);
+    const calls = serve({ ...member, permissions: [] }, (name) => made(name), []);
     render(<App origin={origin} />);
-    await within(await screen.findByRole('navigation', { name: 'Channels' })).findByText('No channels yet: an operator needs to add you to one');
+    await within(await screen.findByRole('navigation', { name: 'Channels' })).findByText('No channels yet');
     expect(screen.queryByRole('button', { name: 'New channel' })).toBeNull();
     expect(screen.queryByRole('form', { name: 'New channel' })).toBeNull();
     expect(screen.queryByRole('heading', { name: "You're not in any channels yet" })).toBeNull();

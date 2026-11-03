@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { headingId } from './Conversation';
 import { InvitePanel } from './InvitePanel';
 import { Lobby } from './Lobby';
-import { MicTestShown, useAppHeight, VoiceLive, VoiceStrip } from './phone';
+import { MicTestShown, ShowChat, useAppHeight, VoiceLive, VoiceStrip } from './phone';
 import type { ChannelV0 } from './schema/channel';
 import type { ChannelsState } from './state/channels';
 
@@ -106,7 +106,8 @@ function lobby({
   onOpen = () => undefined,
   joined = () => undefined,
   firstRun,
-}: { channels?: ChannelsState; live?: boolean; onOpen?: (name: string) => void; joined?: () => void; firstRun?: ReactNode } = {}) {
+  newChannel,
+}: { channels?: ChannelsState; live?: boolean; onOpen?: (name: string) => void; joined?: () => void; firstRun?: ReactNode; newChannel?: ReactNode } = {}) {
   const page = (voice: ReactNode, shown: ChannelsState = channels) => (
     <Lobby
       origin="http://127.0.0.1:8080"
@@ -117,6 +118,7 @@ function lobby({
       connection="connected"
       conversation={firstRun === undefined ? <Conversation /> : null}
       firstRun={firstRun}
+      newChannel={newChannel}
       panel={<p>Nobody</p>}
       voice={voice}
       invites={null}
@@ -191,6 +193,38 @@ describe('the bottom navigation', () => {
     cleanup();
     lobby();
     expect(tab('Chat').getAttribute('aria-current')).toBe('page');
+  });
+});
+
+// Issue #991: the directory's Join opens a channel itself, and on a phone that
+// returns to Chat with focus on the heading, as choosing a row does.
+describe('opening a channel from the channels column (issue #991)', () => {
+  function Opener() {
+    const showChat = useContext(ShowChat);
+    return (
+      <button type="button" onClick={showChat}>
+        Join ideas
+      </button>
+    );
+  }
+
+  it('returns a phone to Chat with focus on the heading', () => {
+    windowOf(true);
+    lobby({ newChannel: <Opener /> });
+    fireEvent.click(tab('Channels'));
+    expect(tab('Channels').getAttribute('aria-current')).toBe('page');
+    fireEvent.click(screen.getByRole('button', { name: 'Join ideas' }));
+    expect(tab('Chat').getAttribute('aria-current')).toBe('page');
+    expect(document.activeElement?.id).toBe(headingId);
+  });
+
+  it('does nothing where the conversation is already beside the list', () => {
+    windowOf(false);
+    lobby({ newChannel: <Opener /> });
+    const before = document.activeElement;
+    fireEvent.click(screen.getByRole('button', { name: 'Join ideas' }));
+    expect(screen.queryByRole('navigation', { name: 'Main navigation' })).toBeNull();
+    expect(document.activeElement).toBe(before);
   });
 });
 

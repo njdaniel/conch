@@ -84,14 +84,17 @@ func TestAdminInviteCommands(t *testing.T) {
 		return stdout, stderr
 	}
 	run("channel", "create", "ops")
+	// A member link lands its joiner in the default channels.
+	run("channel", "settings", "ops", "--public")
+	run("channel", "settings", "ops", "--default", "on")
 
-	stdout, stderr := run("invite", "create", "--open", "--channel", "ops", "--expires", "24h", "--max-uses", "5", "--voice")
+	stdout, stderr := run("invite", "create", "--expires", "24h", "--uses", "5")
 	m := inviteLinkPattern.FindStringSubmatch(stdout)
 	if m == nil || m[1] != e.url {
 		t.Fatalf("stdout = %q, want the link alone on one line", stdout)
 	}
 	code := m[2]
-	if strings.Contains(stderr, code) || !strings.HasPrefix(stderr, "invite 1 open uses 0/5 expires ") {
+	if strings.Contains(stderr, code) || !strings.HasPrefix(stderr, "invite 1 member uses 0/5 expires ") {
 		t.Errorf("stderr = %q, want the invite's id and expiry and not its code", stderr)
 	}
 	wren := e.redeemCode(t, code, "wren")
@@ -102,13 +105,13 @@ func TestAdminInviteCommands(t *testing.T) {
 		args []string
 		want string // a regular expression for the whole of stdout
 	}{
-		{"list", []string{"invite", "list"}, `^1 open open uses 2/5 expires \S+ by 1 channels ops\n$`},
-		{"list, filtered", []string{"invite", "list", "--kind", "personal"}, `^$`},
+		{"list", []string{"invite", "list"}, `^1 member open uses 2/5 joiners 2 expires \S+ by 1 other 0 channels -\n$`},
+		{"list, filtered", []string{"invite", "list", "--state", "used"}, `^$`},
 		{"joiners", []string{"invite", "joiners", "1"}, `^3 enabled \S+ wren\n4 enabled \S+ piper\n$`},
 		{"dry run", []string{"invite", "disable-joiners", "1"}, `^would disable 2 principal\(s\): 3,4; run again with --yes to do it and close invite 1\n$`},
-		{"still open", []string{"invite", "list", "--state", "open"}, `^1 open open `},
+		{"still open", []string{"invite", "list", "--state", "open"}, `^1 member open `},
 		{"disable them", []string{"invite", "disable-joiners", "1", "--yes"}, `^disabled 2 principal\(s\): 3,4\nclosed invite 1\n$`},
-		{"closed", []string{"invite", "list", "--state", "closed", "--created-by", "1"}, `^1 open closed uses 2/5 `},
+		{"closed", []string{"invite", "list", "--state", "closed", "--created-by", "1"}, `^1 member closed uses 2/5 `},
 		{"joiners disabled", []string{"invite", "joiners", "1"}, `^3 disabled \S+ wren\n4 disabled \S+ piper\n$`},
 		{"pause", []string{"invite", "pause"}, `^invites are paused\n$`},
 		{"status", []string{"invite", "status"}, `^invites are paused\n$`},
@@ -130,23 +133,30 @@ func TestAdminInviteCommands(t *testing.T) {
 		}
 	}
 
-	// A personal invite, then closed by id.
-	stdout, _ = run("invite", "create", "--personal", "--channel", "ops", "--expires", "7d")
+	// A second link, then closed by id.
+	stdout, _ = run("invite", "create", "--expires", "7d")
 	if !inviteLinkPattern.MatchString(stdout) {
-		t.Fatalf("personal create stdout = %q", stdout)
+		t.Fatalf("second create stdout = %q", stdout)
 	}
 	if out, _ := run("invite", "close", "2"); out != "closed invite 2\n" {
 		t.Errorf("close = %q", out)
+	}
+
+	// A link that lands in a channel an operator names.
+	stdout, _ = run("invite", "create", "--landing-channel", "ops", "--expires", "1h")
+	if !inviteLinkPattern.MatchString(stdout) {
+		t.Fatalf("landing create stdout = %q", stdout)
+	}
+	if out, _ := run("invite", "list", "--state", "open"); !regexp.MustCompile(`^3 member open uses 0 joiners 0 expires \S+ by 1 other 0 channels ops\n$`).MatchString(out) {
+		t.Errorf("list after a landing link = %q", out)
 	}
 }
 
 // Pausing refuses redemption until resumed.
 func TestAdminInvitePauseRefusesRedeem(t *testing.T) {
 	e := newAdminEnv(t)
-	if _, _, err := e.admin(t, e.operatorToken, "", "channel", "create", "ops"); err != nil {
-		t.Fatal(err)
-	}
-	stdout, _, err := e.admin(t, e.operatorToken, "", "invite", "create", "--open", "--channel", "ops", "--expires", "1h")
+	e.makeDefaultChannel(t)
+	stdout, _, err := e.admin(t, e.operatorToken, "", "invite", "create", "--expires", "1h")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +172,7 @@ func TestAdminInvitePauseRefusesRedeem(t *testing.T) {
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("redeem while paused = %d, want 503", resp.StatusCode)
 	}
-	if _, _, err := e.admin(t, e.operatorToken, "", "invite", "create", "--open", "--channel", "ops", "--expires", "1h"); err == nil || !strings.Contains(err.Error(), schema.ErrorCodeInvitesPaused) {
+	if _, _, err := e.admin(t, e.operatorToken, "", "invite", "create", "--expires", "1h"); !IsServerCode(err, schema.ErrorCodeInvitesPaused) {
 		t.Errorf("create while paused = %v, want invites_paused", err)
 	}
 	if _, _, err := e.admin(t, e.operatorToken, "", "invite", "resume"); err != nil {
@@ -175,10 +185,8 @@ func TestAdminInvitePauseRefusesRedeem(t *testing.T) {
 // in no other output of any invite command, nor in any error.
 func TestAdminInviteCodePrintedOnce(t *testing.T) {
 	e := newAdminEnv(t)
-	if _, _, err := e.admin(t, e.operatorToken, "", "channel", "create", "ops"); err != nil {
-		t.Fatal(err)
-	}
-	stdout, stderr, err := e.admin(t, e.operatorToken, "", "invite", "create", "--open", "--channel", "ops", "--expires", "1h")
+	e.makeDefaultChannel(t)
+	stdout, stderr, err := e.admin(t, e.operatorToken, "", "invite", "create", "--expires", "1h")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +208,7 @@ func TestAdminInviteCodePrintedOnce(t *testing.T) {
 		}
 	}
 	// A member's refusals too.
-	for _, args := range [][]string{{"invite", "joiners", "1"}, {"invite", "create", "--open", "--channel", "ops", "--expires", "1h"}} {
+	for _, args := range [][]string{{"invite", "joiners", "1"}, {"invite", "create", "--expires", "1h"}} {
 		out, errOut, err := e.admin(t, e.memberToken, "", args...)
 		all = append(all, out, errOut)
 		if err != nil {
@@ -244,7 +252,7 @@ func TestAdminInviteCreateRefusesMalformedCode(t *testing.T) {
 			}))
 			defer fake.Close()
 			var out, errOut bytes.Buffer
-			err := RunWithStdin(context.Background(), []string{"admin", "invite", "create", "--open", "--channel", "ops", "--expires", "1h", "--server", fake.URL},
+			err := RunWithStdin(context.Background(), []string{"admin", "invite", "create", "--expires", "1h", "--server", fake.URL},
 				strings.NewReader(""), &out, &errOut, "vtest")
 			if tt.wantOK {
 				if err != nil || out.String() != fake.URL+"/app/#/invite/"+good+"\n" {
@@ -264,8 +272,8 @@ func TestAdminInviteCreateRefusesMalformedCode(t *testing.T) {
 
 func createResponse(t *testing.T, code string) []byte {
 	t.Helper()
-	b, err := json.Marshal(schema.CreateInviteResponseV1{
-		Invite: schema.InviteV1{ID: 1, Kind: schema.InviteKindOpen, Channels: []schema.InviteChannelV1{}},
+	b, err := json.Marshal(schema.CreateInviteResponseV2{
+		Invite: schema.InviteV2{ID: 1, Kind: schema.InviteKindMember},
 		Code:   code,
 	})
 	if err != nil {
@@ -278,9 +286,7 @@ func createResponse(t *testing.T, code string) []byte {
 // type the route documents.
 func TestAdminInviteJSON(t *testing.T) {
 	e := newAdminEnv(t)
-	if _, _, err := e.admin(t, e.operatorToken, "", "channel", "create", "ops"); err != nil {
-		t.Fatal(err)
-	}
+	e.makeDefaultChannel(t)
 	strict := func(t *testing.T, raw string, into any) {
 		t.Helper()
 		dec := json.NewDecoder(strings.NewReader(raw))
@@ -297,15 +303,15 @@ func TestAdminInviteJSON(t *testing.T) {
 		args  []string
 		check func(t *testing.T, out string)
 	}{
-		{"create", []string{"invite", "create", "--open", "--channel", "ops", "--expires", "1h"}, func(t *testing.T, out string) {
-			var r schema.CreateInviteResponseV1
+		{"create", []string{"invite", "create", "--expires", "1h"}, func(t *testing.T, out string) {
+			var r schema.CreateInviteResponseV2
 			strict(t, out, &r)
 			if r.Invite.ID != 1 || schema.ValidateInviteCode(r.Code) != nil {
 				t.Errorf("response = %+v", r.Invite)
 			}
 		}},
 		{"list", []string{"invite", "list"}, func(t *testing.T, out string) {
-			var r schema.ListInvitesResponseV1
+			var r schema.ListInvitesResponseV2
 			strict(t, out, &r)
 			if len(r.Invites) != 1 {
 				t.Errorf("invites = %+v", r.Invites)
@@ -369,22 +375,22 @@ func TestAdminInviteMemberRefused(t *testing.T) {
 		args []string
 		code string
 	}{
-		{"joiners", []string{"invite", "joiners", "1"}, "forbidden"},
+		// Not "yours to see" and "no such link" read the same, by design.
+		{"joiners", []string{"invite", "joiners", "1"}, schema.ErrorCodeInviteNotFound},
 		{"disable-joiners", []string{"invite", "disable-joiners", "1", "--yes"}, "forbidden"},
 		{"pause", []string{"invite", "pause"}, "forbidden"},
 		{"resume", []string{"invite", "resume"}, "forbidden"},
 		{"status", []string{"invite", "status"}, "forbidden"},
 		{"invite-permission", []string{"principal", "invite-permission", "2", "on"}, "forbidden"},
 		{"disable-invitees", []string{"principal", "disable-invitees", "1", "--yes"}, "forbidden"},
-		// A member makes member links, not v1 invites (issue #990): the CLI moves to
-		// them with #994, and the server says the kind is retired.
-		{"create", []string{"invite", "create", "--personal", "--channel", "ops", "--expires", "1h"}, schema.ErrorCodeInviteKindRetired},
+		// Making an invite is a person's route; this member may not.
+		{"create", []string{"invite", "create", "--expires", "1h"}, schema.ErrorCodeInviteNotAllowed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			stdout, _, err := e.admin(t, e.memberToken, "", tt.args...)
-			if err == nil || !strings.Contains(err.Error(), tt.code) {
-				t.Fatalf("error = %v, want %s", err, tt.code)
+			if !IsServerCode(err, tt.code) {
+				t.Fatalf("error = %v, want the server's %s", err, tt.code)
 			}
 			if stdout != "" {
 				t.Errorf("stdout = %q, want empty", stdout)
@@ -405,24 +411,26 @@ func TestAdminInviteUsageErrors(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"no kind", []string{"invite", "create", "--channel", "ops", "--expires", "1h"}, "exactly one of --open and --personal"},
-		{"both kinds", []string{"invite", "create", "--open", "--personal", "--channel", "ops", "--expires", "1h"}, "exactly one of --open and --personal"},
-		{"no channel", []string{"invite", "create", "--open", "--expires", "1h"}, "--channel is required"},
-		{"no expiry", []string{"invite", "create", "--open", "--channel", "ops"}, "--expires is required"},
-		{"bad expiry", []string{"invite", "create", "--open", "--channel", "ops", "--expires", "soon"}, "--expires must be a duration"},
-		{"zero days", []string{"invite", "create", "--open", "--channel", "ops", "--expires", "0d"}, "--expires must be a duration"},
-		{"past expiry", []string{"invite", "create", "--open", "--channel", "ops", "--expires", "2001-01-01T00:00:00Z"}, "must be in the future"},
-		{"open link too long", []string{"invite", "create", "--open", "--channel", "ops", "--expires", "8d"}, "expires_at must be within"},
-		{"personal with a cap", []string{"invite", "create", "--personal", "--channel", "ops", "--expires", "1h", "--max-uses", "3"}, "only an open invite takes max_uses"},
-		{"zero cap", []string{"invite", "create", "--open", "--channel", "ops", "--expires", "1h", "--max-uses", "0"}, "max_uses must be between"},
-		{"credential days", []string{"invite", "create", "--open", "--channel", "ops", "--expires", "1h", "--credential-days", "400"}, "--credential-days must be between"},
-		{"same channel twice", []string{"invite", "create", "--open", "--channel", "ops", "--channel", "ops", "--expires", "1h"}, "names a channel twice"},
+		{"old open flag", []string{"invite", "create", "--open", "--expires", "1h"}, "--open no longer exist; a link is a member link"},
+		{"old flags are all named", []string{"invite", "create", "--personal", "--channel", "ops", "--voice", "--may-invite", "--join-as", "account"}, "--personal, --channel, --voice, --may-invite, --join-as no longer exist"},
+		{"old channel names its replacement", []string{"invite", "create", "--channel", "ops"}, "(--channel is --landing-channel)"},
+		{"the settings are all named", []string{"invite", "create", "--open"}, "--credential-days <n> and --landing-channel <name> are its only settings"},
+		{"landing channel twice", []string{"invite", "create", "--landing-channel", "ops", "--landing-channel", "ops"}, "named twice"},
+		{"old max-uses names its replacement", []string{"invite", "create", "--max-uses", "3"}, "(--max-uses is --uses)"},
+		{"never and an expiry", []string{"invite", "create", "--never-expires", "--expires", "1h"}, "--expires or --never-expires, not both"},
+		{"bad expiry", []string{"invite", "create", "--expires", "soon"}, "--expires must be a duration"},
+		{"zero days", []string{"invite", "create", "--expires", "0d"}, "--expires must be a duration"},
+		{"past expiry", []string{"invite", "create", "--expires", "2001-01-01T00:00:00Z"}, "must be in the future"},
+		{"too far ahead", []string{"invite", "create", "--expires", "400d"}, "expires_at must be within"},
+		{"zero cap", []string{"invite", "create", "--uses", "0"}, "max_uses must be between"},
+		{"credential days", []string{"invite", "create", "--credential-days", "400"}, "--credential-days must be between"},
 		{"close without id", []string{"invite", "close"}, "expected <id>"},
 		{"joiners bad id", []string{"invite", "joiners", "x"}, "id must be a positive integer"},
 		{"pause takes nothing", []string{"invite", "pause", "now"}, "expected <>"},
 		{"permission without a value", []string{"principal", "invite-permission", "2"}, "expected <id> <on|off>"},
 		{"permission yes", []string{"principal", "invite-permission", "2", "yes"}, "must be on or off"},
 		{"list negative maker", []string{"invite", "list", "--created-by", "-1"}, "--created-by must be a positive integer"},
+		{"list kind is gone", []string{"invite", "list", "--kind", "open"}, "flag provided but not defined: -kind"},
 		{"unknown verb", []string{"invite", "frob"}, "conch admin invite <create|list|close|joiners|disable-joiners|pause|resume|status>"},
 	}
 	for _, tt := range tests {
@@ -478,22 +486,48 @@ func TestParseInviteExpiry(t *testing.T) {
 	}
 }
 
+func TestNeverExpires(t *testing.T) {
+	past := schema.NewTimestamp(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	sentinel := schema.NewTimestamp(time.UnixMilli(schema.NoExpiryMillis).UTC())
+	tests := []struct {
+		name string
+		inv  schema.InviteV2
+		want bool
+	}{
+		{"no expiry sent", schema.InviteV2{}, true},
+		{"the sentinel", schema.InviteV2{ExpiresAt: &sentinel}, true},
+		{"a real time", schema.InviteV2{ExpiresAt: &past}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := neverExpires(tt.inv); got != tt.want {
+				t.Errorf("neverExpires = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestInviteState(t *testing.T) {
 	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 	ts := func(d time.Duration) schema.Timestamp { return schema.NewTimestamp(now.Add(d)) }
+	tsp := func(d time.Duration) *schema.Timestamp { v := ts(d); return &v }
 	one := int64(1)
 	closedAt := ts(-time.Minute)
+	sentinelTime := schema.NewTimestamp(time.UnixMilli(schema.NoExpiryMillis).UTC())
+	sentinel := &sentinelTime
 	tests := []struct {
 		name string
-		inv  schema.InviteV1
+		inv  schema.InviteV2
 		want string
 	}{
-		{"open", schema.InviteV1{ExpiresAt: ts(time.Hour)}, "open"},
-		{"open with a cap left", schema.InviteV1{ExpiresAt: ts(time.Hour), MaxUses: &one}, "open"},
-		{"used", schema.InviteV1{ExpiresAt: ts(time.Hour), MaxUses: &one, Uses: 1}, "used"},
-		{"expired", schema.InviteV1{ExpiresAt: ts(-time.Hour)}, "expired"},
-		{"closed wins", schema.InviteV1{ExpiresAt: ts(-time.Hour), MaxUses: &one, Uses: 1, ClosedAt: &closedAt}, "closed"},
-		{"used wins over expired", schema.InviteV1{ExpiresAt: ts(-time.Hour), MaxUses: &one, Uses: 1}, "used"},
+		{"open", schema.InviteV2{ExpiresAt: tsp(time.Hour)}, "open"},
+		{"never expires", schema.InviteV2{}, "open"},
+		{"the sentinel is never", schema.InviteV2{ExpiresAt: sentinel}, "open"},
+		{"open with a cap left", schema.InviteV2{ExpiresAt: tsp(time.Hour), MaxUses: &one}, "open"},
+		{"used", schema.InviteV2{ExpiresAt: tsp(time.Hour), MaxUses: &one, Uses: 1}, "used"},
+		{"expired", schema.InviteV2{ExpiresAt: tsp(-time.Hour)}, "expired"},
+		{"closed wins", schema.InviteV2{ExpiresAt: tsp(-time.Hour), MaxUses: &one, Uses: 1, ClosedAt: &closedAt}, "closed"},
+		{"used wins over expired", schema.InviteV2{ExpiresAt: tsp(-time.Hour), MaxUses: &one, Uses: 1}, "used"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

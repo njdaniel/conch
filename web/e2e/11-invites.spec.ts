@@ -21,7 +21,7 @@ const noLongerWorks = 'Ask the person who sent it for a new one. If you already 
 
 const unique = (label: string) => `a8-${label}-${String(Date.now())}`;
 // The channels' own buttons, not the ⋯ of a row's menu (issue #1135).
-const channelButtons = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('button', { name: /^(?!Actions for )/ });
+const channelButtons = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('button', { name: /^(?!Actions for |Browse channels$|New channel$)/ });
 
 // join chooses a name and a password on the landing page (issue #713: the
 // invite makes an account through POST /v2/invites/redeem) and waits for the
