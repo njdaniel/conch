@@ -89,9 +89,12 @@ describe('an unread count', () => {
 
 // Issue #596: how many are in a channel's voice, as text beside its button,
 // describing it as the unread count does, never in its name.
+// A count alone, as a server from before issue #1103 sends it: no people.
+const countsOnly = (occupancy: [number, number][]) => new Map(occupancy.map(([id, count]) => [id, { count, people: null }]));
+
 describe('a voice count', () => {
   const occupied = (occupancy: [number, number][], unread = new Map<string, number>()) => (
-    <ChannelList channels={channels} selected="general" unread={unread} occupancy={new Map(occupancy)} onOpen={() => undefined} />
+    <ChannelList channels={channels} selected="general" unread={unread} occupancy={countsOnly(occupancy)} onOpen={() => undefined} />
   );
 
   it('says how many are in voice, describes its channel button and leaves the name alone', async () => {
@@ -123,7 +126,7 @@ describe('a voice count', () => {
 
   it('opens the channel when its button is pressed, as any channel does', () => {
     const opened: string[] = [];
-    render(<ChannelList channels={channels} selected="general" unread={new Map()} occupancy={new Map([[3, 2]])} onOpen={(n) => { opened.push(n); }} />);
+    render(<ChannelList channels={channels} selected="general" unread={new Map()} occupancy={countsOnly([[3, 2]])} onOpen={(n) => { opened.push(n); }} />);
     fireEvent.click(screen.getByRole('button', { name: 'game-night' }));
     expect(opened).toEqual(['game-night']);
   });
@@ -136,6 +139,98 @@ describe('a voice count', () => {
     expect(screen.getByRole('img', { name: '4 in voice' })).toBeTruthy();
     view.rerender(occupied([]));
     expect(screen.queryByRole('img', { name: /in voice/ })).toBeNull();
+  });
+});
+
+// Issue #1103: who is in a channel's voice, by name, nested under the
+// channel; the viewer is "You"; someone not yet named is their id; the list
+// folds after five; a row opens the channel and nothing more.
+describe('who is in voice', () => {
+  const names = new Map<number, string>([
+    [10, 'alice'],
+    [11, 'bob'],
+    [12, 'carol'],
+    [13, 'dave'],
+    [14, 'erin'],
+    [15, 'frank'],
+    [16, 'grace'],
+  ]);
+  const listed = (people: Record<number, number[]>, onOpen: (n: string) => void = () => undefined, voiceNames = names) => (
+    <ChannelList
+      channels={channels}
+      selected="general"
+      unread={new Map()}
+      occupancy={new Map(Object.entries(people).map(([id, ids]) => [Number(id), { count: ids.length, people: ids }]))}
+      voiceNames={voiceNames}
+      viewer={7}
+      onOpen={onOpen}
+    />
+  );
+  const inVoice = (channel: string) => screen.getByRole('list', { name: `In voice in #${channel}` });
+  const rows = (channel: string) => within(inVoice(channel)).getAllByRole('listitem').map((li) => li.textContent);
+
+  it('names the people under the channel, in the order the server lists them, as text outside the channel button', () => {
+    render(listed({ 3: [10, 11] }));
+    expect(rows('game-night')).toEqual(['alice', 'bob']);
+    const button = screen.getByRole('button', { name: 'game-night' });
+    expect(button.textContent).toBe('game-night');
+    expect(inVoice('game-night').closest('button')).toBeNull();
+    // Under the channel's row, with the count still beside the button.
+    expect(inVoice('game-night').parentElement).toBe(button.parentElement);
+    expect(screen.getByRole('img', { name: '2 in voice' })).toBeTruthy();
+    // No list under a channel with nobody.
+    expect(screen.queryByRole('list', { name: 'In voice in #general' })).toBeNull();
+  });
+
+  it('says You for the viewer and Member N for someone not yet named', () => {
+    render(listed({ 2: [7, 99] }));
+    expect(rows('book-club')).toEqual(['You', 'Member 99']);
+  });
+
+  it('folds after five with how many more', () => {
+    render(listed({ 3: [10, 11, 12, 13, 14, 15, 16] }));
+    expect(rows('game-night')).toEqual(['alice', 'bob', 'carol', 'dave', 'erin', '+2 more']);
+  });
+
+  it('shows all five when there are no more than five', () => {
+    render(listed({ 3: [10, 11, 12, 13, 14] }));
+    expect(rows('game-night')).toEqual(['alice', 'bob', 'carol', 'dave', 'erin']);
+  });
+
+  it('folds the sixth into +1 more', () => {
+    render(listed({ 3: [10, 11, 12, 13, 14, 15] }));
+    expect(rows('game-night')).toEqual(['alice', 'bob', 'carol', 'dave', 'erin', '+1 more']);
+  });
+
+  it('opens the channel from a name or from the fold, and nothing else', () => {
+    const opened: string[] = [];
+    render(listed({ 3: [10, 11, 12, 13, 14, 15] }, (n) => { opened.push(n); }));
+    fireEvent.click(within(inVoice('game-night')).getByRole('button', { name: 'bob' }));
+    fireEvent.click(within(inVoice('game-night')).getByRole('button', { name: '+1 more' }));
+    expect(opened).toEqual(['game-night', 'game-night']);
+  });
+
+  it('keeps the rows out of the tab order: the channel button does what they do', () => {
+    render(listed({ 3: [10, 11] }));
+    for (const b of within(inVoice('game-night')).getAllByRole('button')) expect(b.tabIndex).toBe(-1);
+    expect(screen.getByRole('button', { name: 'general' }).tabIndex).toBe(0);
+  });
+
+  it('shows the count alone when the server did not say who', () => {
+    render(<ChannelList channels={channels} selected="general" unread={new Map()} occupancy={countsOnly([[3, 2]])} voiceNames={names} viewer={7} onOpen={() => undefined} />);
+    expect(screen.getByRole('img', { name: '2 in voice' })).toBeTruthy();
+    expect(screen.queryByRole('list', { name: /^In voice in/ })).toBeNull();
+  });
+
+  it('follows the people and their names as they change', () => {
+    const view = render(listed({ 3: [10, 99] }));
+    expect(rows('game-night')).toEqual(['alice', 'Member 99']);
+    view.rerender(listed({ 3: [10, 99] }, undefined, new Map([...names, [99, 'zed']])));
+    expect(rows('game-night')).toEqual(['alice', 'zed']);
+    view.rerender(listed({ 3: [99] }, undefined, new Map([...names, [99, 'zed']])));
+    expect(rows('game-night')).toEqual(['zed']);
+    view.rerender(listed({}));
+    expect(screen.queryByRole('list', { name: /^In voice in/ })).toBeNull();
   });
 });
 

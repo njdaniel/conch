@@ -48,14 +48,16 @@ vi.mock('../api', () => ({
   },
 }));
 
-import { countsOf, parseOccupancy, settleDelay, useOccupancy } from './useOccupancy';
+import { countsOf, parseOccupancy, settleDelay, useOccupancy, type InVoice } from './useOccupancy';
 
-const doc = (channels: [number, number][], up: Partial<Pick<VoiceOccupancyV1, 'configured' | 'available'>> = {}): VoiceOccupancyV1 => ({
+// A document: each channel its count and, when given, who (issue #1103); a
+// row without ids is one a conchd from before the field wrote.
+const doc = (channels: [number, number, number[]?][], up: Partial<Pick<VoiceOccupancyV1, 'configured' | 'available'>> = {}): VoiceOccupancyV1 => ({
   schema: 'conch.voice_occupancy.v1',
   configured: true,
   available: true,
   ...up,
-  channels: channels.map(([channel_id, in_voice]) => ({ channel_id, in_voice })),
+  channels: channels.map(([channel_id, in_voice, principal_ids]) => ({ channel_id, in_voice, ...(principal_ids === undefined ? {} : { principal_ids }) })),
 });
 
 interface Props {
@@ -112,7 +114,10 @@ function drop(code: number): void {
 }
 
 const live = () => fake.opened.filter((o) => !o.closed);
-const entries = (m: ReadonlyMap<number, number>) => [...m.entries()];
+// The counts, by channel.
+const entries = (m: InVoice) => [...m.entries()].map(([id, v]) => [id, v.count]);
+// Who, by channel.
+const whom = (m: InVoice) => [...m.entries()].map(([id, v]) => [id, v.people]);
 
 beforeEach(() => {
   vi.useFakeTimers();
@@ -130,6 +135,15 @@ afterEach(() => {
 describe('a document', () => {
   it('is read as the channels with someone in voice, zeros left out', () => {
     expect(entries(countsOf(doc([[1, 3], [2, 0], [7, 1]])))).toEqual([[1, 3], [7, 1]]);
+  });
+
+  // Issue #1103: who is there, as the server lists them; a document from a
+  // server that does not say has the count alone.
+  it('carries who is in each channel, or null when the server did not say', () => {
+    expect(whom(countsOf(doc([[1, 3, [4, 9, 12]], [2, 0, []], [7, 1]])))).toEqual([
+      [1, [4, 9, 12]],
+      [7, null],
+    ]);
   });
 
   it('says nobody anywhere while voice is not set up, or LiveKit is out of reach', () => {
@@ -169,10 +183,20 @@ describe('the socket', () => {
   it('keeps the same counts when a frame changes nothing', async () => {
     const { result } = hook();
     await flush();
-    send(doc([[1, 2]]));
+    send(doc([[1, 2, [4, 9]]]));
     const before = result.current;
-    send(doc([[1, 2], [2, 0]]));
+    send(doc([[1, 2, [4, 9]], [2, 0, []]]));
     expect(result.current).toBe(before);
+  });
+
+  it('follows who is there when the count stays and the people change (issue #1103)', async () => {
+    const { result } = hook();
+    await flush();
+    send(doc([[1, 2, [4, 9]]]));
+    const before = result.current;
+    send(doc([[1, 2, [4, 12]]]));
+    expect(result.current).not.toBe(before);
+    expect(whom(result.current)).toEqual([[1, [4, 12]]]);
   });
 
   it('ignores a frame that is not an occupancy document', async () => {
