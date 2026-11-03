@@ -52,7 +52,7 @@ var communityRoutes = map[string]parityVerb{
 // communityRoutes nor parityExempt fails the test.
 var communityRouteFamilies = regexp.MustCompile(`^(POST /v1/channels|(GET|POST|PUT|PATCH|DELETE) (` +
 	`/v1/directory/.*` +
-	`|/v1/channels/\{[a-z_]+\}/(join|leave|authors)` +
+	`|/v1/channels/\{[a-z_]+\}/(join|leave)` +
 	`|/v1/channels/\{[a-z_]+\}/settings` +
 	`|/v1/principals/\{[a-z_]+\}/voice-permission` +
 	`|/v2/invites.*` +

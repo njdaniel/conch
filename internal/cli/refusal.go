@@ -26,6 +26,14 @@ func (e *refusalError) Error() string { return e.line }
 
 func (e *refusalError) Unwrap() error { return e.cause }
 
+// operatorOnly and communityOnly are the 403 forbidden lines a command uses
+// when it is certain of the cause: an operator-only route, and a route for
+// people in the community, which agents and people outside it cannot use.
+const (
+	operatorOnly  = "only an operator may do this"
+	communityOnly = "only a person in the community may do this: agents and people outside it cannot"
+)
+
 // refusalLines maps a server code to a command's own sentence for it.
 type refusalLines map[string]string
 
@@ -33,7 +41,7 @@ type refusalLines map[string]string
 // own lines are looked up first.
 var commonRefusals = refusalLines{
 	schema.ErrorCodeReauthRequired:  "this needs your password first: run 'conch reauth' (a script credential cannot give one; sign in with 'conch login --password'), then try again",
-	"forbidden":                     "only an operator may do this",
+	"forbidden":                     "the server does not allow you to do this",
 	schema.ErrorCodeHumanRequired:   "only a person may do this, not an agent",
 	schema.ErrorCodeGuestNotAllowed: "a guest may not do this",
 	"channel_not_found":             "no such channel, or you cannot see it",

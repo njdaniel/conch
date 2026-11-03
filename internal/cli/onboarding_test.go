@@ -128,7 +128,7 @@ func (e *onboardEnv) openJoining(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, _ := e.mustRun(t, e.operatorToken, "", "admin", "join", "set", "--open-joining", "account", "--open-channel", "lobby")
-	if !strings.Contains(out, "open joining: account\nguests: off\n") || !strings.Contains(out, "open channels: lobby\n") {
+	if !strings.Contains(out, "open joining: account\nguests: off\n") || !strings.Contains(out, "default channels: lobby\n") {
 		t.Fatalf("join set printed %q", out)
 	}
 }

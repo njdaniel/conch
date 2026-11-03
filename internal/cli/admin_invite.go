@@ -25,7 +25,9 @@ import (
 type inviteOpts struct {
 	expires string
 	// uses is -1 when --uses was not given.
-	uses           int64
+	uses int64
+	// landing names the channels the link lands its joiner in (--landing-channel).
+	landing        stringList
 	neverExpires   bool
 	credentialDays int64
 	// retired are the per-channel flags of the old invite, which a member
@@ -52,6 +54,7 @@ func bindInviteCreate(fs *flag.FlagSet, o *adminOpts) {
 	fs.Int64Var(&o.invite.uses, "uses", -1, "how many people may join through it (default: no cap)")
 	fs.BoolVar(&o.invite.neverExpires, "never-expires", false, "a link that never expires (operators)")
 	fs.Int64Var(&o.invite.credentialDays, "credential-days", 0, "how many days the joiner's first credential lasts")
+	fs.Var(&o.invite.landing, "landing-channel", "a channel the link lands its joiner in, in place of the default channels (repeat for more; needs manage_channels)")
 	// The old per-channel flags are kept only to say what replaced them.
 	for _, name := range []string{"open", "personal", "voice", "may-invite"} {
 		fs.BoolFunc(name, "retired: a link is a member link", func(string) error { o.invite.retired = append(o.invite.retired, "--"+name); return nil })
@@ -63,9 +66,12 @@ func bindInviteCreate(fs *flag.FlagSet, o *adminOpts) {
 
 // retiredInviteError names what replaced the old per-channel invite flags.
 func retiredInviteError(flags []string) error {
-	replacement := "a link is a member link: it lands the joiner in the default channels, and --expires <duration>, --uses <n> and --never-expires are its only settings"
+	replacement := "a link is a member link: it lands the joiner in the default channels, and --expires <duration>, --uses <n>, --never-expires, --credential-days <n> and --landing-channel <name> are its only settings"
 	if slices.Contains(flags, "--max-uses") {
 		replacement += " (--max-uses is --uses)"
+	}
+	if slices.Contains(flags, "--channel") {
+		replacement += " (--channel is --landing-channel)"
 	}
 	return fmt.Errorf("cli: admin invite create: %s no longer exist; %s", strings.Join(flags, ", "), replacement)
 }
@@ -123,6 +129,9 @@ func inviteCreateRequest(o inviteOpts, now time.Time) (schema.CreateInviteReques
 		n := o.uses
 		req.MaxUses = &n
 	}
+	if len(o.landing) > 0 {
+		req.LandingChannels = append([]string(nil), o.landing...)
+	}
 	if o.credentialDays != 0 {
 		if o.credentialDays < 0 || o.credentialDays > schema.MaxInviteCredentialLifetimeSeconds/86400 {
 			return req, fmt.Errorf("--credential-days must be between 1 and %d", schema.MaxInviteCredentialLifetimeSeconds/86400)
@@ -178,10 +187,16 @@ func adminInviteCreate(ctx context.Context, r *adminRun) error {
 
 // expiryText is when a link stops working: "never" for one with no expiry.
 func linkExpiryText(inv schema.InviteV2) string {
-	if inv.ExpiresAt == nil || inv.ExpiresAt.Time().UnixMilli() >= schema.NoExpiryMillis {
+	if neverExpires(inv) {
 		return "never"
 	}
 	return formatTimestamp(*inv.ExpiresAt)
+}
+
+// neverExpires reports whether a link has no expiry: the server omits
+// expires_at, or sends the sentinel that stands for none.
+func neverExpires(inv schema.InviteV2) bool {
+	return inv.ExpiresAt == nil || inv.ExpiresAt.Time().UnixMilli() >= schema.NoExpiryMillis
 }
 
 // inviteState is where a link is, as the server's states are decided: closed
@@ -192,7 +207,7 @@ func inviteState(inv schema.InviteV2, now time.Time) string {
 		return "closed"
 	case inv.MaxUses != nil && inv.Uses >= *inv.MaxUses:
 		return "used"
-	case linkExpiryText(inv) != "never" && !inv.ExpiresAt.Time().After(now):
+	case !neverExpires(inv) && !inv.ExpiresAt.Time().After(now):
 		return "expired"
 	default:
 		return "open"
@@ -258,7 +273,7 @@ func adminInviteList(ctx context.Context, r *adminRun) error {
 
 func adminInviteClose(ctx context.Context, r *adminRun) error {
 	if err := r.client.CloseInvite(ctx, r.id); err != nil {
-		return err
+		return refused(err, inviteRefusals)
 	}
 	return r.say("closed invite %d\n", r.id)
 }

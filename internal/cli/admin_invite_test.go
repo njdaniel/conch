@@ -141,6 +141,15 @@ func TestAdminInviteCommands(t *testing.T) {
 	if out, _ := run("invite", "close", "2"); out != "closed invite 2\n" {
 		t.Errorf("close = %q", out)
 	}
+
+	// A link that lands in a channel an operator names.
+	stdout, _ = run("invite", "create", "--landing-channel", "ops", "--expires", "1h")
+	if !inviteLinkPattern.MatchString(stdout) {
+		t.Fatalf("landing create stdout = %q", stdout)
+	}
+	if out, _ := run("invite", "list", "--state", "open"); !regexp.MustCompile(`^3 member open uses 0 joiners 0 expires \S+ by 1 other 0 channels ops\n$`).MatchString(out) {
+		t.Errorf("list after a landing link = %q", out)
+	}
 }
 
 // Pausing refuses redemption until resumed.
@@ -404,6 +413,9 @@ func TestAdminInviteUsageErrors(t *testing.T) {
 	}{
 		{"old open flag", []string{"invite", "create", "--open", "--expires", "1h"}, "--open no longer exist; a link is a member link"},
 		{"old flags are all named", []string{"invite", "create", "--personal", "--channel", "ops", "--voice", "--may-invite", "--join-as", "account"}, "--personal, --channel, --voice, --may-invite, --join-as no longer exist"},
+		{"old channel names its replacement", []string{"invite", "create", "--channel", "ops"}, "(--channel is --landing-channel)"},
+		{"the settings are all named", []string{"invite", "create", "--open"}, "--credential-days <n> and --landing-channel <name> are its only settings"},
+		{"landing channel twice", []string{"invite", "create", "--landing-channel", "ops", "--landing-channel", "ops"}, "named twice"},
 		{"old max-uses names its replacement", []string{"invite", "create", "--max-uses", "3"}, "(--max-uses is --uses)"},
 		{"never and an expiry", []string{"invite", "create", "--never-expires", "--expires", "1h"}, "--expires or --never-expires, not both"},
 		{"bad expiry", []string{"invite", "create", "--expires", "soon"}, "--expires must be a duration"},
@@ -469,6 +481,27 @@ func TestParseInviteExpiry(t *testing.T) {
 			}
 			if err != nil && len(tt.in) > 3 && strings.Contains(err.Error(), tt.in) {
 				t.Errorf("the error repeats the input: %v", err)
+			}
+		})
+	}
+}
+
+func TestNeverExpires(t *testing.T) {
+	past := schema.NewTimestamp(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
+	sentinel := schema.NewTimestamp(time.UnixMilli(schema.NoExpiryMillis).UTC())
+	tests := []struct {
+		name string
+		inv  schema.InviteV2
+		want bool
+	}{
+		{"no expiry sent", schema.InviteV2{}, true},
+		{"the sentinel", schema.InviteV2{ExpiresAt: &sentinel}, true},
+		{"a real time", schema.InviteV2{ExpiresAt: &past}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := neverExpires(tt.inv); got != tt.want {
+				t.Errorf("neverExpires = %v, want %v", got, tt.want)
 			}
 		})
 	}

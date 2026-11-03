@@ -226,10 +226,11 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "admin manifest put", quietWhenOK: true, stdin: testManifest, args: func(u, _ string) []string { return []string{"admin", "manifest", "put", "--server", u, "9"} }},
 		{key: "admin manifest get", args: func(u, _ string) []string { return []string{"admin", "manifest", "get", "--server", u, "9"} }},
 		{key: "admin invite create", ownWords: true, args: func(u, _ string) []string {
-			return []string{"admin", "invite", "create", "--server", u, "--expires", "1h", "--uses", "3"}
+			return []string{"admin", "invite", "create", "--server", u, "--expires", "1h", "--uses", "3", "--landing-channel", "general"}
 		}},
 		{key: "admin invite list", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "invite", "list", "--server", u} }},
 		{key: "admin invite close|joiners", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "invite", "joiners", "--server", u, "9"} }},
+		{key: "admin invite close|joiners", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "invite", "close", "--server", u, "9"} }},
 		{key: "admin invite disable-joiners", quietWhenOK: true, args: func(u, _ string) []string {
 			return []string{"admin", "invite", "disable-joiners", "--server", u, "9"}
 		}},
@@ -461,7 +462,7 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.DisableJoinersResponseV1{DryRun: true, Count: 1, PrincipalIDs: []int64{5}})
 		case "GET /v1/invites/settings":
 			write(w, http.StatusOK, schema.InviteSettingsV1{Paused: true})
-		case "PUT /v1/principals/9/invite-permission", "DELETE /v1/sign-in-links/9":
+		case "PUT /v1/principals/9/invite-permission", "DELETE /v1/sign-in-links/9", "DELETE /v1/invites/9":
 			w.WriteHeader(http.StatusNoContent)
 		case "POST /v1/principals/9/sign-in-links":
 			write(w, http.StatusCreated, schema.CreateSignInLinkResponseV1{

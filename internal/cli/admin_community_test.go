@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -90,6 +91,12 @@ func TestAdminChannelSettingsRefusals(t *testing.T) {
 			"a private channel cannot be a default channel"},
 		{"a member is refused", e.memberToken, []string{"channel", "settings", "lounge", "--private"}, "forbidden", "only an operator may do this"},
 		{"no such channel", e.operatorToken, []string{"channel", "settings", "nowhere", "--private"}, "", "no such channel, or you cannot see it"},
+	}
+	// The lookup miss reads as the server's own 404 does.
+	_, _, missErr := e.admin(t, e.operatorToken, "", "channel", "settings", "nowhere", "--private")
+	var miss *refusalError
+	if !errors.As(missErr, &miss) || miss.line != refusalLine(&ServerError{Status: 404, Code: "channel_not_found"}, channelSettingsRefusals) {
+		t.Errorf("a lookup miss = %v, want the refusal line of a 404 channel_not_found", missErr)
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -227,23 +234,31 @@ func refusalServer(status int, code string, retryAfter string) *httptest.Server 
 // client's own, chosen by the code, and nothing of the server's message or an
 // unknown code reaches the output.
 func TestCommunityCommandsRefusals(t *testing.T) {
+	const (
+		neutral = "the server does not allow you to do this"
+	)
 	commands := []struct {
 		name string
 		args []string
+		// forbidden is the command's line for a 403 forbidden: operator-only
+		// where the route is, agents and outsiders where it is theirs, and
+		// the cause-neutral line where the cause could be either.
+		forbidden string
 	}{
-		{"channels list", []string{"channels", "list"}},
-		{"channels list --all", []string{"channels", "list", "--all"}},
-		{"channels join", []string{"channels", "join", "general"}},
-		{"channels leave", []string{"channels", "leave", "general"}},
-		{"channels create", []string{"channels", "create", "general"}},
-		{"channel settings", []string{"admin", "channel", "settings", "general", "--private"}},
-		{"principal voice", []string{"admin", "principal", "voice", "9", "off"}},
-		{"directory members", []string{"admin", "directory", "members"}},
-		{"invite create", []string{"admin", "invite", "create"}},
-		{"invite list", []string{"admin", "invite", "list"}},
-		{"invite joiners", []string{"admin", "invite", "joiners", "9"}},
-		{"join status", []string{"admin", "join", "status"}},
-		{"join set", []string{"admin", "join", "set", "--open-signup", "on"}},
+		{"channels list", []string{"channels", "list"}, communityOnly},
+		{"channels list --all", []string{"channels", "list", "--all"}, operatorOnly},
+		{"channels join", []string{"channels", "join", "general"}, neutral},
+		{"channels leave", []string{"channels", "leave", "general"}, communityOnly},
+		{"channels create", []string{"channels", "create", "general"}, communityOnly},
+		{"channel settings", []string{"admin", "channel", "settings", "general", "--private"}, operatorOnly},
+		{"principal voice", []string{"admin", "principal", "voice", "9", "off"}, operatorOnly},
+		{"directory members", []string{"admin", "directory", "members"}, communityOnly},
+		{"invite create", []string{"admin", "invite", "create"}, neutral},
+		{"invite list", []string{"admin", "invite", "list"}, neutral},
+		{"invite joiners", []string{"admin", "invite", "joiners", "9"}, neutral},
+		{"invite close", []string{"admin", "invite", "close", "9"}, neutral},
+		{"join status", []string{"admin", "join", "status"}, operatorOnly},
+		{"join set", []string{"admin", "join", "set", "--open-signup", "on"}, operatorOnly},
 	}
 	refusals := []struct {
 		name       string
@@ -252,7 +267,7 @@ func TestCommunityCommandsRefusals(t *testing.T) {
 		retryAfter string
 		want       string
 	}{
-		{"403 forbidden", 403, "forbidden", "", "only an operator may do this"},
+		{"403 forbidden", 403, "forbidden", "", "\x00forbidden"},
 		{"403 permission", 403, schema.ErrorCodePermissionDenied, "", "you do not have the permission this needs"},
 		{"404 channel", 404, "channel_not_found", "", "no such channel, or you cannot see it"},
 		{"409 unknown code", 409, "something_new", "", "the server refused this (HTTP 409)"},
@@ -260,7 +275,7 @@ func TestCommunityCommandsRefusals(t *testing.T) {
 		{"429 without it", 429, schema.ErrorCodeRateLimited, "", "too many tries: wait a while and try again"},
 		{"429 with a hostile wait", 429, schema.ErrorCodeRateLimited, "99999999999", "too many tries: wait 24h and try again"},
 		{"429 with a word", 429, schema.ErrorCodeRateLimited, "soon", "too many tries: wait a while and try again"},
-		{"reauth", 401, schema.ErrorCodeReauthRequired, "", ""},
+		{"reauth", 403, schema.ErrorCodeReauthRequired, "", "this needs your password first"},
 	}
 	for _, c := range commands {
 		for _, rf := range refusals {
@@ -274,8 +289,12 @@ func TestCommunityCommandsRefusals(t *testing.T) {
 				if err == nil {
 					t.Fatalf("a refused command succeeded; stdout = %q", stdout.String())
 				}
-				if rf.want != "" && !strings.Contains(err.Error(), rf.want) {
-					t.Errorf("error = %q, want %q", err.Error(), rf.want)
+				want := rf.want
+				if want == "\x00forbidden" {
+					want = c.forbidden
+				}
+				if want != "" && !strings.Contains(err.Error(), want) {
+					t.Errorf("error = %q, want %q", err.Error(), want)
 				}
 				all := stdout.String() + stderr.String() + err.Error()
 				if strings.Contains(all, "raw") || strings.Contains(all, "H"+esc) || strings.Contains(all, rf.code) && rf.code == "something_new" {
@@ -303,6 +322,7 @@ func TestCommunityCommandsNamedConflicts(t *testing.T) {
 		{"leave, last member", []string{"channels", "leave", "general"}, 409, schema.ErrorCodeChannelLastMember, "you are the last member of this private channel"},
 		{"settings conflict", []string{"admin", "channel", "settings", "general", "--private"}, 409, schema.ErrorCodeChannelSettingsConflict, "a default channel must be public"},
 		{"voice for an agent", []string{"admin", "principal", "voice", "9", "on"}, 409, schema.ErrorCodeNotAPerson, "agents do not use voice"},
+		{"landing channel beyond the maker", []string{"admin", "invite", "create", "--landing-channel", "general"}, 403, schema.ErrorCodeInviteGrantExceedsInviter, "that link would give more than you have"},
 		{"retired invite", []string{"admin", "invite", "create"}, 409, schema.ErrorCodeInviteKindRetired, "per-channel invites are retired"},
 		{"join, guests", []string{"admin", "join", "set", "--open-joining", "guest"}, 409, schema.ErrorCodeJoinPolicyConflict, "guests are turned off for now"},
 		{"join, voice off", []string{"admin", "join", "set", "--voice", "off"}, 409, schema.ErrorCodeJoinPolicyConflict, "voice for joiners follows each member's own switch"},
@@ -437,6 +457,37 @@ func TestAdminJoinOptionB(t *testing.T) {
 	// Turning open sign-up on with no default channel is refused by the server.
 	if _, _, err := e.admin(t, e.operatorToken, "", "join", "set", "--no-open-channels", "--open-signup", "on"); !IsServerCode(err, schema.ErrorCodeJoinPolicyConflict) {
 		t.Errorf("open sign-up with no default channel = %v, want join_policy_conflict", err)
+	}
+}
+
+// Under Option B the open channels are the default channels, and are printed
+// once, as such; and the usage line of join set offers only what the server
+// takes.
+func TestJoinStatusNamesDefaultChannelsOnce(t *testing.T) {
+	e := newAdminEnv(t)
+	e.makeDefaultChannel(t)
+	out, _, err := e.admin(t, e.operatorToken, "", "join", "status")
+	if err != nil || strings.Contains(out, "open channels:") || strings.Count(out, "default channels: ops\n") != 1 {
+		t.Errorf("status = %q, %v", out, err)
+	}
+}
+
+func TestJoinSetUsageMatchesHelp(t *testing.T) {
+	var join adminCommand
+	for _, c := range adminCommands {
+		if c.group == "join" && c.verb == "set" {
+			join = c
+		}
+	}
+	for _, bad := range []string{"guest|account|both", "--guests on|off", "--voice on|off"} {
+		if strings.Contains(join.usage(), bad) {
+			t.Errorf("the usage line offers %q, which the server refuses", bad)
+		}
+	}
+	var buf bytes.Buffer
+	Usage(&buf)
+	if strings.Contains(buf.String(), "--voice on|off") || strings.Contains(buf.String(), "--open-joining off|guest") {
+		t.Errorf("the usage text offers what the server refuses")
 	}
 }
 

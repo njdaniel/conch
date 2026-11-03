@@ -15,16 +15,18 @@ import (
 // this file's words, by its code (refusal.go).
 
 var channelRefusals = map[string]refusalLines{
-	"list": {},
+	"list": {"forbidden": communityOnly},
 	"join": {
 		schema.ErrorCodeChannelNotJoinable: "you cannot join this channel: only a person in the community can, and not one removed from it",
 	},
 	"leave": {
+		"forbidden":                       communityOnly,
 		schema.ErrorCodeChannelLastMember: "you are the last member of this private channel: someone else must be added before you can leave",
 	},
 	// One line for every collision: a name in use, one that reads the same,
 	// and one in a channel the caller cannot see (community model R2).
 	"create": {
+		"forbidden":      communityOnly,
 		"channel_exists": "there is already a channel with that name, perhaps one you are not in; choose another name",
 	},
 }
@@ -88,6 +90,10 @@ func runChannels(ctx context.Context, args []string, stdout, stderr io.Writer) e
 	}
 	out := channelsOutput{stdout: stdout, asJSON: *asJSON}
 	lines := channelRefusals[verb]
+	if verb == "list" && *all {
+		// ?scope=all is an operator's listing.
+		lines = refusalLines{"forbidden": operatorOnly}
+	}
 	switch verb {
 	case "list":
 		resp, err := client.ChannelDirectory(ctx, *all)

@@ -217,10 +217,17 @@ func (r *adminRun) sayJoinSettings(resp schema.JoinSettingsResponseV1) error {
 	for i, c := range s.OpenChannels {
 		channels[i] = safeLine(c)
 	}
-	if err := r.say("server name: %s\nopen joining: %s\nguests: %s\njoining paused: %s\nvoice for joiners: %s\nmax guests: %d (%d per address)\na guest visit lasts: at most %s, and ends after %s unused\nopen channels: %s\nlive guests: %d\n",
+	if err := r.say("server name: %s\nopen joining: %s\nguests: %s\njoining paused: %s\nvoice for joiners: %s\nmax guests: %d (%d per address)\na guest visit lasts: at most %s, and ends after %s unused\nlive guests: %d\n",
 		safeLine(resp.ServerName), safeLine(string(s.OpenJoining)), either(s.GuestsEnabled, "on", "off"), yesNo(s.JoiningPaused), yesNo(s.JoinVoice),
-		s.MaxGuests, s.MaxGuestsPerAddress, span(s.GuestAbsoluteSeconds), span(s.GuestIdleSeconds), dashIfEmpty(strings.Join(channels, ", ")), resp.LiveGuests); err != nil {
+		s.MaxGuests, s.MaxGuestsPerAddress, span(s.GuestAbsoluteSeconds), span(s.GuestIdleSeconds), resp.LiveGuests); err != nil {
 		return err
+	}
+	// Under the community model the open channels are the default channels,
+	// which are printed below as such.
+	if s.OpenSignup == nil {
+		if err := r.say("open channels: %s\n", dashIfEmpty(strings.Join(channels, ", "))); err != nil {
+			return err
+		}
 	}
 	// The community model's fields, only when the server sent them.
 	if s.OpenSignup != nil {
@@ -263,6 +270,7 @@ func (r *adminRun) sayJoinSettings(resp schema.JoinSettingsResponseV1) error {
 // removed (ADR-013, community model §3.4 Option B): the server answers 409 and
 // the reader is told why.
 var joinRefusals = refusalLines{
+	"forbidden":                             operatorOnly,
 	schema.ErrorCodeJoinPolicyConflict:      "the server does not take that: guests are turned off for now (so not --open-joining guest|both, --guests on or a guest cap), and voice for joiners follows each member's own switch (so not --voice off; use 'conch admin principal voice'). Open sign-up needs a default channel. Nothing was changed",
 	schema.ErrorCodeChannelSettingsConflict: "a default channel must be public: nothing was changed",
 }
