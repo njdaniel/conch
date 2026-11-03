@@ -905,7 +905,8 @@ describe('the secret panel', () => {
       expect(document.body.contains(row)).toBe(false);
     });
     release();
-    expect(await within(region).findByText('A credential for builder was made but could not be shown; revoke it under Sign-ins.')).toBeTruthy();
+    // The answer is released, then the list reads again before the line shows.
+    expect(await within(region).findByText('A credential for builder was made but could not be shown; revoke it under Sign-ins.', {}, { timeout: 5000 })).toBeTruthy();
     expect(document.body.textContent).not.toContain(secretToken);
   });
 });
