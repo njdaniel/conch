@@ -187,6 +187,8 @@ var TSTypes = []TSType{
 	{Value: VoicePresenceRoom{}},
 	// Why the reader's own share ended (issue #487), in their presence alone.
 	{Value: VoiceShareEnded{}},
+	// Why the reader's own camera ended (ADR-015, issue #1238), likewise.
+	{Value: VoiceCameraEnded{}},
 	{Value: VoicePresenceV1{}, Family: "voice-presence-v1", Schema: VoicePresenceSchemaV1},
 	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
 	// Companion and viewer participants (issue #933).
@@ -195,6 +197,9 @@ var TSTypes = []TSType{
 	// Screen share (issue #443): the claim the page is given when the room's
 	// share is its own. Presence says who shares (VoiceParticipant above).
 	{Value: VoiceShareV1{}, Family: "voice-share-v1"},
+	// The camera claim (ADR-015, issue #1238): the page may publish a camera
+	// while conchd holds it. Presence says who has one (VoiceParticipant).
+	{Value: VoiceCameraV1{}, Family: "voice-camera-v1"},
 	// Voice occupancy (issue #596): how many are in each channel's voice,
 	// streamed on a socket of its own so the channel list can show it.
 	{Value: VoiceChannelOccupancy{}},
@@ -534,8 +539,9 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"VoiceCompanionPublish": TSStrict,
 	// A new share end reason is a new version of presence, by its contract
 	// (voice.go; webcam-video.md §10 keeps the camera's reasons the same way).
-	"VoiceShareEndReason": TSStrict,
-	"VoiceTransmitState":  TSStrict,
+	"VoiceShareEndReason":  TSStrict,
+	"VoiceCameraEndReason": TSStrict,
+	"VoiceTransmitState":   TSStrict,
 
 	// Strict: written by the page itself in a problem report (issue #446);
 	// the server validates what it is sent, and the page sends only what it

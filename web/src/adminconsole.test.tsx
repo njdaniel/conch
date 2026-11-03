@@ -722,6 +722,14 @@ describe('gating by permission', () => {
     expect(memberLine({ ...member, permissions: undefined })).toBeNull();
   });
 
+  it('words the camera permission (ADR-015)', () => {
+    expect(permissionName('use_camera')).toBe('use a camera');
+    expect(memberLine({ ...member, permissions: ['use_voice', 'use_camera'] })).toBe('You can turn on your camera. Voice is on.');
+    expect(memberLine({ ...member, permissions: ['use_voice', 'share_screen', 'use_camera'] })).toBe('You can share your screen and turn on your camera. Voice is on.');
+    expect(canDo({ ...member, permissions: ['use_voice'] }, 'use_camera')).toBe(false);
+    expect(canDo(owner, 'use_camera')).toBe(true);
+  });
+
   it('words each refusal by its code', () => {
     const cases: [Parameters<typeof refusalLine>[0], string][] = [
       [{ failure: 'network' }, 'Cannot reach the server. X'],

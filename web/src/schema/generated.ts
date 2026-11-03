@@ -157,7 +157,8 @@ export type KnownPermission =
   | 'act_as_members'
   | 'manage_channels'
   | 'change_server_settings'
-  | 'read_audit_log';
+  | 'read_audit_log'
+  | 'use_camera';
 export type Permission = KnownPermission | (string & {});
 
 export const permission = tolerant<KnownPermission>({
@@ -172,6 +173,7 @@ export const permission = tolerant<KnownPermission>({
   manage_channels: true,
   change_server_settings: true,
   read_audit_log: true,
+  use_camera: true,
 });
 
 // schema.WhoAmIResponseV1
@@ -1151,6 +1153,7 @@ export interface VoiceParticipant {
   joined_at: string;
   sharing?: boolean;
   sharing_audio?: boolean;
+  camera?: boolean;
 }
 
 export const voiceParticipant = object<VoiceParticipant>({
@@ -1160,6 +1163,7 @@ export const voiceParticipant = object<VoiceParticipant>({
   joined_at: timestamp,
   sharing: optional(bool),
   sharing_audio: optional(bool),
+  camera: optional(bool),
 });
 
 // schema.VoicePresenceRoom
@@ -1198,6 +1202,37 @@ export const voiceShareEnded = object<VoiceShareEnded>({
   ended_at: timestamp,
 });
 
+// schema.VoiceCameraEndReason
+export type VoiceCameraEndReason =
+  | 'self'
+  | 'operator'
+  | 'left'
+  | 'access_lost'
+  | 'rotated'
+  | 'idle';
+
+export const voiceCameraEndReason = vocab<VoiceCameraEndReason>({
+  self: true,
+  operator: true,
+  left: true,
+  access_lost: true,
+  rotated: true,
+  idle: true,
+});
+
+// schema.VoiceCameraEnded
+export interface VoiceCameraEnded {
+  reason: VoiceCameraEndReason;
+  started_at: string;
+  ended_at: string;
+}
+
+export const voiceCameraEnded = object<VoiceCameraEnded>({
+  reason: voiceCameraEndReason,
+  started_at: timestamp,
+  ended_at: timestamp,
+});
+
 // schema.VoicePresenceV1
 export const voicePresenceV1Schema = 'conch.voice_presence.v1';
 
@@ -1208,6 +1243,7 @@ export interface VoicePresenceV1 {
   available: boolean;
   rooms: VoicePresenceRoom[];
   share_ended?: VoiceShareEnded;
+  camera_ended?: VoiceCameraEnded;
 }
 
 export const voicePresenceV1 = object<VoicePresenceV1>({
@@ -1217,6 +1253,7 @@ export const voicePresenceV1 = object<VoicePresenceV1>({
   available: bool,
   rooms: array(voicePresenceRoom),
   share_ended: optional(voiceShareEnded),
+  camera_ended: optional(voiceCameraEnded),
 });
 
 // schema.VoiceTransmitState
@@ -1283,6 +1320,17 @@ export const voiceShareV1 = object<VoiceShareV1>({
   principal_id: int,
   started_at: timestamp,
   audio: bool,
+});
+
+// schema.VoiceCameraV1
+export interface VoiceCameraV1 {
+  principal_id: number;
+  started_at: string;
+}
+
+export const voiceCameraV1 = object<VoiceCameraV1>({
+  principal_id: int,
+  started_at: timestamp,
 });
 
 // schema.VoiceChannelOccupancy

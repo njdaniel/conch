@@ -1,0 +1,26 @@
+{
+  "id": 1,
+  "kind": "human",
+  "name": "owner",
+  "role": "operator",
+  "server_version": "v0.9.0",
+  "may_invite": true,
+  "voice_allowed": true,
+  "identity_class": "operator",
+  "owner": true,
+  "permissions": [
+    "create_public_channels",
+    "create_private_channels",
+    "make_member_links",
+    "see_member_directory",
+    "use_voice",
+    "share_screen",
+    "manage_members",
+    "act_as_members",
+    "manage_channels",
+    "change_server_settings",
+    "read_audit_log",
+    "use_camera"
+  ],
+  "permissions_revision": 1
+}
