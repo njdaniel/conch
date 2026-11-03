@@ -128,7 +128,7 @@ func (e *onboardEnv) openJoining(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, _ := e.mustRun(t, e.operatorToken, "", "admin", "join", "set", "--open-joining", "account", "--open-channel", "lobby")
-	if !strings.Contains(out, "open joining: account\nguests: off\n") || !strings.Contains(out, "open channels: lobby\n") {
+	if !strings.Contains(out, "open joining: account\nguests: off\n") || !strings.Contains(out, "default channels: lobby\n") {
 		t.Fatalf("join set printed %q", out)
 	}
 }
@@ -305,13 +305,13 @@ func TestGuestLifecycle(t *testing.T) {
 		args []string
 		code string
 	}{
-		{"invite", []string{"admin", "invite", "create", "--open", "--channel", "lobby", "--expires", "1h"}, schema.ErrorCodeGuestNotAllowed},
+		{"invite", []string{"admin", "invite", "create", "--expires", "1h"}, schema.ErrorCodeGuestNotAllowed},
 		{"device link", []string{"device-link", "create"}, schema.ErrorCodeGuestNotAllowed},
 		{"a member sign-in over the visit", []string{"login", "--password", "--name", "root"}, "end it first"},
 	}
 	for _, tt := range refusals {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, _, err := e.run(t, "", memberPassword+"\n", tt.args...); err == nil || !strings.Contains(err.Error(), tt.code) {
+			if _, _, err := e.run(t, "", memberPassword+"\n", tt.args...); err == nil || (!IsServerCode(err, tt.code) && !strings.Contains(err.Error(), tt.code)) {
 				t.Errorf("error = %v, want %s", err, tt.code)
 			}
 		})
@@ -587,7 +587,7 @@ func TestAdminJoinSetRefusesGuests(t *testing.T) {
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "guests are turned off") {
+			if !IsServerCode(err, tt.want) || !strings.Contains(err.Error(), "guests are turned off") {
 				t.Errorf("join set = %v, want the server's %s and its reason", err, tt.want)
 			}
 			if after, _ := e.mustRun(t, e.operatorToken, "", "admin", "join", "status"); after != before {
@@ -739,13 +739,15 @@ func TestDeviceLinks(t *testing.T) {
 func TestJoinThroughInvite(t *testing.T) {
 	e := newOnboardEnv(t)
 	e.openJoining(t)
+	// A link is a member link now (issue #994): the guest kinds are not
+	// flags any more, and say what replaced them.
 	for _, mode := range []string{"both", "guest"} {
-		if _, _, err := e.run(t, e.operatorToken, "", "admin", "invite", "create", "--open", "--channel", "lobby", "--expires", "1h", "--join-as", mode); err == nil ||
-			!strings.Contains(err.Error(), schema.ErrorCodeJoinPolicyConflict) {
-			t.Errorf("invite create --join-as %s = %v, want the server's %s", mode, err, schema.ErrorCodeJoinPolicyConflict)
+		if _, _, err := e.run(t, e.operatorToken, "", "admin", "invite", "create", "--expires", "1h", "--join-as", mode); err == nil ||
+			!strings.Contains(err.Error(), "--join-as no longer exist") {
+			t.Errorf("invite create --join-as %s = %v, want the retired-flag line", mode, err)
 		}
 	}
-	link, _ := e.mustRun(t, e.operatorToken, "", "admin", "invite", "create", "--open", "--channel", "lobby", "--expires", "1h")
+	link, _ := e.mustRun(t, e.operatorToken, "", "admin", "invite", "create", "--expires", "1h")
 	out, _ := e.mustRun(t, "", link+memberPassword+"\n", "join", "account", "frank", "--invite")
 	if !strings.HasPrefix(out, "created account frank (id ") {
 		t.Errorf("join account --invite = %q", out)

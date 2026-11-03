@@ -90,6 +90,19 @@ export function Glyph({ name }: { readonly name: IconName }) {
   return <Icon>{paths[name]}</Icon>;
 }
 
+// The mark of a private channel (issue #991, Nick's decision of 2026-11-01): a
+// lock before its name, with "Private" for a screen reader, so it says
+// "Private, <name>". It is drawn from a channel's visibility alone, never from
+// how many are in it; a public channel has none.
+export function PrivateMark() {
+  return (
+    <span className="private-mark">
+      <Glyph name="lock" />
+      <span className="vh">Private</span>
+    </span>
+  );
+}
+
 // A person's initial in a coloured circle. The letter comes from CSS
 // (attr(data-initial)), so it is in no text a test or a screen reader reads:
 // the name beside it is.

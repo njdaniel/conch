@@ -155,6 +155,10 @@ type walkCase struct {
 	// quietWhenOK is a command whose success prints none of the server's
 	// strings (an id, or only what the user typed).
 	quietWhenOK bool
+	// ownWords is a command that explains a refusal in its own words, by the
+	// server's code (refusal.go): whatever the server wrote there, code and
+	// message alike, must not reach the output at all, escaped or not.
+	ownWords bool
 }
 
 func walkCases(t *testing.T) []walkCase {
@@ -175,6 +179,21 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "nets archive", quietWhenOK: true, args: func(u, _ string) []string { return []string{"nets", "archive", "--server", u, "general", "alpha"} }},
 		{key: "nets add", quietWhenOK: true, args: func(u, _ string) []string { return []string{"nets", "add", "--server", u, "general", "alpha", "9"} }},
 		{key: "nets remove", quietWhenOK: true, args: func(u, _ string) []string { return []string{"nets", "remove", "--server", u, "general", "alpha", "9"} }},
+		// The community model (ADR-013, issue #994).
+		{key: "channels list", ownWords: true, args: func(u, _ string) []string { return []string{"channels", "list", "--server", u} }},
+		{key: "channels list", ownWords: true, args: func(u, _ string) []string { return []string{"channels", "list", "--server", u, "--all"} }},
+		{key: "channels join", ownWords: true, args: func(u, _ string) []string { return []string{"channels", "join", "--server", u, "general"} }},
+		{key: "channels leave", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"channels", "leave", "--server", u, "general"} }},
+		{key: "channels create", ownWords: true, args: func(u, _ string) []string {
+			return []string{"channels", "create", "--server", u, "--private", "general"}
+		}},
+		{key: "admin channel settings", ownWords: true, args: func(u, _ string) []string {
+			return []string{"admin", "channel", "settings", "--server", u, "--private", "--default", "off", "general"}
+		}},
+		{key: "admin principal voice", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "principal", "voice", "--server", u, "9", "off"}
+		}},
+		{key: "admin directory members", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "directory", "members", "--server", u} }},
 		{key: "admin channel create", args: func(u, _ string) []string { return []string{"admin", "channel", "create", "--server", u, "general"} }},
 		{key: "admin principal create", args: func(u, _ string) []string {
 			return []string{"admin", "principal", "create", "--server", u, "--kind", "human", "bob"}
@@ -206,11 +225,12 @@ func walkCases(t *testing.T) []walkCase {
 		}},
 		{key: "admin manifest put", quietWhenOK: true, stdin: testManifest, args: func(u, _ string) []string { return []string{"admin", "manifest", "put", "--server", u, "9"} }},
 		{key: "admin manifest get", args: func(u, _ string) []string { return []string{"admin", "manifest", "get", "--server", u, "9"} }},
-		{key: "admin invite create", args: func(u, _ string) []string {
-			return []string{"admin", "invite", "create", "--server", u, "--open", "--channel", "general", "--expires", "1h"}
+		{key: "admin invite create", ownWords: true, args: func(u, _ string) []string {
+			return []string{"admin", "invite", "create", "--server", u, "--expires", "1h", "--uses", "3", "--landing-channel", "general"}
 		}},
-		{key: "admin invite list", args: func(u, _ string) []string { return []string{"admin", "invite", "list", "--server", u} }},
-		{key: "admin invite close|joiners", args: func(u, _ string) []string { return []string{"admin", "invite", "joiners", "--server", u, "9"} }},
+		{key: "admin invite list", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "invite", "list", "--server", u} }},
+		{key: "admin invite close|joiners", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "invite", "joiners", "--server", u, "9"} }},
+		{key: "admin invite close|joiners", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "invite", "close", "--server", u, "9"} }},
 		{key: "admin invite disable-joiners", quietWhenOK: true, args: func(u, _ string) []string {
 			return []string{"admin", "invite", "disable-joiners", "--server", u, "9"}
 		}},
@@ -250,8 +270,10 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "device-link create", quietWhenOK: true, args: func(u, _ string) []string { return []string{"device-link", "create", "--server", u} }},
 		{key: "device-link list", args: func(u, _ string) []string { return []string{"device-link", "list", "--server", u} }},
 		{key: "device-link close", quietWhenOK: true, args: func(u, _ string) []string { return []string{"device-link", "close", "--server", u, "9"} }},
-		{key: "admin join status", args: func(u, _ string) []string { return []string{"admin", "join", "status", "--server", u} }},
-		{key: "admin join set", args: func(u, _ string) []string { return []string{"admin", "join", "set", "--server", u, "--guests", "off"} }},
+		{key: "admin join status", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "join", "status", "--server", u} }},
+		{key: "admin join set", ownWords: true, args: func(u, _ string) []string {
+			return []string{"admin", "join", "set", "--server", u, "--guests", "off", "--open-signup", "on", "--link-expiry", "48h"}
+		}},
 		{key: "admin guest list", args: func(u, _ string) []string { return []string{"admin", "guest", "list", "--server", u} }},
 		{key: "admin guest end", args: func(u, _ string) []string { return []string{"admin", "guest", "end", "--server", u, "9"} }},
 		{key: "admin guest end-all", args: func(u, _ string) []string { return []string{"admin", "guest", "end-all", "--server", u} }},
@@ -317,7 +339,7 @@ func usageCommands(t *testing.T) []string {
 		fields := strings.Fields(rest)
 		key := fields[0]
 		switch key {
-		case "nets", "voice", "audit", "approvals", "join", "account", "password", "device-link":
+		case "nets", "voice", "audit", "approvals", "join", "account", "password", "device-link", "channels":
 			key += " " + fields[1]
 		case "admin":
 			key += " " + fields[1] + " " + fields[2]
@@ -440,7 +462,7 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.DisableJoinersResponseV1{DryRun: true, Count: 1, PrincipalIDs: []int64{5}})
 		case "GET /v1/invites/settings":
 			write(w, http.StatusOK, schema.InviteSettingsV1{Paused: true})
-		case "PUT /v1/principals/9/invite-permission", "DELETE /v1/sign-in-links/9":
+		case "PUT /v1/principals/9/invite-permission", "DELETE /v1/sign-in-links/9", "DELETE /v1/invites/9":
 			w.WriteHeader(http.StatusNoContent)
 		case "POST /v1/principals/9/sign-in-links":
 			write(w, http.StatusCreated, schema.CreateSignInLinkResponseV1{
@@ -524,8 +546,11 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 		case "GET /v1/sign-in-links/mine":
 			write(w, http.StatusOK, schema.ListOwnSignInLinksResponseV1{SignInLinks: []schema.SignInLinkV1{{ID: 3, PrincipalID: 42, CreatedBy: 42, CreatedAt: ts, ExpiresAt: ts, Label: hostile}}})
 		case "GET /v1/join/settings", "PUT /v1/join/settings":
+			yes, week := true, int64(604800)
 			write(w, http.StatusOK, schema.JoinSettingsResponseV1{ServerName: hostile, LiveGuests: 2, Warnings: []schema.JoinWarning{schema.JoinWarning(hostile), schema.JoinWarningLiveGuestsRemain},
-				Settings: schema.JoinSettingsV1{OpenJoining: schema.OpenJoiningMode(hostile), OpenChannels: []string{hostile}, MaxGuests: 5, MaxGuestsPerAddress: 1, GuestIdleSeconds: 60, GuestAbsoluteSeconds: 60}})
+				DefaultChannels: []schema.InviteChannelV1{{ID: 1, Name: hostile}},
+				Settings: schema.JoinSettingsV1{OpenJoining: schema.OpenJoiningMode(hostile), OpenChannels: []string{hostile}, MaxGuests: 5, MaxGuestsPerAddress: 1, GuestIdleSeconds: 60, GuestAbsoluteSeconds: 60,
+					OpenSignup: &yes, MemberLinkDefaultExpirySeconds: &week, OtherOpenChannels: 2}})
 		case "GET /v1/guests":
 			invite := int64(3)
 			write(w, http.StatusOK, schema.ListGuestsResponseV1{Guests: []schema.GuestAdminV1{{ID: 9, Handle: hostile, Label: hostile, Tag: hostile, State: schema.GuestState(hostile),
@@ -538,6 +563,42 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, hostilePermissions(ts))
 		case "POST /v1/guests/9/conversion-permit":
 			write(w, http.StatusCreated, schema.CreateSignInLinkResponseV1{SignInLink: schema.SignInLinkV1{ID: 3, PrincipalID: 9, CreatedBy: 42, CreatedAt: ts, ExpiresAt: ts}, Code: walkSignInCode})
+		case "GET /v1/directory/channels":
+			members := int64(3)
+			write(w, http.StatusOK, schema.ChannelDirectoryResponseV1{Channels: []schema.ChannelListingV1{
+				{ID: 1, Name: "general", CreatedAt: ts, Visibility: schema.ChannelPublic, Default: true, Joined: true, Members: &members},
+				{ID: 2, Name: hostile, CreatedAt: ts, Visibility: schema.ChannelVisibility(hostile), Members: &members},
+			}})
+		case "POST /v1/channels/general/join":
+			write(w, http.StatusCreated, schema.JoinChannelResponseV1{Channel: schema.ChannelV0{ID: 1, Name: hostile, CreatedAt: ts.Time(), Visibility: schema.ChannelVisibility(hostile)},
+				Member: schema.ChannelMemberV1{PrincipalID: 42, Name: hostile, CreatedAt: ts}})
+		case "POST /v1/channels/general/leave":
+			w.WriteHeader(http.StatusNoContent)
+		case "POST /v1/channels":
+			write(w, http.StatusCreated, schema.CreateChannelResponseV1{Channel: schema.ChannelV0{ID: 1, Name: hostile, CreatedAt: ts.Time(), Visibility: schema.ChannelVisibility(hostile)}})
+		case "PUT /v1/channels/1/settings":
+			write(w, http.StatusOK, schema.ChannelSettingsResponseV1{Channel: schema.ChannelV0{ID: 1, Name: hostile, CreatedAt: ts.Time(), Visibility: schema.ChannelPrivate},
+				OpenSignupTurnedOff: true, Warnings: []schema.PermissionsWarning{schema.PermissionsWarning(hostile)}})
+		case "PUT /v1/principals/9/voice-permission":
+			write(w, http.StatusOK, schema.VoicePermissionResponseV1{PrincipalID: 9, Changed: true})
+		case "GET /v1/directory/members":
+			yes, invitedBy := true, int64(1)
+			write(w, http.StatusOK, schema.ServerMembersResponseV1{Scope: schema.DirectoryScope(hostile), Members: []schema.ServerMemberV1{
+				{ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), CreatedAt: ts, VoiceAllowed: &yes, MayInvite: &yes, InvitedBy: &invitedBy},
+			}})
+		case "POST /v2/invites":
+			write(w, http.StatusCreated, schema.CreateInviteResponseV2{
+				Invite: schema.InviteV2{ID: 3, Kind: schema.InviteKindV2(hostile), CreatedBy: 42, CreatedByName: hostile, CreatedAt: ts, ExpiresAt: &ts,
+					LandingChannels: []schema.InviteChannelV1{{ID: 1, Name: hostile}}},
+				Code: schema.InviteCodePrefix + strings.Repeat("A", schema.InviteCodeLength-len(schema.InviteCodePrefix)),
+			})
+		case "GET /v2/invites":
+			write(w, http.StatusOK, schema.ListInvitesResponseV2{Invites: []schema.InviteV2{{
+				ID: 3, Kind: schema.InviteKindV2(hostile), CreatedBy: 42, CreatedByName: hostile, CreatedAt: ts, ExpiresAt: &ts,
+				LandingChannels: []schema.InviteChannelV1{{ID: 1, Name: hostile}}, Channels: []schema.InviteChannelV1{{ID: 2, Name: hostile}},
+			}}})
+		case "GET /v2/invites/9/joiners":
+			write(w, http.StatusOK, schema.InviteJoinersResponseV1{Joiners: []schema.InviteJoinerV1{{ID: 5, Name: hostile, CreatedAt: ts}}})
 		default:
 			write(w, http.StatusNotFound, schema.Error{Code: "no_route", Message: key + hostile})
 		}
@@ -641,6 +702,19 @@ func TestPlainCommandsNeverPrintRawServerText(t *testing.T) {
 				}
 				if bad := firstUnsafe(all); bad != "" {
 					t.Errorf("%s in output %q", bad, all)
+				}
+				if mode == "error" && c.ownWords {
+					// The refusal is in the command's own words: none of the
+					// server's reached the output, escaped or not.
+					for _, marker := range []string{`\u202e`, `\x1b`, "pwned", "bad"} {
+						if strings.Contains(all, marker) {
+							t.Errorf("the server's own words (%q) reached the output %q", marker, all)
+						}
+					}
+					if strings.TrimSpace(all) == "" {
+						t.Errorf("a refusal printed nothing")
+					}
+					return
 				}
 				// The hostile text did reach the output, as an escape: the
 				// check above is not passing because nothing was printed.

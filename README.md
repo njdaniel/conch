@@ -1053,9 +1053,8 @@ The two bulk disables never disable an operator or the caller, and the last oper
 `conch admin` covers all of it:
 
 ```sh
-LINK=$(bin/conch admin invite create --open --channel red --channel blue --expires 24h --voice)   # the link, alone on stdout
-bin/conch admin invite create --personal --channel red --expires 7d
-bin/conch admin invite list --state open            # <id> <kind> <state> uses <n>[/<max>] expires <time> by <id> channels <names>
+LINK=$(bin/conch admin invite create --expires 24h --uses 5)   # a member link, alone on stdout; --never-expires for operators
+bin/conch admin invite list --state open            # <id> <kind> <state> uses <n>[/<max>] joiners <n> expires <time|never> by <id> other <n> channels <names>
 bin/conch admin invite close 3
 bin/conch admin invite joiners 1                    # <id> <enabled|disabled> <joined> <name>
 bin/conch admin invite disable-joiners 1            # a dry run: how many it would disable
@@ -1063,6 +1062,17 @@ bin/conch admin invite disable-joiners 1 --yes      # disable them and close the
 bin/conch admin invite pause                        # resume, status
 bin/conch admin principal invite-permission 5 on    # or off
 bin/conch admin principal disable-invitees 5 --all  # a dry run; --yes to do it
+```
+
+A link is a member link (ADR-013): it lands its joiner in the default channels, and `--open`, `--personal`, `--channel`, `--voice`, `--may-invite` and `--join-as` of the old per-channel invite are gone (`--max-uses` is `--uses`). The rest of the community model, from the command line:
+
+```sh
+bin/conch channels list [--all]                     # <id> <visibility> <default|-> <joined|-> <members|-> <name>; --all is for operators
+bin/conch channels join lounge                      # and leave; create lounge [--private]
+bin/conch admin channel settings lounge --public --default on   # --private keeps every member; the answer says whether open sign-up went off
+bin/conch admin principal voice 5 off               # a person's voice switch; asks for your password when the server does
+bin/conch admin directory members                   # the community
+bin/conch admin join set --open-signup on --link-expiry 7d      # 0 for no default expiry; join status shows both and the default channels
 ```
 
 `invite create` prints the link and nothing else on standard output; its id and expiry go to standard error. The code appears in no other output.

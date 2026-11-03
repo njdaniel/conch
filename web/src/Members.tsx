@@ -1,11 +1,11 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { Avatar } from './Icons';
 import { memberName } from './guestName';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { Entry } from './agents/join';
 import type { ChannelMemberV1, ChannelV0, PutChannelMemberRequestV1 } from './schema/channel';
-import type { WhoAmIResponseV1 } from './schema/principal';
+import type { ServerMemberV1, ServerMembersResponseV1, WhoAmIResponseV1 } from './schema/principal';
 
 const addRefusal = 'No one by that name can be added here.';
 const networkRefusal = 'Cannot reach the server. Try again.';
@@ -357,5 +357,122 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
         </>
       )}
     </>
+  );
+}
+
+// What the community member panel says of one person, from the directory's
+// row. An agent is marked as one (ADR-013 O11) and a human shows their role
+// (O4). The operator fields (owner, voice, who may invite, who invited them)
+// are drawn only when the row carries them: the server sends them to a holder
+// of manage_members alone, so the page cannot show a member what it was not
+// told. The controls that act on them are another issue's (#992).
+function CommunityRow({ person, byId, viewer }: { readonly person: ServerMemberV1; readonly byId: ReadonlyMap<number, ServerMemberV1>; readonly viewer: number }) {
+  const inviter = person.invited_by === undefined ? undefined : byId.get(person.invited_by);
+  return (
+    <li className="community-member">
+      <Avatar id={person.id} name={person.name} />
+      <span className="community-name">{person.name}</span>
+      {person.id === viewer ? <span className="ag-badge">You</span> : null}
+      {person.kind === 'agent' ? <span className="ag-badge">Agent</span> : null}
+      {person.kind === 'human' && person.role !== undefined ? <span className="ag-badge">{person.role === 'operator' ? 'Operator' : 'Member'}</span> : null}
+      {person.owner === true ? <span className="ag-badge">Owner</span> : null}
+      {person.voice_allowed === undefined ? null : <span className="hint">{person.voice_allowed ? ' · voice on' : ' · voice off'}</span>}
+      {person.may_invite === undefined ? null : <span className="hint">{person.may_invite ? ' · can invite' : ' · cannot invite'}</span>}
+      {person.invited_by === undefined ? null : <span className="hint">{` · invited by ${inviter?.name ?? `#${String(person.invited_by)}`}`}</span>}
+    </li>
+  );
+}
+
+// The community member panel (issues #983 and #991): everyone the server lists
+// from GET /v1/directory/members, beside the open channel's own people. It is
+// read when it is drawn and again when the person's own channels change or
+// they ask; whatever the server leaves out (a viewer who may only know the
+// people they share a channel with is told so) is not guessed at. There are no
+// guests in it: the directory lists none.
+export function CommunityMembers({
+  viewer,
+  channelIds,
+  permissionsTick = 0,
+  onUnauthorized,
+}: {
+  readonly viewer: number;
+  readonly channelIds: string;
+  // Counts live changes of the person's own permissions (conch.permissions_changed.v1):
+  // what they may see here may have changed, so the list is read again.
+  readonly permissionsTick?: number;
+  readonly onUnauthorized: () => void;
+}) {
+  const headingId = useId();
+  const [answer, setAnswer] = useState<ServerMembersResponseV1 | 'failed' | null>(null);
+  const seq = useRef(0);
+  const live = useRef(true);
+  const latest = useRef(onUnauthorized);
+  latest.current = onUnauthorized;
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
+
+  const load = useCallback(() => {
+    const mine = ++seq.current;
+    void api.directoryMembers().then((result) => {
+      if (mine !== seq.current || !live.current) return;
+      if (result.ok) {
+        setAnswer(result.value);
+        return;
+      }
+      if (result.failure === 'unauthorized') {
+        latest.current();
+        return;
+      }
+      setAnswer('failed');
+    });
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load, channelIds, permissionsTick]);
+  // The server sends no word that the community changed (a person hidden, a
+  // role changed), so the list is read again when the tab comes back.
+  useEffect(() => {
+    const back = () => {
+      if (document.visibilityState === 'visible') load();
+    };
+    document.addEventListener('visibilitychange', back);
+    return () => {
+      document.removeEventListener('visibilitychange', back);
+    };
+  }, [load]);
+
+  const byId = new Map<number, ServerMemberV1>();
+  if (answer !== null && answer !== 'failed') for (const m of answer.members) byId.set(m.id, m);
+  return (
+    <section aria-labelledby={headingId} className="community-members">
+      <h3 id={headingId}>Community members</h3>
+      {answer === null ? (
+        <p className="empty">Loading…</p>
+      ) : answer === 'failed' ? (
+        <p role="status" className="notice">
+          Cannot load the community members.
+        </p>
+      ) : (
+        <>
+          {answer.scope === 'shared_channels' ? <p className="hint">Showing the people you share a channel with.</p> : null}
+          {answer.members.length === 0 ? (
+            <p className="empty">Nobody to show</p>
+          ) : (
+            <ul aria-label="People">
+              {answer.members.map((person) => (
+                <CommunityRow key={person.id} person={person} byId={byId} viewer={viewer} />
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+      <button type="button" className="quiet" onClick={load}>
+        Refresh
+      </button>
+    </section>
   );
 }
