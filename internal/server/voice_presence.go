@@ -1103,6 +1103,24 @@ func (p *voicePoller) removedEvent(channelID, pid int64, reason string, role voi
 	}
 }
 
+// sameOccupants reports whether a room's row in the occupancy document is
+// unchanged by a pass that replaces old with next: the same principals, or
+// nobody both before (a stale room shows nobody) and after.
+func sameOccupants(old, next map[int64]voiceSeen, wasStale bool) bool {
+	if wasStale {
+		return len(next) == 0
+	}
+	if len(old) != len(next) {
+		return false
+	}
+	for pid := range next {
+		if _, ok := old[pid]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // applyRoom replaces r's participants with seen and writes the events that
 // follow from the difference between the two passes.
 //
@@ -1133,23 +1151,6 @@ func (p *voicePoller) removedEvent(channelID, pid int64, reason string, role voi
 // and under the same locks, and its rows are written with the pass's. What it
 // returns are the screen-share sources to withdraw, for the caller to ask
 // LiveKit about once the pass is applied.
-// sameOccupants reports whether a room's row in the occupancy document is
-// unchanged by a pass that replaces old with next: the same principals, or
-// nobody both before (a stale room shows nobody) and after.
-func sameOccupants(old, next map[int64]voiceSeen, wasStale bool) bool {
-	if wasStale {
-		return len(next) == 0
-	}
-	if len(old) != len(next) {
-		return false
-	}
-	for pid := range next {
-		if _, ok := old[pid]; !ok {
-			return false
-		}
-	}
-	return true
-}
 
 func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map[int64]livekit.Participant, fold voiceFold, keep map[int64]struct{}, lost map[int64]bool, again bool, since uint64) ([]shareWithdrawal, []voiceOrphan) {
 	next := make(map[int64]voiceSeen, len(seen))

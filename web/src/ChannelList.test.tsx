@@ -192,9 +192,14 @@ describe('who is in voice', () => {
     expect(rows('game-night')).toEqual(['alice', 'bob', 'carol', 'dave', 'erin', '+2 more']);
   });
 
-  it('shows all six when there is no more than six to show', () => {
+  it('shows all five when there are no more than five', () => {
     render(listed({ 3: [10, 11, 12, 13, 14] }));
     expect(rows('game-night')).toEqual(['alice', 'bob', 'carol', 'dave', 'erin']);
+  });
+
+  it('folds the sixth into +1 more', () => {
+    render(listed({ 3: [10, 11, 12, 13, 14, 15] }));
+    expect(rows('game-night')).toEqual(['alice', 'bob', 'carol', 'dave', 'erin', '+1 more']);
   });
 
   it('opens the channel from a name or from the fold, and nothing else', () => {

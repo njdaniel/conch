@@ -468,10 +468,11 @@ func TestVoiceOccupancySocketStreams(t *testing.T) {
 	}
 }
 
-// TestVoiceOccupancyWakesOnCountsOnly: the poller wakes an occupancy
-// subscriber when a count changes and for nothing else. A transmit flip wakes
-// the channel's presence subscribers and not the occupancy ones.
-func TestVoiceOccupancyWakesOnCountsOnly(t *testing.T) {
+// TestVoiceOccupancyWakesOnPeopleOnly: the poller wakes an occupancy
+// subscriber when a room's people change (a count, or a swap at the same
+// count) and for nothing else. A transmit flip wakes the channel's presence
+// subscribers and not the occupancy ones.
+func TestVoiceOccupancyWakesOnPeopleOnly(t *testing.T) {
 	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
 	ops, _ := f.live(t)
 	occ := f.srv.voice.subscribeOccupancy(f.ids["ann"], 0)
