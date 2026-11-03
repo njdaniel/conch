@@ -293,6 +293,7 @@ export function useAgents({
   onMessageEdited,
   onChannelsChanged,
   onPermissionsChanged,
+  onDirectoryChanged,
 }: {
   readonly signedIn: boolean;
   readonly channel: string | null;
@@ -321,6 +322,9 @@ export function useAgents({
   // The permissions may have changed (conch.permissions_changed.v1), or the
   // socket was down and they may have meanwhile.
   readonly onPermissionsChanged?: () => void;
+  // The directory answer may have changed (conch.directory_changed.v1, issue
+  // #993): the community is read again and replaced.
+  readonly onDirectoryChanged?: () => void;
 }): Agents {
   const [state, dispatch] = useReducer(agentsReducer, initialAgents);
   const [members, setMembers] = useState<readonly ChannelMemberV1[]>([]);
@@ -522,6 +526,9 @@ export function useAgents({
           case 'permissionsChanged':
             onPermissionsChanged?.();
             break;
+          case 'directoryChanged':
+            onDirectoryChanged?.();
+            break;
         }
       },
       onStatus,
@@ -532,7 +539,7 @@ export function useAgents({
       if (retry !== null) realClock.clearTimeout(retry);
       feed.stop();
     };
-  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, onMessageEdited, onChannelsChanged, onPermissionsChanged, replace, healthy]);
+  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, onMessageEdited, onChannelsChanged, onPermissionsChanged, onDirectoryChanged, replace, healthy]);
 
   // The members line is read again each time the socket comes back.
   useEffect(() => {

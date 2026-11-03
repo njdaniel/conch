@@ -292,6 +292,11 @@ func run(h *harness) (summary, error) {
 	}
 	h.say("ok   channel list: ann added to and removed from a channel of A's, with ola of B in it, and the channel renamed; each conch.channels_changed.v1 went to its subject alone, exactly %s, and none of %d events sockets (bob's, ola's, the operator's, both agents') carried one of another's (L1-L4, L7)", channelsChangedWire, n)
 
+	if n, err = w.directoryChangedRows(bsock); err != nil {
+		return sum, fmt.Errorf("the directory signal: %w", err)
+	}
+	h.say("ok   directory: a membership change sent no events socket a conch.directory_changed.v1, and ann's rename (and rename back) sent exactly one, exactly %s, to each human one (ann's, the operator's, ola's and bob's) and to neither agent's, of %d events sockets (D1-D3)", directoryChangedWire, n)
+
 	if v != nil {
 		if err := w.mediaB(v); err != nil {
 			return sum, fmt.Errorf("media: %w", err)
