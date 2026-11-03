@@ -591,7 +591,10 @@ export function ChannelsSection({ who, refresh, onChannelsChanged, onUnauthorize
     [onChannelsChanged, read],
   );
 
-  if (!mayManage) return null;
+  // Nothing is drawn while Settings is closed: the drawer is only hidden, and
+  // a hidden New channel form would be a second "Channel name" field on the
+  // page, beside the ones the lobby and the channel list draw.
+  if (!mayManage || !shown) return null;
 
   return (
     <section className="channels-section" aria-label="Channels">

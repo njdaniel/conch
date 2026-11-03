@@ -193,6 +193,26 @@ afterEach(() => {
 });
 
 describe('who is offered the section', () => {
+  it('draws nothing while Settings is closed: one field labelled Channel name on the page, and opening Settings adds the section’s', async () => {
+    const calls = serve(owner);
+    window.sessionStorage.setItem(key, 'conch_owner_session_token');
+    window.location.hash = '#/c/channel-a';
+    render(<App origin={origin} />);
+    const settings = await screen.findByRole('button', { name: 'Settings' });
+    await waitFor(() => {
+      expect(calls.some((c) => c.path === '/v1/whoami')).toBe(true);
+    });
+    await later10();
+    // The channel list's New channel form is the only one; the console's is not drawn.
+    expect(screen.getAllByLabelText('Channel name')).toHaveLength(1);
+    expect(document.querySelector('.channels-section')).toBeNull();
+    // Nothing was read for a section nobody can see.
+    expect(calls.some((c) => c.query === '?scope=all')).toBe(false);
+    fireEvent.click(settings);
+    await screen.findByRole('region', { name: 'Channels' });
+    expect(screen.getAllByLabelText('Channel name')).toHaveLength(2);
+  });
+
   it('shows an owner every channel, from ?scope=all, with visibility, default, count and managers', async () => {
     const calls = serve(owner);
     const region = await open();
