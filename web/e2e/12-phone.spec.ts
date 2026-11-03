@@ -437,3 +437,32 @@ async function expectTargets(scope: Locator, view: string): Promise<void> {
   });
   expect(small, `${view}: targets under 44 px`).toEqual([]);
 }
+
+// Issue #990: everyone is offered Invite someone, so the top bar holds four
+// 44 px buttons beside the brand. At every phone width, 320 included, they
+// stay on the brand's row and the connection state has the one row under it:
+// the bar costs two rows of height, not three, so the conversation keeps its
+// room (35-phone-voice-strip measures the log).
+for (const [size, options] of phoneSizes) {
+  test(`P990 at ${size} the top bar keeps its four buttons beside the brand, in two rows`, async ({ meet, world }) => {
+    const { page } = await meet(options);
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    await expect(page.getByLabel('To:')).toBeVisible();
+    const bar = await page.locator('.topbar').evaluate((el) => {
+      const top = (sel: string) => el.querySelector(sel)?.getBoundingClientRect() ?? null;
+      return {
+        height: el.getBoundingClientRect().height,
+        brandTop: top('.brand')?.top ?? -1,
+        actionsTop: top('.topbar-actions')?.top ?? -1,
+        statusTop: top('.status')?.top ?? -1,
+        buttons: el.querySelectorAll('.topbar-actions button').length,
+      };
+    });
+    expect(bar.buttons).toBe(4);
+    // The buttons are on the brand's row, not a row of their own, and the
+    // state is below both.
+    expect(Math.abs(bar.actionsTop - bar.brandTop), 'the buttons are on the brand’s row').toBeLessThan(24);
+    expect(bar.statusTop).toBeGreaterThan(bar.actionsTop + 40);
+    expect(bar.height, 'the top bar is two rows high').toBeLessThanOrEqual(72);
+  });
+}

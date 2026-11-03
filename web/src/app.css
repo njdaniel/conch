@@ -2850,6 +2850,14 @@ button.link {
     flex: 1 1 100%;
   }
 
+  /* Everyone is offered Invite someone (issue #990), so four buttons of 44 px
+     stand beside the brand. At 320 px with the usual gap they are one pixel
+     too wide for the row and the buttons drop to a row of their own, taking
+     a row's height from the conversation. A smaller gap keeps them beside it. */
+  .topbar-actions {
+    gap: var(--s1);
+  }
+
   .topbar .conn {
     order: -1;
   }

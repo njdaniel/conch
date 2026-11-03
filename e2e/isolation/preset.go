@@ -16,7 +16,8 @@ import (
 //     use_voice and share_screen;
 //  2. member link creation is refused, 403 invite_not_allowed naming
 //     make_member_links (design §7.4: one code per question, whichever check
-//     refused), by v2 and by v1;
+//     refused), by v2; v1 answers 409 invite_kind_retired to a member
+//     whatever the right (issue #990);
 //  3. member channel creation is refused, 403 permission_denied naming the
 //     create permission for the body's visibility;
 //  4. the directory rows (placeholder: #988);
@@ -89,8 +90,13 @@ func (w *world) presetPhase() (int, error) {
 	}
 	rows++
 	status, body, err = m.api.do(http.MethodPost, "/v1/invites", schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{room}})
-	if err := refusedNaming("a member makes a v1 link under personal", status, body, err, schema.ErrorCodeInviteNotAllowed, schema.PermMakeMemberLinks); err != nil {
-		return rows, err
+	// The v1 route refuses a caller without manage_members before it looks at
+	// the body (issue #990): 409 invite_kind_retired, naming no permission.
+	if err != nil {
+		return rows, fmt.Errorf("a member makes a v1 link under personal: %w", err)
+	}
+	if e, derr := errorOf(body); status != http.StatusConflict || derr != nil || e.Code != schema.ErrorCodeInviteKindRetired || e.Permission != "" {
+		return rows, fmt.Errorf("a member makes a v1 link under personal = %d %s, want 409 %s naming no permission", status, body, schema.ErrorCodeInviteKindRetired)
 	}
 	rows++
 
