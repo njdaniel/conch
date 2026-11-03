@@ -157,6 +157,12 @@ for (const [size, options] of kept) {
     let thread = await openThread(page, root.id);
     await thread.getByRole('textbox', { name: /^Reply to (?!.*'s message, )/ }).fill(body);
 
+    // The sign-in comes back slowly, as it can on a busy runner: the lobby is not
+    // drawn when the page has loaded, and the steps below must wait for it (#1214).
+    await page.route('**/v1/whoami', async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await route.continue();
+    }, { times: 1 });
     await page.reload();
     await openChannel(page, 'general');
     thread = page.getByRole('region', { name: threadName });

@@ -138,8 +138,11 @@ type eventsSub struct {
 	// permissionsChanged owes a human socket one conch.permissions_changed.v1
 	// (notifyPermissionsChanged, design §8.6): a flag, as channelsChanged is.
 	permissionsChanged bool
-	refs               []eventRef
-	gone               bool
+	// directoryChanged owes a human socket one conch.directory_changed.v1
+	// (notifyDirectoryChanged, design §13.6): a flag, as the two above are.
+	directoryChanged bool
+	refs             []eventRef
+	gone             bool
 }
 
 // subscribe registers a subscriber, owed its first roster: that roster goes
@@ -189,6 +192,15 @@ func (sub *eventsSub) takePermissions() bool {
 	defer sub.hub.mu.Unlock()
 	owed := sub.permissionsChanged
 	sub.permissionsChanged = false
+	return owed && !sub.gone
+}
+
+// takeDirectory reports and clears an owed conch.directory_changed.v1.
+func (sub *eventsSub) takeDirectory() bool {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	owed := sub.directoryChanged
+	sub.directoryChanged = false
 	return owed && !sub.gone
 }
 
@@ -382,6 +394,37 @@ func (h *eventsHub) notifyPermissionsChanged(principalIDs ...int64) {
 	for sub := range h.subs {
 		if sub.human && want[sub.principalID] {
 			sub.permissionsChanged = true
+			sub.signal()
+		}
+	}
+}
+
+// notifyDirectoryChanged owes the human events sockets of principalIDs one
+// conch.directory_changed.v1 (design §13.6): their answer to GET
+// /v1/directory/members may have changed. everyone owes every human socket
+// instead, for a change every member's answer shows (the directory
+// permission switched, or members all holding it). The frame carries
+// nothing, so any number of changes owe the same one. A zero id matches
+// nothing, and an agent's socket is never owed it: an agent has no
+// directory (O11). The caller decides the audience; this tells exactly it.
+func (h *eventsHub) notifyDirectoryChanged(everyone bool, principalIDs ...int64) {
+	want := make(map[int64]struct{}, len(principalIDs))
+	for _, id := range principalIDs {
+		if id != 0 {
+			want[id] = struct{}{}
+		}
+	}
+	if !everyone && len(want) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if !sub.human {
+			continue
+		}
+		if _, ok := want[sub.principalID]; everyone || ok {
+			sub.directoryChanged = true
 			sub.signal()
 		}
 	}
@@ -687,6 +730,9 @@ type eventsStream struct {
 	// permissionsLater is channelsLater for conch.permissions_changed.v1:
 	// coalesced under the same roster floor (design §8.6).
 	permissionsLater <-chan time.Time
+	// directoryLater is channelsLater for conch.directory_changed.v1 (design
+	// §13.6): coalesced under the same roster floor.
+	directoryLater   <-chan time.Time
 	readStateBuilt   time.Time
 	readStateLater   <-chan time.Time
 	lastReadStates   map[int64][]byte
@@ -783,6 +829,17 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 			default:
 			}
 			if !e.stillMember(ctx) || !e.sendDoc(ctx, schema.PermissionsChangedV1{Schema: schema.PermissionsChangedSchemaV1}) {
+				return
+			}
+		case <-e.directoryLater:
+			e.directoryLater = nil
+			select {
+			case <-e.sub.dropped:
+				e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+				return
+			default:
+			}
+			if !e.stillMember(ctx) || !e.sendDoc(ctx, schema.DirectoryChangedV1{Schema: schema.DirectoryChangedSchemaV1}) {
 				return
 			}
 		case <-e.sub.dropped:
@@ -901,6 +958,9 @@ func (e *eventsStream) flush(ctx context.Context) bool {
 	}
 	if e.sub.takePermissions() && e.permissionsLater == nil {
 		e.permissionsLater = time.After(e.s.eventsRosterFloor)
+	}
+	if e.sub.takeDirectory() && e.directoryLater == nil {
+		e.directoryLater = time.After(e.s.eventsRosterFloor)
 	}
 	for _, ref := range refs {
 		if !e.sendRef(ctx, ref) {

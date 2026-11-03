@@ -292,6 +292,11 @@ func run(h *harness) (summary, error) {
 	}
 	h.say("ok   channel list: ann added to and removed from a channel of A's, with ola of B in it, and the channel renamed; each conch.channels_changed.v1 went to its subject alone, exactly %s, and none of %d events sockets (bob's, ola's, the operator's, both agents') carried one of another's (L1-L4, L7)", channelsChangedWire, n)
 
+	if n, err = w.directoryChangedRows(bsock); err != nil {
+		return sum, fmt.Errorf("the directory signal: %w", err)
+	}
+	h.say("ok   directory: a membership change sent no events socket a conch.directory_changed.v1, and ann's rename (and rename back) sent exactly one, exactly %s, to each human one (ann's, the operator's, ola's and bob's) and to neither agent's, of %d events sockets (D1-D3)", directoryChangedWire, n)
+
 	if v != nil {
 		if err := w.mediaB(v); err != nil {
 			return sum, fmt.Errorf("media: %w", err)
@@ -331,7 +336,7 @@ func run(h *harness) (summary, error) {
 	if err != nil {
 		return sum, fmt.Errorf("the personal preset: %w", err)
 	}
-	h.say("ok   personal preset: %d rows; with personal applied through PUT /v1/permissions a member's link (v1 and v2) was refused invite_not_allowed naming make_member_links and its channel creation permission_denied naming the permission of the visibility; group gave both back", pn)
+	h.say("ok   personal preset: %d rows; with personal applied through PUT /v1/permissions a member's link (v1 and v2) was refused invite_not_allowed naming make_member_links and its channel creation permission_denied naming the permission of the visibility; the directory narrowed to the people a member may know (bob's and zed's names and ids in none of the routes alice reads, carol known through her link, the authors route naming the departed author alone), conch.directory_changed.v1 reached exactly the viewers whose answer changed; group gave link and channel creation back, widened the directory and signalled it", pn)
 
 	// B's sockets have been open through all of it: a second control, and
 	// every frame since they opened is scanned again.

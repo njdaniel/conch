@@ -138,7 +138,7 @@ func (s *Server) handleHidePrincipal(w http.ResponseWriter, r *http.Request) {
 	if s.ownerProtected(w, r, id) {
 		return
 	}
-	_, err := s.store.HidePrincipal(ctx, auditActor(ctx), id, store.HideOptions{ForbidOwner: authed && !isOwner(caller)})
+	res, err := s.store.HidePrincipal(ctx, auditActor(ctx), id, store.HideOptions{ForbidOwner: authed && !isOwner(caller)})
 	switch {
 	case errors.Is(err, store.ErrOwnerProtected):
 		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
@@ -160,6 +160,11 @@ func (s *Server) handleHidePrincipal(w http.ResponseWriter, r *http.Request) {
 	// Dropped even when nothing changed, as the disable route does: a repeat
 	// is a harmless way to make sure nothing survives.
 	s.principalDisabled(ctx, id)
+	if res.Changed {
+		// Who could know it before its memberships went is the store's, read
+		// in the hiding transaction (directory signal, design §13.6).
+		s.directoryPrincipalChanged(ctx, id, &directoryWatch{everyone: res.KnowersEveryone, ids: res.Knowers})
+	}
 	row, err := s.store.PrincipalAdmin(ctx, id, s.now())
 	if err != nil {
 		slog.ErrorContext(ctx, "principals: read hidden principal failed", "principal", id, "error", err)
@@ -256,6 +261,7 @@ func (s *Server) hidePrincipals(ctx context.Context, targets []store.Principal, 
 		}
 		s.principalDisabled(ctx, p.ID)
 		if res.Changed {
+			s.directoryPrincipalChanged(ctx, p.ID, &directoryWatch{everyone: res.KnowersEveryone, ids: res.Knowers})
 			done = append(done, schema.HiddenPrincipalV1{ID: p.ID, Name: p.Name})
 		}
 	}

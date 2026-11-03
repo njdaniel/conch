@@ -36,7 +36,7 @@ import (
 
 const (
 	defaultRunLimit = 50
-	maxRunLimit     = 100
+	maxRunLimit     = schema.MaxListRunsLimit
 )
 
 var errRunNotFound = &schema.Error{Code: schema.ErrorCodeRunNotFound, Message: "run not found"}
