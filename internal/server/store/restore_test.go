@@ -95,7 +95,7 @@ func newRestoreWorld(t *testing.T) *restoreWorld {
 	both, on, channels := schema.OpenJoiningBoth, true, []string{"ops"}
 	legacyJoinSettings(t, w.s, schema.PutJoinSettingsRequestV1{GuestsEnabled: &on, OpenJoining: &both, OpenChannels: &channels})
 	inv := legacyCreateInvite(t, w.s, principalActor(w.op.ID), w.op.ID,
-		schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"ops"}, JoinAs: schema.InviteJoinBoth}, InviteOptions{}, w.now)
+		schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"ops"}, JoinAs: schema.InviteJoinBoth}, w.now)
 	w.inviteCode = inv.Code
 	// The operator signed in with a code once before the backup.
 	w.totpStepB = totpFloor(w.now) - schema.TOTPWindowSteps - 10
@@ -217,10 +217,8 @@ func TestInvalidateRestoredBackup(t *testing.T) {
 	// the bare address until an operator has looked, nor through an invite,
 	// since invites are paused too. Opening the backup turned its guests off
 	// (issue #1005), so no visit starts at all; the address open to both is
-	// open to accounts, paused.
-	if _, err := r.s.JoinAsGuest(ctx, GuestEntry{}); !errors.Is(err, ErrGuestsDisabled) {
-		t.Errorf("a guest joining from the bare address after the restore = %v, want ErrGuestsDisabled", err)
-	}
+	// open to accounts, paused. The bare address has no visit path (issue
+	// #987).
 	if err := r.s.CheckJoinAccount(ctx); !errors.Is(err, ErrJoiningPaused) {
 		t.Errorf("an account from the bare address after the restore = %v, want ErrJoiningPaused", err)
 	}

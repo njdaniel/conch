@@ -78,7 +78,7 @@ func (f *inviteFixture) mustCreate(creator Principal, req schema.CreateInviteReq
 	f.t.Helper()
 	// An invite that admits guests is one made before issue #1005.
 	if InviteAdmitsGuests(req.JoinAs) {
-		return legacyCreateInvite(f.t, f.s, principalActor(creator.ID), creator.ID, req, InviteOptions{}, f.now)
+		return legacyCreateInvite(f.t, f.s, principalActor(creator.ID), creator.ID, req, f.now)
 	}
 	resp, err := f.create(creator, req)
 	if err != nil {
@@ -359,68 +359,6 @@ func TestInviteAllowance(t *testing.T) {
 	})
 }
 
-// TestInvitesRemaining checks the count whoami reports (issue #468) against
-// open, used, expired and closed invites, and that it agrees with
-// CreateInvite: the next personal invite is refused exactly when it says 0.
-func TestInvitesRemaining(t *testing.T) {
-	week := 8 * 24 * time.Hour
-	openOne := func(f *inviteFixture) { f.mustCreate(f.alice, personal("general")) }
-	usedOne := func(f *inviteFixture) {
-		if _, err := f.redeem(f.mustCreate(f.alice, personal("general")).Code, "joiner"); err != nil {
-			f.t.Fatal(err)
-		}
-	}
-	// Made more than its 7-day default expiry ago.
-	expiredOne := func(f *inviteFixture) {
-		if _, err := f.s.CreateInvite(f.ctx, "system", f.alice.ID, personal("general"), InviteOptions{}, f.now.Add(-week)); err != nil {
-			f.t.Fatal(err)
-		}
-	}
-	closedOne := func(f *inviteFixture) {
-		id := f.mustCreate(f.alice, personal("general")).Invite.ID
-		if _, err := f.s.CloseInvite(f.ctx, "system", f.alice.ID, id, f.now); err != nil {
-			f.t.Fatal(err)
-		}
-	}
-	tests := []struct {
-		name      string
-		allowance int
-		setup     []func(*inviteFixture)
-		want      int
-	}{
-		{"none", 0, nil, DefaultPersonalInviteAllowance},
-		{"one open", 0, []func(*inviteFixture){openOne}, DefaultPersonalInviteAllowance - 1},
-		{"one used", 0, []func(*inviteFixture){usedOne}, DefaultPersonalInviteAllowance},
-		{"one expired", 0, []func(*inviteFixture){expiredOne}, DefaultPersonalInviteAllowance},
-		{"one closed", 0, []func(*inviteFixture){closedOne}, DefaultPersonalInviteAllowance},
-		{"one of each", 0, []func(*inviteFixture){openOne, usedOne, expiredOne, closedOne}, DefaultPersonalInviteAllowance - 1},
-		{"others' invites do not count", 0, []func(*inviteFixture){func(f *inviteFixture) {
-			f.mustCreate(f.op, personal("general"))
-			f.mustCreate(f.op, open("general"))
-		}}, DefaultPersonalInviteAllowance},
-		{"the allowance is a parameter", 2, []func(*inviteFixture){openOne}, 1},
-		{"used up", 2, []func(*inviteFixture){openOne, openOne}, 0},
-		{"never below zero when the allowance is lowered", 1, []func(*inviteFixture){openOne, openOne, openOne}, 0},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			f := newInviteFixture(t)
-			for _, setup := range tt.setup {
-				setup(f)
-			}
-			opts := InviteOptions{Allowance: tt.allowance}
-			got, err := f.s.InvitesRemaining(f.ctx, f.alice.ID, opts, f.now)
-			if err != nil || got != tt.want {
-				t.Fatalf("InvitesRemaining = %d, %v, want %d", got, err, tt.want)
-			}
-			_, err = f.s.CreateInvite(f.ctx, "system", f.alice.ID, personal("general"), opts, f.now)
-			if refused := errors.Is(err, ErrInviteAllowanceExceeded); refused != (tt.want == 0) {
-				t.Errorf("CreateInvite with %d remaining: error = %v", tt.want, err)
-			}
-		})
-	}
-}
-
 func TestRedeemInviteCreatesAccount(t *testing.T) {
 	f := newInviteFixture(t)
 	req := personal("general", "lobby")
@@ -436,11 +374,13 @@ func TestRedeemInviteCreatesAccount(t *testing.T) {
 	if p.Kind != PrincipalHuman || p.Role != RoleMember || p.Name != "river" || p.InvitedBy != f.alice.ID || p.InviteID != inv.Invite.ID {
 		t.Errorf("principal = %+v", p)
 	}
-	if p.MayInvite || !p.VoiceAllowed {
-		t.Errorf("grants = may_invite %v voice %v, want no right to invite (#457) and voice", p.MayInvite, p.VoiceAllowed)
+	// Every member the community model makes has voice and the may_invite
+	// brake on (issue #986, ADR-014: both only take away).
+	if !p.MayInvite || !p.VoiceAllowed {
+		t.Errorf("grants = may_invite %v voice %v, want both on (#986)", p.MayInvite, p.VoiceAllowed)
 	}
 	stored, err := f.s.PrincipalByID(f.ctx, p.ID)
-	if err != nil || stored.InvitedBy != f.alice.ID || stored.InviteID != inv.Invite.ID || stored.Role != RoleMember || stored.MayInvite || !stored.VoiceAllowed {
+	if err != nil || stored.InvitedBy != f.alice.ID || stored.InviteID != inv.Invite.ID || stored.Role != RoleMember || !stored.MayInvite || !stored.VoiceAllowed {
 		t.Errorf("stored principal = %+v, %v", stored, err)
 	}
 	if n := f.count("SELECT COUNT(*) FROM principals WHERE invite_id = ?", inv.Invite.ID); n != 1 {
@@ -457,7 +397,7 @@ func TestRedeemInviteCreatesAccount(t *testing.T) {
 		t.Errorf("credential = %+v", got.Credential)
 	}
 	resolved, err := f.s.ResolveCredential(f.ctx, got.Token)
-	if err != nil || resolved.ID != p.ID || resolved.InvitedBy != f.alice.ID || resolved.MayInvite {
+	if err != nil || resolved.ID != p.ID || resolved.InvitedBy != f.alice.ID || !resolved.MayInvite {
 		t.Errorf("ResolveCredential = %+v, %v", resolved, err)
 	}
 	if n := f.count("SELECT uses FROM invites WHERE id = ?", inv.Invite.ID); n != 1 {
@@ -493,13 +433,16 @@ func TestRedeemInviteGrants(t *testing.T) {
 		wantMay   bool
 		wantVoice bool
 	}{
-		// Nobody who joins may invite unless an operator grants it (#457).
-		{"personal default", personal("general"), func(f *inviteFixture) Principal { return f.alice }, false, false},
-		{"personal without the right to invite", func() schema.CreateInviteRequestV1 { r := personal("general"); r.MayInvite = &no; return r }(), func(f *inviteFixture) Principal { return f.alice }, false, false},
-		{"personal with voice", func() schema.CreateInviteRequestV1 { r := personal("general"); r.Voice = true; return r }(), func(f *inviteFixture) Principal { return f.alice }, false, true},
-		{"an operator's personal invite grants the right", func() schema.CreateInviteRequestV1 { r := personal("general"); r.MayInvite = &yes; return r }(), func(f *inviteFixture) Principal { return f.op }, true, false},
-		{"open default", open("general"), func(f *inviteFixture) Principal { return f.op }, false, false},
-		{"open that lets the joiner invite", func() schema.CreateInviteRequestV1 { r := open("general"); r.MayInvite = &yes; return r }(), func(f *inviteFixture) Principal { return f.op }, true, false},
+		// Whatever a legacy invite asked for, its joiner is a member like
+		// every other: voice and the may_invite brake on, both switches that
+		// only take away (issue #986, ADR-014). Before the community model the
+		// row decided (#457).
+		{"personal default", personal("general"), func(f *inviteFixture) Principal { return f.alice }, true, true},
+		{"personal without the right to invite", func() schema.CreateInviteRequestV1 { r := personal("general"); r.MayInvite = &no; return r }(), func(f *inviteFixture) Principal { return f.alice }, true, true},
+		{"personal with voice", func() schema.CreateInviteRequestV1 { r := personal("general"); r.Voice = true; return r }(), func(f *inviteFixture) Principal { return f.alice }, true, true},
+		{"an operator's personal invite with the right", func() schema.CreateInviteRequestV1 { r := personal("general"); r.MayInvite = &yes; return r }(), func(f *inviteFixture) Principal { return f.op }, true, true},
+		{"open default", open("general"), func(f *inviteFixture) Principal { return f.op }, true, true},
+		{"open that lets the joiner invite", func() schema.CreateInviteRequestV1 { r := open("general"); r.MayInvite = &yes; return r }(), func(f *inviteFixture) Principal { return f.op }, true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1054,17 +997,19 @@ func TestPreviewInviteShowsLittle(t *testing.T) {
 	if f.count("SELECT uses FROM invites") != 0 {
 		t.Error("a preview spent a use")
 	}
-	// Voice is what the maker still holds, not only what was asked for.
+	// Voice is what the joiner gets, and every joiner gets it whatever the
+	// invite or its maker hold (issue #986): the preview says so, and the
+	// redemption does it.
 	if _, err := f.s.db.Exec("UPDATE principals SET voice_allowed = 0 WHERE id = ?", f.alice.ID); err != nil {
 		t.Fatal(err)
 	}
 	got, err = f.s.PreviewInvite(f.ctx, HashInviteCode(inv.Code), f.now)
-	if err != nil || got.Voice {
-		t.Errorf("preview after the maker lost voice = %+v, %v; want voice false", got, err)
+	if err != nil || !got.Voice {
+		t.Errorf("preview after the maker lost voice = %+v, %v; want voice true", got, err)
 	}
 	r, err := f.redeem(inv.Code, "river")
-	if err != nil || r.Principal.VoiceAllowed {
-		t.Errorf("redeem after the maker lost voice: voice %v, %v; want false", r.Principal.VoiceAllowed, err)
+	if err != nil || !r.Principal.VoiceAllowed {
+		t.Errorf("redeem after the maker lost voice: voice %v, %v; want true", r.Principal.VoiceAllowed, err)
 	}
 }
 
@@ -1194,26 +1139,28 @@ func TestInvitesPausedFailsClosed(t *testing.T) {
 	}
 }
 
-// Redemption checks the maker again: an invite row that carries the right to
-// invite but was made by someone who is not an operator gives the joiner no
-// such right, however the row came to be (issue #457).
-func TestRedeemDoesNotTrustAStoredMayInvite(t *testing.T) {
-	f := newInviteFixture(t)
-	inv := f.mustCreate(f.alice, personal("general"))
-	if _, err := f.s.db.ExecContext(f.ctx, "UPDATE invites SET may_invite = 1 WHERE id = ?", inv.Invite.ID); err != nil {
-		t.Fatal(err)
-	}
-	got, err := f.redeem(inv.Code, "joiner")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Principal.MayInvite {
-		t.Error("the joiner holds the right to invite from a tester's invite")
-	}
-	if stored, err := f.s.PrincipalByID(f.ctx, got.Principal.ID); err != nil || stored.MayInvite {
-		t.Errorf("stored principal = %+v, %v; want no right to invite", stored, err)
-	}
-	if resolved, err := f.s.ResolveCredential(f.ctx, got.Token); err != nil || resolved.MayInvite {
-		t.Errorf("ResolveCredential = %+v, %v; want no right to invite", resolved, err)
+// Redemption does not read the joiner's switches from the invite row: a row
+// that says may_invite 0 and voice 0 and one that says 1 and 1 both make a
+// member with voice and the may_invite brake on (issue #986). Before the
+// community model the row decided, checked against the maker (#457); now the
+// brake is every member's, and only an operator takes it away.
+func TestRedeemDoesNotReadTheJoinersSwitchesFromTheRow(t *testing.T) {
+	for _, flags := range []int{0, 1} {
+		f := newInviteFixture(t)
+		inv := f.mustCreate(f.alice, personal("general"))
+		if _, err := f.s.db.ExecContext(f.ctx, "UPDATE invites SET may_invite = ?, voice = ? WHERE id = ?", flags, flags, inv.Invite.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := f.redeem(inv.Code, "joiner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, err := f.s.PrincipalByID(f.ctx, got.Principal.ID)
+		if err != nil || !stored.MayInvite || !stored.VoiceAllowed {
+			t.Errorf("row flags %d: stored principal = %+v, %v; want voice and the brake on", flags, stored, err)
+		}
+		if resolved, err := f.s.ResolveCredential(f.ctx, got.Token); err != nil || !resolved.MayInvite {
+			t.Errorf("row flags %d: ResolveCredential = %+v, %v; want the brake on", flags, resolved, err)
+		}
 	}
 }

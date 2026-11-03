@@ -37,6 +37,16 @@ for (const [size, options] of phones) {
     await expectFits(page, 'the Voice view');
     await showView(page, 'Channels');
     await expectFits(page, 'the Channels view');
+    // The channel directory and the creation form fit too (issue #991).
+    const channelsNav = page.getByRole('navigation', { name: 'Channels' });
+    await channelsNav.getByRole('button', { name: 'Browse channels' }).tap();
+    await expect(channelsNav.getByRole('list', { name: 'All channels' })).toBeVisible();
+    await expectFits(page, 'the Channels view with the directory open');
+    await channelsNav.getByRole('button', { name: 'Browse channels' }).tap();
+    await channelsNav.getByRole('button', { name: 'New channel' }).tap();
+    await expect(page.getByRole('form', { name: 'New channel' }).getByRole('radio', { name: /^Private/ })).toBeVisible();
+    await expectFits(page, 'the Channels view with the New channel form open');
+    await channelsNav.getByRole('button', { name: 'New channel' }).tap();
     await showView(page, 'Chat');
 
     // The whisper picker lays its people out in the composer.
@@ -72,6 +82,7 @@ for (const [size, options] of phones) {
     await expect(members).toHaveAttribute('aria-expanded', 'false');
     await members.tap();
     await expect(page.getByRole('region', { name: 'Members list' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Community members' })).toBeVisible();
     await expectFits(page, 'the lobby with the members panel open');
   });
 
@@ -342,4 +353,70 @@ for (const [size, options] of phoneSizes.filter(([name]) => name === '320×640' 
       await expectStateReadable(page, 'Connected');
     });
   }
+}
+
+// Issue #1018, #1019: an operator's Settings, on a phone, lists the administration
+// sections that exist (Server, Roles and permissions, Reports); each opens as its own page with a
+// Back control, nothing scrolls sideways, and every target is at least 44 px
+// high. One case for each built section.
+for (const [size, options] of phones) {
+  for (const section of ['Server', 'Roles and permissions', 'Reports'] as const) {
+    test(`P1018 at ${size} the ${section} section opens as a page with Back, fits the screen and has 44 px targets`, async ({ meet, world }) => {
+      const { page } = await meet(options);
+      await page.goto(world.appUrl);
+      await page.getByLabel('Credential').fill(world.tokens.operator);
+      await page.getByRole('button', { name: 'Use credential' }).click();
+      await page.getByRole('button', { name: 'Continue anyway' }).click();
+      await expect(statusLine(page)).toContainText('Connected');
+      await page.getByRole('button', { name: 'Settings' }).tap();
+      const dialog = page.getByRole('dialog', { name: 'Settings' });
+      // The sections that exist are a list; the page of one is not drawn yet.
+      const list = dialog.getByRole('list', { name: 'Server administration' });
+      await expect(list.getByRole('button')).toHaveText(['Server', 'Roles and permissions', 'Reports']);
+      await expect(dialog.getByRole('group', { name: 'Server settings' })).toHaveCount(0);
+      await expectFits(page, `${size}: the list of administration sections`);
+      await expectTargets(dialog, `${size}: the list of administration sections`);
+
+      await list.getByRole('button', { name: section, exact: true }).tap();
+      await expect(dialog.getByRole('heading', { name: section, exact: true })).toBeFocused();
+      await expect(dialog.getByRole('list', { name: 'Server administration' })).toHaveCount(0);
+      if (section === 'Server') {
+        await expect(dialog.getByRole('group', { name: 'Server settings' })).toBeVisible();
+        await dialog.getByRole('button', { name: 'Joining' }).tap();
+        await expect(dialog.getByRole('region', { name: 'Joining' })).toBeVisible();
+      } else if (section === 'Roles and permissions') {
+        const region = dialog.getByRole('region', { name: 'Roles and permissions' });
+        await expect(region.getByRole('switch').first()).toBeVisible();
+        await region.getByRole('button', { name: 'Operators', exact: true }).tap();
+        await expect(region.getByRole('list', { name: 'Operators permissions' })).toBeVisible();
+      } else {
+        await dialog.getByRole('button', { name: 'Reports', exact: true }).tap();
+        await expect(dialog.getByRole('region', { name: 'Reports' })).toBeVisible();
+      }
+      await expectFits(page, `${size}: the ${section} page`);
+      await expectTargets(dialog, `${size}: the ${section} page`);
+
+      await dialog.getByRole('button', { name: 'Back to administration' }).tap();
+      await expect(dialog.getByRole('list', { name: 'Server administration' })).toBeVisible();
+      await expect(dialog.getByRole('list', { name: 'Server administration' }).getByRole('button', { name: section, exact: true })).toBeFocused();
+    });
+  }
+}
+
+// expectTargets checks that every button, text field and checkbox label in
+// the console is at least 44 px high (the checkbox itself is drawn inside its
+// label, which is the target).
+async function expectTargets(scope: Locator, view: string): Promise<void> {
+  const small = await scope.locator('.admin-console').evaluate((root) => {
+    const found: string[] = [];
+    for (const el of root.querySelectorAll<HTMLElement>('button, input[type="text"], label')) {
+      if (el.closest('[hidden]') !== null) continue;
+      const box = el.getBoundingClientRect();
+      if (box.width === 0 || box.height === 0) continue;
+      if (el instanceof HTMLLabelElement && el.querySelector('input[type="checkbox"], input[type="radio"]') === null) continue;
+      if (box.height < 43.5) found.push(`${el.tagName.toLowerCase()} "${el.textContent.trim().slice(0, 40)}" is ${String(Math.round(box.height))} px high`);
+    }
+    return found;
+  });
+  expect(small, `${view}: targets under 44 px`).toEqual([]);
 }

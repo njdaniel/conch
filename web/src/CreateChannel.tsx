@@ -1,31 +1,48 @@
 import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
-import { serverLine } from './Invite';
-import type { ChannelV0 } from './schema/channel';
-
-// What the server's refusal means to the person, by its code. A name is taken
-// whoever's channel it is, so the one in the way may be one they are not in
-// and cannot see.
-const refusals: Readonly<Record<string, string>> = {
-  channel_exists: 'There is already a channel with that name, perhaps one you are not in. Choose another name.',
-  forbidden: 'Only an operator can create channels.',
-};
+import { waitWords } from './Invite';
+import type { ChannelV0, ChannelVisibility } from './schema/channel';
 
 // The rule a name must keep, for a refusal that does not say which part it
-// broke.
+// broke. The server's own line is never shown: the page's words are chosen by
+// the server's code.
 const nameRule = 'That name cannot be used: it needs a letter you can see, at most 100 characters, and no spaces at either end or control characters.';
+
+// The one answer to every collision. A name is taken whoever's channel it is,
+// and the page never says whether the one in the way is a private channel it
+// cannot see (design section 5, R2).
+export const nameTaken = 'That name is taken';
+
+// How long a daily cap asks the person to wait: the Retry-After, in hours once
+// it is long.
+function capWait(seconds: number | undefined): string {
+  if (seconds === undefined || seconds < 7200) return waitWords(seconds);
+  return `${String(Math.ceil(seconds / 3600))} hours`;
+}
 
 type Line = { readonly text: string; readonly refused: boolean };
 
 // refusalLine is the plain words for a channel the server did not make.
-function refusalLine(result: { readonly failure: api.ApiFailure; readonly code?: string; readonly message?: string }): string {
+function refusalLine(result: { readonly failure: api.ApiFailure; readonly code?: string; readonly retryAfter?: number }, visibility: ChannelVisibility): string {
   if (result.failure === 'network') return 'Cannot reach the server. Try again.';
-  if (result.code === 'invalid_request') return serverLine(result.message, nameRule);
-  return (result.code === undefined ? undefined : refusals[result.code]) ?? 'The server could not create the channel. Try again.';
+  switch (result.code) {
+    case 'channel_exists':
+      return nameTaken;
+    case 'rate_limited':
+      return `You have reached the daily limit for making channels. Try again in ${capWait(result.retryAfter)}.`;
+    case 'permission_denied':
+      return `You do not have permission to make a ${visibility} channel.`;
+    case 'forbidden':
+      return 'Only members of this community can make channels.';
+    case 'invalid_request':
+      return nameRule;
+    default:
+      return 'The server could not create the channel. Try again.';
+  }
 }
 
-// "New channel" (issue #695): an operator makes a channel from the channel
-// list, one request per submit, however often the button is pressed. The new
+// "New channel" (issues #695, #991): a member makes a public or private channel
+// from the channel list (the server decides who may make which), one request per submit, however often the button is pressed. The new
 // channel is the server's answer, handed to onCreated; nothing changes in the
 // list until the server has said yes. A refusal leaves the name as typed, to
 // be corrected. Making a channel only makes it: it does not join its voice.
@@ -33,15 +50,24 @@ export function CreateChannel({
   onCreated,
   onUnauthorized,
   asks = 0,
+  canPublic = true,
+  canPrivate = true,
 }: {
   // Counts requests from elsewhere on the page to open the form (issue
   // #1032); each one opens it and puts focus in the name field.
   readonly asks?: number;
+  // Which visibilities this person is offered, from what whoami says they
+  // hold; the server still decides. At least one is true, or this is not drawn.
+  readonly canPublic?: boolean;
+  readonly canPrivate?: boolean;
   readonly onCreated: (channel: ChannelV0) => void;
   readonly onUnauthorized: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [value, setValue] = useState('');
+  const [chosen, setChosen] = useState<ChannelVisibility>('public');
+  // What is sent is a visibility this person is offered.
+  const visibility: ChannelVisibility = chosen === 'private' && !canPrivate ? 'public' : chosen === 'public' && !canPublic ? 'private' : chosen;
   const [busy, setBusy] = useState(false);
   const [line, setLine] = useState<Line | null>(null);
   // The request in flight, held outside state: two submits in one tick both
@@ -79,7 +105,7 @@ export function CreateChannel({
     sending.current = true;
     setBusy(true);
     setLine(null);
-    void api.createChannel(value).then((result) => {
+    void api.createChannel(value, visibility).then((result) => {
       sending.current = false;
       if (!live.current) return;
       setBusy(false);
@@ -96,7 +122,7 @@ export function CreateChannel({
         onUnauthorized();
         return;
       }
-      setLine({ text: refusalLine(result), refused: true });
+      setLine({ text: refusalLine(result, visibility), refused: true });
     });
   }
 
@@ -127,6 +153,33 @@ export function CreateChannel({
             setValue(e.target.value);
           }}
         />
+        {canPublic && canPrivate ? (
+          <fieldset disabled={busy}>
+            <legend>Who can find it</legend>
+            <label>
+              <input
+                type="radio"
+                name="create-channel-visibility"
+                checked={visibility === 'public'}
+                onChange={() => {
+                  setChosen('public');
+                }}
+              />
+              Public: every member can find and join it
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="create-channel-visibility"
+                checked={visibility === 'private'}
+                onChange={() => {
+                  setChosen('private');
+                }}
+              />
+              Private: only people you add
+            </label>
+          </fieldset>
+        ) : null}
         <button type="submit" disabled={busy || value.trim() === ''}>
           Create channel
         </button>

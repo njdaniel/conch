@@ -223,7 +223,7 @@ func run(h *harness) (summary, error) {
 	if err := w.buildGroups(); err != nil {
 		return sum, fmt.Errorf("the groups: %w", err)
 	}
-	h.say("ok   the groups: A (%d people and an agent) joined through an open link; B (%d people) through personal invites, the second made by a B tester, and one the operator made by hand, with an agent",
+	h.say("ok   the groups: A (%d people and an agent) joined through the operator's member link; B (%d people) through member links, the second made by a B tester, and one the operator made by hand, with an agent",
 		len(w.a.people), len(w.b.people))
 
 	bob := w.b.people[1]
@@ -233,6 +233,9 @@ func run(h *harness) (summary, error) {
 	}
 	if err := w.activityA(); err != nil {
 		return sum, fmt.Errorf("group A's activity: %w", err)
+	}
+	if err := w.publicA(); err != nil {
+		return sum, fmt.Errorf("group A's public channel: %w", err)
 	}
 	var v *voiceA
 	if lk != nil {
@@ -279,6 +282,11 @@ func run(h *harness) (summary, error) {
 	}
 	h.say("ok   MCP: %d tool calls as B's agent about A's objects and ghosts, each refused alike and with nothing of A (%s)", n, strings.Join(codes, ", "))
 
+	if err := w.checkMemberLinkRedemption(); err != nil {
+		return sum, fmt.Errorf("member-link redemption: %w", err)
+	}
+	h.say("ok   member link: a newcomer through A's member link landed in the default channels as they are now and in none of A's private channels")
+
 	if n, err = w.channelsChangedRows(bsock); err != nil {
 		return sum, fmt.Errorf("the channel-list signal: %w", err)
 	}
@@ -316,6 +324,14 @@ func run(h *harness) (summary, error) {
 		return sum, fmt.Errorf("the restricted operator: %w", err)
 	}
 	h.say("ok   restricted operator: %d rows; with manage_members, act_as_members and manage_channels cut through PUT /v1/permissions, every permission route named its permission, A's channel answered as one that never existed, its own channel gave it a manager's rights, and what it made before the cut was judged again", rn)
+
+	// The personal preset (issue #1017, design §7.7 item 3): the owner
+	// applies personal and group through the real PUT.
+	pn, err := w.presetPhase()
+	if err != nil {
+		return sum, fmt.Errorf("the personal preset: %w", err)
+	}
+	h.say("ok   personal preset: %d rows; with personal applied through PUT /v1/permissions a member's link (v1 and v2) was refused invite_not_allowed naming make_member_links and its channel creation permission_denied naming the permission of the visibility; group gave both back", pn)
 
 	// B's sockets have been open through all of it: a second control, and
 	// every frame since they opened is scanned again.

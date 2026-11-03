@@ -66,6 +66,10 @@ struct Helper {
     events: Arc<Mutex<Vec<String>>>,
     /// Set when the event pipe reached its end: every writer of it has gone.
     events_ended: Arc<Mutex<Option<Instant>>>,
+    /// Whether a thread of the test reads the event pipe, so that `events_ended` is set.
+    reads_events: bool,
+    /// When `exit_within` saw the process gone, before it waited for the readers.
+    exited_at: Option<Instant>,
     /// Filled when standard error reached its end, by `stderr_reader`.
     stderr: Arc<Mutex<String>>,
     /// The thread that reads standard error; taken when it is waited for.
@@ -188,6 +192,8 @@ fn spawn_env(
         stdin,
         events,
         events_ended,
+        exited_at: None,
+        reads_events: matches!(fd3, Fd3::Pipe(_)) && !background,
         stderr,
         stderr_reader: Mutex::new(Some(stderr_reader)),
     }
@@ -254,11 +260,41 @@ impl Helper {
         }
     }
 
+    /// Waits until the thread that reads the event pipe has reached its end, so that
+    /// `events` holds everything the helper wrote. The process having exited is not enough:
+    /// the lines are in the pipe, and a reader that is starved reads them a moment later
+    /// (#1144). The limit only keeps a test from hanging, and passing it fails the test:
+    /// events that may be incomplete must not be inspected.
+    fn events_read_to_the_end(&self) {
+        if !self.reads_events {
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.events_ended.lock().unwrap().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "the event pipe did not reach its end after the helper exited\nevents: {:?}",
+                self.events.lock().unwrap()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// How long after `since` the process was seen to be gone: not counting the wait for
+    /// the test's readers that follows, which is the test's own scheduling.
+    fn exit_after(&self, since: Instant) -> Duration {
+        self.exited_at
+            .expect("exit_within saw the exit")
+            .saturating_duration_since(since)
+    }
+
     /// Waits for the process to exit, for at most `within`.
     fn exit_within(&mut self, within: Duration) -> Option<i32> {
         let began = Instant::now();
         while began.elapsed() < within {
             if let Some(status) = self.child.try_wait().unwrap() {
+                self.exited_at = Some(Instant::now());
+                self.events_read_to_the_end();
                 return status.code();
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -446,7 +482,7 @@ async fn the_end_of_standard_input_ends_it_within_its_bound_while_the_key_device
         let gone = Instant::now();
         helper.close();
         let code = helper.exit_within(Duration::from_secs(10));
-        (code, gone.elapsed(), helper)
+        (code, helper.exit_after(gone), helper)
     })
     .await
     .unwrap();
@@ -661,7 +697,7 @@ async fn a_v2_owner_gets_v2_events_and_the_end_of_standard_input_ends_it_in_open
         let gone = Instant::now();
         helper.close();
         let code = helper.exit_within(Duration::from_secs(10));
-        (code, gone.elapsed(), helper)
+        (code, helper.exit_after(gone), helper)
     })
     .await
     .unwrap();
@@ -1260,7 +1296,7 @@ async fn the_owner_is_lost_by(what: &'static str, act: fn(&Wire)) {
         let gone = Instant::now();
         act(&wire);
         let code = helper.exit_within(Duration::from_secs(10));
-        (code, gone.elapsed(), helper, wire)
+        (code, helper.exit_after(gone), helper, wire)
     })
     .await
     .unwrap();

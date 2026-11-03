@@ -27,8 +27,10 @@ import (
 // yet"), so a release that ships a permission's cell before its gates
 // refuses the change rather than ignoring it.
 //
-//   - Rows 1, 2 and 4 gate routes that do not exist yet (#981, #983): they
-//     are enforced vacuously, so the personal preset can apply before them.
+//   - Rows 1 and 2 are enforced by member channel creation (#981): the
+//     store asks them under its write lock.
+//   - Row 4 is enforced by the member directory (#983): the route asks it
+//     for each viewer, and a manager's add asks it under the write lock.
 //   - Rows 7-11 are enforced by the route classes of this issue and the
 //     store's standing checks of A3a (#1014).
 //   - Rows 3 (make_member_links), 5 (use_voice) and 6 (share_screen) joined

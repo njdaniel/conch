@@ -50,6 +50,11 @@ type adminOpts struct {
 	// join holds the flags of `join` and `guest` (issue #715), in
 	// admin_guest.go.
 	join joinOpts
+	// permissions holds the flags of `permissions set` (issue #1022).
+	permissions permissionsOpts
+	// community holds the flags of `channel settings` (issue #994), in
+	// admin_community.go.
+	community communityOpts
 }
 
 // principalOpts holds the flags of the principal list, hide and sign-in-link
@@ -79,6 +84,9 @@ type adminRun struct {
 	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
+	// prompt asks the person a question; it shares stdin with the
+	// re-authentication prompt.
+	prompt *prompter
 }
 
 // adminCommand is one `conch admin <group> <verb>`.
@@ -103,6 +111,9 @@ type adminCommand struct {
 // lists the groups.
 var adminCommands = []adminCommand{
 	{group: "channel", verb: "create", args: []string{"name"}, run: adminChannelCreate},
+	// The community model (ADR-013, issue #994), in admin_community.go.
+	{group: "channel", verb: "settings", args: []string{"channel"}, flags: "[--public|--private] [--default on|off] ",
+		bind: bindChannelSettings, run: adminChannelSettings},
 	{group: "principal", verb: "create", args: []string{"name"}, flags: "--kind human|agent ", required: []string{"kind"},
 		bind: func(fs *flag.FlagSet, o *adminOpts) { fs.StringVar(&o.kind, "kind", "", "human or agent") },
 		run:  adminPrincipalCreate},
@@ -161,9 +172,9 @@ var adminCommands = []adminCommand{
 		run: adminManifestPut},
 	{group: "manifest", verb: "get", args: []string{"principal-id"}, idAt: 1, run: adminManifestGet},
 	// Invites and their administration (issue #438), in admin_invite.go.
-	{group: "invite", verb: "create", flags: "--open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] [--join-as account|guest|both] ",
-		required: []string{"channel", "expires"}, bind: bindInviteCreate, run: adminInviteCreate},
-	{group: "invite", verb: "list", flags: "[--state open|used|expired|closed] [--kind personal|open] [--created-by <id>] ",
+	{group: "invite", verb: "create", flags: "[--expires <duration|RFC3339> | --never-expires] [--uses <n>] [--credential-days <n>] [--landing-channel <name>...] ",
+		bind: bindInviteCreate, run: adminInviteCreate},
+	{group: "invite", verb: "list", flags: "[--state open|used|expired|closed] [--created-by <id>] ",
 		bind: bindInviteList, run: adminInviteList},
 	{group: "invite", verb: "close", args: []string{"id"}, idAt: 1, run: adminInviteClose},
 	{group: "invite", verb: "joiners", args: []string{"id"}, idAt: 1, run: adminInviteJoiners},
@@ -179,24 +190,32 @@ var adminCommands = []adminCommand{
 	// admin_invite.go.
 	{group: "principal", verb: "sign-in-link", args: []string{"id"}, idAt: 1, flags: "[--purpose sign_in|reset|enrollment] [--expires <duration|RFC3339>] ",
 		bind: bindSignInLink, run: adminPrincipalSignInLink},
+	{group: "principal", verb: "voice", args: []string{"id", "on|off"}, idAt: 1, run: adminPrincipalVoice},
 	// Closing one that leaked, by the link's id (the id `principal
 	// sign-in-link` prints), without disabling its person.
 	{group: "sign-in-link", verb: "close", args: []string{"id"}, idAt: 1, run: adminSignInLinkClose},
 	// The joining policy and guest visits (issue #715), in admin_guest.go.
 	{group: "join", verb: "status", run: adminJoinStatus},
-	{group: "join", verb: "set", flags: "[--open-joining off|guest|account|both] [--guests on|off] [--paused on|off] [--voice on|off] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels] ",
+	{group: "join", verb: "set", flags: "[--open-signup on|off] [--link-expiry <duration|0>] [--open-joining off|account] [--guests off] [--paused on|off] [--voice on] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels] ",
 		bind: bindJoinSet, run: adminJoinSet},
 	{group: "guest", verb: "list", flags: "[--state active|ended|converted] [--origin address|invite] ", bind: bindGuestList, run: adminGuestList},
 	{group: "guest", verb: "end", args: []string{"id"}, idAt: 1, run: adminGuestEnd},
 	{group: "guest", verb: "end-all", flags: "[--origin address|invite] [--invite <id>] [--dry-run | --yes] ", bind: bindGuestEndAll, run: adminGuestEndAll},
 	{group: "guest", verb: "permit", args: []string{"id"}, idAt: 1, flags: "[--expires <duration|RFC3339>] ", bind: bindGuestPermit, run: adminGuestPermit},
+	// The permissions document (ADR-014, issue #1022), in admin_permissions.go.
+	{group: "permissions", verb: "show", run: adminPermissionsShow},
+	{group: "permissions", verb: "set", args: []string{"permission"}, flags: "[--members on|off] [--operators on|off] ",
+		bind: bindPermissionsSet, run: adminPermissionsSet},
+	{group: "permissions", verb: "preset", args: []string{"personal|group"}, flags: "[--yes] ",
+		bind: bindYes, run: adminPermissionsPreset},
+	{group: "directory", verb: "members", run: adminDirectoryMembers},
 	// Problem reports (issue #446), in admin_report.go.
 	{group: "reports", verb: "list", flags: "[--limit <n>] ", bind: bindReportsList, run: adminReportsList},
 	{group: "reports", verb: "show", args: []string{"id"}, idAt: 1, flags: "[--markdown] ", bind: bindReportsShow, run: adminReportsShow},
 	{group: "reports", verb: "file", args: []string{"id", "issue-url"}, idAt: 1, run: adminReportsFile},
 }
 
-const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link"
+const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions|directory"
 
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {
@@ -287,7 +306,10 @@ func runAdminCommand(ctx context.Context, c adminCommand, args []string, stdin i
 	// sensitive commands need a recent proof on it (design §5.3): the server
 	// says reauth_required, the person proves it, and the request is sent
 	// again. A script credential is never asked.
-	askToReauth(client, newPrompter(ctx, stdin, stderr), stderr)
+	// One prompter serves the proof and any confirmation, so a piped stdin
+	// is read through one buffer.
+	r.prompt = newPrompter(ctx, stdin, stderr)
+	askToReauth(client, r.prompt, stderr)
 	r.client = client
 	return c.run(ctx, r)
 }
@@ -400,7 +422,7 @@ func principalState(p schema.PrincipalAdminV1) schema.PrincipalState {
 }
 
 // adminPrincipalList prints
-// `<id> <kind> <role>[ owner] <active|disabled|hidden> creds <n> invite <id|-> <name>`
+// `<id> <kind> <role>[ owner] <active|disabled|hidden> creds <n> invite <id|-> voice <on|off|-> may-invite <on|off|-> <name>`
 // per principal, newest first, following the server's pages to the end. The
 // name is last because it may contain spaces.
 func adminPrincipalList(ctx context.Context, r *adminRun) error {
@@ -443,8 +465,8 @@ func adminPrincipalList(ctx context.Context, r *adminRun) error {
 		if p.Owner {
 			owner = " owner"
 		}
-		if _, err := fmt.Fprintf(r.stdout, "%d %s %s%s %s creds %d invite %s %s\n", p.ID, safeLine(string(p.Kind)), safeLine(string(p.Role)), owner,
-			principalState(p), p.LiveCredentials, invite, safeLine(p.Name)); err != nil {
+		if _, err := fmt.Fprintf(r.stdout, "%d %s %s%s %s creds %d invite %s voice %s may-invite %s %s\n", p.ID, safeLine(string(p.Kind)), safeLine(string(p.Role)), owner,
+			principalState(p), p.LiveCredentials, invite, optionalOnOff(p.VoiceAllowed), optionalOnOff(p.MayInvite), safeLine(p.Name)); err != nil {
 			return err
 		}
 	}

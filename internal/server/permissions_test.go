@@ -148,6 +148,7 @@ func TestPermissionsGet(t *testing.T) {
 	}
 	general := "general"
 	mode := schema.OpenJoiningAccount
+	makeChannelsPublic(t, f.srv.store, general)
 	if _, err := f.srv.store.PutJoinSettings(ctx, "system", 0, schema.PutJoinSettingsRequestV1{OpenJoining: &mode, OpenChannels: &[]string{general}}); err != nil {
 		t.Fatal(err)
 	}
@@ -527,9 +528,19 @@ var permissionGates = map[schema.Permission][][2]string{
 		// security review of #1015).
 		{"hooks.go", "Server.handleCreateHook"},
 		{"manifests.go", "Server.handlePutManifest"},
+		// Channel settings, and the bound on a creator who does not hold
+		// it (issue #981).
+		{"channels.go", "Server.handleChannelSettings"},
+		{"store/queries.go", "Store.ChannelSettings"},
+		{"store/members.go", "channelCreatorStandingTx"},
 	},
-	schema.PermChangeServerSettings: {{"routes.go", "Server.routeTable"}},
-	schema.PermReadAuditLog:         {{"routes.go", "Server.routeTable"}},
+	schema.PermSeeMemberDirectory: {{"directory.go", "Server.handleListDirectoryMembers"}},
+	// Member channel creation (issue #981): the store decides the
+	// permission for the visibility asked, under its write lock.
+	schema.PermCreatePublicChannels:  {{"store/members.go", "channelCreatePermission"}},
+	schema.PermCreatePrivateChannels: {{"store/members.go", "channelCreatePermission"}},
+	schema.PermChangeServerSettings:  {{"routes.go", "Server.routeTable"}},
+	schema.PermReadAuditLog:          {{"routes.go", "Server.routeTable"}},
 	// A4 (#1016): every voice route reads use_voice through
 	// voicePresenceChannel (session, transmit, companion, presence, the
 	// socket, the share routes) or voiceOccupancyCaller; the poller and the
@@ -542,7 +553,7 @@ var permissionGates = map[schema.Permission][][2]string{
 		{"voice.go", "Server.voiceStillEntitled"},
 		{"voice_occupancy.go", "Server.voiceOccupancyCaller"},
 		{"voice_presence.go", "Server.voiceEntitlement"},
-		{"voice_presence.go", "Server.voiceWithheld"},
+		{"voice_presence.go", "Server.voiceWithheldAmong"},
 	},
 	schema.PermShareScreen: {
 		{"voice_share.go", "Server.handleVoiceShareStart"},
@@ -551,11 +562,7 @@ var permissionGates = map[schema.Permission][][2]string{
 	},
 }
 
-var vacuousGates = map[schema.Permission][]string{
-	schema.PermCreatePublicChannels:  {"POST /v1/channels"},
-	schema.PermCreatePrivateChannels: {"POST /v1/channels"},
-	schema.PermSeeMemberDirectory:    {"GET /v1/directory/members"},
-}
+var vacuousGates = map[schema.Permission][]string{}
 
 // TestEnforcedPermissionsAreHonest is the safety net's own check (SF-3):
 // every permission in enforcedPermissions is asked by each of its gates, or
@@ -785,6 +792,38 @@ func TestInviteRefusalsNameThePermission(t *testing.T) {
 				t.Fatal(err)
 			}
 			rec := f.do(t, "POST", "/v1/invites", c.tok, string(body))
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("invite = %d %s, want 403", rec.Code, rec.Body)
+			}
+			if e := decodeBody[schema.Error](t, rec); e.Code != c.code || e.Permission != c.perm {
+				t.Errorf("refusal = %s, want code %q permission %q", rec.Body, c.code, c.perm)
+			}
+		})
+	}
+}
+
+// The same for the member link (issue #985): POST /v2/invites.
+func TestMemberLinkRefusalsNameThePermission(t *testing.T) {
+	f := newRestrictedFixture(t, Config{})
+	f.cut(t)
+	for _, c := range []struct {
+		name string
+		tok  string
+		body string
+		code string
+		perm schema.Permission
+	}{
+		{"a link that never expires, without manage_members", f.opTok, `{"kind":"member","never_expires":true}`,
+			schema.ErrorCodeInviteNotAllowed, schema.PermManageMembers},
+		{"a landing channel it is not in, without manage_channels", f.opTok, `{"kind":"member","landing_channels":["channel-a"]}`,
+			schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageChannels},
+		// A member is never told of an operator permission; its own right
+		// to make links (its brake) it is told.
+		{"a member who may not invite", f.memberTok, `{"kind":"member"}`,
+			schema.ErrorCodeInviteNotAllowed, schema.PermMakeMemberLinks},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rec := f.do(t, "POST", "/v2/invites", c.tok, c.body)
 			if rec.Code != http.StatusForbidden {
 				t.Fatalf("invite = %d %s, want 403", rec.Code, rec.Body)
 			}

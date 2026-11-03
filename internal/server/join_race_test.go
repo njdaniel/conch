@@ -41,6 +41,9 @@ import (
 // parameters (password_test.go), so a join costs microseconds.
 func TestOpenChannelsRaceAccountJoins(t *testing.T) {
 	f := newInviteFixture(t, Config{})
+	// Both are public: listing a private channel is refused (issue #987),
+	// and the race is about which public set an account lands in.
+	f.makePublic(t, "red", "blue")
 	f.mustPutJoin(t, openTo("red"))
 	const (
 		joiners    = 4

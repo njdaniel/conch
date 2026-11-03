@@ -140,10 +140,10 @@ func (f *loginFixture) passwordCount(t *testing.T, id int64) string {
 	return f.queryString(t, fmt.Sprintf("SELECT COUNT(*) FROM passwords WHERE principal_id = %d", id))
 }
 
-// An account from the bare address: made with its password, in every open
-// channel with no right to decide and a history bound at its admission, and
-// signed in again from another device with the password alone once it has
-// signed out.
+// An account from the bare address (open sign-up, issue #987): made with
+// its password, in every default channel with no right to decide and no
+// history bound, the may_invite brake on, and signed in again from another
+// device with the password alone once it has signed out.
 func TestJoinAccount(t *testing.T) {
 	ctx := context.Background()
 	f := newLoginFixture(t, Config{})
@@ -160,19 +160,21 @@ func TestJoinAccount(t *testing.T) {
 		t.Fatalf("account = %+v", acct)
 	}
 	id := acct.Principal.ID
-	if code, who := f.whoami(t, acct.Token); code != 200 || who.ID != id || who.IdentityClass != schema.IdentityMember || who.Guest != nil || who.MayInvite {
+	if code, who := f.whoami(t, acct.Token); code != 200 || who.ID != id || who.IdentityClass != schema.IdentityMember || who.Guest != nil || !who.MayInvite ||
+		who.VoiceAllowed == nil || !*who.VoiceAllowed {
 		t.Fatalf("whoami = %d %+v", code, who)
 	}
 	ms := f.memberships(t, id)
-	if len(ms) != 1 || ms[0].channel != f.red.ID || ms[0].canDecide || ms[0].historyAfter <= 0 {
-		t.Errorf("memberships = %+v, want red with no right to decide and a history bound", ms)
+	if len(ms) != 1 || ms[0].channel != f.red.ID || ms[0].canDecide || ms[0].historyAfter != -1 {
+		t.Errorf("memberships = %+v, want red with no right to decide and no history bound", ms)
 	}
 	if ok, err := f.srv.store.CanDecideApprovals(ctx, f.red.ID, id); err != nil || ok {
 		t.Errorf("CanDecideApprovals = %v, %v", ok, err)
 	}
+	// A member sees a channel's whole history (ADR-013).
 	msgs := decodeBody[schema.ListMessagesResponseV2](t, f.send(t, "GET", "/v2/channels/red/messages", acct.Token, "", ""))
-	if len(msgs.Messages) != 0 {
-		t.Errorf("the new account reads %d messages from before it joined", len(msgs.Messages))
+	if len(msgs.Messages) != 1 {
+		t.Errorf("the new account reads %d messages from before it joined, want 1", len(msgs.Messages))
 	}
 	if f.passwordCount(t, id) != "1" {
 		t.Error("the account has no password")

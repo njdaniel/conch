@@ -172,7 +172,7 @@ Flags for serve:
                          per-address cap on guest visits. Unset, the header is
                          never read and every request counts as coming from its connection's
                          peer: behind a proxy, from the proxy.
-  --invite-allowance     how many open personal invites one person who may invite can hold
+  --invite-allowance     how many open member links one person who may invite can hold
                          at once; operators have no allowance (env CONCHD_INVITE_ALLOWANCE,
                          default 5)
   --server-name          the server's label on its front door, GET /v1/join, at most 64
@@ -190,8 +190,10 @@ Flags for serve:
                          read the metrics; conchd logs a warning when it is used.
   --test-relax-invite-limits
                          TEST SERVERS ONLY. Raises the per-address limits of the invite and
-                         sign-in-link routes so a browser suite that redeems everything from
-                         one address does not share a budget between specs. Flag only, no
+                         sign-in-link routes, and the per-person limit on making them, so a
+                         browser suite that redeems everything from one address and makes
+                         most invites as one operator does not share a budget between specs.
+                         Flag only, no
                          environment variable. serve refuses to start with it unless every
                          address it binds is loopback and no trusted proxy is set, and logs
                          a warning when it is on. Any reverse proxy or tunnel in front of it,
@@ -296,7 +298,7 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	sessionStale := fs.Duration("session-stale", staleDefault, "how long without a heartbeat before a session shows as stale")
 	sessionOffline := fs.Duration("session-offline", offlineDefault, "how long without a heartbeat before a session shows as offline")
 	trustedProxiesRaw := fs.String("trusted-proxies", os.Getenv("CONCHD_TRUSTED_PROXIES"), "comma-separated CIDRs of reverse proxies whose X-Forwarded-For is believed")
-	inviteAllowance := fs.Int("invite-allowance", store.DefaultPersonalInviteAllowance, "open personal invites one inviter may hold at once")
+	inviteAllowance := fs.Int("invite-allowance", store.DefaultPersonalInviteAllowance, "open member links one member may hold at once")
 	if raw := os.Getenv("CONCHD_INVITE_ALLOWANCE"); raw != "" {
 		v, err := strconv.Atoi(raw)
 		if err != nil {
@@ -314,7 +316,7 @@ func parseServeArgs(args []string) (serveOptions, error) {
 	metricsRemote := fs.Bool("metrics-allow-remote", metricsRemoteDefault, "let --metrics-listen be an address that is not loopback")
 	// A flag and nothing else: an environment variable could be left set in
 	// a service file by accident, a flag has to be typed.
-	relaxInviteLimits := fs.Bool("test-relax-invite-limits", false, "TEST SERVERS ONLY: raise the per-address invite and sign-in-link limits (loopback listeners only)")
+	relaxInviteLimits := fs.Bool("test-relax-invite-limits", false, "TEST SERVERS ONLY: raise the per-address and per-person invite and sign-in-link limits (loopback listeners only)")
 	serverName := fs.String("server-name", os.Getenv("CONCHD_SERVER_NAME"), "the server's label on its front door (default "+server.DefaultServerName+")")
 	maxUpload := fs.Int64("max-upload-bytes", server.DefaultMaxUploadBytes, "largest file an upload may carry, in bytes; 0 disables uploads")
 	// The environment seeds the default; a flag given on the command line

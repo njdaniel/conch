@@ -186,6 +186,11 @@ func TestChannelContentLeak(t *testing.T) {
 		{"voice presence websocket", "GET", "/v1/voice/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
 		// The events socket (issue #269) is gated like the roster: a non-member is told nothing.
 		{"events websocket", "GET", "/v1/events/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
+		// Self-join (issue #982): alpha is private, so a member gets their
+		// membership back (200) and a non-member the unknown channel's
+		// 404; an agent is refused before any lookup, the same 403 for an
+		// unknown channel.
+		{"self-join", "POST", "/v1/channels/%s/join", "", false, [4]int{ok, notFound, http.StatusForbidden, notFound}},
 	}
 	// Completeness guard: every route that addresses a channel must either have
 	// a row above or be listed here with the reason it is not a content path.
@@ -194,6 +199,7 @@ func TestChannelContentLeak(t *testing.T) {
 		"POST /v2/channels/{channel}/files":                               "humans-only upload: an agent is refused before the channel is looked up; covered by TestFileUploadRefusals and the file visibility matrix",
 		"POST /v1/channels/{channel}/nets":                                "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"PUT /v1/channels/{channel}/read-state":                           "humans-only: an agent is refused 403 before the channel is looked up, whichever channel it names, and a human non-member gets the unknown-channel 404; covered by TestReadStatePut",
+		"POST /v1/channels/{channel}/leave":                               "a member's leave ends their membership, which later rows need; a non-member's leave is the unknown channel's 404 and an agent is refused before any lookup, covered by TestLeaveChannelRefusals (byte-identical per caller class) and e2e/isolation",
 		"POST /v1/ws-tickets":                                             "names no channel (it only matches the \"/ws\" test above by its spelling); a ticket opens the same v2 socket, which is checked per channel at the upgrade by the row above and by TestWSTicketOpensSocket",
 		"DELETE /v1/channels/{channel}/nets/{net}":                        "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"PUT /v1/channels/{channel}/members/{principal_id}":               "a membership write (operator or manager, issue #790); covered by the \"member put\" row above, whose path names a principal id",
