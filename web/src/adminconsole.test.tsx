@@ -208,12 +208,12 @@ describe('who is shown the console', () => {
     await signedIn(operatorToken);
     expect(await screen.findByRole('heading', { name: 'Server administration' })).toBeDefined();
     expect(await screen.findByRole('button', { name: 'Joining' })).toBeDefined();
-    // Reports is built; Roles and permissions, Members and Channels are not,
+    // Reports and Roles and permissions are built; Members and Channels are not,
     // and so are not listed.
     expect(screen.getByRole('button', { name: 'Reports' })).toBeDefined();
     const console_ = screen.getByRole('heading', { name: 'Server administration' }).parentElement;
     if (console_ === null) throw new Error('no console');
-    for (const name of ['Roles and permissions', 'Members', 'Channels']) expect(within(console_).queryByRole('button', { name })).toBeNull();
+    for (const name of ['Members', 'Channels']) expect(within(console_).queryByRole('button', { name })).toBeNull();
     cleanup();
     serve(owner);
     await signedIn(ownerToken);
@@ -567,17 +567,25 @@ describe('the live signal', () => {
   });
 
   it('reads the permissions document again for an operator', async () => {
-    let reads = 0;
-    serve(owner, { 'GET /v1/permissions': () => json(permissionsDoc(++reads === 1 ? 2 : 3, reads === 1 ? memberRights : ['use_voice'])) });
+    // Two sections read the document (Server and Roles and permissions), so
+    // the answer follows what the server says, not the count of reads.
+    let changed = false;
+    serve(owner, { 'GET /v1/permissions': () => json(changed ? permissionsDoc(3, ['use_voice']) : permissionsDoc(2, memberRights)) });
     window.location.hash = '#/c/channel-a';
     await signedIn(ownerToken);
-    expect(await screen.findByText(/Members see: everyone/)).toBeDefined();
+    const summary = () => screen.getByRole('list', { name: 'What members have' }).textContent;
+    await waitFor(() => {
+      expect(summary()).toContain('Members see: everyone');
+    });
     await waitFor(() => {
       expect(FakeSocket.all.some((s) => s.url.includes('/v1/events/ws?'))).toBe(true);
     });
     for (const s of FakeSocket.all) s.open();
+    changed = true;
     FakeSocket.all.find((s) => s.url.includes('/v1/events/ws?'))?.send({ schema: 'conch.permissions_changed.v1' });
-    expect(await screen.findByText(/Members see: only people they share a channel with/)).toBeDefined();
+    await waitFor(() => {
+      expect(summary()).toContain('Members see: only people they share a channel with');
+    });
   });
 });
 

@@ -175,6 +175,9 @@ up() {
     # bootstrap-operator makes the first principal of a new database, id 1.
     conch admin channel create "$channel" >/dev/null 2>&1 || true
     conch admin member add "$channel" 1 >/dev/null 2>&1 || true
+    # An invite is a member link: it lands the joiner in the default channels.
+    conch admin channel settings "$channel" --public >/dev/null 2>&1 || true
+    conch admin channel settings "$channel" --default on >/dev/null 2>&1 || true
     curl -fsS -o /dev/null -H "Authorization: Bearer $(cat "$state/operator.token")" \
         "$server/v1/channels/$channel/members" ||
         fail "channel \"$channel\" could not be made or read; see $state/conchd.log (CONCH_DEV_CHANNEL?)"
@@ -202,7 +205,7 @@ token() {
 
 invite() {
     require_up
-    conch admin invite create --personal --channel "$channel" --expires 2h --voice
+    conch admin invite create --expires 2h
 }
 
 # Every CPU except LiveKit's, for the load generator.
