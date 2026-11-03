@@ -83,7 +83,10 @@ export function accountRefusal(result: Refusal): AccountProblem | null {
       // A refusal of the name never shows the server's own words: they speak
       // of a "principal name" (issue #1082).
       if (isNameMessage(result.message)) return { line: nameRefusalLine(result.message), field: 'name' };
-      return { line: serverLine(result.message, 'The server did not accept that name or password. Check both and try again.'), field: 'name' };
+      // Nor any other of its words: a password rule is matched on its words
+      // and said in the page's own, and anything else gets one fixed line.
+      if (/password/i.test(result.message ?? '')) return { line: 'That password cannot be used. Choose another.', field: 'password' };
+      return { line: 'The server did not accept that name or password. Check both and try again.', field: 'name' };
     case 'joining_closed':
       return { line: 'Accounts cannot be made here now.' };
     case 'joining_paused':

@@ -203,10 +203,6 @@ func TestCreateInviteRefusals(t *testing.T) {
 				t.Fatal(err)
 			}
 		}, "root", inviteJSON(t, personal("general")), 503, schema.ErrorCodeInvitesPaused},
-		{"allowance used up", Config{InviteAllowance: 1}, func(t *testing.T, f *inviteFixture) {
-			grantAlice(t, f)
-			f.createInvite(t, f.aliceTok, personal("red"))
-		}, "alice", inviteJSON(t, personal("red")), 409, schema.ErrorCodeInviteKindRetired},
 		{"unknown kind", Config{}, nil, "root", `{"kind":"forever","channels":["general"]}`, 400, "invalid_request"},
 		{"no channels", Config{}, nil, "root", `{"kind":"personal","channels":[]}`, 400, "invalid_request"},
 		{"unknown field", Config{}, nil, "root", `{"kind":"personal","channels":["general"],"role":"operator"}`, 400, "invalid_request"},

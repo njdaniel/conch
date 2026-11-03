@@ -767,7 +767,7 @@ func TestJoinSettingsNameOracleClosed(t *testing.T) {
 // is off, whatever the body asks. The refusals that name a permission are the
 // member link's (TestMemberLinkRefusalsNameThePermission), and the refusal
 // here names none, so it says nothing of the roles a caller could hold.
-func TestInviteRefusalsNameThePermission(t *testing.T) {
+func TestInviteV1RefusesWhoLacksManageMembers(t *testing.T) {
 	f := newRestrictedFixture(t, Config{})
 	f.cut(t)
 	yes := true

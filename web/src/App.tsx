@@ -17,7 +17,7 @@ import { ReportProblem } from './Report';
 import { OperatorWarning } from './OperatorWarning';
 import { RenameChannel } from './RenameChannel';
 import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeLinkFromAddress } from './route';
-import type { ChannelDocV1, ChannelV0 } from './schema/channel';
+import type { ChannelDocV1 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import type { ReadStateV1 } from './schema/readstate';
 import { SignIn } from './SignIn';
@@ -475,7 +475,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const [createAsks, setCreateAsks] = useState(0);
   // A channel's ⋯ menu asked for the invite panel with that channel ticked
   // (issue #1135): the channel and a count, so asking twice opens it twice.
-  const [inviteAsk, setInviteAsk] = useState<{ readonly channel: string; readonly n: number } | undefined>(undefined);
+  const [inviteAsk, setInviteAsk] = useState<{ readonly n: number } | undefined>(undefined);
   const restoreSearchFocus = useRef(false);
   useEffect(() => {
     if (searchOpen) {
@@ -1702,8 +1702,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           )}
           {...(auth.principal.may_invite === true
             ? {
-                onInviteTo: (channel: ChannelV0) => {
-                  setInviteAsk((ask) => ({ channel: channel.name, n: (ask?.n ?? 0) + 1 }));
+                onInviteTo: () => {
+                  setInviteAsk((ask) => ({ n: (ask?.n ?? 0) + 1 }));
                 },
               }
             : {})}

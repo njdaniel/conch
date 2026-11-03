@@ -13,6 +13,7 @@
 // the server's message is never shown.
 import { useCallback, useContext, useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
+import { canDo } from './admin/permissions';
 import { clock } from './Conversation';
 import { Glyph } from './Icons';
 import { waitWords } from './Invite';
@@ -115,14 +116,11 @@ export function InvitePanel({
   readonly origin: string;
   readonly me: WhoAmIResponseV1;
   // Opens the panel from outside (issue #1135: a channel's ⋯ menu, "Invite
-  // people"). A member link names no channel, so the channel is not used. `n`
-  // counts the asks, so asking twice opens it twice.
-  readonly request?: { readonly channel: string; readonly n: number } | undefined;
+  // people"). A member link names no channel, so none is passed. `n` counts
+  // the asks, so asking twice opens it twice.
+  readonly request?: { readonly n: number } | undefined;
   readonly onUnauthorized: () => void;
 }) {
-  // Whoever holds manage_members sees every link's reach and may ask for one
-  // that never expires; a server that sends no permissions is not guessed at.
-  const holdsMembers = me.role === 'operator' && (me.permissions === undefined || me.permissions.includes('manage_members'));
   const operator = me.role === 'operator';
   const [open, setOpen] = useState(false);
   const toggle = useRef<HTMLButtonElement>(null);
@@ -145,6 +143,10 @@ export function InvitePanel({
   const [asking, setAsking] = useState<Asking | null>(null);
   const [disabled, setDisabled] = useState<string | null>(null);
   const makeButton = useRef<HTMLButtonElement>(null);
+  const refreshButton = useRef<HTMLButtonElement>(null);
+  // Set at once when a link is asked for, since busy changes only on the next
+  // render: a second press before then sends nothing.
+  const making = useRef(false);
   // whoami as last re-read here: what is left of the allowance changes with
   // every link made, closed, used or expired, and only the server counts it.
   const [latest, setLatest] = useState<WhoAmIResponseV1 | null>(null);
@@ -152,6 +154,26 @@ export function InvitePanel({
   // right turned off since is shown off as soon as the panel reads it again,
   // and the form never shows more than the server answered.
   const mayMake = me.may_invite === true && latest?.may_invite !== false;
+  // Whoever holds manage_members may ask for a link that never expires and
+  // disable the people a link brought in. As for mayMake, what the page was
+  // told and what the server last said must both allow it (canDo reads
+  // whoami's permissions, and takes an operator of a server that sends none
+  // to hold them all).
+  const holdsMembers = canDo(me, 'manage_members') && (latest === null || canDo(latest, 'manage_members'));
+  // Losing a right closes what it opened: the question before disabling
+  // joiners, the link just shown, and a choice of "Never expires".
+  useEffect(() => {
+    if (!holdsMembers) {
+      setAsking(null);
+      setLifetime((now) => (now === neverLabel ? defaultLabel : now));
+    }
+  }, [holdsMembers]);
+  useEffect(() => {
+    if (!mayMake) {
+      setAsking(null);
+      setLink(null);
+    }
+  }, [mayMake]);
 
   const meId = me.id;
   const refresh = useCallback(() => {
@@ -203,6 +225,7 @@ export function InvitePanel({
     // An earlier link is forgotten, and an answer still on its way changes
     // nothing.
     generation.current++;
+    making.current = false;
     setBusy(false);
     setLink(null);
     setCopied('no');
@@ -229,7 +252,8 @@ export function InvitePanel({
 
   function create(event: SyntheticEvent) {
     event.preventDefault();
-    if (!canCreate) return;
+    if (!canCreate || making.current) return;
+    making.current = true;
     const chosen = choices.find((l) => l.label === lifetime);
     const made: CreateInviteRequestV2 = {
       kind: 'member',
@@ -247,6 +271,7 @@ export function InvitePanel({
     void api.createMemberLink(made).then((result) => {
       // Asked again (or Done) meanwhile: this answer is for what was asked
       // then, and shows nothing.
+      making.current = false;
       if (mine !== generation.current) return;
       setBusy(false);
       if (result.ok) {
@@ -280,6 +305,9 @@ export function InvitePanel({
   }
 
   function close(id: number) {
+    // The button that was pressed goes with the row's state: focus stays on
+    // the panel's own Refresh.
+    refreshButton.current?.focus();
     void api.closeInvite(id).then((result) => {
       if (result.ok) refresh();
       else if (result.failure === 'unauthorized') onUnauthorized();
@@ -304,6 +332,7 @@ export function InvitePanel({
 
   // Disabling joiners asks first, from a dry run that says how many.
   function askDisable(id: number) {
+    if (!holdsMembers) return;
     setDisabled(null);
     void api.disableJoiners(id, true).then((result) => {
       if (result.ok) setAsking({ id, count: result.value.count });
@@ -314,6 +343,7 @@ export function InvitePanel({
 
   function disable(id: number) {
     setAsking(null);
+    if (!holdsMembers) return;
     void api.disableJoiners(id, false).then((result) => {
       if (result.ok) {
         setDisabled(result.value.count === 1 ? 'Disabled 1 person.' : `Disabled ${String(result.value.count)} people.`);
@@ -518,18 +548,19 @@ export function InvitePanel({
                           </button>
                         ) : null}
                       </div>
-                      {asking === null || asking.id !== invite.id ? null : (
+                      {!holdsMembers || asking === null || asking.id !== invite.id ? null : (
                         <div className="invite-ask" role="group" aria-label="Disable joiners">
                           <p>
                             {asking.count === 0
                               ? 'Nobody who joined through this link can be disabled.'
-                              : `This signs out and disables ${asking.count === 1 ? '1 person' : `${String(asking.count)} people`} who joined through this link.`}
+                              : `This signs out and disables ${asking.count === 1 ? '1 person' : `${String(asking.count)} people`} who joined through this link, and closes the link too.`}
                           </p>
                           <div className="actions">
                             {asking.count === 0 ? null : (
                               <button
                                 type="button"
                                 onClick={() => {
+                                  refreshButton.current?.focus();
                                   disable(invite.id);
                                 }}
                               >
@@ -539,6 +570,7 @@ export function InvitePanel({
                             <button
                               type="button"
                               onClick={() => {
+                                refreshButton.current?.focus();
                                 setAsking(null);
                               }}
                             >
@@ -552,7 +584,7 @@ export function InvitePanel({
                       ) : seen.state === 'failed' ? (
                         <p className="notice">{seen.line}</p>
                       ) : (
-                        <ul className="invite-joiners" aria-label={`Joiners of this link`}>
+                        <ul className="invite-joiners" aria-label="Joiners of this link">
                           {seen.joiners.map((joiner) => (
                             <li key={joiner.id}>
                               {joiner.name}
@@ -566,7 +598,7 @@ export function InvitePanel({
                 })}
               </ul>
             )}
-            <button type="button" onClick={refresh}>
+            <button ref={refreshButton} type="button" onClick={refresh}>
               Refresh
             </button>
             {readAt === null ? null : (

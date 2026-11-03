@@ -303,6 +303,22 @@ describe('the landing page', () => {
     });
   });
 
+  // Item: the server's words for a request it could not take are other
+  // people's text; the page says its own, matched on the rule's words.
+  it.each([
+    { message: 'SERVER WORDS <img src=x>', line: 'The server did not accept that name or password. Check both and try again.', field: 'Your name' },
+    { message: 'schema: password SERVER WORDS <img src=x>', line: 'That password cannot be used. Choose another.', field: 'Choose a password' },
+  ])('never shows the server\u2019s words for an invalid_request: $message', async ({ message, line, field }) => {
+    opened({ ...joining, 'POST /v2/invites/redeem': () => refusal(400, 'invalid_request', message) });
+    await chooseName('wren');
+    expect(await screen.findByText(line)).toBeDefined();
+    expect(document.body.textContent).not.toContain('SERVER WORDS');
+    expect(document.body.innerHTML).not.toContain('<img');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByLabelText(field));
+    });
+  });
+
   it.each<{ readonly when: string; readonly routes: Record<string, Route> }>([
     { when: 'previewed', routes: { 'POST /v2/invites/preview': () => refusal(404, 'invite_invalid', 'this invite is not valid') } },
     { when: 'redeemed', routes: { 'POST /v2/invites/redeem': () => refusal(404, 'invite_invalid', 'this invite is not valid') } },
@@ -742,6 +758,87 @@ describe('member links', () => {
     fireEvent.click(await within(panel).findByRole('button', { name: 'Disable 2 people' }));
     expect(await within(panel).findByText('Disabled 2 people.')).toBeDefined();
     expect(calls.filter((c) => c.path.endsWith('/disable-joiners')).map((c) => c.body)).toEqual([{ dry_run: true }, { dry_run: true }, { dry_run: false }]);
+  });
+
+  it('closes the Disable joiners question when whoami is read again without manage_members, and sends nothing more', async () => {
+    let stripped = false;
+    const calls = forOperator({
+      'GET /v1/whoami': (c) => (c.auth === `Bearer ${operatorToken}` ? json(stripped ? { ...operator, permissions: ['make_member_links'] } : operator) : json({}, 401)),
+      'GET /v2/invites': () => json({ invites: [linkOf(3, 1, { joiners: 2, uses: 2 })] }),
+      'POST /v1/invites/3/disable-joiners': (c) => json({ dry_run: (c.body as { dry_run: boolean }).dry_run, count: 2, principal_ids: [20, 21] }),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(await within(panel).findByRole('button', { name: 'Disable joiners' }));
+    const ask = await within(panel).findByRole('group', { name: 'Disable joiners' });
+    // The question says the link is closed too.
+    expect(ask.textContent).toContain('closes the link too');
+
+    stripped = true;
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => {
+      expect(within(panel).queryByRole('group', { name: 'Disable joiners' })).toBeNull();
+    });
+    expect(within(panel).queryByRole('button', { name: /Disable/ })).toBeNull();
+    expect(calls.filter((c) => c.path.endsWith('/disable-joiners')).map((c) => c.body)).toEqual([{ dry_run: true }]);
+  });
+
+  it('puts "Never expires" back to the default when manage_members goes', async () => {
+    let stripped = false;
+    forOperator({
+      'GET /v1/whoami': (c) => (c.auth === `Bearer ${operatorToken}` ? json(stripped ? { ...operator, permissions: ['make_member_links'] } : operator) : json({}, 401)),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const expiry = within(panel).getByRole<HTMLSelectElement>('combobox');
+    fireEvent.change(expiry, { target: { value: 'Never expires' } });
+    expect(expiry.value).toBe('Never expires');
+    stripped = true;
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => {
+      expect(within(panel).getByRole<HTMLSelectElement>('combobox').value).toBe('7 days');
+    });
+  });
+
+  it('keeps focus in the panel, on Refresh, when Cancel, Disable or Close removes the button pressed', async () => {
+    forOperator({
+      'GET /v2/invites': () => json({ invites: [linkOf(3, 1, { joiners: 2, uses: 2 })] }),
+      'POST /v1/invites/3/disable-joiners': (c) => json({ dry_run: (c.body as { dry_run: boolean }).dry_run, count: 2, principal_ids: [20, 21] }),
+      'DELETE /v1/invites/3': () => new Response(null, { status: 204 }),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const refreshButton = within(panel).getByRole('button', { name: 'Refresh' });
+    fireEvent.click(await within(panel).findByRole('button', { name: 'Disable joiners' }));
+    fireEvent.click(await within(panel).findByRole('button', { name: 'Cancel' }));
+    expect(document.activeElement).toBe(refreshButton);
+    fireEvent.click(within(panel).getByRole('button', { name: 'Disable joiners' }));
+    (within(panel).getByRole('button', { name: 'Refresh' })).focus();
+    fireEvent.click(await within(panel).findByRole('button', { name: 'Disable 2 people' }));
+    expect(document.activeElement).toBe(refreshButton);
+    within(panel).getByRole('button', { name: 'Close' }).focus();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Close' }));
+    expect(document.activeElement).toBe(refreshButton);
+  });
+
+  it('sends one request however often Make link is pressed before the answer', async () => {
+    let release: (r: Response) => void = () => undefined;
+    const calls = forMember({ 'POST /v2/invites': () => new Promise<Response>((resolve) => (release = resolve)) });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const form = within(panel).getByRole('button', { name: 'Make link' }).closest('form');
+    if (form === null) throw new Error('no form');
+    // All inside one act: busy has not rendered between the presses.
+    act(() => {
+      for (let i = 0; i < 4; i++) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    expect(calls.filter((c) => c.method === 'POST' && c.path === '/v2/invites')).toHaveLength(1);
+    await act(async () => {
+      release(json({ invite: linkOf(7, 2), code: newCode }, 201));
+      await Promise.resolve();
+    });
+    await within(panel).findByRole('textbox', { name: 'Invite link' });
+    expect(calls.filter((c) => c.method === 'POST' && c.path === '/v2/invites')).toHaveLength(1);
   });
 
   // The refusal is the page's words for its code: the server's message, which
