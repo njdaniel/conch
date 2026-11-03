@@ -126,7 +126,7 @@ func TestCheckRefusal(t *testing.T) {
 // both maps are stale.
 func TestGateCoverage(t *testing.T) {
 	gates := []string{"a.go A", "b.go B", "c.go C"}
-	source := "the row of A"
+	source := []string{"the row of A", "x"}
 	rows := map[string]string{"a.go A": "the row of A"}
 	pending := map[string]string{"b.go B": "#1", "c.go C": "#2"}
 	for _, tc := range []struct {
@@ -173,7 +173,7 @@ func TestEveryPermissionRouteHasARestrictedRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source, err := rowSource(repo)
+	source, err := rowLiterals(repo)
 	if err != nil {
 		t.Fatal(err)
 	}

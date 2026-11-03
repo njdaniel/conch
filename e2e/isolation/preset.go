@@ -35,8 +35,8 @@ func (w *world) applyPreset(p schema.PermissionPreset) error {
 	return w.op.call(http.MethodPut, "/v1/permissions", schema.PutPermissionsRequestV1{Revision: doc.Revision, Preset: p}, nil)
 }
 
-// created requires a 201 answer.
-func created(what string, status int, body []byte, err error) error {
+// wantCreated requires a 201 answer.
+func wantCreated(what string, status int, body []byte, err error) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", what, err)
 	}
@@ -72,7 +72,7 @@ func (w *world) presetPhase() (int, error) {
 
 	// The control: before the preset, a member makes a member link.
 	status, body, err := memberLink()
-	if err := created("a member's member link before the preset", status, body, err); err != nil {
+	if err := wantCreated("a member's member link before the preset", status, body, err); err != nil {
 		return 0, err
 	}
 
@@ -121,11 +121,11 @@ func (w *world) presetPhase() (int, error) {
 		return rows, fmt.Errorf("the owner applies group: %w", err)
 	}
 	status, body, err = memberLink()
-	if err := created("a member's member link after group", status, body, err); err != nil {
+	if err := wantCreated("a member's member link after group", status, body, err); err != nil {
 		return rows, err
 	}
 	status, body, err = createChannel(schema.ChannelPrivate, "back")
-	if err := created("a member creates a private channel after group", status, body, err); err != nil {
+	if err := wantCreated("a member creates a private channel after group", status, body, err); err != nil {
 		return rows, err
 	}
 	rows += 2

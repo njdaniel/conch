@@ -5,6 +5,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -36,88 +37,107 @@ var rowSources = []string{"restricted.go", "preset.go"}
 // gateRows names, for each gate with a restricted row, a phrase of the
 // phase that runs it.
 var gateRows = map[string]string{
-	"routes.go Server.routeTable":                      "permissionRoutes(",
+	"routes.go Server.routeTable":                      "the restricted operator on a permission route: ",
 	"invites.go Server.handleListInvites":              "the restricted operator's invite list",
 	"sessions.go Server.handleListSessions":            "the restricted operator sees the session's runtime",
 	"store/invites.go makerRightsTx":                   "the restricted operator: an open link",
 	"store/invites.go Store.CloseInvite":               "R closes A's open link",
 	"store/sign_in_links.go makerMayActAsTx":           "the restricted operator's sign-in link after the cut",
 	"auth.go Server.guard":                             "on A's channel = %d %s, want 404",
-	"members.go Server.handleListChannelMembers":       `"GET /v1/channels/{channel}/members"`,
-	"nets.go Server.handleListNets":                    `"GET /v1/channels/{channel}/nets"`,
+	"members.go Server.handleListChannelMembers":       "GET /v1/channels/{channel}/members",
+	"nets.go Server.handleListNets":                    "GET /v1/channels/{channel}/nets",
 	"store/members.go memberActorStandingTx":           "in its own channel",
-	"store/channels_rename.go channelRenameStandingTx": `"PUT /v1/channels/{id}/name"`,
+	"store/channels_rename.go channelRenameStandingTx": "PUT /v1/channels/{id}/name",
 	"store/guest_policy.go checkOpenChannelsWriterTx":  "the joining settings naming A's channel",
 	"hooks.go Server.handleCreateHook":                 "a hook into A's channel",
 	"manifests.go Server.handlePutManifest":            "a manifest granting A's channel",
-	"store/members.go channelCreatePermission":         "a member creates a private channel",
+	"store/members.go channelCreatePermission":         " channel under personal",
 }
 
 // pendingGates are the gates that have no restricted row yet, each with what
 // will give it one. The rule fails when a gate is in neither map; when a row
 // lands, the gate moves to gateRows, and the rule fails until it does.
-var pendingGates = map[string]string{
-	"principals.go Server.handleRenamePrincipal":     "no restricted row: the rename route's manage_members check (file an issue)",
-	"disable.go Server.handleRevokeAllCredentials":   "no restricted row: the revoke-all route's manage_members check (file an issue)",
-	"hooks.go Server.handleListHooks":                "no restricted row: the other_hooks name filter (file an issue)",
-	"auth.go Server.channelSightFor":                 "no restricted row: the channel names an operator answer may show (file an issue)",
-	"join.go Server.joinSettingsResponse":            "no restricted row: the other_open_channels name filter (file an issue)",
-	"store/guest_policy.go admittingOpenChannelsTx":  "no restricted row: the address join's per-channel re-check (file an issue)",
-	"channels.go Server.handleChannelSettings":       "#981: the channel-settings route's restricted row",
-	"store/queries.go Store.ChannelSettings":         "#981: the channel-settings route's restricted row",
-	"store/members.go channelCreatorStandingTx":      "#981: a creator without manage_channels, bound in its own channel",
+var pendingGates = map[string]string{ // #nosec G101 -- gate names, not credentials
+	"principals.go Server.handleRenamePrincipal":     "#1190: the rename route's manage_members check",
+	"disable.go Server.handleRevokeAllCredentials":   "#1190: the revoke-all route's manage_members check",
+	"hooks.go Server.handleListHooks":                "#1190: the other_hooks name filter",
+	"auth.go Server.channelSightFor":                 "#1190: the channel names an operator answer may show",
+	"join.go Server.joinSettingsResponse":            "#1190: the other_open_channels name filter",
+	"store/guest_policy.go admittingOpenChannelsTx":  "#1190: the address join's per-channel re-check",
+	"channels.go Server.handleChannelSettings":       "#1190: the channel-settings route's restricted row",
+	"store/queries.go Store.ChannelSettings":         "#1190: the channel-settings route's restricted row",
+	"store/members.go channelCreatorStandingTx":      "#1190: a creator without manage_channels, bound in its own channel",
 	"directory.go Server.handleListDirectoryMembers": "#988: the directory rows (placeholder in preset.go)",
-	"voice.go Server.voicePresenceChannel":           "#984 follow-up: a member without use_voice at the voice routes (file an issue)",
-	"voice.go Server.voiceStillEntitled":             "#984 follow-up: a member without use_voice at the voice routes (file an issue)",
-	"voice_occupancy.go Server.voiceOccupancyCaller": "#984 follow-up: a member without use_voice at the voice routes (file an issue)",
-	"voice_presence.go Server.voiceEntitlement":      "#984 follow-up: a member without use_voice at the voice routes (file an issue)",
-	"voice_presence.go Server.voiceWithheldAmong":    "#984 follow-up: a member without use_voice at the voice routes (file an issue)",
-	"voice_share.go Server.handleVoiceShareStart":    "#984 follow-up: a member without share_screen at the share routes (file an issue)",
-	"voice_share.go voicePoller.shareEntitled":       "#984 follow-up: a member without share_screen at the share routes (file an issue)",
-	"voice_share.go voicePoller.sharesWithheld":      "#984 follow-up: a member without share_screen at the share routes (file an issue)",
+	"voice.go Server.voicePresenceChannel":           "#1190: a member without use_voice at the voice routes",
+	"voice.go Server.voiceStillEntitled":             "#1190: a member without use_voice at the voice routes",
+	"voice_occupancy.go Server.voiceOccupancyCaller": "#1190: a member without use_voice at the voice routes",
+	"voice_presence.go Server.voiceEntitlement":      "#1190: a member without use_voice at the voice routes",
+	"voice_presence.go Server.voiceWithheldAmong":    "#1190: a member without use_voice at the voice routes",
+	"voice_share.go Server.handleVoiceShareStart":    "#1190: a member without share_screen at the share routes",
+	"voice_share.go voicePoller.shareEntitled":       "#1190: a member without share_screen at the share routes",
+	"voice_share.go voicePoller.sharesWithheld":      "#1190: a member without share_screen at the share routes",
 }
 
 // gateKeys reads the gates of permissionGates out of the server's test file,
-// as "file function" keys.
+// as "file function" keys. An element that is not a composite of exactly two
+// string literals is an error naming the permission and the element's index,
+// never skipped: a gate the reader cannot see would go uncovered.
 func gateKeys(repo string) ([]string, error) {
 	path := filepath.Join(repo, "internal", "server", "permissions_test.go")
 	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
 	if err != nil {
 		return nil, err
 	}
-	seen := map[string]bool{}
-	found := false
+	return gateKeysOf(file)
+}
+
+// gateKeysOf reads the permissionGates of a parsed file.
+func gateKeysOf(file *ast.File) ([]string, error) {
+	var lit *ast.CompositeLit
 	ast.Inspect(file, func(n ast.Node) bool {
 		spec, ok := n.(*ast.ValueSpec)
 		if !ok || len(spec.Names) != 1 || spec.Names[0].Name != "permissionGates" || len(spec.Values) != 1 {
 			return true
 		}
-		lit, ok := spec.Values[0].(*ast.CompositeLit)
-		if !ok {
-			return true
-		}
-		found = true
-		ast.Inspect(lit, func(m ast.Node) bool {
-			pair, ok := m.(*ast.CompositeLit)
-			if !ok || len(pair.Elts) != 2 {
-				return true
-			}
-			a, aok := pair.Elts[0].(*ast.BasicLit)
-			b, bok := pair.Elts[1].(*ast.BasicLit)
-			if !aok || !bok || a.Kind != token.STRING || b.Kind != token.STRING {
-				return true
-			}
-			fileName, err1 := strconv.Unquote(a.Value)
-			fn, err2 := strconv.Unquote(b.Value)
-			if err1 == nil && err2 == nil {
-				seen[fileName+" "+fn] = true
-			}
-			return false
-		})
+		lit, _ = spec.Values[0].(*ast.CompositeLit)
 		return false
 	})
-	if !found || len(seen) == 0 {
+	if lit == nil {
 		return nil, fmt.Errorf("internal/server/permissions_test.go has no permissionGates this check can read")
+	}
+	seen := map[string]bool{}
+	for _, el := range lit.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			return nil, fmt.Errorf("permissionGates: an entry that is not key: value")
+		}
+		perm := types.ExprString(kv.Key)
+		gates, ok := kv.Value.(*ast.CompositeLit)
+		if !ok {
+			return nil, fmt.Errorf("permissionGates[%s]: the value is not a list of gates", perm)
+		}
+		for i, g := range gates.Elts {
+			pair, ok := g.(*ast.CompositeLit)
+			if !ok || len(pair.Elts) != 2 {
+				return nil, fmt.Errorf("permissionGates[%s] element %d is not a composite of exactly two string literals", perm, i)
+			}
+			var parts [2]string
+			for j, e := range pair.Elts {
+				b, ok := e.(*ast.BasicLit)
+				if !ok || b.Kind != token.STRING {
+					return nil, fmt.Errorf("permissionGates[%s] element %d is not a composite of exactly two string literals", perm, i)
+				}
+				s, err := strconv.Unquote(b.Value)
+				if err != nil {
+					return nil, fmt.Errorf("permissionGates[%s] element %d: %w", perm, i, err)
+				}
+				parts[j] = s
+			}
+			seen[parts[0]+" "+parts[1]] = true
+		}
+	}
+	if len(seen) == 0 {
+		return nil, fmt.Errorf("permissionGates is empty")
 	}
 	out := make([]string, 0, len(seen))
 	for k := range seen {
@@ -128,9 +148,18 @@ func gateKeys(repo string) ([]string, error) {
 }
 
 // gateCoverage compares the gates with the rows. missing: a gate with a row
-// in neither map. noRow: a gateRows phrase that no phase source holds.
-// stale: an entry for a gate the list lacks, or a gate in both maps.
-func gateCoverage(gates []string, rows, pending map[string]string, source string) (missing, noRow, stale []string) {
+// in neither map. noRow: a gateRows phrase that no string literal of the
+// phase sources holds. stale: an entry for a gate the list lacks, or a gate
+// in both maps.
+func gateCoverage(gates []string, rows, pending map[string]string, literals []string) (missing, noRow, stale []string) {
+	held := func(phrase string) bool {
+		for _, l := range literals {
+			if strings.Contains(l, phrase) {
+				return true
+			}
+		}
+		return false
+	}
 	in := map[string]bool{}
 	for _, g := range gates {
 		in[g] = true
@@ -146,7 +175,7 @@ func gateCoverage(gates []string, rows, pending map[string]string, source string
 	for g, phrase := range rows {
 		if !in[g] {
 			stale = append(stale, g)
-		} else if !strings.Contains(source, phrase) {
+		} else if !held(phrase) {
 			noRow = append(noRow, g+" -> "+phrase)
 		}
 	}
@@ -185,15 +214,35 @@ func permissionRouteCount(repo string) (unread []string, err error) {
 	return unread, nil
 }
 
-// rowSource is the text of the phase files.
-func rowSource(repo string) (string, error) {
-	var b strings.Builder
+// rowLiterals is every string literal of the phase files, unquoted. A phrase
+// is held only by a literal: a comment, an identifier or a function name that
+// happens to carry the words is not a row. gaterows.go itself is never a
+// source, or its own phrases would hold themselves.
+func rowLiterals(repo string) ([]string, error) {
+	var out []string
 	for _, f := range rowSources {
-		src, err := os.ReadFile(filepath.Join(repo, "e2e", "isolation", f)) // #nosec G304 -- the repository this run is in
-		if err != nil {
-			return "", err
+		if f == "gaterows.go" {
+			return nil, fmt.Errorf("rowSources lists gaterows.go, whose own phrases would hold themselves")
 		}
-		b.Write(src)
+		file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(repo, "e2e", "isolation", f), nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, literalsOf(file)...)
 	}
-	return b.String(), nil
+	return out, nil
+}
+
+// literalsOf is the unquoted string literals of a file, and nothing else.
+func literalsOf(file *ast.File) []string {
+	var out []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		if b, ok := n.(*ast.BasicLit); ok && b.Kind == token.STRING {
+			if s, err := strconv.Unquote(b.Value); err == nil {
+				out = append(out, s)
+			}
+		}
+		return true
+	})
+	return out
 }
