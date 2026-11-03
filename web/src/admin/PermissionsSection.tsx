@@ -18,7 +18,7 @@ import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState } 
 import * as api from '../api';
 import { SettingsOpen } from '../joiningSettings';
 import { usePhone } from '../phone';
-import type { IssuedByOperatorV1, Permission, PermissionChangeV1, PermissionPreset, PermissionRowV1, PermissionsResponseV1, PermissionsWarning, PutPermissionsRequestV1 } from '../schema/permission';
+import type { IssuedByOperatorV1, KnownPermission, KnownPermissionPreset, Permission, PermissionChangeV1, PermissionPreset, PermissionRowV1, PermissionsResponseV1, PermissionsWarning, PutPermissionsRequestV1 } from '../schema/permission';
 import type { WhoAmIResponseV1 } from '../schema/principal';
 import { canDo, reasonFor, refusalLine } from './permissions';
 import { presetChanges } from './ServerSection';
@@ -41,7 +41,7 @@ interface RowInfo {
 
 // The page's words for each permission it knows (design §4.1, shortened), in
 // catalog order. A permission not here is shown by its name and is read-only.
-const info: Readonly<Record<Permission, RowInfo>> = {
+const info: Readonly<Record<KnownPermission, RowInfo>> = {
   create_public_channels: { label: 'Create public channels', text: 'Create a public channel, and manage it.' },
   create_private_channels: { label: 'Create private channels', text: 'Create a private channel, and manage it.' },
   make_member_links: { label: 'Make member links', text: 'Make links that bring people onto the server.' },
@@ -55,7 +55,7 @@ const info: Readonly<Record<Permission, RowInfo>> = {
   read_audit_log: { label: 'Read the audit log', text: `Holders ${auditSentence}.` },
 };
 
-function known(permission: string): permission is Permission {
+function known(permission: string): permission is KnownPermission {
   return Object.hasOwn(info, permission);
 }
 
@@ -75,8 +75,24 @@ function fixedOf(row: PermissionRowV1, role: Role): boolean {
 
 const keyOf = (permission: string, role: Role) => `${permission}:${role}`;
 
-const presetNames: Readonly<Record<PermissionPreset, string>> = { personal: 'Personal server', group: 'Group server' };
-const presetShort: Readonly<Record<PermissionPreset, string>> = { personal: 'Personal', group: 'Group' };
+const presetNames: Readonly<Record<KnownPermissionPreset, string>> = { personal: 'Personal server', group: 'Group server' };
+const presetShort: Readonly<Record<KnownPermissionPreset, string>> = { personal: 'Personal', group: 'Group' };
+
+function knownPreset(preset: string): preset is KnownPermissionPreset {
+  return Object.hasOwn(presetNames, preset);
+}
+
+// presetLabel is a preset's words from names, or the value itself when the
+// page has none for it (a preset a newer server added, issue #1051).
+function presetLabel(names: Readonly<Record<KnownPermissionPreset, string>>, preset: PermissionPreset): string {
+  return knownPreset(preset) ? names[preset] : preset;
+}
+
+// issuedLabel is an issued item's kind in the page's words, or the value
+// itself when the page has none for it (a kind a newer server added).
+function issuedLabel(kind: string): string {
+  return kind === 'credential' ? 'Credential' : kind === 'hook' ? 'Hook' : kind;
+}
 
 // warningText is a document warning in the words of this section; one the
 // page has no words for is shown by its name.
@@ -115,7 +131,7 @@ function lockedReason(doc: PermissionsResponseV1, who: WhoAmIResponseV1, row: Pe
 // ruleBreak finds, in the cells as they would stand, the first rule of the
 // design §4.4 they break, in the page's own words; null when none.
 function ruleBreak(rows: readonly PermissionRowV1[], valueOf: (row: PermissionRowV1, role: Role) => boolean): { readonly permission: string; readonly line: string } | null {
-  const byName = new Map(rows.map((row) => [row.permission as string, row]));
+  const byName = new Map(rows.map((row) => [row.permission, row]));
   for (const row of rows) {
     if (valueOf(row, 'member') && !valueOf(row, 'operator')) {
       return { permission: row.permission, line: `“${labelOf(row.permission)}” cannot be on for members while it is off for operators.` };
@@ -149,7 +165,7 @@ function permissionIn(message: string | undefined): Permission | null {
 // movedCells says, in the page's words, which cells differ between two
 // versions of the document.
 export function movedCells(before: PermissionsResponseV1, after: PermissionsResponseV1): string[] {
-  const was = new Map(before.rows.map((row) => [row.permission as string, row]));
+  const was = new Map(before.rows.map((row) => [row.permission, row]));
   const said: string[] = [];
   for (const row of after.rows) {
     const old = was.get(row.permission);
@@ -519,7 +535,7 @@ export function PermissionsSection({ who, refresh, names, focus, onUnauthorized 
 
   function applyPreset(preset: PermissionPreset) {
     if (doc === null || busy || !canWrite || patch.length > 0 || !doc.editable.includes('member')) return;
-    send({ revision: doc.revision, preset }, `Applied ${presetNames[preset]}.`);
+    send({ revision: doc.revision, preset }, `Applied ${presetLabel(presetNames, preset)}.`);
   }
 
   const dirty = patch.length > 0;
@@ -558,9 +574,9 @@ export function PermissionsSection({ who, refresh, names, focus, onUnauthorized 
           const changes = presetChanges(doc, p.preset);
           const here = doc.preset === p.preset;
           return (
-            <section key={p.preset} className={`preset-card${here ? ' current' : ''}`} aria-label={`${presetShort[p.preset]} preset`}>
+            <section key={p.preset} className={`preset-card${here ? ' current' : ''}`} aria-label={`${presetLabel(presetShort, p.preset)} preset`}>
               <h5>
-                {presetNames[p.preset]}
+                {presetLabel(presetNames, p.preset)}
                 {here ? <span className="current-mark"> (the members’ column matches this)</span> : null}
               </h5>
               {changes === null || (changes.on.length === 0 && changes.off.length === 0) ? (
@@ -579,7 +595,7 @@ export function PermissionsSection({ who, refresh, names, focus, onUnauthorized 
                   applyPreset(p.preset);
                 }}
               >
-                Use {presetShort[p.preset]} preset
+                Use {presetLabel(presetShort, p.preset)} preset
               </button>
             </section>
           );
@@ -754,10 +770,13 @@ function IssuedList({
       <ul>
         {items.map((item) => {
           const key = `${item.kind}-${String(item.id)}`;
+          // Revoked by its kind's route; a kind this page does not know it
+          // cannot revoke here, and never sends to another kind's route.
+          const revoke = item.kind === 'credential' ? () => api.revokeIssuedCredential(item.id) : item.kind === 'hook' ? () => api.revokeIssuedHook(item.id) : null;
           return (
             <li key={key}>
               <span>
-                {item.kind === 'credential' ? 'Credential' : 'Hook'} #{item.id} for {person(item.principal_id)}, issued by {person(item.issued_by)} on {when(item.issued_at)}
+                {issuedLabel(item.kind)} #{item.id} for {person(item.principal_id)}, issued by {person(item.issued_by)} on {when(item.issued_at)}
               </span>
               <span className="actions">
                 {leaders.has(key) ? (
@@ -780,11 +799,13 @@ function IssuedList({
                 ) : null}
                 <button
                   type="button"
-                  disabled={!canRevoke || busy !== null}
+                  disabled={!canRevoke || busy !== null || revoke === null}
+                  title={revoke === null ? 'This page has no words for this kind, so it cannot revoke it here.' : undefined}
                   aria-label={`Revoke ${item.kind} #${String(item.id)}`}
                   onClick={() => {
+                    if (revoke === null) return;
                     const go = () => {
-                      run(key, () => (item.kind === 'credential' ? api.revokeIssuedCredential(item.id) : api.revokeIssuedHook(item.id)), (i) => i.kind === item.kind && i.id === item.id, `Revoked ${item.kind} #${String(item.id)}.`);
+                      run(key, revoke, (i) => i.kind === item.kind && i.id === item.id, `Revoked ${item.kind} #${String(item.id)}.`);
                     };
                     if (item.principal_id === who.id) {
                       setAsking({ text: `Revoke your own ${item.kind} #${String(item.id)}? It stops working at once.`, yes: 'Yes, revoke', go });
