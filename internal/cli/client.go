@@ -508,7 +508,22 @@ func (c *Client) decodeError(resp *http.Response) error {
 	if !decoded {
 		return &statusError{status: resp.StatusCode, text: fmt.Sprintf("cli: server returned %s", safeLine(resp.Status))}
 	}
-	return &ServerError{Status: resp.StatusCode, Code: serverError.Code, Message: serverError.Message, Permission: string(serverError.Permission)}
+	return &ServerError{Status: resp.StatusCode, Code: serverError.Code, Message: serverError.Message, Permission: string(serverError.Permission),
+		RetryAfterSeconds: retryAfterSeconds(resp.Header.Get("Retry-After"), serverError.RetryAfterSeconds)}
+}
+
+// maxRetryAfterSeconds bounds a wait a server asks for that a client repeats:
+// a day. A hostile server's larger number is read as this.
+const maxRetryAfterSeconds = 24 * 60 * 60
+
+// retryAfterSeconds reads a Retry-After header as whole seconds, falling back
+// to the error document's own count, and clamps the result to 0 through a day.
+func retryAfterSeconds(header string, fallback int) int {
+	n := fallback
+	if v, err := strconv.Atoi(strings.TrimSpace(header)); err == nil {
+		n = v
+	}
+	return max(0, min(n, maxRetryAfterSeconds))
 }
 
 // statusError is a refusal with no error document, such as the mux's 404 for
@@ -549,6 +564,10 @@ type ServerError struct {
 	// empty. It is shown by name, so a permission this client does not know
 	// still reads.
 	Permission string
+	// RetryAfterSeconds is how long a 429 asks the caller to wait: the
+	// Retry-After header, or the document's own field when the header is
+	// absent or not a whole number of seconds. 0 when neither says.
+	RetryAfterSeconds int
 }
 
 func (e *ServerError) Error() string {
