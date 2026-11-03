@@ -27,7 +27,7 @@ func TestAdminJoinAndGuestUsageErrors(t *testing.T) {
 		{"a dry run that is done", []string{"guest", "end-all", "--dry-run", "--yes"}, "not both"},
 		{"no id", []string{"guest", "end"}, "expected <id>"},
 		{"a permit for too long", []string{"guest", "permit", "2", "--expires", "2h"}, "expires_at must be within"},
-		{"an unknown invite mode", []string{"invite", "create", "--open", "--channel", "lobby", "--expires", "1h", "--join-as", "visitor"}, "join_as must be one of"},
+		{"the join-as flag is retired", []string{"invite", "create", "--expires", "1h", "--join-as", "visitor"}, "--join-as no longer exist"},
 		{"a link of another purpose", []string{"principal", "sign-in-link", "2", "--purpose", "device"}, "a device link is not made on this route"},
 	}
 	for _, tt := range tests {

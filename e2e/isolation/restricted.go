@@ -269,7 +269,7 @@ func (w *world) restrictedPhase() (int, error) {
 			body = map[string]any{}
 		}
 		status, resp, err := r.api.do(method, path, body)
-		if err := refusedNaming("the restricted operator: "+route, status, resp, err, schema.ErrorCodePermissionDenied, perm); err != nil {
+		if err := refusedNaming("the restricted operator on a permission route: "+route, status, resp, err, schema.ErrorCodePermissionDenied, perm); err != nil {
 			return rows, err
 		}
 		rows++

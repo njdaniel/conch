@@ -4,10 +4,10 @@ import { serverLine } from './Invite';
 import type { ChannelV0 } from './schema/channel';
 
 // What the server's refusal means to the person, by its code. A name is
-// taken whoever's channel it is, so the one in the way may be one they are
-// not in and cannot see.
+// taken whoever's channel it is, and the line never says whose, so it does
+// not hint that a private channel exists (ADR-013 R2).
 const refusals: Readonly<Record<string, string>> = {
-  channel_exists: 'There is already a channel with that name, or one that reads the same, perhaps one you are not in. Choose another name.',
+  channel_exists: 'That name is taken',
   forbidden: "Only operators and this channel's managers rename it.",
   channel_not_found: 'That channel is gone, or you can no longer see it.',
 };

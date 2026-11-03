@@ -508,7 +508,22 @@ func (c *Client) decodeError(resp *http.Response) error {
 	if !decoded {
 		return &statusError{status: resp.StatusCode, text: fmt.Sprintf("cli: server returned %s", safeLine(resp.Status))}
 	}
-	return &ServerError{Status: resp.StatusCode, Code: serverError.Code, Message: serverError.Message, Permission: string(serverError.Permission)}
+	return &ServerError{Status: resp.StatusCode, Code: serverError.Code, Message: serverError.Message, Permission: string(serverError.Permission),
+		RetryAfterSeconds: retryAfterSeconds(resp.Header.Get("Retry-After"), serverError.RetryAfterSeconds)}
+}
+
+// maxRetryAfterSeconds bounds a wait a server asks for that a client repeats:
+// a day. A hostile server's larger number is read as this.
+const maxRetryAfterSeconds = 24 * 60 * 60
+
+// retryAfterSeconds reads a Retry-After header as whole seconds, falling back
+// to the error document's own count, and clamps the result to 0 through a day.
+func retryAfterSeconds(header string, fallback int) int {
+	n := fallback
+	if v, err := strconv.Atoi(strings.TrimSpace(header)); err == nil {
+		n = v
+	}
+	return max(0, min(n, maxRetryAfterSeconds))
 }
 
 // statusError is a refusal with no error document, such as the mux's 404 for
@@ -549,6 +564,10 @@ type ServerError struct {
 	// empty. It is shown by name, so a permission this client does not know
 	// still reads.
 	Permission string
+	// RetryAfterSeconds is how long a 429 asks the caller to wait: the
+	// Retry-After header, or the document's own field when the header is
+	// absent or not a whole number of seconds. 0 when neither says.
+	RetryAfterSeconds int
 }
 
 func (e *ServerError) Error() string {
@@ -609,9 +628,11 @@ func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoin
 		return nil
 	}
 	var answer io.Reader = resp.Body
+	var capped *cappedReader
 	if l, ok := out.(interface{ maxBody() int64 }); ok {
 		// A document with a known size bound is read no further than it.
-		answer = &cappedReader{r: resp.Body, left: l.maxBody() + 1, limit: l.maxBody()}
+		capped = &cappedReader{r: resp.Body, left: l.maxBody() + 1, limit: l.maxBody()}
+		answer = capped
 	}
 	if err := json.NewDecoder(answer).Decode(out); err != nil {
 		var tooLarge *bodyTooLargeError
@@ -619,6 +640,13 @@ func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoin
 			return fmt.Errorf("cli: %s: %w", what, tooLarge)
 		}
 		return fmt.Errorf("cli: decode %s response: %w", what, err)
+	}
+	if capped != nil && capped.left <= 0 {
+		// The decoder pulled cap+1 bytes and found its value complete without
+		// surfacing the reader's error. The cap is on the body the decoder
+		// reads, trailing bytes such as the encoder's newline included, so this
+		// is still over it.
+		return fmt.Errorf("cli: %s: %w", what, &bodyTooLargeError{limit: capped.limit})
 	}
 	return nil
 }
@@ -938,11 +966,11 @@ func (c *Client) ListPrincipals(ctx context.Context, filter PrincipalListFilter)
 		query.Set("limit", strconv.Itoa(filter.Limit))
 	}
 	endpoint.RawQuery = query.Encode()
-	var result schema.ListPrincipalsResponseV1
+	var result principalsDoc
 	if err := c.roundTrip(ctx, "list principals", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ListPrincipalsResponseV1{}, err
 	}
-	return result, nil
+	return result.ListPrincipalsResponseV1, nil
 }
 
 // HidePrincipal disables and hides a principal, which frees its name.

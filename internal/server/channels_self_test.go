@@ -568,6 +568,16 @@ func TestLeaveChannel(t *testing.T) {
 	if in, err := f.srv.store.IsChannelMember(ctx, f.chanA.ID, f.root.ID); err != nil || !in {
 		t.Errorf("the owner left channel-a after the refusal: %v, %v", in, err)
 	}
+	// An agent in the channel is not "someone else": the last human still
+	// can't leave (#1150).
+	bot, err := f.srv.store.CreatePrincipal(ctx, store.PrincipalAgent, "leave-bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.srv.store.AddChannelMember(ctx, owner, f.chanA.ID, bot.ID, f.root.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertErrorBody(t, f.do(t, http.MethodPost, "/v1/channels/"+f.chanA.Name+"/leave", f.rootTok, ""), http.StatusConflict, schema.ErrorCodeChannelLastMember)
 	// Once someone else is in channel-a, the owner may leave it.
 	if _, err := f.srv.store.AddChannelMember(ctx, owner, f.chanA.ID, f.member.ID, f.root.ID); err != nil {
 		t.Fatal(err)
