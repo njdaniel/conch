@@ -49,6 +49,18 @@ async function boxOf(el: Locator, what: string): Promise<Box> {
   return found;
 }
 
+// tapUntil taps an element until its state is the one wanted, and never taps
+// once it is. Under a loaded machine a tap can land just before the page
+// re-lays itself out (a roster row going, a share's stage drawn) and so miss
+// the button it was aimed at; a person taps again, and so does this. A toggle
+// is safe to retry only because the state is read first.
+async function tapUntil(target: Locator, done: () => Promise<boolean>): Promise<void> {
+  await expect(async () => {
+    if (!(await done())) await target.tap({ timeout: 5_000 });
+    await expect.poll(done, { timeout: 3_000 }).toBe(true);
+  }).toPass({ timeout: 30_000 });
+}
+
 // Whether two boxes share any area.
 function overlap(a: Box, b: Box): boolean {
   return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
@@ -367,18 +379,19 @@ test.describe('the phone voice strip with LiveKit', () => {
         await voice.getByRole('button', { name: 'Watch', exact: true }).tap();
         await expect(shareView(page)).toContainText('alice is sharing', { timeout: 30_000 });
         const options = voice.getByRole('button', { name: 'Voice options' });
-        await options.tap();
+        const expanded = (want: 'true' | 'false') => async () => (await options.getAttribute('aria-expanded')) === want;
+        await tapUntil(options, expanded('true'));
         await expect(voice.getByLabel('Push to talk')).toBeVisible();
         // With the open microphone, the strip shows its level where Hold to
         // talk was: the meter is drawn whole inside its slot, in one row.
-        await voice.getByLabel('Open microphone').tap();
+        await tapUntil(voice.getByLabel('Open microphone'), () => voice.getByLabel('Open microphone').isChecked());
         await expect(voice.getByLabel('Open microphone')).toBeChecked();
         await showView(page, 'Chat');
         await expectOpenMicrophone(p);
         await voice.getByRole('button', { name: fourControls[0] }).tap();
-        await voice.getByLabel('Push to talk').tap();
+        await tapUntil(voice.getByLabel('Push to talk'), () => voice.getByLabel('Push to talk').isChecked());
         await expect(voice.getByLabel('Push to talk')).toBeChecked();
-        await options.tap();
+        await tapUntil(options, expanded('false'));
         await expect(voice.getByLabel('Push to talk')).toBeHidden();
         // The strip's Leave voice leaves.
         await showView(page, 'Chat');
