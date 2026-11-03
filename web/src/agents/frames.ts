@@ -6,7 +6,7 @@ import { activitySchema, agentActivityV1, type AgentActivityV1 } from '../schema
 import { channelDocSchema, channelDocV1, channelMembersSchema, channelMembersV1, type ChannelDocV1, type ChannelMembersV1 } from '../schema/channel';
 import { interventionSchema, interventionV1, type InterventionV1 } from '../schema/intervention';
 import { messageEditedV1, messageEditedV1Schema, messageV2, type MessageEditedV1, type MessageV2 } from '../schema/message';
-import { channelsChangedV1, channelsChangedV1Schema, messageV2Schema, permissionsChangedV1, permissionsChangedV1Schema, readStateV1, readStateV1Schema, type ReadStateV1 } from '../schema/generated';
+import { channelsChangedV1, channelsChangedV1Schema, directoryChangedV1, directoryChangedV1Schema, messageV2Schema, permissionsChangedV1, permissionsChangedV1Schema, readStateV1, readStateV1Schema, type ReadStateV1 } from '../schema/generated';
 import { runSchema, runV1, type RunV1 } from '../schema/run';
 import { sessionRosterSchema, sessionRosterV1, type SessionRosterV1 } from '../schema/session';
 
@@ -27,7 +27,10 @@ export type EventFrame =
   | { readonly kind: 'channelsChanged' }
   // The person's own permissions may have changed (ADR-014 design §8.6): no
   // content, only a hint to read whoami (and the document) again.
-  | { readonly kind: 'permissionsChanged' };
+  | { readonly kind: 'permissionsChanged' }
+  // The community's directory answer may have changed (issue #993, design
+  // §13.6): no content, only a hint to read the directory again and replace.
+  | { readonly kind: 'directoryChanged' };
 
 export function parseEventFrame(data: unknown): EventFrame | null {
   if (typeof data !== 'string') return null;
@@ -63,6 +66,8 @@ export function parseEventFrame(data: unknown): EventFrame | null {
       return channelsChangedV1({ schema: channelsChangedV1Schema }).length === 0 ? { kind: 'channelsChanged' } : null;
     case permissionsChangedV1Schema:
       return permissionsChangedV1({ schema: permissionsChangedV1Schema }).length === 0 ? { kind: 'permissionsChanged' } : null;
+    case directoryChangedV1Schema:
+      return directoryChangedV1({ schema: directoryChangedV1Schema }).length === 0 ? { kind: 'directoryChanged' } : null;
     default:
       return null;
   }

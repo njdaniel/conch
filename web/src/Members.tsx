@@ -17,6 +17,9 @@ export interface MemberControlsProps {
   readonly members: readonly ChannelMemberV1[];
   readonly viewer: Pick<WhoAmIResponseV1, 'role'> & { readonly guest: boolean };
   readonly refreshMembers: () => void;
+  // Counts the server's words that the directory changed (issue #993): an
+  // open picker reads the other channels again and replaces its candidates.
+  readonly directoryTick?: number;
   readonly onUnauthorized: () => void;
 }
 
@@ -30,7 +33,7 @@ function refusalLine(result: api.InviteRefusal): string {
 }
 
 function AddPeople(props: MemberControlsProps) {
-  const { channel, channels, members, viewer, refreshMembers, onUnauthorized } = props;
+  const { channel, channels, members, viewer, refreshMembers, directoryTick = 0, onUnauthorized } = props;
   const [name, setName] = useState('');
   const [adding, setAdding] = useState(false);
   const [line, setLine] = useState<string | null>(null);
@@ -71,12 +74,9 @@ function AddPeople(props: MemberControlsProps) {
     setLine(result.failure === 'network' ? networkRefusal : addRefusal);
   }
 
-  async function openPicker() {
-    const opening = !pickerOpen;
-    setPickerOpen(opening);
-    setLine(null);
-    setSelected('');
-    if (!opening) return;
+  // Reads the other channels' people and replaces the candidates. An answer to
+  // an earlier read, or to another channel, is dropped.
+  async function loadCandidates() {
     const mine = ++request.current;
     setLoading(true);
     const other = channels.filter((c) => c.id !== channel.id);
@@ -101,7 +101,29 @@ function AddPeople(props: MemberControlsProps) {
       }
     }
     setCandidates([...found.values()]);
+    // A chosen person the new list lacks is no longer chosen.
+    setSelected((held) => (held !== '' && found.has(Number(held)) ? held : ''));
   }
+
+  async function openPicker() {
+    const opening = !pickerOpen;
+    setPickerOpen(opening);
+    setLine(null);
+    setSelected('');
+    if (!opening) return;
+    await loadCandidates();
+  }
+
+  // The directory changed (issue #993): an open picker is read again and its
+  // candidates replaced, so a renamed or hidden person is not offered stale.
+  const loadAgain = useRef(loadCandidates);
+  loadAgain.current = loadCandidates;
+  const seenTick = useRef(directoryTick);
+  useEffect(() => {
+    if (seenTick.current === directoryTick) return;
+    seenTick.current = directoryTick;
+    if (pickerOpen) void loadAgain.current();
+  }, [directoryTick, pickerOpen]);
 
   async function addSelected(event: SyntheticEvent) {
     event.preventDefault();
@@ -385,14 +407,15 @@ function CommunityRow({ person, byId, viewer }: { readonly person: ServerMemberV
 
 // The community member panel (issues #983 and #991): everyone the server lists
 // from GET /v1/directory/members, beside the open channel's own people. It is
-// read when it is drawn and again when the person's own channels change or
-// they ask; whatever the server leaves out (a viewer who may only know the
+// read when it is drawn and again when the person's own channels or
+// permissions change and when the server says the directory changed; whatever the server leaves out (a viewer who may only know the
 // people they share a channel with is told so) is not guessed at. There are no
 // guests in it: the directory lists none.
 export function CommunityMembers({
   viewer,
   channelIds,
   permissionsTick = 0,
+  directoryTick = 0,
   onUnauthorized,
 }: {
   readonly viewer: number;
@@ -400,6 +423,9 @@ export function CommunityMembers({
   // Counts live changes of the person's own permissions (conch.permissions_changed.v1):
   // what they may see here may have changed, so the list is read again.
   readonly permissionsTick?: number;
+  // Counts the server's words that the directory changed
+  // (conch.directory_changed.v1): the list is read again and replaced.
+  readonly directoryTick?: number;
   readonly onUnauthorized: () => void;
 }) {
   const headingId = useId();
@@ -432,19 +458,7 @@ export function CommunityMembers({
   }, []);
   useEffect(() => {
     load();
-  }, [load, channelIds, permissionsTick]);
-  // The server sends no word that the community changed (a person hidden, a
-  // role changed), so the list is read again when the tab comes back.
-  useEffect(() => {
-    const back = () => {
-      if (document.visibilityState === 'visible') load();
-    };
-    document.addEventListener('visibilitychange', back);
-    return () => {
-      document.removeEventListener('visibilitychange', back);
-    };
-  }, [load]);
-
+  }, [load, channelIds, permissionsTick, directoryTick]);
   const byId = new Map<number, ServerMemberV1>();
   if (answer !== null && answer !== 'failed') for (const m of answer.members) byId.set(m.id, m);
   return (
@@ -470,9 +484,6 @@ export function CommunityMembers({
           )}
         </>
       )}
-      <button type="button" className="quiet" onClick={load}>
-        Refresh
-      </button>
     </section>
   );
 }

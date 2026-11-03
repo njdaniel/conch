@@ -59,6 +59,7 @@ import { useReadState } from './useReadState';
 import { useChannelRefresh } from './useChannelRefresh';
 import { MembersPanel } from './agents/MembersPanel';
 import { CommunityMembers } from './Members';
+import { useDirectoryChanged } from './useDirectoryChanged';
 import { RunDetail } from './agents/RunDetail';
 import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
@@ -573,6 +574,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     setPermissionsTick((n) => n + 1);
     readWho();
   }, [readWho]);
+  const directory = useDirectoryChanged();
   const agents = useAgents({
     signedIn,
     channel: channelId === null ? null : selected,
@@ -588,7 +590,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onMessageEdited,
     onChannelsChanged: refreshChannels,
     onPermissionsChanged: permissionsChanged,
+    onDirectoryChanged: directory.signal,
   });
+  // The server's word that the directory changed (issue #993): the community
+  // panel, the picker and this channel's people are read again and replaced.
+  const refreshMembers = agents.refreshMembers;
+  useEffect(() => {
+    if (directory.tick > 0) refreshMembers();
+  }, [directory.tick, refreshMembers]);
   // The people the page knows by name, for Settings → Reports (issue #1029):
   // the open channel's members. A sender it does not know is "person #id".
   const memberNames = useMemo(() => {
@@ -1586,12 +1595,13 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                         channel: currentChannel,
                         channels: channels.channels,
                         viewer: { role: auth.principal.role, guest: visit !== null },
+                        directoryTick: directory.tick,
                         onUnauthorized,
                       }
                 }
               />
               {auth.principal.kind === 'human' && visit === null ? (
-                <CommunityMembers viewer={auth.principal.id} permissionsTick={permissionsTick} channelIds={channels.channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
+                <CommunityMembers viewer={auth.principal.id} permissionsTick={permissionsTick} directoryTick={directory.tick} channelIds={channels.channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
               ) : null}
             </>
           }
