@@ -4,7 +4,13 @@ import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { SettingsChange } from './ChannelSettingsAsk';
 import type { ChannelV0 } from './schema/channel';
 import { badgeText } from './useReadState';
-import { nobody, type InVoice } from './voice/useOccupancy';
+import { nobody, type InVoice, type Voices } from './voice/useOccupancy';
+
+// How many people a channel lists in voice before folding the rest into
+// "+M more" (issue #1103).
+export const shownInVoice = 5;
+
+const noNames: ReadonlyMap<number, string> = new Map();
 
 const badgeId = (channel: number) => `unread-${String(channel)}`;
 const voiceId = (channel: number) => `in-voice-${String(channel)}`;
@@ -38,6 +44,60 @@ function VoiceMark({ id, count }: { readonly id: number; readonly count: number 
   );
 }
 
+// voiceName is how someone in a channel's voice is named in the list: the
+// viewer is "You"; anyone else by the name the page has for them, or, until
+// the channel's members have been read, by their id.
+function voiceName(id: number, viewer: number, names: ReadonlyMap<number, string>): string {
+  if (id === viewer) return 'You';
+  return names.get(id) ?? `Member ${String(id)}`;
+}
+
+// Who is in a channel's voice (issue #1103), nested under its row: a list
+// named for the channel, one row a person, up to shownInVoice of them and
+// then "+M more". Each row opens the channel, as the channel's own button
+// does, and nothing more: nothing in the list joins voice. The rows are
+// outside the tab order, since the channel's button, which is in it, does
+// what they do; they are read as text under the channel. No speaking,
+// muted or deafened state: that is the voice bar's, for the room joined.
+function VoicePeople({
+  channel,
+  people,
+  names,
+  viewer,
+  onOpen,
+}: {
+  readonly channel: ChannelV0;
+  readonly people: readonly number[];
+  readonly names: ReadonlyMap<number, string>;
+  readonly viewer: number;
+  readonly onOpen: (name: string) => void;
+}) {
+  if (people.length === 0) return null;
+  const shown = people.slice(0, shownInVoice);
+  const more = people.length - shown.length;
+  const open = () => {
+    onOpen(channel.name);
+  };
+  return (
+    <ul className="in-voice-people" aria-label={`In voice in #${channel.name}`}>
+      {shown.map((id) => (
+        <li key={id}>
+          <button type="button" tabIndex={-1} onClick={open}>
+            {voiceName(id, viewer, names)}
+          </button>
+        </li>
+      ))}
+      {more > 0 ? (
+        <li className="more">
+          <button type="button" tabIndex={-1} onClick={open}>
+            +{more} more
+          </button>
+        </li>
+      ) : null}
+    </ul>
+  );
+}
+
 // One channel's row (issue #1135): its button, which opens the channel, its
 // badges, and, when the viewer may do anything to the channel, one ⋯ menu
 // beside them (never inside the button). The menu is the message log's
@@ -52,6 +112,8 @@ function ChannelRow({
   stop,
   unread,
   voiced,
+  voiceNames,
+  viewer,
   mayRename,
   renderRename,
   mayManage,
@@ -66,7 +128,9 @@ function ChannelRow({
   readonly selected: string | null;
   readonly stop: string | null;
   readonly unread: number;
-  readonly voiced: number;
+  readonly voiced: Voices | undefined;
+  readonly voiceNames: ReadonlyMap<number, string>;
+  readonly viewer: number;
   readonly mayRename: boolean;
   readonly renderRename: ((channel: ChannelV0, close: () => void) => ReactNode) | undefined;
   readonly mayManage: boolean;
@@ -103,7 +167,8 @@ function ChannelRow({
     if (lost) main.current?.focus();
   }, [mayManage, change]);
   // What describes the button: private, a manager grant, who is in its voice, then its unread.
-  const described = [isPrivate ? privateId(channel.id) : null, channel.manages === true ? managesId(channel.id) : null, voiced > 0 ? voiceId(channel.id) : null, unread > 0 ? badgeId(channel.id) : null].filter(
+  const inVoice = voiced?.count ?? 0;
+  const described = [isPrivate ? privateId(channel.id) : null, channel.manages === true ? managesId(channel.id) : null, inVoice > 0 ? voiceId(channel.id) : null, unread > 0 ? badgeId(channel.id) : null].filter(
     (x) => x !== null,
   );
 
@@ -183,10 +248,13 @@ function ChannelRow({
           manages
         </span>
       ) : null}
-      <VoiceMark id={channel.id} count={voiced} />
+      <VoiceMark id={channel.id} count={inVoice} />
       <UnreadBadge id={channel.id} count={unread} />
       {items.length === 0 ? null : (
         <ActionsMenu label={`Actions for ${channel.name}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
+      )}
+      {voiced?.people === null || voiced?.people === undefined ? null : (
+        <VoicePeople channel={channel} people={voiced.people} names={voiceNames} viewer={viewer} onOpen={onOpen} />
       )}
       {renaming && mayRename && renderRename !== undefined
         ? renderRename(channel, () => {
@@ -221,6 +289,8 @@ export function ChannelList({
   selected,
   unread,
   occupancy = nobody,
+  voiceNames = noNames,
+  viewer = 0,
   empty = 'No channels yet: an operator needs to add you to one',
   canRename,
   renderRename,
@@ -233,8 +303,13 @@ export function ChannelList({
   readonly selected: string | null;
   // Each channel's unread count by name; a channel at 0 has no entry.
   readonly unread: ReadonlyMap<string, number>;
-  // How many are in each channel's voice, by id; nobody, no entry.
+  // Who is in each channel's voice, by id; nobody, no entry.
   readonly occupancy?: InVoice;
+  // The names the page has for people, by principal id (issue #1103): the
+  // people listed under a channel are named from it, "Member N" otherwise.
+  readonly voiceNames?: ReadonlyMap<number, string>;
+  // The viewer's principal id: in a list they are "You".
+  readonly viewer?: number;
   // What an empty list says: by default, who can change that. Someone who can
   // make a channel is told less, with the control to do it beside the list.
   readonly empty?: string;
@@ -298,7 +373,9 @@ export function ChannelList({
           selected={selected}
           stop={stop}
           unread={unread.get(channel.name) ?? 0}
-          voiced={occupancy.get(channel.id) ?? 0}
+          voiced={occupancy.get(channel.id)}
+          voiceNames={voiceNames}
+          viewer={viewer}
           mayRename={canRename?.(channel) === true}
           renderRename={renderRename}
           mayManage={canManage}

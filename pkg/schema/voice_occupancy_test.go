@@ -13,6 +13,7 @@ func TestVoiceOccupancyGoldenFixtures(t *testing.T) {
 		file string
 	}{
 		{name: "two channels, one with people and one without", file: "voice-occupancy-v1.json"},
+		{name: "two channels, with who is in each (issue #1103)", file: "voice-occupancy-v1-people.json"},
 		{name: "configured but unavailable", file: "voice-occupancy-v1-unavailable.json"},
 		{name: "not configured", file: "voice-occupancy-v1-not-configured.json"},
 	}
@@ -39,7 +40,10 @@ func validVoiceOccupancyV1() VoiceOccupancyV1 {
 		Schema:     VoiceOccupancySchemaV1,
 		Configured: true,
 		Available:  true,
-		Channels:   []VoiceChannelOccupancy{{ChannelID: 7, InVoice: 3}, {ChannelID: 9, InVoice: 0}},
+		Channels: []VoiceChannelOccupancy{
+			{ChannelID: 7, InVoice: 3, PrincipalIDs: []int64{3, 5, 12}},
+			{ChannelID: 9, InVoice: 0, PrincipalIDs: []int64{}},
+		},
 	}
 }
 
@@ -51,7 +55,11 @@ func TestVoiceOccupancyV1Validate(t *testing.T) {
 	}{
 		{name: "valid, two channels", mutate: func(*VoiceOccupancyV1) {}},
 		{name: "valid, available with no channels", mutate: func(o *VoiceOccupancyV1) { o.Channels = []VoiceChannelOccupancy{} }},
-		{name: "valid, every count zero", mutate: func(o *VoiceOccupancyV1) { o.Channels[0].InVoice = 0 }},
+		{name: "valid, every count zero", mutate: func(o *VoiceOccupancyV1) { o.Channels[0].InVoice, o.Channels[0].PrincipalIDs = 0, []int64{} }},
+		// A document from before principal_ids (issue #1103): the count
+		// stands alone, as the published fixture voice-occupancy-v1.json has it.
+		{name: "valid, principal_ids not stated", mutate: func(o *VoiceOccupancyV1) { o.Channels[0].PrincipalIDs, o.Channels[1].PrincipalIDs = nil, nil }},
+		{name: "valid, one person", mutate: func(o *VoiceOccupancyV1) { o.Channels[0].InVoice, o.Channels[0].PrincipalIDs = 1, []int64{3} }},
 		{name: "valid, configured but unavailable", mutate: func(o *VoiceOccupancyV1) { o.Available, o.Channels = false, []VoiceChannelOccupancy{} }},
 		{name: "valid, not configured", mutate: func(o *VoiceOccupancyV1) {
 			o.Configured, o.Available, o.Channels = false, false, []VoiceChannelOccupancy{}
@@ -71,7 +79,15 @@ func TestVoiceOccupancyV1Validate(t *testing.T) {
 		{name: "negative channel", mutate: func(o *VoiceOccupancyV1) { o.Channels[0].ChannelID = -7 }, wantErr: "voice occupancy channel_id must be positive, got -7"},
 		{name: "channel twice", mutate: func(o *VoiceOccupancyV1) { o.Channels[1].ChannelID = 7 }, wantErr: "voice occupancy lists channel 7 more than once"},
 		{name: "channels out of order", mutate: func(o *VoiceOccupancyV1) { o.Channels[0].ChannelID = 11 }, wantErr: "ascending channel_id order, got 9 after 11"},
-		{name: "negative count", mutate: func(o *VoiceOccupancyV1) { o.Channels[1].InVoice = -1 }, wantErr: "voice occupancy in_voice of channel 9 must not be negative, got -1"},
+		{name: "negative count", mutate: func(o *VoiceOccupancyV1) { o.Channels[1].InVoice, o.Channels[1].PrincipalIDs = -1, nil }, wantErr: "voice occupancy in_voice of channel 9 must not be negative, got -1"},
+
+		// principal_ids (issue #1103): stated, it is exactly the count.
+		{name: "fewer principals than the count", mutate: func(o *VoiceOccupancyV1) { o.Channels[0].PrincipalIDs = []int64{3, 5} }, wantErr: "voice occupancy of channel 7 lists 2 principal_ids for in_voice 3"},
+		{name: "more principals than the count", mutate: func(o *VoiceOccupancyV1) { o.Channels[1].PrincipalIDs = []int64{4} }, wantErr: "voice occupancy of channel 9 lists 1 principal_ids for in_voice 0"},
+		{name: "zero principal", mutate: func(o *VoiceOccupancyV1) { o.Channels[0].PrincipalIDs = []int64{0, 5, 12} }, wantErr: "voice occupancy of channel 7 has a principal_id that is not positive: 0"},
+		{name: "negative principal", mutate: func(o *VoiceOccupancyV1) { o.Channels[0].PrincipalIDs = []int64{-3, 5, 12} }, wantErr: "voice occupancy of channel 7 has a principal_id that is not positive: -3"},
+		{name: "principal twice", mutate: func(o *VoiceOccupancyV1) { o.Channels[0].PrincipalIDs = []int64{3, 5, 5} }, wantErr: "voice occupancy of channel 7 lists principal 5 more than once"},
+		{name: "principals out of order", mutate: func(o *VoiceOccupancyV1) { o.Channels[0].PrincipalIDs = []int64{3, 12, 5} }, wantErr: "voice occupancy of channel 7 must list principal_ids in ascending order, got 5 after 12"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -97,19 +113,31 @@ func TestVoiceOccupancyEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A row that does not state who is there (nil) leaves principal_ids out,
+	// which is how the published fixture reads and how a writer from before
+	// issue #1103 wrote; a row that states nobody writes [].
 	if string(raw) != `{"channel_id":9,"in_voice":0}` {
-		t.Errorf("a zero count encodes as %s, want in_voice written out", raw)
+		t.Errorf("a zero count encodes as %s, want in_voice written out and no principal_ids", raw)
+	}
+	raw, err = json.Marshal(VoiceChannelOccupancy{ChannelID: 9, PrincipalIDs: []int64{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `{"channel_id":9,"in_voice":0,"principal_ids":[]}` {
+		t.Errorf("nobody encodes as %s, want principal_ids written out as []", raw)
 	}
 }
 
 // forbiddenOccupancyKeys are the JSON keys the occupancy document must never
 // carry at any depth: presence's (no token, no room), and anything that names
-// someone. A count is all it says; who is there is in presence.
-var forbiddenOccupancyKeys = map[string]bool{"token": true, "room": true, "name": true, "principal_id": true, "participants": true}
+// someone in text. Who is there is said by principal id alone (issue #1103),
+// as presence says it, never by name, and never as presence's participant
+// objects, which carry what a person does.
+var forbiddenOccupancyKeys = map[string]bool{"token": true, "room": true, "name": true, "display_name": true, "participants": true}
 
 // forbiddenOccupancyFields are the Go field names the occupancy types must
 // not declare, whatever their JSON tag.
-var forbiddenOccupancyFields = map[string]bool{"Token": true, "Room": true, "RoomName": true, "Name": true, "PrincipalID": true, "Participants": true}
+var forbiddenOccupancyFields = map[string]bool{"Token": true, "Room": true, "RoomName": true, "Name": true, "DisplayName": true, "Participants": true}
 
 // TestVoiceOccupancyCarriesNoTokenRoomOrName checks the document two ways, as
 // TestVoicePresenceCarriesNoTokenOrRoom checks presence: the JSON of a

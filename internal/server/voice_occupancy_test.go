@@ -68,6 +68,48 @@ func (f *presenceFixture) occ(doc schema.VoiceOccupancyV1) string {
 	return strings.Join(out, ",")
 }
 
+// occWho renders who a document says is in each channel (issue #1103):
+// "ops:ann+ann2,ops2:" with the people by name, ascending by id, and
+// nothing after the colon for nobody; "x" and "-" as occ.
+func (f *presenceFixture) occWho(doc schema.VoiceOccupancyV1) string {
+	switch {
+	case !doc.Configured:
+		return "x"
+	case !doc.Available:
+		return "-"
+	}
+	channels := map[int64]string{f.ops.ID: "ops", f.ops2.ID: "ops2"}
+	people := map[int64]string{}
+	for name, id := range f.ids {
+		people[id] = name
+	}
+	var out []string
+	for _, c := range doc.Channels {
+		var names []string
+		for _, id := range c.PrincipalIDs {
+			n, ok := people[id]
+			if !ok {
+				n = fmt.Sprintf("principal%d", id)
+			}
+			names = append(names, n)
+		}
+		out = append(out, fmt.Sprintf("%s:%s", channels[c.ChannelID], strings.Join(names, "+")))
+	}
+	return strings.Join(out, ",")
+}
+
+// statesWho fails unless every row of an available document states who is
+// there (issue #1103): conchd always writes principal_ids, as [] for nobody;
+// Validate has already checked that it is exactly in_voice ids, ascending.
+func statesWho(t *testing.T, doc schema.VoiceOccupancyV1, raw string) {
+	t.Helper()
+	for _, c := range doc.Channels {
+		if c.PrincipalIDs == nil {
+			t.Fatalf("channel %d states no principal_ids: %s", c.ChannelID, raw)
+		}
+	}
+}
+
 // getOccupancy reads GET /v1/voice/occupancy as who.
 func (f *presenceFixture) getOccupancy(t *testing.T, who string) (wireResult, schema.VoiceOccupancyV1) {
 	t.Helper()
@@ -84,6 +126,7 @@ func (f *presenceFixture) getOccupancy(t *testing.T, who string) (wireResult, sc
 	if err := doc.Validate(); err != nil {
 		t.Fatalf("document does not validate: %v; %s", err, res.body)
 	}
+	statesWho(t, doc, res.body)
 	return res, doc
 }
 
@@ -238,6 +281,78 @@ func TestVoiceOccupancyCountsAsPresence(t *testing.T) {
 	}
 }
 
+// TestVoiceOccupancyNamesWhoPresenceLists (issue #1103): a row's
+// principal_ids are exactly the people the channel's presence lists in its
+// channel-wide room, ascending, the viewer among them; a net's room names
+// nobody to anyone; a channel the reader is not in is absent, people and
+// all; a room that cannot be read, or an outage, names nobody.
+func TestVoiceOccupancyNamesWhoPresenceLists(t *testing.T) {
+	f := newPresenceFixture(t, presenceOpts{auth: AuthRequired})
+	ops, ops2 := f.live(t)
+	read := func(who string) string {
+		t.Helper()
+		_, doc := f.getOccupancy(t, who)
+		return f.occWho(doc)
+	}
+	if got := read("ann"); got != "ops:ann+ann2,ops2:" {
+		t.Fatalf("start = %q", got)
+	}
+	// ann2 is in ops alone: ops2 is absent, not nobody.
+	if got := read("ann2"); got != "ops:ann+ann2" {
+		t.Errorf("as ann2 = %q", got)
+	}
+	// The ids are presence's, in order.
+	var fromPresence []int64
+	for _, p := range f.snap(t, f.ops).Rooms[0].Participants {
+		fromPresence = append(fromPresence, p.PrincipalID)
+	}
+	slices.Sort(fromPresence)
+	if _, doc := f.getOccupancy(t, "ann"); !slices.Equal(doc.Channels[0].PrincipalIDs, fromPresence) {
+		t.Errorf("principal_ids = %v, presence lists %v", doc.Channels[0].PrincipalIDs, fromPresence)
+	}
+
+	// A net's room in ops with ann2 and bob in it: neither is named for it,
+	// and ann2, already in the channel-wide room, is named once.
+	net := store.VoiceRoom{ID: 999, ChannelID: f.ops.ID, NetID: 3, RoomName: ops + "-net"}
+	f.srv.voice.noteSession(net)
+	f.lk.setRoom(net.RoomName, fakeParticipant{identity: f.identity("ann2"), joinedMs: 3_000}, fakeParticipant{identity: f.identity("bob"), joinedMs: 3_000})
+	f.clock.Advance(testPassGap)
+	f.pass(t)
+	if got := read("ann"); got != "ops:ann+ann2,ops2:" {
+		t.Errorf("with a net room in use = %q, want its people unnamed", got)
+	}
+
+	// One person in two channels is named in each.
+	f.lk.setRoom(ops2, fakeParticipant{identity: f.identity("ann"), joinedMs: 4_000})
+	f.clock.Advance(testPassGap)
+	f.pass(t)
+	if got := read("ann"); got != "ops:ann+ann2,ops2:ann" {
+		t.Errorf("after ann joins ops2 = %q", got)
+	}
+
+	// A room that cannot be read names nobody until it is read again.
+	f.lk.config(func(l *scriptedLiveKit) { l.listFail = map[string]bool{ops: true} })
+	f.clock.Advance(testPassGap)
+	f.pass(t)
+	if got := read("ann"); got != "ops:,ops2:ann" {
+		t.Errorf("with ops unreadable = %q", got)
+	}
+	f.lk.config(func(l *scriptedLiveKit) { l.listFail = nil })
+	f.clock.Advance(testPassGap)
+	f.pass(t)
+	if got := read("ann"); got != "ops:ann+ann2,ops2:ann" {
+		t.Errorf("once readable again = %q", got)
+	}
+
+	// An outage names nobody at all.
+	f.lk.setListStatus(http.StatusServiceUnavailable)
+	f.clock.Advance(testPassGap)
+	f.pass(t)
+	if got := read("ann"); got != "-" {
+		t.Errorf("during an outage = %q", got)
+	}
+}
+
 // dialOccupancy opens the occupancy socket as token.
 func dialOccupancy(t *testing.T, base, token string) (*websocket.Conn, *http.Response, error) {
 	t.Helper()
@@ -273,6 +388,7 @@ func readOccupancy(t *testing.T, conn *websocket.Conn) schema.VoiceOccupancyV1 {
 	if err := doc.Validate(); err != nil {
 		t.Fatalf("frame does not validate: %v; %s", err, raw)
 	}
+	statesWho(t, doc, string(raw))
 	return doc
 }
 
@@ -291,38 +407,49 @@ func TestVoiceOccupancySocketStreams(t *testing.T) {
 	if got := f.occ(readOccupancy(t, conn)); got != "-" {
 		t.Fatalf("on connect, before LiveKit has answered: %q", got)
 	}
+	// Each step's frame: the counts (occ) and who (occWho, issue #1103).
 	steps := []struct {
 		name   string
 		script func()
 		want   string
+		who    string
 	}{
-		{"first contact", func() {}, "ops:0,ops2:0"},
+		{"first contact", func() {}, "ops:0,ops2:0", "ops:,ops2:"},
 		{"nothing changed, then ann2 joins ops", func() {
 			f.pass(t)
 			f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann2"), joinedMs: 1_000, published: true, muted: true})
-		}, "ops:1,ops2:0"},
+		}, "ops:1,ops2:0", "ops:ann2,ops2:"},
 		{"she talks, then ann joins ops2", func() {
 			f.lk.update(ops, f.identity("ann2"), func(p *fakeParticipant) { p.muted = false })
 			f.pass(t)
 			f.lk.setRoom(ops2, fakeParticipant{identity: f.identity("ann"), joinedMs: 2_000})
-		}, "ops:1,ops2:1"},
+		}, "ops:1,ops2:1", "ops:ann2,ops2:ann"},
 		{"ann2 reconnects, then ann joins ops", func() {
 			f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann2"), joinedMs: 5_000, published: true})
 			f.pass(t)
 			f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann2"), joinedMs: 5_000, published: true}, fakeParticipant{identity: f.identity("ann"), joinedMs: 6_000})
-		}, "ops:2,ops2:1"},
-		{"ops cannot be read", func() { f.lk.config(func(l *scriptedLiveKit) { l.listFail = map[string]bool{ops: true} }) }, "ops:0,ops2:1"},
-		{"ops is read again", func() { f.lk.config(func(l *scriptedLiveKit) { l.listFail = nil }) }, "ops:2,ops2:1"},
+		}, "ops:2,ops2:1", "ops:ann+ann2,ops2:ann"},
+		{"ops cannot be read", func() { f.lk.config(func(l *scriptedLiveKit) { l.listFail = map[string]bool{ops: true} }) }, "ops:0,ops2:1", "ops:,ops2:ann"},
+		{"ops is read again", func() { f.lk.config(func(l *scriptedLiveKit) { l.listFail = nil }) }, "ops:2,ops2:1", "ops:ann+ann2,ops2:ann"},
 		{"ann2 leaves", func() {
 			f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann"), joinedMs: 6_000})
-		}, "ops:1,ops2:1"},
+		}, "ops:1,ops2:1", "ops:ann,ops2:ann"},
+		// A swap in one pass (issue #1103): the count stays and the people
+		// change, which is a frame of its own.
+		{"ann leaves and ann2 comes back in one pass", func() {
+			f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann2"), joinedMs: 7_000})
+		}, "ops:1,ops2:1", "ops:ann2,ops2:ann"},
 	}
 	for _, st := range steps {
 		st.script()
 		f.clock.Advance(testPassGap)
 		f.pass(t)
-		if got := f.occ(readOccupancy(t, conn)); got != st.want {
+		doc := readOccupancy(t, conn)
+		if got := f.occ(doc); got != st.want {
 			t.Errorf("%s: frame = %q, want %q", st.name, got, st.want)
+		}
+		if got := f.occWho(doc); got != st.who {
+			t.Errorf("%s: frame names %q, want %q", st.name, got, st.who)
 		}
 	}
 	// An outage is a change too, and carries no counts; so is the recovery,
@@ -373,6 +500,14 @@ func TestVoiceOccupancyWakesOnCountsOnly(t *testing.T) {
 		{"ann2 leaves", func() { f.lk.drop(ops, f.identity("ann2")) }, true, true},
 		{"ann2 comes back", func() {
 			f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000}, fakeParticipant{identity: f.identity("ann2"), joinedMs: 10_000})
+		}, true, true},
+		// The count stays at one and the person changes (issue #1103).
+		{"ann2 leaves and bob takes her place in one pass", func() {
+			f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000})
+			f.clock.Advance(testPassGap)
+			f.pass(t)
+			drain()
+			f.lk.setRoom(ops, fakeParticipant{identity: f.identity("ann2"), joinedMs: 11_000})
 		}, true, true},
 	}
 	for _, tt := range tests {

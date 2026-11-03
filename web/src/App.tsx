@@ -65,6 +65,7 @@ import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
 import { VoiceStatus } from './VoiceStatus';
 import { useOccupancy } from './voice/useOccupancy';
+import { useOccupantNames } from './voice/useOccupantNames';
 import { needsHttps } from './transport';
 
 const checkingAudience = 'Checking who this draft goes to…';
@@ -670,6 +671,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // How many are in each channel's voice (issue #596): one socket for the
   // page, for the list and the strip. Never opened for someone without voice.
   const occupancy = useOccupancy({ signedIn, voiceAllowed, reachable: connection === 'connected', onUnauthorized });
+  // Their names (issue #1103), from the channel's members; the page's own
+  // people first.
+  const voiceNames = useOccupantNames({ occupancy, channels: channels.channels, people: live.people, viewer: principal?.id ?? 0 });
 
   // Go to message: run detail closes, and once the conversation is on screen
   // again it scrolls to the message the run answers and puts focus on it. A
@@ -1581,6 +1585,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           channels={channels}
           unread={unread}
           occupancy={occupancy}
+          voiceNames={voiceNames}
           notificationCenter={<NotificationCenter alerts={notifications.alerts} onOpen={notifications.openAlert} onClear={notifications.clearAlerts} />}
           connection={connection}
           panel={
