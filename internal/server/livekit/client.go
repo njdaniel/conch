@@ -337,7 +337,7 @@ const (
 // permission to. LiveKit replaces the whole permission with what it is sent,
 // so this names only what conchd decides and the request spells out the
 // rest: subscribe, never publish data, nothing hidden or administrative.
-// With ScreenShare false it is exactly what a join token grants (JoinToken),
+// With ScreenShare and Camera false it is exactly what a join token grants (JoinToken),
 // and LiveKit treats setting it on a participant that already has it as no
 // change at all.
 type Permission struct {
@@ -353,8 +353,8 @@ type Permission struct {
 	Camera bool
 
 	// explicit, with sources, is the per-source form (SourcePermission): the
-	// list of sources is exactly sources, and CanPublish and ScreenShare are
-	// not consulted for it. The bundled form above is what every other
+	// list of sources is exactly sources, and CanPublish, ScreenShare and
+	// Camera are not consulted for it. The bundled form above is what every other
 	// Permission is, and its requests are unchanged.
 	explicit    bool
 	noSubscribe bool

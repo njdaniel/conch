@@ -70,10 +70,12 @@ func publishPermission(role voiceRole, in publishInput, camera bool) livekit.Per
 //
 // The caller holds the room's claims (voiceRoomState.claims), which is what
 // serializes every write of one participant's permission. The camera term is
-// read here, at the moment of writing, from the person's current claims, never
-// from a snapshot a pass carried in; no camera claim exists yet (webcam C4),
-// so it is false. found is false, with a nil error, when nobody by that
-// identity is in the room.
+// the constant false until C4 (#1241): no camera claim exists yet. C4 reads it
+// here, at the moment of writing, from the person's current claims in the
+// room, never from a snapshot a pass carried in, and threads the room
+// (r *voiceRoomState) through setPublishPermission, withdrawLocked and
+// withdrawCompanion to do so. found is false, with a nil error, when nobody by
+// that identity is in the room.
 func (p *voicePoller) setPublishPermission(ctx context.Context, roomName string, principalID int64, role voiceRole, in publishInput) (found bool, err error) {
 	const camera = false
 	return p.s.lk.UpdateParticipant(ctx, roomName, voiceParticipantIdentity(principalID, role), publishPermission(role, in, camera))

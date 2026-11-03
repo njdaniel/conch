@@ -785,8 +785,10 @@ func (p *voicePoller) grantCompanion(ctx context.Context, r *voiceRoomState, roo
 // role (a companion or a viewer): canPublish off and no sources, and
 // canSubscribe as the participant has it (canSubscribe), never more. It is not
 // the microphone-only bundle withdrawLocked leaves a person, which would let
-// the companion publish a microphone. The caller holds the room's claims. It
-// reports whether LiveKit answered.
+// the companion publish a microphone. Only a companion or a viewer is passed:
+// for a person, publishPermission would write the microphone bundle, not a
+// per-source permission, so a caller must use withdrawLocked for one. The caller
+// holds the room's claims. It reports whether LiveKit answered.
 func (p *voicePoller) withdrawCompanion(ctx context.Context, roomName string, channelID, principalID int64, role voiceRole, canSubscribe bool) bool {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
 	defer cancel()

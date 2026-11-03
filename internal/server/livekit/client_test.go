@@ -290,8 +290,6 @@ func TestRoomCalls(t *testing.T) {
 			want:      true,
 		},
 		{
-			// The per-source form (issue #932): a companion's grant, never the
-			// microphone-only bundle.
 			name: "UpdateParticipant bundled, microphone and camera", method: "UpdateParticipant",
 			response: `{"identity":"p7"}`,
 			call: func(c *Client) (any, error) {
@@ -367,6 +365,8 @@ func TestRoomCalls(t *testing.T) {
 			want:      true,
 		},
 		{
+			// The per-source form (issue #932): a companion's grant, never the
+			// microphone-only bundle.
 			name: "UpdateParticipant per source, nothing", method: "UpdateParticipant",
 			response: `{"identity":"p7.screen"}`,
 			call: func(c *Client) (any, error) {
