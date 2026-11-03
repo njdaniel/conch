@@ -318,8 +318,8 @@ func selfOrAdministratorTx(ctx context.Context, tx execer, actorID, targetID int
 // (design §5), whatever the document says of perm: voice_allowed = 0
 // withholds use_voice, share_screen and use_camera from members and
 // operators (ADR-015 amends ADR-014 decision 4; there is no camera-only
-// brake), and may_invite = 0 withholds make_member_links from members only. An owner
-// skips brakes (§4.3). It is the one statement of the brakes: principalHolds
+// brake), and may_invite = 0 withholds make_member_links from members only.
+// An owner skips brakes (§4.3). It is the one statement of the brakes: principalHolds
 // ANDs it in, and SetMayInvite asks it alone, so a permission switched off
 // by the document (reversible) is never taken for the brake (final).
 func brakeWithholds(p Principal, perm schema.Permission) bool {

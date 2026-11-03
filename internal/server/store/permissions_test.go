@@ -124,7 +124,7 @@ func designHolds(rows []storedRow, s permSubject, p schema.Permission) bool {
 	if !designRoleHolds(rows, r, p) {
 		return false
 	}
-	if (p == schema.PermUseVoice || p == schema.PermShareScreen) && !s.voice {
+	if (p == schema.PermUseVoice || p == schema.PermShareScreen || p == schema.PermUseCamera) && !s.voice {
 		return false
 	}
 	if p == schema.PermMakeMemberLinks && r == schema.PermissionRoleMember && !s.invite {
@@ -818,6 +818,15 @@ func TestPutPermissions(t *testing.T) {
 			writer: "operator-no-voice",
 			req:    changes(member(schema.PermShareScreen, true)),
 			want:   result{ErrPermissionDenied, schema.PermShareScreen},
+		},
+		{
+			// The owner turned the operator cell on; an operator whose own
+			// voice brake withholds use_camera may not grant it to members.
+			name:   "operator turns on the camera its own voice brake withholds",
+			setup:  []schema.PermissionChangeV1{grantSettings, operatorCell(schema.PermUseCamera, true)},
+			writer: "operator-no-voice",
+			req:    changes(member(schema.PermUseCamera, true)),
+			want:   result{ErrPermissionDenied, schema.PermUseCamera},
 		},
 		{
 			name:   "operator turns on a member cell the operator column lacks",
