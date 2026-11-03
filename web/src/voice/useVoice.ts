@@ -7,7 +7,7 @@ import * as api from '../api';
 import type { ChannelV0 } from '../schema/channel';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
-import { VoiceClient, type Microphone, type Output, type ProcessingStore, type VoiceState } from './connection';
+import { VoiceClient, type Microphone, type ModeStore, type Output, type ProcessingStore, type VoiceState } from './connection';
 import { clampTail, defaultTail } from './gate';
 import { defaultTalkKey, isTyping } from './keys';
 import { parsePresence } from './presence';
@@ -179,6 +179,14 @@ function processingChoices(): ProcessingStore {
   };
 }
 
+// The microphone mode the person chose (issue #1244), kept in this browser
+// through the platform's preferences: a per-viewer convenience. Storage that
+// throws or holds anything else reads as no choice, and the client starts in
+// open microphone.
+function modeChoice(): ModeStore {
+  return { get: api.readVoiceMode, set: api.writeVoiceMode };
+}
+
 // What is known about the channel's voice, as the strip says it. loading is
 // before the first frame; presence is a frame on an open socket; unreachable
 // is the socket lost and not back, so the server cannot be reached;
@@ -256,6 +264,7 @@ export function useVoice({
       stopShare: api.stopVoiceShare,
       microphone: readMicrophone(),
       processing: processingChoices(),
+      mode: modeChoice(),
       outputSelection: canChooseOutput(),
       output: readOutput(),
       gate: { tail: readRelease() },

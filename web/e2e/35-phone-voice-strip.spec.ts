@@ -14,7 +14,7 @@
 // fails when CI is set and is skipped otherwise, as in 10-voice.
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { PostMessageRequestV2 } from '../src/schema/generated';
-import { expect, expectFits, mainNav, messages, openChannel, phoneSizes, showView, signIn, test } from './fixtures';
+import { chooseMicrophone, expect, expectFits, mainNav, messages, openChannel, phoneSizes, showView, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, type Member, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -34,7 +34,11 @@ function logBound(size: string, state: State): number {
 }
 
 // The strip's four controls, by name, in order.
-const fourControls = [/^In voice in #voice-room/, /^Hold to talk$/, /^Mute$/, /^Leave voice$/] as const;
+// Issue #1244 added the mode switch, so push to talk has five and the open
+// microphone, whose level is a meter and not a button, has four.
+const fourControls = [/^In voice in #voice-room/, /^Open mic$/, /^Mute$/, /^Leave voice$/] as const;
+const pushControls = [/^In voice in #voice-room/, /^Hold to talk$/, /^Open mic$/, /^Mute$/, /^Leave voice$/] as const;
+const stateButton = fourControls[0];
 
 interface Box {
   readonly x: number;
@@ -133,10 +137,14 @@ test.describe('the phone voice strip with LiveKit', () => {
     return { page, size, close };
   }
 
-  async function join(p: Someone): Promise<void> {
+  // join joins voice, which is in the open microphone for a browser that never
+  // chose (issue #1244), and then chooses push to talk unless the test is of
+  // the open microphone.
+  async function join(p: Someone, mode: 'push to talk' | 'open' = 'push to talk'): Promise<void> {
     await showView(p.page, 'Voice');
     await voiceRegion(p.page).getByRole('button', { name: 'Join voice' }).click();
     await expect(voiceRegion(p.page)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+    await chooseMicrophone(voiceRegion(p.page), mode, p.size === '1440×900' ? 'click' : 'tap');
   }
 
   async function post(body: string): Promise<void> {
@@ -148,14 +156,14 @@ test.describe('the phone voice strip with LiveKit', () => {
   // expectStrip checks the strip under the view now shown: one row of the
   // four controls, each 44 px each way at least, at most 64 px high, and
   // nothing else drawn in it.
-  async function expectStrip(p: Someone, where: string): Promise<Box> {
+  async function expectStrip(p: Someone, where: string, controls: readonly RegExp[] = pushControls): Promise<Box> {
     const voice = voiceRegion(p.page);
     const dock = await boxOf(p.page.locator('.dock'), `${where}: the strip`);
     expect.soft(dock.height, `${where}: the strip is ${String(dock.height)} px high`).toBeLessThanOrEqual(64);
     const shown = voice.getByRole('button').filter({ visible: true });
-    expect.soft(await shown.count(), `${where}: the buttons the strip shows`).toBe(fourControls.length);
+    expect.soft(await shown.count(), `${where}: the buttons the strip shows`).toBe(controls.length);
     const middles: number[] = [];
-    for (const name of fourControls) {
+    for (const name of controls) {
       const control = voice.getByRole('button', { name });
       if (!(await control.isVisible())) {
         expect.soft(false, `${where}: ${String(name)} is in the strip`).toBe(true);
@@ -165,6 +173,9 @@ test.describe('the phone voice strip with LiveKit', () => {
       const screen = p.page.viewportSize()?.width ?? 0;
       expect.soft(box.x, `${where}: ${String(name)} starts at ${String(box.x)} px`).toBeGreaterThanOrEqual(0);
       expect.soft(box.x + box.width, `${where}: ${String(name)} ends at ${String(box.x + box.width)} px of ${String(screen)}`).toBeLessThanOrEqual(screen);
+      // Room to spare: CI's fonts are wider than a developer's, and the state
+      // button's name is what grows (issue #1244), so the row keeps 8 px.
+      expect.soft(box.x + box.width, `${where}: ${String(name)} ends at ${String(box.x + box.width)} px, less than 8 px short of ${String(screen)}`).toBeLessThanOrEqual(screen - 8);
       expect.soft(await hit(control), `${where}: a tap at the centre of ${String(name)} reaches it`).toBe(true);
       expect.soft(box.width, `${where}: ${String(name)} is ${String(box.width)} px wide`).toBeGreaterThanOrEqual(44);
       expect.soft(box.height, `${where}: ${String(name)} is ${String(box.height)} px high`).toBeGreaterThanOrEqual(44);
@@ -359,7 +370,7 @@ test.describe('the phone voice strip with LiveKit', () => {
         const { page } = p;
         await showView(page, 'Chat');
         const voice = voiceRegion(page);
-        await voice.getByRole('button', { name: fourControls[0] }).tap();
+        await voice.getByRole('button', { name: stateButton }).tap();
         await expect(mainNav(page).getByRole('button', { name: 'Voice', exact: true })).toHaveAttribute('aria-current', 'page');
         // Each phone before this one has left, and presence says so a few
         // seconds later: the roster is above the controls, so a person waits
@@ -388,7 +399,7 @@ test.describe('the phone voice strip with LiveKit', () => {
         await expect(voice.getByLabel('Open microphone')).toBeChecked();
         await showView(page, 'Chat');
         await expectOpenMicrophone(p);
-        await voice.getByRole('button', { name: fourControls[0] }).tap();
+        await voice.getByRole('button', { name: stateButton }).tap();
         await tapUntil(voice.getByLabel('Push to talk'), () => voice.getByLabel('Push to talk').isChecked());
         await expect(voice.getByLabel('Push to talk')).toBeChecked();
         await tapUntil(options, expanded('false'));
@@ -402,6 +413,48 @@ test.describe('the phone voice strip with LiveKit', () => {
       await desk.getByRole('button', { name: 'Stop sharing' }).click();
     } finally {
       for (const p of [a, ...phones]) await p.close();
+    }
+  });
+
+  // Issue #1244: a browser that never chose joins in the open microphone, and
+  // the strip has the one-tap switch, 44 px, in its one row at both widths:
+  // one tap to push to talk (Hold to talk appears), and the choice is still
+  // there after a reload, one tap back to the open microphone.
+  test('on a phone the strip starts in the open microphone and its switch goes both ways, and is kept', async ({ browser }) => {
+    test.setTimeout(240_000);
+    const phones: Someone[] = [];
+    try {
+      for (const [size, options] of sizes) phones.push(await person(browser, size === '390×844' ? vw.bob : vw.carol, size, options));
+      for (const p of phones) {
+        const voice = voiceRegion(p.page);
+        await join(p, 'open');
+        await showView(p.page, 'Chat');
+        const toggle = voice.getByRole('button', { name: 'Open mic', exact: true });
+        await expect(toggle, `${p.size}: the switch in the strip`).toHaveAttribute('aria-pressed', 'true');
+        await expect(voice.getByRole('meter', { name: 'Microphone level' })).toBeAttached();
+        await settled(p.page);
+        await expectStrip(p, `${p.size}, open by default`, fourControls);
+        await expectOpenMicrophone(p);
+        await toggle.tap();
+        await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+        await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
+        await expectStrip(p, `${p.size}, push to talk by the switch`, pushControls);
+
+        // The choice is the browser's: a reload and a rejoin find push to talk.
+        await p.page.reload();
+        await openChannel(p.page, vw.channel);
+        await join(p, 'push to talk');
+        await showView(p.page, 'Chat');
+        await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
+        await toggle.tap();
+        await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+        await expect(voice.getByRole('button', { name: 'Hold to talk' })).toHaveCount(0);
+        await voice.getByRole('button', { name: 'Leave voice' }).tap();
+        await showView(p.page, 'Voice');
+        await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+      }
+    } finally {
+      for (const p of phones) await p.close();
     }
   });
 });

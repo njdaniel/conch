@@ -28,6 +28,11 @@ release that Nick publishes.
 
 ### Changed
 
+- **The browser joins voice with the open microphone** (#1244), where it
+  started in push to talk. The person's choice is kept per browser, and an
+  "Open mic" toggle beside the talk control switches it in one tap, on the
+  desktop voice bar and on the phone strip.
+
 - **`POST /v1/invites` is for operators who manage members only** (#990).
   A caller without `manage_members` now gets 409 `invite_kind_retired`:
   members make member links with `POST /v2/invites`. This replaces the
