@@ -119,12 +119,17 @@ export const mainNav = (page: Page) => page.getByRole('navigation', { name: 'Mai
 export async function chooseMicrophone(voice: Locator, mode: 'push to talk' | 'open', how: 'click' | 'tap' = 'click'): Promise<void> {
   const toggle = voice.getByRole('button', { name: 'Open mic', exact: true });
   const want = mode === 'open' ? 'true' : 'false';
-  await expect(toggle).toBeEnabled();
-  if ((await toggle.getAttribute('aria-pressed')) !== want) {
-    if (how === 'tap') await toggle.tap();
-    else await toggle.click();
-  }
-  await expect(toggle).toHaveAttribute('aria-pressed', want);
+  // Right after a join the strip can still be settling, and a press then may
+  // not take: press again until the toggle says the mode asked for. A press
+  // that did take is never repeated, because the state is read first.
+  await expect(async () => {
+    await expect(toggle).toBeEnabled({ timeout: 2000 });
+    if ((await toggle.getAttribute('aria-pressed')) !== want) {
+      if (how === 'tap') await toggle.tap();
+      else await toggle.click();
+    }
+    await expect(toggle).toHaveAttribute('aria-pressed', want, { timeout: 2000 });
+  }).toPass({ timeout: 20_000 });
 }
 
 // rememberPushToTalk is a browser that chose push to talk before it joined:
