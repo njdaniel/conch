@@ -14,14 +14,16 @@ import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
 import { SettingsOpen } from '../joiningSettings';
 import type { ChannelV0 } from '../schema/channel';
-import type { Permission, PermissionPreset, PermissionsResponseV1, PermissionsWarning } from '../schema/permission';
+import type { KnownPermissionPreset, Permission, PermissionPreset, PermissionsResponseV1, PermissionsWarning } from '../schema/permission';
 import type { WhoAmIResponseV1 } from '../schema/principal';
 import { JoiningPanel } from './JoiningPanel';
 import { canDo, permissionName, reasonFor, refusalLine } from './permissions';
 
 type Line = { readonly text: string; readonly refused: boolean };
 
-const presetLabels: Readonly<Record<PermissionPreset, string>> = { personal: 'Personal server', group: 'Group server' };
+// The card offers the presets this page knows; the server's own list is the
+// Roles and permissions section's.
+const presetLabels: Readonly<Record<KnownPermissionPreset, string>> = { personal: 'Personal server', group: 'Group server' };
 
 // memberCell reads a permission's member column in the document; undefined
 // when the document has no row for it.
@@ -77,7 +79,7 @@ function SetupCard({
   readonly onUnauthorized: () => void;
 }) {
   const [dismissed, setDismissed] = useState(() => api.setupCardDismissed(origin, who.id));
-  const [asked, setAsked] = useState<PermissionPreset | null>(null);
+  const [asked, setAsked] = useState<KnownPermissionPreset | null>(null);
   const [busy, setBusy] = useState(false);
   const [line, setLine] = useState<Line | null>(null);
   const canChange = canDo(who, 'change_server_settings');
@@ -88,7 +90,7 @@ function SetupCard({
   if (dismissed) return null;
   const changes = asked === null ? null : presetChanges(doc, asked);
 
-  function apply(preset: PermissionPreset) {
+  function apply(preset: KnownPermissionPreset) {
     if (busy || !canChange) return;
     setBusy(true);
     setLine(null);
