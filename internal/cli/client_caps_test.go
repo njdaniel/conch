@@ -63,6 +63,10 @@ func TestListReadsRefuseOversizedBody(t *testing.T) {
 			_, err := c.ListGuests(ctx, GuestListFilter{})
 			return err
 		}},
+		{"hooks", "hooks", maxHooksBody, func(c *Client) error {
+			_, err := c.ListHooks(ctx)
+			return err
+		}},
 	}
 	for _, tt := range tests {
 		for _, over := range []bool{true, false} {

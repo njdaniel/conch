@@ -41,6 +41,9 @@ const (
 	maxDirectoryMembersBody = schema.MaxListPrincipalsLimit*listRowBound + listSlack
 	maxPrincipalsBody       = schema.MaxListPrincipalsLimit*listRowBound + listSlack
 	maxGuestsBody           = schema.MaxListGuestsLimit*guestRowBound + listSlack
+	// maxHooksBody: the hook list is not paged (issue #1228), so it is read to
+	// the ceiling; a hook row is a channel name, a label and a few scalars.
+	maxHooksBody = listRowCeiling*listRowBound + listSlack
 )
 
 // The list responses, each with its size bounded. They decode as the schema
@@ -59,6 +62,7 @@ type (
 		schema.ListPrincipalsResponseV1
 	}
 	guestsDoc struct{ schema.ListGuestsResponseV1 }
+	hooksDoc  struct{ schema.ListHooksResponseV1 }
 )
 
 func (channelDirectoryDoc) maxBody() int64 { return maxChannelDirectoryBody }
@@ -68,3 +72,4 @@ func (joinersDoc) maxBody() int64          { return maxJoinersBody }
 func (directoryMembersDoc) maxBody() int64 { return maxDirectoryMembersBody }
 func (principalsDoc) maxBody() int64       { return maxPrincipalsBody }
 func (guestsDoc) maxBody() int64           { return maxGuestsBody }
+func (hooksDoc) maxBody() int64            { return maxHooksBody }
