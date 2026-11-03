@@ -44,7 +44,7 @@ var gateRows = map[string]string{
 	"store/invites.go Store.CloseInvite":               "R closes A's open link",
 	"store/sign_in_links.go makerMayActAsTx":           "the restricted operator's sign-in link after the cut",
 	"auth.go Server.guard":                             "on A's channel = %d %s, want 404",
-	"members.go Server.handleListChannelMembers":       "GET /v1/channels/{channel}/members",
+	"members.go Server.channelMembersGate":             "GET /v1/channels/{channel}/members",
 	"nets.go Server.handleListNets":                    "GET /v1/channels/{channel}/nets",
 	"store/members.go memberActorStandingTx":           "in its own channel",
 	"store/channels_rename.go channelRenameStandingTx": "PUT /v1/channels/{id}/name",

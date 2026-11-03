@@ -503,6 +503,7 @@ func (s *Server) writeRedeemed(w http.ResponseWriter, r *http.Request, res store
 		// A new principal has no socket open yet; the call covers a later
 		// route that redeems for an existing one (issue #1027).
 		s.events.notifyChannelsChanged(res.Principal.ID)
+		s.directoryPrincipalChanged(ctx, res.Principal.ID, nil)
 		writeSecretJSON(w, http.StatusCreated, schema.RedeemInviteResponseV1{
 			Principal:  principalFromStore(res.Principal),
 			Credential: res.Credential,
@@ -689,6 +690,7 @@ func (s *Server) disablePrincipals(ctx context.Context, ids []int64, forbidOwner
 		}
 		s.principalDisabled(ctx, id)
 		if changed {
+			s.directoryPrincipalChanged(ctx, id, nil)
 			done = append(done, id)
 		}
 	}
