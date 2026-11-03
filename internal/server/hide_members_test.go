@@ -454,6 +454,52 @@ func TestChannelAuthors(t *testing.T) {
 	}
 }
 
+// TestChannelAuthorsNamesAuthorsWhoCannotBeKnown: the route does not use the
+// member predicate: an ended guest's and a disabled person's earlier messages
+// name them, whatever the cell says (design §13.5). A later refactor that
+// pulled the base set in would drop them.
+func TestChannelAuthorsNamesAuthorsWhoCannotBeKnown(t *testing.T) {
+	f := newHideFixture(t)
+	ctx := context.Background()
+	for _, p := range []store.Principal{f.endedGuest, f.disabled} {
+		legacyExec(t, f.srv, "INSERT OR IGNORE INTO channel_members (channel_id, principal_id, created_at) VALUES (?, ?, 0)", f.chA.ID, p.ID)
+		if _, err := f.srv.store.InsertMessage(ctx, f.chA.ID, p.ID, "earlier post by "+p.Name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, hidden := range []bool{false, true} {
+		if hidden {
+			f.membersSee(t, false)
+		}
+		rec := f.do(t, "GET", fmt.Sprintf("/v1/channels/hide-a/authors?ids=%d,%d", f.endedGuest.ID, f.disabled.ID), f.zedTok, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("authors = %d %s", rec.Code, rec.Body)
+		}
+		got := map[int64]string{}
+		for _, a := range decodeBody[schema.ChannelAuthorsResponseV1](t, rec).Authors {
+			got[a.PrincipalID] = a.Name
+		}
+		if got[f.endedGuest.ID] == "" || got[f.disabled.ID] == "" || len(got) != 2 {
+			t.Errorf("cell hidden=%v: authors = %v, want the ended guest and the disabled person named", hidden, got)
+		}
+	}
+}
+
+// TestChannelAuthorsCapCountsDistinctIDs: duplicates do not count toward the
+// cap of 100, as the store's cap is on distinct ids.
+func TestChannelAuthorsCapCountsDistinctIDs(t *testing.T) {
+	f := newHideFixture(t)
+	var ids []string
+	for i := 1; i <= schema.MaxChannelAuthorIDs; i++ {
+		ids = append(ids, fmt.Sprint(i), fmt.Sprint(i))
+	}
+	if rec := f.do(t, "GET", "/v1/channels/hide-a/authors?ids="+strings.Join(ids, ","), f.zedTok, ""); rec.Code != http.StatusOK {
+		t.Errorf("100 distinct ids, each twice = %d %s", rec.Code, rec.Body)
+	}
+	ids = append(ids, fmt.Sprint(schema.MaxChannelAuthorIDs+1))
+	assertErrorBody(t, f.do(t, "GET", "/v1/channels/hide-a/authors?ids="+strings.Join(ids, ","), f.zedTok, ""), http.StatusBadRequest, "invalid_request")
+}
+
 // TestChannelAuthorsWhisperDoesNotCount: an author whose only message in the
 // channel is a whisper the caller was not sent is absent for that caller and
 // named for the recipient.

@@ -410,16 +410,24 @@ func memberActorStandingTx(ctx context.Context, tx execer, channelID, actorID in
 // already shares a channel with the manager, is gone. Every refused case
 // returns ErrNotAddable, so a caller cannot tell an unknown id from a hidden
 // person.
+//
+// Every refused class runs the same statements: the principal read, the
+// permission read and the may-know read happen whatever the first answer is,
+// and only then are the two verdicts combined. An early return after the
+// principal read would make a ghost id, a hidden person or an operator
+// measurably faster than a member the manager may not know, which is an
+// existence oracle by timing (security review S1 of #988).
 func checkManagerAddTargetTx(ctx context.Context, tx execer, managerID, targetID int64) error {
 	target, found, err := queryPrincipal(ctx, tx, targetID)
 	if err != nil {
 		return err
 	}
-	if !found || target.HiddenAt != nil || target.DisabledAt != nil || target.Kind != PrincipalHuman || target.guestTarget() || target.Role != RoleMember || target.Owner {
-		return ErrNotAddable
-	}
+	addable := found && target.HiddenAt == nil && target.DisabledAt == nil && target.Kind == PrincipalHuman &&
+		!target.guestTarget() && target.Role == RoleMember && !target.Owner
 	// Who the manager may know bounds who they may add (design §13.11): with
 	// see_member_directory, any member; without it, their channel-mates only.
+	// mayKnowTx asks the principals table by id, so a missing row is a plain
+	// "not known" and the statement still runs.
 	seeAll, err := permittedTx(ctx, tx, managerID, schema.PermSeeMemberDirectory)
 	if err != nil {
 		return err
@@ -428,7 +436,7 @@ func checkManagerAddTargetTx(ctx context.Context, tx execer, managerID, targetID
 	if err != nil {
 		return err
 	}
-	if !known {
+	if !addable || !known {
 		return ErrNotAddable
 	}
 	return nil

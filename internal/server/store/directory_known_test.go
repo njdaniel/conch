@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"slices"
 	"testing"
 
@@ -318,6 +320,118 @@ func TestDirectoryMembershipAudience(t *testing.T) {
 	got, _ = ids(w.s.DirectoryMembershipAudience(ctx, w.chA.ID, w.dave.ID))
 	if want := sorted(w.root.ID, w.dave.ID); !slices.Equal(got, want) {
 		t.Errorf("dave in A, zed also sharing C: %v, want %v", got, want)
+	}
+}
+
+// countingExecer counts the statements run through it.
+type countingExecer struct {
+	execer
+	n int
+}
+
+func (c *countingExecer) ExecContext(ctx context.Context, q string, args ...any) (sql.Result, error) {
+	c.n++
+	return c.execer.ExecContext(ctx, q, args...)
+}
+
+func (c *countingExecer) QueryContext(ctx context.Context, q string, args ...any) (*sql.Rows, error) {
+	c.n++
+	return c.execer.QueryContext(ctx, q, args...)
+}
+
+func (c *countingExecer) QueryRowContext(ctx context.Context, q string, args ...any) *sql.Row {
+	c.n++
+	return c.execer.QueryRowContext(ctx, q, args...)
+}
+
+// TestManagerAddRunsTheSameStatementsInEveryClass: a refusal must not be
+// faster than another (security review S1 of #988). A ghost id, a hidden,
+// a disabled and an operator target, an agent, a member the manager may not
+// know and one they may all run the same number of statements.
+func TestManagerAddRunsTheSameStatementsInEveryClass(t *testing.T) {
+	w := newKnowsWorld(t)
+	ctx := context.Background()
+	hidden, err := w.s.CreatePrincipal(ctx, PrincipalHuman, "hid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.s.HidePrincipal(ctx, "system", hidden.ID, HideOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	off, err := w.s.CreatePrincipal(ctx, PrincipalHuman, "off")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.s.DisablePrincipal(ctx, "system", off.ID); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name   string
+		target int64
+		seeAll bool
+	}{
+		{"a ghost id", 1 << 40, false},
+		{"a hidden person", hidden.ID, false},
+		{"a disabled person", off.ID, false},
+		{"an operator", w.root.ID, false},
+		{"an agent", w.agent.ID, false},
+		{"a member the manager may not know", w.bob.ID, false},
+		{"a member the manager may know", w.dave.ID, false},
+	}
+	if _, err := w.s.PutPermissions(ctx, principalActor(w.root.ID), w.root.ID, schema.PutPermissionsRequestV1{
+		Revision: func() int64 { d, _ := w.s.Permissions(ctx); return d.Revision }(),
+		Changes:  []schema.PermissionChangeV1{{Permission: schema.PermSeeMemberDirectory, Role: schema.PermissionRoleMember, Granted: false}},
+	}, credentialNow()); err != nil {
+		t.Fatal(err)
+	}
+	want := -1
+	for _, tt := range tests {
+		c := &countingExecer{execer: w.s.db}
+		err := checkManagerAddTargetTx(ctx, c, w.zed.ID, tt.target)
+		if tt.name == "a member the manager may know" {
+			if err != nil {
+				t.Errorf("%s: %v", tt.name, err)
+			}
+		} else if !errors.Is(err, ErrNotAddable) {
+			t.Errorf("%s: err = %v, want ErrNotAddable", tt.name, err)
+		}
+		if want < 0 {
+			want = c.n
+		}
+		if c.n != want {
+			t.Errorf("%s ran %d statements, a ghost id ran %d", tt.name, c.n, want)
+		}
+	}
+}
+
+// TestHidePrincipalReturnsWhoCouldKnowIt: the audience of the directory
+// signal is read in the hiding transaction, before the memberships go.
+func TestHidePrincipalReturnsWhoCouldKnowIt(t *testing.T) {
+	w := newKnowsWorld(t)
+	ctx := context.Background()
+	doc, err := w.s.Permissions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.s.PutPermissions(ctx, principalActor(w.root.ID), w.root.ID, schema.PutPermissionsRequestV1{
+		Revision: doc.Revision,
+		Changes:  []schema.PermissionChangeV1{{Permission: schema.PermSeeMemberDirectory, Role: schema.PermissionRoleMember, Granted: false}},
+	}, credentialNow()); err != nil {
+		t.Fatal(err)
+	}
+	res, err := w.s.HidePrincipal(ctx, "system", w.dave.ID, HideOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// dave shared A with zed and the owner, and bob made his link.
+	slices.Sort(res.Knowers)
+	if want := sorted(w.root.ID, w.zed.ID, w.bob.ID, w.dave.ID); res.KnowersEveryone || !slices.Equal(res.Knowers, want) {
+		t.Errorf("knowers = %v everyone=%v, want %v", res.Knowers, res.KnowersEveryone, want)
+	}
+	// A repeat changes nothing and reports nobody.
+	again, err := w.s.HidePrincipal(ctx, "system", w.dave.ID, HideOptions{})
+	if err != nil || again.Changed || len(again.Knowers) != 0 {
+		t.Errorf("a repeated hide = %+v, %v", again, err)
 	}
 }
 

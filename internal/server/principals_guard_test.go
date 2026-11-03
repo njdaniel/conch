@@ -34,8 +34,11 @@ import (
 //   - readOwnOrInternal: the caller's own row, identity and credential
 //     checks, and bookkeeping that is never served to a member.
 //
-// A listed entry that no longer matches the code fails too, and so does a
-// second copy of the shared-channel clause outside the fragment.
+// A listed entry that no longer matches the code fails too. The listing is
+// the real guard: it makes every new query over principals say what it is.
+// The tripwire for a second copy of the shared-channel clause outside the
+// fragment is only a backstop: it keys on the fragment's aliases (m1, m2), so
+// a copy written with other aliases is caught by the listing, not by it.
 type principalReadKind int
 
 const (
@@ -62,7 +65,7 @@ var principalReads = []principalRead{
 	{"store/credentials.go", "Store.createCredential", 1, readOwnOrInternal},
 	{"store/credentials.go", "Store.revokeCredential", 1, readOwnOrInternal},
 	{"store/credentials.go", "insertCredentialTx", 1, readOwnOrInternal},
-	{"store/directory.go", "Store.DirectoryKnowers", 1, readPredicate},
+	{"store/directory.go", "directoryKnowersTx", 1, readPredicate},
 	{"store/directory.go", "Store.DirectoryMembershipAudience", 1, readPredicate},
 	{"store/directory.go", "Store.ListDirectory", 1, readPredicate},
 	{"store/directory.go", "mayKnowTx", 1, readPredicate},
@@ -142,7 +145,7 @@ var principalReads = []principalRead{
 var predicateNames = map[string]string{
 	"Store.ListDirectory":               "knownPrincipalsSQL",
 	"mayKnowTx":                         "knownPrincipalsSQL",
-	"Store.DirectoryKnowers":            "knowsCond",
+	"directoryKnowersTx":                "knowsCond",
 	"Store.DirectoryMembershipAudience": "knowsCondExcept",
 }
 

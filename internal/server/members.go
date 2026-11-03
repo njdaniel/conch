@@ -168,12 +168,18 @@ func (s *Server) handleListChannelAuthors(w http.ResponseWriter, r *http.Request
 // parseAuthorIDs reads the ids of ?ids=<id>,<id>…, given once or repeated.
 func parseAuthorIDs(values []string) ([]int64, error) {
 	var ids []int64
+	seen := map[int64]bool{}
 	for _, v := range values {
 		for _, part := range strings.Split(v, ",") {
 			id, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
 			if err != nil || id <= 0 {
 				return nil, errors.New("ids must be a comma-separated list of positive principal ids")
 			}
+			// The cap is on distinct ids, as the store's is.
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
 			ids = append(ids, id)
 			if len(ids) > schema.MaxChannelAuthorIDs {
 				return nil, fmt.Errorf("at most %d ids may be asked at once", schema.MaxChannelAuthorIDs)

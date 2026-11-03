@@ -47,33 +47,18 @@ func (s *Server) directoryMembershipChanged(ctx context.Context, channelID, subj
 	s.events.notifyDirectoryChanged(false, ids...)
 }
 
-// directoryWatch is who could know a principal before a change, taken before
-// the change is written; a nil one is "nobody" (a principal just created).
+// directoryWatch is who could know a principal before a change, read by the
+// store inside the transaction that made it (HideResult); a nil one is
+// "nobody" (a principal just created).
 type directoryWatch struct {
 	everyone bool
 	ids      []int64
-	failed   bool
-}
-
-// watchDirectory takes the audience of subject as it stands. Call it before
-// a write that can remove the subject from viewers' directories (hiding it,
-// which drops its memberships).
-func (s *Server) watchDirectory(ctx context.Context, subject int64) *directoryWatch {
-	everyone, ids, err := s.store.DirectoryKnowers(ctx, subject)
-	if err != nil {
-		slog.ErrorContext(ctx, "directory: read the audience failed", "subject", subject, "error", err)
-		return &directoryWatch{failed: true}
-	}
-	return &directoryWatch{everyone: everyone, ids: ids}
 }
 
 // directoryPrincipalChanged tells every viewer who may know subject, now or
 // (with a watch taken before the write) before it, that the principal was
 // created, renamed, disabled, enabled, hidden or re-roled.
 func (s *Server) directoryPrincipalChanged(ctx context.Context, subject int64, before *directoryWatch) {
-	if before != nil && before.failed {
-		return
-	}
 	everyone, ids, err := s.store.DirectoryKnowers(ctx, subject)
 	if err != nil {
 		slog.ErrorContext(ctx, "directory: read the audience failed", "subject", subject, "error", err)

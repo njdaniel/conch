@@ -169,14 +169,21 @@ func (s *Store) HasDefaultChannel(ctx context.Context) (bool, error) {
 // always), the subject, and every member that knowsCond lets know it. A
 // disabled, hidden or non-human principal never listens and is left out.
 func (s *Store) DirectoryKnowers(ctx context.Context, subjectID int64) (everyone bool, ids []int64, err error) {
-	d, err := readPermissionDocTx(ctx, s.db)
+	return directoryKnowersTx(ctx, s.db, subjectID)
+}
+
+// directoryKnowersTx is DirectoryKnowers inside the caller's transaction, so
+// a write that changes who may know the subject (hiding it) can read who did
+// before it, under the same lock.
+func directoryKnowersTx(ctx context.Context, q execer, subjectID int64) (everyone bool, ids []int64, err error) {
+	d, err := readPermissionDocTx(ctx, q)
 	if err != nil {
 		return false, nil, err
 	}
 	if d.roleHolds(schema.PermissionRoleMember, schema.PermSeeMemberDirectory) {
 		return true, nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := q.QueryContext(ctx,
 		`SELECT v.id FROM principals v
 		 WHERE v.kind = 'human' AND v.disabled_at IS NULL AND v.hidden_at IS NULL
 		   AND (v.role = 'operator' OR v.owner = 1 OR v.id = ?

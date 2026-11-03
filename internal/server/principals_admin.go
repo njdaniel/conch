@@ -138,9 +138,6 @@ func (s *Server) handleHidePrincipal(w http.ResponseWriter, r *http.Request) {
 	if s.ownerProtected(w, r, id) {
 		return
 	}
-	// Hiding drops the principal's memberships, so who could know it is read
-	// first (directory signal, design §13.6).
-	watch := s.watchDirectory(ctx, id)
 	res, err := s.store.HidePrincipal(ctx, auditActor(ctx), id, store.HideOptions{ForbidOwner: authed && !isOwner(caller)})
 	switch {
 	case errors.Is(err, store.ErrOwnerProtected):
@@ -164,7 +161,9 @@ func (s *Server) handleHidePrincipal(w http.ResponseWriter, r *http.Request) {
 	// is a harmless way to make sure nothing survives.
 	s.principalDisabled(ctx, id)
 	if res.Changed {
-		s.directoryPrincipalChanged(ctx, id, watch)
+		// Who could know it before its memberships went is the store's, read
+		// in the hiding transaction (directory signal, design §13.6).
+		s.directoryPrincipalChanged(ctx, id, &directoryWatch{everyone: res.KnowersEveryone, ids: res.Knowers})
 	}
 	row, err := s.store.PrincipalAdmin(ctx, id, s.now())
 	if err != nil {
@@ -252,7 +251,6 @@ func (s *Server) hidePrincipals(ctx context.Context, targets []store.Principal, 
 	actor := auditActor(ctx)
 	done := []schema.HiddenPrincipalV1{}
 	for _, p := range targets {
-		watch := s.watchDirectory(ctx, p.ID)
 		res, err := s.store.HidePrincipal(ctx, actor, p.ID, store.HideOptions{RefuseOperator: true, ForbidOwner: forbidOwner})
 		switch {
 		case errors.Is(err, store.ErrPrincipalNotFound), errors.Is(err, store.ErrHideOperator), errors.Is(err, store.ErrLastOperator),
@@ -263,7 +261,7 @@ func (s *Server) hidePrincipals(ctx context.Context, targets []store.Principal, 
 		}
 		s.principalDisabled(ctx, p.ID)
 		if res.Changed {
-			s.directoryPrincipalChanged(ctx, p.ID, watch)
+			s.directoryPrincipalChanged(ctx, p.ID, &directoryWatch{everyone: res.KnowersEveryone, ids: res.Knowers})
 			done = append(done, schema.HiddenPrincipalV1{ID: p.ID, Name: p.Name})
 		}
 	}
