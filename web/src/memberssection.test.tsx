@@ -254,9 +254,17 @@ describe('the list', () => {
     window.location.hash = '#/c/channel-a';
     render(<App origin={origin} />);
     const settings = await screen.findByRole('button', { name: 'Settings' });
-    await later10();
     const reads = () => calls.filter((c) => c.path === '/v1/directory/members').length;
-    const before = reads();
+    // The main page's own community list reads the directory too, again once
+    // its channels arrive; under load that lands late. Wait until the count
+    // holds still for several ticks, then check Settings adds nothing more.
+    let before = reads();
+    for (let still = 0; still < 5; ) {
+      await later10();
+      const now = reads();
+      still = now === before ? still + 1 : 0;
+      before = now;
+    }
     await later10();
     expect(reads()).toBe(before);
     fireEvent.click(settings);
