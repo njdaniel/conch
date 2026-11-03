@@ -18,6 +18,13 @@ release that Nick publishes.
   right to decide approvals away, as `PUT .../members/{id}` with
   `can_decide: false` does. A channel manager sending `can_decide` is
   refused with 403, as on the PUT.
+- **Docs for running a personal or a group server** (#1023, ADR-014).
+  `docs/deploy.md` has a new part, "Running a personal or a group server",
+  with the console path first and the `conch admin` command after for the
+  roles and the owner mark, the preset (what each changes), member links and
+  the invite brake, channel privacy and default channels, hiding members, and
+  what an operator can and cannot see. README gains an administration
+  paragraph. Docs only: no code, wire or migration change.
 
 ### Changed
 
@@ -31,6 +38,52 @@ release that Nick publishes.
 ### Security
 
 - Demoting an operator now closes, in the same transaction and with an `invite_closed` row each, the member links a member could not hold: every member link when their `may_invite` brake is off, and the never-expiring ones when it is on. Before (alpha.10), links made under the role survived a demotion with the brake off, and turning the brake on later brought back links a member could never make (#1165). `invite_closed` for a member link now says `link=member`.
+
+### Upgrade notice: roles and permissions (ADR-014)
+
+For anyone who runs a personal server, or moves one across `alpha.8` to
+`alpha.10`.
+
+- **The migration changes nothing.** Migration 39 (`alpha.8`) adds the
+  `role_permissions` table, empty, so every permission reads as its default
+  and behaviour is the same until an owner changes a cell.
+- **Apply `personal` once, before members can see each other.** The member
+  directory (`alpha.10`, #983) shows every member to every member by default.
+  On a personal server, apply the preset (`conch admin permissions preset
+  personal`, or the setup card in Settings → Server) before the release with
+  the directory reaches it. A server already on `alpha.10` or later that never
+  applied it is showing its members to each other now: apply it now. The
+  next release also draws the directory in the web client (Community
+  members, Browse channels), so a personal server upgrading to it must have
+  applied the preset first. Browse channels lists every public channel to
+  members; the preset doesn't turn that off.
+- **Rolling back forgets a preset.** A binary from before `alpha.8` refuses a
+  database that has migration 39, so rolling back restores the pre-upgrade
+  backup (docs/deploy.md step 11; the rollback script does it), and a preset
+  applied since the upgrade goes with it.
+- **Owners skip brakes.** A voice or member-link switch stored on an owner
+  no longer counts: an owner whose voice or link-making was switched off has
+  them again.
+- **Open sign-up members can make links.** Members who join through open
+  sign-up hold the member-link switch, so, while members hold
+  `make_member_links`, they can make member links straight away, and they
+  keep that after open sign-up is switched off. Close their links or remove
+  the people a link brought in (ADR-013 decision 5).
+- **Members who made links see the people who joined through them**
+  (#988). With the directory off, a member sees themself, the people in
+  their channels and the people who joined through a link they made. That
+  is recorded at join and never cleared, so on a server that ran the
+  defaults first it stays after link-making is switched off; `conch admin
+  principal list` shows "invited by" to find them. The
+  server now sends the `default_channel_exposes_members` warning when
+  members lack the directory and a default channel exists. Before this
+  release it didn't, so check for default channels yourself on a server
+  that runs an earlier one.
+- **The preset leaves the channel directory on.** There is no permission
+  for it: on a personal server a member's **Browse channels** still lists
+  every public channel, and any member may join one. Keep a personal
+  server's channels private.
+
 
 ## [0.1.0-alpha.11] - 2026-11-02
 
