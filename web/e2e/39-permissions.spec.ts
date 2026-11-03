@@ -163,7 +163,8 @@ test('A1019 at 390×844 the phone shows one list with a switch per row, and a se
     await dialog.getByRole('button', { name: 'Roles and permissions', exact: true }).tap();
     const region = dialog.getByRole('region', { name: 'Roles and permissions' });
     await expect(region.getByRole('table')).toHaveCount(0);
-    await expect(region.getByRole('switch')).toHaveCount(11);
+    // One switch per permission in the catalog: twelve since use_camera (#1238).
+    await expect(region.getByRole('switch')).toHaveCount(12);
     await expect(region.getByText('Owners hold every permission.')).toBeVisible();
     const share = region.getByRole('switch', { name: 'Share a screen, Members' });
     await expect(share).toBeChecked();
