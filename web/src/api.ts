@@ -2071,6 +2071,24 @@ export async function addChannelMember(channel: string, name: string): Promise<I
   return readSent(await authedPost(call('addMember', { channel }), request), channelMemberV1);
 }
 
+// What adding a person by id gave: added is a 201 (a new member), not added a
+// 200 (already in the channel, left exactly as they were).
+export interface MemberAddition {
+  readonly added: boolean;
+  readonly member: ChannelMemberV1;
+}
+
+// addChannelMemberById is the server's add-if-absent form (POST
+// /v1/channels/{channel}/members {id, can_decide}): it can never change an
+// existing member's right to decide approvals, so it needs no read first.
+export async function addChannelMemberById(channel: string, id: number, canDecide: boolean): Promise<InviteResult<MemberAddition>> {
+  const request: AddChannelMemberRequestV1 = { id, can_decide: canDecide };
+  const reply = await authedPost(call('addMember', { channel }), request);
+  const result = await readSent(reply, channelMemberV1);
+  if (!result.ok) return result;
+  return { ok: true, value: { added: reply.kind === 'reply' && reply.res.status === 201, member: result.value } };
+}
+
 export async function putChannelMember(channel: string, principal: number, request: PutChannelMemberRequestV1): Promise<InviteResult<null>> {
   return readDone(await authedSend(call('putMember', { channel, principal }), request));
 }
