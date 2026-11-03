@@ -31,7 +31,7 @@ const (
 )
 
 // MaxProblemReportList is the most reports one list returns.
-const MaxProblemReportList = 200
+const MaxProblemReportList = schema.MaxListReportsLimit
 
 func problemReportSubject(id int64) string { return fmt.Sprintf("report:%d", id) }
 

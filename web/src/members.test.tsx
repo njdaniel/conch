@@ -328,6 +328,33 @@ describe('the shared-channel picker', () => {
   });
 });
 
+describe('the shared-channel picker follows the directory (issue #993)', () => {
+  it('reads again on a directory tick and replaces its candidates: a renamed person shows, a hidden one is not offered, a chosen one that is gone is unchosen', async () => {
+    const cara: ChannelMemberV1 = { principal_id: 6, created_at: at, name: 'cara', kind: 'human', can_decide: false };
+    const dan: ChannelMemberV1 = { principal_id: 7, created_at: at, name: 'dan', kind: 'human', can_decide: false };
+    let ops: ChannelMemberV1[] = [cara, dan];
+    vi.mocked(api.listMembers).mockImplementation((name) => Promise.resolve({ ok: true, value: name === 'ops' ? ops : [] }));
+    const view = draw(props('member'));
+    fireEvent.click(screen.getByRole('button', { name: 'Add from another channel' }));
+    const form = await screen.findByRole('form', { name: 'Add person from another channel' });
+    await within(form).findByRole('option', { name: 'dan' });
+    fireEvent.change(within(form).getByLabelText('Person from another channel'), { target: { value: '7' } });
+    ops = [{ ...cara, name: 'karen' }];
+    view.rerender(controlsView({ ...props('member'), directoryTick: 1 }));
+    await within(form).findByRole('option', { name: 'karen' });
+    expect(within(form).getAllByRole('option').map((option) => option.textContent)).toEqual(['Choose a person', 'karen']);
+    expect(within(form).getByLabelText<HTMLSelectElement>('Person from another channel').value).toBe('');
+    expect(within(form).getByRole<HTMLButtonElement>('button', { name: 'Add selected person' }).disabled).toBe(true);
+  });
+
+  it('reads nothing on a tick while the picker is closed', async () => {
+    const view = draw(props('member'));
+    view.rerender(controlsView({ ...props('member'), directoryTick: 1 }));
+    await Promise.resolve();
+    expect(api.listMembers).not.toHaveBeenCalled();
+  });
+});
+
 describe('membership writes', () => {
   it('sets manages and can_decide independently and removes by principal id', async () => {
     vi.mocked(api.putChannelMember).mockResolvedValue({ ok: true, value: null });

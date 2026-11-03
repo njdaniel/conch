@@ -114,7 +114,11 @@ export const mainNav = (page: Page) => page.getByRole('navigation', { name: 'Mai
 // none (700 px and wider) every view is already on screen and it does nothing.
 export async function showView(page: Page, view: 'Chat' | 'Channels' | 'Voice'): Promise<void> {
   const nav = mainNav(page);
-  if ((await nav.count()) === 0) return;
+  // Whether there is a navigation is the width's to say, not the page's at this
+  // instant: just after a reload the lobby is not drawn yet, and a page with no
+  // navigation yet is not a page with none. A phone waits for it (issue #1214).
+  if ((page.viewportSize()?.width ?? Infinity) >= 700) return;
+  await expect(nav).toBeVisible();
   // The members panel is drawn over the page, the navigation's right end
   // included; a person closes it before moving on, as Escape does.
   const members = page.getByRole('region', { name: 'Members list' });

@@ -70,6 +70,9 @@ func (s *Server) routeTable() []route {
 		// Members of the channel and operators (checked in the handler); anyone
 		// else gets the channel-not-found response.
 		rt("GET /v1/channels/{channel}/members", accessAuthenticated, hf(s.handleListChannelMembers)),
+		// Who wrote what the caller may read here (design §13.5): behind the
+		// member list's gate, through the message visibility.
+		rt("GET /v1/channels/{channel}/authors", accessAuthenticated, hf(s.handleListChannelAuthors)),
 		rt("POST /v1/channels/{channel}/members", accessChannelManager, hf(s.handleAddChannelMemberByName)),
 		rt("PUT /v1/channels/{channel}/members/{principal_id}", accessChannelManager, hf(s.handlePutChannelMember)),
 		rt("DELETE /v1/channels/{channel}/members/{principal_id}", accessChannelManager, hf(s.handleDeleteChannelMember)),

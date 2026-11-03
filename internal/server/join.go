@@ -416,6 +416,8 @@ func (s *Server) handleJoinAccount(w http.ResponseWriter, r *http.Request) {
 	// A new principal has no socket open yet; this covers a later route
 	// that adds an existing one (issue #1027).
 	s.events.notifyChannelsChanged(acct.Principal.ID)
+	// A new member, in the default channels they joined (design §13.6).
+	s.directoryPrincipalChanged(ctx, acct.Principal.ID, nil)
 	slog.InfoContext(ctx, "join: account created", "principal", acct.Principal.ID)
 	writeSecretJSON(w, http.StatusCreated, schema.JoinAccountResponseV1{
 		Principal:  principalFromStore(acct.Principal),
