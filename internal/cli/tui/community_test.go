@@ -22,8 +22,10 @@ type communityAPI struct {
 	stubAPI
 	mu sync.Mutex
 
-	listing  []schema.ChannelListingV1
-	listErr  error
+	listing []schema.ChannelListingV1
+	listErr error
+	// allErr answers only the operators' every-channel read.
+	allErr   error
 	joinErr  error
 	leaveErr error
 	makeErr  error
@@ -56,6 +58,9 @@ func (a *communityAPI) got() []string {
 
 func (a *communityAPI) ChannelDirectory(_ context.Context, all bool) (schema.ChannelDirectoryResponseV1, error) {
 	a.record("directory all=%v", all)
+	if all && a.allErr != nil {
+		return schema.ChannelDirectoryResponseV1{}, a.allErr
+	}
 	return schema.ChannelDirectoryResponseV1{Channels: a.listing}, a.listErr
 }
 

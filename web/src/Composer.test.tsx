@@ -1,4 +1,4 @@
-import { createEvent, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { createEvent, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useReducer, useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Composer, ComposerAttachmentProvider } from './Composer';
@@ -86,7 +86,9 @@ describe('composer image drafts', () => {
 
     expect(screen.getAllByRole('listitem')).toHaveLength(3);
     expect(onSend).not.toHaveBeenCalled();
-    expect(createObjectURL).toHaveBeenCalledTimes(3);
+    // The name shows at commit; the preview's object URL is made in a passive
+    // effect that can land a tick later under load, so wait on the call.
+    await waitFor(() => { expect(createObjectURL).toHaveBeenCalledTimes(3); });
     expect(screen.getByRole<HTMLButtonElement>('button', { name: 'Send' }).disabled).toBe(false);
   });
 
@@ -130,7 +132,7 @@ describe('composer image drafts', () => {
     await screen.findByText('two.png');
     fireEvent.click(screen.getByRole('button', { name: 'Remove one.png' }));
     expect(screen.queryByText('one.png')).toBeNull();
-    expect(revokeObjectURL).toHaveBeenCalledWith('blob:draft-1');
+    await waitFor(() => { expect(revokeObjectURL).toHaveBeenCalledWith('blob:draft-1'); });
     view.unmount();
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:draft-2');
   });

@@ -37,10 +37,13 @@ var _ CommunityAPI = (*cli.Client)(nil)
 const statusNoCommunity = "this client cannot reach the channel directory"
 
 // directoryView is the channel directory: public channels and the caller's
-// private ones. It lists no counts.
+// private ones, without counts; or, for a holder of manage_channels who asked
+// for it with a, every channel with its member count.
 type directoryView struct {
 	rows            []schema.ChannelListingV1
 	loaded, loading bool
+	// all is the operators' every-channel view (?scope=all).
+	all bool
 	// busy is set while a join, leave or create is in flight, so a second key
 	// cannot send it twice.
 	busy bool
@@ -60,6 +63,7 @@ type directoryView struct {
 
 // directoryLoaded is the answer to a read of the directory.
 type directoryLoaded struct {
+	all  bool
 	rows []schema.ChannelListingV1
 	err  error
 }
@@ -88,26 +92,65 @@ func (m Model) enterDirectory() (tea.Model, tea.Cmd) {
 	}
 	m.mode = modeDirectory
 	m.dir.note, m.dir.creating, m.dir.confirm = "", false, 0
+	if m.dir.all {
+		// Always open on the caller's own view.
+		m.dir.all, m.dir.rows, m.dir.loaded = false, nil, false
+	}
 	m.dir.loading = true
 	return m, m.loadDirectory()
 }
 
 func (m Model) loadDirectory() tea.Cmd {
-	api, ctx := m.comm, m.ctx
+	api, ctx, all := m.comm, m.ctx, m.dir.all
 	return func() tea.Msg {
-		resp, err := api.ChannelDirectory(ctx, false)
-		return directoryLoaded{rows: resp.Channels, err: err}
+		resp, err := api.ChannelDirectory(ctx, all)
+		return directoryLoaded{all: all, rows: resp.Channels, err: err}
 	}
+}
+
+// canManageChannels reports whether whoami says the caller holds
+// manage_channels, decided as canManageMembers is: an owner always; a server
+// that sends no permissions leaves it to the role; otherwise the permission.
+// It only decides what is offered: the server decides every request.
+func (m Model) canManageChannels() bool {
+	switch {
+	case m.role == schema.RoleOperator && m.owner:
+		return true
+	case !m.permsKnown:
+		return m.role == schema.RoleOperator
+	}
+	return slices.Contains(m.permissions, schema.PermManageChannels)
+}
+
+// toggleAll switches between the caller's own view and every channel.
+func (m Model) toggleAll() (tea.Model, tea.Cmd) {
+	m.dir.all = !m.dir.all
+	m.dir.rows, m.dir.loaded, m.dir.loading = nil, false, true
+	return m, m.loadDirectory()
 }
 
 func (m Model) directoryLoaded(msg directoryLoaded) (tea.Model, tea.Cmd) {
 	d := m.dir
+	if msg.all != d.all {
+		// The answer to a view the person has left.
+		return m, nil
+	}
 	d.loading = false
 	if msg.err != nil {
-		if line := m.communityError(cli.CommunityOpChannels, msg.err); line != "" {
+		op := cli.CommunityOpChannels
+		if msg.all {
+			op = cli.CommunityOpChannelsAll
+		}
+		line := m.communityError(op, msg.err)
+		if line != "" {
 			d.note = line
 		}
 		m.dir = d
+		if msg.all {
+			// Not allowed (or unreachable): back to the caller's own view.
+			m.dir.all, m.dir.rows, m.dir.loaded, m.dir.loading = false, nil, false, true
+			return m, m.loadDirectory()
+		}
 		return m, nil
 	}
 	d.rows, d.loaded = msg.rows, true
@@ -175,6 +218,11 @@ func (m Model) directoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.loadDirectory()
 	case "n":
 		m.dir.creating, m.dir.name, m.dir.private = true, "", false
+		return m, nil
+	case "a":
+		if m.canManageChannels() {
+			return m.toggleAll()
+		}
 		return m, nil
 	}
 	i := d.selected()
@@ -338,7 +386,7 @@ func channelLabel(name string) string {
 
 // directoryLine is one channel: its name and what is true of it. The marks are
 // words, so nothing rests on colour.
-func directoryLine(r schema.ChannelListingV1, selected bool, cols int) string {
+func directoryLine(r schema.ChannelListingV1, selected, counts bool, cols int) string {
 	var marks []string
 	if r.Joined {
 		marks = append(marks, "joined")
@@ -351,6 +399,9 @@ func directoryLine(r schema.ChannelListingV1, selected bool, cols int) string {
 	}
 	if r.Manages {
 		marks = append(marks, "managed")
+	}
+	if counts && r.Members != nil {
+		marks = append(marks, strconv.FormatInt(*r.Members, 10)+" members")
 	}
 	tail := ""
 	if len(marks) > 0 {
@@ -377,17 +428,24 @@ func (m Model) directoryPanes(l layout) string {
 	default:
 		sel := m.dir.selected()
 		for i, r := range m.dir.rows {
-			lines = append(lines, directoryLine(r, i == sel, cols))
+			lines = append(lines, directoryLine(r, i == sel, m.dir.all, cols))
 		}
 		lines = agentsWindow(lines, max(sel, 0), l.contentH)
 	}
-	return paneBox("CHANNEL DIRECTORY", true, lines, l.width, l.contentH, "")
+	title := "CHANNEL DIRECTORY"
+	if m.dir.all {
+		title = "ALL CHANNELS"
+	}
+	return paneBox(title, true, lines, l.width, l.contentH, "")
 }
 
 // directoryStatus is the status line of the directory.
 func (m Model) directoryStatus() string {
 	if m.dir.note != "" {
 		return m.dir.note
+	}
+	if m.dir.all {
+		return "every channel (" + strconv.Itoa(len(m.dir.rows)) + ")"
 	}
 	return "channel directory (" + strconv.Itoa(len(m.dir.rows)) + ")"
 }
