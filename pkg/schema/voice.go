@@ -21,9 +21,14 @@ import (
 // client sends conchd when a press starts and stops. It was added later, also
 // as a new type, and is near the end of this file. The screen share (issue
 // #443) added the claim a client is given when it may share, and two optional
-// fields of a participant in presence. Issue #487 added the last: why the
-// server ended a share, an optional field of the sharer's own presence, and the
-// parameter by which a release names the share it means.
+// fields of a participant in presence. Issue #487 added why the server ended
+// a share, an optional field of the sharer's own presence, and the parameter
+// by which a release names the share it means. The camera (ADR-015, issue
+// #1238; docs/design/webcam-video.md §4.2, §5, §10) added the last, on the
+// share's pattern: the claim a client is given when it may publish a camera,
+// an optional field of a participant, why the server ended a camera, in the
+// person's own presence alone, and the parameters of the camera routes. All
+// of it is additive; no published shape changed.
 //
 // Room names and tokens are opaque strings. The schema checks that they are
 // present, never what they contain: a token is a credential conchd signed and
@@ -76,6 +81,23 @@ const (
 	// share the room has now, someone else's or a newer one of the caller's,
 	// goes on.
 	ErrorCodeVoiceShareStale = "voice_share_stale"
+	// ErrorCodeVoiceCameraFull: the room already holds as many camera claims
+	// as it allows, and the caller holds none (HTTP 409, ADR-015; design
+	// §4.2 step 10). The answer names nobody. The cap is the server's
+	// constant, not the schema's: presence reports whatever was granted.
+	ErrorCodeVoiceCameraFull = "voice_camera_full"
+	// ErrorCodeVoiceCameraStale: a camera request named a claim
+	// (VoiceCameraClaimParam) that is not the caller's current one, and
+	// nothing was changed (HTTP 409, design §4.2). On a POST that is any
+	// claim the server no longer holds, other than the adoption of one the
+	// room's rotation ended moments ago; on a DELETE it is as
+	// voice_share_stale. A client that gets it stops its capture.
+	ErrorCodeVoiceCameraStale = "voice_camera_stale"
+	// ErrorCodeVoiceCameraRateLimited: the caller made more camera claims
+	// than the per-principal bound allows (HTTP 429, design §4.2). A
+	// continued claim and an un-named request while holding one count too;
+	// releases are never bounded.
+	ErrorCodeVoiceCameraRateLimited = "voice_camera_rate_limited"
 )
 
 // VoiceRoomGrant is one room a voice session may join: the LiveKit room name,
@@ -237,13 +259,21 @@ type VoiceParticipant struct {
 	// the share and a screen-share audio track was published on the last
 	// pass. Omitted when false.
 	SharingAudio bool `json:"sharing_audio,omitempty"`
+	// Camera is whether the participant holds a camera claim (ADR-015,
+	// design §5): conchd granted it and it has not ended. As with Sharing it
+	// is what conchd decided, not what LiveKit last showed, so it is true
+	// from the moment the claim is answered. Any number of participants may
+	// hold one at a time; how many is the server's cap, not the schema's.
+	// Omitted when false, so a document with no camera is what it was
+	// before.
+	Camera bool `json:"camera,omitempty"`
 }
 
 // Validate reports whether the participant is structurally well-formed. A
-// participant who cannot publish cannot be transmitting or sharing: if
-// presence ever said so, either the grant or the observation is wrong, and a
-// reader must not be left to guess which. Sound of a share needs a share, so
-// sharing_audio needs sharing.
+// participant who cannot publish cannot be transmitting, sharing or holding
+// a camera: if presence ever said so, either the grant or the observation is
+// wrong, and a reader must not be left to guess which. Sound of a share needs
+// a share, so sharing_audio needs sharing.
 func (p VoiceParticipant) Validate() error {
 	if p.PrincipalID <= 0 {
 		return fmt.Errorf("schema: voice participant principal_id must be positive, got %d", p.PrincipalID)
@@ -256,6 +286,9 @@ func (p VoiceParticipant) Validate() error {
 	}
 	if p.SharingAudio && !p.Sharing {
 		return fmt.Errorf("schema: voice participant %d cannot have sharing_audio without sharing", p.PrincipalID)
+	}
+	if p.Camera && !p.CanPublish {
+		return fmt.Errorf("schema: voice participant %d cannot have a camera without can_publish", p.PrincipalID)
 	}
 	if p.JoinedAt.IsZero() {
 		return errors.New("schema: voice participant joined_at is required")
@@ -279,12 +312,18 @@ type VoicePresenceRoom struct {
 }
 
 // Validate reports whether the room is structurally well-formed: a present
-// audience satisfies Audience.Validate, every participant is well-formed, no
-// principal is listed twice, and at most one participant is sharing. One
-// principal holds one own connection per room (a second device displaces the
-// first; a companion or viewer under a derived identity is folded into the
-// person, issue #933), and a room has one screen share at a time, so either duplicate is a
-// conchd bug, not a state. Order is not checked.
+// audience satisfies Audience.Validate, every participant is well-formed (a
+// camera, like a share, needs can_publish), no principal is listed twice, and
+// at most one participant is sharing. One principal holds one own connection
+// per room (a second device displaces the first; a companion or viewer under
+// a derived identity is folded into the person, issue #933), and a room has
+// one screen share at a time, so either duplicate is a conchd bug, not a
+// state. Order is not checked.
+//
+// How many participants hold a camera is not checked (ADR-015, design §5):
+// the cap is a server constant that can change without a schema change, and
+// a check here would fail the server's own snapshot, and every older
+// client's, the day it did.
 func (r VoicePresenceRoom) Validate() error {
 	if r.Audience != nil {
 		if err := r.Audience.Validate(); err != nil {
@@ -343,13 +382,21 @@ type VoicePresenceV1 struct {
 	// reader matches its started_at with the claim it held
 	// (VoiceShareV1.StartedAt). It never names who ended the share.
 	ShareEnded *VoiceShareEnded `json:"share_ended,omitempty"`
+	// CameraEnded is why the reader's own last camera claim ended (ADR-015,
+	// design §5), on the same terms as ShareEnded: in the document sent to
+	// the person who held the camera and in no one else's, in the frame that
+	// takes their camera away, kept until that person claims a camera again,
+	// and dropped by a restart. A reader matches its started_at with the
+	// claim it held (VoiceCameraV1.StartedAt). It never names who ended the
+	// camera.
+	CameraEnded *VoiceCameraEnded `json:"camera_ended,omitempty"`
 }
 
 // Validate reports whether the snapshot is structurally well-formed: the v1
 // schema name, a positive channel_id, every room well-formed, no two rooms for
 // the same audience, the configured/available/rooms states consistent with
-// each other, and a present share_ended well-formed, on a server with voice
-// configured.
+// each other, and a present share_ended or camera_ended well-formed, on a
+// server with voice configured.
 //
 // An unknown audience kind in any room fails the whole document, as it does
 // for a message (ADR-005: an audience a reader does not understand must never
@@ -387,6 +434,15 @@ func (p VoicePresenceV1) Validate() error {
 			return errors.New("schema: voice presence cannot carry share_ended when not configured")
 		}
 		if err := p.ShareEnded.Validate(); err != nil {
+			return err
+		}
+	}
+	if p.CameraEnded != nil {
+		// As for a share: a camera needs voice, not a reachable LiveKit.
+		if !p.Configured {
+			return errors.New("schema: voice presence cannot carry camera_ended when not configured")
+		}
+		if err := p.CameraEnded.Validate(); err != nil {
 			return err
 		}
 	}
@@ -507,6 +563,140 @@ const VoiceShareClaimParam = "started_at"
 // timestamp, normalized as every wire timestamp is (UTC, millisecond
 // precision), so that it compares equal to the started_at it was copied from.
 func ParseVoiceShareClaim(s string) (Timestamp, error) {
+	return parseTimestamp(s)
+}
+
+// VoiceCameraEndReason is why a camera claim ended: the reason conchd records
+// on voice_camera_stopped (ADR-015, design §5). The vocabulary is closed and
+// case-sensitive; a value outside it fails validation, so a new reason is a
+// new version of the presence document, as it is for VoiceShareEndReason. It
+// is its own type, not the share's, so that the two can grow apart.
+type VoiceCameraEndReason string
+
+// Voice camera end reasons (docs/design/webcam-video.md §5, §6.2).
+const (
+	// VoiceCameraEndSelf: the person turned it off.
+	VoiceCameraEndSelf VoiceCameraEndReason = "self"
+	// VoiceCameraEndOperator: a holder of manage_channels turned it off.
+	// Which one is not said.
+	VoiceCameraEndOperator VoiceCameraEndReason = "operator"
+	// VoiceCameraEndLeft: the person was no longer in the room.
+	VoiceCameraEndLeft VoiceCameraEndReason = "left"
+	// VoiceCameraEndAccessLost: the person lost their place in the channel,
+	// their voice, or use_camera.
+	VoiceCameraEndAccessLost VoiceCameraEndReason = "access_lost"
+	// VoiceCameraEndRotated: the room was replaced by a new one, which drops
+	// its claims. A claim that ended this way may be adopted by a named
+	// request for a short while (design §4.2).
+	VoiceCameraEndRotated VoiceCameraEndReason = "rotated"
+	// VoiceCameraEndIdle: nothing was sent for a while: no camera track soon
+	// enough after the claim, or none any more.
+	VoiceCameraEndIdle VoiceCameraEndReason = "idle"
+)
+
+// Valid reports whether r is a recognized end reason.
+func (r VoiceCameraEndReason) Valid() bool {
+	switch r {
+	case VoiceCameraEndSelf, VoiceCameraEndOperator, VoiceCameraEndLeft, VoiceCameraEndAccessLost, VoiceCameraEndRotated, VoiceCameraEndIdle:
+		return true
+	default:
+		return false
+	}
+}
+
+// VoiceCameraEnded is why the reader's own camera claim ended, carried in
+// their presence alone (VoicePresenceV1.CameraEnded, ADR-015). It names no
+// principal: the reader is the person whose camera it was, and who stopped it
+// is not told.
+type VoiceCameraEnded struct {
+	// Reason is why the camera ended.
+	Reason VoiceCameraEndReason `json:"reason"`
+	// StartedAt is the started_at of the claim that ended, as its claim
+	// answered it (VoiceCameraV1.StartedAt): which claim this was.
+	StartedAt Timestamp `json:"started_at"`
+	// EndedAt is when conchd ended it (UTC, ms precision).
+	EndedAt Timestamp `json:"ended_at"`
+}
+
+// Validate reports whether the end is structurally well-formed: a known
+// reason, both times, and an end no earlier than the start.
+func (e VoiceCameraEnded) Validate() error {
+	if !e.Reason.Valid() {
+		return fmt.Errorf("schema: voice camera end reason %q is not one of self, operator, left, access_lost, rotated, idle", e.Reason)
+	}
+	if e.StartedAt.IsZero() {
+		return errors.New("schema: voice camera end started_at is required")
+	}
+	if e.EndedAt.IsZero() {
+		return errors.New("schema: voice camera end ended_at is required")
+	}
+	if e.EndedAt.Time().Before(e.StartedAt.Time()) {
+		return errors.New("schema: voice camera end ended_at is before started_at")
+	}
+	return nil
+}
+
+// VoiceCameraV1 is the body of a successful POST
+// /v1/channels/{channel}/voice/camera[?started_at=…] (ADR-015; design
+// docs/design/webcam-video.md §4.2): conchd holds a camera claim for the
+// caller, and LiveKit lets the caller's connection publish a camera. Like the
+// share it is a REST body with no schema-name field, versioned by the V1 type
+// suffix, and it carries no room name and no token: the camera is granted to
+// the connection the caller already has.
+//
+// A request without VoiceCameraClaimParam starts a claim. One that names the
+// caller's current claim continues it, and is answered with the claim already
+// held; one that names any other claim is 409 voice_camera_stale, except the
+// adoption of a claim the room's rotation ended moments ago, which is a new
+// claim with a new started_at. The adoption window is the server's constant
+// and is not published.
+type VoiceCameraV1 struct {
+	// PrincipalID is the principal who holds the claim: the caller.
+	PrincipalID int64 `json:"principal_id"`
+	// StartedAt is when conchd granted the claim (UTC, ms precision). Asking
+	// again while holding it answers with the same time; a client names it
+	// (VoiceCameraClaimParam) on every request that means this claim.
+	StartedAt Timestamp `json:"started_at"`
+}
+
+// Validate reports whether the claim is structurally well-formed: a positive
+// principal_id and a started_at.
+func (c VoiceCameraV1) Validate() error {
+	if c.PrincipalID <= 0 {
+		return fmt.Errorf("schema: voice camera principal_id must be positive, got %d", c.PrincipalID)
+	}
+	if c.StartedAt.IsZero() {
+		return errors.New("schema: voice camera started_at is required")
+	}
+	return nil
+}
+
+// Query parameters of the camera routes (design §4.2).
+const (
+	// VoiceCameraClaimParam is the optional query parameter of both POST and
+	// DELETE /v1/channels/{channel}/voice/camera by which a request names
+	// the claim it means: the started_at of the caller's own claim, as
+	// VoiceCameraV1 gave it. On a POST it continues that claim (a named
+	// request never starts a new one, except the rotation adoption); on a
+	// DELETE it ends that claim only if it is still the caller's current
+	// one, as VoiceShareClaimParam does. A name that is not the caller's
+	// current claim is 409 voice_camera_stale and changes nothing. A DELETE
+	// without it ends whatever the caller holds.
+	VoiceCameraClaimParam = "started_at"
+	// VoiceCameraPrincipalParam is the optional query parameter of DELETE
+	// /v1/channels/{channel}/voice/camera by which a holder of
+	// manage_channels names whose camera to stop: a principal id. Absent, or
+	// naming the caller, the request is the caller's own stop. It is not
+	// combined with VoiceCameraClaimParam when it names someone else: the
+	// operator stops the camera, not a particular claim, and the pair is
+	// 400 invalid_request.
+	VoiceCameraPrincipalParam = "principal"
+)
+
+// ParseVoiceCameraClaim reads the value of VoiceCameraClaimParam: an RFC 3339
+// timestamp, normalized as every wire timestamp is (UTC, millisecond
+// precision), so that it compares equal to the started_at it was copied from.
+func ParseVoiceCameraClaim(s string) (Timestamp, error) {
 	return parseTimestamp(s)
 }
 

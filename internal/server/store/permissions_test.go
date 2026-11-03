@@ -32,6 +32,9 @@ var (
 		schema.PermManageChannels:        {false, true},
 		schema.PermChangeServerSettings:  {false, false},
 		schema.PermReadAuditLog:          {false, false},
+		// Row 12 (ADR-015, docs/design/webcam-video.md §3.1): off for both,
+		// configurable in both columns, and needs use_voice.
+		schema.PermUseCamera: {false, false},
 	}
 	designFixed = map[permissionCell]bool{
 		{schema.PermissionRoleMember, schema.PermManageMembers}:        false,
@@ -44,6 +47,7 @@ var (
 	designRequires = map[schema.Permission]schema.Permission{
 		schema.PermShareScreen:  schema.PermUseVoice,
 		schema.PermActAsMembers: schema.PermManageMembers,
+		schema.PermUseCamera:    schema.PermUseVoice,
 	}
 	// designPresets are the member cells each preset turns on (§6).
 	designPresets = map[schema.PermissionPreset][]schema.Permission{

@@ -70,6 +70,13 @@ const (
 	// PermReadAuditLog: export the audit trail, which names every member and
 	// every private channel. Operator-only; off by default.
 	PermReadAuditLog Permission = "read_audit_log"
+	// PermUseCamera: turn on a camera in voice, in channels one is in
+	// (ADR-015, docs/design/webcam-video.md §3.1). Requires PermUseVoice in
+	// the same column. Members and operators: off by default, because before
+	// it existed nobody could publish a camera and an upgrade changes nothing
+	// (ADR-014 decision 2). Owners always hold it. The voice_allowed brake
+	// withholds it; there is no camera-only brake.
+	PermUseCamera Permission = "use_camera"
 )
 
 // Permissions is the catalog in wire order: the order of every list of
@@ -86,6 +93,7 @@ var Permissions = []Permission{
 	PermManageChannels,
 	PermChangeServerSettings,
 	PermReadAuditLog,
+	PermUseCamera,
 }
 
 // Valid reports whether p is a permission of the catalog.
@@ -93,7 +101,7 @@ func (p Permission) Valid() bool {
 	switch p {
 	case PermCreatePublicChannels, PermCreatePrivateChannels, PermMakeMemberLinks, PermSeeMemberDirectory,
 		PermUseVoice, PermShareScreen, PermManageMembers, PermActAsMembers, PermManageChannels,
-		PermChangeServerSettings, PermReadAuditLog:
+		PermChangeServerSettings, PermReadAuditLog, PermUseCamera:
 		return true
 	default:
 		return false
@@ -102,12 +110,13 @@ func (p Permission) Valid() bool {
 
 // OperatorOnly reports whether p can never be granted to members: rows 7 to
 // 11 of the catalog (manage_members, act_as_members, manage_channels,
-// change_server_settings, read_audit_log). An unknown permission is
-// operator-only, so it can never reach a member.
+// change_server_settings, read_audit_log). Rows 1 to 6 and row 12
+// (use_camera) are member-grantable. An unknown permission is operator-only,
+// so it can never reach a member: the fall-through fails closed and stays.
 func (p Permission) OperatorOnly() bool {
 	switch p {
 	case PermCreatePublicChannels, PermCreatePrivateChannels, PermMakeMemberLinks, PermSeeMemberDirectory,
-		PermUseVoice, PermShareScreen:
+		PermUseVoice, PermShareScreen, PermUseCamera:
 		return false
 	default:
 		return true
@@ -141,32 +150,39 @@ func (p Permission) Fixed(r PermissionRole) (fixed, value bool) {
 // Default reports p's default for role r: the value a cell has while no row
 // is stored for it (design §4.1). Members hold rows 1 to 6 (channel
 // creation, member links, the directory, voice and screen share); operators
-// hold rows 1 to 9; change_server_settings and read_audit_log are off for
-// both. The defaults reproduce what a server did before ADR-014. An unknown
-// permission or role defaults to off.
+// hold rows 1 to 9; change_server_settings, read_audit_log and use_camera
+// are off for both. The defaults reproduce what a server did before the
+// permission existed (ADR-014 decision 2). An unknown permission or role
+// defaults to off.
+//
+// The six permissions that are on by default for both roles are named, and
+// the switch falls through to off: a permission added to the catalog without
+// a case here is off until someone decides otherwise, never on (ADR-015,
+// design §10).
 func (p Permission) Default(r PermissionRole) bool {
 	if !p.Valid() || !r.Valid() {
 		return false
 	}
 	switch p {
-	case PermChangeServerSettings, PermReadAuditLog:
-		return false
+	case PermCreatePublicChannels, PermCreatePrivateChannels, PermMakeMemberLinks,
+		PermSeeMemberDirectory, PermUseVoice, PermShareScreen:
+		return true
 	case PermManageMembers, PermActAsMembers, PermManageChannels:
 		return r == PermissionRoleOperator
 	default:
-		return true
+		return false
 	}
 }
 
 // Requires lists the permissions p depends on in the same column (design
-// §4.4.2): share_screen needs use_voice, and act_as_members needs
-// manage_members. A cell may be on only while every cell it requires in its
-// column is on; the store checks this on every write and ANDs it into every
-// answer. Nil for a permission with no dependency. The slice is the
+// §4.4.2): share_screen and use_camera need use_voice, and act_as_members
+// needs manage_members. A cell may be on only while every cell it requires
+// in its column is on; the store checks this on every write and ANDs it into
+// every answer. Nil for a permission with no dependency. The slice is the
 // caller's.
 func (p Permission) Requires() []Permission {
 	switch p {
-	case PermShareScreen:
+	case PermShareScreen, PermUseCamera:
 		return []Permission{PermUseVoice}
 	case PermActAsMembers:
 		return []Permission{PermManageMembers}

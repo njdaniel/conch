@@ -32,6 +32,7 @@ const doing: Readonly<Record<Permission, string>> = {
   manage_channels: 'manage channels',
   change_server_settings: 'change server settings',
   read_audit_log: 'read the audit log',
+  use_camera: 'use a camera',
 };
 
 // permissionName is a permission's words, or the value itself when this page
@@ -62,6 +63,7 @@ export function memberLine(who: WhoAmIResponseV1): string | null {
   if (has('make_member_links')) things.push('make member links');
   if (has('see_member_directory')) things.push('see everyone on the server');
   if (has('share_screen')) things.push('share your screen');
+  if (has('use_camera')) things.push('turn on your camera');
   // Anything this page has no word for is named, not hidden.
   for (const p of held) if (!doingByName.has(p)) things.push(p);
   const can = things.length === 0 ? 'You can read and write in the channels you are in.' : `You can ${list(things)}.`;

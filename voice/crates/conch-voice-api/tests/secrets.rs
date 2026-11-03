@@ -144,6 +144,7 @@ fn presence() -> VoicePresenceV1 {
                 joined_at: stamp(),
                 sharing: false,
                 sharing_audio: false,
+                camera: false,
             }],
         }],
     }
