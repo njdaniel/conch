@@ -40,7 +40,7 @@ type hideWorld struct {
 	p1ID, msgID                        int64
 	alice, bob, zed, dep, carol, agent *member
 	aliceLink, bobLink                 schema.CreateInviteResponseV2
-	marks                              *markers
+	marks, marksBob                    *markers
 	ghostName                          string
 	// aliceF, bobF, zedF and ownerF are events sockets, open from before
 	// the cell is cut: the directory signal travels on them.
@@ -51,8 +51,8 @@ type hideWorld struct {
 // runs with the member column as it is by default, since the links are made
 // by members. mtag is bob's and zed's own tag, held by no one else's name,
 // so that a run of six of their characters is theirs alone.
-func (w *world) buildHideWorld(name func(string) string, mtag string) (*hideWorld, error) {
-	hw := &hideWorld{marks: newMarkers(), ghostName: "ghost-" + mtag}
+func (w *world) buildHideWorld(name func(string) string, mtag, atag string) (*hideWorld, error) {
+	hw := &hideWorld{marks: newMarkers(), marksBob: newMarkers(), ghostName: "ghost-" + mtag}
 	var who schema.WhoAmIResponseV1
 	if err := w.op.call(http.MethodGet, "/v1/whoami", nil, &who); err != nil {
 		return nil, err
@@ -91,7 +91,7 @@ func (w *world) buildHideWorld(name func(string) string, mtag string) (*hideWorl
 		}
 		return m, nil
 	}
-	if hw.alice, err = person(name("alice"), hw.p1); err != nil {
+	if hw.alice, err = person("alice"+atag, hw.p1); err != nil {
 		return nil, err
 	}
 	if err := w.op.call(http.MethodPut, "/v1/channels/"+hw.p1+"/members/"+itoa(hw.alice.id), schema.PutChannelMemberRequestV1{Manages: &yes}, nil); err != nil {
@@ -110,7 +110,7 @@ func (w *world) buildHideWorld(name func(string) string, mtag string) (*hideWorl
 	hw.marks.str("zed's name", hw.zed.name)
 	hw.marks.id("principal", "bob's id", hw.bob.id)
 	hw.marks.id("principal", "zed's id", hw.zed.id)
-	if hw.agent, err = w.newAgent(name("agent"), &group{channels: []string{hw.p1}, chanIDs: []int64{hw.p1ID}}); err != nil {
+	if hw.agent, err = w.newAgent("agent"+atag, &group{channels: []string{hw.p1}, chanIDs: []int64{hw.p1ID}}); err != nil {
 		return nil, err
 	}
 	// dep wrote in p1 and left it; alice read p1 from before.
@@ -131,7 +131,7 @@ func (w *world) buildHideWorld(name func(string) string, mtag string) (*hideWorl
 		return nil, fmt.Errorf("bob makes a member link: %w", err)
 	}
 	w.h.secret("bob's member link code", hw.bobLink.Code)
-	cname := name("carol")
+	cname := "carol" + atag
 	var resp schema.RedeemInviteResponseV1
 	if err := w.newcomer(cname+" (joining)").call(http.MethodPost, "/v2/invites/redeem",
 		schema.RedeemInviteRequestV2{Code: hw.aliceLink.Code, Name: cname, Password: joinPassword}, &resp); err != nil {
@@ -140,6 +140,12 @@ func (w *world) buildHideWorld(name func(string) string, mtag string) (*hideWorl
 	w.h.secret(cname+"'s credential", resp.Token)
 	hw.carol = &member{name: cname, id: resp.Principal.ID, token: resp.Token, credID: resp.Credential.ID, password: true}
 	hw.carol.api = w.as(hw.carol)
+	// Alice's, carol's and the agent's names and ids are markers in bob's
+	// register (§13.9).
+	for _, m := range []*member{hw.alice, hw.carol, hw.agent} {
+		hw.marksBob.str(m.name+"'s name", m.name)
+		hw.marksBob.id("principal", m.name+"'s id", m.id)
+	}
 	// Sockets, open before the cell is cut.
 	open := func(a api, what, channel string) (*feed, error) {
 		f, r, err := dialSocket(a, what, "/v1/events/ws", url.Values{"channel": {channel}}, false)
@@ -251,9 +257,9 @@ func (hw *hideWorld) signalStep(row string, act func() error, want ...*feed) err
 	return nil
 }
 
-// scan requires that a response holds no marker of bob's or zed's.
-func (hw *hideWorld) scan(what string, body []byte) error {
-	if leaks := hw.marks.leaks(body, asked{}); len(leaks) > 0 {
+// scan requires that a response holds no marker of marks.
+func (hw *hideWorld) scan(marks *markers, what string, body []byte) error {
+	if leaks := marks.leaks(body, asked{}); len(leaks) > 0 {
 		return fmt.Errorf("%s holds %s", what, strings.Join(leaks, "; "))
 	}
 	return nil
@@ -344,52 +350,53 @@ type hideRead struct{ route, path string }
 // object but her own channel and link: each is asked as alice and its
 // answer scanned for bob's and zed's markers. The route is the table's text
 // (checked against the table by TestHideReadsAreRoutes).
-func (hw *hideWorld) reads() []hideRead {
-	c := "/v1/channels/" + hw.p1
+func (hw *hideWorld) reads(p1 string, linkID, authorID int64) []hideRead {
+	c := "/v1/channels/" + p1
 	return []hideRead{
 		{"GET /v1/whoami", "/v1/whoami"},
 		{"GET /v1/channels", "/v1/channels"},
 		{"GET /v1/directory/channels", "/v1/directory/channels"},
 		{"GET /v1/directory/members", "/v1/directory/members"},
 		{"GET /v1/channels/{channel}/members", c + "/members"},
-		{"GET /v1/channels/{channel}/authors", fmt.Sprintf("%s/authors?ids=%d", c, hw.dep.id)},
+		{"GET /v1/channels/{channel}/authors", fmt.Sprintf("%s/authors?ids=%d", c, authorID)},
 		{"GET /v1/channels/{channel}/nets", c + "/nets"},
 		{"GET /v1/channels/{channel}/voice", c + "/voice"},
 		{"GET /v1/voice/occupancy", "/v1/voice/occupancy"},
 		{"GET /v1/channels/{channel}/messages", c + "/messages"},
-		{"GET /v2/channels/{channel}/messages", "/v2/channels/" + hw.p1 + "/messages"},
-		{"GET /v2/channels/{channel}/messages/search", "/v2/channels/" + hw.p1 + "/messages/search?q=word"},
-		{"GET /v2/channels/{channel}/reactions", fmt.Sprintf("/v2/channels/%s/reactions?messages=%d", hw.p1, hw.msgID)},
-		{"GET /v1/sessions", "/v1/sessions?channel=" + url.QueryEscape(hw.p1)},
-		{"GET /v1/runs", "/v1/runs?channel=" + url.QueryEscape(hw.p1)},
+		{"GET /v2/channels/{channel}/messages", "/v2/channels/" + p1 + "/messages"},
+		{"GET /v2/channels/{channel}/messages/search", "/v2/channels/" + p1 + "/messages/search?q=word"},
+		{"GET /v2/channels/{channel}/reactions", fmt.Sprintf("/v2/channels/%s/reactions?messages=%d", p1, hw.msgID)},
+		{"GET /v1/sessions", "/v1/sessions?channel=" + url.QueryEscape(p1)},
+		{"GET /v1/runs", "/v1/runs?channel=" + url.QueryEscape(p1)},
 		{"GET /v1/read-state", "/v1/read-state"},
 		{"GET /v1/approvals", "/v1/approvals"},
 		{"GET /v1/invites", "/v1/invites"},
 		{"GET /v2/invites", "/v2/invites"},
-		{"GET /v2/invites/{id}/joiners", fmt.Sprintf("/v2/invites/%d/joiners", hw.aliceLink.Invite.ID)},
+		{"GET /v2/invites/{id}/joiners", fmt.Sprintf("/v2/invites/%d/joiners", linkID)},
 		{"GET /v1/credentials/mine", "/v1/credentials/mine"},
 	}
 }
 
-// checkReads asks every read of alice and requires 200 and no marker, in the
-// body or in the frames her events socket has carried.
-func (w *world) checkReads(hw *hideWorld, phase string) (int, error) {
+// checkReads asks every read of who (alice or bob, over their own channel,
+// link and an author id) and requires 200 and no marker of marks, in the
+// body or in the frames f, who's events socket, has carried.
+func (w *world) checkReads(hw *hideWorld, phase string, who *member, marks *markers, f *feed, p1 string, linkID, authorID int64) (int, error) {
 	n := 0
-	for _, rd := range hw.reads() {
-		status, body, err := hw.alice.api.do(http.MethodGet, rd.path, nil)
+	for _, rd := range hw.reads(p1, linkID, authorID) {
+		status, body, err := who.api.do(http.MethodGet, rd.path, nil)
 		if err != nil {
 			return n, err
 		}
 		if status != http.StatusOK {
-			return n, fmt.Errorf("%s: alice reads %s = %d %s, want 200", phase, rd.path, status, w.h.redact(string(body)))
+			return n, fmt.Errorf("%s: %s reads %s = %d %s, want 200", phase, who.name, rd.path, status, w.h.redact(string(body)))
 		}
-		if err := hw.scan(phase+": alice's read of "+rd.route, body); err != nil {
+		if err := hw.scan(marks, phase+": the read of "+rd.route+" as "+who.name, body); err != nil {
 			return n, err
 		}
 		n++
 	}
-	for i, fr := range hw.aliceF.received() {
-		if err := hw.scan(fmt.Sprintf("%s: frame %d of alice's events socket", phase, i), fr); err != nil {
+	for i, fr := range f.received() {
+		if err := hw.scan(marks, fmt.Sprintf("%s: frame %d of %s", phase, i, f.what), fr); err != nil {
 			return n, err
 		}
 	}
@@ -399,8 +406,8 @@ func (w *world) checkReads(hw *hideWorld, phase string) (int, error) {
 // checkHideReadsAreRoutes requires that every read of the world is a request
 // its route serves, and that the route is in the table.
 func checkHideReadsAreRoutes(table []routetable.Route) error {
-	hw := &hideWorld{p1: "p1", dep: &member{id: 1}}
-	for _, rd := range hw.reads() {
+	hw := &hideWorld{}
+	for _, rd := range hw.reads("p1", 1, 1) {
 		r, err := routetable.Parse(rd.route)
 		if err != nil {
 			return err
@@ -434,7 +441,7 @@ func (w *world) hidePersonalRows(hw *hideWorld) (int, error) {
 		return rows, err
 	}
 	for _, b := range bodies {
-		if err := hw.scan(dirRow+": alice's page", b); err != nil {
+		if err := hw.scan(hw.marks, dirRow+": alice's page", b); err != nil {
 			return rows, err
 		}
 	}
@@ -495,18 +502,36 @@ func (w *world) hidePersonalRows(hw *hideWorld) (int, error) {
 		return rows, fmt.Errorf("%s: paging a row at a time gave %d pages and %v, want %d pages and %v", dirRow, pages, idsOf(pl), len(listed), idsOf(listed))
 	}
 	for _, b := range pbodies {
-		if err := hw.scan(dirRow+": alice's page of one row", b); err != nil {
+		if err := hw.scan(hw.marks, dirRow+": alice's page of one row", b); err != nil {
 			return rows, err
 		}
 	}
 	rows++
 
 	// Every route alice reads names neither bob nor zed.
-	n, err := w.checkReads(hw, "personal")
+	n, err := w.checkReads(hw, "personal", hw.alice, hw.marks, hw.aliceF, hw.p1, hw.aliceLink.Invite.ID, hw.dep.id)
 	if err != nil {
 		return rows, err
 	}
 	rows += n
+	// And the other way (§13.9): alice's, carol's and the agent's names and
+	// ids are markers in bob's register, over the same routes.
+	n, err = w.checkReads(hw, "personal", hw.bob, hw.marksBob, hw.bobF, hw.p2, hw.bobLink.Invite.ID, hw.bob.id)
+	if err != nil {
+		return rows, err
+	}
+	rows += n
+
+	// R5, accepted and pinned: a name taken is told as taken, by the
+	// rename and by the redemption, for a person alice may not know.
+	status, body, err = hw.alice.api.do(http.MethodPut, "/v1/principals/"+itoa(hw.alice.id)+"/name", schema.RenamePrincipalRequestV1{Name: hw.bob.name})
+	if err != nil {
+		return rows, err
+	}
+	if _, err := checkAnswer(result{status: status, body: body}, answer{http.StatusConflict, "principal_exists"}); err != nil {
+		return rows, fmt.Errorf("R5: alice renames herself to bob's name: %w", err)
+	}
+	rows++
 
 	// A manager adds by id and by name: bob and a ghost are one 404.
 	add := func(path string) (int, []byte, error) { return hw.alice.api.do(http.MethodPut, path, nil) }
@@ -651,6 +676,18 @@ func (w *world) hideGroupRows(hw *hideWorld) (int, error) {
 	rows++
 	if err := w.checkAuthors(hw, "group"); err != nil {
 		return rows, err
+	}
+	rows++
+	// R5, accepted and pinned: alice's link, valid again with the column
+	// back (under personal its maker no longer holds make_member_links, so
+	// it is judged invalid), tells a newcomer that bob's name is taken.
+	status, body, err := w.newcomer("a newcomer redeeming alice's link").do(http.MethodPost, "/v2/invites/redeem",
+		schema.RedeemInviteRequestV2{Code: hw.aliceLink.Code, Name: hw.bob.name, Password: joinPassword})
+	if err != nil {
+		return rows, err
+	}
+	if _, err := checkAnswer(result{status: status, body: body}, answer{http.StatusConflict, "principal_exists"}); err != nil {
+		return rows, fmt.Errorf("R5: alice's link redeemed with bob's name: %w", err)
 	}
 	rows++
 	// The add that was one 404 now works (O10).

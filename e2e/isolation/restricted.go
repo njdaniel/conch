@@ -829,6 +829,27 @@ func (w *world) restrictedPhase() (int, error) {
 	if !slices.Equal(whole.Settings.OpenChannels, addressBefore.Settings.OpenChannels) || whole.Settings.OtherOpenChannels != 0 {
 		return rows, fmt.Errorf("the control: with manage_channels back the restricted operator's joining settings list %v and %d others, want %v", whole.Settings.OpenChannels, whole.Settings.OtherOpenChannels, addressBefore.Settings.OpenChannels)
 	}
+	// The control for the address join: R lists its channel again while it
+	// holds manage_channels, and an address join now lands in it.
+	if err := r.api.call(http.MethodPut, "/v1/join/settings", schema.PutJoinSettingsRequestV1{OpenChannels: &withMine}, nil); err != nil {
+		return rows, fmt.Errorf("the control: the operator lists its channel again: %w", err)
+	}
+	againName := name("addressed-again")
+	var again schema.JoinAccountResponseV1
+	if err := w.entryCall(w.newcomer(againName+" (joining)"), http.MethodPost, "/v1/join/account", schema.JoinAccountRequestV1{Name: againName, Password: joinPassword}, &again); err != nil {
+		return rows, fmt.Errorf("the control: an address join while R's listing stands: %w", err)
+	}
+	w.h.secret(againName+"'s credential", again.Token)
+	var landedAgain schema.ListChannelsResponse
+	if err := (api{h: w.h, base: w.d.baseURL, who: againName, token: again.Token}).call(http.MethodGet, "/v1/channels", nil, &landedAgain); err != nil {
+		return rows, err
+	}
+	if !slices.ContainsFunc(landedAgain.Channels, func(c schema.ChannelV0) bool { return c.Name == ochan }) {
+		return rows, fmt.Errorf("the control: an address join while R holds manage_channels did not land in R's listed channel %q", ochan)
+	}
+	if err := w.op.call(http.MethodPut, "/v1/join/settings", schema.PutJoinSettingsRequestV1{OpenChannels: &addressBefore.Settings.OpenChannels}, nil); err != nil {
+		return rows, fmt.Errorf("the owner puts the default channels back: %w", err)
+	}
 	if err := w.setOperatorCells(false, schema.PermChangeServerSettings); err != nil {
 		return rows, err
 	}
@@ -932,6 +953,12 @@ func (w *world) voiceMemberRows(rchan string, talker, stranger *member) (rows in
 	// no one's now, so no live share is ended).
 	if err := voiceSwitch(true); err != nil {
 		return rows, "", err
+	}
+	for _, c := range []struct{ what, path string }{{"the voice presence", voice}, {"the voice occupancy", "/v1/voice/occupancy"}} {
+		var doc json.RawMessage
+		if err := talker.api.call(http.MethodGet, c.path, nil, &doc); err != nil {
+			return rows, "", fmt.Errorf("the control: with the voice switch back the member reads %s: %w", c.what, err)
+		}
 	}
 	if err := w.setCells(schema.PermissionRoleMember, false, schema.PermShareScreen); err != nil {
 		return rows, "", fmt.Errorf("the owner cuts share_screen from the member column: %w", err)

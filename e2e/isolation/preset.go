@@ -82,7 +82,8 @@ func (w *world) presetPhase() (int, error) {
 
 	// The hide-members world (hiderows.go), made while members still hold
 	// see_member_directory, with its sockets open.
-	hw, err := w.buildHideWorld(name, newTag(w.tag, w.btag, w.ptag, w.qtag, tag))
+	mtag := newTag(w.tag, w.btag, w.ptag, w.qtag, tag)
+	hw, err := w.buildHideWorld(name, mtag, newTag(w.tag, w.btag, w.ptag, w.qtag, tag, mtag))
 	if err != nil {
 		return 0, fmt.Errorf("the hide-members world: %w", err)
 	}

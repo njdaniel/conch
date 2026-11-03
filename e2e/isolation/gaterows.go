@@ -77,7 +77,7 @@ var pendingGates = map[string]string{ // #nosec G101 -- gate names, not credenti
 	"store/queries.go Store.ChannelSettings":      "reached only by a race with a cut after handleChannelSettings' own check (store/channels_v1_test.go); #1217: a seam-driven race row",
 	"voice.go Server.voiceStillEntitled":          "reached only by a cut landing between the handler's check and the token's signing (server voice_permission_test.go TestVoicePermissionTokenMintedBeforeTheFlip); #1217: needs a live LiveKit participant row",
 	"voice_presence.go Server.voiceEntitlement":   "the poller's per-participant check: needs a live LiveKit participant when use_voice is cut (server voice_permission_test.go); #1217: a live-media isolation row",
-	"voice_presence.go Server.voiceWithheldAmong": "ends the voice of those who lost use_voice at the PUT: needs a live LiveKit participant (server voice_permission_test.go); #1217: a live-media isolation row",
+	"voice_presence.go Server.voiceWithheldAmong": "closes the voice sockets of those who lost use_voice at the PUT; the permissions rule \"members can't hold use_voice while operators don't\" (409) means any column cut that closes an operator's socket also cuts the member column and closes B's open voice sockets, so a row needs a world without B's sockets (server voice_permission_test.go); #1217: a live-media isolation row",
 	"voice_share.go voicePoller.shareEntitled":    "the claim's re-read under the room's claims: needs a live share (server voice_share_revoke_test.go); #1217: a live-media isolation row",
 	"voice_share.go voicePoller.sharesWithheld":   "ends a live share when share_screen is cut: needs a live share (server voice_share_revoke_test.go); #1217: a live-media isolation row",
 }
