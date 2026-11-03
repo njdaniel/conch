@@ -616,6 +616,23 @@ describe('invites', () => {
       message: 'you already have as many open personal invites as you may',
     });
   });
+
+  // Issue #1051: a newer server names a permission this bundle does not know.
+  // The error document still reads, so the code is passed through rather than
+  // dropped with the document.
+  it('passes a refusal naming an unknown permission through by its code', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ code: 'permission_denied', message: 'no', permission: 'fly_the_server' }, 403));
+    expect(await listChannels()).toEqual({ ok: false, failure: 'invalid', code: 'permission_denied' });
+  });
+
+  it('reads a whoami naming an unknown permission, and keeps it', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ ...member, permissions: ['use_voice', 'fly_the_server'] }));
+    const result = await whoAmI();
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.permissions).toEqual(['use_voice', 'fly_the_server']);
+  });
 });
 
 // Issue #595: Chromium logs an answer whose body is never read, or is
