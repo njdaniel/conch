@@ -142,6 +142,16 @@ func (c *eventsClient) next() eventFrame {
 		if err = json.Unmarshal(raw, &doc); err == nil {
 			verr = doc.Validate()
 		}
+	case schema.PermissionsChangedSchemaV1:
+		var doc schema.PermissionsChangedV1
+		if err = json.Unmarshal(raw, &doc); err == nil {
+			verr = doc.Validate()
+		}
+	case schema.DirectoryChangedSchemaV1:
+		var doc schema.DirectoryChangedV1
+		if err = json.Unmarshal(raw, &doc); err == nil {
+			verr = doc.Validate()
+		}
 	default:
 		c.t.Fatalf("a frame of schema %q, which the events socket does not send:\n%s", head.Schema, raw)
 	}

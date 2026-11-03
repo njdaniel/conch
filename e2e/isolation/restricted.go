@@ -125,13 +125,19 @@ func sameAnswer(what string, s1 int, b1 []byte, s2 int, b2 []byte) error {
 // setOperatorCells sets the operator column's cells for perms, as the owner,
 // through the real PUT.
 func (w *world) setOperatorCells(granted bool, perms ...schema.Permission) error {
+	return w.setCells(schema.PermissionRoleOperator, granted, perms...)
+}
+
+// setCells sets the cells of role's column for perms, as the owner, through
+// the real PUT.
+func (w *world) setCells(role schema.PermissionRole, granted bool, perms ...schema.Permission) error {
 	var doc schema.PermissionsResponseV1
 	if err := w.op.call(http.MethodGet, "/v1/permissions", nil, &doc); err != nil {
 		return err
 	}
 	req := schema.PutPermissionsRequestV1{Revision: doc.Revision}
 	for _, p := range perms {
-		req.Changes = append(req.Changes, schema.PermissionChangeV1{Permission: p, Role: schema.PermissionRoleOperator, Granted: granted})
+		req.Changes = append(req.Changes, schema.PermissionChangeV1{Permission: p, Role: role, Granted: granted})
 	}
 	return w.op.call(http.MethodPut, "/v1/permissions", req, nil)
 }
@@ -159,6 +165,30 @@ func (w *world) auditDenials(actor int64, perm schema.Permission) (int, error) {
 		}
 	}
 	return n, sc.Err()
+}
+
+// auditRows is the rows of the owner's audit export whose action is action.
+func (w *world) auditRows(action string) ([]schema.AuditEventV1, error) {
+	status, body, err := w.op.do(http.MethodGet, "/v1/audit", nil)
+	if err != nil {
+		return nil, fmt.Errorf("the audit export: %w", err)
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("the audit export = %d %s", status, body)
+	}
+	var out []schema.AuditEventV1
+	sc := bufio.NewScanner(bytes.NewReader(body))
+	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for sc.Scan() {
+		var e schema.AuditEventV1
+		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
+			return nil, err
+		}
+		if e.Action == action {
+			out = append(out, e)
+		}
+	}
+	return out, sc.Err()
 }
 
 // restrictedPhase runs the restricted operator's rows. It answers how many
@@ -239,6 +269,42 @@ func (w *world) restrictedPhase() (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// A second link of the same two channels, never redeemed, for the list
+	// the cut will filter; and a member for the rename and revoke-all rows.
+	listed, err := w.invite(r.api, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{rchan, w.a.main()}})
+	if err != nil {
+		return 0, err
+	}
+	victim, err := w.newPerson(name("victim"), rchan)
+	if err != nil {
+		return 0, err
+	}
+	// R lists a public channel of its own making in the bare address's
+	// default channels while it holds manage_channels and
+	// change_server_settings: it stands behind that channel until it loses
+	// one of them.
+	if err := w.setOperatorCells(true, schema.PermChangeServerSettings); err != nil {
+		return 0, err
+	}
+	var addressBefore schema.JoinSettingsResponseV1
+	if err := w.op.call(http.MethodGet, "/v1/join/settings", nil, &addressBefore); err != nil {
+		return 0, err
+	}
+	if len(addressBefore.Settings.OpenChannels) == 0 {
+		return 0, fmt.Errorf("the bare address lists no default channel before the restricted phase: the address join and the name filter rows would prove nothing")
+	}
+	ochan := name("listed")
+	var ocreated schema.CreateChannelResponseV1
+	if err := w.op.call(http.MethodPost, "/v1/channels", schema.CreateChannelRequestV1{Name: ochan, Visibility: schema.ChannelPublic}, &ocreated); err != nil {
+		return 0, err
+	}
+	withMine := append(slices.Clone(addressBefore.Settings.OpenChannels), ochan)
+	if err := r.api.call(http.MethodPut, "/v1/join/settings", schema.PutJoinSettingsRequestV1{OpenChannels: &withMine}, nil); err != nil {
+		return 0, fmt.Errorf("the operator lists a public channel while it holds manage_channels: %w", err)
+	}
+	if err := w.setOperatorCells(false, schema.PermChangeServerSettings); err != nil {
+		return 0, err
+	}
 
 	// The cut, through the real PUT.
 	cut := []schema.Permission{schema.PermManageMembers, schema.PermActAsMembers, schema.PermManageChannels}
@@ -274,6 +340,51 @@ func (w *world) restrictedPhase() (int, error) {
 		}
 		rows++
 	}
+
+	// Someone else's name and someone else's credentials need manage_members
+	// in the handler, not only at the route (the table's class is
+	// operator-or-self): refused naming it, and nothing changed.
+	renamed := name("renamed")
+	status, resp, err := r.api.do(http.MethodPut, "/v1/principals/"+itoa(rmember.id)+"/name", schema.RenamePrincipalRequestV1{Name: renamed})
+	if err := refusedNaming("the restricted operator renames a member", status, resp, err, "forbidden", schema.PermManageMembers); err != nil {
+		return rows, err
+	}
+	status, resp, err = r.api.do(http.MethodPost, "/v1/principals/"+itoa(victim.id)+"/credentials/revoke-all", nil)
+	if err := refusedNaming("the restricted operator revokes every credential of a member", status, resp, err, "forbidden", schema.PermManageMembers); err != nil {
+		return rows, err
+	}
+	var still schema.WhoAmIResponseV1
+	if err := rmember.api.call(http.MethodGet, "/v1/whoami", nil, &still); err != nil {
+		return rows, fmt.Errorf("the restricted operator's refused rename left the member unreadable: %w", err)
+	}
+	if still.Name != rmember.name {
+		return rows, fmt.Errorf("the restricted operator's refused rename changed the member to %q", still.Name)
+	}
+	if err := victim.api.call(http.MethodGet, "/v1/whoami", nil, nil); err != nil {
+		return rows, fmt.Errorf("the restricted operator's refused revoke-all still ended the member's credential: %w", err)
+	}
+	rows += 2
+
+	// The channel's settings: the handler refuses before it reads the id, so
+	// R's own channel, A's and one that never existed are one answer.
+	var settingsAnswers [3]struct {
+		status int
+		body   []byte
+	}
+	for i, id := range []string{itoa(created.Channel.ID), itoa(w.a.chanIDs[0]), "999999999"} {
+		settingsAnswers[i].status, settingsAnswers[i].body, err = r.api.do(http.MethodPut, "/v1/channels/"+id+"/settings", schema.ChannelSettingsRequestV1{Default: &yes})
+		if err := refusedNaming("the restricted operator changes a channel's settings", settingsAnswers[i].status, settingsAnswers[i].body, err,
+			schema.ErrorCodePermissionDenied, schema.PermManageChannels); err != nil {
+			return rows, err
+		}
+	}
+	for i := 1; i < len(settingsAnswers); i++ {
+		if err := sameAnswer("the restricted operator changes a channel's settings: its own channel, A's and a ghost", settingsAnswers[0].status, settingsAnswers[0].body,
+			settingsAnswers[i].status, settingsAnswers[i].body); err != nil {
+			return rows, err
+		}
+	}
+	rows++
 
 	// The manager class on A's channel: the uniform 404.
 	aChan, ghost := w.a.main(), "no-such-channel-"+tag
@@ -422,6 +533,77 @@ func (w *world) restrictedPhase() (int, error) {
 	if err := sameAnswer("the restricted operator: the joining settings naming A's channel", status, body, gs, gb); err != nil {
 		return rows, err
 	}
+	rows++
+
+	// The settings it may read name the default channels it is in and count
+	// the rest (other_open_channels); the channel it listed itself, which it
+	// is not in, is among the rest.
+	const nameRow = "the joining settings R may read name the default channels it is in"
+	var current schema.JoinSettingsResponseV1
+	if err := w.op.call(http.MethodGet, "/v1/join/settings", nil, &current); err != nil {
+		return rows, err
+	}
+	status, body, err = r.api.do(http.MethodGet, "/v1/join/settings", nil)
+	if err != nil {
+		return rows, err
+	}
+	var seen schema.JoinSettingsResponseV1
+	if status != http.StatusOK || json.Unmarshal(body, &seen) != nil {
+		return rows, fmt.Errorf("%s = %d %s, want 200", nameRow, status, body)
+	}
+	if got, want := int64(len(current.Settings.OpenChannels)), seen.Settings.OtherOpenChannels; got != want || len(seen.Settings.OpenChannels) != 0 {
+		return rows, fmt.Errorf("%s: names %v and counts %d others; the owner's list is %v and R is in none of it", nameRow, seen.Settings.OpenChannels, want, current.Settings.OpenChannels)
+	}
+	if len(seen.DefaultChannels) > 0 {
+		return rows, fmt.Errorf("%s: names the default channels %v, which R is not in", nameRow, seen.DefaultChannels)
+	}
+	if leaks := w.leaks(body, asked{}); len(leaks) > 0 {
+		return rows, fmt.Errorf("%s: holds %s", nameRow, strings.Join(leaks, "; "))
+	}
+	for _, listedName := range current.Settings.OpenChannels {
+		if bytes.Contains(body, []byte(listedName)) {
+			return rows, fmt.Errorf("%s: names the default channel %q, which R is not in", nameRow, listedName)
+		}
+	}
+	rows++
+
+	// An address join, after R lost manage_channels, lands only in the
+	// default channels whose lister still stands behind them: the channel R
+	// listed is left out, and the drop is audited.
+	joinerName := name("addressed")
+	var joined schema.JoinAccountResponseV1
+	if err := w.entryCall(w.newcomer(joinerName+" (joining)"), http.MethodPost, "/v1/join/account", schema.JoinAccountRequestV1{Name: joinerName, Password: joinPassword}, &joined); err != nil {
+		return rows, fmt.Errorf("an address join after its lister lost manage_channels: %w", err)
+	}
+	w.h.secret(joinerName+"'s credential", joined.Token)
+	addressed := api{h: w.h, base: w.d.baseURL, who: joinerName, token: joined.Token}
+	var landed schema.ListChannelsResponse
+	if err := addressed.call(http.MethodGet, "/v1/channels", nil, &landed); err != nil {
+		return rows, err
+	}
+	var landedNames []string
+	for _, c := range landed.Channels {
+		landedNames = append(landedNames, c.Name)
+	}
+	if slices.Contains(landedNames, ochan) {
+		return rows, fmt.Errorf("an address join after its lister lost manage_channels landed in %q, which R listed and can no longer stand behind: %v", ochan, landedNames)
+	}
+	for _, want := range addressBefore.Settings.OpenChannels {
+		if !slices.Contains(landedNames, want) {
+			return rows, fmt.Errorf("an address join after its lister lost manage_channels did not land in %q, which the owner listed: %v", want, landedNames)
+		}
+	}
+	dropped, err := w.auditRows("join_channel_dropped")
+	if err != nil {
+		return rows, err
+	}
+	if !slices.ContainsFunc(dropped, func(e schema.AuditEventV1) bool { return e.Subject == "channel:"+itoa(ocreated.Channel.ID) }) {
+		return rows, fmt.Errorf("an address join after its lister lost manage_channels wrote no join_channel_dropped row for channel %d", ocreated.Channel.ID)
+	}
+	// The owner's write puts the list back and vouches for what it leaves.
+	if err := w.op.call(http.MethodPut, "/v1/join/settings", schema.PutJoinSettingsRequestV1{OpenChannels: &addressBefore.Settings.OpenChannels}, nil); err != nil {
+		return rows, fmt.Errorf("the owner puts the default channels back: %w", err)
+	}
 	if err := w.setOperatorCells(false, schema.PermChangeServerSettings); err != nil {
 		return rows, err
 	}
@@ -429,14 +611,38 @@ func (w *world) restrictedPhase() (int, error) {
 
 	// Invites: its own only, and A's open link is not its to close.
 	var invites schema.ListInvitesResponseV1
-	if err := r.api.call(http.MethodGet, "/v1/invites", nil, &invites); err != nil {
+	status, body, err = r.api.do(http.MethodGet, "/v1/invites", nil)
+	if err != nil {
 		return rows, err
+	}
+	if status != http.StatusOK || json.Unmarshal(body, &invites) != nil {
+		return rows, fmt.Errorf("the restricted operator's invite list = %d %s, want 200", status, body)
 	}
 	for _, i := range invites.Invites {
 		if i.CreatedBy != r.id {
 			return rows, fmt.Errorf("the restricted operator's invite list holds invite %d of principal %d", i.ID, i.CreatedBy)
 		}
 	}
+	// A link of R's that lands its joiner in R's channel and A's lists the
+	// channel R is in and counts the other (other_channels), and its list
+	// holds nothing of A's.
+	const linkRow = "R's link of two channels is listed with the one R is in"
+	var listedLink *schema.InviteV1
+	for i := range invites.Invites {
+		if invites.Invites[i].ID == listed.Invite.ID {
+			listedLink = &invites.Invites[i]
+		}
+	}
+	if listedLink == nil {
+		return rows, fmt.Errorf("%s: link %d, which R made, is not listed", linkRow, listed.Invite.ID)
+	}
+	if len(listedLink.Channels) != 1 || listedLink.Channels[0].Name != rchan || listedLink.OtherChannels != 1 {
+		return rows, fmt.Errorf("%s: it names %+v and %d other channels, want R's channel and 1", linkRow, listedLink.Channels, listedLink.OtherChannels)
+	}
+	if leaks := w.leaks(body, asked{}); len(leaks) > 0 {
+		return rows, fmt.Errorf("%s: the list holds %s", linkRow, strings.Join(leaks, "; "))
+	}
+	rows++
 	s1, b1, err = r.api.do(http.MethodDelete, "/v1/invites/"+itoa(w.a.openInviteID), nil)
 	if err != nil {
 		return rows, err
@@ -537,9 +743,259 @@ func (w *world) restrictedPhase() (int, error) {
 	}
 	rows += 2
 
+	// The hook list: a hook into R's channel and one into A's exist; R
+	// reads the first, counts the second (other_hooks) and sees nothing of
+	// A's. The owner makes both, with a posting principal of R's own.
+	var mineHook, theirsHook schema.CreateHookResponse
+	if err := w.op.call(http.MethodPost, "/v1/hooks", schema.CreateHookRequest{Channel: rchan, Principal: bot.id}, &mineHook); err != nil {
+		return rows, err
+	}
+	if err := w.op.call(http.MethodPost, "/v1/hooks", schema.CreateHookRequest{Channel: aChan, Principal: bot.id}, &theirsHook); err != nil {
+		return rows, err
+	}
+	w.h.secret("the restricted operator's hook token", mineHook.Token)
+	w.h.secret("a hook token into A's channel", theirsHook.Token)
+	status, body, err = r.api.do(http.MethodGet, "/v1/hooks", nil)
+	if err != nil {
+		return rows, err
+	}
+	var hooks schema.ListHooksResponseV1
+	if status != http.StatusOK || json.Unmarshal(body, &hooks) != nil {
+		return rows, fmt.Errorf("the restricted operator's hook list = %d %s, want 200", status, body)
+	}
+	var sawMine bool
+	for _, h := range hooks.Hooks {
+		if h.Channel != rchan {
+			return rows, fmt.Errorf("the restricted operator's hook list holds hook %d into %q, a channel R is not in", h.ID, h.Channel)
+		}
+		sawMine = sawMine || h.ID == mineHook.ID
+	}
+	if !sawMine || hooks.OtherHooks < 1 {
+		return rows, fmt.Errorf("the restricted operator's hook list = %s, want the hook into R's channel and a count of the others", body)
+	}
+	if leaks := w.leaks(body, asked{}); len(leaks) > 0 {
+		return rows, fmt.Errorf("the restricted operator's hook list holds %s", strings.Join(leaks, "; "))
+	}
+	rows++
+
+	// A creator without manage_channels is bound, the bound the store decides
+	// under its write lock: ten channels a day, the eleventh refused.
+	for i := 1; i <= 11; i++ {
+		status, body, err = r.api.do(http.MethodPost, "/v1/channels", schema.CreateChannelRequestV1{Name: name(fmt.Sprintf("made-%d", i)), Visibility: schema.ChannelPrivate})
+		if i <= 10 {
+			if err := wantCreated(fmt.Sprintf("the restricted operator's channel creation is bounded: channel %d", i), status, body, err); err != nil {
+				return rows, err
+			}
+			continue
+		}
+		if err != nil {
+			return rows, err
+		}
+		if status != http.StatusTooManyRequests || errorCode(body) != schema.ErrorCodeRateLimited {
+			return rows, fmt.Errorf("the restricted operator's channel creation is bounded: the eleventh = %d %s, want 429 %s", status, body, schema.ErrorCodeRateLimited)
+		}
+	}
+	rows++
+
 	// The operator column back, for the rest of the run.
 	if err := w.setOperatorCells(true, cut...); err != nil {
 		return rows, fmt.Errorf("give the operator column back: %w", err)
 	}
+
+	// The controls: with the column back, the same requests are not refused
+	// for want of the permission. The hook list shows A's hook, the link
+	// lists both channels, the joining settings (once R may read them) list
+	// the whole of the bare address's channels, the channel's settings are
+	// judged (a private channel cannot be a default one), the eleventh
+	// channel is made, and R renames a member and ends another's credentials.
+	status, body, err = r.api.do(http.MethodGet, "/v1/hooks", nil)
+	if err != nil {
+		return rows, err
+	}
+	hooks = schema.ListHooksResponseV1{}
+	if status != http.StatusOK || json.Unmarshal(body, &hooks) != nil || hooks.OtherHooks != 0 || !slices.ContainsFunc(hooks.Hooks, func(h schema.HookV1) bool { return h.Channel == aChan }) {
+		return rows, fmt.Errorf("the control: with manage_channels back the restricted operator's hook list = %d %s, want it to hold the hook into A's channel", status, body)
+	}
+	for _, id := range []int64{mineHook.ID, theirsHook.ID} {
+		if err := w.op.call(http.MethodDelete, "/v1/hooks/"+itoa(id), nil, nil); err != nil {
+			return rows, err
+		}
+	}
+	invites = schema.ListInvitesResponseV1{}
+	if err := r.api.call(http.MethodGet, "/v1/invites", nil, &invites); err != nil {
+		return rows, err
+	}
+	if !slices.ContainsFunc(invites.Invites, func(i schema.InviteV1) bool {
+		return i.ID == listed.Invite.ID && len(i.Channels) == 2 && i.OtherChannels == 0
+	}) {
+		return rows, fmt.Errorf("the control: with manage_channels back the restricted operator's link lists %+v, want both channels", invites.Invites)
+	}
+	if err := w.setOperatorCells(true, schema.PermChangeServerSettings); err != nil {
+		return rows, err
+	}
+	var whole schema.JoinSettingsResponseV1
+	if err := r.api.call(http.MethodGet, "/v1/join/settings", nil, &whole); err != nil {
+		return rows, err
+	}
+	if !slices.Equal(whole.Settings.OpenChannels, addressBefore.Settings.OpenChannels) || whole.Settings.OtherOpenChannels != 0 {
+		return rows, fmt.Errorf("the control: with manage_channels back the restricted operator's joining settings list %v and %d others, want %v", whole.Settings.OpenChannels, whole.Settings.OtherOpenChannels, addressBefore.Settings.OpenChannels)
+	}
+	// The control for the address join: R lists its channel again while it
+	// holds manage_channels, and an address join now lands in it.
+	if err := r.api.call(http.MethodPut, "/v1/join/settings", schema.PutJoinSettingsRequestV1{OpenChannels: &withMine}, nil); err != nil {
+		return rows, fmt.Errorf("the control: the operator lists its channel again: %w", err)
+	}
+	againName := name("addressed-again")
+	var again schema.JoinAccountResponseV1
+	if err := w.entryCall(w.newcomer(againName+" (joining)"), http.MethodPost, "/v1/join/account", schema.JoinAccountRequestV1{Name: againName, Password: joinPassword}, &again); err != nil {
+		return rows, fmt.Errorf("the control: an address join while R's listing stands: %w", err)
+	}
+	w.h.secret(againName+"'s credential", again.Token)
+	var landedAgain schema.ListChannelsResponse
+	if err := (api{h: w.h, base: w.d.baseURL, who: againName, token: again.Token}).call(http.MethodGet, "/v1/channels", nil, &landedAgain); err != nil {
+		return rows, err
+	}
+	if !slices.ContainsFunc(landedAgain.Channels, func(c schema.ChannelV0) bool { return c.Name == ochan }) {
+		return rows, fmt.Errorf("the control: an address join while R holds manage_channels did not land in R's listed channel %q", ochan)
+	}
+	if err := w.op.call(http.MethodPut, "/v1/join/settings", schema.PutJoinSettingsRequestV1{OpenChannels: &addressBefore.Settings.OpenChannels}, nil); err != nil {
+		return rows, fmt.Errorf("the owner puts the default channels back: %w", err)
+	}
+	if err := w.setOperatorCells(false, schema.PermChangeServerSettings); err != nil {
+		return rows, err
+	}
+	status, body, err = r.api.do(http.MethodPut, "/v1/channels/"+itoa(created.Channel.ID)+"/settings", schema.ChannelSettingsRequestV1{Default: &yes})
+	if err != nil {
+		return rows, err
+	}
+	if status != http.StatusConflict || errorCode(body) != schema.ErrorCodeChannelSettingsConflict {
+		return rows, fmt.Errorf("the control: with manage_channels back the restricted operator's change to R's private channel = %d %s, want 409 %s", status, body, schema.ErrorCodeChannelSettingsConflict)
+	}
+	status, body, err = r.api.do(http.MethodPost, "/v1/channels", schema.CreateChannelRequestV1{Name: name("made-11"), Visibility: schema.ChannelPrivate})
+	if err := wantCreated("the control: with manage_channels back the restricted operator's eleventh channel", status, body, err); err != nil {
+		return rows, err
+	}
+	var revoked schema.RevokeAllCredentialsResponseV1
+	if err := r.api.call(http.MethodPost, "/v1/principals/"+itoa(victim.id)+"/credentials/revoke-all", nil, &revoked); err != nil {
+		return rows, fmt.Errorf("the control: with manage_members back the restricted operator revokes a member's credentials: %w", err)
+	}
+	status, _, err = victim.api.do(http.MethodGet, "/v1/whoami", nil)
+	if err != nil {
+		return rows, err
+	}
+	if status != http.StatusUnauthorized {
+		return rows, fmt.Errorf("the control: the member's credential after R's revoke-all = %d, want 401", status)
+	}
+	var renamedTo schema.RenamePrincipalResponseV1
+	if err := r.api.call(http.MethodPut, "/v1/principals/"+itoa(rmember.id)+"/name", schema.RenamePrincipalRequestV1{Name: renamed}, &renamedTo); err != nil {
+		return rows, fmt.Errorf("the control: with manage_members back the restricted operator renames a member: %w", err)
+	}
+
+	// The restricted member: the voice and share routes.
+	talker, err := w.newPerson(name("talker"), rchan)
+	if err != nil {
+		return rows, err
+	}
+	n, skipped, err := w.voiceMemberRows(rchan, talker, w.b.people[0])
+	rows += n
+	if err != nil {
+		return rows, fmt.Errorf("the restricted member's voice rows: %w", err)
+	}
+	if skipped != "" {
+		w.h.say("     skipped, no LiveKit in this run: %s", skipped)
+	}
 	return rows, nil
+}
+
+// voiceMemberRows is the restricted member (design §7.7 item 1, issue #1190):
+// a member of rchan whose voice switch is off, then whose column has lost share_screen, is
+// refused at the voice routes naming the permission, and a person who is not
+// in the channel still gets the channel's 404 (membership is read first).
+// These need no LiveKit: use_voice is read before the room is looked at; the
+// share claim sits behind the "voice is not configured" answer, so its row
+// runs only when the run has LiveKit, and says so when it does not. It
+// answers how many rows ran, and gives the column back.
+func (w *world) voiceMemberRows(rchan string, talker, stranger *member) (rows int, skipped string, err error) {
+	voice := "/v1/channels/" + rchan + "/voice"
+	// The control, with the column as it is: not refused.
+	for _, c := range []struct{ what, path string }{{"the voice presence", voice}, {"the voice occupancy", "/v1/voice/occupancy"}} {
+		var doc json.RawMessage
+		if err := talker.api.call(http.MethodGet, c.path, nil, &doc); err != nil {
+			return rows, "", fmt.Errorf("the control: a member who holds use_voice reads %s: %w", c.what, err)
+		}
+	}
+	// use_voice is cut by the person's own switch, which the permission ANDs
+	// in for a member (issue #437): cutting the member column would end
+	// every member's voice, B's open sockets among them.
+	voiceSwitch := func(allowed bool) error {
+		return w.op.call(http.MethodPut, "/v1/principals/"+itoa(talker.id)+"/voice-permission", schema.VoicePermissionRequestV1{VoiceAllowed: allowed}, nil)
+	}
+	if err := voiceSwitch(false); err != nil {
+		return rows, "", fmt.Errorf("the owner switches the member's voice off: %w", err)
+	}
+	transmit := schema.VoiceTransmitReportV1{State: schema.VoiceTransmitStateStarted}
+	for _, c := range []struct {
+		what, method, path string
+		body               any
+	}{
+		{"a member without use_voice at the voice session", http.MethodPost, voice + "/session", nil},
+		{"a member without use_voice at the voice transmit report", http.MethodPost, voice + "/transmit", transmit},
+		{"a member without use_voice at the voice presence", http.MethodGet, voice, nil},
+		{"a member without use_voice at voice occupancy", http.MethodGet, "/v1/voice/occupancy", nil},
+		{"a member without use_voice at the share claim", http.MethodPost, voice + "/share", nil},
+	} {
+		status, body, err := talker.api.do(c.method, c.path, c.body)
+		if err := refusedNaming(c.what, status, body, err, schema.ErrorCodeVoiceNotAllowed, schema.PermUseVoice); err != nil {
+			return rows, "", err
+		}
+		rows++
+	}
+	// Membership first: a person outside the channel is told the channel
+	// does not exist, not that voice is withheld.
+	status, body, err := stranger.api.do(http.MethodGet, voice, nil)
+	if err != nil {
+		return rows, "", err
+	}
+	if _, err := checkAnswer(result{status: status, body: body}, channelNotFound); err != nil {
+		return rows, "", fmt.Errorf("a person outside the channel at the voice presence, use_voice cut: %w", err)
+	}
+	rows++
+	// use_voice back; share_screen cut from the member column (a share is
+	// no one's now, so no live share is ended).
+	if err := voiceSwitch(true); err != nil {
+		return rows, "", err
+	}
+	for _, c := range []struct{ what, path string }{{"the voice presence", voice}, {"the voice occupancy", "/v1/voice/occupancy"}} {
+		var doc json.RawMessage
+		if err := talker.api.call(http.MethodGet, c.path, nil, &doc); err != nil {
+			return rows, "", fmt.Errorf("the control: with the voice switch back the member reads %s: %w", c.what, err)
+		}
+	}
+	if err := w.setCells(schema.PermissionRoleMember, false, schema.PermShareScreen); err != nil {
+		return rows, "", fmt.Errorf("the owner cuts share_screen from the member column: %w", err)
+	}
+	if w.lk == nil {
+		skipped = "the share claim of a member without share_screen (it sits behind voice_not_configured when LiveKit is not up)"
+	} else {
+		status, body, err := talker.api.do(http.MethodPost, voice+"/share", nil)
+		if err := refusedNaming("a member without share_screen at the share claim", status, body, err, schema.ErrorCodeVoiceNotAllowed, schema.PermShareScreen); err != nil {
+			return rows, "", err
+		}
+		rows++
+	}
+	if err := w.setCells(schema.PermissionRoleMember, true, schema.PermShareScreen); err != nil {
+		return rows, "", fmt.Errorf("give the member column back: %w", err)
+	}
+	if w.lk != nil {
+		// The control: with the column back the claim is judged on its merits
+		// (this member holds no voice session), not refused for the right.
+		status, body, err := talker.api.do(http.MethodPost, voice+"/share", nil)
+		if err != nil {
+			return rows, "", err
+		}
+		if status == http.StatusForbidden && errorCode(body) == schema.ErrorCodeVoiceNotAllowed {
+			return rows, "", fmt.Errorf("the control: with share_screen back the claim is still refused: %s", body)
+		}
+	}
+	return rows, skipped, nil
 }

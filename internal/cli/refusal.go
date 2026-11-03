@@ -30,8 +30,9 @@ func (e *refusalError) Unwrap() error { return e.cause }
 // when it is certain of the cause: an operator-only route, and a route for
 // people in the community, which agents and people outside it cannot use.
 const (
-	operatorOnly  = "only an operator may do this"
-	communityOnly = "only a person in the community may do this: agents and people outside it cannot"
+	operatorOnly   = "only an operator may do this"
+	voiceForbidden = "the server does not allow this: only an operator who manages members may switch a voice, and only an owner may switch an owner's"
+	communityOnly  = "only a person in the community may do this: agents and people outside it cannot"
 )
 
 // refusalLines maps a server code to a command's own sentence for it.

@@ -176,11 +176,11 @@ func (c *Client) CreateDeviceLink(ctx context.Context, request schema.CreateDevi
 
 // ListOwnDeviceLinks returns the caller's open device links, without codes.
 func (c *Client) ListOwnDeviceLinks(ctx context.Context) (schema.ListOwnSignInLinksResponseV1, error) {
-	var result schema.ListOwnSignInLinksResponseV1
+	var result deviceLinksDoc
 	if err := c.roundTrip(ctx, "list device links", http.MethodGet, c.resolve("v1", "sign-in-links", "mine"), nil, &result); err != nil {
 		return schema.ListOwnSignInLinksResponseV1{}, err
 	}
-	return result, nil
+	return result.ListOwnSignInLinksResponseV1, nil
 }
 
 // CloseOwnDeviceLink closes one of the caller's device links.

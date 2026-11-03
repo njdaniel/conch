@@ -20,6 +20,9 @@ import { usePhone } from './phone';
 import type { ChannelV0 } from './schema/channel';
 import type { Permission } from './schema/permission';
 import type { WhoAmIResponseV1 } from './schema/principal';
+import { canDo } from './admin/permissions';
+import { ChannelsSection } from './admin/ChannelsSection';
+import { MembersSection } from './admin/MembersSection';
 import { PermissionsSection } from './admin/PermissionsSection';
 import { ReportsSection } from './admin/ReportsSection';
 import { ServerSection } from './admin/ServerSection';
@@ -38,10 +41,12 @@ export interface AdminConsoleProps {
   readonly names?: ReadonlyMap<number, string>;
   // Counts the times the server said the permissions changed.
   readonly permissionsChanged: number;
+  // The page's channel list is read again after a change made in Channels.
+  readonly onChannelsChanged: () => void;
   readonly onUnauthorized: () => void;
 }
 
-export function AdminConsole({ who, origin, channels, names, permissionsChanged, onUnauthorized }: AdminConsoleProps) {
+export function AdminConsole({ who, origin, channels, names, permissionsChanged, onChannelsChanged, onUnauthorized }: AdminConsoleProps) {
   const phone = usePhone();
   const id = useId();
   // The section open as a page on a phone; null is the list.
@@ -60,8 +65,7 @@ export function AdminConsole({ who, origin, channels, names, permissionsChanged,
     if (sentHere > 0) setPage('server');
   }, [sentHere]);
 
-  // The sections that exist, in order. A8 and A9 add theirs between Roles and
-  // permissions and Reports when they merge.
+  // The sections that exist, in order.
   const sections: readonly Section[] = [
     {
       id: 'server',
@@ -93,6 +97,27 @@ export function AdminConsole({ who, origin, channels, names, permissionsChanged,
         />
       ),
     },
+    // Members (A8, #1020): the directory with the operator fields, and the
+    // one menu of what the viewer may do to each person.
+    {
+      id: 'members',
+      label: 'Members',
+      render: () => (
+        <MembersSection who={who} origin={origin} refresh={permissionsChanged} channelIds={channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
+      ),
+    },
+    // Channels (A9, #1021): only for a holder of manage_channels, who is the
+    // one the server lets list every channel. A channel manager without it
+    // manages their own channels from the channel itself.
+    ...(canDo(who, 'manage_channels')
+      ? [
+          {
+            id: 'channels',
+            label: 'Channels',
+            render: () => <ChannelsSection who={who} refresh={permissionsChanged} onChannelsChanged={onChannelsChanged} onUnauthorized={onUnauthorized} />,
+          },
+        ]
+      : []),
     {
       id: 'reports',
       label: 'Reports',

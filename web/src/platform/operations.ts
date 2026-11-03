@@ -35,7 +35,18 @@ import {
   updateProblemReportRequestV1,
   createSessionRequestV1,
   createSignInLinkResponseV1,
+  createCredentialRequestV1,
+  createCredentialResponseV1,
   createDeviceLinkRequestV1,
+  createHookRequest,
+  createHookResponse,
+  createSignInLinkRequestV1,
+  hidePrincipalResponseV1,
+  invitePermissionRequestV1,
+  roleChangeRequestV1,
+  roleChangeResponseV1,
+  voicePermissionRequestV1,
+  voicePermissionResponseV1,
   editMessageRequestV1,
   editMessageResponseV1,
   endGuestsRequestV1,
@@ -253,6 +264,28 @@ export const operations = {
   }),
 
   // People and channels.
+  // The Members section's actions on a person (ADR-014 design §10.2, issue
+  // #1020). The answers that hold a link's code or a token are kept out of the
+  // desktop renderer's hands, as every credential is.
+  setRole: op('PUT', '/v1/principals/{id}/role', 'bearer', { request: check(roleChangeRequestV1), response: check(roleChangeResponseV1) }),
+  setVoicePermission: op('PUT', '/v1/principals/{id}/voice-permission', 'bearer', { request: check(voicePermissionRequestV1), response: check(voicePermissionResponseV1) }),
+  setInvitePermission: op('PUT', '/v1/principals/{id}/invite-permission', 'bearer', { request: check(invitePermissionRequestV1) }),
+  hidePrincipal: op('POST', '/v1/principals/{id}/hide', 'bearer', { response: check(hidePrincipalResponseV1) }),
+  disablePrincipal: op('POST', '/v1/principals/{id}/disable', 'bearer'),
+  enablePrincipal: op('POST', '/v1/principals/{id}/enable', 'bearer'),
+  createPrincipalSignInLink: op('POST', '/v1/principals/{id}/sign-in-links', 'bearer', {
+    request: check(createSignInLinkRequestV1),
+    response: check(createSignInLinkResponseV1),
+    renderer: false,
+    credentials: ['code'],
+  }),
+  createPrincipalCredential: op('POST', '/v1/principals/{id}/credentials', 'bearer', {
+    request: check(createCredentialRequestV1),
+    response: check(createCredentialResponseV1),
+    renderer: false,
+    credentials: token,
+  }),
+  createHook: op('POST', '/v1/hooks', 'bearer', { request: check(createHookRequest), response: check(createHookResponse), renderer: false, credentials: token }),
   renamePrincipal: op('PUT', '/v1/principals/{id}/name', 'bearer', { request: check(renamePrincipalRequestV1), response: check(renamePrincipalResponseV1) }),
   listChannels: op('GET', '/v1/channels', 'bearer', { response: check(listChannelsResponse) }),
   createChannel: op('POST', '/v1/channels', 'bearer', { request: check(createChannelRequestV1), response: check(createChannelResponseV1) }),

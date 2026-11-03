@@ -24,7 +24,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -39,6 +39,7 @@ use serde_json::json;
 
 use support::keyboard::Pipe;
 use support::managed::KEYS_TOML;
+use support::reaped::Reaped;
 use support::stub::{FAKE_JOIN, FAKE_LOGIN, FAKE_ROOM, Reply, Stub, whoami};
 
 const BIN: &str = env!("CARGO_BIN_EXE_conch-voice");
@@ -60,7 +61,7 @@ enum Fd3 {
 
 /// A running helper: its owner's ends of its pipes, and what it wrote.
 struct Helper {
-    child: Child,
+    child: Reaped,
     stdin: Option<ChildStdin>,
     events: Arc<Mutex<Vec<String>>>,
     /// Set when the event pipe reached its end: every writer of it has gone.
@@ -154,7 +155,8 @@ fn spawn_env(
             *ended.lock().unwrap() = Some(Instant::now());
         });
     }
-    let mut child = Command::new("/bin/sh")
+    let mut command = Command::new("/bin/sh");
+    command
         .arg("-c")
         .arg(shell_line(&fd3, background))
         .arg(BIN)
@@ -169,9 +171,14 @@ fn spawn_env(
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    // A shell that leaves the helper in the background is killed with it.
+    let mut child = if background {
+        Reaped::spawn_in_group(&mut command)
+    } else {
+        Reaped::spawn(&mut command)
+    }
+    .unwrap();
     let stdin = child.stdin.take();
     let stderr = Arc::new(Mutex::new(String::new()));
     let (mut err, kept) = (child.stderr.take().unwrap(), Arc::clone(&stderr));
@@ -1401,7 +1408,8 @@ fn a_socket_stream_on_fd_3_without_an_endpoint_is_exit_2_not_a_pipe_having_done_
     let (ours, theirs) = UnixStream::pair().unwrap();
     // The shell makes the socket (the helper's standard output) its fd 3 and gives the
     // helper /dev/null for the rest.
-    let mut child = Command::new("/bin/sh")
+    let mut command = Command::new("/bin/sh");
+    command
         .arg("-c")
         .arg(r#"exec "$0" managed "$@" 3>&1 >/dev/null"#)
         .arg(BIN)
@@ -1414,9 +1422,10 @@ fn a_socket_stream_on_fd_3_without_an_endpoint_is_exit_2_not_a_pipe_having_done_
         .env("CONCH_TOKEN", FAKE_LOGIN)
         .stdin(Stdio::null())
         .stdout(Stdio::from(OwnedFd::from(theirs)))
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    let mut child = Reaped::spawn(&mut command).unwrap();
+    // The command holds the socket too: its other end sees an end only when this lets go.
+    drop(command);
     let mut stderr = String::new();
     child
         .stderr

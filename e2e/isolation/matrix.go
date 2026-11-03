@@ -426,6 +426,11 @@ func coreMatrixRows() []row {
 
 		// Members and nets.
 		byChannel("GET /v1/channels/{channel}/members", "lists A's channel's members", func(_ *world, s subject) probe { return get(ch(s) + "/members") }),
+		// Naming authors (issue #988) sits behind the member list's gate: A's
+		// channel is the one channel-not-found to B, whoever it asks about.
+		byChannel("GET /v1/channels/{channel}/authors", "asks who wrote in A's channel", func(w *world, s subject) probe {
+			return get(ch(s) + "/authors?ids=" + id(w.a.people[0].id))
+		}),
 		byChannel("POST /v1/channels/{channel}/members", "adds an A member by name to A's channel", func(w *world, s subject) probe {
 			return post(ch(s)+"/members", schema.AddChannelMemberRequestV1{Name: w.a.people[0].name})
 		}),
@@ -448,6 +453,13 @@ func coreMatrixRows() []row {
 			want: answer{http.StatusNotFound, "principal_not_found"},
 			probe: func(w *world, s subject) probe {
 				return post("/v1/channels/"+bChannel(w)+"/members", schema.AddChannelMemberRequestV1{Name: s.name})
+			}},
+		// The add by id (issue #1206) answers A's hidden principal exactly as
+		// by name and as the PUT.
+		{route: "POST /v1/channels/{channel}/members", what: "has B's manager add A's hidden principal by id to B's channel", pick: aHidden, manager: true,
+			want: answer{http.StatusNotFound, "principal_not_found"},
+			probe: func(w *world, s subject) probe {
+				return post("/v1/channels/"+bChannel(w)+"/members", schema.AddChannelMemberRequestV1{ID: s.id})
 			}},
 		// The community's member list: a member of B sees A's people (which
 		// are not markers after the split, design section 8), and not the

@@ -278,10 +278,9 @@ test('A14 a member removed from the channel, or hidden, leaves the open page of 
   await expect(members).not.toContainText(abe.name, { timeout: 5_000 });
   // His message stays, by #<id> now, as a reload would show it.
   await expect(said).toContainText(`#${String(abe.id)}`);
-  // The community list has no push from the server yet: it is read again on
-  // Refresh (and on focus), and the hidden account is gone from it then.
-  await region.getByRole('button', { name: 'Refresh' }).click();
-  await expect(page.locator('body')).not.toContainText(abe.name);
+  // The server says the directory changed (conch.directory_changed.v1) and the
+  // community list is read again with no click: the hidden account is gone.
+  await expect(page.locator('body')).not.toContainText(abe.name, { timeout: 5_000 });
   await expect(members).toContainText(ann.name);
 });
 

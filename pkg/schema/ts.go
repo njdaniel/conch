@@ -269,6 +269,10 @@ var TSTypes = []TSType{
 	{Value: CreatePrincipalResponse{}, Family: "create-principal-response-v0"},
 	{Value: CreateCredentialRequestV1{}, Family: "create-credential-request-v1"},
 	{Value: CreateCredentialResponseV1{}, Family: "create-credential-response-v1"},
+	// Binding a hook to a person (POST /v1/hooks), which the console's member
+	// menu does as acting as that person (issue #1020).
+	{Value: CreateHookRequest{}, Family: "create-hook-request-v1"},
+	{Value: CreateHookResponse{}, Family: "create-hook-response-v1"},
 	// Changing your name (issue #441).
 	{Value: RenamePrincipalRequestV1{}, Family: "rename-principal-request-v1"},
 	{Value: RenamePrincipalResponseV1{}, Family: "rename-principal-response-v1"},

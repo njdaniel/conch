@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use support::reaped::Reaped;
 use support::stub::{FAKE_JOIN, FAKE_LOGIN, FAKE_ROOM, Reply, Stub, join_token, room_name};
 
 const BIN: &str = env!("CARGO_BIN_EXE_conch-voice");
@@ -364,14 +365,14 @@ impl NotLiveKit {
 
 /// Collects a child's output on threads of their own, so that neither pipe fills.
 struct Running {
-    child: Child,
+    child: Reaped,
     stdout: Arc<Mutex<String>>,
     stderr: Arc<Mutex<String>>,
 }
 
 impl Running {
     fn start(command: &mut Command) -> Self {
-        let mut child = command.spawn().unwrap();
+        let mut child = Reaped::spawn(command).unwrap();
         let stdout = Arc::new(Mutex::new(String::new()));
         let stderr = Arc::new(Mutex::new(String::new()));
         let (out, kept) = (child.stdout.take().unwrap(), Arc::clone(&stdout));
@@ -846,8 +847,7 @@ fn on_a_terminal_line(private: &Path, line: &str, token: bool) -> (Option<i32>, 
     if token {
         command.env("CONCH_TOKEN", FAKE_LOGIN);
     }
-    let mut child = command
-        .spawn()
+    let mut child = Reaped::spawn(&mut command)
         .expect("script(1) from util-linux is needed to give the binary a terminal");
     let stdin = child.stdin.take();
     let mut terminal = child.stdout.take().unwrap();
@@ -973,6 +973,64 @@ fn signal(child: &Child, name: &str) {
     assert!(status.success(), "kill -{name} failed");
 }
 
+/// The longest the test waits for anything about the client before it gives up and kills
+/// it: a watchdog for cleanup, not a measure of how fast the client is.
+const WATCHDOG: Duration = Duration::from_secs(60);
+
+/// How long the client may take to leave once its standard output is blocked on the full
+/// pipe. Its own bounded waits add up to about 3.5 s (a connection attempt 2 s alongside
+/// the reports' 3 s, then the last lines' 1 s, and the gate's half second), measured the
+/// same under a load of seventy. A wait of its own that is not bounded, or one on the
+/// pipe, takes longer than that or for ever: this is the "within a few seconds" the test
+/// stands for.
+const LEAVE_WITHIN: Duration = Duration::from_secs(10);
+
+/// Whether a thread of the child is blocked writing to a pipe right now: the kernel's
+/// `wchan`, the place in the kernel it sleeps at, in `/proc/<pid>/task/<tid>/wchan`
+/// (`anon_pipe_write` or `pipe_wait_writable`, by kernel). The client's only writes to a
+/// pipe that can fill are those to its standard output (the test's standard input and
+/// the stub are read or answered, not blocked on), so this is its writer, on a full pipe
+/// nobody reads. A kernel that shows `0` for every wait makes this never true; the caller
+/// then fails with that said.
+fn blocked_writing_a_pipe(child: &Child) -> bool {
+    let dir = format!("/proc/{}/task", child.id());
+    let Ok(tasks) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    tasks.filter_map(Result::ok).any(|task| {
+        std::fs::read_to_string(task.path().join("wchan"))
+            .is_ok_and(|wchan| wchan.contains("pipe_write") || wchan.contains("pipe_wait_writable"))
+    })
+}
+
+/// Waits until the client's standard output is blocked on a full pipe, which is the state
+/// this test is about: seen on two samples in a row, a few milliseconds apart, so that a
+/// write that is merely in progress does not count. Nothing is guessed from how long it
+/// ought to take, so a loaded machine only makes this take longer. `Err` with what to say
+/// if the client leaves, or the pipe is not blocked within [`WATCHDOG`]; the caller kills
+/// and reaps the child before it fails.
+fn wait_until_output_is_blocked(child: &mut Child) -> Result<(), String> {
+    let began = Instant::now();
+    let mut seen = false;
+    loop {
+        if child.try_wait().unwrap().is_some() {
+            return Err("the client left by itself".to_owned());
+        }
+        if began.elapsed() > WATCHDOG {
+            return Err(format!(
+                "no thread of the client was blocked writing a pipe within {WATCHDOG:?} \
+                 (the kernel must show a wait channel in /proc/<pid>/task/<tid>/wchan)"
+            ));
+        }
+        let blocked = blocked_writing_a_pipe(child);
+        if blocked && seen {
+            return Ok(());
+        }
+        seen = blocked;
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Waits for a child to exit by itself, for at most `within`. `None` if it did not.
 fn exit_within(child: &mut Child, within: Duration) -> Option<(Option<i32>, Duration)> {
     let began = Instant::now();
@@ -1038,18 +1096,21 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
             // What it logs about the joins that fail is not what this is about.
             .stderr(Stdio::null());
         let (exited, room, unread) = tokio::task::spawn_blocking(move || {
-            let mut child = command.spawn().unwrap();
+            let mut child = Reaped::spawn(&mut command).unwrap();
             // The command holds the client's end too: the pipe ends when the client's does.
             drop(command);
             let mut stdin = child.stdin.take().unwrap();
-            stdin.write_all(&b"junk\n".repeat(30_000)).unwrap();
+            let junk = b"junk\n".repeat(30_000);
+            stdin.write_all(&junk).unwrap();
             stdin.flush().unwrap();
-            // Long enough for the client to have read all of it and filled the pipe.
-            std::thread::sleep(Duration::from_millis(1500));
-            assert!(
-                child.try_wait().unwrap().is_none(),
-                "the client left by itself"
-            );
+            // Not a guess at how long the client needs: it is waited for until its writer
+            // is blocked on the full pipe nobody reads. A readiness that fails kills and
+            // reaps the client before the test does.
+            if let Err(why) = wait_until_output_is_blocked(&mut child) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("{way}: {why}");
+            }
 
             if way == "the end of standard input" {
                 drop(stdin);
@@ -1058,7 +1119,7 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
                 // Standard input stays open: it is the signal that is being tried.
                 std::mem::forget(stdin);
             }
-            let exited = exit_within(&mut child, Duration::from_secs(8));
+            let exited = exit_within(&mut child, WATCHDOG);
             if exited.is_none() {
                 child.kill().unwrap();
                 child.wait().unwrap();
@@ -1075,10 +1136,13 @@ async fn a_standard_output_nobody_reads_cannot_keep_the_process_from_leaving() {
         .unwrap();
 
         let (code, took) = exited.unwrap_or_else(|| {
-            panic!("{way}: still running 8 s later, with nobody reading its standard output")
+            panic!(
+                "{way}: still running {WATCHDOG:?} later, with nobody reading its standard output"
+            )
         });
+        eprintln!("{way}: left after {took:?}");
         assert_eq!(code, Some(0), "{way}: a clean exit");
-        assert!(took < Duration::from_secs(8), "{way}: {took:?}");
+        assert!(took < LEAVE_WITHIN, "{way}: {took:?}");
         // The pipe really was full: when the client left it had no room for a line, whatever
         // size the pipe was.
         assert!(

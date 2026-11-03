@@ -865,7 +865,7 @@ describe('the console on a phone', () => {
       'matchMedia',
       vi.fn(() => ({ matches: true, addEventListener: () => undefined, removeEventListener: () => undefined })),
     );
-    const props = { who: owner, origin, permissionsChanged: 0, onUnauthorized: () => undefined };
+    const props = { who: owner, origin, permissionsChanged: 0, onChannelsChanged: () => undefined, onUnauthorized: () => undefined };
     const view = render(<AdminConsole {...props} channels={[]} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Server' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Joining' }));

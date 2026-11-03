@@ -32,7 +32,7 @@ import (
 // that has a row.
 
 // rowSources are the files whose text holds the phases' rows.
-var rowSources = []string{"restricted.go", "preset.go"}
+var rowSources = []string{"restricted.go", "preset.go", "hiderows.go"}
 
 // gateRows names, for each gate with a restricted row, a phrase of the
 // phase that runs it.
@@ -44,7 +44,7 @@ var gateRows = map[string]string{
 	"store/invites.go Store.CloseInvite":               "R closes A's open link",
 	"store/sign_in_links.go makerMayActAsTx":           "the restricted operator's sign-in link after the cut",
 	"auth.go Server.guard":                             "on A's channel = %d %s, want 404",
-	"members.go Server.handleListChannelMembers":       "GET /v1/channels/{channel}/members",
+	"members.go Server.channelMembersGate":             "GET /v1/channels/{channel}/members",
 	"nets.go Server.handleListNets":                    "GET /v1/channels/{channel}/nets",
 	"store/members.go memberActorStandingTx":           "in its own channel",
 	"store/channels_rename.go channelRenameStandingTx": "PUT /v1/channels/{id}/name",
@@ -52,30 +52,34 @@ var gateRows = map[string]string{
 	"hooks.go Server.handleCreateHook":                 "a hook into A's channel",
 	"manifests.go Server.handlePutManifest":            "a manifest granting A's channel",
 	"store/members.go channelCreatePermission":         " channel under personal",
+
+	// Issue #1190: the gates #1017 left pending.
+	"principals.go Server.handleRenamePrincipal":     "the restricted operator renames a member",
+	"disable.go Server.handleRevokeAllCredentials":   "the restricted operator revokes every credential of a member",
+	"hooks.go Server.handleListHooks":                "the restricted operator's hook list",
+	"auth.go Server.channelSightFor":                 "R's link of two channels is listed with the one R is in",
+	"join.go Server.joinSettingsResponse":            "the joining settings R may read name the default channels it is in",
+	"store/guest_policy.go admittingOpenChannelsTx":  "an address join after its lister lost manage_channels",
+	"channels.go Server.handleChannelSettings":       "the restricted operator changes a channel's settings",
+	"store/members.go channelCreatorStandingTx":      "the restricted operator's channel creation is bounded",
+	"directory.go Server.handleListDirectoryMembers": "the directory of a member without see_member_directory",
+	"voice.go Server.voicePresenceChannel":           "a member without use_voice at the voice session",
+	"voice_occupancy.go Server.voiceOccupancyCaller": "a member without use_voice at voice occupancy",
+	"voice_share.go Server.handleVoiceShareStart":    "a member without share_screen at the share claim",
 }
 
-// pendingGates are the gates that have no restricted row yet, each with what
-// will give it one. The rule fails when a gate is in neither map; when a row
-// lands, the gate moves to gateRows, and the rule fails until it does.
+// pendingGates are the gates that have no restricted row yet, each with why
+// and what will give it one. The rule fails when a gate is in neither map;
+// when a row lands, the gate moves to gateRows, and the rule fails until it
+// does. Each of these is reachable only by a race or by a live media
+// participant, which a request-and-response row cannot make.
 var pendingGates = map[string]string{ // #nosec G101 -- gate names, not credentials
-	"principals.go Server.handleRenamePrincipal":     "#1190: the rename route's manage_members check",
-	"disable.go Server.handleRevokeAllCredentials":   "#1190: the revoke-all route's manage_members check",
-	"hooks.go Server.handleListHooks":                "#1190: the other_hooks name filter",
-	"auth.go Server.channelSightFor":                 "#1190: the channel names an operator answer may show",
-	"join.go Server.joinSettingsResponse":            "#1190: the other_open_channels name filter",
-	"store/guest_policy.go admittingOpenChannelsTx":  "#1190: the address join's per-channel re-check",
-	"channels.go Server.handleChannelSettings":       "#1190: the channel-settings route's restricted row",
-	"store/queries.go Store.ChannelSettings":         "#1190: the channel-settings route's restricted row",
-	"store/members.go channelCreatorStandingTx":      "#1190: a creator without manage_channels, bound in its own channel",
-	"directory.go Server.handleListDirectoryMembers": "#988: the directory rows (placeholder in preset.go)",
-	"voice.go Server.voicePresenceChannel":           "#1190: a member without use_voice at the voice routes",
-	"voice.go Server.voiceStillEntitled":             "#1190: a member without use_voice at the voice routes",
-	"voice_occupancy.go Server.voiceOccupancyCaller": "#1190: a member without use_voice at the voice routes",
-	"voice_presence.go Server.voiceEntitlement":      "#1190: a member without use_voice at the voice routes",
-	"voice_presence.go Server.voiceWithheldAmong":    "#1190: a member without use_voice at the voice routes",
-	"voice_share.go Server.handleVoiceShareStart":    "#1190: a member without share_screen at the share routes",
-	"voice_share.go voicePoller.shareEntitled":       "#1190: a member without share_screen at the share routes",
-	"voice_share.go voicePoller.sharesWithheld":      "#1190: a member without share_screen at the share routes",
+	"store/queries.go Store.ChannelSettings":      "reached only by a race with a cut after handleChannelSettings' own check (store/channels_v1_test.go); #1217: a seam-driven race row",
+	"voice.go Server.voiceStillEntitled":          "reached only by a cut landing between the handler's check and the token's signing (server voice_permission_test.go TestVoicePermissionTokenMintedBeforeTheFlip); #1217: needs a live LiveKit participant row",
+	"voice_presence.go Server.voiceEntitlement":   "the poller's per-participant check: needs a live LiveKit participant when use_voice is cut (server voice_permission_test.go); #1217: a live-media isolation row",
+	"voice_presence.go Server.voiceWithheldAmong": "closes the voice sockets of those who lost use_voice at the PUT; the permissions rule \"members can't hold use_voice while operators don't\" (409) means any column cut that closes an operator's socket also cuts the member column and closes B's open voice sockets, so a row needs a world without B's sockets (server voice_permission_test.go); #1217: a live-media isolation row",
+	"voice_share.go voicePoller.shareEntitled":    "the claim's re-read under the room's claims: needs a live share (server voice_share_revoke_test.go); #1217: a live-media isolation row",
+	"voice_share.go voicePoller.sharesWithheld":   "ends a live share when share_screen is cut: needs a live share (server voice_share_revoke_test.go); #1217: a live-media isolation row",
 }
 
 // gateKeys reads the gates of permissionGates out of the server's test file,
