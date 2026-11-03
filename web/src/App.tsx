@@ -1671,6 +1671,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 channels={channels.channels}
                 names={memberNames}
                 permissionsChanged={permissionsTick}
+                onChannelsChanged={refreshChannels}
                 onUnauthorized={onUnauthorized}
               />
             ) : null

@@ -161,7 +161,13 @@ export function ActionsMenu({
 // box, a link or an image, whose own menus people use), and a long press.
 // Android opens the context menu on a long press itself; iOS does not, so
 // the timer is the way there. Both only ever open.
-export function useOpeners(enabled: boolean, open: () => void) {
+//
+// A press inside a dialog is left alone by default, so a dialog's own content
+// keeps the browser's menu. A row that is itself drawn inside a dialog (the
+// console's Channels section, in the Settings drawer, issue #1021) opts in
+// with `insideDialog`; a press in a text box, a link, an image or the menu is
+// still left alone.
+export function useOpeners(enabled: boolean, open: () => void, options: { readonly insideDialog?: boolean } = {}) {
   const timer = useRef<number | null>(null);
   const start = useRef<{ readonly x: number; readonly y: number } | null>(null);
   useEffect(() => () => {
@@ -172,7 +178,8 @@ export function useOpeners(enabled: boolean, open: () => void) {
     timer.current = null;
     start.current = null;
   };
-  const own = (target: EventTarget) => !(target instanceof Element && target.closest('textarea, input, a, img, [role="menu"], [role="dialog"]') !== null);
+  const skipped = options.insideDialog === true ? 'textarea, input, a, img, [role="menu"]' : 'textarea, input, a, img, [role="menu"], [role="dialog"]';
+  const own = (target: EventTarget) => !(target instanceof Element && target.closest(skipped) !== null);
   if (!enabled) return {};
   return {
     onContextMenu: (event: { readonly target: EventTarget; preventDefault: () => void }) => {
