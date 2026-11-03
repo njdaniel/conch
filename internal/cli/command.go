@@ -55,6 +55,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runDownload(ctx, args[1:], stdout, stderr)
 	case "nets":
 		return runNets(ctx, args[1:], stdout, stderr)
+	case "channels":
+		return runChannels(ctx, args[1:], stdout, stderr)
 	case "admin":
 		return runAdmin(ctx, args[1:], stdin, stdout, stderr)
 	case "voice":
@@ -119,9 +121,16 @@ Usage:
   conch nets archive [--server <url>] <channel> <name>
   conch nets add [--server <url>] <channel> <name> <principal-id> [--monitor]
   conch nets remove [--server <url>] <channel> <name> <principal-id>
+  conch channels list [--server <url>] [--json] [--all]
+  conch channels join [--server <url>] [--json] <channel>
+  conch channels leave [--server <url>] [--json] <channel>
+  conch channels create [--server <url>] [--json] [--private] <name>
   conch admin channel create [--server <url>] [--json] <name>
+  conch admin channel settings [--server <url>] [--json] [--public|--private] [--default on|off] <channel>
   conch admin principal create [--server <url>] [--json] --kind human|agent <name>
   conch admin principal disable|enable [--server <url>] [--json] <id>
+  conch admin principal voice [--server <url>] [--json] <id> on|off
+  conch admin directory members [--server <url>] [--json]
   conch admin principal rename [--server <url>] [--json] <id> <name>
   conch admin principal role [--server <url>] [--json] [--owner|--no-owner] <id> operator|member
   conch admin principal list [--server <url>] [--json] [--state active|disabled|hidden] [--prefix <name-prefix>] [--invite <id>] [--kind human|agent]
@@ -136,8 +145,8 @@ Usage:
   conch admin member remove [--server <url>] [--json] <channel> <principal-id>
   conch admin manifest put [--server <url>] [--json] [--file <path>] <principal-id>
   conch admin manifest get [--server <url>] [--json] <principal-id>
-  conch admin invite create [--server <url>] [--json] --open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] [--join-as account]
-  conch admin invite list [--server <url>] [--json] [--state open|used|expired|closed] [--kind personal|open] [--created-by <id>]
+  conch admin invite create [--server <url>] [--json] [--expires <duration|RFC3339> | --never-expires] [--uses <n>] [--credential-days <n>]
+  conch admin invite list [--server <url>] [--json] [--state open|used|expired|closed] [--created-by <id>]
   conch admin invite close|joiners [--server <url>] [--json] <id>
   conch admin invite disable-joiners [--server <url>] [--json] [--yes] <id>
   conch admin invite pause|resume|status [--server <url>] [--json]
@@ -146,7 +155,7 @@ Usage:
   conch admin principal sign-in-link [--server <url>] [--json] [--purpose sign_in|reset|enrollment] [--expires <duration|RFC3339>] <id>
   conch admin sign-in-link close [--server <url>] [--json] <id>
   conch admin join status [--server <url>] [--json]
-  conch admin join set [--server <url>] [--json] [--open-joining off|account] [--guests off] [--paused on|off] [--voice on|off] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels]
+  conch admin join set [--server <url>] [--json] [--open-signup on|off] [--link-expiry <duration|0>] [--open-joining off|account] [--guests off] [--paused on|off] [--voice on|off] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels]
   conch admin guest list [--server <url>] [--json] [--state active|ended|converted] [--origin address|invite]
   conch admin guest end [--server <url>] [--json] <id>
   conch admin guest end-all [--server <url>] [--json] [--origin address|invite] [--invite <id>] [--dry-run | --yes]
