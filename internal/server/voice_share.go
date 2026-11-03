@@ -495,8 +495,7 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 		}
 		return schema.VoiceShareV1{}, err
 	}
-	identity := voiceIdentity(principalID)
-	found, err := p.s.lk.UpdateParticipant(lctx, room.RoomName, identity, livekit.Permission{CanPublish: true, ScreenShare: true})
+	found, err := p.setPublishPermission(lctx, room.RoomName, principalID, voiceRolePerson, publishInput{canPublish: true, share: true})
 	if err != nil || !found {
 		if held == nil {
 			p.undoClaim(r, mine)
@@ -777,9 +776,7 @@ func (p *voicePoller) grantCompanion(ctx context.Context, r *voiceRoomState, roo
 	// Its own canSubscribe, as the pass listed it: LiveKit replaces the
 	// permission whole, and a publish-only companion must not be handed the
 	// right to receive everyone's voice by being given its screen.
-	identity := voiceParticipantIdentity(principalID, voiceRoleScreen)
-	perm := livekit.SourcePermission(c.screenSubscribes, true, livekit.SourceScreenShare)
-	if _, err := p.s.lk.UpdateParticipant(ctx, room.RoomName, identity, perm); err != nil {
+	if _, err := p.setPublishPermission(ctx, room.RoomName, principalID, voiceRoleScreen, publishInput{canSubscribe: c.screenSubscribes, share: true}); err != nil {
 		slog.WarnContext(ctx, "voice: granting the screen to a companion failed; the next claim restores it", "channel", room.ChannelID, "principal", principalID, "error", err)
 	}
 }
@@ -793,8 +790,7 @@ func (p *voicePoller) grantCompanion(ctx context.Context, r *voiceRoomState, roo
 func (p *voicePoller) withdrawCompanion(ctx context.Context, roomName string, channelID, principalID int64, role voiceRole, canSubscribe bool) bool {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
 	defer cancel()
-	identity := voiceParticipantIdentity(principalID, role)
-	if _, err := p.s.lk.UpdateParticipant(ctx, roomName, identity, livekit.SourcePermission(canSubscribe, false)); err != nil {
+	if _, err := p.setPublishPermission(ctx, roomName, principalID, role, publishInput{canSubscribe: canSubscribe}); err != nil {
 		slog.WarnContext(ctx, "voice: withdrawing a companion's screen-share sources failed; passes retry", "channel", channelID, "principal", principalID, "participant", role.label(), "error", err)
 		return false
 	}
@@ -969,7 +965,7 @@ func (p *voicePoller) endShareLocked(r *voiceRoomState, principalID int64, reaso
 func (p *voicePoller) withdrawLocked(ctx context.Context, roomName string, channelID, principalID int64, canPublish bool) bool {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
 	defer cancel()
-	if _, err := p.s.lk.UpdateParticipant(ctx, roomName, voiceIdentity(principalID), livekit.Permission{CanPublish: canPublish}); err != nil {
+	if _, err := p.setPublishPermission(ctx, roomName, principalID, voiceRolePerson, publishInput{canPublish: canPublish}); err != nil {
 		slog.WarnContext(ctx, "voice: withdrawing screen-share sources failed; passes retry", "channel", channelID, "principal", principalID, "error", err)
 		return false
 	}

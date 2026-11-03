@@ -330,6 +330,7 @@ const (
 	sourceMicrophone       = "MICROPHONE"
 	sourceScreenShare      = "SCREEN_SHARE"
 	sourceScreenShareAudio = "SCREEN_SHARE_AUDIO"
+	sourceCamera           = "CAMERA"
 )
 
 // Permission is what UpdateParticipant sets a connected participant's
@@ -346,6 +347,10 @@ type Permission struct {
 	// ScreenShare adds the screen-share sources to the microphone: a screen
 	// and its sound. It means nothing without CanPublish.
 	ScreenShare bool
+	// Camera adds the camera to the microphone (ADR-015). It means nothing
+	// without CanPublish, and independent of ScreenShare: each term only adds
+	// its own sources.
+	Camera bool
 
 	// explicit, with sources, is the per-source form (SourcePermission): the
 	// list of sources is exactly sources, and CanPublish and ScreenShare are
@@ -368,6 +373,7 @@ type Source string
 const (
 	SourceScreenShare      Source = sourceScreenShare
 	SourceScreenShareAudio Source = sourceScreenShareAudio
+	SourceCamera           Source = sourceCamera
 )
 
 // SourcePermission is the per-source form of Permission, for a participant
@@ -379,7 +385,7 @@ const (
 //
 // No sources with canPublish false is a participant that publishes nothing.
 // No sources with canPublish true would read as every source to LiveKit, and
-// a source other than the two exported is not a thing conchd grants:
+// a source other than the three exported is not a thing conchd grants:
 // UpdateParticipant refuses both before any request is made.
 func SourcePermission(canSubscribe, canPublish bool, sources ...Source) Permission {
 	return Permission{CanPublish: canPublish, explicit: true, noSubscribe: !canSubscribe, listed: append([]Source{}, sources...)}
@@ -394,8 +400,8 @@ func (p Permission) check() error {
 		return errors.New("livekit: a permission that may publish must name its sources: none means every source")
 	}
 	for _, s := range p.listed {
-		if s != SourceScreenShare && s != SourceScreenShareAudio {
-			return errors.New("livekit: a per-source permission may name only the screen-share sources")
+		if s != SourceScreenShare && s != SourceScreenShareAudio && s != SourceCamera {
+			return errors.New("livekit: a per-source permission may name only the screen-share and camera sources")
 		}
 	}
 	return nil
@@ -411,10 +417,14 @@ func (p Permission) sources() []string {
 		}
 		return out
 	}
+	out := []string{sourceMicrophone}
 	if p.ScreenShare {
-		return []string{sourceMicrophone, sourceScreenShare, sourceScreenShareAudio}
+		out = append(out, sourceScreenShare, sourceScreenShareAudio)
 	}
-	return []string{sourceMicrophone}
+	if p.Camera {
+		out = append(out, sourceCamera)
+	}
+	return out
 }
 
 // participantPermission is the permission ListParticipants reports for a
