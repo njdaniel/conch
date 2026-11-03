@@ -204,6 +204,72 @@ func (s *Store) newestVisibleMessageID(ctx context.Context, channelID int64, rea
 	return id, nil
 }
 
+// ChannelAuthor is one author named by ListChannelAuthors.
+type ChannelAuthor struct {
+	PrincipalID int64
+	Name        string
+	Kind        PrincipalKind
+}
+
+// ListChannelAuthors answers, for each of ids, whether that principal
+// authored at least one message in channelID that reader may read, and names
+// the ones that did, ordered by id (design §13.5). "May read" is
+// messageVisible, the condition every message read here embeds, in the same
+// statement: a whisper the reader was not sent, or a message before the
+// reader's history bound, does not make its author known. An id that
+// authored nothing the reader may read is absent, whether or not the
+// principal exists, so the answer discloses only what a visible message
+// already disclosed to the channel. Authors may be departed, disabled or
+// ended guests: the message stays attributed. At most MaxChannelAuthorIDs
+// distinct positive ids are asked; more is an error.
+func (s *Store) ListChannelAuthors(ctx context.Context, channelID int64, reader Reader, ids []int64) ([]ChannelAuthor, error) {
+	distinct := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id > 0 {
+			distinct[id] = struct{}{}
+		}
+	}
+	if len(distinct) > schema.MaxChannelAuthorIDs {
+		return nil, fmt.Errorf("store: list channel authors: %d ids asked, at most %d", len(distinct), schema.MaxChannelAuthorIDs)
+	}
+	if len(distinct) == 0 {
+		return []ChannelAuthor{}, nil
+	}
+	scoped, predArgs := visibilityArgs(reader)
+	args := make([]any, 0, len(distinct)+1+len(predArgs))
+	marks := make([]string, 0, len(distinct))
+	for id := range distinct {
+		marks = append(marks, "?")
+		args = append(args, id)
+	}
+	args = append(append(args, channelID), predArgs...)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT p.id, p.name, p.kind FROM principals p
+		 WHERE p.id IN (`+strings.Join(marks, ",")+`)
+		   AND EXISTS (SELECT 1 FROM messages m
+		               WHERE m.channel_id = ? AND m.author_id = p.id AND `+messageVisible(scoped)+`)
+		 ORDER BY p.id`, // #nosec G202 -- only "?" marks and constant conditions are joined; every value is an argument
+		args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list authors of channel %d: %w", channelID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []ChannelAuthor{}
+	for rows.Next() {
+		var a ChannelAuthor
+		var kind string
+		if err := rows.Scan(&a.PrincipalID, &a.Name, &kind); err != nil {
+			return nil, fmt.Errorf("store: list authors of channel %d: %w", channelID, err)
+		}
+		a.Kind = PrincipalKind(kind)
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list authors of channel %d: %w", channelID, err)
+	}
+	return out, nil
+}
+
 // historyWatermarkTx is the history bound a guest admitted to channelID now
 // gets (issue #705): the id of the channel's last message, or 0 when it has
 // none. Message ids only grow, so every later message of the channel has a

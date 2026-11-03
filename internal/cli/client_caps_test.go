@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -30,39 +31,110 @@ func TestListReadsRefuseOversizedBody(t *testing.T) {
 		key  string
 		cap  int64
 		read func(*Client) error
+		// okErr is what a body at the cap may still fail with after it has
+		// been read whole (a check made on the decoded document).
+		okErr string
 	}{
 		{"channel directory", "channels", maxChannelDirectoryBody, func(c *Client) error {
 			_, err := c.ChannelDirectory(ctx, false)
 			return err
-		}},
+		}, ""},
 		{"channel directory, all", "channels", maxChannelDirectoryBody, func(c *Client) error {
 			_, err := c.ChannelDirectory(ctx, true)
 			return err
-		}},
+		}, ""},
 		{"directory members", "members", maxDirectoryMembersBody, func(c *Client) error {
 			_, err := c.DirectoryMembers(ctx, 0, 200)
 			return err
-		}},
+		}, ""},
 		{"member links", "invites", maxMemberLinksBody, func(c *Client) error {
 			_, err := c.ListMemberLinks(ctx)
 			return err
-		}},
+		}, ""},
 		{"link joiners", "joiners", maxJoinersBody, func(c *Client) error {
 			_, err := c.MemberLinkJoiners(ctx, 3)
 			return err
-		}},
+		}, ""},
 		{"channel members", "members", maxChannelMembersBody, func(c *Client) error {
 			_, err := c.ListChannelMembers(ctx, "general")
 			return err
-		}},
+		}, ""},
 		{"principals", "principals", maxPrincipalsBody, func(c *Client) error {
 			_, err := c.ListPrincipals(ctx, PrincipalListFilter{})
 			return err
-		}},
+		}, ""},
 		{"guests", "guests", maxGuestsBody, func(c *Client) error {
 			_, err := c.ListGuests(ctx, GuestListFilter{})
 			return err
-		}},
+		}, ""},
+		{"channel list", "channels", maxChannelListBody, func(c *Client) error {
+			_, err := c.ListChannels(ctx)
+			return err
+		}, ""},
+		{"v1 messages", "messages", pageBody(1, messageRowBound), func(c *Client) error {
+			_, err := c.ListMessages(ctx, "general", 0, 1)
+			return err
+		}, ""},
+		{"v2 messages", "messages", pageBody(1, messageRowBound), func(c *Client) error {
+			_, err := c.ListMessagesV2(ctx, "general", 0, 1)
+			return err
+		}, ""},
+		{"v2 messages, newest first", "messages", pageBody(1, messageRowBound), func(c *Client) error {
+			_, err := c.ListMessagesV2Page(ctx, "general", MessagesPage{NewestFirst: true}, 1)
+			return err
+		}, ""},
+		{"thread", "messages", pageBody(1, messageRowBound), func(c *Client) error {
+			_, err := c.ListThreadV2(ctx, "general", 5, 0, 1)
+			return err
+		}, ""},
+		{"search", "messages", pageBody(1, messageRowBound), func(c *Client) error {
+			_, err := c.SearchMessagesV2(ctx, "general", "words", 0, 1)
+			return err
+		}, ""},
+		{"reports", "reports", pageBody(1, reportRowBound), func(c *Client) error {
+			_, err := c.ListProblemReports(ctx, 1)
+			return err
+		}, ""},
+		{"reports, whole page", "reports", pageBody(maxReportPage, reportRowBound), func(c *Client) error {
+			_, err := c.ListProblemReports(ctx, 0)
+			return err
+		}, ""},
+		{"nets", "nets", maxNetsBody, func(c *Client) error {
+			_, err := c.ListNets(ctx, "general")
+			return err
+		}, ""},
+		{"read state", "read_state", maxReadStateBody, func(c *Client) error {
+			_, err := c.ListReadState(ctx)
+			return err
+		}, ""},
+		{"credentials", "credentials", maxCredentialsBody, func(c *Client) error {
+			_, err := c.ListCredentials(ctx, 3)
+			return err
+		}, ""},
+		{"runs", "runs", pageBody(1, runRowBound), func(c *Client) error {
+			_, err := c.ListRuns(ctx, "general", 0, RunsPage{}, 1)
+			return err
+		}, ""},
+		{"activity", "activity", pageBody(1, activityRowBound), func(c *Client) error {
+			_, err := c.ListActivity(ctx, 7, 0, 1)
+			return err
+		}, ""},
+		{"interventions", "interventions", pageBody(1, interventionRowBound), func(c *Client) error {
+			_, err := c.ListInterventions(ctx, 7, 0, 1)
+			return err
+		}, ""},
+		{"a limit past the page is read as the page", "runs", pageBody(maxRunPage, runRowBound), func(c *Client) error {
+			_, err := c.ListRuns(ctx, "general", 0, RunsPage{}, 100000)
+			return err
+		}, ""},
+		{"device links", "sign_in_links", maxDeviceLinksBody, func(c *Client) error {
+			_, err := c.ListOwnDeviceLinks(ctx)
+			return err
+		}, ""},
+		{"voice occupancy", "channels", maxVoiceOccupancyBody, func(c *Client) error {
+			_, err := c.VoiceOccupancy(ctx)
+			return err
+		}, "invalid voice occupancy"},
 	}
 	for _, tt := range tests {
 		for _, over := range []bool{true, false} {
@@ -87,7 +159,7 @@ func TestListReadsRefuseOversizedBody(t *testing.T) {
 				switch {
 				case over && (err == nil || !strings.Contains(ErrorLine(err), "larger than")):
 					t.Fatalf("error = %v, want the client's refusal (larger than ...)", err)
-				case !over && err != nil:
+				case !over && err != nil && (tt.okErr == "" || !strings.Contains(err.Error(), tt.okErr)):
 					t.Fatalf("a body at the cap: %v", err)
 				}
 			})
@@ -113,6 +185,9 @@ func TestPagedListsStopAtThePageLimit(t *testing.T) {
 		{"directory members", []string{"admin", "directory", "members"}, func(n int64) any {
 			return schema.ServerMembersResponseV1{Members: []schema.ServerMemberV1{}, After: n + 1, Scope: schema.DirectoryScopeEveryone}
 		}},
+		{"thread", []string{"thread", "--server", "{url}", "general", "5"}, func(n int64) any {
+			return schema.ListMessagesResponseV2{Messages: []schema.MessageV2{}, NextAfter: n}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -125,7 +200,13 @@ func TestPagedListsStopAtThePageLimit(t *testing.T) {
 			}))
 			defer srv.Close()
 			var stdout, stderr bytes.Buffer
-			err := RunWithStdin(context.Background(), append(tc.args, "--server", srv.URL), strings.NewReader(""), &stdout, &stderr, "vtest")
+			args := append([]string(nil), tc.args...)
+			if i := slices.Index(args, "{url}"); i >= 0 {
+				args[i] = srv.URL // flags come before the positional arguments
+			} else {
+				args = append(args, "--server", srv.URL)
+			}
+			err := RunWithStdin(context.Background(), args, strings.NewReader(""), &stdout, &stderr, "vtest")
 			if err == nil || !strings.Contains(err.Error(), "pages do not end") {
 				t.Fatalf("err = %v, want the page-limit refusal", err)
 			}

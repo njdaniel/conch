@@ -7,11 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // The sockets: what B's own open sockets receive while A is active, from
@@ -266,4 +269,205 @@ func (s *bSockets) frames() int {
 		n += len(f.received())
 	}
 	return n
+}
+
+// The directory signal (issue #993, community-model §13.6, ADR-014).
+// conch.directory_changed.v1 goes to the human events sockets of the viewers
+// whose answer to GET /v1/directory/members may have changed, and it carries
+// nothing: no id, no name, no count, no reason. In the community as the run
+// has it (members hold see_member_directory, so the list is everyone) the
+// rows are:
+//
+//   - D1: a membership change (ann added to and removed from a channel of A's
+//     that ola of B is in) does not change any directory, so no events socket
+//     of anyone carries a frame: not ann's, the operator's, ola's, bob's nor
+//     an agent's.
+//   - D2: ann, of A, is renamed. Her name is public in the community's
+//     directory, so every human socket is owed exactly one frame, bob's and
+//     ola's of B included, and an agent's is owed none (an agent has no
+//     directory, O11); the frame names neither her nor her group.
+//   - D3: every frame is exactly the wire form, nothing more.
+//
+// A quiet socket is checked after the owed ones have their frame and a
+// further ccQuiet has passed (the frame is coalesced under the 250 ms roster
+// floor, so one owed to anyone else would have gone too).
+
+// directoryChanged counts f's conch.directory_changed.v1 frames, and fails
+// on one that is not exactly the wire form (D3).
+func directoryChanged(f *feed) (int, error) {
+	n := 0
+	for _, fr := range f.received() {
+		if !strings.Contains(string(fr), schema.DirectoryChangedSchemaV1) {
+			continue
+		}
+		if string(fr) != directoryChangedWire {
+			return n, fmt.Errorf("%s carried %s, want exactly %s", f.what, fr, directoryChangedWire)
+		}
+		n++
+	}
+	return n, nil
+}
+
+// directoryChangedRows runs D1–D3 with bob's sockets (bsock) and sockets of
+// its own, and returns how many sockets it looked at. Ann is left with her
+// own name and in no channel of cove's.
+func (w *world) directoryChangedRows(bsock *bSockets) (int, error) {
+	ann, ola := w.a.people[0], w.b.people[2]
+	cove := w.aName("cove-directory")
+	w.marks.str("A's channel name", cove)
+	if err := w.op.call(http.MethodPost, "/v0/channels", schema.CreateChannelRequest{Name: cove}, nil); err != nil {
+		return 0, err
+	}
+	open := func(a api, what, channel string) (*feed, error) {
+		f, r, err := dialSocket(a, what, "/v1/events/ws", url.Values{"channel": {channel}}, false)
+		if err != nil {
+			return nil, err
+		}
+		if f == nil {
+			return nil, fmt.Errorf("%s: status %d %s", what, r.status, w.h.redact(string(r.body)))
+		}
+		return f, waitFor(what+" to send its roster", 30*time.Second, func() (bool, string) {
+			return len(f.received()) > 0, "no frame"
+		})
+	}
+	var owed, quiet []*feed
+	for _, s := range []struct {
+		a             api
+		what, channel string
+	}{
+		{ann.api, "ann's events socket on " + w.a.main(), w.a.main()},
+		{w.op, "the operator's events socket on " + w.a.main(), w.a.main()},
+		{ola.api, "ola's events socket on " + w.b.main(), w.b.main()},
+	} {
+		f, err := open(s.a, s.what, s.channel)
+		if err != nil {
+			return 0, err
+		}
+		owed = append(owed, f)
+	}
+	for _, s := range []struct {
+		a             api
+		what, channel string
+	}{
+		{w.a.agent.api, "A's agent's events socket on " + w.a.main(), w.a.main()},
+		{w.b.agent.api, "B's agent's events socket on " + w.b.main(), w.b.main()},
+	} {
+		f, err := open(s.a, s.what, s.channel)
+		if err != nil {
+			return 0, err
+		}
+		quiet = append(quiet, f)
+	}
+	// Bob's are human: owed what the other humans are.
+	for _, f := range bsock.feeds {
+		if strings.Contains(f.what, "/v1/events/ws") {
+			owed = append(owed, f)
+		}
+	}
+	all := append(append([]*feed(nil), owed...), quiet...)
+	pause := func() error {
+		select {
+		case <-stopCtx.Done():
+			return errInterrupted
+		case <-time.After(ccQuiet):
+			return nil
+		}
+	}
+	// Whatever the setup above owed has had a floor to go.
+	if err := pause(); err != nil {
+		return 0, err
+	}
+	step := func(row string, act func() error, want []*feed) error {
+		base := map[*feed]int{}
+		for _, f := range all {
+			n, err := directoryChanged(f)
+			if err != nil {
+				return fmt.Errorf("%s: %w", row, err)
+			}
+			base[f] = n
+		}
+		if err := act(); err != nil {
+			return fmt.Errorf("%s: %w", row, err)
+		}
+		for _, f := range want {
+			if err := waitFor(f.what+" to carry directory_changed ("+row+")", 30*time.Second, func() (bool, string) {
+				n, err := directoryChanged(f)
+				if err != nil {
+					return true, ""
+				}
+				return n > base[f], fmt.Sprintf("%d frames, %d of them directory_changed", len(f.received()), n)
+			}); err != nil {
+				return err
+			}
+		}
+		if err := pause(); err != nil {
+			return err
+		}
+		for _, f := range all {
+			n, err := directoryChanged(f)
+			if err != nil {
+				return fmt.Errorf("%s: %w", row, err)
+			}
+			expected := 0
+			if slices.Contains(want, f) {
+				expected = 1
+			}
+			if got := n - base[f]; got != expected {
+				return fmt.Errorf("%s: %s carried %d directory_changed frames, want %d", row, f.what, got, expected)
+			}
+			if ended, _ := f.ended(); ended {
+				return fmt.Errorf("%s: %s closed", row, f.what)
+			}
+		}
+		return nil
+	}
+	member := func(method string) func() error {
+		return func() error {
+			return w.op.call(method, fmt.Sprintf("/v1/channels/%s/members/%d", url.PathEscape(cove), ann.id), nil, nil)
+		}
+	}
+	// ola is in cove too, so that a change of its members is as visible to B
+	// as it can be made.
+	if err := w.op.call(http.MethodPut, fmt.Sprintf("/v1/channels/%s/members/%d", url.PathEscape(cove), ola.id), nil, nil); err != nil {
+		return 0, err
+	}
+	if err := pause(); err != nil {
+		return 0, err
+	}
+	rename := func(name string) func() error {
+		return func() error {
+			return w.op.call(http.MethodPut, fmt.Sprintf("/v1/principals/%d/name", ann.id), schema.RenamePrincipalRequestV1{Name: name}, nil)
+		}
+	}
+	original := ann.name
+	steps := []struct {
+		row  string
+		act  func() error
+		want []*feed
+	}{
+		{"D1/D3: ann added to cove, ola of B in it", member(http.MethodPut), nil},
+		{"D1/D3: ann removed from cove", member(http.MethodDelete), nil},
+		{"D1/D3: ola removed from cove", func() error {
+			return w.op.call(http.MethodDelete, fmt.Sprintf("/v1/channels/%s/members/%d", url.PathEscape(cove), ola.id), nil, nil)
+		}, nil},
+		{"D2/D3: ann renamed", rename(w.aName("ann-renamed")), owed},
+		{"D2/D3: ann renamed back", rename(original), owed},
+	}
+	for _, s := range steps {
+		if err := step(s.row, s.act, s.want); err != nil {
+			return 0, err
+		}
+	}
+	// Nothing of A on B's own sockets of this phase, ola's and B's agent's.
+	for _, f := range []*feed{owed[2], quiet[1]} {
+		for i, fr := range f.received() {
+			if leaks := w.leaks(fr, asked{}); len(leaks) > 0 {
+				return 0, fmt.Errorf("frame %d on %s holds %s", i, f.what, strings.Join(leaks, "; "))
+			}
+		}
+	}
+	for _, f := range append(append([]*feed(nil), owed[:3]...), quiet...) {
+		f.close()
+	}
+	return len(all), nil
 }

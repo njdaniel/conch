@@ -241,8 +241,8 @@ func (s *Store) channelDirectoryAll(ctx context.Context, viewerID int64) ([]Chan
 		        g.principal_id, p.name, p.kind
 		 FROM channels c
 		 LEFT JOIN channel_members m ON m.channel_id = c.id AND m.principal_id = ?
-		 LEFT JOIN channel_members g ON g.channel_id = c.id AND g.manages = 1
-		 LEFT JOIN principals p ON p.id = g.principal_id
+		 LEFT JOIN (channel_members g JOIN principals p ON p.id = g.principal_id AND `+listedManagerSQL+`)
+		        ON g.channel_id = c.id AND g.manages = 1
 		 ORDER BY c.id ASC, g.principal_id ASC`, viewerID)
 	if err != nil {
 		return nil, fmt.Errorf("store: channel directory: %w", err)
