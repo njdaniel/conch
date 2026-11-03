@@ -377,7 +377,7 @@ describe('an operator renames the open channel', () => {
     [
       'a name already taken',
       () => Promise.resolve(json({ code: 'channel_exists', message: 'taken' }, 409)),
-      'There is already a channel with that name, or one that reads the same, perhaps one you are not in. Choose another name.',
+      'That name is taken',
     ],
     ['no answer at all', () => Promise.reject(new TypeError('failed')), 'Cannot reach the server. Try again.'],
   ])('says so for %s, keeps the name as typed and renames nothing', async (_case, answer, line) => {
@@ -388,6 +388,7 @@ describe('an operator renames the open channel', () => {
     fireEvent.click(within(screen.getByRole('form', { name: 'Rename channel' })).getByRole('button', { name: 'Rename channel' }));
     const said = await within(nav()).findByText(line);
     expect(said.getAttribute('role')).toBe('status');
+    expect(said.textContent).not.toContain('perhaps one you are not in');
     expect(screen.getByRole('form', { name: 'Rename channel' }).hidden).toBe(false);
     expect(field().value).toBe(' lounge');
     expect(within(nav()).getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
