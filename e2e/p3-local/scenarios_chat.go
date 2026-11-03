@@ -635,9 +635,18 @@ func (s *suite) p309Restart() error {
 	if err := s.say(chNets, "p309after"); err != nil {
 		return err
 	}
-	if err := t.waitFor("a message sent after the restart", 30*time.Second, func(r []string) bool { return showing(r, "p309after") }); err != nil {
+	// The message socket has a backoff of its own, apart from the events
+	// socket whose recovery is checked above, and the failed send above
+	// replaced the "reconnecting" it would have shown. The restart can land
+	// just after a retry of the message socket, and under load while the
+	// server is still starting, so the next retry can be a full ceiling of
+	// the TUI's delay away; wait for that, and slack for a starved machine.
+	// A TUI that never shows the line still fails here.
+	sentAfter := time.Now()
+	if err := t.waitFor("a message sent after the restart", messageSocketCeiling+30*time.Second, func(r []string) bool { return showing(r, "p309after") }); err != nil {
 		return err
 	}
+	fmt.Printf("    the TUI showed the message %.1fs after it was sent\n", time.Since(sentAfter).Seconds())
 	rows := t.rows()
 	for _, word := range []string{"p309seedone", "p309seedtwo", "p309after"} {
 		if n := countRows(rows, word); n != 1 {
@@ -731,6 +740,9 @@ const (
 	// retryGrace is how long a server may be down with no retry seen before
 	// the TUI is judged not to retry: ten times its first delay.
 	retryGrace = 10 * time.Second
+	// messageSocketCeiling is the longest the TUI waits between two tries of a
+	// channel's message socket (maxResubscribeDelay in internal/cli/tui).
+	messageSocketCeiling = 30 * time.Second
 )
 
 // doublings is how many times a delay that starts at one second can double
