@@ -16,7 +16,20 @@
 // the Authorization header, and never put in a URL, a log call, the DOM or an
 // error: a failure is reported as a kind, never with the request in it.
 import { listActivityResponseV1, type AgentActivityV1 } from './schema/activity';
-import { listOwnCredentialsResponseV1, revokeAllCredentialsResponseV1, type OwnCredentialV1 } from './schema/credential';
+import {
+  createHookResponse,
+  hidePrincipalResponseV1,
+  roleChangeResponseV1,
+  voicePermissionResponseV1,
+  type CreateHookRequest,
+  type HidePrincipalResponseV1,
+  type InvitePermissionRequestV1,
+  type RoleChangeRequestV1,
+  type RoleChangeResponseV1,
+  type VoicePermissionRequestV1,
+  type VoicePermissionResponseV1,
+} from './schema/admin';
+import { createCredentialResponseV1, listOwnCredentialsResponseV1, revokeAllCredentialsResponseV1, type CreateCredentialRequestV1, type OwnCredentialV1 } from './schema/credential';
 import { errorV0, type ErrorV0 } from './schema/error';
 import {
   loginResponseV1,
@@ -126,9 +139,12 @@ import {
   redeemSignInLinkResponseV1,
   signInLinkPreviewV1,
   type CreateDeviceLinkRequestV1,
+  type CreateSignInLinkRequestV1,
+  type CreateSignInLinkResponseV1,
   type RedeemSignInLinkRequestV1,
   type SignInLinkPreviewRequestV1,
   type SignInLinkPreviewV1,
+  type SignInLinkPurpose,
   type SignInLinkV1,
 } from './schema/signin';
 import { listReadStateResponseV1, readStateV1, type MarkReadRequestV1, type ReadStateV1 } from './schema/readstate';
@@ -1137,6 +1153,75 @@ export async function putPermissions(request: PutPermissionsRequestV1): Promise<
 // needs manage_members and a recent proof; a refusal carries the server's code.
 export async function signOutPrincipalEverywhere(principal: number): Promise<InviteResult<null>> {
   return readDone(await authedSend(call('revokeAll', { principal })));
+}
+
+// The Members section's actions on a person (ADR-014 design §10.2, issue
+// #1020). Each is a write that needs a recent proof of the password
+// (reauth_required), which authedSend asks for; a refusal carries the
+// server's code and the permission it names. The page treats no answer as
+// true until the server has given it.
+
+// setRole changes a person's role and owner mark (PUT /v1/principals/{id}/role;
+// the owner's alone). The answer says what the change did to their sign-ins,
+// hooks and links.
+export async function setRole(id: number, request: RoleChangeRequestV1): Promise<InviteResult<RoleChangeResponseV1>> {
+  return readSent(await authedSend(call('setRole', { id }), request), roleChangeResponseV1);
+}
+
+// setVoicePermission switches one person's voice and screen share on or off
+// (PUT /v1/principals/{id}/voice-permission; manage_members).
+export async function setVoicePermission(id: number, voiceAllowed: boolean): Promise<InviteResult<VoicePermissionResponseV1>> {
+  const request: VoicePermissionRequestV1 = { voice_allowed: voiceAllowed };
+  return readSent(await authedSend(call('setVoicePermission', { id }), request), voicePermissionResponseV1);
+}
+
+// setInvitePermission switches one member's member links on or off (PUT
+// /v1/principals/{id}/invite-permission; manage_members).
+export async function setInvitePermission(id: number, mayInvite: boolean): Promise<InviteResult<null>> {
+  const request: InvitePermissionRequestV1 = { may_invite: mayInvite };
+  return readDone(await authedSend(call('setInvitePermission', { id }), request));
+}
+
+// hidePrincipal removes a person from the server's lists and ends their
+// access (POST /v1/principals/{id}/hide; manage_members).
+export async function hidePrincipal(id: number): Promise<InviteResult<HidePrincipalResponseV1>> {
+  return readSent(await authedSend(call('hidePrincipal', { id })), hidePrincipalResponseV1);
+}
+
+// disablePrincipal and enablePrincipal stop and allow a person's sign-in
+// (POST /v1/principals/{id}/disable and /enable; manage_members). Both are
+// repeatable.
+export async function disablePrincipal(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('disablePrincipal', { id })));
+}
+
+export async function enablePrincipal(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('enablePrincipal', { id })));
+}
+
+// makeLinkFor makes a one-use link that signs in as another person, or resets
+// their password or enrols them (POST /v1/principals/{id}/sign-in-links;
+// act_as_members). The code is in the answer alone, to be shown once.
+export async function makeLinkFor(id: number, purpose: SignInLinkPurpose): Promise<InviteResult<CreateSignInLinkResponseV1>> {
+  const request: CreateSignInLinkRequestV1 = { purpose };
+  return readSent(await authedSend(call('createPrincipalSignInLink', { id }), request), createSignInLinkResponseV1);
+}
+
+// issueCredentialFor issues a credential that acts as another person (POST
+// /v1/principals/{id}/credentials; act_as_members). The token is in the answer
+// alone, to be shown once.
+export async function issueCredentialFor(id: number, label: string): Promise<InviteResult<{ readonly secret: string }>> {
+  const request: CreateCredentialRequestV1 = { label };
+  const made = await readSent(await authedSend(call('createPrincipalCredential', { id }), request), createCredentialResponseV1);
+  return made.ok ? { ok: true, value: { secret: made.value.token } } : made;
+}
+
+// bindHookFor binds a webhook that posts in a channel as another person (POST
+// /v1/hooks; act_as_members). The token is in the answer alone, to be shown once.
+export async function bindHookFor(channel: string, principal: number, label: string): Promise<InviteResult<{ readonly secret: string }>> {
+  const request: CreateHookRequest = { channel, principal, ...(label === '' ? {} : { label }) };
+  const made = await readSent(await authedSend(call('createHook'), request), createHookResponse);
+  return made.ok ? { ok: true, value: { secret: made.value.token } } : made;
 }
 
 // revokeIssuedCredential revokes one credential an operator issued to someone

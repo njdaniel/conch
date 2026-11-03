@@ -2388,6 +2388,30 @@ export const createCredentialResponseV1 = object<CreateCredentialResponseV1>({
   token: str,
 });
 
+// schema.CreateHookRequest
+export interface CreateHookRequest {
+  channel: string;
+  principal: number;
+  label?: string;
+}
+
+export const createHookRequest = object<CreateHookRequest>({
+  channel: str,
+  principal: int,
+  label: optional(str),
+});
+
+// schema.CreateHookResponse
+export interface CreateHookResponse {
+  id?: number;
+  token: string;
+}
+
+export const createHookResponse = object<CreateHookResponse>({
+  id: optional(int),
+  token: str,
+});
+
 // schema.RenamePrincipalRequestV1
 export interface RenamePrincipalRequestV1 {
   name: string;

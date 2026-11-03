@@ -52,7 +52,10 @@ describe('the operation table', () => {
       [
         'changePassword',
         'convertGuest',
+        'createHook',
         'createInvite',
+        'createPrincipalCredential',
+        'createPrincipalSignInLink',
         'createSignInLink',
         'joinAccount',
         'joinGuest',
