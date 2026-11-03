@@ -62,9 +62,13 @@ func TestEventsNotificationsAreLiveAndScoped(t *testing.T) {
 	if got := nextNotification(t, ann).Body; got != "net1" {
 		t.Errorf("net notification body = %q", got)
 	}
-	if got := queuedNotifications(f.srv, f.p("olga").ID); got != 0 {
-		t.Errorf("outside-net reader has %d queued notifications, want none", got)
-	}
+	// notifyMessage queues the message for every human member of the channel;
+	// the visibility check happens when the subscriber drains its queue. So
+	// olga's queue holds net1 until her goroutine has read and dropped it: wait
+	// for that, rather than sampling it the instant ann's frame arrives.
+	waitFor(t, "the outside-net reader's queue to drain", func() bool {
+		return queuedNotifications(f.srv, f.p("olga").ID) == 0
+	})
 	f.mustPost(t, "nina", `{"body":"whisper to ann",`+whisperAudience(f.p("ann").ID)+`}`)
 	if got := nextNotification(t, ann).Body; got != "whisper to ann" {
 		t.Errorf("whisper notification body = %q", got)
