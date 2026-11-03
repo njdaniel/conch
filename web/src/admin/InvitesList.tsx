@@ -5,10 +5,15 @@
 // the channels the caller is in, and the server counts the rest: it is said
 // here as "and 2 other channels", never guessed at.
 //
+// Disable joiners is for a holder of manage_members. It asks first: a dry run
+// says how many people it would disable, the question names that number, and
+// one send follows a yes (which also closes the link). The question closes if
+// the permission goes.
+//
 // Closing is the maker's or a holder of manage_members's. The page disables
 // it for anyone else, with the reason; the server decides again and its
 // refusal is shown by its code and permission.
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../api';
 import type { InviteJoinerV1, InviteV2 } from '../schema/permission';
 import type { WhoAmIResponseV1 } from '../schema/principal';
@@ -36,6 +41,15 @@ export function InvitesList({ who, open, onUnauthorized }: { readonly who: WhoAm
   const [joiners, setJoiners] = useState<ReadonlyMap<number, readonly InviteJoinerV1[]>>(new Map());
   const [closing, setClosing] = useState<number | null>(null);
   const everyone = canDo(who, 'manage_members');
+  const [asking, setAsking] = useState<{ readonly id: number; readonly count: number } | null>(null);
+  const [sending, setSending] = useState(false);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const askButtons = useRef(new Map<number, HTMLButtonElement>());
+
+  // Losing manage_members closes the question, and nothing more is sent.
+  useEffect(() => {
+    if (!everyone) setAsking(null);
+  }, [everyone]);
 
   const read = useCallback(() => {
     void api.memberLinks().then((result) => {
@@ -80,9 +94,42 @@ export function InvitesList({ who, open, onUnauthorized }: { readonly who: WhoAm
     });
   }
 
+  function askDisable(invite: InviteV2) {
+    if (!everyone || sending) return;
+    setLine(null);
+    void api.disableJoiners(invite.id, true).then((result) => {
+      if (result.ok) setAsking({ id: invite.id, count: result.value.count });
+      else if (result.failure === 'unauthorized') onUnauthorized();
+      else setLine({ text: refusalLine(result, 'No one was disabled.'), refused: true });
+    });
+  }
+
+  function disable(invite: InviteV2) {
+    if (!everyone || sending) return;
+    setAsking(null);
+    setSending(true);
+    heading.current?.focus();
+    void api.disableJoiners(invite.id, false).then((result) => {
+      setSending(false);
+      if (result.ok) {
+        setLine({ text: result.value.count === 1 ? 'Disabled 1 person.' : `Disabled ${String(result.value.count)} people.`, refused: false });
+        setJoiners(new Map());
+        read();
+      } else if (result.failure === 'unauthorized') onUnauthorized();
+      else setLine({ text: refusalLine(result, 'No one was disabled.'), refused: true });
+    });
+  }
+
+  function cancelAsk(id: number) {
+    askButtons.current.get(id)?.focus();
+    setAsking(null);
+  }
+
   return (
     <div className="invites-list">
-      <h3>Invites</h3>
+      <h3 ref={heading} tabIndex={-1}>
+        Invites
+      </h3>
       {loadLine === null ? null : (
         <p role="alert" className="notice">
           {loadLine}
@@ -127,6 +174,21 @@ export function InvitesList({ who, open, onUnauthorized }: { readonly who: WhoAm
                       {seen === undefined ? `Show joiners of link ${String(invite.id)}` : `Hide joiners of link ${String(invite.id)}`}
                     </button>
                   )}
+                  {everyone && invite.joiners > 0 ? (
+                    <button
+                      type="button"
+                      disabled={sending}
+                      ref={(el) => {
+                        if (el === null) askButtons.current.delete(invite.id);
+                        else askButtons.current.set(invite.id, el);
+                      }}
+                      onClick={() => {
+                        askDisable(invite);
+                      }}
+                    >
+                      Disable joiners of link {invite.id}
+                    </button>
+                  ) : null}
                   {invite.closed_at !== undefined ? null : (
                     <button
                       type="button"
@@ -145,6 +207,37 @@ export function InvitesList({ who, open, onUnauthorized }: { readonly who: WhoAm
                   <span id={`invite-${String(invite.id)}-why`} className="hint">
                     {reasonFor('manage_members')}
                   </span>
+                )}
+                {!everyone || asking === null || asking.id !== invite.id ? null : (
+                  <div role="group" aria-label={`Disable joiners of link ${String(invite.id)}`}>
+                    <p>
+                      {asking.count === 0
+                        ? 'Nobody who joined through this link can be disabled.'
+                        : `This signs out and disables ${asking.count === 1 ? '1 person' : `${String(asking.count)} people`} who joined through this link, and closes the link too.`}
+                    </p>
+                    <span className="actions">
+                      {asking.count === 0 ? null : (
+                        <button
+                          type="button"
+                          autoFocus
+                          onClick={() => {
+                            disable(invite);
+                          }}
+                        >
+                          Disable {asking.count === 1 ? '1 person' : `${String(asking.count)} people`}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        autoFocus={asking.count === 0}
+                        onClick={() => {
+                          cancelAsk(invite.id);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </span>
+                  </div>
                 )}
                 {seen === undefined ? null : (
                   <ul aria-label={`Joiners of link ${String(invite.id)}`}>

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -59,5 +60,46 @@ func TestTSTypesFixtures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTSVocabularyModes checks the modes table against Vocabularies: every
+// vocabulary has a mode and nothing else does, each mode is one of the two,
+// the ones the issue names are tolerant, and no union's tag is (issue
+// #1051). cmd/schema-ts refuses the same table faults; this finds them with
+// Go alone.
+func TestTSVocabularyModes(t *testing.T) {
+	var want, got []string
+	for name := range Vocabularies {
+		want = append(want, name)
+	}
+	for name, mode := range TSVocabularyModes {
+		got = append(got, name)
+		if mode != TSStrict && mode != TSTolerant {
+			t.Errorf("TSVocabularyModes[%q] = %d, want TSStrict or TSTolerant", name, mode)
+		}
+	}
+	sort.Strings(want)
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("TSVocabularyModes lists %v,\nVocabularies lists %v", got, want)
+	}
+	for _, name := range []string{"Permission", "PermissionsWarning", "JoinWarning"} {
+		if TSVocabularyModes[name] != TSTolerant {
+			t.Errorf("TSVocabularyModes[%q] is strict; the type's contract says a client shows a value it does not know by its name", name)
+		}
+	}
+	for _, u := range TSUnions {
+		typ := reflect.TypeOf(u.Value)
+		for i := range typ.NumField() {
+			f := typ.Field(i)
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			if name != u.Tag {
+				continue
+			}
+			if TSVocabularyModes[f.Type.Name()] == TSTolerant {
+				t.Errorf("%s is tolerant, and is the tag of the union %s; a tagged validator has no variant for a value it does not know", f.Type.Name(), typ.Name())
+			}
+		}
 	}
 }

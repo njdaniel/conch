@@ -594,8 +594,8 @@ export function CommunityMembers({
           )}
         </>
       )}
-      {/* A list that is not told of directory changes (the admin console's,
-          until #1226) keeps a Refresh; the community panel follows the frame. */}
+      {/* A list that is not told of directory changes keeps a Refresh; the
+          community panel and the admin console's follow the frame. */}
       {directoryTick !== undefined ? null : (
         <button type="button" className="quiet" onClick={load}>
           Refresh

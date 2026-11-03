@@ -106,11 +106,12 @@ describe('local storage', () => {
     expect(code).not.toMatch(storageCallOtherKey);
     expect(code).not.toMatch(/\.(key|clear)\(|[sS]torage\.length/);
     // The preference methods take the key from their caller, and the only
-    // callers name the notification preferences' key and the setup card's
-    // (a per-account mark that the card was put off).
+    // callers name the notification preferences' key, the setup card's
+    // (a per-account mark that the card was put off) and the voice mode's
+    // (issue #1244).
     const api = withoutComments(sources['./api.ts'] ?? '');
-    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|setupCardKey\()/g) ?? []).toEqual([]);
-    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(4);
+    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|setupCardKey\(|voiceModeKey\b)/g) ?? []).toEqual([]);
+    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(6);
   });
 
   it('is not missed by the rules: a bare test of each', () => {
@@ -389,7 +390,7 @@ describe('the invite code', () => {
       .map(([path]) => path);
     expect(calling).toEqual(['./platform/operations.ts']);
     const asking = Object.entries(sources)
-      .filter(([path, code]) => !path.startsWith('./platform/') && /\b(previewInvite|redeemInvite|redeemInviteGuest|createInvite|listInvites|closeInvite)'/.test(code))
+      .filter(([path, code]) => !path.startsWith('./platform/') && /\b(previewInvite|previewMemberLink|redeemInvite|redeemInviteGuest|createInvite|createMemberLink|listInvites|closeInvite)'/.test(code))
       .map(([path]) => path);
     expect(asking).toEqual(['./api.ts']);
   });

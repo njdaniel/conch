@@ -106,6 +106,7 @@ function setup(claims: ShareClaimResult[] = [], features: ShareFeatures = chrome
   const rooms: StubRoom[] = [];
   const client = new VoiceClient({
     clock: new FakeClock(),
+    mode: { get: () => 'ptt', set: () => undefined },
     random: () => 0.5,
     createSession: () => Promise.resolve(session),
     report: () => Promise.resolve('ok'),

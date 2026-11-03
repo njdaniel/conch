@@ -503,13 +503,16 @@ export interface ChannelsSectionProps {
   readonly who: WhoAmIResponseV1;
   // Counts the times the server said the permissions changed.
   readonly refresh: number;
+  // Counts the server's words that the directory changed
+  // (conch.directory_changed.v1): the list is read again while shown.
+  readonly directoryTick: number;
   // The channel list the page keeps (the sidebar's) is read again after a
   // change made here.
   readonly onChannelsChanged: () => void;
   readonly onUnauthorized: () => void;
 }
 
-export function ChannelsSection({ who, refresh, onChannelsChanged, onUnauthorized }: ChannelsSectionProps) {
+export function ChannelsSection({ who, refresh, directoryTick, onChannelsChanged, onUnauthorized }: ChannelsSectionProps) {
   const shown = useContext(SettingsOpen);
   const phone = usePhone();
   const [rows, setRows] = useState<readonly ChannelListingV1[] | null>(null);
@@ -581,7 +584,7 @@ export function ChannelsSection({ who, refresh, onChannelsChanged, onUnauthorize
 
   useEffect(() => {
     if (shown && mayManage) read();
-  }, [shown, refresh, mayManage, read]);
+  }, [shown, refresh, directoryTick, mayManage, read]);
 
   // The channels list of the page follows a change made here.
   const changed = useCallback(

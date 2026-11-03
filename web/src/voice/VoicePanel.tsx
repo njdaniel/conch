@@ -81,7 +81,7 @@ export function busiest(channels: readonly ChannelV0[], occupancy: InVoice, view
   let best: { readonly channel: ChannelV0; readonly count: number } | null = null;
   let found = 0;
   for (const channel of channels) {
-    const count = occupancy.get(channel.id) ?? 0;
+    const count = occupancy.get(channel.id)?.count ?? 0;
     if (channel.name === viewed || count <= 0) continue;
     found++;
     if (best === null || count > best.count || (count === best.count && channel.id < best.channel.id)) best = { channel, count };
@@ -368,12 +368,14 @@ export function VoicePanel({
             {strip ? (
               <>
                 <TalkControl voice={voice} silenced={silenced} />
+                <ModeToggle voice={voice} />
                 <MuteButton voice={voice} />
                 <LeaveButton onLeave={leave} />
               </>
             ) : inVoice ? (
               <>
                 <TalkControl voice={voice} silenced={silenced} />
+                <ModeToggle voice={voice} />
                 {state.watchOnly && !state.listenOnly ? (
                   <button type="button" onClick={() => { void client.useMicrophone(); }} disabled={state.phase !== 'connected'}>
                     Use microphone
@@ -554,6 +556,29 @@ function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readon
     >
       <Glyph name="mic" />
       Hold to talk
+    </button>
+  );
+}
+
+// ModeToggle is the one-tap switch between the open microphone and push to
+// talk (issue #1244), in the bar and in the phone's strip. Pressed is the open
+// microphone; the Voice options radios follow the same state. Listen-only and
+// watch-only have no microphone to switch, as the radios are.
+function ModeToggle({ voice }: { readonly voice: VoiceControl }) {
+  const { state, client } = voice;
+  const open = state.mode === 'open';
+  // With no microphone, nothing is shown as on: not pressed, and disabled.
+  const off = state.listenOnly || state.watchOnly;
+  return (
+    <button
+      type="button"
+      className="mode-toggle"
+      aria-pressed={open && !off}
+      disabled={off}
+      onClick={() => { client.setMode(open ? 'ptt' : 'open'); }}
+    >
+      <Glyph name="wave" />
+      <span className="label">Open mic</span>
     </button>
   );
 }

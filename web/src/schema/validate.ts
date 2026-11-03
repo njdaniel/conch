@@ -99,6 +99,25 @@ export function vocab<T extends string>(members: { readonly [V in T]: true }): V
   );
 }
 
+// tolerant checks a closed vocabulary the client tolerates (issue #1051):
+// one whose Go type says a client shows a value it does not know by its
+// name, such as Permission. Its argument names every member of T and nothing
+// else, as vocab's does, so the known values cannot fall behind the type;
+// the validator accepts any non-empty string besides, so a bundle built
+// before a value shipped still reads a document that carries it. The value
+// is kept as it came: the type is T | (string & {}), every known value as
+// its literal and any other string too. Nothing the client sends comes
+// from such a value unless the server named it first.
+/* @__NO_SIDE_EFFECTS__ */
+export function tolerant<T extends string>(members: { readonly [V in T]: true }): Validator<T | (string & {})> {
+  const known = Object.keys(members);
+  return validator((v, path) =>
+    typeof v === 'string' && v !== ''
+      ? []
+      : [`${path}: want one of ${known.join(', ')} or another name, got ${typeof v === 'string' ? JSON.stringify(v) : describe(v)}`],
+  );
+}
+
 /* @__NO_SIDE_EFFECTS__ */
 export function array<T>(item: Validator<T>): Validator<T[]> {
   return validator((v, path) =>

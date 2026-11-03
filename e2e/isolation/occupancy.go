@@ -20,11 +20,15 @@ import (
 )
 
 // Voice occupancy (issue #596, docs/design/voice-occupancy.md §5): how many
-// are in each channel's voice, for the channels the reader is in, read once
-// or on a socket of its own. A channel of A's is never in what B is sent, not
-// even as a zero; B's counts are B's alone, and they do not move when A's
-// people join; the socket closes when its credential goes and loses a row,
-// and stays open, when its holder is removed from a channel.
+// are in each channel's voice, and who (issue #1103, principal_ids), for the
+// channels the reader is in, read once or on a socket of its own. A channel
+// of A's is never in what B is sent, not even as a zero; B's counts and ids
+// are B's alone, and they do not move when A's people join; every id in a
+// row is a member of that channel as the reader lists its members; the
+// socket closes when its credential goes and loses a row, and stays open,
+// when its holder is removed from a channel. The marker scan reads
+// principal_ids as principal ids (markers.go), so an id of A's in a frame of
+// B's fails the run wherever it is.
 
 // occupancyPath is the occupancy socket.
 const occupancyPath = "/v1/voice/occupancy/ws"
@@ -80,13 +84,27 @@ func counts(doc schema.VoiceOccupancyV1) map[int64]int {
 	return out
 }
 
+// people is a document's principal ids by channel id.
+func people(doc schema.VoiceOccupancyV1) map[int64][]int64 {
+	out := map[int64][]int64{}
+	for _, c := range doc.Channels {
+		out[c.ChannelID] = slices.Clone(c.PrincipalIDs)
+	}
+	return out
+}
+
 // checkRows requires that an available document has a row for exactly the
-// channels in own, and an unavailable one none: a channel the reader is not
-// in is absent, never a zero.
+// channels in own, each stating who is there (issue #1103: conchd always
+// writes principal_ids, as [] for nobody; parseOccupancy has checked that it
+// is exactly in_voice ids), and an unavailable one none: a channel the
+// reader is not in is absent, never a zero.
 func checkRows(doc schema.VoiceOccupancyV1, own []int64) error {
 	var got []int64
 	for _, c := range doc.Channels {
 		got = append(got, c.ChannelID)
+		if c.PrincipalIDs == nil {
+			return fmt.Errorf("the occupancy row of channel %d states no principal_ids", c.ChannelID)
+		}
 	}
 	want := own
 	if !doc.Available {
@@ -99,33 +117,70 @@ func checkRows(doc schema.VoiceOccupancyV1, own []int64) error {
 	return nil
 }
 
-// channelIDs is the ids of the channels a is a member of, as GET /v1/channels
+// channelsOf is the channels a is a member of, by id, as GET /v1/channels
 // lists them.
-func channelIDs(a api) ([]int64, error) {
+func channelsOf(a api) (map[int64]string, error) {
 	var list schema.ListChannelsResponse
 	if err := a.call(http.MethodGet, "/v1/channels", nil, &list); err != nil {
 		return nil, err
 	}
-	var ids []int64
+	out := map[int64]string{}
 	for _, c := range list.Channels {
-		ids = append(ids, c.ID)
+		out[c.ID] = c.Name
 	}
-	slices.Sort(ids)
-	return ids, nil
+	return out, nil
+}
+
+// channelIDs is the ids of the channels a is a member of, ascending.
+func channelIDs(a api) ([]int64, error) {
+	byID, err := channelsOf(a)
+	if err != nil {
+		return nil, err
+	}
+	return slices.Sorted(maps.Keys(byID)), nil
+}
+
+// checkPeopleAreMembers requires that every principal a document names under
+// a channel is a member of that channel as a lists its members (issue
+// #1103): the ids reveal nobody the reader could not already see there.
+func checkPeopleAreMembers(a api, doc schema.VoiceOccupancyV1, names map[int64]string) error {
+	for _, c := range doc.Channels {
+		if len(c.PrincipalIDs) == 0 {
+			continue
+		}
+		name, ok := names[c.ChannelID]
+		if !ok {
+			return fmt.Errorf("the occupancy names people under channel %d, which the reader is not in", c.ChannelID)
+		}
+		var members schema.ListChannelMembersResponseV1
+		if err := a.call(http.MethodGet, "/v1/channels/"+url.PathEscape(name)+"/members", nil, &members); err != nil {
+			return err
+		}
+		for _, id := range c.PrincipalIDs {
+			if !slices.ContainsFunc(members.Members, func(m schema.ChannelMemberV1) bool { return m.PrincipalID == id }) {
+				return fmt.Errorf("the occupancy names principal %d under channel %d, whom its member list does not name", id, c.ChannelID)
+			}
+		}
+	}
+	return nil
 }
 
 // checkOwnOccupancy is the occupancy rows' own check: the document the prober
-// was given has a row for each of her channels and for nothing else.
+// was given has a row for each of her channels and for nothing else, and
+// names nobody who is not a member of the row's channel.
 func checkOwnOccupancy(_ *world, a api, body []byte) error {
 	doc, err := parseOccupancy(body)
 	if err != nil {
 		return err
 	}
-	own, err := channelIDs(a)
+	names, err := channelsOf(a)
 	if err != nil {
 		return err
 	}
-	return checkRows(doc, own)
+	if err := checkRows(doc, slices.Sorted(maps.Keys(names))); err != nil {
+		return err
+	}
+	return checkPeopleAreMembers(a, doc, names)
 }
 
 // checkAgentVoiceDenied returns the agent rows' check: the refusal is in the
@@ -159,10 +214,10 @@ func checkAgentVoiceDenied(route string) func(w *world, a api) error {
 	}
 }
 
-// presenceCounts is how many are in each of channels' channel-wide rooms as
-// a reads presence: what occupancy must say.
-func (w *world) presenceCounts(a api, g *group) (map[int64]int, error) {
-	out := map[int64]int{}
+// presencePeople is who is in each of channels' channel-wide rooms as a
+// reads presence, ascending by id: what occupancy must say, count and ids.
+func (w *world) presencePeople(a api, g *group) (map[int64][]int64, error) {
+	out := map[int64][]int64{}
 	for i, ch := range g.channels {
 		var doc schema.VoicePresenceV1
 		if err := a.call(http.MethodGet, "/v1/channels/"+url.PathEscape(ch)+"/voice", nil, &doc); err != nil {
@@ -177,7 +232,11 @@ func (w *world) presenceCounts(a api, g *group) (map[int64]int, error) {
 				in[p.PrincipalID] = true
 			}
 		}
-		out[g.chanIDs[i]] = len(in)
+		ids := slices.Sorted(maps.Keys(in))
+		if ids == nil {
+			ids = []int64{}
+		}
+		out[g.chanIDs[i]] = ids
 	}
 	return out, nil
 }
@@ -185,9 +244,9 @@ func (w *world) presenceCounts(a api, g *group) (map[int64]int, error) {
 // checkOccupancyFeed is checkQuiet's part for one of B's occupancy sockets:
 // every frame it has carried is a document with a row for each of B's
 // channels and nothing else, and, as the control, its latest frame says what
-// B's own presence says. mode is "counts" with LiveKit, the schema name for
-// the one document a socket carries without it, or "" for nothing to wait
-// for.
+// B's own presence says, the same people under each channel. mode is
+// "counts" with LiveKit, the schema name for the one document a socket
+// carries without it, or "" for nothing to wait for.
 func (s *bSockets) checkOccupancyFeed(w *world, f *feed, mode string, since int) error {
 	bob := w.b.people[1]
 	own := slices.Clone(w.b.chanIDs)
@@ -195,7 +254,7 @@ func (s *bSockets) checkOccupancyFeed(w *world, f *feed, mode string, since int)
 	case "":
 	case "counts":
 		if err := waitFor(f.what+" to say what B's presence says", 30*time.Second, func() (bool, string) {
-			want, err := w.presenceCounts(bob.api, w.b)
+			want, err := w.presencePeople(bob.api, w.b)
 			if err != nil {
 				return false, err.Error()
 			}
@@ -207,8 +266,8 @@ func (s *bSockets) checkOccupancyFeed(w *world, f *feed, mode string, since int)
 			if err != nil || !doc.Available {
 				return false, "latest frame " + lkit.Truncate(string(frames[len(frames)-1]), 200)
 			}
-			got := counts(doc)
-			return maps.Equal(got, want), fmt.Sprintf("latest frame %v, B's presence %v (%d frames, %d since the last check)", got, want, len(frames), len(frames)-since)
+			got := people(doc)
+			return maps.EqualFunc(got, want, slices.Equal), fmt.Sprintf("latest frame %v, B's presence %v (%d frames, %d since the last check)", got, want, len(frames), len(frames)-since)
 		}); err != nil {
 			return err
 		}
@@ -238,18 +297,21 @@ func (s *bSockets) checkOccupancyFeed(w *world, f *feed, mode string, since int)
 }
 
 // checkOccupancyWhileAIsInVoice runs once A is in voice: A's own occupancy
-// shows ann and amy in A's room, so the server has seen them, and yet no
-// frame B's occupancy sockets carried counts anyone in B's channels, where
-// nobody of B's has joined yet. The silence means something because A's side
-// is seen to move.
+// shows ann and amy in A's room, by id, so the server has seen them, and yet
+// no frame B's occupancy sockets carried counts or names anyone in B's
+// channels, where nobody of B's has joined yet. The silence means something
+// because A's side is seen to move.
 func (s *bSockets) checkOccupancyWhileAIsInVoice(w *world) error {
-	ann := w.a.people[0]
+	// ann and amy are the two startVoiceA puts in the room (media.go).
+	ann, amy := w.a.people[0], w.a.people[2]
 	camp := w.a.chanIDs[0]
 	// ann's channels: A's, and the public channel she made (communityrows.go).
 	annsChannels := slices.Clone(w.a.chanIDs)
 	if w.a.publicID != 0 {
 		annsChannels = append(annsChannels, w.a.publicID)
 	}
+	inRoom := []int64{ann.id, amy.id}
+	slices.Sort(inRoom)
 	if err := waitFor("ann's occupancy to show ann and amy in A's room", 30*time.Second, func() (bool, string) {
 		var doc schema.VoiceOccupancyV1
 		if err := ann.api.call(http.MethodGet, "/v1/voice/occupancy", nil, &doc); err != nil {
@@ -258,7 +320,7 @@ func (s *bSockets) checkOccupancyWhileAIsInVoice(w *world) error {
 		if err := checkRows(doc, annsChannels); err != nil {
 			return false, err.Error()
 		}
-		return counts(doc)[camp] == 2, fmt.Sprintf("%v", counts(doc))
+		return counts(doc)[camp] == 2 && slices.Equal(people(doc)[camp], inRoom), fmt.Sprintf("%v %v", counts(doc), people(doc))
 	}); err != nil {
 		return err
 	}
@@ -272,9 +334,9 @@ func (s *bSockets) checkOccupancyWhileAIsInVoice(w *world) error {
 			if err != nil {
 				return fmt.Errorf("frame %d on %s: %w", i, f.what, err)
 			}
-			for id, c := range counts(doc) {
-				if c != 0 {
-					return fmt.Errorf("frame %d on %s counts %d in B's channel %d while only A was in voice", i, f.what, c, id)
+			for _, c := range doc.Channels {
+				if c.InVoice != 0 || len(c.PrincipalIDs) != 0 {
+					return fmt.Errorf("frame %d on %s counts %d (ids %v) in B's channel %d while only A was in voice", i, f.what, c.InVoice, c.PrincipalIDs, c.ChannelID)
 				}
 			}
 			n++
@@ -283,7 +345,7 @@ func (s *bSockets) checkOccupancyWhileAIsInVoice(w *world) error {
 	if n == 0 {
 		return errors.New("no frame on any of B's occupancy sockets")
 	}
-	w.h.say("ok   occupancy: ann's own shows ann and amy in A's room; B's occupancy sockets carried %d frames, every count in B's channels zero, and no channel of A's", n)
+	w.h.say("ok   occupancy: ann's own shows ann and amy in A's room, by id; B's occupancy sockets carried %d frames, every count in B's channels zero with nobody named, and no channel of A's", n)
 	return nil
 }
 

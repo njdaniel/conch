@@ -2,7 +2,7 @@
 // (never a second tab of one), and every page of every context is checked,
 // when the test ends, for a credential in the address bar or in
 // performance.getEntries(): the one thing that must hold throughout.
-import { expect, test as base, type BrowserContext, type BrowserContextOptions, type Page } from '@playwright/test';
+import { expect, test as base, type BrowserContext, type BrowserContextOptions, type Locator, type Page } from '@playwright/test';
 import { allTokens, loadWorld, type World } from './world';
 
 // leaks lists where in a page a credential shows, none when it does not.
@@ -112,6 +112,41 @@ export const mainNav = (page: Page) => page.getByRole('navigation', { name: 'Mai
 
 // showView taps the phone navigation's Chat, Channels or Voice. Where there is
 // none (700 px and wider) every view is already on screen and it does nothing.
+// chooseMicrophone puts a joined voice panel in push to talk or the open
+// microphone with the one-tap switch (issue #1244), and waits for it. A browser
+// that never chose joins in the open microphone, so a test of Hold to talk
+// chooses push to talk explicitly. A phone taps; a desktop clicks.
+export async function chooseMicrophone(voice: Locator, mode: 'push to talk' | 'open', how: 'click' | 'tap' = 'click'): Promise<void> {
+  const toggle = voice.getByRole('button', { name: 'Open mic', exact: true });
+  const want = mode === 'open' ? 'true' : 'false';
+  // Right after a join the strip can still be settling, and a press then may
+  // not take: press again until the toggle says the mode asked for. A press
+  // that did take is never repeated, because the state is read first.
+  await expect(async () => {
+    await expect(toggle).toBeEnabled({ timeout: 2000 });
+    if ((await toggle.getAttribute('aria-pressed')) !== want) {
+      if (how === 'tap') await toggle.tap();
+      else await toggle.click();
+    }
+    await expect(toggle).toHaveAttribute('aria-pressed', want, { timeout: 2000 });
+  }).toPass({ timeout: 20_000 });
+}
+
+// rememberPushToTalk is a browser that chose push to talk before it joined:
+// the choice a person's browser keeps (issue #1244), set before each page
+// load. A browser that never chose joins in the open microphone, which opens
+// the gate on any sound and so reports a transmission nobody held a key for;
+// a test that counts what a held key sends starts from this, not from a blip.
+export async function rememberPushToTalk(where: BrowserContext | Page): Promise<void> {
+  await where.addInitScript(() => {
+    try {
+      window.localStorage.setItem('conch.web.voice.mode.v1', 'ptt');
+    } catch {
+      // No storage, no choice: the open microphone.
+    }
+  });
+}
+
 export async function showView(page: Page, view: 'Chat' | 'Channels' | 'Voice'): Promise<void> {
   const nav = mainNav(page);
   // Whether there is a navigation is the width's to say, not the page's at this

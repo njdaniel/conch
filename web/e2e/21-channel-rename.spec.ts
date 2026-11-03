@@ -13,7 +13,7 @@ import type { Browser, Page } from '@playwright/test';
 import { createChannelResponse, listChannelsResponse, renameChannelResponseV1, type CreateChannelRequest, type RenameChannelRequestV1 } from '../src/schema/channel';
 import { errorV0 } from '../src/schema/error';
 import { post } from './api';
-import { channelButton, expect, messages, signIn, statusLine, test } from './fixtures';
+import { channelButton, expect, messages, rememberPushToTalk, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld } from './voice-world';
 import { call, ok, type World } from './world';
 
@@ -211,6 +211,8 @@ test.describe('in voice, with LiveKit', () => {
 
   async function person(browser: Browser, who: 'alice' | Member) {
     const context = await browser.newContext();
+    // Not about the mode: push to talk, chosen before joining (issue #1244).
+    await rememberPushToTalk(context);
     const page = await context.newPage();
     const watch = await watchPage(page, vw);
     const opened = sockets(page);

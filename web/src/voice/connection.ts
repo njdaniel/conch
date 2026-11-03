@@ -156,6 +156,14 @@ export interface ProcessingStore {
   readonly set: (device: string | null, on: boolean) => void;
 }
 
+// Where the person's choice of microphone mode is kept (issue #1244). A
+// browser that has never chosen is in open microphone; a store that cannot be
+// read says so by returning null.
+export interface ModeStore {
+  readonly get: () => GateMode | null;
+  readonly set: (mode: GateMode) => void;
+}
+
 // memoryStore keeps the choices for as long as the client lasts.
 function memoryStore(): ProcessingStore {
   const kept = new Map<string | null, boolean>();
@@ -326,6 +334,9 @@ export interface VoiceEnv {
   // The voice processing chosen for each microphone (issue #659); without
   // it, the choices last as long as the client.
   readonly processing?: ProcessingStore;
+  // The microphone mode chosen earlier in this browser (issue #1244); without
+  // it, the mode is open microphone and lasts as long as the client.
+  readonly mode?: ModeStore;
   // Whether the speakers may be chosen, and the output chosen earlier in
   // this tab, if any (issue #660).
   readonly outputSelection?: boolean;
@@ -353,7 +364,7 @@ export const initialVoice: VoiceState = {
   phase: 'idle',
   channel: null,
   why: null,
-  mode: 'ptt',
+  mode: 'open',
   muted: false,
   deafened: false,
   listenOnly: false,
@@ -429,6 +440,7 @@ export class VoiceClient {
   private switching = false;
   private switches = 0;
   private readonly processing: ProcessingStore;
+  private readonly modes: ModeStore | null;
   // Numbers the changes of output: only the last one's refusal counts.
   private outputTurn = 0;
 
@@ -436,8 +448,10 @@ export class VoiceClient {
     this.env = env;
     this.now = now;
     this.processing = env.processing ?? memoryStore();
+    this.modes = env.mode ?? null;
     this.state = {
       ...initialVoice,
+      mode: this.modes?.get() ?? initialVoice.mode,
       ...this.chosen(env.microphone ?? null),
       outputSelection: env.outputSelection === true,
       output: env.output ?? null,
@@ -446,6 +460,7 @@ export class VoiceClient {
     this.gate = new TransmitGate(env.clock, (open) => {
       this.onGate(open);
     }, env.gate);
+    this.gate.setMode(this.state.mode);
     this.share = new ScreenShare(
       { claim: env.claimShare, release: env.stopShare },
       (share) => {
@@ -822,6 +837,7 @@ export class VoiceClient {
 
   setMode(mode: GateMode): void {
     this.gate.setMode(mode);
+    this.modes?.set(mode);
     this.set({ mode });
   }
 

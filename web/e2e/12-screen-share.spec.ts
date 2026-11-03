@@ -19,7 +19,7 @@
 // person with the devices (#474).
 import type { Browser, BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { VoicePresenceV1 } from '../src/schema/voice';
-import { expect, expectFits, openChannel, phones, showView, signIn, test } from './fixtures';
+import { expect, expectFits, openChannel, phones, rememberPushToTalk, showView, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -226,6 +226,8 @@ test.describe('screen share with LiveKit', () => {
 
   async function person(browser: Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, late?: LateSignal, crowd = 0): Promise<Someone> {
     const context = await browser.newContext(options);
+    // Not about the mode: push to talk, chosen before joining (issue #1244).
+    await rememberPushToTalk(context);
     const page = await context.newPage();
     const watch = await watchPage(page, vw);
     await page.addInitScript(instrument);
