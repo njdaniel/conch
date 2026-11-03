@@ -119,7 +119,8 @@ func (s *Store) JoinChannel(ctx context.Context, channelID, principalID int64, n
 // LeaveChannel removes principalID from channelID at its own asking (POST
 // /v1/channels/{channel}/leave): in one IMMEDIATE transaction it answers
 // ErrNotFound when the channel does not exist or the caller is not in it,
-// refuses the last member of a private channel (ErrChannelLastMember), and
+// refuses the last community member of a private channel, one with no other
+// member by design §1.1's predicate (ErrChannelLastMember), and
 // otherwise removes the membership, its manager grant and its net seats as
 // a removal does, audited member_removed with the member themselves as
 // actor. The last member of a public channel may leave, and so may a
@@ -148,7 +149,8 @@ func (s *Store) LeaveChannel(ctx context.Context, channelID, principalID int64, 
 		if schema.ChannelVisibility(visibility) != schema.ChannelPublic {
 			var others int
 			if err := tx.QueryRowContext(ctx,
-				"SELECT COUNT(*) FROM channel_members WHERE channel_id = ? AND principal_id != ?",
+				`SELECT COUNT(*) FROM channel_members cm JOIN principals p ON p.id = cm.principal_id
+				 WHERE cm.channel_id = ? AND cm.principal_id != ? AND `+memberPredicateSQL,
 				channelID, principalID).Scan(&others); err != nil {
 				return fmt.Errorf("store: count members of channel %d: %w", channelID, err)
 			}
