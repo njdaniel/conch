@@ -170,6 +170,8 @@ var authorityAllowlist = []authorityAllowed{
 	{"sign_in_links.go", "Server.deviceLinkCaller", kindIsOperator, 1, whySignIn + ": an operator never signs in by a device link"},
 
 	// internal/server/store.
+	{"store/directory.go", "Store.DirectoryKnowers", kindRoleSQL, 1, "the operator cell of see_member_directory is fixed on (schema.Permission.Fixed), so every operator and the owner is in the audience of the directory signal (design §13.6); it addresses a frame and grants nothing"},
+	{"store/directory.go", "Store.DirectoryMembershipAudience", kindRoleSQL, 1, "the operator cell of see_member_directory is fixed on (schema.Permission.Fixed), so every operator and the owner is in the audience of the directory signal (design §13.6); it addresses a frame and grants nothing"},
 	{"store/credentials.go", "Store.RotateCredential", kindRoleCompare, 1, whyTarget + ": an owner's credential"},
 	{"store/credentials.go", "Store.revokeCredential", kindRoleCompare, 2, whyTarget + ": an owner's credential, and the last owner's sign-in"},
 	{"store/disable.go", "Store.RevokeAllCredentialsAs", kindRoleCompare, 1, whyTarget + ": the last owner's sign-in"},

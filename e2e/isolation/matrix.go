@@ -426,6 +426,11 @@ func coreMatrixRows() []row {
 
 		// Members and nets.
 		byChannel("GET /v1/channels/{channel}/members", "lists A's channel's members", func(_ *world, s subject) probe { return get(ch(s) + "/members") }),
+		// Naming authors (issue #988) sits behind the member list's gate: A's
+		// channel is the one channel-not-found to B, whoever it asks about.
+		byChannel("GET /v1/channels/{channel}/authors", "asks who wrote in A's channel", func(w *world, s subject) probe {
+			return get(ch(s) + "/authors?ids=" + id(w.a.people[0].id))
+		}),
 		byChannel("POST /v1/channels/{channel}/members", "adds an A member by name to A's channel", func(w *world, s subject) probe {
 			return post(ch(s)+"/members", schema.AddChannelMemberRequestV1{Name: w.a.people[0].name})
 		}),

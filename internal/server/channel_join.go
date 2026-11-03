@@ -130,6 +130,7 @@ func (s *Server) handleJoinChannel(w http.ResponseWriter, r *http.Request) {
 		// own channel list gained the channel (issue #1027).
 		s.events.notifyChannelRoster(channel.ID)
 		s.events.notifyChannelsChanged(caller.ID)
+		s.directoryMembershipChanged(ctx, channel.ID, caller.ID)
 	}
 	writeJSON(w, status, schema.JoinChannelResponseV1{
 		Channel: channelDoc(res.Channel),
@@ -183,6 +184,7 @@ func (s *Server) handleLeaveChannel(w http.ResponseWriter, r *http.Request) {
 	s.events.dropPrincipal(channel.ID, caller.ID)
 	s.events.notifyChannelRoster(channel.ID)
 	s.events.notifyChannelsChanged(caller.ID)
+	s.directoryMembershipChanged(ctx, channel.ID, caller.ID)
 	s.voiceMemberRemoved(ctx, channel.ID, caller.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
