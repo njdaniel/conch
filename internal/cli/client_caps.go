@@ -41,6 +41,13 @@ const (
 	maxDirectoryMembersBody = schema.MaxListPrincipalsLimit*listRowBound + listSlack
 	maxPrincipalsBody       = schema.MaxListPrincipalsLimit*listRowBound + listSlack
 	maxGuestsBody           = schema.MaxListGuestsLimit*guestRowBound + listSlack
+	// hookRowBound bounds a hook row, which carries two names (its channel
+	// and its label, each at most 100 characters, escaped up to six bytes a
+	// character for <, > and &) beside ids and times: about 1.3 KiB at worst.
+	hookRowBound = 2 << 10
+	// maxHooksBody: the hook list is not paged and keeps revoked hooks (issue
+	// #1228), so it is read to listRowCeiling rows of hookRowBound.
+	maxHooksBody = listRowCeiling*hookRowBound + listSlack
 )
 
 // Size caps for the remaining list reads (issue #1203), built as above.
@@ -124,6 +131,7 @@ type (
 		schema.ListPrincipalsResponseV1
 	}
 	guestsDoc struct{ schema.ListGuestsResponseV1 }
+	hooksDoc  struct{ schema.ListHooksResponseV1 }
 
 	channelListDoc struct{ schema.ListChannelsResponse }
 	readStateDoc   struct{ schema.ListReadStateResponseV1 }
@@ -174,6 +182,7 @@ func (joinersDoc) maxBody() int64          { return maxJoinersBody }
 func (directoryMembersDoc) maxBody() int64 { return maxDirectoryMembersBody }
 func (principalsDoc) maxBody() int64       { return maxPrincipalsBody }
 func (guestsDoc) maxBody() int64           { return maxGuestsBody }
+func (hooksDoc) maxBody() int64            { return maxHooksBody }
 
 func (channelListDoc) maxBody() int64    { return maxChannelListBody }
 func (readStateDoc) maxBody() int64      { return maxReadStateBody }

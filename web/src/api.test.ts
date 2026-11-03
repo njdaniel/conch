@@ -37,9 +37,11 @@ import {
   signOut,
   setPassword,
   signOutEverywhere,
+  readVoiceMode,
   stopVoiceShare,
   uploadFile,
   whoAmI,
+  writeVoiceMode,
 } from './api';
 
 afterEach(async () => {
@@ -613,6 +615,23 @@ describe('invites', () => {
       code: 'invite_allowance_exceeded',
       message: 'you already have as many open personal invites as you may',
     });
+  });
+
+  // Issue #1051: a newer server names a permission this bundle does not know.
+  // The error document still reads, so the code is passed through rather than
+  // dropped with the document.
+  it('passes a refusal naming an unknown permission through by its code', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ code: 'permission_denied', message: 'no', permission: 'fly_the_server' }, 403));
+    expect(await listChannels()).toEqual({ ok: false, failure: 'invalid', code: 'permission_denied' });
+  });
+
+  it('reads a whoami naming an unknown permission, and keeps it', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ ...member, permissions: ['use_voice', 'fly_the_server'] }));
+    const result = await whoAmI();
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.permissions).toEqual(['use_voice', 'fly_the_server']);
   });
 });
 
@@ -1578,5 +1597,34 @@ describe('a credential replaced while a call was out', () => {
     expect(calls.filter((c) => c.path === '/v1/whoami').map((c) => c.auth)).toEqual([`Bearer ${memberToken}`, `Bearer ${otherMemberToken}`]);
     await whoAmI();
     expect(calls.at(-1)?.auth).toBe(`Bearer ${otherMemberToken}`);
+  });
+});
+
+// Issue #1244: the microphone mode kept in this browser. Nothing kept, a value
+// that is neither mode, and a storage that throws are all no choice (null), so
+// the voice client starts in open microphone and shows no error.
+describe('the voice mode kept in the browser', () => {
+  it('reads nothing as no choice, and what was written back', () => {
+    expect(readVoiceMode()).toBeNull();
+    writeVoiceMode('ptt');
+    expect(readVoiceMode()).toBe('ptt');
+    writeVoiceMode('open');
+    expect(readVoiceMode()).toBe('open');
+  });
+
+  it('reads anything else as no choice', () => {
+    window.localStorage.setItem('conch.web.voice.mode.v1', 'loud');
+    expect(readVoiceMode()).toBeNull();
+  });
+
+  it('is tolerated when the storage throws', () => {
+    const refuse = () => {
+      throw new Error('storage is off');
+    };
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(refuse);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(refuse);
+    expect(readVoiceMode()).toBeNull();
+    expect(() => { writeVoiceMode('ptt'); }).not.toThrow();
+    vi.restoreAllMocks();
   });
 });

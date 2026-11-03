@@ -1111,9 +1111,14 @@ mod tests {
     /// Voice fixtures of documents `conch-voice` never reads, each with the reason, so
     /// that a new one is still a decision: claim it with a type, or say here why not.
     const NOT_READ: &[(&str, &str)] = &[
-        // Voice occupancy (issue #596): how many are in each channel's voice, for a
-        // channel list. The voice client joins one channel it is told and shows no list.
+        // Voice occupancy (issue #596): how many are in each channel's voice, and who
+        // (issue #1103), for a channel list. The voice client joins one channel it is
+        // told and shows no list.
         ("voice-occupancy-v1.json", "occupancy is for a channel list"),
+        (
+            "voice-occupancy-v1-people.json",
+            "occupancy is for a channel list",
+        ),
         (
             "voice-occupancy-v1-unavailable.json",
             "occupancy is for a channel list",

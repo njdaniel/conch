@@ -192,13 +192,15 @@ export function SignIn({
       </p>
       {insecure ? (
         <p className="notice insecure">{insecureLine}</p>
-      ) : join === undefined ? null : (
+      ) : join === undefined ? null : !join.paused && !join.account ? (
+        // Invite-only (issue #990): Sign in alone, and the one line. No guest
+        // visit is ever offered, whatever the server says of guests.
+        <p className="hint front-door">This server is invite-only.</p>
+      ) : (
         <section aria-labelledby="join-heading" className="front-door">
           <h2 id="join-heading">Join</h2>
           {join.paused ? (
             <p className="notice">Joining is paused on this server for now. If you have an account, sign in below.</p>
-          ) : !join.account ? (
-            <p className="hint">This server is invite-only. To join, ask someone on it for an invite link.</p>
           ) : (
             <>
               {way === null ? (

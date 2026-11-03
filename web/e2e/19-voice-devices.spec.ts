@@ -32,7 +32,7 @@
 // (voice-world.ts): without Docker it fails when CI is set and is skipped
 // otherwise.
 import type { Locator, Page } from '@playwright/test';
-import { channelButton, expect, signIn, test } from './fixtures';
+import { channelButton, chooseMicrophone, expect, rememberPushToTalk, signIn, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -156,6 +156,7 @@ test.describe('choosing the microphone', () => {
 
   async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob') {
     const context = await browser.newContext();
+    await rememberPushToTalk(context);
     const page = await context.newPage();
     const watch = await watchPage(page, vw);
     await page.addInitScript(countBytes);
@@ -170,6 +171,8 @@ test.describe('choosing the microphone', () => {
     const voice = voiceRegion(page);
     await voice.getByRole('button', { name: 'Join voice' }).click();
     await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+    // These tests hold the talk key; the open microphone is the default (issue #1244).
+    await chooseMicrophone(voice, 'push to talk');
     await voice.getByRole('button', { name: 'Voice options' }).click();
     const list = voice.getByRole('combobox', { name: 'Microphone' });
     await expect(list).toBeVisible();
@@ -182,6 +185,7 @@ test.describe('choosing the microphone', () => {
     const voice = voiceRegion(page);
     await voice.getByRole('button', { name: 'Join voice' }).click();
     await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+    await chooseMicrophone(voice, 'push to talk');
     const options = voice.getByRole('button', { name: 'Voice options' });
     if ((await options.getAttribute('aria-expanded')) !== 'true') await options.click();
     await expect(voice.getByRole('combobox', { name: 'Microphone' })).toBeVisible();

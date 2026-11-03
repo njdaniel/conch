@@ -57,6 +57,9 @@ export function warningLine(warning: JoinWarning, live: number): string {
       return 'An account holds the server’s name, or one that looks the same. It is kept; you may rename it.';
     case 'no_default_channel':
       return 'No channel is a default channel, so someone who joins through a link or the address lands in no channel.';
+    default:
+      // A warning a newer server added (issue #1051): shown by its name.
+      return warning;
   }
 }
 

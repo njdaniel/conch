@@ -225,7 +225,7 @@ func TestRoleChangeSuspendsSignInLinks(t *testing.T) {
 // a stored brake. One code, invite_not_allowed, naming make_member_links,
 // whichever check said no (design §7.4, §5).
 func TestCreateInviteByPermissionAndBrake(t *testing.T) {
-	const link = `{"kind":"personal","channels":["channel-b"]}`
+	const link = `{"kind":"member"}`
 	tests := []struct {
 		name  string
 		who   string // member, operator or owner
@@ -254,9 +254,9 @@ func TestCreateInviteByPermissionAndBrake(t *testing.T) {
 			f := newRestrictedFixture(t, Config{AuthMode: AuthRequired})
 			tt.setup(t, f)
 			tok := map[string]string{"member": f.memberTok, "operator": f.opTok, "owner": f.rootTok}[tt.who]
-			rec := f.do(t, "POST", "/v1/invites", tok, link)
+			rec := f.do(t, "POST", "/v2/invites", tok, link)
 			if rec.Code != tt.want {
-				t.Fatalf("POST /v1/invites = %d %s, want %d", rec.Code, rec.Body, tt.want)
+				t.Fatalf("POST /v2/invites = %d %s, want %d", rec.Code, rec.Body, tt.want)
 			}
 			if tt.want == http.StatusForbidden {
 				if e := decodeBody[schema.Error](t, rec); e.Code != schema.ErrorCodeInviteNotAllowed || e.Permission != schema.PermMakeMemberLinks {
@@ -291,14 +291,14 @@ func (f *restrictedFixture) memberLinks(t *testing.T) {
 func TestPersonalPresetApplies(t *testing.T) {
 	f := newRestrictedFixture(t, Config{AuthMode: AuthRequired})
 	f.mayInvite(t, f.member, true)
-	if rec := f.do(t, "POST", "/v1/invites", f.memberTok, `{"kind":"personal","channels":["channel-b"]}`); rec.Code != http.StatusCreated {
+	if rec := f.do(t, "POST", "/v2/invites", f.memberTok, `{"kind":"member"}`); rec.Code != http.StatusCreated {
 		t.Fatalf("a member's link before the preset = %d %s", rec.Code, rec.Body)
 	}
 	res := f.putPermissions(t, f.rootTok, schema.PutPermissionsRequestV1{Revision: revisionOf(t, f), Preset: schema.PresetPersonal})
 	if res.code != http.StatusOK {
 		t.Fatalf("PUT preset personal = %d %s, want 200", res.code, res.body)
 	}
-	if rec := f.do(t, "POST", "/v1/invites", f.memberTok, `{"kind":"personal","channels":["channel-b"]}`); rec.Code != http.StatusForbidden {
+	if rec := f.do(t, "POST", "/v2/invites", f.memberTok, `{"kind":"member"}`); rec.Code != http.StatusForbidden {
 		t.Errorf("a member's link after the preset = %d %s, want 403", rec.Code, rec.Body)
 	}
 }

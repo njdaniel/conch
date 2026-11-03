@@ -127,9 +127,10 @@ async function expectNothingOf(page: Page, traffic: Traffic, markers: readonly s
 const voiceMarks = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('img', { name: / in voice$/ });
 
 // Occupancy is every document the page's occupancy socket was sent, and how
-// many such sockets it opened.
+// many such sockets it opened. A row names who is there by principal id
+// (issue #1103).
 interface Occupancy {
-  readonly frames: { channels: { channel_id: number; in_voice: number }[] }[];
+  readonly frames: { channels: { channel_id: number; in_voice: number; principal_ids?: number[] }[] }[];
   readonly opened: () => number;
 }
 
@@ -152,13 +153,15 @@ function watchOccupancy(page: Page): Occupancy {
 
 // expectOnlyOwn checks that the occupancy socket sent something, and that
 // every channel it counted is one of the reader's own, never one of the
-// other group's: absent, not zero.
-function expectOnlyOwn(occupancy: Occupancy, own: readonly number[], other: readonly number[], view: string): void {
+// other group's: absent, not zero; and that nobody of the other group's
+// room is named in any row (issue #1103).
+function expectOnlyOwn(occupancy: Occupancy, own: readonly number[], other: readonly number[], view: string, otherPeople: readonly number[] = []): void {
   expect(occupancy.frames.length, `${view}: the occupancy socket sent a document`).toBeGreaterThan(0);
   for (const f of occupancy.frames) {
     for (const c of f.channels) {
       expect(own, `${view}: the occupancy socket counted channel ${String(c.channel_id)}`).toContain(c.channel_id);
       expect(other, `${view}: the occupancy socket counted a channel of the other group`).not.toContain(c.channel_id);
+      for (const id of c.principal_ids ?? []) expect(otherPeople, `${view}: the occupancy socket named principal ${String(id)} of the other group's room`).not.toContain(id);
     }
   }
 }
@@ -358,6 +361,9 @@ test.describe('with LiveKit', () => {
     // check on who is in the room is on the room's own list below.
     const markersOfA = [vw.channel];
     const inRoomOfA = [vw.alice.name, vw.bob.name, vw.carol.name];
+    const idsInRoomOfA = [vw.alice.id, vw.bob.id, vw.carol.id];
+    // Nobody of A's room is named under any channel of B's list (issue #1103).
+    const namedInList = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('list', { name: /^In voice in/ });
 
     // The channel ids of each group, for the occupancy socket (issue #596),
     // whose frames name channels by id alone.
@@ -385,6 +391,10 @@ test.describe('with LiveKit', () => {
     await showView(b.page, 'Channels');
     await expect(voiceMarks(b.page)).toHaveText(['1'], { timeout: 15_000 });
     await expect(voiceMarks(b.page).first()).toHaveAccessibleName('1 in voice');
+    // The channel list names bea alone, as You, under B's channel (issue
+    // #1103); the people of A's room are named under nothing.
+    await expect(namedInList(b.page)).toHaveCount(1);
+    await expect(namedInList(b.page).getByRole('listitem')).toHaveText(['You']);
     await showView(b.page, 'Voice');
 
     // The roster calls its reader "You". alice is in A's room all the while,
@@ -397,7 +407,7 @@ test.describe('with LiveKit', () => {
     await expectFits(b.page, "B's lobby in voice at phone size");
     for (const name of inRoomOfA) await expect(inVoice, `${name} of A's room is not in B's list`).not.toContainText(name);
     await expectNothingOf(b.page, traffic, markersOfA, 'in voice');
-    expectOnlyOwn(occupancy, bIds, aIds, 'in voice');
+    expectOnlyOwn(occupancy, bIds, aIds, 'in voice', idsInRoomOfA);
 
     await b.page.reload();
     await expect(statusLine(b.page)).toContainText('Connected');
@@ -411,8 +421,11 @@ test.describe('with LiveKit', () => {
     await expect(voiceRegion(b.page).locator('.voice-elsewhere')).toHaveCount(0);
     await showView(b.page, 'Channels');
     expect(await voiceMarks(b.page).count()).toBeLessThanOrEqual(1);
+    // Nobody of A's is named under any channel; at most B's own room's list.
+    expect(await namedInList(b.page).count()).toBeLessThanOrEqual(1);
+    for (const name of inRoomOfA) await expect(b.page.getByRole('navigation', { name: 'Channels' }), `${name} of A's room is not named in B's channel list`).not.toContainText(name);
     await expectNothingOf(b.page, traffic, markersOfA, 'after a full load');
-    expectOnlyOwn(occupancy, bIds, aIds, 'after a full load');
+    expectOnlyOwn(occupancy, bIds, aIds, 'after a full load', idsInRoomOfA);
 
     await showView(b.page, 'Voice');
     await voiceRegion(b.page).getByRole('button', { name: 'Join voice' }).tap();
@@ -421,7 +434,7 @@ test.describe('with LiveKit', () => {
     await expect(voiceRegion(b.page).getByRole('list', { name: 'In voice' })).toContainText('You', { timeout: 15_000 });
     expect(await aliceInVoice(), 'alice is still in A\'s voice room').toBe(true);
     await expectNothingOf(b.page, traffic, markersOfA, 'after a reconnect');
-    expectOnlyOwn(occupancy, bIds, aIds, 'after a reconnect');
+    expectOnlyOwn(occupancy, bIds, aIds, 'after a reconnect', idsInRoomOfA);
     // One occupancy socket a load, opened again after the drop: three in all.
     expect(occupancy.opened(), 'occupancy sockets B\'s page opened').toBe(3);
   });

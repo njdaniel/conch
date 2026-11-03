@@ -278,6 +278,8 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "admin guest end", args: func(u, _ string) []string { return []string{"admin", "guest", "end", "--server", u, "9"} }},
 		{key: "admin guest end-all", args: func(u, _ string) []string { return []string{"admin", "guest", "end-all", "--server", u} }},
 		{key: "admin guest permit", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "guest", "permit", "--server", u, "9"} }},
+		{key: "admin hook list", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "hook", "list", "--server", u} }},
+		{key: "admin hook revoke", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "hook", "revoke", "--server", u, "9"} }},
 		{key: "admin permissions show", args: func(u, _ string) []string { return []string{"admin", "permissions", "show", "--server", u} }},
 		{key: "admin permissions set", args: func(u, _ string) []string {
 			return []string{"admin", "permissions", "set", "--server", u, "--members", "off", "use_voice"}
@@ -581,6 +583,14 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 				OpenSignupTurnedOff: true, Warnings: []schema.PermissionsWarning{schema.PermissionsWarning(hostile)}})
 		case "PUT /v1/principals/9/voice-permission":
 			write(w, http.StatusOK, schema.VoicePermissionResponseV1{PrincipalID: 9, Changed: true})
+		case "GET /v1/hooks":
+			revoked := ts
+			write(w, http.StatusOK, schema.ListHooksResponseV1{OtherHooks: 2, Hooks: []schema.HookV1{
+				{ID: 4, Channel: hostile, Principal: 9, Label: hostile, CreatedAt: ts},
+				{ID: 5, Channel: hostile, Principal: 9, Label: hostile, CreatedAt: ts, RevokedAt: &revoked},
+			}})
+		case "DELETE /v1/hooks/9":
+			w.WriteHeader(http.StatusNoContent)
 		case "GET /v1/directory/members":
 			yes, invitedBy := true, int64(1)
 			write(w, http.StatusOK, schema.ServerMembersResponseV1{Scope: schema.DirectoryScope(hostile), Members: []schema.ServerMemberV1{

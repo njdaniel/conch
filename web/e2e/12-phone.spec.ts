@@ -5,7 +5,7 @@
 // operator's invite panel in 11-invites. This spec runs after both, so the
 // person it adds to the fixture channels touches no other spec.
 import type { Locator, Page } from '@playwright/test';
-import { makeInvite, post } from './api';
+import { makeMemberLink, post, withDefaultChannels } from './api';
 import { accountPassword, channelButton, conversation, expect, expectFits, expectStateReadable, phoneSizes, mainNav, messages, phones, showView, signIn, statusLine, test } from './fixtures';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import type { InvitePermissionRequestV1 } from '../src/schema/generated';
@@ -128,52 +128,69 @@ for (const [size, options] of phones) {
     expect(Math.abs(after.top - before.top), `${before.text} moved with the picker closed`).toBeLessThanOrEqual(1);
   });
 
-  test(`P467 at ${size} a member opens a channel, posts and makes an invite, all by tapping`, async ({ meet, secrets, world }) => {
-    const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general', 'nets-demo'], voice: false, may_invite: true });
-    const name = unique(size.slice(0, 3));
+  test(`P467 at ${size} a member opens a channel, posts and makes a member link, all by tapping`, async ({ meet, secrets, world }) => {
+    await withDefaultChannels(world, ['general', 'nets-demo'], async () => {
+      const made = await makeMemberLink(world, world.tokens.operator);
+      const name = unique(size.slice(0, 3));
+      const { page } = await meet(options);
+      await page.goto(inviteUrl(world, made.code));
+      await expectFits(page, 'the invite landing page');
+      // An invite makes an account with a password (issue #713).
+      await page.getByLabel('Your name').tap();
+      await page.getByLabel('Your name').fill(name);
+      await page.getByLabel('Choose a password').fill(accountPassword);
+      await page.getByLabel('Type the password again').fill(accountPassword);
+      await page.getByRole('button', { name: 'Create account', exact: true }).tap();
+      await expect(statusLine(page)).toContainText(name);
+      await expect(statusLine(page)).toContainText('Connected');
+      await keepToken(page, secrets);
+      await expectFits(page, 'the lobby of a new member');
+
+      // Open a channel and back again, then post in it: each channel is chosen
+      // in Channels, which returns to Chat.
+      await tapChannel(page, 'nets-demo');
+      await expect(page.getByRole('heading', { name: 'nets-demo' })).toBeVisible();
+      await tapChannel(page, 'general');
+      await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
+      const body = `${name} posted by tapping`;
+      const box = page.getByLabel('Message #general');
+      await box.tap();
+      await expect(box).toBeFocused();
+      await box.fill(body);
+      await page.getByRole('button', { name: 'Send' }).tap();
+      await expect(messages(page).getByRole('listitem').filter({ hasText: body })).toHaveCount(1);
+      await expect(messages(page).getByRole('listitem').filter({ hasText: body })).not.toContainText('Sending');
+      await expectFits(page, 'a conversation after a post');
+
+      // The link panel (issue #990): open it, choose a use limit, make a link,
+      // and see it listed, all by tapping.
+      const panel = page.getByRole('region', { name: 'Invites' });
+      await panel.getByRole('button', { name: 'Invite someone' }).tap();
+      await expect(panel.getByRole('button', { name: 'Make link' })).toBeVisible();
+      const limit = panel.getByRole('checkbox', { name: 'Limit the number of people' });
+      await limit.tap();
+      await expect(limit).toBeChecked();
+      await expect(panel.getByRole('spinbutton')).toBeVisible();
+      await expectFits(page, 'the link form with a use limit');
+      await panel.getByRole('button', { name: 'Make link' }).tap();
+      await expect(panel.getByRole('textbox', { name: 'Invite link' })).toBeVisible();
+      await expect(panel.getByRole('list', { name: 'Your links' }).getByRole('listitem')).toHaveCount(1);
+      await expectFits(page, 'the link panel with a new link');
+      await panel.getByRole('button', { name: 'Done' }).tap();
+      await expect(panel.getByRole('textbox', { name: 'Invite link' })).toHaveCount(0);
+    });
+  });
+
+  // Issue #990: the bare address of a server that is invite-only is a sign-in
+  // page and one line, and fits the screen; no account and no guest visit is
+  // offered.
+  test(`P990 at ${size} the sign-in-only front door fits and offers nothing to join`, async ({ meet, world }) => {
     const { page } = await meet(options);
-    await page.goto(inviteUrl(world, made.code));
-    await expectFits(page, 'the invite landing page');
-    // An invite makes an account with a password (issue #713).
-    await page.getByLabel('Your name').tap();
-    await page.getByLabel('Your name').fill(name);
-    await page.getByLabel('Choose a password').fill(accountPassword);
-    await page.getByLabel('Type the password again').fill(accountPassword);
-    await page.getByRole('button', { name: 'Create account', exact: true }).tap();
-    await expect(statusLine(page)).toContainText(name);
-    await expect(statusLine(page)).toContainText('Connected');
-    await keepToken(page, secrets);
-    await expectFits(page, 'the lobby of a new member');
-
-    // Open a channel and back again, then post in it: each channel is chosen
-    // in Channels, which returns to Chat.
-    await tapChannel(page, 'nets-demo');
-    await expect(page.getByRole('heading', { name: 'nets-demo' })).toBeVisible();
-    await tapChannel(page, 'general');
-    await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
-    const body = `${name} posted by tapping`;
-    const box = page.getByLabel('Message #general');
-    await box.tap();
-    await expect(box).toBeFocused();
-    await box.fill(body);
-    await page.getByRole('button', { name: 'Send' }).tap();
-    await expect(messages(page).getByRole('listitem').filter({ hasText: body })).toHaveCount(1);
-    await expect(messages(page).getByRole('listitem').filter({ hasText: body })).not.toContainText('Sending');
-    await expectFits(page, 'a conversation after a post');
-
-    // The invite panel: open it, pick a channel, make a link.
-    const panel = page.getByRole('region', { name: 'Invites' });
-    await panel.getByRole('button', { name: 'Invite someone' }).tap();
-    await expect(panel.getByRole('button', { name: 'Make invite' })).toBeVisible();
-    const channel = panel.getByRole('checkbox', { name: '#general' });
-    await channel.tap();
-    await expect(channel).toBeChecked();
-    await panel.getByRole('button', { name: 'Make invite' }).tap();
-    await expect(panel.getByRole('textbox', { name: 'Invite link' })).toBeVisible();
-    await expect(panel.getByRole('list', { name: 'Your invites' }).getByRole('listitem')).toHaveCount(1);
-    await expectFits(page, 'the invite panel with a new link');
-    await panel.getByRole('button', { name: 'Done' }).tap();
-    await expect(panel.getByRole('textbox', { name: 'Invite link' })).toHaveCount(0);
+    await page.goto(world.appUrl);
+    await expect(page.getByText('This server is invite-only.')).toBeVisible();
+    await expect(page.getByRole('button', { name: /create an account|guest/i })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+    await expectFits(page, 'the sign-in-only front door');
   });
 
   // Issue #601: the channel row shows there are more channels than fit, and
@@ -445,4 +462,33 @@ async function expectTargets(scope: Locator, view: string): Promise<void> {
     return found;
   });
   expect(small, `${view}: targets under 44 px`).toEqual([]);
+}
+
+// Issue #990: everyone is offered Invite someone, so the top bar holds four
+// 44 px buttons beside the brand. At every phone width, 320 included, they
+// stay on the brand's row and the connection state has the one row under it:
+// the bar costs two rows of height, not three, so the conversation keeps its
+// room (35-phone-voice-strip measures the log).
+for (const [size, options] of phoneSizes) {
+  test(`P990 at ${size} the top bar keeps its four buttons beside the brand, in two rows`, async ({ meet, world }) => {
+    const { page } = await meet(options);
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    await expect(page.getByLabel('To:')).toBeVisible();
+    const bar = await page.locator('.topbar').evaluate((el) => {
+      const top = (sel: string) => el.querySelector(sel)?.getBoundingClientRect() ?? null;
+      return {
+        height: el.getBoundingClientRect().height,
+        brandTop: top('.brand')?.top ?? -1,
+        actionsTop: top('.topbar-actions')?.top ?? -1,
+        statusTop: top('.status')?.top ?? -1,
+        buttons: el.querySelectorAll('.topbar-actions button').length,
+      };
+    });
+    expect(bar.buttons).toBe(4);
+    // The buttons are on the brand's row, not a row of their own, and the
+    // state is below both.
+    expect(Math.abs(bar.actionsTop - bar.brandTop), 'the buttons are on the brand’s row').toBeLessThan(24);
+    expect(bar.statusTop).toBeGreaterThan(bar.actionsTop + 40);
+    expect(bar.height, 'the top bar is two rows high').toBeLessThanOrEqual(72);
+  });
 }

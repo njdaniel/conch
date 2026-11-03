@@ -53,7 +53,7 @@ const panelAction = (panel: Panel): MemberActionId => (panel.kind === 'ask' ? pa
 // personRefusal is the page's own words for a write to a person the server did
 // not make: the codes of these routes first, then the shared lines by code and
 // permission (permissions.ts). `nothing` says what was left as it was.
-export function personRefusal(result: Refusal & { readonly retryAfter?: number }, nothing: string, name = 'That person'): string {
+export function personRefusal(result: Refusal & { readonly retryAfter?: number }, nothing: string): string {
   if (result.failure !== 'network') {
     switch (result.code) {
       case 'principal_not_found':
@@ -70,10 +70,6 @@ export function personRefusal(result: Refusal & { readonly retryAfter?: number }
         return `That channel is gone, or you can no longer see it. ${nothing}`;
       case 'rate_limited':
         return `Too many attempts; try again later. ${nothing}`;
-      case 'already_member':
-        return `${name} is already in that channel. ${nothing}`;
-      case 'members_unread':
-        return `The channel's people could not be read first. ${nothing}`;
       default:
         break;
     }
@@ -225,7 +221,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
         onChanged(text);
         return;
       }
-      setLine({ text: personRefusal(result, nothing, name), refused: true });
+      setLine({ text: personRefusal(result, nothing), refused: true });
       if (result.failure !== 'network' && (result.code === 'principal_not_found' || result.code === 'last_operator')) onChanged();
     });
   }
@@ -398,19 +394,14 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
               busy={busy}
               onCancel={close}
               onSubmit={(channel) => {
-                // The write is never sent for someone already in the channel: the server
-                // would set their right to decide approvals to what it is told, and
-                // take it from an approver. A new member does not decide approvals.
+                // The server's add-if-absent form: someone already in the channel is
+                // left as they were, so their right to decide approvals is never
+                // changed. A new member does not decide approvals.
                 send(
                   'channel',
-                  async () => {
-                    const there = await api.listMembers(channel);
-                    if (!there.ok) return there.failure === 'unauthorized' ? { ok: false as const, failure: 'unauthorized' as const } : { ok: false as const, failure: there.failure, code: 'members_unread' };
-                    if (there.value.some((m) => m.principal_id === person.id)) return { ok: false as const, failure: 'invalid' as const, code: 'already_member' };
-                    return api.putChannelMember(channel, person.id, { can_decide: false });
-                  },
+                  () => api.addChannelMemberById(channel, person.id, false),
                   'Nothing was sent.',
-                  () => `${name} is in ${channel}.`,
+                  (result) => (result.added ? `${name} is in ${channel}.` : `${name} is already in that channel. Nothing changed.`),
                 );
               }}
             />

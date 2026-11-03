@@ -6,6 +6,7 @@ import { act, cleanup, fireEvent, render, screen, within } from '@testing-librar
 import { useContext, useEffect, useState, type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { headingId } from './Conversation';
+import { InvitePanel } from './InvitePanel';
 import { Lobby } from './Lobby';
 import { MicTestShown, ShowChat, useAppHeight, VoiceLive, VoiceStrip } from './phone';
 import type { ChannelV0 } from './schema/channel';
@@ -524,5 +525,45 @@ describe('the top bar', () => {
     lobby();
     expect(screen.getByRole('status', { name: 'Status' }).textContent).toContain('127.0.0.1');
     expect(screen.getByRole('button', { name: 'Settings' }).getAttribute('aria-label')).toBeNull();
+  });
+});
+
+// Issue #990: the member-link panel on a phone. The panel is in the top bar,
+// outside the three views, so it is reachable from each of them, and its form
+// is the whole of what it was.
+describe('member links on a phone (issue #990)', () => {
+  const who = { id: 2, kind: 'human', name: 'ada', role: 'member', may_invite: true } as const;
+
+  function withPanel() {
+    return render(
+      <Lobby
+        origin="http://127.0.0.1:8080"
+        name="ada"
+        me={2}
+        channels={loaded}
+        unread={new Map()}
+        connection="connected"
+        conversation={<Conversation />}
+        panel={<p>Nobody</p>}
+        voice={<Voice live={false} joined={() => undefined} />}
+        invites={<InvitePanel origin="http://127.0.0.1:8080" me={who} onUnauthorized={() => undefined} />}
+        onOpen={() => undefined}
+        onRetry={() => undefined}
+        onSignOut={() => undefined}
+        onSignOutEverywhere={() => undefined}
+        signOutProblem={null}
+      />,
+    );
+  }
+
+  it.each(['Chat', 'Channels', 'Voice'])('reaches Invite someone from the %s view, and the form with it', (view) => {
+    windowOf(true);
+    withPanel();
+    fireEvent.click(tab(view));
+    const panel = screen.getByRole('region', { name: 'Invites' });
+    expect(panel.closest('[hidden]')).toBeNull();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Invite someone' }));
+    expect(within(panel).getByRole('button', { name: 'Make link' }).closest('[hidden]')).toBeNull();
+    expect(within(panel).getByRole('combobox')).toBeTruthy();
   });
 });

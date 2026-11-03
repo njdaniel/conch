@@ -5,7 +5,7 @@
 // validate.ts. To change one, change the Go type or the table and run
 // `go generate ./pkg/schema`; scripts/schema-ts-check.sh fails while this file
 // differs from what that writes.
-import { array, bool, int, json, object, optional, str, tagged, timestamp, vocab } from './validate';
+import { array, bool, int, json, object, optional, str, tagged, timestamp, tolerant, vocab } from './validate';
 
 // Constants of pkg/schema the client must agree with the server on.
 export const EMOJI_VERSION = '18.0';
@@ -144,8 +144,9 @@ export type ServerMode = 'temporary';
 
 export const serverMode = vocab<ServerMode>({ temporary: true });
 
-// schema.Permission
-export type Permission =
+// schema.Permission: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPermission is the known ones.
+export type KnownPermission =
   | 'create_public_channels'
   | 'create_private_channels'
   | 'make_member_links'
@@ -157,8 +158,9 @@ export type Permission =
   | 'manage_channels'
   | 'change_server_settings'
   | 'read_audit_log';
+export type Permission = KnownPermission | (string & {});
 
-export const permission = vocab<Permission>({
+export const permission = tolerant<KnownPermission>({
   create_public_channels: true,
   create_private_channels: true,
   make_member_links: true,
@@ -1287,11 +1289,13 @@ export const voiceShareV1 = object<VoiceShareV1>({
 export interface VoiceChannelOccupancy {
   channel_id: number;
   in_voice: number;
+  principal_ids?: number[];
 }
 
 export const voiceChannelOccupancy = object<VoiceChannelOccupancy>({
   channel_id: int,
   in_voice: int,
+  principal_ids: optional(array(int)),
 });
 
 // schema.VoiceOccupancyV1
@@ -2754,16 +2758,18 @@ export const putJoinSettingsRequestV1 = object<PutJoinSettingsRequestV1>({
   member_link_default_expiry_seconds: optional(int),
 });
 
-// schema.JoinWarning
-export type JoinWarning =
+// schema.JoinWarning: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownJoinWarning is the known ones.
+export type KnownJoinWarning =
   | 'live_guests_remain'
   | 'trusted_proxy_unset'
   | 'one_address'
   | 'reserved_names_in_use'
   | 'server_name_in_use'
   | 'no_default_channel';
+export type JoinWarning = KnownJoinWarning | (string & {});
 
-export const joinWarning = vocab<JoinWarning>({
+export const joinWarning = tolerant<KnownJoinWarning>({
   live_guests_remain: true,
   trusted_proxy_unset: true,
   one_address: true,
@@ -3471,10 +3477,12 @@ export const permissionRowV1 = object<PermissionRowV1>({
   operator_fixed: optional(bool),
 });
 
-// schema.PermissionPreset
-export type PermissionPreset = 'personal' | 'group';
+// schema.PermissionPreset: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPermissionPreset is the known ones.
+export type KnownPermissionPreset = 'personal' | 'group';
+export type PermissionPreset = KnownPermissionPreset | (string & {});
 
-export const permissionPreset = vocab<PermissionPreset>({ personal: true, group: true });
+export const permissionPreset = tolerant<KnownPermissionPreset>({ personal: true, group: true });
 
 // schema.PermissionPresetV1
 export interface PermissionPresetV1 {
@@ -3487,10 +3495,12 @@ export const permissionPresetV1 = object<PermissionPresetV1>({
   member: array(permission),
 });
 
-// schema.IssuedKind
-export type IssuedKind = 'credential' | 'hook';
+// schema.IssuedKind: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownIssuedKind is the known ones.
+export type KnownIssuedKind = 'credential' | 'hook';
+export type IssuedKind = KnownIssuedKind | (string & {});
 
-export const issuedKind = vocab<IssuedKind>({ credential: true, hook: true });
+export const issuedKind = tolerant<KnownIssuedKind>({ credential: true, hook: true });
 
 // schema.IssuedByOperatorV1
 export interface IssuedByOperatorV1 {
@@ -3509,15 +3519,19 @@ export const issuedByOperatorV1 = object<IssuedByOperatorV1>({
   issued_at: timestamp,
 });
 
-// schema.PermissionRole
-export type PermissionRole = 'member' | 'operator';
+// schema.PermissionRole: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPermissionRole is the known ones.
+export type KnownPermissionRole = 'member' | 'operator';
+export type PermissionRole = KnownPermissionRole | (string & {});
 
-export const permissionRole = vocab<PermissionRole>({ member: true, operator: true });
+export const permissionRole = tolerant<KnownPermissionRole>({ member: true, operator: true });
 
-// schema.PermissionsWarning
-export type PermissionsWarning = 'default_channel_exposes_members' | 'open_signup_on';
+// schema.PermissionsWarning: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPermissionsWarning is the known ones.
+export type KnownPermissionsWarning = 'default_channel_exposes_members' | 'open_signup_on';
+export type PermissionsWarning = KnownPermissionsWarning | (string & {});
 
-export const permissionsWarning = vocab<PermissionsWarning>({
+export const permissionsWarning = tolerant<KnownPermissionsWarning>({
   default_channel_exposes_members: true,
   open_signup_on: true,
 });
@@ -3684,10 +3698,12 @@ export const channelSettingsResponseV1 = object<ChannelSettingsResponseV1>({
   warnings: optional(array(permissionsWarning)),
 });
 
-// schema.InviteKindV2
-export type InviteKindV2 = 'member';
+// schema.InviteKindV2: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownInviteKindV2 is the known ones.
+export type KnownInviteKindV2 = 'member';
+export type InviteKindV2 = KnownInviteKindV2 | (string & {});
 
-export const inviteKindV2 = vocab<InviteKindV2>({ member: true });
+export const inviteKindV2 = tolerant<KnownInviteKindV2>({ member: true });
 
 // schema.InviteV2
 export interface InviteV2 {
@@ -3809,10 +3825,15 @@ export const serverMemberV1 = object<ServerMemberV1>({
   invited_by: optional(int),
 });
 
-// schema.DirectoryScope
-export type DirectoryScope = 'everyone' | 'shared_channels';
+// schema.DirectoryScope: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownDirectoryScope is the known ones.
+export type KnownDirectoryScope = 'everyone' | 'shared_channels';
+export type DirectoryScope = KnownDirectoryScope | (string & {});
 
-export const directoryScope = vocab<DirectoryScope>({ everyone: true, shared_channels: true });
+export const directoryScope = tolerant<KnownDirectoryScope>({
+  everyone: true,
+  shared_channels: true,
+});
 
 // schema.ServerMembersResponseV1
 export interface ServerMembersResponseV1 {
