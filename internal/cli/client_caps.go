@@ -54,10 +54,10 @@ const (
 	// maxMessagePage and maxRunPage are the most rows the server returns for
 	// the message reads (list, thread, search) and the run reads (runs,
 	// activity, interventions).
-	maxMessagePage = 100
-	maxRunPage     = 100
+	maxMessagePage = schema.MaxListMessagesLimit
+	maxRunPage     = schema.MaxListRunsLimit
 	// maxReportPage is the most reports one list returns.
-	maxReportPage = 200
+	maxReportPage = schema.MaxListReportsLimit
 
 	// messageRowBound is a message row. A message has a schema maximum, so a
 	// full page of long ones must still read: the stored message as the
