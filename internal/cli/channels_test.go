@@ -60,6 +60,16 @@ func TestChannelsRefusals(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// An agent, which no community route lets in.
+	if _, _, err := e.admin(t, e.operatorToken, "", "principal", "create", "--kind", "agent", "bot"); err != nil {
+		t.Fatal(err)
+	}
+	agentToken, _, err := e.admin(t, e.operatorToken, "", "credential", "issue", "3", "--label", "bot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentToken = strings.TrimSpace(agentToken)
+	const agents = "only a person in the community may do this: agents and people outside it cannot"
 	tests := []struct {
 		name  string
 		token string
@@ -67,6 +77,9 @@ func TestChannelsRefusals(t *testing.T) {
 		code  string
 		line  string
 	}{
+		{"an agent may not create", agentToken, []string{"channels", "create", "bots"}, "forbidden", agents},
+		{"an agent may not leave", agentToken, []string{"channels", "leave", "lounge"}, "forbidden", agents},
+		{"an agent may not list", agentToken, []string{"channels", "list"}, "forbidden", agents},
 		{"a member may not list everything", e.memberToken, []string{"channels", "list", "--all"}, "forbidden", "only an operator may do this"},
 		{"a name in use", e.operatorToken, []string{"channels", "create", "lounge"}, "channel_exists", "there is already a channel with that name, perhaps one you are not in"},
 		{"a private channel's name is the same line", e.operatorToken, []string{"channels", "create", "den"}, "channel_exists", "there is already a channel with that name, perhaps one you are not in"},

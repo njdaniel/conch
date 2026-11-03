@@ -114,8 +114,6 @@ var adminCommands = []adminCommand{
 	// The community model (ADR-013, issue #994), in admin_community.go.
 	{group: "channel", verb: "settings", args: []string{"channel"}, flags: "[--public|--private] [--default on|off] ",
 		bind: bindChannelSettings, run: adminChannelSettings},
-	{group: "principal", verb: "voice", args: []string{"id", "on|off"}, idAt: 1, run: adminPrincipalVoice},
-	{group: "directory", verb: "members", run: adminDirectoryMembers},
 	{group: "principal", verb: "create", args: []string{"name"}, flags: "--kind human|agent ", required: []string{"kind"},
 		bind: func(fs *flag.FlagSet, o *adminOpts) { fs.StringVar(&o.kind, "kind", "", "human or agent") },
 		run:  adminPrincipalCreate},
@@ -174,7 +172,7 @@ var adminCommands = []adminCommand{
 		run: adminManifestPut},
 	{group: "manifest", verb: "get", args: []string{"principal-id"}, idAt: 1, run: adminManifestGet},
 	// Invites and their administration (issue #438), in admin_invite.go.
-	{group: "invite", verb: "create", flags: "[--expires <duration|RFC3339> | --never-expires] [--uses <n>] [--credential-days <n>] ",
+	{group: "invite", verb: "create", flags: "[--expires <duration|RFC3339> | --never-expires] [--uses <n>] [--credential-days <n>] [--landing-channel <name>...] ",
 		bind: bindInviteCreate, run: adminInviteCreate},
 	{group: "invite", verb: "list", flags: "[--state open|used|expired|closed] [--created-by <id>] ",
 		bind: bindInviteList, run: adminInviteList},
@@ -192,12 +190,13 @@ var adminCommands = []adminCommand{
 	// admin_invite.go.
 	{group: "principal", verb: "sign-in-link", args: []string{"id"}, idAt: 1, flags: "[--purpose sign_in|reset|enrollment] [--expires <duration|RFC3339>] ",
 		bind: bindSignInLink, run: adminPrincipalSignInLink},
+	{group: "principal", verb: "voice", args: []string{"id", "on|off"}, idAt: 1, run: adminPrincipalVoice},
 	// Closing one that leaked, by the link's id (the id `principal
 	// sign-in-link` prints), without disabling its person.
 	{group: "sign-in-link", verb: "close", args: []string{"id"}, idAt: 1, run: adminSignInLinkClose},
 	// The joining policy and guest visits (issue #715), in admin_guest.go.
 	{group: "join", verb: "status", run: adminJoinStatus},
-	{group: "join", verb: "set", flags: "[--open-signup on|off] [--link-expiry <duration|0>] [--open-joining off|guest|account|both] [--guests on|off] [--paused on|off] [--voice on|off] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels] ",
+	{group: "join", verb: "set", flags: "[--open-signup on|off] [--link-expiry <duration|0>] [--open-joining off|account] [--guests off] [--paused on|off] [--voice on] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels] ",
 		bind: bindJoinSet, run: adminJoinSet},
 	{group: "guest", verb: "list", flags: "[--state active|ended|converted] [--origin address|invite] ", bind: bindGuestList, run: adminGuestList},
 	{group: "guest", verb: "end", args: []string{"id"}, idAt: 1, run: adminGuestEnd},
@@ -209,6 +208,7 @@ var adminCommands = []adminCommand{
 		bind: bindPermissionsSet, run: adminPermissionsSet},
 	{group: "permissions", verb: "preset", args: []string{"personal|group"}, flags: "[--yes] ",
 		bind: bindYes, run: adminPermissionsPreset},
+	{group: "directory", verb: "members", run: adminDirectoryMembers},
 	// Problem reports (issue #446), in admin_report.go.
 	{group: "reports", verb: "list", flags: "[--limit <n>] ", bind: bindReportsList, run: adminReportsList},
 	{group: "reports", verb: "show", args: []string{"id"}, idAt: 1, flags: "[--markdown] ", bind: bindReportsShow, run: adminReportsShow},

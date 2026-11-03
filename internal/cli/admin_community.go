@@ -32,6 +32,7 @@ func bindChannelSettings(fs *flag.FlagSet, o *adminOpts) {
 }
 
 var channelSettingsRefusals = refusalLines{
+	"forbidden":                             operatorOnly,
 	schema.ErrorCodeChannelSettingsConflict: "a private channel cannot be a default channel, and a default channel must be public: nothing was changed",
 }
 
@@ -82,7 +83,9 @@ func adminChannelSettings(ctx context.Context, r *adminRun) error {
 		}
 	}
 	if id <= 0 {
-		return fmt.Errorf("cli: %s: %s", cmd, commonRefusals["channel_not_found"])
+		// The line the server's own 404 gets, so a channel that is not there
+		// and one the caller cannot see read the same.
+		return &refusalError{line: commonRefusals["channel_not_found"]}
 	}
 	resp, err := r.client.PutChannelSettings(ctx, id, req)
 	if err != nil {
@@ -129,6 +132,7 @@ func (r *adminRun) sayChannelSettings(req schema.ChannelSettingsRequestV1, resp 
 }
 
 var principalVoiceRefusals = refusalLines{
+	"forbidden":                operatorOnly,
 	schema.ErrorCodeNotAPerson: "agents do not use voice: only a person has a voice switch",
 }
 
@@ -161,7 +165,7 @@ func adminPrincipalVoice(ctx context.Context, r *adminRun) error {
 // server whose cursor always advances cannot keep it reading for ever.
 const maxDirectoryPages = 1000
 
-var directoryRefusals = refusalLines{}
+var directoryRefusals = refusalLines{"forbidden": communityOnly}
 
 // adminDirectoryMembers lists the community, following the server's pages to
 // the end. It prints
