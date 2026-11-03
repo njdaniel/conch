@@ -1,0 +1,29 @@
+{
+  "channels": [
+    {
+      "id": 7,
+      "name": "general",
+      "created_at": "2026-07-13T12:34:56.000Z",
+      "visibility": "public",
+      "default": true,
+      "joined": true,
+      "members": 4,
+      "managers": [
+        {
+          "principal_id": 1,
+          "name": "nick",
+          "kind": "human"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "name": "music",
+      "created_at": "2026-10-30T09:00:00.000Z",
+      "visibility": "public",
+      "joined": false,
+      "members": 0,
+      "managers": []
+    }
+  ]
+}

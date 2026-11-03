@@ -37,7 +37,7 @@ func (s *Server) handleDisablePrincipal(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	caller, authed := callerFrom(ctx)
-	_, err := s.store.DisablePrincipal(ctx, auditActor(ctx), id, authed && !isOwner(caller))
+	changed, err := s.store.DisablePrincipal(ctx, auditActor(ctx), id, authed && !isOwner(caller))
 	switch {
 	case errors.Is(err, store.ErrOwnerProtected):
 		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
@@ -56,6 +56,9 @@ func (s *Server) handleDisablePrincipal(w http.ResponseWriter, r *http.Request) 
 	// Dropped even when nothing changed: a repeat call is a harmless way to
 	// make sure no socket survives.
 	s.principalDisabled(ctx, id)
+	if changed {
+		s.directoryPrincipalChanged(ctx, id, nil)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -83,7 +86,7 @@ func (s *Server) handleEnablePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	caller, authed := callerFrom(ctx)
-	_, err := s.store.EnablePrincipal(ctx, auditActor(ctx), id, authed && !isOwner(caller))
+	changed, err := s.store.EnablePrincipal(ctx, auditActor(ctx), id, authed && !isOwner(caller))
 	switch {
 	case errors.Is(err, store.ErrOwnerProtected):
 		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
@@ -95,6 +98,9 @@ func (s *Server) handleEnablePrincipal(w http.ResponseWriter, r *http.Request) {
 		slog.ErrorContext(ctx, "principals: enable failed", "principal", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
+	}
+	if changed {
+		s.directoryPrincipalChanged(ctx, id, nil)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
