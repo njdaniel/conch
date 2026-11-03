@@ -2,13 +2,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import * as api from './api';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
-import { Avatar } from './Icons';
+import { Avatar, PrivateMark } from './Icons';
 import { Linkified } from './Linkified';
 import { ImageAttachment } from './ImageAttachment';
 import { loadStored, saveEdit, saveReplies } from './state/draftStore';
 import { canEdit, EditedMarker, editEnds, editsLeft, editWindowMs, MessageEditor } from './MessageEdit';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
+import type { ChannelVisibility } from './schema/channel';
 import { fileAttachmentPayloadSchema, fileAttachmentV1, type FileAttachmentV1 } from './schema/file';
 import { MAX_MESSAGE_EDITS, type Audience, type MessageV2 } from './schema/message';
 import type { Target, TargetAction } from './state/drafts';
@@ -501,11 +502,15 @@ export function Conversation({
   onEdited,
   onEditFinal,
   historyBounded = false,
+  visibility,
 }: {
   // The viewer's own membership here has a history bound (history_after), so
   // what was said before they joined is not shown (issue #1034). False when
   // it has none or is not known yet: the page never claims hiding it cannot see.
   readonly historyBounded?: boolean;
+  // The channel's visibility (issue #991): a private one has a lock before its
+  // name. Drawn from this alone, never from how many are in the channel.
+  readonly visibility?: ChannelVisibility;
   // The channel's id, for keeping an open edit across a reload (issue #1039);
   // without it nothing is kept.
   readonly channelId?: number;
@@ -838,6 +843,7 @@ export function Conversation({
         <span className="hash" aria-hidden="true">
           #
         </span>
+        {visibility === 'private' ? <PrivateMark /> : null}
         <h2 id={headingId} tabIndex={-1}>
           {channel}
         </h2>

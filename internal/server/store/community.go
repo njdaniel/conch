@@ -364,7 +364,7 @@ func closeGuestInvitesTx(ctx context.Context, tx execer, now time.Time) (int64, 
 			return 0, fmt.Errorf("invite %d: %w", o.id, err)
 		}
 		if err := appendAuditEventTx(ctx, tx, migrationActor, AuditInviteClosed, inviteSubject(o.id),
-			inviteClosedDetail(o.id, o.kind, o.uses, InviteCloseGuestsRemoved), now); err != nil {
+			inviteClosedDetail(o.id, o.kind, linkLegacy, o.uses, InviteCloseGuestsRemoved), now); err != nil {
 			return 0, err
 		}
 	}

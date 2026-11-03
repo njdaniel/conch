@@ -6,7 +6,7 @@ import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
 import { JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
-import { MicTestShown, phoneViews, useAppHeight, usePhone, VoiceLive, VoiceStrip, type PhoneView } from './phone';
+import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceStrip, type PhoneView } from './phone';
 import type { ChannelV0 } from './schema/channel';
 import { StageHost } from './stage';
 import type { ChannelsState } from './state/channels';
@@ -398,7 +398,15 @@ export function Lobby({
                     }
                   }}
                 />
-                {newChannel}
+                <ShowChat.Provider
+                  value={() => {
+                    if (!phone) return;
+                    toHeading.current = true;
+                    setView('chat');
+                  }}
+                >
+                  {newChannel}
+                </ShowChat.Provider>
                 {phone ? firstRun : null}
               </>
             ) : connection === 'reconnecting' ? (
