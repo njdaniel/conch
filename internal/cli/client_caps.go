@@ -12,17 +12,27 @@ import "github.com/njdaniel/conch/pkg/schema"
 // (the channel directory, member links, joiners and channel members all
 // answer whole) use listRowCeiling, far above any real community.
 const (
-	// listRowBound bounds one row: names are at most 100 characters, and a row
-	// holds a few more fields. 4 KiB is many times a real row.
-	listRowBound = 4 << 10
-	// inviteRowBound bounds one member link, which also lists its channels
-	// (at most schema.MaxInviteChannels names).
-	inviteRowBound = 16 << 10
+	// listRowBound bounds a row that carries one name (at most 100
+	// characters, so 400 bytes of UTF-8) and a few scalars: about 600 bytes at
+	// worst, so 1 KiB is still about twice a real row.
+	listRowBound = 1 << 10
+	// guestRowBound bounds a guest row, which carries three strings (handle,
+	// label and tag).
+	guestRowBound = 4 << 10
+	// inviteRowBound bounds one member link, which lists its channels and its
+	// landing channels (each at most schema.MaxInviteChannels names): about
+	// 27 KiB at worst.
+	inviteRowBound = 32 << 10
 	// listSlack is room for the envelope around the rows.
 	listSlack = 64 << 10
 	// listRowCeiling is the row count allowed from a list the server does not
 	// page.
-	listRowCeiling = 5000
+	listRowCeiling = 2000
+	// maxListPages bounds how many pages a paged list is followed for, so a
+	// server whose cursor always advances cannot keep the client reading, and
+	// holding, for ever: 250 pages of 200 rows is 50,000, far above a
+	// self-hosted community.
+	maxListPages = 250
 
 	maxChannelDirectoryBody = listRowCeiling*listRowBound + listSlack
 	maxChannelMembersBody   = listRowCeiling*listRowBound + listSlack
@@ -30,7 +40,7 @@ const (
 	maxJoinersBody          = listRowCeiling*listRowBound + listSlack
 	maxDirectoryMembersBody = schema.MaxListPrincipalsLimit*listRowBound + listSlack
 	maxPrincipalsBody       = schema.MaxListPrincipalsLimit*listRowBound + listSlack
-	maxGuestsBody           = schema.MaxListGuestsLimit*listRowBound + listSlack
+	maxGuestsBody           = schema.MaxListGuestsLimit*guestRowBound + listSlack
 )
 
 // The list responses, each with its size bounded. They decode as the schema

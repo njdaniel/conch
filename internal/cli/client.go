@@ -642,8 +642,10 @@ func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoin
 		return fmt.Errorf("cli: decode %s response: %w", what, err)
 	}
 	if capped != nil && capped.left <= 0 {
-		// The value ended on the very byte past the cap, so the decoder never
-		// saw the reader's error. It is still over the cap.
+		// The decoder pulled cap+1 bytes and found its value complete without
+		// surfacing the reader's error. The cap is on the body the decoder
+		// reads, trailing bytes such as the encoder's newline included, so this
+		// is still over it.
 		return fmt.Errorf("cli: %s: %w", what, &bodyTooLargeError{limit: capped.limit})
 	}
 	return nil
