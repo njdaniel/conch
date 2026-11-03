@@ -622,6 +622,9 @@ func (s *Store) AddChannelMemberIfAbsent(ctx context.Context, actor string, chan
 		if err := checkChannelExistsTx(ctx, tx, channelID); err != nil {
 			return err
 		}
+		if (target.Name == "") == (target.ID == 0) {
+			return fmt.Errorf("store: add channel member: give exactly one of a name and an id")
+		}
 		targetID := target.ID
 		if target.Name != "" {
 			switch err := tx.QueryRowContext(ctx, "SELECT id FROM principals WHERE name = ?", target.Name).Scan(&targetID); {

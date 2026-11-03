@@ -170,7 +170,7 @@ func TestAddChannelMemberRequestV1Validate(t *testing.T) {
 	}{
 		{name: "valid", req: AddChannelMemberRequestV1{Name: "wren"}},
 		{name: "valid unicode", req: AddChannelMemberRequestV1{Name: "山田 太郎"}},
-		{name: "empty", req: AddChannelMemberRequestV1{}, wantErr: "principal name must not be empty"},
+		{name: "empty", req: AddChannelMemberRequestV1{}, wantErr: "give a name or an id"},
 		{name: "blank", req: AddChannelMemberRequestV1{Name: "   "}, wantErr: "principal name must not be empty"},
 		{name: "fringe whitespace", req: AddChannelMemberRequestV1{Name: " wren"}, wantErr: "whitespace"},
 		{name: "control character", req: AddChannelMemberRequestV1{Name: "wr\x1ben"}, wantErr: "control characters"},

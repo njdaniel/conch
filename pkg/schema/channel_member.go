@@ -189,11 +189,13 @@ type AddChannelMemberRequestV1 struct {
 func (r AddChannelMemberRequestV1) Validate() error {
 	switch {
 	case r.ID < 0:
-		return errors.New("id must be a positive principal id")
+		return errors.New("schema: id must be a positive principal id")
 	case r.ID > 0 && r.Name != "":
-		return errors.New("give a name or an id, not both")
+		return errors.New("schema: give a name or an id, not both")
 	case r.ID > 0:
 		return nil
+	case r.Name == "":
+		return errors.New("schema: give a name or an id")
 	}
 	return CreatePrincipalRequest{Kind: PrincipalHuman, Name: r.Name}.Validate()
 }
