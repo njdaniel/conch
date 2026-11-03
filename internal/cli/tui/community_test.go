@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -32,7 +33,13 @@ type communityAPI struct {
 	pageErr  error
 	voiceNow map[int64]bool
 
+	who   schema.WhoAmIResponseV1
 	calls []string
+}
+
+func (a *communityAPI) WhoAmI(context.Context) (schema.WhoAmIResponseV1, error) {
+	a.record("whoami")
+	return a.who, nil
 }
 
 func (a *communityAPI) record(format string, args ...any) {
@@ -268,18 +275,20 @@ func TestDirectoryLeave(t *testing.T) {
 		want     string
 		leaves   []string
 	}{
-		{name: "public channel leaves at once", keys: []tea.KeyMsg{rune1("l")}, onRow: 0, want: "left #general", leaves: []string{"leave general"}},
+		{name: "public channel asks first", keys: []tea.KeyMsg{rune1("l")}, onRow: 0,
+			want: "leave #general? y to leave, any other key to stay"},
+		{name: "public channel left on y", keys: []tea.KeyMsg{rune1("l"), rune1("y")}, onRow: 0, want: "left #general", leaves: []string{"leave general"}},
 		{name: "not in it", keys: []tea.KeyMsg{rune1("l")}, onRow: 1, want: "not in #random"},
 		{name: "private asks first", keys: []tea.KeyMsg{rune1("l")}, onRow: 2,
 			want: "leave private #ops-private? you cannot join it again yourself: y to leave, any other key to stay"},
 		{name: "private left on y", keys: []tea.KeyMsg{rune1("l"), rune1("y")}, onRow: 2, want: "left #ops-private", leaves: []string{"leave ops-private"}},
 		{name: "l again does not confirm", keys: []tea.KeyMsg{rune1("l"), rune1("l")}, onRow: 2,
 			want: "leave private #ops-private? you cannot join it again yourself: y to leave, any other key to stay"},
-		{name: "private stays on any other key", keys: []tea.KeyMsg{rune1("l"), rune1("n"), rune1("y")}, onRow: 2, want: "channel directory (3)"},
+		{name: "private stays on any other key", keys: []tea.KeyMsg{rune1("l"), tea.KeyMsg{Type: tea.KeyUp}, rune1("y")}, onRow: 2, want: "channel directory (3)"},
 		{name: "last member of a private channel", keys: []tea.KeyMsg{rune1("l"), rune1("y")}, onRow: 2,
 			leaveErr: refusal(409, schema.ErrorCodeChannelLastMember), leaves: []string{"leave ops-private"},
 			want: "you are the last member of this private channel: someone else must be added before you can leave"},
-		{name: "no such channel", keys: []tea.KeyMsg{rune1("l")}, onRow: 0, leaveErr: refusal(404, "channel_not_found"),
+		{name: "no such channel", keys: []tea.KeyMsg{rune1("l"), rune1("y")}, onRow: 0, leaveErr: refusal(404, "channel_not_found"),
 			leaves: []string{"leave general"}, want: "no such channel, or you cannot see it"},
 	}
 	for _, tt := range tests {
@@ -306,14 +315,45 @@ func TestDirectoryLeave(t *testing.T) {
 	}
 }
 
+// A leave question belongs to the row it was asked about: a directory that
+// arrives without that row, or with another name under its id, ends it.
+func TestLeaveQuestionDoesNotSurviveAChangedDirectory(t *testing.T) {
+	general := channelRow(1, "general", schema.ChannelPublic, true)
+	ask := "leave #general? y to leave, any other key to stay"
+	tests := []struct {
+		name string
+		rows []schema.ChannelListingV1
+		want string
+	}{
+		{"same row", []schema.ChannelListingV1{general}, ask},
+		{"row gone", []schema.ChannelListingV1{channelRow(2, "random", schema.ChannelPublic, false)}, ""},
+		{"id reused under another name", []schema.ChannelListingV1{channelRow(1, "other", schema.ChannelPublic, true)}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &communityAPI{listing: []schema.ChannelListingV1{general}}
+			m := pressK(directoryModel(t, api), rune1("l"))
+			m, _ = update(m, directoryLoaded{rows: tt.rows})
+			if m.dir.note != tt.want {
+				t.Errorf("note = %q, want %q", m.dir.note, tt.want)
+			}
+			// y after the reload leaves nothing the question was not about.
+			m = pressK(m, rune1("y"))
+			left := slices.ContainsFunc(api.got(), func(c string) bool { return strings.HasPrefix(c, "leave ") })
+			if left != (tt.want != "") {
+				t.Errorf("leave sent = %v after y, question kept = %v", left, tt.want != "")
+			}
+		})
+	}
+}
+
 func TestLeavingTheChannelOnScreenOpensANeighbour(t *testing.T) {
 	api := &communityAPI{listing: []schema.ChannelListingV1{channelRow(1, "general", schema.ChannelPublic, true)}}
 	m := communityModel(t, api, schema.RoleMember)
 	m.selected = 1 // ops
 	m = pressK(m, keyCtrlD)
 	m.dir.sel = 1
-	m, cmd := update(m, rune1("l"))
-	m = feed(m, cmd)
+	m = pressK(m, rune1("l"), rune1("y"))
 	// Leaving "general" while "ops" is on screen keeps "ops" on screen.
 	if m.current() != "general" && m.current() != "ops" {
 		t.Fatalf("current = %q", m.current())
@@ -326,6 +366,7 @@ func TestLeavingTheChannelOnScreenOpensANeighbour(t *testing.T) {
 	m = pressK(m, rune1("r"))
 	m.dir.sel = 2
 	m, _ = update(m, rune1("l"))
+	m, _ = update(m, rune1("y"))
 	m, _ = update(m, channelActed{op: cli.CommunityOpLeave, channel: "ops"})
 	if !m.loadingChannels || len(m.channels) != 0 {
 		t.Errorf("channels = %v, loading %v, want the list read again after the last one", m.channels, m.loadingChannels)
@@ -539,7 +580,8 @@ func TestVoiceSwitchRefusals(t *testing.T) {
 	}{
 		{"reauthentication", refusal(403, schema.ErrorCodeReauthRequired),
 			"this needs your password first: run 'conch reauth' in another terminal (a script credential cannot; sign in with 'conch login --password'), then try again"},
-		{"owner protection", refusal(403, "forbidden"), "only an owner may change an owner's voice"},
+		{"owner protection or a demoted caller", refusal(403, "forbidden"),
+			"the server does not allow this: only an operator who manages members may switch a voice, and only an owner may switch an owner's"},
 		{"an agent", refusal(409, schema.ErrorCodeNotAPerson), "agents do not use voice: only a person has a voice switch"},
 		{"gone", refusal(404, "principal_not_found"), "no such person"},
 		{"no permission", &cli.ServerError{Status: 403, Code: schema.ErrorCodePermissionDenied, Permission: "manage_members\x1b[31m"},
@@ -570,7 +612,7 @@ func TestVoiceSwitchIsForOperatorsOnAPersonsRow(t *testing.T) {
 	}
 	before := len(api.got())
 	m = pressK(m, rune1("v"))
-	if len(api.got()) != before || m.status() != "only an operator can switch a person's voice" {
+	if len(api.got()) != before || m.status() != "only an operator who manages members can switch a person's voice" {
 		t.Errorf("a member's v sent a request or said %q", m.status())
 	}
 	// An operator's v on an agent sends nothing.

@@ -331,10 +331,15 @@ type Model struct {
 	// comm is the client's community calls, nil when it has none. role is the
 	// caller's role from whoami: the voice switch is offered to operators.
 	// dir and people are the directory and the member view.
-	comm      CommunityAPI
-	role      schema.PrincipalRole
-	dir       directoryView
-	community communityView
+	comm CommunityAPI
+	role schema.PrincipalRole
+	// owner and permissions are what whoami said the caller holds; permsKnown
+	// is false for a server that sends no permissions.
+	owner       bool
+	permissions []schema.Permission
+	permsKnown  bool
+	dir         directoryView
+	community   communityView
 }
 
 // setStatus records status for mode; modeDecision shares the inbox's.
@@ -733,6 +738,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.authorID = msg.who.ID
 		m.userName = msg.who.Name
 		m.role = msg.who.Role
+		m.owner = msg.who.Owner
+		m.permissions = msg.who.Permissions
+		m.permsKnown = msg.who.Permissions != nil || msg.who.PermissionsRevision > 0
 		m.visit = nil
 		if g := msg.who.Guest; g != nil {
 			// Shown from the visit the server describes, never from the

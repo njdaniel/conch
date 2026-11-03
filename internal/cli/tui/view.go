@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -287,8 +288,8 @@ func (m Model) statusHints() []hint {
 		}
 	case modeCommunity:
 		hints = []hint{{"↑/↓", "people", 3}, {"r", "refresh", 2}, {"esc", "back", 0}}
-		if m.operator() {
-			hints = append(hints[:1], append([]hint{{"v", "voice", 1}}, hints[1:]...)...)
+		if m.canManageMembers() {
+			hints = slices.Insert(hints, 1, hint{"v", "voice", 1})
 		}
 	default:
 		arrows := hint{"↑/↓", "channels", 3}
@@ -417,6 +418,12 @@ func (m Model) viewTabs() (string, int) {
 		}
 		parts = append(parts, statusStyle.Render(name))
 		plain = append(plain, name)
+	}
+	for md, label := range map[mode]string{modeDirectory: "[directory]", modeCommunity: "[community]"} {
+		if m.mode == md {
+			parts = append(parts, activeStyle.Render(label))
+			plain = append(plain, label)
+		}
 	}
 	if m.mode == modeRun {
 		run := "[run #" + strconv.FormatInt(m.rd.runID, 10) + "]"

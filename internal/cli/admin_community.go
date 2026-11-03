@@ -132,7 +132,7 @@ func (r *adminRun) sayChannelSettings(req schema.ChannelSettingsRequestV1, resp 
 }
 
 var principalVoiceRefusals = refusalLines{
-	"forbidden":                operatorOnly,
+	"forbidden":                voiceForbidden,
 	schema.ErrorCodeNotAPerson: "agents do not use voice: only a person has a voice switch",
 }
 

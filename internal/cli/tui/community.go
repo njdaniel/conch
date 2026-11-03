@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -123,8 +124,19 @@ func (m Model) moveCommunity(delta int) Model {
 	return m
 }
 
-// operator reports whether the caller is an operator, as whoami said.
-func (m Model) operator() bool { return m.role == schema.RoleOperator }
+// canManageMembers reports whether whoami says the caller may manage members,
+// as the web's canDo does: an owner always may; a server that sends no
+// permissions leaves it to the role; otherwise the permission decides. It only
+// decides what is offered: the server decides every request.
+func (m Model) canManageMembers() bool {
+	switch {
+	case m.role == schema.RoleOperator && m.owner:
+		return true
+	case !m.permsKnown:
+		return m.role == schema.RoleOperator
+	}
+	return slices.Contains(m.permissions, schema.PermManageMembers)
+}
 
 // communityKey handles every key in the member view.
 func (m Model) communityKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -132,7 +144,9 @@ func (m Model) communityKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" {
 		return m, tea.Quit
 	}
-	m.community.note = ""
+	if !m.community.busy {
+		m.community.note = ""
+	}
 	switch key {
 	case "esc", "tab", "shift+tab":
 		m.mode = modeChannels
@@ -165,8 +179,8 @@ func (m Model) switchVoice() (tea.Model, tea.Cmd) {
 	}
 	row := p.members[i]
 	switch {
-	case !m.operator():
-		m.community.note = "only an operator can switch a person's voice"
+	case !m.canManageMembers():
+		m.community.note = "only an operator who manages members can switch a person's voice"
 		return m, nil
 	case row.Kind == schema.PrincipalAgent:
 		m.community.note = "agents do not use voice: only a person has a voice switch"
@@ -195,6 +209,11 @@ func (m Model) voiceSwitched(msg voiceSwitched) (tea.Model, tea.Cmd) {
 			p.note = line
 		}
 		m.community = p
+		if cli.IsServerCode(msg.err, "forbidden") && m.authenticated {
+			// Not (or no longer) allowed: ask who we are now, so the switch
+			// stops being offered.
+			return m, m.loadWhoAmI()
+		}
 		return m, nil
 	}
 	p.members = append([]schema.ServerMemberV1(nil), p.members...)
@@ -239,7 +258,7 @@ func (m Model) memberLine(r schema.ServerMemberV1, selected bool, cols int) stri
 	if r.Owner {
 		marks = append(marks, "owner")
 	}
-	if m.operator() && r.VoiceAllowed != nil {
+	if m.canManageMembers() && r.VoiceAllowed != nil {
 		if *r.VoiceAllowed {
 			marks = append(marks, "voice on")
 		} else {

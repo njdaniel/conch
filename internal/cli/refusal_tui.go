@@ -28,9 +28,9 @@ var communityRefusals = map[string]refusalLines{
 	CommunityOpMembers:  directoryRefusals,
 	CommunityOpVoice: {
 		schema.ErrorCodeNotAPerson: principalVoiceRefusals[schema.ErrorCodeNotAPerson],
-		// A forbidden answer to an operator is the owner protection of
-		// ADR-010: only an owner may act on an owner.
-		"forbidden": "only an owner may change an owner's voice",
+		// Owner protection (ADR-010) and the route guard (a caller no longer
+		// allowed, e.g. demoted mid-session) both answer forbidden.
+		"forbidden": voiceForbidden,
 	},
 }
 

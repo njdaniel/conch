@@ -54,7 +54,8 @@ type directoryView struct {
 	private  bool
 	// confirm is the id of a private channel the user asked to leave: leaving
 	// it cannot be undone by joining again, so it is asked once.
-	confirm int64
+	confirm     int64
+	confirmName string
 }
 
 // directoryLoaded is the answer to a read of the directory.
@@ -110,6 +111,9 @@ func (m Model) directoryLoaded(msg directoryLoaded) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	d.rows, d.loaded = msg.rows, true
+	if d.confirm != 0 && !slices.ContainsFunc(d.rows, func(r schema.ChannelListingV1) bool { return r.ID == d.confirm && r.Name == d.confirmName }) {
+		d.confirm, d.confirmName, d.note = 0, "", ""
+	}
 	if d.selected() < 0 && len(d.rows) > 0 {
 		d.sel = d.rows[0].ID
 	}
@@ -151,7 +155,9 @@ func (m Model) directoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	confirm := d.confirm
 	m.dir.confirm = 0
-	m.dir.note = ""
+	if !d.busy {
+		m.dir.note = ""
+	}
 	switch key {
 	case "esc", "tab", "shift+tab":
 		m.mode = modeChannels
@@ -188,13 +194,13 @@ func (m Model) directoryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dir.note = "not in " + channelLabel(row.Name)
 			return m, nil
 		}
+		// Only y leaves; l again asks again.
+		m.dir.confirm, m.dir.confirmName = row.ID, row.Name
+		m.dir.note = "leave " + channelLabel(row.Name) + "? y to leave, any other key to stay"
 		if row.Visibility != schema.ChannelPublic {
-			// Only y leaves a private channel; l again asks again.
-			m.dir.confirm = row.ID
 			m.dir.note = "leave private " + channelLabel(row.Name) + "? you cannot join it again yourself: y to leave, any other key to stay"
-			return m, nil
 		}
-		return m.channelAction(cli.CommunityOpLeave, row.Name, "leaving…")
+		return m, nil
 	case "y":
 		if confirm == row.ID && row.ID != 0 {
 			return m.channelAction(cli.CommunityOpLeave, row.Name, "leaving…")
