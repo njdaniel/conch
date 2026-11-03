@@ -378,11 +378,15 @@ export const putChannelMemberRequestV1 = object<PutChannelMemberRequestV1>({
 
 // schema.AddChannelMemberRequestV1
 export interface AddChannelMemberRequestV1 {
-  name: string;
+  name?: string;
+  id?: number;
+  can_decide?: boolean;
 }
 
 export const addChannelMemberRequestV1 = object<AddChannelMemberRequestV1>({
-  name: str,
+  name: optional(str),
+  id: optional(int),
+  can_decide: optional(bool),
 });
 
 // schema.Payload

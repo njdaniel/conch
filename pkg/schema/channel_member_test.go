@@ -22,6 +22,8 @@ func TestChannelMemberGoldenFixtures(t *testing.T) {
 		{"put-channel-member-request-v1.json", func() any { return new(PutChannelMemberRequestV1) }},
 		{"put-channel-member-request-v1-manages.json", func() any { return new(PutChannelMemberRequestV1) }},
 		{"add-channel-member-request-v1.json", func() any { return new(AddChannelMemberRequestV1) }},
+		// By id, with a decide right for a new member (issue #1206).
+		{"add-channel-member-request-v1-id.json", func() any { return new(AddChannelMemberRequestV1) }},
 		{"list-channel-members-response-v1.json", func() any { return new(ListChannelMembersResponseV1) }},
 		{"list-channel-members-response-v1-empty.json", func() any { return new(ListChannelMembersResponseV1) }},
 	}
@@ -177,6 +179,30 @@ func TestAddChannelMemberRequestV1Validate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assertValidation(t, tt.req.Validate(), tt.wantErr)
+		})
+	}
+}
+
+func TestAddChannelMemberRequestValidate(t *testing.T) {
+	yes := true
+	tests := []struct {
+		name string
+		req  AddChannelMemberRequestV1
+		ok   bool
+	}{
+		{"by name", AddChannelMemberRequestV1{Name: "wren"}, true},
+		{"by id", AddChannelMemberRequestV1{ID: 42}, true},
+		{"by id with a decide right", AddChannelMemberRequestV1{ID: 42, CanDecide: &yes}, true},
+		{"neither", AddChannelMemberRequestV1{}, false},
+		{"both", AddChannelMemberRequestV1{Name: "wren", ID: 42}, false},
+		{"negative id", AddChannelMemberRequestV1{ID: -1}, false},
+		{"bad name", AddChannelMemberRequestV1{Name: " "}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.req.Validate(); (err == nil) != tt.ok {
+				t.Errorf("Validate() = %v, want ok=%v", err, tt.ok)
+			}
 		})
 	}
 }
