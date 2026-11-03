@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
+import { useEffect, useId, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { waitWords } from './Invite';
 import type { ChannelV0, ChannelVisibility } from './schema/channel';
@@ -6,7 +6,7 @@ import type { ChannelV0, ChannelVisibility } from './schema/channel';
 // The rule a name must keep, for a refusal that does not say which part it
 // broke. The server's own line is never shown: the page's words are chosen by
 // the server's code.
-const nameRule = 'That name cannot be used: it needs a letter you can see, at most 100 characters, and no spaces at either end or control characters.';
+export const nameRule = 'That name cannot be used: it needs a letter you can see, at most 100 characters, and no spaces at either end or control characters.';
 
 // The one answer to every collision. A name is taken whoever's channel it is,
 // and the page never says whether the one in the way is a private channel it
@@ -63,6 +63,11 @@ export function CreateChannel({
   readonly onCreated: (channel: ChannelV0) => void;
   readonly onUnauthorized: () => void;
 }) {
+  // Two of these may be on the page at once (the channel list's and the
+  // console's), so the ids that tie the label and the form are made, not typed.
+  const ids = useId();
+  const formId = `${ids}-form`;
+  const fieldId = `${ids}-field`;
   const [open, setOpen] = useState(false);
   const [value, setValue] = useState('');
   const [chosen, setChosen] = useState<ChannelVisibility>('public');
@@ -132,7 +137,7 @@ export function CreateChannel({
         ref={toggle}
         type="button"
         aria-expanded={open}
-        aria-controls="create-channel-form"
+        aria-controls={formId}
         onClick={() => {
           setOpen(!open);
           setLine(null);
@@ -140,10 +145,10 @@ export function CreateChannel({
       >
         New channel
       </button>
-      <form id="create-channel-form" aria-label="New channel" hidden={!open} onSubmit={submit}>
-        <label htmlFor="create-channel-field">Channel name</label>
+      <form id={formId} aria-label="New channel" hidden={!open} onSubmit={submit}>
+        <label htmlFor={fieldId}>Channel name</label>
         <input
-          id="create-channel-field"
+          id={fieldId}
           ref={field}
           type="text"
           autoComplete="off"
@@ -159,7 +164,7 @@ export function CreateChannel({
             <label>
               <input
                 type="radio"
-                name="create-channel-visibility"
+                name={`${ids}-visibility`}
                 checked={visibility === 'public'}
                 onChange={() => {
                   setChosen('public');
@@ -170,7 +175,7 @@ export function CreateChannel({
             <label>
               <input
                 type="radio"
-                name="create-channel-visibility"
+                name={`${ids}-visibility`}
                 checked={visibility === 'private'}
                 onChange={() => {
                   setChosen('private');

@@ -1736,9 +1736,19 @@ export async function createChannel(name: string, visibility: ChannelVisibility)
 // channelDirectory reads the channel directory (GET /v1/directory/channels,
 // issue #982): every public channel and the caller's own private ones, as the
 // server answers. A member count is sent only to a holder of manage_channels
-// who asks for scope=all, which this never does, and no page reads one.
+// who asks for scope=all (channelDirectoryAll), and the member's pages read none.
 export async function channelDirectory(): Promise<ApiResult<ChannelListingV1[]>> {
   const result = await authed(call('channelDirectory'), channelDirectoryResponseV1);
+  return result.ok ? { ok: true, value: result.value.channels } : result;
+}
+
+// channelDirectoryAll reads every channel with its member count (GET
+// /v1/directory/channels?scope=all, issues #982 and #1021): for a holder of
+// manage_channels, who is refused with permission_denied otherwise. It reads
+// no channel's content, and a private channel's name comes only to such a
+// holder.
+export async function channelDirectoryAll(): Promise<ApiResult<ChannelListingV1[]>> {
+  const result = await authed(call('channelDirectory', {}, 'scope=all'), channelDirectoryResponseV1);
   return result.ok ? { ok: true, value: result.value.channels } : result;
 }
 
