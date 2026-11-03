@@ -30,11 +30,11 @@ func (c *Client) ListProblemReports(ctx context.Context, limit int) (schema.List
 		q.Set("limit", strconv.Itoa(limit))
 		endpoint.RawQuery = q.Encode()
 	}
-	var result schema.ListProblemReportsResponseV1
+	result := reportsDoc{rows: pageRows(limit, maxReportPage)}
 	if err := c.roundTrip(ctx, "list problem reports", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ListProblemReportsResponseV1{}, err
 	}
-	return result, nil
+	return result.ListProblemReportsResponseV1, nil
 }
 
 // ProblemReport returns one report whole (operators only).

@@ -53,6 +53,9 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 	}
 	// The creator's other tabs list the new channel (issue #1027).
 	s.events.notifyChannelsChanged(creatorID)
+	if creatorID != 0 {
+		s.directoryMembershipChanged(ctx, channel.ID, creatorID)
+	}
 	writeJSON(w, http.StatusCreated, schema.CreateChannelResponse{Channel: channelFromStore(channel)})
 }
 
@@ -131,6 +134,7 @@ func (s *Server) handleCreateChannelV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.events.notifyChannelsChanged(caller.ID)
+	s.directoryMembershipChanged(ctx, channel.ID, caller.ID)
 	writeJSON(w, http.StatusCreated, schema.CreateChannelResponseV1{Channel: channelDoc(channel)})
 }
 
@@ -227,7 +231,20 @@ func (s *Server) handleChannelSettings(w http.ResponseWriter, r *http.Request) {
 		s.events.notifyChannel(id, eventRef{kind: eventChannel, id: id})
 		s.channelRenamedLists(ctx, id)
 	}
-	writeJSON(w, http.StatusOK, schema.ChannelSettingsResponseV1{Channel: channelFromStore(res.Channel), OpenSignupTurnedOff: res.OpenSignupTurnedOff})
+	resp := schema.ChannelSettingsResponseV1{Channel: channelFromStore(res.Channel), OpenSignupTurnedOff: res.OpenSignupTurnedOff}
+	// Marking a channel default while members cannot see the directory is
+	// allowed, and says what it does to it (design §13.7, O14a): everyone in
+	// a default channel sees everyone else in it.
+	if req.Default != nil && *req.Default && res.Channel.IsDefault {
+		// The change is made; a warning is a help, so a failed read logs and
+		// the answer goes without it.
+		if doc, err := s.store.Permissions(ctx); err != nil {
+			slog.ErrorContext(ctx, "channels: read the permissions for the warning failed", "channel", id, "error", err)
+		} else if !memberCell(doc.Rows, schema.PermSeeMemberDirectory) {
+			resp.Warnings = []schema.PermissionsWarning{schema.PermissionsWarningDefaultChannelExposesMembers}
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // channelDoc is channelFromStore with the caller's manager grant.

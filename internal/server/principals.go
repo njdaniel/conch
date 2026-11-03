@@ -50,6 +50,7 @@ func (s *Server) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+	s.directoryPrincipalChanged(ctx, principal.ID, nil)
 	writeJSON(w, http.StatusCreated, schema.CreatePrincipalResponse{Principal: principalFromStore(principal)})
 }
 
@@ -191,6 +192,8 @@ func (s *Server) handleRenamePrincipal(w http.ResponseWriter, r *http.Request) {
 		// sends it if it changed. Messages carry author ids, so clients show
 		// the new name on old messages once they reread the member list.
 		s.events.notifyRosters()
+		// And the member directory carries names (design §13.6).
+		s.directoryPrincipalChanged(ctx, id, nil)
 	}
 	writeJSON(w, http.StatusOK, schema.RenamePrincipalResponseV1{Principal: principalFromStore(res.Principal)})
 }

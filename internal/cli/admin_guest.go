@@ -329,7 +329,10 @@ func adminGuestList(ctx context.Context, r *adminRun) error {
 	}
 	filter := GuestListFilter{State: o.state, Origin: o.origin, Limit: schema.MaxListGuestsLimit}
 	all := []schema.GuestAdminV1{}
-	for {
+	for n := 0; ; n++ {
+		if n == maxListPages {
+			return errors.New("cli: admin guest list: the server's pages do not end")
+		}
 		page, err := r.client.ListGuests(ctx, filter)
 		if err != nil {
 			return olderServer(err, "guest visits")
