@@ -33,9 +33,13 @@ const catalog: Permission[] = [
   'manage_channels',
   'change_server_settings',
   'read_audit_log',
+  'use_camera',
 ];
 const memberRights: Permission[] = catalog.slice(0, 6);
 const operatorRights: Permission[] = catalog.slice(0, 9);
+// Rows 7 to 11 are operator-only, so their member cell is fixed; row 12
+// (use_camera, ADR-015) is configurable in both columns and off by default.
+const memberFixed = (permission: Permission, i: number) => i >= 6 && permission !== 'use_camera';
 const personalRights: Permission[] = ['use_voice', 'share_screen'];
 const auth = { scope: 'full', password_set: true, totp_enrolled: false, setup_complete: true, expires_at: later, idle_expires_at: later } as const;
 
@@ -72,7 +76,7 @@ function permissionsDoc(
       permission,
       member: member.includes(permission),
       operator: op.includes(permission),
-      ...(i >= 6 ? { member_fixed: true } : {}),
+      ...(memberFixed(permission, i) ? { member_fixed: true } : {}),
       ...(permission === 'see_member_directory' ? { operator_fixed: true } : {}),
     })),
     ...(current === undefined ? {} : { preset: current.preset }),
@@ -221,6 +225,7 @@ describe('the matrix', () => {
       'Manage channels',
       'Change server settings',
       'Read the audit log',
+      'Use a camera',
     ]);
     expect(within(region).getAllByRole('columnheader').map((h) => h.textContent)).toEqual(['Permission', 'Members', 'Operators', 'Owners']);
     // The sentences the design fixes.
@@ -259,6 +264,42 @@ describe('the matrix', () => {
       expect(input.checked).toBe(was);
     }
     expect(screen.queryByText(/unsaved/)).toBeNull();
+  });
+
+  it('shows the camera row (ADR-015) with its words, off for both and open in both columns', async () => {
+    serve(owner, { 'GET /v1/permissions': () => json(permissionsDoc(2)) });
+    const region = await open(ownerToken);
+    const header = within(region).getByRole('rowheader', { name: /Use a camera/ });
+    expect(header.querySelector('strong')?.textContent).toBe('Use a camera');
+    expect(header.textContent).toContain('Turn on a camera in voice. Needs voice.');
+    for (const role of ['member', 'operator'] as const) {
+      const input = cell(region, 'use_camera', role);
+      expect(input.checked).toBe(false);
+      expect(locked(input)).toBe(false);
+    }
+  });
+
+  it('words the server’s refusal of a camera on where voice is off, naming the cell', async () => {
+    // Voice is off in both columns; the operator cell of use_camera is on,
+    // so precedence holds and the dependency is the rule the page finds
+    // broken when the server answers 409 permissions_conflict.
+    serve(owner, {
+      'GET /v1/permissions': () =>
+        json(
+          permissionsDoc(2, {
+            operator: [...operatorRights.filter((p) => p !== 'use_voice' && p !== 'share_screen'), 'use_camera'],
+            member: memberRights.filter((p) => p !== 'use_voice' && p !== 'share_screen'),
+          }),
+        ),
+      'PUT /v1/permissions': () => refusal(409, 'permissions_conflict', 'use_camera requires use_voice for member'),
+    });
+    const region = await open(ownerToken);
+    fireEvent.click(cell(region, 'use_camera', 'member'));
+    fireEvent.click(within(region).getByRole('button', { name: 'Save changes' }));
+    expect(await within(region).findByText('“Use a camera” needs “Use voice” in the same column. Nothing was saved.')).toBeDefined();
+    expect(cell(region, 'use_camera', 'member').closest('tr')?.className).toContain('flagged');
+    // The edit is kept for the person to decide.
+    expect(cell(region, 'use_camera', 'member').checked).toBe(true);
   });
 
   it('shows an unknown permission by its name, read-only', () => {
@@ -302,6 +343,7 @@ function info(p: Permission): string {
     manage_channels: 'Manage channels',
     change_server_settings: 'Change server settings',
     read_audit_log: 'Read the audit log',
+    use_camera: 'Use a camera',
   };
   return words[p];
 }

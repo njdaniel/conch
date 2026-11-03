@@ -186,6 +186,8 @@ var TSTypes = []TSType{
 	{Value: VoicePresenceRoom{}},
 	// Why the reader's own share ended (issue #487), in their presence alone.
 	{Value: VoiceShareEnded{}},
+	// Why the reader's own camera ended (ADR-015, issue #1238), likewise.
+	{Value: VoiceCameraEnded{}},
 	{Value: VoicePresenceV1{}, Family: "voice-presence-v1", Schema: VoicePresenceSchemaV1},
 	{Value: VoiceTransmitReportV1{}, Family: "voice-transmit-report-v1"},
 	// Companion and viewer participants (issue #933).
@@ -194,6 +196,9 @@ var TSTypes = []TSType{
 	// Screen share (issue #443): the claim the page is given when the room's
 	// share is its own. Presence says who shares (VoiceParticipant above).
 	{Value: VoiceShareV1{}, Family: "voice-share-v1"},
+	// The camera claim (ADR-015, issue #1238): the page may publish a camera
+	// while conchd holds it. Presence says who has one (VoiceParticipant).
+	{Value: VoiceCameraV1{}, Family: "voice-camera-v1"},
 	// Voice occupancy (issue #596): how many are in each channel's voice,
 	// streamed on a socket of its own so the channel list can show it.
 	{Value: VoiceChannelOccupancy{}},

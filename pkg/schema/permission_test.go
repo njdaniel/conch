@@ -19,11 +19,14 @@ func TestPermissionGoldenFixtures(t *testing.T) {
 	}{
 		{"permissions-response-v1.json", func() any { return new(PermissionsResponseV1) }},
 		{"permissions-response-v1-personal.json", func() any { return new(PermissionsResponseV1) }},
+		// The twelve-row document of a server with use_camera (ADR-015).
+		{"permissions-response-v1-camera.json", func() any { return new(PermissionsResponseV1) }},
 		{"put-permissions-request-v1.json", func() any { return new(PutPermissionsRequestV1) }},
 		{"put-permissions-request-v1-preset.json", func() any { return new(PutPermissionsRequestV1) }},
 		{"permissions-changed-v1.json", func() any { return new(PermissionsChangedV1) }},
 		{"whoami-response-v1-permissions.json", func() any { return new(WhoAmIResponseV1) }},
 		{"whoami-response-v1-permissions-none.json", func() any { return new(WhoAmIResponseV1) }},
+		{"whoami-response-v1-permissions-camera.json", func() any { return new(WhoAmIResponseV1) }},
 		{"error-permission-denied.json", func() any { return new(Error) }},
 		{"error-invite-not-allowed-permission.json", func() any { return new(Error) }},
 		{"invite-v1-other-channels.json", func() any { return new(InviteV1) }},
@@ -55,20 +58,22 @@ func TestPermissionFixturesValidate(t *testing.T) {
 			t.Errorf("Validate() = %v, want nil", err)
 		}
 	})
-	// Each response fixture's rows are the catalog, in order, and agree with
-	// the fixed cells and the preset table.
-	for _, file := range []string{"permissions-response-v1.json", "permissions-response-v1-personal.json"} {
+	// Each response fixture's rows are a prefix of the catalog, in order,
+	// each at most once, and agree with the fixed cells and the preset table.
+	// A prefix, not the whole catalog: the two older fixtures are what a
+	// server before use_camera answered, eleven rows, and they stay valid
+	// and byte-identical (ADR-015 decision 10). Only published fixtures get
+	// that latitude; conchd itself always answers the full catalog, which
+	// internal/server's TestPermissionsGet pins.
+	for _, file := range []string{"permissions-response-v1.json", "permissions-response-v1-personal.json", "permissions-response-v1-camera.json"} {
 		t.Run(file, func(t *testing.T) {
 			var r PermissionsResponseV1
 			readFixture(t, file, &r)
-			if len(r.Rows) != len(Permissions) {
-				t.Fatalf("%d rows, want %d", len(r.Rows), len(Permissions))
+			if err := catalogPrefix(rowPermissions(r.Rows)); err != nil {
+				t.Fatal(err)
 			}
 			var member []Permission
 			for i, row := range r.Rows {
-				if row.Permission != Permissions[i] {
-					t.Errorf("rows[%d] = %s, want %s (catalog order)", i, row.Permission, Permissions[i])
-				}
 				for _, c := range []struct {
 					role       PermissionRole
 					value, fix bool
@@ -97,6 +102,68 @@ func TestPermissionFixturesValidate(t *testing.T) {
 	}
 }
 
+// rowPermissions is the permission of each row, in the rows' order.
+func rowPermissions(rows []PermissionRowV1) []Permission {
+	out := make([]Permission, len(rows))
+	for i, row := range rows {
+		out[i] = row.Permission
+	}
+	return out
+}
+
+// catalogPrefix is the rule a published permissions document is held to:
+// its permissions are a prefix of the catalog, in catalog order, each at
+// most once. It accepts the full catalog and any document from a server
+// whose catalog was shorter, and refuses a reordered, a repeated or a gapped
+// list, and a permission outside the catalog.
+func catalogPrefix(got []Permission) error {
+	if len(got) > len(Permissions) {
+		return fmt.Errorf("%d rows, the catalog has %d", len(got), len(Permissions))
+	}
+	for i, p := range got {
+		if p != Permissions[i] {
+			return fmt.Errorf("rows[%d] = %s, want %s: rows are a prefix of the catalog, in order, each once", i, p, Permissions[i])
+		}
+	}
+	return nil
+}
+
+// The fixture rule itself: an eleven-row document (a server before
+// use_camera) and the full twelve-row one pass; anything that is not a prefix
+// of the catalog in order fails.
+func TestPermissionFixtureRowRule(t *testing.T) {
+	eleven := Permissions[:11]
+	tests := []struct {
+		name    string
+		rows    []Permission
+		wantErr string
+	}{
+		{name: "the full catalog", rows: Permissions},
+		{name: "eleven rows, from before use_camera", rows: eleven},
+		{name: "one row", rows: Permissions[:1]},
+		{name: "no rows", rows: nil},
+		{name: "reordered", rows: []Permission{PermCreatePrivateChannels, PermCreatePublicChannels}, wantErr: "rows[0] = create_private_channels, want create_public_channels"},
+		{name: "repeated", rows: []Permission{PermCreatePublicChannels, PermCreatePublicChannels}, wantErr: "rows[1] = create_public_channels, want create_private_channels"},
+		{name: "gapped", rows: append(slices.Clone(Permissions[:10]), PermUseCamera), wantErr: "rows[10] = use_camera, want read_audit_log"},
+		{name: "not a prefix: use_camera first", rows: []Permission{PermUseCamera}, wantErr: "rows[0] = use_camera, want create_public_channels"},
+		{name: "a thirteenth row", rows: append(slices.Clone(Permissions), "pin_messages"), wantErr: "13 rows, the catalog has 12"},
+		{name: "a row outside the catalog", rows: append(slices.Clone(eleven), "pin_messages"), wantErr: "rows[11] = pin_messages, want use_camera"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := catalogPrefix(tt.rows)
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Errorf("catalogPrefix() = %v, want nil", err)
+			case tt.wantErr != "" && err == nil:
+				t.Errorf("catalogPrefix() = nil, want an error containing %q", tt.wantErr)
+			case tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr):
+				t.Errorf("catalogPrefix() = %v, want an error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func readFixture(t *testing.T, file string, v any) {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", file)) // #nosec G304 -- fixture name comes from this file's own tests
@@ -112,7 +179,7 @@ func TestPermissionsCatalog(t *testing.T) {
 	want := []string{
 		"create_public_channels", "create_private_channels", "make_member_links", "see_member_directory",
 		"use_voice", "share_screen", "manage_members", "act_as_members", "manage_channels",
-		"change_server_settings", "read_audit_log",
+		"change_server_settings", "read_audit_log", "use_camera",
 	}
 	if got := values(Permissions...); !reflect.DeepEqual(got, want) {
 		t.Errorf("Permissions = %q,\nwant %q", got, want)
@@ -152,6 +219,92 @@ var permissionTable = map[Permission]permissionCell{
 	PermManageChannels:        {operator: true, memberFixed: true, operatorOnly: true},
 	PermChangeServerSettings:  {memberFixed: true, operatorOnly: true},
 	PermReadAuditLog:          {memberFixed: true, operatorOnly: true},
+	// ADR-015: off for both, member-grantable, nothing fixed.
+	PermUseCamera: {},
+}
+
+// TestUseCameraDefaultsOff is the dedicated test the security review of
+// ADR-015 asked for (design §11.1, §15): use_camera is off by default for
+// both roles, not operator-only, not fixed in either column, and requires
+// exactly use_voice. It is written out, not derived from the table above, so
+// that it fails on its own if the value is ever on by default or treated as
+// operator-only, whichever way the methods are reshaped.
+func TestUseCameraDefaultsOff(t *testing.T) {
+	if !PermUseCamera.Valid() {
+		t.Fatal("use_camera is not in the catalog")
+	}
+	if got := Permissions[len(Permissions)-1]; got != PermUseCamera {
+		t.Errorf("the last permission is %s, want use_camera", got)
+	}
+	for _, r := range []PermissionRole{PermissionRoleMember, PermissionRoleOperator} {
+		if PermUseCamera.Default(r) {
+			t.Errorf("Default(%s) = true: use_camera must be off until the owner turns it on (ADR-014 decision 2)", r)
+		}
+		if fixed, value := PermUseCamera.Fixed(r); fixed || value {
+			t.Errorf("Fixed(%s) = (%v, %v), want (false, false): the cell is configurable", r, fixed, value)
+		}
+	}
+	if PermUseCamera.OperatorOnly() {
+		t.Error("OperatorOnly() = true: members may be granted use_camera")
+	}
+	if got := PermUseCamera.Requires(); !slices.Equal(got, []Permission{PermUseVoice}) {
+		t.Errorf("Requires() = %v, want exactly [use_voice]", got)
+	}
+	for _, on := range PresetMemberPermissions {
+		if slices.Contains(on, PermUseCamera) {
+			t.Errorf("a preset turns use_camera on: %v", on)
+		}
+	}
+	// The reshaped Default falls through to off, and OperatorOnly to
+	// operator-only: a permission the methods do not name is granted to
+	// nobody. Valid is bypassed by a value that is in the catalog but
+	// unnamed only in a future edit, so this guards the fall-throughs with
+	// an unknown value, the one case that reaches them today.
+	for _, unknown := range []Permission{"pin_messages", ""} {
+		for _, r := range []PermissionRole{PermissionRoleMember, PermissionRoleOperator} {
+			if unknown.Default(r) {
+				t.Errorf("Default(%q, %s) = true, want off", unknown, r)
+			}
+		}
+		if !unknown.OperatorOnly() {
+			t.Errorf("OperatorOnly(%q) = false, want operator-only", unknown)
+		}
+	}
+}
+
+// TestPermissionDefaultsUnchanged pins every existing permission's default,
+// by name, against the reshaped Default: the six on for both, the three on
+// for operators, the two off for both, and use_camera off for both. The
+// table above drives TestPermissionCells; this list is a second, independent
+// statement of the same defaults.
+func TestPermissionDefaultsUnchanged(t *testing.T) {
+	type defaults struct{ member, operator bool }
+	want := map[Permission]defaults{
+		PermCreatePublicChannels:  {true, true},
+		PermCreatePrivateChannels: {true, true},
+		PermMakeMemberLinks:       {true, true},
+		PermSeeMemberDirectory:    {true, true},
+		PermUseVoice:              {true, true},
+		PermShareScreen:           {true, true},
+		PermManageMembers:         {false, true},
+		PermActAsMembers:          {false, true},
+		PermManageChannels:        {false, true},
+		PermChangeServerSettings:  {false, false},
+		PermReadAuditLog:          {false, false},
+		PermUseCamera:             {false, false},
+	}
+	if len(want) != len(Permissions) {
+		t.Fatalf("the list has %d rows, the catalog %d", len(want), len(Permissions))
+	}
+	for _, p := range Permissions {
+		w := want[p]
+		if got := p.Default(PermissionRoleMember); got != w.member {
+			t.Errorf("%s: Default(member) = %v, want %v", p, got, w.member)
+		}
+		if got := p.Default(PermissionRoleOperator); got != w.operator {
+			t.Errorf("%s: Default(operator) = %v, want %v", p, got, w.operator)
+		}
+	}
 }
 
 func TestPermissionCells(t *testing.T) {
@@ -231,6 +384,7 @@ func TestPermissionRequires(t *testing.T) {
 	want := map[Permission][]Permission{
 		PermShareScreen:  {PermUseVoice},
 		PermActAsMembers: {PermManageMembers},
+		PermUseCamera:    {PermUseVoice},
 	}
 	for _, p := range Permissions {
 		t.Run(string(p), func(t *testing.T) {
@@ -410,7 +564,7 @@ func TestPutPermissionsRequestV1Validate(t *testing.T) {
 }
 
 // everyConfigurableCell is one change per configurable cell of the catalog:
-// 16 today (6 member cells, 10 operator cells). With no pair twice, that is
+// 18 today (7 member cells, 11 operator cells). With no pair twice, that is
 // the longest valid patch the catalog allows now; MaxPermissionChanges
 // leaves room for it to grow.
 func everyConfigurableCell() []PermissionChangeV1 {
@@ -506,6 +660,16 @@ func TestPermissionUnknownFieldsTolerated(t *testing.T) {
 		}
 		if len(r.Warnings) != 1 || r.Warnings[0].Valid() {
 			t.Errorf("warnings = %v, want the unknown warning kept by name", r.Warnings)
+		}
+	})
+	t.Run("whoami of an owner with use_camera", func(t *testing.T) {
+		var w WhoAmIResponseV1
+		readFixture(t, "whoami-response-v1-permissions-camera.json", &w)
+		if err := w.Validate(); err != nil {
+			t.Errorf("Validate() = %v, want nil", err)
+		}
+		if !slices.Equal(w.Permissions, Permissions) {
+			t.Errorf("permissions = %v, want the whole catalog in order", w.Permissions)
 		}
 	})
 	t.Run("whoami with a later permission", func(t *testing.T) {

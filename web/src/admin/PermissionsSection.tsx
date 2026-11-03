@@ -53,6 +53,7 @@ const info: Readonly<Record<Permission, RowInfo>> = {
   manage_channels: { label: 'Manage channels', text: 'Administer every channel, and see the names of channels they are not in.' },
   change_server_settings: { label: 'Change server settings', text: 'Change joining, open sign-up, the default link expiry and what members may do.' },
   read_audit_log: { label: 'Read the audit log', text: `Holders ${auditSentence}.` },
+  use_camera: { label: 'Use a camera', text: 'Turn on a camera in voice. Needs voice.' },
 };
 
 function known(permission: string): permission is Permission {
@@ -123,6 +124,7 @@ function ruleBreak(rows: readonly PermissionRowV1[], valueOf: (row: PermissionRo
   }
   const needs: readonly (readonly [Permission, Permission])[] = [
     ['share_screen', 'use_voice'],
+    ['use_camera', 'use_voice'],
     ['act_as_members', 'manage_members'],
   ];
   for (const [dependent, base] of needs) {

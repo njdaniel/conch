@@ -141,14 +141,18 @@ var Vocabularies = map[string][]string{
 		VoiceShareEndSelf, VoiceShareEndOperator, VoiceShareEndLeft,
 		VoiceShareEndAccessLost, VoiceShareEndRotated, VoiceShareEndIdle,
 	),
+	"VoiceCameraEndReason": values(
+		VoiceCameraEndSelf, VoiceCameraEndOperator, VoiceCameraEndLeft,
+		VoiceCameraEndAccessLost, VoiceCameraEndRotated, VoiceCameraEndIdle,
+	),
 	"VoiceTransmitState": values(VoiceTransmitStateStarted, VoiceTransmitStateStopped),
 
 	// Roles and permissions (ADR-014, issue #1012). Permission is in catalog
-	// order, the order of Permissions.
+	// order, the order of Permissions. Row 12, use_camera, is ADR-015's.
 	"Permission": values(
 		PermCreatePublicChannels, PermCreatePrivateChannels, PermMakeMemberLinks, PermSeeMemberDirectory,
 		PermUseVoice, PermShareScreen, PermManageMembers, PermActAsMembers, PermManageChannels,
-		PermChangeServerSettings, PermReadAuditLog,
+		PermChangeServerSettings, PermReadAuditLog, PermUseCamera,
 	),
 	"PermissionRole":     values(PermissionRoleMember, PermissionRoleOperator),
 	"PermissionPreset":   values(PresetPersonal, PresetGroup),
