@@ -325,6 +325,14 @@ func run(h *harness) (summary, error) {
 	}
 	h.say("ok   restricted operator: %d rows; with manage_members, act_as_members and manage_channels cut through PUT /v1/permissions, every permission route named its permission, A's channel answered as one that never existed, its own channel gave it a manager's rights, and what it made before the cut was judged again", rn)
 
+	// The personal preset (issue #1017, design §7.7 item 3): the owner
+	// applies personal and group through the real PUT.
+	pn, err := w.presetPhase()
+	if err != nil {
+		return sum, fmt.Errorf("the personal preset: %w", err)
+	}
+	h.say("ok   personal preset: %d rows; with personal applied through PUT /v1/permissions a member's link (v1 and v2) was refused invite_not_allowed naming make_member_links and its channel creation permission_denied naming the permission of the visibility; group gave both back", pn)
+
 	// B's sockets have been open through all of it: a second control, and
 	// every frame since they opened is scanned again.
 	if c, err = w.controlB(2); err != nil {

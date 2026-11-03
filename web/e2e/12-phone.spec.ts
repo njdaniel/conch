@@ -355,12 +355,12 @@ for (const [size, options] of phoneSizes.filter(([name]) => name === '320×640' 
   }
 }
 
-// Issue #1018: an operator's Settings, on a phone, lists the administration
-// sections that exist (Server, Reports); each opens as its own page with a
+// Issue #1018, #1019: an operator's Settings, on a phone, lists the administration
+// sections that exist (Server, Roles and permissions, Reports); each opens as its own page with a
 // Back control, nothing scrolls sideways, and every target is at least 44 px
 // high. One case for each built section.
 for (const [size, options] of phones) {
-  for (const section of ['Server', 'Reports'] as const) {
+  for (const section of ['Server', 'Roles and permissions', 'Reports'] as const) {
     test(`P1018 at ${size} the ${section} section opens as a page with Back, fits the screen and has 44 px targets`, async ({ meet, world }) => {
       const { page } = await meet(options);
       await page.goto(world.appUrl);
@@ -372,7 +372,7 @@ for (const [size, options] of phones) {
       const dialog = page.getByRole('dialog', { name: 'Settings' });
       // The sections that exist are a list; the page of one is not drawn yet.
       const list = dialog.getByRole('list', { name: 'Server administration' });
-      await expect(list.getByRole('button')).toHaveText(['Server', 'Reports']);
+      await expect(list.getByRole('button')).toHaveText(['Server', 'Roles and permissions', 'Reports']);
       await expect(dialog.getByRole('group', { name: 'Server settings' })).toHaveCount(0);
       await expectFits(page, `${size}: the list of administration sections`);
       await expectTargets(dialog, `${size}: the list of administration sections`);
@@ -384,6 +384,11 @@ for (const [size, options] of phones) {
         await expect(dialog.getByRole('group', { name: 'Server settings' })).toBeVisible();
         await dialog.getByRole('button', { name: 'Joining' }).tap();
         await expect(dialog.getByRole('region', { name: 'Joining' })).toBeVisible();
+      } else if (section === 'Roles and permissions') {
+        const region = dialog.getByRole('region', { name: 'Roles and permissions' });
+        await expect(region.getByRole('switch').first()).toBeVisible();
+        await region.getByRole('button', { name: 'Operators', exact: true }).tap();
+        await expect(region.getByRole('list', { name: 'Operators permissions' })).toBeVisible();
       } else {
         await dialog.getByRole('button', { name: 'Reports', exact: true }).tap();
         await expect(dialog.getByRole('region', { name: 'Reports' })).toBeVisible();
