@@ -490,7 +490,7 @@ A release you installed stays in `/opt/conch/releases/`; remove old ones by hand
 
 Steps 1 to 11 get a server running. This part is about what the people on it may do. It follows [ADR-014](adr/ADR-014-fixed-roles-configurable-permissions.md) (the reasons are in [the design](design/admin-roles.md)). The examples use `alpha.your.domain` for a **personal server**, one person with family and friends in separate private conversations, and `chat.your.domain` for a **group server**, where everyone sees everyone.
 
-Each task below gives the browser path first and the `conch admin` command after. In the browser, **Settings** (in the lobby) opens **Server administration**, which has the sections **Server**, **Roles and permissions**, **Members**, **Channels** and **Reports**. Operators and owners see it; members don't. **Channels** appears only for someone who holds `manage_channels`. The commands need your operator token (`CONCH_SERVER` and `CONCH_TOKEN`, as in step 6). Changing permissions from the browser asks for your password again if you last gave it more than ten minutes ago.
+Each task below gives the browser path first and the `conch admin` command after. In the browser, **Settings** (in the lobby) opens **Server administration**, which has the sections **Server**, **Roles and permissions**, **Members**, **Channels** and **Reports**. Operators and owners see it; members don't. **Channels** appears only for someone who holds `manage_channels`. The commands need your operator token (`CONCH_SERVER` and `CONCH_TOKEN`, as in step 6). Changing permissions from the browser asks an operator for their password and authenticator code again if you last gave them more than ten minutes ago.
 
 ### The roles and the owner mark
 
@@ -655,7 +655,7 @@ A member sees each person's id, name, role and join time and nothing else. Who i
 
 Browser: **Settings → Server** has the line "Members see: only people they share a channel with" (or "everyone"), which links to the cell in **Roles and permissions**. CLI: `conch admin permissions set see_member_directory --members off`, or apply the personal preset.
 
-What it doesn't hide: the people in a channel you are both in (a default channel included), and, for a member who can make links, the people who joined through theirs. The personal preset turns link-making off for members, so there are none. If you turn `make_member_links` back on for members on a server where the directory is off, each maker sees the people their links brought in. Hiding members is only as strong as your channels.
+What it doesn't hide: the people in a channel you are both in (a default channel included), and the people who joined through a link the viewer **made**. The server records who made the link a person joined through when they join, and never clears it, so turning link-making off later does not end it. On a server where the personal preset was applied before anyone joined, there are none. On one that ran the defaults first, each member who made a link still sees the people it brought in, and that stays so. **Members** (or `conch admin principal list`) shows "invited by" to holders of `manage_members`, so you can find them. Hiding members is only as strong as your channels.
 
 ### What an operator can and can't see
 
@@ -664,7 +664,7 @@ An operator never reads a channel it isn't a member of: membership is the bounda
 - **With `manage_channels`** (on for operators by default) an operator sees every channel's name, adds and removes members, and so can add itself to a private channel. With `act_as_members` (also on by default) it can sign in as any member who isn't an owner. Treat an operator with these as someone you trust with the content. The way to hold an operator back is to turn these permissions off for the operators' column, not to rely on the title.
 - **Without `manage_channels`** an operator sees only the channels it is in, with a count of the rest: invites, hooks and the joining settings show "and N other channels" (`other_channels`, `other_hooks`, `other_open_channels`), and a request for a channel it isn't in answers as if it didn't exist. Three things remain. The first two show it a channel's name, the third only that channels exist:
   - **The audit export.** The trail names every member and every private channel. That is why `read_audit_log` is off for operators by default and needs a recent sign-in from anyone but an owner. Turning it on for operators shows them everything.
-  - **A problem report's own text.** The server removes channel and member names from the report it keeps, but a person can write a name in the text of their report, and every operator can read reports.
+  - **A problem report's own text.** The server stores a report as written and only attaches a `redact` list of names at read time. The diagnostics it adds carry no names. The three free-text answers are the reporter's own words and may name a channel or a person, and every operator can read reports.
   - **The counts**, which say that channels exist but not which. This one gives no name.
 - Whoever has the host can read the database. See [Trust and scope](../README.md#trust-and-scope).
 

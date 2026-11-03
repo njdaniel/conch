@@ -52,11 +52,15 @@ For anyone who runs a personal server, or moves one across `alpha.8` to
   On a personal server, apply the preset (`conch admin permissions preset
   personal`, or the setup card in Settings → Server) before the release with
   the directory reaches it. A server already on `alpha.10` or later that never
-  applied it is showing its members to each other now: apply it now.
-- **Rolling back forgets a preset.** A binary from before `alpha.8` ignores
-  the table, so it behaves as the defaults (members create channels, make
-  links and see the directory). Rolling back across a migration restores the
-  pre-upgrade backup, which loses a preset applied since in any case.
+  applied it is showing its members to each other now: apply it now. The
+  next release also draws the directory in the web client (Community
+  members, Browse channels), so a personal server upgrading to it must have
+  applied the preset first. Browse channels lists every public channel to
+  members; the preset doesn't turn that off.
+- **Rolling back forgets a preset.** A binary from before `alpha.8` refuses a
+  database that has migration 39, so rolling back restores the pre-upgrade
+  backup (docs/deploy.md step 11; the rollback script does it), and a preset
+  applied since the upgrade goes with it.
 - **Owners skip brakes.** A voice or member-link switch stored on an owner
   no longer counts: an owner whose voice or link-making was switched off has
   them again.
@@ -65,9 +69,12 @@ For anyone who runs a personal server, or moves one across `alpha.8` to
   `make_member_links`, they can make member links straight away, and they
   keep that after open sign-up is switched off. Close their links or remove
   the people a link brought in (ADR-013 decision 5).
-- **Members who can make links see the people who joined through them**
+- **Members who made links see the people who joined through them**
   (#988). With the directory off, a member sees themself, the people in
-  their channels and the people who joined through a link they made. The
+  their channels and the people who joined through a link they made. That
+  is recorded at join and never cleared, so on a server that ran the
+  defaults first it stays after link-making is switched off; `conch admin
+  principal list` shows "invited by" to find them. The
   server now sends the `default_channel_exposes_members` warning when
   members lack the directory and a default channel exists. Before this
   release it didn't, so check for default channels yourself on a server
