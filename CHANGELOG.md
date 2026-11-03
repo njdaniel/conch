@@ -8,6 +8,46 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Added
+
+- **Docs for running a personal or a group server** (#1023, ADR-014).
+  `docs/deploy.md` has a new part, "Running a personal or a group server",
+  with the console path first and the `conch admin` command after for the
+  roles and the owner mark, the preset (what each changes), member links and
+  the invite brake, channel privacy and default channels, hiding members, and
+  what an operator can and cannot see. README gains an administration
+  paragraph. Docs only: no code, wire or migration change.
+
+### Upgrade notice: roles and permissions (ADR-014)
+
+For anyone who runs a personal server, or moves one across `alpha.8` to
+`alpha.10`.
+
+- **The migration changes nothing.** Migration 39 (`alpha.8`) adds the
+  `role_permissions` table, empty, so every permission reads as its default
+  and behaviour is the same until an owner changes a cell.
+- **Apply `personal` once, before members can see each other.** The member
+  directory (`alpha.10`, #983) shows every member to every member by default.
+  On a personal server, apply the preset (`conch admin permissions preset
+  personal`, or the setup card in Settings → Server) before the release with
+  the directory reaches it. A server already on `alpha.10` or later that never
+  applied it is showing its members to each other now: apply it now.
+- **Rolling back forgets a preset.** A binary from before `alpha.8` ignores
+  the table, so it behaves as the defaults (members create channels, make
+  links and see the directory). Rolling back across a migration restores the
+  pre-upgrade backup, which loses a preset applied since in any case.
+- **Owners skip brakes.** A voice or member-link switch stored on an owner
+  no longer counts: an owner whose voice or link-making was switched off has
+  them again.
+- **Open sign-up members can make links.** Members who join through open
+  sign-up hold the member-link switch, so, while members hold
+  `make_member_links`, they can make member links straight away, and they
+  keep that after open sign-up is switched off. Close their links or remove
+  the people a link brought in (ADR-013 decision 5).
+- **`default_channel_exposes_members` is not raised yet.** The warning exists
+  in the vocabulary, the console and the CLI, but the server doesn't send it,
+  so check for default channels yourself on a personal server.
+
 ## [0.1.0-alpha.11] - 2026-11-02
 
 This finishes the joining side of the one-community model: open sign-up and
