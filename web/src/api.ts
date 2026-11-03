@@ -87,12 +87,15 @@ import {
   listChannelMembersResponseV1,
   listChannelsResponse,
   renameChannelResponseV1,
+  channelSettingsResponseV1,
   type AddChannelMemberRequestV1,
   type ChannelMemberV1,
   type ChannelV0,
   type CreateChannelRequest,
   type PutChannelMemberRequestV1,
   type RenameChannelRequestV1,
+  type ChannelSettingsRequestV1,
+  type ChannelSettingsResponseV1,
 } from './schema/channel';
 import { fileAttachmentPayloadSchema, fileV1, type FileAttachmentV1, type FileV1 } from './schema/file';
 import {
@@ -1118,6 +1121,28 @@ export async function putPermissions(request: PutPermissionsRequestV1): Promise<
   return readSent(await authedSend(call('putPermissions'), request), permissionsResponseV1);
 }
 
+// signOutPrincipalEverywhere revokes every credential of another person
+// (POST /v1/principals/{id}/credentials/revoke-all), as the permissions
+// console's issued_to_others list offers it. Unlike signOutEverywhere it does
+// not forget the credential held here: if the person is the caller, the next
+// request is refused and the page signs out as for any revoked credential. It
+// needs manage_members and a recent proof; a refusal carries the server's code.
+export async function signOutPrincipalEverywhere(principal: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('revokeAll', { principal })));
+}
+
+// revokeIssuedCredential revokes one credential an operator issued to someone
+// else (DELETE /v1/credentials/{id}); manage_members and a recent proof.
+export async function revokeIssuedCredential(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('revokeCredential', { id })));
+}
+
+// revokeIssuedHook revokes one hook an operator bound to someone else
+// (DELETE /v1/hooks/{id}); manage_members and a recent proof.
+export async function revokeIssuedHook(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('revokeHook', { id })));
+}
+
 // memberLinks reads the member links the caller may see (GET /v2/invites),
 // newest first: every link with manage_members, else the caller's own. Without
 // manage_channels a link names only the caller's channels and counts the
@@ -1715,6 +1740,16 @@ export async function renameChannel(id: number, from: string, name: string): Pro
   if (!reply.res.ok) return inviteRefused(reply.res);
   const renamed = await readBody(reply.res, renameChannelResponseV1);
   return renamed.ok ? { ok: true, value: renamed.value.channel } : renamed;
+}
+
+// channelSettings makes a channel public or private, a default or not
+// (PUT /v1/channels/{id}/settings, issue #1183): for holders of manage_channels,
+// after a recent proof (reauth_required, which authedSend asks for). A refusal
+// carries the server's code: channel_settings_conflict (a default channel must
+// be public), permission_denied, channel_not_found. The answer is the channel
+// as it now is, and whether unmarking the last default turned open sign-up off.
+export async function channelSettings(id: number, request: ChannelSettingsRequestV1): Promise<InviteResult<ChannelSettingsResponseV1>> {
+  return readSent(await authedSend(call('channelSettings', { id }), request), channelSettingsResponseV1);
 }
 
 // How every channel-addressed route answers a name that is not a channel of

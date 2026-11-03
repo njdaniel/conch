@@ -78,6 +78,8 @@ import {
   redeemSetupTokenResponseV1,
   redeemSignInLinkRequestV1,
   redeemSignInLinkResponseV1,
+  channelSettingsRequestV1,
+  channelSettingsResponseV1,
   renameChannelRequestV1,
   renameChannelResponseV1,
   renamePrincipalRequestV1,
@@ -156,6 +158,10 @@ export const operations = {
   revokeAll: op('POST', '/v1/principals/{principal}/credentials/revoke-all', 'bearer', { response: check(revokeAllCredentialsResponseV1) }),
   listOwnCredentials: op('GET', '/v1/credentials/mine', 'bearer', { response: check(listOwnCredentialsResponseV1) }),
   endOwnCredential: op('DELETE', '/v1/credentials/mine/{id}', 'bearer'),
+  // An operator revokes a credential or a hook issued to someone else
+  // (manage_members), as the permissions console's issued_to_others list does.
+  revokeCredential: op('DELETE', '/v1/credentials/{id}', 'bearer'),
+  revokeHook: op('DELETE', '/v1/hooks/{id}', 'bearer'),
   reauth: op('POST', '/v1/reauth', 'bearer', { request: check(reauthRequestV1), response: check(reauthResponseV1), secret: true, renderer: false }),
   changePassword: op('PUT', '/v1/password/mine', 'bearer', {
     request: check(changePasswordRequestV1),
@@ -239,6 +245,7 @@ export const operations = {
   listChannels: op('GET', '/v1/channels', 'bearer', { response: check(listChannelsResponse) }),
   createChannel: op('POST', '/v0/channels', 'bearer', { request: check(createChannelRequest), response: check(createChannelResponse) }),
   renameChannel: op('PUT', '/v1/channels/{id}/name', 'bearer', { request: check(renameChannelRequestV1), response: check(renameChannelResponseV1) }),
+  channelSettings: op('PUT', '/v1/channels/{id}/settings', 'bearer', { request: check(channelSettingsRequestV1), response: check(channelSettingsResponseV1) }),
   listMembers: op('GET', '/v1/channels/{channel}/members', 'bearer', { response: check(listChannelMembersResponseV1) }),
   addMember: op('POST', '/v1/channels/{channel}/members', 'bearer', { request: check(addChannelMemberRequestV1), response: check(channelMemberV1) }),
   putMember: op('PUT', '/v1/channels/{channel}/members/{principal}', 'bearer', { request: check(putChannelMemberRequestV1) }),
