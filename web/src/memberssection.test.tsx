@@ -10,6 +10,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { AdminConsole } from './AdminConsole';
+import { SettingsOpen } from './joiningSettings';
 import type { ChannelListingV1 } from './schema/channel';
 import type { Permission, PermissionsResponseV1 } from './schema/permission';
 import type { ServerMemberV1, WhoAmIResponseV1 } from './schema/principal';
@@ -115,6 +116,15 @@ class FakeSocket {
       this.onmessage?.({ data: JSON.stringify(data) });
     });
   }
+}
+
+// directoryFrame tells the page the directory changed, as the server does.
+async function directoryFrame(): Promise<void> {
+  await waitFor(() => {
+    expect(FakeSocket.all.some((s) => s.url.includes('/v1/events/ws?'))).toBe(true);
+  });
+  for (const s of FakeSocket.all) s.open();
+  FakeSocket.all.find((s) => s.url.includes('/v1/events/ws?'))?.send({ schema: 'conch.directory_changed.v1' });
 }
 
 async function tick(): Promise<void> {
@@ -770,7 +780,7 @@ describe('the phone', () => {
       'matchMedia',
       vi.fn(() => ({ matches: true, addEventListener: () => undefined, removeEventListener: () => undefined })),
     );
-    render(<AdminConsole who={owner} origin={origin} channels={[]} permissionsChanged={0} onChannelsChanged={() => undefined} onUnauthorized={() => undefined} />);
+    render(<AdminConsole who={owner} origin={origin} channels={[]} permissionsChanged={0} directoryChanged={0} onChannelsChanged={() => undefined} onUnauthorized={() => undefined} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Members' }));
     const region = await screen.findByRole('region', { name: 'Members' });
     await within(region).findByRole('list', { name: 'People' });
@@ -922,7 +932,7 @@ describe('the secret panel', () => {
     await makeCredential(row);
     // The agent leaves the list while the answer is on its way.
     gone = true;
-    fireEvent.click(within(region).getByRole('button', { name: 'Refresh' }));
+    await directoryFrame();
     await waitFor(() => {
       expect(document.body.contains(row)).toBe(false);
     });
@@ -968,5 +978,71 @@ describe('a secondary click inside an open question', () => {
     await choose(row, 'member-1', 'Remove from server…');
     expect(fireEvent.contextMenu(within(row).getByRole('button', { name: 'Cancel' }))).toBe(true);
     expect(within(row).queryByRole('menu')).toBeNull();
+  });
+});
+
+describe('the section follows the directory frame (issue #1226)', () => {
+  // The page signs in once, which sets the api's origin and token; the console is then drawn alone.
+  async function signedIn() {
+    window.sessionStorage.setItem(key, 'conch_owner_session_token');
+    render(<App origin={origin} />);
+    await screen.findByRole('button', { name: 'Settings' });
+    cleanup();
+  }
+  const console = (shown: boolean, directoryChanged: number) => (
+    <SettingsOpen.Provider value={shown}>
+      <AdminConsole who={owner} origin={origin} channels={[]} permissionsChanged={0} directoryChanged={directoryChanged} onChannelsChanged={() => undefined} onUnauthorized={() => undefined} />
+    </SettingsOpen.Provider>
+  );
+  const reads = (calls: readonly Call[]) => calls.filter((c) => c.path === '/v1/directory/members').length;
+
+  it('reads again on a tick while shown, and has no Refresh button', async () => {
+    let list = everyone;
+    const calls = serve(owner, { members: () => list });
+    await signedIn();
+    const view = render(console(true, 0));
+    const region = await screen.findByRole('region', { name: 'Members' });
+    await within(region).findByRole('list', { name: 'People' });
+    expect(within(region).queryByRole('button', { name: 'Refresh' })).toBeNull();
+    const before = reads(calls);
+    list = [...everyone, person(9, 'newcomer')];
+    view.rerender(console(true, 1));
+    await waitFor(() => {
+      expect(rowOf(region, 'newcomer')).toBeTruthy();
+    });
+    expect(reads(calls)).toBe(before + 1);
+  });
+
+  it('sends nothing while hidden', async () => {
+    const calls = serve(owner);
+    await signedIn();
+    await later10();
+    const seen = calls.length;
+    const view = render(console(false, 0));
+    await later10();
+    view.rerender(console(false, 1));
+    view.rerender(console(false, 2));
+    await later10();
+    expect(reads(calls.slice(seen))).toBe(0);
+  });
+
+  it('keeps an open question and its focus through the re-read', async () => {
+    const calls = serve(owner);
+    await signedIn();
+    const view = render(console(true, 0));
+    const region = await screen.findByRole('region', { name: 'Members' });
+    await within(region).findByRole('list', { name: 'People' });
+    const row = rowOf(region, 'member-1');
+    await choose(row, 'member-1', 'Remove from server…');
+    const yes = within(row).getByRole('button', { name: 'Yes, remove' });
+    yes.focus();
+    const before = reads(calls);
+    view.rerender(console(true, 1));
+    await waitFor(() => {
+      expect(reads(calls)).toBe(before + 1);
+    });
+    await later10();
+    expect(within(rowOf(region, 'member-1')).getByRole('button', { name: 'Yes, remove' })).toBe(yes);
+    expect(document.activeElement).toBe(yes);
   });
 });

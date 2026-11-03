@@ -7,6 +7,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { AdminConsole } from './AdminConsole';
+import { SettingsOpen } from './joiningSettings';
 import type { ChannelListingV1, ChannelMemberV1 } from './schema/channel';
 import type { Permission, PermissionsResponseV1 } from './schema/permission';
 import type { WhoAmIResponseV1 } from './schema/principal';
@@ -490,7 +491,7 @@ describe('the phone', () => {
       'matchMedia',
       vi.fn(() => ({ matches: true, addEventListener: () => undefined, removeEventListener: () => undefined })),
     );
-    render(<AdminConsole who={owner} origin={origin} channels={[]} permissionsChanged={0} onChannelsChanged={() => undefined} onUnauthorized={() => undefined} />);
+    render(<AdminConsole who={owner} origin={origin} channels={[]} permissionsChanged={0} directoryChanged={0} onChannelsChanged={() => undefined} onUnauthorized={() => undefined} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Channels' }));
     const region = await screen.findByRole('region', { name: 'Channels' });
     const row = rowOf(region, 'channel-a');
@@ -506,7 +507,7 @@ async function direct(who: WhoAmIResponseV1, onUnauthorized: () => void = () => 
   render(<App origin={origin} />);
   await screen.findByRole('button', { name: 'Settings' });
   cleanup();
-  render(<AdminConsole who={who} origin={origin} channels={[]} permissionsChanged={0} onChannelsChanged={() => undefined} onUnauthorized={onUnauthorized} />);
+  render(<AdminConsole who={who} origin={origin} channels={[]} permissionsChanged={0} directoryChanged={0} onChannelsChanged={() => undefined} onUnauthorized={onUnauthorized} />);
   const region = await screen.findByRole('region', { name: 'Channels' });
   await within(region).findByRole('list', { name: 'Every channel' });
   return region;
@@ -702,5 +703,78 @@ describe('losing manage_channels', () => {
     await later10();
     await later10();
     expect(calls.slice(after).filter((c) => c.query === '?scope=all' || /\/members$/.test(c.path))).toEqual([]);
+  });
+});
+
+describe('the section follows the directory frame (issue #1226)', () => {
+  // The page signs in once, which sets the api's origin and token; the console is then drawn alone.
+  async function signedIn() {
+    window.sessionStorage.setItem(key, 'conch_owner_session_token');
+    render(<App origin={origin} />);
+    await screen.findByRole('button', { name: 'Settings' });
+    cleanup();
+  }
+  // Stable callbacks: a new function per rerender would re-read on its own, so
+  // only the tick may cause a read.
+  const noop = () => undefined;
+  const console = (shown: boolean, directoryChanged: number) => (
+    <SettingsOpen.Provider value={shown}>
+      <AdminConsole who={owner} origin={origin} channels={[]} permissionsChanged={0} directoryChanged={directoryChanged} onChannelsChanged={noop} onUnauthorized={noop} />
+    </SettingsOpen.Provider>
+  );
+  const reads = (calls: readonly Call[]) => calls.filter((c) => c.query === '?scope=all').length;
+
+  it('reads again on a tick while shown', async () => {
+    const rows = [channelA, channelP];
+    const calls = serve(owner, { rows });
+    await signedIn();
+    const view = render(console(true, 0));
+    const region = await screen.findByRole('region', { name: 'Channels' });
+    await within(region).findByRole('list', { name: 'Every channel' });
+    const before = reads(calls);
+    // A rerender with the same tick reads nothing.
+    view.rerender(console(true, 0));
+    await later10();
+    expect(reads(calls)).toBe(before);
+    rows.push({ ...channelP, id: 3, name: 'channel-new' });
+    view.rerender(console(true, 1));
+    await waitFor(() => {
+      expect(rowOf(region, 'channel-new')).toBeTruthy();
+    });
+    expect(reads(calls)).toBe(before + 1);
+  });
+
+  it('sends nothing while hidden', async () => {
+    const calls = serve(owner);
+    await signedIn();
+    await later10();
+    const seen = calls.length;
+    const view = render(console(false, 0));
+    await later10();
+    view.rerender(console(false, 1));
+    view.rerender(console(false, 2));
+    await later10();
+    expect(calls.slice(seen).filter((c) => c.path === '/v1/directory/channels' || /\/members$/.test(c.path))).toEqual([]);
+  });
+
+  it('keeps the People panel and its focus through the re-read', async () => {
+    const calls = serve(owner);
+    await signedIn();
+    const view = render(console(true, 0));
+    const region = await screen.findByRole('region', { name: 'Channels' });
+    await within(region).findByRole('list', { name: 'Every channel' });
+    const row = rowOf(region, 'channel-a');
+    await choose(row, 'channel-a', 'People and managers…');
+    const remove = await within(row).findByRole('button', { name: 'Remove member-1 from channel-a' });
+    remove.focus();
+    const before = reads(calls);
+    view.rerender(console(true, 1));
+    await waitFor(() => {
+      expect(reads(calls)).toBe(before + 1);
+    });
+    await later10();
+    expect(within(row).getByRole('button', { name: 'Remove member-1 from channel-a' })).toBe(remove);
+    expect(document.activeElement).toBe(remove);
+    expect(within(row).queryByText('Reading the people…')).toBeNull();
   });
 });
