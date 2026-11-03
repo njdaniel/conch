@@ -3,7 +3,7 @@
 // section, the list from ?scope=all with its managers, the request each action
 // sends, the page's own words for a refusal (never the server's message), the
 // first action on a personal server, and the phone page. No network, no browser.
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { AdminConsole } from './AdminConsole';
@@ -73,16 +73,41 @@ interface Call {
 type Route = (call: Call) => Response | Promise<Response>;
 
 class FakeSocket {
+  static all: FakeSocket[] = [];
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onclose: ((event: { code: number }) => void) | null = null;
-  constructor(readonly url: string) {}
+  constructor(readonly url: string) {
+    FakeSocket.all.push(this);
+  }
   close() {
     // Nothing to release.
   }
+  open() {
+    act(() => {
+      this.onopen?.();
+    });
+  }
+  send(data: unknown) {
+    act(() => {
+      this.onmessage?.({ data: JSON.stringify(data) });
+    });
+  }
 }
 
-function serve(who: WhoAmIResponseV1, opts: { preset?: 'personal' | 'group'; rows?: ChannelListingV1[]; routes?: Record<string, Route> } = {}): Call[] {
+// tick opens the page's sockets and tells it the permissions changed, as the
+// server does when a document or a role changes.
+async function tick(): Promise<void> {
+  await waitFor(() => {
+    expect(FakeSocket.all.some((s) => s.url.includes('/v1/events/ws?'))).toBe(true);
+  });
+  for (const s of FakeSocket.all) s.open();
+  FakeSocket.all.find((s) => s.url.includes('/v1/events/ws?'))?.send({ schema: 'conch.permissions_changed.v1' });
+}
+
+const later10 = () => new Promise<void>((resolve) => setTimeout(resolve, 30));
+
+function serve(who: WhoAmIResponseV1 | (() => WhoAmIResponseV1), opts: { preset?: 'personal' | 'group'; rows?: ChannelListingV1[]; routes?: Record<string, Route> } = {}): Call[] {
   const calls: Call[] = [];
   const rows = opts.rows ?? [channelA, channelP];
   vi.stubGlobal('WebSocket', FakeSocket);
@@ -98,7 +123,7 @@ function serve(who: WhoAmIResponseV1, opts: { preset?: 'personal' | 'group'; row
       const route = opts.routes?.[`${method} ${url.pathname}`];
       if (route !== undefined) return route(call);
       const path = url.pathname;
-      if (path === '/v1/whoami') return json(who);
+      if (path === '/v1/whoami') return json(typeof who === 'function' ? who() : who);
       if (path === '/v1/channels' && method === 'GET') return json({ channels: [{ id: 1, name: 'channel-a', created_at: at }] });
       if (path === '/v1/directory/channels') return json({ channels: rows });
       if (path === '/v1/permissions') return json(doc(opts.preset ?? 'group'));
@@ -157,6 +182,7 @@ async function choose(row: HTMLElement, channel: string, item: string): Promise<
 const sent = (calls: readonly Call[], method: string, pattern: RegExp) => calls.filter((c) => c.method === method && pattern.test(c.path));
 
 beforeEach(() => {
+  FakeSocket.all = [];
   window.sessionStorage.clear();
   window.localStorage.clear();
   window.location.hash = '';
@@ -313,6 +339,9 @@ describe('the actions send their requests', () => {
     const row = rowOf(region, 'channel-a');
     await choose(row, 'channel-a', 'People and managers…');
     fireEvent.click(await within(row).findByRole('button', { name: 'Let member-1 manage channel-a' }));
+    // Asked first, in place: nothing is sent until it is confirmed.
+    expect(sent(calls, 'PUT', /members\/3$/)).toEqual([]);
+    fireEvent.click(within(row).getByRole('button', { name: 'Make member-1 a manager' }));
     await waitFor(() => {
       expect(sent(calls, 'PUT', /members\/3$/).map((c) => c.body)).toEqual([{ manages: true }]);
     });
@@ -352,12 +381,15 @@ describe('the actions send their requests', () => {
 
 describe('a personal server', () => {
   it('leads each row’s menu with Add person', async () => {
-    serve(owner, { preset: 'personal' });
+    const calls = serve(owner, { preset: 'personal' });
     const region = await open();
-    await waitFor(async () => {
-      const m = await menu(rowOf(region, 'channel-a'), 'channel-a');
-      expect(within(m).getAllByRole('menuitem')[0]?.textContent).toBe('Add person…');
+    // The preset is read after the list; wait for its answer, then open the menu once.
+    await waitFor(() => {
+      expect(calls.some((c) => c.path === '/v1/permissions')).toBe(true);
     });
+    await later10();
+    const m = await menu(rowOf(region, 'channel-a'), 'channel-a');
+    expect(within(m).getAllByRole('menuitem')[0]?.textContent).toBe('Add person…');
   });
 
   it('leads with Rename on a group server', async () => {
@@ -386,5 +418,214 @@ describe('the phone', () => {
     const row = rowOf(region, 'channel-a');
     const m = await menu(row, 'channel-a');
     expect(within(m).getAllByRole('menuitem').length).toBeGreaterThan(3);
+  });
+});
+
+// direct renders the console alone, signed in by the page's credential, with no
+// Reauth overlay behind it: a reauth_required answer is handed back as it came.
+async function direct(who: WhoAmIResponseV1, onUnauthorized: () => void = () => undefined): Promise<HTMLElement> {
+  window.sessionStorage.setItem(key, 'conch_owner_session_token');
+  render(<App origin={origin} />);
+  await screen.findByRole('button', { name: 'Settings' });
+  cleanup();
+  render(<AdminConsole who={who} origin={origin} channels={[]} permissionsChanged={0} onChannelsChanged={() => undefined} onUnauthorized={onUnauthorized} />);
+  const region = await screen.findByRole('region', { name: 'Channels' });
+  await within(region).findByRole('list', { name: 'Every channel' });
+  return region;
+}
+
+describe('the row’s other ways in', () => {
+  it('opens the row’s menu on a right-click and on a long press, though the row is inside the Settings dialog', async () => {
+    serve(owner);
+    const region = await open();
+    expect(region.closest('[role="dialog"]')).not.toBeNull();
+    const row = rowOf(region, 'channel-a');
+    // A right-click is taken over (the browser's own menu is suppressed) and opens the menu.
+    expect(fireEvent.contextMenu(row)).toBe(false);
+    expect(await within(row).findByRole('menu', { name: 'Actions for channel-a' })).toBeTruthy();
+    fireEvent.keyDown(within(row).getByRole('menu'), { key: 'Escape' });
+    await waitFor(() => {
+      expect(within(row).queryByRole('menu')).toBeNull();
+    });
+    // A long press opens it too.
+    fireEvent.touchStart(row, { touches: [{ clientX: 5, clientY: 5 }] });
+    expect(await within(row).findByRole('menu', { name: 'Actions for channel-a' }, { timeout: 2000 })).toBeTruthy();
+  });
+
+  it('still leaves a text box inside the row to the browser’s own menu', async () => {
+    serve(owner);
+    const region = await open();
+    const row = rowOf(region, 'channel-p');
+    await choose(row, 'channel-p', 'Rename channel…');
+    expect(fireEvent.contextMenu(within(row).getByLabelText('New name'))).toBe(true);
+  });
+});
+
+describe('a read does not blank what is open', () => {
+  it('keeps the People list, and its focus, when the permissions change', async () => {
+    // The second read's members answers are slow, so a blank between the
+    // directory's answer and theirs would be seen.
+    let slow = false;
+    const calls = serve(owner, {
+      routes: {
+        'GET /v1/channels/channel-a/members': async () => {
+          if (slow) await new Promise((resolve) => setTimeout(resolve, 150));
+          return json({ members: people['channel-a'] ?? [] });
+        },
+      },
+    });
+    const region = await open();
+    const row = rowOf(region, 'channel-a');
+    await choose(row, 'channel-a', 'People and managers…');
+    const remove = await within(row).findByRole('button', { name: 'Remove member-1 from channel-a' });
+    remove.focus();
+    const reads = calls.filter((c) => c.query === '?scope=all').length;
+    slow = true;
+    await tick();
+    await waitFor(() => {
+      expect(calls.filter((c) => c.query === '?scope=all').length).toBeGreaterThan(reads);
+    });
+    await later10();
+    // The very button, still there, still focused, never replaced by "Reading the people…".
+    expect(within(row).getByRole('button', { name: 'Remove member-1 from channel-a' })).toBe(remove);
+    expect(document.activeElement).toBe(remove);
+    expect(within(row).queryByText('Reading the people…')).toBeNull();
+  });
+
+  it('drops an answer to an earlier read: the newest read’s managers stay', async () => {
+    // The first read of channel-p is held; a second read answers first, then the held one.
+    let first = true;
+    let release: (r: Response) => void = () => undefined;
+    const old = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    serve(owner, {
+      routes: {
+        'GET /v1/channels/channel-p/members': () => {
+          if (first) {
+            first = false;
+            return old;
+          }
+          return json({ members: [member(1, 'owner', true)] });
+        },
+      },
+    });
+    const region = await open();
+    const row = rowOf(region, 'channel-p');
+    await tick();
+    await waitFor(() => {
+      expect(row.textContent).toContain('Managed by owner');
+    });
+    // The first read's answer arrives last, with the older list: it is not shown.
+    release(json({ members: [member(1, 'owner')] }));
+    await later10();
+    expect(row.textContent).toContain('Managed by owner');
+  });
+});
+
+describe('a write that is refused or answered late', () => {
+  const manageIt = async (region: HTMLElement) => {
+    const row = rowOf(region, 'channel-a');
+    await choose(row, 'channel-a', 'People and managers…');
+    fireEvent.click(await within(row).findByRole('button', { name: 'Let member-1 manage channel-a' }));
+    fireEvent.click(within(row).getByRole('button', { name: 'Make member-1 a manager' }));
+    return row;
+  };
+
+  it('shows the page’s line for reauth_required, with one request and no server message', async () => {
+    const calls = serve(owner, { routes: { 'PUT /v1/channels/channel-a/members/3': () => refusal(403, 'reauth_required') } });
+    const region = await direct(owner);
+    const row = await manageIt(region);
+    expect(await within(row).findByText('It needs your password first. Nothing was changed.')).toBeTruthy();
+    expect(region.textContent).not.toContain(leak);
+    expect(sent(calls, 'PUT', /members\/3$/)).toHaveLength(1);
+  });
+
+  it('sends a 401 to sign-out', async () => {
+    const out = vi.fn();
+    serve(owner, { routes: { 'PUT /v1/channels/channel-a/members/3': () => refusal(401, 'unauthorized') } });
+    const region = await direct(owner, out);
+    await manageIt(region);
+    await waitFor(() => {
+      expect(out).toHaveBeenCalled();
+    });
+  });
+
+  it('says a channel was renamed by someone else first, trims the name it sends, and reads the list again', async () => {
+    const calls = serve(owner, { routes: { 'PUT /v1/channels/2/name': () => refusal(409, 'channel_name_stale') } });
+    const region = await direct(owner);
+    const row = rowOf(region, 'channel-p');
+    await choose(row, 'channel-p', 'Rename channel…');
+    fireEvent.change(within(row).getByLabelText('New name'), { target: { value: '  channel-q  ' } });
+    fireEvent.click(within(row).getByRole('button', { name: 'Rename channel' }));
+    expect(await within(row).findByText(/was renamed by someone else first/)).toBeTruthy();
+    expect(sent(calls, 'PUT', /name$/).map((c) => c.body)).toEqual([{ name: 'channel-q', from: 'channel-p' }]);
+    await waitFor(() => {
+      expect(calls.filter((c) => c.query === '?scope=all').length).toBeGreaterThan(1);
+    });
+  });
+});
+
+describe('losing manage_channels', () => {
+  it('removes the section, and no further list or members call is made', async () => {
+    let who = owner;
+    const calls = serve(() => who);
+    const region = await open();
+    await waitFor(() => {
+      expect(rowOf(region, 'channel-a').textContent).toContain('Managed by owner');
+    });
+    who = { ...bareOperator, id: owner.id };
+    await tick();
+    await waitFor(() => {
+      expect(screen.queryByRole('region', { name: 'Channels' })).toBeNull();
+    });
+    const after = calls.length;
+    await later10();
+    await later10();
+    expect(calls.slice(after).filter((c) => c.query === '?scope=all' || /\/members$/.test(c.path))).toEqual([]);
+  });
+
+  it('sends no DELETE for a Remove confirmation that was open', async () => {
+    let who = owner;
+    const calls = serve(() => who);
+    const region = await open();
+    const row = rowOf(region, 'channel-a');
+    await choose(row, 'channel-a', 'People and managers…');
+    fireEvent.click(await within(row).findByRole('button', { name: 'Remove member-1 from channel-a' }));
+    expect(within(row).getByRole('button', { name: 'Remove member-1' })).toBeTruthy();
+    who = { ...bareOperator, id: owner.id };
+    await tick();
+    await waitFor(() => {
+      expect(screen.queryByRole('region', { name: 'Channels' })).toBeNull();
+    });
+    await later10();
+    expect(sent(calls, 'DELETE', /members/)).toEqual([]);
+  });
+
+  it('a write that answers after the grant went sends no read', async () => {
+    let who = owner;
+    let release: (r: Response) => void = () => undefined;
+    const held = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    const calls = serve(() => who, { routes: { 'PUT /v1/channels/channel-a/members/3': () => held } });
+    const region = await open();
+    const row = rowOf(region, 'channel-a');
+    await choose(row, 'channel-a', 'People and managers…');
+    fireEvent.click(await within(row).findByRole('button', { name: 'Let member-1 manage channel-a' }));
+    fireEvent.click(within(row).getByRole('button', { name: 'Make member-1 a manager' }));
+    await waitFor(() => {
+      expect(sent(calls, 'PUT', /members\/3$/)).toHaveLength(1);
+    });
+    who = { ...bareOperator, id: owner.id };
+    await tick();
+    await waitFor(() => {
+      expect(screen.queryByRole('region', { name: 'Channels' })).toBeNull();
+    });
+    const after = calls.length;
+    release(new Response(null, { status: 204 }));
+    await later10();
+    await later10();
+    expect(calls.slice(after).filter((c) => c.query === '?scope=all' || /\/members$/.test(c.path))).toEqual([]);
   });
 });

@@ -97,6 +97,8 @@ test('A1021 at 1440×900 on a personal server the owner makes a private channel,
     await row.getByRole('button', { name: `Actions for ${channel}` }).click();
     await row.getByRole('menuitem', { name: 'People and managers…' }).click();
     await row.getByRole('button', { name: `Let ${friend} manage ${channel}` }).click();
+    // Asked first, in place.
+    await row.getByRole('button', { name: `Make ${friend} a manager` }).click();
     await expect(row).toContainText(`Managed by`);
     await expect(row).toContainText(friend);
     expect((await membersOf(world, channel)).find((m) => m.principal_id === friendId)?.manages).toBe(true);
@@ -142,6 +144,26 @@ test('A1021 at 390×844 the phone adds a person from the sheet its ⋯ button op
     await row.getByLabel('Their name').fill(friend);
     await row.getByRole('button', { name: 'Add person', exact: true }).tap();
     await expect(row.getByText(`Added ${friend} to ${channel}.`)).toBeVisible();
+    expect((await membersOf(world, channel)).map((m) => m.principal_id)).toContain(friendId);
+
+    // People, with a Remove confirmation open: every control in the row is finger-sized.
+    await row.getByRole('button', { name: `Actions for ${channel}` }).tap();
+    await row.getByRole('menuitem', { name: 'People and managers…' }).tap();
+    await row.getByRole('button', { name: `Remove ${friend} from ${channel}` }).tap();
+    await expect(row.getByRole('group', { name: `Remove ${friend}` })).toBeVisible();
+    const small = await row.evaluate((el) => {
+      const found: string[] = [];
+      for (const control of el.querySelectorAll<HTMLElement>('button, input[type="text"]')) {
+        if (control.closest('[hidden]') !== null) continue;
+        const box = control.getBoundingClientRect();
+        if (box.width === 0 || box.height === 0) continue;
+        if (box.height < 43.5) found.push(`${control.tagName.toLowerCase()} "${control.textContent.trim().slice(0, 40)}" is ${String(Math.round(box.height))} px high`);
+      }
+      return found;
+    });
+    expect(small, '390×844: the controls of a row with a Remove confirmation open').toEqual([]);
+    await expectFits(page, '390×844: Channels, Remove asked');
+    await row.getByRole('button', { name: 'Keep' }).tap();
     expect((await membersOf(world, channel)).map((m) => m.principal_id)).toContain(friendId);
     await expectFits(page, '390×844: Channels');
   } finally {

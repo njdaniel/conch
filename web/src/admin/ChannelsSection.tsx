@@ -68,6 +68,8 @@ export function channelRefusal(result: Refusal, nothing: string): string {
         return `A private channel keeps at least one person. ${nothing}`;
       case 'channel_exists':
         return `${nameTaken}. ${nothing}`;
+      case 'channel_name_stale':
+        return `The channel was renamed by someone else first. ${nothing}`;
       case 'rate_limited':
         return `Too many refused attempts; try again later. ${nothing}`;
       case 'invalid_request':
@@ -142,18 +144,23 @@ interface RowProps {
   readonly people: People | undefined;
   readonly personal: boolean;
   readonly reload: (hint?: string) => void;
+  // The page's own channel list is read again; all a row that is gone may ask.
+  readonly notify: () => void;
   readonly loadPeople: (channel: ChannelListingV1) => Promise<void>;
   readonly applied: (id: number, channel: ChannelV0) => void;
   readonly onUnauthorized: () => void;
 }
 
-function Row({ channel, people, personal, reload, loadPeople, applied, onUnauthorized }: RowProps) {
+function Row({ channel, people, personal, reload, notify, loadPeople, applied, onUnauthorized }: RowProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [busy, setBusy] = useState(false);
   const [line, setLine] = useState<Line>(null);
-  // Removing a person is asked first, in place.
-  const [removing, setRemoving] = useState<number | null>(null);
+  // Removing a person, or making one a manager, is asked first, in place.
+  const [asking, setAsking] = useState<{ readonly kind: 'remove' | 'manage'; readonly id: number } | null>(null);
+  const setRemoving = (id: number | null) => {
+    setAsking(id === null ? null : { kind: 'remove', id });
+  };
   const more = useRef<HTMLButtonElement>(null);
   const field = useRef<HTMLInputElement>(null);
   const sending = useRef(false);
@@ -195,8 +202,10 @@ function Row({ channel, people, personal, reload, loadPeople, applied, onUnautho
         onUnauthorized();
         return;
       }
+      // The row is gone (the grant went, or Settings closed): the answer
+      // changes nothing here and asks for no read; the page's list may follow.
       if (!live.current) {
-        if (result.ok) then();
+        if (result.ok) notify();
         return;
       }
       setBusy(false);
@@ -256,9 +265,15 @@ function Row({ channel, people, personal, reload, loadPeople, applied, onUnautho
       setPanel({ kind: 'settings', change: { kind: 'default', to: !isDefault } });
     },
   });
-  const openers = useOpeners(true, () => {
-    setMenuOpen(true);
-  });
+  // The row is inside the Settings drawer, a dialog: its long press and
+  // right-click are opted in.
+  const openers = useOpeners(
+    true,
+    () => {
+      setMenuOpen(true);
+    },
+    { insideDialog: true },
+  );
 
   const managers = managersOf(people);
   const count = people === undefined || people === null ? channel.members : people.length;
@@ -311,7 +326,8 @@ function Row({ channel, people, personal, reload, loadPeople, applied, onUnautho
             busy={busy}
             fieldRef={field}
             onCancel={close}
-            onSubmit={(name) => {
+            onSubmit={(typed) => {
+              const name = typed.trim();
               if (name === channel.name) {
                 setLine({ text: 'That is already the channel’s name.', refused: true });
                 return;
@@ -344,24 +360,60 @@ function Row({ channel, people, personal, reload, loadPeople, applied, onUnautho
                     {name}
                     {m.manages === true ? <span className="ag-badge manages">manages</span> : null}
                   </span>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    aria-label={`${m.manages === true ? 'Stop' : 'Let'} ${name} ${m.manages === true ? 'managing' : 'manage'} ${channel.name}`}
-                    onClick={() => {
-                      run(
-                        () => api.putChannelMember(channel.name, m.principal_id, { manages: m.manages !== true }),
-                        'Nothing was changed.',
-                        m.manages === true ? `${name} no longer manages ${channel.name}.` : `${name} now manages ${channel.name}.`,
-                        () => {
-                          void loadPeople(channel);
-                        },
-                      );
-                    }}
-                  >
-                    {m.manages === true ? 'Stop managing' : 'Make manager'}
-                  </button>
-                  {removing === m.principal_id ? (
+                  {asking?.kind === 'manage' && asking.id === m.principal_id ? (
+                    <span role="group" aria-label={`Make ${name} a manager`} className="signout-confirm">
+                      <span>{`Let ${name} manage ${channel.name}? They can add and remove people, rename it and moderate it.`}</span>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => {
+                          run(
+                            () => api.putChannelMember(channel.name, m.principal_id, { manages: true }),
+                            'Nothing was changed.',
+                            `${name} now manages ${channel.name}.`,
+                            () => {
+                              setAsking(null);
+                              void loadPeople(channel);
+                            },
+                          );
+                        }}
+                      >
+                        {`Make ${name} a manager`}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAsking(null);
+                        }}
+                      >
+                        Keep
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      aria-label={`${m.manages === true ? 'Stop' : 'Let'} ${name} ${m.manages === true ? 'managing' : 'manage'} ${channel.name}`}
+                      onClick={() => {
+                        setLine(null);
+                        if (m.manages === true) {
+                          run(
+                            () => api.putChannelMember(channel.name, m.principal_id, { manages: false }),
+                            'Nothing was changed.',
+                            `${name} no longer manages ${channel.name}.`,
+                            () => {
+                              void loadPeople(channel);
+                            },
+                          );
+                          return;
+                        }
+                        setAsking({ kind: 'manage', id: m.principal_id });
+                      }}
+                    >
+                      {m.manages === true ? 'Stop managing' : 'Make manager'}
+                    </button>
+                  )}
+                  {asking?.kind === 'remove' && asking.id === m.principal_id ? (
                     <span role="group" aria-label={`Remove ${name}`} className="signout-confirm">
                       <span>{`Remove ${name} from ${channel.name}?`}</span>
                       <button
@@ -449,35 +501,44 @@ export function ChannelsSection({ who, refresh, onChannelsChanged, onUnauthorize
   const [personal, setPersonal] = useState(false);
   const [people, setPeople] = useState<ReadonlyMap<number, People>>(new Map());
   const reads = useRef(0);
-  const live = useRef(true);
+  const mayManage = canDo(who, 'manage_channels');
+  // The section may read and write only while it is mounted and its holder
+  // still holds manage_channels (whoami says so). Losing it ends every read
+  // in flight and stops the next one from being sent.
+  const live = useRef(mayManage);
   useEffect(() => {
-    live.current = true;
+    live.current = mayManage;
+    if (!mayManage) reads.current++;
     return () => {
       live.current = false;
     };
-  }, []);
-  const mayManage = canDo(who, 'manage_channels');
+  }, [mayManage]);
+  // Read through a call, so a check after an await is not taken for a
+  // repeat of the one before it.
+  const stillOpen = useCallback(() => live.current, []);
 
   const loadPeople = useCallback(
     async (channel: ChannelListingV1) => {
+      if (!stillOpen()) return;
       const result = await api.listMembers(channel.name);
-      if (!live.current) return;
+      if (!stillOpen()) return;
       if (!result.ok && result.failure === 'unauthorized') {
         onUnauthorized();
         return;
       }
       setPeople((now) => new Map(now).set(channel.id, result.ok ? result.value : null));
     },
-    [onUnauthorized],
+    [onUnauthorized, stillOpen],
   );
 
   // read asks again; `hint`, if given, is a line to show above the list.
   const read = useCallback(
     (hint?: string) => {
+      if (!stillOpen()) return;
       const mine = ++reads.current;
       void (async () => {
         const result = await api.channelDirectoryAll();
-        if (mine !== reads.current || !live.current) return;
+        if (mine !== reads.current || !stillOpen()) return;
         if (!result.ok) {
           if (result.failure === 'unauthorized') onUnauthorized();
           else if (result.code === 'permission_denied' || result.code === 'forbidden') setReadLine(refusalLine({ failure: result.failure, code: result.code }, 'No channel is shown.'));
@@ -486,24 +547,35 @@ export function ChannelsSection({ who, refresh, onChannelsChanged, onUnauthorize
         }
         setReadLine(hint ?? null);
         setRows(result.value);
-        setPeople(new Map());
+        // What is known of each channel stays until its new answer comes, so
+        // an open panel keeps its list; only channels gone from the list go.
+        const present = new Set(result.value.map((c) => c.id));
+        setPeople((now) => new Map([...now].filter(([id]) => present.has(id))));
         // The preset says whether Add person leads; a document that cannot be
         // read leaves the order as a group server's.
         void api.permissions().then((doc) => {
-          if (mine === reads.current && live.current && doc.ok) setPersonal(doc.value.preset === 'personal');
+          if (mine === reads.current && stillOpen() && doc.ok) setPersonal(doc.value.preset === 'personal');
         });
         // Who manages each channel: read a few at a time.
         const queue = [...result.value];
         const worker = async () => {
           for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
-            if (mine !== reads.current || !live.current) return;
-            await loadPeople(next);
+            if (mine !== reads.current || !stillOpen()) return;
+            const answer = await api.listMembers(next.name);
+            // An answer to an earlier read, or after the grant went, is dropped.
+            if (mine !== reads.current || !stillOpen()) return;
+            if (!answer.ok && answer.failure === 'unauthorized') {
+              onUnauthorized();
+              return;
+            }
+            const id = next.id;
+            setPeople((now) => new Map(now).set(id, answer.ok ? answer.value : null));
           }
         };
         await Promise.all([worker(), worker(), worker(), worker()]);
       })();
     },
-    [loadPeople, onUnauthorized],
+    [onUnauthorized, stillOpen],
   );
 
   useEffect(() => {
@@ -551,6 +623,7 @@ export function ChannelsSection({ who, refresh, onChannelsChanged, onUnauthorize
               people={people.get(channel.id)}
               personal={personal}
               reload={changed}
+              notify={onChannelsChanged}
               loadPeople={loadPeople}
               applied={(id, next) => {
                 setRows((now) => now?.map((r) => (r.id === id ? { ...r, visibility: next.visibility ?? r.visibility, default: next.default === true } : r)) ?? now);
