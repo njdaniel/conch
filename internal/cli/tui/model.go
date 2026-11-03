@@ -164,6 +164,11 @@ const (
 	// modeRuns is the Runs view: the channel's runs. r in the Agents view enters
 	// it, a goes back, tab moves on to the channels.
 	modeRuns
+	// modeDirectory is the channel directory and modeCommunity the community's
+	// members (ADR-013, directory.go and community.go). Both are entered from
+	// the chat view and esc goes back to it.
+	modeDirectory
+	modeCommunity
 )
 
 // Model is the root Bubble Tea model. Network results enter Update as messages,
@@ -323,6 +328,13 @@ type Model struct {
 	// vc is voice: the supervisor of the conch-voice helper this TUI owns,
 	// and what it last said (voicectl.go).
 	vc voiceCtl
+	// comm is the client's community calls, nil when it has none. role is the
+	// caller's role from whoami: the voice switch is offered to operators.
+	// dir and people are the directory and the member view.
+	comm      CommunityAPI
+	role      schema.PrincipalRole
+	dir       directoryView
+	community communityView
 }
 
 // setStatus records status for mode; modeDecision shares the inbox's.
@@ -350,6 +362,10 @@ func (m Model) status() string {
 		return m.runStatus()
 	case modeRuns:
 		return m.runsStatus()
+	case modeDirectory:
+		return m.directoryStatus()
+	case modeCommunity:
+		return m.communityStatus()
 	}
 	return m.inboxStatus
 }
@@ -379,6 +395,9 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		sessionRuns: make(map[sessionRunKey][]schema.RunV1), rs: newReadState()}
 	if v, ok := api.(VoiceAPI); ok {
 		m.voice.api = v
+	}
+	if c, ok := api.(CommunityAPI); ok {
+		m.comm = c
 	}
 	if len(clean) == 0 {
 		m.loadingChannels = true
@@ -436,6 +455,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.opensHelp(msg.String()) {
 			m.help, m.helpTop, m.helpTopic = true, 0, topicKeys
 			return m, nil
+		}
+		if m.mode == modeDirectory {
+			return m.directoryKey(msg)
+		}
+		if m.mode == modeCommunity {
+			return m.communityKey(msg)
+		}
+		if m.mode == modeChannels {
+			// Not typed text: the directory and the community.
+			switch msg.String() {
+			case "ctrl+d":
+				return m.enterDirectory()
+			case "ctrl+p":
+				return m.enterCommunity()
+			}
 		}
 		if m.mode == modeRun {
 			return m.runKey(msg)
@@ -629,6 +663,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case directoryLoaded:
+		return m.directoryLoaded(msg)
+	case channelActed:
+		return m.channelActed(msg)
+	case communityLoaded:
+		return m.communityLoaded(msg)
+	case voiceSwitched:
+		return m.voiceSwitched(msg)
 	case readStateLoaded:
 		return m.readStateLoaded(msg)
 	case readMarked:
@@ -690,6 +732,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.whoErr = nil
 		m.authorID = msg.who.ID
 		m.userName = msg.who.Name
+		m.role = msg.who.Role
 		m.visit = nil
 		if g := msg.who.Guest; g != nil {
 			// Shown from the visit the server describes, never from the
@@ -941,6 +984,12 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.selected = next
+	return m.openSelected()
+}
+
+// openSelected opens the selected channel: its nets, members, voice, events
+// and history, as selecting it does.
+func (m Model) openSelected() (Model, tea.Cmd) {
 	m.scroll = 0
 	// The Runs view is of one channel.
 	m.runs = runsView{channel: m.current(), filter: m.runs.filter}
@@ -1578,7 +1627,7 @@ func clipTail(value string, width int) string {
 // secrecy, and users should not mistake it for the latter.
 const whisperNotice = "note: whispers are recorded in the audit log"
 
-const slashHint = `commands: /net [name], /w <ids> <text>, /voice help, /help; start a message with // to send a literal /`
+const slashHint = `commands: /net [name], /w <ids> <text>, /channels, /people, /voice help, /help; start a message with // to send a literal /`
 
 // submit handles enter in the channel pane: a slash command, or a message sent
 // to the current target. Every refusal leaves the input as typed and sends
@@ -1615,6 +1664,12 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/voice":
 		return m.voiceCommand(rest)
+	case "/channels":
+		m.input = ""
+		return m.enterDirectory()
+	case "/people":
+		m.input = ""
+		return m.enterCommunity()
 	default:
 		m.setStatus(modeChannels, fmt.Sprintf("unknown command %q; %s", sanitize(name), slashHint))
 		return m, nil

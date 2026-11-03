@@ -76,6 +76,10 @@ func (m Model) panes(l layout) string {
 		return m.agentsPanes(l)
 	case modeRuns:
 		return m.runsPanes(l)
+	case modeDirectory:
+		return m.directoryPanes(l)
+	case modeCommunity:
+		return m.communityPanes(l)
 	case modeRun:
 		return paneBox("RUN #"+strconv.FormatInt(m.rd.runID, 10), true, m.runLines(l.width-2, l.contentH), l.width, l.contentH, "")
 	}
@@ -250,6 +254,8 @@ func (m Model) inputRow(width int) string {
 		return row.Render(prompt + " " + clipTail(sanitize(m.input), width-cellWidth(prompt)-3) + cursor)
 	case modeRun:
 		return row.Render(fitCells(m.runPrompt(width), width))
+	case modeDirectory:
+		return row.Render(m.directoryPrompt(width))
 	}
 	return row.Render("")
 }
@@ -273,6 +279,17 @@ func (m Model) statusHints() []hint {
 		hints = []hint{{"↑/↓", "runs", 4}, {"enter", "open", 1}, {"f", "filter", 3}, {"a", "agents", 2}, {"esc", "quit", 0}}
 	case modeInbox:
 		hints = []hint{{"↑/↓", "approvals", 3}, {"enter", "decide", 1}, {"tab", "agents", 2}, {"esc", "quit", 0}}
+	case modeDirectory:
+		if m.dir.creating {
+			hints = []hint{{"enter", "create", 1}, {"tab", "public/private", 2}, {"esc", "cancel", 0}}
+		} else {
+			hints = []hint{{"↑/↓", "channels", 4}, {"enter", "join", 1}, {"l", "leave", 2}, {"n", "new", 3}, {"esc", "back", 0}}
+		}
+	case modeCommunity:
+		hints = []hint{{"↑/↓", "people", 3}, {"r", "refresh", 2}, {"esc", "back", 0}}
+		if m.operator() {
+			hints = append(hints[:1], append([]hint{{"v", "voice", 1}}, hints[1:]...)...)
+		}
 	default:
 		arrows := hint{"↑/↓", "channels", 3}
 		if m.focus == focusMessages {
