@@ -19,11 +19,10 @@ import * as api from '../api';
 import { memberActions, voiceOffLine, voiceRoleOff, type MemberAction, type MemberActionId } from '../memberActions';
 import { ActionsMenu, type MenuItem } from '../MessageMenu';
 import { deviceLink } from '../route';
-import type { ChannelListingV1 } from '../schema/channel';
 import type { PermissionRowV1 } from '../schema/permission';
 import type { ServerMemberV1, WhoAmIResponseV1 } from '../schema/principal';
 import type { SignInLinkPurpose } from '../schema/signin';
-import { refusalLine, type Refusal } from './permissions';
+import { canDo, refusalLine, type Refusal } from './permissions';
 import { SecretOnce } from './SecretOnce';
 
 type Line = { readonly text: string; readonly refused: boolean } | null;
@@ -54,7 +53,7 @@ const panelAction = (panel: Panel): MemberActionId => (panel.kind === 'ask' ? pa
 // personRefusal is the page's own words for a write to a person the server did
 // not make: the codes of these routes first, then the shared lines by code and
 // permission (permissions.ts). `nothing` says what was left as it was.
-export function personRefusal(result: Refusal & { readonly retryAfter?: number }, nothing: string): string {
+export function personRefusal(result: Refusal & { readonly retryAfter?: number }, nothing: string, name = 'That person'): string {
   if (result.failure !== 'network') {
     switch (result.code) {
       case 'principal_not_found':
@@ -64,13 +63,17 @@ export function personRefusal(result: Refusal & { readonly retryAfter?: number }
       case 'principal_disabled':
         return `That person is disabled. Enable them first. ${nothing}`;
       case 'not_a_person':
-        return `Agents do not use voice. ${nothing}`;
+        return `That does not apply to an agent. ${nothing}`;
       case 'guest_not_allowed':
         return `That does not apply to a guest. ${nothing}`;
       case 'channel_not_found':
         return `That channel is gone, or you can no longer see it. ${nothing}`;
       case 'rate_limited':
         return `Too many attempts; try again later. ${nothing}`;
+      case 'already_member':
+        return `${name} is already in that channel. ${nothing}`;
+      case 'members_unread':
+        return `The channel's people could not be read first. ${nothing}`;
       default:
         break;
     }
@@ -91,7 +94,7 @@ const purposes: readonly { readonly value: SignInLinkPurpose; readonly label: st
 const clock = (at: string) => new Date(at).toLocaleTimeString();
 
 // The channel choices of the two forms that name a channel, read when one opens.
-type Channels = readonly ChannelListingV1[] | 'failed' | null;
+type Channels = readonly { readonly id: number; readonly name: string }[] | 'failed' | null;
 
 export interface PersonActionsProps {
   readonly who: WhoAmIResponseV1;
@@ -161,7 +164,10 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
     if (!wantsChannels) return;
     const mine = ++channelReads.current;
     setChannels(null);
-    void api.channelDirectoryAll().then((result) => {
+    // Every channel for a holder of manage_channels, who may list them all;
+    // otherwise the viewer's own, the only ones they can bind a hook in.
+    const read = canDo(who, 'manage_channels') ? api.channelDirectoryAll() : api.listChannels();
+    void read.then((result) => {
       if (mine !== channelReads.current || !live.current) return;
       if (!result.ok && result.failure === 'unauthorized') {
         onUnauthorized();
@@ -185,7 +191,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
 
   // send makes one write, once, and says how it went. `done` is the line for
   // success; `then` gets the value the server answered with.
-  function send<T>(id: MemberActionId, write: () => Promise<api.InviteResult<T>>, nothing: string, done: (value: T) => string, then?: (value: T) => void) {
+  function send<T>(id: MemberActionId, write: () => Promise<api.InviteResult<T>>, nothing: string, done: (value: T) => string, lost?: string, then?: (value: T) => void) {
     if (sending.current) return;
     if (!allowed.current.some((a) => a.id === id)) {
       setPanel(null);
@@ -204,7 +210,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
       // The row is gone (the grant went, or Settings closed): the answer
       // changes nothing here, and the list may follow.
       if (!live.current) {
-        if (result.ok) onChanged();
+        if (result.ok) onChanged(lost);
         return;
       }
       setBusy(false);
@@ -213,10 +219,13 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
         const text = done(result.value);
         setLine(null);
         then?.(result.value);
+        // Focus goes back to the row's ⋯ button; if the row goes with the next
+        // read, the list's status line takes it (Members.tsx).
+        button.current?.focus();
         onChanged(text);
         return;
       }
-      setLine({ text: personRefusal(result, nothing), refused: true });
+      setLine({ text: personRefusal(result, nothing, name), refused: true });
       if (result.failure !== 'network' && (result.code === 'principal_not_found' || result.code === 'last_operator')) onChanged();
     });
   }
@@ -324,12 +333,13 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
                   'link',
                   () => api.makeLinkFor(person.id, purpose),
                   'No link was made.',
-                  (made) => `Link made. It works once, until ${clock(made.sign_in_link.expires_at)}.`,
+                  (made) => `Link made. It works once, until ${clock(made.expiresAt)}.`,
+                  `A link for ${name} was made but could not be shown. It works once and runs out on its own.`,
                   (made) => {
                     setSecret({
                       id: 'link',
                       label: `Link that signs in as ${name}`,
-                      value: deviceLink(origin, made.code),
+                      value: deviceLink(origin, made.secret),
                       note: purposes.find((p) => p.value === purpose)?.note ?? '',
                     });
                   },
@@ -351,6 +361,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
                   () => api.issueCredentialFor(person.id, label),
                   'No credential was made.',
                   () => 'Credential made.',
+                  `A credential for ${name} was made but could not be shown; revoke it under Sign-ins.`,
                   (made) => {
                     setSecret({ id: 'credential', label: `Credential that acts as ${name}`, value: made.secret, note: '' });
                   },
@@ -372,6 +383,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
                   () => api.bindHookFor(channel, person.id, label),
                   'No hook was made.',
                   () => 'Hook made.',
+                  `A hook for ${name} was made but could not be shown; revoke it in the permissions list.`,
                   (made) => {
                     setSecret({ id: 'hook', label: `Hook that posts as ${name}`, value: made.secret, note: '' });
                   },
@@ -386,15 +398,36 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
               busy={busy}
               onCancel={close}
               onSubmit={(channel) => {
-                // A new member of a channel does not decide its approvals unless asked.
-                send('channel', () => api.putChannelMember(channel, person.id, { can_decide: false }), 'Nobody was added.', () => `${name} is in ${channel}.`);
+                // The write is never sent for someone already in the channel: the server
+                // would set their right to decide approvals to what it is told, and
+                // take it from an approver. A new member does not decide approvals.
+                send(
+                  'channel',
+                  async () => {
+                    const there = await api.listMembers(channel);
+                    if (!there.ok) return there.failure === 'unauthorized' ? { ok: false as const, failure: 'unauthorized' as const } : { ok: false as const, failure: there.failure, code: 'members_unread' };
+                    if (there.value.some((m) => m.principal_id === person.id)) return { ok: false as const, failure: 'invalid' as const, code: 'already_member' };
+                    return api.putChannelMember(channel, person.id, { can_decide: false });
+                  },
+                  'Nothing was sent.',
+                  () => `${name} is in ${channel}.`,
+                );
               }}
             />
           ) : null}
         </div>
       )}
       {secret === null ? null : (
-        <div className="person-panel">
+        <div
+          className="person-panel"
+          onKeyDown={(event) => {
+            // Escape must not close Settings and lose the secret: only Done ends it.
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+          }}
+        >
           {secret.note === '' ? null : <p className="hint">{secret.note}</p>}
           <SecretOnce
             label={secret.label}
@@ -406,9 +439,11 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
           />
         </div>
       )}
-      <p role="status" className={`member-line${line?.refused === true ? ' notice' : ''}`}>
-        {line?.text ?? ''}
-      </p>
+      {items.length === 0 && line === null ? null : (
+        <p role="status" className={`member-line${line?.refused === true ? ' notice' : ''}`}>
+          {line?.text ?? ''}
+        </p>
+      )}
     </>
   );
 }
@@ -466,10 +501,11 @@ function RoleForm({ name, current, busy, onCancel, onSubmit }: { readonly name: 
           </label>
         ))}
       </fieldset>
+      {to === 'owner' ? <p className="notice">An owner holds every permission, is never braked, and only another owner can change or remove them.</p> : null}
       <p className="hint">A new role ends their sign-ins and hooks, and closes the links they made. They sign in again.</p>
       <div className="actions">
         <button type="submit" disabled={busy || to === current}>
-          {`Make ${roleWords[to]}`}
+          {to === 'owner' ? 'Make an owner, who holds every permission' : `Make ${roleWords[to]}`}
         </button>
         <button type="button" className="cancel" onClick={onCancel}>
           Cancel
@@ -481,7 +517,7 @@ function RoleForm({ name, current, busy, onCancel, onSubmit }: { readonly name: 
 
 function LinkForm({ name, busy, onCancel, onSubmit }: { readonly name: string; readonly busy: boolean; readonly onCancel: () => void; readonly onSubmit: (purpose: SignInLinkPurpose) => void }) {
   const id = useId();
-  const [purpose, setPurpose] = useState<SignInLinkPurpose>('sign_in');
+  const [purpose, setPurpose] = useState<SignInLinkPurpose>('reset');
   return (
     <form
       aria-label={`Make a link that signs in as ${name}`}

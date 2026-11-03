@@ -187,6 +187,15 @@ describe('administration controls', () => {
     expect(screen.getAllByText('Approver')).toHaveLength(2);
   });
 
+  it('gives the viewer own row no menu and leaves the native one alone (issue #1020: no self-removal, the last owner too)', () => {
+    // olivia is the viewer: an operator whose own row would otherwise offer all three items.
+    draw({ ...props('operator'), viewer: { id: 1, role: 'operator', guest: false } });
+    expect(within(row('olivia')).queryByRole('button', { name: 'Actions for olivia' })).toBeNull();
+    expect(fireEvent.contextMenu(row('olivia'))).toBe(true);
+    // Another person row still has its menu.
+    expect(labels(openMenu('ada'))).toContain('Remove from channel');
+  });
+
   it('gives a manager add and a menu of only the removals the rules allow, with no per-row explanations', () => {
     draw(props('member'));
     expect(screen.getByRole('form', { name: 'Add person by name' })).toBeDefined();

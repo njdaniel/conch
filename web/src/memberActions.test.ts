@@ -102,6 +102,12 @@ describe('the member action table', () => {
     expect(labels.hook).toBe('Make a hook that posts as this person…');
   });
 
+  it('says agent for an agent', () => {
+    const labels = Object.fromEntries(memberActions(owner, agent).map((a) => [a.id, a.label]));
+    expect(labels.credential).toBe('Make a credential that acts as this agent…');
+    expect(labels.hook).toBe('Make a hook that posts as this agent…');
+  });
+
   it('names the brake in the direction it would turn', () => {
     const on = memberActions(owner, member).find((a) => a.id === 'voice');
     const off = memberActions(owner, { ...member, voice_allowed: false }).find((a) => a.id === 'voice');

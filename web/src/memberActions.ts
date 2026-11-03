@@ -57,8 +57,9 @@ export function memberActions(who: WhoAmIResponseV1, target: ServerMemberV1): re
   if (members && human && target.role === 'member') add('invites', target.may_invite === false ? 'Allow member links' : 'Stop member links', 'manage_members');
   if (canDo(who, 'manage_channels')) add('channel', 'Add to a channel…', 'manage_channels');
   if (acting && human && !targetOperator) add('link', 'Make a link that signs in as this person…', 'act_as_members');
-  if (acting) add('credential', 'Make a credential that acts as this person…', 'act_as_members');
-  if (acting) add('hook', 'Make a hook that posts as this person…', 'act_as_members');
+  const whom = human ? 'person' : 'agent';
+  if (acting) add('credential', `Make a credential that acts as this ${whom}…`, 'act_as_members');
+  if (acting) add('hook', `Make a hook that posts as this ${whom}…`, 'act_as_members');
   if (owner && human) add('role', 'Change role…', 'owner');
   if (members) {
     add('signout', 'Sign out everywhere…', 'manage_members', true);

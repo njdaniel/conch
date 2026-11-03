@@ -167,7 +167,7 @@ export function ActionsMenu({
 // console's Channels section, in the Settings drawer, issue #1021) opts in
 // with `insideDialog`; a press in a text box, a link, an image or the menu is
 // still left alone.
-export function useOpeners(enabled: boolean, open: () => void, options: { readonly insideDialog?: boolean } = {}) {
+export function useOpeners(enabled: boolean, open: () => void, options: { readonly insideDialog?: boolean; readonly skip?: string } = {}) {
   const timer = useRef<number | null>(null);
   const start = useRef<{ readonly x: number; readonly y: number } | null>(null);
   useEffect(() => () => {
@@ -178,7 +178,8 @@ export function useOpeners(enabled: boolean, open: () => void, options: { readon
     timer.current = null;
     start.current = null;
   };
-  const skipped = options.insideDialog === true ? 'textarea, input, a, img, [role="menu"]' : 'textarea, input, a, img, [role="menu"], [role="dialog"]';
+  const base = options.insideDialog === true ? 'textarea, input, a, img, [role="menu"]' : 'textarea, input, a, img, [role="menu"], [role="dialog"]';
+  const skipped = options.skip === undefined ? base : `${base}, ${options.skip}`;
   const own = (target: EventTarget) => !(target instanceof Element && target.closest(skipped) !== null);
   if (!enabled) return {};
   return {

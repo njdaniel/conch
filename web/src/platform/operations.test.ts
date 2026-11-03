@@ -103,6 +103,9 @@ describe('the operation table', () => {
       createSignInLink: 'code',
       createInvite: 'code',
       totpEnroll: 'secret',
+      createPrincipalSignInLink: 'code',
+      createPrincipalCredential: 'token',
+      createHook: 'token',
     };
     for (const [id, field] of Object.entries(carrying) as [OperationId, string][]) {
       expect(operations[id].renderer, id).toBe(false);

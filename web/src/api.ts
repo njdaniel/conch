@@ -140,7 +140,6 @@ import {
   signInLinkPreviewV1,
   type CreateDeviceLinkRequestV1,
   type CreateSignInLinkRequestV1,
-  type CreateSignInLinkResponseV1,
   type RedeemSignInLinkRequestV1,
   type SignInLinkPreviewRequestV1,
   type SignInLinkPreviewV1,
@@ -1202,9 +1201,12 @@ export async function enablePrincipal(id: number): Promise<InviteResult<null>> {
 // makeLinkFor makes a one-use link that signs in as another person, or resets
 // their password or enrols them (POST /v1/principals/{id}/sign-in-links;
 // act_as_members). The code is in the answer alone, to be shown once.
-export async function makeLinkFor(id: number, purpose: SignInLinkPurpose): Promise<InviteResult<CreateSignInLinkResponseV1>> {
+export async function makeLinkFor(id: number, purpose: SignInLinkPurpose): Promise<InviteResult<{ readonly secret: string; readonly expiresAt: string }>> {
   const request: CreateSignInLinkRequestV1 = { purpose };
-  return readSent(await authedSend(call('createPrincipalSignInLink', { id }), request), createSignInLinkResponseV1);
+  const made = await readSent(await authedSend(call('createPrincipalSignInLink', { id }), request), createSignInLinkResponseV1);
+  if (!made.ok) return made;
+  const { sign_in_link: link, ...rest } = made.value;
+  return { ok: true, value: { secret: rest.code, expiresAt: link.expires_at } };
 }
 
 // issueCredentialFor issues a credential that acts as another person (POST

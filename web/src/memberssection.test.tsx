@@ -406,7 +406,7 @@ describe('the actions send their requests', () => {
     const row = rowOf(region, 'operator-1');
     await choose(row, 'operator-1', 'Change role…');
     fireEvent.click(within(row).getByRole('radio', { name: 'Owner' }));
-    fireEvent.click(within(row).getByRole('button', { name: 'Make an owner' }));
+    fireEvent.click(within(row).getByRole('button', { name: 'Make an owner, who holds every permission' }));
     await waitFor(() => {
       expect(sent(calls, 'PUT', /role$/).map((c) => c.body)).toEqual([{ role: 'operator', owner: true }]);
     });
@@ -531,10 +531,12 @@ describe('what acts as a person shows its secret once', () => {
     const region = await open();
     const row = rowOf(region, 'member-1');
     await choose(row, 'member-1', 'Make a link that signs in as this person…');
-    fireEvent.change(within(row).getByLabelText('What the link does'), { target: { value: 'reset' } });
+    // The default is the milder one: a password reset, not signing in as them.
+    expect(within(row).getByLabelText<HTMLSelectElement>('What the link does').value).toBe('reset');
+    fireEvent.change(within(row).getByLabelText('What the link does'), { target: { value: 'sign_in' } });
     fireEvent.click(within(row).getByRole('button', { name: 'Make link' }));
     await waitFor(() => {
-      expect(sent(calls, 'POST', /sign-in-links$/).map((c) => c.body)).toEqual([{ purpose: 'reset' }]);
+      expect(sent(calls, 'POST', /sign-in-links$/).map((c) => c.body)).toEqual([{ purpose: 'sign_in' }]);
     });
     const secret = await within(row).findByRole('group', { name: 'Link that signs in as member-1' });
     expect(document.body.textContent).not.toContain(secretCode);
@@ -555,7 +557,7 @@ describe('what acts as a person shows its secret once', () => {
     });
     const region = await open();
     const row = rowOf(region, 'builder');
-    await choose(row, 'builder', 'Make a credential that acts as this person…');
+    await choose(row, 'builder', 'Make a credential that acts as this agent…');
     const submit = within(row).getByRole('button', { name: 'Make credential' });
     expect((submit as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(within(row).getByLabelText('Name for it'), { target: { value: 'ci' } });
@@ -566,7 +568,7 @@ describe('what acts as a person shows its secret once', () => {
     fireEvent.click(await within(row).findByRole('button', { name: 'Done' }));
     expect(document.body.textContent).not.toContain(secretToken);
 
-    await choose(row, 'builder', 'Make a hook that posts as this person…');
+    await choose(row, 'builder', 'Make a hook that posts as this agent…');
     await waitFor(() => {
       expect(within(within(row).getByLabelText('Channel')).getAllByRole('option').length).toBeGreaterThan(2);
     });
@@ -724,6 +726,15 @@ describe('Add a person', () => {
     await waitFor(() => {
       expect(screen.queryByRole('region', { name: 'Members' })).toBeNull();
     });
+    // The member-link panel is open, with the open channel ticked, and focus is in it.
+    const invites = await screen.findByRole('region', { name: 'Invites' });
+    await waitFor(() => {
+      expect(within(invites).getByRole('button', { name: 'Invite someone' }).getAttribute('aria-expanded')).toBe('true');
+    });
+    expect(within(invites).getByRole<HTMLInputElement>('checkbox', { name: /channel-a/ }).checked).toBe(true);
+    await waitFor(() => {
+      expect(invites.contains(document.activeElement)).toBe(true);
+    });
   });
 
   it('is not offered without make_member_links', async () => {
@@ -758,5 +769,173 @@ describe('the phone', () => {
     // A destructive item asks in the page, with a button that has room for a finger.
     fireEvent.click(within(m).getByRole('menuitem', { name: 'Remove from server…' }));
     expect(within(rowOf(region, 'member-1')).getByRole('button', { name: 'Yes, remove' })).toBeTruthy();
+  });
+});
+
+
+describe('adding to a channel never changes who decides approvals', () => {
+  const inChannel = (id: number) => ({ members: [{ principal_id: id, name: 'member-1', kind: 'human', created_at: at, can_decide: true }] });
+
+  async function submit(row: HTMLElement) {
+    await choose(row, 'member-1', 'Add to a channel…');
+    const select = within(row).getByLabelText('Add member-1 to');
+    await waitFor(() => {
+      expect(within(select).getAllByRole('option').length).toBeGreaterThan(2);
+    });
+    fireEvent.change(select, { target: { value: 'channel-p' } });
+    fireEvent.click(within(row).getByRole('button', { name: 'Add to channel' }));
+  }
+
+  it('sends no write for someone already in the channel, and says so', async () => {
+    const calls = serve(owner, { routes: { 'GET /v1/channels/channel-p/members': () => json(inChannel(3)), 'PUT /v1/channels/channel-p/members/3': noContent } });
+    const region = await open();
+    const row = rowOf(region, 'member-1');
+    await submit(row);
+    expect(await within(row).findByText('member-1 is already in that channel. Nothing was sent.')).toBeTruthy();
+    expect(sent(calls, 'PUT', /members/)).toEqual([]);
+  });
+
+  it('sends nothing when the channel’s people cannot be read first', async () => {
+    const calls = serve(owner, { routes: { 'GET /v1/channels/channel-p/members': () => refusal(500, 'internal_error'), 'PUT /v1/channels/channel-p/members/3': noContent } });
+    const region = await open();
+    const row = rowOf(region, 'member-1');
+    await submit(row);
+    expect(await within(row).findByText("The channel's people could not be read first. Nothing was sent.")).toBeTruthy();
+    expect(sent(calls, 'PUT', /members/)).toEqual([]);
+  });
+});
+
+describe('after an action', () => {
+  it('puts focus back on the row’s ⋯ button', async () => {
+    serve(owner, { routes: { 'PUT /v1/principals/3/invite-permission': noContent } });
+    const region = await open();
+    const row = rowOf(region, 'member-1');
+    await choose(row, 'member-1', 'Stop member links');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(within(rowOf(region, 'member-1')).getByRole('button', { name: 'Actions for member-1' }));
+    });
+  });
+
+  it('puts focus on the list’s status line when the row is gone', async () => {
+    let gone = false;
+    serve(owner, {
+      members: () => (gone ? everyone.filter((p) => p.id !== 3) : everyone),
+      routes: {
+        'POST /v1/principals/3/hide': () => {
+          gone = true;
+          return json({ principal: { id: 3, kind: 'human', name: 'member-1', role: 'member', created_at: at, hidden_at: at, live_credentials: 0 } });
+        },
+      },
+    });
+    const region = await open();
+    const row = rowOf(region, 'member-1');
+    await choose(row, 'member-1', 'Remove from server…');
+    fireEvent.click(within(row).getByRole('button', { name: 'Yes, remove' }));
+    const line = await within(region).findByText('member-1 is removed from the server.');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(line);
+    });
+  });
+});
+
+describe('the owner mark', () => {
+  it('shows its own warning, and its own button, for Owner only', async () => {
+    serve(owner);
+    const region = await open();
+    const row = rowOf(region, 'member-1');
+    await choose(row, 'member-1', 'Change role…');
+    const warning = 'An owner holds every permission, is never braked, and only another owner can change or remove them.';
+    expect(within(row).queryByText(warning)).toBeNull();
+    fireEvent.click(within(row).getByRole('radio', { name: 'Operator' }));
+    expect(within(row).queryByText(warning)).toBeNull();
+    fireEvent.click(within(row).getByRole('radio', { name: 'Owner' }));
+    expect(within(row).getByText(warning)).toBeTruthy();
+    expect(within(row).getByRole('button', { name: 'Make an owner, who holds every permission' })).toBeTruthy();
+    fireEvent.click(within(row).getByRole('radio', { name: 'Member' }));
+    expect(within(row).queryByText(warning)).toBeNull();
+  });
+});
+
+describe('the secret panel', () => {
+  const credentialRoute = (held?: Promise<void>): Route => async () => {
+    if (held !== undefined) await held;
+    return json({ credential: { id: 9, principal_id: 4, label: 'ci', created_at: at }, token: secretToken }, 201);
+  };
+
+  async function makeCredential(row: HTMLElement) {
+    await choose(row, 'builder', 'Make a credential that acts as this agent…');
+    fireEvent.change(within(row).getByLabelText('Name for it'), { target: { value: 'ci' } });
+    fireEvent.click(within(row).getByRole('button', { name: 'Make credential' }));
+  }
+
+  it('keeps Escape to itself, so Settings stays open and the secret is not lost', async () => {
+    serve(owner, { routes: { 'POST /v1/principals/4/credentials': credentialRoute() } });
+    const region = await open();
+    const row = rowOf(region, 'builder');
+    await makeCredential(row);
+    const secret = await within(row).findByRole('group', { name: 'Credential that acts as builder' });
+    fireEvent.keyDown(within(secret).getByRole('button', { name: 'Reveal' }), { key: 'Escape' });
+    // Settings is still open (Escape would close it) and the secret is still there.
+    expect(screen.getByRole('dialog', { name: 'Settings' })).toBeTruthy();
+    expect(within(row).getByRole('group', { name: 'Credential that acts as builder' })).toBeTruthy();
+  });
+
+  it('never shows a secret that arrives after its row is gone, and says what became of it', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let gone = false;
+    serve(owner, { members: () => (gone ? everyone.filter((p) => p.id !== 4) : everyone), routes: { 'POST /v1/principals/4/credentials': credentialRoute(held) } });
+    const region = await open();
+    const row = rowOf(region, 'builder');
+    await makeCredential(row);
+    // The agent leaves the list while the answer is on its way.
+    gone = true;
+    fireEvent.click(within(region).getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => {
+      expect(document.body.contains(row)).toBe(false);
+    });
+    release();
+    expect(await within(region).findByText('A credential for builder was made but could not be shown; revoke it under Sign-ins.')).toBeTruthy();
+    expect(document.body.textContent).not.toContain(secretToken);
+  });
+});
+
+describe('the hook form’s channels', () => {
+  it('lists the viewer’s own channels, not the directory, without manage_channels', async () => {
+    const calls = serve({ ...operator, permissions: operatorRights.filter((p) => p !== 'manage_channels') });
+    window.sessionStorage.setItem(key, 'conch_operator_session_token');
+    window.location.hash = '#/c/channel-a';
+    render(<App origin={origin} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    const region = await screen.findByRole('region', { name: 'Members' });
+    await within(region).findByRole('list', { name: 'People' });
+    const row = rowOf(region, 'builder');
+    await choose(row, 'builder', 'Make a hook that posts as this agent…');
+    await waitFor(() => {
+      expect(within(within(row).getByLabelText('Channel')).getAllByRole('option').map((o) => o.textContent)).toEqual(['Choose a channel', 'channel-a']);
+    });
+    expect(calls.some((c) => c.path === '/v1/directory/channels')).toBe(false);
+  });
+});
+
+describe('the row’s status line', () => {
+  it('is drawn only for a row with actions or a line', async () => {
+    serve(owner);
+    const region = await open();
+    expect(rowOf(region, 'owner').querySelector('[role="status"]')).toBeNull();
+    expect(rowOf(region, 'member-1').querySelector('[role="status"]')).not.toBeNull();
+  });
+});
+
+describe('a secondary click inside an open question', () => {
+  it('does not open the menu again', async () => {
+    serve(owner);
+    const region = await open();
+    const row = rowOf(region, 'member-1');
+    await choose(row, 'member-1', 'Remove from server…');
+    expect(fireEvent.contextMenu(within(row).getByRole('button', { name: 'Cancel' }))).toBe(true);
+    expect(within(row).queryByRole('menu')).toBeNull();
   });
 });

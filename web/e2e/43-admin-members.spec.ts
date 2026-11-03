@@ -69,6 +69,14 @@ async function person(world: World, name: string, role: 'member' | 'operator' = 
   return { id, token };
 }
 
+// hide removes a person this spec made, so no operator it made stays on the shared server.
+async function hide(world: World, ...ids: number[]): Promise<void> {
+  for (const id of ids) {
+    const done = await call(world, world.tokens.operator, 'POST', `/v1/principals/${String(id)}/hide`);
+    expect(done.status, `hiding ${String(id)}: ${JSON.stringify(done.body)}`).toBeLessThan(300);
+  }
+}
+
 const desktop: BrowserContextOptions = { viewport: { width: 1440, height: 900 } };
 const phone: BrowserContextOptions = { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true };
 
@@ -80,34 +88,40 @@ const rowOf = (page: Page, name: string) => section(page).locator('li.community-
 test('A1020 at 1440×900 the owner changes a role from a person’s menu, and the server has it', async ({ meet, world }) => {
   const name = `member-${stamp}-w`;
   const target = await person(world, name);
-  const { page } = await meet(desktop);
-  await signedIn(page, world, world.tokens.operator);
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const region = section(page);
-  await expect(region.getByRole('list', { name: 'People' })).toBeVisible();
-  const row = rowOf(page, name);
-  await expect(row).toBeVisible();
+  try {
+    const { page } = await meet(desktop);
+    await signedIn(page, world, world.tokens.operator);
+    await page.getByRole('button', { name: 'Settings' }).click();
+    const region = section(page);
+    await expect(region.getByRole('list', { name: 'People' })).toBeVisible();
+    const row = rowOf(page, name);
+    await expect(row).toBeVisible();
 
-  await row.getByRole('button', { name: `Actions for ${name}` }).click();
-  await expect(row.getByRole('menuitem', { name: 'Change role…' })).toBeVisible();
-  // The items that act as the person say so.
-  await expect(row.getByRole('menuitem', { name: 'Make a link that signs in as this person…' })).toBeVisible();
-  await row.getByRole('menuitem', { name: 'Change role…' }).click();
-  await row.getByRole('radio', { name: 'Operator' }).check();
-  await row.getByRole('button', { name: 'Make an operator' }).click();
-  await expect(region.getByText(new RegExp(`^${name} is now an operator`))).toBeVisible();
-  expect((await directory(world)).find((m) => m.id === target.id)?.role).toBe('operator');
-  await expectFits(page, '1440×900: Members');
+    await row.getByRole('button', { name: `Actions for ${name}` }).click();
+    await expect(row.getByRole('menuitem', { name: 'Change role…' })).toBeVisible();
+    // The items that act as the person say so.
+    await expect(row.getByRole('menuitem', { name: 'Make a link that signs in as this person…' })).toBeVisible();
+    await row.getByRole('menuitem', { name: 'Change role…' }).click();
+    await row.getByRole('radio', { name: 'Operator' }).check();
+    await row.getByRole('button', { name: 'Make an operator' }).click();
+    await expect(region.getByText(new RegExp(`^${name} is now an operator`))).toBeVisible();
+    expect((await directory(world)).find((m) => m.id === target.id)?.role).toBe('operator');
+    await expectFits(page, '1440×900: Members');
+  } finally {
+    await hide(world, target.id);
+  }
 });
 
 test('A1020 at 1440×900 an operator without act_as_members is offered no sign-in link, credential or hook', async ({ meet, secrets, world }) => {
   const before = await read(world);
   const operatorName = `operator-${stamp}-w`;
   const memberName = `member-${stamp}-n`;
+  const made: number[] = [];
   try {
     const operator = await person(world, operatorName, 'operator');
+    made.push(operator.id);
     secrets.push(operator.token);
-    await person(world, memberName);
+    made.push((await person(world, memberName)).id);
     const now = await read(world);
     const put = await call(world, world.tokens.operator, 'PUT', '/v1/permissions', {
       revision: now.revision,
@@ -129,6 +143,7 @@ test('A1020 at 1440×900 an operator without act_as_members is offered no sign-i
     await expect(rowOf(page, owner?.name ?? '').getByRole('button', { name: /^Actions for/ })).toHaveCount(0);
   } finally {
     await restore(world, before);
+    await hide(world, ...made);
   }
 });
 

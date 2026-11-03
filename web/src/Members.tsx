@@ -401,7 +401,8 @@ function CommunityRow({
     () => {
       setMenuOpen(true);
     },
-    { insideDialog: true },
+    // A press inside the question or form a menu item opened is not a new menu.
+    { insideDialog: true, skip: '.person-panel' },
   );
   return (
     <li className={`community-member${has ? ' member-row has-actions' : ''}`} {...openers}>
@@ -478,6 +479,8 @@ export function CommunityMembers({
   const [rows, setRows] = useState<readonly PermissionRowV1[] | null>(null);
   // What the last change said, at the list's level: the row may be gone.
   const [note, setNote] = useState('');
+  const noteLine = useRef<HTMLParagraphElement>(null);
+  const wantsFocus = useRef(false);
   const seq = useRef(0);
   const rowReads = useRef(0);
   const live = useRef(true);
@@ -528,13 +531,21 @@ export function CommunityMembers({
     };
   }, [load, active]);
 
+  // After a change, if the row that had focus went with the list's next read,
+  // focus would drop to the page: the status line takes it.
+  useEffect(() => {
+    if (!wantsFocus.current || answer === null) return;
+    wantsFocus.current = false;
+    if (document.activeElement === null || document.activeElement === document.body || !document.body.contains(document.activeElement)) noteLine.current?.focus();
+  }, [answer]);
+
   const byId = new Map<number, ServerMemberV1>();
   if (answer !== null && answer !== 'failed') for (const m of answer.members) byId.set(m.id, m);
   return (
     <section {...(showTitle ? { 'aria-labelledby': headingId } : { 'aria-label': title })} className="community-members">
       {!showTitle ? null : level === 4 ? <h4 id={headingId}>{title}</h4> : <h3 id={headingId}>{title}</h3>}
       {header}
-      <p role="status" className="hint">
+      <p ref={noteLine} role="status" className="hint" tabIndex={-1}>
         {note}
       </p>
       {answer === null ? (
@@ -558,6 +569,7 @@ export function CommunityMembers({
                   viewer={viewer}
                   manage={who === undefined ? undefined : { who, origin, rows, readRows, onChanged: (done) => {
                       setNote(done ?? '');
+                      wantsFocus.current = true;
                       load();
                     }, onUnauthorized: () => {
                       latest.current();
