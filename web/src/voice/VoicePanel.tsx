@@ -368,12 +368,14 @@ export function VoicePanel({
             {strip ? (
               <>
                 <TalkControl voice={voice} silenced={silenced} />
+                <ModeToggle voice={voice} />
                 <MuteButton voice={voice} />
                 <LeaveButton onLeave={leave} />
               </>
             ) : inVoice ? (
               <>
                 <TalkControl voice={voice} silenced={silenced} />
+                <ModeToggle voice={voice} />
                 {state.watchOnly && !state.listenOnly ? (
                   <button type="button" onClick={() => { void client.useMicrophone(); }} disabled={state.phase !== 'connected'}>
                     Use microphone
@@ -561,6 +563,27 @@ function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readon
 // MuteButton is Mute. Deafened is muted too (UX-11), so Mute shows pressed and
 // cannot be let go of. The choice made before is kept, and is back on
 // Undeafen (issue #591, F13).
+// ModeToggle is the one-tap switch between the open microphone and push to
+// talk (issue #1244), in the bar and in the phone's strip. Pressed is the open
+// microphone; the Voice options radios follow the same state. Listen-only and
+// watch-only have no microphone to switch, as the radios are.
+function ModeToggle({ voice }: { readonly voice: VoiceControl }) {
+  const { state, client } = voice;
+  const open = state.mode === 'open';
+  return (
+    <button
+      type="button"
+      className="mode-toggle"
+      aria-pressed={open}
+      disabled={state.listenOnly || state.watchOnly}
+      onClick={() => { client.setMode(open ? 'ptt' : 'open'); }}
+    >
+      <Glyph name="wave" />
+      <span className="label">Open mic</span>
+    </button>
+  );
+}
+
 function MuteButton({ voice }: { readonly voice: VoiceControl }) {
   const { state, client } = voice;
   return (

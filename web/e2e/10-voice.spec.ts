@@ -8,7 +8,7 @@
 // page says voice is not set up and asks for no device.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { PostMessageRequestV2 } from '../src/schema/generated';
-import { channelButton, conversation, expect, expectFits, mainNav, messages, openChannel, phones, showView, signIn, statusLine, test } from './fixtures';
+import { channelButton, chooseMicrophone, conversation, expect, expectFits, mainNav, messages, openChannel, phones, rememberPushToTalk, showView, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
 // The longest the roster may take to stop saying "transmitting" after the
@@ -93,8 +93,14 @@ test.describe('with LiveKit', () => {
   });
 
   // before runs on the new page before it signs in, to watch it from the start.
-  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, before?: (page: Page) => void) {
+  //
+  // Most of these are of push to talk, so the browser has chosen it before it
+  // joins (issue #1244: one that never chose joins in the open microphone,
+  // which transmits on the fake microphone's tone, and the tests that count
+  // what a held key reports start from silence). 'unchosen' is a fresh browser.
+  async function person(browser: import('@playwright/test').Browser, who: 'alice' | 'bob' | 'carol' | Member, options?: BrowserContextOptions, before?: (page: Page) => void, mode: 'push to talk' | 'unchosen' = 'push to talk') {
     const context = await browser.newContext(options);
+    if (mode === 'push to talk') await rememberPushToTalk(context);
     const page = await context.newPage();
     before?.(page);
     const watch = await watchPage(page, vw);
@@ -181,6 +187,9 @@ test.describe('with LiveKit', () => {
       await voiceRegion(a.page).getByRole('button', { name: 'Join voice' }).click();
       await voiceRegion(b.page).getByRole('button', { name: 'Join voice' }).click();
       for (const p of [a, b]) await expect(voiceRegion(p.page)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      // This test is of push to talk; a browser that never chose joins in the
+      // open microphone (issue #1244), so it chooses.
+      for (const p of [a, b]) await chooseMicrophone(voiceRegion(p.page), 'push to talk');
       // The roster of each page names both.
       await expect(voiceRegion(b.page).getByRole('list', { name: 'In voice' })).toContainText('alice');
       await expect(voiceRegion(a.page).getByRole('list', { name: 'In voice' })).toContainText('bob');
@@ -239,6 +248,7 @@ test.describe('with LiveKit', () => {
       const actor = `principal:${String(eli.id)}`;
       await voice.getByRole('button', { name: 'Join voice' }).click();
       await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      await chooseMicrophone(voice, 'push to talk');
       await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
       const transmits = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit')).map((e) => e.action);
       const pair = ['voice_transmit_started', 'voice_transmit_stopped'];
@@ -287,6 +297,7 @@ test.describe('with LiveKit', () => {
       const actor = `principal:${String(vw.carol.id)}`;
       await voice.getByRole('button', { name: 'Join voice' }).click();
       await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      await chooseMicrophone(voice, 'push to talk');
       await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
       const transmits = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit')).map((e) => e.action);
       // Five presses, each followed by its two reports. Two passes inside one
@@ -325,6 +336,9 @@ test.describe('with LiveKit', () => {
       const actor = `principal:${String(vw.bob.id)}`;
       await voice.getByRole('button', { name: 'Join voice' }).click();
       await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      // Chosen once, here: the choice is the browser's, so each rejoin after a
+      // reload below is in push to talk without choosing again (issue #1244).
+      await chooseMicrophone(voice, 'push to talk');
       await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
       const transmits = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit')).map((e) => `${e.action} ${e.detail.replace(/^channel=\d+ audience=channel /, '')}`);
       const pair = ['voice_transmit_started source=reported', 'voice_transmit_stopped source=reported'];
@@ -374,6 +388,7 @@ test.describe('with LiveKit', () => {
       expect(fills.primary[1]).toBe(fills.plain[1]);
       await voice.getByRole('button', { name: 'Join voice' }).click();
       await expect(voice).toContainText('Connected', { timeout: 30_000 });
+      await chooseMicrophone(voice, 'push to talk');
       const talk = voice.getByRole('button', { name: 'Hold to talk' });
       // The mouse is moved onto the button before each press: the page lays
       // out the same buttons again after a mute, and a press elsewhere is not a talk.
@@ -443,6 +458,7 @@ test.describe('with LiveKit', () => {
   test('voice is worked from the keyboard alone, and focus is never dropped', async ({ browser }) => {
     const b = await person(browser, 'bob');
     const context = await browser.newContext();
+    await rememberPushToTalk(context);
     const page = await context.newPage();
     const watch = await watchPage(page, vw);
     try {
@@ -466,6 +482,20 @@ test.describe('with LiveKit', () => {
       await tabTo(join);
       await page.keyboard.press('Enter');
       await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      // This browser chose push to talk before it joined (issue #1244). The
+      // switch is worked from the keyboard too: Space goes to the open
+      // microphone, and Space again back to push to talk.
+      const mode = voice.getByRole('button', { name: 'Open mic', exact: true });
+      await expect(mode).toHaveAttribute('aria-pressed', 'false');
+      await tabTo(mode);
+      await page.keyboard.press('Space');
+      await expect(mode).toHaveAttribute('aria-pressed', 'true');
+      await page.keyboard.press('Space');
+      await expect(mode).toHaveAttribute('aria-pressed', 'false');
+      await expect(voice).toContainText('Not transmitting');
+      // The open microphone may have reported a transmission of the tone in
+      // the moment it was on; let it land before the count below starts.
+      await new Promise((r) => setTimeout(r, 2000));
       const actor = `principal:${String(vw.alice.id)}`;
       await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
       const transmits = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit')).map((e) => e.action);
@@ -528,6 +558,7 @@ test.describe('with LiveKit', () => {
     for (const o of others) {
       await voiceRegion(o.page).getByRole('button', { name: 'Join voice' }).click();
       await expect(voiceRegion(o.page)).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      await chooseMicrophone(voiceRegion(o.page), 'push to talk');
     }
     return others;
   }
@@ -545,6 +576,7 @@ test.describe('with LiveKit', () => {
           const voice = voiceRegion(a.page);
           await voice.getByRole('button', { name: 'Join voice' }).click();
           await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+          await chooseMicrophone(voice, 'push to talk');
           await expect(voice.getByRole('list', { name: 'In voice' }).getByRole('listitem')).toHaveCount(3, { timeout: 15_000 });
           const more = voice.getByRole('button', { name: 'More about sharing' });
           await expect(more, `${size}: the line about sharing shows before Share screen is pressed`).toBeVisible();
@@ -613,6 +645,9 @@ test.describe('with LiveKit', () => {
       await expectFits(a.page, `${size}: the Voice view before joining`);
       await voice.getByRole('button', { name: 'Join voice' }).tap();
       await expect(voice).toContainText('Connected in', { timeout: 30_000 });
+      // The open microphone is the default (issue #1244); this phone is of
+      // push to talk first, so it taps the switch.
+      await chooseMicrophone(voice, 'push to talk', 'tap');
       await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
       await expect(voice.getByRole('list', { name: 'In voice' }).getByRole('listitem')).toHaveCount(3, { timeout: 15_000 });
       await expectFits(a.page, `${size}: the Voice view, joined`);
@@ -999,12 +1034,14 @@ test.describe('with LiveKit', () => {
         people.map(async (m, i) => {
           const context = contexts[i];
           if (context === undefined) throw new Error('no context');
+          await rememberPushToTalk(context);
           const page = await context.newPage();
           await signIn(page, vw, m.token, m.name);
           await channelButton(page, vw.channel).click();
           const voice = voiceRegion(page);
           await voice.getByRole('button', { name: 'Join voice' }).click();
           await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+          await chooseMicrophone(voice, 'push to talk');
           return { page, voice };
         }),
       );
@@ -1033,6 +1070,71 @@ test.describe('with LiveKit', () => {
       }
     } finally {
       for (const c of contexts) await c.close();
+    }
+  });
+
+  // Issue #1244: a browser that never chose joins in the open microphone,
+  // which transmits when it hears speech with no key held (Chromium's fake
+  // microphone plays a steady tone); the switch in the voice bar goes to push
+  // to talk, and that choice, and then the choice back, are the browser's: a
+  // reload and a rejoin find each.
+  test('a fresh browser joins in the open microphone, and the choice of mode is kept across a reload', async ({ browser }) => {
+    const listener = await vw.addMember('ned');
+    const talker = await vw.addMember('opal');
+    const b = await person(browser, listener);
+    const heard = voiceRegion(b.page).getByRole('list', { name: 'In voice' });
+    const a = await person(browser, talker, undefined, undefined, 'unchosen');
+    try {
+      await voiceRegion(b.page).getByRole('button', { name: 'Join voice' }).click();
+      await expect(voiceRegion(b.page)).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      await chooseMicrophone(voiceRegion(b.page), 'push to talk');
+
+      const voice = voiceRegion(a.page);
+      const toggle = voice.getByRole('button', { name: 'Open mic', exact: true });
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+      await expect(voice.getByRole('meter', { name: 'Microphone level' })).toBeVisible();
+      await expect(voice.getByRole('button', { name: 'Hold to talk' })).toHaveCount(0);
+      // No key is held: the tone opens the gate, and the other page says so.
+      await expect(heard).toContainText('opal (transmitting)', { timeout: 20_000 });
+
+      // One tap to push to talk: silent, and Hold to talk is there.
+      await toggle.click();
+      await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+      await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
+      await expect(heard).not.toContainText('opal (transmitting)', { timeout: 15_000 });
+
+      // A reload and a rejoin keep it.
+      await a.page.reload();
+      await channelButton(a.page, vw.channel).click();
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+      await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
+      await voice.getByRole('button', { name: 'Leave voice' }).click();
+      await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+      // And so does the choice back, in Voice options too.
+      await toggle.click();
+      await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+      await a.page.reload();
+      await channelButton(a.page, vw.channel).click();
+      await voice.getByRole('button', { name: 'Join voice' }).click();
+      await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+      await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+      await voice.getByRole('button', { name: 'Voice options' }).click();
+      await expect(voice.getByLabel('Open microphone')).toBeChecked();
+      for (const p of [a, b]) {
+        await voiceRegion(p.page).getByRole('button', { name: 'Leave voice' }).click();
+        await expect(voiceRegion(p.page)).toContainText('Not in voice', { timeout: 10_000 });
+      }
+    } finally {
+      await a.context.close();
+      await b.context.close();
     }
   });
 
@@ -1249,6 +1351,8 @@ test.describe('with LiveKit', () => {
           const voice = voiceRegion(a.page);
           await voice.getByRole('button', { name: 'Join voice' }).click();
           await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });
+          // Hold the talk key to transmit: push to talk, chosen (issue #1244).
+          await chooseMicrophone(voice, 'push to talk');
           await expect(heard).toContainText('yan', { timeout: 15_000 });
           await a.page.getByRole('heading', { name: 'Conch' }).click();
           await a.page.keyboard.down('Backquote');

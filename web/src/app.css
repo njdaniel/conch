@@ -2334,7 +2334,8 @@ label {
   font-size: 0.875rem;
 }
 
-.voice .sharing {
+.voice .sharing,
+.voice .mode-toggle[aria-pressed='true'] {
   background: var(--accent-bg);
   border-color: var(--accent);
   color: var(--accent);
@@ -3178,9 +3179,16 @@ button.link {
      never pushed out of the slot and clipped. */
   .voice.strip .open-mic {
     flex: 1 1 auto;
-    min-width: 5rem;
+    min-width: 3.5rem;
     min-height: 2.75rem;
-    padding-inline: var(--s2);
+    padding-inline: 0.25rem;
+  }
+
+  /* The mode switch beside it (issue #1244) takes a 44 px target of the row,
+     so at 320 px the slot gives up its microphone glyph: the switch says what
+     it is, and the level still has the 3rem it needs. */
+  .voice.strip .open-mic .icon {
+    display: none;
   }
 
   .voice.strip .open-mic-label {
