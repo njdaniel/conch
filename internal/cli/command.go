@@ -163,6 +163,8 @@ Usage:
   conch admin permissions set [--server <url>] [--json] [--members on|off] [--operators on|off] <permission>
   conch admin permissions preset [--server <url>] [--json] [--yes] personal|group
   conch admin directory members [--server <url>] [--json]
+  conch admin hook list [--server <url>] [--json]
+  conch admin hook revoke [--server <url>] <hook-id>
   conch admin reports list [--server <url>] [--json] [--limit <n>]
   conch admin reports show [--server <url>] [--json] [--markdown] <id>
   conch admin reports file [--server <url>] [--json] <id> <issue-url>

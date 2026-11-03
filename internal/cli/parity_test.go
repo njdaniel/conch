@@ -45,6 +45,8 @@ var communityRoutes = map[string]parityVerb{
 	"GET /v1/join/settings":                    {"admin join status", []string{"admin", "join", "status"}},
 	"PUT /v1/join/settings":                    {"admin join set", []string{"admin", "join", "set", "--open-signup", "on"}},
 	"POST /v0/channels":                        {"admin channel create", []string{"admin", "channel", "create", "general"}},
+	"GET /v1/hooks":                            {"admin hook list", []string{"admin", "hook", "list"}},
+	"DELETE /v1/hooks/{id}":                    {"admin hook revoke", []string{"admin", "hook", "revoke", "9"}},
 }
 
 // communityRouteFamilies selects, from the server's route table, the routes
@@ -57,10 +59,13 @@ var communityRouteFamilies = regexp.MustCompile(`^(POST /v1/channels|(GET|POST|P
 	`|/v1/principals/\{[a-z_]+\}/voice-permission` +
 	`|/v2/invites.*` +
 	`|/v1/join/settings` +
+	`|/v1/hooks(/\{[a-z_]+\})?` +
 	`))$`)
 
 // parityExempt are community routes with no verb, and why.
-var parityExempt = map[string]string{
+var parityExempt = map[string]string{ //nolint:gosec // G101: route names and prose, no credential
+	"POST /v1/hooks":           "creating a hook shows its token once; the console and the API do it, and `conch admin hook` only lists and revokes (issue #1228)",
+	"POST /v1/hooks/{token}":   "webhook ingest: called by other systems with the hook's own URL token, never by a person at a terminal",
 	"POST /v2/invites/preview": "exempt from authentication, for the page a link opens; `conch join account --invite` redeems without previewing (unchanged by #994)",
 	"POST /v2/invites/redeem":  "`conch join account --invite` (unchanged by #994, covered in onboarding_test.go)",
 }

@@ -287,8 +287,7 @@ func issuedLine(item schema.IssuedByOperatorV1) string {
 	case schema.IssuedCredential:
 		return fmt.Sprintf("  credential %s (%s): conch admin credential revoke %s", id, who, id)
 	case schema.IssuedHook:
-		// conch has no hook command; the API route is the way.
-		return fmt.Sprintf("  hook %s (%s): DELETE /v1/hooks/%s (the API; conch has no hook command)", id, who, id)
+		return fmt.Sprintf("  hook %s (%s): conch admin hook revoke %s", id, who, id)
 	default:
 		return fmt.Sprintf("  %s %s (%s): this conch does not know how to revoke it", kind, id, who)
 	}
