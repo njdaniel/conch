@@ -305,7 +305,7 @@ describe('the community member panel', () => {
   const bot: ServerMemberV1 = { id: 3, kind: 'agent', name: 'builder', created_at: at };
 
   function panel(ids = '1') {
-    return render(<CommunityMembers viewer={2} channelIds={ids} onUnauthorized={() => seen.unauthorized++} />);
+    return render(<CommunityMembers viewer={2} channelIds={ids} directoryTick={0} onUnauthorized={() => seen.unauthorized++} />);
   }
 
   it('lists every member the server sent, marks agents and shows roles, with no guests and no counts', async () => {
@@ -361,7 +361,7 @@ describe('the community member panel', () => {
     const out = panel();
     await screen.findByText(/invited by ada/);
     people.mockResolvedValueOnce({ ok: true, value: { members: [ada, bob] } });
-    out.rerender(<CommunityMembers viewer={2} channelIds="1" permissionsTick={1} onUnauthorized={() => seen.unauthorized++} />);
+    out.rerender(<CommunityMembers viewer={2} channelIds="1" permissionsTick={1} directoryTick={0} onUnauthorized={() => seen.unauthorized++} />);
     await waitFor(() => {
       expect(screen.queryByText(/invited by/)).toBeNull();
     });
@@ -400,7 +400,7 @@ describe('the community member panel', () => {
     const out = panel('1');
     await screen.findByRole('list', { name: 'People' });
     expect(people).toHaveBeenCalledTimes(1);
-    out.rerender(<CommunityMembers viewer={2} channelIds="1,2" onUnauthorized={() => seen.unauthorized++} />);
+    out.rerender(<CommunityMembers viewer={2} channelIds="1,2" directoryTick={0} onUnauthorized={() => seen.unauthorized++} />);
     await waitFor(() => {
       expect(people).toHaveBeenCalledTimes(2);
     });

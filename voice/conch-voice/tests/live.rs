@@ -22,11 +22,16 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+
+#[allow(dead_code)]
+#[path = "support/reaped.rs"]
+mod reaped;
+use reaped::Reaped;
 
 const BIN: &str = env!("CARGO_BIN_EXE_conch-voice");
 
@@ -40,7 +45,7 @@ fn var(name: &str) -> String {
 /// One running client, with every object it has written and when.
 struct Client {
     name: &'static str,
-    child: Child,
+    child: Reaped,
     written: Arc<Mutex<Vec<(Instant, Value)>>>,
     everything: Arc<Mutex<String>>,
     /// The client's private home directory, removed with the client.
@@ -52,18 +57,19 @@ impl Client {
         // An empty directory that nothing is read from or written to: it is set so that
         // nothing can fall back to the real home directory.
         let home = tempfile::tempdir().unwrap();
-        let mut child = Command::new(BIN)
-            .env_clear()
-            .env("CONCH_CONFIG_DIR", config_dir)
-            .env("HOME", home.path())
-            .args(["join", &var("CONCH_VOICE_LIVE_CHANNEL")])
-            .args(["--server", &var("CONCH_VOICE_LIVE_SERVER"), "--json"])
-            .args(["--mic", &format!("tone:{tone}"), "--sink", "count:440,880"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = Reaped::spawn(
+            Command::new(BIN)
+                .env_clear()
+                .env("CONCH_CONFIG_DIR", config_dir)
+                .env("HOME", home.path())
+                .args(["join", &var("CONCH_VOICE_LIVE_CHANNEL")])
+                .args(["--server", &var("CONCH_VOICE_LIVE_SERVER"), "--json"])
+                .args(["--mic", &format!("tone:{tone}"), "--sink", "count:440,880"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
         let written = Arc::new(Mutex::new(Vec::new()));
         let everything = Arc::new(Mutex::new(String::new()));
         let (out, objects, all) = (

@@ -12,11 +12,11 @@ import (
 // the server knows them by.
 func (c *Client) ListChannelMembers(ctx context.Context, channel string) (schema.ListChannelMembersResponseV1, error) {
 	endpoint := c.resolve("v1", "channels", channel, "members")
-	var result schema.ListChannelMembersResponseV1
+	var result channelMembersDoc
 	if err := c.roundTrip(ctx, "list channel members", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ListChannelMembersResponseV1{}, err
 	}
-	return result, nil
+	return result.ListChannelMembersResponseV1, nil
 }
 
 // ChangePrincipalRole sets a principal's role and, when request.Owner is not

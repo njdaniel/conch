@@ -57,6 +57,10 @@ type principalRead struct {
 var principalReads = []principalRead{
 	{"store/approvals.go", "Store.castDecision", 2, readGated},
 	{"store/audience.go", "Store.ListChannelAuthors", 1, readGated},
+	// #1202: managers on the ?scope=all listing, for holders of manage_channels.
+	{"store/channels_self.go", "Store.channelDirectoryAll", 1, readOperatorOrMaker},
+	// #1150: the last-member count, never served to anyone.
+	{"store/channels_self.go", "Store.LeaveChannel", 1, readOwnOrInternal},
 	{"store/community.go", "isMemberTx", 1, readOwnOrInternal},
 	{"store/community.go", "migrateToCommunity", 1, readOwnOrInternal},
 	{"store/credentials.go", "Store.ListCredentials", 1, readOwnOrInternal},
@@ -94,7 +98,7 @@ var principalReads = []principalRead{
 	{"store/invites_v2.go", "inviteJoinersTx", 1, readOperatorOrMaker},
 	{"store/manifests.go", "Store.CountAgentsWithoutManifest", 1, readOperatorOrMaker},
 	{"store/manifests.go", "Store.PutAgentManifest", 1, readOwnOrInternal},
-	{"store/members.go", "Store.AddChannelMemberByName", 1, readGated},
+	{"store/members.go", "Store.AddChannelMemberIfAbsent", 1, readGated},
 	{"store/members.go", "Store.CanDecideApprovals", 1, readGated},
 	{"store/members.go", "Store.ListChannelMembers", 1, readGated},
 	{"store/members.go", "Store.ManagesChannel", 1, readGated},

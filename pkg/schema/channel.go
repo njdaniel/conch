@@ -117,6 +117,16 @@ type CreateChannelResponseV1 struct {
 // (ADR-014), which also lists every private channel; the member view
 // carries no counts and no names, so a count on a private channel can
 // never be an oracle (community-model §5).
+//
+// Managers (issue #1202, additive) names the channel's managers, the
+// members whose manages bit is set, ordered by principal_id; each is the
+// principal reference the authors route uses (ChannelAuthorV1: id, name,
+// kind). Like Members it is present only on the ?scope=all listing, where
+// it is always an array, empty when nobody manages the channel; the member
+// view never carries it, and a server that predates it omits it on every
+// row. It is what GET /v1/channels/{channel}/members says of each member's
+// manages, gathered so an operator's console reads one list, not one
+// member list per channel.
 type ChannelListingV1 struct {
 	ID         int64             `json:"id"`
 	Name       string            `json:"name"`
@@ -126,6 +136,7 @@ type ChannelListingV1 struct {
 	Joined     bool              `json:"joined"`
 	Manages    bool              `json:"manages,omitempty"`
 	Members    *int64            `json:"members,omitempty"`
+	Managers   []ChannelAuthorV1 `json:"managers,omitzero"`
 }
 
 // ChannelDirectoryResponseV1 is the body of GET /v1/directory/channels.
