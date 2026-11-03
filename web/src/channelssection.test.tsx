@@ -745,7 +745,7 @@ describe('the section follows the directory frame (issue #1226)', () => {
     const before = reads(calls);
     // A rerender with the same tick reads nothing.
     view.rerender(console(true, 0));
-    await later10();
+    await settled();
     expect(reads(calls)).toBe(before);
     rows.push({ ...channelP, id: 3, name: 'channel-new' });
     view.rerender(console(true, 1));
@@ -758,13 +758,13 @@ describe('the section follows the directory frame (issue #1226)', () => {
   it('sends nothing while hidden', async () => {
     const calls = serve(owner);
     await signedIn();
-    await later10();
+    await settled();
     const seen = calls.length;
     const view = render(console(false, 0));
-    await later10();
+    await settled();
     view.rerender(console(false, 1));
     view.rerender(console(false, 2));
-    await later10();
+    await settled();
     expect(calls.slice(seen).filter((c) => c.path === '/v1/directory/channels' || /\/members$/.test(c.path))).toEqual([]);
   });
 
@@ -783,7 +783,7 @@ describe('the section follows the directory frame (issue #1226)', () => {
     await waitFor(() => {
       expect(reads(calls)).toBe(before + 1);
     });
-    await later10();
+    await settled();
     expect(within(row).getByRole('button', { name: 'Remove member-1 from channel-a' })).toBe(remove);
     expect(document.activeElement).toBe(remove);
     expect(within(row).queryByText('Reading the people…')).toBeNull();

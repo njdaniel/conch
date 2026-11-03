@@ -1023,13 +1023,13 @@ describe('the section follows the directory frame (issue #1226)', () => {
   it('sends nothing while hidden', async () => {
     const calls = serve(owner);
     await signedIn();
-    await later10();
+    await settled();
     const seen = calls.length;
     const view = render(console(false, 0));
-    await later10();
+    await settled();
     view.rerender(console(false, 1));
     view.rerender(console(false, 2));
-    await later10();
+    await settled();
     expect(reads(calls.slice(seen))).toBe(0);
   });
 
@@ -1048,7 +1048,7 @@ describe('the section follows the directory frame (issue #1226)', () => {
     await waitFor(() => {
       expect(reads(calls)).toBe(before + 1);
     });
-    await later10();
+    await settled();
     expect(within(rowOf(region, 'member-1')).getByRole('button', { name: 'Yes, remove' })).toBe(yes);
     expect(document.activeElement).toBe(yes);
   });
