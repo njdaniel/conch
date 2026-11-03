@@ -271,12 +271,12 @@ describe('the list', () => {
     // holds still for several ticks, then check Settings adds nothing more.
     let before = reads();
     for (let still = 0; still < 5; ) {
-      await later10();
+      await settled();
       const now = reads();
       still = now === before ? still + 1 : 0;
       before = now;
     }
-    await later10();
+    await settled();
     expect(reads()).toBe(before);
     fireEvent.click(settings);
     await screen.findByRole('region', { name: 'Members' });
@@ -366,13 +366,20 @@ describe('the voice line', () => {
     serve(owner, { voiceForMembers: true });
     const region = await open();
     const m = await menu(rowOf(region, 'member-1'), 'member-1');
-    await later10();
+    await settled();
     expect(m.textContent).not.toContain('Voice is off for all members');
     expect(within(m).getByRole('menuitem', { name: 'Turn voice off' }).getAttribute('aria-disabled')).toBeNull();
   });
 });
 
-const later10 = () => new Promise<void>((resolve) => setTimeout(resolve, 30));
+// settled drains what is already in motion: every promise the fetch stub and
+// the section chain, then React's scheduled effects. It waits on that work, not
+// on a number of milliseconds, so a slow runner cannot reorder it. Use it to
+// show that something did not happen after the work that could have caused it.
+const settled = () =>
+  act(async () => {
+    for (let hop = 0; hop < 3; hop++) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  });
 
 describe('the actions send their requests', () => {
   it('switches voice off and on for a member', async () => {
@@ -510,7 +517,7 @@ describe('destructive actions ask first', () => {
     const yes = within(row).getByRole('button', { name: 'Yes, disable' });
     fireEvent.click(yes);
     fireEvent.click(yes);
-    await later10();
+    await settled();
     expect(sent(calls, 'POST', /disable$/).length).toBe(1);
   });
 
@@ -731,7 +738,7 @@ describe('a grant that goes while a question is open', () => {
       expect(within(row).queryByRole('group', { name: /Remove/ })).toBeNull();
     });
     fireEvent.click(yes);
-    await later10();
+    await settled();
     expect(sent(calls, 'POST', /hide$/)).toEqual([]);
     expect(await within(region).findByText('You can no longer do that. Nothing was sent.')).toBeTruthy();
   });
@@ -1016,13 +1023,13 @@ describe('the section follows the directory frame (issue #1226)', () => {
   it('sends nothing while hidden', async () => {
     const calls = serve(owner);
     await signedIn();
-    await later10();
+    await settled();
     const seen = calls.length;
     const view = render(console(false, 0));
-    await later10();
+    await settled();
     view.rerender(console(false, 1));
     view.rerender(console(false, 2));
-    await later10();
+    await settled();
     expect(reads(calls.slice(seen))).toBe(0);
   });
 
@@ -1041,7 +1048,7 @@ describe('the section follows the directory frame (issue #1226)', () => {
     await waitFor(() => {
       expect(reads(calls)).toBe(before + 1);
     });
-    await later10();
+    await settled();
     expect(within(rowOf(region, 'member-1')).getByRole('button', { name: 'Yes, remove' })).toBe(yes);
     expect(document.activeElement).toBe(yes);
   });
