@@ -1683,6 +1683,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 channels={channels.channels}
                 names={memberNames}
                 permissionsChanged={permissionsTick}
+                directoryChanged={directory.tick}
                 onChannelsChanged={refreshChannels}
                 onUnauthorized={onUnauthorized}
               />

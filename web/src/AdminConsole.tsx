@@ -41,12 +41,14 @@ export interface AdminConsoleProps {
   readonly names?: ReadonlyMap<number, string>;
   // Counts the times the server said the permissions changed.
   readonly permissionsChanged: number;
+  // Counts the server's words that the directory changed (conch.directory_changed.v1).
+  readonly directoryChanged: number;
   // The page's channel list is read again after a change made in Channels.
   readonly onChannelsChanged: () => void;
   readonly onUnauthorized: () => void;
 }
 
-export function AdminConsole({ who, origin, channels, names, permissionsChanged, onChannelsChanged, onUnauthorized }: AdminConsoleProps) {
+export function AdminConsole({ who, origin, channels, names, permissionsChanged, directoryChanged, onChannelsChanged, onUnauthorized }: AdminConsoleProps) {
   const phone = usePhone();
   const id = useId();
   // The section open as a page on a phone; null is the list.
@@ -103,7 +105,7 @@ export function AdminConsole({ who, origin, channels, names, permissionsChanged,
       id: 'members',
       label: 'Members',
       render: () => (
-        <MembersSection who={who} origin={origin} refresh={permissionsChanged} channelIds={channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
+        <MembersSection who={who} origin={origin} refresh={permissionsChanged} directoryTick={directoryChanged} channelIds={channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
       ),
     },
     // Channels (A9, #1021): only for a holder of manage_channels, who is the
@@ -114,7 +116,7 @@ export function AdminConsole({ who, origin, channels, names, permissionsChanged,
           {
             id: 'channels',
             label: 'Channels',
-            render: () => <ChannelsSection who={who} refresh={permissionsChanged} onChannelsChanged={onChannelsChanged} onUnauthorized={onUnauthorized} />,
+            render: () => <ChannelsSection who={who} refresh={permissionsChanged} directoryTick={directoryChanged} onChannelsChanged={onChannelsChanged} onUnauthorized={onUnauthorized} />,
           },
         ]
       : []),

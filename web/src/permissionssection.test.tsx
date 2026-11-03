@@ -868,7 +868,7 @@ describe('the table on a wide window', () => {
     render(<App origin={origin} />);
     await screen.findByRole('button', { name: 'Settings' });
     cleanup();
-    const props = { origin, permissionsChanged: 0, onChannelsChanged: () => undefined, onUnauthorized: () => undefined, channels: [] as [] };
+    const props = { origin, permissionsChanged: 0, directoryChanged: 0, onChannelsChanged: () => undefined, onUnauthorized: () => undefined, channels: [] as [] };
     const view = render(<AdminConsole {...props} who={owner} />);
     const input = await screen.findByRole<HTMLInputElement>('checkbox', { name: 'Use voice, Members' });
     input.focus();
@@ -885,7 +885,7 @@ describe('the phone layout', () => {
       'matchMedia',
       vi.fn(() => ({ matches: true, addEventListener: () => undefined, removeEventListener: () => undefined })),
     );
-    return { origin, permissionsChanged: 0, onChannelsChanged: () => undefined, onUnauthorized: () => undefined, channels: [] as [] };
+    return { origin, permissionsChanged: 0, directoryChanged: 0, onChannelsChanged: () => undefined, onUnauthorized: () => undefined, channels: [] as [] };
   }
 
   async function phonePage(who: WhoAmIResponseV1, routes: Record<string, Route> = {}) {
