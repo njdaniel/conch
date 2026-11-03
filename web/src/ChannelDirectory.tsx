@@ -60,7 +60,10 @@ function Row({
   const [line, setLine] = useState<Line | null>(null);
   const sending = useRef(false);
   const live = useRef(true);
+  // The row's one control (Join or Leave), where focus returns after a request.
   const more = useRef<HTMLButtonElement>(null);
+  const acted = useRef(false);
+  const [settled, setSettled] = useState(0);
   const cancel = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     live.current = true;
@@ -71,6 +74,19 @@ function Row({
   useEffect(() => {
     if (asking) cancel.current?.focus();
   }, [asking]);
+  // The button that was pressed was disabled while the request ran, or is gone
+  // (the confirmation): focus would fall to the page. It goes to the row's
+  // control, now and again if the row swaps Join for Leave.
+  useEffect(() => {
+    if (!acted.current) return;
+    const at = document.activeElement;
+    if (at === null || at === document.body) more.current?.focus();
+  }, [settled, row.joined]);
+  // The channel stopped being one the person is in while "Leave #x?" was open:
+  // the question goes, and sends nothing.
+  useEffect(() => {
+    if (!row.joined) setAsking(false);
+  }, [row.joined]);
 
   const isPrivate = row.visibility === 'private';
 
@@ -82,6 +98,8 @@ function Row({
     }
     if (!live.current) return;
     setBusy(false);
+    acted.current = true;
+    setSettled((n) => n + 1);
     setLine(result.ok ? { text: done, refused: false } : { text: words(result.failure, result.code), refused: true });
   }
 
@@ -140,7 +158,7 @@ function Row({
           Leave
         </button>
       ) : (
-        <button type="button" disabled={busy} aria-label={`Join ${row.name}`} onClick={join}>
+        <button ref={more} type="button" disabled={busy} aria-label={`Join ${row.name}`} onClick={join}>
           Join
         </button>
       )}

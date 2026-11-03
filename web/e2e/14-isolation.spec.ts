@@ -18,6 +18,7 @@ import type { BrowserContextOptions, Page } from '@playwright/test';
 import { channelButton, consoleErrors, expect, expectFits, messages, openChannel, phones, showView, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { findLeak } from './traffic';
+import { watchTraffic, type Traffic } from './watch';
 import { call, type World } from './world';
 
 const desktop: BrowserContextOptions = { viewport: { width: 1280, height: 800 } };
@@ -101,50 +102,13 @@ async function dropSockets(page: Page): Promise<void> {
   await expect(statusLine(page)).toContainText('Connected', { timeout: 30_000 });
 }
 
-// Traffic is everything a page was sent: each frame on each of its sockets
-// (LiveKit's included) and the body of each answer from the API.
-interface Traffic {
-  readonly text: () => Promise<string>;
-}
-
-// A binary frame (LiveKit's) is bytes; decoded one character per byte, a name
-// in it reads as itself.
-const latin1 = new TextDecoder('latin1');
-
-// watchTraffic records what page is sent from now on. Call it before the page
-// loads.
-function watchTraffic(page: Page): Traffic {
-  const seen: string[] = [];
-  const reads: Promise<void>[] = [];
-  page.on('websocket', (ws) => {
-    ws.on('framereceived', (frame) => {
-      const payload: unknown = frame.payload;
-      seen.push(typeof payload === 'string' ? payload : latin1.decode(payload as Uint8Array));
-    });
-  });
-  page.on('response', (res) => {
-    // The API's answers; the client's own files are the same for everyone.
-    if (!/^\/v[0-9]+\//.test(new URL(res.url()).pathname)) return;
-    reads.push(
-      res.text().then(
-        (body) => {
-          seen.push(body);
-        },
-        () => undefined,
-      ),
-    );
-  });
-  return {
-    text: async () => {
-      await Promise.all(reads);
-      return seen.join('\n');
-    },
-  };
-}
-
 // expectNothingOf checks that none of a group's names or words is anywhere in
 // the page (its text, its markup, its address) or in anything it was sent.
-async function expectNothingOf(page: Page, traffic: Traffic, markers: readonly string[], view: string): Promise<void> {
+//
+// people are names that are allowed in the community member list (issue #991)
+// and nowhere else the page is sent: not on a socket, not in a channel's
+// answers, so a leak by another way is still caught.
+async function expectNothingOf(page: Page, traffic: Traffic, markers: readonly string[], view: string, people: readonly string[] = []): Promise<void> {
   const shown = await page.evaluate(() => [location.href, document.documentElement.outerHTML, document.body.innerText].join('\n'));
   const sent = await traffic.text();
   expect(sent.length, `${view}: the page was sent something`).toBeGreaterThan(0);
@@ -152,6 +116,10 @@ async function expectNothingOf(page: Page, traffic: Traffic, markers: readonly s
     expect(shown, `${view}: the page shows "${m}" of the other group`).not.toContain(m);
     // Random tickets and tokens are blanked first (traffic.ts, issue #1069).
     expect(findLeak(sent, m), `${view}: the page was sent something of the other group`).toBeUndefined();
+  }
+  const elsewhere = await traffic.textExcept('/v1/directory/members');
+  for (const name of people) {
+    expect(findLeak(elsewhere, name), `${view}: the other group's person was sent outside the member directory`).toBeUndefined();
   }
 }
 
@@ -222,6 +190,7 @@ sizes.forEach(([size, options], n) => {
     await say(bea, bChannel, `${tag} bravo before`);
     // A's channel and its words are never shown or sent; its people are listed.
     const markersOfA = [aChannel, `${tag} alpha`];
+    const peopleOfA = [ann.name, abe.name];
 
     const { page } = await meet(options);
     await page.addInitScript(trackSockets);
@@ -237,16 +206,16 @@ sizes.forEach(([size, options], n) => {
     await expect(members).toContainText(bea.name);
     // The private register: A's people are in the community, so they are
     // listed, by name alone; the channel they share is not.
-    const community = members.getByRole('list', { name: 'Community members' });
+    const community = members.getByRole('list', { name: 'People' });
     await expect(community).toContainText(ann.name);
     await expect(community).toContainText(abe.name);
     await expectFits(page, `${size}: B's lobby with the members panel open`);
-    await expectNothingOf(page, traffic, markersOfA, 'after sign-in');
+    await expectNothingOf(page, traffic, markersOfA, 'after sign-in', peopleOfA);
     // Nor does the directory list A's channel.
     await showView(page, 'Channels');
     await page.getByRole('navigation', { name: 'Channels' }).getByRole('button', { name: 'Browse channels' }).click();
     await expect(page.getByRole('navigation', { name: 'Channels' }).getByRole('list', { name: 'All channels' })).toContainText(bChannel);
-    await expectNothingOf(page, traffic, markersOfA, 'with the directory open');
+    await expectNothingOf(page, traffic, markersOfA, 'with the directory open', peopleOfA);
     await page.getByRole('navigation', { name: 'Channels' }).getByRole('button', { name: 'Browse channels' }).click();
 
     // A full load.
@@ -257,7 +226,7 @@ sizes.forEach(([size, options], n) => {
     await openChannel(page, bChannel);
     await expect(messages(page).getByText(`${tag} bravo before`)).toBeVisible();
     await expect(await openMembers(page)).toContainText(bea.name);
-    await expectNothingOf(page, traffic, markersOfA, 'after a full load');
+    await expectNothingOf(page, traffic, markersOfA, 'after a full load', peopleOfA);
 
     // The sockets drop and come back. A is busy meanwhile, and B's own
     // message after it arriving shows the page is live again.
@@ -269,7 +238,7 @@ sizes.forEach(([size, options], n) => {
     await expect(channelButtons(page)).toHaveCount(1);
     await expect(await openMembers(page)).toContainText(bea.name);
     await expectFits(page, `${size}: B's lobby after a reconnect`);
-    await expectNothingOf(page, traffic, markersOfA, 'after a reconnect');
+    await expectNothingOf(page, traffic, markersOfA, 'after a reconnect', peopleOfA);
   });
 });
 
