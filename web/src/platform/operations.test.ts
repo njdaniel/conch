@@ -53,6 +53,7 @@ describe('the operation table', () => {
         'changePassword',
         'convertGuest',
         'createInvite',
+        'createMemberLink',
         'createSignInLink',
         'joinAccount',
         'joinGuest',
@@ -99,6 +100,7 @@ describe('the operation table', () => {
       voiceSession: 'rooms',
       createSignInLink: 'code',
       createInvite: 'code',
+      createMemberLink: 'code',
       totpEnroll: 'secret',
     };
     for (const [id, field] of Object.entries(carrying) as [OperationId, string][]) {

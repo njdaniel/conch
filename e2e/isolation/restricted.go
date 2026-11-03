@@ -349,27 +349,38 @@ func (w *world) restrictedPhase() (int, error) {
 		return rows, fmt.Errorf("the restricted operator's refusals in its own channel wrote %d access_denied rows with permission=manage_channels, want 5", after-before)
 	}
 
-	// Links: A's channel, an open link, the right to invite.
+	// The v1 route refuses a caller without manage_members whatever it names
+	// (issue #990): the same 409 for A's channel, a ghost, an open link and
+	// the right to invite, naming no permission.
 	inviteAs := func(req schema.CreateInviteRequestV1) (int, []byte, error) {
 		return r.api.do(http.MethodPost, "/v1/invites", req)
 	}
+	retired := func(what string, status int, body []byte, err error) error {
+		if err != nil {
+			return fmt.Errorf("%s: %w", what, err)
+		}
+		if e, derr := errorOf(body); status != http.StatusConflict || derr != nil || e.Code != schema.ErrorCodeInviteKindRetired || e.Permission != "" {
+			return fmt.Errorf("%s = %d %s, want 409 %s naming no permission", what, status, body, schema.ErrorCodeInviteKindRetired)
+		}
+		return nil
+	}
 	s1, b1, err := inviteAs(schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{aChan}})
-	if err := refusedNaming("the restricted operator: a link naming A's channel", s1, b1, err, schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageChannels); err != nil {
+	if err := retired("the restricted operator: a v1 invite naming A's channel", s1, b1, err); err != nil {
 		return rows, err
 	}
 	s2, b2, err := inviteAs(schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{ghost}})
 	if err != nil {
 		return rows, err
 	}
-	if err := sameAnswer("the restricted operator: a link naming A's channel", s1, b1, s2, b2); err != nil {
+	if err := sameAnswer("the restricted operator: a v1 invite naming A's channel", s1, b1, s2, b2); err != nil {
 		return rows, err
 	}
 	status, body, err := inviteAs(schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{rchan}})
-	if err := refusedNaming("the restricted operator: an open link", status, body, err, schema.ErrorCodeInviteNotAllowed, schema.PermManageMembers); err != nil {
+	if err := retired("the restricted operator: a v1 open link", status, body, err); err != nil {
 		return rows, err
 	}
 	status, body, err = inviteAs(schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{rchan}, MayInvite: &yes})
-	if err := refusedNaming("the restricted operator: a link granting may_invite", status, body, err, schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageMembers); err != nil {
+	if err := retired("the restricted operator: a v1 invite granting may_invite", status, body, err); err != nil {
 		return rows, err
 	}
 	rows += 3

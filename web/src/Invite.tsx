@@ -1,15 +1,15 @@
-// The landing page of an invite link (issue #440): what the invite grants,
-// then how to join with it, then the lobby. Since issue #713 an invite may
-// make an account (a name and a password together, through POST
-// /v2/invites/redeem). Guests are removed for now (issue #1005), so the page
-// offers an account when the server's preview says the invite allows it, and
-// nothing else. The
-// code is a prop held in memory by App, sent only in request bodies, and
-// never rendered: nothing on this page shows it.
+// The landing page of a member link (issues #440, #990): who invited you and
+// where you land, then how to join with it, then the lobby. The link is
+// previewed through POST /v2/invites/preview and makes an account (a name and
+// a password together) through POST /v2/invites/redeem. Guests are removed
+// for now (issue #1005), so the page offers an account when the server's
+// preview says the link allows it, and nothing else: it never routes to the
+// guest flow. The code is a prop held in memory by App, sent only in request
+// bodies, and never rendered: nothing on this page shows it.
 import { useEffect, useRef, useState } from 'react';
 import * as api from './api';
 import { CreateAccount, type AccountProblem } from './CreateAccount';
-import type { InvitePreviewV1 } from './schema/invite';
+import type { InvitePreviewV2 } from './schema/invite';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { isNameMessage, nameRefusalLine } from './nameRefusal';
 import { ServerVersion } from './ServerVersion';
@@ -101,7 +101,7 @@ export function accountRefusal(result: Refusal): AccountProblem | null {
 export const heldLine =
   'This browser holds another sign-in that could not be checked. Reload the page when the server can be reached: it will say who is signed in here and offer to sign them out before you join.';
 
-// What an invite lets a new person do now, from its preview: make an account,
+// What a link lets a new person do now, from its preview: make an account,
 // or nothing. Guests are removed for now (issue #1005): whatever the server
 // says of guests, this page offers none.
 interface Offer {
@@ -109,10 +109,8 @@ interface Offer {
   readonly paused: boolean;
 }
 
-function offerOf(preview: InvitePreviewV1): Offer {
-  const join = preview.join;
-  if (join === undefined) return { account: true, paused: false };
-  return { account: join.account, paused: join.paused === true };
+function offerOf(preview: InvitePreviewV2): Offer {
+  return { account: preview.join.account, paused: preview.join.paused === true };
 }
 
 // channelWords names an invite's channels in a sentence: "#red and #blue".
@@ -124,7 +122,7 @@ export function channelWords(channels: readonly string[]): string {
 
 type Preview =
   | { readonly state: 'loading' }
-  | { readonly state: 'ready'; readonly preview: InvitePreviewV1 }
+  | { readonly state: 'ready'; readonly preview: InvitePreviewV2 }
   // gone is the invite that no longer works: nothing on the page can help,
   // and only someone signed in here has somewhere to go back to.
   | { readonly state: 'refused'; readonly line: string; readonly gone: boolean };
@@ -171,7 +169,7 @@ export function Invite({
 
   useEffect(() => {
     let live = true;
-    void api.previewInvite(inviteCode).then((result) => {
+    void api.previewMemberLink(inviteCode).then((result) => {
       if (!live) return;
       if (result.ok) setPreview({ state: 'ready', preview: result.value });
       else setPreview({ state: 'refused', line: refusalLine(result), gone: result.code === 'invite_invalid' });
@@ -303,11 +301,13 @@ export function Invite({
                 ))}
               </ul>
             </dd>
-            <dt>Voice</dt>
-            <dd>{ready.voice ? 'Included' : 'Not included'}</dd>
             <dt>Expires</dt>
             <dd>
-              <time dateTime={ready.expires_at}>{new Date(ready.expires_at).toLocaleString()}</time>
+              {ready.expires_at === undefined ? (
+                'Does not expire'
+              ) : (
+                <time dateTime={ready.expires_at}>{new Date(ready.expires_at).toLocaleString()}</time>
+              )}
             </dd>
           </dl>
           {signedInAs !== null ? (

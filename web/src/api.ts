@@ -65,6 +65,16 @@ import {
   type PutPermissionsRequestV1,
 } from './schema/permission';
 import {
+  createInviteResponseV2,
+  disableJoinersResponseV1,
+  invitePreviewV2,
+  type CreateInviteRequestV2,
+  type CreateInviteResponseV2,
+  type DisableJoinersRequestV1,
+  type DisableJoinersResponseV1,
+  type InvitePreviewV2,
+} from './schema/invite';
+import {
   createInviteResponseV1,
   inviteSettingsV1,
   invitePreviewV1,
@@ -1639,6 +1649,40 @@ export async function closeInvite(id: number): Promise<InviteResult<null>> {
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return inviteRefused(reply.res);
   return { ok: true, value: null };
+}
+
+// Member links (issue #990, ADR-013): the invite family's second version.
+// Anyone who may make one does, with an optional expiry and use limit; the
+// server decides again who may, and what a link lands its joiner in.
+
+// createMemberLink makes a member link (POST /v2/invites). The answer carries
+// its code, shown once to whoever made it and nowhere else.
+export async function createMemberLink(request: CreateInviteRequestV2): Promise<InviteResult<CreateInviteResponseV2>> {
+  const reply = await authedPost(call('createMemberLink'), request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return inviteRefused(reply.res);
+  return readBody(reply.res, createInviteResponseV2);
+}
+
+// previewMemberLink asks what a member link would offer, without using it
+// (POST /v2/invites/preview, no credential): the inviter, the server and the
+// channels the joiner lands in.
+export async function previewMemberLink(inviteCode: string): Promise<InviteResult<InvitePreviewV2>> {
+  const request: InvitePreviewRequestV1 = { code: inviteCode };
+  const res = await sendOpen(call('previewMemberLink'), request);
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  return readBody(res, invitePreviewV2);
+}
+
+// disableJoiners disables the members who joined through a link
+// (POST /v1/invites/{id}/disable-joiners), for a holder of manage_members; with
+// dryRun it disables none and says how many it would. Disabling asks for a
+// recent proof of the operator's password, which authedSend gets first.
+export async function disableJoiners(id: number, dryRun: boolean): Promise<InviteResult<DisableJoinersResponseV1>> {
+  const request: DisableJoinersRequestV1 = { dry_run: dryRun };
+  return readSent(await authedSend(call('disableJoiners', { id }), request), disableJoinersResponseV1);
 }
 
 // onSignedOutElsewhere calls back when another tab of this origin removes the

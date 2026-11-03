@@ -1720,9 +1720,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             ) : null
           }
           invites={
-            auth.principal.may_invite === true ? (
-              <InvitePanel origin={origin} me={auth.principal} channels={channels.channels} request={inviteAsk} onUnauthorized={onUnauthorized} />
-            ) : null
+            // Everyone signed in is offered the panel; one whose right to make
+            // links is off is told why and gets no form (issue #990). A guest
+            // visit has none.
+            visit === null ? <InvitePanel origin={origin} me={auth.principal} request={inviteAsk} onUnauthorized={onUnauthorized} /> : null
           }
           firstRun={
             // An operator on a server with no channels is shown what to do

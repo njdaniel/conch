@@ -103,10 +103,25 @@ func inviteJSON(t *testing.T, v any) string {
 	return string(b)
 }
 
-// createInvite makes an invite over REST and fails the test unless it is made.
+// createInvite makes a v1 invite and fails the test unless it is made. Over
+// REST for a holder of manage_members; POST /v1/invites refuses anyone else
+// (issue #990: 409 invite_kind_retired), so the invite of a member is made in
+// the store, as the data of a test about what follows from one (the invitee
+// tree, the lists, the allowance) needs it.
 func (f *inviteFixture) createInvite(t *testing.T, token string, req schema.CreateInviteRequestV1) schema.CreateInviteResponseV1 {
 	t.Helper()
 	rec := f.send(t, "POST", "/v1/invites", token, inviteJSON(t, req), "")
+	if rec.Code == http.StatusConflict && decodeBody[schema.Error](t, rec).Code == schema.ErrorCodeInviteKindRetired {
+		who, err := f.srv.store.ResolveCredential(context.Background(), token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := f.srv.store.CreateInvite(context.Background(), "system", who.ID, req, store.InviteOptions{Allowance: f.srv.cfg.InviteAllowance}, f.srv.now())
+		if err != nil {
+			t.Fatalf("create invite in the store = %v", err)
+		}
+		return resp
+	}
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create invite = %d %s", rec.Code, rec.Body)
 	}
@@ -174,12 +189,12 @@ func TestCreateInviteRefusals(t *testing.T) {
 		{"operator, personal", Config{}, nil, "root", inviteJSON(t, personal("general")), 201, ""},
 		{"operator, open link", Config{}, nil, "root", inviteJSON(t, openLink("red", "blue")), 201, ""},
 		{"operator grants the right to invite", Config{}, nil, "root", inviteJSON(t, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"red"}, MayInvite: boolPtr(true)}), 201, ""},
-		{"member with the right, personal", Config{}, grantAlice, "alice", inviteJSON(t, personal("red")), 201, ""},
-		{"member without the right", Config{}, nil, "alice", inviteJSON(t, personal("red")), 403, schema.ErrorCodeInviteNotAllowed},
-		{"member with the right, open link", Config{}, grantAlice, "alice", inviteJSON(t, openLink("red")), 403, schema.ErrorCodeInviteNotAllowed},
-		{"member passes the right on", Config{}, grantAlice, "alice", inviteJSON(t, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"red"}, MayInvite: boolPtr(true)}), 403, schema.ErrorCodeInviteGrantExceedsInviter},
-		{"member names a channel they are not in", Config{}, grantAlice, "alice", inviteJSON(t, personal("blue")), 403, schema.ErrorCodeInviteGrantExceedsInviter},
-		{"member names a channel that does not exist", Config{}, grantAlice, "alice", inviteJSON(t, personal("nosuch")), 403, schema.ErrorCodeInviteGrantExceedsInviter},
+		{"member with the right, personal (refused: member links, issue #990)", Config{}, grantAlice, "alice", inviteJSON(t, personal("red")), 409, schema.ErrorCodeInviteKindRetired},
+		{"member without the right", Config{}, nil, "alice", inviteJSON(t, personal("red")), 409, schema.ErrorCodeInviteKindRetired},
+		{"member with the right, open link", Config{}, grantAlice, "alice", inviteJSON(t, openLink("red")), 409, schema.ErrorCodeInviteKindRetired},
+		{"member passes the right on", Config{}, grantAlice, "alice", inviteJSON(t, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"red"}, MayInvite: boolPtr(true)}), 409, schema.ErrorCodeInviteKindRetired},
+		{"member names a channel they are not in", Config{}, grantAlice, "alice", inviteJSON(t, personal("blue")), 409, schema.ErrorCodeInviteKindRetired},
+		{"member names a channel that does not exist", Config{}, grantAlice, "alice", inviteJSON(t, personal("nosuch")), 409, schema.ErrorCodeInviteKindRetired},
 		{"operator names a channel that does not exist", Config{}, nil, "root", inviteJSON(t, personal("nosuch")), 404, "channel_not_found"},
 		{"agent", Config{}, nil, "bot", inviteJSON(t, personal("general")), 403, schema.ErrorCodeHumanRequired},
 		{"no credential", Config{}, nil, "", inviteJSON(t, personal("general")), 401, "unauthenticated"},
@@ -191,7 +206,7 @@ func TestCreateInviteRefusals(t *testing.T) {
 		{"allowance used up", Config{InviteAllowance: 1}, func(t *testing.T, f *inviteFixture) {
 			grantAlice(t, f)
 			f.createInvite(t, f.aliceTok, personal("red"))
-		}, "alice", inviteJSON(t, personal("red")), 403, schema.ErrorCodeInviteAllowanceExceeded},
+		}, "alice", inviteJSON(t, personal("red")), 409, schema.ErrorCodeInviteKindRetired},
 		{"unknown kind", Config{}, nil, "root", `{"kind":"forever","channels":["general"]}`, 400, "invalid_request"},
 		{"no channels", Config{}, nil, "root", `{"kind":"personal","channels":[]}`, 400, "invalid_request"},
 		{"unknown field", Config{}, nil, "root", `{"kind":"personal","channels":["general"],"role":"operator"}`, 400, "invalid_request"},
@@ -227,24 +242,25 @@ func TestCreateInviteRefusals(t *testing.T) {
 	}
 }
 
-// POST /v1/invites is unchanged beside POST /v2/invites (issue #985): a member
-// with the right still makes a personal invite, and the allowance is one
-// number for v1 personal invites and v2 links together.
-func TestMemberStillCreatesV1InviteAndSharesTheAllowance(t *testing.T) {
+// POST /v1/invites refuses a member (issue #990: 409 invite_kind_retired, the
+// member makes member links), and the allowance is still one number for the
+// v1 personal invites made before the cut and the v2 links together: an
+// invite made in the store counts against the next link.
+func TestMemberRefusedOnV1InviteAndSharesTheAllowance(t *testing.T) {
 	f := newInviteFixture(t, Config{InviteAllowance: 2})
 	if _, err := f.srv.store.SetMayInvite(context.Background(), "system", f.alice.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	rec := f.send(t, "POST", "/v1/invites", f.aliceTok, inviteJSON(t, personal("red")), "")
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("member's v1 personal invite = %d %s", rec.Code, rec.Body)
+	for _, req := range []schema.CreateInviteRequestV1{personal("red"), openLink("red")} {
+		rec := f.send(t, "POST", "/v1/invites", f.aliceTok, inviteJSON(t, req), "")
+		assertErrorBody(t, rec, http.StatusConflict, schema.ErrorCodeInviteKindRetired)
+		if e := decodeBody[schema.Error](t, rec); e.Permission != "" {
+			t.Errorf("the refusal names the permission %q; it says only that the kind is retired", e.Permission)
+		}
 	}
+	f.createInvite(t, f.aliceTok, personal("red")) // made before the cut, in the store
 	f.createMemberLink(t, f.aliceTok, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
-	// Both used the allowance: neither route makes a third.
-	assertErrorBody(t, f.send(t, "POST", "/v1/invites", f.aliceTok, inviteJSON(t, personal("red")), ""), http.StatusForbidden, schema.ErrorCodeInviteAllowanceExceeded)
 	assertErrorBody(t, f.send(t, "POST", "/v2/invites", f.aliceTok, `{"kind":"member"}`, ""), http.StatusForbidden, schema.ErrorCodeInviteAllowanceExceeded)
-	// A member still may not make an open link or name a channel they are not in.
-	assertErrorBody(t, f.send(t, "POST", "/v1/invites", f.aliceTok, inviteJSON(t, openLink("red")), ""), http.StatusForbidden, schema.ErrorCodeInviteNotAllowed)
 }
 
 // The code is in the create response and nowhere else: not in the list, not

@@ -762,8 +762,11 @@ func TestJoinSettingsNameOracleClosed(t *testing.T) {
 	}
 }
 
-// Invite refusals name the permission they lack, to a caller whose role
-// could hold it (design §7.4): the same codes as before.
+// POST /v1/invites refuses whoever lacks manage_members with 409
+// invite_kind_retired (issue #990): a member, an operator whose manage_members
+// is off, whatever the body asks. The refusals that name a permission are the
+// member link's (TestMemberLinkRefusalsNameThePermission), and the refusal
+// here names none, so it says nothing of the roles a caller could hold.
 func TestInviteRefusalsNameThePermission(t *testing.T) {
 	f := newRestrictedFixture(t, Config{})
 	f.cut(t)
@@ -772,19 +775,11 @@ func TestInviteRefusalsNameThePermission(t *testing.T) {
 		name string
 		tok  string
 		req  schema.CreateInviteRequestV1
-		code string
-		perm schema.Permission
 	}{
-		{"an open link without manage_members", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"channel-b"}},
-			schema.ErrorCodeInviteNotAllowed, schema.PermManageMembers},
-		{"granting may_invite without manage_members", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-b"}, MayInvite: &yes},
-			schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageMembers},
-		{"a channel it is not in, without manage_channels", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-a"}},
-			schema.ErrorCodeInviteGrantExceedsInviter, schema.PermManageChannels},
-		// A member is never told of an operator permission; its own right
-		// to make links (its brake) it is told.
-		{"a member who may not invite", f.memberTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-b"}},
-			schema.ErrorCodeInviteNotAllowed, schema.PermMakeMemberLinks},
+		{"an open link without manage_members", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"channel-b"}}},
+		{"granting may_invite without manage_members", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-b"}, MayInvite: &yes}},
+		{"a channel it is not in, without manage_channels", f.opTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-a"}}},
+		{"a member who may not invite", f.memberTok, schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{"channel-b"}}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			body, err := json.Marshal(c.req)
@@ -792,11 +787,11 @@ func TestInviteRefusalsNameThePermission(t *testing.T) {
 				t.Fatal(err)
 			}
 			rec := f.do(t, "POST", "/v1/invites", c.tok, string(body))
-			if rec.Code != http.StatusForbidden {
-				t.Fatalf("invite = %d %s, want 403", rec.Code, rec.Body)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("invite = %d %s, want 409", rec.Code, rec.Body)
 			}
-			if e := decodeBody[schema.Error](t, rec); e.Code != c.code || e.Permission != c.perm {
-				t.Errorf("refusal = %s, want code %q permission %q", rec.Body, c.code, c.perm)
+			if e := decodeBody[schema.Error](t, rec); e.Code != schema.ErrorCodeInviteKindRetired || e.Permission != "" {
+				t.Errorf("refusal = %s, want code %q and no permission", rec.Body, schema.ErrorCodeInviteKindRetired)
 			}
 		})
 	}

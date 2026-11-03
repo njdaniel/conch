@@ -8,6 +8,15 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Changed
+
+- **`POST /v1/invites` is for operators who manage members only** (#990).
+  A caller without `manage_members` now gets 409 `invite_kind_retired`:
+  members make member links with `POST /v2/invites`. This replaces the
+  earlier "unchanged for now" note. An operator holding `manage_members`
+  keeps v1 until #1134 retires it. The web app's invite panel makes,
+  lists and closes member links, and shows each link's joiners.
+
 ### Added
 
 - **The channel directory; members join and leave channels themselves**

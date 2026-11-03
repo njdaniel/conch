@@ -2772,6 +2772,29 @@ button.link {
   font-weight: 600;
 }
 
+/* A link's buttons and the people who joined through it (issue #990): they
+   wrap, so the panel fits a phone. */
+.invite-list .actions {
+  flex-wrap: wrap;
+  margin-top: var(--s1);
+}
+
+.invite-joiners {
+  margin: var(--s1) 0 0;
+  padding-left: var(--s4);
+}
+
+.invite-ask {
+  margin-top: var(--s1);
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.invite-ask p {
+  margin: 0 0 var(--s1);
+}
+
 /* ---------------------------------------------------------------- sizes */
 
 /* Below the wide breakpoint the members panel is drawn over the right side

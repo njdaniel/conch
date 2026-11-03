@@ -360,8 +360,9 @@ var routeExpectations = map[string]routeExpectation{
 	// whatever it is sent (#713): 409 password_required, for every caller
 	// and under AuthOff alike. People only: an agent gets 403 and AuthOff
 	// 401 on the three authenticated routes (both special-cased below).
-	// POST /v1/invites is retired (issue #985): 409 invite_kind_retired for
-	// every person. Member links (v2): an empty create is a 400, the list is
+	// POST /v1/invites answers a member 409 invite_kind_retired (issue #990)
+	// and an operator its own validation (the table is for the operator).
+	// Member links (v2): an empty create is a 400, the list is
 	// the caller's own, preview sends no code, and the joiners of an invite
 	// that does not exist are a 404 for a person and for an agent alike (no
 	// route refuses an agent by name: that would say which ids exist).
@@ -638,6 +639,13 @@ func TestRoleMatrix(t *testing.T) {
 			}
 			if rt.pattern == "PUT /v1/channels/{id}/name" {
 				memberWant = exp.allowed // a non-member cannot discover the channel id
+			}
+			// A member makes member links, not v1 invites (issue #990): the
+			// route answers 409 invite_kind_retired before reading the body.
+			// An agent is still refused first, as a person who is not.
+			inviteRetired := rt.pattern == "POST /v1/invites"
+			if inviteRetired {
+				memberWant = http.StatusConflict
 			}
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
