@@ -60,6 +60,10 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
   // Counts the sessions asked for; an answer for an older one is ended at once.
   const generation = useRef(0);
   const replaced = useRef(false);
+  // The generation of the creation in flight, if any, and the generations a
+  // credential's replacement made out of date (issue #1084).
+  const creating = useRef<number | null>(null);
+  const dropped = useRef(new Set<number>());
   // Set by release: the session was ended on purpose (sign-out), so the
   // server's closing of its socket is not a reason to make another.
   const released = useRef(false);
@@ -92,11 +96,16 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
   const start = useCallback(
     (why: 'ended' | 'unavailable') => {
       const mine = ++generation.current;
+      creating.current = mine;
       setSession({ phase: 'starting' });
       void api.createSession(sessionClient).then((result) => {
+        if (creating.current === mine) creating.current = null;
         if (mine !== generation.current) {
-          // Signed out, or replaced, while it was being made.
-          if (result.ok) void api.endSession(result.value.id);
+          // Signed out, or replaced, while it was being made. One made for a
+          // credential being replaced is left: the replacement ends it on the
+          // server, or it lapses, and asking to end it is a request that may
+          // be refused (issue #1084).
+          if (result.ok && !dropped.current.has(mine)) void api.endSession(result.value.id);
           return;
         }
         if (result.ok) {
@@ -163,6 +172,68 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
     replaced.current = false;
   }, []);
 
+  // A write that may replace the page's credential (a password change) ends
+  // the session on the server if it does, and its events socket would be
+  // opened again for it and refused (issue #1084). So the session is let go
+  // of before the write is sent, which stops that socket; when the write
+  // replaced the credential, a new session is made with the new one, else the
+  // same session is taken up again.
+  useEffect(() => {
+    if (!active) return;
+    // The writes out now, whether any replaced the credential, the session
+    // let go of (null when none was held), and whether a creation in flight
+    // was let go of: the page resumes once every write has settled.
+    const outstanding = new Set<number>();
+    let rotated = false;
+    let paused: number | null = null;
+    let fresh = false;
+    let recovering = false;
+    const rotatedNow = () => {
+      held.current = null;
+      replaced.current = false;
+      start('unavailable');
+    };
+    return api.onCredentialReplacing((event) => {
+      if (event.phase === 'begin') {
+        if (outstanding.size === 0) {
+          paused = held.current;
+          fresh = creating.current !== null;
+          // A recovery waiting out its backoff (replace) is let go of too:
+          // its timer is cancelled, and it runs when the writes settle.
+          recovering = timer.current !== null;
+          if (timer.current !== null) window.clearTimeout(timer.current);
+          timer.current = null;
+          rotated = false;
+          dropped.current.add(generation.current);
+          generation.current++;
+          setSession({ phase: 'starting' });
+        }
+        outstanding.add(event.id);
+        return;
+      }
+      if (event.late) {
+        // Answered after the wait with a new credential: what was taken up
+        // again belongs to the old one.
+        if (outstanding.size > 0) rotated = true;
+        else rotatedNow();
+        return;
+      }
+      if (!outstanding.delete(event.id)) return;
+      if (event.rotated) rotated = true;
+      if (outstanding.size > 0) return;
+      const id = paused;
+      const again = fresh;
+      const recover = recovering;
+      paused = null;
+      fresh = false;
+      recovering = false;
+      if (rotated) rotatedNow();
+      else if (id !== null) setSession({ phase: 'ready', id });
+      else if (recover) start('ended');
+      else if (again) start('unavailable');
+    });
+  }, [active, start]);
+
   return { session, release, replace, healthy };
 }
 
@@ -221,6 +292,7 @@ export function useAgents({
   onMessage,
   onMessageEdited,
   onChannelsChanged,
+  onPermissionsChanged,
 }: {
   readonly signedIn: boolean;
   readonly channel: string | null;
@@ -246,6 +318,9 @@ export function useAgents({
   // The person's channel list may have changed (issue #1027): the frame, and
   // each reconnect of the socket, which may have missed one.
   readonly onChannelsChanged?: () => void;
+  // The permissions may have changed (conch.permissions_changed.v1), or the
+  // socket was down and they may have meanwhile.
+  readonly onPermissionsChanged?: () => void;
 }): Agents {
   const [state, dispatch] = useReducer(agentsReducer, initialAgents);
   const [members, setMembers] = useState<readonly ChannelMemberV1[]>([]);
@@ -353,6 +428,10 @@ export function useAgents({
             interrupted = false;
             onChannelsChanged?.();
           }
+          // Every subscription that is established reads the permissions
+          // again, the first of a feed too: a feed made after a channel was
+          // selected has missed whatever changed before it, and no event says so.
+          onPermissionsChanged?.();
           break;
         case 'waiting':
           interrupted = true;
@@ -440,6 +519,9 @@ export function useAgents({
           case 'channelsChanged':
             onChannelsChanged?.();
             break;
+          case 'permissionsChanged':
+            onPermissionsChanged?.();
+            break;
         }
       },
       onStatus,
@@ -450,7 +532,7 @@ export function useAgents({
       if (retry !== null) realClock.clearTimeout(retry);
       feed.stop();
     };
-  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, onMessageEdited, onChannelsChanged, replace, healthy]);
+  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, onMessageEdited, onChannelsChanged, onPermissionsChanged, replace, healthy]);
 
   // The members line is read again each time the socket comes back.
   useEffect(() => {

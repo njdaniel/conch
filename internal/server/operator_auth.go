@@ -420,7 +420,7 @@ type setupLimiter struct {
 func newSetupLimiter(cfg Config) *setupLimiter {
 	l := inviteLimit{"setup_redeem_per_address", defaultRedeemPerAddress, defaultAddressWindow}
 	if cfg.TestRelaxInviteLimits {
-		l.burst = testRelaxedPerAddressBurst
+		l.burst = testRelaxedBurst
 	}
 	return &setupLimiter{limit: l}
 }

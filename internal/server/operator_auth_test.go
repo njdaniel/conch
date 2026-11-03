@@ -526,8 +526,9 @@ type reauthDecision struct {
 // decision that disagrees, and on a class entry for a route that is not in
 // the table or is not an operator route.
 var reauthDecisions = map[string]reauthDecision{
-	"POST /v0/channels":   {reauthNone, "makes a channel: no principal, credential, link, permit or hook, no grant"},
-	"POST /v0/principals": {reauthAlways, "creates a principal"},
+	"POST /v0/channels":                                               {reauthNone, "makes a channel: no principal, credential, link, permit or hook, no grant"},
+	"PUT /v1/channels/{id}/settings":                                  {reauthNone, "changes a channel's visibility and default mark: no principal, credential, link, permit or hook, no grant"},
+	"POST /v0/principals":                                             {reauthAlways, "creates a principal"},
 	"PUT /v1/channels/{channel}/members/{principal_id}":               {reauthOperators, "grants access, and can_decide (approval-path); a manager's add is a member's write (issue #790)"},
 	"POST /v1/channels/{channel}/members":                             {reauthOperators, "grants access, as the PUT by id; a manager's add is a member's write (issue #790)"},
 	"PUT /v1/principals/{id}/role":                                    {reauthAlways, "makes or unmakes an operator or an owner (issue #790)"},
@@ -560,6 +561,7 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/invites/{id}/disable-joiners":                           {reauthAlways, "ends people in bulk"},
 	"POST /v1/principals/{id}/disable-invitees":                       {reauthAlways, "ends people in bulk"},
 	"PUT /v1/principals/{id}/invite-permission":                       {reauthAlways, "grants invite permission"},
+	"PUT /v1/principals/{id}/voice-permission":                        {reauthAlways, "switches a person's voice"},
 	"GET /v1/invites/settings":                                        {reauthNone, "a settings read"},
 	"PUT /v1/invites/settings":                                        {reauthAlways, "opens or closes joining through invites"},
 	"POST /v1/principals/{id}/sign-in-links":                          {reauthAlways, "creates a link"},
@@ -576,7 +578,8 @@ var reauthDecisions = map[string]reauthDecision{
 
 	// Every write anyone authenticated may make: in the class only where an
 	// operator's use creates a principal or a link (rule: reauthOperators).
-	"POST /v1/invites":                              {reauthOperators, "an operator's invite makes principals, with no allowance"},
+	"POST /v1/invites":                              {reauthOperators, "an operator's invite makes principals, with no allowance (members are refused, issue #985)"},
+	"POST /v2/invites":                              {reauthOperators, "an operator's member link makes principals, with no allowance, and may never expire"},
 	"DELETE /v1/invites/{id}":                       {reauthNone, "closes an invite"},
 	"POST /v1/ws-tickets":                           {reauthNone, "a one-use socket ticket for the caller's own credential, no principal or link"},
 	"POST /v0/channels/{channel}/messages":          {reauthNone, "a message"},
@@ -617,6 +620,9 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/totp/enroll":                                                                 {reauthNone, "setup scope only"},
 	"POST /v1/totp/confirm":                                                                {reauthNone, "setup scope only"},
 	"POST /v1/reports":                                                                     {reauthNone, "a problem report"},
+	"POST /v1/channels":                                                                    {reauthNone, "a member makes a channel: no grant beyond the creator's own membership of it"},
+	"POST /v1/channels/{channel}/join":                                                     {reauthNone, "a member joins a public channel themselves, with can_decide = 0: no grant"},
+	"POST /v1/channels/{channel}/leave":                                                    {reauthNone, "a member ends their own membership"},
 	"POST /v1/approvals":                                                                   {reauthNone, "an approval request (approval-path, unchanged)"},
 	"POST /v1/approvals/{id}/decisions":                                                    {reauthNone, "a decision (approval-path, unchanged)"},
 }
@@ -711,7 +717,7 @@ func TestRecentAuthGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertErrorBody(t, f.send(t, "POST", "/v1/invites", aliceSession, `{}`, ""), http.StatusBadRequest, "invalid_request")
+	assertErrorBody(t, f.send(t, "POST", "/v2/invites", aliceSession, `{}`, ""), http.StatusBadRequest, "invalid_request")
 	if rec := f.reauthOp(t, session, rootPassword, f.code(secret)); rec.Code != http.StatusOK {
 		t.Fatalf("reauth = %d %s", rec.Code, rec.Body)
 	}
@@ -744,7 +750,7 @@ func (f *operatorFixture) signInWithCode(t *testing.T, secret []byte) (string, t
 // re-authentication class (audit 3 F8).
 func (f *operatorFixture) inviteNow(t *testing.T, token string) *httptest.ResponseRecorder {
 	t.Helper()
-	return f.send(t, "POST", "/v1/invites", token, inviteJSON(t, personal("general")), "")
+	return f.send(t, "POST", "/v2/invites", token, `{"kind":"member"}`, "")
 }
 
 // A full sign-in with password and code is the recent proof for its first
@@ -1256,4 +1262,62 @@ func TestSoleOperatorWithBothFactorsCanSignOut(t *testing.T) {
 	if _, err := f.srv.store.DisablePrincipal(ctx, "system", f.root.ID); err != nil {
 		t.Errorf("disabling root with another operator able to sign in = %v", err)
 	}
+}
+
+// A role change drops the principal's recent-auth proofs (issue #1054): a
+// member's password-only proof must not satisfy an operator route, which
+// needs password and code, and a demoted operator's proof ends with the
+// role. Sessions are not ended: they carry no role, and the route's own
+// check asks for the fresh proof.
+func TestRoleChangeClearsRecentAuthProof(t *testing.T) {
+	setRole := func(t *testing.T, f *operatorFixture, role string) {
+		t.Helper()
+		rec := f.send(t, "PUT", fmt.Sprintf("/v1/principals/%d/role", f.alice.ID), f.rootTok, fmt.Sprintf(`{"role":%q}`, role), "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("set role %s = %d %s", role, rec.Code, rec.Body)
+		}
+	}
+	login := func(t *testing.T, f *operatorFixture) string {
+		t.Helper()
+		rec := f.login(t, "alice", alicePassword, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("login alice = %d %s", rec.Code, rec.Body)
+		}
+		return decodeBody[schema.LoginResponseV1](t, rec).Token
+	}
+	t.Run("promotion then fresh operator proof then demotion", func(t *testing.T) {
+		f := newOperatorFixture(t)
+		session := login(t, f)
+		f.nextStep()
+		if rec := f.reauthOp(t, session, alicePassword, ""); rec.Code != http.StatusOK {
+			t.Fatalf("member reauth = %d %s", rec.Code, rec.Body)
+		}
+		if f.whoamiAuth(t, session).RecentAuthUntil == nil {
+			t.Fatal("the member's re-authentication made no proof")
+		}
+		setRole(t, f, "operator")
+		if got := f.whoamiAuth(t, session).RecentAuthUntil; got != nil {
+			t.Errorf("the promoted operator still holds a proof to %v", got)
+		}
+		assertErrorBody(t, f.inviteNow(t, session), http.StatusForbidden, schema.ErrorCodeReauthRequired)
+
+		// A fresh operator re-authentication, password and code, works.
+		secret := f.enrolOperator(t, f.alice.ID)
+		if got := f.status(t, session); got != http.StatusOK {
+			t.Fatalf("the member's session = %d after promotion and enrolment, want 200 (sessions stand)", got)
+		}
+		assertErrorBody(t, f.inviteNow(t, session), http.StatusForbidden, schema.ErrorCodeReauthRequired)
+		if rec := f.reauthOp(t, session, alicePassword, f.code(secret)); rec.Code != http.StatusOK {
+			t.Fatalf("operator reauth = %d %s", rec.Code, rec.Body)
+		}
+		if rec := f.inviteNow(t, session); rec.Code >= 300 {
+			t.Errorf("operator route after a fresh re-authentication = %d %s", rec.Code, rec.Body)
+		}
+
+		// Demotion clears that proof too.
+		setRole(t, f, "member")
+		if got := f.whoamiAuth(t, session).RecentAuthUntil; got != nil {
+			t.Errorf("the demoted member still holds a proof to %v", got)
+		}
+	})
 }

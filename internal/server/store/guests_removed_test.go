@@ -54,11 +54,11 @@ func legacyJoinSettings(t testing.TB, s *Store, req schema.PutJoinSettingsReques
 
 // legacyCreateInvite makes an invite as CreateInvite did before issue
 // #1005: one whose join_as may admit guests.
-func legacyCreateInvite(t testing.TB, s *Store, actor string, creatorID int64, req schema.CreateInviteRequestV1, opts InviteOptions, now time.Time) schema.CreateInviteResponseV1 {
+func legacyCreateInvite(t testing.TB, s *Store, actor string, creatorID int64, req schema.CreateInviteRequestV1, now time.Time) schema.CreateInviteResponseV1 {
 	t.Helper()
 	mode := req.EffectiveJoinAs()
 	req.JoinAs = schema.InviteJoinAccount
-	resp, err := s.CreateInvite(context.Background(), actor, creatorID, req, opts, now)
+	resp, err := s.CreateInvite(context.Background(), actor, creatorID, req, InviteOptions{}, now)
 	if err != nil {
 		t.Fatalf("CreateInvite: %v", err)
 	}
@@ -316,16 +316,14 @@ func TestGuestsRemovedRefusals(t *testing.T) {
 			}
 		})
 	}
-	// With the policy as it now always is, neither entry point of the store
-	// starts a visit.
+	// With the policy as it now always is, the store's one entry point that
+	// starts a visit, an invite's, starts none. The bare address has no
+	// visit path in the store at all (issue #987).
 	f := newInviteFixture(t)
 	req := open("general")
 	req.JoinAs = schema.InviteJoinBoth
-	inv := legacyCreateInvite(t, f.s, "system", f.op.ID, req, InviteOptions{}, f.now)
+	inv := legacyCreateInvite(t, f.s, "system", f.op.ID, req, f.now)
 	legacyJoinSettings(t, f.s, schema.PutJoinSettingsRequestV1{OpenJoining: &account, OpenChannels: &[]string{"general"}})
-	if _, err := f.s.JoinAsGuest(f.ctx, GuestEntry{}); !errors.Is(err, ErrGuestsDisabled) {
-		t.Errorf("JoinAsGuest = %v, want ErrGuestsDisabled", err)
-	}
 	if _, err := f.s.RedeemInviteGuest(f.ctx, HashInviteCode(inv.Code), GuestEntry{}, f.now); !errors.Is(err, ErrGuestsDisabled) {
 		t.Errorf("RedeemInviteGuest = %v, want ErrGuestsDisabled", err)
 	}

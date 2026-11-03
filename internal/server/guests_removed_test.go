@@ -168,9 +168,15 @@ func TestGuestsRemovedNoRouteStartsAVisit(t *testing.T) {
 	both := f.legacyInvite(t, open, schema.InviteJoinBoth)
 	guestOnly := f.legacyInvite(t, open, schema.InviteJoinGuest)
 	unknown := schema.InviteCodePrefix + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	// A member link and a legacy account invite are refused there too: the
+	// route admits nobody whatever code it is given (issue #986).
+	link := f.createMemberLink(t, f.rootTok, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
+	account := f.createInvite(t, f.rootTok, personal("red"))
 	for _, tt := range []struct {
 		name, path, body string
 	}{
+		{"a member link", "/v1/invites/redeem-guest", inviteJSON(t, schema.RedeemInviteGuestRequestV1{Code: link.Code, Label: "Pat"})},
+		{"a legacy account invite", "/v1/invites/redeem-guest", inviteJSON(t, schema.RedeemInviteGuestRequestV1{Code: account.Code, Label: "Pat"})},
 		{"address, no label", "/v1/join/guest", `{}`},
 		{"address, a label", "/v1/join/guest", inviteJSON(t, schema.JoinGuestRequestV1{Label: "Pat"})},
 		{"address, a bad label", "/v1/join/guest", `{"label":"\u0000"}`},
@@ -261,6 +267,9 @@ func TestGuestsRemovedNoGuestEntryPoint(t *testing.T) {
 	} {
 		t.Run("settings "+tt.name, func(t *testing.T) {
 			f := newInviteFixture(t, Config{})
+			// red is public, so only the guest rules decide (issue #987
+			// refuses a private open channel).
+			f.makePublic(t, "red")
 			rec := f.putJoin(t, tt.req)
 			if tt.status == http.StatusConflict {
 				assertErrorBody(t, rec, http.StatusConflict, schema.ErrorCodeJoinPolicyConflict)

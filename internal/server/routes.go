@@ -28,7 +28,21 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/ws-tickets", accessAuthenticated, hf(s.handleCreateWSTicket)),
 		rt("GET /v1/whoami", accessAuthenticated, hf(s.handleWhoAmI)),
 		rt("POST /v0/channels", accessPermission, hf(s.handleCreateChannel)).needs(schema.PermManageChannels),
+		// Member channel creation (issue #981): community members only; an
+		// agent and a guest are refused before the handler runs.
+		rt("POST /v1/channels", accessAuthenticated, s.humansOnlyBecause(denyAgentChannelCreate, "agents cannot create channels", s.membersOnly(hf(s.handleCreateChannelV1)))),
 		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
+		// The channel directory, self-join and leave (issue #982). The
+		// directory and leave are for community members: an agent and a
+		// guest are refused before the handler runs. Join refuses them in
+		// the handler, with its own code, before any lookup.
+		rt("GET /v1/directory/channels", accessAuthenticated, s.humansOnlyBecause(denyAgentDirectory, "agents cannot list the channel directory", s.membersOnly(hf(s.handleChannelDirectory)))),
+		rt("POST /v1/channels/{channel}/join", accessAuthenticated, hf(s.handleJoinChannel)),
+		rt("POST /v1/channels/{channel}/leave", accessAuthenticated, s.humansOnlyBecause(denyAgentLeave, "an agent's channels are its operator's to change", s.membersOnly(hf(s.handleLeaveChannel)))),
+		// Channel settings (issue #981, ADR-013 O5): visibility and the
+		// default mark. manage_channels, refused before any lookup, so a
+		// caller without it learns nothing of which ids exist.
+		rt("PUT /v1/channels/{id}/settings", accessPermission, hf(s.handleChannelSettings)).needs(schema.PermManageChannels),
 		// Renaming a channel (issues #727, #791): operators or its managers,
 		// addressed by id since the name is what it changes. /name is a literal
 		// no {channel} route ends in, so no two patterns meet.
@@ -179,6 +193,9 @@ func (s *Server) routeTable() []route {
 		// meet in the mux; POST /v0/principals is another version.
 		rt("POST /v1/principals/{id}/hide", accessPermission, hf(s.handleHidePrincipal)).needs(schema.PermManageMembers),
 		rt("POST /v1/principals/hide", accessPermission, hf(s.handleHidePrincipals)).needs(schema.PermManageMembers),
+		// The community's member list (issue #983): any member; see_member_directory
+		// decides everyone versus the may-know list, manage_members the operator fields.
+		rt("GET /v1/directory/members", accessAuthenticated, s.directoryRoute(hf(s.handleListDirectoryMembers))),
 		rt("GET /v1/principals", accessPermission, hf(s.handleListPrincipals)).needs(schema.PermManageMembers),
 		// Operators, or the principal itself: "sign out everywhere" (issue
 		// #439; checked in the handler).
@@ -203,7 +220,17 @@ func (s *Server) routeTable() []route {
 		// and use it. They carry the code in the body only, are rate-limited
 		// per client address before any store work, and the store decides
 		// everything else. See invites.go.
+		// POST /v1/invites is unchanged until #990 and #1134 (issue #985). A
+		// member link is made with POST /v2/invites, listed with GET
+		// /v2/invites, previewed (exempt, as v1's) with POST /v2/invites/preview
+		// and its joiners read by its maker or an operator with GET
+		// /v2/invites/{id}/joiners. The joiners route has no membersOnly: a
+		// guest there is a 404 invite_not_found, as for a ghost id.
 		rt("POST /v1/invites", accessAuthenticated, s.membersOnly(hf(s.handleCreateInvite))),
+		rt("POST /v2/invites", accessAuthenticated, s.membersOnly(hf(s.handleCreateMemberLink))),
+		rt("GET /v2/invites", accessAuthenticated, s.membersOnly(hf(s.handleListMemberLinks))),
+		rt("POST /v2/invites/preview", accessExempt, hf(s.handlePreviewMemberLink)),
+		rt("GET /v2/invites/{id}/joiners", accessAuthenticated, hf(s.handleMemberLinkJoiners)),
 		rt("GET /v1/invites", accessAuthenticated, hf(s.handleListInvites)),
 		rt("DELETE /v1/invites/{id}", accessAuthenticated, hf(s.handleCloseInvite)),
 		rt("POST /v1/invites/preview", accessExempt, hf(s.handlePreviewInvite)),
@@ -262,6 +289,8 @@ func (s *Server) routeTable() []route {
 		rt("POST /v1/invites/{id}/disable-joiners", accessPermission, hf(s.handleDisableJoiners)).needs(schema.PermManageMembers),
 		rt("POST /v1/principals/{id}/disable-invitees", accessPermission, hf(s.handleDisableInvitees)).needs(schema.PermManageMembers),
 		rt("PUT /v1/principals/{id}/invite-permission", accessPermission, hf(s.handleInvitePermission)).needs(schema.PermManageMembers),
+		// A person's voice switch (issue #984): immediate effect on live media.
+		rt("PUT /v1/principals/{id}/voice-permission", accessPermission, hf(s.handleVoicePermission)).needs(schema.PermManageMembers),
 		rt("GET /v1/invites/settings", accessOperator, hf(s.handleGetInviteSettings)),
 		rt("PUT /v1/invites/settings", accessPermission, hf(s.handlePutInviteSettings)).needs(schema.PermManageMembers),
 		// Sign-in links (issue #493): an operator makes a one-time link that
@@ -365,6 +394,7 @@ var recentAuthRoutes = map[string]reauthRule{
 	"POST /v1/invites/{id}/disable-joiners":                        reauthAlways,
 	"POST /v1/principals/{id}/disable-invitees":                    reauthAlways,
 	"PUT /v1/principals/{id}/invite-permission":                    reauthAlways,
+	"PUT /v1/principals/{id}/voice-permission":                     reauthAlways,
 	"PUT /v1/invites/settings":                                     reauthAlways,
 	"POST /v1/principals/{id}/sign-in-links":                       reauthAlways,
 	// Guest entry (issue #710): opening or closing joining to guests, and
@@ -377,9 +407,10 @@ var recentAuthRoutes = map[string]reauthRule{
 	// Signing out everywhere is anyone's for themself; an operator doing it
 	// to someone else is the bulk revoke of the rule.
 	"POST /v1/principals/{id}/credentials/revoke-all": reauthOnOthers,
-	// An invite makes principals; an operator's has no allowance and may be
-	// open to anyone. A member's invites are not in the class.
+	// An invite makes principals; an operator's has no allowance and may never
+	// expire. A member's links are not in the class.
 	"POST /v1/invites": reauthOperators,
+	"POST /v2/invites": reauthOperators,
 	// The permissions document grants rights (ADR-014 design §7.2).
 	"PUT /v1/permissions": reauthAlways,
 	// The audit export names every member and private channel: a holder of

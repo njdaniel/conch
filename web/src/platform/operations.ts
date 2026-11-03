@@ -15,8 +15,11 @@ import {
   confirmTOTPRequestV1,
   convertGuestRequestV1,
   convertGuestResponseV1,
-  createChannelRequest,
-  createChannelResponse,
+  createChannelRequestV1,
+  createChannelResponseV1,
+  channelDirectoryResponseV1,
+  joinChannelResponseV1,
+  serverMembersResponseV1,
   createInterventionRequestV1,
   createInviteRequestV1,
   createInviteResponseV1,
@@ -36,6 +39,10 @@ import {
   health,
   interventionV1,
   inviteSettingsV1,
+  inviteJoinersResponseV1,
+  listInvitesResponseV2,
+  permissionsResponseV1,
+  putPermissionsRequestV1,
   invitePreviewRequestV1,
   invitePreviewV1,
   joinAccountRequestV1,
@@ -74,6 +81,8 @@ import {
   redeemSetupTokenResponseV1,
   redeemSignInLinkRequestV1,
   redeemSignInLinkResponseV1,
+  channelSettingsRequestV1,
+  channelSettingsResponseV1,
   renameChannelRequestV1,
   renameChannelResponseV1,
   renamePrincipalRequestV1,
@@ -152,6 +161,10 @@ export const operations = {
   revokeAll: op('POST', '/v1/principals/{principal}/credentials/revoke-all', 'bearer', { response: check(revokeAllCredentialsResponseV1) }),
   listOwnCredentials: op('GET', '/v1/credentials/mine', 'bearer', { response: check(listOwnCredentialsResponseV1) }),
   endOwnCredential: op('DELETE', '/v1/credentials/mine/{id}', 'bearer'),
+  // An operator revokes a credential or a hook issued to someone else
+  // (manage_members), as the permissions console's issued_to_others list does.
+  revokeCredential: op('DELETE', '/v1/credentials/{id}', 'bearer'),
+  revokeHook: op('DELETE', '/v1/hooks/{id}', 'bearer'),
   reauth: op('POST', '/v1/reauth', 'bearer', { request: check(reauthRequestV1), response: check(reauthResponseV1), secret: true, renderer: false }),
   changePassword: op('PUT', '/v1/password/mine', 'bearer', {
     request: check(changePasswordRequestV1),
@@ -215,6 +228,11 @@ export const operations = {
   // The invite's code grants an account, once, to whoever holds it.
   createInvite: op('POST', '/v1/invites', 'bearer', { request: check(createInviteRequestV1), response: check(createInviteResponseV1), renderer: false, credentials: ['code'] }),
   listInvites: op('GET', '/v1/invites', 'bearer', { response: check(listInvitesResponseV1) }),
+  // Member links and the permissions document (ADR-014).
+  listMemberLinks: op('GET', '/v2/invites', 'bearer', { response: check(listInvitesResponseV2) }),
+  memberLinkJoiners: op('GET', '/v2/invites/{id}/joiners', 'bearer', { response: check(inviteJoinersResponseV1) }),
+  getPermissions: op('GET', '/v1/permissions', 'bearer', { response: check(permissionsResponseV1) }),
+  putPermissions: op('PUT', '/v1/permissions', 'bearer', { request: check(putPermissionsRequestV1), response: check(permissionsResponseV1) }),
   closeInvite: op('DELETE', '/v1/invites/{id}', 'bearer'),
   previewInvite: op('POST', '/v1/invites/preview', 'none', { request: check(invitePreviewRequestV1), response: check(invitePreviewV1) }),
   redeemInvite: op('POST', '/v2/invites/redeem', 'none', { request: check(redeemInviteRequestV2), response: check(redeemInviteResponseV1), renderer: false, credentials: token }),
@@ -228,8 +246,15 @@ export const operations = {
   // People and channels.
   renamePrincipal: op('PUT', '/v1/principals/{id}/name', 'bearer', { request: check(renamePrincipalRequestV1), response: check(renamePrincipalResponseV1) }),
   listChannels: op('GET', '/v1/channels', 'bearer', { response: check(listChannelsResponse) }),
-  createChannel: op('POST', '/v0/channels', 'bearer', { request: check(createChannelRequest), response: check(createChannelResponse) }),
+  createChannel: op('POST', '/v1/channels', 'bearer', { request: check(createChannelRequestV1), response: check(createChannelResponseV1) }),
+  // The directory, self-join and leave (issues #982, #991), and the
+  // community's member list (issue #983).
+  channelDirectory: op('GET', '/v1/directory/channels', 'bearer', { response: check(channelDirectoryResponseV1) }),
+  joinChannel: op('POST', '/v1/channels/{channel}/join', 'bearer', { response: check(joinChannelResponseV1) }),
+  leaveChannel: op('POST', '/v1/channels/{channel}/leave', 'bearer'),
+  directoryMembers: op('GET', '/v1/directory/members', 'bearer', { response: check(serverMembersResponseV1) }),
   renameChannel: op('PUT', '/v1/channels/{id}/name', 'bearer', { request: check(renameChannelRequestV1), response: check(renameChannelResponseV1) }),
+  channelSettings: op('PUT', '/v1/channels/{id}/settings', 'bearer', { request: check(channelSettingsRequestV1), response: check(channelSettingsResponseV1) }),
   listMembers: op('GET', '/v1/channels/{channel}/members', 'bearer', { response: check(listChannelMembersResponseV1) }),
   addMember: op('POST', '/v1/channels/{channel}/members', 'bearer', { request: check(addChannelMemberRequestV1), response: check(channelMemberV1) }),
   putMember: op('PUT', '/v1/channels/{channel}/members/{principal}', 'bearer', { request: check(putChannelMemberRequestV1) }),

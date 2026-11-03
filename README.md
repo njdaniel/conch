@@ -1045,6 +1045,7 @@ An operator sees every invite, closes any of them, and has these routes besides 
 | `POST /v1/invites/{id}/disable-joiners` | `{"dry_run":bool,"close":bool}` | `200`, `{"dry_run":…,"count":N,"principal_ids":[…]}`. Disables every enabled joiner the way `POST /v1/principals/{id}/disable` does: credentials revoked, sockets closed, out of voice. `close` (default `true`) closes the invite first. `dry_run` changes nothing and only counts |
 | `POST /v1/principals/{id}/disable-invitees` | `{"dry_run":bool,"depth":"1"\|"all"}` | `200`, the same shape: the people this person invited (`"1"`, the default), or everyone under them (`"all"`). The person themselves is left alone, and plain `disable` never follows the tree |
 | `PUT /v1/principals/{id}/invite-permission` | `{"may_invite":bool}` | `204`. Only an operator grants the right to invite. Taking it away closes the person's open personal invites; giving it back does not reopen them |
+| `PUT /v1/principals/{id}/voice-permission` | `{"voice_allowed":bool}` | `200` `{principal_id, voice_allowed, changed}`. Needs `manage_members` and a recent proof; an owner target needs an owner; an agent is `409 not_a_person`; a hidden or unknown id is `404 principal_not_found`. Off removes the person (and their companion and viewer, and any share) from every voice room before the answer, with no room rotated; on changes nothing live. Each change is audited `voice_permission_changed` |
 | `GET /v1/invites/settings`, `PUT /v1/invites/settings` | `{"paused":bool}` | `200` with the setting. Paused refuses making, previewing and redeeming any invite. It is stored, so it survives a restart |
 
 The two bulk disables never disable an operator or the caller, and the last operator is never disabled by anything. Disabling a person, however it is done, closes every invite they made that could still be used.
@@ -1052,9 +1053,8 @@ The two bulk disables never disable an operator or the caller, and the last oper
 `conch admin` covers all of it:
 
 ```sh
-LINK=$(bin/conch admin invite create --open --channel red --channel blue --expires 24h --voice)   # the link, alone on stdout
-bin/conch admin invite create --personal --channel red --expires 7d
-bin/conch admin invite list --state open            # <id> <kind> <state> uses <n>[/<max>] expires <time> by <id> channels <names>
+LINK=$(bin/conch admin invite create --expires 24h --uses 5)   # a member link, alone on stdout; --never-expires for operators
+bin/conch admin invite list --state open            # <id> <kind> <state> uses <n>[/<max>] joiners <n> expires <time|never> by <id> other <n> channels <names>
 bin/conch admin invite close 3
 bin/conch admin invite joiners 1                    # <id> <enabled|disabled> <joined> <name>
 bin/conch admin invite disable-joiners 1            # a dry run: how many it would disable
@@ -1062,6 +1062,17 @@ bin/conch admin invite disable-joiners 1 --yes      # disable them and close the
 bin/conch admin invite pause                        # resume, status
 bin/conch admin principal invite-permission 5 on    # or off
 bin/conch admin principal disable-invitees 5 --all  # a dry run; --yes to do it
+```
+
+A link is a member link (ADR-013): it lands its joiner in the default channels, and `--open`, `--personal`, `--channel`, `--voice`, `--may-invite` and `--join-as` of the old per-channel invite are gone (`--max-uses` is `--uses`). The rest of the community model, from the command line:
+
+```sh
+bin/conch channels list [--all]                     # <id> <visibility> <default|-> <joined|-> <members|-> <name>; --all is for operators
+bin/conch channels join lounge                      # and leave; create lounge [--private]
+bin/conch admin channel settings lounge --public --default on   # --private keeps every member; the answer says whether open sign-up went off
+bin/conch admin principal voice 5 off               # a person's voice switch; asks for your password when the server does
+bin/conch admin directory members                   # the community
+bin/conch admin join set --open-signup on --link-expiry 7d      # 0 for no default expiry; join status shows both and the default channels
 ```
 
 `invite create` prints the link and nothing else on standard output; its id and expiry go to standard error. The code appears in no other output.
@@ -1078,7 +1089,7 @@ Someone who joined through the link and should stay can be enabled again (`conch
 
 Removing a person and everyone they invited (`conch admin principal disable-invitees <id> --all`) works the same way: pause first. The tree is read once, before anyone is disabled, and each person's own invites close only when they are disabled, so someone who joins through one of them in between is not in the list.
 
-**Audit.** Making, redeeming and closing an invite are audited by the store (`invite_created`, `invite_redeemed`, `principal_created`, `member_added`, `credential_created`, `invite_closed`), attributed to the maker, or, for a redemption, to `invite:<id>`. `invite_closed` says why: `reason=creator` (its maker), `operator` (an operator who did not make it), `creator_disabled` (its maker was disabled) or `permission_revoked` (its maker lost the right to invite). An operator's administration adds `invites_paused`, `invites_resumed`, `invite_permission_changed`, and one summary row per bulk disable, `joiners_disabled` (the invite, the count, whether it was closed) or `invitees_disabled` (the person, the depth, the count), beside each person's own `principal_disabled`. A dry run writes nothing. Refusals are audited as `invite_rate_limited` (which limit) and `invite_redeem_refused` (an invalid code), by actor `anonymous` on preview and redeem, thinned like `access_denied`: the first eight of a kind in a minute, then the 16th, 32nd…, each with `count=N`. No row carries the code or the client address. A change to the permissions document that takes `make_member_links` from a maker, or gives it back, suspends or resumes the maker's open personal invites without closing them: one `invite_suspended` or `invite_resumed` row per invite (actor `system`, `reason=permission`); the same change to `act_as_members` writes `sign_in_link_suspended` and `sign_in_link_resumed` for sign-in, reset and enrolment links.
+**Audit.** Making, redeeming and closing an invite are audited by the store (`invite_created`, `invite_redeemed`, `principal_created`, `member_added`, `credential_created`, `invite_closed`), attributed to the maker, or, for a redemption, to `invite:<id>`. `invite_closed` says why: `reason=creator` (its maker), `operator` (an operator who did not make it), `creator_disabled` (its maker was disabled) or `permission_revoked` (its maker lost the right to invite). An operator's administration adds `invites_paused`, `invites_resumed`, `invite_permission_changed`, `voice_permission_changed`, and one summary row per bulk disable, `joiners_disabled` (the invite, the count, whether it was closed) or `invitees_disabled` (the person, the depth, the count), beside each person's own `principal_disabled`. A dry run writes nothing. Refusals are audited as `invite_rate_limited` (which limit) and `invite_redeem_refused` (an invalid code), by actor `anonymous` on preview and redeem, thinned like `access_denied`: the first eight of a kind in a minute, then the 16th, 32nd…, each with `count=N`. No row carries the code or the client address. A change to the permissions document that takes `make_member_links` from a maker, or gives it back, suspends or resumes the maker's open personal invites without closing them: one `invite_suspended` or `invite_resumed` row per invite (actor `system`, `reason=permission`); the same change to `act_as_members` writes `sign_in_link_suspended` and `sign_in_link_resumed` for sign-in, reset and enrolment links.
 
 ### Signing a person back in
 

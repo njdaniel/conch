@@ -56,6 +56,15 @@ import {
 } from './schema/guest';
 import { health } from './schema/health';
 import {
+  inviteJoinersResponseV1,
+  listInvitesResponseV2,
+  permissionsResponseV1,
+  type InviteJoinerV1,
+  type InviteV2,
+  type PermissionsResponseV1,
+  type PutPermissionsRequestV1,
+} from './schema/permission';
+import {
   createInviteResponseV1,
   inviteSettingsV1,
   invitePreviewV1,
@@ -74,16 +83,24 @@ import { listRunsResponseV1, runV1, type RunV1 } from './schema/run';
 import { sessionV1, type CreateSessionRequestV1, type SessionV1 } from './schema/session';
 import {
   channelMemberV1,
-  createChannelResponse,
+  channelDirectoryResponseV1,
+  createChannelResponseV1,
+  joinChannelResponseV1,
   listChannelMembersResponseV1,
   listChannelsResponse,
   renameChannelResponseV1,
+  channelSettingsResponseV1,
   type AddChannelMemberRequestV1,
   type ChannelMemberV1,
   type ChannelV0,
-  type CreateChannelRequest,
+  type ChannelListingV1,
+  type CreateChannelRequestV1,
+  type JoinChannelResponseV1,
+  type ChannelVisibility,
   type PutChannelMemberRequestV1,
   type RenameChannelRequestV1,
+  type ChannelSettingsRequestV1,
+  type ChannelSettingsResponseV1,
 } from './schema/channel';
 import { fileAttachmentPayloadSchema, fileV1, type FileAttachmentV1, type FileV1 } from './schema/file';
 import {
@@ -117,8 +134,11 @@ import {
 import { listReadStateResponseV1, readStateV1, type MarkReadRequestV1, type ReadStateV1 } from './schema/readstate';
 import {
   renamePrincipalResponseV1,
+  serverMembersResponseV1,
   whoAmIResponseV1,
   type PrincipalV0,
+  type ServerMemberV1,
+  type ServerMembersResponseV1,
   type RenamePrincipalRequestV1,
   type RenamePrincipalResponseV1,
   type WhoAmIResponseV1,
@@ -199,6 +219,61 @@ let pinned: Held | null = null;
 const replacing = new Map<string, Promise<void>>();
 const replaced = new Set<string>();
 
+// The writes that replace the credential in force (a password change among
+// them) that are out now. The server revokes the old credential as it
+// answers, which closes every socket opened with it (1008) and ends its
+// session, and a ticket, a whoami or a presence read that follows from those
+// closes, asked for with it, is a request known to fail: the browser logs it
+// as an error whatever the page does with the answer (issue #1084). So while
+// one is out, no socket is opened (connect waits, and then asks for its ticket
+// with the credential the write left, the new one), and a socket closed 1008
+// by the replacement is told to its owner as lost, not refused, since an
+// owner's answer to a refusal is to ask the server who it is, and why, with
+// the credential that was just revoked.
+// A hold is dropped when its write is answered or after replacingWait,
+// whichever is first, so a write that never answers does not hold the page up.
+const requestHolds = new Set<Promise<void>>();
+
+// The reason conchd gives when it closes a socket (1008) because the
+// credential it was opened with has been revoked.
+const credentialInvalid = 'credential no longer valid';
+
+// A write that may replace this page's credential is about to be sent
+// ('begin'), and it has been answered ('end'; rotated says the page now holds
+// the new credential, so what was made with the old one is gone). A write not
+// answered by replacingWait ends with rotated false ('end' for the same id),
+// and, should it answer later with a new credential, ends again with late
+// true. Each write has its own id. The browser's own session listens: it is
+// the one thing the old credential's revocation ends on the server, and its
+// events socket would otherwise be opened again for it, refused 404 (issue
+// #1084).
+export type ReplacingEvent =
+  | { readonly phase: 'begin'; readonly id: number }
+  | { readonly phase: 'end'; readonly id: number; readonly rotated: boolean; readonly late: boolean };
+
+let replacingIds = 0;
+
+const replacingListeners = new Set<(event: ReplacingEvent) => void>();
+
+// onCredentialReplacing calls listener for each ReplacingEvent, and returns
+// the function that stops it.
+export function onCredentialReplacing(listener: (event: ReplacingEvent) => void): () => void {
+  replacingListeners.add(listener);
+  return () => {
+    replacingListeners.delete(listener);
+  };
+}
+
+function tellReplacing(event: ReplacingEvent): void {
+  for (const listener of [...replacingListeners]) listener(event);
+}
+
+// holdSockets resolves once no replacing write is out (a hold that has waited
+// replacingWait is dropped, see whileReplacing).
+async function holdSockets(): Promise<void> {
+  while (requestHolds.size > 0) await Promise.all([...requestHolds]);
+}
+
 // pin sets the credential this page signs in with, as a new sign-in (or none).
 function pin(held: Held | null): void {
   pinned = held;
@@ -217,7 +292,42 @@ function rotate(from: Held, next: Held): void {
 // before work sends anything.
 function whileReplacing<T>(from: Held | null, work: () => Promise<T>): Promise<T> {
   if (from === null) return work();
+  // No socket is opened until the write is answered (see requestHolds), and
+  // what holds a session of the old credential is told to let go of it
+  // first (see onCredentialReplacing).
+  let release = (): void => undefined;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const id = ++replacingIds;
+  let expired = false;
+  let answered = false;
+  // Not answered in time: the hold is dropped and the listeners told, so the
+  // page's sockets and session go on with what they have.
+  const timer = setTimeout(() => {
+    if (answered) return;
+    expired = true;
+    requestHolds.delete(hold);
+    release();
+    tellReplacing({ phase: 'end', id, rotated: false, late: false });
+  }, replacingWait);
+  requestHolds.add(hold);
+  tellReplacing({ phase: 'begin', id });
   const done = Promise.resolve().then(work);
+  void done
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    .then(() => {
+      answered = true;
+      clearTimeout(timer);
+      const rotated = replaced.has(from.token);
+      if (!expired) tellReplacing({ phase: 'end', id, rotated, late: false });
+      else if (rotated) tellReplacing({ phase: 'end', id, rotated, late: true });
+      requestHolds.delete(hold);
+      release();
+    });
   const settled = done.then(
     () => undefined,
     () => undefined,
@@ -1005,6 +1115,58 @@ export async function putInviteSettings(request: InviteSettingsV1): Promise<Invi
   return readSent(await authedSend(call('putInviteSettings'), request), inviteSettingsV1);
 }
 
+// permissions reads the permissions document (GET /v1/permissions, an
+// operator's): the revision, the grid, the presets and the warnings.
+export function permissions(): Promise<ApiResult<PermissionsResponseV1>> {
+  return authed(call('getPermissions'), permissionsResponseV1);
+}
+
+// putPermissions changes the document (PUT /v1/permissions): a preset or
+// cells, against the revision that was read. It needs change_server_settings
+// and a recent proof (reauth_required), as authedSend asks for. A refusal
+// carries the server's code, and for permission_denied the permission.
+export async function putPermissions(request: PutPermissionsRequestV1): Promise<InviteResult<PermissionsResponseV1>> {
+  return readSent(await authedSend(call('putPermissions'), request), permissionsResponseV1);
+}
+
+// signOutPrincipalEverywhere revokes every credential of another person
+// (POST /v1/principals/{id}/credentials/revoke-all), as the permissions
+// console's issued_to_others list offers it. Unlike signOutEverywhere it does
+// not forget the credential held here: if the person is the caller, the next
+// request is refused and the page signs out as for any revoked credential. It
+// needs manage_members and a recent proof; a refusal carries the server's code.
+export async function signOutPrincipalEverywhere(principal: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('revokeAll', { principal })));
+}
+
+// revokeIssuedCredential revokes one credential an operator issued to someone
+// else (DELETE /v1/credentials/{id}); manage_members and a recent proof.
+export async function revokeIssuedCredential(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('revokeCredential', { id })));
+}
+
+// revokeIssuedHook revokes one hook an operator bound to someone else
+// (DELETE /v1/hooks/{id}); manage_members and a recent proof.
+export async function revokeIssuedHook(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('revokeHook', { id })));
+}
+
+// memberLinks reads the member links the caller may see (GET /v2/invites),
+// newest first: every link with manage_members, else the caller's own. Without
+// manage_channels a link names only the caller's channels and counts the
+// rest in other_channels.
+export async function memberLinks(): Promise<ApiResult<InviteV2[]>> {
+  const result = await authed(call('listMemberLinks'), listInvitesResponseV2);
+  return result.ok ? { ok: true, value: result.value.invites } : result;
+}
+
+// memberLinkJoiners reads who came through one link (GET
+// /v2/invites/{id}/joiners), to its maker or a holder of manage_members.
+export async function memberLinkJoiners(id: number): Promise<ApiResult<InviteJoinerV1[]>> {
+  const result = await authed(call('memberLinkJoiners', { id }), inviteJoinersResponseV1);
+  return result.ok ? { ok: true, value: result.value.joiners } : result;
+}
+
 // listGuests reads the live guest visits, newest first: one page.
 export async function listGuests(): Promise<ApiResult<GuestAdminV1[]>> {
   const result = await authed(call('listGuests'), listGuestsResponseV1);
@@ -1035,6 +1197,9 @@ export type InviteResult<T> =
       readonly code?: string;
       readonly message?: string;
       readonly retryAfter?: number;
+      // The permission a permission_denied refusal names (ADR-014 design
+      // §7.4), as the server wrote it.
+      readonly permission?: string;
     };
 
 export type InviteRefusal = Extract<InviteResult<never>, { ok: false }>;
@@ -1054,6 +1219,7 @@ async function inviteRefused(res: Response): Promise<InviteRefusal> {
     failure: 'invalid',
     ...(doc === undefined ? {} : { code: doc.code }),
     ...(message === '' ? {} : { message }),
+    ...(doc?.permission === undefined ? {} : { permission: doc.permission }),
     ...(Number.isFinite(retryAfter) && retryAfter >= 0 ? { retryAfter } : {}),
   };
 }
@@ -1551,19 +1717,66 @@ export async function listChannels(): Promise<ApiResult<ChannelV0[]>> {
   return { ok: true, value: result.value.channels };
 }
 
-// createChannel makes a channel (issue #695). The server allows operators
-// alone (403 forbidden for anyone else) and makes the caller its only member,
-// so it is one of theirs from then on. A refusal carries the server's code and
-// line as an invite call's does: channel_exists for a name already used,
-// invalid_request with the rule a name broke. It is never repeated here.
-export async function createChannel(name: string): Promise<InviteResult<ChannelV0>> {
-  const request: CreateChannelRequest = { name };
+// createChannel makes a public or private channel (POST /v1/channels, issues
+// #981 and #991): any member the server lets create one, who becomes its only
+// member and its manager. A refusal carries the server's code, never repeated
+// here: channel_exists for every collision (it never says whose channel is in
+// the way), rate_limited with its Retry-After, permission_denied, forbidden,
+// invalid_request for a name that breaks the rule.
+export async function createChannel(name: string, visibility: ChannelVisibility): Promise<InviteResult<ChannelV0>> {
+  const request: CreateChannelRequestV1 = { name, visibility };
   const reply = await authedPost(call('createChannel'), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return inviteRefused(reply.res);
-  const created = await readBody(reply.res, createChannelResponse);
+  const created = await readBody(reply.res, createChannelResponseV1);
   return created.ok ? { ok: true, value: created.value.channel } : created;
+}
+
+// channelDirectory reads the channel directory (GET /v1/directory/channels,
+// issue #982): every public channel and the caller's own private ones, as the
+// server answers. A member count is sent only to a holder of manage_channels
+// who asks for scope=all, which this never does, and no page reads one.
+export async function channelDirectory(): Promise<ApiResult<ChannelListingV1[]>> {
+  const result = await authed(call('channelDirectory'), channelDirectoryResponseV1);
+  return result.ok ? { ok: true, value: result.value.channels } : result;
+}
+
+// joinChannel joins a public channel (POST /v1/channels/{channel}/join, issue
+// #982). A private channel the caller is not in is the same channel_not_found
+// as one that never was.
+export async function joinChannel(name: string): Promise<InviteResult<JoinChannelResponseV1>> {
+  return readSent(await authedPost(call('joinChannel', { channel: name })), joinChannelResponseV1);
+}
+
+// leaveChannel leaves a channel (POST /v1/channels/{channel}/leave). The last
+// member of a private channel is refused with channel_last_member.
+export async function leaveChannel(name: string): Promise<InviteResult<null>> {
+  return readDone(await authedPost(call('leaveChannel', { channel: name })));
+}
+
+const directoryLimit = 100;
+const maxDirectoryPages = 50;
+
+// directoryMembers reads the community's member list (GET
+// /v1/directory/members, issue #983), every page of it, in the server's order.
+// What it holds is what the server answered: operator fields only if the
+// server sent them, and the scope it says it applied.
+export async function directoryMembers(): Promise<ApiResult<ServerMembersResponseV1>> {
+  const members: ServerMemberV1[] = [];
+  let scope: ServerMembersResponseV1['scope'];
+  let after = 0;
+  for (let page = 0; page < maxDirectoryPages; page++) {
+    const query = `limit=${String(directoryLimit)}${after === 0 ? '' : `&after=${String(after)}`}`;
+    const result = await authed(call('directoryMembers', {}, query), serverMembersResponseV1);
+    if (!result.ok) return result;
+    members.push(...result.value.members);
+    scope = result.value.scope;
+    const next = result.value.after;
+    if (next === undefined || next <= after) break;
+    after = next;
+  }
+  return { ok: true, value: { members, ...(scope === undefined ? {} : { scope }) } };
 }
 
 // renameChannel renames a channel by its id (issue #728): operators and this
@@ -1582,6 +1795,16 @@ export async function renameChannel(id: number, from: string, name: string): Pro
   if (!reply.res.ok) return inviteRefused(reply.res);
   const renamed = await readBody(reply.res, renameChannelResponseV1);
   return renamed.ok ? { ok: true, value: renamed.value.channel } : renamed;
+}
+
+// channelSettings makes a channel public or private, a default or not
+// (PUT /v1/channels/{id}/settings, issue #1183): for holders of manage_channels,
+// after a recent proof (reauth_required, which authedSend asks for). A refusal
+// carries the server's code: channel_settings_conflict (a default channel must
+// be public), permission_denied, channel_not_found. The answer is the channel
+// as it now is, and whether unmarking the last default turned open sign-up off.
+export async function channelSettings(id: number, request: ChannelSettingsRequestV1): Promise<InviteResult<ChannelSettingsResponseV1>> {
+  return readSent(await authedSend(call('channelSettings', { id }), request), channelSettingsResponseV1);
 }
 
 // How every channel-addressed route answers a name that is not a channel of
@@ -1952,6 +2175,26 @@ export function writeNotificationPreferences(origin: string, account: number, pr
   }
 }
 
+// The setup card's "Decide later" (ADR-014 design §10.2): a per-browser,
+// per-account, non-secret mark that keeps the card from showing again.
+const setupCardKey = (origin: string, account: number) => `conch.web.setup-card.v1.${origin}.${String(account)}`;
+
+export function setupCardDismissed(origin: string, account: number): boolean {
+  try {
+    return platform.credentials.readPreference(setupCardKey(origin, account)) === 'dismissed';
+  } catch {
+    return false;
+  }
+}
+
+export function dismissSetupCard(origin: string, account: number): void {
+  try {
+    platform.credentials.writePreference(setupCardKey(origin, account), 'dismissed');
+  } catch {
+    // Storage can be unavailable; the card stays dismissed until the page reloads.
+  }
+}
+
 // requestTicket asks for a single-use ticket to open a socket with.
 async function requestTicket(): Promise<ApiResult<WSTicketV1>> {
   const reply = await authedPost(call('wsTicket'));
@@ -1992,6 +2235,9 @@ async function connect(name: SocketName, id: OperationId, query: Readonly<Record
   // Lost until it opens: a ticket refused or a socket that never opens is
   // followed by another try.
   lost[name] = true;
+  await holdSockets();
+  // The credential this socket is opened with, which a replacement may end.
+  const opened = current();
   let address = query;
   if (platform.sockets.ticket) {
     const ticket = await requestTicket();
@@ -2017,7 +2263,13 @@ async function connect(name: SocketName, id: OperationId, query: Readonly<Record
   socket.onclose = (event: CloseEvent) => {
     lost[name] = true;
     record({ kind: 'socket_close', socket: kind, code: event.code });
-    events.onClose(event.code, event.reason);
+    // Closed because its credential was revoked, by a replacement that is out
+    // or has been kept: an abnormal close, which the owner opens again after
+    // its wait. Any other 1008 (the channel lost, the session ended) keeps
+    // its reason, which its owner acts on.
+    const replacedMeanwhile = requestHolds.size > 0 || (opened !== null && replaced.has(opened.token));
+    if (event.code === 1008 && event.reason === credentialInvalid && replacedMeanwhile) events.onClose(1006, '');
+    else events.onClose(event.code, event.reason);
   };
   const handle: FeedSocket = {
     close: () => {

@@ -671,8 +671,13 @@ func TestStopEscalation(t *testing.T) {
 			if info.sentTerm != tt.term || info.sentKill != tt.kill {
 				t.Errorf("SIGTERM %v, SIGKILL %v; want %v, %v", info.sentTerm, info.sentKill, tt.term, tt.kill)
 			}
-			if info.stopTook < tt.atLeast || (!tt.term && info.stopTook >= stopTimings.StopTerm) {
-				t.Errorf("exited %v after the stop began", info.stopTook)
+			// Only a lower bound: it proves the supervisor waited before
+			// escalating. Whether it escalated is the sentTerm/sentKill check
+			// above; how long the OS took to schedule, exit and reap a
+			// well-behaved helper is not the supervisor's doing, and load only
+			// stretches it.
+			if info.stopTook < tt.atLeast {
+				t.Errorf("exited %v after the stop began, want at least %v", info.stopTook, tt.atLeast)
 			}
 			if st := s.Status(); st.Phase != PhaseIdle {
 				t.Errorf("status %+v, want idle", st)

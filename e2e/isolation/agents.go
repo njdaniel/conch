@@ -40,6 +40,26 @@ func coreAgentRows() []row {
 	runNotFound := answer{http.StatusNotFound, "run_not_found"}
 	interNotFound := answer{http.StatusNotFound, "intervention_not_found"}
 	return []row{
+		// The community's member list is for people: an agent is refused,
+		// whoever it is.
+		{route: "GET /v1/directory/members", what: "asks for the community's members", want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(*world, subject) probe { return get("/v1/directory/members") }},
+		// Channels are made by community members (issue #981): an agent is
+		// refused before any name is looked at.
+		byID("POST /v1/channels", "makes a channel with A's private channel's name", aChannel, answer{http.StatusForbidden, "forbidden"}, func(_ *world, s subject) probe {
+			return post("/v1/channels", schema.CreateChannelRequestV1{Name: s.name, Visibility: schema.ChannelPrivate})
+		}),
+		// The channel directory, self-join and leave are a community
+		// member's (issue #982): an agent is refused before any lookup,
+		// the same for A's private channel as for one never made.
+		{route: "GET /v1/directory/channels", what: "lists the channel directory", want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(*world, subject) probe { return get("/v1/directory/channels") }},
+		byID("POST /v1/channels/{channel}/join", "joins A's private channel", aChannel, answer{http.StatusForbidden, schema.ErrorCodeChannelNotJoinable}, func(_ *world, s subject) probe {
+			return post(ch(s)+"/join", nil)
+		}),
+		byID("POST /v1/channels/{channel}/leave", "leaves A's private channel", aChannel, answer{http.StatusForbidden, "forbidden"}, func(_ *world, s subject) probe {
+			return post(ch(s)+"/leave", nil)
+		}),
 		byChannel("GET /v2/channels/{channel}/messages", "reads A's channel", func(_ *world, s subject) probe { return get("/v2/channels/" + s.name + "/messages") }),
 		byChannel("POST /v2/channels/{channel}/messages", "posts to A's channel", func(_ *world, s subject) probe {
 			return post("/v2/channels/"+s.name+"/messages", schema.PostMessageRequestV2{Body: "hello"})
@@ -66,6 +86,14 @@ func coreAgentRows() []row {
 		}),
 		byID("POST /v1/runs/{id}/activity", "adds activity to A's run", aRun, runNotFound, func(_ *world, s subject) probe {
 			return post("/v1/runs/"+id(s.id)+"/activity", schema.AppendActivityRequestV1{Kind: schema.ActivityKindRunStarted, Summary: "s"})
+		}),
+		// The joiners of a link answer an agent as they answer any caller who
+		// is not its maker or an operator: as for an id that never existed.
+		byID("GET /v2/invites/{id}/joiners", "lists who joined through A's member link", aMemberLink, answer{http.StatusNotFound, schema.ErrorCodeInviteNotFound}, func(_ *world, s subject) probe {
+			return get("/v2/invites/" + id(s.id) + "/joiners")
+		}),
+		byID("GET /v2/invites/{id}/joiners", "lists who joined through A's open link", aOpenLink, answer{http.StatusNotFound, schema.ErrorCodeInviteNotFound}, func(_ *world, s subject) probe {
+			return get("/v2/invites/" + id(s.id) + "/joiners")
 		}),
 		byID("GET /v1/runs/{id}", "reads A's run", aRun, runNotFound, func(_ *world, s subject) probe { return get("/v1/runs/" + id(s.id)) }),
 		byID("GET /v1/runs/{id}/activity", "reads A's run's activity", aRun, runNotFound, func(_ *world, s subject) probe { return get("/v1/runs/" + id(s.id) + "/activity") }),
@@ -102,6 +130,9 @@ func mcpProbes() []mcpProbe {
 	return []mcpProbe{
 		{"read_channel", aChannel, func(_ *world, s subject) map[string]any { return map[string]any{"channel": s.name} }},
 		{"post_message", aChannel, func(_ *world, s subject) map[string]any { return map[string]any{"channel": s.name, "body": "hello"} }},
+		{"post_message", aChannel, func(_ *world, s subject) map[string]any {
+			return map[string]any{"channel": s.name, "body": "hello", "thread_root_id": 1}
+		}},
 		{"check_decision", aApproval, func(_ *world, s subject) map[string]any { return map[string]any{"approval_id": s.id} }},
 		{"await_decision", aApproval, func(_ *world, s subject) map[string]any { return map[string]any{"approval_id": s.id, "timeout_ms": 1} }},
 		{"heartbeat", aSession, func(_ *world, s subject) map[string]any { return map[string]any{"session_id": s.id} }},

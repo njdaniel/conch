@@ -335,7 +335,10 @@ type RoleChangeResult struct {
 //     links.
 //   - Demoting an operator to member closes the open invite links and sign-in
 //     links they made, and their personal invites unless targetID holds
-//     may_invite.
+//     may_invite. Their member links are closed too when the may_invite
+//     brake is off, and otherwise only those that never expire: a link a
+//     member could not make is never left to come back with the brake
+//     (issue #1165).
 //   - Every effective change appends one principal_role_changed audit row.
 func (s *Store) SetRole(ctx context.Context, actor string, actorID, targetID int64, role Role, owner *bool) (RoleChangeResult, error) {
 	now := credentialNow().Truncate(time.Millisecond)
@@ -414,6 +417,23 @@ func setRoleTx(ctx context.Context, tx execer, actor string, actorID, targetID i
 		return RoleChangeResult{}, fmt.Errorf("store: set role: %w", err)
 	}
 
+	// Any role change drops every recent-auth proof the principal holds: a
+	// proof earned under one role's rules (a member's password alone) must
+	// not satisfy the other's (an operator's password and code), and a
+	// demoted operator's proof ends with the role. The sessions themselves
+	// stand: they carry no role, which is read live on every request, and
+	// an operator route needing a fresh proof now answers reauth_required
+	// (issue #1054; ADR-012). Same transaction as the role write.
+	proofsRes, err := tx.ExecContext(ctx,
+		"UPDATE credentials SET recent_auth_until = NULL WHERE principal_id = ? AND recent_auth_until IS NOT NULL", targetID)
+	if err != nil {
+		return RoleChangeResult{}, fmt.Errorf("store: set role: clear recent-auth proofs: %w", err)
+	}
+	proofsCleared, err := proofsRes.RowsAffected()
+	if err != nil {
+		return RoleChangeResult{}, fmt.Errorf("store: set role: clear recent-auth proofs: %w", err)
+	}
+
 	var invitesClosed, credsRevoked, hooksRevoked int
 	if !target.Owner && wantOwner {
 		if credsRevoked, err = revokePrincipalCredentialsTx(ctx, tx, actor, targetID, "owner mark set", SessionEndedByRevocation, now, runs); err != nil {
@@ -437,10 +457,13 @@ func setRoleTx(ctx context.Context, tx execer, actor string, actorID, targetID i
 		if target.MayInvite {
 			kind = schema.InviteKindOpen
 		}
-		if invitesClosed, err = countOpenCreatorInvitesTx(ctx, tx, targetID, kind, now); err != nil {
+		// Their member links go unless a member who may invite could hold them
+		// (brake on, and not never-expiring); see selectDemotedInvites.
+		sel := selectDemotedInvites(kind, target.MayInvite)
+		if invitesClosed, err = countOpenCreatorInvitesTx(ctx, tx, targetID, sel, now); err != nil {
 			return RoleChangeResult{}, err
 		}
-		if err := closeCreatorInvitesTx(ctx, tx, actor, targetID, kind, InviteClosePermissionRevoked, now); err != nil {
+		if err := closeCreatorInvitesTx(ctx, tx, actor, targetID, sel, InviteClosePermissionRevoked, now); err != nil {
 			return RoleChangeResult{}, err
 		}
 		if err := closeOpenSignInLinksTx(ctx, tx, actor, targetID, true, SignInLinkCloseOperator, now); err != nil {
@@ -460,8 +483,8 @@ func setRoleTx(ctx context.Context, tx execer, actor string, actorID, targetID i
 	if len(managesIDs) > 0 {
 		managesText = strings.Join(managesIDs, ",")
 	}
-	detail := fmt.Sprintf("from=%s to=%s owner=%t manages=%s invites_closed=%d credentials_revoked=%d hooks_revoked=%d",
-		target.Role, role, wantOwner, managesText, invitesClosed, credsRevoked, hooksRevoked)
+	detail := fmt.Sprintf("from=%s to=%s owner=%t manages=%s invites_closed=%d credentials_revoked=%d hooks_revoked=%d proofs_cleared=%d",
+		target.Role, role, wantOwner, managesText, invitesClosed, credsRevoked, hooksRevoked, proofsCleared)
 	if err := appendAuditEventTx(ctx, tx, actor, AuditPrincipalRoleChanged, principalActor(targetID), detail, now); err != nil {
 		return RoleChangeResult{}, err
 	}
@@ -501,14 +524,13 @@ func populateRoleChangeResultTx(ctx context.Context, tx execer, targetID int64, 
 	}, nil
 }
 
-func countOpenCreatorInvitesTx(ctx context.Context, tx execer, creatorID int64, kind schema.InviteKind, now time.Time) (int, error) {
+func countOpenCreatorInvitesTx(ctx context.Context, tx execer, creatorID int64, sel inviteSelector, now time.Time) (int, error) {
 	q := `SELECT COUNT(*) FROM invites
 		 WHERE created_by = ? AND closed_at IS NULL AND expires_at > ? AND (max_uses IS NULL OR uses < max_uses)`
 	args := []any{creatorID, now.UnixMilli()}
-	if kind != "" {
-		q += " AND kind = ?"
-		args = append(args, string(kind))
-	}
+	extra, extraArgs := sel.clause()
+	q += extra
+	args = append(args, extraArgs...)
 	var n int
 	if err := tx.QueryRowContext(ctx, q, args...).Scan(&n); err != nil {
 		return 0, fmt.Errorf("store: count open invites: %w", err)

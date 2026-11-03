@@ -9,7 +9,7 @@
 // permission-aware context menu of issue #972 can adopt it: the caller says
 // which items there are (only those the person may use), and an item list
 // that is empty draws nothing at all.
-import { useEffect, useId, useRef, type KeyboardEvent, type RefObject, type TouchEvent } from 'react';
+import { Fragment, useEffect, useId, useRef, type KeyboardEvent, type RefObject, type TouchEvent } from 'react';
 
 export interface MenuItem {
   // Unique within the menu.
@@ -19,6 +19,8 @@ export interface MenuItem {
   // Shown, and announced, as unavailable for now (a request is pending);
   // choosing it does nothing and leaves the menu open. Absent means usable.
   readonly disabled?: boolean;
+  // Why it is unavailable, shown under it and announced with it.
+  readonly reason?: string;
 }
 
 // How long a finger rests on a message before its menu opens.
@@ -35,7 +37,7 @@ export function ActionsMenu({
   onOpenChange,
   button,
 }: {
-  // The button's and the menu's accessible name ("More actions for message 12").
+  // The button's and the menu's accessible name ("More actions for ada's message, 21:38").
   readonly label: string;
   readonly items: readonly MenuItem[];
   readonly open: boolean;
@@ -126,20 +128,27 @@ export function ActionsMenu({
       {open ? (
         <div ref={menu} id={id} role="menu" aria-label={label} className="actions-menu" onKeyDown={key}>
           {items.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              role="menuitem"
-              tabIndex={-1}
-              {...(item.disabled === true ? { 'aria-disabled': true } : {})}
-              onClick={() => {
-                if (item.disabled === true) return;
-                onOpenChange(false);
-                item.onSelect();
-              }}
-            >
-              {item.label}
-            </button>
+            <Fragment key={item.key}>
+              <button
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                {...(item.disabled === true ? { 'aria-disabled': true } : {})}
+                {...(item.reason === undefined ? {} : { 'aria-describedby': `${id}-${item.key}-reason` })}
+                onClick={() => {
+                  if (item.disabled === true) return;
+                  onOpenChange(false);
+                  item.onSelect();
+                }}
+              >
+                {item.label}
+              </button>
+              {item.reason === undefined ? null : (
+                <span id={`${id}-${item.key}-reason`} className="menu-reason" role="presentation">
+                  {item.reason}
+                </span>
+              )}
+            </Fragment>
           ))}
         </div>
       ) : null}
