@@ -108,6 +108,27 @@ describe('sign-in', () => {
     expect(screen.getByText(origin)).toBeDefined();
   });
 
+  // Issue #1084: a page with no stored credential has nothing to ask whoami,
+  // and a refused one is a request known to fail, which the browser logs as
+  // an error. A stored credential is checked, once.
+  it('asks nothing of whoami when no credential is stored', async () => {
+    const fetchMock = serve({ ...asMember, '/healthz': healthz('v0.1.0-alpha.1') });
+    render(<App origin={origin} />);
+    expect(screen.getByLabelText('Credential')).toBeDefined();
+    await screen.findByText('v0.1.0-alpha.1');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchMock.mock.calls.filter(([input]) => input === '/v1/whoami')).toEqual([]);
+  });
+
+  it('asks whoami once for a stored credential that is refused, and shows the sign-in page', async () => {
+    window.localStorage.setItem('conch.web.token', 'conch_revoked_token_value');
+    const fetchMock = serve(asMember);
+    render(<App origin={origin} />);
+    expect(await screen.findByLabelText('Credential')).toBeDefined();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fetchMock.mock.calls.filter(([input]) => input === '/v1/whoami')).toHaveLength(1);
+  });
+
   it('shows the server version from /healthz on the sign-in page and in the lobby', async () => {
     serve({ ...asMember, '/healthz': healthz('v0.1.0-alpha.1') });
     render(<App origin={origin} />);
@@ -300,7 +321,8 @@ describe('lobby', () => {
     signIn();
     await screen.findByRole('button', { name: 'general' });
     const list = screen.getByRole('navigation', { name: 'Channels' });
-    expect(list.querySelectorAll('button')).toHaveLength(3);
+    // Two channels, a voice-less one aside, and Browse channels.
+    expect(list.querySelectorAll('button')).toHaveLength(4);
     expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
     expect(within(screen.getByRole('region', { name: 'Conversation' })).getByRole('heading', { level: 2 }).textContent).toBe('general');
     const status = screen.getByRole('status', { name: 'Status' });
@@ -457,7 +479,7 @@ describe('lobby', () => {
     serve({ ...asMember, '/v1/channels': () => json({ channels: [] }) });
     render(<App origin={origin} />);
     signIn();
-    await screen.findByText('No channels yet: an operator needs to add you to one');
+    await screen.findByText('No channels yet');
     expect(screen.getByRole('region', { name: 'Conversation' }).textContent).toBe('');
   });
 

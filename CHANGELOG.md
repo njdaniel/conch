@@ -8,6 +8,144 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.11] - 2026-11-02
+
+This finishes the joining side of the one-community model: open sign-up and
+member links both make a full member in the default channels, and members
+find, join and leave public channels themselves. Private channels now show a
+lock, and operators make a channel public or private from its menu. The web
+app has an admin console (Server, and Reports), agents can reply in threads
+over MCP, and a member's re-authentication no longer carries over a
+promotion. Upgrade with `conch-server upgrade v0.1.0-alpha.11` from your
+workstation, or with `conch-upgrade.sh` on the droplet (docs/deploy.md
+step 11).
+
+There is no migration and no wire change since `alpha.10`, so rolling back to
+`alpha.10` is a plain downgrade. Behaviour does change: see Changed.
+
+### Added
+
+- **The channel directory; members join and leave channels themselves**
+  (#982, community model I3b).
+  - `GET /v1/directory/channels` lists every public channel and the private
+    channels the caller is in, each with `joined`, `default`, `visibility`
+    and (when joined) `manages`, and no member counts or names.
+    `?scope=all` lists every channel with its `members` count, for holders
+    of `manage_channels` only. Agents and guests are refused.
+  - `POST /v1/channels/{channel}/join` joins a public channel, as a member
+    who does not decide its approvals and with its whole history. Joining a
+    channel you are in returns your membership unchanged. A private channel
+    you are not in answers the same 404 as one that does not exist. Agents
+    and guests get 403 `channel_not_joinable`.
+  - `POST /v1/channels/{channel}/leave` leaves any channel you are in, and a
+    manager's grant goes with it. The last member of a private channel may
+    not leave it (409 `channel_last_member`). A decider who leaves takes
+    their decisions with them: pending approvals count only the deciders
+    who remain.
+
+- **Private channels show a lock, and operators change it from the
+  channel's menu** (#1183). A private channel's row shows a lock in place of
+  `#`, live as it changes, and screen readers hear "private channel". A
+  holder of `manage_channels` gets "Make private" or "Make public" in the
+  channel's ⋯ menu, which asks first, and "Make default channel" or "Stop
+  being a default channel". A default channel must be public, so each offers
+  the other only once that holds, with the reason shown.
+- **The web admin console** (#1018). Operators and the owner get a Server
+  administration area in Settings: the server's name, a setup card on a new
+  server (Personal, Group, or decide later) that shows what a preset changes
+  before applying it, the permissions summary and warnings, and the joining
+  settings with every member link. Members see one line saying who
+  administers the server. It follows permission changes live.
+- **Agents reply in threads over MCP** (#1171). `post_message` takes
+  `thread_root_id` and follows the REST rules, and `read_channel` and
+  `post_message` now carry `thread_root_id` and `guest_author`, which MCP used
+  to drop.
+
+### Changed
+
+- **Open sign-up makes a full member, and the bare address never admits a
+  guest** (#987, ADR-013). The joining settings stay on
+  `GET/PUT /v1/join/settings`, with one switch, `open_signup`, in place of the
+  four joining modes.
+  - While open sign-up is on, `POST /v1/join/account` makes the member a
+    member link makes: the default channels with the whole of their history
+    (no history bound), no right to decide approvals, voice on, and the
+    right to make member links on. Before, such an account started with a
+    history bound in each channel and no right to invite. `joining_paused`
+    still pauses it, and turning it on needs at least one default channel.
+  - `open_channels` now refuses a private channel with
+    `409 channel_settings_conflict`, where it used to make the channel public.
+    Make a channel public first with `PUT /v1/channels/{id}/settings`.
+  - `join_voice: false` is refused with `409 join_policy_conflict`: every
+    member may use voice. `conch admin join set --voice off` gets that answer.
+  - `POST /v1/join/guest` always answers `403 guests_disabled`, and
+    `GET /v1/join` never offers a guest and always offers voice. Guests, when
+    they return, come through guest links (#1004).
+  - The settings answer carries `default_channels` and warns
+    `no_default_channel` when no channel is a default channel.
+- **Redeeming a link makes a full member** (#986, ADR-013).
+  `POST /v2/invites/redeem` with a member link lands the joiner in the
+  default channels as they are at that moment (none is fine), or in the
+  link's landing channels, with the whole history, no right to decide
+  approvals, voice on and the right to make member links on.
+  - An invite made before the upgrade still lands in its own channels its
+    maker still stands behind, and now also in the default channels. One with
+    none of its own channels left is still refused.
+  - Every joiner has voice and may make member links, whatever the invite
+    said: both are switches an operator turns off for one person
+    (`PUT /v1/principals/{id}/voice-permission`, `.../invite-permission`).
+    Before, an invite could withhold voice, and only an operator's invite
+    could pass on the right to invite.
+  - For old clients, `GET /v1/invites` and `POST /v1/invites/preview` show a
+    member link as an `open` invite into the default channels as they are
+    now, with voice, no right to invite passed on, joining as an account, and
+    its expiry (or the never-expires sentinel).
+  - For an invite made before the upgrade, `GET /v1/invites` still shows the
+    voice and right to invite it was made with, and its list and preview show
+    only its own channels, not the default channels its joiner now also
+    lands in. Redemption follows the rules above, not those fields.
+  - Such an invite keeps today's rules for its own channels, including one
+    made private since: it still lands its joiner there while its maker stands
+    behind it (an operator holding `manage_channels`, or a member still in the
+    channel), until it expires or an operator closes it.
+
+- **Web: the message log is one Tab stop** (#1040). Arrow keys move between
+  messages and Home and End go to the first and last, and Tab walks only the
+  chosen message's controls. Controls are named by author and time ("Reply
+  to ada's message, 21:38"), never by message id.
+
+### Fixed
+
+- **No request the page knows will fail** (#1084). Changing your password
+  while staying signed in no longer sends a stale `whoami` or failing events
+  sockets, and losing a channel while in its voice no longer asks for its
+  presence. The console stays clean.
+
+### Security
+
+- Demoting an operator now closes, in the same transaction and with an `invite_closed` row each, the member links a member could not hold: every member link when their `may_invite` brake is off, and the never-expiring ones when it is on. Before (alpha.10), links made under the role survived a demotion with the brake off, and turning the brake on later brought back links a member could never make (#1165). `invite_closed` for a member link now says `link=member`.
+- Any role change (a promotion, a demotion, an owner-mark change) now clears every recent-auth proof of that person, so a member's password-only re-authentication no longer satisfies an operator route that needs password and code (#1054). Their sessions stand; they re-authenticate on the next sensitive action. The `principal_role_changed` audit row gains `proofs_cleared=N`.
+
+### Docs
+
+- The principal review of 2026-11-02 (P2 to alpha.10) is in
+  `docs/reports/2026-11-02-principal-review.md`.
+- A test fix, with no change to behaviour: the phone voice strip spec
+  (#1163).
+
+## [0.1.0-alpha.10] - 2026-11-02
+
+This is the move to one community (ADR-013): member permissions, members
+making channels, member links, the member directory, the desktop app's saved
+server profiles, server allowlist and safer links and clipboard, and web
+polish (member and channel actions in ⋯ menus, and more). Upgrade with
+`conch-server upgrade v0.1.0-alpha.10` from your workstation, or with
+`conch-upgrade.sh` on the droplet (docs/deploy.md step 11).
+
+Unlike `alpha.9`, this release has a migration (migration 40, issue #979).
+Rolling back is the previous binary plus the pre-upgrade backup, not a plain
+downgrade. See the upgrade notice below.
+
 ### Upgrade notice: one community (issue #979)
 
 The first start on this version converts the server to the community model
@@ -36,9 +174,24 @@ the usual backup first (docs/deploy.md does).
   reads them. Until open sign-up's change (#987) ships, someone who joins
   through the bare address afterwards still starts with a bound from when
   they joined.
-- **Voice and making invite links are on for every member.** Until member
-  links (#985) replace invites, that means any member can make a single-use
-  invite to any channel they are in.
+- **Voice and making invite links are on for every member.** Every member
+  can now make member links (`POST /v2/invites`, issue #985), which land the
+  newcomer in the default channels and grant nothing else. An operator
+  switches the right off for one person with
+  `PUT /v1/principals/{id}/invite-permission`, which also closes that
+  person's open links.
+- **Member links.** Make one with `POST /v2/invites`, and read it with
+  `GET /v2/invites`, `POST /v2/invites/preview` and
+  `GET /v2/invites/{id}/joiners`. `POST /v1/invites` is unchanged for now: the
+  browser and `conch admin invite create` still use it until they move to
+  member links (#990, #994), and a later release retires it (#1134). Invites
+  made before the upgrade keep working, and are listed, previewed and closed
+  as before.
+- **`--invite-allowance` now counts member links.** The number of open member
+  links and personal invites together that one person may hold (default 5, an
+  uncapped link counts as open; operators have no limit).
+  A link that names no expiry lasts 7 days, and only an operator can make one
+  that never expires.
 - **Joining.** The bare address now either makes accounts (open sign-up on,
   where it admitted accounts before) or admits nobody. It no longer admits
   guests. Voice for new accounts is always on.
@@ -73,6 +226,173 @@ audit trail has one `community_migrated` row with the counts.
     `visibility` and `default`, and a settings change sends the channel
     document. `POST /v0/channels` stays operator-only and makes a private
     channel.
+
+- **Member permissions: a document, `GET`/`PUT /v1/permissions`, and a live
+  signal** (#1015, approval-path). What a member or an operator may do is now
+  one permissions document, and operator routes ask for the permission they
+  need instead of "is an operator".
+  - `GET /v1/permissions` returns the document, what the caller may edit,
+    warnings, and the credentials issued to others. `PUT /v1/permissions`
+    applies patches and the `personal` and `group` presets. It refuses
+    operator-column changes from a non-owner, a stale revision, and any cell
+    the server doesn't enforce, and it asks for a fresh sign-in.
+  - An operator without the needed permission gets `permission_denied`
+    naming it, and the refusal is audited. Members and agents get the same
+    403 as before. The manager check is now `manage_channels`, and a channel
+    the operator isn't in answers 404.
+  - `whoami` carries `permissions`, `permissions_revision`, `may_invite` and
+    `voice_allowed`. `conch.permissions_changed.v1` tells every signed-in
+    human socket when the document changes, and tells one person when their
+    role or brake changes.
+- **Permissions reach voice, screen share and member links, with live
+  effects** (#1016). `use_voice`, `share_screen` and `make_member_links` are
+  now enforced, so the `personal` preset applies. This ships with #1015.
+  - Withholding `use_voice` closes the voice sockets and removes everyone it
+    now withholds, in a room or only watching, before `PUT /v1/permissions`
+    answers. It is checked again mid-request (403 `voice_not_allowed`) and on
+    every poller pass. No room is rotated.
+  - Withholding `share_screen` ends the share at once, and a reclaim after
+    losing the right ends the held share.
+  - Withholding `make_member_links` refuses new links with
+    `invite_not_allowed`, naming the permission. Suspending and resuming a
+    link is audited per link.
+  - Guests hold no `use_voice` and lose voice. Guests are off in this
+    release, so nobody is affected.
+- **Set one person's voice permission** (#984).
+  `PUT /v1/principals/{id}/voice-permission` (`{voice_allowed}`) is for
+  holders of `manage_members`. It removes the person from voice before it
+  answers, and a body without `voice_allowed` is refused. Each change is
+  audited `voice_permission_changed`, and a repeat is not. The target gets
+  `permissions_changed`.
+- **A role change that withholds `use_voice` removes the person from voice
+  at once** (#1131). `PUT /v1/principals/{id}/role` used to end a withheld
+  share but leave the person in the room for up to about 1.5 seconds.
+- **The member directory, and managers add any member** (#983).
+  `GET /v1/directory/members` lists the community's members and visible
+  agents, paged.
+  - Everyone sees id, kind, name, role and join time. Holders of
+    `manage_members` also see owner, voice and invite flags, and who invited
+    them. Guests and agents are refused.
+  - With `see_member_directory` a viewer sees everyone. Without it (the
+    `personal` preset) a viewer sees themselves and the members of their
+    channels.
+  - A channel manager can add any member they may know, by id or by name,
+    not only people who share a channel. Every other target answers the same
+    404 `principal_not_found`. With the directory off, a manager adds only
+    channel-mates, so adding can't be used to find out who exists.
+- **`conch admin permissions`, and permissions in `whoami`** (#1022).
+  `show` prints the matrix, warnings, the preset and which roles you may
+  change. `set <permission> --members on|off --operators on|off` checks the
+  cell locally before sending anything. `preset personal|group` shows the
+  difference and asks first (`--yes` skips the question). A stale revision
+  is re-read once and reported, never retried. `conch whoami` prints your
+  permissions. A refusal that names a permission now prints it. The TUI part
+  is #1148.
+- **Desktop app: saved server profiles** (#945). Each server is a profile
+  bound to one account on first sign-in. Another account on a bound profile
+  is refused, and a second account on the same server is a second profile.
+  Switching tears the old profile down (sockets, requests, window and
+  partition) and starts the next in a fresh partition, so nothing from
+  server A reaches B. Only a member's sign-in is kept. Sign-out and Remove
+  forget, delete and revoke it. The profile file and data folder are private
+  to you (`0600` and `0700`), and a corrupt file is set aside before
+  anything is written. `setServerAddress` is gone, so a page can't re-point a
+  profile.
+- **Desktop app: sign in only to a listed server release** (#946). Before
+  any saved credential is read, the app asks the server's `/healthz` and
+  checks the version against `desktop/build/compat.json`, an exact list. An
+  unlisted version, or no answer, means no automatic sign-in, and the saved
+  credential is left alone for a server the app does support. The screen
+  shows both versions with "Check again". A reply that fails validation
+  after sign-in is reported as incompatible, not as a network error.
+  `--allow-unlisted-server` works only in an unpackaged development build,
+  with a visible warning.
+- **Desktop app: links, attachments and the clipboard go through the shell**
+  (#947). A link opens in your browser only after your own click, tap, Enter
+  or Space, and Enter asks first ("Open this link in your browser?", Cancel
+  is the default). Links are `http`/`https` only, with no user name, no
+  lookalike host and at most 2048 characters, and at most 10 a minute.
+  Uploads and downloads use the shell's own client with size limits, and
+  Save goes through the native dialog and refuses if the account changes
+  meanwhile. Clipboard writes work within 1.5 seconds of your input, and
+  reads never do.
+- **Web: problem reports for operators** (#1029). Settings has a Reports
+  section: the list (newest first), one report with what they did, expected
+  and saw, and a closed "Technical details" for diagnostics. Mark filed
+  takes an `http(s)` address of 1 to 512 bytes and shows it as a link only
+  when the message log would. Only operators see it. There is no wire
+  change.
+- **Web: a typed `:name:` becomes its emoji** (#1081). Typing the closing
+  colon of a known name turns `:tada:` into the emoji. Only typing does it,
+  never a paste, a drop, a restored draft or IME composition, and times like
+  `12:30:45` and colons inside links are left alone. One Backspace gives the
+  text back.
+- **Web: a half-typed reply survives a reload** (#1080). It is kept by
+  thread root, text only, and forgotten when sent, emptied or closed. It
+  always goes to its root's audience, so a kept reply never reaches more
+  people.
+- **Community wire shapes** (#978, groundwork for the entries above). The
+  schema gains channel visibility, the v2 invite family (`member` only), the
+  channel and member directories, and the voice permission. The v1 invite
+  shapes are byte-identical, and the bump was signed off in ADR-013.
+
+### Changed
+
+- **Web: member actions are in a ⋯ menu on each row** (#1094). People and
+  agents get one menu in place of inline buttons: Remove from channel, and
+  for an operator on a person, Make manager and Let decide approvals. It
+  opens by button, Enter or Space, right-click or long press. A row with
+  nothing to offer has no ⋯.
+- **Web: channel actions are in a ⋯ menu on each row** (#1135). Invite
+  people (for anyone who may invite) opens the invite panel with that
+  channel ticked. Rename channel… (for an operator or the channel's manager,
+  never a visit) opens the rename form under that row. The rename form that
+  sat under the channel list is gone, and a row with nothing to offer has no
+  ⋯. It opens the same four ways as the member menu.
+- **Web: removing someone from a channel, and pausing invites, ask first**
+  (#1083). "Remove from channel" asks "Remove <name> from #<channel>?" with
+  focus on Cancel. Ticking "Pause all invites" says no one can make, preview
+  or use an invite, links already sent included, until you switch it back.
+  Un-pausing doesn't ask.
+- **Web: the join form says "name"** (#1082). A refused name on the join,
+  invite or guest forms now shows the page's own line for the rule it broke
+  and puts the cursor in the name field. "schema: principal name …" no
+  longer reaches the person.
+- **Web: Edit stops being offered after ten known edits or a final refusal**
+  (#1031). A 429 at the limit shows the limit line, not "try again".
+
+### Fixed
+
+- **conch-voice never drops the final state or the closing line** (#1144).
+  When the output queue was full, the last managed state and the `Stopped`
+  and `Closed` lines could be dropped, so a supervisor or the TUI missed the
+  helper's last word. Last lines now have places of their own, and exit is
+  still time-bounded.
+
+### Security
+
+- **Voice fails closed after a screen-share grant, and a revocation waits
+  only for claims running at the time** (#1089). If the check that the room
+  is still live fails after a grant, the share is ended and withdrawn and
+  the claim answers 409 `voice_no_session`, where before it answered 200
+  with the screen granted. A claim that queues after a revocation starts
+  can't lengthen its wait, and is refused.
+- **A held screen share is withdrawn when its room is rotated, even if
+  LiveKit's DeleteRoom fails** (#1087). Before, a failed DeleteRoom left the
+  grant in place until the sweep, up to 30 seconds.
+
+### Docs
+
+- **Mobile design** (#1107, #1106, #1108). A phone interaction spec with an
+  accessible flow mockup, a mobile app architecture proposal (ADR-016,
+  Proposed, so not a decision yet) with a capability matrix, and a design
+  for push delivery and notification privacy. None of it is built.
+- **Dependency audit.** RUSTSEC-2026-0429 (zip 0.6.6) is ignored in
+  `voice/deny.toml` for the same reason as the three earlier zip advisories:
+  the extraction path never runs, because `LK_CUSTOM_WEBRTC` is always set
+  (#1167, dropped with #481).
+- **Test fixes.** Several flaky tests are fixed, with no change to behaviour
+  (#1098, #1104, #958, #1136).
 
 ## [0.1.0-alpha.9] - 2026-11-01
 

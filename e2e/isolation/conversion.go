@@ -236,6 +236,9 @@ func (w *world) hideKeepsAttribution(member *member, guestPost int64, g schema.G
 	if err := w.op.call(http.MethodPost, fmt.Sprintf("/v1/principals/%d/hide", member.id), nil, nil); err != nil {
 		return err
 	}
+	if err := w.voicePermissionHiddenIsGhost(member.id); err != nil {
+		return err
+	}
 	return w.checkAttribution(w.p.pia.api, guestPost, g)
 }
 

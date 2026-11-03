@@ -55,6 +55,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runDownload(ctx, args[1:], stdout, stderr)
 	case "nets":
 		return runNets(ctx, args[1:], stdout, stderr)
+	case "channels":
+		return runChannels(ctx, args[1:], stdout, stderr)
 	case "admin":
 		return runAdmin(ctx, args[1:], stdin, stdout, stderr)
 	case "voice":
@@ -119,7 +121,12 @@ Usage:
   conch nets archive [--server <url>] <channel> <name>
   conch nets add [--server <url>] <channel> <name> <principal-id> [--monitor]
   conch nets remove [--server <url>] <channel> <name> <principal-id>
+  conch channels list [--server <url>] [--json] [--all]
+  conch channels join [--server <url>] [--json] <channel>
+  conch channels leave [--server <url>] [--json] <channel>
+  conch channels create [--server <url>] [--json] [--private] <name>
   conch admin channel create [--server <url>] [--json] <name>
+  conch admin channel settings [--server <url>] [--json] [--public|--private] [--default on|off] <channel>
   conch admin principal create [--server <url>] [--json] --kind human|agent <name>
   conch admin principal disable|enable [--server <url>] [--json] <id>
   conch admin principal rename [--server <url>] [--json] <id> <name>
@@ -136,21 +143,26 @@ Usage:
   conch admin member remove [--server <url>] [--json] <channel> <principal-id>
   conch admin manifest put [--server <url>] [--json] [--file <path>] <principal-id>
   conch admin manifest get [--server <url>] [--json] <principal-id>
-  conch admin invite create [--server <url>] [--json] --open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] [--join-as account]
-  conch admin invite list [--server <url>] [--json] [--state open|used|expired|closed] [--kind personal|open] [--created-by <id>]
+  conch admin invite create [--server <url>] [--json] [--expires <duration|RFC3339> | --never-expires] [--uses <n>] [--credential-days <n>] [--landing-channel <name>...]
+  conch admin invite list [--server <url>] [--json] [--state open|used|expired|closed] [--created-by <id>]
   conch admin invite close|joiners [--server <url>] [--json] <id>
   conch admin invite disable-joiners [--server <url>] [--json] [--yes] <id>
   conch admin invite pause|resume|status [--server <url>] [--json]
   conch admin principal invite-permission [--server <url>] [--json] <id> on|off
   conch admin principal disable-invitees [--server <url>] [--json] [--all] [--yes] <id>
   conch admin principal sign-in-link [--server <url>] [--json] [--purpose sign_in|reset|enrollment] [--expires <duration|RFC3339>] <id>
+  conch admin principal voice [--server <url>] [--json] <id> on|off
   conch admin sign-in-link close [--server <url>] [--json] <id>
   conch admin join status [--server <url>] [--json]
-  conch admin join set [--server <url>] [--json] [--open-joining off|account] [--guests off] [--paused on|off] [--voice on|off] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels]
+  conch admin join set [--server <url>] [--json] [--open-signup on|off] [--link-expiry <duration|0>] [--open-joining off|account] [--guests off] [--paused on|off] [--voice on] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels]
   conch admin guest list [--server <url>] [--json] [--state active|ended|converted] [--origin address|invite]
   conch admin guest end [--server <url>] [--json] <id>
   conch admin guest end-all [--server <url>] [--json] [--origin address|invite] [--invite <id>] [--dry-run | --yes]
   conch admin guest permit [--server <url>] [--json] [--expires <duration|RFC3339>] <id>
+  conch admin permissions show [--server <url>] [--json]
+  conch admin permissions set [--server <url>] [--json] [--members on|off] [--operators on|off] <permission>
+  conch admin permissions preset [--server <url>] [--json] [--yes] personal|group
+  conch admin directory members [--server <url>] [--json]
   conch admin reports list [--server <url>] [--json] [--limit <n>]
   conch admin reports show [--server <url>] [--json] [--markdown] <id>
   conch admin reports file [--server <url>] [--json] <id> <issue-url>
@@ -1108,7 +1120,31 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			return err
 		}
 	}
-	return writeIdentity(stdout, who)
+	if err := writeIdentity(stdout, who); err != nil {
+		return err
+	}
+	return writeWhoAmIPermissions(stdout, who)
+}
+
+// writeWhoAmIPermissions prints what the caller holds (ADR-014), in catalog
+// order, each by the name the server sent: one this client does not know
+// reads as well as one it does. A server that predates permissions sends
+// neither them nor a revision, and nothing is printed; one that sends a
+// revision and no permissions means the caller holds none.
+func writeWhoAmIPermissions(w io.Writer, who schema.WhoAmIResponseV1) error {
+	if len(who.Permissions) == 0 {
+		if who.PermissionsRevision == 0 {
+			return nil
+		}
+		_, err := fmt.Fprintln(w, "permissions: none")
+		return err
+	}
+	names := make([]string, len(who.Permissions))
+	for i, p := range who.Permissions {
+		names[i] = safeLine(string(p))
+	}
+	_, err := fmt.Fprintf(w, "permissions: %s\n", strings.Join(names, ", "))
+	return err
 }
 
 // writeIdentity prints what a server with guests and passwords adds to

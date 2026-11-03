@@ -522,6 +522,8 @@ label {
 
 .channel-list {
   display: grid;
+  /* A row is never wider than the column: its name is cut instead. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 2px;
   margin: 0;
   padding: 0;
@@ -534,13 +536,15 @@ label {
   gap: var(--s1);
 }
 
-.channel-list button {
-  flex: 1;
+.channel-list li > button {
+  /* The name takes what the badges and the ⋯ leave, on one line, and is cut
+     with an ellipsis when that is too little (the whole name is the button's
+     name and its title), so a row stays one line however narrow the column. */
+  flex: 1 1 0;
   min-width: 0;
   justify-content: flex-start;
   padding: 0.4rem 0.6rem;
   text-align: left;
-  overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 0.95rem;
   background: transparent;
@@ -549,19 +553,26 @@ label {
   border-radius: var(--radius-sm);
 }
 
+.channel-list .channel-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* The # is not part of the button's name ('#' / '' gives it no alt text). */
-.channel-list button::before {
+.channel-list li > button::before {
   content: '#';
   content: '#' / '';
   margin-right: 0.15rem;
 }
 
-.channel-list button:hover:not(:disabled) {
+.channel-list li > button:hover:not(:disabled) {
   color: var(--text);
   background: var(--raised);
 }
 
-.channel-list button[aria-current='true'] {
+.channel-list li > button[aria-current='true'] {
   color: var(--text);
   font-weight: 600;
   background: var(--accent-bg);
@@ -595,6 +606,34 @@ label {
 .channel-list .in-voice .icon {
   width: 0.85rem;
   height: 0.85rem;
+}
+
+/* A row's ⋯ menu (issue #1135): after the badges, in the row's line, not
+   floated over the row as on a message. The menu drops from it. The rename
+   form takes a line of its own under the row. */
+.channel-list li {
+  flex-wrap: wrap;
+}
+
+/* Tighter than a message's, in the narrow channel column; a phone keeps its
+   44 px target. */
+@media (min-width: 700px) {
+  .channel-list .more-actions {
+    min-width: 1.75rem;
+    padding: 0 var(--s1);
+  }
+}
+
+.channel-list .message-menu {
+  position: relative;
+  top: auto;
+  right: auto;
+  flex: none;
+}
+
+.channel-list .rename-channel {
+  flex: 1 0 100%;
+  margin-top: 0;
 }
 
 .centre {
@@ -1204,6 +1243,13 @@ label {
 .message:hover,
 .message:focus {
   background: var(--raised);
+}
+
+/* The message the arrow keys are on (issue #1040): marked beyond the
+   background, which a hover shares. */
+.messages > .message:focus-visible {
+  outline: 2px solid var(--focus, currentColor);
+  outline-offset: -2px;
 }
 
 .message > .avatar {
@@ -3078,7 +3124,7 @@ button.link {
     border-color: var(--accent);
   }
 
-  .lobby.phone .channel-list button {
+  .lobby.phone .channel-list li > button {
     min-height: 3rem;
     padding: var(--s2) var(--s3);
     color: var(--text);
@@ -3087,7 +3133,7 @@ button.link {
     border-left: 0;
   }
 
-  .lobby.phone .channel-list button[aria-current='true'] {
+  .lobby.phone .channel-list li > button[aria-current='true'] {
     background: transparent;
   }
 
@@ -3635,4 +3681,477 @@ button.link {
 .report-view h4 {
   margin: var(--s2) 0 var(--s1);
   font-size: 0.9rem;
+}
+
+/* The administration console (ADR-014 design §10, issue #1018): sections one
+   under another in the Settings drawer; on a phone a list of sections, each
+   opening as its own page with a Back control. Nothing scrolls sideways, and
+   every button is at least 44px high there. */
+.admin-console {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.admin-console h3 {
+  margin: var(--s2) 0;
+  font-size: 1rem;
+}
+
+.admin-section + .admin-section {
+  margin-top: var(--s3);
+}
+
+.server-section {
+  display: grid;
+  gap: var(--s2);
+}
+
+.server-section p,
+.server-section ul {
+  margin: 0;
+}
+
+.summary-lines {
+  list-style: none;
+  padding: 0;
+}
+
+.setup-card {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+.setup-card h4 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.setup-card .actions,
+.invites-list .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.invites-list li {
+  display: grid;
+  gap: var(--s1);
+}
+
+.section-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.section-list button,
+.admin-console .back {
+  width: 100%;
+  min-height: 2.75rem;
+  text-align: left;
+}
+
+.admin-console .back {
+  margin-bottom: var(--s2);
+}
+
+.admin-console .link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+/* Roles and permissions (ADR-014 design §10.2, §10.3, issue #1019): preset
+   cards, then the matrix. A locked cell stays focusable (aria-disabled) so its
+   reason shows on hover and on keyboard focus; nothing scrolls sideways. */
+.roles-section {
+  display: grid;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.roles-section h4,
+.roles-section h5,
+.roles-section p,
+.roles-section ul {
+  margin: 0;
+}
+
+.roles-section h5 {
+  font-size: 0.9rem;
+}
+
+.preset-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--s2);
+}
+
+.preset-card,
+.issued-list {
+  display: grid;
+  gap: var(--s2);
+  align-content: start;
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.preset-card.current {
+  border-color: var(--accent);
+}
+
+.current-mark {
+  color: var(--accent);
+  font-weight: normal;
+}
+
+.matrix {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.matrix th,
+.matrix td {
+  padding: var(--s2);
+  border-top: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.matrix thead th {
+  border-top: 0;
+}
+
+.matrix th:first-child {
+  width: 46%;
+}
+
+.matrix th[scope='row'] {
+  font-weight: normal;
+}
+
+.matrix tr.flagged,
+.matrix-list li.flagged {
+  background: var(--danger-bg);
+}
+
+.matrix td,
+.matrix thead th:not(:first-child) {
+  text-align: center;
+}
+
+.what {
+  display: block;
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.cell {
+  position: relative;
+  display: inline-block;
+}
+
+.cell input[type='checkbox'] {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.cell.locked input[type='checkbox'] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.cell.edited input[type='checkbox'] {
+  outline: 2px solid var(--accent);
+}
+
+.cell.edited.stale input[type='checkbox'] {
+  outline-color: var(--warn);
+}
+
+.edit-mark {
+  display: block;
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.cell .reason {
+  display: none;
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  top: 100%;
+  width: 14rem;
+  max-width: 60vw;
+  padding: var(--s2);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  font-size: var(--small);
+  text-align: left;
+}
+
+.cell:hover .reason,
+.cell:focus-within .reason {
+  display: block;
+}
+
+.matrix-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: var(--s1);
+}
+
+.matrix-list li {
+  border-top: 1px solid var(--border);
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  min-height: 2.75rem;
+  padding: var(--s2) 0;
+}
+
+.switch-row .describe {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.matrix-list .cell {
+  display: grid;
+  justify-items: end;
+  flex: none;
+  max-width: 45%;
+}
+
+.matrix-list .cell input[type='checkbox'] {
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.matrix-list .cell .reason {
+  display: block;
+  position: static;
+  width: auto;
+  max-width: none;
+  padding: 0;
+  background: none;
+  border: 0;
+  box-shadow: none;
+  color: var(--muted);
+  text-align: right;
+}
+
+.owners-line,
+.managers-block {
+  color: var(--muted);
+}
+
+.segmented {
+  display: flex;
+  gap: var(--s1);
+}
+
+.segmented button {
+  flex: 1;
+  min-height: 2.75rem;
+}
+
+.segmented button[aria-pressed='true'] {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+}
+
+.issued-list ul {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.issued-list li {
+  display: grid;
+  gap: var(--s1);
+}
+
+.roles-section .actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+@media (max-width: 699px) {
+  .admin-console button,
+  .admin-console input[type='text'] {
+    min-height: 2.75rem;
+  }
+
+  .admin-console label:has(input[type='checkbox']),
+  .admin-console label:has(input[type='radio']) {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    min-height: 2.75rem;
+  }
+}
+
+/* A private channel's row (issue #1183): a lock where the # is. Its words,
+   "private channel", describe the button and are not in its name. */
+.channel-list li.private > button::before {
+  content: none;
+}
+
+.channel-list li > button .icon {
+  flex: none;
+  width: 0.85rem;
+  height: 0.85rem;
+  margin-right: 0.3rem;
+}
+
+/* The confirmation of a settings change, in place under the row. */
+.channel-list .channel-settings-ask {
+  flex: 1 0 100%;
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+  justify-items: start;
+}
+
+.channel-list .channel-settings-ask p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-settings-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.actions-menu .menu-reason {
+  max-width: 14rem;
+  padding: 0 var(--s2) var(--s1);
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+/* Issue #991: the lock of a private channel, in the directory and before the
+   conversation's heading; its word, "Private", is for a screen reader. */
+.private-mark {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  color: var(--muted);
+}
+
+.private-mark .icon {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+/* "Browse channels" and its list, under the channel list: rows wrap rather
+   than widen the column. */
+.channel-directory {
+  display: grid;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  justify-items: start;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.channel-directory > section {
+  width: 100%;
+  min-width: 0;
+}
+
+.channel-directory ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.channel-directory .directory-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.channel-directory .directory-row .channel-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-directory .directory-row > p,
+.channel-directory .directory-ask {
+  flex: 1 0 100%;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-directory .directory-row > p:empty {
+  display: none;
+}
+
+.create-channel fieldset {
+  flex-basis: 100%;
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.create-channel fieldset label {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+
+.create-channel fieldset input[type='radio'] {
+  flex: none;
+  min-width: 0;
+}
+
+.community-members {
+  margin-top: var(--s3);
+}
+
+.community-members ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s1);
+}
+
+.community-members .community-member {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  overflow-wrap: anywhere;
 }

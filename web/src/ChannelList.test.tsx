@@ -3,9 +3,10 @@
 // and each count still only describes its channel's button (issue #601). The
 // sideways row and its overflow cue of #601 are gone: on a phone the list is
 // the Channels view, one row a channel (issue #929).
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChannelList } from './ChannelList';
+import { longPressMs } from './MessageMenu';
 import type { ChannelV0 } from './schema/channel';
 
 const channels: ChannelV0[] = ['general', 'book-club', 'game-night'].map((name, i) => ({
@@ -155,25 +156,8 @@ describe('an empty list', () => {
   });
 });
 
-// The rename control (issue #728) is the caller's to give, for an operator or
-// this channel's manager; the list shows it under itself while a channel is
-// open, and keeps each channel's place, count and focus stop by id across a rename.
-describe('the rename control', () => {
-  const control = <button type="button">Rename the open channel</button>;
-
-  it('is shown under the list while a channel is open, when given', () => {
-    render(<ChannelList channels={channels} selected="book-club" unread={new Map()} rename={control} onOpen={() => undefined} />);
-    const button = screen.getByRole('button', { name: 'Rename the open channel' });
-    expect(screen.getByRole('list').contains(button)).toBe(false);
-  });
-
-  it('is not shown when not given (anyone without the grant), nor while no channel is open', () => {
-    const view = render(<ChannelList channels={channels} selected="book-club" unread={new Map()} onOpen={() => undefined} />);
-    expect(screen.queryByRole('button', { name: 'Rename the open channel' })).toBeNull();
-    view.rerender(<ChannelList channels={channels} selected={null} unread={new Map()} rename={control} onOpen={() => undefined} />);
-    expect(screen.queryByRole('button', { name: 'Rename the open channel' })).toBeNull();
-  });
-
+// A channel renamed keeps its place, count and focus stop by id (issue #728).
+describe('a rename', () => {
   it('a channel renamed keeps its place, stays the open one and is opened by its new name', () => {
     const opened: string[] = [];
     const renamed = channels.map((c) => (c.id === 2 ? { ...c, name: 'readers' } : c));
@@ -195,5 +179,129 @@ describe('the rename control', () => {
     expect(screen.getByRole('img', { name: '2 unread' })).toBeTruthy();
     fireEvent.click(after);
     expect(opened).toEqual(['readers']);
+  });
+});
+
+// Issue #1135: a channel's ⋯ menu, with Invite people and Rename channel…, by
+// viewer and by channel. The list is given what the viewer may do; a row with
+// nothing to do has no ⋯.
+describe('a channel row\'s menu', () => {
+  const managed = channels.map((c) => ({ ...c, manages: c.id === 2 }));
+  const row = (name: string) => screen.getByRole('button', { name }).closest('li') as HTMLElement;
+  const more = (name: string) => within(row(name)).getByRole('button', { name: `Actions for ${name}` });
+  const labels = (name: string) => within(screen.getByRole('menu', { name: `Actions for ${name}` })).getAllByRole('menuitem').map((i) => i.textContent);
+  const rename = (channel: ChannelV0, close: () => void) => (
+    <form aria-label={`Rename ${channel.name}`}>
+      <button type="button" onClick={close}>
+        Cancel
+      </button>
+    </form>
+  );
+  const draw = (extra: Partial<Parameters<typeof ChannelList>[0]> = {}, list: readonly ChannelV0[] = managed) =>
+    render(<ChannelList channels={list} selected="general" unread={new Map()} onOpen={() => undefined} {...extra} />);
+
+  it('gives a plain member without may_invite no ⋯ at all, and leaves the native menu alone', () => {
+    draw({ canRename: () => false, renderRename: rename });
+    expect(screen.queryByRole('button', { name: /^Actions for/ })).toBeNull();
+    expect(fireEvent.contextMenu(row('general'))).toBe(true);
+  });
+
+  it('offers Invite people alone to a member who may invite, on every channel', () => {
+    draw({ onInvite: () => undefined, canRename: () => false, renderRename: rename });
+    for (const name of ['general', 'book-club', 'game-night']) {
+      fireEvent.click(more(name));
+      expect(labels(name)).toEqual(['Invite people']);
+      fireEvent.keyDown(document.activeElement as Element, { key: 'Escape' });
+    }
+  });
+
+  it('offers a manager Rename on the channel they manage only', () => {
+    draw({ canRename: (c) => c.manages === true, renderRename: rename });
+    expect(within(row('general')).queryByRole('button', { name: /^Actions for/ })).toBeNull();
+    expect(within(row('game-night')).queryByRole('button', { name: /^Actions for/ })).toBeNull();
+    fireEvent.click(more('book-club'));
+    expect(labels('book-club')).toEqual(['Rename channel…']);
+  });
+
+  it('offers an operator who may invite both items on every channel', () => {
+    draw({ onInvite: () => undefined, canRename: () => true, renderRename: rename });
+    for (const name of ['general', 'book-club', 'game-night']) {
+      fireEvent.click(more(name));
+      expect(labels(name)).toEqual(['Invite people', 'Rename channel…']);
+      fireEvent.keyDown(document.activeElement as Element, { key: 'Escape' });
+    }
+  });
+
+  it('keeps the ⋯ outside the channel button, which keeps its name and still opens the channel', () => {
+    const opened: string[] = [];
+    draw({ onInvite: () => undefined, onOpen: (n: string) => opened.push(n) });
+    const button = screen.getByRole('button', { name: 'book-club' });
+    expect(button.querySelector('button')).toBeNull();
+    expect(button.textContent).toBe('book-club');
+    expect(more('book-club').closest('button:not([aria-haspopup])')).toBeNull();
+    fireEvent.click(button);
+    expect(opened).toEqual(['book-club']);
+  });
+
+  it('Invite people hands the row\'s channel (not the open one) to the opener and closes the menu', () => {
+    const asked: string[] = [];
+    draw({ onInvite: (c: ChannelV0) => asked.push(c.name) });
+    fireEvent.click(more('game-night'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
+    expect(asked).toEqual(['game-night']);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('Rename shows the form under that row, not the open channel\'s, and Cancel returns focus to its ⋯', () => {
+    draw({ canRename: () => true, renderRename: rename });
+    fireEvent.click(more('book-club'));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename channel…' }));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(within(row('book-club')).getByRole('form', { name: 'Rename book-club' })).toBeDefined();
+    expect(screen.queryByRole('form', { name: 'Rename general' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('form')).toBeNull();
+    expect(document.activeElement).toBe(more('book-club'));
+  });
+
+  it('opens by right-click on the row only, and by a long press', () => {
+    vi.useFakeTimers();
+    try {
+      draw({ onInvite: () => undefined });
+      expect(fireEvent.contextMenu(row('general'))).toBe(false);
+      expect(screen.getByRole('menu', { name: 'Actions for general' })).toBeDefined();
+      expect(fireEvent.contextMenu(screen.getByRole('list'))).toBe(true);
+      fireEvent.keyDown(document.activeElement as Element, { key: 'Escape' });
+      fireEvent.touchStart(row('book-club'), { touches: [{ clientX: 5, clientY: 5 }] });
+      act(() => {
+        vi.advanceTimersByTime(longPressMs);
+      });
+      expect(screen.getByRole('menu', { name: 'Actions for book-club' })).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('opens from the button with focus on the first item; Escape closes it and focuses the button; an outside press closes it', () => {
+    draw({ onInvite: () => undefined });
+    const button = more('general');
+    expect(button.getAttribute('aria-haspopup')).toBe('menu');
+    fireEvent.click(button);
+    expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Invite people' }));
+    fireEvent.keyDown(document.activeElement as Element, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(document.activeElement).toBe(button);
+    fireEvent.click(button);
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('leaves the arrow keys moving between channel buttons only', () => {
+    draw({ onInvite: () => undefined });
+    screen.getByRole('button', { name: 'general' }).focus();
+    fireEvent.keyDown(document.activeElement as Element, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'book-club' }));
+    fireEvent.keyDown(document.activeElement as Element, { key: 'End' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'game-night' }));
   });
 });

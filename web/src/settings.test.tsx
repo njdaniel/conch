@@ -428,14 +428,14 @@ describe('joining and guests, for an operator', () => {
     const { region } = await openJoining({ 'PUT /v1/join/settings': () => refusal(409, 'join_policy_conflict', 'guests are not available') });
     fireEvent.click(within(region).getByLabelText('Create an account'));
     fireEvent.click(within(region).getByRole('button', { name: 'Save joining' }));
-    expect(await within(region).findByText('Guests are not available.')).toBeDefined();
+    expect(await within(region).findByText('Those joining settings cannot stand together. Nothing was changed.')).toBeDefined();
   });
 
   it('says what the server refused, and keeps what was chosen', async () => {
     const { region } = await openJoining({ 'PUT /v1/join/settings': () => refusal(409, 'join_policy_conflict', 'open joining needs at least one open channel') });
     fireEvent.click(within(region).getByLabelText('Create an account'));
     fireEvent.click(within(region).getByRole('button', { name: 'Save joining' }));
-    expect(await within(region).findByText('Open joining needs at least one open channel.')).toBeDefined();
+    expect(await within(region).findByText('Those joining settings cannot stand together. Nothing was changed.')).toBeDefined();
     expect(within(region).getByLabelText<HTMLInputElement>('Create an account').checked).toBe(true);
   });
 

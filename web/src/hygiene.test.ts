@@ -106,10 +106,11 @@ describe('local storage', () => {
     expect(code).not.toMatch(storageCallOtherKey);
     expect(code).not.toMatch(/\.(key|clear)\(|[sS]torage\.length/);
     // The preference methods take the key from their caller, and the only
-    // caller names the notification preferences' key.
+    // callers name the notification preferences' key and the setup card's
+    // (a per-account mark that the card was put off).
     const api = withoutComments(sources['./api.ts'] ?? '');
-    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\()/g) ?? []).toEqual([]);
-    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(2);
+    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|setupCardKey\()/g) ?? []).toEqual([]);
+    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(4);
   });
 
   it('is not missed by the rules: a bare test of each', () => {

@@ -22,7 +22,7 @@ import (
 // ops whose invite did not grant voice.
 
 // joinWithoutVoiceP adds "vic", a member of ops through an operator's invite
-// that does not grant voice (issue #437), to a presence fixture.
+// whose voice an operator then turned off (issue #984), to a presence fixture.
 func (f *presenceFixture) joinWithoutVoiceP(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
@@ -35,8 +35,13 @@ func (f *presenceFixture) joinWithoutVoiceP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if joined.Principal.VoiceAllowed {
-		t.Fatal("the joiner holds voice")
+	// Every member who joins has voice (issue #986): an operator takes it
+	// away from vic with the per-person switch (issue #984).
+	if _, err := f.srv.store.SetVoiceAllowed(ctx, "system", f.root.ID, joined.Principal.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := f.srv.store.PrincipalByID(ctx, joined.Principal.ID); err != nil || p.VoiceAllowed {
+		t.Fatalf("vic = %+v, %v; want no voice", p, err)
 	}
 	f.tokens["vic"], f.ids["vic"] = joined.Token, joined.Principal.ID
 }

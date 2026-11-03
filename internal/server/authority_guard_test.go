@@ -73,13 +73,10 @@ func TestEveryPermissionIsChecked(t *testing.T) {
 }
 
 // notYetGated is each permission no route or store check reads yet, with
-// the issue that wires its gate (ADR-014 design §12). The member cell of
-// row 4 gates a route that does not exist yet. Rows 1 and 2 left with #981
-// (member channel creation), row 5 with A4 (#1016), and rows 10 and 11 with
-// A3b (#1015).
-var notYetGated = map[schema.Permission]string{
-	schema.PermSeeMemberDirectory: "#983, the member directory",
-}
+// the issue that wires its gate (ADR-014 design §12). Rows 1 and 2 left with
+// #981 (member channel creation), row 4 with I4 (#983), row 5 with A4
+// (#1016), and rows 10 and 11 with A3b (#1015).
+var notYetGated = map[schema.Permission]string{}
 
 // permissionConsts names each schema.Permission constant, so the scan can
 // tell which are named in code. TestEveryPermissionIsChecked keeps it in
@@ -196,6 +193,7 @@ var authorityAllowlist = []authorityAllowed{
 	{"store/permissions.go", "principalHolds", kindRoleSwitch, 1, whyHelper},
 	{"store/queries.go", "Principal.IsOwner", kindRoleCompare, 1, whyOwnerMark},
 	{"store/queries.go", "ownerProtectedTx", kindRoleCompare, 1, whyTarget + ": nobody but an owner acts on an owner"},
+	{"store/voice_permission.go", "Store.SetVoiceAllowed", kindRoleCompare, 1, whyOwnerMark + ": the caller side of owner protection, read under the write lock"},
 	{"store/roles.go", "Store.BootstrapOperatorWith", kindRoleSQL, 1, whyRoleAdmin + ": the first operator"},
 	{"store/roles.go", "reportPromotedOwners", kindRoleSQL, 1, whyRoleAdmin + ": the migration's report of owners"},
 	{"store/roles.go", "setRoleTx", kindRoleCompare, 7, whyRoleAdmin},
@@ -682,7 +680,12 @@ func TestAuthorityViolationsFailsOnNewAndStale(t *testing.T) {
 // operators and skips it for owners (design §5, §7.3). The one read left is
 // whoami's, which reports the brake's half beside the effective list.
 func TestVoiceIsNeverDecidedByTheBrakeAlone(t *testing.T) {
-	allowed := map[string]bool{"auth.go voiceAllowed": true}
+	allowed := map[string]bool{
+		"auth.go voiceAllowed": true,
+		// The voice switch's own route writes the brake (the request and
+		// response fields); it decides no voice from it (issue #984).
+		"voice_permission.go Server.handleVoicePermission": true,
+	}
 	authoritySources(t, func(_ *token.FileSet, rel string, file *ast.File) {
 		if strings.HasPrefix(rel, "store/") {
 			return
