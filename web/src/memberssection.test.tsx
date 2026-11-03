@@ -734,12 +734,13 @@ describe('Add a person', () => {
     await waitFor(() => {
       expect(screen.queryByRole('region', { name: 'Members' })).toBeNull();
     });
-    // The member-link panel is open, with the open channel ticked, and focus is in it.
+    // The member-link panel is open and focus is in it. A member link names no
+    // channel (#990): the panel says where its people land.
     const invites = await screen.findByRole('region', { name: 'Invites' });
     await waitFor(() => {
       expect(within(invites).getByRole('button', { name: 'Invite someone' }).getAttribute('aria-expanded')).toBe('true');
     });
-    expect(within(invites).getByRole<HTMLInputElement>('checkbox', { name: /channel-a/ }).checked).toBe(true);
+    expect(within(invites).getByText("A link lands the people who use it in the server's default channels.")).toBeTruthy();
     await waitFor(() => {
       expect(invites.contains(document.activeElement)).toBe(true);
     });

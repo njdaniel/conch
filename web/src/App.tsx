@@ -478,8 +478,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const [searchOpen, setSearchOpen] = useState(false);
   // Asks from the first-run panel for the New channel form (issue #1032).
   const [createAsks, setCreateAsks] = useState(0);
-  // A channel's ⋯ menu asked for the invite panel with that channel ticked
-  // (issue #1135): the channel and a count, so asking twice opens it twice.
+  // A channel's ⋯ menu (issue #1135) or Add a person asked for the invite
+  // panel: a count, so asking twice opens it twice.
   const [inviteAsk, setInviteAsk] = useState<{ readonly n: number } | undefined>(undefined);
   const restoreSearchFocus = useRef(false);
   useEffect(() => {
@@ -1740,9 +1740,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           {...(auth.principal.may_invite === true && channels.channels.length > 0
             ? {
                 onAddPerson: () => {
-                  // The member-link panel with the open channel ticked, or the first.
-                  const channel = channels.channels.find((c) => c.name === selected) ?? channels.channels[0];
-                  if (channel !== undefined) setInviteAsk((ask) => ({ channel: channel.name, n: (ask?.n ?? 0) + 1 }));
+                  // The member-link panel. A member link names no channel (#990):
+                  // it lands people in the server's default channels.
+                  setInviteAsk((ask) => ({ n: (ask?.n ?? 0) + 1 }));
                 },
               }
             : {})}
