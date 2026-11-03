@@ -8,6 +8,21 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.11] - 2026-11-02
+
+This finishes the joining side of the one-community model: open sign-up and
+member links both make a full member in the default channels, and members
+find, join and leave public channels themselves. Private channels now show a
+lock, and operators make a channel public or private from its menu. The web
+app has an admin console (Server, and Reports), agents can reply in threads
+over MCP, and a member's re-authentication no longer carries over a
+promotion. Upgrade with `conch-server upgrade v0.1.0-alpha.11` from your
+workstation, or with `conch-upgrade.sh` on the droplet (docs/deploy.md
+step 11).
+
+There is no migration and no wire change since `alpha.10`, so rolling back to
+`alpha.10` is a plain downgrade. Behaviour does change: see Changed.
+
 ### Added
 
 - **The channel directory; members join and leave channels themselves**
@@ -27,6 +42,24 @@ release that Nick publishes.
     not leave it (409 `channel_last_member`). A decider who leaves takes
     their decisions with them: pending approvals count only the deciders
     who remain.
+
+- **Private channels show a lock, and operators change it from the
+  channel's menu** (#1183). A private channel's row shows a lock in place of
+  `#`, live as it changes, and screen readers hear "private channel". A
+  holder of `manage_channels` gets "Make private" or "Make public" in the
+  channel's ⋯ menu, which asks first, and "Make default channel" or "Stop
+  being a default channel". A default channel must be public, so each offers
+  the other only once that holds, with the reason shown.
+- **The web admin console** (#1018). Operators and the owner get a Server
+  administration area in Settings: the server's name, a setup card on a new
+  server (Personal, Group, or decide later) that shows what a preset changes
+  before applying it, the permissions summary and warnings, and the joining
+  settings with every member link. Members see one line saying who
+  administers the server. It follows permission changes live.
+- **Agents reply in threads over MCP** (#1171). `post_message` takes
+  `thread_root_id` and follows the REST rules, and `read_channel` and
+  `post_message` now carry `thread_root_id` and `guest_author`, which MCP used
+  to drop.
 
 ### Changed
 
@@ -76,9 +109,28 @@ release that Nick publishes.
     behind it (an operator holding `manage_channels`, or a member still in the
     channel), until it expires or an operator closes it.
 
+- **Web: the message log is one Tab stop** (#1040). Arrow keys move between
+  messages and Home and End go to the first and last, and Tab walks only the
+  chosen message's controls. Controls are named by author and time ("Reply
+  to ada's message, 21:38"), never by message id.
+
+### Fixed
+
+- **No request the page knows will fail** (#1084). Changing your password
+  while staying signed in no longer sends a stale `whoami` or failing events
+  sockets, and losing a channel while in its voice no longer asks for its
+  presence. The console stays clean.
+
 ### Security
 
 - Any role change (a promotion, a demotion, an owner-mark change) now clears every recent-auth proof of that person, so a member's password-only re-authentication no longer satisfies an operator route that needs password and code (#1054). Their sessions stand; they re-authenticate on the next sensitive action. The `principal_role_changed` audit row gains `proofs_cleared=N`.
+
+### Docs
+
+- The principal review of 2026-11-02 (P2 to alpha.10) is in
+  `docs/reports/2026-11-02-principal-review.md`.
+- A test fix, with no change to behaviour: the phone voice strip spec
+  (#1163).
 
 ## [0.1.0-alpha.10] - 2026-11-02
 
