@@ -35,6 +35,10 @@ export type ChannelsAction =
   | { readonly type: 'settings'; readonly id: number; readonly visibility: ChannelVisibility | undefined; readonly default: boolean | undefined }
   // The caller's manager grant in one channel, from its accepted member list.
   | { readonly type: 'managed'; readonly id: number; readonly manages: boolean }
+  // The person has left a channel themselves (issue #991): it goes from the
+  // list, and the open one, if it was, gives way to the landing channel. Not a
+  // loss: nothing is said of it.
+  | { readonly type: 'left'; readonly name: string }
   | { readonly type: 'lost'; readonly name: string }
   // The list as the server now answers it (issue #1027): it replaces the one
   // held, never merges. If the open channel is not in it, it is lost.
@@ -116,6 +120,11 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
       if (held === undefined || (held.manages ?? false) === action.manages) return state;
       const channels = state.channels.map((channel) => (channel.id === action.id ? { ...channel, manages: action.manages } : channel));
       return { ...state, channels };
+    }
+    case 'left': {
+      const channels = state.channels.filter((c) => c.name !== action.name);
+      if (channels.length === state.channels.length) return state;
+      return { ...state, channels, selected: state.selected === action.name ? fallback(channels) : state.selected };
     }
     case 'lost': {
       const channels = state.channels.filter((c) => c.name !== action.name);

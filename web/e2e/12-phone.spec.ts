@@ -37,6 +37,16 @@ for (const [size, options] of phones) {
     await expectFits(page, 'the Voice view');
     await showView(page, 'Channels');
     await expectFits(page, 'the Channels view');
+    // The channel directory and the creation form fit too (issue #991).
+    const channelsNav = page.getByRole('navigation', { name: 'Channels' });
+    await channelsNav.getByRole('button', { name: 'Browse channels' }).tap();
+    await expect(channelsNav.getByRole('list', { name: 'All channels' })).toBeVisible();
+    await expectFits(page, 'the Channels view with the directory open');
+    await channelsNav.getByRole('button', { name: 'Browse channels' }).tap();
+    await channelsNav.getByRole('button', { name: 'New channel' }).tap();
+    await expect(page.getByRole('form', { name: 'New channel' }).getByRole('radio', { name: /^Private/ })).toBeVisible();
+    await expectFits(page, 'the Channels view with the New channel form open');
+    await channelsNav.getByRole('button', { name: 'New channel' }).tap();
     await showView(page, 'Chat');
 
     // The whisper picker lays its people out in the composer.
@@ -72,6 +82,7 @@ for (const [size, options] of phones) {
     await expect(members).toHaveAttribute('aria-expanded', 'false');
     await members.tap();
     await expect(page.getByRole('region', { name: 'Members list' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Community members' })).toBeVisible();
     await expectFits(page, 'the lobby with the members panel open');
   });
 
