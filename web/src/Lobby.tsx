@@ -5,7 +5,7 @@ import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
-import { JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
+import { AddPerson, JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
 import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceStrip, type PhoneView } from './phone';
 import type { ChannelV0 } from './schema/channel';
 import { StageHost } from './stage';
@@ -76,6 +76,7 @@ export function Lobby({
   canManage,
   renderSettings,
   onInviteTo,
+  onAddPerson,
   account,
   signIns,
   report,
@@ -125,6 +126,9 @@ export function Lobby({
   readonly canManage?: boolean;
   readonly renderSettings?: (channel: ChannelV0, change: SettingsChange, close: () => void) => ReactNode;
   readonly onInviteTo?: (channel: ChannelV0) => void;
+  // The console's Members section asks for the member-link panel (issue
+  // #1020, "Add a person"): Settings closes, then the page opens it.
+  readonly onAddPerson?: () => void;
   // The caller's standing and own account settings, in Settings.
   readonly account?: ReactNode;
   // "Your sign-ins" (issue #496), in Settings. Ending this browser's own
@@ -315,6 +319,10 @@ export function Lobby({
     setConfirming(null);
     settingsClosed.current = true;
   }
+  function addPerson() {
+    closeSettings();
+    onAddPerson?.();
+  }
   function closeMembers() {
     setPanelOpen(false);
     membersButton.current?.focus();
@@ -329,6 +337,7 @@ export function Lobby({
   return (
     <JoiningSettings.Provider value={joining}>
     <SettingsOpen.Provider value={settingsOpen}>
+    <AddPerson.Provider value={onAddPerson === undefined ? null : addPerson}>
       <div ref={lobbyEl} className={phone ?`lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}>
         {/* While Settings is open the rest of the page is inert: the panel is
             modal, and focus cannot wander behind its backdrop. */}
@@ -599,6 +608,7 @@ export function Lobby({
         </div>
         {overlay}
       </div>
+    </AddPerson.Provider>
     </SettingsOpen.Provider>
     </JoiningSettings.Provider>
   );
