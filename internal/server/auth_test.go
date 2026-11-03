@@ -201,6 +201,7 @@ var routeExpectations = map[string]routeExpectation{
 	// Both membership writes are no-ops in the fixture (alice is already a
 	// member; ghost, id 4, is not), so they change nothing and audit nothing.
 	"GET /v1/channels/{channel}/members":                   {classAuth, "/v1/channels/general/members", "", 200},
+	"GET /v1/channels/{channel}/authors":                   {classAuth, "/v1/channels/general/authors?ids=2", "", 200},
 	"PUT /v1/channels/{channel}/members/{principal_id}":    {classManager, "/v1/channels/general/members/2", "", 204},
 	"DELETE /v1/channels/{channel}/members/{principal_id}": {classManager, "/v1/channels/general/members/4", "", 204},
 	// Adding a member by name (issue #790): an empty body is a 400 before

@@ -15,7 +15,7 @@ func (m Model) mouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		// The help covers the panes: there is nothing under it to point at.
 		return m, nil
 	}
-	if m.mode == modeAgents || m.mode == modeRun || m.mode == modeRuns {
+	if m.mode == modeAgents || m.mode == modeRun || m.mode == modeRuns || m.mode == modeDirectory || m.mode == modeCommunity {
 		// Lists and a pane that are read with the keys; there is nothing to click.
 		return m, nil
 	}

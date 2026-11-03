@@ -38,8 +38,10 @@ const owner: WhoAmIResponseV1 = { id: 1, kind: 'human', name: 'owner', role: 'op
 const operator: WhoAmIResponseV1 = { ...owner, id: 2, name: 'operator-1', owner: false, permissions: operatorRights };
 const bareOperator: WhoAmIResponseV1 = { ...operator, permissions: operatorRights.filter((p) => p !== 'manage_channels') };
 
-const channelA: ChannelListingV1 = { id: 1, name: 'channel-a', created_at: at, visibility: 'public', default: true, joined: true, members: 2 };
-const channelP: ChannelListingV1 = { id: 2, name: 'channel-p', created_at: at, visibility: 'private', joined: false, members: 1 };
+// The listing names each channel's managers (issue #1202): the owner manages
+// channel-a; nobody manages channel-p.
+const channelA: ChannelListingV1 = { id: 1, name: 'channel-a', created_at: at, visibility: 'public', default: true, joined: true, members: 2, managers: [{ principal_id: 1, name: 'owner', kind: 'human' }] };
+const channelP: ChannelListingV1 = { id: 2, name: 'channel-p', created_at: at, visibility: 'private', joined: false, members: 1, managers: [] };
 const member = (id: number, name: string, manages = false): ChannelMemberV1 => ({ principal_id: id, name, kind: 'human', created_at: at, ...(manages ? { manages: true } : {}) });
 const people: Record<string, ChannelMemberV1[]> = {
   'channel-a': [member(1, 'owner', true), member(3, 'member-1')],
@@ -227,6 +229,62 @@ describe('who is offered the section', () => {
     const p = rowOf(region, 'channel-p');
     expect(within(p).getByText('Private')).toBeTruthy();
     expect(p.textContent).toContain('1 person');
+    expect(p.textContent).toContain('No managers');
+  });
+
+  // The page itself reads the open channel's (channel-a's) members for its
+  // roster, and the member directory; the section's own reads would be of
+  // channel-p, a row the page is not viewing.
+  const membersOfP = (calls: readonly Call[]) => sent(calls, 'GET', /^\/v1\/channels\/channel-p\/members$/);
+
+  it('reads the managers from the list: one request on load, and no channel’s members then or on a change', async () => {
+    const calls = serve(owner);
+    const region = await open();
+    await waitFor(() => {
+      expect(rowOf(region, 'channel-a').textContent).toContain('Managed by owner');
+    });
+    await later10();
+    expect(calls.filter((c) => c.query === '?scope=all')).toHaveLength(1);
+    expect(membersOfP(calls)).toEqual([]);
+    // The permissions change: the list is read again, and still no members.
+    await tick();
+    await waitFor(() => {
+      expect(calls.filter((c) => c.query === '?scope=all').length).toBeGreaterThanOrEqual(2);
+    });
+    await later10();
+    expect(membersOfP(calls)).toEqual([]);
+    expect(rowOf(region, 'channel-a').textContent).toContain('Managed by owner');
+    expect(rowOf(region, 'channel-p').textContent).toContain('No managers');
+  });
+
+  it('reads a channel’s members only when its People panel opens, and the list again after a change made there', async () => {
+    const rows: ChannelListingV1[] = [channelA, channelP];
+    const calls = serve(owner, {
+      rows,
+      routes: {
+        'GET /v1/channels/channel-p/members': () => json({ members: [member(1, 'owner'), member(3, 'member-1')] }),
+        'PUT /v1/channels/channel-p/members/3': () => {
+          rows[1] = { ...channelP, managers: [{ principal_id: 3, name: 'member-1', kind: 'human' }] };
+          return new Response(null, { status: 204 });
+        },
+      },
+    });
+    const region = await open();
+    const row = rowOf(region, 'channel-p');
+    expect(row.textContent).toContain('No managers');
+    expect(membersOfP(calls)).toEqual([]);
+    await choose(row, 'channel-p', 'People and managers…');
+    fireEvent.click(await within(row).findByRole('button', { name: 'Let member-1 manage channel-p' }));
+    expect(membersOfP(calls)).toHaveLength(1);
+    const reads = calls.filter((c) => c.query === '?scope=all').length;
+    fireEvent.click(within(row).getByRole('button', { name: 'Make member-1 a manager' }));
+    // The row's line follows the list, read again after the server said yes.
+    await waitFor(() => {
+      expect(row.textContent).toContain('Managed by member-1');
+    });
+    expect(calls.filter((c) => c.query === '?scope=all')).toHaveLength(reads + 1);
+    // The panel's list was read again too, once.
+    expect(membersOfP(calls)).toHaveLength(2);
   });
 
   it('shows an operator who holds manage_channels the section', async () => {
@@ -483,24 +541,15 @@ describe('the row’s other ways in', () => {
 
 describe('a read does not blank what is open', () => {
   it('keeps the People list, and its focus, when the permissions change', async () => {
-    // The second read's members answers are slow, so a blank between the
-    // directory's answer and theirs would be seen.
-    let slow = false;
-    const calls = serve(owner, {
-      routes: {
-        'GET /v1/channels/channel-a/members': async () => {
-          if (slow) await new Promise((resolve) => setTimeout(resolve, 150));
-          return json({ members: people['channel-a'] ?? [] });
-        },
-      },
-    });
+    // The list is read again, and the open panel's people are not: a blank
+    // between the list's answer and a members answer would be seen.
+    const calls = serve(owner);
     const region = await open();
     const row = rowOf(region, 'channel-a');
     await choose(row, 'channel-a', 'People and managers…');
     const remove = await within(row).findByRole('button', { name: 'Remove member-1 from channel-a' });
     remove.focus();
     const reads = calls.filter((c) => c.query === '?scope=all').length;
-    slow = true;
     await tick();
     await waitFor(() => {
       expect(calls.filter((c) => c.query === '?scope=all').length).toBeGreaterThan(reads);
@@ -513,31 +562,37 @@ describe('a read does not blank what is open', () => {
   });
 
   it('drops an answer to an earlier read: the newest read’s managers stay', async () => {
-    // The first read of channel-p is held; a second read answers first, then the held one.
-    let first = true;
+    // The second ?scope=all read is held; a third answers first, with the
+    // owner managing channel-p, then the held one, without.
+    let reads = 0;
     let release: (r: Response) => void = () => undefined;
-    const old = new Promise<Response>((resolve) => {
+    const held = new Promise<Response>((resolve) => {
       release = resolve;
     });
+    const managed: ChannelListingV1 = { ...channelP, managers: [{ principal_id: 1, name: 'owner', kind: 'human' }] };
     serve(owner, {
       routes: {
-        'GET /v1/channels/channel-p/members': () => {
-          if (first) {
-            first = false;
-            return old;
-          }
-          return json({ members: [member(1, 'owner', true)] });
+        'GET /v1/directory/channels': (call) => {
+          if (call.query !== '?scope=all') return json({ channels: [channelA, channelP] });
+          reads++;
+          if (reads === 2) return held;
+          return json({ channels: [channelA, reads >= 3 ? managed : channelP] });
         },
       },
     });
     const region = await open();
     const row = rowOf(region, 'channel-p');
+    expect(row.textContent).toContain('No managers');
     await tick();
+    await waitFor(() => {
+      expect(reads).toBeGreaterThanOrEqual(2);
+    });
+    FakeSocket.all.find((s) => s.url.includes('/v1/events/ws?'))?.send({ schema: 'conch.permissions_changed.v1' });
     await waitFor(() => {
       expect(row.textContent).toContain('Managed by owner');
     });
-    // The first read's answer arrives last, with the older list: it is not shown.
-    release(json({ members: [member(1, 'owner')] }));
+    // The second read's answer arrives last, with the older list: it is not shown.
+    release(json({ channels: [channelA, channelP] }));
     await later10();
     expect(row.textContent).toContain('Managed by owner');
   });

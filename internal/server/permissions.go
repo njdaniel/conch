@@ -138,14 +138,24 @@ func memberCell(rows []schema.PermissionRowV1, perm schema.Permission) bool {
 // permissionsWarnings are the conditions of design §6, shown and never
 // refused:
 //
-//   - default_channel_exposes_members: the member directory is off and at
-//     least one default channel exists. There are no default channels until
-//     #979 adds them, so it is never raised yet.
+//   - default_channel_exposes_members: members do not hold
+//     see_member_directory and at least one default channel exists, which
+//     shows its members to each other whatever the cell says (design
+//     §13.7).
 //   - open_signup_on: member links are off for members, and the address
 //     still admits accounts (open joining that takes accounts, not paused;
 //     open sign-up once #987 replaces the joining modes).
 func (s *Server) permissionsWarnings(ctx context.Context, doc store.PermissionsDocument) ([]schema.PermissionsWarning, error) {
 	out := []schema.PermissionsWarning{}
+	if !memberCell(doc.Rows, schema.PermSeeMemberDirectory) {
+		has, err := s.store.HasDefaultChannel(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if has {
+			out = append(out, schema.PermissionsWarningDefaultChannelExposesMembers)
+		}
+	}
 	if !memberCell(doc.Rows, schema.PermMakeMemberLinks) {
 		join, _, err := s.store.JoinSettings(ctx)
 		if err != nil {
@@ -228,6 +238,9 @@ func (s *Server) handlePutPermissions(w http.ResponseWriter, r *http.Request) {
 		// The document is server-wide, so telling everyone it changed
 		// tells no one anything about anyone (design §8.6).
 		s.events.notifyPermissionsChangedAll()
+		// The member directory switched: every member's list may now be
+		// everyone or only the people they may know (design §13.6).
+		s.directorySettingChanged(out.Changes)
 		// Before the answer, in this order: everyone who lost use_voice
 		// leaves voice (their shares end with them), then whoever lost
 		// only share_screen loses the share (design §7.5).

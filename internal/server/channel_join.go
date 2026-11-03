@@ -16,9 +16,10 @@ import (
 // every public channel and the private channels they are in, each with
 // joined, default, visibility and (when joined) manages, and no counts and
 // no names of members. ?scope=all, for a holder of manage_channels (R4),
-// lists every channel with its member count, so an operator can find a
-// channel nobody can reach; it reads no channel's content. Agents and
-// guests are refused before the handler runs.
+// lists every channel with its member count and its managers (issue
+// #1202), so an operator can find a channel nobody can reach, and the
+// console reads one list rather than every channel's members; it reads no
+// channel's content. Agents and guests are refused before the handler runs.
 func (s *Server) handleChannelDirectory(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var all bool
@@ -74,6 +75,12 @@ func (s *Server) handleChannelDirectory(w http.ResponseWriter, r *http.Request) 
 		if all {
 			n := l.Members
 			row.Members = &n
+			// Who manages the channel (issue #1202): an array on every
+			// scope=all row, empty when nobody does; never on the member view.
+			row.Managers = make([]schema.ChannelAuthorV1, 0, len(l.Managers))
+			for _, m := range l.Managers {
+				row.Managers = append(row.Managers, schema.ChannelAuthorV1{PrincipalID: m.ID, Name: m.Name, Kind: schema.PrincipalKind(m.Kind)})
+			}
 		}
 		resp.Channels = append(resp.Channels, row)
 	}
@@ -130,6 +137,7 @@ func (s *Server) handleJoinChannel(w http.ResponseWriter, r *http.Request) {
 		// own channel list gained the channel (issue #1027).
 		s.events.notifyChannelRoster(channel.ID)
 		s.events.notifyChannelsChanged(caller.ID)
+		s.directoryMembershipChanged(ctx, channel.ID, caller.ID)
 	}
 	writeJSON(w, status, schema.JoinChannelResponseV1{
 		Channel: channelDoc(res.Channel),
@@ -183,6 +191,7 @@ func (s *Server) handleLeaveChannel(w http.ResponseWriter, r *http.Request) {
 	s.events.dropPrincipal(channel.ID, caller.ID)
 	s.events.notifyChannelRoster(channel.ID)
 	s.events.notifyChannelsChanged(caller.ID)
+	s.directoryMembershipChanged(ctx, channel.ID, caller.ID)
 	s.voiceMemberRemoved(ctx, channel.ID, caller.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
