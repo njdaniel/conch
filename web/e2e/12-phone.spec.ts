@@ -356,11 +356,11 @@ for (const [size, options] of phoneSizes.filter(([name]) => name === '320×640' 
 }
 
 // Issue #1018, #1019: an operator's Settings, on a phone, lists the administration
-// sections that exist (Server, Roles and permissions, Reports); each opens as its own page with a
+// sections that exist (Server, Roles and permissions, Members, Channels, Reports); each opens as its own page with a
 // Back control, nothing scrolls sideways, and every target is at least 44 px
 // high. One case for each built section.
 for (const [size, options] of phones) {
-  for (const section of ['Server', 'Roles and permissions', 'Reports'] as const) {
+  for (const section of ['Server', 'Roles and permissions', 'Members', 'Channels', 'Reports'] as const) {
     test(`P1018 at ${size} the ${section} section opens as a page with Back, fits the screen and has 44 px targets`, async ({ meet, world }) => {
       const { page } = await meet(options);
       await page.goto(world.appUrl);
@@ -372,7 +372,7 @@ for (const [size, options] of phones) {
       const dialog = page.getByRole('dialog', { name: 'Settings' });
       // The sections that exist are a list; the page of one is not drawn yet.
       const list = dialog.getByRole('list', { name: 'Server administration' });
-      await expect(list.getByRole('button')).toHaveText(['Server', 'Roles and permissions', 'Reports']);
+      await expect(list.getByRole('button')).toHaveText(['Server', 'Roles and permissions', 'Members', 'Channels', 'Reports']);
       await expect(dialog.getByRole('group', { name: 'Server settings' })).toHaveCount(0);
       await expectFits(page, `${size}: the list of administration sections`);
       await expectTargets(dialog, `${size}: the list of administration sections`);
@@ -389,6 +389,32 @@ for (const [size, options] of phones) {
         await expect(region.getByRole('switch').first()).toBeVisible();
         await region.getByRole('button', { name: 'Operators', exact: true }).tap();
         await expect(region.getByRole('list', { name: 'Operators permissions' })).toBeVisible();
+      } else if (section === 'Members') {
+        // Every person's actions are a sheet from the ⋯ button (issue #1020).
+        const region = dialog.getByRole('region', { name: 'Members' });
+        const more = region.getByRole('button', { name: /^Actions for / }).first();
+        await expect(more).toBeVisible();
+        await more.tap();
+        const sheet = region.getByRole('menu').first();
+        await expect(sheet).toBeVisible();
+        await expectTargets(dialog, `${size}: the Members sheet`);
+        const box = await sheet.boundingBox();
+        const height = page.viewportSize()?.height ?? 0;
+        expect(box === null ? 0 : box.y + box.height, `${size}: the sheet rests on the bottom of the screen`).toBeGreaterThanOrEqual(height - 1);
+        await page.keyboard.press('Escape');
+      } else if (section === 'Channels') {
+        // Every row's actions are a sheet from its ⋯ button (issue #1021).
+        const region = dialog.getByRole('region', { name: 'Channels' });
+        const more = region.getByRole('button', { name: /^Actions for / }).first();
+        await expect(more).toBeVisible();
+        await more.tap();
+        const sheet = region.getByRole('menu').first();
+        await expect(sheet).toBeVisible();
+        await expectTargets(dialog, `${size}: the Channels sheet`);
+        const box = await sheet.boundingBox();
+        const height = page.viewportSize()?.height ?? 0;
+        expect(box === null ? 0 : box.y + box.height, `${size}: the sheet rests on the bottom of the screen`).toBeGreaterThanOrEqual(height - 1);
+        await page.keyboard.press('Escape');
       } else {
         await dialog.getByRole('button', { name: 'Reports', exact: true }).tap();
         await expect(dialog.getByRole('region', { name: 'Reports' })).toBeVisible();

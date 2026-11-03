@@ -8,6 +8,17 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Added
+
+- **Add a person to a channel by id, without ever changing an existing
+  member** (#1206). `POST /v1/channels/{channel}/members` now takes `id` as
+  well as `name` (exactly one), and an operator may send `can_decide` for a
+  new member. Someone already in the channel is left exactly as they are
+  and the answer is 200 with their membership, so an add can never take a
+  right to decide approvals away, as `PUT .../members/{id}` with
+  `can_decide: false` does. A channel manager sending `can_decide` is
+  refused with 403, as on the PUT.
+
 ## [0.1.0-alpha.11] - 2026-11-02
 
 This finishes the joining side of the one-community model: open sign-up and
