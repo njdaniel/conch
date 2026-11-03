@@ -81,7 +81,7 @@ export function busiest(channels: readonly ChannelV0[], occupancy: InVoice, view
   let best: { readonly channel: ChannelV0; readonly count: number } | null = null;
   let found = 0;
   for (const channel of channels) {
-    const count = occupancy.get(channel.id) ?? 0;
+    const count = occupancy.get(channel.id)?.count ?? 0;
     if (channel.name === viewed || count <= 0) continue;
     found++;
     if (best === null || count > best.count || (count === best.count && channel.id < best.channel.id)) best = { channel, count };

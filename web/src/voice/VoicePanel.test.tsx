@@ -921,7 +921,7 @@ describe('where else people are in voice', () => {
         people={new Map()}
         viewed={viewed}
         channels={channels}
-        occupancy={new Map(occupancy)}
+        occupancy={new Map(occupancy.map(([id, count]) => [id, { count, people: null }]))}
         onOpen={(name) => {
           opened.push(name);
         }}

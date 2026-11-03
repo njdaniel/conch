@@ -1103,6 +1103,24 @@ func (p *voicePoller) removedEvent(channelID, pid int64, reason string, role voi
 	}
 }
 
+// sameOccupants reports whether a room's row in the occupancy document is
+// unchanged by a pass that replaces old with next: the same principals, or
+// nobody both before (a stale room shows nobody) and after.
+func sameOccupants(old, next map[int64]voiceSeen, wasStale bool) bool {
+	if wasStale {
+		return len(next) == 0
+	}
+	if len(old) != len(next) {
+		return false
+	}
+	for pid := range next {
+		if _, ok := old[pid]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // applyRoom replaces r's participants with seen and writes the events that
 // follow from the difference between the two passes.
 //
@@ -1133,6 +1151,7 @@ func (p *voicePoller) removedEvent(channelID, pid int64, reason string, role voi
 // and under the same locks, and its rows are written with the pass's. What it
 // returns are the screen-share sources to withdraw, for the caller to ask
 // LiveKit about once the pass is applied.
+
 func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map[int64]livekit.Participant, fold voiceFold, keep map[int64]struct{}, lost map[int64]bool, again bool, since uint64) ([]shareWithdrawal, []voiceOrphan) {
 	next := make(map[int64]voiceSeen, len(seen))
 	// gone holds principals evicted since the pass asked LiveKit.
@@ -1288,14 +1307,12 @@ func (p *voicePoller) applyRoom(ctx context.Context, r *voiceRoomState, seen map
 		events = append(events, transmitEvents(r.channelID, judged[pid])...)
 	}
 	events = append(events, unclaimed...)
-	// What the room's count shows (occupancyLocked): nobody while it was
-	// stale. Only a change to that wakes the occupancy sockets; a transmit
-	// flip, a share or a reconnection changes no count.
-	shown := len(old)
-	if r.stale {
-		shown = 0
-	}
-	counted := shown != len(next)
+	// What the room's row shows (occupancyLocked): its people, or nobody
+	// while it was stale. Only a change to who is shown wakes the occupancy
+	// sockets: someone in or out, or one person swapped for another in a
+	// single pass, which keeps the count and changes the ids (issue #1103).
+	// A transmit flip, a share or a reconnection changes neither.
+	counted := !sameOccupants(old, next, r.stale)
 	// A stale room shown again shows people it hid, even when they are the
 	// same as before the failure and none of the cases above saw a change
 	// (issue #610). An empty room shows nothing either way.

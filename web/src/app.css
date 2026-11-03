@@ -530,13 +530,13 @@ label {
   list-style: none;
 }
 
-.channel-list li {
+.channel-list > li {
   display: flex;
   align-items: center;
   gap: var(--s1);
 }
 
-.channel-list li > button {
+.channel-list > li > button {
   /* The name takes what the badges and the ⋯ leave, on one line, and is cut
      with an ellipsis when that is too little (the whole name is the button's
      name and its title), so a row stays one line however narrow the column. */
@@ -561,18 +561,18 @@ label {
 }
 
 /* The # is not part of the button's name ('#' / '' gives it no alt text). */
-.channel-list li > button::before {
+.channel-list > li > button::before {
   content: '#';
   content: '#' / '';
   margin-right: 0.15rem;
 }
 
-.channel-list li > button:hover:not(:disabled) {
+.channel-list > li > button:hover:not(:disabled) {
   color: var(--text);
   background: var(--raised);
 }
 
-.channel-list li > button[aria-current='true'] {
+.channel-list > li > button[aria-current='true'] {
   color: var(--text);
   font-weight: 600;
   background: var(--accent-bg);
@@ -608,10 +608,66 @@ label {
   height: 0.85rem;
 }
 
+/* Who is in a channel's voice (issue #1103): a list of its own under the
+   row, on a line of its own, one person a row, indented under the channel's
+   name and quieter than it. A row opens the channel, as the row above does;
+   nothing here joins. */
+.channel-list .in-voice-people {
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  margin: 0 0 var(--s1);
+  padding: 0 0 0 1.35rem;
+  list-style: none;
+}
+
+.channel-list .in-voice-people > li {
+  display: block;
+}
+
+.channel-list .in-voice-people button {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  min-height: 1.6rem;
+  padding: 0 0.6rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+}
+
+/* A small dot before each person, the speaker's colour. */
+.channel-list .in-voice-people button::before {
+  content: '';
+  flex: none;
+  width: 0.4rem;
+  height: 0.4rem;
+  background: var(--accent);
+  border-radius: 50%;
+}
+
+.channel-list .in-voice-people .more button {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.channel-list .in-voice-people .more button::before {
+  background: transparent;
+}
+
+.channel-list .in-voice-people button:hover {
+  color: var(--text);
+  background: var(--raised);
+}
+
 /* A row's ⋯ menu (issue #1135): after the badges, in the row's line, not
    floated over the row as on a message. The menu drops from it. The rename
    form takes a line of its own under the row. */
-.channel-list li {
+.channel-list > li {
   flex-wrap: wrap;
 }
 
@@ -3142,7 +3198,7 @@ button.link {
     gap: var(--s2);
   }
 
-  .lobby.phone .channel-list li {
+  .lobby.phone .channel-list > li {
     gap: var(--s2);
     padding-right: var(--s3);
     background: var(--raised);
@@ -3150,12 +3206,12 @@ button.link {
     border-radius: var(--radius);
   }
 
-  .lobby.phone .channel-list li:has(> button[aria-current='true']) {
+  .lobby.phone .channel-list > li:has(> button[aria-current='true']) {
     background: var(--accent-bg);
     border-color: var(--accent);
   }
 
-  .lobby.phone .channel-list li > button {
+  .lobby.phone .channel-list > li > button {
     min-height: 3rem;
     padding: var(--s2) var(--s3);
     color: var(--text);
@@ -3164,8 +3220,20 @@ button.link {
     border-left: 0;
   }
 
-  .lobby.phone .channel-list li > button[aria-current='true'] {
+  .lobby.phone .channel-list > li > button[aria-current='true'] {
     background: transparent;
+  }
+
+  /* The people in a channel's voice keep a 44 px target each on a phone
+     (issue #1103), under the row inside its card. */
+  .lobby.phone .channel-list .in-voice-people {
+    margin: 0 0 var(--s1);
+    padding-left: var(--s3);
+  }
+
+  .lobby.phone .channel-list .in-voice-people button {
+    min-height: 2.75rem;
+    font-size: 0.95rem;
   }
 
   /* The strip: compact under Chat and Channels, and only while in voice
@@ -4045,11 +4113,11 @@ button.link {
 
 /* A private channel's row (issue #1183): a lock where the # is. Its words,
    "private channel", describe the button and are not in its name. */
-.channel-list li.private > button::before {
+.channel-list > li.private > button::before {
   content: none;
 }
 
-.channel-list li > button .icon {
+.channel-list > li > button .icon {
   flex: none;
   width: 0.85rem;
   height: 0.85rem;
