@@ -1,5 +1,5 @@
 // The channel list and which channel is open.
-import type { ChannelV0 } from '../schema/channel';
+import type { ChannelV0, ChannelVisibility } from '../schema/channel';
 
 export interface ChannelsState {
   readonly channels: readonly ChannelV0[];
@@ -28,6 +28,11 @@ export type ChannelsAction =
   // channel_not_found. It stays where it is in the list, and stays open if it
   // was.
   | { readonly type: 'renamed'; readonly id: number; readonly name: string }
+  // A channel's visibility and default mark (issue #1183), by its id: the
+  // operator's own answer, or the events socket's conch.channel.v1. What the
+  // server says replaces what is held; a field it omits keeps the value held
+  // (a reader takes an absent visibility as private, so nothing is guessed).
+  | { readonly type: 'settings'; readonly id: number; readonly visibility: ChannelVisibility | undefined; readonly default: boolean | undefined }
   // The caller's manager grant in one channel, from its accepted member list.
   | { readonly type: 'managed'; readonly id: number; readonly manages: boolean }
   | { readonly type: 'lost'; readonly name: string }
@@ -89,6 +94,22 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
       const channels = state.channels.map((c) => (c.id === action.id ? { ...c, name: action.name } : c));
       const selected = state.selected === was.name ? action.name : state.selected;
       return { ...state, channels, selected };
+    }
+    case 'settings': {
+      const held = state.channels.find((channel) => channel.id === action.id);
+      if (held === undefined) return state;
+      const visibility = action.visibility ?? held.visibility;
+      const isDefault = action.default ?? held.default;
+      if (held.visibility === visibility && held.default === isDefault) return state;
+      const next: ChannelV0 = {
+        id: held.id,
+        name: held.name,
+        created_at: held.created_at,
+        ...(held.manages === undefined ? {} : { manages: held.manages }),
+        ...(visibility === undefined ? {} : { visibility }),
+        ...(isDefault === undefined ? {} : { default: isDefault }),
+      };
+      return { ...state, channels: state.channels.map((channel) => (channel.id === action.id ? next : channel)) };
     }
     case 'managed': {
       const held = state.channels.find((channel) => channel.id === action.id);

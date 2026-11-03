@@ -17,7 +17,7 @@ import (
 )
 
 // The paths of the managed-voice check that need conchd to refuse or LiveKit
-// to go away (issue #559): a member whose invite withheld voice joins from her
+// to go away (issue #559): a member whose voice an operator turned off joins from her
 // TUI, and so does a TUI whose stored login has become another account's; then
 // LiveKit is stopped and started again under a TUI in voice, once at once and
 // once after a long outage. What the TUI says is read from its screen, in the
@@ -197,18 +197,21 @@ func (l *live) lkCount(channelID int64, p *person) (int, error) {
 	return n, nil
 }
 
-// managedRefused: a member whose invite withheld voice joins voice from her
+// managedRefused: a member whose voice an operator turned off joins voice from her
 // TUI and is refused; then her TUI's stored login becomes ben's, and the
 // helper refuses to join as anyone but her. Neither captures anything, joins
 // LiveKit or is issued a session, and ben, whose account the second would
 // have joined as, stays connected.
 func (l *live) managedRefused(squadID int64, ben *person, ears *voiceClient) error {
 	h, d := l.h, l.d
-	var inv schema.CreateInviteResponseV1
-	if err := d.operator.call(http.MethodPost, "/v1/invites", schema.CreateInviteRequestV1{
-		Kind: schema.InviteKindPersonal, Channels: []string{"squad"}, Voice: false,
+	// A member link of the operator's, landing in squad (POST /v2/invites,
+	// issue #986). Every member it makes has voice, so the operator then
+	// takes dee's away with the per-person switch (issue #984).
+	var inv schema.CreateInviteResponseV2
+	if err := d.operator.call(http.MethodPost, "/v2/invites", schema.CreateInviteRequestV2{
+		Kind: schema.InviteKindMember, LandingChannels: []string{"squad"},
 	}, &inv); err != nil {
-		return fmt.Errorf("an invite without voice: %w", err)
+		return fmt.Errorf("a member link to squad: %w", err)
 	}
 	h.secret("an invite code", inv.Code)
 	var joined schema.RedeemInviteResponseV1
@@ -216,9 +219,13 @@ func (l *live) managedRefused(squadID int64, ben *person, ears *voiceClient) err
 	if err := d.as("").call(http.MethodPost, "/v2/invites/redeem", schema.RedeemInviteRequestV2{
 		Code: inv.Code, Name: "dee", Password: "a passphrase long enough to pass",
 	}, &joined); err != nil {
-		return fmt.Errorf("redeem the invite without voice: %w", err)
+		return fmt.Errorf("redeem the member link: %w", err)
 	}
 	h.secret("dee's conch credential", joined.Token)
+	if err := d.operator.call(http.MethodPut, fmt.Sprintf("/v1/principals/%d/voice-permission", joined.Principal.ID),
+		schema.VoicePermissionRequestV1{VoiceAllowed: false}, nil); err != nil {
+		return fmt.Errorf("turn dee's voice off: %w", err)
+	}
 	dee := &person{name: "dee", id: joined.Principal.ID, token: joined.Token, credID: joined.Credential.ID, d: d, api: d.as(joined.Token)}
 	cli, err := h.newConchUser(d.baseURL, joined.Token)
 	if err != nil {
@@ -226,7 +233,7 @@ func (l *live) managedRefused(squadID int64, ben *person, ears *voiceClient) err
 	}
 	dee.cli = cli
 	// conchd refuses her a session itself: what the helper would be told.
-	if err := expectRefusal("a voice session for a member whose invite withheld voice", dee.api, http.MethodPost, "/v1/channels/squad/voice/session", http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed); err != nil {
+	if err := expectRefusal("a voice session for a member whose voice an operator turned off", dee.api, http.MethodPost, "/v1/channels/squad/voice/session", http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed); err != nil {
 		return err
 	}
 
@@ -260,9 +267,9 @@ func (l *live) managedRefused(squadID int64, ben *person, ears *voiceClient) err
 	if n, err := l.sessionsIssued(dee); err != nil {
 		return err
 	} else if n != 0 {
-		return fmt.Errorf("conchd issued dee %d voice sessions; her invite withheld voice", n)
+		return fmt.Errorf("conchd issued dee %d voice sessions; an operator turned her voice off", n)
 	}
-	h.say("ok   managed: dee, whose invite withheld voice (conchd answers her 403 voice_not_allowed), typed /voice join: her conch-voice started and refused, the TUI said voice stopped, this account may not use voice, offered no retry and refused one; /voice status says failed (voice_not_allowed), microphone off; no session was issued and LiveKit lists her nowhere")
+	h.say("ok   managed: dee, whose voice an operator turned off (conchd answers her 403 voice_not_allowed), typed /voice join: her conch-voice started and refused, the TUI said voice stopped, this account may not use voice, offered no retry and refused one; /voice status says failed (voice_not_allowed), microphone off; no session was issued and LiveKit lists her nowhere")
 
 	// ---- the stored login is another account's
 	if _, err := dee.cli.run(ben.token+"\n", "login"); err != nil {

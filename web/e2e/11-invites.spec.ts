@@ -5,9 +5,9 @@
 // touch no other spec.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import { invitesOf, makeInvite, post } from './api';
-import { channelButton, expect, expectFits, fillAccount, showView, statusLine, test } from './fixtures';
+import { channelButton, expect, expectFits, fillAccount, showView, signIn, statusLine, test } from './fixtures';
 import { joinSettingsResponseV1, type PutJoinSettingsRequestV1 } from '../src/schema/guest';
-import { call, inviteUrl, ok, principalId, type World } from './world';
+import { call, inviteUrl, ok, principalId, setChannelVisibility, type World } from './world';
 
 const desktop: BrowserContextOptions = { viewport: { width: 1280, height: 800 } };
 const phone: BrowserContextOptions = { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true };
@@ -85,7 +85,8 @@ for (const [size, options] of sizes) {
     const gives = page.getByLabel('What the invite gives');
     await expect(gives).toContainText('p3-operator');
     await expect(gives).toContainText('#general');
-    await expect(gives).toContainText('Not included');
+    // Every joiner has voice now, whatever the invite said (issue #986).
+    await expect(gives).toContainText('Included');
     await expect(page.getByText(world.origin)).toBeVisible();
     // Out of the address as soon as the page read it.
     expect(page.url()).not.toContain(made.code);
@@ -100,8 +101,9 @@ for (const [size, options] of sizes) {
     await expect(channelButtons(page)).toHaveCount(1);
     await showView(page, 'Chat');
     await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
-    // A joiner the operator did not let invite sees no invite controls.
-    await expect(page.getByRole('button', { name: 'Invite someone' })).toHaveCount(0);
+    // Every member may make member links now, a joiner included (issue
+    // #986): the brake is on until an operator turns it off.
+    await expect(page.getByRole('button', { name: 'Invite someone' })).toHaveCount(1);
     // The server agrees: the new person is a member, not an operator, with
     // the password chosen on the page (POST /v2/invites/redeem, issue #713).
     const token = await keepToken(page, secrets);
@@ -111,24 +113,34 @@ for (const [size, options] of sizes) {
   });
 }
 
-// Issue #585 (F07): a joiner whose invite left voice out is told so, not that
-// voice could not be read, and the page asks nothing of voice: a socket conchd
-// refuses before the upgrade would be retried for ever.
+// Issue #585 (F07): a member without voice is told so, not that voice could
+// not be read, and the page asks nothing of voice: a socket conchd refuses
+// before the upgrade would be retried for ever. Every joiner has voice now
+// (issue #986), so the operator takes it away (issue #984), and the member
+// signs in on a second browser, whose every request is watched.
 test('A8 a joiner without voice is told so, and the page asks for no voice route', async ({ meet, secrets, world }) => {
   const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
   const { page } = await meet(desktop);
+  await page.goto(inviteUrl(world, made.code));
+  const name = unique('no-voice');
+  await join(page, name);
+  const token = await keepToken(page, secrets);
+  const who = await call(world, token, 'GET', '/v1/whoami');
+  const id = (who.body as { id: number }).id;
+  const off = await call(world, world.tokens.operator, 'PUT', `/v1/principals/${String(id)}/voice-permission`, { voice_allowed: false });
+  expect(off.status, JSON.stringify(off.body)).toBeLessThan(300);
+
+  const second = (await meet(desktop)).page;
   const asked: string[] = [];
   const voiceRoute = /\/v1\/channels\/[^/]+\/voice(\/|$|\?)|\/v1\/voice\//;
-  page.on('request', (r) => {
+  second.on('request', (r) => {
     if (voiceRoute.test(new URL(r.url()).pathname)) asked.push(r.url());
   });
-  page.on('websocket', (ws) => {
+  second.on('websocket', (ws) => {
     if (voiceRoute.test(new URL(ws.url()).pathname)) asked.push(ws.url());
   });
-  await page.goto(inviteUrl(world, made.code));
-  await join(page, unique('no-voice'));
-  await keepToken(page, secrets);
-  const voice = page.getByRole('region', { name: 'Voice' });
+  await signIn(second, world, token, name);
+  const voice = second.getByRole('region', { name: 'Voice' });
   await expect(voice).toContainText('Your account does not include voice. Ask whoever invited you.');
   await expect(voice).not.toContainText('Voice status could not be read.');
   await expect(voice.getByRole('button')).toHaveCount(0);
@@ -301,19 +313,21 @@ test('A8 an operator makes an open link with its defaults, and closes it', async
   expect(closed?.closed_at).toBeDefined();
 });
 
-// Issue #1034 (browser UX audit 3, F9): a newcomer who makes an account at the
-// bare address is admitted to a channel under a history bound, so a channel
-// with messages in it reads empty to them. The page says what is true: it
-// does not claim the channel is empty. (People an operator adds, and those a
-// personal invite admits, read all of the channel's history and never see this
-// state in a channel that has messages.) At the narrowest width. The joining
-// settings are put back when the test is done.
-test('F9 a newcomer admitted under a history bound is told what is not shown, not that the channel is empty', async ({ meet, secrets, world }) => {
+// Issue #987 (open sign-up), replacing #1034's F9 check: a newcomer who makes
+// an account at the bare address is the member a member link makes, with no
+// history bound, so a default channel with messages in it shows them its
+// earlier messages, not an empty log. (The page's words for a channel whose
+// earlier messages are hidden are unit-tested, src/chat.test.tsx: no route
+// makes such a member now.) At the narrowest width. The joining settings are
+// put back when the test is done.
+test('F9 a newcomer from open sign-up reads the default channel\'s earlier messages', async ({ meet, secrets, world }) => {
   const channel = `f9-channel-a-${String(Date.now())}`;
   const op = world.tokens.operator;
   const created = await call(world, op, 'POST', '/v0/channels', { name: channel });
   expect(created.status).toBe(201);
   await post(world, op, channel, 'f9 sent before the newcomer came');
+  // A default channel must be public (issue #987).
+  await setChannelVisibility(world, channel, 'public');
   await ok(world, op, 'PUT', '/v1/join/settings', joinSettingsResponseV1, { open_joining: 'account', open_channels: [channel] } satisfies PutJoinSettingsRequestV1);
   try {
     const { page } = await meet({ viewport: { width: 320, height: 640 } });
@@ -325,12 +339,11 @@ test('F9 a newcomer admitted under a history bound is told what is not shown, no
     await showView(page, 'Channels');
     await channelButton(page, channel).click();
     const log = page.getByRole('log', { name: 'Messages' });
-    await expect(log.getByText('No messages here that you can see yet.')).toBeVisible();
-    await expect(log.getByText("Messages sent before you joined aren't shown.")).toBeVisible();
-    await expect(log.getByText('Write a message to start.')).toBeVisible();
-    await expect(page.getByText(/Say hello|No messages in #/)).toHaveCount(0);
+    await expect(log.getByText('f9 sent before the newcomer came')).toBeVisible();
+    await expect(log.getByText("Messages sent before you joined aren't shown.")).toHaveCount(0);
   } finally {
     await ok(world, op, 'PUT', '/v1/join/settings', joinSettingsResponseV1, { open_joining: 'off', open_channels: [] } satisfies PutJoinSettingsRequestV1);
+    await setChannelVisibility(world, channel, 'private');
   }
 });
 

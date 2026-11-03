@@ -148,6 +148,7 @@ func TestPermissionsGet(t *testing.T) {
 	}
 	general := "general"
 	mode := schema.OpenJoiningAccount
+	makeChannelsPublic(t, f.srv.store, general)
 	if _, err := f.srv.store.PutJoinSettings(ctx, "system", 0, schema.PutJoinSettingsRequestV1{OpenJoining: &mode, OpenChannels: &[]string{general}}); err != nil {
 		t.Fatal(err)
 	}

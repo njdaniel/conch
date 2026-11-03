@@ -296,7 +296,15 @@ func (r inviteRow) makerStillAllowed() bool {
 	return r.maker.members
 }
 
+// wire is the invite as v1 tells it. A member link is projected for old
+// clients (design §3.3, issue #986): kind open, the channels a joiner would
+// land in now (the caller passes them), voice on, no right to invite passed
+// on, joining as an account, and its expiry or the NoExpiryMillis sentinel.
+// Lossy, and for old clients only.
 func (r inviteRow) wire(channels []schema.InviteChannelV1) schema.InviteV1 {
+	if r.link == linkMember {
+		r.kind, r.voice, r.mayInvite, r.joinAs = schema.InviteKindOpen, true, false, schema.InviteJoinAccount
+	}
 	inv := schema.InviteV1{
 		ID:                        r.id,
 		Kind:                      r.kind,
@@ -396,6 +404,23 @@ func effectiveChannelsTx(ctx context.Context, tx execer, r inviteRow) (kept, dro
 		}
 	}
 	return kept, dropped, nil
+}
+
+// unionChannels is a with each channel of b it does not hold already
+// appended, in b's order.
+func unionChannels(a, b []schema.InviteChannelV1) []schema.InviteChannelV1 {
+	seen := make(map[int64]bool, len(a))
+	for _, c := range a {
+		seen[c.ID] = true
+	}
+	out := append([]schema.InviteChannelV1{}, a...)
+	for _, c := range b {
+		if !seen[c.ID] {
+			seen[c.ID] = true
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func invitesPausedTx(ctx context.Context, tx execer) (bool, error) {
@@ -700,11 +725,14 @@ func (s *Store) PreviewInvite(ctx context.Context, codeHash string, now time.Tim
 	for i, c := range kept {
 		names[i] = c.Name
 	}
+	// Voice is what the joiner gets, and every joiner gets it now, whatever
+	// the invite said (issue #986): a preview that said otherwise would tell
+	// the newcomer less than redemption gives.
 	return schema.InvitePreviewV1{
 		Kind:      r.kind,
 		Inviter:   r.creatorName,
 		Channels:  names,
-		Voice:     r.voice && r.creatorVoice,
+		Voice:     true,
 		ExpiresAt: schema.NewTimestamp(time.UnixMilli(r.expiresAt)),
 		Join:      &join,
 	}, nil
@@ -834,12 +862,24 @@ func (s *Store) redeemInvite(ctx context.Context, codeHash, name, record string,
 			return ErrInviteInvalid
 		}
 
-		voice := r.voice && r.creatorVoice
-		// Only a holder of manage_members grants the right to invite (issue
-		// #457, ADR-014 design §7.3). Checked again here, against the maker as
-		// they are now (usableInviteTx loaded r.maker in this transaction), so
-		// the rule does not rest on what an invite row says.
-		mayInvite := r.mayInvite && r.maker.members
+		// Every member the community model makes has voice and the may_invite
+		// brake on: both are per-person switches that only take away (ADR-014),
+		// set as for open sign-up (#987). That holds for a member link and for
+		// a legacy invite alike, whatever the legacy row said (issue #986,
+		// design §2.1); an operator turns either off for one person.
+		voice, mayInvite := true, true
+		// A legacy invite that makes a member lands its joiner in its own
+		// channels its maker still stands behind (usableInviteTx refused one
+		// with none left) and also in the default channels as they are now. A
+		// member link already lands in the defaults, or in its landing
+		// channels (effectiveChannelsTx).
+		if r.link != linkMember {
+			defaults, err := openChannelsTx(ctx, tx)
+			if err != nil {
+				return err
+			}
+			kept = unionChannels(kept, defaults)
+		}
 		// A name that clashes with another by case or look-alike
 		// characters is taken (issue #441).
 		keys, err := s.claimNameTx(ctx, tx, name, 0)
@@ -865,15 +905,8 @@ func (s *Store) redeemInvite(ctx context.Context, codeHash, name, record string,
 			InvitedBy: r.createdBy, InviteID: r.id, MayInvite: mayInvite, VoiceAllowed: voice,
 		}
 
-		for _, c := range kept {
-			// A member who joins through an invite never gets the right to
-			// decide the channel's approvals (issue #450): the column's
-			// default of 1 is for members an operator adds.
-			if _, err := tx.ExecContext(ctx,
-				"INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide) VALUES (?, ?, ?, ?, 0)",
-				c.ID, pid, r.createdBy, now.UnixMilli()); err != nil {
-				return fmt.Errorf("store: redeem invite: add member: %w", err)
-			}
+		if err := addJoinerMembershipsTx(ctx, tx, pid, sql.NullInt64{Int64: r.createdBy, Valid: true}, kept, now); err != nil {
+			return fmt.Errorf("store: redeem invite: %w", err)
 		}
 
 		// The joiner's credential renews by being used (issue #439): its
@@ -1121,6 +1154,13 @@ func (s *Store) ListInvites(ctx context.Context, f InviteFilter, now time.Time) 
 		channels, err := inviteChannelsTx(ctx, s.db, r.id)
 		if err != nil {
 			return nil, err
+		}
+		// A member link with no landing channels lands in the default
+		// channels as they are now, which is what v1 lists for it.
+		if r.link == linkMember && len(channels) == 0 {
+			if channels, err = openChannelsTx(ctx, s.db); err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, r.wire(channels))
 	}

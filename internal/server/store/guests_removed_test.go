@@ -316,16 +316,14 @@ func TestGuestsRemovedRefusals(t *testing.T) {
 			}
 		})
 	}
-	// With the policy as it now always is, neither entry point of the store
-	// starts a visit.
+	// With the policy as it now always is, the store's one entry point that
+	// starts a visit, an invite's, starts none. The bare address has no
+	// visit path in the store at all (issue #987).
 	f := newInviteFixture(t)
 	req := open("general")
 	req.JoinAs = schema.InviteJoinBoth
 	inv := legacyCreateInvite(t, f.s, "system", f.op.ID, req, f.now)
 	legacyJoinSettings(t, f.s, schema.PutJoinSettingsRequestV1{OpenJoining: &account, OpenChannels: &[]string{"general"}})
-	if _, err := f.s.JoinAsGuest(f.ctx, GuestEntry{}); !errors.Is(err, ErrGuestsDisabled) {
-		t.Errorf("JoinAsGuest = %v, want ErrGuestsDisabled", err)
-	}
 	if _, err := f.s.RedeemInviteGuest(f.ctx, HashInviteCode(inv.Code), GuestEntry{}, f.now); !errors.Is(err, ErrGuestsDisabled) {
 		t.Errorf("RedeemInviteGuest = %v, want ErrGuestsDisabled", err)
 	}

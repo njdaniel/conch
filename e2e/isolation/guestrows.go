@@ -144,6 +144,9 @@ func guestRows() []row {
 			probe: func(*world, subject) probe { return get("/v1/whoami") }},
 		{route: "GET /v1/channels", what: "lists her channels", own: true, inspect: onlyThePlaza,
 			probe: func(*world, subject) probe { return get("/v1/channels") }},
+		// The channel directory is a community member's (issue #982): a
+		// guest's channels are its link's.
+		refused("GET /v1/directory/channels", "lists the channel directory", notAllowed, func(*world) probe { return get("/v1/directory/channels") }),
 		{route: "GET /v1/credentials/mine", what: "lists her sign-ins", own: true, inspect: oneSignIn,
 			probe: func(*world, subject) probe { return get("/v1/credentials/mine") }},
 		{route: "GET /v1/channels/{channel}/voice", what: "reads the plaza's voice presence (a guest holds no voice since A4, #1016)", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
@@ -414,15 +417,23 @@ func oneSignIn(w *world, _ api, body []byte) error {
 
 // offersAccounts requires that the front door offers an account and no
 // visit: guests are removed for now (issue #1005).
-func offersAccounts(_ *world, _ api, body []byte) error {
+func offersAccounts(w *world, _ api, body []byte) error {
 	var info schema.JoinInfoV1
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&info); err != nil {
 		return err
 	}
-	if info.Join.Guest || info.Join.GuestsFull || !info.Join.Account || info.ServerName != "conch" || !info.PasswordLogin {
-		return fmt.Errorf("the front door says %+v, want an account and no visit at conch", info)
+	// Issue #987: never a guest, voice always.
+	if info.Join.Guest || info.Join.GuestsFull || !info.Join.Account || !info.Voice || info.ServerName != "conch" || !info.PasswordLogin {
+		return fmt.Errorf("the front door says %+v, want an account, voice and no visit at conch", info)
+	}
+	// It names no channel at all (DisallowUnknownFields above), and so none
+	// of A's private channels; said again in bytes, for the record.
+	for _, name := range w.a.channels {
+		if bytes.Contains(body, []byte(name)) {
+			return fmt.Errorf("the front door names %q, a private channel of A's: %s", name, body)
+		}
 	}
 	return nil
 }

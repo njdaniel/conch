@@ -4,6 +4,7 @@
 // observe through the API with these credentials and act through the page.
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { channelSettingsResponseV1, listChannelsResponse, type ChannelSettingsRequestV1, type ChannelVisibility } from '../src/schema/generated';
 import { whoAmIResponseV1 } from '../src/schema/principal';
 import type { Validator } from '../src/schema/validate';
 
@@ -166,6 +167,17 @@ export async function ok<T>(
 
 export async function principalId(world: World, token: string): Promise<number> {
   return (await ok(world, token, 'GET', '/v1/whoami', whoAmIResponseV1)).id;
+}
+
+// setChannelVisibility makes the channel called name public or private, as
+// the operator. A default channel must be public, and the joining settings
+// refuse a private one (issue #987), so a spec that opens the bare address
+// to a channel the world made (every one is private) makes it public first.
+export async function setChannelVisibility(world: World, name: string, visibility: ChannelVisibility): Promise<void> {
+  const op = world.tokens.operator;
+  const channel = (await ok(world, op, 'GET', '/v1/channels', listChannelsResponse)).channels.find((c) => c.name === name);
+  if (channel === undefined) throw new Error(`no channel called ${name}`);
+  await ok(world, op, 'PUT', `/v1/channels/${String(channel.id)}/settings`, channelSettingsResponseV1, { visibility } satisfies ChannelSettingsRequestV1);
 }
 
 // inviteUrl is the link an invite's maker hands out (issue #440), as the web

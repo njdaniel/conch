@@ -60,6 +60,11 @@ const (
 	// denyAgentChannelCreate: channels are made by community members
 	// (issue #981); an agent is never one.
 	denyAgentChannelCreate = "agents_no_channel_create"
+	// denyAgentDirectory and denyAgentLeave: the channel directory and
+	// leaving are a community member's (issue #982); an agent's channels
+	// are set by its operator.
+	denyAgentDirectory = "agents_no_directory"
+	denyAgentLeave     = "agents_no_leave"
 )
 
 var (
@@ -480,6 +485,55 @@ func (a *agentScope) channelForAudience(ctx context.Context, name string, aud sc
 	return &grantedChannel{scope: a, channel: channel, audience: &aud}, nil
 }
 
+// memberChannel resolves the channel named name for an agent that is a member
+// of it, deciding nothing about its manifest: a reply's grant depends on its
+// root's audience, which is not known yet. An unknown channel and one the
+// agent is not a member of are the same answer.
+func (a *agentScope) memberChannel(ctx context.Context, name string) (*replyChannel, *schema.Error) {
+	channel, err := a.s.store.ChannelByName(ctx, name)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, errChannelNotFound
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "authz: find channel failed", "error", err)
+		return nil, errInternal
+	}
+	member, err := a.s.store.IsChannelMember(ctx, channel.ID, a.identity.principalID)
+	if err != nil {
+		slog.ErrorContext(ctx, "authz: check membership failed", "error", err)
+		return nil, errInternal
+	}
+	if !member {
+		a.s.auditAgentDenial(ctx, a.identity.principalID, a.subject, a.capability, channel.ID, denyNotMember)
+		return nil, errChannelNotFound
+	}
+	return &replyChannel{scope: a, channel: channel}, nil
+}
+
+// replyChannel is a channel the agent is a member of and nothing more: its
+// manifest has not been consulted. It is deliberately not a grantedChannel and
+// exposes only the two operations a reply needs, so that no tool can read or
+// post through a lookup that was never authorized. postReplyMCP decides the
+// manifest from the root's audience, between replyRoot and insertReply.
+type replyChannel struct {
+	scope   *agentScope
+	channel store.Channel
+}
+
+// replyRoot reads the root of a reply as the agent. An unseen, missing,
+// other-channel or reply root is store.ErrThreadNotFound.
+func (g *replyChannel) replyRoot(ctx context.Context, rootID int64) (store.Message, error) {
+	return g.scope.s.store.ReplyRootMessage(ctx, g.channel.ID, g.scope.reader(), rootID)
+}
+
+// insertReply stores the agent's reply to rootID and returns it with the
+// recipients resolved at post time. The author is the agent.
+func (g *replyChannel) insertReply(ctx context.Context, rootID int64, body string, payload *schema.Payload) (store.Message, []int64, error) {
+	return g.scope.s.store.InsertReplyMessage(ctx, store.ReplyPost{
+		ChannelID: g.channel.ID, AuthorID: g.scope.identity.principalID, RootID: rootID, Body: body, Payload: payload,
+	}, g.scope.reader())
+}
+
 // channelByID is channelByName for a channel id.
 func (a *agentScope) channelByID(ctx context.Context, id int64, permission schema.ChannelPermission) (*grantedChannel, *schema.Error) {
 	channel, err := a.s.store.ChannelByID(ctx, id)
@@ -750,4 +804,64 @@ func (s *Server) logAgentsWithoutManifest(ctx context.Context) {
 	if n > 0 {
 		slog.Warn("authz: agent principals without a manifest can do nothing until one is written with PUT /v1/principals/{id}/manifest", "agents", n)
 	}
+}
+
+// postReplyMCP is postReply (messages.go) for an agent, with the same order of
+// checks: channel membership (the unknown-channel answer); whether the agent
+// can see the root, where unknown, other-channel, a reply and not-visible all
+// give errThreadNotFound; only then the manifest, decided from the root's
+// audience (a channel-wide root needs the post permission, a net or whisper
+// root its own grant). The store judges the root's visibility again inside the
+// insert transaction.
+func (s *Server) postReplyMCP(ctx context.Context, scope *agentScope, channelName string, rootID int64, body string, payload *schema.Payload) (schema.PostMessageResponseV2, *schema.Error) {
+	authorID := scope.identity.principalID
+	granted, serr := scope.memberChannel(ctx, channelName)
+	if serr != nil {
+		return schema.PostMessageResponseV2{}, serr
+	}
+	root, err := granted.replyRoot(ctx, rootID)
+	if errors.Is(err, store.ErrThreadNotFound) {
+		return schema.PostMessageResponseV2{}, errThreadNotFound
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "mcp: find thread root failed", "error", err)
+		return schema.PostMessageResponseV2{}, errInternal
+	}
+	if root.Audience == nil {
+		if serr := scope.channel(ctx, granted.channel, schema.ChannelPermissionPost, errChannelNotFound); serr != nil {
+			return schema.PostMessageResponseV2{}, serr
+		}
+	} else {
+		agent := store.Principal{ID: authorID, Kind: store.PrincipalAgent}
+		allowed, err := s.authorizeScopedPost(ctx, agent, scope.subject, granted.channel.ID, root.Audience.Normalize(authorID))
+		var limited *rateLimitedError
+		if errors.As(err, &limited) {
+			return schema.PostMessageResponseV2{}, limited.schemaError()
+		}
+		if err != nil {
+			slog.ErrorContext(ctx, "mcp: authorize reply failed", "error", err)
+			return schema.PostMessageResponseV2{}, errInternal
+		}
+		if !allowed {
+			return schema.PostMessageResponseV2{}, errForbidden
+		}
+	}
+	stored, recipients, err := granted.insertReply(ctx, rootID, body, payload)
+	if serr := s.scopedPostRefusal(ctx, err, granted.channel.ID, authorID, scope.subject); serr != nil {
+		return schema.PostMessageResponseV2{}, serr
+	}
+	s.metrics.messagePosted(store.PrincipalAgent)
+	message := messageV2FromStore(stored)
+	// Persist-then-broadcast, as for the REST reply.
+	if stored.Audience != nil {
+		s.hub.BroadcastMessageV2(ctx, message, recipients)
+	} else {
+		messageV0 := messageV0FromStore(stored)
+		s.hub.BroadcastMessage(ctx, messageV0)
+		s.hub.BroadcastReply(ctx, messageV1FromStore(stored), message)
+		s.broadcaster.BroadcastMessage(ctx, messageV0)
+	}
+	s.events.notifyReadState(granted.channel.ID, authorID)
+	s.events.notifyMessage(granted.channel.ID, stored.ID, authorID)
+	return schema.PostMessageResponseV2{Message: message}, nil
 }

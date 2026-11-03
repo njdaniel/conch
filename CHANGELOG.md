@@ -8,6 +8,74 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Added
+
+- **The channel directory; members join and leave channels themselves**
+  (#982, community model I3b).
+  - `GET /v1/directory/channels` lists every public channel and the private
+    channels the caller is in, each with `joined`, `default`, `visibility`
+    and (when joined) `manages`, and no member counts or names.
+    `?scope=all` lists every channel with its `members` count, for holders
+    of `manage_channels` only. Agents and guests are refused.
+  - `POST /v1/channels/{channel}/join` joins a public channel, as a member
+    who does not decide its approvals and with its whole history. Joining a
+    channel you are in returns your membership unchanged. A private channel
+    you are not in answers the same 404 as one that does not exist. Agents
+    and guests get 403 `channel_not_joinable`.
+  - `POST /v1/channels/{channel}/leave` leaves any channel you are in, and a
+    manager's grant goes with it. The last member of a private channel may
+    not leave it (409 `channel_last_member`). A decider who leaves takes
+    their decisions with them: pending approvals count only the deciders
+    who remain.
+
+### Changed
+
+- **Open sign-up makes a full member, and the bare address never admits a
+  guest** (#987, ADR-013). The joining settings stay on
+  `GET/PUT /v1/join/settings`, with one switch, `open_signup`, in place of the
+  four joining modes.
+  - While open sign-up is on, `POST /v1/join/account` makes the member a
+    member link makes: the default channels with the whole of their history
+    (no history bound), no right to decide approvals, voice on, and the
+    right to make member links on. Before, such an account started with a
+    history bound in each channel and no right to invite. `joining_paused`
+    still pauses it, and turning it on needs at least one default channel.
+  - `open_channels` now refuses a private channel with
+    `409 channel_settings_conflict`, where it used to make the channel public.
+    Make a channel public first with `PUT /v1/channels/{id}/settings`.
+  - `join_voice: false` is refused with `409 join_policy_conflict`: every
+    member may use voice. `conch admin join set --voice off` gets that answer.
+  - `POST /v1/join/guest` always answers `403 guests_disabled`, and
+    `GET /v1/join` never offers a guest and always offers voice. Guests, when
+    they return, come through guest links (#1004).
+  - The settings answer carries `default_channels` and warns
+    `no_default_channel` when no channel is a default channel.
+- **Redeeming a link makes a full member** (#986, ADR-013).
+  `POST /v2/invites/redeem` with a member link lands the joiner in the
+  default channels as they are at that moment (none is fine), or in the
+  link's landing channels, with the whole history, no right to decide
+  approvals, voice on and the right to make member links on.
+  - An invite made before the upgrade still lands in its own channels its
+    maker still stands behind, and now also in the default channels. One with
+    none of its own channels left is still refused.
+  - Every joiner has voice and may make member links, whatever the invite
+    said: both are switches an operator turns off for one person
+    (`PUT /v1/principals/{id}/voice-permission`, `.../invite-permission`).
+    Before, an invite could withhold voice, and only an operator's invite
+    could pass on the right to invite.
+  - For old clients, `GET /v1/invites` and `POST /v1/invites/preview` show a
+    member link as an `open` invite into the default channels as they are
+    now, with voice, no right to invite passed on, joining as an account, and
+    its expiry (or the never-expires sentinel).
+  - For an invite made before the upgrade, `GET /v1/invites` still shows the
+    voice and right to invite it was made with, and its list and preview show
+    only its own channels, not the default channels its joiner now also
+    lands in. Redemption follows the rules above, not those fields.
+  - Such an invite keeps today's rules for its own channels, including one
+    made private since: it still lands its joiner there while its maker stands
+    behind it (an operator holding `manage_channels`, or a member still in the
+    channel), until it expires or an operator closes it.
+
 ### Security
 
 - Any role change (a promotion, a demotion, an owner-mark change) now clears every recent-auth proof of that person, so a member's password-only re-authentication no longer satisfies an operator route that needs password and code (#1054). Their sessions stand; they re-authenticate on the next sensitive action. The `principal_role_changed` audit row gains `proofs_cleared=N`.

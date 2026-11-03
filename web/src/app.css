@@ -4011,3 +4011,44 @@ button.link {
     min-height: 2.75rem;
   }
 }
+
+/* A private channel's row (issue #1183): a lock where the # is. Its words,
+   "private channel", describe the button and are not in its name. */
+.channel-list li.private > button::before {
+  content: none;
+}
+
+.channel-list li > button .icon {
+  flex: none;
+  width: 0.85rem;
+  height: 0.85rem;
+  margin-right: 0.3rem;
+}
+
+/* The confirmation of a settings change, in place under the row. */
+.channel-list .channel-settings-ask {
+  flex: 1 0 100%;
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+  justify-items: start;
+}
+
+.channel-list .channel-settings-ask p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-settings-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.actions-menu .menu-reason {
+  max-width: 14rem;
+  padding: 0 var(--s2) var(--s1);
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
