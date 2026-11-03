@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/njdaniel/conch/e2e/internal/routetable"
@@ -117,5 +118,73 @@ func TestCheckRefusal(t *testing.T) {
 				t.Errorf("checkRefusal = %v, want ok=%v", err, tc.ok)
 			}
 		})
+	}
+}
+
+// TestGateCoverage: a gate with a row in neither map is missing; a row whose
+// phrase no phase holds, an entry for a gate the list lacks and a gate in
+// both maps are stale.
+func TestGateCoverage(t *testing.T) {
+	gates := []string{"a.go A", "b.go B", "c.go C"}
+	source := []string{"the row of A", "x"}
+	rows := map[string]string{"a.go A": "the row of A"}
+	pending := map[string]string{"b.go B": "#1", "c.go C": "#2"}
+	for _, tc := range []struct {
+		name                  string
+		gates                 []string
+		rows, pending         map[string]string
+		missing, noRow, stale []string
+	}{
+		{"every gate has a row or a pending note", gates, rows, pending, nil, nil, nil},
+		{"a gate added with no row", append([]string{"d.go D"}, gates...), rows, pending, []string{"d.go D"}, nil, nil},
+		{"a row whose phrase is gone", gates, map[string]string{"a.go A": "a phrase nobody wrote"}, pending, nil, []string{"a.go A -> a phrase nobody wrote"}, nil},
+		{"a row for a gate removed", gates[1:], rows, pending, nil, nil, []string{"a.go A"}},
+		{"a pending note for a gate removed", gates[:1], rows, pending, nil, nil, []string{"b.go B", "c.go C"}},
+		{"a gate with a row and a pending note", gates, rows, map[string]string{"a.go A": "#3", "b.go B": "#1", "c.go C": "#2"}, nil, nil, []string{"a.go A (in both maps)"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			missing, noRow, stale := gateCoverage(tc.gates, tc.rows, tc.pending, source)
+			if !slices.Equal(missing, tc.missing) || !slices.Equal(noRow, tc.noRow) || !slices.Equal(stale, tc.stale) {
+				t.Errorf("gateCoverage = missing %q, noRow %q, stale %q; want %q, %q, %q", missing, noRow, stale, tc.missing, tc.noRow, tc.stale)
+			}
+		})
+	}
+}
+
+// TestEveryPermissionRouteHasARestrictedRow is the coverage rule of design
+// §7.7 item 2 against this repository: every route of class accessPermission
+// is read by the restricted phase (which asks each one), and every handler
+// check of §7.3, the gates the server's TestEnforcedPermissionsAreHonest
+// lists, has a restricted-operator or restricted-member row or a pending
+// note. A permission route or a gate added without a row fails here.
+func TestEveryPermissionRouteHasARestrictedRow(t *testing.T) {
+	repo, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unread, err := permissionRouteCount(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unread) > 0 {
+		t.Errorf("routes of class accessPermission the restricted phase does not read (write each as rt(\"...\", accessPermission, ...).needs(schema.Perm...) on one line): %s", strings.Join(unread, ", "))
+	}
+	gates, err := gateKeys(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := rowLiterals(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, noRow, stale := gateCoverage(gates, gateRows, pendingGates, source)
+	if len(missing) > 0 {
+		t.Errorf("handler checks (permissionGates, internal/server/permissions_test.go) with no restricted row in gateRows and no note in pendingGates (e2e/isolation/gaterows.go): %s", strings.Join(missing, ", "))
+	}
+	if len(noRow) > 0 {
+		t.Errorf("gateRows name a phrase that restricted.go and preset.go do not hold: %s", strings.Join(noRow, "; "))
+	}
+	if len(stale) > 0 {
+		t.Errorf("gateRows or pendingGates entries that name no gate, or a gate twice: %s", strings.Join(stale, ", "))
 	}
 }
