@@ -4155,3 +4155,176 @@ button.link {
   gap: var(--s1) var(--s2);
   overflow-wrap: anywhere;
 }
+
+/* The console's Channels section (ADR-014 design §10.2, §10.3, issue #1021):
+   one row per channel with its ⋯ menu. On a phone the menu is a sheet from the
+   bottom of the screen, every item at least 44px; nothing scrolls sideways. */
+.channels-section {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.channels-section p,
+.channels-section ul {
+  margin: 0;
+}
+
+.channels-admin-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.channels-admin-list > li {
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  min-width: 0;
+}
+
+.channels-section .channel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.channels-section .channel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.channels-section .channel-panel {
+  display: grid;
+  gap: var(--s2);
+}
+
+.channels-section .channel-panel ul {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.channels-section .channel-panel li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+@media (max-width: 699px) {
+  .channels-section .actions-menu {
+    position: fixed;
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 50;
+    max-height: 70vh;
+    overflow-y: auto;
+    padding: var(--s2);
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+
+  .channels-section .actions-menu .menu-reason {
+    max-width: none;
+  }
+}
+
+/* The ⋯ button sits in its row, not at the corner of the drawer. */
+.channels-section .message-menu {
+  position: relative;
+  top: auto;
+  right: auto;
+  flex: none;
+}
+
+/* The Members section and the member panel's person menu (ADR-014 design
+   §10.2, §10.3, issue #1020): the ⋯ button at the row's edge, the question or
+   form an item opens under the name, and on a phone the menu a sheet from the
+   bottom, every item and control at least 44px. */
+.member-line:empty {
+  display: none;
+}
+
+.community-members .person-panel {
+  flex-basis: 100%;
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.community-members .person-form {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.community-members .person-form p,
+.community-members .person-form fieldset {
+  margin: 0;
+}
+
+.community-members .person-form .choice {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 2.75rem;
+}
+
+.community-members .secret-once {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.community-members .secret-once input {
+  width: 100%;
+  min-width: 0;
+}
+
+.community-members .member-confirm .actions,
+.community-members .person-form .actions,
+.community-members .secret-once .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+@media (max-width: 699px) {
+  .community-members .actions-menu {
+    position: fixed;
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 50;
+    max-height: 70vh;
+    overflow-y: auto;
+    padding: var(--s2);
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+
+  .community-members .actions-menu .menu-reason {
+    max-width: none;
+  }
+
+  .community-members .person-panel button,
+  .community-members .person-panel input,
+  .community-members .person-panel select {
+    min-height: 2.75rem;
+  }
+
+  .community-members .more-actions {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+}

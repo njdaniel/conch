@@ -2392,6 +2392,30 @@ export const createCredentialResponseV1 = object<CreateCredentialResponseV1>({
   token: str,
 });
 
+// schema.CreateHookRequest
+export interface CreateHookRequest {
+  channel: string;
+  principal: number;
+  label?: string;
+}
+
+export const createHookRequest = object<CreateHookRequest>({
+  channel: str,
+  principal: int,
+  label: optional(str),
+});
+
+// schema.CreateHookResponse
+export interface CreateHookResponse {
+  id?: number;
+  token: string;
+}
+
+export const createHookResponse = object<CreateHookResponse>({
+  id: optional(int),
+  token: str,
+});
+
 // schema.RenamePrincipalRequestV1
 export interface RenamePrincipalRequestV1 {
   name: string;
@@ -3578,6 +3602,19 @@ export const createChannelResponseV1 = object<CreateChannelResponseV1>({
   channel: channelV0,
 });
 
+// schema.ChannelAuthorV1
+export interface ChannelAuthorV1 {
+  principal_id: number;
+  name: string;
+  kind: PrincipalKind;
+}
+
+export const channelAuthorV1 = object<ChannelAuthorV1>({
+  principal_id: int,
+  name: str,
+  kind: principalKind,
+});
+
 // schema.ChannelListingV1
 export interface ChannelListingV1 {
   id: number;
@@ -3588,6 +3625,7 @@ export interface ChannelListingV1 {
   joined: boolean;
   manages?: boolean;
   members?: number;
+  managers?: ChannelAuthorV1[];
 }
 
 export const channelListingV1 = object<ChannelListingV1>({
@@ -3599,6 +3637,7 @@ export const channelListingV1 = object<ChannelListingV1>({
   joined: bool,
   manages: optional(bool),
   members: optional(int),
+  managers: optional(array(channelAuthorV1)),
 });
 
 // schema.ChannelDirectoryResponseV1
@@ -3797,19 +3836,6 @@ export interface DirectoryChangedV1 {
 
 export const directoryChangedV1 = object<DirectoryChangedV1>({
   schema: vocab<typeof directoryChangedV1Schema>({ [directoryChangedV1Schema]: true }),
-});
-
-// schema.ChannelAuthorV1
-export interface ChannelAuthorV1 {
-  principal_id: number;
-  name: string;
-  kind: PrincipalKind;
-}
-
-export const channelAuthorV1 = object<ChannelAuthorV1>({
-  principal_id: int,
-  name: str,
-  kind: principalKind,
 });
 
 // schema.ChannelAuthorsResponseV1

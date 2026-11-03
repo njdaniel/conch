@@ -161,9 +161,9 @@ func adminPrincipalVoice(ctx context.Context, r *adminRun) error {
 	return r.say("voice is now %s for %d\n", state, r.id)
 }
 
-// maxDirectoryPages bounds how many pages `directory members` follows, so a
-// server whose cursor always advances cannot keep it reading for ever.
-const maxDirectoryPages = 1000
+// maxDirectoryPages bounds how many pages `directory members` follows (see
+// maxListPages).
+const maxDirectoryPages = maxListPages
 
 var directoryRefusals = refusalLines{"forbidden": communityOnly}
 
