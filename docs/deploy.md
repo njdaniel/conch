@@ -570,7 +570,7 @@ conch admin permissions set make_member_links --members on
 Warnings come back with `show` and with every change. They are never refusals:
 
 - **`open_signup_on`**: members can't make member links, but open sign-up is on, so the server's address still lets anyone make an account. In the browser it is shown in **Server** and in **Roles and permissions**. On a personal server, turn open sign-up off.
-- **`default_channel_exposes_members`**: the directory is off, but a default channel still shows its people to each other. This is the reason a default channel defeats a personal server: everyone who starts in it can see everyone else in it. The vocabulary, the console and the CLI carry words for this warning, but **the server doesn't raise it yet**, so check for default channels yourself (below).
+- **`default_channel_exposes_members`**: members can't see the directory, but a default channel still shows its people to each other. This is the reason a default channel defeats a personal server: everyone who starts in it can see everyone else in it. The server raises it whenever members lack `see_member_directory` and at least one default channel exists. The browser shows it in **Settings → Server** and in **Roles and permissions**; the CLI prints it with `permissions show` and after every `permissions set` and `permissions preset`. It is also in the answer to marking a channel default, and `conch admin channel settings --default on <channel>` prints it then; the browser's **Make default channel** does not show it at that moment, so look in **Server**.
 
 Applying a preset has live effects. Turning `use_voice` off removes everyone it now withholds from voice at once, and turning `share_screen` off ends their shares. Turning `make_member_links` off doesn't close the links members already made: they stop working while the maker lacks the permission, and work again when it comes back. Nobody's sign-in changes.
 
@@ -579,20 +579,26 @@ Applying a preset has live effects. Turning `use_voice` off removes everyone it 
 You hold the conversations; the people on the server shouldn't see each other. Do this once, in this order.
 
 1. **Apply the personal preset** (above). Do it before anyone joins.
-2. **Make sure no channel is a default channel.** A default channel is where every new person starts, and the people in it see each other. In the browser, **Settings → Channels** marks default channels; for one, open its **⋯** menu and choose **Stop being a default channel**. With the CLI, `conch admin join status` lists "default channels", and `conch admin channel settings <channel> --default off` removes one. A fresh server has none. Also keep **open sign-up** off (**Settings → Server → Joining**; `conch admin join set --open-signup off`).
-3. **Create one private channel for each conversation.** Browser: **Settings → Channels → New channel**, private. CLI: `conch admin channel create alice-chat` (you are its only member, and it is private).
-4. **Make a link for each person, landing in their channel.** A member link lands the person in the default channels, and a personal server has none, so name the channel yourself:
+2. **Make sure no channel is a default channel.** A default channel is where every new person starts, and the people in it see each other. In the browser, **Settings → Channels** marks default channels; for one, open its **⋯** menu and choose **Stop being a default channel**. With the CLI, `conch admin join status` lists "default channels", and `conch admin channel settings --default off <channel>` removes one. A fresh server has none. With no default channel, `conch admin join status` and **Settings → Server → Joining** warn that a member link lands nobody anywhere: on a personal server that is what you want, step 5 puts people in. Also keep **open sign-up** off (**Settings → Server → Joining**; `conch admin join set --open-signup off`).
+3. **Create one private channel for each conversation.** Browser: **Settings → Channels → New channel**, private. CLI: `conch admin channel create alice-chat` (you are its only member, and it is private). Do this first: the browser's **Add a person** button (next step) is offered only once you are in at least one channel.
+4. **Make a member link for each person.** A member link names no channel: whoever opens it picks a name and a password, becomes a member and lands in the server's default channels, which on a personal server are none. As the owner you are never held back by `make_member_links`. In the browser, **Settings → Members → Add a person** opens the **Invite someone** panel; choose how long the link lasts and how many people may use it (one, for a personal server), then **Make link**. It shows the link once. With the CLI:
 
    ```sh
-   conch admin invite create --landing-channel alice-chat --uses 1
+   conch admin invite create --uses 1
    ```
 
-   It prints the link once. Send it to Alice. She opens it, picks a name and a password, and lands in `alice-chat` and nowhere else. In the browser, **Settings → Members → Add a person** opens the **Invite someone** panel, where you tick the channel; the panel makes the older personal or open invite, not a member link, and doesn't offer a landing channel. Use the CLI when you want a member link.
-5. **Add a person to another conversation later.** Browser: **Settings → Channels**, the channel's **⋯** menu, **Add person…**. CLI: `conch admin member add <channel> --name alice` (or the id). Someone you add this way can decide the channel's approvals unless you add `--no-decide`.
+   It prints the link once. Send it to Alice. She opens it and lands in no channel: her list is empty until step 5.
+5. **Add each person to their channel.** Browser: **Settings → Channels**, the channel's **⋯** menu, **Add person…**, then their name; or **Settings → Members**, the person's **⋯** menu, **Add to a channel…**. CLI: `conch admin member add alice-chat --name alice` (or `conch admin member add alice-chat <id>`). On a personal server **Add person…** is the first item in the menu. The browser and `--name` add the person without the right to decide the channel's approvals; adding by id from the CLI gives that right unless you add `--no-decide`.
 
-What a member sees now: themself and the people in the channels they are in. They can't create channels, make links, or list the directory. To check, sign in as a member and run `conch admin directory members`. It lists only the member and whoever shares a channel with them (you, in a one-to-one channel). A second member who isn't in the channel isn't listed.
+   To bring Alice into another conversation later, add her to that channel the same way.
 
-Two things to keep in mind. Two people in the same channel see each other, so keep one channel per conversation. And the owner and every operator see everyone, in **Members**.
+What a member sees now: themself and the people in the channels they are in. They can't create channels, make links, or list the directory. To check, sign in as a member and run `conch admin directory members`. It lists the member and whoever shares a channel with them (you, in a one-to-one channel). A second member who isn't in the channel isn't listed.
+
+Three things to keep in mind.
+
+- Two people in the same channel see each other, so keep one channel per conversation.
+- The owner and every operator see everyone, in **Members**.
+- **The preset does not turn off the channel directory.** There is no permission for it. A member's **Browse channels** (REST: `GET /v1/directory/channels`) still lists every public channel on the server, and any member may join one, after which they see its people. Members can't create channels under this preset, so this only matters if you or an operator make a public channel. On a personal server, keep every channel private.
 
 ### A group server
 
@@ -605,7 +611,7 @@ The defaults are the group server: members create public and private channels, m
 
 ### Member links and the invite brake
 
-A member link is how a person joins. It names no one: whoever opens it picks a name and a password and becomes a full member, in the default channels or in the landing channels the link names. A member can make one only while `make_member_links` is on for members and the member-link switch on them is on. An operator can make one while the operators' cell is on. Landing in channels other than the default needs `manage_channels`.
+A member link is how a person joins. It names no one: whoever opens it picks a name and a password and becomes a full member, in the server's default channels. The browser's link always lands people there: the **Invite someone** panel says "A link lands the people who use it in the server's default channels." and offers no channel. A member can make one only while `make_member_links` is on for members and the member-link switch on them is on. An operator can make one while the operators' cell is on. From the CLI (and the API), a holder of `manage_channels` can name other channels with `--landing-channel`, repeated for each one, in place of the default channels; that is not offered in the browser.
 
 ```sh
 conch admin invite create --expires 24h --uses 5 --landing-channel alice-chat
@@ -614,7 +620,7 @@ conch admin invite joiners <id>        # who came in through link <id>
 conch admin invite close <id>
 ```
 
-The browser has the same list under **Settings → Server → Joining → Invites**: who made each link, how many people came in, **Show joiners of link N** and **Close link N**. An operator without `manage_members` sees only its own links.
+The browser has two views of the same links. **Settings → Server → Joining → Invites** lists them: "Link #N · made by <name>", its uses, how many joiners, when it expires or closed, the channels it lands in, **Show joiners of link N** (who came in) and **Close link N**. Someone without `manage_members` sees only the links they made. The **Invite someone** panel (the lobby for a member; **Settings → Members → Add a person** for an owner or operator; a channel's **⋯** menu has **Invite people**) lists your own links with **Joiners (N)** and **Close**. **Disable joiners**, which signs out and disables the people a link brought in (and closes the link), is in that panel and needs `manage_members`; the Settings list doesn't have it.
 
 Three brakes:
 
@@ -622,7 +628,7 @@ Three brakes:
 - **One person.** **Stop member links** in their **⋯** menu, or `conch admin principal invite-permission <id> off`. It closes their open links. It doesn't bind operators.
 - **Everyone.** Turn `make_member_links` off for members (the personal preset does).
 
-Members who join through **open sign-up** hold the member-link switch on, so, while members hold `make_member_links`, they can make links straight away. They **keep it after open sign-up is switched off**. If that isn't what you want, close their links (`conch admin invite close <id>`), switch their link-making off (`conch admin principal invite-permission <id> off`), or remove the people a link brought in (`conch admin invite disable-joiners <id>`, which asks first). `conch admin directory members` shows `may-invite on` and no inviter for open sign-up accounts.
+Members who join through **open sign-up** hold the member-link switch on, so, while members hold `make_member_links`, they can make links straight away. They **keep it after open sign-up is switched off**. If that isn't what you want, close their links (`conch admin invite close <id>`), switch their link-making off (`conch admin principal invite-permission <id> off`), or remove the people a link brought in (`conch admin invite disable-joiners <id>`, which asks first; **Disable joiners** in the panel). `conch admin directory members` shows `may-invite on` and no inviter for open sign-up accounts.
 
 ### Channel privacy and default channels
 
@@ -643,21 +649,23 @@ A channel manager who isn't an operator manages their own channels from the chan
 
 ### Hiding members from each other
 
-The switch is `see_member_directory` for members. With it off, a member sees themself and the people in the channels they are in. Everything else about them (that they exist, their name) is not shown. Operators always see everyone, whatever the cell says.
+The switch is `see_member_directory` for members. With it off, a member sees three kinds of people: themself, the people in the channels they are in, and the people who joined through a member link they made. Everything else about anyone else (that they exist, their name) is not shown. Owners and operators always see everyone, whatever the cell says.
+
+A member sees each person's id, name, role and join time and nothing else. Who invited whom is shown only to holders of `manage_members` (**Members** shows "invited by <name>" to them), so a member can't see who invited them, or who invited anyone else. Someone who holds a link's code sees the name of the person who made it when they open it, as before.
 
 Browser: **Settings → Server** has the line "Members see: only people they share a channel with" (or "everyone"), which links to the cell in **Roles and permissions**. CLI: `conch admin permissions set see_member_directory --members off`, or apply the personal preset.
 
-What it doesn't hide: the people in a channel you are both in, and the people in a default channel. Hiding members is only as strong as your channels.
+What it doesn't hide: the people in a channel you are both in (a default channel included), and, for a member who can make links, the people who joined through theirs. The personal preset turns link-making off for members, so there are none. If you turn `make_member_links` back on for members on a server where the directory is off, each maker sees the people their links brought in. Hiding members is only as strong as your channels.
 
 ### What an operator can and can't see
 
 An operator never reads a channel it isn't a member of: membership is the boundary for messages, and operators get no exemption. What operators can do beyond that is what you grant:
 
 - **With `manage_channels`** (on for operators by default) an operator sees every channel's name, adds and removes members, and so can add itself to a private channel. With `act_as_members` (also on by default) it can sign in as any member who isn't an owner. Treat an operator with these as someone you trust with the content. The way to hold an operator back is to turn these permissions off for the operators' column, not to rely on the title.
-- **Without `manage_channels`** an operator sees only the channels it is in, with a count of the rest: invites, hooks and the joining settings show "and N other channels" (`other_channels`, `other_hooks`, `other_open_channels`), and a request for a channel it isn't in answers as if it didn't exist. It still learns that channels it can't see exist, and in three ways learns their names:
+- **Without `manage_channels`** an operator sees only the channels it is in, with a count of the rest: invites, hooks and the joining settings show "and N other channels" (`other_channels`, `other_hooks`, `other_open_channels`), and a request for a channel it isn't in answers as if it didn't exist. Three things remain. The first two show it a channel's name, the third only that channels exist:
   - **The audit export.** The trail names every member and every private channel. That is why `read_audit_log` is off for operators by default and needs a recent sign-in from anyone but an owner. Turning it on for operators shows them everything.
   - **A problem report's own text.** The server removes channel and member names from the report it keeps, but a person can write a name in the text of their report, and every operator can read reports.
-  - **The counts**, which say that channels exist but not which.
+  - **The counts**, which say that channels exist but not which. This one gives no name.
 - Whoever has the host can read the database. See [Trust and scope](../README.md#trust-and-scope).
 
 ### Taking `act_as_members` away
@@ -668,10 +676,10 @@ The change tells you what it left. In the browser the list "Still working after 
 
 ```
   credential 12 (principal 4, issued by 2): conch admin credential revoke 12
-  hook 3 (principal 4, issued by 2): DELETE /v1/hooks/3 (the API; conch has no hook command)
+  hook 3 (principal 4, issued by 2): conch admin hook revoke 3
 ```
 
-Revoke what you don't want. The same gap exists when you **demote or disable an operator**: what they issued stays live until you revoke it. The audit trail names the issuer of every credential and hook (`credential_created`, `credential_rotated`, `hook_created`), so `conch audit export` finds them. Recording the issuer on the credential itself, and listing these on demotion and disable, is [#1024](https://github.com/njdaniel/conch/issues/1024), not built yet.
+Revoke what you don't want. The list is only in the answer to that change; it isn't kept, so revoke from it before you leave the page or the terminal. It comes from the audit trail: a credential or hook issued before the trail recorded who issued it (before 2026-10-08) isn't on it, and neither are an owner's own, since owners keep `act_as_members`. The same gap exists when you **demote or disable an operator**: what they issued stays live until you revoke it. The audit trail names the issuer of every credential and hook (`credential_created`, `credential_rotated`, `hook_created`), so `conch audit export` finds them. Recording the issuer on the credential itself, and listing these on demotion and disable, is [#1024](https://github.com/njdaniel/conch/issues/1024), not built yet.
 
 ## A second instance
 

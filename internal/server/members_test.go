@@ -150,6 +150,8 @@ func TestChannelContentLeak(t *testing.T) {
 		{"v2 websocket", "GET", "/v2/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
 		// Listing members is allowed to members and to operators only.
 		{"member list", "GET", "/v1/channels/%s/members", "", false, [4]int{ok, notFound, notFound, ok}},
+		// Naming authors (design §13.5) sits behind the same gate.
+		{"authors", "GET", "/v1/channels/%s/authors?ids=1", "", false, [4]int{ok, notFound, notFound, ok}},
 		// The membership writes (issue #790) are an operator's or a manager's:
 		// an agent is refused before any lookup (the same 403 for an unknown
 		// channel), a member who does not manage gets 403, and a non-member

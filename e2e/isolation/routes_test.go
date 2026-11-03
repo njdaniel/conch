@@ -188,3 +188,20 @@ func TestEveryPermissionRouteHasARestrictedRow(t *testing.T) {
 		t.Errorf("gateRows or pendingGates entries that name no gate, or a gate twice: %s", strings.Join(stale, ", "))
 	}
 }
+
+// TestHideReadsAreRoutes: every read the hide-members rows scan alice's
+// answers of (hiderows.go) is a request its route serves, and the route is
+// in the table.
+func TestHideReadsAreRoutes(t *testing.T) {
+	repo, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tbl, err := routetable.Read(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkHideReadsAreRoutes(tbl); err != nil {
+		t.Fatal(err)
+	}
+}

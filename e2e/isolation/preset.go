@@ -16,15 +16,20 @@ import (
 //     use_voice and share_screen;
 //  2. member link creation is refused, 403 invite_not_allowed naming
 //     make_member_links (design §7.4: one code per question, whichever check
-//     refused), by v2 and by v1;
+//     refused), by v2; v1 answers 409 invite_kind_retired to a member
+//     whatever the right (issue #990);
 //  3. member channel creation is refused, 403 permission_denied naming the
 //     create permission for the body's visibility;
-//  4. the directory rows (placeholder: #988);
-//  5. applies preset group, after which link and channel creation work again
-//     and the directory widens (placeholder: #988).
+//  4. the directory rows (issue #1190, community-model §13.9; hiderows.go):
+//     the directory narrows to the people the viewer may know, bob's and
+//     zed's names and ids are markers in alice's register across the routes
+//     she reads, carol is known through her link, the authors route names
+//     the departed author alone, and conch.directory_changed.v1 reaches
+//     only the viewers whose answer changed;
+//  5. applies preset group, after which link and channel creation work again,
+//     the directory widens and the signal arrives.
 //
-// A step that waits for a route that does not exist yet is a marked
-// placeholder naming the issue that fills it.
+// Both applications are signalled to the four sockets the phase holds open.
 
 // applyPreset applies a preset as the owner, through the real PUT.
 func (w *world) applyPreset(p schema.PermissionPreset) error {
@@ -76,8 +81,20 @@ func (w *world) presetPhase() (int, error) {
 		return 0, err
 	}
 
-	// 1. Personal, through the real PUT.
-	if err := w.applyPreset(schema.PresetPersonal); err != nil {
+	// The hide-members world (hiderows.go), made while members still hold
+	// see_member_directory, with its sockets open.
+	mtag := newTag(w.tag, w.btag, w.ptag, w.qtag, tag)
+	hw, err := w.buildHideWorld(name, mtag, newTag(w.tag, w.btag, w.ptag, w.qtag, tag, mtag))
+	if err != nil {
+		return 0, fmt.Errorf("the hide-members world: %w", err)
+	}
+	defer hw.closeSockets()
+
+	// 1. Personal, through the real PUT: every member and operator with a
+	// socket is told the directory may have changed.
+	if err := hw.signalStep("the owner applies personal",
+		func() error { return w.applyPreset(schema.PresetPersonal) },
+		hw.aliceF, hw.bobF, hw.zedF, hw.ownerF); err != nil {
 		return 0, fmt.Errorf("the owner applies personal: %w", err)
 	}
 	rows := 0
@@ -89,8 +106,13 @@ func (w *world) presetPhase() (int, error) {
 	}
 	rows++
 	status, body, err = m.api.do(http.MethodPost, "/v1/invites", schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{room}})
-	if err := refusedNaming("a member makes a v1 link under personal", status, body, err, schema.ErrorCodeInviteNotAllowed, schema.PermMakeMemberLinks); err != nil {
-		return rows, err
+	// The v1 route refuses a caller without manage_members before it looks at
+	// the body (issue #990): 409 invite_kind_retired, naming no permission.
+	if err != nil {
+		return rows, fmt.Errorf("a member makes a v1 link under personal: %w", err)
+	}
+	if e, derr := errorOf(body); status != http.StatusConflict || derr != nil || e.Code != schema.ErrorCodeInviteKindRetired || e.Permission != "" {
+		return rows, fmt.Errorf("a member makes a v1 link under personal = %d %s, want 409 %s naming no permission", status, body, schema.ErrorCodeInviteKindRetired)
 	}
 	rows++
 
@@ -110,14 +132,19 @@ func (w *world) presetPhase() (int, error) {
 		rows++
 	}
 
-	// 4. PLACEHOLDER (#988): the directory rows. Under personal the member
-	// column lacks see_member_directory, so GET /v1/directory/members lists
-	// the may-know list (scope shared_channels) and community-model §13.9's
-	// rows run unchanged. #988 fills this in; #983's route answers today
-	// but the may-know predicate is its.
+	// 4. The directory rows: under personal the member column lacks
+	// see_member_directory, so the directory lists the may-know list (scope
+	// shared_channels) and community-model §13.9's rows run.
+	n, err := w.hidePersonalRows(hw)
+	rows += n
+	if err != nil {
+		return rows, fmt.Errorf("the directory under personal: %w", err)
+	}
 
 	// 5. Group: the column is back, and what was refused works.
-	if err := w.applyPreset(schema.PresetGroup); err != nil {
+	if err := hw.signalStep("the owner applies group",
+		func() error { return w.applyPreset(schema.PresetGroup) },
+		hw.aliceF, hw.bobF, hw.zedF, hw.ownerF); err != nil {
 		return rows, fmt.Errorf("the owner applies group: %w", err)
 	}
 	status, body, err = memberLink()
@@ -129,7 +156,12 @@ func (w *world) presetPhase() (int, error) {
 		return rows, err
 	}
 	rows += 2
-	// PLACEHOLDER (#988): the directory widens to everyone, and
-	// conch.directory_changed.v1 arrives on the member's events socket.
+	// The directory widens to everyone (the signal arrived above, on every
+	// socket).
+	n, err = w.hideGroupRows(hw)
+	rows += n
+	if err != nil {
+		return rows, fmt.Errorf("the directory under group: %w", err)
+	}
 	return rows, nil
 }

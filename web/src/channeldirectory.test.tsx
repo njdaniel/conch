@@ -305,7 +305,7 @@ describe('the community member panel', () => {
   const bot: ServerMemberV1 = { id: 3, kind: 'agent', name: 'builder', created_at: at };
 
   function panel(ids = '1') {
-    return render(<CommunityMembers viewer={2} channelIds={ids} onUnauthorized={() => seen.unauthorized++} />);
+    return render(<CommunityMembers viewer={2} channelIds={ids} directoryTick={0} onUnauthorized={() => seen.unauthorized++} />);
   }
 
   it('lists every member the server sent, marks agents and shows roles, with no guests and no counts', async () => {
@@ -361,7 +361,7 @@ describe('the community member panel', () => {
     const out = panel();
     await screen.findByText(/invited by ada/);
     people.mockResolvedValueOnce({ ok: true, value: { members: [ada, bob] } });
-    out.rerender(<CommunityMembers viewer={2} channelIds="1" permissionsTick={1} onUnauthorized={() => seen.unauthorized++} />);
+    out.rerender(<CommunityMembers viewer={2} channelIds="1" permissionsTick={1} directoryTick={0} onUnauthorized={() => seen.unauthorized++} />);
     await waitFor(() => {
       expect(screen.queryByText(/invited by/)).toBeNull();
     });
@@ -369,35 +369,43 @@ describe('the community member panel', () => {
     expect(people).toHaveBeenCalledTimes(2);
   });
 
-  it('reads again once when the tab comes back, not twice (focus does not also reload)', async () => {
+  it('does not read on focus or a tab coming back (the server says when it changed), and has no Refresh', async () => {
     people.mockResolvedValue({ ok: true, value: { members: [bob] } });
     panel();
     await screen.findByRole('list', { name: 'People' });
-    expect(people).toHaveBeenCalledTimes(1);
     act(() => {
       window.dispatchEvent(new Event('focus'));
       document.dispatchEvent(new Event('visibilitychange'));
     });
-    await waitFor(() => {
-      expect(people).toHaveBeenCalledTimes(2);
-    });
     await act(async () => {
       await Promise.resolve();
     });
-    expect(people).toHaveBeenCalledTimes(2);
+    expect(people).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: 'Refresh' })).toBeNull();
   });
 
-  it('is read again when the person’s own channels change, and on Refresh; a 401 signs out', async () => {
+  it('replaces its list on a directory tick: a renamed person shows and a hidden one is gone', async () => {
+    people.mockResolvedValueOnce({ ok: true, value: { members: [ada, bob, bot] } });
+    const out = panel();
+    await screen.findByText('builder');
+    people.mockResolvedValueOnce({ ok: true, value: { members: [ada, { ...bob, name: 'robert' }] } });
+    out.rerender(<CommunityMembers viewer={2} channelIds="1" directoryTick={1} onUnauthorized={() => seen.unauthorized++} />);
+    await screen.findByText('robert');
+    expect(screen.queryByText('bob')).toBeNull();
+    expect(screen.queryByText('builder')).toBeNull();
+  });
+
+  it('is read again when the person’s own channels change, and on a directory tick; a 401 signs out', async () => {
     people.mockResolvedValue({ ok: true, value: { members: [bob] } });
     const out = panel('1');
     await screen.findByRole('list', { name: 'People' });
     expect(people).toHaveBeenCalledTimes(1);
-    out.rerender(<CommunityMembers viewer={2} channelIds="1,2" onUnauthorized={() => seen.unauthorized++} />);
+    out.rerender(<CommunityMembers viewer={2} channelIds="1,2" directoryTick={0} onUnauthorized={() => seen.unauthorized++} />);
     await waitFor(() => {
       expect(people).toHaveBeenCalledTimes(2);
     });
     people.mockResolvedValueOnce({ ok: false, failure: 'unauthorized' });
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    out.rerender(<CommunityMembers viewer={2} channelIds="1,2" directoryTick={1} onUnauthorized={() => seen.unauthorized++} />);
     await waitFor(() => {
       expect(seen.unauthorized).toBe(1);
     });

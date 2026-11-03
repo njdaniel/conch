@@ -78,6 +78,16 @@ import {
   type PutPermissionsRequestV1,
 } from './schema/permission';
 import {
+  createInviteResponseV2,
+  disableJoinersResponseV1,
+  invitePreviewV2,
+  type CreateInviteRequestV2,
+  type CreateInviteResponseV2,
+  type DisableJoinersRequestV1,
+  type DisableJoinersResponseV1,
+  type InvitePreviewV2,
+} from './schema/invite';
+import {
   createInviteResponseV1,
   inviteSettingsV1,
   invitePreviewV1,
@@ -1761,6 +1771,40 @@ export async function closeInvite(id: number): Promise<InviteResult<null>> {
   return { ok: true, value: null };
 }
 
+// Member links (issue #990, ADR-013): the invite family's second version.
+// Anyone who may make one does, with an optional expiry and use limit; the
+// server decides again who may, and what a link lands its joiner in.
+
+// createMemberLink makes a member link (POST /v2/invites). The answer carries
+// its code, shown once to whoever made it and nowhere else.
+export async function createMemberLink(request: CreateInviteRequestV2): Promise<InviteResult<CreateInviteResponseV2>> {
+  const reply = await authedPost(call('createMemberLink'), request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return inviteRefused(reply.res);
+  return readBody(reply.res, createInviteResponseV2);
+}
+
+// previewMemberLink asks what a member link would offer, without using it
+// (POST /v2/invites/preview, no credential): the inviter, the server and the
+// channels the joiner lands in.
+export async function previewMemberLink(inviteCode: string): Promise<InviteResult<InvitePreviewV2>> {
+  const request: InvitePreviewRequestV1 = { code: inviteCode };
+  const res = await sendOpen(call('previewMemberLink'), request);
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  return readBody(res, invitePreviewV2);
+}
+
+// disableJoiners disables the members who joined through a link
+// (POST /v1/invites/{id}/disable-joiners), for a holder of manage_members; with
+// dryRun it disables none and says how many it would. Disabling asks for a
+// recent proof of the operator's password, which authedSend gets first.
+export async function disableJoiners(id: number, dryRun: boolean): Promise<InviteResult<DisableJoinersResponseV1>> {
+  const request: DisableJoinersRequestV1 = { dry_run: dryRun };
+  return readSent(await authedSend(call('disableJoiners', { id }), request), disableJoinersResponseV1);
+}
+
 // onSignedOutElsewhere calls back when another tab of this origin removes the
 // lasting credential this page signed in with (it signed out, or was refused)
 // or replaces it with another person's. A tab on its own operator credential
@@ -2025,6 +2069,24 @@ export async function listMembers(channel: string): Promise<ApiResult<ChannelMem
 export async function addChannelMember(channel: string, name: string): Promise<InviteResult<ChannelMemberV1>> {
   const request: AddChannelMemberRequestV1 = { name };
   return readSent(await authedPost(call('addMember', { channel }), request), channelMemberV1);
+}
+
+// What adding a person by id gave: added is a 201 (a new member), not added a
+// 200 (already in the channel, left exactly as they were).
+export interface MemberAddition {
+  readonly added: boolean;
+  readonly member: ChannelMemberV1;
+}
+
+// addChannelMemberById is the server's add-if-absent form (POST
+// /v1/channels/{channel}/members {id, can_decide}): it can never change an
+// existing member's right to decide approvals, so it needs no read first.
+export async function addChannelMemberById(channel: string, id: number, canDecide: boolean): Promise<InviteResult<MemberAddition>> {
+  const request: AddChannelMemberRequestV1 = { id, can_decide: canDecide };
+  const reply = await authedPost(call('addMember', { channel }), request);
+  const result = await readSent(reply, channelMemberV1);
+  if (!result.ok) return result;
+  return { ok: true, value: { added: reply.kind === 'reply' && reply.res.status === 201, member: result.value } };
 }
 
 export async function putChannelMember(channel: string, principal: number, request: PutChannelMemberRequestV1): Promise<InviteResult<null>> {

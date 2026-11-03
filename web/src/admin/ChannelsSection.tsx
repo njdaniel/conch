@@ -18,9 +18,12 @@
 // "New channel" makes a public or private channel with no daily cap for a
 // holder of manage_channels (the server decides; the cap does not apply to
 // them). The list is GET /v1/directory/channels?scope=all, which the server
-// refuses to anyone else: the console omits the section for them. A channel
-// manager without manage_channels manages their own channels from the channel
-// itself, not from here.
+// refuses to anyone else: the console omits the section for them. Each row's
+// count and managers come from that one list (its `members` and `managers`,
+// issue #1202): a read is one request, however many channels there are. A
+// channel's people are read (GET /v1/channels/{name}/members) only when its
+// People panel opens. A channel manager without manage_channels manages their
+// own channels from the channel itself, not from here.
 //
 // The words of every refusal are this page's own, chosen by the server's code
 // and the permission it names; the server's message is never shown. Nothing
@@ -83,7 +86,11 @@ export function channelRefusal(result: Refusal, nothing: string): string {
 
 const peopleLine = (n: number) => (n === 1 ? '1 person' : `${String(n)} people`);
 
-function managersOf(people: People | undefined): readonly string[] | null {
+// managersOf names a channel's managers: from the listing's own `managers`,
+// or, from a server that predates the field, from the People list when it has
+// been read; null when neither says.
+function managersOf(channel: ChannelListingV1, people: People | undefined): readonly string[] | null {
+  if (channel.managers !== undefined) return channel.managers.map((m) => m.name);
   if (people === undefined || people === null) return null;
   return people.filter((m) => m.manages === true).map((m) => m.name ?? `person ${String(m.principal_id)}`);
 }
@@ -143,7 +150,11 @@ interface RowProps {
   readonly channel: ChannelListingV1;
   readonly people: People | undefined;
   readonly personal: boolean;
+  // reload reads this list again and tells the page its channel list changed
+  // (a rename); reread reads only this list, for a change to who is in a
+  // channel or who manages it, which the page's own list does not show.
   readonly reload: (hint?: string) => void;
+  readonly reread: () => void;
   // The page's own channel list is read again; all a row that is gone may ask.
   readonly notify: () => void;
   readonly loadPeople: (channel: ChannelListingV1) => Promise<void>;
@@ -151,7 +162,7 @@ interface RowProps {
   readonly onUnauthorized: () => void;
 }
 
-function Row({ channel, people, personal, reload, notify, loadPeople, applied, onUnauthorized }: RowProps) {
+function Row({ channel, people, personal, reload, reread, notify, loadPeople, applied, onUnauthorized }: RowProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [panel, setPanel] = useState<Panel | null>(null);
   const [busy, setBusy] = useState(false);
@@ -275,8 +286,10 @@ function Row({ channel, people, personal, reload, notify, loadPeople, applied, o
     { insideDialog: true },
   );
 
-  const managers = managersOf(people);
-  const count = people === undefined || people === null ? channel.members : people.length;
+  // The row's line is the listing's: every write here reads it again. The
+  // People list, when read, is only the panel's.
+  const managers = managersOf(channel, people);
+  const count = channel.members;
 
   return (
     <li className={isPrivate ? 'private' : undefined} data-channel={channel.name} {...openers}>
@@ -291,7 +304,7 @@ function Row({ channel, people, personal, reload, notify, loadPeople, applied, o
       <p className="hint">
         {count === undefined ? 'People not counted' : peopleLine(count)}
         {' · '}
-        {managers === null ? (people === null ? 'Managers could not be read' : 'Reading managers…') : managers.length === 0 ? 'No managers' : `Managed by ${managers.join(', ')}`}
+        {managers === null ? 'Managers not listed' : managers.length === 0 ? 'No managers' : `Managed by ${managers.join(', ')}`}
       </p>
       {panel?.kind === 'add' ? (
         <div className="channel-panel" role="group" aria-label={`Add a person to ${channel.name}`}>
@@ -309,7 +322,7 @@ function Row({ channel, people, personal, reload, notify, loadPeople, applied, o
                 'Nobody was added.',
                 `Added ${name.trim()} to ${channel.name}.`,
                 () => {
-                  void loadPeople(channel);
+                  reread();
                 },
               );
             }}
@@ -374,6 +387,7 @@ function Row({ channel, people, personal, reload, notify, loadPeople, applied, o
                             () => {
                               setAsking(null);
                               void loadPeople(channel);
+                              reread();
                             },
                           );
                         }}
@@ -403,6 +417,7 @@ function Row({ channel, people, personal, reload, notify, loadPeople, applied, o
                             `${name} no longer manages ${channel.name}.`,
                             () => {
                               void loadPeople(channel);
+                              reread();
                             },
                           );
                           return;
@@ -427,6 +442,7 @@ function Row({ channel, people, personal, reload, notify, loadPeople, applied, o
                             () => {
                               setRemoving(null);
                               void loadPeople(channel);
+                              reread();
                             },
                           );
                         }}
@@ -546,9 +562,11 @@ export function ChannelsSection({ who, refresh, onChannelsChanged, onUnauthorize
           return;
         }
         setReadLine(hint ?? null);
+        // Each row's count and managers are in the list; nothing more is read
+        // for it.
         setRows(result.value);
-        // What is known of each channel stays until its new answer comes, so
-        // an open panel keeps its list; only channels gone from the list go.
+        // An open People panel keeps its list; only channels gone from the
+        // list go.
         const present = new Set(result.value.map((c) => c.id));
         setPeople((now) => new Map([...now].filter(([id]) => present.has(id))));
         // The preset says whether Add person leads; a document that cannot be
@@ -556,23 +574,6 @@ export function ChannelsSection({ who, refresh, onChannelsChanged, onUnauthorize
         void api.permissions().then((doc) => {
           if (mine === reads.current && stillOpen() && doc.ok) setPersonal(doc.value.preset === 'personal');
         });
-        // Who manages each channel: read a few at a time.
-        const queue = [...result.value];
-        const worker = async () => {
-          for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
-            if (mine !== reads.current || !stillOpen()) return;
-            const answer = await api.listMembers(next.name);
-            // An answer to an earlier read, or after the grant went, is dropped.
-            if (mine !== reads.current || !stillOpen()) return;
-            if (!answer.ok && answer.failure === 'unauthorized') {
-              onUnauthorized();
-              return;
-            }
-            const id = next.id;
-            setPeople((now) => new Map(now).set(id, answer.ok ? answer.value : null));
-          }
-        };
-        await Promise.all([worker(), worker(), worker(), worker()]);
       })();
     },
     [onUnauthorized, stillOpen],
@@ -626,6 +627,7 @@ export function ChannelsSection({ who, refresh, onChannelsChanged, onUnauthorize
               people={people.get(channel.id)}
               personal={personal}
               reload={changed}
+              reread={read}
               notify={onChannelsChanged}
               loadPeople={loadPeople}
               applied={(id, next) => {

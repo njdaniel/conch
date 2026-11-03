@@ -209,6 +209,9 @@ var adminCommands = []adminCommand{
 	{group: "permissions", verb: "preset", args: []string{"personal|group"}, flags: "[--yes] ",
 		bind: bindYes, run: adminPermissionsPreset},
 	{group: "directory", verb: "members", run: adminDirectoryMembers},
+	// Webhook hooks (issue #1228), in admin_hook.go.
+	{group: "hook", verb: "list", run: adminHookList},
+	{group: "hook", verb: "revoke", args: []string{"hook-id"}, idAt: 1, run: adminHookRevoke},
 	// Problem reports (issue #446), in admin_report.go.
 	{group: "reports", verb: "list", flags: "[--limit <n>] ", bind: bindReportsList, run: adminReportsList},
 	{group: "reports", verb: "show", args: []string{"id"}, idAt: 1, flags: "[--markdown] ", bind: bindReportsShow, run: adminReportsShow},
@@ -438,7 +441,10 @@ func adminPrincipalList(ctx context.Context, r *adminRun) error {
 	}
 	filter := PrincipalListFilter{State: o.state, NamePrefix: o.prefix, Kind: r.opts.kind, InviteID: o.inviteID, Limit: schema.MaxListPrincipalsLimit}
 	all := []schema.PrincipalAdminV1{}
-	for {
+	for n := 0; ; n++ {
+		if n == maxListPages {
+			return errors.New("cli: admin principal list: the server's pages do not end")
+		}
 		page, err := r.client.ListPrincipals(ctx, filter)
 		if err != nil {
 			return err

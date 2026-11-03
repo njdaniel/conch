@@ -277,7 +277,7 @@ describe('the sign-in link landing page', () => {
   it('revokes an invite credential too when whoami names someone else', async () => {
     const inviteCode = `conch_inv_${'Q'.repeat(43)}`;
     const calls = serve({
-      'POST /v1/invites/preview': () => json({ kind: 'personal', inviter: 'ada', channels: ['red'], voice: false, expires_at }),
+      'POST /v2/invites/preview': () => json({ kind: 'member', server_name: 'Conch', inviter: 'ada', channels: ['red'], expires_at, join: { guest: false, account: true } }),
       'POST /v2/invites/redeem': () => json(redeemed, 201),
       ...people({ [newToken]: { who: { ...wren, id: 99 }, channels: channelList('red') } }),
       'DELETE /v1/credentials/current': () => new Response(null, { status: 204 }),

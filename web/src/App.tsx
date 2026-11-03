@@ -19,7 +19,7 @@ import { OperatorWarning } from './OperatorWarning';
 import { ChannelSettingsAsk } from './ChannelSettingsAsk';
 import { RenameChannel } from './RenameChannel';
 import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeLinkFromAddress } from './route';
-import type { ChannelDocV1, ChannelV0 } from './schema/channel';
+import type { ChannelDocV1 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import type { ReadStateV1 } from './schema/readstate';
 import { SignIn } from './SignIn';
@@ -59,6 +59,7 @@ import { useReadState } from './useReadState';
 import { useChannelRefresh } from './useChannelRefresh';
 import { MembersPanel } from './agents/MembersPanel';
 import { CommunityMembers } from './Members';
+import { useDirectoryChanged } from './useDirectoryChanged';
 import { RunDetail } from './agents/RunDetail';
 import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
@@ -477,9 +478,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const [searchOpen, setSearchOpen] = useState(false);
   // Asks from the first-run panel for the New channel form (issue #1032).
   const [createAsks, setCreateAsks] = useState(0);
-  // A channel's ⋯ menu asked for the invite panel with that channel ticked
-  // (issue #1135): the channel and a count, so asking twice opens it twice.
-  const [inviteAsk, setInviteAsk] = useState<{ readonly channel: string; readonly n: number } | undefined>(undefined);
+  // A channel's ⋯ menu (issue #1135) or Add a person asked for the invite
+  // panel: a count, so asking twice opens it twice.
+  const [inviteAsk, setInviteAsk] = useState<{ readonly n: number } | undefined>(undefined);
   const restoreSearchFocus = useRef(false);
   useEffect(() => {
     if (searchOpen) {
@@ -573,6 +574,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     setPermissionsTick((n) => n + 1);
     readWho();
   }, [readWho]);
+  const directory = useDirectoryChanged();
   const agents = useAgents({
     signedIn,
     channel: channelId === null ? null : selected,
@@ -588,7 +590,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onMessageEdited,
     onChannelsChanged: refreshChannels,
     onPermissionsChanged: permissionsChanged,
+    onDirectoryChanged: directory.signal,
   });
+  // The server's word that the directory changed (issue #993): the community
+  // panel, the picker and this channel's people are read again and replaced.
+  const refreshMembers = agents.refreshMembers;
+  useEffect(() => {
+    if (directory.tick > 0) refreshMembers();
+  }, [directory.tick, refreshMembers]);
   // The people the page knows by name, for Settings → Reports (issue #1029):
   // the open channel's members. A sender it does not know is "person #id".
   const memberNames = useMemo(() => {
@@ -1586,12 +1595,15 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                         channel: currentChannel,
                         channels: channels.channels,
                         viewer: { id: auth.principal.id, role: auth.principal.role, guest: visit !== null },
+                        // A reconnect owes no frame for what changed while it was down, so the
+                        // picker also re-reads on the permission tick every socket open bumps.
+                        directoryTick: directory.tick + permissionsTick,
                         onUnauthorized,
                       }
                 }
               />
               {auth.principal.kind === 'human' && visit === null ? (
-                <CommunityMembers viewer={auth.principal.id} who={auth.principal} origin={origin} permissionsTick={permissionsTick} channelIds={channels.channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
+                <CommunityMembers viewer={auth.principal.id} who={auth.principal} origin={origin} permissionsTick={permissionsTick} directoryTick={directory.tick} channelIds={channels.channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
               ) : null}
             </>
           }
@@ -1728,16 +1740,16 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           {...(auth.principal.may_invite === true && channels.channels.length > 0
             ? {
                 onAddPerson: () => {
-                  // The member-link panel with the open channel ticked, or the first.
-                  const channel = channels.channels.find((c) => c.name === selected) ?? channels.channels[0];
-                  if (channel !== undefined) setInviteAsk((ask) => ({ channel: channel.name, n: (ask?.n ?? 0) + 1 }));
+                  // The member-link panel. A member link names no channel (#990):
+                  // it lands people in the server's default channels.
+                  setInviteAsk((ask) => ({ n: (ask?.n ?? 0) + 1 }));
                 },
               }
             : {})}
           {...(auth.principal.may_invite === true
             ? {
-                onInviteTo: (channel: ChannelV0) => {
-                  setInviteAsk((ask) => ({ channel: channel.name, n: (ask?.n ?? 0) + 1 }));
+                onInviteTo: () => {
+                  setInviteAsk((ask) => ({ n: (ask?.n ?? 0) + 1 }));
                 },
               }
             : {})}
@@ -1775,9 +1787,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
             ) : null
           }
           invites={
-            auth.principal.may_invite === true ? (
-              <InvitePanel origin={origin} me={auth.principal} channels={channels.channels} request={inviteAsk} onUnauthorized={onUnauthorized} />
-            ) : null
+            // Everyone signed in is offered the panel; one whose right to make
+            // links is off is told why and gets no form (issue #990). A guest
+            // visit has none.
+            visit === null ? <InvitePanel origin={origin} me={auth.principal} request={inviteAsk} onUnauthorized={onUnauthorized} /> : null
           }
           firstRun={
             // An operator on a server with no channels is shown what to do

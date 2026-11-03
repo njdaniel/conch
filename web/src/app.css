@@ -2772,6 +2772,29 @@ button.link {
   font-weight: 600;
 }
 
+/* A link's buttons and the people who joined through it (issue #990): they
+   wrap, so the panel fits a phone. */
+.invite-list .actions {
+  flex-wrap: wrap;
+  margin-top: var(--s1);
+}
+
+.invite-joiners {
+  margin: var(--s1) 0 0;
+  padding-left: var(--s4);
+}
+
+.invite-ask {
+  margin-top: var(--s1);
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.invite-ask p {
+  margin: 0 0 var(--s1);
+}
+
 /* ---------------------------------------------------------------- sizes */
 
 /* Below the wide breakpoint the members panel is drawn over the right side
@@ -2825,6 +2848,14 @@ button.link {
     line-height: 1;
     order: 3;
     flex: 1 1 100%;
+  }
+
+  /* Everyone is offered Invite someone (issue #990), so four buttons of 44 px
+     stand beside the brand. At 320 px with the usual gap they are one pixel
+     too wide for the row and the buttons drop to a row of their own, taking
+     a row's height from the conversation. A smaller gap keeps them beside it. */
+  .topbar-actions {
+    gap: var(--s1);
   }
 
   .topbar .conn {

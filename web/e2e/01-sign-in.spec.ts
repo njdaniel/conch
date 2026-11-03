@@ -70,7 +70,7 @@ test('A7 an operator is warned, and the credential stays with that one tab', asy
 test('G6 the front door says the server is invite-only, and refuses a wrong password with the one answer', async ({ meet, world }) => {
   const { page } = await meet();
   await page.goto(world.appUrl);
-  await expect(page.getByText('This server is invite-only. To join, ask someone on it for an invite link.')).toBeVisible();
+  await expect(page.getByText('This server is invite-only.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Join as guest' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Create an account' })).toHaveCount(0);
   await expect(page.getByRole('region', { name: 'Operators and scripts' })).toContainText('Paste the credential an operator issued');

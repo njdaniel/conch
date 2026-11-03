@@ -106,13 +106,23 @@ func (s *Server) inviteCaller(w http.ResponseWriter, r *http.Request) (store.Pri
 // handleCreateInvite serves POST /v1/invites: the caller makes an invite. The
 // code is in the 201 body and nowhere else, sent no-store.
 //
-// It is unchanged beside POST /v2/invites (issue #985); refusing members here
-// moves to #990 with the browser's switch to member links, and #1134 retires
+// It is unchanged for operators beside POST /v2/invites (issue #985); a member is
+// refused here (409 invite_kind_retired, issue #990), and #1134 retires
 // the route.
 func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	caller, ok := s.inviteCaller(w, r)
 	if !ok {
+		return
+	}
+	// Someone without manage_members makes member links (POST /v2/invites)
+	// and no personal or open invite (issue #990): the browser moved to v2 in
+	// the same change. A holder keeps this route until it is retired (#1134).
+	// The permission is read, never the role (ADR-014).
+	if holds, ok := s.canOrFail(w, r, caller, schema.PermManageMembers); !ok {
+		return
+	} else if !holds {
+		writeError(w, http.StatusConflict, schema.ErrorCodeInviteKindRetired, inviteKindRetiredMessage)
 		return
 	}
 	if limit, ok, retry := s.inviteLimits.takeCreate(caller.ID, s.now()); !ok {
@@ -503,6 +513,7 @@ func (s *Server) writeRedeemed(w http.ResponseWriter, r *http.Request, res store
 		// A new principal has no socket open yet; the call covers a later
 		// route that redeems for an existing one (issue #1027).
 		s.events.notifyChannelsChanged(res.Principal.ID)
+		s.directoryPrincipalChanged(ctx, res.Principal.ID, nil)
 		writeSecretJSON(w, http.StatusCreated, schema.RedeemInviteResponseV1{
 			Principal:  principalFromStore(res.Principal),
 			Credential: res.Credential,
@@ -689,6 +700,7 @@ func (s *Server) disablePrincipals(ctx context.Context, ids []int64, forbidOwner
 		}
 		s.principalDisabled(ctx, id)
 		if changed {
+			s.directoryPrincipalChanged(ctx, id, nil)
 			done = append(done, id)
 		}
 	}

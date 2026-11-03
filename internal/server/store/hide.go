@@ -66,6 +66,12 @@ type HideResult struct {
 	// Changed is false when the principal was already hidden: nothing was
 	// written.
 	Changed bool
+	// KnowersEveryone and Knowers are who could know the principal just
+	// before it was hidden (DirectoryKnowers), read inside the transaction
+	// that hid it, for the directory signal: hiding drops its memberships,
+	// so the audience cannot be read afterwards. Empty when Changed is false.
+	KnowersEveryone bool
+	Knowers         []int64
 }
 
 // HidePrincipal hides principal id in one IMMEDIATE transaction:
@@ -118,6 +124,9 @@ func (s *Store) HidePrincipal(ctx context.Context, actor string, id int64, opts 
 			return ErrHideOperator
 		}
 		now := credentialNow().Truncate(time.Millisecond)
+		if out.KnowersEveryone, out.Knowers, err = directoryKnowersTx(ctx, tx, id); err != nil {
+			return err
+		}
 		if _, err := disablePrincipalTx(ctx, tx, actor, id, now, &runs, opts.ForbidOwner); err != nil {
 			return err
 		}

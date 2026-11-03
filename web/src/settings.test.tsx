@@ -497,8 +497,8 @@ describe('an operator’s invite admits accounts only', () => {
           live_guests: 0,
           warnings: [],
         }),
-      'GET /v1/invites': () => json({ invites: [] }),
-      'POST /v1/invites': () => refusal(500, 'internal_error'),
+      'GET /v2/invites': () => json({ invites: [] }),
+      'POST /v2/invites': () => refusal(500, 'internal_error'),
     });
     window.sessionStorage.setItem(key, operatorToken);
     render(<App origin={origin} />);
@@ -516,11 +516,10 @@ describe('an operator’s invite admits accounts only', () => {
     });
     expect(screen.queryByLabelText('A temporary guest')).toBeNull();
     expect(screen.queryByRole('group', { name: 'Who may join with it' })).toBeNull();
-    fireEvent.click(screen.getByLabelText('#lobby'));
-    fireEvent.click(screen.getByRole('button', { name: 'Make invite' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Make link' }));
     await waitFor(() => {
-      expect(calls.some((c) => c.method === 'POST' && c.path === '/v1/invites')).toBe(true);
+      expect(calls.some((c) => c.method === 'POST' && c.path === '/v2/invites')).toBe(true);
     });
-    expect(calls.find((c) => c.method === 'POST' && c.path === '/v1/invites')?.body).not.toHaveProperty('join_as');
+    expect(calls.find((c) => c.method === 'POST' && c.path === '/v2/invites')?.body).not.toHaveProperty('join_as');
   });
 });

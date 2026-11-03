@@ -16,7 +16,7 @@ import (
 
 const (
 	defaultMessageLimit = 50
-	maxMessageLimit     = 100
+	maxMessageLimit     = schema.MaxListMessagesLimit
 	// What a client must be able to read back is derived from this limit
 	// (schema.MaxMessageFrameBytes), which is why it is the schema's.
 	maxMessageBodyBytes = schema.MaxPostRequestBytes

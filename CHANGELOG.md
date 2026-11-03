@@ -10,6 +10,14 @@ release that Nick publishes.
 
 ### Added
 
+- **Add a person to a channel by id, without ever changing an existing
+  member** (#1206). `POST /v1/channels/{channel}/members` now takes `id` as
+  well as `name` (exactly one), and an operator may send `can_decide` for a
+  new member. Someone already in the channel is left exactly as they are
+  and the answer is 200 with their membership, so an add can never take a
+  right to decide approvals away, as `PUT .../members/{id}` with
+  `can_decide: false` does. A channel manager sending `can_decide` is
+  refused with 403, as on the PUT.
 - **Docs for running a personal or a group server** (#1023, ADR-014).
   `docs/deploy.md` has a new part, "Running a personal or a group server",
   with the console path first and the `conch admin` command after for the
@@ -17,6 +25,19 @@ release that Nick publishes.
   the invite brake, channel privacy and default channels, hiding members, and
   what an operator can and cannot see. README gains an administration
   paragraph. Docs only: no code, wire or migration change.
+
+### Changed
+
+- **`POST /v1/invites` is for operators who manage members only** (#990).
+  A caller without `manage_members` now gets 409 `invite_kind_retired`:
+  members make member links with `POST /v2/invites`. This replaces the
+  earlier "unchanged for now" note. An operator holding `manage_members`
+  keeps v1 until #1134 retires it. The web app's invite panel makes,
+  lists and closes member links, and shows each link's joiners.
+
+### Security
+
+- Demoting an operator now closes, in the same transaction and with an `invite_closed` row each, the member links a member could not hold: every member link when their `may_invite` brake is off, and the never-expiring ones when it is on. Before (alpha.10), links made under the role survived a demotion with the brake off, and turning the brake on later brought back links a member could never make (#1165). `invite_closed` for a member link now says `link=member`.
 
 ### Upgrade notice: roles and permissions (ADR-014)
 
@@ -44,9 +65,18 @@ For anyone who runs a personal server, or moves one across `alpha.8` to
   `make_member_links`, they can make member links straight away, and they
   keep that after open sign-up is switched off. Close their links or remove
   the people a link brought in (ADR-013 decision 5).
-- **`default_channel_exposes_members` is not raised yet.** The warning exists
-  in the vocabulary, the console and the CLI, but the server doesn't send it,
-  so check for default channels yourself on a personal server.
+- **Members who can make links see the people who joined through them**
+  (#988). With the directory off, a member sees themself, the people in
+  their channels and the people who joined through a link they made. The
+  server now sends the `default_channel_exposes_members` warning when
+  members lack the directory and a default channel exists. Before this
+  release it didn't, so check for default channels yourself on a server
+  that runs an earlier one.
+- **The preset leaves the channel directory on.** There is no permission
+  for it: on a personal server a member's **Browse channels** still lists
+  every public channel, and any member may join one. Keep a personal
+  server's channels private.
+
 
 ## [0.1.0-alpha.11] - 2026-11-02
 
@@ -163,7 +193,6 @@ There is no migration and no wire change since `alpha.10`, so rolling back to
 
 ### Security
 
-- Demoting an operator now closes, in the same transaction and with an `invite_closed` row each, the member links a member could not hold: every member link when their `may_invite` brake is off, and the never-expiring ones when it is on. Before (alpha.10), links made under the role survived a demotion with the brake off, and turning the brake on later brought back links a member could never make (#1165). `invite_closed` for a member link now says `link=member`.
 - Any role change (a promotion, a demotion, an owner-mark change) now clears every recent-auth proof of that person, so a member's password-only re-authentication no longer satisfies an operator route that needs password and code (#1054). Their sessions stand; they re-authenticate on the next sensitive action. The `principal_role_changed` audit row gains `proofs_cleared=N`.
 
 ### Docs

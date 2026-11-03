@@ -84,6 +84,7 @@ function doc(voiceForMembers: boolean): PermissionsResponseV1 {
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 const refusal = (status: number, code: string, more: Record<string, unknown> = {}) => json({ code, message: leak, ...more }, status);
 const noContent = () => new Response(null, { status: 204 });
+const addedMember = (id: number, can_decide = false) => ({ principal_id: id, name: 'member-1', kind: 'human', created_at: at, can_decide });
 
 interface Call {
   readonly method: string;
@@ -421,7 +422,7 @@ describe('the actions send their requests', () => {
   });
 
   it('adds a person to a channel without letting them decide approvals', async () => {
-    const calls = serve(owner, { routes: { 'PUT /v1/channels/channel-p/members/3': noContent } });
+    const calls = serve(owner, { routes: { 'POST /v1/channels/channel-p/members': () => json(addedMember(3), 201) } });
     const region = await open();
     const row = rowOf(region, 'member-1');
     await choose(row, 'member-1', 'Add to a channel…');
@@ -432,7 +433,7 @@ describe('the actions send their requests', () => {
     fireEvent.change(select, { target: { value: 'channel-p' } });
     fireEvent.click(within(row).getByRole('button', { name: 'Add to channel' }));
     await waitFor(() => {
-      expect(sent(calls, 'PUT', /members\/3$/)).toEqual([{ method: 'PUT', path: '/v1/channels/channel-p/members/3', query: '', body: { can_decide: false } }]);
+      expect(sent(calls, 'POST', /channel-p\/members$/)).toEqual([{ method: 'POST', path: '/v1/channels/channel-p/members', query: '', body: { id: 3, can_decide: false } }]);
     });
   });
 
@@ -734,12 +735,13 @@ describe('Add a person', () => {
     await waitFor(() => {
       expect(screen.queryByRole('region', { name: 'Members' })).toBeNull();
     });
-    // The member-link panel is open, with the open channel ticked, and focus is in it.
+    // The member-link panel is open and focus is in it. A member link names no
+    // channel (#990): the panel says where its people land.
     const invites = await screen.findByRole('region', { name: 'Invites' });
     await waitFor(() => {
       expect(within(invites).getByRole('button', { name: 'Invite someone' }).getAttribute('aria-expanded')).toBe('true');
     });
-    expect(within(invites).getByRole<HTMLInputElement>('checkbox', { name: /channel-a/ }).checked).toBe(true);
+    expect(within(invites).getByText("A link lands the people who use it in the server's default channels.")).toBeTruthy();
     await waitFor(() => {
       expect(invites.contains(document.activeElement)).toBe(true);
     });
@@ -782,8 +784,6 @@ describe('the phone', () => {
 
 
 describe('adding to a channel never changes who decides approvals', () => {
-  const inChannel = (id: number) => ({ members: [{ principal_id: id, name: 'member-1', kind: 'human', created_at: at, can_decide: true }] });
-
   async function submit(row: HTMLElement) {
     await choose(row, 'member-1', 'Add to a channel…');
     const select = within(row).getByLabelText('Add member-1 to');
@@ -793,23 +793,45 @@ describe('adding to a channel never changes who decides approvals', () => {
     fireEvent.change(select, { target: { value: 'channel-p' } });
     fireEvent.click(within(row).getByRole('button', { name: 'Add to channel' }));
   }
+  const noReadNoPut = (calls: readonly Call[]) => {
+    expect(sent(calls, 'PUT', /members/)).toEqual([]);
+    expect(sent(calls, 'GET', /channel-p\/members/)).toEqual([]);
+  };
 
-  it('sends no write for someone already in the channel, and says so', async () => {
-    const calls = serve(owner, { routes: { 'GET /v1/channels/channel-p/members': () => json(inChannel(3)), 'PUT /v1/channels/channel-p/members/3': noContent } });
+  it('says they were added on a 201, with one add-if-absent POST and no PUT or members read', async () => {
+    const calls = serve(owner, { routes: { 'POST /v1/channels/channel-p/members': () => json(addedMember(3), 201) } });
     const region = await open();
     const row = rowOf(region, 'member-1');
     await submit(row);
-    expect(await within(row).findByText('member-1 is already in that channel. Nothing was sent.')).toBeTruthy();
-    expect(sent(calls, 'PUT', /members/)).toEqual([]);
+    expect(await within(region).findByText('member-1 is in channel-p.')).toBeTruthy();
+    expect(sent(calls, 'POST', /channel-p\/members$/).map((c) => c.body)).toEqual([{ id: 3, can_decide: false }]);
+    noReadNoPut(calls);
   });
 
-  it('sends nothing when the channel’s people cannot be read first', async () => {
-    const calls = serve(owner, { routes: { 'GET /v1/channels/channel-p/members': () => refusal(500, 'internal_error'), 'PUT /v1/channels/channel-p/members/3': noContent } });
+  it('says nothing changed on a 200, because they were already in it', async () => {
+    const calls = serve(owner, { routes: { 'POST /v1/channels/channel-p/members': () => json(addedMember(3, true), 200) } });
     const region = await open();
     const row = rowOf(region, 'member-1');
     await submit(row);
-    expect(await within(row).findByText("The channel's people could not be read first. Nothing was sent.")).toBeTruthy();
-    expect(sent(calls, 'PUT', /members/)).toEqual([]);
+    expect(await within(region).findByText('member-1 is already in that channel. Nothing changed.')).toBeTruthy();
+    expect(sent(calls, 'POST', /channel-p\/members$/).length).toBe(1);
+    noReadNoPut(calls);
+  });
+
+  const refusals: readonly { readonly name: string; readonly res: () => Response; readonly line: string }[] = [
+    { name: 'principal_not_found', res: () => refusal(404, 'principal_not_found'), line: 'That person is gone, or you can no longer see them. Nothing was sent.' },
+    { name: 'channel_not_found', res: () => refusal(404, 'channel_not_found'), line: 'That channel is gone, or you can no longer see it. Nothing was sent.' },
+    { name: 'forbidden', res: () => refusal(403, 'forbidden'), line: 'The server does not allow you to do that. Nothing was sent.' },
+    { name: 'rate_limited', res: () => refusal(429, 'rate_limited'), line: 'Too many attempts; try again later. Nothing was sent.' },
+  ];
+  it.each(refusals)('words a $name refusal itself, never the server’s message', async ({ res, line }) => {
+    const calls = serve(owner, { routes: { 'POST /v1/channels/channel-p/members': res } });
+    const region = await open();
+    const row = rowOf(region, 'member-1');
+    await submit(row);
+    expect(await within(row).findByText(line)).toBeTruthy();
+    expect(screen.queryByText(leak)).toBeNull();
+    noReadNoPut(calls);
   });
 });
 
@@ -905,7 +927,8 @@ describe('the secret panel', () => {
       expect(document.body.contains(row)).toBe(false);
     });
     release();
-    expect(await within(region).findByText('A credential for builder was made but could not be shown; revoke it under Sign-ins.')).toBeTruthy();
+    // The answer is released, then the list reads again before the line shows.
+    expect(await within(region).findByText('A credential for builder was made but could not be shown; revoke it under Sign-ins.', {}, { timeout: 5000 })).toBeTruthy();
     expect(document.body.textContent).not.toContain(secretToken);
   });
 });

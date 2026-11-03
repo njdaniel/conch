@@ -28,11 +28,11 @@ func (c *Client) SearchMessagesV2(ctx context.Context, channel, words string, be
 		query.Set("limit", strconv.Itoa(limit))
 	}
 	endpoint.RawQuery = query.Encode()
-	var result schema.SearchMessagesResponseV2
+	result := searchDoc{rows: pageRows(limit, maxMessagePage)}
 	if err := c.roundTrip(ctx, "search v2 messages", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.SearchMessagesResponseV2{}, err
 	}
-	return result, nil
+	return result.SearchMessagesResponseV2, nil
 }
 
 // runSearch is `conch search [--server <url>] [--limit <n>] [--before <id>]
