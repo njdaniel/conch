@@ -9,23 +9,25 @@ import "github.com/njdaniel/conch/pkg/schema"
 
 // Community operations a pane can refuse. They name the line sets below.
 const (
-	CommunityOpChannels = "channels" // reading the channel directory
-	CommunityOpJoin     = "join"
-	CommunityOpLeave    = "leave"
-	CommunityOpCreate   = "create"
-	CommunityOpMembers  = "members" // reading the community's members
-	CommunityOpVoice    = "voice"   // an operator's voice switch
+	CommunityOpChannels    = "channels"     // reading the channel directory
+	CommunityOpChannelsAll = "channels_all" // the operators' every-channel listing
+	CommunityOpJoin        = "join"
+	CommunityOpLeave       = "leave"
+	CommunityOpCreate      = "create"
+	CommunityOpMembers     = "members" // reading the community's members
+	CommunityOpVoice       = "voice"   // an operator's voice switch
 )
 
 // communityRefusals is the sentences of each operation, the command's own
 // where there is one. The TUI cannot prompt for a password, so its
 // reauthentication line points at the command instead.
 var communityRefusals = map[string]refusalLines{
-	CommunityOpChannels: channelRefusals["list"],
-	CommunityOpJoin:     channelRefusals["join"],
-	CommunityOpLeave:    channelRefusals["leave"],
-	CommunityOpCreate:   channelRefusals["create"],
-	CommunityOpMembers:  directoryRefusals,
+	CommunityOpChannels:    channelRefusals["list"],
+	CommunityOpChannelsAll: {"forbidden": operatorOnly},
+	CommunityOpJoin:        channelRefusals["join"],
+	CommunityOpLeave:       channelRefusals["leave"],
+	CommunityOpCreate:      channelRefusals["create"],
+	CommunityOpMembers:     directoryRefusals,
 	CommunityOpVoice: {
 		schema.ErrorCodeNotAPerson: principalVoiceRefusals[schema.ErrorCodeNotAPerson],
 		// Owner protection (ADR-010) and the route guard (a caller no longer

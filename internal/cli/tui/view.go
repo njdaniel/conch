@@ -285,6 +285,13 @@ func (m Model) statusHints() []hint {
 			hints = []hint{{"enter", "create", 1}, {"tab", "public/private", 2}, {"esc", "cancel", 0}}
 		} else {
 			hints = []hint{{"↑/↓", "channels", 4}, {"enter", "join", 1}, {"l", "leave", 2}, {"n", "new", 3}, {"esc", "back", 0}}
+			if m.canManageChannels() {
+				label := "all"
+				if m.dir.all {
+					label = "mine"
+				}
+				hints = slices.Insert(hints, 4, hint{"a", label, 2})
+			}
 		}
 	case modeCommunity:
 		hints = []hint{{"↑/↓", "people", 3}, {"r", "refresh", 2}, {"esc", "back", 0}}

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strconv"
 )
 
@@ -136,6 +137,9 @@ func (m Model) helpEntries() []helpEntry {
 			{"n", "create a channel, public or private"},
 			{"r", "read the directory again"},
 			{"esc, tab", "back to Chat"},
+		}
+		if m.canManageChannels() {
+			entries = slices.Insert(entries, 5, helpEntry{"a", "operators: switch between your channels and every channel, with member counts"})
 		}
 	case modeCommunity:
 		entries = []helpEntry{
