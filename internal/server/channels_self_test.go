@@ -502,6 +502,12 @@ func TestLeaveChannelClosesTheLeaversSockets(t *testing.T) {
 	ann2Ops := startReader(ctx, dialAs(t, ctx, base, "/v1/ws?channel=ops", ann2))
 	annEvents := dialEvents(t, base, "/v1/events/ws?channel=ops", ann)
 	ann2Events := dialEvents(t, base, "/v1/events/ws?channel=ops", ann2)
+	// The member list a socket is measured against is read when its first
+	// roster is built, which is after the handshake. Wait for that roster, or
+	// a leave that lands first is in the baseline and no members frame follows.
+	anyRoster := isRoster(func(schema.SessionRosterV1) bool { return true })
+	annEvents.until("ann's first roster", anyRoster)
+	ann2Events.until("ann2's first roster", anyRoster)
 	room := f.inUse(t, f.ops)
 	f.lk.setRoom(room, fakeParticipant{identity: f.identity("ann"), joinedMs: 1_000, published: true},
 		fakeParticipant{identity: f.identity("ann2"), joinedMs: 2_000})

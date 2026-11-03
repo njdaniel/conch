@@ -511,7 +511,7 @@ var permissionGates = map[schema.Permission][][2]string{
 	schema.PermManageChannels: {
 		{"routes.go", "Server.routeTable"},
 		{"auth.go", "Server.guard"},
-		{"members.go", "Server.handleListChannelMembers"},
+		{"members.go", "Server.channelMembersGate"},
 		{"nets.go", "Server.handleListNets"},
 		{"store/members.go", "memberActorStandingTx"},
 		{"store/channels_rename.go", "channelRenameStandingTx"},

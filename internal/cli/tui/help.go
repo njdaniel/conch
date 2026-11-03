@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strconv"
 )
 
@@ -51,6 +52,10 @@ func (m Model) helpName() string {
 		return "Runs"
 	case modeRun:
 		return "Run detail"
+	case modeDirectory:
+		return "Channel directory"
+	case modeCommunity:
+		return "Community"
 	}
 	return "Chat"
 }
@@ -75,6 +80,8 @@ func (m Model) helpEntries() []helpEntry {
 			entries = append(entries, helpEntry{"/voice …", "join, leave, mute and deafen voice, and choose the microphone and speakers; /voice help says how"})
 		}
 		entries = append(entries, []helpEntry{
+			{"/channels, ctrl+d", "the channel directory: join, leave and create channels"},
+			{"/people, ctrl+p", "the community: everyone on the server, agents marked"},
 			{"/help", "this help"},
 			{"↑/↓", "focus on channels: open the channel above or below"},
 			{"", "focus on messages: scroll the history a line"},
@@ -113,6 +120,34 @@ func (m Model) helpEntries() []helpEntry {
 			{"a", "back to Agents"},
 			{"tab", "Chat"},
 		}
+	case modeDirectory:
+		if m.dir.creating {
+			entries = []helpEntry{
+				{"type", "the new channel's name"},
+				{"tab", "choose public or private"},
+				{"enter", "create it; you are its first member and its manager"},
+				{"esc", "cancel"},
+			}
+			break
+		}
+		entries = []helpEntry{
+			{"↑/↓ pgup/pgdn", "choose a channel"},
+			{"enter, j", "join the channel (a public one)"},
+			{"l", "leave it; a private channel asks first, and its last member cannot leave"},
+			{"n", "create a channel, public or private"},
+			{"r", "read the directory again"},
+			{"esc, tab", "back to Chat"},
+		}
+		if m.canManageChannels() {
+			entries = slices.Insert(entries, 5, helpEntry{"a", "operators: switch between your channels and every channel, with member counts"})
+		}
+	case modeCommunity:
+		entries = []helpEntry{
+			{"↑/↓ pgup/pgdn", "choose a person"},
+			{"v", "operators: turn the person's voice on or off"},
+			{"r", "read the community again"},
+			{"esc, tab", "back to Chat"},
+		}
 	case modeRun:
 		entries = []helpEntry{
 			{"↑/↓ pgup/pgdn", "move through the timeline"},
@@ -122,7 +157,7 @@ func (m Model) helpEntries() []helpEntry {
 			{"esc", "back to the view the run was opened from"},
 		}
 	}
-	if m.mode != modeDecision && m.mode != modeRun {
+	if m.mode != modeDecision && m.mode != modeRun && m.mode != modeDirectory && m.mode != modeCommunity {
 		entries = append(entries, helpEntry{"shift+tab", "the view before"}, helpEntry{"esc", "quit"})
 	}
 	ctrlC := helpEntry{"ctrl+c", "quit"}
@@ -274,8 +309,10 @@ func (m Model) opensHelp(key string) bool {
 		return false
 	}
 	switch m.mode {
-	case modeInbox, modeAgents, modeRuns:
+	case modeInbox, modeAgents, modeRuns, modeCommunity:
 		return true
+	case modeDirectory:
+		return !m.dir.creating
 	case modeRun:
 		return m.rd.input == inputNone
 	}
