@@ -454,6 +454,13 @@ func coreMatrixRows() []row {
 			probe: func(w *world, s subject) probe {
 				return post("/v1/channels/"+bChannel(w)+"/members", schema.AddChannelMemberRequestV1{Name: s.name})
 			}},
+		// The add by id (issue #1206) answers A's hidden principal exactly as
+		// by name and as the PUT.
+		{route: "POST /v1/channels/{channel}/members", what: "has B's manager add A's hidden principal by id to B's channel", pick: aHidden, manager: true,
+			want: answer{http.StatusNotFound, "principal_not_found"},
+			probe: func(w *world, s subject) probe {
+				return post("/v1/channels/"+bChannel(w)+"/members", schema.AddChannelMemberRequestV1{ID: s.id})
+			}},
 		// The community's member list: a member of B sees A's people (which
 		// are not markers after the split, design section 8), and not the
 		// hidden one, and none of the operator fields.

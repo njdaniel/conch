@@ -251,7 +251,7 @@ func TestCommunityCommandsRefusals(t *testing.T) {
 		{"channels leave", []string{"channels", "leave", "general"}, communityOnly},
 		{"channels create", []string{"channels", "create", "general"}, communityOnly},
 		{"channel settings", []string{"admin", "channel", "settings", "general", "--private"}, operatorOnly},
-		{"principal voice", []string{"admin", "principal", "voice", "9", "off"}, operatorOnly},
+		{"principal voice", []string{"admin", "principal", "voice", "9", "off"}, voiceForbidden},
 		{"directory members", []string{"admin", "directory", "members"}, communityOnly},
 		{"invite create", []string{"admin", "invite", "create"}, neutral},
 		{"invite list", []string{"admin", "invite", "list"}, neutral},

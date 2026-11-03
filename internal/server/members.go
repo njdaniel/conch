@@ -377,9 +377,12 @@ func (s *Server) handlePutChannelMember(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleAddChannelMemberByName serves POST /v1/channels/{channel}/members
-// (operator or channel manager; issue #790, ADR-010 §3.3). It adds the named
-// human member with can_decide = 0 and manages = 0, returning 201 on a new
-// membership and 200 when the person is already in the channel.
+// (operator or channel manager; issue #790, ADR-010 §3.3, #1206). It adds the
+// person named by name or id only if they are not in the channel: 201 with a
+// new membership (manages = 0, can_decide as an operator asked, else 0), or
+// 200 with the membership as it stands, unchanged, when they are already in
+// it. Unlike PUT .../members/{id}, it can never change an existing member's
+// right to decide approvals.
 func (s *Server) handleAddChannelMemberByName(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req schema.AddChannelMemberRequestV1
@@ -411,12 +414,17 @@ func (s *Server) handleAddChannelMemberByName(w http.ResponseWriter, r *http.Req
 		addedBy = caller.ID
 	}
 	if manager {
+		if req.CanDecide != nil {
+			s.denyForbiddenFor(w, r, caller, "forbidden", "only an operator may set can_decide or manages", refused)
+			return
+		}
 		if err := s.store.CheckMemberAddLimit(ctx, caller.ID, renameAttemptsPerDay, now); err != nil {
 			s.writeMemberAddLimitError(w, r, err, now)
 			return
 		}
 	}
-	member, added, err := s.store.AddChannelMemberByName(ctx, auditActor(ctx), channel.ID, addedBy, req.Name)
+	target := store.MemberTarget{Name: req.Name, ID: req.ID}
+	member, added, err := s.store.AddChannelMemberIfAbsent(ctx, auditActor(ctx), channel.ID, addedBy, target, req.CanDecide)
 	if errors.Is(err, store.ErrNotAddable) || errors.Is(err, store.ErrPrincipalNotFound) {
 		if manager {
 			if rerr := s.store.RecordMemberAddRefusedFor(context.WithoutCancel(ctx), caller.ID, channel.ID, refused, renameAttemptsPerDay, now); rerr != nil {
