@@ -1287,11 +1287,13 @@ export const voiceShareV1 = object<VoiceShareV1>({
 export interface VoiceChannelOccupancy {
   channel_id: number;
   in_voice: number;
+  principal_ids?: number[];
 }
 
 export const voiceChannelOccupancy = object<VoiceChannelOccupancy>({
   channel_id: int,
   in_voice: int,
+  principal_ids: optional(array(int)),
 });
 
 // schema.VoiceOccupancyV1

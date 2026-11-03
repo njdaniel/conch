@@ -867,7 +867,11 @@ test.describe('with LiveKit', () => {
   // leaving. max's Open button opens the channel and joins nothing. Three
   // people and three channels of this test's own, made through the API, so
   // no other test's voice moves these counts.
-  test('people in voice in one channel are seen from the others, and opening that channel joins nothing', async ({ browser }) => {
+  //
+  // Issue #1103: each list also names kim under #f01-game-night, from
+  // another channel, within the same 3 s; lee's click on her name opens the
+  // channel and joins nothing.
+  test('people in voice in one channel are seen from the others, by name, and opening that channel joins nothing', async ({ browser }) => {
     const must = async (what: string, call: Promise<{ status: number; text: string }>): Promise<unknown> => {
       const r = await call;
       expect(r.status >= 200 && r.status < 300, `${what}: status ${String(r.status)}`).toBe(true);
@@ -920,12 +924,16 @@ test.describe('with LiveKit', () => {
     const k = await open(kim, room);
     const lee = await open(leeMember, reading.lee);
     const max = await open(maxMember, reading.max);
-    const mark = (page: Page) => page.getByRole('navigation', { name: 'Channels' }).getByRole('img', { name: / in voice$/ });
+    const nav = (page: Page) => page.getByRole('navigation', { name: 'Channels' });
+    const mark = (page: Page) => nav(page).getByRole('img', { name: / in voice$/ });
+    // The names under a channel (issue #1103).
+    const named = (page: Page) => nav(page).getByRole('list', { name: `In voice in #${room}` });
     // The strip's line "N in voice in #x", with its Open button.
     const elsewhere = (page: Page) => voiceRegion(page).locator('.voice-elsewhere');
     try {
       for (const r of [lee, max]) {
         await expect(mark(r.page)).toHaveCount(0);
+        await expect(nav(r.page).getByRole('list', { name: /^In voice in/ })).toHaveCount(0);
         await expect(elsewhere(r.page)).toHaveCount(0);
       }
 
@@ -934,10 +942,16 @@ test.describe('with LiveKit', () => {
       for (const r of [lee, max]) {
         // The count is beside the channel's button, which keeps its name.
         await expect(mark(r.page)).toHaveAccessibleName('1 in voice', { timeout: 3000 });
-        await expect(r.page.getByRole('navigation', { name: 'Channels' }).getByRole('listitem').filter({ has: r.page.getByRole('img', { name: / in voice$/ }) })).toContainText(room);
+        await expect(nav(r.page).getByRole('listitem').filter({ has: r.page.getByRole('img', { name: / in voice$/ }) })).toContainText(room);
         await expect(channelButton(r.page, room)).toHaveAccessibleName(room);
         await expect(elsewhere(r.page)).toHaveText(`1 in voice in #${room} Open #${room}`, { timeout: 3000 });
+        // kim, by name, nested under the channel, from a channel she is not
+        // in; nobody under the others.
+        await expect(named(r.page).getByRole('listitem')).toHaveText([kim.name], { timeout: 3000 });
+        await expect(nav(r.page).getByRole('list', { name: /^In voice in/ })).toHaveCount(1);
       }
+      // kim sees herself as You.
+      await expect(named(k.page).getByRole('listitem')).toHaveText(['You'], { timeout: 3000 });
 
       // max opens it from the strip: the channel opens, and voice does not.
       await voiceRegion(max.page).getByRole('button', { name: `Open #${room}`, exact: true }).click();
@@ -948,10 +962,20 @@ test.describe('with LiveKit', () => {
       // Its people are the roster now, not the line.
       await expect(elsewhere(max.page)).toHaveCount(0);
 
+      // lee opens it from kim's name in the list: the same, and no join.
+      await named(lee.page).getByRole('button', { name: kim.name, exact: true }).click();
+      await expect(conversation(lee.page).getByRole('heading', { name: room })).toBeVisible();
+      await expect(voiceRegion(lee.page)).toContainText('Not in voice');
+      await expect(voiceRegion(lee.page).getByRole('button', { name: `Join voice in #${room}`, exact: true })).toBeEnabled();
+      await expect(named(lee.page).getByRole('listitem')).toHaveText([kim.name]);
+      await channelButton(lee.page, reading.lee).click();
+      await expect(conversation(lee.page).getByRole('heading', { name: reading.lee })).toBeVisible();
+
       // kim leaves; lee's list and strip say so within 3 s.
       await voiceRegion(k.page).getByRole('button', { name: 'Leave voice' }).click();
       await expect(voiceRegion(k.page)).toContainText('Not in voice', { timeout: 10_000 });
       await expect(mark(lee.page)).toHaveCount(0, { timeout: 3000 });
+      await expect(named(lee.page)).toHaveCount(0, { timeout: 3000 });
       await expect(elsewhere(lee.page)).toHaveCount(0, { timeout: 3000 });
 
       // Seeing it asked for nothing of voice: no session, no device, no

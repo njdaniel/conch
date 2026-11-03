@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/njdaniel/conch/e2e/internal/lkit"
 	"github.com/njdaniel/conch/e2e/internal/routetable"
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -653,6 +655,159 @@ func (w *world) hidePersonalRows(hw *hideWorld) (int, error) {
 		return rows, fmt.Errorf("alice's member list of the public channel does not name bob, whom a shared channel shows")
 	}
 	rows += 2
+
+	// Voice occupancy under the cell (issue #1103): with LiveKit, bob joins
+	// the voice of the public channel alice is in, and zed the voice of his
+	// own. Alice's occupancy names bob's id under the shared channel, as her
+	// member list of it does (§13.2 clause 4, documented above), and has
+	// neither zed's channel nor anything of zed's.
+	if w.lk != nil {
+		n, err := w.hideVoiceRows(hw, pub)
+		rows += n
+		if err != nil {
+			return rows, err
+		}
+	}
+	return rows, nil
+}
+
+// hideVoiceRows is the occupancy row of the hide-members phase, with
+// LiveKit: bob in the voice of pub (shared with alice) and zed in the voice
+// of p3 (not), and alice's occupancy, read and on a socket, naming bob under
+// pub and nothing of zed. Both leave afterwards, and alice's occupancy is
+// seen to drop bob, so the run goes on with the rooms empty.
+func (w *world) hideVoiceRows(hw *hideWorld, pub string) (int, error) {
+	const row = "the voice occupancy of a member without see_member_directory"
+	rows := 0
+	feeds, err := openOccupancy(hw.alice)
+	if err != nil {
+		return rows, err
+	}
+	defer func() {
+		for _, f := range feeds {
+			f.close()
+		}
+	}()
+	var conns []*lkit.SignalConn
+	for _, j := range []struct {
+		who     *member
+		channel string
+	}{{hw.bob, pub}, {hw.zed, hw.p3}} {
+		s, err := w.session(j.who, j.channel)
+		if err != nil {
+			return rows, fmt.Errorf("%s: %s's session in %s: %w", row, j.who.name, j.channel, err)
+		}
+		c, err := w.joinSignal(s.Rooms[0])
+		if err != nil {
+			return rows, fmt.Errorf("%s: %s joins %s's room: %w", row, j.who.name, j.channel, err)
+		}
+		conns = append(conns, c)
+	}
+	leave := func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}
+	defer leave()
+	own, err := channelsOf(hw.alice.api)
+	if err != nil {
+		return rows, err
+	}
+	var pubID int64
+	for id, name := range own {
+		if name == pub {
+			pubID = id
+		}
+	}
+	if pubID == 0 {
+		return rows, fmt.Errorf("%s: alice's channels do not list %s", row, pub)
+	}
+	// What alice's occupancy must say once bob is in: bob alone under pub,
+	// nobody elsewhere, and no row that is not hers. bob's id is set aside
+	// for the scan as the one the row documents; zed's is a marker still.
+	bobAside := asked{ids: []kindID{{"principal", hw.bob.id}}}
+	check := func(what string, body []byte) (bool, string) {
+		doc, err := parseOccupancy(body)
+		if err != nil {
+			return false, err.Error()
+		}
+		if err := checkRows(doc, slices.Sorted(maps.Keys(own))); err != nil {
+			return false, err.Error()
+		}
+		if leaks := hw.marks.leaks(body, bobAside); len(leaks) > 0 {
+			return false, what + " holds " + strings.Join(leaks, "; ")
+		}
+		got := people(doc)
+		for id, ids := range got {
+			if id != pubID && len(ids) != 0 {
+				return false, fmt.Sprintf("%s names %v under channel %d", what, ids, id)
+			}
+		}
+		return slices.Equal(got[pubID], []int64{hw.bob.id}), fmt.Sprintf("%s names %v under the shared channel, want bob alone", what, got[pubID])
+	}
+	if err := waitFor("alice's occupancy to name bob under the shared channel", 30*time.Second, func() (bool, string) {
+		status, body, err := hw.alice.api.do(http.MethodGet, "/v1/voice/occupancy", nil)
+		if err != nil {
+			return false, err.Error()
+		}
+		if status != http.StatusOK {
+			return false, fmt.Sprintf("status %d %s", status, w.h.redact(string(body)))
+		}
+		return check("the read", body)
+	}); err != nil {
+		return rows, fmt.Errorf("%s: %w", row, err)
+	}
+	rows++
+	// Her sockets, open from before bob joined, carry the same: every frame
+	// her channels alone and nothing of zed's, the latest naming bob.
+	for _, f := range feeds {
+		if err := waitFor(f.what+" to name bob under the shared channel", 30*time.Second, func() (bool, string) {
+			frames := f.received()
+			if len(frames) == 0 {
+				return false, "no frame"
+			}
+			return check("the latest frame", frames[len(frames)-1])
+		}); err != nil {
+			return rows, fmt.Errorf("%s: %w", row, err)
+		}
+		for i, fr := range f.received() {
+			doc, err := parseOccupancy(fr)
+			if err != nil {
+				return rows, fmt.Errorf("%s: frame %d of %s: %w", row, i, f.what, err)
+			}
+			if err := checkRows(doc, slices.Sorted(maps.Keys(own))); err != nil {
+				return rows, fmt.Errorf("%s: frame %d of %s: %w", row, i, f.what, err)
+			}
+			if leaks := hw.marks.leaks(fr, bobAside); len(leaks) > 0 {
+				return rows, fmt.Errorf("%s: frame %d of %s holds %s", row, i, f.what, strings.Join(leaks, "; "))
+			}
+		}
+		rows++
+	}
+	// Bob's own view the other way: alice's id is a marker in his register,
+	// and his occupancy names her nowhere (she is in no voice).
+	status, body, err := hw.bob.api.do(http.MethodGet, "/v1/voice/occupancy", nil)
+	if err != nil {
+		return rows, err
+	}
+	if status != http.StatusOK {
+		return rows, fmt.Errorf("%s: bob reads his occupancy: %d %s", row, status, w.h.redact(string(body)))
+	}
+	if err := hw.scan(hw.marksBob, row+": bob's occupancy", body); err != nil {
+		return rows, err
+	}
+	rows++
+	// They leave, and alice's occupancy is seen to let bob go.
+	leave()
+	if err := waitFor("alice's occupancy to drop bob once he has left", 30*time.Second, func() (bool, string) {
+		var doc schema.VoiceOccupancyV1
+		if err := hw.alice.api.call(http.MethodGet, "/v1/voice/occupancy", nil, &doc); err != nil {
+			return false, err.Error()
+		}
+		return len(people(doc)[pubID]) == 0, fmt.Sprintf("%v", people(doc))
+	}); err != nil {
+		return rows, fmt.Errorf("%s: %w", row, err)
+	}
 	return rows, nil
 }
 

@@ -1,0 +1,21 @@
+{
+  "schema": "conch.voice_occupancy.v1",
+  "configured": true,
+  "available": true,
+  "channels": [
+    {
+      "channel_id": 7,
+      "in_voice": 3,
+      "principal_ids": [
+        3,
+        5,
+        12
+      ]
+    },
+    {
+      "channel_id": 9,
+      "in_voice": 0,
+      "principal_ids": []
+    }
+  ]
+}
