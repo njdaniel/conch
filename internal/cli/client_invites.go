@@ -131,11 +131,11 @@ func (c *Client) ListGuests(ctx context.Context, filter GuestListFilter) (schema
 		query.Set("limit", strconv.Itoa(filter.Limit))
 	}
 	endpoint.RawQuery = query.Encode()
-	var result schema.ListGuestsResponseV1
+	var result guestsDoc
 	if err := c.roundTrip(ctx, "list guests", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ListGuestsResponseV1{}, err
 	}
-	return result, nil
+	return result.ListGuestsResponseV1, nil
 }
 
 // EndGuest ends one guest visit.

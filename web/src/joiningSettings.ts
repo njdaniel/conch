@@ -16,3 +16,9 @@ export interface JoiningRequest {
 }
 
 export const JoiningSettings = createContext<JoiningRequest | null>(null);
+
+// A way to open the member-link panel from the console's Members section
+// (issue #1020, "Add a person"): the lobby closes Settings and the page opens
+// the panel. Null where there is no lobby or the person cannot make member
+// links: the section then offers no such button.
+export const AddPerson = createContext<(() => void) | null>(null);
