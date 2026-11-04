@@ -8,6 +8,16 @@ on:
 permissions:
   contents: read
 
+# One run per pull request and one per main at a time (#1305): the
+# self-hosted runners are shared, so a superseded run should not hold them.
+# A new push to a pull request cancels its older run. On main a run is never
+# cancelled mid-way; while one runs, only the newest pending one is kept, so
+# a burst of merges is checked at its tip instead of once per merge. The
+# merge queue's main check skips the cancelled ones.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Which kind of change this is (issue #1300). A pull request whose every
   # changed path is documentation (scripts/ci-docs-only.sh) gets the text
