@@ -365,13 +365,13 @@ var routeExpectations = map[string]routeExpectation{
 	// whatever it is sent (#713): 409 password_required, for every caller
 	// and under AuthOff alike. People only: an agent gets 403 and AuthOff
 	// 401 on the three authenticated routes (both special-cased below).
-	// POST /v1/invites answers a member 409 invite_kind_retired (issue #990)
-	// and an operator its own validation (the table is for the operator).
+	// POST /v1/invites answers every authenticated caller 409
+	// invite_kind_retired, before it reads the body (issues #990, #1134).
 	// Member links (v2): an empty create is a 400, the list is
 	// the caller's own, preview sends no code, and the joiners of an invite
 	// that does not exist are a 404 for a person and for an agent alike (no
 	// route refuses an agent by name: that would say which ids exist).
-	"POST /v1/invites":             {classAuth, "/v1/invites", `{}`, 400},
+	"POST /v1/invites":             {classAuth, "/v1/invites", `{}`, 409},
 	"GET /v1/invites":              {classAuth, "/v1/invites", "", 200},
 	"DELETE /v1/invites/{id}":      {classAuth, "/v1/invites/9999", "", 404},
 	"POST /v1/invites/preview":     {classExempt, "/v1/invites/preview", `{}`, 404},
@@ -645,9 +645,9 @@ func TestRoleMatrix(t *testing.T) {
 			if rt.pattern == "PUT /v1/channels/{id}/name" {
 				memberWant = exp.allowed // a non-member cannot discover the channel id
 			}
-			// A member makes member links, not v1 invites (issue #990): the
-			// route answers 409 invite_kind_retired before reading the body.
-			// An agent is still refused first, as a person who is not.
+			// Nobody makes v1 invites (issue #1134): the route answers
+			// 409 invite_kind_retired to every authenticated caller, agents
+			// and operators included, before reading the body.
 			inviteRetired := rt.pattern == "POST /v1/invites"
 			if inviteRetired {
 				memberWant = http.StatusConflict
@@ -686,7 +686,7 @@ func TestRoleMatrix(t *testing.T) {
 			// reports (issue #446) and message edits (issue #845: message
 			// 9999 does not exist, so a person gets message_not_found, and an
 			// agent is refused before any lookup).
-			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" || rt.pattern == "POST /v1/channels" || isSelfMembershipRoute(rt.pattern) || isMessageEditRoute(rt.pattern) {
+			if (isInviteRoute(rt.pattern) && !inviteRetired) || rt.pattern == "POST /v1/reports" || rt.pattern == "POST /v1/channels" || isSelfMembershipRoute(rt.pattern) || isMessageEditRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// Signing out (issue #439) succeeds for any member and revokes
@@ -776,6 +776,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if isInviteRoute(rt.pattern) || rt.pattern == "GET /v2/invites/{id}/joiners" {
 					want = http.StatusUnauthorized // like whoami: no one to make or own an invite
+				}
+				if rt.pattern == "POST /v1/invites" {
+					want = http.StatusConflict // retired for everyone, before any caller is looked at (issue #1134)
 				}
 				if rt.pattern == "POST /v1/reports" {
 					want = http.StatusUnauthorized // like whoami: no one to say who reported

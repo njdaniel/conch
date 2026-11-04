@@ -415,9 +415,9 @@ var recentAuthRoutes = map[string]reauthRule{
 	// Signing out everywhere is anyone's for themself; an operator doing it
 	// to someone else is the bulk revoke of the rule.
 	"POST /v1/principals/{id}/credentials/revoke-all": reauthOnOthers,
-	// An invite makes principals; an operator's has no allowance and may never
-	// expire. A member's links are not in the class.
-	"POST /v1/invites": reauthOperators,
+	// A member link makes principals; an operator's has no allowance and may
+	// never expire. A member's links are not in the class. POST /v1/invites
+	// makes nothing for anyone (issue #1134), so it is not in the class.
 	"POST /v2/invites": reauthOperators,
 	// The permissions document grants rights (ADR-014 design §7.2).
 	"PUT /v1/permissions": reauthAlways,

@@ -688,9 +688,9 @@ func coreMatrixRows() []row {
 		operator("DELETE /v1/hooks/{id}", "revokes a hook", nil, func(*world, subject) probe { return del("/v1/hooks/1") }),
 
 		// Invites.
-		// A member is refused the v1 route whatever it names and whatever its
-		// brake (issue #990): the kind is retired for it, and the answer is
-		// the same for A's channel and for a ghost.
+		// The v1 route makes nothing for anyone (issues #990, #1134): the kind
+		// is retired, and the answer is the same for a member, an operator,
+		// A's channel and a ghost.
 		{route: "POST /v1/invites", what: "invites someone to A's channel", pick: aChannel,
 			want: answer{http.StatusConflict, schema.ErrorCodeInviteKindRetired}, mayNot: answer{http.StatusConflict, schema.ErrorCodeInviteKindRetired},
 			probe: func(_ *world, s subject) probe {

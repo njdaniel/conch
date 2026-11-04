@@ -100,7 +100,7 @@ describe('the desktop transport: a call of the table is a call of the bridge', (
   it('does not ask main for an operation whose answer holds a credential', async () => {
     const request = vi.fn((): Promise<BridgeReply> => Promise.resolve({ kind: 'none' }));
     install(fakeBridge({ request }));
-    await expect(http.send(call('createInvite'), STAND_IN, { body: {}, keepalive: false })).rejects.toBeInstanceOf(TypeError);
+    await expect(http.send(call('createMemberLink'), STAND_IN, { body: {}, keepalive: false })).rejects.toBeInstanceOf(TypeError);
     await expect(http.send(call('voiceSession', { channel: 'a' }), STAND_IN, { keepalive: false })).rejects.toBeInstanceOf(TypeError);
     expect(request).not.toHaveBeenCalled();
   });

@@ -236,16 +236,6 @@ func refusedPermission(caller store.Principal, perm schema.Permission) schema.Pe
 	return perm
 }
 
-// storeRefusalPermission is the permission a store refusal names (a *PermissionError
-// in err's chain), or "" for one that names none.
-func storeRefusalPermission(err error) schema.Permission {
-	var perr *store.PermissionError
-	if errors.As(err, &perr) {
-		return perr.Permission
-	}
-	return ""
-}
-
 func isOwner(p store.Principal) bool { return p.IsOwner() }
 
 // ownerProtected refuses a non-owner operator acting on an owner principal

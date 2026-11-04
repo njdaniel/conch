@@ -71,7 +71,8 @@ func tryInviteGuest(mode schema.InviteJoinMode, want answer) tryEntry {
 
 // tryPersonalGuest has the operator try to make a personal invite to the
 // plaza for a guest: §9.1 names personal invites beside open links, and
-// none may admit a guest now.
+// none may admit a guest now. POST /v1/invites is retired for everyone, the
+// operator included (issue #1134), so it answers 409 invite_kind_retired.
 func tryPersonalGuest(want answer) tryEntry {
 	return tryEntry{what: "is made a personal invite for a guest by the operator", want: want, do: func(w *world, _ api) (int, []byte, error) {
 		return w.op.do(http.MethodPost, "/v1/invites", schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{w.p.channel}, JoinAs: schema.InviteJoinGuest})
@@ -133,6 +134,7 @@ var (
 	joiningPaused  = answer{http.StatusForbidden, schema.ErrorCodeJoiningPaused}
 	invitesPaused  = answer{http.StatusServiceUnavailable, schema.ErrorCodeInvitesPaused}
 	policyConflict = answer{http.StatusConflict, schema.ErrorCodeJoinPolicyConflict}
+	inviteRetired  = answer{http.StatusConflict, schema.ErrorCodeInviteKindRetired}
 )
 
 // gates is the steps, in order.
@@ -143,7 +145,7 @@ func gates() []gate {
 		{what: "guests off, accounts open", set: settings(schema.PutJoinSettingsRequestV1{GuestsEnabled: &no}),
 			front: schema.JoinOptionsV1{Account: true},
 			tries: []tryEntry{tryGuest(guestsDisabled), tryInviteGuest(schema.InviteJoinBoth, guestsDisabled), tryInviteGuest(schema.InviteJoinGuest, guestsDisabled),
-				tryPersonalGuest(policyConflict),
+				tryPersonalGuest(inviteRetired),
 				trySettings("turns guests on", schema.PutJoinSettingsRequestV1{GuestsEnabled: &yes}, policyConflict),
 				trySettings("makes the address guest-only", schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningGuest)}, policyConflict),
 				trySettings("opens the address to guests and accounts", schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningBoth)}, policyConflict),

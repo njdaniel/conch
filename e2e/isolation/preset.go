@@ -106,8 +106,8 @@ func (w *world) presetPhase() (int, error) {
 	}
 	rows++
 	status, body, err = m.api.do(http.MethodPost, "/v1/invites", schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{room}})
-	// The v1 route refuses a caller without manage_members before it looks at
-	// the body (issue #990): 409 invite_kind_retired, naming no permission.
+	// The v1 route refuses every caller before it looks at the body (issues
+	// #990, #1134): 409 invite_kind_retired, naming no permission.
 	if err != nil {
 		return rows, fmt.Errorf("a member makes a v1 link under personal: %w", err)
 	}

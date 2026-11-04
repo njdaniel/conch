@@ -109,7 +109,6 @@ func (f *archiveFixture) refusedRoutes() []archiveRoute {
 		{"self-join", "nora", "POST", "/v1/channels/ops/join", "", "", conflict, code},
 		{"add a member by name", "root", "POST", "/v1/channels/ops/members", js, `{"name":"nora"}`, conflict, code},
 		{"add a member by id", "root", "PUT", fmt.Sprintf("/v1/channels/ops/members/%d", f.p("nora").ID), "", "", conflict, code},
-		{"create an invite naming it", "root", "POST", "/v1/invites", js, `{"kind":"personal","channels":["ops"]}`, conflict, code},
 		{"create a member link landing in it", "root", "POST", "/v2/invites", js, `{"kind":"member","landing_channels":["ops"]}`, conflict, code},
 	}
 }
