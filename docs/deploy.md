@@ -515,9 +515,11 @@ conch admin principal role 5 operator --no-owner  # take the owner mark away
 conch admin principal role 5 member               # back to a member
 ```
 
-### The eleven permissions
+<a id="the-eleven-permissions"></a>
 
-A permission is a switch with one cell for members and one for operators. Owners have no cell: they hold all eleven.
+### The twelve permissions
+
+A permission is a switch with one cell for members and one for operators. Owners have no cell: they hold all twelve.
 
 | Permission | Members (default) | Operators (default) |
 | --- | --- | --- |
@@ -525,6 +527,7 @@ A permission is a switch with one cell for members and one for operators. Owners
 | `make_member_links` | on | on |
 | `see_member_directory` | on | on, and fixed on |
 | `use_voice`, `share_screen` | on | on |
+| `use_camera` | off | off |
 | `manage_members` | fixed off | on |
 | `act_as_members` | fixed off | on |
 | `manage_channels` | fixed off | on |
@@ -536,7 +539,7 @@ Two of them need a sentence:
 - **`act_as_members`** "can sign in as, and post as, any member who isn't an owner": it covers making a credential, a sign-in link or a hook for someone else. It needs `manage_members`.
 - **`read_audit_log`** "sees every member and every private channel's name in the audit trail".
 
-A member's cell can't be on while the operators' is off, `share_screen` needs `use_voice`, and the "fixed" cells can't be changed. The server refuses a change that breaks one of these and says which.
+A member's cell can't be on while the operators' is off, `share_screen` and `use_camera` need `use_voice`, and the "fixed" cells can't be changed. The server refuses a change that breaks one of these and says which.
 
 Who changes them: an owner changes both columns. An operator holding `change_server_settings` changes the members' column only, and can only turn a cell on if it holds that permission itself. Give that permission only to someone you would trust with opening the server.
 
