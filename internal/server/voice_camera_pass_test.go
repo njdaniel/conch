@@ -654,3 +654,33 @@ func TestVoiceShareIgnoresMismatchedShareTracks(t *testing.T) {
 		t.Errorf("removals %q, want none (LiveKit refused them)", got)
 	}
 }
+
+// TestVoiceCameraRemovalWithdrawsAGrantFirst (the security review of #1258,
+// round 4): someone without a claim, found with the camera granted and a
+// mismatched track, has the camera withdrawn before their removal, so the
+// token LiveKit sends with the withdrawal, not one carrying the camera, is
+// what a rejoin would use.
+func TestVoiceCameraRemovalWithdrawsAGrantFirst(t *testing.T) {
+	f, room := newCameraFixture(t)
+	f.lk.update(room, f.identity("ann2"), func(p *fakeParticipant) {
+		p.cameraGranted, p.tracks = true, []fakeTrack{{sid: "TR_w1", typ: "VIDEO", source: "MICROPHONE"}}
+	})
+	from := len(f.lk.calls())
+	f.at(500)
+	f.pass(t)
+	var order []string
+	for _, c := range f.lk.calls()[from:] {
+		if c.identity == f.identity("ann2") && (c.method == "UpdateParticipant" || c.method == "RemoveParticipant") {
+			order = append(order, c.method)
+		}
+	}
+	if !slices.Equal(order, []string{"UpdateParticipant", "RemoveParticipant"}) {
+		t.Errorf("calls for ann2 %q, want the withdrawal and then the removal", order)
+	}
+	if got := strings.Join(f.lastUpdate(t, "ann2"), ","); got != "MICROPHONE" {
+		t.Errorf("the withdrawal wrote %s, want the microphone alone", got)
+	}
+	if got := f.removals(t); !slices.Equal(got, []string{"ann2 camera_unclaimed"}) {
+		t.Errorf("removals %q, want ann2 camera_unclaimed", got)
+	}
+}

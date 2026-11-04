@@ -790,7 +790,7 @@ func TestVoiceCameraRevocationWaitsForARetiringRoomsWithdrawal(t *testing.T) {
 	}
 	f.setCamera(t, false, schema.PermissionRoleMember, schema.PermissionRoleOperator)
 	found := make(chan int, 1)
-	f.srv.voice.endCamerasSeam = func(n int) {
+	f.srv.voice.endCamerasWaitSeam = func(n int) {
 		select {
 		case found <- n:
 		default:
@@ -820,4 +820,220 @@ func TestVoiceCameraRevocationWaitsForARetiringRoomsWithdrawal(t *testing.T) {
 		t.Error("ann's camera is still granted in the old room when the PUT answered")
 	}
 	<-rotated
+}
+
+// heldAnswer reports that answered stays open for a moment: what a test
+// calls while it holds the withdrawal the revocation must wait for.
+func heldAnswer(t *testing.T, answered <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-answered:
+		t.Fatalf("%s: the use_camera revocation answered while ann's camera grant was still in flight", what)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// waitOr waits for c, or fails the test naming what it waited for.
+func waitOr(t *testing.T, c <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-c:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// TestVoiceCameraRevocationFindsARoomForgottenAfterItsLook (the security
+// review of #1258, round 4): the revocation's stop path looks while the room
+// is live, with ann's claim in it, and is held at the room's claims. A
+// rotation then forgets the room (ann's camera ends, rotated) and is held
+// before retireRoom takes the claims to withdraw ann's grant. The stop path
+// gets the claims first and finds no claim to end; it must still wait for
+// the withdrawal before the revocation answers.
+func TestVoiceCameraRevocationFindsARoomForgottenAfterItsLook(t *testing.T) {
+	f, room := newCameraFixture(t)
+	f.lk.config(func(l *scriptedLiveKit) { l.deleteFail = map[string]bool{room: true} })
+	f.mustCamera(t, "ann", "")
+	r := f.srv.voice.roomNamed(room)
+	r.claims.Lock()
+	unlocked := false
+	t.Cleanup(func() {
+		if !unlocked {
+			r.claims.Unlock()
+		}
+	})
+	looked := make(chan struct{})
+	var lookOnce sync.Once
+	f.srv.voice.endCamerasSeam = func(n int) {
+		if n > 0 {
+			lookOnce.Do(func() { close(looked) })
+		}
+	}
+	atRetire, goRetire := make(chan struct{}), make(chan struct{})
+	var retireOnce, goOnce sync.Once
+	letRetire := func() { goOnce.Do(func() { close(goRetire) }) }
+	t.Cleanup(letRetire)
+	f.srv.voice.claimSeam = func(at string) {
+		if at == "retire" {
+			retireOnce.Do(func() { close(atRetire) })
+			<-goRetire
+		}
+	}
+	f.setCamera(t, false, schema.PermissionRoleMember, schema.PermissionRoleOperator)
+	answered := make(chan struct{})
+	go func() {
+		defer close(answered)
+		f.srv.endWithheldCameras(context.Background())
+	}()
+	waitOr(t, looked, "the stop path to find ann's room")
+	rotated := make(chan struct{})
+	go func() {
+		defer close(rotated)
+		id := f.credID(t, "ann2")
+		if err := f.srv.store.RevokeCredential(context.Background(), "system", id); err != nil {
+			t.Error(err)
+		}
+		f.srv.credentialRevoked(context.Background(), id)
+	}()
+	waitOr(t, atRetire, "the rotation to forget the room")
+	unlocked = true
+	r.claims.Unlock() // the stop path takes the claims before retireRoom
+	heldAnswer(t, answered, "forgotten after the stop path's look")
+	letRetire()
+	waitOr(t, answered, "the revocation to answer")
+	if f.camGranted(room, "ann") {
+		t.Error("ann's camera is still granted in the old room when the revocation answered")
+	}
+	waitOr(t, rotated, "the rotation's hook")
+}
+
+// TestVoiceCameraRevocationWaitsWhenAClaimEndsBeforeRetireRoom (the security
+// review of #1258, round 4): a rotation forgets the room while ann2's claim
+// is inside LiveKit, so the room is retiring under ann2's id, and ends ann's
+// camera there. ann2's claim then returns before retireRoom has looked at the
+// room again. A use_camera revocation of ann made in between must still wait
+// for retireRoom's withdrawal of ann's grant.
+func TestVoiceCameraRevocationWaitsWhenAClaimEndsBeforeRetireRoom(t *testing.T) {
+	f, room := newCameraFixture(t)
+	f.lk.config(func(l *scriptedLiveKit) { l.deleteFail = map[string]bool{room: true} })
+	f.mustCamera(t, "ann", "")
+	ann2 := f.identity("ann2")
+	granting, release := make(chan struct{}), make(chan struct{})
+	var grantOnce, releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letGo)
+	f.lk.config(func(l *scriptedLiveKit) {
+		l.onUpdateCamera = func(_, identity string, camera bool) {
+			if camera && identity == ann2 {
+				grantOnce.Do(func() {
+					close(granting)
+					<-release
+				})
+			}
+		}
+	})
+	atRetire, goRetire := make(chan struct{}), make(chan struct{})
+	var retireOnce, goOnce sync.Once
+	letRetire := func() { goOnce.Do(func() { close(goRetire) }) }
+	t.Cleanup(letRetire)
+	f.srv.voice.claimSeam = func(at string) {
+		if at == "retire" {
+			retireOnce.Do(func() { close(atRetire) })
+			<-goRetire
+		}
+	}
+	claimed := make(chan wireResult, 1)
+	go func() { claimed <- f.camera(t, http.MethodPost, "ann2", "ops", "") }()
+	waitOr(t, granting, "ann2's grant to reach LiveKit")
+	rotated := make(chan struct{})
+	go func() {
+		defer close(rotated)
+		f.rotateInStoreOnly(t)
+		if _, err := f.srv.voice.rotateInvalid(context.Background()); err != nil {
+			t.Error(err)
+		}
+		old, err := f.srv.store.ListRetiredVoiceRooms(context.Background())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		for _, o := range old {
+			if o.RoomName == room {
+				f.srv.voice.retireRoom(context.Background(), o)
+			}
+		}
+	}()
+	waitOr(t, atRetire, "the rotation to forget the room")
+	letGo()
+	select {
+	case res := <-claimed:
+		if res.status == http.StatusOK {
+			t.Errorf("ann2's claim in a retired room was granted: %s", res.body)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ann2's claim never returned")
+	}
+	f.setCamera(t, false, schema.PermissionRoleMember, schema.PermissionRoleOperator)
+	answered := make(chan struct{})
+	go func() {
+		defer close(answered)
+		f.srv.voice.endCamerasOf(context.Background(), f.ids["ann"], 0, voiceCameraStopAccessLost)
+	}()
+	heldAnswer(t, answered, "a claim ended between the forget and retireRoom")
+	letRetire()
+	waitOr(t, answered, "the revocation to answer")
+	if f.camGranted(room, "ann") {
+		t.Error("ann's camera is still granted in the old room when the revocation answered")
+	}
+	waitOr(t, rotated, "the rotation")
+}
+
+// TestVoiceCameraRevocationWaitsForAPendingGrantAcrossARotation (Kimi, round
+// 4): ann's first claim has passed its re-read and is inside LiveKit's grant
+// when a rotation retires the room with ann as its claimer; the claim is
+// pending, so the forget ends no camera of hers. A use_camera revocation,
+// with nothing of the share's to wait on, must still find the claim and wait
+// for it, so the grant is taken back before the revocation answers.
+func TestVoiceCameraRevocationWaitsForAPendingGrantAcrossARotation(t *testing.T) {
+	f, room := newCameraFixture(t)
+	f.lk.config(func(l *scriptedLiveKit) { l.deleteFail = map[string]bool{room: true} })
+	ann := f.identity("ann")
+	granting, release := make(chan struct{}), make(chan struct{})
+	var grantOnce, releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letGo)
+	f.lk.config(func(l *scriptedLiveKit) {
+		l.onUpdateCamera = func(_, identity string, camera bool) {
+			if camera && identity == ann {
+				grantOnce.Do(func() {
+					close(granting)
+					<-release
+				})
+			}
+		}
+	})
+	claimed := make(chan wireResult, 1)
+	go func() { claimed <- f.camera(t, http.MethodPost, "ann", "ops", "") }()
+	waitOr(t, granting, "ann's grant to reach LiveKit")
+	old, err := f.srv.store.ChannelVoiceRoom(context.Background(), f.ops.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.rotateInStoreOnly(t)
+	f.srv.voice.retireRoom(context.Background(), old)
+	f.setCamera(t, false, schema.PermissionRoleMember, schema.PermissionRoleOperator)
+	answered := make(chan struct{})
+	go func() {
+		defer close(answered)
+		f.srv.endWithheldCameras(context.Background())
+	}()
+	heldAnswer(t, answered, "a pending grant across a rotation")
+	letGo()
+	waitOr(t, answered, "the revocation to answer")
+	if f.camGranted(room, "ann") {
+		t.Error("ann's camera is granted after the revocation answered")
+	}
+	if res := <-claimed; res.status == http.StatusOK {
+		t.Errorf("ann's claim in a retired room was granted: %s", res.body)
+	}
 }

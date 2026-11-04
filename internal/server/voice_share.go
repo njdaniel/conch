@@ -405,8 +405,15 @@ func (p *voicePoller) claimRunning(ctx context.Context, r *voiceRoomState, princ
 					close(r.withdrawDone)
 					r.withdrawDone = nil
 				}
+				// A withdrawal still owed by someone else (forgetRoom ended
+				// cameras while this claim ran, and retireRoom has yet to
+				// withdraw them) keeps the room in retiring, as retireRoom's.
 				if pid, ok := p.retiring[r]; ok && pid != 0 {
-					delete(p.retiring, r)
+					if r.withdrawDone != nil {
+						p.retiring[r] = 0
+					} else {
+						delete(p.retiring, r)
+					}
 				}
 				p.mu.Unlock()
 				return
@@ -631,12 +638,17 @@ func (p *voicePoller) roomRotatedUnder(ctx, lctx context.Context, r *voiceRoomSt
 		// whose grants are left; the claimer's is taken back with theirs, under
 		// the claims this claim holds. If another path forgot the room first,
 		// what it owes is this claim's to pay (claimRunning).
-		_, holders := p.forgetRoom(ctx, room.RoomName)
+		forgot, holders := p.forgetRoom(ctx, room.RoomName)
 		if !slices.Contains(holders, principalID) {
 			holders = append(holders, principalID)
 		}
 		for _, pid := range holders {
 			p.withdrawAll(ctx, r, pid, voiceRoomPublishes(room))
+		}
+		if forgot != nil {
+			// This claim's own forget made the withdrawals: what it opened
+			// for them (forgetRoom, ended cameras) is closed.
+			p.withdrawFinished(r)
 		}
 		return true
 	}
