@@ -1376,7 +1376,9 @@ class LiveKitAdapter implements Room {
   }
 
   // switchCamera moves the capture to another camera, exactly, keeping its
-  // publication. A capture that fails leaves nothing captured.
+  // publication. On the latest switch's failure the capture is stopped, but
+  // its wrapper and publication stay held: the caller must switch it again or
+  // call stopCamera.
   //
   // Switches run one after another, and only the last one asked for runs: one
   // overtaken while it waited does nothing, so an earlier switch's failure
@@ -1412,7 +1414,9 @@ class LiveKitAdapter implements Room {
         // still holds, may stop it: one overtaken while the browser was
         // asked leaves it to the later one.
         if (ours()) {
-          if (turn === this.switchTurn) await this.stopCamera();
+          // Keep the stopped wrapper for a newer choice to restart while the
+          // camera is starting; its caller stops and releases if none is left.
+          if (turn === this.switchTurn) track.stop();
         } else if (this.camera !== track) letGo();
         throw err;
       }
