@@ -74,6 +74,32 @@ const (
 	AuditVoiceShareUnclaimed = "voice_share_unclaimed"
 )
 
+// Audit actions of the camera (ADR-015, issue #1241;
+// docs/design/webcam-video.md §4.7). Their subject is "channel:<id>"; none
+// carries a token, a room name, a device name or a device id. A refused claim
+// writes none of them.
+const (
+	// AuditVoiceCameraStarted is written by the camera endpoint when a claim
+	// is granted, before it is answered. Its actor is the person and its
+	// detail "channel=<id>".
+	AuditVoiceCameraStarted = "voice_camera_started"
+	// AuditVoiceCameraStopped is written once for every camera claim that
+	// started, when it ends. Its actor is the person for reason=self, the
+	// operator for reason=operator, and "system" for every end conchd decided
+	// (left, access_lost, rotated, idle); its detail "channel=<id>
+	// principal=<person> reason=<self, operator, left, access_lost, rotated
+	// or idle>".
+	AuditVoiceCameraStopped = "voice_camera_stopped"
+	// AuditVoiceCameraUnclaimed is written by the poller, once per track, when
+	// it sees a camera track published by a participant who holds no camera
+	// claim, or a track whose kind and declared source disagree. Its actor is
+	// that participant's principal and its detail "channel=<id>
+	// source=observed track_source=<declared> track_type=<declared>", with
+	// " participant=screen|view" for a companion or a viewer. The source is
+	// withdrawn, or the publisher removed.
+	AuditVoiceCameraUnclaimed = "voice_camera_unclaimed"
+)
+
 // AuditVoiceCompanionRemoved is written by the poller (issue #932) when
 // LiveKit actually removed a companion participant (p<id>.screen) because the
 // person's own connection had been gone for longer than the grace. Its actor

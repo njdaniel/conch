@@ -485,6 +485,14 @@ func coreMatrixRows() []row {
 		byChannel("POST /v1/channels/{channel}/voice/transmit", "reports transmitting in A's channel", func(_ *world, s subject) probe { return post(ch(s)+"/voice/transmit", transmit) }),
 		byChannel("POST /v1/channels/{channel}/voice/share", "claims A's room's share", func(_ *world, s subject) probe { return post(ch(s)+"/voice/share", nil) }),
 		byChannel("DELETE /v1/channels/{channel}/voice/share", "stops A's room's share", func(_ *world, s subject) probe { return del(ch(s) + "/voice/share") }),
+		// The camera (issue #1241, ADR-015): a claim, a release, and the stop
+		// of an A member's camera, which needs manage_channels that no member
+		// of B holds, all answered as for a channel that never existed.
+		byChannel("POST /v1/channels/{channel}/voice/camera", "claims a camera in A's room", func(_ *world, s subject) probe { return post(ch(s)+"/voice/camera", nil) }),
+		byChannel("DELETE /v1/channels/{channel}/voice/camera", "releases a camera in A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/camera") }),
+		byChannel("DELETE /v1/channels/{channel}/voice/camera", "stops an A member's camera in A's room", func(w *world, s subject) probe {
+			return del(ch(s) + "/voice/camera?" + schema.VoiceCameraPrincipalParam + "=" + id(w.a.people[0].id))
+		}),
 		byChannel("POST /v1/channels/{channel}/voice/companion", "asks for a screen companion in A's room", func(_ *world, s subject) probe { return post(ch(s)+"/voice/companion", companion) }),
 		byChannel("DELETE /v1/channels/{channel}/voice/companion", "removes a companion from A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/companion") }),
 		byChannel("GET /v1/channels/{channel}/voice", "reads A's voice presence", func(_ *world, s subject) probe { return get(ch(s) + "/voice") }),

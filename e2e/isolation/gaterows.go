@@ -66,6 +66,10 @@ var gateRows = map[string]string{
 	"voice.go Server.voicePresenceChannel":           "a member without use_voice at the voice session",
 	"voice_occupancy.go Server.voiceOccupancyCaller": "a member without use_voice at voice occupancy",
 	"voice_share.go Server.handleVoiceShareStart":    "a member without share_screen at the share claim",
+
+	// Issue #1241: the camera.
+	"voice_camera.go Server.handleVoiceCameraStart": "a member without use_camera at the camera claim",
+	"voice_camera.go Server.handleVoiceCameraStop":  "the restricted operator stops a member's camera in its own channel",
 }
 
 // pendingGates are the gates that have no restricted row yet, each with why
@@ -80,6 +84,14 @@ var pendingGates = map[string]string{ // #nosec G101 -- gate names, not credenti
 	"voice_presence.go Server.voiceWithheldAmong": "closes the voice sockets of those who lost use_voice at the PUT; the permissions rule \"members can't hold use_voice while operators don't\" (409) means any column cut that closes an operator's socket also cuts the member column and closes B's open voice sockets, so a row needs a world without B's sockets (server voice_permission_test.go); #1217: a live-media isolation row",
 	"voice_share.go voicePoller.shareEntitled":    "the claim's re-read under the room's claims: needs a live share (server voice_share_revoke_test.go); #1217: a live-media isolation row",
 	"voice_share.go voicePoller.sharesWithheld":   "ends a live share when share_screen is cut: needs a live share (server voice_share_revoke_test.go); #1217: a live-media isolation row",
+	// The camera's (issue #1241). Each ends or refuses a live claim, which a
+	// request-and-response row cannot hold; the media half's camera rows
+	// (media.go) run the PUT's hook against a real one, and the server's
+	// tests the rest (voice_camera_revoke_test.go, voice_camera_pass_test.go).
+	"voice_camera.go voicePoller.cameraEntitled":  "the claim's re-read under the room's claims: needs a claim held at the lock (server voice_camera_revoke_test.go TestVoiceCameraClaimRevokedBeforeGrant); #1217: a seam-driven race row",
+	"voice_camera.go voicePoller.camerasWithheld": "ends a live camera on the pass when use_camera was cut without the hook: needs a live claim and a store edit (server voice_camera_pass_test.go TestVoiceCameraEntitlementEveryPass); #1217: a live-media isolation row",
+	"permissions.go Server.endWithheldCameras":    "the PUT's hook ending a live camera when use_camera is cut: run against a real claim in the media half (media.go, cameraA); the phrase rule reads the request phases only",
+	"permissions.go Server.endCameraIfWithheld":   "a role change's hook ending a live camera: needs a live claim (server voice_camera_revoke_test.go TestVoiceCameraHooksEndBeforeAnswer); #1217: a live-media isolation row",
 }
 
 // gateKeys reads the gates of permissionGates out of the server's test file,

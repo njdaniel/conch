@@ -75,13 +75,9 @@ func TestEveryPermissionIsChecked(t *testing.T) {
 // notYetGated is each permission no route or store check reads yet, with
 // the issue that wires its gate (ADR-014 design §12). Rows 1 and 2 left with
 // #981 (member channel creation), row 4 with I4 (#983), row 5 with A4
-// (#1016), and rows 10 and 11 with A3b (#1015). Row 12, use_camera, arrived
-// with the schema of ADR-015 (C2, #1238) and leaves with the camera routes
-// (C4); the store's brake (C3) does not count, since the scan skips the
-// permissions helpers.
-var notYetGated = map[schema.Permission]string{
-	schema.PermUseCamera: "webcam C4: POST /v1/channels/{channel}/voice/camera",
-}
+// (#1016), rows 10 and 11 with A3b (#1015), and row 12, use_camera, with the
+// camera routes (C4, #1241). It is empty: every permission is checked.
+var notYetGated = map[schema.Permission]string{}
 
 // permissionConsts names each schema.Permission constant, so the scan can
 // tell which are named in code. TestEveryPermissionIsChecked keeps it in
