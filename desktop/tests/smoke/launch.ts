@@ -8,7 +8,7 @@
 // that needs it, and driven with chromium.connectOverCDP. The app itself never
 // turns that port on; a test that does not ask for it gets none.
 import { spawn, type ChildProcess } from 'node:child_process';
-import type { Browser, Page } from '@playwright/test';
+import type { Browser, Locator, Page } from '@playwright/test';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -109,4 +109,14 @@ export async function livePage(browser: Browser, not?: Page): Promise<Page> {
     await new Promise((r) => setTimeout(r, 100));
   }
   throw new Error('no app window within 30 s');
+}
+
+// credentialField opens the sign-in page's "Operator or script?" disclosure,
+// where the credential field lives (#1042, F24), and returns the field. As
+// web/e2e/fixtures.ts does for the browser specs.
+export async function credentialField(page: Page): Promise<Locator> {
+  const disclosure = page.locator('details.operator-signin');
+  await disclosure.waitFor({ state: 'attached' });
+  if (!(await disclosure.evaluate((d) => (d as HTMLDetailsElement).open))) await disclosure.locator('summary').click();
+  return page.getByLabel('Credential');
 }
