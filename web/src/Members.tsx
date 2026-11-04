@@ -570,7 +570,7 @@ export function CommunityMembers({
         </p>
       ) : (
         <>
-          {answer.scope === 'shared_channels' ? <p className="hint">Showing the people you share a channel with.</p> : null}
+          {answer.scope === 'shared_channels' ? <p className="hint">You see the people you share a channel with</p> : null}
           {answer.members.length === 0 ? (
             <p className="empty">Nobody to show</p>
           ) : (

@@ -279,8 +279,9 @@ test('A14 a member removed from the channel, or hidden, leaves the open page of 
 
   await must(api, `hide ${abe.name}`, op, 'POST', `/v1/principals/${String(abe.id)}/hide`);
   await expect(members).not.toContainText(abe.name, { timeout: 5_000 });
-  // His message stays, by #<id> now, as a reload would show it.
-  await expect(said).toContainText(`#${String(abe.id)}`);
+  // His message stays, named as the channel's authors route names a hidden
+  // author (design §13.5): by the placeholder, not by his name, as a reload would show it.
+  await expect(said).toContainText(`hidden-${String(abe.id)}`);
   // The server says the directory changed (conch.directory_changed.v1) and the
   // community list is read again with no click: the hidden account is gone.
   await expect(page.locator('body')).not.toContainText(abe.name, { timeout: 5_000 });

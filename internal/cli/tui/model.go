@@ -244,6 +244,11 @@ type Model struct {
 	// A channel whose list never loaded has no entry, and its authors show as
 	// numbers.
 	members map[string]map[int64]schema.ChannelMemberV1
+	// departed is what the channel's authors route named for authors the member
+	// list does not have, and authorsAsked the ids it has been asked about
+	// (authors.go). Both are dropped when the member list is read again.
+	departed     map[string]map[int64]schema.ChannelAuthorV1
+	authorsAsked map[string]map[int64]bool
 	// now and loc give the clock and the time zone message times are shown in.
 	// Injectable so tests do not depend on the machine or on today's date; a nil
 	// loc means the local zone.
@@ -832,7 +837,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				names[member.PrincipalID] = member
 			}
 			m.members[msg.channel] = names
+			m.forgetAuthors(msg.channel)
+			return m, m.nameAuthors(msg.channel)
 		}
+	case authorsLoaded:
+		return m.authorsLoaded(msg)
 	case messagesLoaded:
 		// The result of a channel the user has since left must not overwrite
 		// the status of the channel they are looking at.
@@ -862,8 +871,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loaded[msg.channel] = true
 		m.addMessages(msg.channel, msg.messages)
 		m.markStreamed(msg.channel, msg.messages...)
+		naming := m.nameAuthors(msg.channel)
 		if stale {
-			return m, nil
+			return m, naming
 		}
 		switch {
 		case m.notice != "":
@@ -875,13 +885,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			m.setStatus(modeChannels, "connected")
 		}
-		return m, m.markReading()
+		return m, tea.Batch(m.markReading(), naming)
 	case messageReceived:
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
 		m.addMessages(msg.channel, []schema.MessageV2{msg.message})
 		m.markStreamed(msg.channel, msg.message)
-		return m, tea.Batch(m.waitEvent(), m.countArrival(msg.channel, msg.message), m.markReading())
+		return m, tea.Batch(m.waitEvent(), m.countArrival(msg.channel, msg.message), m.markReading(), m.nameAuthors(msg.channel))
 	case subscriptionOpened:
 		if msg.channel == m.current() && m.channelStatus == statusReconnecting && m.notice == "" {
 			m.setStatus(modeChannels, "connected")
@@ -2017,6 +2027,12 @@ func (m Model) authorName(channel string, id int64) (name string, agent bool) {
 		// the server keeps, never from the name's text (ADR-009 §4.1).
 		if g := member.Guest; g != nil && g.Validate() == nil {
 			name = safeName(schema.GuestDisplayName(g.Label, g.Handle))
+		}
+	}
+	if _, listed := m.members[channel][id]; !listed {
+		if a, ok := m.departed[channel][id]; ok {
+			name = safeName(a.Name)
+			agent = a.Kind == schema.PrincipalAgent
 		}
 	}
 	if name == "" {

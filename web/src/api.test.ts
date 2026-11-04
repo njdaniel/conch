@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   changePassword,
+  channelAuthors,
   claimVoiceShare,
   closeInvite,
   convertGuest,
@@ -1626,5 +1627,58 @@ describe('the voice mode kept in the browser', () => {
     expect(readVoiceMode()).toBeNull();
     expect(() => { writeVoiceMode('ptt'); }).not.toThrow();
     vi.restoreAllMocks();
+  });
+});
+
+describe('channelAuthors (design §13.5)', () => {
+  const author = (id: number) => ({ principal_id: id, name: `p${String(id)}`, kind: 'human' });
+
+  it('asks in batches of at most 100 ids, once each, and gathers the answers', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const ids = Array.from({ length: 250 }, (_, i) => i + 10);
+    const asked: number[][] = [];
+    serve((call) => {
+      const wanted = new URL(call.path, 'http://x').searchParams.get('ids')?.split(',').map(Number) ?? [];
+      asked.push(wanted);
+      return json({ authors: wanted.map(author) });
+    });
+    const result = await channelAuthors('general', [...ids, ...ids.slice(0, 5)]);
+    expect(asked.map((a) => a.length)).toEqual([100, 100, 50]);
+    expect(result.ok && result.value.length).toBe(250);
+  });
+
+  it('puts the channel in the path as one segment', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const calls = serve(() => json({ authors: [] }));
+    await channelAuthors('a/b c', [3]);
+    expect(calls.map((c) => c.path)).toEqual(['/v1/channels/a%2Fb%20c/authors?ids=3']);
+  });
+
+  it('keeps only names for ids it asked, and skips a batch that did not answer', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    let n = 0;
+    serve(() => (++n === 1 ? json({ authors: [author(10), author(999)] }) : json({ code: 'internal_error', message: 'x' }, 500)));
+    const ids = Array.from({ length: 101 }, (_, i) => i + 10);
+    const result = await channelAuthors('general', ids);
+    expect(result).toEqual({ ok: true, value: [author(10)] });
+  });
+
+  it('refuses a body that is not the schema’s shape, naming nobody', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ authors: [{ principal_id: 'x', name: 1 }] }));
+    expect(await channelAuthors('general', [3])).toEqual({ ok: true, value: [] });
+  });
+
+  it('is a failure on a 401, so the page signs out', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({}, 401));
+    expect(await channelAuthors('general', [3])).toEqual({ ok: false, failure: 'unauthorized' });
+  });
+
+  it('asks nothing for no ids', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const calls = serve(() => json({ authors: [] }));
+    expect(await channelAuthors('general', [])).toEqual({ ok: true, value: [] });
+    expect(calls).toEqual([]);
   });
 });

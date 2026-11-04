@@ -109,11 +109,13 @@ import {
   channelDirectoryResponseV1,
   createChannelResponseV1,
   joinChannelResponseV1,
+  channelAuthorsResponseV1,
   listChannelMembersResponseV1,
   listChannelsResponse,
   renameChannelResponseV1,
   channelSettingsResponseV1,
   type AddChannelMemberRequestV1,
+  type ChannelAuthorV1,
   type ChannelMemberV1,
   type ChannelV0,
   type ChannelListingV1,
@@ -2066,6 +2068,34 @@ export async function loadMessagesAscending(channel: string, after = 0): Promise
 export async function listMembers(channel: string): Promise<ApiResult<ChannelMemberV1[]>> {
   const result = await authed(call('listMembers', { channel }), listChannelMembersResponseV1);
   return result.ok ? { ok: true, value: result.value.members } : result;
+}
+
+// How many ids one authors call may ask about (pkg/schema
+// MaxChannelAuthorIDs): the server refuses more.
+export const authorBatch = 100;
+
+// channelAuthors names the people who wrote in a channel but are not in the
+// list the page holds (GET /v1/channels/{channel}/authors, design §13.5): a
+// message's author stays named for everyone who can read the message. The ids
+// go in batches of at most authorBatch. What comes back is only what the
+// server named for an id that was asked: another id in an answer is dropped,
+// and a batch that did not answer names nobody (those ids read #<id>). A 401
+// is the whole call's failure, so the page signs out.
+export async function channelAuthors(channel: string, ids: readonly number[]): Promise<ApiResult<ChannelAuthorV1[]>> {
+  const wanted = [...new Set(ids)].filter((id) => Number.isSafeInteger(id) && id > 0);
+  const named = new Map<number, ChannelAuthorV1>();
+  for (let from = 0; from < wanted.length; from += authorBatch) {
+    const batch = wanted.slice(from, from + authorBatch);
+    const result = await authed(call('channelAuthors', { channel }, queryOf({ ids: batch.join(',') })), channelAuthorsResponseV1);
+    if (!result.ok) {
+      if (result.failure === 'unauthorized') return result;
+      continue;
+    }
+    for (const author of result.value.authors) {
+      if (batch.includes(author.principal_id)) named.set(author.principal_id, author);
+    }
+  }
+  return { ok: true, value: [...named.values()] };
 }
 
 export async function addChannelMember(channel: string, name: string): Promise<InviteResult<ChannelMemberV1>> {

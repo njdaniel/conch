@@ -17,6 +17,7 @@ import type { ChannelChat, PendingSend } from './state/messages';
 import { canLoadOlder, editsKnown, isLater, lastId, oldestId, ordered } from './state/messages';
 import type { LiveStatus, Person } from './useLiveChannel';
 import { mentions } from './useNotifications';
+import { useAuthorNames } from './useAuthorNames';
 
 // HH:MM in the reader's own time zone.
 export function clock(when: string | number): string {
@@ -327,7 +328,7 @@ function continues(before: MessageV2 | undefined, message: MessageV2): boolean {
   return Date.parse(message.created_at) - Date.parse(before.created_at) < sameRun;
 }
 
-function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized }: {
+function ThreadView({ rootId, root, chat, channel, live, people: known, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized }: {
   readonly rootId: number;
   readonly root: MessageV2 | undefined;
   readonly chat: ChannelChat;
@@ -387,6 +388,8 @@ function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, d
     if (held === undefined || isLater(message, held)) byId.set(message.id, message);
   }
   const messages = [...byId.values()].sort((a, b) => a.id - b.id);
+  const threadAuthors = useMemo(() => [...new Set(messages.filter((m) => m.guest_author === undefined).map((m) => m.author_id))], [messages]);
+  const people = useAuthorNames(channel, threadAuthors, known, onUnauthorized);
   const rootMessage = byId.get(rootId);
   const me = people.get(viewer) ?? { name: `#${String(viewer)}`, kind: null };
   const pending = chat.pending.filter((send) => send.threadRootId === rootId);
@@ -482,7 +485,7 @@ export function Conversation({
   channel,
   chat,
   live,
-  people,
+  people: members,
   nets,
   viewer,
   draft,
@@ -541,6 +544,11 @@ export function Conversation({
   // A refusal ended a message's edits for good (issue #1031).
   readonly onEditFinal?: (id: number) => void;
 }) {
+  // Whoever wrote here and is not in the member list is named by the
+  // channel's authors route (design §13.5); the composer's mention candidates
+  // stay the member list alone.
+  const authorIds = useMemo(() => [...new Set([...chat.byId.values()].filter((m) => m.guest_author === undefined).map((m) => m.author_id))], [chat.byId]);
+  const people = useAuthorNames(channel, authorIds, members, onUnauthorized);
   const log = useRef<HTMLDivElement>(null);
   // Whether the reader is at the bottom, so new messages follow them.
   const atBottom = useRef(true);
@@ -1004,7 +1012,7 @@ export function Conversation({
         target={target}
         nets={nets}
         monitored={monitored}
-        people={people}
+        people={members}
         viewer={viewer}
         draft={draft}
         enabled={live === 'open'}

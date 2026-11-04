@@ -46,6 +46,7 @@ interface Server {
   directory: unknown[];
   directoryGets: number;
   members: unknown[];
+  scope: 'everyone' | 'shared_channels';
 }
 let server: Server;
 
@@ -54,6 +55,7 @@ function install() {
     directory: [person(2, 'ada'), person(3, 'bob'), person(4, 'cyd')],
     directoryGets: 0,
     members: [member(2, 'ada'), member(3, 'bob'), member(4, 'cyd')],
+    scope: 'everyone',
   };
   vi.stubGlobal('WebSocket', FakeSocket);
   vi.stubGlobal(
@@ -66,7 +68,7 @@ function install() {
       if (path === '/v1/channels') return Promise.resolve(json({ channels: [general] }));
       if (path === '/v1/directory/members') {
         server.directoryGets++;
-        return Promise.resolve(json({ members: server.directory, scope: 'everyone' }));
+        return Promise.resolve(json({ members: server.directory, scope: server.scope }));
       }
       if (path === '/v1/ws-tickets') return Promise.resolve(json({ ticket: ticketValue, expires_at: at }, 201));
       if (path === '/v1/sessions' && init?.method === 'POST') {
@@ -152,6 +154,33 @@ describe('the community follows the server', () => {
     await waitFor(() => {
       expect(mentionOffers()).toEqual(['@robert']);
     });
+  });
+
+  it('drops a person from the panel and from mention candidates when the member turns the directory off (shared_channels)', async () => {
+    const events = await openChat();
+    const line = 'You see the people you share a channel with';
+    expect(screen.queryByText(line)).toBeNull();
+    expect(names()).toEqual(['ada', 'bob', 'cyd']);
+    expect(mentionOffers()).toEqual(['@bob', '@cyd']);
+    server.scope = 'shared_channels';
+    server.directory = [person(2, 'ada'), person(3, 'bob')];
+    server.members = [member(2, 'ada'), member(3, 'bob')];
+    events.send(frame);
+    await screen.findByText(line);
+    expect(names()).toEqual(['ada', 'bob']);
+    expect(screen.queryByText('cyd')).toBeNull();
+    await waitFor(() => {
+      expect(mentionOffers()).toEqual(['@bob']);
+    });
+    // And back: the line goes with the scope.
+    server.scope = 'everyone';
+    server.directory = [person(2, 'ada'), person(3, 'bob'), person(4, 'cyd')];
+    server.members = [member(2, 'ada'), member(3, 'bob'), member(4, 'cyd')];
+    events.send(frame);
+    await waitFor(() => {
+      expect(screen.queryByText(line)).toBeNull();
+    });
+    expect(names()).toEqual(['ada', 'bob', 'cyd']);
   });
 
   it('reads once for frames that land close together', async () => {

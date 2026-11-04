@@ -344,7 +344,14 @@ describe('the community member panel', () => {
   it('says when the list is only the people the viewer shares a channel with', async () => {
     people.mockResolvedValue({ ok: true, value: { members: [bob], scope: 'shared_channels' } });
     panel();
-    await screen.findByText('Showing the people you share a channel with.');
+    await screen.findByText('You see the people you share a channel with');
+  });
+
+  it('says nothing about scope when the list is everyone', async () => {
+    people.mockResolvedValue({ ok: true, value: { members: [bob], scope: 'everyone' } });
+    panel();
+    await screen.findByRole('list', { name: 'People' });
+    expect(screen.queryByText(/share a channel with/)).toBeNull();
   });
 
   it('says nothing about who it could not list when the server refuses', async () => {

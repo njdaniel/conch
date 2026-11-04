@@ -27,7 +27,10 @@ const (
 
 // communityView is the member view.
 type communityView struct {
-	members         []schema.ServerMemberV1
+	members []schema.ServerMemberV1
+	// scope is the list the server said it answered with (community-model
+	// §13.3). Only shared_channels is told to the reader.
+	scope           schema.DirectoryScope
 	loaded, loading bool
 	busy            bool
 	sel             int64
@@ -37,6 +40,7 @@ type communityView struct {
 // communityLoaded is the community, every page of it.
 type communityLoaded struct {
 	members []schema.ServerMemberV1
+	scope   schema.DirectoryScope
 	err     error
 }
 
@@ -46,6 +50,11 @@ type voiceSwitched struct {
 	resp schema.VoicePermissionResponseV1
 	err  error
 }
+
+// communityScopeLine is what the view says when the server limited the list
+// to the people the viewer shares a channel with. It says nothing for
+// everyone, and nothing for a scope it does not know.
+const communityScopeLine = "You see the people you share a channel with"
 
 var errCommunityPages = errors.New("the server's pages do not end")
 
@@ -76,7 +85,7 @@ func (m Model) loadCommunity() tea.Cmd {
 			}
 			all = append(all, resp.Members...)
 			if resp.After == 0 {
-				return communityLoaded{members: all}
+				return communityLoaded{members: all, scope: resp.Scope}
 			}
 			if resp.After <= after {
 				return communityLoaded{err: errCommunityPages}
@@ -96,7 +105,7 @@ func (m Model) communityLoaded(msg communityLoaded) (tea.Model, tea.Cmd) {
 		m.community = p
 		return m, nil
 	}
-	p.members, p.loaded = msg.members, true
+	p.members, p.scope, p.loaded = msg.members, msg.scope, true
 	if p.selected() < 0 && len(p.members) > 0 {
 		p.sel = p.members[0].ID
 	}
@@ -291,7 +300,15 @@ func (m Model) communityPanes(l layout) string {
 		for i, r := range m.community.members {
 			lines = append(lines, m.memberLine(r, i == sel, cols))
 		}
-		lines = agentsWindow(lines, max(sel, 0), l.contentH)
+		height := l.contentH
+		// The scope line stays above the window, whatever the list.
+		if m.community.scope == schema.DirectoryScopeSharedChannels && height > 1 {
+			height--
+			lines = agentsWindow(lines, max(sel, 0), height)
+			lines = append([]string{statusStyle.Render(fitCells(communityScopeLine, cols))}, lines...)
+		} else {
+			lines = agentsWindow(lines, max(sel, 0), height)
+		}
 	}
 	return paneBox("COMMUNITY", true, lines, l.width, l.contentH, "")
 }
