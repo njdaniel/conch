@@ -527,6 +527,18 @@ jobs:
     # check is (#1286, #1288); a fork's pull request runs on ubuntu-latest.
     runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
+    # Two jobs, each with its own conchd, fixture community and LiveKit, each
+    # running half the specs one at a time (#1290): 250 tests took 19 minutes
+    # in one.
+    name: web-e2e (${{ matrix.shard }}/2)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    env:
+      # Labels this shard's LiveKit container, so the clean-up step below
+      # removes only its own (web/e2e/voice-world.ts reads it).
+      VOICE_CHECK_RUN: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
     steps:
       - uses: actions/checkout@v4
 
@@ -557,7 +569,7 @@ jobs:
         run: npx playwright install chromium
 
       - name: web-e2e
-        run: make web-e2e
+        run: make web-e2e E2E_ARGS=--shard=${{ matrix.shard }}/2
 
       # The spec removes its own container on every path; this is for the case
       # where the runner killed it. Only the container of this run.
@@ -573,7 +585,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: web-e2e-test-results
+          name: web-e2e-test-results-${{ matrix.shard }}
           path: web/test-results
           retention-days: 7
           if-no-files-found: ignore
