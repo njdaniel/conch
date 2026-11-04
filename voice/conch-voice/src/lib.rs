@@ -243,6 +243,7 @@ pub fn join(
             .as_ref()
             .map(|(device, _)| device.display().to_string()),
         unreachable_note: resolved.unreachable_note,
+        share_audio_owner: args.share_audio_owner,
         timings: Timings::default(),
     };
     let out = Output::stdout(args.json);
@@ -331,6 +332,7 @@ pub fn managed(
                 sink: args.sink.clone(),
             },
             keys,
+            args.share_audio_owner,
         );
         managed::signals(inputs.clone(), host.watchdog.clone()).map_err(Error::Runtime)?;
         managed::watch_parent(parent, inputs.clone(), host.watchdog.clone());
