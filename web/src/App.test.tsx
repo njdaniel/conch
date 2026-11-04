@@ -228,6 +228,20 @@ describe('sign-in', () => {
     expect((container.querySelector('details.operator-signin') as HTMLDetailsElement).open).toBe(true);
   });
 
+  it('keeps the disclosure open while a retried credential is checked', async () => {
+    serve(asMember);
+    const { container } = render(<App origin={origin} />);
+    const details = container.querySelector('details.operator-signin') as HTMLDetailsElement;
+    signIn('wrong-token');
+    await screen.findByText('That credential was not accepted');
+    expect(details.open).toBe(true);
+    // The retry clears the notice while it is checked: the fold stays open.
+    signIn('wrong-token');
+    expect(details.open).toBe(true);
+    await screen.findByText('That credential was not accepted');
+    expect(details.open).toBe(true);
+  });
+
   it('shows one line for a refused credential, keeps focus in the field and stores nothing', async () => {
     serve(asMember);
     const { container } = render(<App origin={origin} />);

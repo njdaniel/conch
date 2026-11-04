@@ -181,6 +181,11 @@ export function SignIn({
   // The disclosure stays open where the credential field is the one way in,
   // or an answer about the credential has to be read and acted on.
   const operatorForced = !passwordLogin || notice === 'rejected' || notice === 'held' || credentialLine !== null;
+  // Once it has opened by itself it stays open: a retried credential has no
+  // notice while it is checked, and the fold must not shut over the button.
+  useEffect(() => {
+    if (operatorForced) setOperatorOpen(true);
+  }, [operatorForced]);
 
   if (code !== undefined) {
     return <CodeSignIn origin={origin} step={code} insecure={insecure} onCode={onCode} onCodeOver={onCodeOver} />;

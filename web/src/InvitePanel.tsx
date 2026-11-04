@@ -146,6 +146,11 @@ export function InvitePanel({
   // Whether invites are paused: read by an operator, and for a member the
   // sign is a refusal as paused, since they have no route to read it.
   const [paused, setPaused] = useState(false);
+  // A member learns of a pause only from a refusal, so what was learnt is
+  // forgotten when the panel closes: the next opening asks again.
+  useEffect(() => {
+    if (!open && !operator) setPaused(false);
+  }, [open, operator]);
   const [copied, setCopied] = useState<'no' | 'yes' | 'failed'>('no');
   const [invites, setInvites] = useState<readonly InviteV2[] | null>(null);
   const [listProblem, setListProblem] = useState<string | null>(null);
