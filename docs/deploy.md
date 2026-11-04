@@ -582,9 +582,11 @@ Two of them need a sentence:
 
 A member's cell can't be on while the operators' is off, `share_screen` and `use_camera` need `use_voice`, and the "fixed" cells can't be changed. The server refuses a change that breaks one of these and says which.
 
+**Turning the camera on for members takes two cells.** `use_camera` is off for members and for operators, and owners always hold it, so an owner can try it at once. For members to have it, the operators' cell must be on first, or in the same save as the members' (**Save changes** applies both together; `conch admin permissions set use_camera --operators on --members on` does the same in one command; `--operators` is for owners). This is the rule stated above: a member's cell can't be on while the operators' is off, and a change that turns the operators' cell off while the members' is on is refused. Turning either cell off ends every affected camera at once. The camera is off for everyone but owners until you do this, and nothing about the camera changes for a server that never does. **What viewers see is not a permission:** anyone in the room receives the cameras in it, as they receive its voice.
+
 Who changes them: an owner changes both columns. An operator holding `change_server_settings` changes the members' column only, and can only turn a cell on if it holds that permission itself. Give that permission only to someone you would trust with opening the server.
 
-Beside the cells, two **switches per person** can only take something away: the voice switch (`use_voice` and `share_screen`) and the member-link switch (`make_member_links`, for members only; operators' links follow the operators' cell). They are in each person's **⋯** menu in **Members** (**Turn voice off**, **Stop member links**) and in `conch admin principal voice <id> on|off` and `conch admin principal invite-permission <id> on|off`. An owner is never held back by either: if a switch was ever stored on an owner, it no longer counts.
+Beside the cells, two **switches per person** can only take something away: the voice switch (`use_voice`, `share_screen` and `use_camera`: there is no camera-only switch, so "voice yes, camera no" for one person has no answer short of turning the role's cell off) and the member-link switch (`make_member_links`, for members only; operators' links follow the operators' cell). They are in each person's **⋯** menu in **Members** (**Turn voice off**, **Stop member links**) and in `conch admin principal voice <id> on|off` and `conch admin principal invite-permission <id> on|off`. An owner is never held back by either: if a switch was ever stored on an owner, it no longer counts.
 
 ### Choosing and applying a preset
 
@@ -598,6 +600,9 @@ A preset sets the **members' column** and nothing else. It does not touch the op
 | `see_member_directory` | off | on |
 | `use_voice` | on | on |
 | `share_screen` | on | on |
+| `use_camera` | off | off |
+
+Both presets leave the camera off for members, so applying either one turns it off for them if it was on (and ends the cameras then running). It leaves the operators' cell alone. A server that has turned the camera on for members therefore matches neither preset: neither card in **Roles and permissions** is marked as matching the members' column.
 
 A new server is already on the group column. While nothing has been changed, **Settings → Server** shows a card, "How will this server be used?", with **Personal server**, **Group server** and **Decide later**. Choosing one shows what members would gain and lose, and **Apply Personal server** (or **Apply Group server**) does it. Later, **Settings → Roles and permissions** has the two preset cards (**Use Personal preset**, **Use Group preset**) at the top, each listing what it would turn on or off, with the matching one marked. Below them is the matrix, where **Save changes** applies cell edits and **Discard changes** drops them.
 
@@ -616,7 +621,7 @@ Warnings come back with `show` and with every change. They are never refusals:
 - **`open_signup_on`**: members can't make member links, but open sign-up is on, so the server's address still lets anyone make an account. In the browser it is shown in **Server** and in **Roles and permissions**. On a personal server, turn open sign-up off.
 - **`default_channel_exposes_members`**: members can't see the directory, but a default channel still shows its people to each other. This is the reason a default channel defeats a personal server: everyone who starts in it can see everyone else in it. The server raises it whenever members lack `see_member_directory` and at least one default channel exists. The browser shows it in **Settings → Server** and in **Roles and permissions**; the CLI prints it with `permissions show` and after every `permissions set` and `permissions preset`. It is also in the answer to marking a channel default, and `conch admin channel settings --default on <channel>` prints it then; the browser's **Make default channel** does not show it at that moment, so look in **Server**.
 
-Applying a preset has live effects. Turning `use_voice` off removes everyone it now withholds from voice at once, and turning `share_screen` off ends their shares. Turning `make_member_links` off doesn't close the links members already made: they stop working while the maker lacks the permission, and work again when it comes back. Nobody's sign-in changes.
+Applying a preset has live effects. Turning `use_voice` off removes everyone it now withholds from voice at once, turning `share_screen` off ends their shares, and turning `use_camera` off ends their cameras. Turning `make_member_links` off doesn't close the links members already made: they stop working while the maker lacks the permission, and work again when it comes back. Nobody's sign-in changes.
 
 ### A personal server
 
@@ -740,6 +745,19 @@ The change tells you what it left. In the browser the list "Still working after 
 ```
 
 Revoke what you don't want. The list is only in the answer to that change; it isn't kept, so revoke from it before you leave the page or the terminal. It comes from the audit trail: a credential or hook issued before the trail recorded who issued it (before 2026-10-08) isn't on it, and neither are an owner's own, since owners keep `act_as_members`. The same gap exists when you **demote or disable an operator**: what they issued stays live until you revoke it. The audit trail names the issuer of every credential and hook (`credential_created`, `credential_rotated`, `hook_created`), so `conch audit export` finds them. Recording the issuer on the credential itself, and listing these on demotion and disable, is [#1024](https://github.com/njdaniel/conch/issues/1024), not built yet.
+
+### Camera video and bandwidth
+
+Cameras use the droplet's bandwidth and CPU, and **how much a droplet carries is not yet measured**. Nothing here is a capacity.
+
+What there is is the browser's presets, which are the SDK's figures and not measurements ([README, Camera](../README.md#camera)):
+
+- A computer sends a top layer of at most 1.2 Mbps, with smaller layers of 450 kbps and 150 kbps; a phone sends at most 450 kbps, with one smaller layer of 150 kbps.
+- For scale: in a one-to-one call each side sends at most about 1.8 Mbps across all its layers and receives one layer. In a call with 9 cameras each person receives 8 small layers, and LiveKit sends roughly 9 × 8 streams.
+- LiveKit sends only the layers viewers ask for, so a 3 × 3 grid of small tiles receives the 180p or 360p layers, and a sender stops encoding a layer nobody receives. `conchd` limits no bitrate or resolution.
+- The cap of 9 cameras per room is a constant in `conchd`, not a setting, and it stays what it is until the measurement says what a droplet carries.
+
+To find out for your own droplet, watch **What to watch** (below) while people use cameras: the droplet's bandwidth graph, and `htop` and `docker stats livekit` for CPU. The method for measuring one-to-one and 9-camera calls, with and without a share, is the template [docs/reports/TEMPLATE-camera-bandwidth.md](reports/TEMPLATE-camera-bandwidth.md). A tool that simulates 9 cameras on a load generator is proposed and does not exist yet, so until it does a measurement uses as many real devices as there are, and says it is partial.
 
 ## A second instance
 

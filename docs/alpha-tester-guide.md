@@ -203,22 +203,105 @@ choose **Use microphone**.
 
 On a phone, keep the Conch page open on the screen while you watch.
 
-## 8. Which browser for what
+## 8. Your camera
 
-| | Chat | Voice | Talk key | Share a screen | Share its sound | Watch a share |
-| --- | --- | --- | --- | --- | --- | --- |
-| Windows, Chrome or Edge | yes | yes | while the tab is in front | yes | a tab, or the whole computer | yes |
-| Mac, Chrome or Edge | yes | yes | while the tab is in front | yes | a tab | yes |
-| Linux, Chrome or Edge | yes | yes | while the tab is in front | yes | a tab | yes |
-| Firefox or Safari, any computer | yes | yes | while the tab is in front | yes | none | yes |
-| iPhone or iPad | yes | yes | while the page is on screen | no | no | yes |
-| Android, Chrome | yes | yes | while the page is on screen | not known yet | no | yes |
+You can turn on a camera in a channel's voice, and the others in the voice can see it.
+
+**The camera is off for everyone but the owner until the owner turns it on.** If you
+are in voice and see no **Camera** button, your server has not turned it on for you.
+**Voice options** then says **Camera is off for you on this server.** Ask the person
+running the server. It is meant for one-to-one calls and small groups: up to 9 cameras at
+once.
+
+**Turn it on**
+
+1. Join voice (section 5).
+2. Choose **Camera**. Your browser asks whether Conch may use your camera. Choose
+   **Allow**. If you blocked it by mistake, allow the camera in the browser's settings
+   for this site, then choose **Camera** again.
+3. The page says **Starting your camera…**. Then you see two things, one after the other:
+   - **Camera in use**: the browser has your camera, and nothing is sent yet.
+   - **Sending video**: your picture is going to the others.
+4. A video view opens above the conversation with your own picture in it, labelled
+   **You** and mirrored like a mirror. **Hide self-view** hides only that tile; you are
+   still sending.
+
+Joining voice, unmuting and sharing your screen never turn the camera on. Only the
+**Camera** button does, and there is no key for it. Muting or deafening does not touch it
+either.
+
+**Choose or test a camera.** Under **Voice options**, **Camera** lists your cameras once
+you have turned the camera on or tested it. **Test camera** shows your picture with the
+words **Preview: not sent**: nobody sees it, and it stops when you close **Voice
+options**. If the camera you chose is not plugged in, the page says **Your chosen camera
+is not connected.** It does not use another one for you.
+
+**Turn it off.** Choose **Camera** again. Leaving voice and signing out turn it off too,
+and so does changing channel. Conch lets go of the camera, so its light goes off. If you
+want to check, look at the light.
+
+**It never turns itself back on.** If your connection drops, someone turns your camera
+off, you join from another device, or you unplug the camera, it stays off, and the page
+says why: for example **An operator turned off your camera.**, **Your camera was turned
+off.** or **Camera disconnected. Choose a camera in Voice options.** Choose **Camera**
+when you want it again.
+
+**Watching others**
+
+- When someone has a camera on, the voice buttons show **Show video (2)**, with the
+  number of cameras. Choose it to open the video view. **Hide video** closes it. Another
+  person turning on a camera never opens it for you.
+- Up to 9 people each get a tile. Someone without a camera shows their initial and
+  **Camera off**. Whoever is talking has a ring and the word **speaking**; the view does
+  not jump to them.
+- Choose a tile (**Enlarge** and the person's name) to make it big. **Back to grid**, or
+  Escape, brings the others back. **Full screen** works as for a share.
+- If someone shares a screen and you are watching it, the share is the big picture and the
+  cameras sit beside or below it.
+
+**Who sees you, and what happens to it**
+
+- Everyone in the channel's voice can see your camera, as they can hear you.
+- The picture is encrypted on its way to the server and on its way from the server to each
+  person. It is **not end-to-end encrypted**: the voice service, and the person who runs
+  the server, can see it.
+- **Conch does not record anything.** But anyone watching can record their own screen,
+  and nothing can stop that. Only turn the camera on where you are comfortable with that.
+
+**On a phone**
+
+- Video appears only in the **Voice** view. In **Chat** or **Channels** you receive no
+  video, so it spends no data. Your own camera keeps sending, and the voice strip says
+  **Camera on**; choose it to go to Voice.
+- **The camera stops when the page leaves the screen**: the phone locks, or you switch
+  apps. It does not come back by itself when you return; choose **Camera**.
+- The camera that faces you is used first, at a smaller picture than a computer sends.
+  Pick the other one under **Voice options** if you want it; Conch remembers.
+
+How many cameras a server can carry has not been measured yet. If a call with several
+cameras stutters, tell us how many there were and what you used (section 10).
+
+## 9. Which browser for what
+
+| | Chat | Voice | Talk key | Share a screen | Share its sound | Watch a share | Send a camera | See cameras |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Windows, Chrome or Edge | yes | yes | while the tab is in front | yes | a tab, or the whole computer | yes | not known yet | not known yet |
+| Mac, Chrome or Edge | yes | yes | while the tab is in front | yes | a tab | yes | not known yet | not known yet |
+| Linux, Chrome or Edge | yes | yes | while the tab is in front | yes | a tab | yes | not known yet | not known yet |
+| Firefox or Safari, any computer | yes | yes | while the tab is in front | yes | none | yes | not known yet | not known yet |
+| iPhone or iPad | yes | yes | while the page is on screen | no | no | yes | not known yet | not known yet |
+| Android, Chrome | yes | yes | while the page is on screen | not known yet | no | yes | not known yet | not known yet |
 
 The three share columns are about screen sharing. Like the table
 in section 6, this one says what the browsers say they do. Tell us what really
 happens on yours.
 
-## 9. Report a problem
+The two camera columns are about section 8. **Nobody has tried a real camera in any of
+these yet.** The project's own tests have tried only Chrome's built-in fake camera, on
+Linux, so every camera cell says "not known yet" and part of the test is filling them
+in. Please try, and tell us what worked and what did not.
+
+## 10. Report a problem
 
 When something goes wrong, report it from inside Conch. It takes a minute, and it
 sends us what we need to find the cause.
@@ -247,7 +330,7 @@ If you cannot reach Conch at all, tell the person running the test instead. Say 
 you did, what happened, the version from **Settings** if you saw it, and
 your device and browser.
 
-## 10. What is known not to work yet
+## 11. What is known not to work yet
 
 If you see "Temporary server: no backups, and it may be removed. Don't keep
 anything here you need.", this server is for short-lived tests. Its messages and
@@ -259,8 +342,16 @@ recover them from. Keep anything you need somewhere else.
 - **The talk key works only while the Conch tab is in front.** A key that works while
   a game or another app is in front needs a desktop app, which comes after the alpha.
 - **On a phone, voice and watching stop when the page leaves the screen** (the phone
-  locks, or you switch app).
-- **Not every browser can share, or share sound.** See the tables in sections 6 and 8.
+  locks, or you switch app). The camera stops then too, and stays off until you choose
+  **Camera** again.
+- **On a phone, video shows only in the Voice view.** In Chat and Channels you receive no
+  camera video.
+- **No camera from the desktop app or the terminal app.** The terminal app
+  (`conch`) can say who has a camera on, and an operator can turn one off with it, but
+  it cannot send or show one. A camera is sent, and watched, in the browser only.
+- **The camera is off until the owner turns it on**, and how many cameras a server can
+  carry has not been measured. A call with many cameras may stutter.
+- **Not every browser can share, or share sound.** See the tables in sections 6 and 9.
 - **A private window forgets your sign-in.** Use your name and password to return. See
   section 3.
 - **On a slow connection, a message you send may show twice for a moment** while it is
@@ -268,7 +359,7 @@ recover them from. Keep anything you need somewhere else.
 - **A share stops if the sharer's connection drops** for more than a few seconds. The
   page says so; share again.
 
-## 11. Switching servers
+## 12. Switching servers
 
 You may be invited to more than one Conch server. Each server has its own address,
 such as `https://chat.example` and `https://other.example`, and the address is what
