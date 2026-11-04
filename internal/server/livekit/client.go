@@ -120,14 +120,12 @@ type Participant struct {
 	// §4.5): the only tracks that are a camera.
 	Cameras []Track
 	// Mismatched is every published track whose type disagrees with its
-	// declared source (§4.5, S1): one that is not audio under the
-	// microphone, one that is not video under the camera, and any video
-	// track under a source that is neither the camera nor the screen share
-	// (the screen share's sound, or a source LiveKit does not name). LiveKit
-	// enforces a track's declared source, and nothing read so far says it
-	// checks the kind, so each of these is unclaimed whatever is granted. A
-	// screen-share track is still read by its source alone
-	// (ScreenSharePublished, ScreenShareAudioPublished).
+	// declared source (§4.5, S1): one that is not audio under the microphone
+	// or the screen share's sound, one that is not video under the camera or
+	// the screen share, and any video track under a source LiveKit does not
+	// name. LiveKit enforces a track's declared source and not its kind
+	// (K8), so each of these is unclaimed whatever is granted, and none
+	// counts as a camera, a microphone or the share.
 	Mismatched []Track
 }
 
@@ -145,20 +143,10 @@ type Track struct {
 	Muted  bool
 }
 
-// CameraPublished reports whether the participant has a camera track
-// published, muted or not.
-func (p Participant) CameraPublished() bool { return len(p.Cameras) > 0 }
-
-// CameraLive reports whether the participant has an unmuted camera track
-// published: a muted one sends nothing, and does not count as a camera on.
-func (p Participant) CameraLive() bool {
-	for _, t := range p.Cameras {
-		if !t.Muted {
-			return true
-		}
-	}
-	return false
-}
+// CameraLive reports whether the participant's first camera track, the one a
+// claim covers, is published and unmuted: a muted one sends nothing, and does
+// not count as a camera on. Any further camera track is no claim's.
+func (p Participant) CameraLive() bool { return len(p.Cameras) > 0 && !p.Cameras[0].Muted }
 
 // Sharing reports whether the participant has either screen-share source
 // published.
@@ -242,18 +230,27 @@ func (p wireParticipant) participant() Participant {
 	mics, muted := 0, 0
 	for _, t := range p.Tracks {
 		track := Track{SID: t.SID, Source: sourceName(t.Source), Type: typeName(t.Type), Muted: t.Muted}
-		// Kind and source together (docs/design/webcam-video.md §4.5, S1).
-		// A screen share is still recognised by its source alone, whatever
-		// its type: a source that is not allowed is refused by LiveKit
-		// whatever the type says, so a track of an unexpected type under a
-		// share source is still a share. Video under the share's sound is a
-		// mismatch as well, since no sound path carries video.
+		// Kind and source together (docs/design/webcam-video.md §4.5, S1),
+		// for every source: LiveKit checks a track's declared source and not
+		// its kind (K8), so the screen share is video under SCREEN_SHARE and
+		// its sound audio under SCREEN_SHARE_AUDIO, and anything else under
+		// either is mismatched, never the share: sound under SCREEN_SHARE
+		// would be a sound path outside transmitting and sharing_audio.
 		switch track.Source {
 		case "screen_share":
-			part.ScreenSharePublished = true
+			if track.Type == "video" {
+				part.ScreenSharePublished = true
+			} else {
+				part.Mismatched = append(part.Mismatched, track)
+			}
 			continue
 		case "screen_share_audio":
-			part.ScreenShareAudioPublished = true
+			if track.Type == "audio" {
+				part.ScreenShareAudioPublished = true
+			} else {
+				part.Mismatched = append(part.Mismatched, track)
+			}
+			continue
 		case "camera":
 			if track.Type == "video" {
 				part.Cameras = append(part.Cameras, track)

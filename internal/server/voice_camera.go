@@ -854,14 +854,27 @@ func (p *voicePoller) endCamerasOf(ctx context.Context, principalID, channelID i
 			rooms = append(rooms, r)
 		}
 	}
-	for r, pid := range p.retiring {
-		if pid == principalID && (channelID == 0 || r.channelID == channelID) {
-			rooms = append(rooms, r)
+	// A room a rotation forgot, whose ended camera of theirs is still being
+	// withdrawn (retireRoom, or a running claim that was handed the debt):
+	// it is in neither rooms nor, under their id, retiring, and there is no
+	// claim left to end in it, but the revocation must not answer while the
+	// grant is in flight (ADR-015 decision 6). Its withdrawal's done
+	// channels are waited for, as waitRunningClaims waits for them.
+	var waits []chan struct{}
+	for r := range p.retiring {
+		if !slices.Contains(r.retiredCameras, principalID) || (channelID != 0 && r.channelID != channelID) {
+			continue
+		}
+		if r.withdrawDone != nil {
+			waits = append(waits, r.withdrawDone)
+		}
+		if r.claimDone != nil {
+			waits = append(waits, r.claimDone)
 		}
 	}
 	p.mu.Unlock()
 	if p.endCamerasSeam != nil {
-		p.endCamerasSeam(len(rooms))
+		p.endCamerasSeam(len(rooms) + len(waits))
 	}
 	ctx = context.WithoutCancel(ctx)
 	slices.SortFunc(rooms, func(a, b *voiceRoomState) int {
@@ -871,6 +884,9 @@ func (p *voicePoller) endCamerasOf(ctx context.Context, principalID, channelID i
 		r.claims.Lock()
 		p.endHeldCamera(ctx, r, principalID, reason)
 		r.claims.Unlock()
+	}
+	for _, d := range waits {
+		<-d
 	}
 }
 
@@ -951,9 +967,13 @@ func (p *voicePoller) cameraPrincipals() []int64 {
 			seen[r.claimer] = true
 		}
 	}
-	for _, pid := range p.retiring {
+	for r, pid := range p.retiring {
 		if pid != 0 {
 			seen[pid] = true
+		}
+		// Whose camera a rotation ended there and may still be withdrawing.
+		for _, c := range r.retiredCameras {
+			seen[c] = true
 		}
 	}
 	out := make([]int64, 0, len(seen))
@@ -1065,7 +1085,7 @@ func (p *voicePoller) judgeCamerasLocked(r *voiceRoomState, now time.Time, seen 
 			// covers one camera track, the first LiveKit lists; any other is
 			// judged below as one nobody claimed (the security review of
 			// #1258: one claim must not carry the cap's worth of cameras).
-			live := len(part.Cameras) > 0 && !part.Cameras[0].Muted
+			live := part.CameraLive()
 			if live {
 				c.published, c.lastTrack = true, now
 			}
@@ -1262,25 +1282,48 @@ func (p *voicePoller) withdrawCameras(ctx context.Context, r *voiceRoomState, li
 		if gone || (holds && !w.mismatch) {
 			continue
 		}
+		// Removed at once: what the pass found is to be removed, or a
+		// mismatched track whose owner has claimed a camera since the plan
+		// (a withdrawal now would keep the claim's camera source, and with
+		// it a mismatched track declared under it). No write first: it would
+		// only grant again what the removal takes.
+		remove := w.evict || (holds && w.mismatch)
 		key, done := voiceWithdrawKey{w.principalID, w.role}, false
-		lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
-		// Not what LiveKit listed: a listing that lost the person's
-		// canPublish must not turn the withdrawal into a listen-only write.
-		in := publishInput{canSubscribe: w.canSubscribe, share: share, canPublish: w.role == voiceRolePerson}
-		if _, err := p.setPublishPermission(lctx, r, w.principalID, w.role, in); err != nil {
-			slog.WarnContext(lctx, "voice: withdrawing a camera nobody claimed failed; passes retry", "channel", r.channelID, "principal", w.principalID, "participant", w.role.label(), "error", err)
-		} else {
-			done = true
-			p.camWithdrawConfirmed(r, key)
+		if !remove {
+			lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
+			// Not what LiveKit listed: a listing that lost the person's
+			// canPublish must not turn the withdrawal into a listen-only write.
+			in := publishInput{canSubscribe: w.canSubscribe, share: share, canPublish: w.role == voiceRolePerson}
+			if _, err := p.setPublishPermission(lctx, r, w.principalID, w.role, in); err != nil {
+				slog.WarnContext(lctx, "voice: withdrawing a camera nobody claimed failed; passes retry", "channel", r.channelID, "principal", w.principalID, "participant", w.role.label(), "error", err)
+			} else {
+				done = true
+				p.camWithdrawConfirmed(r, key)
+			}
+			cancel()
+			if !done {
+				again = true
+			}
 		}
-		cancel()
-		if !done {
-			again = true
+		if !remove && (done || !w.published) {
+			continue
 		}
-		if w.evict || (!done && w.published) {
-			again = true
-			part := livekit.Participant{Identity: voiceParticipantIdentity(w.principalID, w.role), JoinedAt: w.joinedAt}
-			p.removeObserved(ctx, r, part, w.principalID, w.reason)
+		again = true
+		part := livekit.Participant{Identity: voiceParticipantIdentity(w.principalID, w.role), JoinedAt: w.joinedAt}
+		if !p.removeObserved(ctx, r, part, w.principalID, w.reason) || w.role != voiceRolePerson {
+			continue
+		}
+		// A person removed holding a claim has left with it: the claim ends
+		// now (reason=left, camera_ended in their presence), so its place
+		// under the cap is free and a reconnect cannot continue it.
+		r.order.Lock()
+		p.mu.Lock()
+		events := p.endCameraLocked(r, w.principalID, voiceCameraStopLeft, 0)
+		p.mu.Unlock()
+		p.writeEvents(ctx, events...)
+		r.order.Unlock()
+		if len(events) > 0 {
+			p.notify(r.channelID)
 		}
 	}
 	return again

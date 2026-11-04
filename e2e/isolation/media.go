@@ -482,8 +482,10 @@ type cameraA struct {
 
 // camera source and type numbers, as LiveKit's room API may write them.
 const (
-	lkSourceCamera     = 1
-	lkSourceMicrophone = 2
+	lkSourceCamera           = 1
+	lkSourceMicrophone       = 2
+	lkSourceScreenShare      = 3
+	lkSourceScreenShareAudio = 4
 )
 
 // trackOf reports whether t is declared as source (by name or number) and is
@@ -689,6 +691,18 @@ func (w *world) cameraRowsA(v *voiceA, c *cameraA) error {
 	if err := lkit.WriteSilentOpus(camAudio, 900); err != nil {
 		return err
 	}
+	// The screen share's sources by kind (the review of #1258): the share is
+	// held in A's second channel, whose room has no share yet (ann holds the
+	// first room's for the revocation phase), by the member who publishes the
+	// mismatched track. lk publishes audio files and video, never data: data
+	// under the share's sound is the server's unit tests' (TestVoiceCameraKindAndSource).
+	shareAudio := filepath.Join(dir, "share-mismatch.ogg")
+	if err := lkit.WriteSilentOpus(shareAudio, 900); err != nil {
+		return err
+	}
+	den := w.a.channels[1]
+	isDemo := func(n string) bool { return n == "demo" }
+	isShareAudio := func(n string) bool { return strings.HasSuffix(n, "share-mismatch.ogg") }
 	for _, k := range []struct {
 		what, who   string
 		claim       bool
@@ -698,27 +712,40 @@ func (w *world) cameraRowsA(v *voiceA, c *cameraA) error {
 		trackSource string
 		srcNum      int
 		trackType   string
+		// share says the member claims the screen share first, in den.
+		share bool
 	}{
 		{"a video track declared as the microphone, under the join grant", "vid", false, lkSourceMicrophone,
-			func(n string) bool { return n == "demo" }, []string{"--publish-demo"}, "microphone", lkSourceMicrophone, "video"},
+			isDemo, []string{"--publish-demo"}, "microphone", lkSourceMicrophone, "video", false},
 		{"a sound declared as the camera, under a claim", "snd", true, lkSourceCamera,
-			func(n string) bool { return strings.HasSuffix(n, "camera-audio.ogg") }, []string{"--publish", camAudio}, "camera", lkSourceCamera, "audio"},
+			func(n string) bool { return strings.HasSuffix(n, "camera-audio.ogg") }, []string{"--publish", camAudio}, "camera", lkSourceCamera, "audio", false},
+		{"a sound declared as the screen share, under the join grant", "ssa", false, lkSourceScreenShare,
+			isShareAudio, []string{"--publish", shareAudio}, "screen_share", lkSourceScreenShare, "audio", false},
+		{"a sound declared as the screen share, under the share", "ssb", false, lkSourceScreenShare,
+			isShareAudio, []string{"--publish", shareAudio}, "screen_share", lkSourceScreenShare, "audio", true},
+		{"a video track declared as the share's sound, under the share", "ssc", false, lkSourceScreenShareAudio,
+			isDemo, []string{"--publish-demo"}, "screen_share_audio", lkSourceScreenShareAudio, "video", true},
 	} {
-		m, err := w.newPerson(w.aPerson(k.who), camp)
+		channel := camp
+		if k.share {
+			channel = den
+		}
+		m, err := w.newPerson(w.aPerson(k.who), channel)
 		if err != nil {
 			return err
 		}
-		s, err := w.session(m, camp)
+		s, err := w.session(m, channel)
 		if err != nil {
 			return err
 		}
-		gate := newSourceGate(k.claim, k.source, k.match)
+		room := s.Rooms[0].Room
+		gate := newSourceGate(k.claim || k.share, k.source, k.match)
 		hl, err := w.h.kit.StartLK(lk.lkBin, lk.hostPort(), s.Rooms[0].Token, gate.Filter, k.options...)
 		if err != nil {
 			return err
 		}
 		if err := waitFor("LiveKit to list "+k.who+" in A's room", 60*time.Second, func() (bool, string) {
-			ok, _, saw := lk.has(v.room, m.id)
+			ok, _, saw := lk.has(room, m.id)
 			if !ok && hl.Exited() {
 				return false, "lk exited: " + hl.Tail()
 			}
@@ -737,6 +764,33 @@ func (w *world) cameraRowsA(v *voiceA, c *cameraA) error {
 			if err := claimCamera(m, camp); err != nil {
 				hl.Stop()
 				return fmt.Errorf("%s claims a camera: %w", k.who, err)
+			}
+			gate.Release()
+		}
+		if k.share {
+			select {
+			case <-gate.Held():
+			case <-time.After(30 * time.Second):
+				hl.Stop()
+				return fmt.Errorf("%s's lk did not try to publish within 30 s", k.who)
+			}
+			// The row before this one removed its publisher holding den's
+			// share, which ends (reason=left) on the next pass that finds them
+			// gone: until then the claim is busy, and is asked again.
+			if err := waitFor(k.who+"'s share claim in den", 15*time.Second, func() (bool, string) {
+				status, body, err := m.api.do(http.MethodPost, "/v1/channels/"+den+"/voice/share", nil)
+				switch {
+				case err != nil:
+					return false, err.Error()
+				case status == http.StatusOK:
+					return true, ""
+				case status == http.StatusConflict && errorCode(body) == schema.ErrorCodeVoiceShareBusy:
+					return false, "den's share is still the last row's"
+				}
+				return false, fmt.Sprintf("status %d %s", status, body)
+			}); err != nil {
+				hl.Stop()
+				return err
 			}
 			gate.Release()
 		}
@@ -763,7 +817,7 @@ func (w *world) cameraRowsA(v *voiceA, c *cameraA) error {
 		listedAt := time.Time{}
 		audited := false
 		err = waitFor(k.what+" to be refused by LiveKit or removed by a pass", 45*time.Second, func() (bool, string) {
-			ok, p, saw := lk.has(v.room, m.id)
+			ok, p, saw := lk.has(room, m.id)
 			if ok {
 				for _, t := range p.Tracks {
 					if trackOf(t, strings.ToUpper(k.trackSource), k.srcNum, strings.ToUpper(k.trackType)) && listedAt.IsZero() {
@@ -791,13 +845,16 @@ func (w *world) cameraRowsA(v *voiceA, c *cameraA) error {
 			findings = append(findings, "K8: LiveKit refused "+k.what)
 			continue
 		}
-		if listedAt.IsZero() {
-			// The pass removed the publisher between two looks of this loop.
-			listedAt = time.Now()
-		}
-		took := time.Since(listedAt)
-		if took > 6*time.Second {
-			return fmt.Errorf("%s was listed for %s before its publisher was removed, past the bound (a pass and a removal, 5.5 s)", k.what, took.Round(time.Millisecond))
+		// The 6 s bound is measured from the first look that saw the track
+		// listed; a pass that removed the publisher between two looks left
+		// nothing to measure it from.
+		measured := !listedAt.IsZero()
+		took := time.Duration(0)
+		if measured {
+			took = time.Since(listedAt)
+			if took > 6*time.Second {
+				return fmt.Errorf("%s was listed for %s before its publisher was removed, past the bound (a pass and a removal, 5.5 s)", k.what, took.Round(time.Millisecond))
+			}
 		}
 		found, err := unclaimedRows()
 		if err != nil {
@@ -819,7 +876,11 @@ func (w *world) cameraRowsA(v *voiceA, c *cameraA) error {
 		}); err != nil {
 			return err
 		}
-		findings = append(findings, fmt.Sprintf("K8: LiveKit accepted %s; the pass removed its publisher %s after LiveKit listed it, and audited it once", k.what, took.Round(time.Millisecond)))
+		if measured {
+			findings = append(findings, fmt.Sprintf("K8: LiveKit accepted %s; the pass removed its publisher %s after LiveKit listed it, and audited it once", k.what, took.Round(time.Millisecond)))
+		} else {
+			findings = append(findings, fmt.Sprintf("K8: LiveKit accepted %s (the pass's row says so); the pass removed its publisher before this run saw the track listed, so the 6 s bound was not measured; audited once", k.what))
+		}
 	}
 	for _, f := range findings {
 		w.h.say("     finding: %s", f)

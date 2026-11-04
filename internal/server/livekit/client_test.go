@@ -200,8 +200,8 @@ func TestRoomCalls(t *testing.T) {
 			// number, in camel case, or by an empty list (LiveKit reads it as
 			// every source; 1.13.7 lists a token that names no sources so);
 			// not granted when publishing is off, when only the microphone
-			// is named, or when no permission is reported. A share source
-			// counts whatever the track's type.
+			// is named, or when no permission is reported. A share track is
+			// video under SCREEN_SHARE and audio under SCREEN_SHARE_AUDIO.
 			name: "ListParticipants permissions and share sources", method: "ListParticipants",
 			response: `{"participants":[
 				{"identity":"p1","permission":{"can_publish":true,"can_publish_sources":["MICROPHONE"]}},
@@ -209,7 +209,7 @@ func TestRoomCalls(t *testing.T) {
 				{"identity":"p3","permission":{"canPublish":true,"canPublishSources":["SCREEN_SHARE_AUDIO"]}},
 				{"identity":"p4","permission":{"can_publish":true,"can_publish_sources":[2,3]}},
 				{"identity":"p5","permission":{"can_publish":false,"can_publish_sources":["SCREEN_SHARE"]}},
-				{"identity":"p6","tracks":[{"type":"AUDIO","source":"SCREEN_SHARE"},{"type":1,"source":4}]},
+				{"identity":"p6","tracks":[{"type":"VIDEO","source":"SCREEN_SHARE"},{"source":4}]},
 				{"identity":"p7","permission":{"can_publish":true}}]}`,
 			call:      func(c *Client) (any, error) { return c.ListParticipants(context.Background(), "conch-a") },
 			wantBody:  map[string]any{"room": "conch-a"},
@@ -222,7 +222,8 @@ func TestRoomCalls(t *testing.T) {
 				{Identity: "p5"},
 				// Video under the share's sound still counts as the share's
 				// sound, and is a mismatch besides (webcam-video §4.5).
-				{Identity: "p6", ScreenSharePublished: true, ScreenShareAudioPublished: true, Mismatched: []Track{{Source: "screen_share_audio", Type: "video"}}},
+				// By name and by number; an absent type is AUDIO.
+				{Identity: "p6", ScreenSharePublished: true, ScreenShareAudioPublished: true},
 				{Identity: "p7", ShareSourcesGranted: true, CameraGranted: true, CanPublish: true},
 			},
 		},
@@ -491,12 +492,22 @@ func TestParticipantKindAndSource(t *testing.T) {
 			Participant{Mismatched: []Track{{SID: "T3", Source: "camera", Type: "data"}}}},
 		{"screen share, video", `[{"sid":"T4","type":"VIDEO","source":"SCREEN_SHARE"}]`, ``,
 			Participant{ScreenSharePublished: true}},
-		{"screen share, audio: still the share", `[{"sid":"T4","type":"AUDIO","source":"SCREEN_SHARE"}]`, ``,
-			Participant{ScreenSharePublished: true}},
+		{"screen share, audio: a mismatch, not the share", `[{"sid":"T4","type":"AUDIO","source":"SCREEN_SHARE"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T4", Source: "screen_share", Type: "audio"}}}},
+		{"screen share, type absent (AUDIO, 0): a mismatch", `[{"sid":"T4","source":3}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T4", Source: "screen_share", Type: "audio"}}}},
+		{"screen share, data: a mismatch", `[{"sid":"T4","type":"DATA","source":"SCREEN_SHARE"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T4", Source: "screen_share", Type: "data"}}}},
 		{"screen share audio, audio", `[{"sid":"T5","type":"AUDIO","source":"SCREEN_SHARE_AUDIO"}]`, ``,
 			Participant{ScreenShareAudioPublished: true}},
-		{"screen share audio, video: the share's sound and a mismatch", `[{"sid":"T5","type":"VIDEO","source":"SCREEN_SHARE_AUDIO"}]`, ``,
-			Participant{ScreenShareAudioPublished: true, Mismatched: []Track{{SID: "T5", Source: "screen_share_audio", Type: "video"}}}},
+		{"screen share audio, type absent: the share's sound", `[{"sid":"T5","source":4}]`, ``,
+			Participant{ScreenShareAudioPublished: true}},
+		{"screen share audio, video: a mismatch, not the share's sound", `[{"sid":"T5","type":"VIDEO","source":"SCREEN_SHARE_AUDIO"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T5", Source: "screen_share_audio", Type: "video"}}}},
+		{"screen share audio, data: a mismatch", `[{"sid":"T5","type":"DATA","source":"SCREEN_SHARE_AUDIO"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T5", Source: "screen_share_audio", Type: "data"}}}},
+		{"screen share audio, a type LiveKit does not have: a mismatch", `[{"sid":"T5","type":"SMELL","source":"SCREEN_SHARE_AUDIO"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T5", Source: "screen_share_audio", Type: "unknown"}}}},
 		{"unknown source, video: unclaimed video", `[{"sid":"T6","type":"VIDEO","source":"UNKNOWN"}]`, ``,
 			Participant{Mismatched: []Track{{SID: "T6", Source: "unknown", Type: "video"}}}},
 		{"source absent, video: unclaimed video", `[{"sid":"T6","type":"VIDEO"}]`, ``,

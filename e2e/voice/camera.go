@@ -633,7 +633,23 @@ func (l *live) camera(ctx context.Context) error {
 	if audited == 1 {
 		h.say("finding K5: a token LiveKit sent during the claim still granted the camera after it ended; cal's camera was published on it, the pass withdrew it and wrote voice_camera_unclaimed, and removed nobody")
 	} else {
-		h.say("finding K5: cal rejoined on a token LiveKit sent during the claim; a pass found the grant before lk had published, withdrew it (a grant alone writes nothing), LiveKit lists no camera and the microphone alone, and nobody was removed")
+		// No row: the withdrawal must still be seen to have happened. LiveKit
+		// sends a connection a fresh token carrying each permission it is
+		// given, so the relay holds one naming the microphone alone, sent
+		// after the join.
+		mic := false
+		if err := waitFor("LiveKit to send cal's connection on the refreshed token a microphone-only token", 15*time.Second, func() (bool, string) {
+			toks := k5.Relay.IssuedTokens()
+			for _, tok := range toks {
+				if h.checkLiveKitTokenGrant(tok, d.lk, identity(cal.id), room, false, false) == nil {
+					mic = true
+				}
+			}
+			return mic, fmt.Sprintf("%d tokens sent, none naming the microphone alone", len(toks))
+		}); err != nil {
+			return fmt.Errorf("finding K5: %w", err)
+		}
+		h.say("finding K5: cal rejoined on a token LiveKit sent during the claim; a pass found the grant before lk had published, withdrew it (a grant alone writes nothing; LiveKit then sent the connection a microphone-only token), LiveKit lists no camera, and nobody was removed")
 	}
 
 	// K8: whether LiveKit accepts a track whose kind disagrees with its

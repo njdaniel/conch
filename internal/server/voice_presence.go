@@ -269,6 +269,11 @@ type voiceRoomState struct {
 	// participants whose camera is being taken away, 0 while it is owed and
 	// the eviction count at which LiveKit confirmed it once it has.
 	camWithdrawing map[voiceWithdrawKey]uint64
+	// retiredCameras is who held a started camera claim in the room when a
+	// rotation forgot it (forgetRoom): their grants are withdrawn after, by
+	// retireRoom or a running claim, and a revocation of use_camera waits for
+	// that withdrawal (endCamerasOf). Set once, under voicePoller.mu.
+	retiredCameras []int64
 	// camTracks is what the passes have seen of the camera tracks nobody
 	// claimed and of the tracks whose kind and source disagree, by track
 	// (voiceCameraTrackKey): each is audited once, and one still listed
@@ -2167,6 +2172,7 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) (*voiceRoomSt
 			continue
 		}
 		events = append(events, p.endCameraLocked(r, pid, voiceCameraStopRotated, 0)...)
+		r.retiredCameras = append(r.retiredCameras, pid)
 		if !slices.Contains(holders, pid) {
 			holders = append(holders, pid)
 		}

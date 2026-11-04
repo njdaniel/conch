@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -265,7 +266,11 @@ func TestVoiceCameraRevocationWaitsForClaimInFlight(t *testing.T) {
 					// The revocation has committed and reached its stop path,
 					// which found the claim; it cannot answer while the grant
 					// is held inside LiveKit.
-					<-found
+					select {
+					case <-found:
+					case <-time.After(10 * time.Second):
+						t.Fatalf("%s: the revocation's stop path never found the claim in flight", t.Name())
+					}
 					select {
 					case <-revoked:
 						t.Fatal("the revocation answered while the camera's grant was in flight")
@@ -735,4 +740,84 @@ func TestVoiceCameraWithdrawalKeepsThePublisher(t *testing.T) {
 	if !last.canPublish || strings.Join(last.sources, ",") != "MICROPHONE,SCREEN_SHARE,SCREEN_SHARE_AUDIO" {
 		t.Errorf("the camera's withdrawal wrote pub=%v %v, want the microphone and the share", last.canPublish, last.sources)
 	}
+}
+
+// TestVoiceCameraRevocationWaitsForARetiringRoomsWithdrawal (agy's
+// SHOULD-FIX 1 on #1258): a rotation (ann2's credential revoked) forgets the
+// room and ends ann's camera there, and its withdrawal of ann's grant is held
+// inside LiveKit. The room is in neither rooms nor, under ann's id, retiring.
+// A PUT that withholds use_camera meanwhile must still find ann and wait for
+// that withdrawal before it answers (ADR-015 decision 6).
+func TestVoiceCameraRevocationWaitsForARetiringRoomsWithdrawal(t *testing.T) {
+	f, room := newCameraFixture(t)
+	f.lk.config(func(l *scriptedLiveKit) { l.deleteFail = map[string]bool{room: true} })
+	f.mustCamera(t, "ann", "")
+	ann := f.identity("ann")
+	withdrawing, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	f.lk.setOnUpdate(func(_, identity string, _ bool) {
+		if identity == ann {
+			once.Do(func() {
+				close(withdrawing)
+				<-release
+			})
+		}
+	})
+	// However the test ends, the held withdrawal is let go before the fake
+	// LiveKit is closed (cleanups run last registered first).
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(letGo)
+	rotated := make(chan struct{})
+	go func() {
+		defer close(rotated)
+		id := f.credID(t, "ann2")
+		if err := f.srv.store.RevokeCredential(context.Background(), "system", id); err != nil {
+			t.Error(err)
+		}
+		f.srv.credentialRevoked(context.Background(), id)
+	}()
+	select {
+	case <-withdrawing:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the rotation never withdrew ann's camera")
+	}
+	f.srv.voice.mu.Lock()
+	inRooms := f.srv.voice.rooms[room] != nil
+	f.srv.voice.mu.Unlock()
+	if inRooms {
+		t.Fatal("the rotated room is still in rooms: the interleaving was not reached")
+	}
+	f.setCamera(t, false, schema.PermissionRoleMember, schema.PermissionRoleOperator)
+	found := make(chan int, 1)
+	f.srv.voice.endCamerasSeam = func(n int) {
+		select {
+		case found <- n:
+		default:
+		}
+	}
+	answered := make(chan struct{})
+	go func() {
+		defer close(answered)
+		f.srv.endWithheldCameras(context.Background())
+	}()
+	select {
+	case n := <-found:
+		if n == 0 {
+			t.Fatal("the PUT's stop path found nothing to wait for while ann's grant was being withdrawn")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the PUT's stop path never ran for ann")
+	}
+	select {
+	case <-answered:
+		t.Fatal("the PUT answered while ann's camera grant was still being withdrawn")
+	case <-time.After(50 * time.Millisecond):
+	}
+	letGo()
+	<-answered
+	if f.camGranted(room, "ann") {
+		t.Error("ann's camera is still granted in the old room when the PUT answered")
+	}
+	<-rotated
 }
