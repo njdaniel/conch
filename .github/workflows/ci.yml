@@ -10,7 +10,12 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # This repository's own branches (pushes to main, and pull requests whose
+    # head is a branch here) run on the self-hosted runner on Nick's 4 TB
+    # drive (#1286): the hosted runner ran out of disk restoring the voice
+    # build. A fork's pull request never does: it runs on ubuntu-latest, so
+    # code from outside never reaches that machine.
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -91,11 +96,25 @@ jobs:
       # a real conchd. sqlite3 is a host prerequisite of those scripts; the
       # runner image has shellcheck and systemd-analyze, and with CI set the
       # test fails rather than skips when one is missing.
-      - name: deployment scripts
+      # The self-hosted runner installs nothing (it has no sudo): it has
+      # these, and this step says so when one is missing.
+      - name: host prerequisites (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: |
+          missing=""
+          for t in sqlite3 shellcheck systemd-analyze pkg-config; do command -v "$t" >/dev/null || missing="$missing $t"; done
+          for p in glib-2.0 libpipewire-0.3; do pkg-config --exists "$p" || missing="$missing $p"; done
+          ls /usr/lib/llvm-*/lib/libclang.so >/dev/null 2>&1 || missing="$missing libclang"
+          if [ -n "$missing" ]; then echo "the self-hosted runner lacks:$missing"; exit 1; fi
+
+      - name: deployment script packages
+        if: runner.environment == 'github-hosted'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends sqlite3 shellcheck
-          ./scripts/deploy-scripts-test.sh
+
+      - name: deployment scripts
+        run: ./scripts/deploy-scripts-test.sh
 
       # The Rust voice client under voice/ (ADR-006). The toolchain script
       # fetches one pinned clang, cargo-deny and libwebrtc and verifies each
@@ -129,6 +148,7 @@ jobs:
       # libclang, which generates the Rust bindings to them. Nothing else comes
       # from the system. scripts/voice-env.sh says so if any is missing.
       - name: rust system packages
+        if: runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config
 
       - name: rust toolchain
@@ -503,8 +523,22 @@ jobs:
     # program is neither on this runner nor ever run. The suite takes 17-19
     # minutes on main with the camera specs (44-46), so the bound is 30, not
     # 20: a bound the passing suite runs into cancels a green run (#1268).
-    runs-on: ubuntu-latest
+    # On the self-hosted runners for this repository's own branches, as
+    # check is (#1286, #1288); a fork's pull request runs on ubuntu-latest.
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
+    # Two jobs, each with its own conchd, fixture community and LiveKit, each
+    # running half the specs one at a time (#1290): 250 tests took 19 minutes
+    # in one.
+    name: web-e2e (${{ matrix.shard }}/2)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    env:
+      # Labels this shard's LiveKit container, so the clean-up step below
+      # removes only its own (web/e2e/voice-world.ts reads it).
+      VOICE_CHECK_RUN: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
     steps:
       - uses: actions/checkout@v4
 
@@ -525,11 +559,17 @@ jobs:
       # --with-deps installs the system libraries Chromium needs, with sudo,
       # which the runner has. Locally, `npx playwright install chromium` alone.
       - name: browser
+        if: runner.environment == 'github-hosted'
         working-directory: web
         run: npx playwright install --with-deps chromium
+      # The self-hosted runner has Chromium's system libraries and no sudo.
+      - name: browser (self-hosted)
+        if: runner.environment == 'self-hosted'
+        working-directory: web
+        run: npx playwright install chromium
 
       - name: web-e2e
-        run: make web-e2e
+        run: make web-e2e E2E_ARGS=--shard=${{ matrix.shard }}/2
 
       # The spec removes its own container on every path; this is for the case
       # where the runner killed it. Only the container of this run.
@@ -545,7 +585,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: web-e2e-test-results
+          name: web-e2e-test-results-${{ matrix.shard }}
           path: web/test-results
           retention-days: 7
           if-no-files-found: ignore
@@ -559,7 +599,9 @@ jobs:
     # main, like check. CI=true makes a skip a failure: if Docker, the LiveKit
     # image, lk or the Rust toolchain cannot be had, this job is red rather
     # than quietly green.
-    runs-on: ubuntu-latest
+    # On the self-hosted runners for this repository's own branches, as
+    # check is (#1286, #1288); a fork's pull request runs on ubuntu-latest.
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
       CI: "true"
@@ -598,6 +640,7 @@ jobs:
             voice-build-${{ runner.os }}-
 
       - name: rust system packages
+        if: runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config
 
       - name: rust toolchain
@@ -622,7 +665,9 @@ jobs:
     # failure: without Docker, the image or lk this job is red, not quietly
     # green. A run takes well under a minute once the image and lk are
     # fetched; the timeout leaves room for a slow pull.
-    runs-on: ubuntu-latest
+    # On the self-hosted runners for this repository's own branches, as
+    # check is (#1286, #1288); a fork's pull request runs on ubuntu-latest.
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     env:
       CI: "true"
