@@ -15,15 +15,18 @@ jobs:
   # which satisfies branch protection. A push to main always runs everything.
   # The classifier is taken from main's side of the merge, never from the
   # pull request, so a pull request cannot rewrite it to skip its own
-  # checks; one that adds or changes the script runs everything.
+  # checks; one that adds or changes the script runs everything. If this job
+  # fails, the run shows it red (so the merge queue waits for a person) and
+  # every other job runs in full.
   changes:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.classify.outputs.code }}
     steps:
       - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
         with:
-          fetch-depth: 0
+          fetch-depth: 2 # the merge commit and both its parents
 
       - name: classify the change
         id: classify
@@ -35,7 +38,7 @@ jobs:
              git cat-file -e HEAD^1:scripts/ci-docs-only.sh 2>/dev/null &&
              git diff --quiet HEAD^1 HEAD -- scripts/ci-docs-only.sh; then
             git show HEAD^1:scripts/ci-docs-only.sh > "$RUNNER_TEMP/ci-docs-only.sh"
-            if [ "$(git diff --name-only HEAD^1 HEAD | bash "$RUNNER_TEMP/ci-docs-only.sh")" = true ]; then
+            if [ "$(git diff --name-status --no-renames HEAD^1 HEAD | bash "$RUNNER_TEMP/ci-docs-only.sh")" = true ]; then
               code=false
             fi
           fi
@@ -78,6 +81,7 @@ jobs:
         run: |
           ./scripts/invisible-chars-test.sh
           ./scripts/invisible-chars.sh
+          ./scripts/ci-docs-only-test.sh
 
       - name: go vet
         if: needs.changes.outputs.code != 'false'

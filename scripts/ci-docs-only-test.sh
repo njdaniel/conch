@@ -9,12 +9,16 @@ script=./scripts/ci-docs-only.sh
 fails=0
 fail() { echo "ci-docs-only-test: FAIL: $*"; fails=1; }
 
-# case: expected answer, then the changed paths (one per line).
+# case: expected answer, then the changes as "status:path" ("M:" when no
+# status is given), turned into the tab-separated lines git prints.
 check() {
     local want=$1; shift
-    local got
-    got=$(printf '%s\n' "$@" | "$script")
-    [ "$got" = "$want" ] || fail "paths [$*] = $got, want $want"
+    local got line c
+    got=$(for c in "$@"; do
+        if [[ $c =~ ^[A-Z][0-9]*: ]]; then line="${c%%:*}"$'\t'"${c#*:}"; else line="M"$'\t'"$c"; fi
+        printf '%s\n' "$line"
+    done | "$script")
+    [ "$got" = "$want" ] || fail "changes [$*] = $got, want $want"
 }
 
 check true  docs/design/admin-roles.md
@@ -35,6 +39,14 @@ check false docs/design/tui-voice.md
 check false docs/deploy.md
 check false docs/reports/2026-07-21-principal-review.md
 check false docs/design/admin-roles.md docs/p3-walkthrough.md
+# Additions are documentation like edits; deletions never are (a test may
+# link to the file), and a rename arrives as a deletion plus an addition.
+check true  A:docs/design/new-note.md
+check false D:docs/design/windows-desktop.md
+check false D:docs/design/old.md A:docs/design/new.md
+check false D:scripts/foo.sh A:docs/foo.md
+check false R100:docs/a.md
+check false C:docs/a.md
 got=$(printf '' | "$script"); [ "$got" = false ] || fail "no paths = $got, want false"
 got=$(printf '\n\n' | "$script"); [ "$got" = false ] || fail "blank lines only = $got, want false"
 
@@ -48,8 +60,9 @@ e2e/reviewpost/run_linux_test.go
 pkg/schema/voice_control_test.go
 pkg/schema/voice_devices_test.go
 scripts/deploy-scripts-test.sh"
-readers=$( { git grep -lE '"docs("|/)' -- '*.go' ':!*node_modules*' || true
-             git grep -lE '^[^#]*[^A-Za-z0-9_/.-]docs/[A-Za-z0-9_.-]' -- 'scripts/*-test.sh' || true; } | sort -u)
+# shellcheck disable=SC2016 # the backticks are a regex, not an expansion
+readers=$( { git grep -lE '["`](\.\./)*docs("|`|/)' -- '*.go' ':!*node_modules*' || true
+             git grep -lE '^[^#]*[^A-Za-z0-9_/.-]docs/[A-Za-z0-9_.-]' -- 'scripts/*-test.sh' ':!scripts/ci-docs-only-test.sh' || true; } | sort -u)
 if [ "$readers" != "$known_readers" ]; then
     fail "the files that read docs changed. Add the docs a new reader reads to READ_BY_TESTS in $script, then update known_readers here:
 $(diff <(echo "$known_readers") <(echo "$readers") || true)"
