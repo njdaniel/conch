@@ -101,6 +101,11 @@ func (s *Server) handleCreateApproval(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if errors.Is(err, store.ErrChannelArchived) {
+		// Nothing was written and nobody was told (issue #1296).
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
+		return
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "approvals: create failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")

@@ -191,6 +191,11 @@ func (s *Store) CreateRun(ctx context.Context, actor string, p RunParams, reader
 		if !usable {
 			return ErrNotChannelMember
 		}
+		// An archived channel takes no new runs (issue #1296). A run already
+		// going there can still change state and report activity.
+		if err := channelNotArchivedTx(ctx, tx, p.ChannelID); err != nil {
+			return err
+		}
 		var message any
 		if p.MessageID > 0 {
 			if err := runAnchorVisibleTx(ctx, tx, p.ChannelID, p.MessageID, reader); err != nil {

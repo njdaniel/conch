@@ -76,7 +76,7 @@ var (
 	// guard refuses (issue #844). It is said only after the caller's
 	// standing in the channel is known: to anyone else the channel is
 	// errChannelNotFound.
-	errChannelArchived = &schema.Error{Code: schema.ErrorCodeChannelArchived, Message: "the channel is archived: restore it to post, react, upload, join or call in it"}
+	errChannelArchived = &schema.Error{Code: schema.ErrorCodeChannelArchived, Message: "the channel is archived: restore it to post, react, upload, join, call, or start an approval or a run in it"}
 	errUnauthenticated = &schema.Error{Code: "unauthenticated", Message: "the credential is no longer valid"}
 )
 
@@ -361,8 +361,8 @@ func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload
 	return msg, err
 }
 
-// errArchivedRefused is insertMessage's error for a post to an archived
-// channel (issue #844). Nothing was stored.
+// errArchivedRefused is the error insertMessage and createApproval give for a
+// write to an archived channel (issues #844 and #1296). Nothing was stored.
 var errArchivedRefused = errors.New("server: channel is archived")
 
 // errAttachmentRefused is insertMessage's error for a post whose file
@@ -403,7 +403,7 @@ func (g *grantedChannel) createApproval(ctx context.Context, req schema.CreateAp
 	if quorum == 0 {
 		quorum = 1
 	}
-	return g.scope.s.approvals.Create(ctx, store.ApprovalParams{
+	a, err := g.scope.s.approvals.Create(ctx, store.ApprovalParams{
 		RequesterID: g.scope.identity.principalID,
 		ChannelID:   g.channel.ID,
 		Title:       req.Title,
@@ -414,6 +414,12 @@ func (g *grantedChannel) createApproval(ctx context.Context, req schema.CreateAp
 		Quorum:      quorum,
 		Escalation:  req.EscalationTarget,
 	})
+	if errors.Is(err, store.ErrChannelArchived) {
+		// The channel was archived (issue #1296): nothing was written and
+		// nobody was told.
+		return store.Approval{}, errArchivedRefused
+	}
+	return a, err
 }
 
 // grantedApproval is an approval the agent has been authorized to observe.

@@ -137,6 +137,11 @@ func (s *Store) CreateIntervention(ctx context.Context, actor string, p Interven
 		if kind != PrincipalHuman {
 			return ErrNotHuman
 		}
+		// An archived channel takes no new interventions (issue #1296); the
+		// run is visible to the requester by now, so the answer leaks nothing.
+		if err := channelNotArchivedTx(ctx, tx, run.ChannelID); err != nil {
+			return err
+		}
 		sess, err := sessionByIDTx(ctx, tx, run.SessionID)
 		if err != nil {
 			return fmt.Errorf("store: create intervention: run %d: %w", run.ID, err)

@@ -201,6 +201,8 @@ func (s *Server) createRun(ctx context.Context, call sessionCall, sessionID int6
 		return schema.RunV1{}, callTooManyCredRuns
 	case errors.Is(err, store.ErrSessionOffline):
 		return schema.RunV1{}, callSessionOffline
+	case errors.Is(err, store.ErrChannelArchived):
+		return schema.RunV1{}, callChannelArchived
 	case err != nil:
 		slog.ErrorContext(ctx, "runs: create failed", "principal", call.caller.ID, "error", err)
 		return schema.RunV1{}, callInternal
