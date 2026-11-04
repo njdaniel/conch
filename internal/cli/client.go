@@ -786,6 +786,18 @@ func (c *Client) VoicePresence(ctx context.Context, channel string) (schema.Voic
 	return result, nil
 }
 
+// StopVoiceCamera turns off principalID's camera in channel's voice room. It
+// names the person always: an un-named stop would end the caller's own claim,
+// which only the browser holding it may do. The server answers 204 whether or
+// not a camera was on, so nothing is returned.
+func (c *Client) StopVoiceCamera(ctx context.Context, channel string, principalID int64) error {
+	endpoint := c.resolve("v1", "channels", channel, "voice", "camera")
+	query := endpoint.Query()
+	query.Set(schema.VoiceCameraPrincipalParam, strconv.FormatInt(principalID, 10))
+	endpoint.RawQuery = query.Encode()
+	return c.roundTrip(ctx, "stop voice camera", http.MethodDelete, endpoint, nil, nil)
+}
+
 // VoiceOccupancy returns one snapshot of how many people are in the voice of
 // each channel the caller may see voice in. As with presence, a document that
 // fails its own Validate is an error and is never shown.
