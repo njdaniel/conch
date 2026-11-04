@@ -1,6 +1,7 @@
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import * as api from './api';
 import { PrivateMark } from './Icons';
+import { leaveLine } from './leaveChannel';
 import { ShowChat } from './phone';
 import type { ChannelListingV1, ChannelV0 } from './schema/channel';
 
@@ -13,7 +14,6 @@ import type { ChannelListingV1, ChannelV0 } from './schema/channel';
 // exists. The words of every refusal are the page's own, by the server's code;
 // the server's message is never shown.
 
-const lastMember = 'You are the last member of this private channel. Add someone else before you leave.';
 const gone = 'That channel is gone, or you can no longer see it.';
 
 function joinLine(failure: api.ApiFailure, code: string | undefined): string {
@@ -25,18 +25,6 @@ function joinLine(failure: api.ApiFailure, code: string | undefined): string {
       return gone;
     default:
       return 'The server could not add you to the channel. Try again.';
-  }
-}
-
-function leaveLine(failure: api.ApiFailure, code: string | undefined): string {
-  if (failure === 'network') return 'Cannot reach the server. Nothing was changed; try again.';
-  switch (code) {
-    case 'channel_last_member':
-      return lastMember;
-    case api.channelNotFound:
-      return gone;
-    default:
-      return 'The server could not take you out of the channel. Try again.';
   }
 }
 

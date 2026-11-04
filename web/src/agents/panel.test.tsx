@@ -512,9 +512,12 @@ describe('the member list the socket sends', () => {
       expect(panel().queryByRole('form', { name: 'Add person by name' })).toBeNull();
     });
     expect(nav().queryByText('manages')).toBeNull();
-    expect(nav().queryByRole('button', { name: 'Actions for general' })).toBeNull();
+    // Leave remains after the manager grant and its Rename item go (#1095).
     expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
     expect(document.activeElement).toBe(nav().getByRole('button', { name: 'general' }));
+    fireEvent.click(nav().getByRole('button', { name: 'Actions for general' }));
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
     expect(panel().getByText('Only operators and this channel\'s managers add people.')).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     expect(screen.getByText('You are a member.')).toBeDefined();
