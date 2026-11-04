@@ -118,7 +118,7 @@ The security review of the first draft found two things on main that any restric
    - `can(principal, permission)` in handlers, and `permittedTx` inside every gated write, re-checked under the write lock.
    - This covers the store's own standing decisions:
      - the channel-manager standing functions;
-     - link creation and redemption (channels beyond the maker's own need `manage_channels`; open links and `may_invite` grants need `manage_members`);
+     - link creation and redemption (channels beyond the maker's own need `manage_channels`; open links need `manage_members`; no link carries a `may_invite` grant, since every member is made with it on, #986);
      - `open_channels`, judged on the state each write leaves, and re-checked at every address join against each channel's `added_by`, which must be an owner or hold `manage_channels`;
      - sign-in links (`act_as_members`, re-checked at redemption);
      - closing another's invite;
