@@ -8,7 +8,7 @@ release that Nick publishes.
 
 ## [Unreleased]
 
-## [0.1.0-alpha.13] - 2026-11-03
+## [0.1.0-alpha.13] - 2026-11-04
 
 This is a pre-1.0 release (`v0.1.0-alpha.13`): the API and the wire shapes
 can still change between alphas. There is no breaking change in it.
@@ -69,12 +69,6 @@ not use cameras:** `use_camera` is off for operators and members on upgrade.
   - **A new `Permissions-Policy`** (#1242): `camera=(self)` on `/app/`, and
     deny-all (`camera=(), microphone=(), display-capture=()`) on every other
     answer, the metrics listener included.
-  - Known follow-ups: a narrow race where a screen-share revocation can
-    answer while a retiring room's share withdrawal is in flight, which
-    predates cameras (#1265); and a camera start glitch where choosing a
-    second, unplugged camera and then a third while starting ends the start
-    instead of following the newer choice, fixed by pressing Camera again
-    (#1266).
 - **Leave channel in the channel ⋯ menu** (#1095, PR #1263), for members of
   the channel (not guests). A public channel is left at once; a private one
   asks first, since it cannot be found again. A refusal, such as the last
@@ -111,11 +105,34 @@ not use cameras:** `use_camera` is off for operators and members on upgrade.
 - **The roadmap moves webcam video into the private alpha** (PR #1260, with
   Nick's sign-off of 2026-11-03). Docs only.
 
+### Fixed
+
+- **A screen-share revocation waits for a retiring room's withdrawal**
+  (#1265, PR #1272). When a share's permission was withdrawn while a room
+  rotation was still withdrawing that share, the route could answer before
+  the share had ended. It now waits, as a camera's revocation already did
+  (#1241). The race predates cameras.
+- **A camera start follows a newer camera choice** (#1266, PR #1275). If the
+  camera chosen while starting could not be had and the person had already
+  chosen another, the start ended instead of moving to the newer choice.
+  Now it follows the newer choice, and a choice changed back to a camera it
+  had already tried still publishes a live picture.
+
 ### Docs
 
 - **The tester guide and README say the browser starts in the open
   microphone** (#1261, PR #1262), name the "Open mic" toggle and say the
   choice is kept. Docs only.
+- **The docs describe the community model as it ships** (#997, PR #1270).
+  README, `docs/deploy.md` and the tester guide cover member links, the
+  sign-in-only front page and `open_signup`, default channels with their
+  history, Browse channels, the member directory, voice on by default, and
+  no guests for now. The older private-alpha design notes say that ADR-013
+  supersedes them.
+- **README and `docs/deploy.md` give the camera policy and the twelfth
+  permission** (PR #1273, refs #1269): `Permissions-Policy` is
+  `camera=(self)` on `/app/`, and `use_camera` is listed with the other
+  permissions, off for operators and members.
 
 ### Tests
 
@@ -128,6 +145,14 @@ not use cameras:** `use_camera` is off for operators and members on upgrade.
   `use_camera` on and off while an approval is open (#1240), the pinned
   LiveKit permission requests of every publish-permission write (#1239), and
   `e2e/voice` and `e2e/isolation` rows for the camera (#1241).
+- **The community newcomer scenario runs end to end** (#989, PR #1271), in
+  a new CI job, `community-check` (`go run ./e2e/community`), on every pull
+  request and push to `main`. The owner makes a member link; a newcomer
+  redeems it, reads `#general`'s history, finds and joins a channel made
+  public, and joins its voice. Her voice is switched off and back on, the
+  closed link stops working, and the server admits no guest. It runs
+  against a real conchd and the pinned LiveKit, through the API and media
+  control, not the browser.
 
 ## [0.1.0-alpha.12] - 2026-11-03
 
