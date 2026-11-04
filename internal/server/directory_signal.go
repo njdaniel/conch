@@ -24,7 +24,10 @@ import (
 //     (directoryMembershipChanged);
 //   - a principal created, renamed, disabled, enabled, hidden or re-roled:
 //     every viewer who may know it, before or after
-//     (directoryPrincipalChanged).
+//     (directoryPrincipalChanged). A hide also tells, without the
+//     see_member_directory permission, the readers of the hidden principal's
+//     messages (hideWatch), so their page names the author again (issue
+//     #1282).
 //
 // The audiences are computed by the store from its one may-know fragment, so
 // this file decides nothing about who may know whom. A failed read is logged
@@ -81,4 +84,26 @@ func (s *Server) directorySettingChanged(changes []store.PermissionCellChange) {
 	if slices.ContainsFunc(changes, func(c store.PermissionCellChange) bool { return c.Permission == schema.PermSeeMemberDirectory }) {
 		s.events.notifyDirectoryChanged(true)
 	}
+}
+
+// hideWatch is the watch for a hide that changed something: who could know
+// the principal before, from the store's read, plus, when members do not all
+// know each other, the readers of its messages. The page names an author it
+// does not know through the channel's authors route, which answers for a
+// visible message, so the readers are exactly the people that route names
+// the principal to (store.AuthorReaders, through messageVisible): a frame to
+// them tells nobody anything a message did not. A failed read is logged and
+// leaves the watch as the store gave it.
+func (s *Server) hideWatch(ctx context.Context, subject int64, res store.HideResult) *directoryWatch {
+	w := &directoryWatch{everyone: res.KnowersEveryone, ids: slices.Clone(res.Knowers)}
+	if w.everyone {
+		return w
+	}
+	readers, err := s.store.AuthorReaders(ctx, subject)
+	if err != nil {
+		slog.ErrorContext(ctx, "directory: read the readers of a hidden author failed", "subject", subject, "error", err)
+		return w
+	}
+	w.ids = append(w.ids, readers...)
+	return w
 }

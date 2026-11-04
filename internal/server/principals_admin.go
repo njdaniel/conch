@@ -163,7 +163,7 @@ func (s *Server) handleHidePrincipal(w http.ResponseWriter, r *http.Request) {
 	if res.Changed {
 		// Who could know it before its memberships went is the store's, read
 		// in the hiding transaction (directory signal, design §13.6).
-		s.directoryPrincipalChanged(ctx, id, &directoryWatch{everyone: res.KnowersEveryone, ids: res.Knowers})
+		s.directoryPrincipalChanged(ctx, id, s.hideWatch(ctx, id, res))
 	}
 	row, err := s.store.PrincipalAdmin(ctx, id, s.now())
 	if err != nil {
@@ -261,7 +261,7 @@ func (s *Server) hidePrincipals(ctx context.Context, targets []store.Principal, 
 		}
 		s.principalDisabled(ctx, p.ID)
 		if res.Changed {
-			s.directoryPrincipalChanged(ctx, p.ID, &directoryWatch{everyone: res.KnowersEveryone, ids: res.Knowers})
+			s.directoryPrincipalChanged(ctx, p.ID, s.hideWatch(ctx, p.ID, res))
 			done = append(done, schema.HiddenPrincipalV1{ID: p.ID, Name: p.Name})
 		}
 	}
