@@ -134,6 +134,10 @@ func TestCommunityChannelGoldenFixtures(t *testing.T) {
 		{"join-channel-response-v1.json", func() any { return new(JoinChannelResponseV1) }},
 		{"channel-settings-request-v1.json", func() any { return new(ChannelSettingsRequestV1) }},
 		{"channel-settings-request-v1-default.json", func() any { return new(ChannelSettingsRequestV1) }},
+		{"channel-v0-archived.json", func() any { return new(ChannelV0) }},
+		{"channel-listing-v1-archived.json", func() any { return new(ChannelListingV1) }},
+		{"channel-settings-request-v1-archived.json", func() any { return new(ChannelSettingsRequestV1) }},
+		{"channel-settings-request-v1-restored.json", func() any { return new(ChannelSettingsRequestV1) }},
 		{"channel-settings-response-v1.json", func() any { return new(ChannelSettingsResponseV1) }},
 		{"channel-settings-response-v1-open-signup-off.json", func() any { return new(ChannelSettingsResponseV1) }},
 		{"channel-settings-response-v1-warning.json", func() any { return new(ChannelSettingsResponseV1) }},
@@ -147,13 +151,16 @@ func TestCommunityChannelGoldenFixtures(t *testing.T) {
 	t.Run("channel-v1-public.json", func(t *testing.T) {
 		assertP3GoldenFixture(t, "channel-v1-public.json", func() any { return new(ChannelDocV1) })
 	})
+	t.Run("channel-v1-archived.json", func(t *testing.T) {
+		assertP3GoldenFixture(t, "channel-v1-archived.json", func() any { return new(ChannelDocV1) })
+	})
 	// And the request fixtures are requests the schema accepts.
 	t.Run("create-channel-request-v1.json validates", func(t *testing.T) {
 		var r CreateChannelRequestV1
 		decodeFixture(t, "create-channel-request-v1.json", &r)
 		assertValidation(t, r.Validate(), "")
 	})
-	for _, file := range []string{"channel-settings-request-v1.json", "channel-settings-request-v1-default.json"} {
+	for _, file := range []string{"channel-settings-request-v1.json", "channel-settings-request-v1-default.json", "channel-settings-request-v1-archived.json", "channel-settings-request-v1-restored.json"} {
 		t.Run(file+" validates", func(t *testing.T) {
 			var r ChannelSettingsRequestV1
 			decodeFixture(t, file, &r)
@@ -195,6 +202,8 @@ func TestChannelVisibility(t *testing.T) {
 		ErrorCodeChannelNotJoinable:      "channel_not_joinable",
 		ErrorCodeChannelSettingsConflict: "channel_settings_conflict",
 		ErrorCodeChannelLastMember:       "channel_last_member",
+		ErrorCodeChannelArchived:         "channel_archived",
+		ErrorCodeChannelArchiveDefault:   "channel_archive_default",
 	}
 	for got, w := range want {
 		if got != w {
@@ -248,6 +257,8 @@ func TestChannelSettingsRequestV1Validate(t *testing.T) {
 		// A private default channel is the server's 409, not this rule's.
 		{"private and default", ChannelSettingsRequestV1{Visibility: vis(ChannelPrivate), Default: b(true)}, ""},
 
+		{"archive", ChannelSettingsRequestV1{Archived: b(true)}, ""},
+		{"restore", ChannelSettingsRequestV1{Archived: b(false)}, ""},
 		{"nothing", ChannelSettingsRequestV1{}, "the request changes no setting"},
 		{"empty visibility", ChannelSettingsRequestV1{Visibility: vis("")}, "channel visibility must be one of: public, private"},
 		{"unknown visibility", ChannelSettingsRequestV1{Visibility: vis("secret"), Default: b(true)}, "channel visibility must be one of: public, private"},

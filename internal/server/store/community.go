@@ -27,6 +27,10 @@ import (
 // before it, so it is the next free one at dispatch.
 const communityMigration = 40
 
+// archiveMigration is the migration that adds channels.archived_at (issue
+// #844).
+const archiveMigration = 41
+
 // AuditCommunityMigrated is the one audit row migration 40 writes for itself
 // (design §6 step 10): actor "migration", subject "server", detail the counts
 // of what steps 3 to 9 changed. Step 4's rows (End visit's and an invite
@@ -404,8 +408,14 @@ func affected(res sql.Result) int64 {
 func setDefaultChannelTx(ctx context.Context, tx execer, channelID int64, isDefault bool, listedBy int64) (madePublic bool, err error) {
 	if isDefault {
 		var was string
-		if err := tx.QueryRowContext(ctx, "SELECT visibility FROM channels WHERE id = ?", channelID).Scan(&was); err != nil {
+		var archived sql.NullInt64
+		if err := tx.QueryRowContext(ctx, "SELECT visibility, archived_at FROM channels WHERE id = ?", channelID).Scan(&was, &archived); err != nil {
 			return false, fmt.Errorf("store: set default channel %d: %w", channelID, err)
+		}
+		// An archived channel is never a default channel (issue #844,
+		// decision 4): the join settings' open_channels reach it here.
+		if archived.Valid {
+			return false, ErrChannelArchiveDefault
 		}
 		_, err = tx.ExecContext(ctx,
 			"UPDATE channels SET visibility = 'public', is_default = 1, default_listed_by = ? WHERE id = ?",

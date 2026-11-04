@@ -158,6 +158,10 @@ func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 			refusedPermission(caller, storeRefusalPermission(err)))
 	case errors.Is(err, store.ErrInviteAllowanceExceeded):
 		s.denyForbidden(w, r, caller, schema.ErrorCodeInviteAllowanceExceeded, "you already have as many open personal invites as you may")
+	case errors.Is(err, store.ErrChannelArchived):
+		// The store's archived guard (issue #844), after the maker's standing
+		// in the channel is established.
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
 	case errors.Is(err, store.ErrNotFound):
 		// Only an operator gets this far with a channel that does not exist;
 		// anyone else gets invite_grant_exceeds_inviter for it.

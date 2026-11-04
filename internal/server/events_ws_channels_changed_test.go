@@ -281,6 +281,44 @@ func TestEventsChannelsChangedRecipients(t *testing.T) {
 			want: map[string]int{"subject": 1, "subject-2": 1, "member": 1},
 		},
 		{
+			// Issue #844, membership-live.md's archive row: the same
+			// recipients as a rename, through the settings handler.
+			name:  "a channel archived",
+			setup: func(t *testing.T, f *ccFixture) { f.join(t, f.target.ID, f.bob.ID) },
+			act: func(t *testing.T, f *ccFixture) {
+				f.must(t, "PUT", fmt.Sprintf("/v1/channels/%d/settings", f.target.ID), f.rootTok, `{"archived":true}`, http.StatusOK)
+			},
+			want: map[string]int{"subject": 1, "subject-2": 1, "member": 1},
+		},
+		{
+			name: "a channel restored",
+			setup: func(t *testing.T, f *ccFixture) {
+				f.join(t, f.target.ID, f.bob.ID)
+				archived := true
+				if _, err := f.srv.store.ChannelSettings(context.Background(), "system", 0, f.target.ID, store.ChannelSettingsChange{Archived: &archived}, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			},
+			act: func(t *testing.T, f *ccFixture) {
+				f.must(t, "PUT", fmt.Sprintf("/v1/channels/%d/settings", f.target.ID), f.rootTok, `{"archived":false}`, http.StatusOK)
+			},
+			want: map[string]int{"subject": 1, "subject-2": 1, "member": 1},
+		},
+		{
+			name: "archiving an archived channel changes nothing",
+			setup: func(t *testing.T, f *ccFixture) {
+				f.join(t, f.target.ID, f.bob.ID)
+				archived := true
+				if _, err := f.srv.store.ChannelSettings(context.Background(), "system", 0, f.target.ID, store.ChannelSettingsChange{Archived: &archived}, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			},
+			act: func(t *testing.T, f *ccFixture) {
+				f.must(t, "PUT", fmt.Sprintf("/v1/channels/%d/settings", f.target.ID), f.rootTok, `{"archived":true}`, http.StatusOK)
+			},
+			want: map[string]int{},
+		},
+		{
 			name: "a rename to the same name changes nothing",
 			act: func(t *testing.T, f *ccFixture) {
 				f.must(t, "PUT", fmt.Sprintf("/v1/channels/%d/name", f.target.ID), f.rootTok, `{"from":"target","name":"target"}`, http.StatusOK)

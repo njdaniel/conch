@@ -32,12 +32,12 @@ func TestChannelsCommands(t *testing.T) {
 		{"and a private one", e.memberToken, []string{"channels", "create", "--private", "den"}, "created private channel den (id 2)\n"},
 		{"flags may follow the name", e.memberToken, []string{"channels", "create", "attic", "--private"}, "created private channel attic (id 3)\n"},
 		{"an operator makes one", e.operatorToken, []string{"channels", "create", "ops"}, "created public channel ops (id 4)\n"},
-		{"a member's directory", e.memberToken, []string{"channels", "list"}, "1 public - joined - lounge\n2 private - joined - den\n3 private - joined - attic\n4 public - - - ops\n"},
-		{"the operator sees the public ones only", e.operatorToken, []string{"channels", "list"}, "1 public - - - lounge\n4 public - joined - ops\n"},
+		{"a member's directory", e.memberToken, []string{"channels", "list"}, "1 public - joined - - lounge\n2 private - joined - - den\n3 private - joined - - attic\n4 public - - - - ops\n"},
+		{"the operator sees the public ones only", e.operatorToken, []string{"channels", "list"}, "1 public - - - - lounge\n4 public - joined - - ops\n"},
 		{"join", e.operatorToken, []string{"channels", "join", "lounge"}, "you are in channel lounge\n"},
 		{"join again is the same answer", e.operatorToken, []string{"channels", "join", "lounge"}, "you are in channel lounge\n"},
 		{"the operator sees every channel with counts", e.operatorToken, []string{"channels", "list", "--all"},
-			"1 public - joined 2 lounge\n2 private - - 1 den\n3 private - - 1 attic\n4 public - joined 1 ops\n"},
+			"1 public - joined 2 - lounge\n2 private - - 1 - den\n3 private - - 1 - attic\n4 public - joined 1 - ops\n"},
 		{"leave", e.operatorToken, []string{"channels", "leave", "lounge"}, "left channel lounge\n"},
 	}
 	for _, st := range steps {

@@ -360,7 +360,32 @@ func inviteChannelsTx(ctx context.Context, tx execer, inviteID int64) ([]schema.
 // landing channels (O5) lands in those instead, and only while its maker
 // still holds manage_channels; without it nothing is kept and every landing
 // channel is dropped, so the link fails closed (usableInviteTx).
+//
+// An archived channel is dropped as one a joiner may not enter (issue #844):
+// the redemption still succeeds for the others, and an invite left with no
+// channel fails as one whose maker lost access does.
 func effectiveChannelsTx(ctx context.Context, tx execer, r inviteRow) (kept, dropped []schema.InviteChannelV1, err error) {
+	kept, dropped, err = permittedChannelsTx(ctx, tx, r)
+	if err != nil {
+		return nil, nil, err
+	}
+	live := kept[:0:0]
+	for _, c := range kept {
+		switch err := channelNotArchivedTx(ctx, tx, c.ID); {
+		case errors.Is(err, ErrChannelArchived):
+			dropped = append(dropped, c)
+		case err != nil:
+			return nil, nil, err
+		default:
+			live = append(live, c)
+		}
+	}
+	return live, dropped, nil
+}
+
+// permittedChannelsTx is effectiveChannelsTx before the archived filter: the
+// split by what the invite's maker still stands behind.
+func permittedChannelsTx(ctx context.Context, tx execer, r inviteRow) (kept, dropped []schema.InviteChannelV1, err error) {
 	all, err := inviteChannelsTx(ctx, tx, r.id)
 	if err != nil {
 		return nil, nil, err
@@ -615,6 +640,11 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 				case err != nil:
 					return fmt.Errorf("store: create invite: check membership: %w", err)
 				}
+			}
+			// The archived guard of an invite naming the channel (issue
+			// #844): after the creator's standing in it is established.
+			if err := channelNotArchivedTx(ctx, tx, id); err != nil {
+				return err
 			}
 			channelIDs = append(channelIDs, id)
 		}

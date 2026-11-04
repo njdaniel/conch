@@ -88,6 +88,12 @@ func (s *Store) JoinChannel(ctx context.Context, channelID, principalID int64, n
 		if ch.Visibility != schema.ChannelPublic {
 			return fmt.Errorf("store: channel %d: %w", channelID, ErrNotFound)
 		}
+		// The archived guard of self-join (issue #844): after the private
+		// channel's uniform not-found above, so it is said only to a caller
+		// that may see the channel by name, and before any write.
+		if ch.Archived() {
+			return ErrChannelArchived
+		}
 		barred, err := selfJoinBarredTx(ctx, tx, channelID, principalID)
 		if err != nil {
 			return err
@@ -198,11 +204,11 @@ func (s *Store) ChannelDirectory(ctx context.Context, viewerID int64, all bool) 
 		return s.channelDirectoryAll(ctx, viewerID)
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default,
+		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at,
 		        m.principal_id IS NOT NULL, COALESCE(m.manages, 0)
 		 FROM channels c
 		 LEFT JOIN channel_members m ON m.channel_id = c.id AND m.principal_id = ?
-		 WHERE c.visibility = 'public' OR m.principal_id IS NOT NULL
+		 WHERE (c.visibility = 'public' AND c.archived_at IS NULL) OR m.principal_id IS NOT NULL
 		 ORDER BY c.id ASC`, viewerID)
 	if err != nil {
 		return nil, fmt.Errorf("store: channel directory: %w", err)
@@ -235,7 +241,7 @@ func (s *Store) ChannelDirectory(ctx context.Context, viewerID int64, all bool) 
 // are.
 func (s *Store) channelDirectoryAll(ctx context.Context, viewerID int64) ([]ChannelListing, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default,
+		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at,
 		        m.principal_id IS NOT NULL, COALESCE(m.manages, 0),
 		        (SELECT COUNT(*) FROM channel_members n WHERE n.channel_id = c.id),
 		        g.principal_id, p.name, p.kind

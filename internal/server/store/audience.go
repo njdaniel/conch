@@ -1098,6 +1098,11 @@ func (s *Store) InsertScopedMessage(ctx context.Context, p ScopedPost) (Message,
 func insertScopedTx(
 	ctx context.Context, tx execer, p ScopedPost, rootID int64, netID any, audience schema.Audience, recipients []int64, now time.Time,
 ) (Message, error) {
+	// The archived guard of every scoped post and reply (issue #844): the
+	// other of the two INSERT INTO messages.
+	if err := channelNotArchivedTx(ctx, tx, p.ChannelID); err != nil {
+		return Message{}, err
+	}
 	var payloadSchema, payloadJSON, thread any
 	if p.Payload != nil {
 		payloadSchema = p.Payload.Schema
@@ -2268,6 +2273,11 @@ func (s *Store) EditOwnMessage(ctx context.Context, channelID int64, reader Read
 	var out MessageEdit
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		if err := reactionReaderTx(ctx, tx, channelID, reader); err != nil {
+			return err
+		}
+		// The archived guard of an edit (issue #844), after the reader's
+		// standing is known.
+		if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
 			return err
 		}
 		msg, err := ownMessageTx(ctx, tx, channelID, reader, messageID)

@@ -153,10 +153,11 @@ func (o channelsOutput) json(v any) error {
 	return jsonLine(o.stdout, v)
 }
 
-// list prints `<id> <visibility> <default|-> <joined|-> <members|-> <name>`
-// per channel in the server's order, id ascending. Members is a count only an
-// operator's --all listing carries. The name is last because it may contain
-// spaces.
+// list prints `<id> <visibility> <default|-> <joined|-> <members|-> <archived|-> <name>`
+// per channel in the server's order, id ascending. archived marks a channel
+// that was archived (issue #844), added before the name so the fields before
+// it keep their places. Members is a count only an operator's --all
+// listing carries. The name is last because it may contain spaces.
 func (o channelsOutput) list(resp schema.ChannelDirectoryResponseV1, all bool) error {
 	if o.asJSON {
 		if resp.Channels == nil {
@@ -169,8 +170,8 @@ func (o channelsOutput) list(resp schema.ChannelDirectoryResponseV1, all bool) e
 		if all && c.Members != nil {
 			members = fmt.Sprintf("%d", *c.Members)
 		}
-		if err := o.say("%d %s %s %s %s %s\n", c.ID, safeLine(string(c.Visibility)),
-			either(c.Default, "default", "-"), either(c.Joined, "joined", "-"), members, safeLine(c.Name)); err != nil {
+		if err := o.say("%d %s %s %s %s %s %s\n", c.ID, safeLine(string(c.Visibility)),
+			either(c.Default, "default", "-"), either(c.Joined, "joined", "-"), members, either(c.ArchivedAt != nil, "archived", "-"), safeLine(c.Name)); err != nil {
 			return err
 		}
 	}

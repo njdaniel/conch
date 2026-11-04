@@ -325,6 +325,11 @@ func (s *Store) reactionWrite(ctx context.Context, channelID int64, reader Reade
 		if err := reactionReaderTx(ctx, tx, channelID, reader); err != nil {
 			return err
 		}
+		// The archived guard of every reaction write, set, remove and
+		// moderate (issue #844), once the reader is known to be a member.
+		if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
+			return err
+		}
 		target, err := reactionTargetTx(ctx, tx, channelID, reader, messageID)
 		if err != nil {
 			return err

@@ -72,6 +72,11 @@ var (
 	errChannelNotFound = &schema.Error{Code: "channel_not_found", Message: "channel not found"}
 	errApprovalMissing = &schema.Error{Code: "approval_not_found", Message: "approval not found"}
 	errInternal        = &schema.Error{Code: "internal_error", Message: "internal server error"}
+	// errChannelArchived is the answer of every write the store's archived
+	// guard refuses (issue #844). It is said only after the caller's
+	// standing in the channel is known: to anyone else the channel is
+	// errChannelNotFound.
+	errChannelArchived = &schema.Error{Code: schema.ErrorCodeChannelArchived, Message: "the channel is archived: restore it to post, react, upload, join or call in it"}
 	errUnauthenticated = &schema.Error{Code: "unauthenticated", Message: "the credential is no longer valid"}
 )
 
@@ -342,6 +347,11 @@ func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload
 		// themselves (issue #240).
 		return store.Message{}, errAttachmentRefused
 	}
+	if errors.Is(err, store.ErrChannelArchived) {
+		// The store's archived guard (issue #844): said by the same tools
+		// without reaching into the store themselves.
+		return store.Message{}, errArchivedRefused
+	}
 	if err == nil {
 		// A grant is only ever an agent's.
 		g.scope.s.metrics.messagePosted(store.PrincipalAgent)
@@ -350,6 +360,10 @@ func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload
 	}
 	return msg, err
 }
+
+// errArchivedRefused is insertMessage's error for a post to an archived
+// channel (issue #844). Nothing was stored.
+var errArchivedRefused = errors.New("server: channel is archived")
 
 // errAttachmentRefused is insertMessage's error for a post whose file
 // attachment cannot be honoured (an agent cannot upload, so for an agent that

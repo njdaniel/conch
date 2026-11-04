@@ -977,6 +977,12 @@ BEGIN SELECT RAISE(ABORT, 'a default channel must be public'); END`,
 )`,
 		`ALTER TABLE invites ADD COLUMN link TEXT NOT NULL DEFAULT 'legacy' CHECK (link IN ('legacy', 'member', 'guest'))`,
 	},
+	// 41 (archiveMigration): archive a channel without deleting it (issue
+	// #844). archived_at is Unix seconds; NULL means the channel is live, so
+	// every existing channel stays live.
+	{
+		`ALTER TABLE channels ADD COLUMN archived_at INTEGER`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

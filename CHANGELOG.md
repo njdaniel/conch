@@ -8,6 +8,21 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Added
+
+- Archive and restore a channel without deleting its history (#844, server,
+  schema and CLI; the browser follows). `PUT /v1/channels/{id}/settings` takes
+  `"archived": true|false` (`manage_channels`, audited as
+  `channel_settings_changed`). An archived channel keeps its history, members
+  and read marks and refuses anything new with 409 `channel_archived`: posts
+  (REST, webhook, MCP), edits, reactions, uploads, voice claims, self-join,
+  adding members, and invites naming it. Voice in progress ends when it is
+  archived. A default channel cannot be archived (409
+  `channel_archive_default`). `conch admin channel settings <channel>
+  --archive|--restore`; `conch channels list` gains an `archived` column.
+  Additive wire fields (`archived_at`, `archived`) and migration 41
+  (`channels.archived_at`); no schema version bump.
+
 ## [0.1.0-alpha.14] - 2026-11-04
 
 This is a pre-1.0 release (`v0.1.0-alpha.14`): the API and the wire shapes

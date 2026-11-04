@@ -226,6 +226,7 @@ export interface ChannelV0 {
   manages?: boolean;
   visibility?: ChannelVisibility;
   default?: boolean;
+  archived_at?: string;
 }
 
 export const channelV0 = object<ChannelV0>({
@@ -235,6 +236,7 @@ export const channelV0 = object<ChannelV0>({
   manages: optional(bool),
   visibility: optional(channelVisibility),
   default: optional(bool),
+  archived_at: optional(timestamp),
 });
 
 // schema.ListChannelsResponse
@@ -294,6 +296,7 @@ export interface ChannelDocV1 {
   created_at: string;
   visibility?: ChannelVisibility;
   default?: boolean;
+  archived_at?: string;
 }
 
 export const channelDocV1 = object<ChannelDocV1>({
@@ -303,6 +306,7 @@ export const channelDocV1 = object<ChannelDocV1>({
   created_at: timestamp,
   visibility: optional(channelVisibility),
   default: optional(bool),
+  archived_at: optional(timestamp),
 });
 
 // schema.GuestAttributionV1
@@ -3688,6 +3692,7 @@ export interface ChannelListingV1 {
   manages?: boolean;
   members?: number;
   managers?: ChannelAuthorV1[];
+  archived_at?: string;
 }
 
 export const channelListingV1 = object<ChannelListingV1>({
@@ -3700,6 +3705,7 @@ export const channelListingV1 = object<ChannelListingV1>({
   manages: optional(bool),
   members: optional(int),
   managers: optional(array(channelAuthorV1)),
+  archived_at: optional(timestamp),
 });
 
 // schema.ChannelDirectoryResponseV1
@@ -3726,11 +3732,13 @@ export const joinChannelResponseV1 = object<JoinChannelResponseV1>({
 export interface ChannelSettingsRequestV1 {
   visibility?: ChannelVisibility;
   default?: boolean;
+  archived?: boolean;
 }
 
 export const channelSettingsRequestV1 = object<ChannelSettingsRequestV1>({
   visibility: optional(channelVisibility),
   default: optional(bool),
+  archived: optional(bool),
 });
 
 // schema.ChannelSettingsResponseV1

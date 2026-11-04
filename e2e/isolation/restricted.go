@@ -403,6 +403,19 @@ func (w *world) restrictedPhase() (int, error) {
 			return rows, err
 		}
 	}
+	// Archiving is the same route and the same gate (issue #844): the answer
+	// for the same three ids is the same bytes, whatever the field asked for.
+	archived := true
+	for i, id := range []string{itoa(created.Channel.ID), itoa(w.a.chanIDs[0]), "999999999"} {
+		status, body, err := r.api.do(http.MethodPut, "/v1/channels/"+id+"/settings", schema.ChannelSettingsRequestV1{Archived: &archived})
+		if err := refusedNaming("the restricted operator archives a channel", status, body, err,
+			schema.ErrorCodePermissionDenied, schema.PermManageChannels); err != nil {
+			return rows, err
+		}
+		if err := sameAnswer("the restricted operator archives a channel: its own, A's and a ghost, against the default mark's answer", settingsAnswers[0].status, settingsAnswers[0].body, status, body); err != nil {
+			return rows, fmt.Errorf("id %d: %w", i, err)
+		}
+	}
 	rows++
 
 	// The manager class on A's channel: the uniform 404.

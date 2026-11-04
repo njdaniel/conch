@@ -29,6 +29,7 @@ func rewindToBeforeCommunity(t *testing.T, path string) {
 	}
 	defer func() { _ = db.Close() }()
 	for _, stmt := range []string{
+		"ALTER TABLE channels DROP COLUMN archived_at", // migration 41 (issue #844)
 		"DROP TRIGGER channels_default_public_insert",
 		"DROP TRIGGER channels_default_public_update",
 		"ALTER TABLE channels DROP COLUMN visibility",

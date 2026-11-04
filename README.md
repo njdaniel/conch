@@ -1090,9 +1090,10 @@ bin/conch admin principal disable-invitees 5 --all  # a dry run; --yes to do it
 A link is a member link (ADR-013): it lands its joiner in the default channels unless a holder of `manage_channels` names `--landing-channel`, and `--open`, `--personal`, `--channel`, `--voice`, `--may-invite` and `--join-as` of the old per-channel invite are gone (`--max-uses` is `--uses`). The rest of the community model, from the command line:
 
 ```sh
-bin/conch channels list [--all]                     # <id> <visibility> <default|-> <joined|-> <members|-> <name>; --all is for operators
+bin/conch channels list [--all]                     # <id> <visibility> <default|-> <joined|-> <members|-> <archived|-> <name>; --all is for operators
 bin/conch channels join lounge                      # and leave; create lounge [--private]
 bin/conch admin channel settings lounge --public --default on   # --private keeps every member; the answer says whether open sign-up went off
+bin/conch admin channel settings lounge --archive               # keeps history and members, refuses anything new; --restore brings it back; a default channel cannot be archived
 bin/conch admin principal voice 5 off               # a person's voice switch; asks for your password when the server does
 bin/conch admin directory members                   # the community
 bin/conch admin join set --open-signup on --link-expiry 7d      # 0 for no default expiry; join status shows both and the default channels

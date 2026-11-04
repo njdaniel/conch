@@ -149,7 +149,7 @@ func (p *voicePoller) companionRemoved(roomName string, principalID int64, role 
 // the one audit row, and it records the denial).
 func (s *Server) handleVoiceCompanion(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	channel, caller, ok := s.voiceSessionCaller(w, r)
+	channel, caller, ok := s.voiceClaimCaller(w, r)
 	if !ok {
 		return
 	}
@@ -209,6 +209,10 @@ func (s *Server) handleVoiceCompanion(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, errVoiceNoLongerEntitled):
 		writeChannelNotFound(w)
+		return
+	case errors.Is(err, errVoiceChannelArchived):
+		// Archived between the check and the token (issue #844).
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
 		return
 	case errors.Is(err, errVoiceCompanionNoRoom):
 		writeVoiceNoSession(w)

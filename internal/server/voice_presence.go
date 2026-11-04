@@ -2585,6 +2585,93 @@ func (s *Server) voiceMemberRemoved(ctx context.Context, channelID, principalID 
 	s.voice.evict(ctx, withoutRotated(rooms, rotated), principalID, voiceReasonMemberRemoved)
 }
 
+// voiceChannelArchived runs after a channel was archived (issue #844,
+// decision 7) and before the settings PUT answers: voice in the channel ends
+// as a whole.
+//
+//  1. Every share and camera claim in the channel ends through the stop paths
+//     with the existing wire reason access_lost (no new end reason), first, so
+//     that a share keeps that reason: a rotation would end it as rotated.
+//  2. Every live room of the channel (VoiceRoomsForChannel, net rooms
+//     included, whoever holds them) is rotated with the store reason
+//     channel_archived, one voice_room_rotated row each, and forgotten by the
+//     poller, which tells presence and occupancy.
+//  3. The retired rooms are deleted in LiveKit, which disconnects everyone in
+//     them, and the poller waits for the claims in flight.
+//
+// Restore starts nothing. Nobody can rejoin while the channel is archived:
+// the session, share, camera and companion routes refuse it (voiceClaimCaller)
+// and voiceGrantOnce re-checks it. It never fails the request: what it cannot
+// do (LiveKit down) is left to the sweep, which deletes the retired rooms. ctx
+// is made uncancellable and bounded here.
+func (s *Server) voiceChannelArchived(ctx context.Context, channelID int64) {
+	if s.lk == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
+	defer cancel()
+	for _, pid := range s.voice.channelClaimants(channelID) {
+		s.voice.endSharesOf(ctx, pid, channelID, voiceShareStopAccessLost)
+		s.voice.endCamerasOf(ctx, pid, channelID, voiceCameraStopAccessLost)
+	}
+	rooms, err := s.voice.channelRooms(ctx, channelID)
+	if err != nil {
+		slog.ErrorContext(ctx, "voice: list rooms of an archived channel failed; the sweep ends nothing but retired rooms", "channel", channelID, "error", err)
+		return
+	}
+	var olds []store.VoiceRoom
+	for _, room := range rooms {
+		_, rotated, err := s.store.RotateVoiceRoom(ctx, room.ID, store.VoiceRotateChannelArchived)
+		if err != nil {
+			slog.ErrorContext(ctx, "voice: rotating a room of an archived channel failed", "channel", channelID, "error", err)
+			s.voice.sweepSoon()
+			continue
+		}
+		if !rotated {
+			continue
+		}
+		slog.InfoContext(ctx, "voice: room rotated", "channel", channelID, "reason", store.VoiceRotateChannelArchived)
+		s.voice.retireRoom(ctx, room)
+		olds = append(olds, room)
+	}
+	s.voice.deleteRooms(ctx, olds)
+	s.voice.waitRunningClaims()
+}
+
+// channelClaimants is everyone the poller holds a share, a camera claim or a
+// running claim for in a room of channelID, live or retiring, each once, in
+// id order. It reads p.mu only.
+func (p *voicePoller) channelClaimants(channelID int64) []int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	seen := map[int64]bool{}
+	for _, r := range p.rooms {
+		if r.channelID != channelID {
+			continue
+		}
+		if r.share != nil {
+			seen[r.share.principalID] = true
+		}
+		for pid := range r.cameras {
+			seen[pid] = true
+		}
+		if r.claimer != 0 {
+			seen[r.claimer] = true
+		}
+	}
+	for r, pid := range p.retiring {
+		if r.channelID == channelID && pid != 0 {
+			seen[pid] = true
+		}
+	}
+	out := make([]int64, 0, len(seen))
+	for pid := range seen {
+		out = append(out, pid)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // voicePrincipalLostAccess runs after a principal was disabled, had every
 // credential revoked or lost use_voice: their presence and occupancy sockets
 // close and the invariant is checked. A disabled principal, or one who lost
