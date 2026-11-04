@@ -523,7 +523,9 @@ jobs:
     # program is neither on this runner nor ever run. The suite takes 17-19
     # minutes on main with the camera specs (44-46), so the bound is 30, not
     # 20: a bound the passing suite runs into cancels a green run (#1268).
-    runs-on: ubuntu-latest
+    # On the self-hosted runners for this repository's own branches, as
+    # check is (#1286, #1288); a fork's pull request runs on ubuntu-latest.
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -545,8 +547,13 @@ jobs:
       # --with-deps installs the system libraries Chromium needs, with sudo,
       # which the runner has. Locally, `npx playwright install chromium` alone.
       - name: browser
+        if: runner.environment == 'github-hosted'
         working-directory: web
         run: npx playwright install --with-deps chromium
+      # The self-hosted runner has Chromium's system libraries and no sudo.
+      - name: browser (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: npx playwright install chromium
 
       - name: web-e2e
         run: make web-e2e
@@ -579,7 +586,9 @@ jobs:
     # main, like check. CI=true makes a skip a failure: if Docker, the LiveKit
     # image, lk or the Rust toolchain cannot be had, this job is red rather
     # than quietly green.
-    runs-on: ubuntu-latest
+    # On the self-hosted runners for this repository's own branches, as
+    # check is (#1286, #1288); a fork's pull request runs on ubuntu-latest.
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
       CI: "true"
@@ -618,6 +627,7 @@ jobs:
             voice-build-${{ runner.os }}-
 
       - name: rust system packages
+        if: runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config
 
       - name: rust toolchain
@@ -642,7 +652,9 @@ jobs:
     # failure: without Docker, the image or lk this job is red, not quietly
     # green. A run takes well under a minute once the image and lk are
     # fetched; the timeout leaves room for a slow pull.
-    runs-on: ubuntu-latest
+    # On the self-hosted runners for this repository's own branches, as
+    # check is (#1286, #1288); a fork's pull request runs on ubuntu-latest.
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
     timeout-minutes: 15
     env:
       CI: "true"
