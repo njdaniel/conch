@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -88,41 +89,58 @@ var cameraRevocations = []struct {
 	perm     bool // refused at the re-read as permission_denied
 	do       func(t *testing.T, f *presenceFixture)
 	rotation bool
+	// setup, when set, runs on the fixture before anything is claimed.
+	setup func(t *testing.T, f *presenceFixture)
 }{
 	{"permissions PUT/use_camera", true, func(t *testing.T, f *presenceFixture) {
 		f.setCamera(t, false, schema.PermissionRoleMember, schema.PermissionRoleOperator)
 		f.srv.endWithheldCameras(context.Background())
-	}, false},
+	}, false, nil},
 	{"permissions PUT/use_voice", true, func(t *testing.T, f *presenceFixture) {
 		f.setCells(t, []schema.Permission{schema.PermUseCamera, schema.PermShareScreen, schema.PermUseVoice}, bothRoles...)
 		f.srv.voiceWithheld(context.Background())
 		f.srv.endWithheldCameras(context.Background())
-	}, false},
+	}, false, nil},
 	{"voice-permission route", true, func(t *testing.T, f *presenceFixture) {
 		rec := f.do(t, http.MethodPut, fmt.Sprintf("/v1/principals/%d/voice-permission", f.ids["ann"]), f.rootTok, `{"voice_allowed":false}`)
 		if rec.Code != http.StatusOK {
 			t.Errorf("voice-permission = %d %s, want 200", rec.Code, rec.Body)
 		}
-	}, false},
+	}, false, nil},
 	{"membership loss", false, func(t *testing.T, f *presenceFixture) {
 		if _, err := f.srv.store.RemoveChannelMember(context.Background(), "system", f.ops.ID, f.ids["ann"]); err != nil {
 			t.Error(err)
 		}
 		f.srv.voiceMemberRemoved(context.Background(), f.ops.ID, f.ids["ann"])
-	}, true},
+	}, true, nil},
 	{"disabled", false, func(t *testing.T, f *presenceFixture) {
 		if _, err := f.srv.store.DisablePrincipal(context.Background(), "system", f.ids["ann"]); err != nil {
 			t.Error(err)
 		}
 		f.srv.principalDisabled(context.Background(), f.ids["ann"])
-	}, true},
+	}, true, nil},
 	{"credential revoked", false, func(t *testing.T, f *presenceFixture) {
 		id := f.credID(t, "ann")
 		if err := f.srv.store.RevokeCredential(context.Background(), "system", id); err != nil {
 			t.Error(err)
 		}
 		f.srv.credentialRevoked(context.Background(), id)
-	}, true},
+	}, true, nil},
+	// A role change, through the route: ann is an operator, and only the
+	// operator column holds use_camera, so demoting her withholds it and the
+	// route's hook (endCameraIfWithheld) ends her camera before it answers.
+	{"role change", true, func(t *testing.T, f *presenceFixture) {
+		rec := f.do(t, http.MethodPut, fmt.Sprintf("/v1/principals/%d/role", f.ids["ann"]), f.rootTok, `{"role":"member"}`)
+		if rec.Code != http.StatusOK {
+			t.Errorf("role change = %d %s, want 200", rec.Code, rec.Body)
+		}
+	}, false, func(t *testing.T, f *presenceFixture) {
+		f.srv.credRecheckInterval = 1 << 62
+		if _, err := f.srv.store.SetRole(context.Background(), fmt.Sprintf("principal:%d", f.root.ID), f.root.ID, f.ids["ann"], "operator", nil); err != nil {
+			t.Fatal(err)
+		}
+		f.setCamera(t, false, schema.PermissionRoleMember)
+	}},
 }
 
 // TestVoiceCameraClaimRevokedBeforeGrant is S3's first interleaving: the
@@ -144,6 +162,9 @@ func TestVoiceCameraClaimRevokedBeforeGrant(t *testing.T) {
 				}
 				t.Run(name, func(t *testing.T) {
 					f, room := newCameraFixture(t)
+					if rev.setup != nil {
+						rev.setup(t, f)
+					}
 					if deleteFail {
 						f.lk.config(func(l *scriptedLiveKit) { l.deleteFail = map[string]bool{room: true} })
 					}
@@ -199,6 +220,9 @@ func TestVoiceCameraRevocationWaitsForClaimInFlight(t *testing.T) {
 				}
 				t.Run(name, func(t *testing.T) {
 					f, room := newCameraFixture(t)
+					if rev.setup != nil {
+						rev.setup(t, f)
+					}
 					if deleteFail {
 						f.lk.config(func(l *scriptedLiveKit) { l.deleteFail = map[string]bool{room: true} })
 					}
@@ -562,5 +586,153 @@ func TestVoiceCameraEndsWithRotation(t *testing.T) {
 				t.Errorf("%d retired rooms are still held", left)
 			}
 		})
+	}
+}
+
+// TestVoiceCameraClaimFailsClosedOnLivenessReadError is the camera's twin of
+// the share's (issue #1089): if the read of the room's liveness after the
+// grant fails, the claim takes back what it granted and answers 409
+// voice_no_session, for a first claim and a continue. Only the camera ends:
+// a share the person holds stays held and granted (the review of #1258).
+func TestVoiceCameraClaimFailsClosedOnLivenessReadError(t *testing.T) {
+	for _, again := range []bool{false, true} {
+		for _, sharing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("again=%v/share held=%v", again, sharing), func(t *testing.T) {
+				f, room := newCameraFixture(t)
+				if sharing {
+					f.mustClaim(t, "ann")
+					f.publish(room, "ann", true, true)
+				}
+				query := ""
+				if again {
+					query = named(f.mustCamera(t, "ann", ""))
+				}
+				f.srv.voice.liveReadSeam = func(context.Context, int64) (bool, error) {
+					return false, errors.New("store: disk I/O error")
+				}
+				res := f.camera(t, http.MethodPost, "ann", "ops", query)
+				if res.status != http.StatusConflict || errCode(t, res.body) != schema.ErrorCodeVoiceNoSession {
+					t.Fatalf("a claim whose liveness read fails: %d %s, want 409 voice_no_session", res.status, res.body)
+				}
+				if f.camGranted(room, "ann") || len(f.cameraHolders(room)) != 0 {
+					t.Error("the camera is still granted or held after the claim was refused")
+				}
+				if sharing {
+					if f.shareState(room) != f.ids["ann"] || !f.granted(t, room, "ann") {
+						t.Error("a camera's failed liveness read ended or withdrew the share")
+					}
+					if got := strings.Join(f.lastUpdate(t, "ann"), ","); got != "MICROPHONE,SCREEN_SHARE,SCREEN_SHARE_AUDIO" {
+						t.Errorf("the camera's withdrawal wrote %s, want the share kept", got)
+					}
+					if rows := f.shareRows(t); len(rows) != 1 {
+						t.Errorf("share rows %q, want its start alone", rows)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestVoiceCameraHolderInARetiredRoomEndsRotated: a holder's continue whose
+// re-read finds the room retired loses the camera as the rotation would end
+// it, reason=rotated, not access_lost (the review of #1258).
+func TestVoiceCameraHolderInARetiredRoomEndsRotated(t *testing.T) {
+	f, room := newCameraFixture(t)
+	c := f.mustCamera(t, "ann", "")
+	// The rotation commits after the holder check (check 7) and before the
+	// re-read: only the re-read can find it.
+	f.srv.voice.claimSeam = func(at string) {
+		if at == "claimed" {
+			f.rotateInStoreOnly(t)
+		}
+	}
+	res := f.camera(t, http.MethodPost, "ann", "ops", named(c))
+	f.srv.voice.claimSeam = nil
+	if res.status != http.StatusConflict || errCode(t, res.body) != schema.ErrorCodeVoiceNoSession {
+		t.Fatalf("a continue in a retired room: %d %s, want 409 voice_no_session", res.status, res.body)
+	}
+	want := []string{"ann started", "system stopped principal=ann reason=rotated"}
+	if got := f.cameraRows(t); !slices.Equal(got, want) {
+		t.Errorf("rows %q, want %q", got, want)
+	}
+	if f.camGranted(room, "ann") {
+		t.Error("the camera is still granted")
+	}
+}
+
+// TestVoiceCameraReReadRefusalOwesNothing (the security review of #1258,
+// NIT 2): a claim refused by its re-read under the lock asked LiveKit for
+// nothing, so no withdrawal is owed, and the person's next unclaimed camera
+// is audited as one.
+func TestVoiceCameraReReadRefusalOwesNothing(t *testing.T) {
+	f, room := newCameraFixture(t)
+	f.srv.voice.claimSeam = func(at string) {
+		if at == "claimed" {
+			f.setCamera(t, false, schema.PermissionRoleMember)
+		}
+	}
+	res := f.camera(t, http.MethodPost, "ann", "ops", "")
+	f.srv.voice.claimSeam = nil
+	if res.status != http.StatusForbidden || errCode(t, res.body) != schema.ErrorCodePermissionDenied {
+		t.Fatalf("a claim refused at the re-read: %d %s, want 403 permission_denied", res.status, res.body)
+	}
+	if f.cameraGrants("ann") != 0 {
+		t.Fatal("the refused claim asked LiveKit for the camera")
+	}
+	f.lk.update(room, f.identity("ann"), func(p *fakeParticipant) { p.cameraGranted, p.camera = true, true })
+	f.at(500)
+	f.pass(t)
+	want := []string{"ann unclaimed source=observed track_source=camera track_type=video"}
+	if got := f.cameraRows(t); !slices.Equal(got, want) {
+		t.Errorf("rows %q, want %q", got, want)
+	}
+}
+
+// TestVoiceCameraWithdrawalSparesAClaimMadeAfterThePlan: a pass plans the
+// removal of ann2's camera (it outlived a confirmed withdrawal), and ann2
+// claims a camera before the withdrawal is made under the room's claims. The
+// claim stands: no write and no removal. A track that is never a claim's (a
+// mismatch) is still removed (the review of #1258).
+func TestVoiceCameraWithdrawalSparesAClaimMadeAfterThePlan(t *testing.T) {
+	for _, mismatch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mismatch=%v", mismatch), func(t *testing.T) {
+			f, room := newCameraFixture(t)
+			p := f.srv.voice
+			r := p.roomNamed(room)
+			planned := []cameraWithdrawal{{principalID: f.ids["ann2"], role: voiceRolePerson, published: true, evict: true, mismatch: mismatch, reason: voiceReasonCameraUnclaimed}}
+			f.mustCamera(t, "ann2", "") // between the plan and the withdrawal
+			before := len(f.lk.updatesFor(f.identity("ann2")))
+			p.withdrawCameras(context.Background(), r, planned)
+			removed := !f.lk.in(room, f.identity("ann2"))
+			if removed != mismatch {
+				t.Errorf("ann2 removed = %v, want %v", removed, mismatch)
+			}
+			if !mismatch {
+				if n := len(f.lk.updatesFor(f.identity("ann2"))); n != before {
+					t.Errorf("the planned withdrawal wrote %d requests after the claim", n-before)
+				}
+				if !f.camGranted(room, "ann2") {
+					t.Error("the planned withdrawal took the claimed camera down")
+				}
+			}
+		})
+	}
+}
+
+// TestVoiceCameraWithdrawalKeepsThePublisher (the review of #1258): the
+// pass's camera withdrawal writes the microphone whatever LiveKit's listing
+// says of canPublish, since every member publishes in a channel-wide room; a
+// listing that came without a permission (read as no canPublish) does not
+// make the person listen-only, or drop the share they hold.
+func TestVoiceCameraWithdrawalKeepsThePublisher(t *testing.T) {
+	f, room := newCameraFixture(t)
+	f.mustClaim(t, "ann")
+	f.lk.update(room, f.identity("ann"), func(p *fakeParticipant) { p.camera, p.noPermission = true, true })
+	f.at(500)
+	f.pass(t)
+	u := f.lk.updatesFor(f.identity("ann"))
+	last := u[len(u)-1]
+	if !last.canPublish || strings.Join(last.sources, ",") != "MICROPHONE,SCREEN_SHARE,SCREEN_SHARE_AUDIO" {
+		t.Errorf("the camera's withdrawal wrote pub=%v %v, want the microphone and the share", last.canPublish, last.sources)
 	}
 }

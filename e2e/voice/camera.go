@@ -546,26 +546,83 @@ func (l *live) camera(ctx context.Context) error {
 	h.say("finding K7: the combined permission [MICROPHONE SCREEN_SHARE SCREEN_SHARE_AUDIO CAMERA] is accepted, and each source is enforced alone: fay's camera stop left her share's track, gil's share stop left his camera")
 
 	// K5: a token LiveKit sent during a claim still grants the camera after the
-	// claim ended. cal rejoins on it, publishing a camera with no claim; the
-	// pass withdraws it and audits it, and removes nobody.
+	// claim ended. cal rejoins on it, publishing a camera with no claim, and
+	// the pass takes the camera away and removes nobody. Which pass gets
+	// there first is not this scenario's to choose: if a pass lists cal after
+	// lk has published, the track is a camera nobody claimed and is audited
+	// (voice_camera_unclaimed, once); if one lists cal before, it finds the
+	// grant alone, withdraws it and writes nothing (design §4.5: a grant alone
+	// writes nothing), and LiveKit unpublishes or refuses what lk then sends.
+	// Either is the server doing its job; the run says which it saw. (On CI's
+	// two cores the second happened, #1258's voice-check failure: LiveKit
+	// listed cal on the refreshed token with sources [] and the permission
+	// already [MICROPHONE].) The audit of a published track is pinned
+	// deterministically by the restart below, whose camera is published
+	// before the first pass, and by the server's unit tests.
 	calLK.Stop()
 	k5, err := h.startLK(l.lkBin, hostPort, during, nil, "--publish-demo")
 	if err != nil {
 		return err
 	}
 	defer k5.Stop()
-	if err := l.waitAuditOn(d, "the pass to audit cal's camera on the refreshed token", store.AuditVoiceCameraUnclaimed, subject, fmt.Sprintf("principal:%d", cal.id)); err != nil {
-		return fmt.Errorf("finding K5: %w", err)
-	}
-	if err := waitFor("the pass to withdraw cal's camera on the refreshed token", 15*time.Second, func() (bool, string) {
+	calActor := fmt.Sprintf("principal:%d", cal.id)
+	// What LiveKit lists for cal, for a wait that fails: whether cal is there
+	// on the refreshed token, with which sources, under which permission.
+	calSeen := func() string {
 		ok, p, saw := l.lkHas(room, cal.id)
 		if !ok {
-			return false, saw
+			return "LiveKit does not list cal: " + saw
+		}
+		return fmt.Sprintf("LiveKit lists cal with sources %v, permission %v", p.Sources(), p.Permission)
+	}
+	// The new connection first: LiveKit lists cal on another connection than
+	// calLK's.
+	sawCamera := false
+	if err := waitForOrFail("LiveKit to list cal on the refreshed token", 30*time.Second, func() (bool, string, error) {
+		if k5.Exited() {
+			return false, "", fmt.Errorf("lk on the refreshed token exited: %s; %s", k5.Tail(), calSeen())
+		}
+		ok, p, saw := l.lkHas(room, cal.id)
+		if !ok {
+			return false, saw, nil
+		}
+		if _, cam := lkTrack(p, "CAMERA", lkSourceCamera); cam {
+			sawCamera = true
+		}
+		return len(k5.Relay.IssuedTokens()) > 0 || sawCamera, calSeen(), nil
+	}); err != nil {
+		return fmt.Errorf("finding K5: %w", err)
+	}
+	// Then the pass's withdrawal: no camera listed and the microphone alone
+	// permitted, within the bound (a pass, 1.5 s, with room for a slow
+	// host).
+	if err := waitForOrFail("the pass to take cal's camera on the refreshed token away", 15*time.Second, func() (bool, string, error) {
+		if k5.Exited() {
+			return false, "", fmt.Errorf("lk on the refreshed token exited: %s; %s", k5.Tail(), calSeen())
+		}
+		ok, p, saw := l.lkHas(room, cal.id)
+		if !ok {
+			return false, saw, nil
 		}
 		_, cam := lkTrack(p, "CAMERA", lkSourceCamera)
-		return !cam && checkPublishPermission(p.Permission, false, false) == nil, fmt.Sprintf("sources %v permission %v", p.Sources(), p.Permission["can_publish_sources"])
+		sawCamera = sawCamera || cam
+		return !cam && checkPublishPermission(p.Permission, false, false) == nil, calSeen(), nil
 	}); err != nil {
+		return fmt.Errorf("finding K5: %w (lk: %s)", err, k5.Tail())
+	}
+	audited, err := l.auditCountOn(d, store.AuditVoiceCameraUnclaimed, subject, calActor)
+	if err != nil {
 		return err
+	}
+	if audited > 1 {
+		return fmt.Errorf("finding K5: %d voice_camera_unclaimed rows for cal's one track, want at most one", audited)
+	}
+	if sawCamera && audited == 0 {
+		// The run saw the track listed: a pass that lists it too audits it.
+		if err := l.waitAuditOn(d, "the pass to audit the camera LiveKit listed for cal on the refreshed token", store.AuditVoiceCameraUnclaimed, subject, calActor); err != nil {
+			return fmt.Errorf("finding K5: %w; %s", err, calSeen())
+		}
+		audited = 1
 	}
 	if n, err := l.auditCountOn(d, store.AuditVoiceParticipantRemoved, subject, ""); err != nil {
 		return err
@@ -573,7 +630,11 @@ func (l *live) camera(ctx context.Context) error {
 		return fmt.Errorf("finding K5: %d voice_participant_removed rows: an honest client on a refreshed token is withdrawn from, not removed", n)
 	}
 	k5.Stop()
-	h.say("finding K5: a token LiveKit sent during the claim still granted the camera after it ended; the pass withdrew it and wrote voice_camera_unclaimed, and removed nobody")
+	if audited == 1 {
+		h.say("finding K5: a token LiveKit sent during the claim still granted the camera after it ended; cal's camera was published on it, the pass withdrew it and wrote voice_camera_unclaimed, and removed nobody")
+	} else {
+		h.say("finding K5: cal rejoined on a token LiveKit sent during the claim; a pass found the grant before lk had published, withdrew it (a grant alone writes nothing), LiveKit lists no camera and the microphone alone, and nobody was removed")
+	}
 
 	// K8: whether LiveKit accepts a track whose kind disagrees with its
 	// declared source (S1). hal declares lk's demo video a microphone, under
@@ -670,8 +731,12 @@ func (l *live) camera(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	calRows := []string{"started", "stopped principal=cal reason=self", "started", "operator stopped principal=cal reason=operator"}
+	if audited == 1 {
+		calRows = append(calRows, "unclaimed source=observed track_source=camera track_type=video")
+	}
 	want := map[string][]string{
-		"cal": {"started", "stopped principal=cal reason=self", "started", "operator stopped principal=cal reason=operator", "unclaimed source=observed track_source=camera track_type=video"},
+		"cal": calRows,
 		"fay": {"started", "stopped principal=fay reason=self"},
 		"gil": {"started", "stopped principal=gil reason=self"},
 		"jo":  {"started", "unclaimed source=observed track_source=camera track_type=video"},
@@ -761,22 +826,41 @@ func (l *live) mismatch(d *conchdProc, p *person, room string, join func(*person
 	}); err != nil {
 		return "", false, err
 	}
-	removed, err := d.auditRows(store.AuditVoiceParticipantRemoved)
-	if err != nil {
-		return "", false, err
-	}
-	found := false
-	for _, e := range removed {
-		if strings.Contains(e.Detail, fmt.Sprintf("principal=%d ", p.id)) && strings.Contains(e.Detail, "reason=camera_unclaimed") {
-			found = true
+	// The removal is audited once LiveKit has answered it, which may be a
+	// moment after the participant is gone: the row is waited for.
+	removedRow := func(match ...string) func() (bool, string) {
+		return func() (bool, string) {
+			rows, err := d.auditRows(store.AuditVoiceParticipantRemoved)
+			if err != nil {
+				return false, err.Error()
+			}
+			for _, e := range rows {
+				if lkit.ContainsAll([]string{e.Detail}, match...) {
+					return true, ""
+				}
+			}
+			return false, fmt.Sprintf("%d voice_participant_removed rows, none for %s", len(rows), p.name)
 		}
 	}
-	if !found {
-		return "", false, fmt.Errorf("no voice_participant_removed reason=camera_unclaimed for %s", p.name)
+	if err := waitFor("the removal of "+p.name+" to be audited, reason=camera_unclaimed", 15*time.Second,
+		removedRow(fmt.Sprintf("principal=%d ", p.id), "reason=camera_unclaimed")); err != nil {
+		return "", false, err
 	}
 	if claim {
-		// The claim ends with its holder gone.
-		if err := l.waitAuditOn(d, p.name+"'s claim to end", store.AuditVoiceCameraStopped, "", "system"); err != nil {
+		// The claim ends with its holder gone: its stop row, by the system,
+		// naming them.
+		if err := waitFor(p.name+"'s claim to end", 30*time.Second, func() (bool, string) {
+			rows, err := d.auditRows(store.AuditVoiceCameraStopped)
+			if err != nil {
+				return false, err.Error()
+			}
+			for _, e := range rows {
+				if e.Actor == "system" && strings.Contains(e.Detail, fmt.Sprintf("principal=%d ", p.id)) {
+					return true, ""
+				}
+			}
+			return false, "no voice_camera_stopped row for " + p.name
+		}); err != nil {
 			return "", false, err
 		}
 	}

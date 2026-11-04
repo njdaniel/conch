@@ -532,7 +532,7 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 		// was in flight, and not yet forgotten, is read from the store, and
 		// what was just granted is taken back before the claims are let go,
 		// so a revocation waiting on them (waitRunningClaims) answers after.
-		if gone := p.roomRotatedUnder(ctx, lctx, r, room, principalID); gone {
+		if gone := p.roomRotatedUnder(ctx, lctx, r, room, principalID, false); gone {
 			return schema.VoiceShareV1{}, errVoiceShareRoomGone
 		}
 		return schema.VoiceShareV1{PrincipalID: principalID, StartedAt: schema.NewTimestamp(held.startedAt), Audio: true}, nil
@@ -583,7 +583,7 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 	// the grant too, but a DeleteRoom that fails leaves the room until the
 	// sweep, up to 30 s, and the grant must not last that long. A rotation
 	// that commits after this read forgets the room itself.
-	if gone := p.roomRotatedUnder(ctx, lctx, r, room, principalID); gone {
+	if gone := p.roomRotatedUnder(ctx, lctx, r, room, principalID, false); gone {
 		return schema.VoiceShareV1{}, errVoiceShareRoomGone
 	}
 	return schema.VoiceShareV1{PrincipalID: principalID, StartedAt: schema.NewTimestamp(mine.startedAt), Audio: true}, nil
@@ -595,8 +595,10 @@ func (p *voicePoller) claimShare(ctx context.Context, room store.VoiceRoom, prin
 // true. A read that fails is a refusal, as for shareEntitled: it cannot be
 // told whether the room was rotated, so what was granted is taken back and
 // the claim is answered as for a room that went (errVoiceShareRoomGone),
-// never 200; the room is left to the sweep. The caller holds r's claims.
-func (p *voicePoller) roomRotatedUnder(ctx, lctx context.Context, r *voiceRoomState, room store.VoiceRoom, principalID int64) bool {
+// never 200; the room is left to the sweep. camera says the claim is a
+// camera's (issue #1241), not a share's: a read that fails ends only the kind
+// being claimed. The caller holds r's claims.
+func (p *voicePoller) roomRotatedUnder(ctx, lctx context.Context, r *voiceRoomState, room store.VoiceRoom, principalID int64, camera bool) bool {
 	var live bool
 	var err error
 	if p.liveReadSeam != nil {
@@ -607,13 +609,16 @@ func (p *voicePoller) roomRotatedUnder(ctx, lctx context.Context, r *voiceRoomSt
 	switch {
 	case err != nil:
 		slog.ErrorContext(ctx, "voice: could not tell whether a room was retired after a claim; the grant is withdrawn and the sweep checks", "channel", room.ChannelID, "error", err)
-		// What the claimer holds in the room ends with the grant
-		// (reason=rotated: the room could not be shown live), the share and
-		// the camera both (issue #1241), so nothing is held that has no
-		// sources; the withdrawal is made whether or not either was found.
-		share := p.endHeldShare(ctx, r, room, principalID, voiceShareStopRotated)
-		camera := p.endHeldCamera(ctx, r, principalID, voiceCameraStopRotated)
-		if !share && !camera {
+		// What the claim recorded ends with the grant (reason=rotated: the
+		// room could not be shown live), so nothing is held that has no
+		// sources; the withdrawal is made whether or not it was found. Only
+		// the kind being claimed: a camera's claim leaves the person's share
+		// as it is, and a share's claim their camera.
+		if camera {
+			if !p.endHeldCamera(ctx, r, principalID, voiceCameraStopRotated) {
+				p.withdrawCamera(ctx, r, principalID)
+			}
+		} else if !p.endHeldShare(ctx, r, room, principalID, voiceShareStopRotated) {
 			p.withdrawAll(ctx, r, principalID, voiceRoomPublishes(room))
 		}
 		p.sweepSoon()

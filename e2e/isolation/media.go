@@ -743,7 +743,25 @@ func (w *world) cameraRowsA(v *voiceA, c *cameraA) error {
 		// Either LiveKit refuses the track (lk gives up and the track is never
 		// listed), or it lists it, and then a pass must remove the publisher
 		// within the bound: a pass (1.5 s) and a removal (4 s).
+		// unclaimedRows counts the pass's rows for m naming the declared
+		// source and type: the proof the track was accepted, even when the
+		// pass removed m before this loop saw LiveKit list it.
+		want := fmt.Sprintf("track_source=%s track_type=%s", k.trackSource, k.trackType)
+		unclaimedRows := func() (int, error) {
+			rows, err := w.auditRows(store.AuditVoiceCameraUnclaimed)
+			if err != nil {
+				return 0, err
+			}
+			n := 0
+			for _, r := range rows {
+				if r.Actor == "principal:"+itoa(m.id) && strings.Contains(r.Detail, want) && strings.Contains(r.Detail, "source=observed") {
+					n++
+				}
+			}
+			return n, nil
+		}
 		listedAt := time.Time{}
+		audited := false
 		err = waitFor(k.what+" to be refused by LiveKit or removed by a pass", 45*time.Second, func() (bool, string) {
 			ok, p, saw := lk.has(v.room, m.id)
 			if ok {
@@ -753,45 +771,53 @@ func (w *world) cameraRowsA(v *voiceA, c *cameraA) error {
 					}
 				}
 			}
-			if !listedAt.IsZero() {
+			if n, err := unclaimedRows(); err == nil && n > 0 {
+				audited = true
+			}
+			if !listedAt.IsZero() || audited {
 				return !ok, "LiveKit lists the mismatched track: " + saw
 			}
 			return hl.Exited(), "lk is still trying to publish"
 		})
+		tail := hl.Tail()
 		hl.Stop()
 		if err != nil {
 			return err
 		}
-		if listedAt.IsZero() {
+		if listedAt.IsZero() && !audited {
+			if !strings.Contains(tail, "timed out publishing track") {
+				return fmt.Errorf("%s: lk exited with no row and without the refusal: %s", k.what, tail)
+			}
 			findings = append(findings, "K8: LiveKit refused "+k.what)
 			continue
+		}
+		if listedAt.IsZero() {
+			// The pass removed the publisher between two looks of this loop.
+			listedAt = time.Now()
 		}
 		took := time.Since(listedAt)
 		if took > 6*time.Second {
 			return fmt.Errorf("%s was listed for %s before its publisher was removed, past the bound (a pass and a removal, 5.5 s)", k.what, took.Round(time.Millisecond))
 		}
-		rows, err := w.auditRows(store.AuditVoiceCameraUnclaimed)
+		found, err := unclaimedRows()
 		if err != nil {
 			return err
-		}
-		want := fmt.Sprintf("track_source=%s track_type=%s", k.trackSource, k.trackType)
-		found := 0
-		for _, r := range rows {
-			if r.Actor == "principal:"+itoa(m.id) && strings.Contains(r.Detail, want) && strings.Contains(r.Detail, "source=observed") {
-				found++
-			}
 		}
 		if found != 1 {
 			return fmt.Errorf("%s: %d voice_camera_unclaimed rows naming %s, want 1", k.what, found, want)
 		}
-		removed, err := w.auditRows(store.AuditVoiceParticipantRemoved)
-		if err != nil {
+		// The removal is audited once LiveKit has answered it, a moment after
+		// the participant is gone: the row is waited for.
+		if err := waitFor(k.what+": the removal of its publisher to be audited", 15*time.Second, func() (bool, string) {
+			removed, err := w.auditRows(store.AuditVoiceParticipantRemoved)
+			if err != nil {
+				return false, err.Error()
+			}
+			return slices.ContainsFunc(removed, func(r schema.AuditEventV1) bool {
+				return strings.Contains(r.Detail, "principal="+itoa(m.id)+" ") && strings.Contains(r.Detail, "reason=camera_unclaimed")
+			}), fmt.Sprintf("no voice_participant_removed row with reason=camera_unclaimed for its publisher among %d", len(removed))
+		}); err != nil {
 			return err
-		}
-		if !slices.ContainsFunc(removed, func(r schema.AuditEventV1) bool {
-			return strings.Contains(r.Detail, "principal="+itoa(m.id)+" ") && strings.Contains(r.Detail, "reason=camera_unclaimed")
-		}) {
-			return fmt.Errorf("%s: no voice_participant_removed row with reason=camera_unclaimed for its publisher", k.what)
 		}
 		findings = append(findings, fmt.Sprintf("K8: LiveKit accepted %s; the pass removed its publisher %s after LiveKit listed it, and audited it once", k.what, took.Round(time.Millisecond)))
 	}
