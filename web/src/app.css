@@ -3600,6 +3600,16 @@ button.link {
     max-width: 30%;
   }
 
+  /* With the camera on the state line is the glyph and "Camera on", which a
+     wide font (DejaVu Sans, on CI) sets about 100 px across: a little more of
+     the row (it does not shrink below its words), and less padding, so that
+     it fits at 320 px. */
+  .voice.strip .voice-open.has-camera {
+    flex-shrink: 0;
+    max-width: 38%;
+    padding-inline: 0.35rem;
+  }
+
   .voice.strip .open-mic-label {
     position: absolute;
     width: 1px;

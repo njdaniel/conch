@@ -140,12 +140,23 @@ test.describe('the camera on a phone with LiveKit', () => {
     readonly close: () => Promise<void>;
   }
 
-  async function person(browser: Browser, member: Member, size: string, options: BrowserContextOptions): Promise<Someone> {
+  async function person(browser: Browser, member: Member, size: string, options: BrowserContextOptions, font?: string): Promise<Someone> {
     const ctx = await browser.newContext(options);
     await rememberPushToTalk(ctx);
     const page = await ctx.newPage();
     const watch = await watchPage(page, vw);
     await page.addInitScript(instrument);
+    // A wider font than the developer's, through a constructed stylesheet (style-src
+    // 'self' allows it), so that a font difference cannot hide a clipped strip: CI
+    // has DejaVu Sans where a developer has Noto Sans. Without the font on
+    // this machine the browser falls back, and the run is the default's.
+    if (font !== undefined) {
+      await page.addInitScript((f) => {
+        const sheet = new CSSStyleSheet();
+        sheet.replaceSync(`html:root { --font: '${f}', sans-serif; }`);
+        document.adoptedStyleSheets = [...document.adoptedStyleSheets, sheet];
+      }, font);
+    }
     const cameraCalls: string[] = [];
     page.on('request', (req) => {
       const url = new URL(req.url());
@@ -224,11 +235,13 @@ test.describe('the camera on a phone with LiveKit', () => {
     await expectFits(p.page, where);
   }
 
-  for (const [size, options] of sizes) {
-    test(`at ${size}: under Chat no camera is drawn or decoded, Voice brings it back; the strip says Camera on in one row; the capture is a phone's`, async ({ browser }) => {
+  // Each size in the page's own font and in a wider one.
+  const fonts: readonly (string | undefined)[] = [undefined, 'DejaVu Sans'];
+  for (const [size, options, font] of sizes.flatMap((s) => fonts.map((f) => [s[0], s[1], f] as const))) {
+    test(`at ${size}${font === undefined ? '' : ` in ${font}`}: under Chat no camera is drawn or decoded, Voice brings it back; the strip says Camera on in one row; the capture is a phone's`, async ({ browser }) => {
       test.setTimeout(240_000);
-      const a = await person(browser, vw.alice, size, options);
-      const b = await person(browser, vw.bob, size, options);
+      const a = await person(browser, vw.alice, size, options, font);
+      const b = await person(browser, vw.bob, size, options, font);
       try {
         await join(a);
         await join(b);
