@@ -37,6 +37,14 @@ func TestPublishPermission(t *testing.T) {
 		{"companion never gets the camera: the camera does not add to its share", voiceRoleScreen, publishInput{canSubscribe: true, share: true}, true, livekit.SourcePermission(true, true, scr)},
 		{"companion never gets the camera: nor without the share", voiceRoleScreen, publishInput{canSubscribe: true}, true, livekit.SourcePermission(true, false)},
 		{"companion is never handed canPublish by a person's input", voiceRoleScreen, publishInput{canPublish: true}, false, livekit.SourcePermission(false, false)},
+		// The share's sound only with the holder's consent (issue #898), and
+		// only beside the screen: audio without share is nothing.
+		{"companion, share held, audio consented, subscribes", voiceRoleScreen, publishInput{canSubscribe: true, share: true, audio: true}, false, livekit.SourcePermission(true, true, scr, livekit.SourceScreenShareAudio)},
+		{"companion, share held, audio consented, publish-only", voiceRoleScreen, publishInput{share: true, audio: true}, false, livekit.SourcePermission(false, true, scr, livekit.SourceScreenShareAudio)},
+		{"companion, no share, audio alone grants nothing", voiceRoleScreen, publishInput{canSubscribe: true, audio: true}, false, livekit.SourcePermission(true, false)},
+		{"companion, audio consented, never the camera", voiceRoleScreen, publishInput{canSubscribe: true, share: true, audio: true}, true, livekit.SourcePermission(true, true, scr, livekit.SourceScreenShareAudio)},
+		{"person: audio adds nothing, the share's bundle carries it", voiceRolePerson, publishInput{canPublish: true, share: true, audio: true}, false, livekit.Permission{CanPublish: true, ScreenShare: true}},
+		{"viewer: audio adds nothing", voiceRoleView, publishInput{canSubscribe: true, share: true, audio: true}, false, livekit.SourcePermission(true, false)},
 		// A viewer publishes nothing, whatever its person holds.
 		{"viewer, subscribes", voiceRoleView, publishInput{canSubscribe: true}, false, livekit.SourcePermission(true, false)},
 		{"viewer, publish-only or unknown", voiceRoleView, publishInput{}, false, livekit.SourcePermission(false, false)},

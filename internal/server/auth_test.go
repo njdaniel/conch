@@ -250,6 +250,10 @@ var routeExpectations = map[string]routeExpectation{
 	// route is, so 503 for a member here, 400 under AuthOff, 403 for an agent.
 	"POST /v1/channels/{channel}/voice/companion":   {classAuth, "/v1/channels/general/voice/companion", `{"publish":"screen","subscribe":true}`, 503},
 	"DELETE /v1/channels/{channel}/voice/companion": {classAuth, "/v1/channels/general/voice/companion", "", 503},
+	// The companion's share audio (issue #898): checked as the companion
+	// route is.
+	"PUT /v1/channels/{channel}/voice/companion/audio":    {classAuth, "/v1/channels/general/voice/companion/audio", `{"scope":"application"}`, 503},
+	"DELETE /v1/channels/{channel}/voice/companion/audio": {classAuth, "/v1/channels/general/voice/companion/audio", "", 503},
 	// Voice presence (issue #127). Not configured is a valid snapshot, so a
 	// member gets 200; AuthOff gets 400 and an agent 403 on the snapshot (both
 	// special-cased below). The socket needs a channel parameter, so every

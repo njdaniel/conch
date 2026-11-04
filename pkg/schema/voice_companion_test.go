@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestErrorCodeVoiceCompanionBusy(t *testing.T) {
@@ -208,5 +209,151 @@ func TestVoiceCompanionRequestFixturesDecodeStrictly(t *testing.T) {
 func TestVoiceCompanionPublishVocabulary(t *testing.T) {
 	if got := Vocabularies["VoiceCompanionPublish"]; !slices.Equal(got, []string{"screen", "none"}) {
 		t.Errorf(`Vocabularies["VoiceCompanionPublish"] = %v, want [screen none]`, got)
+	}
+}
+
+// The companion's share audio (issue #898).
+
+var voiceAudioStartedAt = NewTimestamp(time.Date(2026, 10, 9, 12, 0, 30, 0, time.UTC))
+
+func TestVoiceCompanionAudioGoldenFixtures(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+		new  func() any
+	}{
+		{name: "request, application", file: "voice-companion-audio-request-v1.json", new: func() any { return new(VoiceCompanionAudioRequestV1) }},
+		{name: "request, system excluding the call", file: "voice-companion-audio-request-v1-system.json", new: func() any { return new(VoiceCompanionAudioRequestV1) }},
+		{name: "response", file: "voice-companion-audio-v1.json", new: func() any { return new(VoiceCompanionAudioV1) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertGoldenFixture(t, tt.file, tt.new)
+			assertFixtureValidates(t, tt.file, tt.new)
+		})
+	}
+}
+
+func TestVoiceShareAudioScopeValid(t *testing.T) {
+	tests := []struct {
+		scope VoiceShareAudioScope
+		want  bool
+	}{
+		{VoiceShareAudioScopeApplication, true},
+		{VoiceShareAudioScopeSystemExcludingCall, true},
+		{"", false},
+		{"none", false}, // the absence of a consent is DELETE, not a value
+		{"system", false},
+		{"Application", false},
+		{"application ", false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.scope), func(t *testing.T) {
+			if got := tt.scope.Valid(); got != tt.want {
+				t.Errorf("%q.Valid() = %v, want %v", tt.scope, got, tt.want)
+			}
+			if err := (VoiceCompanionAudioRequestV1{Scope: tt.scope}).Validate(); (err == nil) != tt.want {
+				t.Errorf("request with scope %q: Validate() = %v, want error %v", tt.scope, err, !tt.want)
+			}
+		})
+	}
+}
+
+func TestVoiceCompanionAudioValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		audio   VoiceCompanionAudioV1
+		wantErr bool
+	}{
+		{name: "application", audio: VoiceCompanionAudioV1{Scope: VoiceShareAudioScopeApplication, StartedAt: voiceAudioStartedAt}},
+		{name: "system excluding the call", audio: VoiceCompanionAudioV1{Scope: VoiceShareAudioScopeSystemExcludingCall, StartedAt: voiceAudioStartedAt}},
+		{name: "no scope", audio: VoiceCompanionAudioV1{StartedAt: voiceAudioStartedAt}, wantErr: true},
+		{name: "unknown scope", audio: VoiceCompanionAudioV1{Scope: "none", StartedAt: voiceAudioStartedAt}, wantErr: true},
+		{name: "no started_at", audio: VoiceCompanionAudioV1{Scope: VoiceShareAudioScopeApplication}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.audio.Validate(); (err != nil) != tt.wantErr {
+				t.Errorf("Validate() = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestDecodeVoiceCompanionAudioRequestV1(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		want    VoiceCompanionAudioRequestV1
+		wantErr bool
+	}{
+		{name: "application", body: `{"scope":"application"}`, want: VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeApplication}},
+		{name: "system excluding the call", body: `{"scope":"system_excluding_call"}`, want: VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeSystemExcludingCall}},
+		{name: "none is not a scope", body: `{"scope":"none"}`, wantErr: true},
+		{name: "unknown scope", body: `{"scope":"system"}`, wantErr: true},
+		{name: "wrong case", body: `{"scope":"Application"}`, wantErr: true},
+		{name: "missing scope", body: `{}`, wantErr: true},
+		{name: "scope not a string", body: `{"scope":1}`, wantErr: true},
+		{name: "unknown field", body: `{"scope":"application","identity":"p9.screen"}`, wantErr: true},
+		{name: "unknown field, started_at", body: `{"scope":"application","started_at":"2026-10-09T12:00:30.000Z"}`, wantErr: true},
+		{name: "two objects", body: `{"scope":"application"}{"scope":"application"}`, wantErr: true},
+		{name: "trailing junk", body: `{"scope":"application"} x`, wantErr: true},
+		{name: "null", body: `null`, wantErr: true},
+		{name: "empty", body: ``, wantErr: true},
+		{name: "array", body: `[]`, wantErr: true},
+		{name: "string", body: `"application"`, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := DecodeVoiceCompanionAudioRequestV1(strings.NewReader(tt.body))
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err == nil && got != tt.want {
+				t.Errorf("got %+v, want %+v", got, tt.want)
+			}
+			if err != nil && got != (VoiceCompanionAudioRequestV1{}) {
+				t.Errorf("a refused body returned %+v", got)
+			}
+		})
+	}
+}
+
+func TestDecodeVoiceCompanionAudioRequestV1Bound(t *testing.T) {
+	body := `{"scope":"application"}` + strings.Repeat(" ", 128)
+	limited := http.MaxBytesReader(nil, io.NopCloser(strings.NewReader(body)), 64)
+	_, err := DecodeVoiceCompanionAudioRequestV1(limited)
+	var tooLarge *http.MaxBytesError
+	if !errors.As(err, &tooLarge) {
+		t.Errorf("err = %v, want an *http.MaxBytesError", err)
+	}
+}
+
+func TestVoiceCompanionAudioRequestFixturesDecodeStrictly(t *testing.T) {
+	tests := []struct {
+		file string
+		want VoiceCompanionAudioRequestV1
+	}{
+		{"voice-companion-audio-request-v1.json", VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeApplication}},
+		{"voice-companion-audio-request-v1-system.json", VoiceCompanionAudioRequestV1{Scope: VoiceShareAudioScopeSystemExcludingCall}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.file, func(t *testing.T) {
+			f, err := os.Open(filepath.Join("testdata", tt.file)) // #nosec G304 -- fixed fixture names
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = f.Close() }()
+			got, err := DecodeVoiceCompanionAudioRequestV1(f)
+			if err != nil || got != tt.want {
+				t.Errorf("DecodeVoiceCompanionAudioRequestV1 = %+v, %v; want %+v", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestVoiceShareAudioScopeVocabulary(t *testing.T) {
+	if got := Vocabularies["VoiceShareAudioScope"]; !slices.Equal(got, []string{"application", "system_excluding_call"}) {
+		t.Errorf(`Vocabularies["VoiceShareAudioScope"] = %v, want [application system_excluding_call]`, got)
 	}
 }
