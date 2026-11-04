@@ -228,8 +228,8 @@ func (s *Server) routeTable() []route {
 		// and use it. They carry the code in the body only, are rate-limited
 		// per client address before any store work, and the store decides
 		// everything else. See invites.go.
-		// POST /v1/invites is unchanged until #990 and #1134 (issue #985). A
-		// member link is made with POST /v2/invites, listed with GET
+		// POST /v1/invites is retired for everyone: 409 invite_kind_retired,
+		// before the body is read (issue #1134). A member link is made with POST /v2/invites, listed with GET
 		// /v2/invites, previewed (exempt, as v1's) with POST /v2/invites/preview
 		// and its joiners read by its maker or an operator with GET
 		// /v2/invites/{id}/joiners. The joiners route has no membersOnly: a

@@ -6,12 +6,9 @@ import { fileAttachmentPayloadSchema, fileV1, type FileAttachmentV1, type FileV1
 import { listInterventionsResponseV1, type InterventionV1 } from '../src/schema/intervention';
 import { joinSettingsResponseV1, type PutJoinSettingsRequestV1 } from '../src/schema/guest';
 import {
-  createInviteResponseV1,
   createInviteResponseV2,
   listInvitesResponseV1,
-  type CreateInviteRequestV1,
   type CreateInviteRequestV2,
-  type CreateInviteResponseV1,
   type CreateInviteResponseV2,
   type InviteV1,
 } from '../src/schema/invite';
@@ -107,12 +104,6 @@ export async function interventions(world: World, token: string, runId: number):
 
 export async function activityOf(world: World, token: string, runId: number): Promise<AgentActivityV1[]> {
   return (await ok(world, token, 'GET', `/v1/runs/${String(runId)}/activity?after=0&limit=100`, listActivityResponseV1)).activity;
-}
-
-// makeInvite has the holder of token make an invite (issue #440), as an
-// operator does with curl or conch: the answer carries its code, once.
-export function makeInvite(world: World, token: string, request: CreateInviteRequestV1): Promise<CreateInviteResponseV1> {
-  return ok(world, token, 'POST', '/v1/invites', createInviteResponseV1, request);
 }
 
 // invitesOf is the invites the holder of token may see, newest first.

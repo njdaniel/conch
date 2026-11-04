@@ -61,7 +61,7 @@ test('screenshots for design review', async ({ browser }, info) => {
       await expect((await credentialField(s))).toBeVisible();
       await shot(s, 'signin');
 
-      const invite = await vw.api(vw.operator, 'POST', '/v1/invites', { kind: 'personal', channels: [vw.channel], voice: true });
+      const invite = await vw.api(vw.operator, 'POST', '/v2/invites', { kind: 'member', landing_channels: [vw.channel], max_uses: 1 });
       expect(invite.status).toBe(201);
       const code = (JSON.parse(invite.text) as { code: string }).code;
       const guest = await signInPage.newPage();

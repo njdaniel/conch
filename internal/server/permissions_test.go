@@ -943,9 +943,9 @@ func TestJoinSettingsNameOracleClosed(t *testing.T) {
 	}
 }
 
-// POST /v1/invites refuses whoever lacks manage_members with 409
-// invite_kind_retired (issue #990): a member, an operator whose manage_members
-// is off, whatever the body asks. The refusals that name a permission are the
+// POST /v1/invites refuses everyone with 409 invite_kind_retired (issues #990
+// and #1134): a member, an operator whose manage_members is off, an operator
+// who holds it, whatever the body asks. The refusals that name a permission are the
 // member link's (TestMemberLinkRefusalsNameThePermission), and the refusal
 // here names none, so it says nothing of the roles a caller could hold.
 func TestInviteV1RefusesWhoLacksManageMembers(t *testing.T) {

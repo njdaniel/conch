@@ -96,7 +96,7 @@ export async function startConchd(options: { readonly web?: boolean; readonly ve
 
   const made = await api(operatorToken, 'POST', '/v0/channels', { name: 'general' });
   if (made.status >= 300) throw new Error(`could not make a channel: ${JSON.stringify(made.body)}`);
-  const invite = await api(operatorToken, 'POST', '/v1/invites', { kind: 'open', channels: ['general'], voice: false, max_uses: 5 });
+  const invite = await api(operatorToken, 'POST', '/v2/invites', { kind: 'member', landing_channels: ['general'], max_uses: 5 });
   const code = (invite.body as { code?: string }).code;
   if (invite.status >= 300 || code === undefined) throw new Error(`could not make an invite: ${JSON.stringify(invite.body)}`);
   const enrol = async (name: string, password: string): Promise<Member> => {
