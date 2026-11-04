@@ -8,6 +8,7 @@
 // a question is open, and the phone page. No network, no browser.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { directoryCoalesce } from './useDirectoryChanged';
 import { App } from './App';
 import { AdminConsole } from './AdminConsole';
 import { SettingsOpen } from './joiningSettings';
@@ -937,17 +938,32 @@ describe('the secret panel', () => {
     const region = await open();
     const row = rowOf(region, 'builder');
     await makeCredential(row);
-    // The agent leaves the list while the answer is on its way.
-    gone = true;
-    await directoryFrame();
-    await waitFor(() => {
-      expect(document.body.contains(row)).toBe(false);
-    });
-    release();
-    // The answer is released, then the list reads again before the line shows.
-    expect(await within(region).findByText('A credential for builder was made but could not be shown; revoke it under Sign-ins.', {}, { timeout: 5000 })).toBeTruthy();
+    // The agent leaves the list while the answer is on its way. The page
+    // coalesces directory frames behind a timer (directoryCoalesce); the test
+    // advances that timer itself, so nothing here waits on the wall clock.
+    vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      gone = true;
+      await directoryFrame();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(directoryCoalesce);
+      });
+      await waitFor(() => {
+        expect(document.body.contains(row)).toBe(false);
+      }, { timeout: 3000 });
+      release();
+      // The answer is released, then the list reads again before the line shows.
+      await waitFor(() => {
+        expect(within(region).getByText('A credential for builder was made but could not be shown; revoke it under Sign-ins.')).toBeTruthy();
+      }, { timeout: 3000 });
+    } finally {
+      vi.useRealTimers();
+    }
     expect(document.body.textContent).not.toContain(secretToken);
-  });
+    // The whole App renders and Settings opens first (open()), which is most of
+    // the time; under a loaded CI machine that alone can near vitest's 5 s
+    // default, so this test has its own bound (#1301).
+  }, 15000);
 });
 
 describe('the hook form’s channels', () => {
