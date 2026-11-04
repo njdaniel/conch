@@ -114,6 +114,7 @@ import {
   signInLinkPreviewV1,
   totpEnrollmentV1,
   totpLoginRequestV1,
+  voiceCameraV1,
   voiceOccupancyV1,
   voicePresenceV1,
   voiceSessionResponseV1,
@@ -342,6 +343,10 @@ export const operations = {
   voiceOccupancy: op('GET', '/v1/voice/occupancy', 'bearer', { response: check(voiceOccupancyV1) }),
   claimShare: op('POST', '/v1/channels/{channel}/voice/share', 'bearer', { response: check(voiceShareV1) }),
   stopShare: op('DELETE', '/v1/channels/{channel}/voice/share', 'bearer'),
+  // The camera claim (ADR-015): claimed by the person's camera button, or
+  // continued by naming the claim (?started_at=), and released.
+  claimCamera: op('POST', '/v1/channels/{channel}/voice/camera', 'bearer', { response: check(voiceCameraV1) }),
+  stopCamera: op('DELETE', '/v1/channels/{channel}/voice/camera', 'bearer'),
 
   // Report a problem.
   sendReport: op('POST', '/v1/reports', 'bearer', { request: check(createProblemReportRequestV1), response: check(createProblemReportResponseV1) }),

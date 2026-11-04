@@ -55,6 +55,12 @@ const paths = {
       <path d="M8 20h8M12 16v4M9.5 7.5l5 5M14.5 7.5l-5 5" />
     </>
   ),
+  camera: (
+    <>
+      <rect x="3" y="6" width="13" height="12" rx="2" />
+      <path d="m16 10 5-3v10l-5-3" />
+    </>
+  ),
   leave: <path d="M3 15.5c5-4.7 13-4.7 18 0l-2.3 2.3-3.2-1.6v-2.5a9 9 0 0 0-7 0v2.5l-3.2 1.6z" />,
   speaker: <path d="M4 9h4l5-4v14l-5-4H4zM16.5 8.5a5 5 0 0 1 0 7" />,
   send:<path d="M4 12 20 4l-4 16-4-7zM12 13l8-9" />,

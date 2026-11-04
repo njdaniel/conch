@@ -169,6 +169,7 @@ Usage:
   conch admin reports show [--server <url>] [--json] [--markdown] <id>
   conch admin reports file [--server <url>] [--json] <id> <issue-url>
   conch voice status [--server <url>] [--watch] <channel>
+  conch voice camera stop [--server <url>] <channel> <person-id>
   conch voice where [--server <url>] [--json]
   conch audit export [--server <url>] [--after <id>] [--limit <n>]
   conch approvals list [--server <url>]
@@ -225,14 +226,21 @@ Scope:
   voice status shows who is connected to a channel's voice and who is talking;
   it only reads presence and never joins. One line per participant, in
   principal id order:
-    <id> <name|-> <talking|quiet> <joined-at, RFC 3339 UTC>
-  (a room narrower than the channel adds a fifth field naming it, net:<id>)
+    <id> <name|-> <talking|quiet>[+camera] <joined-at, RFC 3339 UTC>
+  (+camera follows the third field of someone whose camera is on; a room
+  narrower than the channel adds a fifth field naming it, net:<id>)
   The name is shown for yourself only (the API tells a non-operator no one
   else's) and is "-" when unknown; a name with spaces or odd characters is
   double-quoted and escaped. An empty room prints "nobody is connected" and
   exits 0; voice not configured or unavailable prints one line and exits
   nonzero. --watch prints "--- <time>" and then the state on every change,
   until interrupted (exit 0).
+  voice camera stop turns off one person's camera in a channel's voice room, for
+  an owner or an operator holding the manage_channels permission. <person-id>
+  is the principal id, as in 'admin principal voice'; there is no self-stop
+  (the browser that turned a camera on turns it off). It prints nothing and
+  exits 0 whether or not that person had a camera on; a refusal prints one line
+  and exits nonzero.
   voice where shows which of your channels have people in voice, so you can
   find where to join; it only reads and never joins. One line per channel with
   anyone in its channel-wide voice room, in channel id order:
@@ -1251,13 +1259,15 @@ var voiceNow = time.Now
 
 func runVoice(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("cli: voice requires a subcommand (status, where)")
+		return errors.New("cli: voice requires a subcommand (status, where, camera stop)")
 	}
 	switch args[0] {
 	case "status":
 		return runVoiceStatus(ctx, args[1:], stdout, stderr)
 	case "where":
 		return runVoiceWhere(ctx, args[1:], stdout, stderr)
+	case "camera":
+		return runVoiceCamera(ctx, args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("cli: unknown voice subcommand %q", args[0])
 	}
@@ -1333,7 +1343,10 @@ func voiceName(name string) string {
 // nobody is connected. The first four fields are always the same. A room that
 // carries a narrower audience than the channel adds a fifth, naming it
 // (net:<id>), so its people can never read as being in the channel-wide room;
-// V3 servers send only the channel-wide room.
+// V3 servers send only the channel-wide room. A camera is shown inside the
+// third field (quiet+camera, talking+camera) so the field count never moves.
+// A camera is only ever in the channel-wide room (ADR-015), so one a server
+// claims in a narrower room is not shown.
 func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV1, names map[int64]string) error {
 	lines := 0
 	for _, room := range doc.Rooms {
@@ -1349,6 +1362,9 @@ func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV1,
 			if p.Transmitting {
 				state = "talking"
 			}
+			if p.Camera && room.Audience == nil {
+				state += "+camera"
+			}
 			if _, err := fmt.Fprintf(w, "%d %s %s %s%s\n", p.PrincipalID, voiceName(names[p.PrincipalID]), state, p.JoinedAt.Time().Format(time.RFC3339), scope); err != nil {
 				return err
 			}
@@ -1358,6 +1374,61 @@ func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV1,
 	if lines == 0 {
 		_, err := fmt.Fprintf(w, "nobody is connected to voice in %s\n", safeLine(channel))
 		return err
+	}
+	return nil
+}
+
+// cameraStopRefusals are voice camera stop's own sentences for a refusal, by
+// the server's code; what the server wrote is never printed.
+var cameraStopRefusals = refusalLines{
+	schema.ErrorCodeVoiceNotConfigured: errVoiceNotConfigured.Error(),
+	schema.ErrorCodeVoiceUnavailable:   errVoiceUnavailable.Error(),
+	// A member is told no permission (it would be one their role cannot
+	// hold), an operator is told manage_channels: either way, say who may.
+	schema.ErrorCodePermissionDenied: "only an owner, or an operator holding manage_channels, may turn off someone's camera",
+}
+
+func runVoiceCamera(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("cli: voice camera requires a subcommand (stop)")
+	}
+	if args[0] != "stop" {
+		return fmt.Errorf("cli: unknown voice camera subcommand %q", args[0])
+	}
+	return runVoiceCameraStop(ctx, args[1:], stdout, stderr)
+}
+
+// runVoiceCameraStop turns off one person's camera: DELETE
+// /v1/channels/{channel}/voice/camera?principal=<id>. It prints nothing on
+// success, which also does not say whether a camera was on (the route never
+// says whether the person exists).
+func runVoiceCameraStop(ctx context.Context, args []string, _, stderr io.Writer) error {
+	fs := newFlagSet("voice camera stop", stderr)
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return fmt.Errorf("cli: voice camera stop: %w", err)
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		positional = append(positional, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+	if len(positional) != 2 {
+		return errors.New("cli: voice camera stop: expected <channel> <person-id>")
+	}
+	id, err := strconv.ParseInt(positional[1], 10, 64)
+	if err != nil || id <= 0 || positional[1] != strconv.FormatInt(id, 10) {
+		return errors.New("cli: voice camera stop: <person-id> must be a principal id (a positive number)")
+	}
+	client, _, err := NewAuthClient(*server)
+	if err != nil {
+		return err
+	}
+	if err := client.StopVoiceCamera(ctx, positional[0], id); err != nil {
+		return voiceFailure(refused(err, cameraStopRefusals))
 	}
 	return nil
 }
