@@ -4,6 +4,7 @@
 // releases (blur, hidden, pagehide).
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as api from '../api';
+import { pageHiddenOnPhone } from '../phone';
 import type { ChannelV0 } from '../schema/channel';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
@@ -385,6 +386,19 @@ export function useVoice({
   useEffect(() => {
     writeOutput(state.output);
   }, [state.output]);
+
+  // A hidden page on a phone ends the camera as its button does (design §8,
+  // O9); the desktop's hidden page changes nothing. Showing the page again
+  // starts nothing: only the button does.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (pageHiddenOnPhone()) client.pageHidden();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [client]);
 
   // Signing out ends voice.
   useEffect(() => {

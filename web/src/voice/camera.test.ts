@@ -61,7 +61,10 @@ class StubCamRoom implements CameraRoom {
     this.held = gate();
     return this.held.promise;
   }
-  captureCamera = async (choice: string | null): Promise<void> => {
+  // The profile each capture was asked for.
+  profiles: (string | undefined)[] = [];
+  captureCamera = async (choice: string | null, profile?: 'desktop' | 'phone'): Promise<void> => {
+    this.profiles.push(profile);
     this.log.push(`${this.name} capture ${choice ?? 'browser'}`);
     await this.step('capture');
     if (this.captureError !== null) throw this.captureError;
@@ -173,6 +176,17 @@ describe('the camera, turned on and off', () => {
     const t = setup();
     await t.client.start('general', t.room, 'cam-2');
     expect(t.log[0]).toBe('room capture cam-2');
+  });
+
+  it('asks the room for the profile the start was given (the desktop\'s without one), once, as it starts', async () => {
+    const t = setup();
+    await t.client.start('general', t.room, null, 'phone');
+    await settle();
+    expect(t.room.profiles).toEqual(['phone']);
+    await t.client.stop('self');
+    await t.client.start('general', t.room, null);
+    await settle();
+    expect(t.room.profiles).toEqual(['phone', 'desktop']);
   });
 
   it('turned off: the capture stops first, then conchd is told, naming the claim', async () => {

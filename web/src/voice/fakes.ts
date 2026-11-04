@@ -19,6 +19,7 @@ export type CameraHalf = Pick<
   | 'switchCamera'
   | 'attachSelf'
   | 'setViewing'
+  | 'setShown'
   | 'setCameras'
   | 'attachCamera'
 >;
@@ -37,6 +38,7 @@ export function noCamera(): CameraHalf {
     switchCamera: () => Promise.resolve(),
     attachSelf: () => undefined,
     setViewing: () => undefined,
+    setShown: () => undefined,
     setCameras: () => undefined,
     attachCamera: () => undefined,
   };

@@ -2072,8 +2072,8 @@ describe('a switch while the first capture is under way', () => {
 // ---- the camera (ADR-015)
 
 describe('wanted: kind and source together (S1)', () => {
-  const none = { watching: false, viewing: false, claimed: false };
-  const all = { watching: true, viewing: true, claimed: true };
+  const none = { watching: false, viewing: false, shown: false, claimed: false };
+  const all = { watching: true, viewing: true, shown: true, claimed: true };
   const { Source, Kind } = Track;
   it.each([
     // source, kind, with everything wanted, with nothing wanted
@@ -2092,10 +2092,18 @@ describe('wanted: kind and source together (S1)', () => {
     expect(wanted(source, kind, none)).toBe(wantedNone);
   });
 
+  it('no camera is wanted while the video is not shown here, even with the call view open; microphones and a watched share are unaffected', () => {
+    const away = { watching: true, viewing: true, shown: false, claimed: true };
+    expect(wanted(Source.Camera, Kind.Video, away)).toBe(false);
+    expect(wanted(Source.Microphone, Kind.Audio, away)).toBe(true);
+    expect(wanted(Source.ScreenShare, Kind.Video, away)).toBe(true);
+    expect(wanted(Source.ScreenShareAudio, Kind.Audio, away)).toBe(true);
+  });
+
   it('a camera is wanted only while the call view is shown, and only from someone holding a claim', () => {
-    expect(wanted(Source.Camera, Kind.Video, { watching: false, viewing: true, claimed: true })).toBe(true);
-    expect(wanted(Source.Camera, Kind.Video, { watching: true, viewing: false, claimed: true })).toBe(false);
-    expect(wanted(Source.Camera, Kind.Video, { watching: true, viewing: true, claimed: false })).toBe(false);
+    expect(wanted(Source.Camera, Kind.Video, { watching: false, viewing: true, shown: true, claimed: true })).toBe(true);
+    expect(wanted(Source.Camera, Kind.Video, { watching: true, viewing: false, shown: true, claimed: true })).toBe(false);
+    expect(wanted(Source.Camera, Kind.Video, { watching: true, viewing: true, shown: true, claimed: false })).toBe(false);
   });
 });
 
@@ -2132,6 +2140,48 @@ describe('receiving cameras', () => {
     room.setViewing(true);
     room.setCameras(new Set());
     expect(subscribed()).toEqual([false, false, false, true]);
+  });
+
+  it('lets every camera go while the video is not shown here, and keeps the choice to view: the cameras are back with the view, with no other call', async () => {
+    const camera = remotePub('camera', 'video');
+    const mic = remotePub('microphone', 'audio');
+    const share = remotePub('screen_share', 'video');
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', camera], ['b', mic], ['c', share]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setWatching(true);
+    room.setViewing(true);
+    room.setCameras(new Set([8]));
+    const subscribed = () => [camera.isSubscribed, mic.isSubscribed, share.isSubscribed];
+    expect(subscribed()).toEqual([true, true, true]);
+    room.setShown(false);
+    expect(subscribed()).toEqual([false, true, true]);
+    // Presence and the view's own choice change nothing while it is hidden.
+    room.setCameras(new Set([8, 9]));
+    room.setViewing(true);
+    expect(subscribed()).toEqual([false, true, true]);
+    room.setShown(true);
+    expect(subscribed()).toEqual([true, true, true]);
+  });
+
+  it('a camera that arrives while the video is not shown is let go, never played', async () => {
+    const told: (readonly number[])[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onCameraTracks: (p) => told.push(p) });
+    room.setViewing(true);
+    room.setCameras(new Set([8]));
+    room.setShown(false);
+    const attached: string[] = [];
+    const pub = remotePub('camera', 'video');
+    pub.isSubscribed = true;
+    state.handlers.get('ts')?.(
+      { source: 'camera', kind: 'video', sid: 'c', attach: () => attached.push('camera') && undefined, detach: () => [] },
+      pub,
+      { identity: 'p8' },
+    );
+    expect(attached).toEqual([]);
+    expect(pub.isSubscribed).toBe(false);
+    expect(told).toEqual([]);
   });
 
   it('a track that arrives with a kind its source disagrees with is let go, never played or shown', async () => {
@@ -2212,6 +2262,43 @@ describe('the camera', () => {
   it('asks for the camera chosen exactly, at 1280x720 and 30 fps as an ideal, or the browser own choice', () => {
     expect(cameraOptions('cam-1')).toEqual({ resolution: { width: 1280, height: 720, frameRate: 30 }, deviceId: { exact: 'cam-1' } });
     expect(cameraOptions(null)).toEqual({ resolution: { width: 1280, height: 720, frameRate: 30 } });
+  });
+
+  // Design §7.5: the profile is chosen as the capture starts. facingMode is
+  // present only for a phone with no camera chosen, and exact only with one.
+  it.each([
+    ['desktop', null, { resolution: { width: 1280, height: 720, frameRate: 30 } }],
+    ['desktop', 'cam-1', { resolution: { width: 1280, height: 720, frameRate: 30 }, deviceId: { exact: 'cam-1' } }],
+    ['phone', null, { resolution: { width: 640, height: 360, frameRate: 24 }, facingMode: 'user' }],
+    ['phone', 'cam-1', { resolution: { width: 640, height: 360, frameRate: 24 }, deviceId: { exact: 'cam-1' } }],
+  ] as const)('%s capture with %s chosen asks %j', (profile, choice, expected) => {
+    const options = cameraOptions(choice, profile);
+    expect(options).toEqual(expected);
+    expect('facingMode' in options).toBe(profile === 'phone' && choice === null);
+    expect('deviceId' in options).toBe(choice !== null);
+  });
+
+  it('publishes a phone camera as VP8, a 450 kbps top layer of 360p and one 180p layer at 150 kbps', () => {
+    const options = cameraPublishOptions('phone');
+    expect(options).toMatchObject({ source: 'camera', simulcast: true, videoCodec: 'vp8', videoEncoding: { maxBitrate: 450_000, maxFramerate: 24 } });
+    expect(options.videoSimulcastLayers?.map((l) => [l.width, l.height, l.encoding.maxBitrate])).toEqual([[320, 180, 150_000]]);
+    // The desktop is as it was: no codec of its own, two layers.
+    expect(cameraPublishOptions('desktop')).toEqual(cameraPublishOptions());
+    expect(cameraPublishOptions().videoCodec).toBeUndefined();
+  });
+
+  it('a phone capture keeps its profile for its publish and its switches', async () => {
+    const room = await connected();
+    await room.captureCamera(null, 'phone');
+    expect(state.videoOptions.at(-1)).toEqual({ resolution: { width: 640, height: 360, frameRate: 24 }, facingMode: 'user' });
+    state.permissions = { canPublish: true, canPublishSources: [1] };
+    await room.publishCamera();
+    expect(state.published.at(-1)?.options).toMatchObject({ videoCodec: 'vp8', videoEncoding: { maxBitrate: 450_000 } });
+    await room.switchCamera('cam-2');
+    expect(state.videoOptions.at(-1)).toEqual({ resolution: { width: 640, height: 360, frameRate: 24 }, deviceId: { exact: 'cam-2' } });
+    // A desktop capture after it is the desktop's.
+    await room.captureCamera(null);
+    expect(state.videoOptions.at(-1)).toEqual({ resolution: { width: 1280, height: 720, frameRate: 30 } });
   });
 
   it('publishes as the camera, with simulcast layers of 360p and 180p under 1.2 Mbps', () => {

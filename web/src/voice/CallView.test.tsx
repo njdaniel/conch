@@ -5,6 +5,7 @@
 // network, no camera.
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { VoiceStrip } from '../phone';
 import type { VoicePresenceV1 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
 import { cameraOffForYou, watchOnlyCamera, type CameraState } from './camera';
@@ -623,5 +624,143 @@ describe('the camera test', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Test camera' }));
     expect(await screen.findByText("The browser blocked the camera. Allow it in this site's settings.")).toBeTruthy();
     expect(screen.queryByText(previewNote)).toBeNull();
+  });
+});
+
+// The camera on a phone (C7, design §8, ADR-015 O9-O11): in the phone layout
+// under Chat and Channels the section is the strip, which draws no call view
+// and receives no video; "Camera on" is in its state button, from the local
+// track alone.
+describe('the phone strip with the camera (C7)', () => {
+  function stripOf(state: VoiceState, opens: (() => void) | null, { cameras = [8], sharer = null as number | null } = {}) {
+    const client = newClient();
+    const shown = vi.spyOn(client, 'showVideo');
+    const page = (next: VoiceState, opening: (() => void) | null) => (
+      <VoiceStrip.Provider value={opening}>
+        <VoicePanel voice={control(next, { kind: 'presence', presence: roomWith(cameras, sharer) }, client)} viewer={7} people={people} viewed="general" cameraAllowed onOpen={() => undefined} />
+      </VoiceStrip.Provider>
+    );
+    const { rerender } = render(page(state, opens));
+    return {
+      shown,
+      client,
+      voice: screen.getByRole('region', { name: 'Voice' }),
+      redraw: (next: VoiceState, opening: (() => void) | null) => {
+        rerender(page(next, opening));
+      },
+    };
+  }
+
+  it('draws no call view and no camera tile under Chat and Channels, and is back in Voice with no tap', () => {
+    const open = inVoice({ viewing: true, cameraTrack: 'published', camera: { kind: 'sending' }, cameraTracks: new Set([8]) });
+    const { redraw, shown } = stripOf(open, () => undefined);
+    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
+    expect(screen.queryByLabelText("member-1's camera")).toBeNull();
+    expect(shown).toHaveBeenLastCalledWith(false);
+    redraw(open, null);
+    expect(screen.getByRole('region', { name: 'Video call' })).toBeTruthy();
+    expect(shown).toHaveBeenLastCalledWith(true);
+    // And away again: the person's choice to view is kept, not asked again.
+    redraw(open, () => undefined);
+    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
+    expect(shown).toHaveBeenLastCalledWith(false);
+  });
+
+  it('keeps a watched share on the stage under Chat and Channels: the share alone, no cameras', () => {
+    const open = inVoice({ viewing: true, watching: true });
+    stripOf(open, () => undefined, { cameras: [8], sharer: 9 });
+    expect(screen.getByRole('button', { name: 'Stop watching' })).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
+    expect(screen.queryByLabelText("member-1's camera")).toBeNull();
+    expect(screen.queryByRole('listitem')).toBeNull();
+  });
+
+  it('says "Camera on" in the state button from the local track, and still opens the Voice view', () => {
+    let opened = 0;
+    const { voice, redraw } = stripOf(inVoice({ cameraTrack: 'published', camera: { kind: 'sending' } }), () => {
+      opened++;
+    });
+    const button = within(voice).getByRole('button', { name: /Camera on/ });
+    expect(button.textContent).toBe('Camera on in #general');
+    expect(button.querySelector('.camera-on svg')).not.toBeNull();
+    // Still four controls and the state button, no fifth.
+    expect(within(voice).getAllByRole('button').map((b) => b.textContent)).toEqual(['Camera on in #general', 'Hold to talk', 'Open mic', 'Mute', 'Leave voice']);
+    fireEvent.click(button);
+    expect(opened).toBe(1);
+    // A capture not yet sent is in use too (the device is on either way).
+    redraw(inVoice({ cameraTrack: 'captured', camera: { kind: 'claiming' } }), () => undefined);
+    expect(within(voice).getByRole('button', { name: /Camera on/ })).toBeTruthy();
+    // Still read out when the connection is not up.
+    redraw(inVoice({ phase: 'reconnecting', cameraTrack: 'captured', camera: { kind: 'resuming' } }), () => undefined);
+    expect(within(voice).getByRole('button', { name: /Camera on, Reconnecting/ })).toBeTruthy();
+  });
+
+  it('never says "Camera on" because presence shows this person holding a camera', () => {
+    const { voice } = stripOf(inVoice({ cameraTrack: 'none' }), () => undefined, { cameras: [7, 8] });
+    expect(within(voice).getByRole('button', { name: 'In voice in #general' })).toBeTruthy();
+    expect(voice.textContent).not.toContain('Camera on');
+  });
+});
+
+// A hidden page stops the camera test on a phone (O9), and a desktop's keeps
+// going.
+describe('the camera test on a hidden page', () => {
+  function hidden(phone: boolean) {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: phone, addEventListener: () => undefined, removeEventListener: () => undefined })),
+    );
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+  }
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    Reflect.deleteProperty(document, 'visibilityState');
+  });
+  const deps = (stops: string[], profiles: string[]) => ({
+    capture: (_choice: string | null, profile: string) => {
+      profiles.push(profile);
+      return Promise.resolve({
+        show: () => undefined,
+        stop: () => {
+          stops.push('stop');
+        },
+      });
+    },
+  });
+
+  it('stops on a phone, and starts nothing when the page shows again', async () => {
+    const stops: string[] = [];
+    const profiles: string[] = [];
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: () => undefined, removeEventListener: () => undefined })));
+    render(<CameraTest chosen="" choose={() => Promise.resolve(null)} deps={deps(stops, profiles)} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Test camera' }));
+    expect(await screen.findByText(previewNote)).toBeTruthy();
+    // Chosen as it starts: a phone's profile.
+    expect(profiles).toEqual(['phone']);
+    hidden(true);
+    expect(stops).toEqual(['stop']);
+    expect(screen.queryByText(previewNote)).toBeNull();
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(profiles).toEqual(['phone']);
+    expect(screen.queryByText(previewNote)).toBeNull();
+  });
+
+  it('keeps going on a desktop', async () => {
+    const stops: string[] = [];
+    const profiles: string[] = [];
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: () => undefined, removeEventListener: () => undefined })));
+    render(<CameraTest chosen="" choose={() => Promise.resolve(null)} deps={deps(stops, profiles)} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Test camera' }));
+    expect(await screen.findByText(previewNote)).toBeTruthy();
+    expect(profiles).toEqual(['desktop']);
+    hidden(false);
+    expect(stops).toEqual([]);
+    expect(screen.getByText(previewNote)).toBeTruthy();
   });
 });

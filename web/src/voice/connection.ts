@@ -71,7 +71,7 @@
 import type { CameraClaimResult, ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1, VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
-import { CameraClient, cameraOff, findCamera, type Camera, type CameraLoss, type CameraRoom, type CameraState } from './camera';
+import { CameraClient, cameraOff, cameraOn, findCamera, type Camera, type CameraLoss, type CameraProfile, type CameraRoom, type CameraState } from './camera';
 import { afterDisconnect, afterRefusal, cameraAfter, retryDelay, type DisconnectCause, type Next } from './disconnect';
 import { clampTail, defaultTail, TransmitGate, type GateMode, type GateOptions } from './gate';
 import { cameraHolders, occupants, principalOf, sharer } from './presence';
@@ -284,9 +284,12 @@ export interface Room extends ShareRoom, CameraRoom {
   cameras: () => Promise<readonly Camera[] | null>;
   switchCamera: (choice: string) => Promise<void>;
   attachSelf: (el: HTMLVideoElement | null) => void;
-  // Receiving cameras: whether the call view is shown, who holds a camera
+  // Receiving cameras: whether the call view is open (the person's choice),
+  // whether the video is shown here now (setShown: false in the phone layout
+  // outside the Voice view, where no camera is received), who holds a camera
   // claim (presence), and the element each person's camera plays into.
   setViewing: (on: boolean) => void;
+  setShown: (on: boolean) => void;
   setCameras: (claimed: ReadonlySet<number>) => void;
   attachCamera: (principal: number, el: HTMLVideoElement | null) => void;
   close: () => Promise<void>;
@@ -509,6 +512,12 @@ export class VoiceClient {
   private cameraOps = 0;
   // Whether the call view opens once the button's capture is given.
   private openOnCapture = false;
+  // Whether the video is shown on this page now (showVideo): false in the
+  // phone layout outside the Voice view.
+  private videoShown = true;
+  // Counts the page being hidden on a phone (pageHidden), so that a start
+  // still choosing its camera can tell it was hidden meanwhile.
+  private hides = 0;
   // The gate's changes, carried out one after another: a press's wait for its
   // answer, then a release's report. talk numbers the run of them a
   // connection makes (a drop abandons it); edge counts the gate's changes, so
@@ -841,15 +850,22 @@ export class VoiceClient {
   // the call view. The camera chosen is found again by its name if its id has
   // changed, and only if exactly one camera carries it; one not found is not
   // connected, and no other camera is taken.
-  async startCamera(): Promise<void> {
+  //
+  // The profile (phone or desktop, design §7.5) is the capture's, chosen here
+  // as it starts and kept for its switches and publish.
+  async startCamera(profile: CameraProfile = 'desktop'): Promise<void> {
     const channel = this.channel;
     const room = this.room;
     const s = this.state;
     if (s.phase !== 'connected' || s.watchOnly || s.listenOnly || channel === null || room === null) return;
     if (s.camera.kind !== 'off' && s.camera.kind !== 'failed') return;
     const mine = this.attempt;
+    const hides = this.hides;
     const choice = await this.cameraToUse();
     if (mine !== this.attempt || room !== this.room) return;
+    // The page was hidden on a phone while the camera was being chosen: the
+    // start ends here, with nothing captured.
+    if (hides !== this.hides) return;
     if (choice === false) {
       // The camera chosen is not connected: said, through the camera's own
       // state, and nothing is captured.
@@ -859,7 +875,7 @@ export class VoiceClient {
     // The call view opens once the browser gave the capture (O8): a camera
     // refused opens nothing.
     this.openOnCapture = true;
-    await this.camera.start(channel, room, choice);
+    await this.camera.start(channel, room, choice, profile);
     if (mine !== this.attempt || room !== this.room) return;
     void this.readCameras(mine, room);
   }
@@ -886,6 +902,18 @@ export class VoiceClient {
   stopCamera(): Promise<void> {
     this.cameraOps++;
     return this.camera.stop('self');
+  }
+
+  // pageHidden is the page going out of sight in the phone layout (the
+  // caller decides that: phone.ts, at the moment the event fires): the camera
+  // ends as the button ends it, at any step of its start, and the capture is
+  // released with a DELETE naming the claim. Nothing restarts it when the
+  // page shows again: only the button does. The desktop layout never calls
+  // it (O9).
+  pageHidden(): void {
+    this.hides++;
+    if (!cameraOn(this.state.camera)) return;
+    void this.stopCamera();
   }
 
   // chooseCamera chooses the camera, kept for every later capture. While the
@@ -920,6 +948,15 @@ export class VoiceClient {
   viewVideo(on: boolean): void {
     this.room?.setViewing(on);
     this.set(on ? { viewing: true } : { viewing: false, cameraTracks: noCameraTracks });
+  }
+
+  // showVideo is whether the video is shown here now: the phone layout
+  // outside the Voice view shows none, and every camera is let go there
+  // while the person's choice to view (viewVideo) is kept. The person's own
+  // camera is not touched: it keeps sending.
+  showVideo(on: boolean): void {
+    this.videoShown = on;
+    this.room?.setShown(on);
   }
 
   // attachCamera plays a person's camera into a tile, on this connection and
@@ -1415,6 +1452,7 @@ export class VoiceClient {
     // So is what the call view receives, and where it plays.
     room.setCameras(this.cameraClaims);
     room.setViewing(this.state.viewing);
+    room.setShown(this.videoShown);
     room.attachSelf(this.selfView);
     for (const [principal, el] of this.cameraViews) room.attachCamera(principal, el);
     // So is each person's volume, so that nobody is heard at full volume
