@@ -278,18 +278,59 @@ func TestVoiceCameraKindAndSource(t *testing.T) {
 			f.lk.update(room, f.identity("ann2"), func(p *fakeParticipant) {
 				p.shareGranted, p.tracks = true, []fakeTrack{{sid: "TR_v2", typ: "VIDEO", source: "SCREEN_SHARE_AUDIO"}}
 			})
-		}, false, "", "ann2 unclaimed source=observed track_source=screen_share_audio track_type=video", nil},
+		}, false, "", "ann2 unclaimed source=observed track_source=screen_share_audio track_type=video", []string{"ann2 camera_unclaimed"}},
 		{"video under no source LiveKit names", func(t *testing.T, f *presenceFixture, room string) {
 			f.lk.update(room, f.identity("ann2"), func(p *fakeParticipant) {
 				p.allSources, p.tracks = true, []fakeTrack{{sid: "TR_v3", typ: "VIDEO", source: "UNKNOWN"}}
 			})
-		}, false, "", "ann2 unclaimed source=observed track_source=unknown track_type=video", nil},
+		}, false, "", "ann2 unclaimed source=observed track_source=unknown track_type=video", []string{"ann2 camera_unclaimed"}},
 		{"a companion's camera, even with a claim", func(t *testing.T, f *presenceFixture, room string) {
 			f.lk.setRoom(room, append(f.lk.rooms[room], fakeParticipant{identity: f.screenID("ann"), joinedMs: 4_000, cameraGranted: true, camera: true})...)
 		}, true, "", "ann unclaimed source=observed track_source=camera track_type=video participant=screen", nil},
 		{"a companion's camera, LiveKit refusing", func(t *testing.T, f *presenceFixture, room string) {
 			f.lk.setRoom(room, append(f.lk.rooms[room], fakeParticipant{identity: f.screenID("ann"), joinedMs: 4_000, cameraGranted: true, camera: true})...)
 		}, false, "screen", "ann unclaimed source=observed track_source=camera track_type=video participant=screen", []string{"ann.screen camera_unclaimed"}},
+		// The screen share's sources, by kind as well (the review of #1258):
+		// sound under SCREEN_SHARE, and anything but sound under
+		// SCREEN_SHARE_AUDIO, is never the share, and is removed on the pass
+		// that finds it, holding the share or not.
+		{"audio under the screen share, no share held", func(t *testing.T, f *presenceFixture, room string) {
+			f.lk.update(room, f.identity("ann2"), func(p *fakeParticipant) {
+				p.shareGranted, p.tracks = true, []fakeTrack{{sid: "TR_s1", typ: "AUDIO", source: "SCREEN_SHARE"}}
+			})
+		}, false, "", "ann2 unclaimed source=observed track_source=screen_share track_type=audio", []string{"ann2 camera_unclaimed"}},
+		{"audio under the screen share, the share held", func(t *testing.T, f *presenceFixture, room string) {
+			f.mustClaim(t, "ann")
+			f.lk.update(room, f.identity("ann"), func(p *fakeParticipant) {
+				p.screen, p.tracks = true, []fakeTrack{{sid: "TR_s2", typ: "AUDIO", source: "SCREEN_SHARE"}}
+			})
+		}, false, "", "ann unclaimed source=observed track_source=screen_share track_type=audio", []string{"ann camera_unclaimed"}},
+		{"audio under the screen share from the companion, the share held", func(t *testing.T, f *presenceFixture, room string) {
+			f.mustClaim(t, "ann")
+			f.lk.setRoom(room, append(f.lk.rooms[room], fakeParticipant{identity: f.screenID("ann"), joinedMs: 4_000, shareGranted: true,
+				tracks: []fakeTrack{{sid: "TR_s3", typ: "AUDIO", source: "SCREEN_SHARE"}}})...)
+		}, false, "", "ann unclaimed source=observed track_source=screen_share track_type=audio participant=screen", []string{"ann.screen camera_unclaimed"}},
+		{"data under the share's sound", func(t *testing.T, f *presenceFixture, room string) {
+			f.lk.update(room, f.identity("ann2"), func(p *fakeParticipant) {
+				p.shareGranted, p.tracks = true, []fakeTrack{{sid: "TR_s4", typ: "DATA", source: "SCREEN_SHARE_AUDIO"}}
+			})
+		}, false, "", "ann2 unclaimed source=observed track_source=screen_share_audio track_type=data", []string{"ann2 camera_unclaimed"}},
+		{"video under the share's sound, the share held", func(t *testing.T, f *presenceFixture, room string) {
+			f.mustClaim(t, "ann")
+			f.lk.update(room, f.identity("ann"), func(p *fakeParticipant) {
+				p.screen, p.tracks = true, []fakeTrack{{sid: "TR_s5", typ: "VIDEO", source: "SCREEN_SHARE_AUDIO"}}
+			})
+		}, false, "", "ann unclaimed source=observed track_source=screen_share_audio track_type=video", []string{"ann camera_unclaimed"}},
+		// A companion's or a viewer's mismatched track: removed on the pass
+		// that finds it, its per-source withdrawal not relied on.
+		{"a companion's video under the microphone", func(t *testing.T, f *presenceFixture, room string) {
+			f.lk.setRoom(room, append(f.lk.rooms[room], fakeParticipant{identity: f.screenID("ann"), joinedMs: 4_000, allSources: true,
+				tracks: []fakeTrack{{sid: "TR_v4", typ: "VIDEO", source: "MICROPHONE"}}})...)
+		}, false, "", "ann unclaimed source=observed track_source=microphone track_type=video participant=screen", []string{"ann.screen camera_unclaimed"}},
+		{"a viewer's video under no source LiveKit names", func(t *testing.T, f *presenceFixture, room string) {
+			f.lk.setRoom(room, append(f.lk.rooms[room], fakeParticipant{identity: f.viewID("ann"), joinedMs: 4_000, allSources: true,
+				tracks: []fakeTrack{{sid: "TR_v5", typ: "VIDEO", source: "UNKNOWN"}}})...)
+		}, false, "", "ann unclaimed source=observed track_source=unknown track_type=video participant=view", []string{"ann.view camera_unclaimed"}},
 		{"a viewer's camera", func(t *testing.T, f *presenceFixture, room string) {
 			f.lk.setRoom(room, append(f.lk.rooms[room], fakeParticipant{identity: f.viewID("ann"), joinedMs: 4_000, cameraGranted: true, camera: true})...)
 		}, false, "", "ann unclaimed source=observed track_source=camera track_type=video participant=view", nil},
@@ -486,5 +527,224 @@ func TestVoiceCameraEntitlementEveryPass(t *testing.T) {
 				t.Errorf("ann still has a camera: %+v", p)
 			}
 		})
+	}
+}
+
+// TestVoiceCameraOneTrackPerClaim (the security review of #1258): a claim
+// covers one camera track, the first LiveKit lists. A second camera under the
+// same claim would carry the cap's worth of cameras on one claim: it is
+// audited once as unclaimed, and since withdrawing the camera would take the
+// claim's own track too, its publisher is removed. The first alone is fine.
+func TestVoiceCameraOneTrackPerClaim(t *testing.T) {
+	f, room := newCameraFixture(t)
+	f.at(100)
+	c := f.mustCamera(t, "ann", "")
+	f.camTrack(room, "ann", true, false)
+	f.at(500)
+	f.pass(t)
+	if got := f.removals(t); len(got) != 0 {
+		t.Fatalf("removals %q for one camera under one claim", got)
+	}
+	f.lk.update(room, f.identity("ann"), func(p *fakeParticipant) {
+		p.tracks = []fakeTrack{{sid: "TR_cam2", typ: "VIDEO", source: "CAMERA"}}
+	})
+	writes := len(f.lk.updatesFor(f.identity("ann")))
+	f.at(1_000)
+	f.pass(t)
+	// The removal ends the claim on the same pass (reason=left), after the
+	// removal's own row, and nothing was written to ann first.
+	want := []string{"ann started", "ann unclaimed source=observed track_source=camera track_type=video", "system stopped principal=ann reason=left"}
+	if got := f.cameraRows(t); !slices.Equal(got, want) {
+		t.Errorf("rows %q, want %q", got, want)
+	}
+	if n := len(f.lk.updatesFor(f.identity("ann"))) - writes; n != 0 {
+		t.Errorf("%d UpdateParticipant requests for ann before her removal, want none", n)
+	}
+	if f.lk.in(room, f.identity("ann")) {
+		t.Error("a second camera under one claim is still in the room")
+	}
+	if got := f.removals(t); !slices.Equal(got, []string{"ann camera_unclaimed"}) {
+		t.Errorf("removals %q, want ann camera_unclaimed", got)
+	}
+	if e := f.snapAs(t, f.ops, "ann").CameraEnded; e == nil || e.Reason != schema.VoiceCameraEndLeft {
+		t.Errorf("ann's camera_ended = %+v, want left", e)
+	}
+	// Her place under the cap is free, and a reconnect cannot continue the
+	// claim she was removed with.
+	if got := f.cameraHolders(room); len(got) != 0 {
+		t.Errorf("claims %q after the removal, want none", got)
+	}
+	f.lk.setRoom(room, append(f.lk.rooms[room], fakeParticipant{identity: f.identity("ann"), joinedMs: 9_000})...)
+	if res := f.camera(t, http.MethodPost, "ann", "ops", named(c)); res.status != http.StatusConflict || errCode(t, res.body) != schema.ErrorCodeVoiceCameraStale {
+		t.Errorf("a continue of the claim she was removed with: %d %s, want 409 voice_camera_stale", res.status, res.body)
+	}
+}
+
+// TestVoiceCameraMismatchIsRemovedOnThePassThatFindsIt (the review of
+// #1258): a mismatched track that no withdrawal is known to take away (here
+// video under a source LiveKit does not name) has its publisher removed on
+// the pass that finds it, a claim's holder as anyone else: withdrawing first
+// would only leave it published for another pass. A holder's camera is no
+// shield.
+func TestVoiceCameraMismatchIsRemovedOnThePassThatFindsIt(t *testing.T) {
+	for _, holder := range []bool{false, true} {
+		t.Run(fmt.Sprintf("holder=%v", holder), func(t *testing.T) {
+			f, room := newCameraFixture(t)
+			if holder {
+				f.at(100)
+				f.mustCamera(t, "ann", "")
+				f.camTrack(room, "ann", true, false)
+			}
+			f.lk.update(room, f.identity("ann"), func(p *fakeParticipant) {
+				p.tracks = []fakeTrack{{sid: "TR_v9", typ: "VIDEO", source: "UNKNOWN"}}
+			})
+			f.at(500)
+			f.pass(t)
+			if f.lk.in(room, f.identity("ann")) {
+				t.Error("the pass that found the mismatched track left its publisher in the room")
+			}
+			if got := f.removals(t); !slices.Equal(got, []string{"ann camera_unclaimed"}) {
+				t.Errorf("removals %q, want ann camera_unclaimed", got)
+			}
+			var unclaimed []string
+			for _, row := range f.cameraRows(t) {
+				if strings.Contains(row, " unclaimed ") {
+					unclaimed = append(unclaimed, row)
+				}
+			}
+			if want := []string{"ann unclaimed source=observed track_source=unknown track_type=video"}; !slices.Equal(unclaimed, want) {
+				t.Errorf("unclaimed rows %q, want %q", unclaimed, want)
+			}
+		})
+	}
+}
+
+// TestVoiceShareIgnoresMismatchedShareTracks (the review of #1258): a share
+// holder's sound under SCREEN_SHARE, or data under SCREEN_SHARE_AUDIO, is not
+// the share. It does not keep the share from going idle (its last-seen time
+// is not moved), and presence never says the share has sound for it, even
+// while LiveKit will not let its publisher be removed.
+func TestVoiceShareIgnoresMismatchedShareTracks(t *testing.T) {
+	f, room := newCameraFixture(t)
+	f.at(1_000)
+	f.mustClaim(t, "ann")
+	f.publish(room, "ann", true, false)
+	f.at(2_000)
+	f.pass(t)
+	// The screen goes; what is left is sound under the screen and data under
+	// the share's sound. LiveKit refuses the removal, so ann stays listed.
+	f.lk.setRemoveStatus(http.StatusInternalServerError)
+	f.lk.update(room, f.identity("ann"), func(p *fakeParticipant) {
+		p.screen = false
+		p.tracks = []fakeTrack{{sid: "TR_m1", typ: "AUDIO", source: "SCREEN_SHARE"}, {sid: "TR_m2", typ: "DATA", source: "SCREEN_SHARE_AUDIO"}}
+	})
+	for _, ms := range []int{3_000, 5_000, 6_999} {
+		f.at(ms)
+		f.pass(t)
+		if got := f.sharing(t, f.ops); got != "ann" {
+			t.Fatalf("at %d presence shows sharing %q, want ann without sound", ms, got)
+		}
+	}
+	f.at(7_000)
+	f.pass(t)
+	if holder := f.shareState(room); holder != 0 {
+		t.Errorf("the share is still held 5 s after its last screen track: a mismatched track kept it alive")
+	}
+	if got := f.removals(t); len(got) != 0 {
+		t.Errorf("removals %q, want none (LiveKit refused them)", got)
+	}
+}
+
+// TestVoiceCameraRemovalWithdrawsAGrantFirst (the security review of #1258,
+// round 4): someone without a claim, found with the camera granted and a
+// mismatched track, has the camera withdrawn before their removal, so the
+// token LiveKit sends with the withdrawal, not one carrying the camera, is
+// what a rejoin would use.
+func TestVoiceCameraRemovalWithdrawsAGrantFirst(t *testing.T) {
+	f, room := newCameraFixture(t)
+	f.lk.update(room, f.identity("ann2"), func(p *fakeParticipant) {
+		p.cameraGranted, p.tracks = true, []fakeTrack{{sid: "TR_w1", typ: "VIDEO", source: "MICROPHONE"}}
+	})
+	from := len(f.lk.calls())
+	f.at(500)
+	f.pass(t)
+	var order []string
+	for _, c := range f.lk.calls()[from:] {
+		if c.identity == f.identity("ann2") && (c.method == "UpdateParticipant" || c.method == "RemoveParticipant") {
+			order = append(order, c.method)
+		}
+	}
+	if !slices.Equal(order, []string{"UpdateParticipant", "RemoveParticipant"}) {
+		t.Errorf("calls for ann2 %q, want the withdrawal and then the removal", order)
+	}
+	if got := strings.Join(f.lastUpdate(t, "ann2"), ","); got != "MICROPHONE" {
+		t.Errorf("the withdrawal wrote %s, want the microphone alone", got)
+	}
+	if got := f.removals(t); !slices.Equal(got, []string{"ann2 camera_unclaimed"}) {
+		t.Errorf("removals %q, want ann2 camera_unclaimed", got)
+	}
+}
+
+// TestVoiceCameraRemovalWithdrawsAGrantLeftByAnEndedClaim (Kimi, round 5 of
+// #1258): ann holds a claim when the pass plans her removal for a mismatched
+// track; before the removal is made her claim ends, and LiveKit refuses that
+// end's withdrawal, so the camera is still granted. The removal, of someone
+// who no longer holds a claim, withdraws the camera first, so a rejoin does
+// not carry it.
+func TestVoiceCameraRemovalWithdrawsAGrantLeftByAnEndedClaim(t *testing.T) {
+	f, room := newCameraFixture(t)
+	f.at(100)
+	f.mustCamera(t, "ann", "")
+	f.camTrack(room, "ann", true, false)
+	f.lk.update(room, f.identity("ann"), func(p *fakeParticipant) {
+		p.tracks = []fakeTrack{{sid: "TR_k1", typ: "VIDEO", source: "MICROPHONE"}}
+	})
+	p := f.srv.voice
+	r := p.roomNamed(room)
+	r.claims.Lock()
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			r.claims.Unlock()
+		}
+	})
+	passed := make(chan struct{})
+	go func() {
+		defer close(passed)
+		f.at(500)
+		p.runPass(context.Background())
+	}()
+	// The pass has judged (its row is written) and waits for the claims.
+	waitUntil(t, "the pass to plan ann's removal", func() bool {
+		for _, row := range f.cameraRows(t) {
+			if strings.Contains(row, "ann unclaimed") {
+				return true
+			}
+		}
+		return false
+	})
+	// ann's claim ends now, as the holder of the claims, and LiveKit refuses
+	// its withdrawal.
+	f.lk.setUpdateFail(f.identity("ann"), true)
+	p.endHeldCamera(context.Background(), r, f.ids["ann"], voiceCameraStopSelf)
+	f.lk.setUpdateFail(f.identity("ann"), false)
+	if !f.camGranted(room, "ann") {
+		t.Fatal("the fake withdrew a camera it refused to")
+	}
+	from := len(f.lk.calls())
+	locked = false
+	r.claims.Unlock()
+	<-passed
+	var order []string
+	for _, c := range f.lk.calls()[from:] {
+		if c.identity == f.identity("ann") && (c.method == "UpdateParticipant" || c.method == "RemoveParticipant") {
+			order = append(order, c.method)
+		}
+	}
+	if !slices.Equal(order, []string{"UpdateParticipant", "RemoveParticipant"}) {
+		t.Errorf("calls for ann %q, want the withdrawal and then the removal", order)
+	}
+	if got := f.removals(t); !slices.Equal(got, []string{"ann camera_unclaimed"}) {
+		t.Errorf("removals %q, want ann camera_unclaimed", got)
 	}
 }

@@ -241,7 +241,7 @@ describe('the rename control', () => {
   it('is offered to an operator, for the open channel', async () => {
     await open();
     fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
-    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Rename channel…', 'Make private', 'Make default channel']);
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Rename channel…', 'Leave channel', 'Make private', 'Make default channel']);
     // Nothing is shown under the list any more: the form is reached by the menu only.
     expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
     expect(within(nav()).queryByRole('button', { name: /^Rename #/ })).toBeNull();
@@ -276,12 +276,13 @@ describe('the rename control', () => {
     });
   });
 
-  it('is not offered to a member', async () => {
+  it('is not offered to a member, whose menu still offers Leave', async () => {
     window.sessionStorage.clear();
     window.localStorage.setItem(key, secret);
     install(member);
     await open();
-    expect(within(nav()).queryByRole('button', { name: /^(Rename|Actions for)/ })).toBeNull();
+    fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
     expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
     expect(renames()).toEqual([]);
   });
@@ -292,7 +293,9 @@ describe('the rename control', () => {
     install(member);
     (server.channels[1] as Channel).manages = true;
     await open();
-    expect(within(nav()).queryByRole('button', { name: 'Actions for general' })).toBeNull();
+    fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
     expect(within(nav()).getByRole('button', { name: 'Actions for ops' })).toBeDefined();
   });
 
