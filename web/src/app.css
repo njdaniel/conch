@@ -4289,16 +4289,24 @@ button.link {
   margin-right: 0.3rem;
 }
 
-/* The confirmation of a settings change, in place under the row. */
-.channel-list .channel-settings-ask {
+/* A settings change or Leave question and answer, in place under the row. */
+.channel-list .channel-settings-ask,
+.channel-list .channel-leave-ask,
+.channel-list .channel-leave-line {
   flex: 1 0 100%;
+  min-width: 0;
+}
+
+.channel-list .channel-settings-ask,
+.channel-list .channel-leave-ask {
   display: grid;
   gap: var(--s2);
-  min-width: 0;
   justify-items: start;
 }
 
-.channel-list .channel-settings-ask p {
+.channel-list .channel-settings-ask p,
+.channel-list .channel-leave-ask p,
+.channel-list .channel-leave-line {
   margin: 0;
   overflow-wrap: anywhere;
 }

@@ -366,7 +366,7 @@ func TestVoiceCameraClaim(t *testing.T) {
 	if got := f.lastUpdate(t, "ann"); !slices.Equal(got, []string{"MICROPHONE", "CAMERA"}) {
 		t.Errorf("the grant wrote %q, want the microphone and the camera", got)
 	}
-	if !f.camGranted(room, "ann") || f.camGranted(room, "ann2") {
+	if !f.camGranted(room, "ann") || f.camGranted(room, "ann2") || f.cameraGrants("ann2") != 0 {
 		t.Error("the camera is not granted to ann alone")
 	}
 	if got := f.cameraRows(t); !slices.Equal(got, []string{"ann started"}) {
@@ -512,10 +512,36 @@ func TestVoiceCameraNamedClaim(t *testing.T) {
 		if rows := f.cameraRows(t); !slices.Equal(rows, want) {
 			t.Errorf("rows %q, want %q", rows, want)
 		}
-		// The record is consumed: a second adoption of the same claim is stale.
+		// The record is consumed by the adoption: ann's own document no longer
+		// carries it, and once the adopted claim has ended too, a second
+		// adoption of the first claim is stale.
+		if e := f.snapAs(t, f.ops, "ann").CameraEnded; e != nil {
+			t.Errorf("the rotation's end record %+v survived its adoption", e)
+		}
 		f.mustStopCamera(t, named(got))
 		if res := f.camera(t, http.MethodPost, "ann", "ops", named(c)); res.status != http.StatusConflict || errCode(t, res.body) != schema.ErrorCodeVoiceCameraStale {
 			t.Errorf("a second adoption: %d %s, want 409 voice_camera_stale", res.status, res.body)
+		}
+	})
+	t.Run("a failed adoption leaves the record, and a retry adopts", func(t *testing.T) {
+		f, c, next := adoptSetup(t)
+		f.at(2_000)
+		f.lk.setUpdateStatus(http.StatusServiceUnavailable)
+		if res := f.camera(t, http.MethodPost, "ann", "ops", named(c)); res.status != http.StatusServiceUnavailable {
+			t.Fatalf("an adoption with LiveKit down: %d %s, want 503", res.status, res.body)
+		}
+		if e := f.snapAs(t, f.ops, "ann").CameraEnded; e == nil || e.Reason != schema.VoiceCameraEndRotated {
+			t.Fatalf("after a failed adoption ann's camera_ended = %+v, want the rotation's", e)
+		}
+		f.lk.setUpdateStatus(0)
+		f.at(3_000)
+		got := f.mustCamera(t, "ann", named(c))
+		if got.StartedAt.Time().Equal(c.StartedAt.Time()) || !f.camGranted(next, "ann") {
+			t.Errorf("the retry answered %v and granted=%v, want a new claim granted", got.StartedAt, f.camGranted(next, "ann"))
+		}
+		want := []string{"ann started", "system stopped principal=ann reason=rotated", "ann started"}
+		if rows := f.cameraRows(t); !slices.Equal(rows, want) {
+			t.Errorf("rows %q, want %q", rows, want)
 		}
 	})
 	t.Run("adoption past the window", func(t *testing.T) {
@@ -561,8 +587,17 @@ func TestVoiceCameraCap(t *testing.T) {
 	for _, name := range names[:voiceCameraCap-1] {
 		f.mustCamera(t, name, "")
 	}
-	// Two race for the ninth place: ann and ann2, held at the room's claims
-	// until both are admitted.
+	// Two race for the ninth place: ann and ann2, each held just before the
+	// room's claims (the "lock" seam) until both are there, then let go
+	// together.
+	var arrived sync.WaitGroup
+	arrived.Add(2)
+	f.srv.voice.claimSeam = func(at string) {
+		if at == "lock" {
+			arrived.Done()
+			arrived.Wait()
+		}
+	}
 	var wg sync.WaitGroup
 	results := make([]wireResult, 2)
 	for i, who := range []string{"ann", "ann2"} {
@@ -587,6 +622,7 @@ func TestVoiceCameraCap(t *testing.T) {
 			t.Errorf("a racing claim: %d %s", res.status, res.body)
 		}
 	}
+	f.srv.voice.claimSeam = nil
 	if ok != 1 || refused != 1 {
 		t.Fatalf("racing for the ninth place: %d granted, %d full; want one of each", ok, refused)
 	}

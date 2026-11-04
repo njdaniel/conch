@@ -137,6 +137,10 @@ var (
 	// errVoiceCameraGone: the room was rotated, or the claim being continued
 	// ended, while the claim was being made. 409 voice_no_session.
 	errVoiceCameraGone = errors.New("voice: the room or the camera claim went away during the claim")
+	// errVoiceCameraRoomRetired: the re-read found the room retired (a
+	// rotation committed in the store). 409 voice_no_session, as for any room
+	// that went; a holder's claim ends rotated.
+	errVoiceCameraRoomRetired = fmt.Errorf("%w: the room was retired", errVoiceCameraGone)
 	// errVoiceCameraNotConnected: LiveKit has no connection of the caller's in
 	// the room to grant the camera to. 409 voice_no_session.
 	errVoiceCameraNotConnected = errors.New("voice: the caller is not connected to the room")
@@ -561,9 +565,9 @@ func (p *voicePoller) claimCamera(ctx context.Context, room store.VoiceRoom, pri
 		mine = &voiceCamera{principalID: principalID, startedAt: p.now().Truncate(time.Millisecond), pending: true}
 		r.cameras[principalID] = mine
 		delete(r.camWithdrawing, voiceWithdrawKey{principalID, voiceRolePerson})
-		// A new claim makes the end of the last one old news; an adoption
-		// consumes it, so the same claim is adopted at most once.
-		delete(p.cameraEnded, key)
+		// The end record of the last claim stays until this one has started
+		// (check 13): a claim that is refused or undone has adopted nothing,
+		// and a retry may still adopt.
 	}
 	p.mu.Unlock()
 	r.order.Unlock()
@@ -580,9 +584,16 @@ func (p *voicePoller) claimCamera(ctx context.Context, room store.VoiceRoom, pri
 	// read. Either way no camera is granted once a revocation has answered. A
 	// read that fails is a refusal.
 	if err := p.cameraEntitled(lctx, room, principalID); err != nil {
-		if held == nil {
-			p.undoCamera(r, mine)
-		} else {
+		switch {
+		case held == nil:
+			// Nothing was asked of LiveKit, so nothing is owed: a withdrawal
+			// marked owed here would hide the audit of the person's next
+			// unclaimed camera (the security review of #1258, NIT 2).
+			p.undoCamera(r, mine, false)
+		case errors.Is(err, errVoiceCameraRoomRetired):
+			// A holder whose room was retired loses the camera with it.
+			p.endHeldCamera(ctx, r, principalID, voiceCameraStopRotated)
+		default:
 			// A holder who lost the right loses the camera they hold.
 			p.endHeldCamera(ctx, r, principalID, voiceCameraStopAccessLost)
 		}
@@ -597,7 +608,8 @@ func (p *voicePoller) claimCamera(ctx context.Context, room store.VoiceRoom, pri
 	found, err := p.setPublishPermission(lctx, r, principalID, voiceRolePerson, publishInput{canPublish: true, share: share})
 	if err != nil || !found {
 		if held == nil {
-			p.undoCamera(r, mine)
+			// LiveKit may have granted it before failing to say so: owed.
+			p.undoCamera(r, mine, true)
 		}
 		if err != nil {
 			return schema.VoiceCameraV1{}, err
@@ -614,7 +626,7 @@ func (p *voicePoller) claimCamera(ctx context.Context, room store.VoiceRoom, pri
 			p.withdrawCamera(ctx, r, principalID)
 			return schema.VoiceCameraV1{}, errVoiceCameraGone
 		}
-		if gone := p.roomRotatedUnder(ctx, lctx, r, room, principalID); gone {
+		if gone := p.roomRotatedUnder(ctx, lctx, r, room, principalID, true); gone {
 			return schema.VoiceCameraV1{}, errVoiceCameraGone
 		}
 		return schema.VoiceCameraV1{PrincipalID: principalID, StartedAt: schema.NewTimestamp(held.startedAt)}, nil
@@ -652,6 +664,9 @@ func (p *voicePoller) claimCamera(ctx context.Context, room store.VoiceRoom, pri
 	}
 	p.mu.Lock()
 	mine.pending = false
+	// A new claim makes the end of the last one old news; an adoption
+	// consumes it, so the same claim is adopted at most once.
+	delete(p.cameraEnded, key)
 	p.mu.Unlock()
 	r.order.Unlock()
 	p.notify(room.ChannelID)
@@ -659,7 +674,7 @@ func (p *voicePoller) claimCamera(ctx context.Context, room store.VoiceRoom, pri
 	// As for a share: a rotation committed between the holder check and the
 	// claim, and not yet forgotten, is read from the store, and the grant is
 	// taken back before the claims are let go.
-	if gone := p.roomRotatedUnder(ctx, lctx, r, room, principalID); gone {
+	if gone := p.roomRotatedUnder(ctx, lctx, r, room, principalID, true); gone {
 		return schema.VoiceCameraV1{}, errVoiceCameraGone
 	}
 	return schema.VoiceCameraV1{PrincipalID: principalID, StartedAt: schema.NewTimestamp(mine.startedAt)}, nil
@@ -696,20 +711,23 @@ func (p *voicePoller) cameraEntitled(ctx context.Context, room store.VoiceRoom, 
 	case err != nil:
 		return fmt.Errorf("voice: read the room: %w", err)
 	case !live:
-		return errVoiceCameraGone
+		return errVoiceCameraRoomRetired
 	}
 	return nil
 }
 
-// undoCamera takes back a claim that was never granted. Whatever LiveKit may
-// have granted before failing to say so is left for the passes, which
-// withdraw it without auditing it (camWithdrawing).
-func (p *voicePoller) undoCamera(r *voiceRoomState, mine *voiceCamera) {
+// undoCamera takes back a claim that was never granted. owe says LiveKit may
+// have granted it before failing to say so: the passes then withdraw it
+// without auditing it (camWithdrawing). A claim refused before LiveKit was
+// asked owes nothing.
+func (p *voicePoller) undoCamera(r *voiceRoomState, mine *voiceCamera, owe bool) {
 	r.order.Lock()
 	p.mu.Lock()
 	if r.cameras[mine.principalID] == mine {
 		delete(r.cameras, mine.principalID)
-		r.camWithdrawing[voiceWithdrawKey{mine.principalID, voiceRolePerson}] = 0
+		if owe {
+			r.camWithdrawing[voiceWithdrawKey{mine.principalID, voiceRolePerson}] = 0
+		}
 	}
 	p.mu.Unlock()
 	r.order.Unlock()
@@ -836,8 +854,13 @@ func (p *voicePoller) endCamerasOf(ctx context.Context, principalID, channelID i
 			rooms = append(rooms, r)
 		}
 	}
+	// A retired room with a claim of theirs still running in it: it is no
+	// longer in rooms, but the claim, pending and so not among the ones a
+	// forget ends, may be inside LiveKit's answer to its grant. Taking the
+	// room's claims waits for it; it finds the room retired and takes its
+	// grant back before it lets them go.
 	for r, pid := range p.retiring {
-		if pid == principalID && (channelID == 0 || r.channelID == channelID) {
+		if pid == principalID && (channelID == 0 || r.channelID == channelID) && !slices.Contains(rooms, r) {
 			rooms = append(rooms, r)
 		}
 	}
@@ -853,6 +876,36 @@ func (p *voicePoller) endCamerasOf(ctx context.Context, principalID, channelID i
 		r.claims.Lock()
 		p.endHeldCamera(ctx, r, principalID, reason)
 		r.claims.Unlock()
+	}
+	// A room a rotation forgot, whose ended camera of theirs is still being
+	// withdrawn (retireRoom, or a running claim that was handed the debt):
+	// there is no claim left to end in it, but the revocation must not
+	// answer while the grant is in flight (ADR-015 decision 6). It is looked
+	// for now, after the rooms above, so that a room forgotten after the
+	// first look (whose claims this took before retireRoom did, finding
+	// nothing to end) is found too: a forget that ends a camera keeps the
+	// room in retiring, with withdrawDone open, until the withdrawal is made
+	// (forgetRoom, retireRoom, claimRunning). Its done channels are waited
+	// for, as waitRunningClaims waits for them.
+	var waits []chan struct{}
+	p.mu.Lock()
+	for r := range p.retiring {
+		if !slices.Contains(r.retiredCameras, principalID) || (channelID != 0 && r.channelID != channelID) {
+			continue
+		}
+		if r.withdrawDone != nil {
+			waits = append(waits, r.withdrawDone)
+		}
+		if r.claimDone != nil {
+			waits = append(waits, r.claimDone)
+		}
+	}
+	p.mu.Unlock()
+	if p.endCamerasWaitSeam != nil {
+		p.endCamerasWaitSeam(len(waits))
+	}
+	for _, d := range waits {
+		<-d
 	}
 }
 
@@ -933,9 +986,13 @@ func (p *voicePoller) cameraPrincipals() []int64 {
 			seen[r.claimer] = true
 		}
 	}
-	for _, pid := range p.retiring {
+	for r, pid := range p.retiring {
 		if pid != 0 {
 			seen[pid] = true
+		}
+		// Whose camera a rotation ended there and may still be withdrawing.
+		for _, c := range r.retiredCameras {
+			seen[c] = true
 		}
 	}
 	out := make([]int64, 0, len(seen))
@@ -989,18 +1046,30 @@ func (p *voicePoller) camerasWithheld(ctx context.Context, r *voiceRoomState) {
 // a source they keep), or one survived a confirmed withdrawal: they are
 // removed whatever the withdrawal does. reason is the removal's.
 type cameraWithdrawal struct {
-	principalID  int64
-	role         voiceRole
-	joinedAt     time.Time
-	published    bool
-	evict        bool
+	principalID int64
+	role        voiceRole
+	joinedAt    time.Time
+	published   bool
+	evict       bool
+	// mismatch says a track that is never a claim's is among what was
+	// found (a kind that disagrees with its source, or a second camera under
+	// one claim): its publisher is removed even if they hold a claim by the
+	// time the withdrawal is made.
+	mismatch bool
+	// granted says LiveKit listed the camera granted, whoever held a claim
+	// when the pass planned: a removal of someone who holds none when it is
+	// made is preceded by the withdrawal, so that a token LiveKit sends them
+	// does not carry the camera into a rejoin (a claim ended since the plan
+	// whose own withdrawal failed leaves the grant behind).
+	granted      bool
 	reason       string
-	canPublish   bool
 	canSubscribe bool
 }
 
-// voiceCameraTrackKey names one track of one connection for camTracks:
-// LiveKit's track id when it gave one, else the track's source and type.
+// voiceCameraTrackKey names one track of one connection for camTracks: the
+// connection (its identity and join time) and the track (LiveKit's id, empty
+// when it gave none, and its declared source and type), so that a rejoin, a
+// republish or a second track is a new one.
 func voiceCameraTrackKey(part livekit.Participant, t livekit.Track) string {
 	return strings.Join([]string{part.Identity, strconv.FormatInt(part.JoinedAt.UnixMilli(), 10), t.SID, t.Source, t.Type}, "\x00")
 }
@@ -1037,7 +1106,10 @@ func (p *voicePoller) judgeCamerasLocked(r *voiceRoomState, now time.Time, seen 
 		case !here:
 			ended = p.endCameraLocked(r, pid, voiceCameraStopLeft, 0)
 		default:
-			// A muted camera sends nothing, and is not a camera on.
+			// A muted camera sends nothing, and is not a camera on. A claim
+			// covers one camera track, the first LiveKit lists; any other is
+			// judged below as one nobody claimed (the security review of
+			// #1258: one claim must not carry the cap's worth of cameras).
 			live := part.CameraLive()
 			if live {
 				c.published, c.lastTrack = true, now
@@ -1062,12 +1134,17 @@ func (p *voicePoller) judgeCamerasLocked(r *voiceRoomState, now time.Time, seen 
 		// The person's own connection is the only one a claim covers, pending
 		// or started.
 		holder := role == voiceRolePerson && r.cameras[pid] != nil
-		shareHolder := role == voiceRolePerson && r.share != nil && r.share.principalID == pid
 		stamp, owed := r.camWithdrawing[key]
 		// Still owed, or confirmed after this pass listed the room: what it
 		// saw is a claim's camera being taken away, not a new one.
 		quiet := owed && (stamp == 0 || stamp > since)
-		w := cameraWithdrawal{principalID: pid, role: role, joinedAt: part.JoinedAt, canPublish: part.CanPublish, canSubscribe: part.CanSubscribe, reason: voiceReasonCameraUnclaimed}
+		w := cameraWithdrawal{principalID: pid, role: role, joinedAt: part.JoinedAt, canSubscribe: part.CanSubscribe, reason: voiceReasonCameraUnclaimed, granted: part.CameraGranted}
+		// owes says a withdrawal of this participant's is owed and confirmed
+		// (camWithdrawing): for anyone without a claim. A holder's only
+		// withdrawable track would be a camera, which its claim keeps.
+		owes := !holder
+		// mismatched is a track that is never anyone's claim: its kind and
+		// source disagree, or it is a second camera under one claim.
 		note := func(t livekit.Track, mismatched bool) {
 			tk := voiceCameraTrackKey(part, t)
 			known := r.camTracks[tk]
@@ -1090,40 +1167,59 @@ func (p *voicePoller) judgeCamerasLocked(r *voiceRoomState, now time.Time, seen 
 			// pass listed it, and still there: no withdrawal takes it away.
 			if owed && stamp != 0 && stamp > known.since && stamp <= since {
 				w.evict = true
+				w.mismatch = w.mismatch || mismatched
 				if known.ended {
 					w.reason = voiceReasonCameraNotWithdrawn
 				}
 			}
-			// A track under a source this participant keeps is not taken away
-			// by withdrawing the camera: the microphone, its own claim's
-			// camera, the share's sound while it holds the share.
-			keeps := role == voiceRolePerson && (t.Source == "microphone" || (t.Source == "camera" && holder) || (t.Source == "screen_share_audio" && shareHolder))
+			// Withdrawn first only where the withdrawal is known to take the
+			// track away: one declared as the camera, from a participant who
+			// holds no claim (the camera's withdrawal, K3; LiveKit enforces a
+			// track's declared source, K8). Every other mismatched track is
+			// never anyone's and its publisher is removed on this pass:
+			// waiting a pass on a withdrawal would only leave it published
+			// for one more (the review of #1258). That is the microphone, the
+			// claim's own camera source, the share's sound (shared or not), a
+			// source LiveKit does not name, and a companion's or a viewer's,
+			// whose per-source withdrawal is not relied on to cover a source
+			// it never granted.
+			withdrawable := t.Source == "camera" && !holder
 			switch {
-			case mismatched && keeps:
-				w.evict = true
+			case mismatched && !withdrawable:
+				w.evict, w.mismatch = true, true
 			default:
+				// Withdrawn; if it is still listed once LiveKit has
+				// confirmed the withdrawal, its publisher is removed on a
+				// later pass (above).
 				w.published = true
+				w.mismatch = w.mismatch || mismatched
 				if known.ended && !mismatched {
 					w.reason = voiceReasonCameraNotWithdrawn
 				}
 			}
 		}
-		if !holder {
-			for _, t := range part.Cameras {
-				note(t, false)
+		cameras := part.Cameras
+		if holder && len(cameras) > 0 {
+			// The claim's own track is the first; every other is extra.
+			for _, t := range cameras[1:] {
+				note(t, true)
 			}
+			cameras = nil
+		}
+		for _, t := range cameras {
+			note(t, false)
 		}
 		for _, t := range part.Mismatched {
 			note(t, true)
 		}
 		grantedWithout := !holder && part.CameraGranted
 		if !grantedWithout && !w.published && !w.evict {
-			if !holder && (!quiet || stamp == 0) {
+			if owes && (!quiet || stamp == 0) {
 				delete(r.camWithdrawing, key) // nothing left to withdraw
 			}
 			return
 		}
-		if !holder && (!quiet || stamp == 0) {
+		if owes && (!quiet || stamp == 0) {
 			// Owed again until LiveKit confirms. A stamp later than this
 			// pass's listing stands: that confirmation is newer.
 			r.camWithdrawing[key] = 0
@@ -1185,8 +1281,12 @@ func (p *voicePoller) judgeCamerasLocked(r *voiceRoomState, now time.Time, seen 
 
 // withdrawCameras makes a pass's camera withdrawals in r, under the room's
 // claims, so that none takes away a grant a claim has just made: each is
-// checked again, under the lock, against the room's claims. A person keeps
-// the microphone and, if they hold it, the share; a companion keeps the
+// checked again, under the lock. A person who holds a claim by then is let
+// be, unless what was found is a track that is never a claim's (mismatch),
+// as withdrawShares lets a holder of the share be; the camera term is read at
+// the write besides, so a write never drops a held camera. A person keeps the
+// microphone (every member publishes in a channel-wide room, the only rooms
+// with cameras) and, if they hold it, the share; a companion keeps the
 // screen while its person holds the share; a viewer keeps nothing. A
 // withdrawal that fails with a track published, or a track that no
 // withdrawal takes away, removes the publisher (fail closed). It reports
@@ -1201,34 +1301,56 @@ func (p *voicePoller) withdrawCameras(ctx context.Context, r *voiceRoomState, li
 	for _, w := range list {
 		p.mu.Lock()
 		share := p.shareHeldLocked(r, w.principalID)
+		holds := w.role == voiceRolePerson && p.cameraHeldLocked(r, w.principalID)
 		gone := r.retired
 		p.mu.Unlock()
-		if gone {
+		if gone || (holds && !w.mismatch) {
 			continue
 		}
-		// The camera term is read at the write: a claim made since the plan
-		// keeps its camera, and so does a holder whose mismatched track is
-		// what is being taken away.
+		// Removed at once: what the pass found is to be removed, or a
+		// mismatched track whose owner has claimed a camera since the plan
+		// (a withdrawal now would keep the claim's camera source, and with
+		// it a mismatched track declared under it). A holder is not written
+		// first: the write would only grant again what the removal takes.
+		// Anyone else with the camera granted is, so that the refreshed token
+		// LiveKit sends with the withdrawal is the one a rejoin carries.
+		remove := w.evict || (holds && w.mismatch)
 		key, done := voiceWithdrawKey{w.principalID, w.role}, false
-		lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
-		in := publishInput{canSubscribe: w.canSubscribe, share: share}
-		if w.role == voiceRolePerson {
-			in.canPublish = w.canPublish
+		if !remove || (w.granted && !holds) {
+			lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), voiceEvictTimeout)
+			// Not what LiveKit listed: a listing that lost the person's
+			// canPublish must not turn the withdrawal into a listen-only write.
+			in := publishInput{canSubscribe: w.canSubscribe, share: share, canPublish: w.role == voiceRolePerson}
+			if _, err := p.setPublishPermission(lctx, r, w.principalID, w.role, in); err != nil {
+				slog.WarnContext(lctx, "voice: withdrawing a camera nobody claimed failed; passes retry", "channel", r.channelID, "principal", w.principalID, "participant", w.role.label(), "error", err)
+			} else {
+				done = true
+				p.camWithdrawConfirmed(r, key)
+			}
+			cancel()
+			if !done {
+				again = true
+			}
 		}
-		if _, err := p.setPublishPermission(lctx, r, w.principalID, w.role, in); err != nil {
-			slog.WarnContext(lctx, "voice: withdrawing a camera nobody claimed failed; passes retry", "channel", r.channelID, "principal", w.principalID, "participant", w.role.label(), "error", err)
-		} else {
-			done = true
-			p.camWithdrawConfirmed(r, key)
+		if !remove && (done || !w.published) {
+			continue
 		}
-		cancel()
-		if !done {
-			again = true
+		again = true
+		part := livekit.Participant{Identity: voiceParticipantIdentity(w.principalID, w.role), JoinedAt: w.joinedAt}
+		if !p.removeObserved(ctx, r, part, w.principalID, w.reason) || w.role != voiceRolePerson {
+			continue
 		}
-		if w.evict || (!done && w.published) {
-			again = true
-			part := livekit.Participant{Identity: voiceParticipantIdentity(w.principalID, w.role), JoinedAt: w.joinedAt}
-			p.removeObserved(ctx, r, part, w.principalID, w.reason)
+		// A person removed holding a claim has left with it: the claim ends
+		// now (reason=left, camera_ended in their presence), so its place
+		// under the cap is free and a reconnect cannot continue it.
+		r.order.Lock()
+		p.mu.Lock()
+		events := p.endCameraLocked(r, w.principalID, voiceCameraStopLeft, 0)
+		p.mu.Unlock()
+		p.writeEvents(ctx, events...)
+		r.order.Unlock()
+		if len(events) > 0 {
+			p.notify(r.channelID)
 		}
 	}
 	return again

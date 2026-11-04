@@ -269,6 +269,11 @@ type voiceRoomState struct {
 	// participants whose camera is being taken away, 0 while it is owed and
 	// the eviction count at which LiveKit confirmed it once it has.
 	camWithdrawing map[voiceWithdrawKey]uint64
+	// retiredCameras is who held a started camera claim in the room when a
+	// rotation forgot it (forgetRoom): their grants are withdrawn after, by
+	// retireRoom or a running claim, and a revocation of use_camera waits for
+	// that withdrawal (endCamerasOf). Set once, under voicePoller.mu.
+	retiredCameras []int64
 	// camTracks is what the passes have seen of the camera tracks nobody
 	// claimed and of the tracks whose kind and source disagree, by track
 	// (voiceCameraTrackKey): each is audited once, and one still listed
@@ -405,9 +410,12 @@ type voicePoller struct {
 	// take.
 	claimSeam     func(stage string)
 	endSharesSeam func(rooms int)
-	// endCamerasSeam is endSharesSeam's twin for endCamerasOf (issue #1241);
-	// nil outside tests.
-	endCamerasSeam func(rooms int)
+	// endCamerasSeam is endSharesSeam's twin for endCamerasOf (issue #1241),
+	// run once it has found the rooms whose claims it will take; and
+	// endCamerasWaitSeam runs once it has found the retiring rooms whose
+	// withdrawals it will wait for. nil outside tests.
+	endCamerasSeam     func(rooms int)
+	endCamerasWaitSeam func(waits int)
 	// liveReadSeam, when set, replaces the liveness read a claim makes after
 	// its grant (roomRotatedUnder); nil outside tests (issue #1089).
 	liveReadSeam func(ctx context.Context, roomID int64) (bool, error)
@@ -2167,12 +2175,20 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) (*voiceRoomSt
 			continue
 		}
 		events = append(events, p.endCameraLocked(r, pid, voiceCameraStopRotated, 0)...)
+		r.retiredCameras = append(r.retiredCameras, pid)
 		if !slices.Contains(holders, pid) {
 			holders = append(holders, pid)
 		}
 	}
 	if r.claimer != 0 {
 		p.retiring[r] = r.claimer
+		if len(r.retiredCameras) > 0 {
+			// Ended cameras are still to be withdrawn, by the claim or by
+			// retireRoom: a revocation of use_camera waits for that
+			// (endCamerasOf) even if the claim returns first, which then
+			// leaves the room in retiring for the withdrawal (claimRunning).
+			r.withdrawDone = make(chan struct{})
+		}
 	} else if len(holders) > 0 {
 		// The caller owes the withdrawals (retireRoom); a hook waits for them.
 		r.withdrawDone = make(chan struct{})
@@ -2267,6 +2283,15 @@ func (p *voicePoller) retireRoom(ctx context.Context, room store.VoiceRoom) {
 		p.mu.Unlock()
 		return
 	}
+	// The withdrawal is this call's from here on: the room is (again) in
+	// retiring with withdrawDone open until it is made, whatever a claim
+	// that ran during forgetRoom did with the entry when it returned, so a
+	// hook that looks now waits for it. withdrawFinished closes and removes
+	// both.
+	if r.withdrawDone == nil {
+		r.withdrawDone = make(chan struct{})
+	}
+	p.retiring[r] = 0
 	p.mu.Unlock()
 	ctx = context.WithoutCancel(ctx)
 	r.claims.Lock()

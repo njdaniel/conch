@@ -86,6 +86,9 @@ type fakeParticipant struct {
 	camera, cameraMuted bool
 	cameraGranted       bool
 	allSources          bool
+	// noPermission lists the participant with no permission at all, as a
+	// listing LiveKit cut short would.
+	noPermission bool
 	// tracks are further published tracks, as a test declares them: the
 	// mismatched kinds of webcam-video §4.5. One whose source the
 	// permission no longer allows is unpublished, as LiveKit does.
@@ -419,7 +422,9 @@ func fakeParticipantJSON(p fakeParticipant) map[string]any {
 	if p.allSources {
 		sources = []string{}
 	}
-	part["permission"] = map[string]any{"can_subscribe": !p.noSubscribe, "can_publish": !p.listenOnly, "can_publish_data": false, "can_publish_sources": sources}
+	if !p.noPermission {
+		part["permission"] = map[string]any{"can_subscribe": !p.noSubscribe, "can_publish": !p.listenOnly, "can_publish_data": false, "can_publish_sources": sources}
+	}
 	var tracks []map[string]any
 	if p.published {
 		tracks = append(tracks, map[string]any{"type": "AUDIO", "source": "MICROPHONE", "muted": p.muted})
