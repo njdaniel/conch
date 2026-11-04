@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
-import { VoiceClient, chosenGone, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
+import type { CameraClaimResult } from '../api';
+import type { Camera, KeptCamera } from './camera';
+import { VoiceClient, chosenGone, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { resumeLimit, type Captured, type KeptScreen } from './share';
 import { defaultTail } from './gate';
 import { FakeClock, settle } from './fakes';
@@ -72,6 +74,7 @@ class StubRoom implements Room {
   disconnectOnClose = false;
   close = (): Promise<void> => {
     this.closed = true;
+    this.camLog.push('close');
     if (this.disconnectOnClose) this.events?.onDisconnected('lost');
     return Promise.resolve();
   };
@@ -188,6 +191,93 @@ class StubRoom implements Room {
     this.outputsRead++;
     return Promise.resolve(this.outputList);
   };
+  // The camera (ADR-015): each step recorded in camLog, which the test shares
+  // with conchd's camera calls, so that their order is seen; the local
+  // track's state; a capture that fails with a browser's error; and the
+  // cameras listed.
+  camLog: string[] = [];
+  camState: CameraTrack = 'none';
+  captureError: Error | null = null;
+  grantError: Error | null = null;
+  cameraList: readonly Camera[] | null = [
+    { id: 'cam-1', label: 'Desk camera' },
+    { id: 'cam-2', label: 'Laptop camera' },
+  ];
+  keptLiveCamera = true;
+  viewings: boolean[] = [];
+  claimedSets: number[][] = [];
+  captureCamera = (choice: string | null): Promise<void> => {
+    this.camLog.push(`capture ${choice ?? 'browser'}`);
+    if (this.captureError !== null) return Promise.reject(this.captureError);
+    this.camState = 'captured';
+    return Promise.resolve();
+  };
+  awaitCameraGrant = (): Promise<void> => {
+    this.camLog.push('grant');
+    return this.grantError === null ? Promise.resolve() : Promise.reject(this.grantError);
+  };
+  publishCamera = (): Promise<void> => {
+    this.camLog.push('publish camera');
+    this.camState = 'published';
+    this.events?.onCameraChanged();
+    return Promise.resolve();
+  };
+  stopCamera = (): Promise<void> => {
+    if (this.camState !== 'none') this.camLog.push('stop camera');
+    this.camState = 'none';
+    this.events?.onCameraChanged();
+    return Promise.resolve();
+  };
+  keepCamera = (): KeptCamera | null => {
+    if (this.camState === 'none') return null;
+    this.camLog.push('keep camera');
+    this.camState = 'none';
+    // As sdk.ts: the room says its own camera changed, at once.
+    this.events?.onCameraChanged();
+    const log = this.camLog;
+    return {
+      live: () => this.keptLiveCamera,
+      onEnded: null,
+      stop: () => {
+        log.push('stop kept camera');
+      },
+    };
+  };
+  adoptCamera = (): void => {
+    this.camLog.push('adopt camera');
+    this.camState = 'captured';
+  };
+  cameraTrack = (): CameraTrack => this.camState;
+  camDevice = 'cam-1';
+  cameraInUse = (): string | null => (this.camState === 'none' ? null : this.camDevice);
+  cameras = (): Promise<readonly Camera[] | null> => Promise.resolve(this.cameraList);
+  switchError: Error | null = null;
+  // When set, the next switch waits, and the test fails it.
+  holdSwitchCamera = false;
+  failHeldSwitch: ((err: Error) => void) | null = null;
+  switchCamera = (choice: string): Promise<void> => {
+    this.camLog.push(`switch ${choice}`);
+    if (this.holdSwitchCamera) {
+      this.holdSwitchCamera = false;
+      return new Promise((_resolve, reject) => {
+        this.failHeldSwitch = reject;
+      });
+    }
+    if (this.switchError === null) {
+      this.camDevice = choice;
+      return Promise.resolve();
+    }
+    this.camState = 'none';
+    return Promise.reject(this.switchError);
+  };
+  attachSelf = (): void => undefined;
+  setViewing = (on: boolean): void => {
+    this.viewings.push(on);
+  };
+  setCameras = (claimed: ReadonlySet<number>): void => {
+    this.claimedSets.push([...claimed]);
+  };
+  attachCamera = (): void => undefined;
 }
 
 // The mode the harness starts in: push to talk, which most of these tests are of (issue #1244 made the open microphone the default).
@@ -220,6 +310,9 @@ function setup(
   // Issue #660: whether the speakers may be chosen (they may not unless a
   // test says), and the output remembered from earlier in the tab.
   speakers?: { readonly selection: boolean; readonly output?: Output | null },
+  // ADR-015: conchd's answers to camera claims, in order (a granted claim by
+  // default), and the camera remembered from earlier in the tab.
+  camera?: { readonly answers?: CameraClaimResult[]; readonly choice?: Camera | null },
 ) {
   const clock = new FakeClock();
   const rooms: StubRoom[] = [];
@@ -240,6 +333,9 @@ function setup(
   // What the share asked conchd, in order.
   const shares: string[] = [];
   const trace: string[] = [];
+  // What the camera asked of the rooms and of conchd, in order.
+  const camLog: string[] = [];
+  const cameraAnswers = camera?.answers ?? [];
   const client = new VoiceClient(
     {
       clock,
@@ -248,6 +344,7 @@ function setup(
       random: () => 0.999999,
       createSession: (channel) => {
         asked.push(channel);
+        camLog.push(`session ${channel}`);
         return Promise.resolve(sessions.shift() ?? okSession());
       },
       report: (channel, state) => {
@@ -264,6 +361,7 @@ function setup(
       newRoom: () => {
         const room = new StubRoom();
         room.log = log;
+        room.camLog = camLog;
         room.connectError = rooms.length < failFirst;
         prepare?.(room, rooms.length);
         rooms.push(room);
@@ -277,14 +375,25 @@ function setup(
         shares.push(`stop ${channel}`);
         return Promise.resolve();
       },
+      claimCamera: (channel, startedAt) => {
+        camLog.push(startedAt === undefined ? `POST ${channel}` : `POST ${channel} ?started_at=${startedAt}`);
+        return Promise.resolve(cameraAnswers.shift() ?? cameraGranted);
+      },
+      stopCamera: (channel, startedAt) => {
+        camLog.push(`DELETE ${channel} ?started_at=${startedAt}`);
+        return Promise.resolve();
+      },
+      ...(camera?.choice === undefined ? {} : { camera: camera.choice }),
       ...(microphone === undefined ? {} : { microphone }),
       ...(processing === undefined ? {} : { processing }),
       ...(speakers === undefined ? {} : { outputSelection: speakers.selection, output: speakers.output ?? null }),
     },
     () => clock.now,
   );
-  return { client, clock, rooms, asked, reports, reportedIn, shares, log, answer, trace };
+  return { client, clock, rooms, asked, reports, reportedIn, shares, log, answer, trace, camLog };
 }
+
+const cameraGranted: CameraClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:01.000Z' } };
 
 async function joined(t = setup()) {
   t.client.join('general');
@@ -2117,5 +2226,410 @@ describe('deafen on a new room', () => {
     await settle();
     t.client.setDeafened(false);
     expect(t.rooms[0]?.deafened.at(-1)).toBe(false);
+  });
+});
+
+// ---- the camera through the client (ADR-015, design §6.2, §7, §11.5)
+
+const cameraStarted = '2026-10-16T00:00:01.000Z';
+const named = `?started_at=${cameraStarted}`;
+
+// Presence with this person (7) and another (8) in the room, whoever holds a
+// camera claim, and why this person's last one ended.
+const cameraPresence = (cameras: readonly number[], ended?: VoicePresenceV1['camera_ended']): VoicePresenceV1 => ({
+  schema: 'conch.voice_presence.v1',
+  channel_id: 1,
+  configured: true,
+  available: true,
+  rooms: [
+    {
+      participants: [7, 8].map((id) => ({
+        principal_id: id,
+        can_publish: true,
+        transmitting: false,
+        joined_at: '2026-10-16T00:00:00.000Z',
+        ...(cameras.includes(id) ? { camera: true } : {}),
+      })),
+    },
+  ],
+  ...(ended === undefined ? {} : { camera_ended: ended }),
+});
+
+async function cameraOn(t = setup()) {
+  await joined(t);
+  await t.client.startCamera();
+  await settle();
+  return t;
+}
+
+describe('the camera through the client', () => {
+  it('joining, unmuting, deafening and sharing never call the camera', async () => {
+    const t = await joined();
+    t.client.setMuted(true);
+    t.client.setMuted(false);
+    t.client.setDeafened(true);
+    t.client.setDeafened(false);
+    t.client.startShare();
+    await settle();
+    t.client.stopShare();
+    await settle();
+    expect(t.camLog.filter((l) => !l.startsWith('session'))).toEqual([]);
+    expect(t.client.snapshot().camera).toEqual({ kind: 'off', ended: null });
+  });
+
+  it('the button captures, claims un-named, waits for the grant and publishes; the call view opens', async () => {
+    const t = await cameraOn();
+    expect(t.camLog).toEqual(['session general', 'capture browser', 'POST general', 'grant', 'publish camera']);
+    expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'sending' }, cameraTrack: 'published', viewing: true });
+    expect(t.rooms[0]?.viewings).toEqual([false, true]);
+  });
+
+  it('is not offered in Watch only or on a grant that cannot publish (O14)', async () => {
+    const w = setup();
+    w.client.join('general', { watchOnly: true });
+    await settle();
+    await w.client.startCamera();
+    const l = await joined(setup([okSession(false)]));
+    await l.client.startCamera();
+    for (const t of [w, l]) expect(t.camLog.filter((x) => !x.startsWith('session'))).toEqual([]);
+  });
+
+  it('"Sending video" and "Camera in use" come from the local track, never from presence (S5)', async () => {
+    const t = await joined();
+    // Presence says this person holds a camera claim (another device's, or one
+    // displaced): this page sends nothing, and says so.
+    t.client.presence(cameraPresence([7, 8]));
+    expect(t.client.snapshot().cameraTrack).toBe('none');
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.camState = 'captured';
+    room.events?.onCameraChanged();
+    expect(t.client.snapshot().cameraTrack).toBe('captured');
+    room.camState = 'none';
+    room.events?.onCameraChanged();
+    t.client.presence(cameraPresence([7]));
+    expect(t.client.snapshot().cameraTrack).toBe('none');
+  });
+
+  it('receives only the cameras of others presence shows holding a claim', async () => {
+    const t = await joined();
+    t.client.presence(cameraPresence([7, 8]));
+    expect(t.rooms[0]?.claimedSets.at(-1)).toEqual([8]);
+    t.client.presence(cameraPresence([]));
+    expect(t.rooms[0]?.claimedSets.at(-1)).toEqual([]);
+  });
+
+  it('Show video and Hide video subscribe and let go; nothing opens the view by itself (O8)', async () => {
+    const t = await joined();
+    t.client.presence(cameraPresence([8]));
+    expect(t.client.snapshot().viewing).toBe(false);
+    t.client.viewVideo(true);
+    t.client.viewVideo(false);
+    expect(t.rooms[0]?.viewings).toEqual([false, true, false]);
+  });
+
+  it('mute, deafen and stopping a share leave the camera as it is (§7.6)', async () => {
+    const t = await cameraOn();
+    t.client.setMuted(true);
+    t.client.setDeafened(true);
+    t.client.startShare();
+    await settle();
+    t.client.stopShare();
+    await settle();
+    expect(t.camLog).not.toContain('stop camera');
+    expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'sending' }, cameraTrack: 'published' });
+  });
+
+  it('the button, off: the capture stops, then DELETE names the claim', async () => {
+    const t = await cameraOn();
+    t.camLog.length = 0;
+    await t.client.stopCamera();
+    expect(t.camLog).toEqual(['stop camera', `DELETE general ${named}`]);
+    expect(t.client.snapshot().cameraTrack).toBe('none');
+  });
+
+  it('leaving (and so signing out) stops the capture and releases the claim before the room is closed', async () => {
+    const t = await cameraOn();
+    t.camLog.length = 0;
+    await t.client.leave();
+    expect(t.camLog).toEqual(['stop camera', `DELETE general ${named}`, 'close']);
+    expect(t.client.snapshot()).toMatchObject({ viewing: false, cameraTrack: 'none' });
+  });
+
+  it('a change of channel releases the camera before the next session is asked for', async () => {
+    const t = await cameraOn();
+    t.camLog.length = 0;
+    await t.client.leave();
+    t.client.join('random');
+    await settle();
+    expect(t.camLog).toEqual(['stop camera', `DELETE general ${named}`, 'close', 'session random']);
+    // Off on joining: nothing is captured or claimed in the new channel.
+    expect(t.client.snapshot().camera).toEqual({ kind: 'off', ended: null });
+  });
+
+  it('a signed-out report stops and releases the camera with the connection', async () => {
+    const t = setup([okSession()], ['unauthorized']);
+    await cameraOn(t);
+    t.camLog.length = 0;
+    t.client.press();
+    await settle();
+    t.clock.advance(reportWait);
+    await settle();
+    expect(t.camLog.slice(0, 2)).toEqual(['stop camera', 'close']);
+    expect(t.camLog).toContain(`DELETE general ${named}`);
+    expect(t.client.snapshot().phase).toBe('stopped');
+  });
+
+  it.each([
+    ['duplicate_identity', false],
+    ['participant_removed', true],
+  ] as const)('%s stops the capture before anything else (S5); released by name: %s', async (cause, released) => {
+    const t = setup([okSession(), okSession()]);
+    await cameraOn(t);
+    t.camLog.length = 0;
+    t.rooms[0]?.events?.onDisconnected(cause);
+    await settle();
+    t.clock.advance(1000);
+    await settle();
+    expect(t.camLog.slice(0, 2)).toEqual(['stop camera', 'close']);
+    // Displaced, the claim is the other device's now, and ends idle there.
+    expect(t.camLog.includes(`DELETE general ${named}`)).toBe(released);
+    // The capture is not carried to the next connection, if there is one.
+    expect(t.camLog.filter((l) => l.startsWith('POST') || l.startsWith('adopt'))).toEqual([]);
+    expect(t.client.snapshot().cameraTrack).toBe('none');
+  });
+
+  it('a deleted room is the renewal once presence says rotated: the next connection adopts the capture with a POST naming the ended claim', async () => {
+    const adopted: CameraClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:40.000Z' } };
+    const t = setup([okSession(), okSession()], [], 0, false, undefined, undefined, undefined, undefined, { answers: [cameraGranted, adopted] });
+    await cameraOn(t);
+    t.camLog.length = 0;
+    t.client.presence(cameraPresence([], { reason: 'rotated', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }));
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    expect(t.camLog).toEqual(['keep camera', 'close', 'session general', `POST general ${named}`, 'adopt camera', 'grant', 'publish camera']);
+    expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'sending' }, cameraTrack: 'published' });
+  });
+
+  it('a deleted room presence never says was renewed is stopped and released (S5)', async () => {
+    const t = setup([okSession(), okSession()]);
+    await cameraOn(t);
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    t.clock.advance(5000);
+    await settle();
+    expect(t.camLog).toContain('stop kept camera');
+    expect(t.camLog).toContain(`DELETE general ${named}`);
+    expect(t.camLog.filter((l) => l.startsWith('POST'))).toEqual(['POST general']);
+    expect(t.client.snapshot().cameraTrack).toBe('none');
+  });
+
+  it('a refused next session stops and releases a capture held for it (S5)', async () => {
+    const t = setup([okSession(), { ok: false, failure: 'invalid', status: 404, code: 'channel_not_found' }]);
+    await cameraOn(t);
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    t.client.presence(cameraPresence([], { reason: 'rotated', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }));
+    await settle();
+    expect(t.camLog).toContain('stop kept camera');
+    expect(t.camLog.filter((l) => l.startsWith('POST'))).toEqual(['POST general']);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', cameraTrack: 'none' });
+  });
+
+  it('a full reconnect while holding the capture names the claim; stale stops it and says so', async () => {
+    const stale: CameraClaimResult = { ok: false, failure: 'invalid', status: 409, code: 'voice_camera_stale' };
+    const t = setup([okSession(), okSession()], [], 0, false, undefined, undefined, undefined, undefined, { answers: [cameraGranted, stale] });
+    await cameraOn(t);
+    t.rooms[0]?.events?.onDisconnected('lost');
+    await settle();
+    t.clock.advance(2000);
+    await settle();
+    expect(t.camLog.filter((l) => l.startsWith('POST'))).toEqual(['POST general', `POST general ${named}`]);
+    expect(t.camLog).toContain('stop kept camera');
+    expect(t.client.snapshot().camera).toEqual({ kind: 'failed', reason: 'stale' });
+  });
+
+  it("the SDK's reconnect names the claim", async () => {
+    const t = await cameraOn();
+    t.rooms[0]?.events?.onReconnecting();
+    t.rooms[0]?.events?.onReconnected();
+    await settle();
+    expect(t.camLog.filter((l) => l.startsWith('POST'))).toEqual(['POST general', `POST general ${named}`]);
+  });
+
+  it('camera_ended for any reason but rotated stops the capture and claims nothing again', async () => {
+    const t = setup([okSession(), okSession()]);
+    await cameraOn(t);
+    t.client.presence(cameraPresence([], { reason: 'operator', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }));
+    await settle();
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    await settle();
+    expect(t.camLog.filter((l) => l.startsWith('POST'))).toEqual(['POST general']);
+    expect(t.client.snapshot().camera).toEqual({ kind: 'off', ended: 'operator' });
+  });
+
+  it('the room renewed while sending: "Camera in use" for as long as the capture is held, never "none" (S5)', async () => {
+    const t = setup([okSession(), okSession()]);
+    await cameraOn(t);
+    // Every state the page is told of, not only the last.
+    const seen: string[] = [];
+    t.client.subscribe(() => {
+      seen.push(t.client.snapshot().cameraTrack);
+    });
+    t.client.presence(cameraPresence([], { reason: 'rotated', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }));
+    expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'resuming' }, cameraTrack: 'captured' });
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    expect(t.client.snapshot().cameraTrack).toBe('captured');
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.filter((s) => s === 'none')).toEqual([]);
+  });
+
+  it('the call view opens once the capture is given, and not for a camera refused (O8)', async () => {
+    const t = setup([okSession()], [], 0, false, (room) => {
+      room.captureError = new DOMException('no', 'NotAllowedError');
+    });
+    await cameraOn(t);
+    expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'failed', reason: 'blocked' }, viewing: false });
+    expect(t.rooms[0]?.viewings).toEqual([false]);
+  });
+
+  it('the microphone and the camera are independent: a microphone lost leaves the camera, and the camera lost leaves the microphone', async () => {
+    const t = await cameraOn();
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.events?.onMicrophoneLost();
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ missing: true, camera: { kind: 'sending' } });
+    room.events?.onCameraEnded('device');
+    await settle();
+    expect(t.client.snapshot().camera).toEqual({ kind: 'failed', reason: 'disconnected' });
+    expect(t.client.snapshot().phase).toBe('connected');
+  });
+});
+
+describe('the camera chosen (N7)', () => {
+  const desk: Camera = { id: 'old-id', label: 'Desk camera' };
+  it('is found again by its name when exactly one camera carries it, and captured exactly', async () => {
+    const t = setup([okSession()], [], 0, false, (room) => {
+      room.cameraList = [{ id: 'new-id', label: 'Desk camera' }, { id: 'cam-2', label: 'Laptop camera' }];
+    }, undefined, undefined, undefined, { choice: desk });
+    await cameraOn(t);
+    expect(t.camLog[1]).toBe('capture new-id');
+    expect(t.client.snapshot().cameraChoice).toEqual({ id: 'new-id', label: 'Desk camera' });
+  });
+
+  it.each([
+    ['two cameras of its name', [{ id: 'a', label: 'Desk camera' }, { id: 'b', label: 'Desk camera' }]],
+    ['none', [{ id: 'default', label: 'Default camera' }, { id: 'cam-2', label: 'Laptop camera' }]],
+  ])('with %s, is not connected: nothing is captured, never the default', async (_what, list) => {
+    const t = setup([okSession()], [], 0, false, (room) => {
+      room.cameraList = list;
+    }, undefined, undefined, undefined, { choice: desk });
+    await cameraOn(t);
+    expect(t.camLog.filter((l) => !l.startsWith('session'))).toEqual([]);
+    expect(t.client.snapshot().camera).toEqual({ kind: 'failed', reason: 'not_connected' });
+  });
+
+  it('a camera chosen while on that cannot be had stops and releases the camera, and takes no other', async () => {
+    const t = await cameraOn();
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.switchError = new DOMException('gone', 'OverconstrainedError');
+    await t.client.chooseCamera({ id: 'cam-2', label: 'Laptop camera' });
+    await settle();
+    expect(t.camLog.slice(-2)).toEqual(['switch cam-2', `DELETE general ${named}`]);
+    expect(t.client.snapshot().camera).toEqual({ kind: 'failed', reason: 'not_connected' });
+    expect(t.camLog.filter((l) => l.startsWith('capture'))).toEqual(['capture browser']);
+  });
+
+  it('a switch that fails after the camera was turned off and on again leaves the new camera alone', async () => {
+    const t = setup([okSession()], [], 0, false, undefined, undefined, undefined, undefined, { answers: [cameraGranted, { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:09.000Z' } }] });
+    await cameraOn(t);
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.holdSwitchCamera = true;
+    const choosing = t.client.chooseCamera({ id: 'cam-2', label: 'Laptop camera' });
+    await settle();
+    await t.client.stopCamera();
+    await t.client.startCamera();
+    await settle();
+    expect(t.client.snapshot().camera).toEqual({ kind: 'sending' });
+    t.camLog.length = 0;
+    room.failHeldSwitch?.(new DOMException('superseded', 'OverconstrainedError'));
+    await choosing;
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'sending' }, cameraTrack: 'published' });
+    expect(t.camLog).toEqual([]);
+  });
+
+  it('leaving forgets who holds a camera claim: the next connection receives nobody until presence says', async () => {
+    const t = setup([okSession(), okSession()]);
+    await joined(t);
+    t.client.presence(cameraPresence([8]));
+    await t.client.leave();
+    t.client.join('general');
+    await settle();
+    expect(t.rooms[1]?.claimedSets[0]).toEqual([]);
+  });
+
+  it('a choice not connected is said through the camera, and joining again forgets it', async () => {
+    const t = setup([okSession(), okSession()], [], 0, false, (room) => {
+      room.cameraList = [{ id: 'cam-2', label: 'Laptop camera' }];
+    }, undefined, undefined, undefined, { choice: desk });
+    await cameraOn(t);
+    expect(t.client.snapshot().camera).toEqual({ kind: 'failed', reason: 'not_connected' });
+    await t.client.leave();
+    t.client.join('random');
+    await settle();
+    expect(t.client.snapshot().camera).toEqual({ kind: 'off', ended: null });
+  });
+
+  it('is found again under a new id when the cameras are read: at a connection, and when devices change', async () => {
+    let list: readonly Camera[] = [{ id: 'cam-2', label: 'Laptop camera' }];
+    const t = setup([okSession()], [], 0, false, (room) => {
+      room.cameras = () => Promise.resolve(list);
+    }, undefined, undefined, undefined, { choice: desk });
+    await joined(t);
+    expect(t.client.snapshot().cameraChoice).toEqual(desk);
+    expect(t.client.snapshot().cameras).toEqual(list);
+    list = [...list, { id: 'plugged-in', label: 'Desk camera' }];
+    t.rooms[0]?.events?.onDevicesChanged();
+    await settle();
+    expect(t.client.snapshot().cameras).toEqual(list);
+    expect(t.client.snapshot().cameraChoice).toEqual({ id: 'plugged-in', label: 'Desk camera' });
+  });
+
+  it('cameraToUse finds the choice again before a test capture, and says false when it is not connected', async () => {
+    const t = setup([okSession()], [], 0, false, (room) => {
+      room.cameraList = [{ id: 'renamed', label: 'Desk camera' }];
+    }, undefined, undefined, undefined, { choice: desk });
+    await joined(t);
+    expect(await t.client.cameraToUse()).toBe('renamed');
+    const u = setup([okSession()], [], 0, false, (room) => {
+      room.cameraList = [];
+    }, undefined, undefined, undefined, { choice: desk });
+    await joined(u);
+    expect(await u.client.cameraToUse()).toBe(false);
+  });
+
+  it('a camera chosen before the camera is published is switched to once, by the start itself, before the publish', async () => {
+    const t = setup([okSession(), okSession()]);
+    await cameraOn(t);
+    t.rooms[0]?.events?.onDisconnected('lost');
+    await settle();
+    expect(t.client.snapshot().camera).toEqual({ kind: 'resuming' });
+    await t.client.chooseCamera({ id: 'cam-2', label: 'Laptop camera' });
+    // Not switched here: nothing is captured on any room now.
+    expect(t.camLog.filter((l) => l.startsWith('switch'))).toEqual([]);
+    t.clock.advance(2000);
+    await settle();
+    const after = t.camLog.slice(t.camLog.indexOf('adopt camera'));
+    expect(after).toEqual(['adopt camera', 'switch cam-2', 'grant', 'publish camera']);
+  });
+
+  it('a camera chosen while on moves the capture to it, exactly', async () => {
+    const t = await cameraOn();
+    await t.client.chooseCamera({ id: 'cam-2', label: 'Laptop camera' });
+    expect(t.camLog.at(-1)).toBe('switch cam-2');
+    expect(t.client.snapshot().cameraChoice).toEqual({ id: 'cam-2', label: 'Laptop camera' });
   });
 });
