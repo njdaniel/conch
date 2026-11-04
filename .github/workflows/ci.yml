@@ -553,6 +553,7 @@ jobs:
       # The self-hosted runner has Chromium's system libraries and no sudo.
       - name: browser (self-hosted)
         if: runner.environment == 'self-hosted'
+        working-directory: web
         run: npx playwright install chromium
 
       - name: web-e2e
