@@ -97,7 +97,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use conch_voice_audio::{CountingSink, ToneSource, WavSource};
-use dmn_audio::NodeTable;
 use tokio::sync::mpsc;
 
 use crate::audio::PipeWire;
@@ -344,6 +343,13 @@ pub fn managed(
     result
 }
 
+/// The platform's devices as the neutral table: connects, reads the list and lets go. On a
+/// platform with no audio backend that is [`Error::Audio`] holding `NoBackend`, which
+/// `devices` prints as one line, as for a PipeWire that cannot be reached.
+fn list_devices(wait: Duration) -> Result<devices::DeviceTable, Error> {
+    PipeWire::connect()?.list_devices(wait)
+}
+
 /// `conch-voice devices`: the microphones and speakers PipeWire has, by the names the
 /// configuration takes, and then the keyboards under `/dev/input/by-id`, whether this user
 /// can read each, and the udev rule that would grant one. No audio device is opened and
@@ -362,11 +368,7 @@ pub fn devices(json: bool, environment: &Environment, scrubber: &Scrubber) -> Re
         json,
         environment,
         scrubber,
-        || {
-            PipeWire::connect()
-                .map(|pipewire| pipewire.nodes(audio::LISTING_WAIT))
-                .map_err(|error| error.to_string())
-        },
+        || list_devices(audio::LISTING_WAIT).map_err(|error| error.to_string()),
         |out| {
             devices::report(
                 Path::new(devices::BY_ID),
@@ -390,15 +392,18 @@ pub fn devices(json: bool, environment: &Environment, scrubber: &Scrubber) -> Re
 /// # Errors
 ///
 /// [`Error::Output`] if `out` cannot be written to.
-pub fn devices_with(
+pub fn devices_with<T>(
     json: bool,
     environment: &Environment,
     scrubber: &Scrubber,
-    connect: impl FnOnce() -> Result<NodeTable, String>,
+    connect: impl FnOnce() -> Result<T, String>,
     keyboards: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
     out: &mut dyn std::io::Write,
     err: &mut dyn std::io::Write,
-) -> Result<(), Error> {
+) -> Result<(), Error>
+where
+    for<'a> devices::DeviceTable: From<&'a T>,
+{
     if json {
         let (config, refused) = devices::config_view(environment);
         if let Some(refused) = refused {
