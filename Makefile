@@ -86,10 +86,14 @@ web-check: web-node
 # version pins; fetch it once with `cd web && npx playwright install chromium`
 # (CI uses --with-deps, which needs root; do not here). The suite starts and
 # removes its own server and root, and leaves nothing running.
+# E2E_ARGS goes to Playwright as is: CI runs half the specs in each of two
+# jobs with E2E_ARGS=--shard=1/2 and --shard=2/2 (#1290). Empty locally.
+E2E_ARGS ?=
+
 web-e2e: web-node
 	cd web && npm ci --no-audit
 	@cd web && node --input-type=module -e "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; if (!existsSync(chromium.executablePath())) { console.error('web-e2e: FAIL: the browser Playwright pins is not installed; run: cd web && npx playwright install chromium'); process.exit(1); }"
-	cd web && npm run e2e
+	cd web && npm run e2e -- $(E2E_ARGS)
 
 # The desktop shell under desktop/ (issue #940, ADR-007, linux-desktop.md): an
 # Electron app that serves the web client from packaged files. desktop-check
