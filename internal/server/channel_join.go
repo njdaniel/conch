@@ -71,6 +71,7 @@ func (s *Server) handleChannelDirectory(w http.ResponseWriter, r *http.Request) 
 			Default:    l.IsDefault,
 			Joined:     l.Joined,
 			Manages:    l.Joined && l.Manages,
+			ArchivedAt: archivedAtWire(l.Channel),
 		}
 		if all {
 			n := l.Members
@@ -124,6 +125,11 @@ func (s *Server) handleJoinChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, store.ErrChannelNotJoinable):
 		s.denyForbidden(w, r, caller, schema.ErrorCodeChannelNotJoinable, "you may not join this channel")
+		return
+	case errors.Is(err, store.ErrChannelArchived):
+		// The store's archived guard (issue #844), after the private
+		// channel's uniform not-found.
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
 		return
 	default:
 		slog.ErrorContext(ctx, "channels: join failed", "channel", channel.ID, "error", err)

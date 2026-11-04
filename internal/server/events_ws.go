@@ -1269,6 +1269,7 @@ func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
 			CreatedAt:  schema.NewTimestamp(ch.CreatedAt),
 			Visibility: ch.Visibility,
 			Default:    ch.IsDefault,
+			ArchivedAt: archivedAtWire(ch),
 		})
 	}
 	return true

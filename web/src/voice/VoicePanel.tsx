@@ -42,6 +42,7 @@
 // cameras are a strip beside it (design §7.4).
 import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
+import { archivedLine } from '../archived';
 import { Avatar, Glyph } from '../Icons';
 import type { ChannelV0 } from '../schema/channel';
 import { MicTestShown, onPhoneCamera, VoiceLive, VoiceStrip } from '../phone';
@@ -126,6 +127,7 @@ export function VoicePanel({
   channels = [],
   occupancy = nobody,
   cameraAllowed = false,
+  archived = false,
   onOpen,
 }: {
   readonly voice: VoiceControl;
@@ -136,6 +138,9 @@ export function VoicePanel({
   // that says where else people are talking.
   readonly channels?: readonly ChannelV0[];
   readonly occupancy?: InVoice;
+  // The channel on screen is archived (issue #844): it has no voice. Someone
+  // in voice there is ended by the server, and the strip follows.
+  readonly archived?: boolean;
   // Whether whoami says the viewer may turn a camera on (use_camera). The
   // server decides each claim; this only offers the button.
   readonly cameraAllowed?: boolean;
@@ -267,6 +272,17 @@ export function VoicePanel({
           <p className="voice-phase">{phaseLabel[state.phase]}</p>
           {awayLine}
           {state.why === null ? null : <p role="status" className="hint">{state.why}</p>}
+        </div>
+      </section>
+    );
+  }
+  if (!inVoice && archived) {
+    return (
+      <section aria-label="Voice" className="voice">
+        <div className="voice-state">
+          <p className="voice-phase">Not in voice</p>
+          <p className="hint">Voice is off. {archivedLine}</p>
+          {awayLine}
         </div>
       </section>
     );

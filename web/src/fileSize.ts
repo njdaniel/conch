@@ -1,3 +1,4 @@
+import { archivedLine, channelArchived } from './archived';
 // formatSize writes a byte count the way a file chip shows it: "812 B",
 // "3.4 KB", "10 MB". Decimal units, as the server's limit is stated in bytes.
 export function formatSize(bytes: number): string {
@@ -18,6 +19,7 @@ export function formatSize(bytes: number): string {
 // 413 (file_too_large) says its limit in bytes; the line names the file and
 // states that limit.
 export function uploadRefusalLine(filename: string, code: string | undefined, reason: string): string {
+  if (code === channelArchived) return archivedLine;
   if (code !== 'file_too_large') return reason;
   const limit = /(\d+)\s*bytes/.exec(reason)?.[1];
   return limit === undefined

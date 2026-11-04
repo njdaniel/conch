@@ -121,6 +121,11 @@ func (s *Server) postMessage(
 		writeError(w, http.StatusBadRequest, errInvalidFileAttachment.Code, errInvalidFileAttachment.Message)
 		return
 	}
+	if errors.Is(err, store.ErrChannelArchived) {
+		// The store's archived guard (issue #844): nothing was stored.
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
+		return
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "messages: insert failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -625,6 +630,9 @@ func (s *Server) scopedPostRefusal(ctx context.Context, err error, channelID, au
 	case errors.Is(err, store.ErrNotChannelMember):
 		// Removed from the channel after the caller's membership check.
 		return errChannelNotFound
+	case errors.Is(err, store.ErrChannelArchived):
+		// The store's archived guard (issue #844): nothing was stored.
+		return errChannelArchived
 	default:
 		slog.ErrorContext(ctx, "messages: insert scoped failed", "error", err)
 		return errInternal
@@ -762,6 +770,8 @@ func scopedPostStatus(code string) int {
 		return http.StatusNotFound
 	case errForbidden.Code:
 		return http.StatusForbidden
+	case errChannelArchived.Code:
+		return http.StatusConflict
 	case "invalid_audience", errInvalidFileAttachment.Code:
 		return http.StatusBadRequest
 	default:

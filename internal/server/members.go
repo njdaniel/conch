@@ -537,6 +537,10 @@ func (s *Server) writeMemberError(w http.ResponseWriter, r *http.Request, err er
 		} else {
 			writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		}
+	case errors.Is(err, store.ErrChannelArchived):
+		// The store's archived guard (issue #844): said after the actor's
+		// standing is known, so only to someone who may see the channel.
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
 	case errors.Is(err, store.ErrManageNotAllowed):
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 	case errors.Is(err, store.ErrPrincipalNotFound):

@@ -345,3 +345,32 @@ describe('a half-typed reply kept across a reload (issue #1080)', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 });
+
+describe('an archived channel (issue #844)', () => {
+  const archived = (messages: readonly MessageV2[]) => render(cloneElement(conversation(messages), { archived: true }));
+
+  it('replaces the composer with one line, and still shows its history', () => {
+    archived([root(), reply(2)]);
+    expect(screen.getByText('This channel is archived.')).toBeTruthy();
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Send' })).toBeNull();
+    expect(screen.getByText('root')).toBeTruthy();
+  });
+
+  it('keeps the composer for a live channel', () => {
+    view([root()]);
+    expect(screen.queryByText('This channel is archived.')).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Message #general' })).toBeTruthy();
+  });
+
+  it('opens a thread to read, and takes no reply in it', async () => {
+    vi.spyOn(api, 'loadThread').mockResolvedValue({ ok: true, value: { messages: [root(), reply(2)] } });
+    archived([root(), reply(2)]);
+    fireEvent.click(screen.getByRole('button', { name: openName }));
+    const thread = await screen.findByRole('region', { name: threadName });
+    expect(within(thread).getByText('reply 2')).toBeTruthy();
+    expect(within(thread).queryByRole('textbox')).toBeNull();
+    expect(within(thread).queryByRole('button', { name: 'Send reply' })).toBeNull();
+    expect(within(thread).getByText('This channel is archived.')).toBeTruthy();
+  });
+});

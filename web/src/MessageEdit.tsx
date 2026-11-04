@@ -5,6 +5,7 @@
 // its own line.
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
+import { archivedLine, channelArchived } from './archived';
 import { Linkified } from './Linkified';
 import { useCoarsePointer } from './phone';
 import { fileAttachmentPayloadSchema } from './schema/file';
@@ -241,6 +242,8 @@ function refusalOf(result: Exclude<api.EditResult, { readonly ok: true }>, atLim
       return { line: 'This message can no longer be edited: it is more than an hour old.', final: true };
     case 'message_edit_limit_reached':
       return { line: limitLine, final: true };
+    case channelArchived:
+      return { line: archivedLine, final: true };
     case 'message_not_editable':
       return { line: "This message can't be edited.", final: true };
     case 'message_not_found':

@@ -151,7 +151,7 @@ func voiceRoomPublishes(room store.VoiceRoom) bool { return room.NetID == 0 }
 // looked at: held by someone else is 409 voice_share_busy.
 func (s *Server) handleVoiceShareStart(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	channel, caller, ok := s.voiceSessionCaller(w, r)
+	channel, caller, ok := s.voiceClaimCaller(w, r)
 	if !ok {
 		return
 	}

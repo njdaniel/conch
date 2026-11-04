@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -209,7 +210,7 @@ func (s *Server) handleChannelSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	res, err := s.store.ChannelSettings(ctx, auditActor(ctx), actorID, id, store.ChannelSettingsChange{Visibility: req.Visibility, Default: req.Default}, s.now())
+	res, err := s.store.ChannelSettings(ctx, auditActor(ctx), actorID, id, store.ChannelSettingsChange{Visibility: req.Visibility, Default: req.Default, Archived: req.Archived}, s.now())
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeChannelNotFound(w)
@@ -220,10 +221,21 @@ func (s *Server) handleChannelSettings(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, store.ErrChannelSettingsConflict):
 		writeError(w, http.StatusConflict, schema.ErrorCodeChannelSettingsConflict, "a default channel must be public: unmark it to make it private, or make it public to mark it")
 		return
+	case errors.Is(err, store.ErrChannelArchiveDefault):
+		// Decision 4 (issue #844): a default channel is never archived, so
+		// archiving cannot turn open sign-up off as a side effect.
+		writeError(w, http.StatusConflict, schema.ErrorCodeChannelArchiveDefault, "a default channel cannot be archived: stop it being a default channel first")
+		return
 	case err != nil:
 		slog.ErrorContext(ctx, "channels: settings failed", "channel", id, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
+	}
+	if res.Changed && req.Archived != nil && *req.Archived && res.Channel.Archived() {
+		// Archived by this request (the store's archived guard now refuses
+		// every write in the channel): voice in progress ends before the
+		// answer (issue #844, decision 7). Restore starts nothing.
+		s.voiceChannelArchived(ctx, id)
 	}
 	if res.Changed {
 		// Every open events socket of the channel is sent the channel as it
@@ -401,10 +413,26 @@ func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// archivedAtWire is a channel's archive time as the wire carries it: nil while
+// the channel is live, so archived_at is omitted (issue #844).
+func archivedAtWire(channel store.Channel) *schema.Timestamp {
+	if !channel.Archived() {
+		return nil
+	}
+	ts := schema.NewTimestamp(channel.ArchivedAt)
+	return &ts
+}
+
 func channelFromStore(channel store.Channel) schema.ChannelV0 {
+	var archivedAt *time.Time
+	if channel.Archived() {
+		at := channel.ArchivedAt.UTC()
+		archivedAt = &at
+	}
 	return schema.ChannelV0{
-		ID:   channel.ID,
-		Name: channel.Name,
+		ArchivedAt: archivedAt,
+		ID:         channel.ID,
+		Name:       channel.Name,
 		// The wire timestamp is always UTC; store values carry the server's
 		// local zone.
 		CreatedAt:  channel.CreatedAt.UTC(),

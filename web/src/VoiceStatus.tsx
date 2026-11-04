@@ -1,6 +1,7 @@
 // Where voice appears: join and leave, mute and deafen, push-to-talk or an open
 // microphone, and who is in the room and who is talking. The SDK and the
 // microphone are reached only from src/voice/.
+import { isArchived } from './archived';
 import type { ChannelV0 } from './schema/channel';
 import type { InVoice } from './voice/useOccupancy';
 import { VoicePanel } from './voice/VoicePanel';
@@ -52,5 +53,5 @@ export function VoiceStatus({
     presence: snapshot.kind === 'presence' ? snapshot.presence : null,
     people,
   });
-  return <VoicePanel voice={voice} viewer={viewer} people={named} viewed={channel} channels={channels} occupancy={occupancy} cameraAllowed={cameraAllowed} onOpen={onOpen} />;
+  return <VoicePanel voice={voice} viewer={viewer} people={named} viewed={channel} archived={isArchived(channels.find((c) => c.name === channel))} channels={channels} occupancy={occupancy} cameraAllowed={cameraAllowed} onOpen={onOpen} />;
 }

@@ -1948,6 +1948,9 @@ export async function renameChannel(id: number, from: string, name: string): Pro
 // carries the server's code: channel_settings_conflict (a default channel must
 // be public), permission_denied, channel_not_found. The answer is the channel
 // as it now is, and whether unmarking the last default turned open sign-up off.
+// `archived` (issue #844) archives or restores the channel, for the same
+// holders: channel_archive_default refuses archiving a default channel, and
+// the answer's channel carries archived_at while it is archived.
 export async function channelSettings(id: number, request: ChannelSettingsRequestV1): Promise<InviteResult<ChannelSettingsResponseV1>> {
   return readSent(await authedSend(call('channelSettings', { id }), request), channelSettingsResponseV1);
 }

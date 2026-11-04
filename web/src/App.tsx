@@ -16,6 +16,7 @@ import { FirstRun } from './FirstRun';
 import { Lobby } from './Lobby';
 import { ReportProblem } from './Report';
 import { OperatorWarning } from './OperatorWarning';
+import { archivedLine, channelArchived, isArchived } from './archived';
 import { ChannelSettingsAsk } from './ChannelSettingsAsk';
 import { RenameChannel } from './RenameChannel';
 import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, showChannelInAddress, takeLinkFromAddress } from './route';
@@ -475,7 +476,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const onChannel = useCallback(
     (doc: ChannelDocV1) => {
       renamed(doc.channel_id, doc.name);
-      dispatchChannels({ type: 'settings', id: doc.channel_id, visibility: doc.visibility, default: doc.default });
+      dispatchChannels({ type: 'settings', id: doc.channel_id, visibility: doc.visibility, default: doc.default, archivedAt: doc.archived_at });
     },
     [renamed, dispatchChannels],
   );
@@ -797,7 +798,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       } else {
         // A refusal stays as a Failed line with Retry and Dismiss, so the text
         // is never lost; the server's own line is shown beside the composer.
-        if (result.outcome === 'refused') dispatchTargets({ type: 'refused', channel: name, line: result.reason });
+        // A channel archived under the page: say so in the page's words, and read
+        // the list again so the composer gives way (issue #844).
+        const archived = result.outcome === 'refused' && result.code === channelArchived;
+        if (result.outcome === 'refused') dispatchTargets({ type: 'refused', channel: name, line: archived ? archivedLine : result.reason });
+        if (archived) refreshChannels();
         if (result.outcome === 'refused' && result.code === api.channelNotFound) onMissing(send.channelId);
         const uncertainAttachment = result.outcome === 'refused' && result.code === 'invalid_file_attachment';
         dispatchChat({
@@ -809,7 +814,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         });
       }
     });
-  }, [activeSend, nameOf, markSent, dispatchChat, onMissing]);
+  }, [activeSend, nameOf, markSent, dispatchChat, onMissing, refreshChannels]);
 
   const uploadOne = useCallback(async (send: FrozenSend, attachment: DraftAttachment): Promise<DraftAttachment> => {
     if (attachment.status === 'ready') return attachment;
@@ -1770,7 +1775,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               channel={channel}
               change={change}
               onApplied={(now) => {
-                dispatchChannels({ type: 'settings', id: now.id, visibility: now.visibility, default: now.default });
+                dispatchChannels({ type: 'settings', id: now.id, visibility: now.visibility, default: now.default, archivedAt: now.archived_at });
               }}
               onUnauthorized={onUnauthorized}
               onClose={close}
@@ -1867,6 +1872,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 channelId={channelId}
                 channel={selected}
                 {...(currentChannel?.visibility === undefined ? {} : { visibility: currentChannel.visibility })}
+                archived={isArchived(currentChannel)}
                 chat={chatFor(chat, selected)}
                 live={live.status}
                 people={live.people}

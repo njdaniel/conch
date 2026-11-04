@@ -71,6 +71,74 @@ func TestAdminChannelSettings(t *testing.T) {
 	}
 }
 
+// `channel settings --archive|--restore` (issue #844) against a real handler:
+// the answer says what happened, `channels list` marks the archived channel
+// (for the operator's --all listing and the member's own), the default
+// channel refuses, and restoring puts it back.
+func TestAdminChannelArchiveRestore(t *testing.T) {
+	e := newAdminEnv(t)
+	for _, args := range [][]string{{"channel", "create", "old"}, {"channel", "settings", "old", "--public"}} {
+		if _, _, err := e.admin(t, e.operatorToken, "", args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.makeDefaultChannel(t)
+	steps := []struct {
+		name       string
+		token      string
+		args       []string
+		wantStdout string
+		wantCode   string
+	}{
+		{"archive", e.operatorToken, []string{"channel", "settings", "old", "--archive"}, "channel old is now archived: it keeps its history and members and refuses anything new until it is restored\n", ""},
+		{"archived again changes nothing", e.operatorToken, []string{"channel", "settings", "old", "--archive"}, "channel old is now archived: it keeps its history and members and refuses anything new until it is restored\n", ""},
+		{"the default channel refuses", e.operatorToken, []string{"channel", "settings", "ops", "--archive"}, "", schema.ErrorCodeChannelArchiveDefault},
+		{"archive and default together refuse", e.operatorToken, []string{"channel", "settings", "old", "--default", "on"}, "", schema.ErrorCodeChannelArchiveDefault},
+		{"a member may not", e.memberToken, []string{"channel", "settings", "old", "--restore"}, "", "forbidden"},
+		{"list marks it", e.operatorToken, []string{"channels", "list", "--all"}, "", ""},
+		{"restore", e.operatorToken, []string{"channel", "settings", "old", "--restore"}, "channel old is restored: posting, joining and voice work again\n", ""},
+	}
+	for _, st := range steps {
+		t.Run(st.name, func(t *testing.T) {
+			run := e.admin
+			if st.args[0] == "channels" {
+				run = func(t *testing.T, token, _ string, args ...string) (string, string, error) {
+					return e.cli(t, token, args...)
+				}
+			}
+			stdout, _, err := run(t, st.token, "", st.args...)
+			if st.wantCode != "" {
+				if !IsServerCode(err, st.wantCode) {
+					t.Fatalf("error = %v, want the server's %s", err, st.wantCode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.name == "list marks it" {
+				for _, line := range strings.Split(strings.TrimSuffix(stdout, "\n"), "\n") {
+					fields := strings.Fields(line)
+					if len(fields) < 7 {
+						t.Fatalf("line %q has %d fields, want 7", line, len(fields))
+					}
+					if archived := fields[6] == "old"; (fields[5] == "archived") != archived {
+						t.Errorf("line %q: archived column = %q", line, fields[5])
+					}
+				}
+				return
+			}
+			if stdout != st.wantStdout {
+				t.Errorf("stdout = %q, want %q", stdout, st.wantStdout)
+			}
+		})
+	}
+	stdout, _, err := e.cli(t, e.operatorToken, "channels", "list", "--all")
+	if err != nil || strings.Contains(stdout, "archived") {
+		t.Errorf("after restore, channels list --all = %q, %v; want no archived mark", stdout, err)
+	}
+}
+
 // The default mark can be refused with a warning raised; the warning is shown
 // in the permissions command's words.
 func TestAdminChannelSettingsRefusals(t *testing.T) {
@@ -120,9 +188,10 @@ func TestAdminChannelSettingsUsageErrors(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"nothing to change", []string{"channel", "settings", "ops"}, "give at least one of --public, --private and --default"},
+		{"nothing to change", []string{"channel", "settings", "ops"}, "give at least one of --public, --private, --default, --archive and --restore"},
 		{"both visibilities", []string{"channel", "settings", "ops", "--public", "--private"}, "--public or --private, not both"},
 		{"default needs on or off", []string{"channel", "settings", "ops", "--default", "yes"}, "--default must be on or off"},
+		{"both archive and restore", []string{"channel", "settings", "ops", "--archive", "--restore"}, "--archive or --restore, not both"},
 		{"no channel", []string{"channel", "settings", "--public"}, "expected <channel>"},
 	}
 	for _, tt := range tests {
@@ -251,6 +320,8 @@ func TestCommunityCommandsRefusals(t *testing.T) {
 		{"channels leave", []string{"channels", "leave", "general"}, communityOnly},
 		{"channels create", []string{"channels", "create", "general"}, communityOnly},
 		{"channel settings", []string{"admin", "channel", "settings", "general", "--private"}, operatorOnly},
+		{"channel settings --archive", []string{"admin", "channel", "settings", "general", "--archive"}, operatorOnly},
+		{"channel settings --restore", []string{"admin", "channel", "settings", "general", "--restore"}, operatorOnly},
 		{"principal voice", []string{"admin", "principal", "voice", "9", "off"}, voiceForbidden},
 		{"directory members", []string{"admin", "directory", "members"}, communityOnly},
 		{"invite create", []string{"admin", "invite", "create"}, neutral},
@@ -321,6 +392,7 @@ func TestCommunityCommandsNamedConflicts(t *testing.T) {
 		{"join, not joinable", []string{"channels", "join", "general"}, 403, schema.ErrorCodeChannelNotJoinable, "you cannot join this channel"},
 		{"leave, last member", []string{"channels", "leave", "general"}, 409, schema.ErrorCodeChannelLastMember, "you are the last member of this private channel"},
 		{"settings conflict", []string{"admin", "channel", "settings", "general", "--private"}, 409, schema.ErrorCodeChannelSettingsConflict, "a default channel must be public"},
+		{"archive, a default channel", []string{"admin", "channel", "settings", "general", "--archive"}, 409, schema.ErrorCodeChannelArchiveDefault, "a default channel cannot be archived"},
 		{"voice for an agent", []string{"admin", "principal", "voice", "9", "on"}, 409, schema.ErrorCodeNotAPerson, "agents do not use voice"},
 		{"landing channel beyond the maker", []string{"admin", "invite", "create", "--landing-channel", "general"}, 403, schema.ErrorCodeInviteGrantExceedsInviter, "that link would give more than you have"},
 		{"retired invite", []string{"admin", "invite", "create"}, 409, schema.ErrorCodeInviteKindRetired, "per-channel invites are retired"},

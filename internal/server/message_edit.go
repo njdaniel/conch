@@ -99,7 +99,7 @@ func writeMessageEditError(w http.ResponseWriter, serr *schema.Error) {
 		status = http.StatusNotFound
 	case schema.ErrorCodeHumanRequired:
 		status = http.StatusForbidden
-	case errMessageNotEditable.Code, errMessageEditWindowClosed.Code, errMessageEditLimitReached.Code:
+	case errMessageNotEditable.Code, errMessageEditWindowClosed.Code, errMessageEditLimitReached.Code, errChannelArchived.Code:
 		status = http.StatusConflict
 	case errMessageEditRequiresAuth.Code, "invalid_request":
 		status = http.StatusBadRequest
@@ -120,6 +120,8 @@ func messageEditStoreError(r *http.Request, err error) *schema.Error {
 		// Removed from the channel (or disabled) after the gate: the answer
 		// a stranger gets.
 		return errChannelNotFound
+	case errors.Is(err, store.ErrChannelArchived):
+		return errChannelArchived
 	case errors.Is(err, store.ErrMessageNotFound):
 		return errMessageNotFound
 	case errors.Is(err, store.ErrMessageNotEditable):

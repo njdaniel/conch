@@ -126,7 +126,7 @@ Usage:
   conch channels leave [--server <url>] [--json] <channel>
   conch channels create [--server <url>] [--json] [--private] <name>
   conch admin channel create [--server <url>] [--json] <name>
-  conch admin channel settings [--server <url>] [--json] [--public|--private] [--default on|off] <channel>
+  conch admin channel settings [--server <url>] [--json] [--public|--private] [--default on|off] [--archive|--restore] <channel>
   conch admin principal create [--server <url>] [--json] --kind human|agent <name>
   conch admin principal disable|enable [--server <url>] [--json] <id>
   conch admin principal rename [--server <url>] [--json] <id> <name>

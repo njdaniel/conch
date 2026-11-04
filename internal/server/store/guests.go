@@ -439,6 +439,11 @@ func createGuestTx(ctx context.Context, tx execer, actor string, g NewGuest, p p
 // its approvals and a history bound at the channel's last message, and
 // audits member_added. addedBy is the acting principal, or 0.
 func admitGuestTx(ctx context.Context, tx execer, actor string, channelID, pid, addedBy int64, now time.Time) error {
+	// The archived guard of every membership add (issue #844), fail closed
+	// for a path that reached here with an archived channel.
+	if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
+		return err
+	}
 	watermark, err := historyWatermarkTx(ctx, tx, channelID)
 	if err != nil {
 		return err

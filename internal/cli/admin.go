@@ -112,7 +112,7 @@ type adminCommand struct {
 var adminCommands = []adminCommand{
 	{group: "channel", verb: "create", args: []string{"name"}, run: adminChannelCreate},
 	// The community model (ADR-013, issue #994), in admin_community.go.
-	{group: "channel", verb: "settings", args: []string{"channel"}, flags: "[--public|--private] [--default on|off] ",
+	{group: "channel", verb: "settings", args: []string{"channel"}, flags: "[--public|--private] [--default on|off] [--archive|--restore] ",
 		bind: bindChannelSettings, run: adminChannelSettings},
 	{group: "principal", verb: "create", args: []string{"name"}, flags: "--kind human|agent ", required: []string{"kind"},
 		bind: func(fs *flag.FlagSet, o *adminOpts) { fs.StringVar(&o.kind, "kind", "", "human or agent") },

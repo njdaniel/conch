@@ -180,7 +180,7 @@ func (s *Server) handleVoiceCameraStart(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	channel, caller, ok := s.voiceSessionCaller(w, r)
+	channel, caller, ok := s.voiceClaimCaller(w, r)
 	if !ok {
 		return
 	}

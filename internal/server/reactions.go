@@ -129,6 +129,8 @@ func reactionStoreError(ctx context.Context, err error) *schema.Error {
 	case errors.Is(err, store.ErrManagerRefused):
 		// Lost manage_channels or the manager's mark after the gate.
 		return errModerationRefused
+	case errors.Is(err, store.ErrChannelArchived):
+		return errChannelArchived
 	case errors.Is(err, store.ErrMessageNotFound):
 		return errMessageNotFound
 	case errors.Is(err, store.ErrReactionNotPermitted):
@@ -421,7 +423,7 @@ func writeReactionError(w http.ResponseWriter, serr *schema.Error) {
 		status = http.StatusNotFound
 	case errForbidden.Code, errReactionNotPermitted.Code, schema.ErrorCodeGuestNotAllowed:
 		status = http.StatusForbidden
-	case errTooManyReactions.Code:
+	case errTooManyReactions.Code, errChannelArchived.Code:
 		status = http.StatusConflict
 	case errInvalidReaction.Code, errReactionsRequireAuth.Code, "invalid_request":
 		status = http.StatusBadRequest

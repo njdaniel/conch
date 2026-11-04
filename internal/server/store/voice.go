@@ -123,6 +123,9 @@ const (
 	VoiceRotateRevoked           = "credential_revoked"
 	VoiceRotateExpired           = "credential_expired"
 	VoiceRotateNotHuman          = "not_human"
+	// VoiceRotateChannelArchived is the reason of a rotation the server asks
+	// for when a channel is archived (issue #844); no holder is invalid.
+	VoiceRotateChannelArchived = "channel_archived"
 )
 
 // DefaultVoiceRoomPrefix starts every room name when --livekit-room-prefix is not

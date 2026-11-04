@@ -644,6 +644,10 @@ func (s *Server) handlePutJoinSettings(w http.ResponseWriter, r *http.Request) {
 		// A private channel named in open_channels: a default channel must
 		// be public, and listing one no longer makes it so (issue #987).
 		writeError(w, http.StatusConflict, schema.ErrorCodeChannelSettingsConflict, "an open channel must be public: make it public first, or leave it out")
+	case errors.Is(err, store.ErrChannelArchiveDefault):
+		// An archived channel is never a default channel (issue #844): an
+		// open_channels entry naming one is refused, and nothing changes.
+		writeError(w, http.StatusConflict, schema.ErrorCodeChannelArchiveDefault, "an archived channel cannot be a default channel: restore it first")
 	case errors.As(err, &denied) && errors.Is(err, store.ErrPermissionDenied):
 		// The resulting state admits people to a channel the writer is not
 		// in, and it lacks manage_channels (ADR-014 design §7.3).

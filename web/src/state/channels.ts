@@ -32,7 +32,17 @@ export type ChannelsAction =
   // operator's own answer, or the events socket's conch.channel.v1. What the
   // server says replaces what is held; a field it omits keeps the value held
   // (a reader takes an absent visibility as private, so nothing is guessed).
-  | { readonly type: 'settings'; readonly id: number; readonly visibility: ChannelVisibility | undefined; readonly default: boolean | undefined }
+  //
+  // archivedAt (issue #844) is different: the server omits it while a channel is
+  // live, so an absent value is live, and the channel comes back out of the
+  // Archived group on restore with no reload.
+  | {
+      readonly type: 'settings';
+      readonly id: number;
+      readonly visibility: ChannelVisibility | undefined;
+      readonly default: boolean | undefined;
+      readonly archivedAt?: string | undefined;
+    }
   // The caller's manager grant in one channel, from its accepted member list.
   | { readonly type: 'managed'; readonly id: number; readonly manages: boolean }
   // The person has left a channel themselves (issue #991): it goes from the
@@ -104,7 +114,7 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
       if (held === undefined) return state;
       const visibility = action.visibility ?? held.visibility;
       const isDefault = action.default ?? held.default;
-      if (held.visibility === visibility && held.default === isDefault) return state;
+      if (held.visibility === visibility && held.default === isDefault && held.archived_at === action.archivedAt) return state;
       const next: ChannelV0 = {
         id: held.id,
         name: held.name,
@@ -112,6 +122,7 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
         ...(held.manages === undefined ? {} : { manages: held.manages }),
         ...(visibility === undefined ? {} : { visibility }),
         ...(isDefault === undefined ? {} : { default: isDefault }),
+        ...(action.archivedAt === undefined ? {} : { archived_at: action.archivedAt }),
       };
       return { ...state, channels: state.channels.map((channel) => (channel.id === action.id ? next : channel)) };
     }

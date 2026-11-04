@@ -106,11 +106,11 @@ describe('the lock', () => {
 describe('the menu items', () => {
   it('are offered to a holder of manage_channels, as fits each channel', () => {
     render(view(channels, true));
-    expect(labels('general')).toEqual(['Make private', 'Stop being a default channel']);
+    expect(labels('general')).toEqual(['Make private', 'Stop being a default channel', 'Archive channel…']);
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
-    expect(labels('secret')).toEqual(['Make public', 'Make default channel']);
+    expect(labels('secret')).toEqual(['Make public', 'Make default channel', 'Archive channel…']);
     fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
-    expect(labels('plain')).toEqual(['Make private', 'Make default channel']);
+    expect(labels('plain')).toEqual(['Make private', 'Make default channel', 'Archive channel…']);
   });
 
   it('are not offered to anyone else, who then has no ⋯', () => {

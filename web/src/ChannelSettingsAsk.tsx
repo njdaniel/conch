@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import * as api from './api';
+import { archivedLine, channelArchived, channelArchiveDefault } from './archived';
 import type { ChannelSettingsRequestV1, ChannelV0, ChannelVisibility } from './schema/channel';
 
 // One change to a channel's settings, as the ⋯ menu asks for it (issue #1183).
 export type SettingsChange =
   | { readonly kind: 'visibility'; readonly to: ChannelVisibility }
-  | { readonly kind: 'default'; readonly to: boolean };
+  | { readonly kind: 'default'; readonly to: boolean }
+  // Archive (asked first) or restore (sent at once), issue #844.
+  | { readonly kind: 'archived'; readonly to: boolean };
 
 // The words of a refusal are the page's own, by the server's code; the
 // server's message is never shown (it may carry a channel's name or anything a
@@ -17,6 +20,10 @@ export function refusalLine(failure: api.ApiFailure, code: string | undefined, c
       return change.kind === 'default' && change.to
         ? 'A private channel cannot be a default channel. Make it public first.'
         : 'A default channel must be public. Stop it being a default channel first.';
+    case channelArchiveDefault:
+      return 'A default channel cannot be archived. Stop it being a default channel first.';
+    case channelArchived:
+      return archivedLine;
     case 'permission_denied':
       return 'You need permission to manage channels to change this.';
     case 'reauth_required':
@@ -28,10 +35,15 @@ export function refusalLine(failure: api.ApiFailure, code: string | undefined, c
   }
 }
 
+export const archiveAskLine = (name: string) =>
+  `Archive #${name}? Its history stays, and nothing new can be posted in it. You can restore it later.`;
+
 export const openSignupOffLine = 'Open sign-up is now off: no channel is a default channel.';
 
 // What the person is asked before a change that takes effect for everyone.
 // Making a channel a default, or not, is not asked: it adds and removes nobody.
+// Archiving is asked (everyone in the channel is shut out of writing to it);
+// restoring is not.
 export function askLine(name: string, to: ChannelVisibility): string {
   return to === 'private'
     ? `Make #${name} private? Only its current members will see it.`
@@ -59,7 +71,7 @@ export function ChannelSettingsAsk({
   // Escape, Cancel and Close; the caller puts focus back on the row's ⋯.
   readonly onClose: () => void;
 }) {
-  const asks = change.kind === 'visibility';
+  const asks = change.kind === 'visibility' || (change.kind === 'archived' && change.to);
   const [busy, setBusy] = useState(!asks);
   const [line, setLine] = useState<Line | null>(null);
   const [done, setDone] = useState(false);
@@ -76,7 +88,8 @@ export function ChannelSettingsAsk({
     setBusy(true);
     setLine(null);
     const c = frozen.current;
-    const request: ChannelSettingsRequestV1 = c.kind === 'visibility' ? { visibility: c.to } : { default: c.to };
+    const request: ChannelSettingsRequestV1 =
+      c.kind === 'visibility' ? { visibility: c.to } : c.kind === 'archived' ? { archived: c.to } : { default: c.to };
     void api.channelSettings(id, request).then((result) => {
       if (result.ok) {
         onApplied(result.value.channel);
@@ -113,7 +126,7 @@ export function ChannelSettingsAsk({
   }, []);
 
   const shown = frozen.current;
-  const asking = shown.kind === 'visibility' && !done;
+  const asking = (shown.kind === 'visibility' || (shown.kind === 'archived' && shown.to)) && !done;
   return (
     <div
       className="channel-settings-ask"
@@ -127,10 +140,16 @@ export function ChannelSettingsAsk({
       }}
     >
       {shown.kind === 'visibility' && asking ? <p>{askLine(channel.name, shown.to)}</p> : null}
+      {shown.kind === 'archived' && asking ? <p>{archiveAskLine(channel.name)}</p> : null}
       <div className="channel-settings-buttons">
         {shown.kind === 'visibility' && asking ? (
           <button type="button" disabled={busy} onClick={send}>
             {shown.to === 'private' ? 'Make private' : 'Make public'}
+          </button>
+        ) : null}
+        {shown.kind === 'archived' && asking ? (
+          <button type="button" disabled={busy} onClick={send}>
+            Archive channel
           </button>
         ) : null}
         <button type="button" ref={cancel} onClick={onClose}>

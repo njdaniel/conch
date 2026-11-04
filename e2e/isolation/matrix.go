@@ -266,6 +266,13 @@ func coreMatrixRows() []row {
 			public := schema.ChannelPublic
 			return put("/v1/channels/"+id(s.id)+"/settings", schema.ChannelSettingsRequestV1{Visibility: &public})
 		}),
+		// Archiving is the same route and the same gate (issue #844): refused
+		// before the id is looked up, so the archived field tells B nothing
+		// of A's channel, and A's channel is not archived by the attempt.
+		operator("PUT /v1/channels/{id}/settings", "archives A's private channel", aChannel, func(_ *world, s subject) probe {
+			archived := true
+			return put("/v1/channels/"+id(s.id)+"/settings", schema.ChannelSettingsRequestV1{Archived: &archived})
+		}),
 		// The channel directory (issue #982): B's member finds A's public
 		// channel and none of A's private ones, with no counts; the
 		// listing of every channel is manage_channels', refused to her.

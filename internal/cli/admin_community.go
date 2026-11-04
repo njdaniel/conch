@@ -23,17 +23,23 @@ type communityOpts struct {
 	public, private bool
 	// defaultMark is on, off or "" (not given).
 	defaultMark string
+	// archive and restore are the archive flags of `channel settings`
+	// (issue #844): one request field, archived, true and false.
+	archive, restore bool
 }
 
 func bindChannelSettings(fs *flag.FlagSet, o *adminOpts) {
 	fs.BoolVar(&o.community.public, "public", false, "make the channel public: every member can find and join it")
 	fs.BoolVar(&o.community.private, "private", false, "make the channel private: only its members see it; they all keep their place")
 	fs.StringVar(&o.community.defaultMark, "default", "", "on or off: whether new members start in the channel (a default channel is public)")
+	fs.BoolVar(&o.community.archive, "archive", false, "archive the channel: it keeps its history and members and refuses anything new until restored")
+	fs.BoolVar(&o.community.restore, "restore", false, "restore an archived channel: posting, joining and voice work again")
 }
 
 var channelSettingsRefusals = refusalLines{
 	"forbidden":                             operatorOnly,
 	schema.ErrorCodeChannelSettingsConflict: "a private channel cannot be a default channel, and a default channel must be public: nothing was changed",
+	schema.ErrorCodeChannelArchiveDefault:   "a default channel cannot be archived: turn off its default mark first (--default off): nothing was changed",
 }
 
 // channelSettingsRequest builds the change from the flags and checks it as the
@@ -51,12 +57,23 @@ func channelSettingsRequest(o communityOpts) (schema.ChannelSettingsRequestV1, e
 		v := schema.ChannelPrivate
 		req.Visibility = &v
 	}
+	if o.archive && o.restore {
+		return req, errors.New("give --archive or --restore, not both")
+	}
+	switch {
+	case o.archive:
+		v := true
+		req.Archived = &v
+	case o.restore:
+		v := false
+		req.Archived = &v
+	}
 	var err error
 	if req.Default, err = onOff("default", o.defaultMark); err != nil {
 		return req, err
 	}
-	if req.Visibility == nil && req.Default == nil {
-		return req, errors.New("give at least one of --public, --private and --default")
+	if req.Visibility == nil && req.Default == nil && req.Archived == nil {
+		return req, errors.New("give at least one of --public, --private, --default, --archive and --restore")
 	}
 	return req, req.Validate()
 }
@@ -115,6 +132,11 @@ func (r *adminRun) sayChannelSettings(req schema.ChannelSettingsRequestV1, resp 
 	}
 	if req.Default != nil {
 		if err := r.say("channel %s is %s\n", name, either(resp.Channel.Default, "now a default channel: new members start in it", "no longer a default channel")); err != nil {
+			return err
+		}
+	}
+	if req.Archived != nil {
+		if err := r.say("channel %s is %s\n", name, either(resp.Channel.ArchivedAt != nil, "now archived: it keeps its history and members and refuses anything new until it is restored", "restored: posting, joining and voice work again")); err != nil {
 			return err
 		}
 	}

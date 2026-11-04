@@ -496,6 +496,11 @@ func (s *Store) putChannelMember(ctx context.Context, actor string, actorID, cha
 			if err := checkManagerAddTargetTx(ctx, tx, actorID, principalID); err != nil {
 				return err
 			}
+			// The archived guard of adding a member (issue #844), after the
+			// actor's standing is decided.
+			if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
+				return err
+			}
 			res, err := tx.ExecContext(ctx,
 				`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide, manages) VALUES (?, ?, ?, ?, 0, 0)
 				 ON CONFLICT (channel_id, principal_id) DO NOTHING`,
@@ -514,6 +519,10 @@ func (s *Store) putChannelMember(ctx context.Context, actor string, actorID, cha
 			return appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(channelID), memberDetail(principalID)+" can_decide=0", now)
 		}
 		if err := checkChannelExistsTx(ctx, tx, channelID); err != nil {
+			return err
+		}
+		// The archived guard of adding a member (issue #844).
+		if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
 			return err
 		}
 		target, found, err := queryPrincipal(ctx, tx, principalID)
@@ -628,6 +637,10 @@ func (s *Store) AddChannelMemberIfAbsent(ctx context.Context, actor string, chan
 			return ErrManagerRefused
 		}
 		if err := checkChannelExistsTx(ctx, tx, channelID); err != nil {
+			return err
+		}
+		// The archived guard of adding a member (issue #844).
+		if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
 			return err
 		}
 		if (target.Name == "") == (target.ID == 0) {
@@ -1135,7 +1148,7 @@ func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]Chan
 // slice when there are none.
 func (s *Store) ListChannelsForPrincipal(ctx context.Context, principalID int64) ([]Channel, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, m.manages FROM channels c
+		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at, m.manages FROM channels c
 		 JOIN channel_members m ON m.channel_id = c.id
 		 WHERE m.principal_id = ? ORDER BY c.id ASC`, principalID)
 	if err != nil {

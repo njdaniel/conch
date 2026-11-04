@@ -216,6 +216,11 @@ func (s *Store) CreateMemberLink(ctx context.Context, actor string, creatorID in
 			case err != nil:
 				return fmt.Errorf("store: create member link: find channel: %w", err)
 			}
+			// The archived guard of a link naming the channel (issue #844);
+			// landing channels are named only by a holder of manage_channels.
+			if err := channelNotArchivedTx(ctx, tx, id); err != nil {
+				return err
+			}
 			channelIDs = append(channelIDs, id)
 		}
 		// The allowance binds anyone without manage_members, a restricted

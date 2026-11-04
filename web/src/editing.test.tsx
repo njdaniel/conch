@@ -304,6 +304,7 @@ describe('refusals', () => {
     ['the window closed', { ok: false, failure: 'refused', code: 'message_edit_window_closed' }, 'This message can no longer be edited: it is more than an hour old.', true],
     ['the edit limit', { ok: false, failure: 'refused', code: 'message_edit_limit_reached' }, 'This message has been edited the most times allowed.', true],
     ['a message that cannot be edited', { ok: false, failure: 'refused', code: 'message_not_editable' }, "This message can't be edited.", true],
+    ['an archived channel (issue #844)', { ok: false, failure: 'refused', code: 'channel_archived' }, 'This channel is archived.', true],
     ['no answer', { ok: false, failure: 'network' }, "Couldn't save. Your text is kept.", false],
     ['a refusal of no known code', { ok: false, failure: 'refused', code: 'invalid_request' }, "Couldn't save. Your text is kept.", false],
   ];

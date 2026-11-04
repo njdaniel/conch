@@ -192,6 +192,12 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		// Removed from the channel while the body was arriving.
 		writeChannelNotFound(w)
 		return
+	case errors.Is(err, store.ErrChannelArchived):
+		// The store's archived guard (issue #844): the archived channel
+		// refuses the upload. The blob was stored by hash, before the row,
+		// and stays unreferenced like any other orphan.
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
+		return
 	case err != nil:
 		slog.ErrorContext(ctx, "files: record upload failed", "error", err)
 		writeInternalError(w)

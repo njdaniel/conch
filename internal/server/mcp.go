@@ -332,6 +332,9 @@ func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPo
 		// that any agent with the post grant could write at will.
 		return schema.PostMessageResponseV2{}, errInvalidFileAttachment
 	}
+	if errors.Is(err, errArchivedRefused) {
+		return schema.PostMessageResponseV2{}, errChannelArchived
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "mcp: insert failed", "error", err)
 		return schema.PostMessageResponseV2{}, &schema.Error{Code: "internal_error", Message: "internal server error"}
