@@ -405,9 +405,10 @@ func (p *voicePoller) claimRunning(ctx context.Context, r *voiceRoomState, princ
 					close(r.withdrawDone)
 					r.withdrawDone = nil
 				}
-				// A withdrawal still owed by someone else (forgetRoom ended
-				// cameras while this claim ran, and retireRoom has yet to
-				// withdraw them) keeps the room in retiring, as retireRoom's.
+				// A withdrawal still owed by someone else (forgetRoom ended a
+				// share or cameras while this claim ran, and retireRoom has
+				// yet to withdraw them) keeps the room in retiring, as
+				// retireRoom's.
 				if pid, ok := p.retiring[r]; ok && pid != 0 {
 					if r.withdrawDone != nil {
 						p.retiring[r] = 0
@@ -736,12 +737,14 @@ func (p *voicePoller) sharesWithheld(ctx context.Context, r *voiceRoomState) {
 // voice_share_stopped row is written and the sources are withdrawn. It takes
 // each room's claims, so a claim in flight is waited for and then ended, and a
 // claim recorded after this has looked meets the revocation, already
-// committed, in its own re-read (shareEntitled). Call it after the revocation
-// is committed and before it is answered, with no lock held.
+// committed, in its own re-read (shareEntitled). It then waits for the
+// withdrawal of any share of theirs a rotation ended in a room still
+// retiring (retiredShare). Call it after the revocation is committed and
+// before it is answered, with no lock held.
 //
 // Lock order: the room's claims, then its order, then p.mu, as every claim
-// and stop takes them. Nothing here is called with any of them held, and the
-// rooms are taken one at a time in channel order.
+// and stop takes them. Nothing here is called with any of them held, the
+// rooms are taken one at a time in channel order, and the waits hold none.
 //
 //nolint:unparam // every revocation ends a share as access_lost today; the reason is the stop path's own (voice_share_stopped), kept for its other ends
 func (p *voicePoller) endSharesOf(ctx context.Context, principalID, channelID int64, reason schema.VoiceShareEndReason) {
@@ -757,7 +760,7 @@ func (p *voicePoller) endSharesOf(ctx context.Context, principalID, channelID in
 	// rooms, but the claim may be inside LiveKit's answer, and is waited for
 	// too.
 	for r, pid := range p.retiring {
-		if pid == principalID && (channelID == 0 || r.channelID == channelID) {
+		if pid == principalID && (channelID == 0 || r.channelID == channelID) && !slices.Contains(rooms, r) {
 			rooms = append(rooms, r)
 		}
 	}
@@ -774,6 +777,34 @@ func (p *voicePoller) endSharesOf(ctx context.Context, principalID, channelID in
 		r.claims.Lock()
 		p.endHeldShare(ctx, r, store.VoiceRoom{ChannelID: r.channelID, RoomName: r.name}, principalID, reason)
 		r.claims.Unlock()
+	}
+	// A room a rotation forgot, whose ended share of theirs is still being
+	// withdrawn (retireRoom, or a running claim that was handed the debt):
+	// there is no share left to end in it, but the revocation must not
+	// answer while the grant is in flight (S3, issue #1265). It is looked for
+	// now, after the rooms above, so that a room forgotten after the first
+	// look (whose claims this took before retireRoom did, finding nothing to
+	// end) is found too: a forget that ends a share keeps the room in
+	// retiring, with withdrawDone open, until the withdrawal is made
+	// (forgetRoom, retireRoom, claimRunning). Its done channels are waited
+	// for, as waitRunningClaims waits for them, each closed by a withdrawal
+	// bounded by LiveKit's call timeouts.
+	var waits []chan struct{}
+	p.mu.Lock()
+	for r := range p.retiring {
+		if r.retiredShare != principalID || (channelID != 0 && r.channelID != channelID) {
+			continue
+		}
+		if r.withdrawDone != nil {
+			waits = append(waits, r.withdrawDone)
+		}
+		if r.claimDone != nil {
+			waits = append(waits, r.claimDone)
+		}
+	}
+	p.mu.Unlock()
+	for _, d := range waits {
+		<-d
 	}
 }
 
