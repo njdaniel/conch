@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
-import type { Camera, KeptCamera } from './camera';
+import type { Camera, CameraProfile, KeptCamera } from './camera';
 import { VoiceClient, chosenGone, earlierGone, levelEvery, meterEvery, outputMoved, outputRefused, reconnectLimit, reportWait, type CameraTrack, type Microphone, type ModeStore, type Output, type Phase, type Processing, type ProcessingStore, type Room, type RoomEvents, type ShareSink } from './connection';
 import { resumeLimit, type Captured, type KeptScreen } from './share';
 import { defaultTail } from './gate';
@@ -206,25 +206,58 @@ class StubRoom implements Room {
   keptLiveCamera = true;
   viewings: boolean[] = [];
   claimedSets: number[][] = [];
-  captureCamera = (choice: string | null): Promise<void> => {
+  // The profile each capture asked for, and the step a test holds: the next
+  // capture, grant wait or publish waits until the test lets it go. As in
+  // sdk.ts, a stop ends a grant wait or a publish under way; a capture asked
+  // of the browser still comes, and its owner lets it go.
+  profiles: (CameraProfile | undefined)[] = [];
+  hold: 'capture' | 'grant' | 'publish' | null = null;
+  letGo: () => void = () => undefined;
+  private held: { readonly step: string; readonly fail: () => void } | null = null;
+  private waitHeld(step: 'capture' | 'grant' | 'publish'): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.letGo = resolve;
+      this.held = { step, fail: () => { reject(new Error('stopped')); } };
+    });
+  }
+  // Resolves at once but for the step held, so that an unheld test takes the
+  // same turns it always did.
+  private holdThen(step: 'capture' | 'grant' | 'publish', then: () => void): Promise<void> {
+    if (this.hold !== step) {
+      then();
+      return Promise.resolve();
+    }
+    this.hold = null;
+    return this.waitHeld(step).then(then);
+  }
+  captureCamera = (choice: string | null, profile?: CameraProfile): Promise<void> => {
+    this.profiles.push(profile);
     this.camLog.push(`capture ${choice ?? 'browser'}`);
     if (this.captureError !== null) return Promise.reject(this.captureError);
-    this.camState = 'captured';
-    return Promise.resolve();
+    return this.holdThen('capture', () => {
+      this.camState = 'captured';
+    });
   };
   awaitCameraGrant = (): Promise<void> => {
     this.camLog.push('grant');
-    return this.grantError === null ? Promise.resolve() : Promise.reject(this.grantError);
+    if (this.grantError !== null) return Promise.reject(this.grantError);
+    return this.holdThen('grant', () => undefined);
   };
   publishCamera = (): Promise<void> => {
     this.camLog.push('publish camera');
-    this.camState = 'published';
-    this.events?.onCameraChanged();
-    return Promise.resolve();
+    return this.holdThen('publish', () => {
+      this.camState = 'published';
+      this.events?.onCameraChanged();
+    });
   };
   stopCamera = (): Promise<void> => {
     if (this.camState !== 'none') this.camLog.push('stop camera');
     this.camState = 'none';
+    const held = this.held;
+    if (held !== null && held.step !== 'capture') {
+      this.held = null;
+      held.fail();
+    }
     this.events?.onCameraChanged();
     return Promise.resolve();
   };
@@ -274,6 +307,10 @@ class StubRoom implements Room {
   setViewing = (on: boolean): void => {
     this.viewings.push(on);
   };
+  shownSets: boolean[] = [];
+  setShown = (on: boolean): void => {
+    this.shownSets.push(on);
+  };
   setCameras = (claimed: ReadonlySet<number>): void => {
     this.claimedSets.push([...claimed]);
   };
@@ -312,7 +349,7 @@ function setup(
   speakers?: { readonly selection: boolean; readonly output?: Output | null },
   // ADR-015: conchd's answers to camera claims, in order (a granted claim by
   // default), and the camera remembered from earlier in the tab.
-  camera?: { readonly answers?: CameraClaimResult[]; readonly choice?: Camera | null },
+  camera?: { readonly answers?: CameraClaimResult[]; readonly choice?: Camera | null; readonly holdClaims?: boolean },
 ) {
   const clock = new FakeClock();
   const rooms: StubRoom[] = [];
@@ -336,6 +373,8 @@ function setup(
   // What the camera asked of the rooms and of conchd, in order.
   const camLog: string[] = [];
   const cameraAnswers = camera?.answers ?? [];
+  // With holdClaims, each claim waits for the test to answer it.
+  const claimsWaiting: (() => void)[] = [];
   const client = new VoiceClient(
     {
       clock,
@@ -377,7 +416,11 @@ function setup(
       },
       claimCamera: (channel, startedAt) => {
         camLog.push(startedAt === undefined ? `POST ${channel}` : `POST ${channel} ?started_at=${startedAt}`);
-        return Promise.resolve(cameraAnswers.shift() ?? cameraGranted);
+        const answer = cameraAnswers.shift() ?? cameraGranted;
+        if (camera?.holdClaims !== true) return Promise.resolve(answer);
+        return new Promise((resolve) => {
+          claimsWaiting.push(() => { resolve(answer); });
+        });
       },
       stopCamera: (channel, startedAt) => {
         camLog.push(`DELETE ${channel} ?started_at=${startedAt}`);
@@ -390,7 +433,7 @@ function setup(
     },
     () => clock.now,
   );
-  return { client, clock, rooms, asked, reports, reportedIn, shares, log, answer, trace, camLog };
+  return { client, clock, rooms, asked, reports, reportedIn, shares, log, answer, trace, camLog, claimsWaiting };
 }
 
 const cameraGranted: CameraClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:01.000Z' } };
@@ -2631,5 +2674,133 @@ describe('the camera chosen (N7)', () => {
     await t.client.chooseCamera({ id: 'cam-2', label: 'Laptop camera' });
     expect(t.camLog.at(-1)).toBe('switch cam-2');
     expect(t.client.snapshot().cameraChoice).toEqual({ id: 'cam-2', label: 'Laptop camera' });
+  });
+});
+
+// A hidden page on a phone (design §8, ADR-015 O9): the page calls pageHidden
+// (useVoice.ts decides when), and the camera ends as the button ends it, from
+// every step of its start.
+describe('the page hidden on a phone', () => {
+  type Step = 'capturing' | 'claiming' | 'granted-waiting' | 'publishing' | 'sending';
+  const holds = { capturing: 'capture', 'granted-waiting': 'grant', publishing: 'publish' } as const;
+
+  // Starts the camera and stops it at the step, with that step under way.
+  async function reach(step: Step) {
+    const t = setup(undefined, undefined, 0, false, undefined, undefined, undefined, undefined, { holdClaims: step === 'claiming' });
+    await joined(t);
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    if (step !== 'claiming' && step !== 'sending') room.hold = holds[step];
+    void t.client.startCamera('phone');
+    await settle();
+    expect(t.client.snapshot().camera.kind).toBe(step);
+    return { t, room };
+  }
+
+  it.each(['capturing', 'claiming', 'granted-waiting', 'publishing', 'sending'] as const)('ends the start or the camera from %s: stopped, nothing published, the claim released by name', async (step) => {
+    const { t, room } = await reach(step);
+    const published = t.camLog.filter((l) => l === 'publish camera').length;
+    t.client.pageHidden();
+    // What was under way still comes, and finds the start over.
+    room.letGo();
+    t.claimsWaiting.shift()?.();
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'off', ended: 'self' }, cameraTrack: 'none' });
+    expect(room.cameraTrack()).toBe('none');
+    expect(t.camLog.filter((l) => l === 'publish camera')).toHaveLength(published);
+    const released = t.camLog.filter((l) => l.startsWith('DELETE'));
+    // A start still asking the browser has claimed nothing: nothing to name.
+    expect(released).toEqual(step === 'capturing' ? [] : [`DELETE general ${named}`]);
+    expect(t.camLog.filter((l) => l.startsWith('POST'))).toHaveLength(step === 'capturing' ? 0 : 1);
+    // Once the stop is over there is nothing left to stop or restart.
+    t.camLog.length = 0;
+    await settle();
+    expect(t.camLog).toEqual([]);
+  });
+
+  it('a stop from sending is the button\'s: the capture stops, then DELETE names the claim', async () => {
+    const { t } = await reach('sending');
+    t.camLog.length = 0;
+    t.client.pageHidden();
+    await settle();
+    expect(t.camLog).toEqual(['stop camera', `DELETE general ${named}`]);
+  });
+
+  it('showing the page again starts nothing: only the button does', async () => {
+    const { t } = await reach('sending');
+    t.client.pageHidden();
+    await settle();
+    t.camLog.length = 0;
+    t.client.viewVideo(true);
+    await settle();
+    t.clock.advance(60_000);
+    await settle();
+    expect(t.camLog).toEqual([]);
+    expect(t.client.snapshot().camera).toEqual({ kind: 'off', ended: 'self' });
+  });
+
+  it('with the camera off, does nothing', async () => {
+    const t = await joined();
+    t.client.pageHidden();
+    await settle();
+    expect(t.camLog.filter((l) => !l.startsWith('session'))).toEqual([]);
+    expect(t.client.snapshot().camera).toEqual({ kind: 'off', ended: null });
+  });
+
+  it('a start that was still choosing its camera when the page was hidden captures nothing', async () => {
+    const t = setup(undefined, undefined, 0, false, undefined, undefined, undefined, undefined, { choice: { id: 'cam-2', label: 'Laptop camera' } });
+    await joined(t);
+    // The camera chosen is looked for first (cameraToUse); hidden meanwhile.
+    const starting = t.client.startCamera('phone');
+    t.client.pageHidden();
+    await starting;
+    await settle();
+    expect(t.camLog.filter((l) => !l.startsWith('session'))).toEqual([]);
+    expect(t.client.snapshot().camera).toEqual({ kind: 'off', ended: null });
+    // The button, pressed again, starts.
+    await t.client.startCamera('phone');
+    await settle();
+    expect(t.client.snapshot().camera.kind).toBe('sending');
+  });
+
+  it('the camera starts with the profile the button gave, and the desktop\'s without one', async () => {
+    const t = await joined();
+    await t.client.startCamera('phone');
+    await settle();
+    expect(t.rooms[0]?.profiles).toEqual(['phone']);
+    await t.client.stopCamera();
+    await t.client.startCamera();
+    await settle();
+    expect(t.rooms[0]?.profiles).toEqual(['phone', 'desktop']);
+  });
+});
+
+describe('the video shown here', () => {
+  it('is told to every room, and to the next connection as it was left', async () => {
+    const t = setup([okSession(), okSession()]);
+    await joined(t);
+    expect(t.rooms[0]?.shownSets).toEqual([true]);
+    t.client.showVideo(false);
+    expect(t.rooms[0]?.shownSets).toEqual([true, false]);
+    // The person's choice to view is untouched by it.
+    t.client.viewVideo(true);
+    expect(t.client.snapshot().viewing).toBe(true);
+    t.rooms[0]?.events?.onDisconnected('lost');
+    await settle();
+    t.clock.advance(60_000);
+    await settle();
+    expect(t.rooms[1]?.shownSets[0]).toBe(false);
+    t.client.showVideo(true);
+    expect(t.rooms[1]?.shownSets.at(-1)).toBe(true);
+    expect(t.client.snapshot().viewing).toBe(true);
+  });
+
+  it('leaves the person\'s own camera sending', async () => {
+    const t = await cameraOn();
+    t.camLog.length = 0;
+    t.client.showVideo(false);
+    await settle();
+    expect(t.camLog).toEqual([]);
+    expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'sending' }, cameraTrack: 'published' });
   });
 });

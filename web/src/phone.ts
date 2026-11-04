@@ -43,6 +43,26 @@ export const phoneViews: readonly { readonly view: PhoneView; readonly label: st
   { view: 'voice', label: 'Voice' },
 ];
 
+// What "a phone" means for the camera's two rules (design §8, §7.5; ADR-015
+// O9 and O11), wider than the layout: the narrow window, and a touch-only
+// device however wide it is held (a phone in landscape, a tablet). A narrow
+// desktop window counts too, which is conservative and harmless. It is read
+// at the moment it matters (when a capture starts, and when the page is
+// hidden), never followed: a later resize recaptures nothing.
+const phoneCamera = `${phone}, (pointer: coarse) and (hover: none)`;
+
+// onPhoneCamera: whether the camera rules for a phone apply now. False where
+// there is no matchMedia (jsdom), as usePhone is.
+export function onPhoneCamera(): boolean {
+  return typeof window.matchMedia === 'function' && window.matchMedia(phoneCamera).matches;
+}
+
+// pageHiddenOnPhone: whether the page is hidden and the phone rules apply:
+// the moment the camera, and the camera test, stop (O9).
+export function pageHiddenOnPhone(): boolean {
+  return document.visibilityState === 'hidden' && onPhoneCamera();
+}
+
 function isPhone(): boolean {
   return typeof window.matchMedia === 'function' && window.matchMedia(phone).matches;
 }

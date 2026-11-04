@@ -122,7 +122,7 @@ import {
   type VideoCaptureOptions,
 } from 'livekit-client';
 import type { DisconnectCause } from './disconnect';
-import type { Camera, KeptCamera } from './camera';
+import type { Camera, CameraProfile, KeptCamera } from './camera';
 import type { CameraTrack, Microphone, Output, Processing, Room, RoomEvents, ShareSink } from './connection';
 import { principalOf } from './presence';
 import { LogRing, Redactor } from './redact';
@@ -165,18 +165,21 @@ export const roomOptions: RoomOptions = { adaptiveStream: true, dynacast: true, 
 export const connectOptions: RoomConnectOptions = { autoSubscribe: false };
 
 // What this page receives besides microphones: whether it watches the share,
-// whether the call view is shown, and whether the track's publisher holds a
-// camera claim, as presence says.
+// whether the call view is open (the person's choice), whether the video is
+// shown here now (false only in the phone layout outside the Voice view,
+// design §8), and whether the track's publisher holds a camera claim, as
+// presence says.
 export interface Wants {
   readonly watching: boolean;
   readonly viewing: boolean;
+  readonly shown: boolean;
   readonly claimed: boolean;
 }
 
 // wanted is the subscription choice for a remote track, by its declared
 // source and its kind together (S1): a microphone always, if it is sound; a
 // camera if it is a picture, from someone holding a claim, while the call
-// view is shown; a share's picture and its sound while the share is watched,
+// view is open and shown here; a share's picture and its sound while the share is watched,
 // each of its own kind. Anything else, and any track whose kind disagrees
 // with its source, never.
 export function wanted(source: Track.Source, kind: Track.Kind | undefined, want: Wants): boolean {
@@ -184,7 +187,7 @@ export function wanted(source: Track.Source, kind: Track.Kind | undefined, want:
     case Track.Source.Microphone:
       return kind === Track.Kind.Audio;
     case Track.Source.Camera:
-      return kind === Track.Kind.Video && want.viewing && want.claimed;
+      return kind === Track.Kind.Video && want.viewing && want.shown && want.claimed;
     case Track.Source.ScreenShare:
       return kind === Track.Kind.Video && want.watching;
     case Track.Source.ScreenShareAudio:
@@ -196,26 +199,41 @@ export function wanted(source: Track.Source, kind: Track.Kind | undefined, want:
 
 // What a track would be wanted for if the page wanted everything: false only
 // for a kind its source disagrees with.
-const everything: Wants = { watching: true, viewing: true, claimed: true };
+const everything: Wants = { watching: true, viewing: true, shown: true, claimed: true };
 
 // ---- the camera
 
-// What a capture of the camera asks for (design §7.5, the desktop's row): the
-// chosen device exactly, as an object, which the SDK leaves alone (a bare id
-// it tries as exact and then again as ideal, which captures some other
-// camera), at 1280x720 and 30 fps as an ideal. With none chosen, the browser
-// chooses, and the person with it in its prompt.
+// What a capture of the camera asks for (design §7.5): the chosen device
+// exactly, as an object, which the SDK leaves alone (a bare id it tries as
+// exact and then again as ideal, which captures some other camera). The
+// desktop asks 1280x720 at 30 fps, the phone (O11) 640x360 at 24 fps, each as
+// an ideal. With none chosen, the browser chooses, and the person with it in
+// its prompt; on a phone it is asked for the front camera first
+// (facingMode user, which a browser takes as an ideal, never exact). A
+// remembered choice is exact and carries no facingMode.
 export const cameraAsk = { width: 1280, height: 720, frameRate: 30 } as const;
+export const phoneCameraAsk = { width: 640, height: 360, frameRate: 24 } as const;
 
-export function cameraOptions(choice: string | null): VideoCaptureOptions {
-  const resolution = { ...cameraAsk };
-  return choice === null ? { resolution } : { resolution, deviceId: { exact: choice } };
+export function cameraOptions(choice: string | null, profile: CameraProfile = 'desktop'): VideoCaptureOptions {
+  const resolution = { ...(profile === 'phone' ? phoneCameraAsk : cameraAsk) };
+  if (choice !== null) return { resolution, deviceId: { exact: choice } };
+  return profile === 'phone' ? { resolution, facingMode: 'user' } : { resolution };
 }
 
-// How the camera is published: a top layer of at most 1.2 Mbps, and simulcast
-// layers of 360p at 450 kbps and 180p at 150 kbps (design §7.5). VP8, the
-// SDK's default.
-export function cameraPublishOptions(): TrackPublishOptions {
+// How the camera is published (design §7.5). The desktop: a top layer of at
+// most 1.2 Mbps, and simulcast layers of 360p at 450 kbps and 180p at
+// 150 kbps, VP8 the SDK's default. The phone (O11): a top layer of 360p at
+// most 450 kbps, one simulcast layer of 180p at 150 kbps, VP8.
+export function cameraPublishOptions(profile: CameraProfile = 'desktop'): TrackPublishOptions {
+  if (profile === 'phone') {
+    return {
+      source: Track.Source.Camera,
+      simulcast: true,
+      videoCodec: 'vp8',
+      videoEncoding: { maxBitrate: 450_000, maxFramerate: phoneCameraAsk.frameRate },
+      videoSimulcastLayers: [new VideoPreset(320, 180, 150_000, 15)],
+    };
+  }
   return {
     source: Track.Source.Camera,
     simulcast: true,
@@ -224,13 +242,18 @@ export function cameraPublishOptions(): TrackPublishOptions {
   };
 }
 
+// The profile each capture was made with: its switches and its publish keep
+// it, including a capture kept for the next connection.
+const captureProfiles = new WeakMap<LocalVideoTrack, CameraProfile>();
+
 // captureCameraTrack captures the camera and wraps it as a track the page
 // provides: the SDK restarts nothing it did not capture, so a camera that
 // goes is never replaced by another.
-async function captureCameraTrack(choice: string | null): Promise<LocalVideoTrack> {
-  const captured = await createLocalVideoTrack(cameraOptions(choice));
+async function captureCameraTrack(choice: string | null, profile: CameraProfile): Promise<LocalVideoTrack> {
+  const captured = await createLocalVideoTrack(cameraOptions(choice, profile));
   const track = new LocalVideoTrack(captured.mediaStreamTrack, captured.constraints, true);
   track.source = Track.Source.Camera;
+  captureProfiles.set(track, profile);
   return track;
 }
 
@@ -258,8 +281,8 @@ export interface CameraTestCapture {
   stop(): void;
 }
 
-export async function captureCameraTest(choice: string | null): Promise<CameraTestCapture> {
-  const captured = await createLocalVideoTrack(cameraOptions(choice));
+export async function captureCameraTest(choice: string | null, profile: CameraProfile = 'desktop'): Promise<CameraTestCapture> {
+  const captured = await createLocalVideoTrack(cameraOptions(choice, profile));
   let shown: HTMLVideoElement | null = null;
   return {
     show: (el) => {
@@ -688,6 +711,7 @@ class LiveKitAdapter implements Room {
   // claim, the camera tracks received by principal, and the element each
   // plays into.
   private viewing = false;
+  private shown = true;
   private claimed: ReadonlySet<number> = new Set();
   private readonly remoteCameras = new Map<number, RemoteTrack>();
   private readonly cameraViews = new Map<number, HTMLVideoElement>();
@@ -1254,7 +1278,7 @@ class LiveKitAdapter implements Room {
 
   private wantsOf(participant: Participant | undefined): Wants {
     const principal = participant === undefined ? null : principalOf(participant.identity);
-    return { watching: this.watching, viewing: this.viewing, claimed: principal !== null && this.claimed.has(principal) };
+    return { watching: this.watching, viewing: this.viewing, shown: this.shown, claimed: principal !== null && this.claimed.has(principal) };
   }
 
   private subscribe(pub: RemoteTrackPublication, participant: RemoteParticipant | undefined): void {
@@ -1290,13 +1314,13 @@ class LiveKitAdapter implements Room {
 
   // ---- the camera
 
-  async captureCamera(choice: string | null): Promise<void> {
+  async captureCamera(choice: string | null, profile: CameraProfile = 'desktop'): Promise<void> {
     this.ensureOpen();
     // One capture at a time: one held is stopped first.
     await this.stopCamera();
     this.ensureOpen();
     const turn = ++this.cameraTurn;
-    const track = await captureCameraTrack(choice);
+    const track = await captureCameraTrack(choice, profile);
     if (this.closed) {
       track.stop();
       throw new ClosedError();
@@ -1369,7 +1393,7 @@ class LiveKitAdapter implements Room {
     this.ensureOpen();
     const track = this.camera;
     if (track === null) throw new TakenError();
-    const publication = await this.publishGranted(track, cameraPublishOptions(), performance.now() + grantWait, () => this.camera === track);
+    const publication = await this.publishGranted(track, cameraPublishOptions(captureProfiles.get(track)), performance.now() + grantWait, () => this.camera === track);
     this.ensureOpen();
     this.cameraPub = publication;
     this.events?.onCameraChanged();
@@ -1408,7 +1432,7 @@ class LiveKitAdapter implements Room {
         if (!this.keptTracks.has(track)) track.stop();
       };
       try {
-        await track.restartTrack(cameraOptions(choice));
+        await track.restartTrack(cameraOptions(choice, captureProfiles.get(track)));
       } catch (err) {
         // Only the last switch asked for, on the capture this connection
         // still holds, may stop it: one overtaken while the browser was
@@ -1513,6 +1537,15 @@ class LiveKitAdapter implements Room {
   // closes.
   setViewing(on: boolean): void {
     this.viewing = on;
+    this.subscribeAll();
+  }
+
+  // setShown is whether the video is shown here now: false in the phone
+  // layout outside the Voice view, where every camera is let go, explicitly,
+  // and none is received. The person's own choice (setViewing) is kept, so
+  // that the cameras come back with the Voice view and need no tap (O8).
+  setShown(on: boolean): void {
+    this.shown = on;
     this.subscribeAll();
   }
 

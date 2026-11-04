@@ -297,6 +297,84 @@ describe('losing focus', () => {
 // Issue #658: the microphone chosen lasts for the tab, in sessionStorage
 // beside the talk key, and nowhere else: its device id, and its name, by
 // which it is found again under a new id.
+// A hidden page ends the camera on a phone and changes nothing on a desktop
+// (ADR-015 O9, design §6.2, §8). The rule is read when the event fires.
+describe('a hidden page', () => {
+  function window_(phone: boolean) {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: phone, addEventListener: () => undefined, removeEventListener: () => undefined })),
+    );
+  }
+  function visibility(value: 'visible' | 'hidden') {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => value });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+  }
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    Reflect.deleteProperty(document, 'visibilityState');
+  });
+
+  it('on a phone stops the camera, once for each time it is hidden; showing the page again does nothing', () => {
+    window_(true);
+    const { result } = hook({ channel: null });
+    const hidden = vi.spyOn(result.current.client, 'pageHidden');
+    const start = vi.spyOn(result.current.client, 'startCamera');
+    visibility('hidden');
+    expect(hidden).toHaveBeenCalledTimes(1);
+    visibility('visible');
+    expect(hidden).toHaveBeenCalledTimes(1);
+    expect(start).not.toHaveBeenCalled();
+    visibility('hidden');
+    expect(hidden).toHaveBeenCalledTimes(2);
+  });
+
+  it('on a desktop does nothing', () => {
+    window_(false);
+    const { result } = hook({ channel: null });
+    const hidden = vi.spyOn(result.current.client, 'pageHidden');
+    visibility('hidden');
+    visibility('visible');
+    expect(hidden).not.toHaveBeenCalled();
+  });
+
+  it('is read when it happens: a window that became narrow stops, one that became wide does not', () => {
+    window_(false);
+    const { result } = hook({ channel: null });
+    const hidden = vi.spyOn(result.current.client, 'pageHidden');
+    window_(true);
+    visibility('hidden');
+    expect(hidden).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks the wider rule: a touch device is a phone however wide it is held', () => {
+    const queries: string[] = [];
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => {
+        queries.push(query);
+        return { matches: query.includes('(pointer: coarse) and (hover: none)'), addEventListener: () => undefined, removeEventListener: () => undefined };
+      }),
+    );
+    const { result } = hook({ channel: null });
+    const hidden = vi.spyOn(result.current.client, 'pageHidden');
+    visibility('hidden');
+    expect(hidden).toHaveBeenCalledTimes(1);
+    expect(queries.at(-1)).toBe('(max-width: 699px), (pointer: coarse) and (hover: none)');
+  });
+
+  it('stops listening when the page goes', () => {
+    window_(true);
+    const { result, unmount } = hook({ channel: null });
+    const hidden = vi.spyOn(result.current.client, 'pageHidden');
+    unmount();
+    visibility('hidden');
+    expect(hidden).not.toHaveBeenCalled();
+  });
+});
+
 describe('the microphone chosen', () => {
   const key = 'conch.web.voice.microphone';
   const nameKey = 'conch.web.voice.microphone.name';

@@ -44,7 +44,7 @@ import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent
 import { createPortal } from 'react-dom';
 import { Avatar, Glyph } from '../Icons';
 import type { ChannelV0 } from '../schema/channel';
-import { MicTestShown, VoiceLive, VoiceStrip } from '../phone';
+import { MicTestShown, onPhoneCamera, VoiceLive, VoiceStrip } from '../phone';
 import { StageHost } from '../stage';
 import { MicTest } from './MicTest';
 import { cameraNote, cameraOffForYou, cameraOn, listenOnlyCamera, watchOnlyCamera } from './camera';
@@ -162,6 +162,9 @@ export function VoicePanel({
   const toVoiceView = useContext(VoiceStrip);
   const stripOpens = inVoice ? toVoiceView : null;
   const strip = stripOpens !== null;
+  useEffect(() => {
+    client.showVideo(!strip);
+  }, [client, strip]);
   useEffect(() => {
     reportLive(inVoice);
     return () => {
@@ -313,7 +316,11 @@ export function VoicePanel({
   // picture and the cameras a strip beside it while both are open. It is
   // the one CallView whether or not the call view is open, so the share is
   // never drawn again by opening or closing it.
-  const call = inVoice && state.viewing ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer)) : null;
+  // In the phone layout under Chat and Channels (the strip) the stage holds a
+  // watched share only: no call view and no camera tile, and no camera
+  // received (showVideo). The person's choice to view is kept, so the view
+  // and the cameras are back with the Voice view, with no tap (O8).
+  const call = inVoice && state.viewing && !strip ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer)) : null;
   const staged =
     view === null && call === null ? null : (
       <CallView client={client} state={state} tiles={call?.tiles ?? noTiles} hidden={call?.hidden ?? 0} open={call !== null} share={view} />
@@ -376,7 +383,7 @@ export function VoicePanel({
         {awayLine}
         <div className="voice-row">
           {stripOpens !== null ? (
-            <StripState phase={state.phase} channel={state.channel} onOpen={stripOpens} />
+            <StripState phase={state.phase} channel={state.channel} camera={state.cameraTrack !== 'none'} onOpen={stripOpens} />
           ) : (
             <div className="voice-state">
               <p className="voice-phase">
@@ -552,12 +559,36 @@ export function VoicePanel({
 // StripState is the first of the phone strip's four controls (issue #1028):
 // where voice is, as a button that opens the Voice view, where the rest is.
 // Its words are the state and the channel, on two short lines; a long name
-// ends in an ellipsis.
-function StripState({ phase, channel, onOpen }: { readonly phase: Phase; readonly channel: string | null; readonly onOpen: () => void }) {
+// ends in an ellipsis. While this page's own camera is captured or sent, the
+// state line says "Camera on", with the camera glyph in place of the dot
+// (issue #1268, O10): from the local track alone, never from presence (S5),
+// and for a capture not yet sent too, since the device is in use either way.
+// The control stays one, and still opens the Voice view, where the Camera
+// button is.
+function StripState({
+  phase,
+  channel,
+  camera,
+  onOpen,
+}: {
+  readonly phase: Phase;
+  readonly channel: string | null;
+  readonly camera: boolean;
+  readonly onOpen: () => void;
+}) {
   const going = phase === 'connecting' || phase === 'reconnecting';
   return (
-    <button type="button" className="voice-open" onClick={onOpen}>
-      <span className="voice-open-phase">{phase === 'connected' ? 'In voice' : phaseLabel[phase]}</span>
+    <button type="button" className={camera ? 'voice-open has-camera' : 'voice-open'} onClick={onOpen}>
+      {camera ? (
+        <span className="voice-open-phase camera-on">
+          <Glyph name="camera" />
+          Camera on
+          {/* Where the connection is not up, the state is still read out. */}
+          {phase === 'connected' ? null : <span className="vh">, {phaseLabel[phase]}</span>}
+        </span>
+      ) : (
+        <span className="voice-open-phase">{phase === 'connected' ? 'In voice' : phaseLabel[phase]}</span>
+      )}
       {channel === null ? null : (
         <>
           {/* The spaces are outside the spans, where a flex column draws
@@ -998,7 +1029,7 @@ function CameraButton({ voice }: { readonly voice: VoiceControl }) {
       disabled={stopping || (!on && state.phase !== 'connected')}
       onClick={() => {
         if (on) void client.stopCamera();
-        else void client.startCamera();
+        else void client.startCamera(onPhoneCamera() ? 'phone' : 'desktop');
       }}
     >
       <Glyph name="camera" />

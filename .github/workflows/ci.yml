@@ -500,9 +500,11 @@ jobs:
     # web/package.json and installs the Chromium that version needs. A job of
     # its own and not part of check, which needs no browser. It runs on every
     # pull request and every push to main. Scripted agents only: the claude
-    # program is neither on this runner nor ever run.
+    # program is neither on this runner nor ever run. The suite takes 17-19
+    # minutes on main with the camera specs (44-46), so the bound is 30, not
+    # 20: a bound the passing suite runs into cancels a green run (#1268).
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

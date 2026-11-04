@@ -5,12 +5,13 @@
 // cleanup stops the capture. MicTest.tsx is its pattern.
 import { useEffect, useRef, useState } from 'react';
 import { Glyph } from '../Icons';
-import { captureFailure, failureNote } from './camera';
+import { onPhoneCamera, pageHiddenOnPhone } from '../phone';
+import { captureFailure, failureNote, type CameraProfile } from './camera';
 import { captureCameraTest, type CameraTestCapture } from './sdk';
 
 // What the test needs from the browser, so a unit test needs none of it.
 export interface CameraTestDeps {
-  readonly capture: (choice: string | null) => Promise<CameraTestCapture>;
+  readonly capture: (choice: string | null, profile: CameraProfile) => Promise<CameraTestCapture>;
 }
 
 const browser: CameraTestDeps = { capture: captureCameraTest };
@@ -37,6 +38,20 @@ export function CameraTest({ choose, chosen, onCaptured, deps = browser }: {
   const chooser = useRef(choose);
   chooser.current = choose;
 
+  // A hidden page on a phone stops the test, as it stops the camera: nothing
+  // captures in a pocket (O9). The options being open when the page shows
+  // again starts nothing; Test camera does.
+  useEffect(() => {
+    if (!on) return;
+    const hidden = () => {
+      if (pageHiddenOnPhone()) setOn(false);
+    };
+    document.addEventListener('visibilitychange', hidden);
+    return () => {
+      document.removeEventListener('visibilitychange', hidden);
+    };
+  }, [on]);
+
   useEffect(() => {
     if (!on) return;
     // Read afresh after each await: the cleanup ends the run.
@@ -53,7 +68,7 @@ export function CameraTest({ choose, chosen, onCaptured, deps = browser }: {
       }
       let capture: CameraTestCapture;
       try {
-        capture = await deps.capture(choice);
+        capture = await deps.capture(choice, onPhoneCamera() ? 'phone' : 'desktop');
       } catch (err: unknown) {
         if (over()) return;
         setProblem(failureNote(captureFailure(err)));

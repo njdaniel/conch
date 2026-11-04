@@ -35,6 +35,10 @@ import type { CameraClaimResult } from '../api';
 import type { VoiceCameraEnded, VoiceCameraEndReason } from '../schema/voice';
 import type { Clock } from '../state/feed';
 
+// The two capture profiles of design §7.5 (sdk.ts has their numbers): the
+// phone's is chosen when a capture starts (phone.ts), never by a later resize.
+export type CameraProfile = 'desktop' | 'phone';
+
 // A camera the browser lists, or the one chosen: its device id and its name.
 export interface Camera {
   readonly id: string;
@@ -57,7 +61,9 @@ export interface CameraRoom {
   // Captures the camera, exactly the device given (null: the browser's own
   // choice, when the person has made none), and holds it unpublished. Rejects
   // with the browser's error.
-  readonly captureCamera: (choice: string | null) => Promise<void>;
+  // The profile (phone or desktop, design §7.5) is the one the capture starts
+  // with, kept for its switches and its publish.
+  readonly captureCamera: (choice: string | null, profile?: CameraProfile) => Promise<void>;
   // Resolves once LiveKit has told this connection that it may publish a
   // camera (#525); rejects when it has not within grantWait, or the capture
   // was stopped or kept meanwhile, or the connection closed.
@@ -361,7 +367,7 @@ export class CameraClient {
   // start is the camera button: capture, claim (un-named, the one place that
   // sends one), wait for the grant, publish. It does nothing unless the
   // camera is off.
-  async start(channel: string, room: CameraRoom, choice: string | null): Promise<void> {
+  async start(channel: string, room: CameraRoom, choice: string | null, profile: CameraProfile = 'desktop'): Promise<void> {
     if (!this.idle()) return;
     const mine = ++this.attempt;
     this.channel = channel;
@@ -372,7 +378,7 @@ export class CameraClient {
     this.forgetClaim();
     this.set({ kind: 'capturing' });
     try {
-      await room.captureCamera(choice);
+      await room.captureCamera(choice, profile);
     } catch (err: unknown) {
       if (mine !== this.attempt) return;
       this.set({ kind: 'failed', reason: captureFailure(err) });
