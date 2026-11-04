@@ -2,6 +2,7 @@ import { Fragment, useEffect, useRef, useState, type KeyboardEvent, type ReactNo
 import * as api from './api';
 import { Glyph } from './Icons';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
+import { leaveLine } from './leaveChannel';
 import type { SettingsChange } from './ChannelSettingsAsk';
 import type { ChannelV0 } from './schema/channel';
 import { badgeText } from './useReadState';
@@ -97,18 +98,6 @@ function VoicePeople({
       ) : null}
     </ul>
   );
-}
-
-function leaveLine(failure: api.ApiFailure, code: string | undefined): string {
-  if (failure === 'network') return 'Cannot reach the server. Nothing was changed; try again.';
-  switch (code) {
-    case 'channel_last_member':
-      return 'You are the last member of this private channel. Add someone else before you leave.';
-    case api.channelNotFound:
-      return 'That channel is gone, or you can no longer see it.';
-    default:
-      return 'The server could not take you out of the channel. Try again.';
-  }
 }
 
 // One channel's row (issues #1135, #1095): its button, which opens the channel,
@@ -222,6 +211,7 @@ function ChannelRow({
         return;
       }
       if (result.failure === 'unauthorized') {
+        if (live.current) setLeaveBusy(false);
         onUnauthorized?.();
         return;
       }
@@ -447,6 +437,7 @@ export function ChannelList({
   readonly onOpen: (name: string) => void;
 }) {
   const buttons = useRef(new Map<string, HTMLButtonElement>());
+  const list = useRef<HTMLUListElement>(null);
   // The one button in the tab order: the open channel, or the first.
   const stop = selected ?? channels[0]?.name ?? null;
 
@@ -476,11 +467,22 @@ export function ChannelList({
     else buttons.current.set(name, el);
   }
 
+  function left(name: string) {
+    if (onLeft === undefined) return;
+    const at = channels.findIndex((channel) => channel.name === name);
+    onLeft(name);
+    // The menu item and then its row go. Focus the neighbouring row, or the
+    // list when the person left its last channel, rather than losing it to body.
+    const next = channels[at + 1] ?? channels[at - 1];
+    const target = next === undefined ? undefined : buttons.current.get(next.name);
+    (target ?? list.current)?.focus();
+  }
+
   if (channels.length === 0) {
     return <p className="empty">{empty}</p>;
   }
   return (
-    <ul className="channel-list">
+    <ul ref={list} className="channel-list" tabIndex={-1}>
       {channels.map((channel, i) => (
         <ChannelRow
           key={channel.id}
@@ -497,7 +499,7 @@ export function ChannelList({
           mayManage={canManage}
           renderSettings={renderSettings}
           onInvite={onInvite}
-          onLeft={onLeft}
+          onLeft={onLeft === undefined ? undefined : left}
           onUnauthorized={onUnauthorized}
           register={register}
           onMove={move}

@@ -1,11 +1,31 @@
 // Issue #1095: Leave channel in a channel row's ⋯ menu. Public channels are
 // left at once; private ones ask first. The API is a stand-in; nothing here
 // needs a network or a browser.
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import type { SetStateAction } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
 import { ChannelList } from './ChannelList';
 import type { ChannelV0 } from './schema/channel';
+
+const reactState = vi.hoisted(() => ({ track: false, calls: 0 }));
+vi.mock('react', async (importOriginal) => {
+  const real = await importOriginal<typeof import('react')>();
+  return {
+    ...real,
+    useState: <T,>(initial: T | (() => T)) => {
+      const [value, setValue] = real.useState<T>(initial);
+      if (!reactState.track) return [value, setValue] as const;
+      return [
+        value,
+        (next: SetStateAction<T>) => {
+          reactState.calls++;
+          setValue(next);
+        },
+      ] as const;
+    },
+  };
+});
 
 vi.mock('./api', async (importOriginal) => {
   const real = await importOriginal<typeof import('./api')>();
@@ -54,6 +74,8 @@ beforeEach(() => {
   leave.mockReset();
   left = [];
   unauthorized = 0;
+  reactState.track = false;
+  reactState.calls = 0;
 });
 afterEach(cleanup);
 
@@ -85,7 +107,7 @@ describe('Leave channel in the row menu', () => {
     ]);
   });
 
-  it('leaves a public channel at once through the existing request', async () => {
+  it('leaves a public channel at once through the existing request and focuses the next row', async () => {
     leave.mockResolvedValue({ ok: true, value: null });
     render(view());
     choose('general', 'Leave channel');
@@ -95,6 +117,7 @@ describe('Leave channel in the row menu', () => {
     expect(leave).toHaveBeenCalledTimes(1);
     expect(leave).toHaveBeenCalledWith('general');
     expect(screen.queryByRole('group', { name: 'Leave general?' })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'secret' }));
   });
 
   it('asks before leaving a private channel; Escape and Cancel send nothing and return focus to the ⋯', () => {
@@ -144,7 +167,50 @@ describe('Leave channel in the row menu', () => {
     expect(document.activeElement).toBe(more('secret'));
   });
 
-  it('hands an expired credential to the page without leaving locally', async () => {
+  it.each([
+    { name: 'network', result: { ok: false, failure: 'network' } as const, line: 'Cannot reach the server. Nothing was changed; try again.' },
+    { name: 'channel_not_found', result: { ok: false, failure: 'invalid', code: 'channel_not_found', message: 'not shown' } as const, line: 'That channel is gone, or you can no longer see it.' },
+  ])('shows the $name refusal and stays in the channel', async ({ result, line }) => {
+    leave.mockResolvedValue(result);
+    render(view());
+    choose('general', 'Leave channel');
+    expect((await screen.findByRole('status')).textContent).toBe(line);
+    expect(left).toEqual([]);
+    expect(row('general')).toBeDefined();
+  });
+
+  it('sends one request for two rapid Yes, leave clicks', () => {
+    leave.mockReturnValue(new Promise(() => undefined));
+    render(view());
+    choose('secret', 'Leave channel');
+    const yes = screen.getByRole('button', { name: 'Yes, leave' });
+    fireEvent.click(yes);
+    fireEvent.click(yes);
+    expect(leave).toHaveBeenCalledTimes(1);
+    expect(leave).toHaveBeenCalledWith('secret');
+  });
+
+  it('sets no state when a refusal arrives after the row unmounts', async () => {
+    let answer: (result: Awaited<ReturnType<typeof api.leaveChannel>>) => void = () => undefined;
+    leave.mockReturnValue(new Promise((resolve) => {
+      answer = resolve;
+    }));
+    reactState.track = true;
+    const mounted = render(view());
+    choose('secret', 'Leave channel');
+    fireEvent.click(screen.getByRole('button', { name: 'Yes, leave' }));
+    mounted.unmount();
+    reactState.calls = 0;
+    await act(async () => {
+      answer({ ok: false, failure: 'network' });
+      await Promise.resolve();
+    });
+    reactState.track = false;
+    expect(reactState.calls).toBe(0);
+    expect(left).toEqual([]);
+  });
+
+  it('hands an expired credential to the page and clears the pending state without leaving locally', async () => {
     leave.mockResolvedValue({ ok: false, failure: 'unauthorized' });
     render(view());
     choose('general', 'Leave channel');
@@ -152,5 +218,7 @@ describe('Leave channel in the row menu', () => {
       expect(unauthorized).toBe(1);
     });
     expect(left).toEqual([]);
+    expect(screen.queryByRole('status')).toBeNull();
+    expect(within(menuOf('general')).getByRole('menuitem', { name: 'Leave channel' }).getAttribute('aria-disabled')).toBeNull();
   });
 });

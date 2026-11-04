@@ -1736,8 +1736,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           )}
           // Holders of manage_channels make a channel public or private, a
           // default or not, from its ⋯ menu (issue #1183). whoami says who
-          // holds it; the server decides each change. Every member may leave
-          // a listed channel (issue #1095).
+          // holds it; the server decides each change. An account member may
+          // leave a listed channel; a guest visit uses End visit (#1095).
           canManage={visit === null && canDo(auth.principal, 'manage_channels')}
           renderSettings={(channel, change, close) => (
             <ChannelSettingsAsk
@@ -1750,7 +1750,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               onClose={close}
             />
           )}
-          onLeft={leftChannel}
+          {...(auth.principal.kind === 'human' && visit === null ? { onLeft: leftChannel } : {})}
           onUnauthorized={onUnauthorized}
           {...(auth.principal.may_invite === true && channels.channels.length > 0
             ? {

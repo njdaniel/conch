@@ -3,10 +3,10 @@
 // and the channel is gone from both the page and the member's own channel list.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import { makeInvite } from './api';
-import { createChannelResponse, listChannelsResponse, type CreateChannelRequest } from '../src/schema/channel';
+import { createChannelResponse, listChannelsResponse, type ChannelVisibility, type CreateChannelRequest } from '../src/schema/channel';
 import { channelSettingsResponseV1 } from '../src/schema/generated';
 import { channelButton, expect, expectFits, fillAccount, showView, statusLine, test } from './fixtures';
-import { inviteUrl, ok, type World } from './world';
+import { call, inviteUrl, ok, type World } from './world';
 
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Channels' });
 
@@ -19,10 +19,10 @@ const sizes: readonly (readonly [string, BrowserContextOptions, boolean])[] = [
   ['390×844', { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }, true],
 ];
 
-async function makeChannel(world: World, name: string): Promise<void> {
+async function makeChannel(world: World, name: string, visibility: ChannelVisibility = 'public'): Promise<void> {
   const request: CreateChannelRequest = { name };
   const made = (await ok(world, world.tokens.operator, 'POST', '/v0/channels', createChannelResponse, request)).channel;
-  await ok(world, world.tokens.operator, 'PUT', `/v1/channels/${String(made.id)}/settings`, channelSettingsResponseV1, { visibility: 'public' });
+  await ok(world, world.tokens.operator, 'PUT', `/v1/channels/${String(made.id)}/settings`, channelSettingsResponseV1, { visibility });
 }
 
 for (const [size, options, phone] of sizes) {
@@ -31,7 +31,7 @@ for (const [size, options, phone] of sizes) {
     const channel = `p1095-${suffix}${phone ? 'p' : 'w'}`;
     const name = `l${suffix}${phone ? 'p' : 'w'}`;
     await makeChannel(world, channel);
-    const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: [channel], voice: false, may_invite: false });
+    const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: [channel], voice: false, may_invite: true });
 
     const { page } = await meet(options);
     await page.goto(inviteUrl(world, made.code));
@@ -64,3 +64,35 @@ for (const [size, options, phone] of sizes) {
     await expectFits(page, `${size}: after leaving the channel`);
   });
 }
+
+test('P1095 at 390×844 a private-channel confirmation and last-member refusal fit', async ({ meet, secrets, world }) => {
+  const suffix = Date.now().toString(36).slice(-5);
+  const channel = `p1095-${suffix}-private`;
+  const name = `l${suffix}p`;
+  await makeChannel(world, channel, 'private');
+  const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: [channel], voice: false, may_invite: true });
+
+  const { page } = await meet({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+  await page.goto(inviteUrl(world, made.code));
+  await fillAccount(page, name);
+  await expect(statusLine(page)).toContainText('Connected');
+  const token = await page.evaluate(() => window.localStorage.getItem('conch.web.token'));
+  if (token !== null) secrets.push(token);
+  // The operator who made the channel leaves it too: this member is now the
+  // private channel's last member, whom the server refuses.
+  const operatorLeft = await call(world, world.tokens.operator, 'POST', `/v1/channels/${channel}/leave`);
+  expect(operatorLeft.status).toBeLessThan(300);
+  await showView(page, 'Channels');
+  const row = channelRow(page, channel);
+  await row.getByRole('button', { name: `Actions for ${channel}` }).tap();
+  await row.getByRole('menuitem', { name: 'Leave channel' }).tap();
+  const ask = row.getByRole('group', { name: `Leave ${channel}?` });
+  await expect(ask).toContainText(`Leave #${channel}? You will not find it again unless someone adds you back.`);
+  await expectFits(page, '390×844: the private Leave confirmation');
+
+  const answered = page.waitForResponse((response) => response.request().method() === 'POST' && response.url().endsWith(`/v1/channels/${channel}/leave`));
+  await ask.getByRole('button', { name: 'Yes, leave' }).tap();
+  expect((await answered).ok()).toBe(false);
+  await expect(row.getByRole('status')).toHaveText('You are the last member of this private channel. Add someone else before you leave.');
+  await expectFits(page, '390×844: the last-member refusal');
+});
