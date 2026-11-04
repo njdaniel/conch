@@ -19,6 +19,7 @@ import {
   refusalFailure,
   renewalGrace,
   unpublishWait,
+  claimWait,
   type CameraFailure,
   type CameraRoom,
   type CameraState,
@@ -299,10 +300,10 @@ describe('a claim answered once its attempt is over', () => {
     void t.client.start('general', t.room, null);
     await settle();
     expect(t.log).toEqual(['room capture browser', 'POST general']);
-    // The stop waits for the claim no longer than unpublishWait.
+    // The stop waits for the claim no longer than claimWait.
     const stopped = t.client.stop('self');
     await settle();
-    t.clock.advance(unpublishWait);
+    t.clock.advance(claimWait);
     await stopped;
     void t.client.start('general', t.room, null);
     await settle();
@@ -350,6 +351,124 @@ describe('a claim answered once its attempt is over', () => {
     expect(t.room.captured).toBe(false);
   });
 
+  it('displaced while a stop is under way: the stop does not release the claim, now the other device’s', async () => {
+    const t = await sending();
+    t.log.length = 0;
+    t.room.hold = 'stop';
+    const stopping = t.client.stop('self');
+    await settle();
+    t.client.lost(cameraAfter('duplicate_identity'));
+    t.room.held?.open();
+    t.clock.advance(unpublishWait);
+    await stopping;
+    expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([]);
+  });
+
+  it('displaced once the camera is off: a late grant is left to the other device, never released', async () => {
+    const t = manual();
+    void t.client.start('general', t.room, null);
+    await settle();
+    const stopped = t.client.stop('self');
+    await settle();
+    t.clock.advance(claimWait);
+    await stopped;
+    expect(t.client.current).toEqual({ kind: 'off', ended: 'self' });
+    t.client.lost(cameraAfter('duplicate_identity'));
+    await t.answer(granted(first));
+    expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([]);
+  });
+
+  it('a claim that outlives claimWait, answered with the claim a newer one holds, is not released', async () => {
+    const t = manual();
+    void t.client.start('general', t.room, null);
+    await settle();
+    const stopped = t.client.stop('self');
+    await settle();
+    t.clock.advance(claimWait);
+    await stopped;
+    void t.client.start('general', t.room, null);
+    await settle();
+    // The newer one waits for the older no longer than claimWait.
+    t.clock.advance(claimWait);
+    await settle();
+    expect(t.log.filter((l) => l.startsWith('POST'))).toEqual(['POST general', 'POST general']);
+    // conchd answers both with the one claim it holds for the person.
+    await t.answer(granted(first));
+    expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([]);
+    await t.answer(granted(first));
+    await settle();
+    expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([]);
+    expect(t.client.current).toEqual({ kind: 'sending' });
+  });
+
+  it('a claim that outlives claimWait and grants a claim nobody uses is still released, once the newer is answered', async () => {
+    const t = manual();
+    void t.client.start('general', t.room, null);
+    await settle();
+    const stopped = t.client.stop('self');
+    await settle();
+    t.clock.advance(claimWait);
+    await stopped;
+    void t.client.start('general', t.room, null);
+    await settle();
+    t.clock.advance(claimWait);
+    await settle();
+    await t.answer(granted(first));
+    await t.answer(granted(second));
+    await settle();
+    expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([`DELETE general ?started_at=${first}`]);
+  });
+
+  it('a stop waits for a claim answered after unpublishWait, so its grant is released while the credential works (sign-out)', async () => {
+    const t = manual();
+    void t.client.start('general', t.room, null);
+    await settle();
+    let over = false;
+    const stopping = t.client.stop('left').then(() => {
+      over = true;
+    });
+    await settle();
+    t.clock.advance(unpublishWait + 1000);
+    await settle();
+    expect(over).toBe(false);
+    await t.answer(granted(first));
+    await stopping;
+    expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([`DELETE general ?started_at=${first}`]);
+  });
+
+  it('a stop asked again while one is under way waits for all of it', async () => {
+    const t = await sending();
+    t.room.hold = 'stop';
+    const stopping1 = t.client.stop('self');
+    await settle();
+    let over = false;
+    const again = t.client.stop('left').then(() => {
+      over = true;
+    });
+    await settle();
+    expect(over).toBe(false);
+    t.room.held?.open();
+    await stopping1;
+    await again;
+    expect(over).toBe(true);
+    expect(t.log.at(-1)).toBe(`DELETE general ?started_at=${started}`);
+  });
+
+  it('a continue answered while the stop is under way is released once, not twice', async () => {
+    const t = manual();
+    void t.client.start('general', t.room, null);
+    await settle();
+    await t.answer(granted(first));
+    expect(t.client.current).toEqual({ kind: 'sending' });
+    void t.client.reconnected();
+    await settle();
+    const stopping = t.client.stop('self');
+    await settle();
+    await t.answer(granted(first));
+    await stopping;
+    expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([`DELETE general ?started_at=${first}`]);
+  });
+
   it('a stop waits for a claim on its way, so its grant is released before the stop is over (sign-out)', async () => {
     const t = manual();
     void t.client.start('general', t.room, null);
@@ -365,7 +484,7 @@ describe('a claim answered once its attempt is over', () => {
     expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([`DELETE general ?started_at=${first}`]);
   });
 
-  it('a stop waits for a claim on its way no longer than unpublishWait', async () => {
+  it('a stop waits for a claim on its way no longer than claimWait', async () => {
     const t = manual();
     void t.client.start('general', t.room, null);
     await settle();
@@ -374,7 +493,7 @@ describe('a claim answered once its attempt is over', () => {
       over = true;
     });
     await settle();
-    t.clock.advance(unpublishWait);
+    t.clock.advance(claimWait);
     await settle();
     expect(over).toBe(true);
   });
@@ -475,7 +594,73 @@ describe('what the person is told (design §7.2)', () => {
   });
 });
 
+describe('a camera turned on again', () => {
+  it('is not ended by presence still saying why the last claim ended', async () => {
+    const t = await sending(setup([granted(), granted(adopted)]));
+    await t.client.stop('self');
+    t.room.hold = 'capture';
+    const start = t.client.start('general', t.room, null);
+    await settle();
+    // Any frame (someone joins, or the stop's own) carries the old reason.
+    t.client.presence(ended('self'));
+    t.room.held?.open();
+    await start;
+    await settle();
+    expect(t.client.current).toEqual({ kind: 'sending' });
+    // Nor once claiming: the claim answered is a new one.
+    t.client.presence(ended('self'));
+    expect(t.client.current).toEqual({ kind: 'sending' });
+  });
+
+  it('nor after a join, which forgets the last claim', async () => {
+    const t = await sending(setup([granted(), granted(adopted)]));
+    t.client.presence(ended('operator'));
+    await settle();
+    expect(t.client.current).toEqual({ kind: 'off', ended: 'operator' });
+    t.client.reset();
+    expect(t.client.current).toEqual({ kind: 'off', ended: null });
+    t.room.hold = 'capture';
+    const start = t.client.start('general', t.room, null);
+    await settle();
+    t.client.presence(ended('operator'));
+    t.room.held?.open();
+    await start;
+    await settle();
+    expect(t.client.current).toEqual({ kind: 'sending' });
+  });
+});
+
 describe('the camera chosen while the capture is under way (N7)', () => {
+  it('a choice made while the grant is waited for is switched to before the publish', async () => {
+    const t = setup();
+    t.room.hold = 'grant';
+    const start = t.client.start('general', t.room, null);
+    await settle();
+    t.choice.id = 'cam-3';
+    t.room.held?.open();
+    await start;
+    await settle();
+    expect(t.log).toEqual(['room capture browser', 'POST general', 'room grant', 'room switch cam-3', 'room publish']);
+  });
+
+  it('a switch that fails after the choice changed again moves on to the newer choice, and does not stop the camera', async () => {
+    const t = setup();
+    t.choice.id = 'cam-2';
+    const room = t.room;
+    const switchTo = room.switchCamera;
+    room.switchCamera = (choice) => {
+      if (choice === 'cam-2') {
+        t.choice.id = 'cam-3';
+        return Promise.reject(new DOMException('gone', 'OverconstrainedError'));
+      }
+      return switchTo(choice);
+    };
+    await t.client.start('general', room, null);
+    await settle();
+    expect(t.log).toContain('room switch cam-3');
+    expect(t.client.current).toEqual({ kind: 'sending' });
+  });
+
   it('is the camera sent: the capture moves to it, exactly, before the publish', async () => {
     const t = setup();
     t.room.hold = 'capture';

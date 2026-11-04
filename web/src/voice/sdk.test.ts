@@ -146,6 +146,8 @@ interface Stub {
   videoFails: Error | null;
   // When set, each camera capture waits for the next of these, in order.
   videoHolds: Deferred<undefined>[];
+  // When set, each restart of the camera waits for the next of these.
+  videoRestartHolds: Deferred<undefined>[];
   permissions: { canPublish: boolean; canPublishSources: number[] } | undefined;
 }
 interface StubSettings {
@@ -234,6 +236,7 @@ const state = vi.hoisted((): Stub => {
     videoTracks: [],
     videoFails: null,
     videoHolds: [],
+    videoRestartHolds: [],
     permissions: undefined,
   };
 });
@@ -393,11 +396,29 @@ vi.mock('livekit-client', () => {
     userProvided: boolean;
     attached: unknown[] = [];
     mediaStreamTrack: StubVideo['mediaStreamTrack'];
+    private readonly ends = new Set<() => void>();
     constructor(mediaStreamTrack: StubVideo['mediaStreamTrack'], _constraints: unknown, userProvided = false) {
       this.mediaStreamTrack = mediaStreamTrack;
       this.userProvided = userProvided;
+      this.wire(mediaStreamTrack);
       state.videoTracks.push(this);
     }
+    // As the SDK's LocalTrack: the MediaStreamTrack's end is told as the
+    // track's Ended, from whichever MediaStreamTrack it has now.
+    private wire(m: StubVideo['mediaStreamTrack']): void {
+      m.addEventListener('ended', () => {
+        if (m !== this.mediaStreamTrack) return;
+        for (const fn of [...this.ends]) fn();
+      });
+    }
+    on = (event: string, fn: () => void) => {
+      if (event === 'ended') this.ends.add(fn);
+      return this;
+    };
+    off = (event: string, fn: () => void) => {
+      if (event === 'ended') this.ends.delete(fn);
+      return this;
+    };
     stop = () => {
       this.stopped++;
       state.calls.push('stop camera track');
@@ -411,10 +432,13 @@ vi.mock('livekit-client', () => {
       this.attached = this.attached.filter((e) => el !== undefined && e !== el);
       return [];
     };
-    restartTrack = (options: unknown) => {
+    restartTrack = async (options: unknown) => {
       state.videoOptions.push(options);
-      this.mediaStreamTrack = videoMedia(options);
-      return Promise.resolve();
+      const hold = state.videoRestartHolds.shift();
+      if (hold !== undefined) await hold.promise;
+      const m = videoMedia(options);
+      this.mediaStreamTrack = m;
+      this.wire(m);
     };
   }
   class Room {
@@ -647,6 +671,7 @@ beforeEach(() => {
   state.videoTracks.length = 0;
   state.videoFails = null;
   state.videoHolds.length = 0;
+  state.videoRestartHolds.length = 0;
   state.permissions = undefined;
   vi.stubGlobal(
     'AudioContext',
@@ -2347,6 +2372,81 @@ describe('the camera', () => {
     // Stopping it leaves nothing captured.
     await room.stopCamera();
     expect([...captures()].filter((m) => m.readyState === 'live')).toHaveLength(0);
+  });
+
+  it('a switch overtaken by a later one never stops the capture the later one made', async () => {
+    const room = await connected();
+    await room.captureCamera('cam-a');
+    const toB = deferred<undefined>();
+    const toC = deferred<undefined>();
+    state.videoRestartHolds.push(toB, toC);
+    const b = room.switchCamera('cam-b').then(
+      () => 'switched',
+      () => 'failed',
+    );
+    // B's restart is under way when C is asked for.
+    await settle();
+    const c = room.switchCamera('cam-c').then(
+      () => 'switched',
+      () => 'failed',
+    );
+    await settle();
+    // C's camera is had first; B's fails after it.
+    toC.resolve(undefined);
+    await settle();
+    toB.reject(new DOMException('gone', 'OverconstrainedError'));
+    expect([await b, await c]).toEqual(['failed', 'switched']);
+    expect(room.cameraTrack()).toBe('captured');
+    expect(room.cameraInUse()).toBe('cam-c');
+  });
+
+  it('a camera unplugged after a switch is still told as the device', async () => {
+    const room = await connected();
+    await room.captureCamera('cam-a');
+    await room.switchCamera('cam-b');
+    expect(room.cameraInUse()).toBe('cam-b');
+    const wrapper = state.videoTracks.find((t) => t.userProvided);
+    wrapper?.mediaStreamTrack.ended();
+    expect(ended).toEqual(['device']);
+  });
+
+  it('a switch overtaken by a stop leaves nothing captured, and does not fail the stop', async () => {
+    const room = await connected();
+    await room.captureCamera('cam-a');
+    const toB = deferred<undefined>();
+    state.videoRestartHolds.push(toB);
+    const b = room.switchCamera('cam-b').then(
+      () => 'switched',
+      () => 'failed',
+    );
+    await settle();
+    await room.stopCamera();
+    toB.resolve(undefined);
+    expect(await b).toBe('failed');
+    const wrapper = state.videoTracks.find((t) => t.userProvided);
+    expect(wrapper?.mediaStreamTrack.readyState).toBe('ended');
+    expect(room.cameraTrack()).toBe('none');
+  });
+
+  it('a switch overtaken by a keep never stops the capture kept for, and adopted by, the next connection', async () => {
+    const room = await connected();
+    await room.captureCamera('cam-a');
+    const toB = deferred<undefined>();
+    state.videoRestartHolds.push(toB);
+    const b = room.switchCamera('cam-b').then(
+      () => 'switched',
+      () => 'failed',
+    );
+    await settle();
+    const kept = room.keepCamera();
+    if (kept === null) throw new Error('nothing kept');
+    const next = await connected();
+    next.adoptCamera(kept);
+    toB.reject(new DOMException('gone', 'OverconstrainedError'));
+    expect(await b).toBe('failed');
+    expect(next.cameraTrack()).toBe('captured');
+    const wrapper = state.videoTracks.find((t) => t.userProvided);
+    expect(wrapper?.stopped).toBe(0);
   });
 
   it('a capture that completes after a stop is stopped, never held', async () => {

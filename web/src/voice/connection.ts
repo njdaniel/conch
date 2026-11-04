@@ -454,6 +454,10 @@ export const initialVoice: VoiceState = {
 
 const noCameraTracks: ReadonlySet<number> = new Set();
 
+// The camera's states before it is published, when its start applies the
+// choice itself.
+const beforePublish: ReadonlySet<CameraState['kind']> = new Set(['capturing', 'claiming', 'granted-waiting', 'resuming']);
+
 // Without the camera's routes, every claim is refused.
 const noCamera = (): Promise<CameraClaimResult> => Promise.resolve({ ok: false, failure: 'invalid' });
 
@@ -889,6 +893,10 @@ export class VoiceClient {
   // that fails stops the camera, and no other camera is taken.
   async chooseCamera(choice: Camera): Promise<void> {
     this.set({ cameraChoice: choice });
+    // Until the camera is published, its own start moves the capture to the
+    // choice, read afresh before the grant and before the publish
+    // (camera.ts follow): a second switch here would race it.
+    if (beforePublish.has(this.state.camera.kind)) return;
     const room = this.room;
     if (room === null || room.cameraTrack() === 'none') return;
     // A switch answers for the capture it moved: once the camera was turned

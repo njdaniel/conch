@@ -17,11 +17,14 @@ const browser: CameraTestDeps = { capture: captureCameraTest };
 
 export const previewNote = 'Preview: not sent';
 
-export function CameraTest({ choose, onCaptured, deps = browser }: {
+export function CameraTest({ choose, chosen, onCaptured, deps = browser }: {
   // The camera to capture, asked for when the test starts: the one chosen,
   // found again by its name (N7); null for the browser's own choice; false
   // for a choice that is not connected, when nothing is captured.
   readonly choose: () => Promise<string | null | false>;
+  // Which camera is chosen now, by id ('' for none): a running test moves to
+  // a new choice, the old capture stopped first.
+  readonly chosen: string;
   // Told once the browser gave a capture: it names its cameras from then.
   readonly onCaptured?: () => void;
   readonly deps?: CameraTestDeps;
@@ -70,7 +73,7 @@ export function CameraTest({ choose, onCaptured, deps = browser }: {
       live = false;
       held?.stop();
     };
-  }, [on, deps]);
+  }, [on, chosen, deps]);
 
   return (
     <div className="camera-test">

@@ -1080,6 +1080,7 @@ function CameraOptions({ voice, open, cameraAllowed }: { readonly voice: VoiceCo
       {open && off ? (
         <CameraTest
           choose={() => client.cameraToUse()}
+          chosen={state.cameraChoice?.id ?? ''}
           onCaptured={() => {
             client.refreshCameras();
           }}

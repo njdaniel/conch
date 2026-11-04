@@ -174,8 +174,9 @@ const notVoice = (path: string) => !path.startsWith('./voice/');
 // camera and a microphone of the SDK's choosing together. (createScreenTracks,
 // the share's picker, is another name.)
 const cameraShortcut = /enableCameraAndMicrophone|setCameraEnabled|\bcreateTracks\b/;
-// An import of the SDK, static or dynamic.
-const sdkImport = /from\s+['"]livekit-client['"]|import\s*\(\s*['"`]livekit-client['"`]\s*\)/;
+// The SDK's module specifier, or one of its subpaths, as a string: every
+// spelling of an import of it (static, dynamic, re-export, require) names it.
+const sdkImport = /['"`]livekit-client(\/[^'"`]*)?['"`]/;
 
 // Where the join token of a voice grant may be read: a property read
 // (grant.token, x.token), an index into rooms, or a destructuring that names
@@ -237,9 +238,17 @@ describe('media devices', () => {
       .map(([path]) => path);
     expect(hits).toEqual(['./voice/sdk.ts']);
     // And the rule sees a dynamic import, which a bundle would load as well.
-    for (const example of ["const lk = await import('livekit-client');", 'import ( "livekit-client" )', "import { Room } from 'livekit-client';"]) {
+    for (const example of [
+      "const lk = await import('livekit-client');",
+      'import ( "livekit-client" )',
+      "import { Room } from 'livekit-client';",
+      "export { Room } from 'livekit-client';",
+      'const m = `livekit-client`;',
+      "import x from 'livekit-client/dist/livekit-client.esm.mjs';",
+    ]) {
       expect(sdkImport.test(example), example).toBe(true);
     }
+    expect(sdkImport.test("import x from 'livekit-client-other';")).toBe(false);
   });
 
   it('the join token is in src/api.ts and src/voice/ only, and never logged', () => {

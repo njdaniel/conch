@@ -584,17 +584,28 @@ class KeptCam implements KeptCamera {
 
   constructor(track: LocalVideoTrack) {
     this.track = track;
-    track.mediaStreamTrack.addEventListener('ended', () => {
-      const ended = this.onEnded;
-      this.onEnded = null;
-      ended?.();
-    });
+    // The track's own event, which follows the capture through a switch of
+    // camera (the SDK moves it to each new MediaStreamTrack).
+    track.on(TrackEvent.Ended, this.ended);
   }
+
+  private readonly ended = (): void => {
+    const ended = this.onEnded;
+    this.onEnded = null;
+    ended?.();
+  };
 
   live = (): boolean => this.track.mediaStreamTrack.readyState === 'live';
 
   stop = (): void => {
+    this.forget();
     this.track.stop();
+  };
+
+  // forget stops listening: the capture is another connection's now.
+  forget = (): void => {
+    this.onEnded = null;
+    this.track.off(TrackEvent.Ended, this.ended);
   };
 }
 
@@ -661,6 +672,14 @@ class LiveKitAdapter implements Room {
   // that completes after a newer one began, or after a stop, is stopped at
   // once and never held, so no capture is left running unreferenced.
   private cameraTurn = 0;
+  // The switch of camera under way, and the number of the last one asked
+  // for (switchCamera).
+  private switching: Promise<void> = Promise.resolve();
+  private switchTurn = 0;
+  // Stops listening for the held camera's end (holdCamera).
+  private forgetEnded: () => void = () => undefined;
+  // The captures this connection kept for the next one: never its to stop.
+  private readonly keptTracks = new WeakSet<LocalVideoTrack>();
   // The tracks that arrived with a kind their source disagrees with (S1),
   // by sid: never subscribed again.
   private readonly refused = new Set<string>();
@@ -1302,12 +1321,20 @@ class LiveKitAdapter implements Room {
     }
     this.camera = track;
     this.cameraPub = null;
-    track.mediaStreamTrack.addEventListener('ended', () => {
+    // The track's own event, not its MediaStreamTrack's: a switch of camera
+    // replaces the MediaStreamTrack, and the SDK moves its listener to each.
+    this.forgetEnded();
+    const ended = () => {
       // Kept for another connection since, or stopped by this adapter (a
       // track stopped by script fires no ended event): not this one's.
       if (this.camera !== track || this.stoppingCamera || this.closed) return;
       this.events?.onCameraEnded('device');
-    });
+    };
+    track.on(TrackEvent.Ended, ended);
+    this.forgetEnded = () => {
+      track.off(TrackEvent.Ended, ended);
+      this.forgetEnded = () => undefined;
+    };
     if (this.selfView !== null) track.attach(this.selfView);
     this.events?.onCameraChanged();
   }
@@ -1350,22 +1377,53 @@ class LiveKitAdapter implements Room {
 
   // switchCamera moves the capture to another camera, exactly, keeping its
   // publication. A capture that fails leaves nothing captured.
+  //
+  // Switches run one after another, and only the last one asked for runs: one
+  // overtaken while it waited does nothing, so an earlier switch's failure
+  // can never stop a capture a later one made.
   async switchCamera(choice: string): Promise<void> {
     this.ensureOpen();
-    const track = this.camera;
-    if (track === null) return;
+    const turn = ++this.switchTurn;
+    const before = this.switching;
+    let finished: () => void = () => undefined;
+    this.switching = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
     try {
-      await track.restartTrack(cameraOptions(choice));
-    } catch (err) {
-      if (this.camera === track) await this.stopCamera();
-      else track.stop();
-      throw err;
+      await before;
+      if (turn !== this.switchTurn) return;
+      this.ensureOpen();
+      const track = this.camera;
+      if (track === null) return;
+      // The capture this switch moves: a stop, a keep or a new capture since
+      // moves cameraTurn on, and the switch then answers for nothing held.
+      const owned = this.cameraTurn;
+      const ours = () => owned === this.cameraTurn && this.camera === track;
+      // What the switch leaves behind once the track is not this
+      // connection's: stopped, unless it was kept for the next connection,
+      // which holds it now.
+      const letGo = () => {
+        if (!this.keptTracks.has(track)) track.stop();
+      };
+      try {
+        await track.restartTrack(cameraOptions(choice));
+      } catch (err) {
+        // Only the last switch asked for, on the capture this connection
+        // still holds, may stop it: one overtaken while the browser was
+        // asked leaves it to the later one.
+        if (ours()) {
+          if (turn === this.switchTurn) await this.stopCamera();
+        } else if (this.camera !== track) letGo();
+        throw err;
+      }
+      if (this.closed || !ours()) {
+        if (this.camera !== track) letGo();
+        throw new ClosedError();
+      }
+      this.events?.onCameraChanged();
+    } finally {
+      finished();
     }
-    if (this.closed || this.camera !== track) {
-      track.stop();
-      throw new ClosedError();
-    }
-    this.events?.onCameraChanged();
   }
 
   async stopCamera(): Promise<void> {
@@ -1375,6 +1433,7 @@ class LiveKitAdapter implements Room {
     this.camera = null;
     this.cameraPub = null;
     this.wakeGrant();
+    this.forgetEnded();
     if (track === null) return;
     this.stoppingCamera = true;
     // The capture stops first, at once: the device light goes off even if
@@ -1395,7 +1454,9 @@ class LiveKitAdapter implements Room {
     this.camera = null;
     this.cameraPub = null;
     this.wakeGrant();
+    this.forgetEnded();
     if (track === null) return null;
+    this.keptTracks.add(track);
     // Blanked at once: black frames until the next connection adopts it.
     track.mediaStreamTrack.enabled = false;
     if (this.selfView !== null) track.detach(this.selfView);
@@ -1413,7 +1474,7 @@ class LiveKitAdapter implements Room {
     this.ensureOpen();
     this.cameraTurn++;
     if (!(kept instanceof KeptCam)) throw new Error('voice: not a camera this page kept');
-    kept.onEnded = null;
+    kept.forget();
     kept.track.mediaStreamTrack.enabled = true;
     this.holdCamera(kept.track);
   }

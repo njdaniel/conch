@@ -245,7 +245,7 @@ describe('the camera test', () => {
           },
         }),
     };
-    const { unmount } = render(<CameraTest choose={() => Promise.resolve('cam-1')} deps={deps} />);
+    const { unmount } = render(<CameraTest chosen="" choose={() => Promise.resolve('cam-1')} deps={deps} />);
     fireEvent.click(screen.getByRole('button', { name: 'Test camera' }));
     expect(await screen.findByText(previewNote)).toBeTruthy();
     await vi.waitFor(() => {
@@ -256,6 +256,35 @@ describe('the camera test', () => {
     expect(stops).toEqual(['stop']);
   });
 
+  it('a camera chosen while the test runs: the old capture stops, and the new camera is captured', async () => {
+    const asked: (string | null)[] = [];
+    const stopped: string[] = [];
+    const deps = {
+      capture: (choice: string | null) => {
+        asked.push(choice);
+        return Promise.resolve({
+          show: () => undefined,
+          stop: () => {
+            stopped.push(choice ?? 'browser');
+          },
+        });
+      },
+    };
+    let choice = 'cam-a';
+    const choose = () => Promise.resolve(choice);
+    const { rerender } = render(<CameraTest chosen={choice} choose={choose} deps={deps} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Test camera' }));
+    await vi.waitFor(() => {
+      expect(asked).toEqual(['cam-a']);
+    });
+    choice = 'cam-b';
+    rerender(<CameraTest chosen={choice} choose={choose} deps={deps} />);
+    await vi.waitFor(() => {
+      expect(asked).toEqual(['cam-a', 'cam-b']);
+    });
+    expect(stopped).toEqual(['cam-a']);
+  });
+
   it('a chosen camera that is not connected is said, and nothing is captured: never another camera', async () => {
     let asked = 0;
     const deps = {
@@ -264,7 +293,7 @@ describe('the camera test', () => {
         return Promise.reject(new Error('not to be asked'));
       },
     };
-    render(<CameraTest choose={() => Promise.resolve(false)} deps={deps} />);
+    render(<CameraTest chosen="" choose={() => Promise.resolve(false)} deps={deps} />);
     fireEvent.click(screen.getByRole('button', { name: 'Test camera' }));
     expect(await screen.findByText('Your chosen camera is not connected.')).toBeTruthy();
     expect(asked).toBe(0);
@@ -272,7 +301,7 @@ describe('the camera test', () => {
 
   it('a refused capture says why, and nothing is shown', async () => {
     const deps = { capture: () => Promise.reject(new DOMException('no', 'NotAllowedError')) };
-    render(<CameraTest choose={() => Promise.resolve(null)} deps={deps} />);
+    render(<CameraTest chosen="" choose={() => Promise.resolve(null)} deps={deps} />);
     fireEvent.click(screen.getByRole('button', { name: 'Test camera' }));
     expect(await screen.findByText("The browser blocked the camera. Allow it in this site's settings.")).toBeTruthy();
     expect(screen.queryByText(previewNote)).toBeNull();

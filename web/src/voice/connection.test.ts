@@ -248,7 +248,8 @@ class StubRoom implements Room {
     this.camState = 'captured';
   };
   cameraTrack = (): CameraTrack => this.camState;
-  cameraInUse = (): string | null => (this.camState === 'none' ? null : 'cam-1');
+  camDevice = 'cam-1';
+  cameraInUse = (): string | null => (this.camState === 'none' ? null : this.camDevice);
   cameras = (): Promise<readonly Camera[] | null> => Promise.resolve(this.cameraList);
   switchError: Error | null = null;
   // When set, the next switch waits, and the test fails it.
@@ -262,7 +263,10 @@ class StubRoom implements Room {
         this.failHeldSwitch = reject;
       });
     }
-    if (this.switchError === null) return Promise.resolve();
+    if (this.switchError === null) {
+      this.camDevice = choice;
+      return Promise.resolve();
+    }
     this.camState = 'none';
     return Promise.reject(this.switchError);
   };
@@ -2466,10 +2470,17 @@ describe('the camera through the client', () => {
   it('the room renewed while sending: "Camera in use" for as long as the capture is held, never "none" (S5)', async () => {
     const t = setup([okSession(), okSession()]);
     await cameraOn(t);
+    // Every state the page is told of, not only the last.
+    const seen: string[] = [];
+    t.client.subscribe(() => {
+      seen.push(t.client.snapshot().cameraTrack);
+    });
     t.client.presence(cameraPresence([], { reason: 'rotated', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }));
     expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'resuming' }, cameraTrack: 'captured' });
     t.rooms[0]?.events?.onDisconnected('room_deleted');
     expect(t.client.snapshot().cameraTrack).toBe('captured');
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.filter((s) => s === 'none')).toEqual([]);
   });
 
   it('the call view opens once the capture is given, and not for a camera refused (O8)', async () => {
@@ -2598,6 +2609,21 @@ describe('the camera chosen (N7)', () => {
     }, undefined, undefined, undefined, { choice: desk });
     await joined(u);
     expect(await u.client.cameraToUse()).toBe(false);
+  });
+
+  it('a camera chosen before the camera is published is switched to once, by the start itself, before the publish', async () => {
+    const t = setup([okSession(), okSession()]);
+    await cameraOn(t);
+    t.rooms[0]?.events?.onDisconnected('lost');
+    await settle();
+    expect(t.client.snapshot().camera).toEqual({ kind: 'resuming' });
+    await t.client.chooseCamera({ id: 'cam-2', label: 'Laptop camera' });
+    // Not switched here: nothing is captured on any room now.
+    expect(t.camLog.filter((l) => l.startsWith('switch'))).toEqual([]);
+    t.clock.advance(2000);
+    await settle();
+    const after = t.camLog.slice(t.camLog.indexOf('adopt camera'));
+    expect(after).toEqual(['adopt camera', 'switch cam-2', 'grant', 'publish camera']);
   });
 
   it('a camera chosen while on moves the capture to it, exactly', async () => {
