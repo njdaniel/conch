@@ -3,6 +3,7 @@ package tui
 import (
 	"slices"
 	"strconv"
+	"strings"
 )
 
 // The help overlay. F1 opens it everywhere, and so does "?" in a view where
@@ -184,6 +185,9 @@ func (m Model) helpNotes() []string {
 		// What a temporary guest needs to know, wherever the help is opened
 		// (ADR-009 D2): the visit's end, and the two ways to leave it.
 		notes = append(notes, "Guest visit: you are a temporary guest until "+m.clockTime(m.visit.ExpiresAt)+", or sooner if unused. 'conch end-visit' ends it for good; your messages remain. 'conch account create <name>' keeps your access as an account.")
+	}
+	if perms := m.permissionsSummary(); perms != "" {
+		notes = append(notes, "Your permissions (the server decides every request, and names the permission it refuses for): "+strings.TrimPrefix(perms, "perms: ")+".")
 	}
 	notes = append(notes, "Guests show as \"Guest: <label> · <tag>\", and their messages keep that name after the visit.")
 	switch {

@@ -167,6 +167,10 @@ type eventsModel struct {
 	recreated  bool
 }
 
+// eventsPermissionsReceived carries a permissions_changed frame: the caller's
+// permissions may have changed, and whoami says what they are now.
+type eventsPermissionsReceived struct{ gen int }
+
 // eventsRosterReceived carries one roster frame. gen tells which socket sent
 // it, so a late frame from a channel the user has left is dropped.
 type eventsRosterReceived struct {
@@ -246,6 +250,9 @@ func (m Model) startEvents(ctx context.Context, gen int, channel string, session
 				},
 				Intervention: func(iv schema.InterventionV1) error {
 					return push(eventsInterventionReceived{gen: gen, intervention: iv})
+				},
+				PermissionsChanged: func(schema.PermissionsChangedV1) error {
+					return push(eventsPermissionsReceived{gen: gen})
 				},
 			})
 			select {
