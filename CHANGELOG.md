@@ -8,6 +8,47 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Added
+
+- **Cameras for groups of up to 9, and on a phone** (ADR-015, #973; #1267,
+  PR #1274; #1268, PR #1276). Web only; the server and the wire are as in
+  `alpha.13`. As before, **camera is off for everyone but owners until turned
+  on** (`use_camera`).
+  - **The call view holds up to 9 tiles** (it held 4). Every person in voice
+    gets a tile while there are 9 or fewer, with their initial and "Camera
+    off" when there is no camera; with more, only the cameras get tiles. The
+    speaking person's tile has a ring and the word "speaking", and nothing
+    reorders. A tile is a button, "Enlarge {name}'s video", with "Back to
+    grid" and Full screen, and a camera can sit beside a watched share (the
+    share is the main picture and the cameras are a strip, on its right from
+    1100 px wide).
+  - **The phone rules** (ADR-015 O9, O10, O11). On a narrow window or a
+    touch-only device, video is drawn and received only in the Voice view, so
+    a phone in Chat receives none; the voice strip stays one row of four, and
+    its state button says "Camera on"; the camera and the camera test stop
+    when the page is hidden and never restart by themselves; the capture is
+    640 x 360 at 24 fps with one smaller layer, asking for the front camera
+    first. These are the SDK's presets, not measurements.
+
+### Docs
+
+- **The camera is documented** (#1269, Part A; Part B, the by-hand and
+  bandwidth checks, is Nick's). README has a Camera section on the pattern
+  of Screen share (the routes, errors, cap, idle and rate bound, the
+  operator stop that needs `manage_channels` and is stricter than the share
+  stop, presence, the audit actions, the browser and phone behaviour, the
+  SDK's quality presets, the trust model, guests and a browser table) and
+  the CLI's `+camera` and `conch voice camera stop`. `docs/deploy.md` says
+  that turning the camera on for members takes two cells, that the voice
+  switch withholds it, that both presets leave it off, and what is and is
+  not known about bandwidth. The tester guide has a "Your camera" section,
+  camera columns in the browser table and lines in the known-limits list.
+  `docs/reports/TEMPLATE-camera-bandwidth.md` is the measurement method.
+  **No capacity is claimed:** every bitrate is the SDK's preset, and every
+  browser but Chromium with a fake camera is untried. The video is
+  encrypted on each hop but not end-to-end encrypted, and Conch records
+  nothing.
+
 ## [0.1.0-alpha.13] - 2026-11-04
 
 This is a pre-1.0 release (`v0.1.0-alpha.13`): the API and the wire shapes
