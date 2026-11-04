@@ -247,13 +247,17 @@ func (s *Server) handlePutPermissions(w http.ResponseWriter, r *http.Request) {
 		// everyone or only the people they may know (design §13.6).
 		s.directorySettingChanged(out.Changes)
 		// Before the answer, in this order: everyone who lost use_voice
-		// leaves voice (their shares end with them), then whoever lost
-		// only share_screen loses the share (design §7.5).
+		// leaves voice (their shares and cameras end with them), then
+		// whoever lost only share_screen loses the share (design §7.5), and
+		// whoever lost only use_camera their camera (ADR-015 decision 6).
 		if lostVoice(out.Changes) {
 			s.voiceWithheld(ctx)
 		}
 		if lostShare(out.Changes) {
 			s.endWithheldShares(ctx)
+		}
+		if lostCamera(out.Changes) {
+			s.endWithheldCameras(ctx)
 		}
 		if turnedOff(out.Changes, schema.PermissionRoleOperator, schema.PermActAsMembers) {
 			issued, err := s.store.IssuedToOthers(ctx, s.now())
@@ -441,5 +445,51 @@ func (s *Server) endWithheldShares(ctx context.Context) {
 			continue
 		}
 		s.endWithheldShare(ctx, pid)
+	}
+}
+
+// lostCamera reports whether changes may have withheld use_camera from
+// someone: use_camera, or use_voice, which it needs, turned off in a column.
+func lostCamera(changes []store.PermissionCellChange) bool {
+	return slices.ContainsFunc(changes, func(c store.PermissionCellChange) bool {
+		return !c.Granted && (c.Permission == schema.PermUseCamera || c.Permission == schema.PermUseVoice)
+	})
+}
+
+// endCameraIfWithheld ends principalID's camera claims, in every room, if
+// they no longer hold use_camera: after a change to that principal alone (a
+// role change). A read that fails ends them (fail closed).
+func (s *Server) endCameraIfWithheld(ctx context.Context, principalID int64) {
+	if s.lk == nil {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	holds, err := s.store.Permitted(ctx, principalID, schema.PermUseCamera)
+	if err != nil {
+		slog.ErrorContext(ctx, "permissions: read use_camera failed; ending the camera", "principal", principalID, "error", err)
+	} else if holds {
+		return
+	}
+	s.voice.endCamerasOf(ctx, principalID, 0, voiceCameraStopAccessLost)
+}
+
+// endWithheldCameras ends the camera claims of everyone the poller holds one
+// or a running claim for who no longer holds use_camera (ADR-015 decision 6,
+// design §4.6): through the stop path, under each room's claims, after the
+// change is committed and before it is answered. A read that fails ends them
+// (fail closed). It never fails the request.
+func (s *Server) endWithheldCameras(ctx context.Context) {
+	if s.lk == nil {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	for _, pid := range s.voice.cameraPrincipals() {
+		holds, err := s.store.Permitted(ctx, pid, schema.PermUseCamera)
+		if err != nil {
+			slog.ErrorContext(ctx, "permissions: read use_camera failed; ending the camera", "principal", pid, "error", err)
+		} else if holds {
+			continue
+		}
+		s.voice.endCamerasOf(ctx, pid, 0, voiceCameraStopAccessLost)
 	}
 }

@@ -170,10 +170,12 @@ import {
 } from './schema/principal';
 import { wsTicketV1, type WSTicketV1 } from './schema/ticket';
 import {
+  voiceCameraV1,
   voiceOccupancyV1,
   voicePresenceV1,
   voiceSessionResponseV1,
   voiceShareV1,
+  type VoiceCameraV1,
   type VoiceOccupancyV1,
   type VoicePresenceV1,
   type VoiceSessionResponseV1,
@@ -2727,6 +2729,54 @@ export async function claimVoiceShare(channel: string): Promise<ShareClaimResult
     // Fall through.
   }
   return { ok: false, failure: 'invalid' };
+}
+
+// The camera (ADR-015, design docs/design/webcam-video.md §4.2). As for a
+// share, the page connects first, then claims, then publishes: the join token
+// allows the microphone alone, and the claim is what lets that connection
+// publish a camera. A claim refused carries the status and the server's code:
+// 403 permission_denied is a person without use_camera, 409
+// voice_camera_full a room with all its cameras on, 409 voice_camera_stale a
+// named claim the server no longer holds, 409 voice_no_session no connection
+// to grant it to, 429 voice_camera_rate_limited too many claims.
+export type CameraClaimResult =
+  | { readonly ok: true; readonly value: VoiceCameraV1 }
+  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string };
+
+// claimVoiceCamera claims the caller's camera. Without startedAt it starts a
+// claim, which only the person's camera button asks for. With it, it names
+// the claim it continues (schema.VoiceCameraClaimParam): the server answers
+// with that claim while it holds it, accepts the adoption of a claim the
+// room's rotation ended moments ago, and otherwise answers 409
+// voice_camera_stale and changes nothing (S2).
+export async function claimVoiceCamera(channel: string, startedAt?: string): Promise<CameraClaimResult> {
+  const query = startedAt === undefined ? '' : queryOf({ started_at: startedAt });
+  const reply = await authedPost(call('claimCamera', { channel }, query));
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  const res = reply.res;
+  if (!res.ok) {
+    const code = await refusalCode(res);
+    return code === undefined ? { ok: false, failure: 'invalid', status: res.status } : { ok: false, failure: 'invalid', status: res.status, code };
+  }
+  try {
+    const parsed: unknown = await res.json();
+    if (voiceCameraV1(parsed).length === 0) return { ok: true, value: parsed as VoiceCameraV1 };
+  } catch {
+    // Fall through.
+  }
+  return { ok: false, failure: 'invalid' };
+}
+
+// stopVoiceCamera ends the caller's camera claim, naming it: conchd ends it
+// only while it is still the caller's current one, and otherwise answers 409
+// voice_camera_stale and changes nothing. No claim at all is 204.
+export async function stopVoiceCamera(channel: string, startedAt: string): Promise<ApiResult<null>> {
+  const reply = await authedSend(call('stopCamera', { channel }, queryOf({ started_at: startedAt })));
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return refused(reply.res);
+  return { ok: true, value: null };
 }
 
 // stopVoiceShare ends the caller's share. A share nobody holds is 204 too, so

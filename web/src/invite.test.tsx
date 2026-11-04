@@ -529,9 +529,10 @@ describe('member links', () => {
     expect(within(panel).queryByRole('button', { name: 'Make link' })).toBeNull();
     expect(within(panel).queryByRole('combobox')).toBeNull();
     expect(calls.some((c) => c.path.startsWith('/v2/invites'))).toBe(false);
-    // Nor does any channel row carry a ⋯ (issue #1135).
+    // The channel row's ⋯ is only Leave, not Invite (issues #1135, #1095).
     await screen.findByRole('button', { name: 'general' });
-    expect(screen.queryByRole('button', { name: /^Actions for/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for general' }));
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
   });
 
   // The form never shows more than the server last answered: a right turned

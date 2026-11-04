@@ -65,6 +65,7 @@ import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
 import { VoiceStatus } from './VoiceStatus';
 import { useOccupancy } from './voice/useOccupancy';
+import { leaveVoice } from './voice/useVoice';
 import { useOccupantNames } from './voice/useOccupantNames';
 import { needsHttps } from './transport';
 
@@ -411,6 +412,12 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     if (principalNow.current !== null) forgetChannelStored(principalNow.current, id);
   }, [invalidateChannel, dispatchAttachments, dispatchChat]);
 
+  const leftChannel = useCallback((name: string) => {
+    const left = channelsNow.current.channels.find((c) => c.name === name);
+    if (left !== undefined) dropChannel(left.id, left.name);
+    dispatchChannels({ type: 'left', name });
+  }, [dispatchChannels, dropChannel]);
+
   const loseChannel = useCallback((id: number, name: string) => {
     dropChannel(id, name);
     dispatchChannels({ type: 'lost', name });
@@ -668,6 +675,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // A server that predates voice_allowed says nothing: voice, as the invite
   // panel reads it. Agents have no voice (ADR-004).
   const voiceAllowed = principal !== null && principal.voice_allowed !== false && principal.kind === 'human';
+  // Whether whoami says the person may turn a camera on (ADR-015): use_camera
+  // held, which the owner always does. A server that sends no permissions
+  // predates the camera, and offers none. The server decides every claim.
+  const cameraAllowed = voiceAllowed && principal.permissions !== undefined && canDo(principal, 'use_camera');
   // How many are in each channel's voice (issue #596): one socket for the
   // page, for the list and the strip. Never opened for someone without voice.
   const occupancy = useOccupancy({ signedIn, voiceAllowed, reachable: connection === 'connected', onUnauthorized });
@@ -921,7 +932,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     }
   }, [freezeSend, reconcile, dispatchChat, post]);
 
-  const releaseSession = agents.release;
+  // Voice is left first, while the credential still works: the camera's
+  // capture stops and its claim is released, naming it, before anything is
+  // done as anyone else (ADR-015, design §6.2). Then the agent session.
+  const releaseAgents = agents.release;
+  const releaseSession = useCallback(async () => {
+    await leaveVoice();
+    await releaseAgents();
+  }, [releaseAgents]);
   // One sign-out at a time: a second click while the first is with the server
   // does nothing.
   const signingOut = useRef(false);
@@ -947,7 +965,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     if (signingOut.current || principalId === null) return;
     signingOut.current = true;
     setEverywhereFailed(null);
-    void api.signOutEverywhere(principalId).then((result) => {
+    void leaveVoice().then(() => api.signOutEverywhere(principalId)).then((result) => {
       signingOut.current = false;
       if (result.ok) {
         forgetChannel();
@@ -1707,6 +1725,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               viewer={auth.principal.id}
               people={live.people}
               voiceAllowed={voiceAllowed}
+              cameraAllowed={cameraAllowed}
               reachable={connection === 'connected'}
               channels={channels.channels}
               occupancy={occupancy}
@@ -1730,7 +1749,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           )}
           // Holders of manage_channels make a channel public or private, a
           // default or not, from its ⋯ menu (issue #1183). whoami says who
-          // holds it; the server decides each change.
+          // holds it; the server decides each change. An account member may
+          // leave a listed channel; a guest visit uses End visit (#1095).
           canManage={visit === null && canDo(auth.principal, 'manage_channels')}
           renderSettings={(channel, change, close) => (
             <ChannelSettingsAsk
@@ -1743,6 +1763,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               onClose={close}
             />
           )}
+          {...(auth.principal.kind === 'human' && visit === null ? { onLeft: leftChannel } : {})}
+          onUnauthorized={onUnauthorized}
           {...(auth.principal.may_invite === true && channels.channels.length > 0
             ? {
                 onAddPerson: () => {
@@ -1770,11 +1792,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                     setSearchOpen(false);
                     dispatchChannels({ type: 'created', channel });
                   }}
-                  onLeft={(name) => {
-                    const left = channelsNow.current.channels.find((c) => c.name === name);
-                    if (left !== undefined) dropChannel(left.id, left.name);
-                    dispatchChannels({ type: 'left', name });
-                  }}
+                  onLeft={leftChannel}
                   onOpen={onOpen}
                   onUnauthorized={onUnauthorized}
                 />

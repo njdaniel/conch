@@ -58,14 +58,14 @@ for (const [size, options, phone] of sizes) {
 
       const press = async (target: Locator) => (phone ? target.tap() : target.click());
 
-      // The member's page: the channel is public, no lock; and no ⋯ item for it.
+      // The member's page: the channel is public, no lock; its ⋯ offers Leave.
       const seen = await meet(options);
       await signIn(seen.page, world, token, name);
       if (phone) await showView(seen.page, 'Channels');
       const memberRow = channelRow(seen.page, channel);
       await expect(memberRow).toBeVisible();
       await expect(memberRow.locator('svg')).toHaveCount(0);
-      await expect(memberRow.getByRole('button', { name: `Actions for ${channel}` })).toHaveCount(0);
+      await expect(memberRow.getByRole('button', { name: `Actions for ${channel}` })).toBeVisible();
 
       // The operator's page.
       const page = await operatorPage(meet, world, options);

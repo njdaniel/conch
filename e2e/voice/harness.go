@@ -328,6 +328,9 @@ type conchdProc struct {
 	operator api
 	done     chan struct{}
 	stopped  bool
+	// args and env are what serve was started with, so that restart starts
+	// the same conchd again on the same data and address.
+	args, env []string
 }
 
 // startConchd bootstraps an operator into a fresh data directory and starts
@@ -335,6 +338,14 @@ type conchdProc struct {
 // so nothing of the real user's is read or written. A nil lk starts conchd
 // with no LiveKit settings at all.
 func (h *harness) startConchd(name string, lk *livekitSettings) (*conchdProc, error) {
+	return h.startConchdEnv(name, lk)
+}
+
+// startConchdEnv is startConchd with more environment for serve: a second
+// conchd on the same LiveKit names its rooms with a prefix of its own
+// (CONCHD_LIVEKIT_ROOM_PREFIX), or each would sweep the other's rooms away as
+// orphans.
+func (h *harness) startConchdEnv(name string, lk *livekitSettings, extraEnv ...string) (*conchdProc, error) {
 	root, err := h.mkdir("conchd-" + name + "-")
 	if err != nil {
 		return nil, err
@@ -369,38 +380,67 @@ func (h *harness) startConchd(name string, lk *livekitSettings) (*conchdProc, er
 		args = append(args, "--livekit-url", lk.url)
 		env = append(env, "CONCHD_LIVEKIT_API_KEY="+lk.key, "CONCHD_LIVEKIT_API_SECRET="+lk.secret)
 	}
+	env = append(env, extraEnv...)
 	logPath := filepath.Join(root, "conchd.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304 -- a path under this program's temp dir
-	if err != nil {
-		return nil, err
-	}
-	cmd := lkit.GroupStart(h.bin.conchd, args...)
-	cmd.Env = env
-	cmd.Stdout, cmd.Stderr = logFile, logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		return nil, err
-	}
-	p := &conchdProc{h: h, cmd: cmd, baseURL: "http://" + addr, dataDir: dataDir, logPath: logPath, done: make(chan struct{})}
+	p := &conchdProc{h: h, baseURL: "http://" + addr, dataDir: dataDir, logPath: logPath, args: args, env: env}
 	p.operator = api{h: h, baseURL: p.baseURL, token: opToken}
 	p.lk = lk
-	go func() { _ = cmd.Wait(); _ = logFile.Close(); close(p.done) }()
+	if err := p.serve(os.O_TRUNC); err != nil {
+		return nil, err
+	}
 	h.onCleanup(p.stop)
 	h.mu.Lock()
 	h.conchds = append(h.conchds, p)
 	h.logs = append(h.logs, namedFile{"conchd log (" + name + ")", logPath, true})
 	h.mu.Unlock()
-	if err := waitFor("conchd to answer /healthz", 15*time.Second, func() (bool, string) {
+	if err := p.healthy(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// serve starts conchd serve with p's arguments, its output to p's log (made
+// anew, or added to with os.O_APPEND).
+func (p *conchdProc) serve(mode int) error {
+	logFile, err := os.OpenFile(p.logPath, os.O_CREATE|os.O_WRONLY|mode, 0o600) // #nosec G304 -- a path under this program's temp dir
+	if err != nil {
+		return err
+	}
+	cmd := lkit.GroupStart(p.h.bin.conchd, p.args...)
+	cmd.Env = p.env
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return err
+	}
+	done := make(chan struct{})
+	p.cmd, p.done, p.stopped = cmd, done, false
+	go func() { _ = cmd.Wait(); _ = logFile.Close(); close(done) }()
+	return nil
+}
+
+// restart stops conchd and starts it again on the same data and address, as
+// an operator restarting the service does: everything it holds in memory
+// (presence, transmit state, share and camera claims) is gone, and what it
+// stored is not.
+func (p *conchdProc) restart() error {
+	p.stop()
+	if err := p.serve(os.O_APPEND); err != nil {
+		return err
+	}
+	return p.healthy()
+}
+
+// healthy waits for conchd to answer /healthz.
+func (p *conchdProc) healthy() error {
+	return waitFor("conchd to answer /healthz", 15*time.Second, func() (bool, string) {
 		resp, err := http.Get(p.baseURL + "/healthz") // #nosec G107 -- this harness's own conchd
 		if err != nil {
 			return false, err.Error()
 		}
 		_ = resp.Body.Close()
 		return resp.StatusCode == http.StatusOK, fmt.Sprintf("status %d", resp.StatusCode)
-	}); err != nil {
-		return nil, err
-	}
-	return p, nil
+	})
 }
 
 func (p *conchdProc) as(token string) api { return api{h: p.h, baseURL: p.baseURL, token: token} }

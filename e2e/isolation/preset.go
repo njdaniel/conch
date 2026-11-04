@@ -132,6 +132,18 @@ func (w *world) presetPhase() (int, error) {
 		rows++
 	}
 
+	// 3b. The camera (issue #1241, ADR-015): use_camera is off under
+	// personal, as under group (both presets leave it off), so a member's
+	// claim is refused naming it. The claim sits behind "voice is not
+	// configured", so the row runs only with LiveKit.
+	if w.lk != nil {
+		status, body, err := m.api.do(http.MethodPost, "/v1/channels/"+room+"/voice/camera", nil)
+		if err := refusedNaming("a member claims a camera under personal", status, body, err, schema.ErrorCodePermissionDenied, schema.PermUseCamera); err != nil {
+			return rows, err
+		}
+		rows++
+	}
+
 	// 4. The directory rows: under personal the member column lacks
 	// see_member_directory, so the directory lists the may-know list (scope
 	// shared_channels) and community-model §13.9's rows run.
@@ -156,6 +168,14 @@ func (w *world) presetPhase() (int, error) {
 		return rows, err
 	}
 	rows += 2
+	// Group is the defaults, and use_camera is off in them: still refused.
+	if w.lk != nil {
+		status, body, err := m.api.do(http.MethodPost, "/v1/channels/"+room+"/voice/camera", nil)
+		if err := refusedNaming("a member claims a camera under group", status, body, err, schema.ErrorCodePermissionDenied, schema.PermUseCamera); err != nil {
+			return rows, err
+		}
+		rows++
+	}
 	// The directory widens to everyone (the signal arrived above, on every
 	// socket).
 	n, err = w.hideGroupRows(hw)

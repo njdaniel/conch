@@ -106,9 +106,16 @@ voice, whether your microphone is in use, and who else is in voice.
 3. You are in. Everyone in the channel's voice is listed. Whoever is talking is marked
    **(speaking)**.
 
-There are two ways to talk. Choose one under **Voice options**, **Microphone**:
+There are two ways to talk. The browser starts in **Open microphone**. **Open mic**,
+beside the talk control, switches between the two in one tap. On a phone it is on
+the voice strip. The same choice is under **Voice options**, **Microphone**. The
+choice is remembered per browser.
 
-- **Push to talk** (the first choice). Hold the talk key while you speak, and let go
+- **Open microphone.** Your voice is sent when you speak. The level
+  meter in the strip shows it. Use the slider under **Voice options** with the
+  meter: move it until the meter opens the microphone for your voice but not for
+  the noise around you.
+- **Push to talk.** Hold the talk key while you speak, and let go
   when you have finished. The talk key is the backtick key, `` ` ``, which on most
   keyboards is just below Esc. **Change talk key**, under **Voice options**, sets another. On a phone or a touch
   screen, press and hold **Hold to talk** instead.
@@ -119,9 +126,8 @@ There are two ways to talk. Choose one under **Voice options**, **Microphone**:
     **Release delay**, under **Voice options**, sets how long (200 ms at first).
   - The strip says **Transmitting** while you are heard. Just after you press it may
     say **Waiting for the server** for a moment: you are not heard yet.
-- **Open microphone.** Your microphone opens by itself when you speak. Use the slider
-  under **Voice options** with the level meter in the strip: move it until the meter
-  opens the microphone for your voice but not for the noise around you.
+
+In a noisy room, or if others hear an echo, switch to **Push to talk**.
 
 The other buttons:
 

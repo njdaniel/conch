@@ -175,6 +175,15 @@ func TestChannelContentLeak(t *testing.T) {
 		// non-member is told nothing.
 		{"voice share claim", "POST", "/v1/channels/%s/voice/share", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		{"voice share stop", "DELETE", "/v1/channels/%s/voice/share", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, http.StatusServiceUnavailable}},
+		// Camera (issue #1241): claiming answers as the session endpoint
+		// does, and so does a person's own release, operators included. An
+		// operator's stop of someone else's camera lets a holder of
+		// manage_channels through, member or not; a member without it is
+		// refused 403 (the channel is theirs to see), and any other
+		// non-member is told nothing.
+		{"voice camera claim", "POST", "/v1/channels/%s/voice/camera", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		{"voice camera release", "DELETE", "/v1/channels/%s/voice/camera", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		{"voice camera operator stop", "DELETE", "/v1/channels/%s/voice/camera?principal=9999", "", false, [4]int{http.StatusForbidden, notFound, notFound, http.StatusServiceUnavailable}},
 		// Companion and viewer participants (issue #933): answered as the
 		// session endpoint is. The body is read after membership, so a
 		// non-member gets the 404 with a valid body, a malformed one and none.

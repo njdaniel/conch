@@ -30,9 +30,30 @@ import (
 const webCSP = "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 
 // webPermissionsPolicy limits the powers the page may use: its own origin may
-// capture a microphone (browser voice, #442) and a screen (screen share, #444),
-// and nothing else: no camera, and no frame of another origin may do either.
-const webPermissionsPolicy = "microphone=(self), camera=(), display-capture=(self)"
+// capture a microphone (browser voice, #442), a screen (screen share, #444)
+// and a camera (ADR-015, #1242, in the release whose client first captures
+// one), and no frame of another origin may do any of them.
+const webPermissionsPolicy = "microphone=(self), camera=(self), display-capture=(self)"
+
+// denyPermissionsPolicy is the Permissions-Policy of every answer outside the
+// web client (ADR-015, design §6.4, N8): the API, attachments, redirects and
+// refusals are no page, and none may use a microphone, a camera or a screen.
+// Defence in depth: it costs one header and changes nothing for the API's
+// clients.
+const denyPermissionsPolicy = "camera=(), microphone=(), display-capture=()"
+
+// permissionsPolicyMiddleware gives every answer denyPermissionsPolicy before
+// the handler runs, so a refusal, a redirect and a 404 carry it as well.
+// staticHandler, which serves the web client under /app/, replaces it with
+// webPermissionsPolicy (Header.Set), so the client's answers carry the one
+// policy, once; anything else that answers under /app/ (no client
+// configured, say) keeps the deny-all.
+func permissionsPolicyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Permissions-Policy", denyPermissionsPolicy)
+		next.ServeHTTP(w, r)
+	})
+}
 
 // webCSPFor is webCSP for a server whose voice is at livekitURL. With voice not
 // configured (an empty or unusable URL) it is webCSP unchanged. Otherwise

@@ -123,6 +123,8 @@ func coreHistoryRows() []row {
 			probe: func(_ *world, s subject) probe { return get("/v1/sessions?channel=" + url.QueryEscape(s.name)) }},
 		{route: "POST /v1/channels/{channel}/voice/session", what: "asks for a voice session in A's channel", pick: aChannel, want: channelNotFound,
 			probe: func(_ *world, s subject) probe { return post(ch(s)+"/voice/session", nil) }},
+		{route: "POST /v1/channels/{channel}/voice/camera", what: "claims a camera in A's channel", pick: aChannel, want: channelNotFound,
+			probe: func(_ *world, s subject) probe { return post(ch(s)+"/voice/camera", nil) }},
 		{route: "GET /v1/voice/ws", what: "opens the voice presence socket of A's channel", pick: aChannel, want: channelNotFound,
 			probe: func(_ *world, s subject) probe { return sock("/v1/voice/ws", s.name, nil, false) }},
 		{route: "GET /v2/ws", what: "opens the v2 message socket of A's channel with a ticket", pick: aChannel, want: channelNotFound,
@@ -151,6 +153,16 @@ func guestRows() []row {
 			probe: func(*world, subject) probe { return get("/v1/credentials/mine") }},
 		{route: "GET /v1/channels/{channel}/voice", what: "reads the plaza's voice presence (a guest holds no voice since A4, #1016)", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
 			probe: func(w *world, _ subject) probe { return get("/v1/channels/" + pch(w) + "/voice") }},
+		// A guest never claims a camera (ADR-015, S6): on main a guest holds
+		// no voice at all, so the claim is refused at its fourth check, as
+		// every voice route refuses a guest, and so is a release. The
+		// design's row "a guest in voice receives A's camera" (§11.3, O15)
+		// cannot be built while a guest holds no voice; it waits for the
+		// guest column, #1004.
+		{route: "POST /v1/channels/{channel}/voice/camera", what: "claims a camera in the plaza (a guest holds no voice since A4, #1016)", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
+			probe: func(w *world, _ subject) probe { return post("/v1/channels/"+pch(w)+"/voice/camera", nil) }},
+		{route: "DELETE /v1/channels/{channel}/voice/camera", what: "releases a camera in the plaza", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
+			probe: func(w *world, _ subject) probe { return del("/v1/channels/" + pch(w) + "/voice/camera") }},
 		{route: "POST /v1/reports", what: "reports a problem", own: true,
 			probe: func(*world, subject) probe {
 				return post("/v1/reports", schema.CreateProblemReportRequestV1{Did: "d", Expected: "e", Happened: "h", Often: schema.ProblemReportOftenOnce,

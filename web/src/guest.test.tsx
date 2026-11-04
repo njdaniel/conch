@@ -377,10 +377,13 @@ describe('a guest visit', () => {
     expect(displayName(otherWho)).toBe('ada');
   });
 
-  it('hides what a guest cannot do: renaming, sign-in lists and sign out everywhere', async () => {
+  it('hides what a guest cannot do: leaving a channel, renaming, sign-in lists and sign out everywhere', async () => {
     serve(guestServer());
     render(<App origin={origin} />);
     await joinAsGuest();
+    // End visit is the guest's way out; the row has no channel Leave (#1095).
+    expect(screen.getByRole('button', { name: 'End visit' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Actions for lobby' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     const settings = await screen.findByRole('dialog', { name: 'Settings' });
     expect(within(settings).queryByRole('button', { name: 'Sign out everywhere' })).toBeNull();

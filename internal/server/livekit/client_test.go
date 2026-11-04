@@ -119,7 +119,7 @@ func TestRoomCalls(t *testing.T) {
 			want: []Participant{
 				{Identity: "p1", JoinedAt: time.UnixMilli(1791547200123).UTC(), MicrophonePublished: true},
 				{Identity: "p2", JoinedAt: time.Unix(1791547300, 0).UTC(), MicrophonePublished: true, MicrophoneMuted: true},
-				{Identity: "p3"},
+				{Identity: "p3", Cameras: []Track{{Source: "camera", Type: "video"}}},
 				{Identity: "p4"},
 			},
 		},
@@ -136,8 +136,9 @@ func TestRoomCalls(t *testing.T) {
 			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
 			want: []Participant{
 				{Identity: "p1", JoinedAt: time.Unix(1791547200, 0).UTC(), MicrophonePublished: true},
-				{Identity: "p2", MicrophonePublished: true, MicrophoneMuted: true},
-				{Identity: "p3"},
+				{Identity: "p2", MicrophonePublished: true, MicrophoneMuted: true, Cameras: []Track{{Source: "camera", Type: "video"}}},
+				// DATA under the microphone is not a microphone: a mismatch.
+				{Identity: "p3", Mismatched: []Track{{Source: "microphone", Type: "data"}}},
 				{Identity: "p4", MicrophonePublished: true},
 			},
 		},
@@ -187,8 +188,9 @@ func TestRoomCalls(t *testing.T) {
 			wantBody:  map[string]any{"room": "conch-a"},
 			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
 			want: []Participant{
-				{Identity: "p1.screen", ShareSourcesGranted: true, CanPublish: true},
-				{Identity: "p2.screen", ShareSourcesGranted: true, CanPublish: true, CanSubscribe: true},
+				// No list of sources is every source: the camera too.
+				{Identity: "p1.screen", ShareSourcesGranted: true, CameraGranted: true, CanPublish: true},
+				{Identity: "p2.screen", ShareSourcesGranted: true, CameraGranted: true, CanPublish: true, CanSubscribe: true},
 				{Identity: "p3.screen", CanSubscribe: true},
 				{Identity: "p4.screen"},
 			},
@@ -198,8 +200,8 @@ func TestRoomCalls(t *testing.T) {
 			// number, in camel case, or by an empty list (LiveKit reads it as
 			// every source; 1.13.7 lists a token that names no sources so);
 			// not granted when publishing is off, when only the microphone
-			// is named, or when no permission is reported. A share source
-			// counts whatever the track's type.
+			// is named, or when no permission is reported. A share track is
+			// video under SCREEN_SHARE and audio under SCREEN_SHARE_AUDIO.
 			name: "ListParticipants permissions and share sources", method: "ListParticipants",
 			response: `{"participants":[
 				{"identity":"p1","permission":{"can_publish":true,"can_publish_sources":["MICROPHONE"]}},
@@ -207,19 +209,22 @@ func TestRoomCalls(t *testing.T) {
 				{"identity":"p3","permission":{"canPublish":true,"canPublishSources":["SCREEN_SHARE_AUDIO"]}},
 				{"identity":"p4","permission":{"can_publish":true,"can_publish_sources":[2,3]}},
 				{"identity":"p5","permission":{"can_publish":false,"can_publish_sources":["SCREEN_SHARE"]}},
-				{"identity":"p6","tracks":[{"type":"AUDIO","source":"SCREEN_SHARE"},{"type":1,"source":4}]},
+				{"identity":"p6","tracks":[{"type":"VIDEO","source":"SCREEN_SHARE"},{"source":4}]},
 				{"identity":"p7","permission":{"can_publish":true}}]}`,
 			call:      func(c *Client) (any, error) { return c.ListParticipants(context.Background(), "conch-a") },
 			wantBody:  map[string]any{"room": "conch-a"},
 			wantGrant: map[string]any{"roomAdmin": true, "room": "conch-a"},
 			want: []Participant{
 				{Identity: "p1", CanPublish: true},
-				{Identity: "p2", ShareSourcesGranted: true, CanPublish: true},
+				{Identity: "p2", ShareSourcesGranted: true, CameraGranted: true, CanPublish: true},
 				{Identity: "p3", ShareSourcesGranted: true, CanPublish: true},
 				{Identity: "p4", ShareSourcesGranted: true, CanPublish: true},
 				{Identity: "p5"},
+				// Video under the share's sound still counts as the share's
+				// sound, and is a mismatch besides (webcam-video §4.5).
+				// By name and by number; an absent type is AUDIO.
 				{Identity: "p6", ScreenSharePublished: true, ScreenShareAudioPublished: true},
-				{Identity: "p7", ShareSourcesGranted: true, CanPublish: true},
+				{Identity: "p7", ShareSourcesGranted: true, CameraGranted: true, CanPublish: true},
 			},
 		},
 		{
@@ -444,6 +449,105 @@ func TestRoomCalls(t *testing.T) {
 				if !reflect.DeepEqual(got, tt.want) {
 					t.Errorf("result = %+v, want %+v", got, tt.want)
 				}
+			}
+		})
+	}
+}
+
+// TestParticipantKindAndSource is §4.5's table of webcam-video.md (S1, issue
+// #1241): every track is read by its declared source and its type together.
+// A camera is a video track under the camera source, muted or not, and is
+// live only unmuted; video under the microphone, anything but video under the
+// camera, and video under any source but the camera and the screen share are
+// mismatched; a screen-share track is still read by its source alone. The
+// camera grant is read from the permission, an empty list granting every
+// source. LiveKit's track id is kept only to tell tracks apart.
+func TestParticipantKindAndSource(t *testing.T) {
+	cam := func(sid string, muted bool) Track {
+		return Track{SID: sid, Source: "camera", Type: "video", Muted: muted}
+	}
+	tests := []struct {
+		name   string
+		tracks string
+		perm   string
+		want   Participant
+	}{
+		{"microphone, audio", `[{"sid":"T1","type":"AUDIO","source":"MICROPHONE"}]`, ``,
+			Participant{MicrophonePublished: true}},
+		{"microphone, type absent (AUDIO, 0)", `[{"sid":"T1","source":"MICROPHONE"}]`, ``,
+			Participant{MicrophonePublished: true}},
+		{"microphone, video: unclaimed video", `[{"sid":"T1","type":"VIDEO","source":"MICROPHONE"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T1", Source: "microphone", Type: "video"}}}},
+		{"microphone, video by number", `[{"sid":"T1","type":1,"source":2}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T1", Source: "microphone", Type: "video"}}}},
+		{"camera, video", `[{"sid":"T2","type":"VIDEO","source":"CAMERA"}]`, ``,
+			Participant{Cameras: []Track{cam("T2", false)}}},
+		{"camera, video, muted: published, not live", `[{"sid":"T2","type":"VIDEO","source":"CAMERA","muted":true}]`, ``,
+			Participant{Cameras: []Track{cam("T2", true)}}},
+		{"camera, audio: unclaimed", `[{"sid":"T3","type":"AUDIO","source":"CAMERA"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T3", Source: "camera", Type: "audio"}}}},
+		{"camera, type absent: audio, unclaimed", `[{"sid":"T3","source":1}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T3", Source: "camera", Type: "audio"}}}},
+		{"camera, data: unclaimed", `[{"sid":"T3","type":"DATA","source":"CAMERA"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T3", Source: "camera", Type: "data"}}}},
+		{"screen share, video", `[{"sid":"T4","type":"VIDEO","source":"SCREEN_SHARE"}]`, ``,
+			Participant{ScreenSharePublished: true}},
+		{"screen share, audio: a mismatch, not the share", `[{"sid":"T4","type":"AUDIO","source":"SCREEN_SHARE"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T4", Source: "screen_share", Type: "audio"}}}},
+		{"screen share, type absent (AUDIO, 0): a mismatch", `[{"sid":"T4","source":3}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T4", Source: "screen_share", Type: "audio"}}}},
+		{"screen share, data: a mismatch", `[{"sid":"T4","type":"DATA","source":"SCREEN_SHARE"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T4", Source: "screen_share", Type: "data"}}}},
+		{"screen share audio, audio", `[{"sid":"T5","type":"AUDIO","source":"SCREEN_SHARE_AUDIO"}]`, ``,
+			Participant{ScreenShareAudioPublished: true}},
+		{"screen share audio, type absent: the share's sound", `[{"sid":"T5","source":4}]`, ``,
+			Participant{ScreenShareAudioPublished: true}},
+		{"screen share audio, video: a mismatch, not the share's sound", `[{"sid":"T5","type":"VIDEO","source":"SCREEN_SHARE_AUDIO"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T5", Source: "screen_share_audio", Type: "video"}}}},
+		{"screen share audio, data: a mismatch", `[{"sid":"T5","type":"DATA","source":"SCREEN_SHARE_AUDIO"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T5", Source: "screen_share_audio", Type: "data"}}}},
+		{"screen share audio, a type LiveKit does not have: a mismatch", `[{"sid":"T5","type":"SMELL","source":"SCREEN_SHARE_AUDIO"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T5", Source: "screen_share_audio", Type: "unknown"}}}},
+		{"unknown source, video: unclaimed video", `[{"sid":"T6","type":"VIDEO","source":"UNKNOWN"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T6", Source: "unknown", Type: "video"}}}},
+		{"source absent, video: unclaimed video", `[{"sid":"T6","type":"VIDEO"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T6", Source: "unknown", Type: "video"}}}},
+		{"source a name LiveKit does not have, video", `[{"sid":"T6","type":"VIDEO","source":"HOLOGRAM"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T6", Source: "unknown", Type: "video"}}}},
+		{"unknown source, audio: neither a camera nor video", `[{"sid":"T6","type":"AUDIO","source":"UNKNOWN"}]`, ``,
+			Participant{}},
+		{"a type LiveKit does not have under the camera", `[{"sid":"T7","type":"SMELL","source":"CAMERA"}]`, ``,
+			Participant{Mismatched: []Track{{SID: "T7", Source: "camera", Type: "unknown"}}}},
+		{"two cameras, one live", `[{"sid":"A","type":"VIDEO","source":"CAMERA","muted":true},{"sid":"B","type":"VIDEO","source":"CAMERA"}]`, ``,
+			Participant{Cameras: []Track{cam("A", true), cam("B", false)}}},
+		{"camera granted by name", `[]`, `{"can_publish":true,"can_publish_sources":["MICROPHONE","CAMERA"]}`,
+			Participant{CameraGranted: true, CanPublish: true}},
+		{"camera granted by number", `[]`, `{"canPublish":true,"canPublishSources":[2,1]}`,
+			Participant{CameraGranted: true, CanPublish: true}},
+		{"camera granted by an empty list", `[]`, `{"can_publish":true,"can_publish_sources":[]}`,
+			Participant{CameraGranted: true, ShareSourcesGranted: true, CanPublish: true}},
+		{"camera not granted: the microphone alone", `[]`, `{"can_publish":true,"can_publish_sources":["MICROPHONE"]}`,
+			Participant{CanPublish: true}},
+		{"camera not granted: not publishing", `[]`, `{"can_publish":false,"can_publish_sources":["CAMERA"]}`,
+			Participant{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			perm := ""
+			if tt.perm != "" {
+				perm = `,"permission":` + tt.perm
+			}
+			srv, _ := fakeLiveKit(t, http.StatusOK, `{"participants":[{"identity":"p1","tracks":`+tt.tracks+perm+`}]}`)
+			got, err := testClient(t, srv.URL).ListParticipants(context.Background(), "conch-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			tt.want.Identity = "p1"
+			if len(got) != 1 || !reflect.DeepEqual(got[0], tt.want) {
+				t.Errorf("participant = %+v, want %+v", got, tt.want)
+			}
+			if live := tt.want.CameraLive(); got[0].CameraLive() != live {
+				t.Errorf("CameraLive = %v, want %v", got[0].CameraLive(), live)
 			}
 		})
 	}

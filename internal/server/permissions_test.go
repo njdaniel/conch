@@ -700,6 +700,9 @@ var permissionGates = map[schema.Permission][][2]string{
 		{"channels.go", "Server.handleChannelSettings"},
 		{"store/queries.go", "Store.ChannelSettings"},
 		{"store/members.go", "channelCreatorStandingTx"},
+		// Stopping someone else's camera (ADR-015, N1): manage_channels
+		// alone, a channel manager's standing not counting.
+		{"voice_camera.go", "Server.handleVoiceCameraStop"},
 	},
 	schema.PermSeeMemberDirectory: {{"directory.go", "Server.handleListDirectoryMembers"}},
 	// Member channel creation (issue #981): the store decides the
@@ -727,13 +730,20 @@ var permissionGates = map[schema.Permission][][2]string{
 		{"voice_share.go", "voicePoller.shareEntitled"},
 		{"voice_share.go", "voicePoller.sharesWithheld"},
 	},
+	// Webcam C4 (#1241): the claim reads it before the room's lock and again
+	// under it; every pass reads it for each claim's holder; the PUT and a
+	// role change read it to end the cameras of whoever lost it.
+	schema.PermUseCamera: {
+		{"voice_camera.go", "Server.handleVoiceCameraStart"},
+		{"voice_camera.go", "voicePoller.cameraEntitled"},
+		{"voice_camera.go", "voicePoller.camerasWithheld"},
+		{"permissions.go", "Server.endWithheldCameras"},
+		{"permissions.go", "Server.endCameraIfWithheld"},
+	},
 }
 
-var vacuousGates = map[schema.Permission][]string{
-	// Webcam C3 (#1240): C4 (#1241) adds the camera claim, which asks
-	// use_camera; this entry fails the test the moment that route exists.
-	schema.PermUseCamera: {"POST /v1/channels/{channel}/voice/camera"},
-}
+// vacuousGates is empty: the camera route (C4, #1241) was the last.
+var vacuousGates = map[schema.Permission][]string{}
 
 // TestEnforcedPermissionsAreHonest is the safety net's own check (SF-3):
 // every permission in enforcedPermissions is asked by each of its gates, or
