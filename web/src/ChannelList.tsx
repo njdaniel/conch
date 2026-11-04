@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import * as api from './api';
 import { Glyph } from './Icons';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import type { SettingsChange } from './ChannelSettingsAsk';
@@ -98,13 +99,25 @@ function VoicePeople({
   );
 }
 
-// One channel's row (issue #1135): its button, which opens the channel, its
-// badges, and, when the viewer may do anything to the channel, one ⋯ menu
+function leaveLine(failure: api.ApiFailure, code: string | undefined): string {
+  if (failure === 'network') return 'Cannot reach the server. Nothing was changed; try again.';
+  switch (code) {
+    case 'channel_last_member':
+      return 'You are the last member of this private channel. Add someone else before you leave.';
+    case api.channelNotFound:
+      return 'That channel is gone, or you can no longer see it.';
+    default:
+      return 'The server could not take you out of the channel. Try again.';
+  }
+}
+
+// One channel's row (issues #1135, #1095): its button, which opens the channel,
+// its badges, and, when the viewer may do anything to the channel, one ⋯ menu
 // beside them (never inside the button). The menu is the message log's
 // (MessageMenu.tsx), opened by its button, Enter or Space on it, a right-click
 // on the row or a long press. A row with no items draws no ⋯ and suppresses no
-// native menu. New items are one more push onto `items`; the rename form, when
-// chosen, sits in the row under the button and hands focus back to the ⋯.
+// native menu. Forms and answers sit in the row under the button and hand focus
+// back to the ⋯.
 function ChannelRow({
   channel,
   index,
@@ -119,6 +132,8 @@ function ChannelRow({
   mayManage,
   renderSettings,
   onInvite,
+  onLeft,
+  onUnauthorized,
   register,
   onMove,
   onOpen,
@@ -136,6 +151,8 @@ function ChannelRow({
   readonly mayManage: boolean;
   readonly renderSettings: ((channel: ChannelV0, change: SettingsChange, close: () => void) => ReactNode) | undefined;
   readonly onInvite: ((channel: ChannelV0) => void) | undefined;
+  readonly onLeft: ((name: string) => void) | undefined;
+  readonly onUnauthorized: (() => void) | undefined;
   readonly register: (name: string, el: HTMLButtonElement | null) => void;
   readonly onMove: (event: KeyboardEvent, from: number) => void;
   readonly onOpen: (name: string) => void;
@@ -144,11 +161,26 @@ function ChannelRow({
   const [renaming, setRenaming] = useState(false);
   // The settings change being confirmed or sent (issue #1183), in place under the row.
   const [change, setChange] = useState<SettingsChange | null>(null);
+  const [askingLeave, setAskingLeave] = useState(false);
+  const [leaveBusy, setLeaveBusy] = useState(false);
+  const [leaveRefusal, setLeaveRefusal] = useState<string | null>(null);
+  const leaveSending = useRef(false);
+  const cancelLeave = useRef<HTMLButtonElement>(null);
+  const live = useRef(true);
   const row = useRef<HTMLLIElement>(null);
   const isPrivate = channel.visibility === 'private';
   const isDefault = channel.default === true;
   const more = useRef<HTMLButtonElement>(null);
   const main = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (askingLeave) cancelLeave.current?.focus();
+  }, [askingLeave]);
   // The grant to rename was revoked while the form was open: it goes, and
   // focus, which was in it, goes to the row's button.
   useEffect(() => {
@@ -172,6 +204,34 @@ function ChannelRow({
     (x) => x !== null,
   );
 
+  function closeLeave() {
+    setAskingLeave(false);
+    more.current?.focus();
+  }
+
+  function leave() {
+    if (onLeft === undefined || leaveSending.current) return;
+    leaveSending.current = true;
+    setAskingLeave(false);
+    setLeaveBusy(true);
+    setLeaveRefusal(null);
+    void api.leaveChannel(channel.name).then((result) => {
+      leaveSending.current = false;
+      if (result.ok) {
+        onLeft(channel.name);
+        return;
+      }
+      if (result.failure === 'unauthorized') {
+        onUnauthorized?.();
+        return;
+      }
+      if (!live.current) return;
+      setLeaveBusy(false);
+      setLeaveRefusal(leaveLine(result.failure, result.code));
+      more.current?.focus();
+    });
+  }
+
   const items: MenuItem[] = [];
   if (onInvite !== undefined) {
     items.push({
@@ -187,8 +247,25 @@ function ChannelRow({
       key: 'rename',
       label: 'Rename channel…',
       onSelect: () => {
+        setAskingLeave(false);
+        setLeaveRefusal(null);
         setChange(null);
         setRenaming(true);
+      },
+    });
+  }
+  if (onLeft !== undefined) {
+    items.push({
+      key: 'leave',
+      label: 'Leave channel',
+      disabled: leaveBusy,
+      onSelect: () => {
+        setRenaming(false);
+        setChange(null);
+        setLeaveRefusal(null);
+        // A private channel cannot be found again once left, so it asks first.
+        if (isPrivate) setAskingLeave(true);
+        else leave();
       },
     });
   }
@@ -198,6 +275,8 @@ function ChannelRow({
       label: isPrivate ? 'Make public' : 'Make private',
       ...(!isPrivate && isDefault ? { disabled: true, reason: 'A default channel must be public. Stop it being a default channel first.' } : {}),
       onSelect: () => {
+        setAskingLeave(false);
+        setLeaveRefusal(null);
         setRenaming(false);
         setChange({ kind: 'visibility', to: isPrivate ? 'public' : 'private' });
       },
@@ -207,6 +286,8 @@ function ChannelRow({
       label: isDefault ? 'Stop being a default channel' : 'Make default channel',
       ...(!isDefault && isPrivate ? { disabled: true, reason: 'A default channel must be public. Make it public first.' } : {}),
       onSelect: () => {
+        setAskingLeave(false);
+        setLeaveRefusal(null);
         setRenaming(false);
         setChange({ kind: 'default', to: !isDefault });
       },
@@ -275,6 +356,34 @@ function ChannelRow({
             </Fragment>
           )
         : null}
+      {askingLeave ? (
+        <div
+          className="channel-leave-ask"
+          role="group"
+          aria-label={`Leave ${channel.name}?`}
+          onKeyDown={(event) => {
+            if (event.key !== 'Escape' || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            event.stopPropagation();
+            closeLeave();
+          }}
+        >
+          <p>{`Leave #${channel.name}? You will not find it again unless someone adds you back.`}</p>
+          <div className="channel-settings-buttons">
+            <button type="button" disabled={leaveBusy} onClick={leave}>
+              Yes, leave
+            </button>
+            <button ref={cancelLeave} type="button" onClick={closeLeave}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {leaveBusy || leaveRefusal !== null ? (
+        <p role="status" className={leaveRefusal === null ? 'channel-leave-line hint' : 'channel-leave-line notice'}>
+          {leaveRefusal ?? 'Leaving…'}
+        </p>
+      ) : null}
     </li>
   );
 }
@@ -282,8 +391,9 @@ function ChannelRow({
 // The channels as a list of buttons. Tab reaches the list once; the arrow keys
 // move between channels (Home and End jump), Enter or Space opens the one
 // focused. A row may carry a ⋯ menu of what the viewer can do to that channel
-// (issue #1135): Invite people when `onInvite` is given, Rename channel… when
-// `canRename` says so for it. Managed channels carry a badge.
+// (issues #1135, #1095): Invite people when `onInvite` is given, Rename channel…
+// when `canRename` says so for it, and Leave channel when `onLeft` is given.
+// Managed channels carry a badge.
 export function ChannelList({
   channels,
   selected,
@@ -297,6 +407,8 @@ export function ChannelList({
   canManage = false,
   renderSettings,
   onInvite,
+  onLeft,
+  onUnauthorized,
   onOpen,
 }: {
   readonly channels: readonly ChannelV0[];
@@ -328,6 +440,10 @@ export function ChannelList({
   // Opens the invite panel with that channel ticked; absent for a viewer who
   // may not invite, who is then offered no Invite people.
   readonly onInvite?: (channel: ChannelV0) => void;
+  // Every listed channel is one the viewer belongs to. onLeft removes it after
+  // the server accepts Leave; absent, the row offers no Leave channel.
+  readonly onLeft?: (name: string) => void;
+  readonly onUnauthorized?: () => void;
   readonly onOpen: (name: string) => void;
 }) {
   const buttons = useRef(new Map<string, HTMLButtonElement>());
@@ -381,6 +497,8 @@ export function ChannelList({
           mayManage={canManage}
           renderSettings={renderSettings}
           onInvite={onInvite}
+          onLeft={onLeft}
+          onUnauthorized={onUnauthorized}
           register={register}
           onMove={move}
           onOpen={onOpen}

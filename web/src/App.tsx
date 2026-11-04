@@ -411,6 +411,12 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     if (principalNow.current !== null) forgetChannelStored(principalNow.current, id);
   }, [invalidateChannel, dispatchAttachments, dispatchChat]);
 
+  const leftChannel = useCallback((name: string) => {
+    const left = channelsNow.current.channels.find((c) => c.name === name);
+    if (left !== undefined) dropChannel(left.id, left.name);
+    dispatchChannels({ type: 'left', name });
+  }, [dispatchChannels, dropChannel]);
+
   const loseChannel = useCallback((id: number, name: string) => {
     dropChannel(id, name);
     dispatchChannels({ type: 'lost', name });
@@ -1730,7 +1736,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           )}
           // Holders of manage_channels make a channel public or private, a
           // default or not, from its ⋯ menu (issue #1183). whoami says who
-          // holds it; the server decides each change.
+          // holds it; the server decides each change. Every member may leave
+          // a listed channel (issue #1095).
           canManage={visit === null && canDo(auth.principal, 'manage_channels')}
           renderSettings={(channel, change, close) => (
             <ChannelSettingsAsk
@@ -1743,6 +1750,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               onClose={close}
             />
           )}
+          onLeft={leftChannel}
+          onUnauthorized={onUnauthorized}
           {...(auth.principal.may_invite === true && channels.channels.length > 0
             ? {
                 onAddPerson: () => {
@@ -1770,11 +1779,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                     setSearchOpen(false);
                     dispatchChannels({ type: 'created', channel });
                   }}
-                  onLeft={(name) => {
-                    const left = channelsNow.current.channels.find((c) => c.name === name);
-                    if (left !== undefined) dropChannel(left.id, left.name);
-                    dispatchChannels({ type: 'left', name });
-                  }}
+                  onLeft={leftChannel}
                   onOpen={onOpen}
                   onUnauthorized={onUnauthorized}
                 />
