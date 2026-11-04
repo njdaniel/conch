@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# alpha-loadtest.sh — simulated viewers for the screen-share bandwidth runs
-# (issue #448, docs/reports/TEMPLATE-alpha-bandwidth.md).
+# alpha-loadtest.sh — simulated participants for the bandwidth runs
+# (issue #448, docs/reports/TEMPLATE-alpha-bandwidth.md; cameras, #1284).
 #
 # It loads one channel's voice room on a running conchd with `lk load-test`
 # participants, each admitted on a voice session conchd issued to a principal
@@ -13,8 +13,10 @@
 #      to --channel;
 #   3. runs lk load-test through a local relay that swaps the token lk signs
 #      itself for one from POST /v1/channels/{channel}/voice/session, asked
-#      for as that participant's principal when it connects. Only signalling
-#      passes through the relay; media flows between lk and LiveKit;
+#      for as that participant's principal when it connects. For each of the
+#      first --camera-publishers participants, the relay holds its video track
+#      as a camera until that principal's camera claim is granted. Only
+#      signalling passes through the relay; media flows between lk and LiveKit;
 #   4. when lk is done, hides every principal named <prefix>- with the bulk
 #      hide by name prefix, and checks that none is left. Ctrl-C ends the run
 #      early: lk prints its summary of the time so far, and the clean-up
@@ -45,6 +47,10 @@ options (each also read from the environment variable named):
                       (CONCH_LOADTEST_VIEWERS)
   --publishers N      how many of them publish a microphone track; 0, the
                       default, is subscribe-only (CONCH_LOADTEST_PUBLISHERS)
+  --camera-publishers N
+                      how many of the first N participants claim and publish a
+                      camera; 0 to 9, default 0
+                      (CONCH_LOADTEST_CAMERA_PUBLISHERS)
   --duration D        how long lk load-test runs: 30s, 5m; default 5m
                       (CONCH_LOADTEST_DURATION)
   --prefix P          name prefix of the principals made; must start with
@@ -56,11 +62,15 @@ options (each also read from the environment variable named):
   --cleanup-only      only hide what an earlier run with --prefix left behind
   -h, --help          this text
 
+Before a camera run, turn use_camera on for operators and members (two cells),
+and turn it back off afterwards. The script checks this with GET
+/v1/permissions and never changes permissions itself.
+
 Anything after -- is passed to lk load-test, e.g. -- --layout 3x3.
 
 needs: go (builds the helper from this checkout) and the network, to
-download the pinned lk. The script runs on the load generator, not on the
-server it loads.
+download the pinned lk. Camera runs also need curl. The script runs on the
+load generator, not on the server it loads.
 EOF
 }
 
@@ -72,6 +82,7 @@ token_file=${CONCH_LOADTEST_TOKEN_FILE:-}
 channel=${CONCH_LOADTEST_CHANNEL:-}
 viewers=${CONCH_LOADTEST_VIEWERS:-29}
 publishers=${CONCH_LOADTEST_PUBLISHERS:-0}
+camera_publishers=${CONCH_LOADTEST_CAMERA_PUBLISHERS:-0}
 duration=${CONCH_LOADTEST_DURATION:-5m}
 prefix=${CONCH_LOADTEST_PREFIX:-}
 fake_sharer=0
@@ -93,6 +104,7 @@ while [ "$#" -gt 0 ]; do
         --channel) need_value "$@"; channel=$2; shift 2 ;;
         --viewers) need_value "$@"; viewers=$2; shift 2 ;;
         --publishers) need_value "$@"; publishers=$2; shift 2 ;;
+        --camera-publishers) need_value "$@"; camera_publishers=$2; shift 2 ;;
         --duration) need_value "$@"; duration=$2; shift 2 ;;
         --prefix) need_value "$@"; prefix=$2; shift 2 ;;
         --fake-sharer) fake_sharer=1; shift ;;
@@ -124,10 +136,24 @@ if [ "$cleanup_only" = 0 ]; then
     if ! [[ $publishers =~ ^[0-9]+$ ]] || [ "$publishers" -gt "$viewers" ]; then
         fail "--publishers must be a whole number no larger than --viewers"
     fi
+    if ! [[ $camera_publishers =~ ^[0-9]+$ ]] || [ "$camera_publishers" -gt 9 ] || [ "$camera_publishers" -gt "$viewers" ]; then
+        fail "--camera-publishers must be a whole number from 0 to 9 and no larger than --viewers"
+    fi
     # A Go duration; lk reads 0 as "run until stopped", which a measurement
     # must not do by accident.
     if ! [[ $duration =~ ^([0-9]+(\.[0-9]+)?(ms|s|m|h))+$ ]] || [[ $duration =~ ^0+(\.0+)?(ms|s|m|h)$ ]]; then
         fail "--duration must be a positive duration such as 30s or 5m"
+    fi
+    if [ "$camera_publishers" -gt 0 ]; then
+        command -v curl >/dev/null || fail "curl is required to check use_camera"
+        # The header goes on stdin: a credential in curl's arguments would be
+        # readable by anyone on this machine through ps.
+        permissions=$(printf 'Authorization: Bearer %s\n' "$token" | curl -fsS -H @- "${server%/}/v1/permissions") ||
+            fail "could not read /v1/permissions to check use_camera; nothing was changed"
+        camera_row=$(printf '%s' "$permissions" | grep -oE '\{[^{}]*"permission"[[:space:]]*:[[:space:]]*"use_camera"[^{}]*\}' || true)
+        if ! printf '%s' "$camera_row" | grep -qE '"member"[[:space:]]*:[[:space:]]*true'; then
+            fail "--camera-publishers requires use_camera to be on for members (operators too); nothing was changed"
+        fi
     fi
 fi
 command -v go >/dev/null || fail "go is required: the helper is built from this checkout"
@@ -158,7 +184,7 @@ mkdir -m 700 "$work/lk" "$work/lkhome"
 say "downloading the pinned lk"
 lk=$("$work/voice-check" fetch-lk "$work/lk") || fail "could not download and verify the pinned lk"
 
-helper_args+=(-channel "$channel" -viewers "$viewers" -ready "$work/ready")
+helper_args+=(-channel "$channel" -viewers "$viewers" -camera-publishers "$camera_publishers" -ready "$work/ready")
 if [ "$fake_sharer" = 1 ]; then helper_args+=(-fake-sharer -lk "$lk"); fi
 # It runs while lk does, and ignores Ctrl-C: it ends, and hides the
 # principals, on the SIGTERM sent below or by the EXIT trap.
@@ -174,8 +200,10 @@ done
 [ -s "$work/ready" ] || fail "the relay was not up within 120 s"
 relay=$(head -n 1 "$work/ready")
 
-subscribers=$((viewers - publishers))
-say "lk load-test: $subscribers subscribe-only, $publishers publishing a microphone, for $duration"
+publishing_participants=$publishers
+if [ "$camera_publishers" -gt "$publishing_participants" ]; then publishing_participants=$camera_publishers; fi
+subscribers=$((viewers - publishing_participants))
+say "lk load-test: $subscribers subscribe-only, $publishers publishing a microphone, $camera_publishers publishing a claimed camera, for $duration"
 # lk signs its own tokens with a throwaway key pair LiveKit has never heard
 # of; the relay replaces each. lk runs with an empty home and working
 # directory of its own, so no livekit.toml or lk project of the caller's
@@ -187,7 +215,8 @@ lk_status=0
     env -i PATH="$PATH" HOME="$work/lkhome" TMPDIR="$work/lkhome" \
         "$lk" --url "$relay" --api-key relay-only-key --api-secret relay-only-secret-not-known-to-livekit-0000000000 \
         load-test --room relay-placeholder-room --duration "$duration" \
-        --subscribers "$subscribers" --audio-publishers "$publishers" "${lk_extra[@]}"
+        --subscribers "$subscribers" --audio-publishers "$publishers" \
+        --video-publishers "$camera_publishers" "${lk_extra[@]}"
 ) 2>&1 | sed -E 's/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/[jwt redacted]/g' || lk_status=$?
 
 say "lk load-test is done; cleaning up"
