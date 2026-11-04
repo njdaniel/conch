@@ -2,7 +2,7 @@ import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import { createChannelResponse, listChannelMembersResponseV1, type CreateChannelRequest } from '../src/schema/channel';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { whoAmIResponseV1 } from '../src/schema/principal';
-import { channelButton, expect, showView, signIn, statusLine, test } from './fixtures';
+import { channelButton, credentialField, expect, showView, signIn, statusLine, test } from './fixtures';
 import { call, ok, type World } from './world';
 
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Channels' });
@@ -37,7 +37,7 @@ async function person(world: World, secrets: string[], name: string, memberships
 async function operatorPage(meet: () => Promise<{ page: Page }>, world: World): Promise<Page> {
   const { page } = await meet();
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(page)).fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');
@@ -140,7 +140,7 @@ for (const [size, options, phone] of removeSizes) {
 
     const { page } = await meet(options);
     await page.goto(world.appUrl);
-    await page.getByLabel('Credential').fill(world.tokens.operator);
+    await (await credentialField(page)).fill(world.tokens.operator);
     await page.getByRole('button', { name: 'Use credential' }).click();
     await page.getByRole('button', { name: 'Continue anyway' }).click();
     await expect(statusLine(page)).toContainText('Connected');

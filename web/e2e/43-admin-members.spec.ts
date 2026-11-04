@@ -14,7 +14,7 @@ import type { BrowserContextOptions, Page } from '@playwright/test';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { permissionsResponseV1, type PermissionChangeV1, type PermissionsResponseV1 } from '../src/schema/permission';
 import { serverMembersResponseV1, type ServerMemberV1 } from '../src/schema/principal';
-import { expect, expectFits, statusLine, test } from './fixtures';
+import { credentialField, expect, expectFits, statusLine, test } from './fixtures';
 import { call, ok, type World } from './world';
 
 const stamp = Date.now().toString(36).slice(-6);
@@ -51,7 +51,7 @@ async function restore(world: World, before: PermissionsResponseV1): Promise<voi
 
 async function signedIn(page: Page, world: World, token: string): Promise<void> {
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(token);
+  await (await credentialField(page)).fill(token);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');

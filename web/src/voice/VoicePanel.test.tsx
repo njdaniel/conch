@@ -123,6 +123,17 @@ describe('Join voice and Watch only', () => {
     expect(calls).toEqual(['join', 'watch only']);
   });
 
+  // F17: the verb and the channel are in one flex item, so the button's text is
+  // one run and cannot lay out as two columns.
+  it('keep the verb and the channel in one text item of the button', () => {
+    const { voice } = panel(initialVoice, 'general');
+    for (const name of ['Join voice in #general', 'Watch only in #general']) {
+      const text = within(voice).getByRole('button', { name }).querySelector('.btn-text');
+      expect(text?.querySelector('.dest')).not.toBeNull();
+      expect(text?.textContent).toBe(name);
+    }
+  });
+
   it('name no room while no channel is on screen', () => {
     const { voice } = panel(initialVoice, null);
     expect(voice.querySelector('.dest')).toBeNull();
@@ -463,6 +474,21 @@ describe('what is sent, as the strip says it', () => {
     expect(calls).toContain('release 450');
     redraw({ ...inVoice('connected', 'c'), releaseDelay: 450, mode: 'open' });
     expect(within(voice).queryByRole('slider', { name: /Release delay/ })).toBeNull();
+  });
+
+  // F22: the slider steps 50 ms, PageUp and PageDown move 250 ms, within 0 to 2000.
+  it.each([
+    ['PageUp', 200, 'release 450'],
+    ['PageDown', 700, 'release 450'],
+    ['PageDown', 100, 'release 0'],
+    ['PageUp', 1900, 'release 2000'],
+  ])('%s from %d ms', (key, from, said) => {
+    const { voice, calls } = panel({ ...inVoice('connected', 'c'), releaseDelay: from }, 'c');
+    fireEvent.click(within(voice).getByRole('button', { name: 'Voice options' }));
+    const slider = within(voice).getByRole('slider', { name: /Release delay/ });
+    expect(slider.getAttribute('step')).toBe('50');
+    fireEvent.keyDown(slider, { key });
+    expect(calls).toContain(said);
   });
 });
 

@@ -332,19 +332,26 @@ const navigation: readonly RegExp[] = [
 // is in neither the address bar nor the back history.
 const inviteReplace = "window.history.replaceState(null, '', addressWithoutFragment(window.location))";
 
+// The other (F26): route.ts, once, replaces the history entry with the address
+// and the hash of the channel the page shows, when the hash named one the
+// person cannot open. It adds no history entry and writes no hash but the
+// shown channel's.
+const channelReplace = "window.history.replaceState(null, '', addressWithoutFragment(window.location) + hashForChannel(name))";
+
 // navigates says whether a source writes the address bar other than through
 // the hash. Comments are left out first; then the exception is taken out
 // (from route.ts only, and only once).
 function navigates(path: string, code: string): boolean {
   const bare = withoutComments(code);
-  const checked = path === './route.ts' ? bare.replace(inviteReplace, '') : bare;
+  const checked = path === './route.ts' ? bare.replace(inviteReplace, '').replace(channelReplace, '') : bare;
   return navigation.some((rule) => rule.test(checked));
 }
 
 describe('the history exception', () => {
-  it('is one call in src/route.ts, given the address without its fragment', () => {
+  it('is two calls in src/route.ts, each once: the address without its fragment, and the shown channel’s hash', () => {
     const code = sources['./route.ts'] ?? '';
     expect(code.split(inviteReplace)).toHaveLength(2);
+    expect(code.split(channelReplace)).toHaveLength(2);
     // That address is origin, path and query, and nothing else: no hash.
     const built = /export function addressWithoutFragment\([^)]*\): string \{\n\s*return (.*);\n\}/.exec(code)?.[1];
     expect(built).toBe('`${location.origin}${location.pathname}${location.search}`');
@@ -387,10 +394,15 @@ describe('the history exception', () => {
       "window.history.replaceState(null, '', addressWithoutFragment(window.location) + window.location.hash);",
       'location.replace(u);',
       `${inviteReplace};\n${inviteReplace};`,
+      `${channelReplace};\n${channelReplace};`,
+      "window.history.replaceState(null, '', addressWithoutFragment(window.location) + hashForChannel(name) + window.location.search);",
     ]) {
       expect(navigates('./route.ts', example), example).toBe(true);
     }
     expect(navigates('./route.ts', `${inviteReplace};`)).toBe(false);
+    expect(navigates('./route.ts', `${channelReplace};`)).toBe(false);
+    // Outside route.ts the second is no exception either.
+    expect(navigates('./App.tsx', channelReplace)).toBe(true);
     // Allowed: setting the hash, reading location, comparing it, and saying
     // in a comment what the code does not do.
     for (const example of [
@@ -806,4 +818,15 @@ describe('the platform seam', () => {
     // And the browser's credential store is then not in it.
     expect(code).not.toContain('conch.web.token');
   }, 60_000);
+});
+
+// Every time and date the page shows comes from src/time.ts (F26), so they
+// share one locale and hour cycle: no other module formats one itself.
+describe('times and dates', () => {
+  it('are formatted in src/time.ts alone', () => {
+    const formatting = Object.entries(sources)
+      .filter(([path, code]) => path !== './time.ts' && /\.toLocale(Date|Time)?String\(|\bIntl\.DateTimeFormat\b/.test(withoutComments(code)))
+      .map(([path]) => path);
+    expect(formatting).toEqual([]);
+  });
 });

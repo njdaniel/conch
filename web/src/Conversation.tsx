@@ -18,11 +18,22 @@ import { canLoadOlder, editsKnown, isLater, lastId, oldestId, ordered } from './
 import type { LiveStatus, Person } from './useLiveChannel';
 import { mentions } from './useNotifications';
 import { useAuthorNames } from './useAuthorNames';
+import { timeOf } from './time';
 
-// HH:MM in the reader's own time zone.
+// The time of day, in the reader's own locale and time zone (time.ts).
 export function clock(when: string | number): string {
-  const d = new Date(when);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return timeOf(when);
+}
+
+// newestSent: the id of the viewer's newest message among those shown, when it
+// is one sent from this page and confirmed; null otherwise. "Sent" shows under
+// that one only, not under every message (F26).
+export function newestSent(messages: readonly MessageV2[], viewer: number, sentIds: ReadonlySet<number>): number | null {
+  let newest: MessageV2 | null = null;
+  for (const message of messages) {
+    if (message.author_id === viewer && (newest === null || message.id > newest.id)) newest = message;
+  }
+  return newest !== null && sentIds.has(newest.id) ? newest.id : null;
 }
 
 // The author's name from the members list; #<id> for anyone not on it.
@@ -173,6 +184,11 @@ export function Message({
   const who = messageName(message, people);
   const approval = approvalOf(message);
   const attachments = attachmentsOf(message);
+  // An image sent with no text has its filename as the body, and the figure
+  // shows that name already: the name shows once. Display only; the post is
+  // unchanged (F26).
+  const [fileName, setFileName] = useState<string | null>(null);
+  const nameOnly = attachments !== null && attachments.file_ids.length === 1 && fileName !== null && message.body === fileName;
   const items = editor === undefined ? actions ?? [] : [];
   const [menuOpen, setMenuOpen] = useState(false);
   const more = useRef<HTMLButtonElement>(null);
@@ -199,14 +215,14 @@ export function Message({
       >
         {editor ?? (approval === null ? (
           <>
-            <Linkified text={message.body} />
+            {nameOnly ? null : <Linkified text={message.body} />}
             <EditedMarker message={message} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} />
           </>
         ) : <ApprovalCard approval={approval} people={people} />)}
         {attachments === null ? null : (
           <span className="attachments">
             {attachments.file_ids.map((fileId) => (
-              <ImageAttachment key={fileId} fileId={fileId} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} />
+              <ImageAttachment key={fileId} fileId={fileId} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} onFilename={setFileName} />
             ))}
           </span>
         )}
@@ -388,6 +404,7 @@ function ThreadView({ rootId, root, chat, channel, live, people: known, nets, vi
     if (held === undefined || isLater(message, held)) byId.set(message.id, message);
   }
   const messages = [...byId.values()].sort((a, b) => a.id - b.id);
+  const sentMark = newestSent(messages, viewer, chat.sentIds);
   const threadAuthors = useMemo(() => [...new Set(messages.filter((m) => m.guest_author === undefined).map((m) => m.author_id))], [messages]);
   const people = useAuthorNames(channel, threadAuthors, known, onUnauthorized);
   const rootMessage = byId.get(rootId);
@@ -409,7 +426,7 @@ function ThreadView({ rootId, root, chat, channel, live, people: known, nets, vi
         </div>
       ) : null}
       <ol className="messages" aria-label="Root and replies">
-        {messages.map((message) => <Message key={message.id} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={chat.sentIds.has(message.id)} cont={false} onUnauthorized={onUnauthorized} />)}
+        {messages.map((message) => <Message key={message.id} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={message.id === sentMark} cont={false} onUnauthorized={onUnauthorized} />)}
         {pending.map((send) => <Pending key={`local-${String(send.localId)}`} send={send} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />)}
       </ol>
       {nextAfter === undefined ? null : (
@@ -722,6 +739,7 @@ export function Conversation({
   }, [repliesSettled, channelId, viewer, replyDrafts]);
 
   const shown = ordered(chat);
+  const sentMark = newestSent(shown, viewer, chat.sentIds);
   // The log's roving tab stop (issue #1040): the message last focused, else the
   // newest. A message arriving moves the stop, never focus.
   const list = useRef<HTMLOListElement>(null);
@@ -923,7 +941,7 @@ export function Conversation({
               nets={nets}
               viewer={viewer}
               channel={channel}
-              sent={chat.sentIds.has(message.id)}
+              sent={message.id === sentMark}
               cont={continues(shown[i - 1], message)}
               onUnauthorized={onUnauthorized}
               onReply={openFrom}

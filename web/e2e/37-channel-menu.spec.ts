@@ -10,7 +10,7 @@ import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import { makeInvite } from './api';
 import { createChannelResponse, listChannelsResponse, type CreateChannelRequest } from '../src/schema/channel';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
-import { channelButton, expect, expectFits, fillAccount, showView, signIn, statusLine, test } from './fixtures';
+import { channelButton, credentialField, expect, expectFits, fillAccount, showView, signIn, statusLine, test } from './fixtures';
 import { call, inviteUrl, ok, type World } from './world';
 
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Channels' });
@@ -152,7 +152,7 @@ async function watchContextMenus(page: Page): Promise<void> {
 test('P1135 a right-click on a channel row with actions opens its menu and is claimed; on the heading, the native menu stays', async ({ meet, world }) => {
   const { page } = await meet({ viewport: { width: 1440, height: 900 } });
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(page)).fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');

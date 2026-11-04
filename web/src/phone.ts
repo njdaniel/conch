@@ -87,6 +87,14 @@ export function usePhone(): boolean {
   return now;
 }
 
+// useCoarsePointer: whether the main pointer is coarse (a finger), read once
+// when the component mounts; where there is no matchMedia (jsdom) it is false.
+// Used for words that name a keyboard key, which a touch screen has none of.
+export function useCoarsePointer(): boolean {
+  const [coarse] = useState(() => typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches);
+  return coarse;
+}
+
 // useAppHeight keeps --app-height, on the root element, at the height of the
 // visual viewport while the phone layout is on. Browsers that resize the layout
 // viewport for the on-screen keyboard (the viewport meta asks for it) need

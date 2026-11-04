@@ -9,7 +9,7 @@
 // uses: the specs share one server, and its list holds their reports too.
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { problemReportV1 } from '../src/schema/report';
-import { expect, expectFits, phones, signIn, statusLine, test } from './fixtures';
+import { credentialField, expect, expectFits, phones, signIn, statusLine, test } from './fixtures';
 import { ok } from './world';
 
 const stamp = Date.now().toString(36);
@@ -45,7 +45,7 @@ test('R1029 a member sends a report and sees no Reports; the owner reads it and 
 
   const owner = await meet({ viewport: { width: 1440, height: 900 } });
   await owner.page.goto(world.appUrl);
-  await owner.page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(owner.page)).fill(world.tokens.operator);
   await owner.page.getByRole('button', { name: 'Use credential' }).click();
   await owner.page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(owner.page)).toContainText('Connected');

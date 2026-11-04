@@ -182,7 +182,7 @@ export function InviteSettings({
                 }
               }}
             />{' '}
-            Pause all invites
+            Pause all invites (sign-up at the address has its own switch below)
           </label>
           {disabledReason === undefined ? null : <p className="hint">{disabledReason}</p>}
           {asking && !paused && disabledReason === undefined ? (

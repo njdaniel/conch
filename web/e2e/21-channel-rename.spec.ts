@@ -13,7 +13,7 @@ import type { Browser, Page } from '@playwright/test';
 import { createChannelResponse, listChannelsResponse, renameChannelResponseV1, type CreateChannelRequest, type RenameChannelRequestV1 } from '../src/schema/channel';
 import { errorV0 } from '../src/schema/error';
 import { post } from './api';
-import { channelButton, expect, messages, rememberPushToTalk, signIn, statusLine, test } from './fixtures';
+import { channelButton, credentialField, expect, messages, rememberPushToTalk, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld } from './voice-world';
 import { call, ok, type World } from './world';
 
@@ -32,7 +32,7 @@ function fallback(names: readonly string[]): string | undefined {
 async function operatorPage(meet: () => Promise<{ page: Page }>, world: World, hash = ''): Promise<Page> {
   const { page } = await meet();
   await page.goto(world.appUrl + hash);
-  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(page)).fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');
@@ -150,7 +150,7 @@ test('C728 a rename refused because the channel was renamed meanwhile says so, m
   const { page } = await meet();
   await page.routeWebSocket(/\/v1\/events\/ws/, () => undefined);
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(page)).fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');

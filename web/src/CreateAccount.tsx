@@ -100,7 +100,7 @@ export function CreateAccount({
       <label htmlFor={`${id}-name`}>Your name</label>
       <p id={`${id}-name-help`} className="hint">
         Your permanent name: others see it, and you sign in with it. Up to 100 characters, with no space at the start or end
-        and no invisible characters. Names that begin with “guest” are kept for guests. The server says if it is taken.
+        and no invisible characters. Names that begin with “guest” are reserved. The server says if it is taken.
       </p>
       <input
         id={`${id}-name`}

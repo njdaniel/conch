@@ -16,7 +16,7 @@
 // tests fail when CI is set and are skipped otherwise, as in 10-voice.
 import { chromium, devices, type Browser, type BrowserContext, type BrowserContextOptions, type Page } from '@playwright/test';
 import type { VoicePresenceV1 } from '../src/schema/voice';
-import { expect, openChannel, rememberPushToTalk, say, signIn, test } from './fixtures';
+import { credentialField, expect, openChannel, rememberPushToTalk, say, signIn, test } from './fixtures';
 import { toneFile } from './tone';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
@@ -229,7 +229,7 @@ test.describe('the camera with LiveKit', () => {
       await signer.page.getByRole('button', { name: 'Settings' }).click();
       await signer.page.getByRole('button', { name: 'Sign out', exact: true }).click();
       await signer.page.getByRole('button', { name: 'Yes, sign out', exact: true }).click();
-      await expect(signer.page.getByLabel('Credential')).toBeVisible();
+      await expect((await credentialField(signer.page))).toBeVisible();
       await expect.poll(() => camStates(signer.page)).toEqual(['ended']);
       // Released by name before the credential was revoked.
       expect(signer.cameraCalls.at(-1)).toMatch(/^DELETE \?started_at=/);

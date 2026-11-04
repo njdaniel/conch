@@ -242,14 +242,14 @@ describe('the Server section', () => {
     expect(within(region).getByLabelText<HTMLInputElement>('#channel-a').matches(':disabled')).toBe(true);
     expect(within(region).getByRole<HTMLButtonElement>('button', { name: 'Save joining' }).disabled).toBe(true);
     // Pausing every invite is manage_members's, which this operator holds.
-    expect(within(region).getByLabelText<HTMLInputElement>('Pause all invites').disabled).toBe(false);
+    expect(within(region).getByLabelText<HTMLInputElement>(/^Pause all invites/).disabled).toBe(false);
   });
 
   it('disables the invite brake, with the reason, for a caller without manage_members', async () => {
     serve({ ...settingsOperator, permissions: [...memberRights, 'change_server_settings'] });
     await signedIn(operatorToken);
     const region = await joining();
-    expect(within(region).getByLabelText<HTMLInputElement>('Pause all invites').disabled).toBe(true);
+    expect(within(region).getByLabelText<HTMLInputElement>(/^Pause all invites/).disabled).toBe(true);
     expect(within(region).getByText('Needs the permission to manage members.')).toBeDefined();
     expect(within(region).getByLabelText<HTMLInputElement>(/Open sign-up/).disabled).toBe(false);
   });
@@ -845,12 +845,12 @@ describe('the invite brake when the permission goes', () => {
     // One function throughout: a new one on each render would read afresh.
     const stop = () => undefined;
     const view = render(<InviteSettings open onUnauthorized={stop} />);
-    fireEvent.click(await screen.findByLabelText('Pause all invites'));
+    fireEvent.click(await screen.findByLabelText(/^Pause all invites/));
     expect(await screen.findByRole('group', { name: /^Pause every invite\?/ })).toBeDefined();
     view.rerender(<InviteSettings open disabledReason="Needs the permission to manage members." onUnauthorized={stop} />);
     expect(screen.queryByRole('group', { name: /^Pause every invite\?/ })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Yes, pause' })).toBeNull();
-    expect(screen.getByLabelText<HTMLInputElement>('Pause all invites').disabled).toBe(true);
+    expect(screen.getByLabelText<HTMLInputElement>(/^Pause all invites/).disabled).toBe(true);
     // Back again, the question is not still pending.
     view.rerender(<InviteSettings open onUnauthorized={stop} />);
     expect(screen.queryByRole('group', { name: /^Pause every invite\?/ })).toBeNull();

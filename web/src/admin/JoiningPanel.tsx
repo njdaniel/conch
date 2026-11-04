@@ -33,6 +33,7 @@ import type { EndGuestsResponseV1, GuestAdminV1, JoinSettingsResponseV1, JoinWar
 import type { WhoAmIResponseV1 } from '../schema/principal';
 import { InvitesList } from './InvitesList';
 import { canDo, reasonFor, refusalLine } from './permissions';
+import { dateTimeOf } from '../time';
 
 type Line = { readonly text: string; readonly refused: boolean };
 
@@ -366,7 +367,7 @@ export function JoiningPanel({
                 <span className="hint">
                   {' '}
                   · {g.origin === 'invite' ? 'through an invite' : 'from the address'} · ends by{' '}
-                  <time dateTime={g.expires_at}>{new Date(g.expires_at).toLocaleString()}</time>
+                  <time dateTime={g.expires_at}>{dateTimeOf(g.expires_at)}</time>
                 </span>
               </li>
             ))}

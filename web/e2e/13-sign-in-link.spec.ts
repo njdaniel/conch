@@ -5,7 +5,7 @@
 // people it adds to general touch no other spec.
 import type { BrowserContextOptions, Page } from '@playwright/test';
 import { makeInvite } from './api';
-import { accountPassword, channelButton, expect, fillAccount, showView, signInWithPassword, statusLine, test } from './fixtures';
+import { accountPassword, channelButton, credentialField, expect, fillAccount, showView, signInWithPassword, statusLine, test } from './fixtures';
 import { createSignInLinkResponseV1, type CreateSignInLinkRequestV1, type CreateSignInLinkResponseV1 } from '../src/schema/signin';
 import { createPrincipalResponse, type CreatePrincipalRequest } from '../src/schema/credential';
 import { call, inviteUrl, ok, principalId, type World } from './world';
@@ -72,7 +72,7 @@ test('B493 a joiner signs out, is warned first, and comes back into the same acc
   expect((await call(world, firstToken, 'GET', '/v1/whoami')).status).toBe(200);
   await laptop.page.getByRole('button', { name: 'Sign out', exact: true }).click();
   await asked.getByRole('button', { name: 'Yes, sign out', exact: true }).click();
-  await expect(laptop.page.getByLabel('Credential')).toBeVisible();
+  await expect((await credentialField(laptop.page))).toBeVisible();
   expect((await call(world, firstToken, 'GET', '/v1/whoami')).status).toBe(401);
 
   // The operator makes a sign-in link; the tester opens it on a phone.

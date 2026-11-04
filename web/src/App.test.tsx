@@ -199,6 +199,35 @@ describe('sign-in', () => {
     expect(screen.getByRole('status', { name: 'Status' }).textContent).toContain('ada');
   });
 
+  // F24: operator setup is for operators, so the page folds it behind a closed
+  // disclosure; a refused credential opens it, so its answer is read where it
+  // is typed.
+  it('folds the operator and script section behind a closed disclosure, and opening it shows the credential field', () => {
+    serve(asMember);
+    const { container } = render(<App origin={origin} />);
+    const details = container.querySelector('details.operator-signin');
+    if (!(details instanceof HTMLDetailsElement)) throw new Error('no disclosure');
+    expect(details.querySelector('summary')?.textContent).toBe('Operator or script?');
+    expect(details.open).toBe(false);
+    // Everything of operators and scripts is inside it, and nothing else is.
+    const section = screen.getByRole('region', { name: 'Operators and scripts' });
+    expect(details.contains(section)).toBe(true);
+    expect(details.contains(screen.getByLabelText('Credential'))).toBe(true);
+    expect(details.contains(screen.getByLabelText('Name'))).toBe(false);
+    expect(details.contains(screen.getByRole('button', { name: 'Sign in' }))).toBe(false);
+    fireEvent.click(details.querySelector('summary') as HTMLElement);
+    expect(details.open).toBe(true);
+  });
+
+  it('opens the disclosure for a refused credential', async () => {
+    serve(asMember);
+    const { container } = render(<App origin={origin} />);
+    expect((container.querySelector('details.operator-signin') as HTMLDetailsElement).open).toBe(false);
+    signIn('wrong-token');
+    await screen.findByText('That credential was not accepted');
+    expect((container.querySelector('details.operator-signin') as HTMLDetailsElement).open).toBe(true);
+  });
+
   it('shows one line for a refused credential, keeps focus in the field and stores nothing', async () => {
     serve(asMember);
     const { container } = render(<App origin={origin} />);

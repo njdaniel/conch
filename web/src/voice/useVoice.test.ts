@@ -191,6 +191,12 @@ describe('the release delay', () => {
     expect(second.result.current.state.releaseDelay).toBe(700);
   });
 
+  // F22: the slider's step is 50 ms; a stored value off that grid loads on it.
+  it.each([['230', 250], ['224', 200], ['225', 250], ['2000', 2000], ['1990', 2000]])('kept as %s ms, it loads as %d', (kept, loaded) => {
+    window.sessionStorage.setItem('conch.web.voice.release', kept);
+    expect(hook({ channel: null }).result.current.state.releaseDelay).toBe(loaded);
+  });
+
   it.each([['not a number', 'soon'], ['out of range', '99999'], ['negative', '-5']])('kept as %s, it is the default', (_what, kept) => {
     window.sessionStorage.setItem('conch.web.voice.release', kept);
     expect(hook({ channel: null }).result.current.state.releaseDelay).toBe(200);

@@ -5,7 +5,7 @@
 // sign-in links share, and joins no channel another spec reads.
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { makeInvite } from './api';
-import { accountPassword, consoleErrors, expect, expectFits, fillAccount, phones, signIn, statusLine, test } from './fixtures';
+import { accountPassword, consoleErrors, credentialField, expect, expectFits, fillAccount, phones, signIn, statusLine, test } from './fixtures';
 import { call, inviteUrl, ok, type World } from './world';
 
 for (const [size, options] of phones) {
@@ -51,7 +51,7 @@ for (const [size, options] of phones) {
     const asked = page.getByRole('group', { name: /^Sign out of this browser\?/ });
     await expect(asked).toContainText('you will need a new link from an operator');
     await asked.getByRole('button', { name: 'Yes, sign out', exact: true }).tap();
-    await expect(page.getByLabel('Credential')).toBeVisible();
+    await expect((await credentialField(page))).toBeVisible();
     expect((await call(world, phoneToken, 'GET', '/v1/whoami')).status).toBe(401);
   });
 }

@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { dateTimeOf } from './time';
 import { App } from './App';
 import { insecureLine } from './transport';
 import { holdShare } from './voice/heldshare';
@@ -96,7 +97,7 @@ describe('your sign-ins', () => {
     expect(within(here).getByText('This browser')).toBeDefined();
     const link = await item(region, 'sign-in link 3');
     expect(within(link).queryByText('This browser')).toBeNull();
-    expect(within(link).getByText(new Date(signIns[1]?.created_at ?? '').toLocaleString()).getAttribute('datetime')).toBe(signIns[1]?.created_at);
+    expect(within(link).getByText(dateTimeOf(signIns[1]?.created_at ?? '')).getAttribute('datetime')).toBe(signIns[1]?.created_at);
     for (const li of within(list).getAllByRole('listitem')) {
       expect(within(li).getByRole('button', { name: 'End this sign-in' })).toBeDefined();
     }

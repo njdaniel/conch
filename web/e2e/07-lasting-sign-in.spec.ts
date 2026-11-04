@@ -4,7 +4,7 @@
 // another spec uses.
 import type { Page } from '@playwright/test';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
-import { expect, signIn, statusLine, test } from './fixtures';
+import { credentialField, expect, signIn, statusLine, test } from './fixtures';
 import { call, ok, type World } from './world';
 
 interface Newcomer {
@@ -93,17 +93,17 @@ test('A7 sign out everywhere ends every sign-in: the other tab lands on sign-in,
   // It asks first (issue #493).
   await here.page.getByRole('button', { name: 'Yes, sign out everywhere' }).click();
   await expect(here.page.getByRole('alert')).toHaveText('Signed out everywhere: every sign-in of yours has ended');
-  await expect(here.page.getByLabel('Credential')).toBeVisible();
+  await expect((await credentialField(here.page))).toBeVisible();
 
   // The other tab follows at once, without a request of its own.
-  await expect(tab2.getByLabel('Credential')).toBeVisible();
+  await expect((await credentialField(tab2))).toBeVisible();
   await expect(tab2.getByRole('alert')).toHaveText('Signed out in another tab');
 
   // Both credentials are dead on the server, and the other browser is
   // refused on its next request: a reload lands it on sign-in.
   for (const token of person.tokens) expect((await call(world, token, 'GET', '/v1/whoami')).status).toBe(401);
   await elsewhere.page.reload();
-  await expect(elsewhere.page.getByLabel('Credential')).toBeVisible();
+  await expect((await credentialField(elsewhere.page))).toBeVisible();
   await expect(elsewhere.page.getByRole('alert')).toHaveText('Signed out: the credential is no longer valid');
 
   // Nothing of the credential is left in either browser.
@@ -123,7 +123,7 @@ test('A7 sign out revokes this credential on the server, and its next request is
   await page.getByRole('button', { name: 'Sign out', exact: true }).click();
   // It asks first (issue #493).
   await page.getByRole('button', { name: 'Yes, sign out' }).click();
-  await expect(page.getByLabel('Credential')).toBeVisible();
+  await expect((await credentialField(page))).toBeVisible();
   expect((await call(world, first, 'GET', '/v1/whoami')).status).toBe(401);
   // Only that one: the person's other credential still works.
   expect((await call(world, other, 'GET', '/v1/whoami')).status).toBe(200);

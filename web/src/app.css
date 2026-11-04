@@ -1072,6 +1072,26 @@ label {
   width: 100%;
 }
 
+.report-summary {
+  margin: 0;
+}
+
+.report-summary dt {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.report-summary dd {
+  margin: 0 0 var(--s2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.report-technical > summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
 .report-preview {
   max-height: 40vh;
   overflow: auto;
@@ -1665,14 +1685,16 @@ label {
   list-style: none;
 }
 
-.version {
+/* Scoped to the list: the server-version badge is also a .version, and must
+   stay plain text in the card's flow, not take this box (F19). */
+.versions > .version {
   padding: var(--s2) var(--s3);
   background: var(--raised);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
 }
 
-.version.current {
+.versions > .version.current {
   border-color: var(--accent);
 }
 
@@ -2977,9 +2999,19 @@ label {
   font-size: 1.1rem;
 }
 
-.signin .credential-signin {
+.signin .operator-signin {
+  margin-top: var(--s5);
   padding-top: var(--s4);
   border-top: 1px solid var(--border);
+}
+
+.signin .operator-signin > summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.signin .credential-signin {
+  margin-top: var(--s3);
 }
 
 .signin .server-name {
@@ -4785,4 +4817,10 @@ button.link {
     min-width: 2.75rem;
     min-height: 2.75rem;
   }
+}
+
+/* The words of Join voice and Watch only are one flex item, so the channel
+   name follows them on the same line of text instead of beside them (F17). */
+.voice-controls .btn-text {
+  min-width: 0;
 }

@@ -18,11 +18,12 @@ import * as api from '../api';
 import type { InviteJoinerV1, InviteV2 } from '../schema/permission';
 import type { WhoAmIResponseV1 } from '../schema/principal';
 import { canDo, reasonFor, refusalLine } from './permissions';
+import { dateTimeOf } from '../time';
 
 type Line = { readonly text: string; readonly refused: boolean };
 
 function when(at: string) {
-  return <time dateTime={at}>{new Date(at).toLocaleString()}</time>;
+  return <time dateTime={at}>{dateTimeOf(at)}</time>;
 }
 
 // channelsLine names a link's channels, and counts those it leaves out.

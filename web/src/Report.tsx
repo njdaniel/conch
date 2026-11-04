@@ -88,6 +88,19 @@ function refusalLine(result: { readonly failure: api.ApiFailure; readonly code?:
   return result.message === undefined ? 'The server refused the report.' : `The server refused the report: ${result.message}`;
 }
 
+// withIt says, in words, what the page added to the person's answers.
+export function withIt(report: CreateProblemReportRequestV1): string {
+  const n = report.diagnostics.length;
+  const client = report.client;
+  const parts = [
+    `${client.name} ${client.version}`,
+    client.platform,
+    ...(client.screen === undefined ? [] : [`a window of ${client.screen}`]),
+    n === 1 ? '1 diagnostic event' : `${String(n)} diagnostic events`,
+  ];
+  return parts.join(', ');
+}
+
 export function ReportProblem({ onUnauthorized }: { readonly onUnauthorized: () => void }) {
   const id = useId();
   const [open, setOpen] = useState(false);
@@ -186,9 +199,25 @@ export function ReportProblem({ onUnauthorized }: { readonly onUnauthorized: () 
         ) : step.kind === 'review' ? (
           <section aria-label="Review your report">
             <p className="hint">This is exactly what will be sent. The server adds its version, the time, and the ids of your recent requests.</p>
-            <pre className="report-preview" tabIndex={0} aria-label="The report as it will be sent">
-              {JSON.stringify(step.report, null, 2)}
-            </pre>
+            {/* What the person wrote, as text, and what the page adds, in words (F26). */}
+            <dl className="report-summary">
+              <dt>What you did</dt>
+              <dd>{step.report.did}</dd>
+              <dt>What you expected</dt>
+              <dd>{step.report.expected}</dd>
+              <dt>What happened instead</dt>
+              <dd>{step.report.happened}</dd>
+              <dt>How often</dt>
+              <dd>{oftenLabels.find(([value]) => value === step.report.often)?.[1] ?? step.report.often}</dd>
+              <dt>Sent with it</dt>
+              <dd>{withIt(step.report)}</dd>
+            </dl>
+            <details className="report-technical">
+              <summary>Technical details</summary>
+              <pre className="report-preview" tabIndex={0} aria-label="The report as it will be sent">
+                {JSON.stringify(step.report, null, 2)}
+              </pre>
+            </details>
             <div className="actions">
               <button
                 type="button"

@@ -32,6 +32,11 @@ export interface GateOptions {
 export const defaultTail = 200;
 // The longest release delay, as conch-voice's release_tail_ms.
 export const maxTail = 2000;
+
+// The release-delay slider moves by releaseStep ms (F22), and PageUp and
+// PageDown by releasePage.
+export const releaseStep = 50;
+export const releasePage = 250;
 export const defaultHang = 400;
 export const defaultMax = 120_000;
 
@@ -159,4 +164,10 @@ export class TransmitGate {
 export function clampTail(ms: number): number {
   if (!Number.isFinite(ms)) return defaultTail;
   return Math.round(Math.min(maxTail, Math.max(0, ms)));
+}
+
+// snapTail is clampTail, rounded to the nearest releaseStep: a stored value off
+// the slider's grid loads on it.
+export function snapTail(ms: number): number {
+  return clampTail(Math.round(clampTail(ms) / releaseStep) * releaseStep);
 }

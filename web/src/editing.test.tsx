@@ -192,6 +192,19 @@ describe('the actions menu', () => {
 });
 
 describe('the inline editor', () => {
+  // F18: a touch screen has no Enter or Esc to name.
+  it('says Save or Cancel on a coarse pointer, and keeps the keys on a desktop', () => {
+    vi.stubGlobal('matchMedia', (q: string) => ({ matches: q === '(pointer: coarse)', addEventListener: () => undefined, removeEventListener: () => undefined }));
+    try {
+      render(conversation([msg(1, { body: 'helo, conch' })]));
+      openEditor(1);
+      expect(screen.getByText('Editing. Save or Cancel.')).toBeTruthy();
+      expect(screen.queryByText(/Enter to save/)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('holds the text, focused with the caret at the end, and says how to save', () => {
     render(conversation([msg(1, { body: 'helo, conch' })]));
     const editor = openEditor(1);

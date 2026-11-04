@@ -18,7 +18,7 @@ import { ReportProblem } from './Report';
 import { OperatorWarning } from './OperatorWarning';
 import { ChannelSettingsAsk } from './ChannelSettingsAsk';
 import { RenameChannel } from './RenameChannel';
-import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeLinkFromAddress } from './route';
+import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, showChannelInAddress, takeLinkFromAddress } from './route';
 import type { ChannelDocV1 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import type { ReadStateV1 } from './schema/readstate';
@@ -324,11 +324,19 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   }, [auth.phase]);
 
   // The hash names the open channel, so back, forward and a pasted link work.
+  // A hash that names a channel this person cannot open is corrected to the one
+  // shown, in place (F26); nothing is said of the one asked for.
   useEffect(() => {
     if (!signedIn) return;
     function onHash() {
       const name = channelFromHash(window.location.hash);
-      if (name !== null) dispatchChannels({ type: 'select', name });
+      if (name === null) return;
+      const held = channelsNow.current;
+      if (held.selected !== null && !held.channels.some((c) => c.name === name)) {
+        showChannelInAddress(held.selected);
+        return;
+      }
+      dispatchChannels({ type: 'select', name });
     }
     window.addEventListener('hashchange', onHash);
     return () => {
@@ -343,7 +351,12 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     if (channels.selected === null) return;
     rememberChannel(channels.selected);
     const hash = hashForChannel(channels.selected);
-    if (window.location.hash !== hash) window.location.hash = hash;
+    if (window.location.hash === hash) return;
+    // The address names a channel that is not this person's to open (a pasted
+    // link, say): it is corrected in place, not added to the history.
+    const asked = channelFromHash(window.location.hash);
+    if (asked !== null && !channels.channels.some((c) => c.name === asked)) showChannelInAddress(channels.selected);
+    else window.location.hash = hash;
   }, [channels.selected]);
 
   // A channel renamed (issue #728), however the page learned it: the

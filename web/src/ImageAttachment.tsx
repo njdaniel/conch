@@ -27,13 +27,19 @@ export function ImageAttachment({
   channel,
   viewer,
   onUnauthorized = ignoreUnauthorized,
+  onFilename,
 }: {
   readonly fileId: number;
   readonly channel: string;
   readonly viewer: number;
   readonly onUnauthorized?: () => void;
+  // Told the file's name once its metadata is read, so a message whose text is
+  // only that name can show it once (F26).
+  readonly onFilename?: (filename: string) => void;
 }) {
   const id = useId();
+  const nameSink = useRef(onFilename);
+  nameSink.current = onFilename;
   const generation = useRef(0);
   const objectURL = useRef<string | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -68,6 +74,7 @@ export function ImageAttachment({
         return;
       }
       const filename = metadata.value.filename;
+      nameSink.current?.(filename);
       const size = metadata.value.size;
       if (size > maxImageEncodedBytes || !maybeImage(metadata.value.media_type)) {
         setView({ filename, url: null, note: null, size });

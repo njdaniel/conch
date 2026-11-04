@@ -6,6 +6,7 @@
 // attribution in the conversation. conchd is a stand-in fetch.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { dateTimeOf } from './time';
 import { App } from './App';
 import { authorOf } from './Conversation';
 import { displayName, guestName, memberName } from './guestName';
@@ -303,7 +304,7 @@ describe('a guest visit', () => {
     expect(panel.textContent).toContain('Temporary guest');
     expect(panel.textContent).toContain('Guest: Pat · a7k4');
     expect(panel.textContent).toContain('End visit signs you out permanently. Your messages remain. Create an account to keep access.');
-    expect(within(panel).getByText(new Date(visit.expires_at).toLocaleString()).getAttribute('datetime')).toBe(visit.expires_at);
+    expect(within(panel).getByText(dateTimeOf(visit.expires_at)).getAttribute('datetime')).toBe(visit.expires_at);
     // It never says closing the browser ends the visit.
     expect(panel.textContent).toContain('Closing the tab does not end it.');
     expect(within(panel).getByRole('button', { name: 'Create an account' })).toBeDefined();
