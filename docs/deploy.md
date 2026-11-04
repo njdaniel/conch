@@ -32,7 +32,7 @@ See [channel privacy](#channel-privacy-and-default-channels) and
 
 Send newcomers a member link. The browser's links land them in the default channels,
 with full history. With no default channels, they start in no channel. The bare
-address is a sign-in page unless `open_signup` is on. It is off by default.
+address is a sign-in page unless `open_signup` is on. It is off by default on a new server; an upgraded server keeps its old open-joining mode.
 An owner can change it; a delegated operator needs `change_server_settings`.
 Open sign-up needs a public default channel. It makes members with full history too.
 
@@ -43,7 +43,7 @@ See [member links](#member-links-and-the-invite-brake) for the controls.
 
 Voice is on for new members. A holder of `manage_members` can change a person's
 `voice_allowed` switch at any time. Turning it off removes them from live voice
-and ends their share; an owner is exempt. Turning it on lets them join again,
+and ends their share; an owner is exempt, and only an owner may change an owner's switch. Turning it on lets them join again,
 subject to role permissions. See [the per-person switches](#the-eleven-permissions).
 
 There are **no guests for now**. Guests were removed on 2026-10-30 and return with

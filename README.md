@@ -69,7 +69,7 @@ what members see through `see_member_directory`. See
 [hiding members](docs/deploy.md#hiding-members-from-each-other) for its limits.
 
 Open the member link you were sent to make an account. The bare server address is
-a sign-in page. `open_signup` is off by default; an owner can turn it on to let
+a sign-in page. `open_signup` is off by default on a new server (an upgraded server keeps its old open-joining mode); an owner can turn it on to let
 people make accounts there too. An operator needs `change_server_settings` to do so.
 Member links are reusable, with an optional use limit. Without an explicit expiry,
 a link lasts seven days by default. The setting is
@@ -1058,7 +1058,7 @@ A member who joined with a password (through `POST /v2/invites/redeem`) signs in
 
 ### Administering invites
 
-A holder of `manage_members` sees every invite, closes any of them, and has these routes besides:
+A holder of `manage_members` sees every invite, closes any of them, and has these routes besides (any operator may read `GET /v1/invites/settings`; changing it needs `manage_members`):
 
 | Route | Body | Success |
 | --- | --- | --- |
