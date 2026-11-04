@@ -2,9 +2,13 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,5 +128,87 @@ func TestClientDelegatedAdministration(t *testing.T) {
 				t.Errorf("result = %+v, want %+v", result, tt.want)
 			}
 		})
+	}
+}
+
+func TestClientChannelAuthors(t *testing.T) {
+	ids := make([]int64, 0, 230)
+	for i := int64(1); i <= 230; i++ {
+		ids = append(ids, i+10)
+	}
+	var mu sync.Mutex
+	var queries []string
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		queries = append(queries, r.URL.Query().Get("ids"))
+		paths = append(paths, r.URL.EscapedPath())
+		mu.Unlock()
+		out := schema.ChannelAuthorsResponseV1{Authors: []schema.ChannelAuthorV1{}}
+		for _, part := range strings.Split(r.URL.Query().Get("ids"), ",") {
+			id, _ := strconv.ParseInt(part, 10, 64)
+			out.Authors = append(out.Authors, schema.ChannelAuthorV1{PrincipalID: id, Name: "p" + part, Kind: schema.PrincipalHuman})
+		}
+		// A hostile server adds rows nobody asked about, and repeats one.
+		out.Authors = append(out.Authors, schema.ChannelAuthorV1{PrincipalID: 7, Name: "impostor", Kind: schema.PrincipalHuman}, out.Authors[0])
+		_ = json.NewEncoder(w).Encode(out)
+	}))
+	t.Cleanup(server.Close)
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := client.WithToken("tok").ChannelAuthors(context.Background(), "a b", append(ids, ids[:10]...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 230 {
+		t.Errorf("named %d authors, want 230 (no unasked row, no repeat)", len(got))
+	}
+	for _, a := range got {
+		if a.PrincipalID == 7 {
+			t.Error("a row for an id nobody asked about was kept")
+		}
+	}
+	var sizes []int
+	for _, q := range queries {
+		sizes = append(sizes, len(strings.Split(q, ",")))
+	}
+	if !reflect.DeepEqual(sizes, []int{100, 100, 30}) {
+		t.Errorf("batch sizes = %v, want [100 100 30]", sizes)
+	}
+	if paths[0] != "/v1/channels/a%20b/authors" {
+		t.Errorf("path = %q", paths[0])
+	}
+}
+
+func TestClientChannelAuthorsKeepsWhatOtherBatchesNamed(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 2 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(schema.ChannelAuthorsResponseV1{Authors: []schema.ChannelAuthorV1{{PrincipalID: 1, Name: "one", Kind: schema.PrincipalHuman}}})
+	}))
+	t.Cleanup(server.Close)
+	client, err := NewClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]int64, 150)
+	for i := range ids {
+		ids[i] = int64(i + 1)
+	}
+	got, err := client.WithToken("tok").ChannelAuthors(context.Background(), "general", ids)
+	if err == nil {
+		t.Error("the failed batch was not reported")
+	}
+	if len(got) != 1 || got[0].PrincipalID != 1 {
+		t.Errorf("got %v, want the first batch's name", got)
+	}
+	if none, err := client.WithToken("tok").ChannelAuthors(context.Background(), "general", nil); err != nil || none != nil || calls != 2 {
+		t.Errorf("no ids asked the server (%d calls) or failed: %v %v", calls, none, err)
 	}
 }
