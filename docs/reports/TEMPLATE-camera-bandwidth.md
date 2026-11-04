@@ -61,31 +61,32 @@ They decide, afterwards and by Nick: whether the cap of 9 (O6) and the quality p
 
 ### 1.3 The 9-camera load
 
-Nine cameras means nine people in one voice room, each holding a camera claim and
-publishing a video track. The rules of the server make this hard to fake. A published
-camera track needs a claim (`POST /v1/channels/{channel}/voice/camera`), made by the
-person publishing it. Without one, LiveKit refuses it or the pass withdraws it. So
-`scripts/alpha-loadtest.sh`, whose `lk load-test` relay publishes as soon as it joins and
-never claims a camera, **does not make a camera load**. It still makes the simulated
-viewers and voices of the share's runs.
+Nine cameras means nine principals in one voice room, each holding a camera claim and
+publishing a video track. A published camera track needs a claim
+(`POST /v1/channels/{channel}/voice/camera`), made by the principal publishing it.
+Without one, LiveKit refuses it or the pass withdraws it. The alpha load test does this
+in the required order: its relay holds each simulated camera track, that principal claims
+its camera, and the relay releases the track after the claim is granted.
 
-A load tool that claims a camera for each simulated publisher before `lk` publishes is
-**proposed** and does not exist yet; this template does not depend on it. Until it does,
-use as many **real devices** as there are, each its own principal (one person on two
-devices is one principal, and the second device displaces the first), and apply these
-rules:
+For the 9-camera runs, use the real command (adding the server and credential options
+from the script's `--help`):
 
-- The report states how many real cameras each 9-camera run had. A run with fewer than 9
-  is **partial**: say "partial: N of 9 cameras" in its row and in section 2, and do not
-  compare it with a run that had 9.
-- Simulated participants from the alpha loadtest may be added as **viewers** and
-  voices (`--viewers`, `--publishers`), recording the layout used. They are not cameras.
-  A run that adds them says what they were.
-- If the proposed tool exists by the day, record its commit and use it for the
-  9-camera runs; the real devices then sit on top of the simulated cameras, as the real
-  browsers sit on top of the simulated viewers in the share's runs.
+```sh
+scripts/alpha-loadtest.sh --channel general --viewers 9 --publishers 9 \
+    --camera-publishers 9 --duration 5m -- --layout 3x3
+```
 
-Every principal that a script makes is hidden afterwards, as in the share's template.
+Before the run, turn `use_camera` on for operators and members (two cells, section 4);
+turn both back off afterwards. The script reads the permissions and refuses to start if
+the member cell is off; it never changes permissions. Every principal it makes is hidden
+afterwards, as in the share's template.
+
+Record the commit, command, layout, and how many cameras were simulated and real. A run
+using this command with `--camera-publishers 9` is a 9-camera run, **not partial**. Any
+other run with fewer than 9 cameras is **partial**: say "partial: N of 9 cameras" in its
+row and in section 2, and do not compare it with a run that had 9. Real browsers can view
+the simulated cameras; real sending devices have their own principal (one person on two
+devices is one principal, and the second device displaces the first).
 
 ### 1.4 The four runs
 
@@ -96,8 +97,8 @@ would (mute is fine: mute does not touch a camera).
 | --- | --- | --- | --- |
 | 1. One to one | 2 (each side sends and receives) | nobody | two principals, on two devices, one of them a phone if one is at hand |
 | 2. One to one with a share | 2 | one side shares a tab playing a 1080p video, through the web client | as run 1 |
-| 3. Nine cameras | 9 (see section 1.3) | nobody | as many as there are, at least one a phone |
-| 4. Nine cameras with a share | 9 | one person shares a tab playing a 1080p video, and every viewer has the call view open with the share watched | as run 3 |
+| 3. Nine cameras | 9 simulated by the command in section 1.3 | nobody | viewers, at least one a phone |
+| 4. Nine cameras with a share | 9 simulated by the command in section 1.3 | one person shares a tab playing a 1080p video, and every viewer has the call view open with the share watched | as run 3 |
 
 Run 2 against run 1, and run 4 against run 3, show what a share adds. In runs 3 and 4
 the viewers keep the call view open on the 3 x 3 grid the whole time (the call view
@@ -214,7 +215,9 @@ Add rows for anything else run, and say what it was.
 
 ## 2. Results
 
-State first, for each run, how many cameras were real, and whether the run is partial.
+State first, for each run, how many cameras were simulated and real. A run using
+`--camera-publishers 9` is not partial; mark any other run with fewer than 9 cameras
+partial.
 
 ### 2.1 Droplet network
 
@@ -269,10 +272,9 @@ These are Nick's.
 - **What the documentation may now say about capacity:** (nothing, until a run reached
   a limit; or the figure, with the run, the droplet and the load it was measured under)
 - **Droplet size:**
-- **Follow-ups filed:** the load tool for simulated cameras, if it still does not exist;
-  changes to the presets or the cap, each as its own issue; and the small PR that flips the
-  browser-table cells in `README.md` and `docs/alpha-tester-guide.md` from "untried" and
-  "not known yet" to what was run.
+- **Follow-ups filed:** changes to the presets or the cap, each as its own issue; and the
+  small PR that flips the browser-table cells in `README.md` and
+  `docs/alpha-tester-guide.md` from "untried" and "not known yet" to what was run.
 
 ## 4. Afterwards
 

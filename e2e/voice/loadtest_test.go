@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -33,13 +34,18 @@ func TestParseLoadtestFlags(t *testing.T) {
 		check   func(t *testing.T, c loadtestConfig)
 	}{
 		{name: "a run", args: base, check: func(t *testing.T, c loadtestConfig) {
-			if c.server != "https://conch.example.org" || c.viewers != 29 || c.lifetime != 4*time.Hour || c.fakeSharer {
+			if c.server != "https://conch.example.org" || c.viewers != 29 || c.cameraPublishers != 0 || c.lifetime != 4*time.Hour || c.fakeSharer {
 				t.Errorf("config = %+v", c)
 			}
 		}},
 		{name: "fake sharer with lk", args: with("-fake-sharer", "-lk", "/x/lk"), check: func(t *testing.T, c loadtestConfig) {
 			if !c.fakeSharer || c.lkBin != "/x/lk" {
 				t.Errorf("config = %+v", c)
+			}
+		}},
+		{name: "nine camera publishers", args: with("-camera-publishers", "9"), check: func(t *testing.T, c loadtestConfig) {
+			if c.cameraPublishers != 9 {
+				t.Errorf("cameraPublishers = %d, want 9", c.cameraPublishers)
 			}
 		}},
 		{name: "clean-up needs no channel", args: []string{"-server", "http://127.0.0.1:1", "-prefix", "loadtest-a1", "-cleanup-only"}},
@@ -53,6 +59,9 @@ func TestParseLoadtestFlags(t *testing.T) {
 		{name: "no viewers", args: with("-viewers", "0"), wantErr: "-viewers"},
 		{name: "the most viewers", args: with("-viewers", "499")},
 		{name: "more than one hide's worth", args: with("-viewers", "500"), wantErr: "-viewers"},
+		{name: "negative camera publishers", args: with("-camera-publishers", "-1"), wantErr: "-camera-publishers"},
+		{name: "ten camera publishers", args: with("-camera-publishers", "10"), wantErr: "-camera-publishers"},
+		{name: "more cameras than participants", args: with("-viewers", "2", "-camera-publishers", "3"), wantErr: "-camera-publishers"},
 		{name: "a token as an argument", args: with("-token", "x"), wantErr: "flag provided but not defined"},
 		{name: "a stray argument", args: with("extra"), wantErr: "unexpected argument"},
 		{name: "a short credential lifetime", args: with("-credential-lifetime", "30s"), wantErr: "-credential-lifetime"},
@@ -71,6 +80,126 @@ func TestParseLoadtestFlags(t *testing.T) {
 			}
 			if tt.check != nil {
 				tt.check(t, c)
+			}
+		})
+	}
+}
+
+func TestLoadtestCameraPublisher(t *testing.T) {
+	tests := []struct {
+		name  string
+		id    string
+		count int
+		want  bool
+	}{
+		{name: "first publisher", id: "random_pub_0", count: 2, want: true},
+		{name: "second publisher connecting later", id: "random_pub_1", count: 2, want: true},
+		{name: "audio-only publisher after the cameras", id: "random_pub_2", count: 2},
+		{name: "viewer connecting first", id: "random_0", count: 2},
+		{name: "cameras disabled", id: "random_pub_0", count: 0},
+		{name: "not an lk publisher identity", id: "pub_0", count: 2},
+		{name: "sequence is not a number", id: "random_pub_x", count: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := loadtestCameraPublisher(tt.id, tt.count); got != tt.want {
+				t.Fatalf("loadtestCameraPublisher(%q, %d) = %v, want %v", tt.id, tt.count, got, tt.want)
+			}
+		})
+	}
+}
+
+// Add-track requests for lk's two load-test video track names, with no source
+// field. The filter must rewrite them and hold them before the claim.
+var (
+	loadtestCameraFrame    = []byte{0x22, 0x07, 0x12, 0x05, 'v', 'i', 'd', 'e', 'o'}
+	loadtestSimulcastFrame = []byte{0x22, 0x11, 0x12, 0x0f, 'v', 'i', 'd', 'e', 'o', '-', 's', 'i', 'm', 'u', 'l', 'c', 'a', 's', 't'}
+)
+
+func TestLoadtestCameraClaimOrder(t *testing.T) {
+	tests := []struct {
+		name    string
+		frame   []byte
+		status  int
+		wantErr bool
+	}{
+		{name: "claim granted releases the gate", frame: loadtestCameraFrame, status: http.StatusOK},
+		{name: "simulcast track is gated and claimed", frame: loadtestSimulcastFrame, status: http.StatusOK},
+		{name: "claim refused leaves the gate held", frame: loadtestCameraFrame, status: http.StatusForbidden, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gate := newTrackFilter(true, sources(map[string]uint64{"video": lkSourceCamera, "video-simulcast": lkSourceCamera}))
+			claimed := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/v1/channels/movie/voice/camera" {
+					http.Error(w, "unexpected request", http.StatusBadRequest)
+					return
+				}
+				select {
+				case <-gate.gate:
+					http.Error(w, "the gate was released before the claim", http.StatusInternalServerError)
+					return
+				default:
+				}
+				close(claimed)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tt.status)
+				if tt.status == http.StatusOK {
+					_ = json.NewEncoder(w).Encode(map[string]any{"principal_id": 7, "started_at": "2026-11-04T00:00:00Z"})
+				} else {
+					_ = json.NewEncoder(w).Encode(map[string]any{"code": "permission_denied"})
+				}
+			}))
+			defer srv.Close()
+
+			p := &person{name: "cam", id: 7, api: api{baseURL: srv.URL}}
+			lt := &loadtest{cfg: loadtestConfig{channel: "movie"}}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			claimDone := make(chan error, 1)
+			go func() { claimDone <- lt.claimCameraWhenHeld(ctx, p, gate) }()
+			select {
+			case <-claimed:
+				t.Fatal("the camera was claimed before the relay held its track")
+			default:
+			}
+
+			published := make(chan struct{})
+			go func() {
+				gate.Filter(ctx, tt.frame)
+				close(published)
+			}()
+			select {
+			case <-claimed:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the held track did not lead to a camera claim")
+			}
+			select {
+			case err := <-claimDone:
+				if (err != nil) != tt.wantErr {
+					t.Fatalf("claimCameraWhenHeld error = %v, want error %v", err, tt.wantErr)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the claim did not finish")
+			}
+			select {
+			case <-gate.gate:
+				if tt.wantErr {
+					t.Fatal("a refused claim released the gate")
+				}
+			default:
+				if !tt.wantErr {
+					t.Fatal("a granted claim did not release the gate")
+				}
+			}
+			if tt.wantErr {
+				cancel()
+			}
+			select {
+			case <-published:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the relay filter stayed blocked")
 			}
 		})
 	}
