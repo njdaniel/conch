@@ -270,6 +270,65 @@ func (s *Store) ListChannelAuthors(ctx context.Context, channelID int64, reader 
 	return out, nil
 }
 
+// AuthorReaders is who holds a message of authorID that the authors route
+// would let them name (issue #1282), for the hide signal: the ids of the
+// humans, enabled and not hidden, who are a member of a channel where authorID
+// authored a message that they may read. "May read" is messageVisible with
+// the same scoped reader ListChannelAuthors is asked with, so the answer is
+// exactly the people for whom GET /v1/channels/{channel}/authors names the
+// author, and a frame to them tells nobody anything the message had not
+// already told them. An agent is never listed (it has no directory), nor is
+// anyone with no such message, whatever they know of the author otherwise.
+// Called after the author was hidden: their messages stay, their memberships
+// are gone.
+func (s *Store) AuthorReaders(ctx context.Context, authorID int64) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT v.id FROM principals v
+		 JOIN channel_members cm ON cm.principal_id = v.id
+		 WHERE v.kind = 'human' AND v.disabled_at IS NULL AND v.hidden_at IS NULL
+		   AND v.id <> ?
+		   AND EXISTS (SELECT 1 FROM messages x WHERE x.channel_id = cm.channel_id AND x.author_id = ?)
+		 ORDER BY v.id`, authorID, authorID)
+	if err != nil {
+		return nil, fmt.Errorf("store: readers of author %d: %w", authorID, err)
+	}
+	candidates, err := scanIDs(rows)
+	if err != nil {
+		return nil, fmt.Errorf("store: readers of author %d: %w", authorID, err)
+	}
+	var out []int64
+	for _, id := range candidates {
+		scoped, predArgs := visibilityArgs(Reader{Scoped: true, PrincipalID: id})
+		args := append([]any{id, authorID}, predArgs...)
+		var ok bool
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM messages m
+			                JOIN channel_members rc ON rc.channel_id = m.channel_id AND rc.principal_id = ?
+			                WHERE m.author_id = ? AND `+messageVisible(scoped)+`)`, // #nosec G202 -- constant conditions only
+			args...).Scan(&ok); err != nil {
+			return nil, fmt.Errorf("store: readers of author %d: %w", authorID, err)
+		}
+		if ok {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+// scanIDs reads a single integer column and closes rows.
+func scanIDs(rows *sql.Rows) ([]int64, error) {
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // historyWatermarkTx is the history bound a guest admitted to channelID now
 // gets (issue #705): the id of the channel's last message, or 0 when it has
 // none. Message ids only grow, so every later message of the channel has a

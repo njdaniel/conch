@@ -5,6 +5,9 @@
 // owner and bob shares another with the owner, so alice and bob share none.
 // Wide and on a phone, against the real server.
 //
+// Issue #1282: hiding bob also tells alice, who holds his old messages but
+// shares no channel with him, so her page names him hidden-<id> with no reload.
+//
 // The cell is the whole server's and the suite shares one server, so the test
 // puts it back whatever happens.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
@@ -118,3 +121,42 @@ for (const [size, options, phone] of sizes) {
     }
   });
 }
+
+test(`H1282 hiding bob renames him on the page of alice, who holds his messages and shares no channel with him, without a reload`, async ({ meet, secrets, world }) => {
+  const tag = `h1282-${Date.now().toString(36).slice(-6)}`;
+  const owner = await person(world, secrets, `${tag}-owner`);
+  const alice = await person(world, secrets, `${tag}-alice`);
+  const bob = await person(world, secrets, `${tag}-bob`);
+  const old = `${tag}-old`;
+  const other = `${tag}-b`;
+  // bob wrote in the channel alice reads, then left it: they share nothing now.
+  await privateChannel(world, owner, old, [alice, bob]);
+  await privateChannel(world, owner, other, [bob]);
+  const said = `${tag} bob was here`;
+  await post(world, bob.token, old, said);
+  const left = await call(world, world.tokens.operator, 'DELETE', `/v1/channels/${encodeURIComponent(old)}/members/${String(bob.id)}`);
+  expect(left.status, `removing bob from ${old}: ${JSON.stringify(left.body)}`).toBeLessThan(300);
+
+  try {
+    await memberCell(world, false);
+    const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+    await signIn(page, world, alice.token, alice.name);
+    await openChannel(page, old);
+    const message = page.getByText(said);
+    await expect(message).toBeVisible();
+    // Before the hide the authors route names him, though she may not know him.
+    await expect(page.getByText(bob.name).first()).toBeVisible();
+    await page.evaluate(() => {
+      document.body.dataset['kept'] = 'yes';
+    });
+
+    const hidden = await call(world, world.tokens.operator, 'POST', `/v1/principals/${String(bob.id)}/hide`);
+    expect(hidden.status, `hiding bob: ${JSON.stringify(hidden.body)}`).toBeLessThan(300);
+
+    await expect(page.getByText(`hidden-${String(bob.id)}`).first()).toBeVisible();
+    await expect(page.locator('body')).not.toContainText(bob.name);
+    expect(await page.evaluate(() => document.body.dataset['kept']), 'the page reloaded').toBe('yes');
+  } finally {
+    await memberCell(world, true);
+  }
+});
