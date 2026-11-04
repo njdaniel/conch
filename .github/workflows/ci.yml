@@ -9,23 +9,64 @@ permissions:
   contents: read
 
 jobs:
+  # Which kind of change this is (issue #1300). A pull request whose every
+  # changed path is documentation (scripts/ci-docs-only.sh) gets the text
+  # checks of the check job and nothing else; every other job is skipped,
+  # which satisfies branch protection. A push to main always runs everything.
+  # The classifier is taken from main's side of the merge, never from the
+  # pull request, so a pull request cannot rewrite it to skip its own
+  # checks; one that adds or changes the script runs everything.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: classify the change
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          code=true
+          if [ "$EVENT" = pull_request ] && git rev-parse -q --verify HEAD^2 >/dev/null &&
+             git cat-file -e HEAD^1:scripts/ci-docs-only.sh 2>/dev/null &&
+             git diff --quiet HEAD^1 HEAD -- scripts/ci-docs-only.sh; then
+            git show HEAD^1:scripts/ci-docs-only.sh > "$RUNNER_TEMP/ci-docs-only.sh"
+            if [ "$(git diff --name-only HEAD^1 HEAD | bash "$RUNNER_TEMP/ci-docs-only.sh")" = true ]; then
+              code=false
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "code=$code (false: docs only, light run)"
+
   check:
+    needs: changes
+    # Runs even if changes failed: then code is unset, which means everything
+    # runs. Only an answer of false (docs only) lightens it.
+    if: ${{ !cancelled() }}
     # This repository's own branches (pushes to main, and pull requests whose
     # head is a branch here) run on the self-hosted runner on Nick's 4 TB
     # drive (#1286): the hosted runner ran out of disk restoring the voice
     # build. A fork's pull request never does: it runs on ubuntu-latest, so
     # code from outside never reaches that machine.
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
+    # A docs-only pull request (issue #1300) runs only the text checks below,
+    # on a hosted runner, so it holds none of the self-hosted ones.
+    runs-on: ${{ needs.changes.outputs.code == 'false' && 'ubuntu-latest' || ((github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest') }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # schema-compat diffs against the merge base
 
       - uses: actions/setup-go@v5
+        if: needs.changes.outputs.code != 'false'
         with:
           go-version-file: go.mod
 
       - name: gofmt
+        if: needs.changes.outputs.code != 'false'
         run: |
           out=$(gofmt -l $(git ls-files -co --exclude-standard '*.go'))
           if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
@@ -39,6 +80,7 @@ jobs:
           ./scripts/invisible-chars.sh
 
       - name: go vet
+        if: needs.changes.outputs.code != 'false'
         run: go vet ./...
 
       # .golangci-lint-version is the one place the linter version is named;
@@ -47,12 +89,14 @@ jobs:
       # go.mod (1.25). golangci-lint-action@v8 has no version-file input, so
       # the file is read here.
       - name: golangci-lint version
+        if: needs.changes.outputs.code != 'false'
         id: lint-version
         run: |
           v=$(tr -d '[:space:]' < .golangci-lint-version)
           echo "version=v${v#v}" >> "$GITHUB_OUTPUT"
 
       - name: golangci-lint
+        if: needs.changes.outputs.code != 'false'
         uses: golangci/golangci-lint-action@v8
         with:
           version: ${{ steps.lint-version.outputs.version }}
@@ -63,12 +107,14 @@ jobs:
           verify: false
 
       - name: go test
+        if: needs.changes.outputs.code != 'false'
         # internal/server alone takes 7–10 minutes under -race on a runner,
         # past go test's default 10-minute timeout per package (#471);
         # making it faster is #472.
         run: go test -race -timeout 25m ./...
 
       - name: schema compatibility
+        if: needs.changes.outputs.code != 'false'
         env:
           SCHEMA_COMPAT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: ./scripts/schema-compat.sh
@@ -78,6 +124,7 @@ jobs:
       # `go generate ./pkg/schema` writes. Go only. The script's own test
       # runs first.
       - name: generated TypeScript wire types
+        if: needs.changes.outputs.code != 'false'
         run: |
           ./scripts/schema-ts-check-test.sh
           ./scripts/schema-ts-check.sh
@@ -86,9 +133,11 @@ jobs:
       # matches its pinned hash and scripts/emoji-update.sh refuses a mismatch.
       # Drift of the generated catalog fails in go test (cmd/emoji-gen).
       - name: emoji catalog
+        if: needs.changes.outputs.code != 'false'
         run: ./scripts/emoji-update-test.sh
 
       - name: dependency gate
+        if: needs.changes.outputs.code != 'false'
         run: ./scripts/depgate.sh
 
       # The deployment files in ops/deploy (#435): shellcheck, systemd-analyze
@@ -99,7 +148,7 @@ jobs:
       # The self-hosted runner installs nothing (it has no sudo): it has
       # these, and this step says so when one is missing.
       - name: host prerequisites (self-hosted)
-        if: runner.environment == 'self-hosted'
+        if: needs.changes.outputs.code != 'false' && runner.environment == 'self-hosted'
         run: |
           missing=""
           for t in sqlite3 shellcheck systemd-analyze pkg-config; do command -v "$t" >/dev/null || missing="$missing $t"; done
@@ -108,12 +157,13 @@ jobs:
           if [ -n "$missing" ]; then echo "the self-hosted runner lacks:$missing"; exit 1; fi
 
       - name: deployment script packages
-        if: runner.environment == 'github-hosted'
+        if: needs.changes.outputs.code != 'false' && runner.environment == 'github-hosted'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends sqlite3 shellcheck
 
       - name: deployment scripts
+        if: needs.changes.outputs.code != 'false'
         run: ./scripts/deploy-scripts-test.sh
 
       # The Rust voice client under voice/ (ADR-006). The toolchain script
@@ -122,6 +172,7 @@ jobs:
       # cache key. rustup, already on the runner, installs the Rust version
       # voice/rust-toolchain.toml names.
       - name: rust toolchain cache
+        if: needs.changes.outputs.code != 'false'
         uses: actions/cache@v4
         with:
           path: |
@@ -131,6 +182,7 @@ jobs:
           key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
       - name: rust build cache
+        if: needs.changes.outputs.code != 'false'
         uses: actions/cache@v4
         with:
           path: |
@@ -148,19 +200,22 @@ jobs:
       # libclang, which generates the Rust bindings to them. Nothing else comes
       # from the system. scripts/voice-env.sh says so if any is missing.
       - name: rust system packages
-        if: runner.environment == 'github-hosted'
+        if: needs.changes.outputs.code != 'false' && runner.environment == 'github-hosted'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config
 
       - name: rust toolchain
+        if: needs.changes.outputs.code != 'false'
         run: ./scripts/voice-toolchain.sh
 
       - name: rust check
+        if: needs.changes.outputs.code != 'false'
         run: make rust-check
 
       # The web client under web/ (ADR-007). setup-node installs exactly the
       # Node web/.nvmrc pins and caches npm's download cache by the lockfile.
       # web-check installs with npm ci only, and downloads no browser.
       - uses: actions/setup-node@v4
+        if: needs.changes.outputs.code != 'false'
         with:
           node-version-file: web/.nvmrc
           cache: npm
@@ -169,6 +224,7 @@ jobs:
             desktop/package-lock.json
 
       - name: web check
+        if: needs.changes.outputs.code != 'false'
         run: make web-check
 
       # The desktop shell under desktop/ (#940): the fetch script's test, the
@@ -178,14 +234,18 @@ jobs:
       # desktop/.nvmrc names the same Node as web/.nvmrc (make desktop-check
       # fails if the installed Node is not the one it names).
       - name: desktop check
+        if: needs.changes.outputs.code != 'false'
         run: make desktop-check
 
       # The voice supervisor against the real conch-voice (#948): the binary
       # rust check's cargo test built, a stub conchd on loopback, no audio.
       - name: desktop voice-helper integration
+        if: needs.changes.outputs.code != 'false'
         run: CONCH_VOICE_BIN="$PWD/voice/target/debug/conch-voice" make desktop-voice-it
 
   desktop-smoke:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The packaged desktop shell (#940): make desktop-build fetches the pinned
     # Electron (scripts/desktop-electron.sh checks its SHA-256 twice), builds
     # the web client for it and packs the unpacked Linux app with its fuses;
@@ -261,6 +321,8 @@ jobs:
         run: xvfb-run -a make desktop-smoke
 
   web-embedded:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The web client built into conchd (issue #347): make build-web-embedded
     # builds bin/conchd with -tags conchweb, and this job starts it with no
     # --web-dir and checks what an operator who downloaded a release binary
@@ -350,6 +412,8 @@ jobs:
           done
 
   rust-advisories:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # Known advisories against the crates conch-voice links (RustSec). A job of
     # its own and not part of check: it reads a database on the network, and a
     # new advisory turns it red with no change here. Red means look at it, and
@@ -363,6 +427,8 @@ jobs:
         run: ./scripts/voice-advisories.sh
 
   web-advisories:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # Known advisories (high or critical) against the packages web/dist ships:
     # the runtime dependencies, so development tools are left out. A job of
     # its own and not part of check, as rust-advisories is: it reads the npm
@@ -401,6 +467,8 @@ jobs:
         run: go run ./e2e/dogfood
 
   nets-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The V2 exit proof (issue #121): the 2x4 squad layout through real
     # conchd/conch binaries, asserting the exact set of message ids every
     # participant sees on each message read path the server has (MCP
@@ -422,6 +490,8 @@ jobs:
         run: go run ./e2e/nets
 
   conch-bot-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # conch-adapter against a real conchd, answering with the fixture
     # e2e/p3-local/fixtures/echo.sh (never a model): the reply loop in every
     # audience, the adapter's session and one run per reply seen through the
@@ -442,6 +512,8 @@ jobs:
         run: go run ./e2e/conch-bot
 
   p2-hardening-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The P2 exit gate (issue #81): a database written by a P1 conchd is
     # upgraded, and real conchd/conch binaries are driven through everything
     # P2 added on it: credentials, manifests and their refusals, rate limits,
@@ -464,6 +536,8 @@ jobs:
         run: go run ./e2e/p2-hardening
 
   p3-local-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The automated P3 suite (issues #283 and #284): builds conchd, conch and
     # conch-adapter and the web client, starts a disposable conchd with
     # --session-stale 2s --session-offline 5s, creates the test community and
@@ -510,6 +584,8 @@ jobs:
         run: go run ./e2e/p3-local --non-loopback
 
   web-e2e:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The browser suite (issue #285, D7): the web client in Chromium, against
     # the fixture community of e2e/p3-local (started with --keep and a
     # temporary root by the suite's own global setup, removed by its teardown,
@@ -591,6 +667,8 @@ jobs:
           if-no-files-found: ignore
 
   voice-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The V3 exit program (issue #129, ADR-004): a real conchd, the real conch
     # CLI and a real LiveKit server in Docker, plus the proof that the core is
     # unaffected with LiveKit down or not configured. From V4 (issue #188) it
@@ -656,6 +734,8 @@ jobs:
         run: docker ps -aq --filter "label=conch-voice-check=$VOICE_CHECK_RUN" | xargs -r docker rm -f
 
   isolation-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The private alpha's cross-group check (issue #447): two groups on one
     # conchd, a route-table-driven matrix proving a member of one reaches
     # nothing of the other over REST, the sockets and LiveKit's media (the
@@ -691,6 +771,8 @@ jobs:
         run: docker ps -aq --filter "label=conch-isolation-check=$ISOLATION_CHECK_RUN" | xargs -r docker rm -f
 
   community-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The community model's newcomer scenario (issue #989, ADR-013): the owner
     # makes a member link; alice opens the bare address, redeems it, reads
     # #general's full history, finds #project once it is public, joins it and

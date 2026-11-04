@@ -44,6 +44,7 @@ check: fmt-check invisible-check vet lint test schema-compat schema-ts emoji-cat
 invisible-check:
 	./scripts/invisible-chars-test.sh
 	./scripts/invisible-chars.sh
+	./scripts/ci-docs-only-test.sh
 
 # The Rust voice client under voice/ (ADR-006): fmt, clippy, tests, the
 # dependency gate and cargo-deny, with the pinned toolchain. Fetch that once
