@@ -578,7 +578,7 @@ function StripState({
 }) {
   const going = phase === 'connecting' || phase === 'reconnecting';
   return (
-    <button type="button" className="voice-open" onClick={onOpen}>
+    <button type="button" className={camera ? 'voice-open has-camera' : 'voice-open'} onClick={onOpen}>
       {camera ? (
         <span className="voice-open-phase camera-on">
           <Glyph name="camera" />
