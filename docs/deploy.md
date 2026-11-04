@@ -20,6 +20,42 @@ Everything is parameterised by an **instance name** (`alpha` below) and a **doma
 
 Not yet proved on the droplet: voice through TURN from a network that blocks UDP, steps 8 and 9 (off-site backup and the restore drill), and upgrade and rollback.
 
+## The community people join
+
+One server is one community. Members normally see the community's members and
+agents. Public channels are in **Browse channels**, and members join them themselves.
+The directory also lists their own private channels. It lists no other private
+channels and gives members no counts of people. A holder of `manage_channels` can
+list every channel and its member count; reading messages and files and joining voice still need membership.
+See [channel privacy](#channel-privacy-and-default-channels) and
+[operator access](#what-an-operator-can-and-cant-see).
+
+Send newcomers a member link. The browser's links land them in the default channels,
+with full history. With no default channels, they start in no channel. The bare
+address is a sign-in page unless `open_signup` is on. It is off by default on a new server; an upgraded server keeps its old open-joining mode.
+An owner can change it; a delegated operator needs `change_server_settings`.
+Open sign-up needs a public default channel. It makes members with full history too.
+
+A member link without an explicit expiry lasts seven days by default.
+`member_link_default_expiry_seconds` sets that lifetime; `0` means no default expiry.
+An explicit request for a link that never expires needs `manage_members`.
+See [member links](#member-links-and-the-invite-brake) for the controls.
+
+Voice is on for new members. A holder of `manage_members` can change a person's
+`voice_allowed` switch at any time. Turning it off removes them from live voice
+and ends their share; an owner is exempt, and only an owner may change an owner's switch. Turning it on lets them join again,
+subject to role permissions. See [the per-person switches](#the-eleven-permissions).
+
+There are **no guests for now**. Guests were removed on 2026-10-30 and return with
+#1004. The community migration ends active visits and closes invites that admitted
+guests. Their data and past message attribution are kept. The bare address admits
+no guests.
+
+Choose the [personal or group configuration](#running-a-personal-or-a-group-server)
+before inviting people. Before upgrading, read the
+[one-community upgrade notice](../CHANGELOG.md#upgrade-notice-one-community-issue-979)
+and [member-link changes](../CHANGELOG.md#010-alpha11---2026-11-02).
+
 ## Users and who can read what
 
 | User | Runs | Can read |
@@ -464,6 +500,11 @@ After the start:
 
 ## 11. Upgrading and rolling back
 
+Read the [one-community upgrade notice](../CHANGELOG.md#upgrade-notice-one-community-issue-979)
+and [member-link changes](../CHANGELOG.md#010-alpha11---2026-11-02) before upgrading
+an older server. The migration changes channel defaults, member history, voice
+and link-making. Other existing channels stay private.
+
 Releases are tagged, built by `.github/workflows/release.yml`, and name themselves: `conchd version` and `/healthz` report the tag. `conch-upgrade.sh <tag> <instance>...`, as root (name **every** instance on the droplet: they share one binary, so one left out would start on the new release at its next restart, with no pre-upgrade backup; `conch-server upgrade <tag>` on your workstation names them all):
 
 1. downloads `conchd_<tag>_linux_<arch>` and `checksums.txt`, and refuses unless they match (the same limit as step 3: corruption, not tampering);
@@ -635,7 +676,7 @@ Members who join through **open sign-up** hold the member-link switch on, so, wh
 
 ### Channel privacy and default channels
 
-A **private** channel is seen by its members only; to everyone else it doesn't exist. A **public** channel is listed in the channel directory for every member, who can join and leave it. A **default** channel is public, and every new person starts in it. Making a channel public or private keeps everyone who is already in it.
+A **private** channel is omitted from other members' channel directory. Its messages, files and voice need membership. Holders of `manage_channels` can still list and administer it, as [operator access](#what-an-operator-can-and-cant-see) explains. A **public** channel is listed in the channel directory for every member, who can join and leave it. A **default** channel is public, and every new person starts in it. Making a channel public or private keeps everyone who is already in it.
 
 **Settings → Channels** (for a holder of `manage_channels`, which includes every owner) lists every channel with a lock for private, a default mark, how many people are in it and who manages it. **New channel** makes a public or private channel with no daily cap. Each row's **⋯** menu has **Add person…**, **Rename channel…**, **People and managers…** (remove a person, **Make manager** or **Stop managing**), **Make public** or **Make private**, and **Make default channel** or **Stop being a default channel**.
 
@@ -652,6 +693,10 @@ A channel manager who isn't an operator manages their own channels from the chan
 
 ### Hiding members from each other
 
+The design called this `hide_members`. Shipped servers use the members'
+`see_member_directory` permission instead; the old setting is mapped to its
+opposite on upgrade.
+
 The switch is `see_member_directory` for members. With it off, a member sees three kinds of people: themself, the people in the channels they are in, and the people who joined through a member link they made. Everything else about anyone else (that they exist, their name) is not shown. Owners and operators always see everyone, whatever the cell says.
 
 A member sees each person's id, name, role and join time and nothing else. Who invited whom is shown only to holders of `manage_members` (**Members** shows "invited by <name>" to them), so a member can't see who invited them, or who invited anyone else. Someone who holds a link's code sees the name of the person who made it when they open it, as before.
@@ -659,6 +704,18 @@ A member sees each person's id, name, role and join time and nothing else. Who i
 Browser: **Settings → Server** has the line "Members see: only people they share a channel with" (or "everyone"), which links to the cell in **Roles and permissions**. CLI: `conch admin permissions set see_member_directory --members off`, or apply the personal preset.
 
 What it doesn't hide: the people in a channel you are both in (a default channel included), and the people who joined through a link the viewer **made**. The server records who made the link a person joined through when they join, and never clears it, so turning link-making off later does not end it. On a server where the personal preset was applied before anyone joined, there are none. On one that ran the defaults first, each member who made a link still sees the people it brought in, and that stays so. **Members** (or `conch admin principal list`) shows "invited by" to holders of `manage_members`, so you can find them. Hiding members is only as strong as your channels.
+
+Everyone in a channel sees everyone else in it. A default channel, or a public
+channel two people both join, shows them to each other. Hiding members cannot keep
+apart private conversations whose people also share such a channel. It hides people
+in Conch's answers; it does not make anyone anonymous or separate processes on the
+server. A message's author stays named in its channel's history.
+
+While members are hidden, use **no default channels** and **one private channel per
+space** whose people should not see each other. Follow the [personal server steps](#a-personal-server).
+Zero default channels is allowed: a member-link joiner starts in no channel until
+added, or until they join a public channel. A default channel draws the
+`default_channel_exposes_members` warning; it is not refused.
 
 ### What an operator can and can't see
 
@@ -768,7 +825,7 @@ It runs `remove-instance.sh` on the droplet over `ssh -t`, then deletes the serv
 
 ## Temporary servers
 
-For a short-lived server holding nothing anyone needs to keep, `conch-server new <name> --temporary` ([A second instance](#a-second-instance)) makes one: its env file says `CONCHD_MODE=temporary`, and it gets no backup timer ([ADR-011](adr/ADR-011-temporary-servers.md), items 2 and 4). To make an existing server temporary, set `CONCHD_MODE=temporary` in its env file, restart `conchd@<name>`, and disable `conch-backup@<name>.timer`. Operators without an enrolled authenticator may sign in with a password alone; those who enrolled still need a code. The sign-in page and lobby show "Temporary server: no backups, and it may be removed. Don't keep anything here you need." If run, backups make a local archive only, even with an off-site destination configured; pre-upgrade backups are unchanged. No restore drill is needed before testers join. `conch-server rm <name>` removes it ([Removing a server](#removing-a-server)). Guest policy, invites, channel isolation, approvals, rate limits, password rules, script credentials and auditing keep their usual rules; members and guests sign in as usual.
+For a short-lived server holding nothing anyone needs to keep, `conch-server new <name> --temporary` ([A second instance](#a-second-instance)) makes one: its env file says `CONCHD_MODE=temporary`, and it gets no backup timer ([ADR-011](adr/ADR-011-temporary-servers.md), items 2 and 4). To make an existing server temporary, set `CONCHD_MODE=temporary` in its env file, restart `conchd@<name>`, and disable `conch-backup@<name>.timer`. Operators without an enrolled authenticator may sign in with a password alone; those who enrolled still need a code. The sign-in page and lobby show "Temporary server: no backups, and it may be removed. Don't keep anything here you need." If run, backups make a local archive only, even with an off-site destination configured; pre-upgrade backups are unchanged. No restore drill is needed before testers join. `conch-server rm <name>` removes it ([Removing a server](#removing-a-server)). Guest policy, invites, channel isolation, approvals, rate limits, password rules, script credentials and auditing keep their usual rules; members sign in as usual. There are no guests for now.
 
 For password-only operators on a normal server, use `CONCHD_OPERATOR_TOTP=optional` instead ([ADR-012](adr/ADR-012-optional-operator-totp.md)). It adds no temporary banner and **keeps off-site backups required**.
 

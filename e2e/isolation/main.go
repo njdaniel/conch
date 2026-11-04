@@ -1,22 +1,27 @@
 // Command isolation-check is the private alpha's cross-group check (issue
 // #447, docs/design/private-alpha.md §1, exit steps 3 and 7): two groups on
-// one server, and a member of one finds nothing of the other, over REST, the
-// sockets and LiveKit's media; and a revoked tester is out at once.
+// one server, and a member of one sees nothing of the other's private
+// channels, over REST, the sockets and LiveKit's media; and a revoked tester
+// is out at once. The private register holds private channel names and ids,
+// their content, member lists and voice room names. Principal names and ids,
+// public channel names and public content are not private markers: members
+// and public channels are community-wide by default (ADR-013, design §8).
+// Public content still needs channel membership. The hide-members phase
+// checks the narrower view when see_member_directory is off.
 //
 // It runs a real conchd and, when Docker is there, the pinned LiveKit and lk
 // (e2e/internal/lkit, the same as e2e/voice), and calls the public API only:
 // every request it makes is checked against internal/server/routes.go at the
 // end.
 //
-//   - The world (world.go): group A joins through an operator's open link,
-//     group B through personal invites, the second made by a B tester the
-//     operator let invite. Each posts, replies in a thread, whispers, posts to
-//     a net, uploads a file, runs an agent's session and run, asks for an
+//   - The world (world.go): both groups join through member links, including
+//     a link made by a B member. Each posts, replies in a thread, whispers,
+//     posts to a net, uploads a file, runs an agent's session and run, asks for an
 //     intervention and an approval and sends a problem report; A talks in
 //     voice and shares a screen.
 //   - The sockets (sockets.go): every socket variant stays open on both of
 //     B's channels from before A is active to the end of the run, carries
-//     B's controls, and nothing of A in any frame.
+//     B's controls, and no private marker of A in any frame.
 //   - The matrix (matrix.go): for every route of the table, B tries A's
 //     objects by name and id, as an invited tester, as a member the operator
 //     made, and on the agent routes as B's agent (agents.go). Each answer is
@@ -36,8 +41,8 @@
 //   - Revocation (revoke.go): a second credential of a tester's, holding
 //     every socket variant, is revoked alone, and the sockets of her first
 //     stay open; then the tester, holding every socket variant, a LiveKit
-//     participant and the share, is disabled, then everyone from A's open
-//     link, then the link is closed. Each is timed and held to its
+//     participant and the share, is disabled, then everyone from A's
+//     member link, then the link is closed. Each is timed and held to its
 //     bound: 2 s for a socket, one voice poller pass plus a room rotation for
 //     LiveKit (read from the server's source). Then the revoked must stay
 //     out: a kept ticket and a kept join grant no longer work.

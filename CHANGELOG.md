@@ -8,6 +8,152 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.13] - 2026-11-04
+
+This is a pre-1.0 release (`v0.1.0-alpha.13`): the API and the wire shapes
+can still change between alphas. There is no breaking change in it.
+
+The headline is webcam video in channel voice rooms (ADR-015): one to one
+and small groups, in the browser, with a `use_camera` permission that is off
+until an owner turns it on. It also brings a Leave channel item to the
+channel menu, an admin console that updates itself, and web clients that
+accept permissions and warnings they do not yet know. Upgrade with
+`conch-server upgrade v0.1.0-alpha.13` from your workstation, or with
+`conch-upgrade.sh` on the droplet (docs/deploy.md step 11).
+
+There is no migration since `alpha.12`, so rolling back to `alpha.12` is a
+plain downgrade. The wire changes are additive only, listed after Added, and
+an `alpha.12` client ignores them. **Nothing changes for a server that does
+not use cameras:** `use_camera` is off for operators and members on upgrade.
+
+### Added
+
+- **Webcam video in channel voice rooms** (ADR-015, #973; #1238, #1239,
+  #1240, #1241, #1242, #1243). A person in a channel's voice room can turn
+  on a camera, and the others in the room can watch it.
+  - **A camera is a permission, `use_camera`, and it is off by default** for
+    operators and members. The owner turns it on in Settings, Roles and
+    permissions: the operator cell first, then the member cell (a member
+    cell cannot be on while the operator cell is off). It needs `use_voice`,
+    and the voice switch (`voice_allowed`) also withholds it: there is no
+    camera-only switch. Applying a preset leaves the operator cell and turns
+    the member cell off (#1240).
+  - **One to one and small groups.** A room holds at most nine cameras (the
+    tenth claim is refused with 409 `voice_camera_full`), and the browser's
+    call view shows up to four tiles, with a "Show video (n)" control, a
+    camera picker, a test camera and a mirrored self-view (#1242).
+  - **conchd enforces kind and source on every track** (#1241). A video
+    track declared as the microphone, an audio track declared as the camera,
+    a camera without a claim, and a companion's or viewer's camera are each
+    withdrawn and audited once as `voice_camera_unclaimed`; the publisher is
+    removed if the track survives. LiveKit itself accepts such tracks, so
+    this check is the only thing that stops them. Camera starts and ends are
+    audited too (`voice_camera_started`, `voice_camera_stopped`, with the
+    reason). The routes are `POST` and `DELETE
+    /v1/channels/{channel}/voice/camera`; an operator with `manage_channels`
+    stops someone's camera with `DELETE ...?principal=`. A claim that
+    publishes nothing for 15 seconds ends as `idle`.
+  - **A camera ends before the route answers** when its permission is
+    withdrawn: the permissions PUT, the voice switch, a role change, losing
+    the channel, disabling a person, revoking a credential and a room
+    rotation all end it (#1241). Stopping a camera never drops a screen
+    share, and the reverse.
+  - **The browser asks for the camera only from the Camera button** (#1242).
+    Joining voice, unmuting and sharing the screen never prompt for it, and
+    leaving or signing out stops the capture. A denied camera leaves voice
+    and chat working.
+  - **The CLI** (#1243): `conch voice status` marks a person with a camera
+    with `+camera` on the state field (`quiet+camera`, `talking+camera`),
+    and `conch voice camera stop <channel> <person>` is the operator stop.
+    Lines for people without a camera are unchanged.
+  - **A new `Permissions-Policy`** (#1242): `camera=(self)` on `/app/`, and
+    deny-all (`camera=(), microphone=(), display-capture=()`) on every other
+    answer, the metrics listener included.
+- **Leave channel in the channel ⋯ menu** (#1095, PR #1263), for members of
+  the channel (not guests). A public channel is left at once; a private one
+  asks first, since it cannot be found again. A refusal, such as the last
+  member of a private channel, is said under the row.
+
+**Wire changes since `alpha.12`, all additive; no version bump.**
+- `use_camera`, the twelfth value of the `Permission` catalog (#1238). Off
+  for operators and members, requires `use_voice`, not operator-only. Every
+  other default is unchanged.
+- `camera` on `VoiceParticipant` (it needs `can_publish`) and `camera_ended`
+  on `VoicePresenceV1`, with the closed `VoiceCameraEndReason` vocabulary
+  (the same six values as the share's) (#1238).
+- `VoiceCameraV1`, the camera route's answer, and its parameters
+  `started_at` and `principal` (#1238, #1241).
+- Three error codes: `voice_camera_full`, `voice_camera_stale` and
+  `voice_camera_rate_limited` (#1238).
+- On the TypeScript side, eight open vocabularies are now client-tolerant
+  (`Permission`, `PermissionRole`, `PermissionPreset`, `PermissionsWarning`,
+  `IssuedKind`, `JoinWarning`, `InviteKindV2`, `DirectoryScope`); the other
+  57 stay strict (#1051). No fixture changed.
+
+### Changed
+
+- **Older web clients accept permissions and warnings they do not yet know**
+  (#1051, PR #1253). Before, a page that met a new permission (such as
+  `use_camera`) in a response refused the whole answer. Now it keeps the
+  value: the console shows an unknown preset, warning or issued kind by its
+  name, and Revoke is disabled for an unknown issued kind so it is never
+  sent to a hook route. Unions, states, roles and the voice protocol stay
+  strict.
+- **The admin Members and Channels sections update themselves** (#1226,
+  PR #1237), when the server says the directory changed. Members loses its
+  Refresh button. An open panel and its focus survive the re-read.
+- **The roadmap moves webcam video into the private alpha** (PR #1260, with
+  Nick's sign-off of 2026-11-03). Docs only.
+
+### Fixed
+
+- **A screen-share revocation waits for a retiring room's withdrawal**
+  (#1265, PR #1272). When a share's permission was withdrawn while a room
+  rotation was still withdrawing that share, the route could answer before
+  the share had ended. It now waits, as a camera's revocation already did
+  (#1241). The race predates cameras.
+- **A camera start follows a newer camera choice** (#1266, PR #1275). If the
+  camera chosen while starting could not be had and the person had already
+  chosen another, the start ended instead of moving to the newer choice.
+  Now it follows the newer choice, and a choice changed back to a camera it
+  had already tried still publishes a live picture.
+
+### Docs
+
+- **The tester guide and README say the browser starts in the open
+  microphone** (#1261, PR #1262), name the "Open mic" toggle and say the
+  choice is kept. Docs only.
+- **The docs describe the community model as it ships** (#997, PR #1270).
+  README, `docs/deploy.md` and the tester guide cover member links, the
+  sign-in-only front page and `open_signup`, default channels with their
+  history, Browse channels, the member directory, voice on by default, and
+  no guests for now. The older private-alpha design notes say that ADR-013
+  supersedes them.
+- **README and `docs/deploy.md` give the camera policy and the twelfth
+  permission** (PR #1273, refs #1269): `Permissions-Policy` is
+  `camera=(self)` on `/app/`, and `use_camera` is listed with the other
+  permissions, off for operators and members.
+
+### Tests
+
+- Test-only and flake fixes, with no change to behaviour: the e2e Docker
+  probe retries a call that times out (#1251), the Channels and Members
+  section tests wait for settled work instead of 30 ms (#1255), and the
+  mode-toggle helper in the phone voice strip spec presses again until the
+  mode takes (#1244, PR #1254).
+- New coverage for the camera: an approval full-chain test that turns
+  `use_camera` on and off while an approval is open (#1240), the pinned
+  LiveKit permission requests of every publish-permission write (#1239), and
+  `e2e/voice` and `e2e/isolation` rows for the camera (#1241).
+- **The community newcomer scenario runs end to end** (#989, PR #1271), in
+  a new CI job, `community-check` (`go run ./e2e/community`), on every pull
+  request and push to `main`. The owner makes a member link; a newcomer
+  redeems it, reads `#general`'s history, finds and joins a channel made
+  public, and joins its voice. Her voice is switched off and back on, the
+  closed link stops working, and the server admits no guest. It runs
+  against a real conchd and the pinned LiveKit, through the API and media
+  control, not the browser.
+
 ## [0.1.0-alpha.12] - 2026-11-03
 
 This is a pre-1.0 release (`v0.1.0-alpha.12`): the API and the wire shapes

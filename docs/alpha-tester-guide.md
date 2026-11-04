@@ -7,10 +7,6 @@ This guide is for the alpha's pre-release builds. Each build's version is shown 
 **Settings** (the gear at the top right of the Conch page; for example
 `Version v0.1.0-alpha.1`). Please quote it whenever you tell us about a problem.
 
-A few parts of this guide are still being finished. They are marked like this:
-*(lands with #444)*. The marks come out once those parts are in a build; if your
-build does not have one yet, skip that part.
-
 ## What you need
 
 - A computer with Chrome, Edge, Firefox or Safari, or a phone or tablet with its usual
@@ -19,24 +15,24 @@ build does not have one yet, skip that part.
 - Headphones, if you will use voice. They stop the others hearing themselves back.
 - The invite link you were sent.
 
-Please keep invite links to yourself. Anyone who has an open invite link can use it
+Please keep invite links to yourself. Anyone who has a member link can use it
 to join.
 
 ## 1. Open your invite
 
-1. Open the link you were sent, in the browser you want to use Conch in.
+1. Open the member link you were sent, in the browser you want to use Conch in.
+   Use that link, not the bare server address. The address is a sign-in page;
+   it offers account creation only if the owner has turned on open sign-up.
 2. The page says **You are invited to Conch**, and shows:
    - who invited you;
    - which channels you will be in;
-   - whether voice is included;
    - when the invite expires.
 3. The long code at the end of the link disappears from the address bar as soon as
-   the page opens. That is on purpose: the invite is not kept in your browser's
-   history.
+   the page opens. Keep the original link somewhere private if you need it again.
 
-If the page says **This invite no longer works**, the invite has been used, has
-expired or has been closed. Ask the person who sent it for a new one. A personal
-invite works only once, so do not pass yours on.
+If the page says **This link can't be used**, the link may have expired, reached
+its use limit or been closed. Ask the person who sent it for a new one. Member
+links can be reused unless a use limit was set. Keep yours private.
 
 If the page says you are already signed in as someone else, choose **Continue as a
 new person** only if you mean to make a second account. Otherwise choose **Go back**.
@@ -44,7 +40,14 @@ new person** only if you mean to make a second account. Otherwise choose **Go ba
 ## 2. Choose a name
 
 1. Type the name you want the others to see, under **Your name**.
-2. Choose **Join**. You arrive in Conch, in your first channel.
+2. Under **Choose a password**, choose a password, then **Type the password again**.
+3. Choose **Create account**. You start in the default channels, with their full
+   history. If the link names other landing channels, you start there instead.
+   If there are none, your channel list is empty. Ask the person who invited you
+   to add you, or use **Browse channels**.
+
+Voice is on for new members, unless the server's permissions withhold it. There
+are **no guests for now**. Every newcomer makes an account.
 
 Names are unique on the server. If the page says **That name is taken. Choose
 another.**, someone already has it, or a name that looks too much like it (for
@@ -69,18 +72,22 @@ Under **Settings** (the gear at the top right of the page) there are two buttons
 - **Sign out** ends your sign-in on this browser, in every tab.
 - **Sign out everywhere** ends every sign-in you have, on every device.
 
-**Please do not sign out unless you mean to leave.** There is no password. Once you
-sign out, you cannot sign back in by yourself: ask the person running the test to
-let you back in.
+To return after signing out, use your name and password on the sign-in page.
+If you forget your password, ask the person running the test for a reset link.
+Older accounts without a password need a sign-in link.
 
-To use Conch on a second device or another browser, ask the person running the test.
-They can give you a sign-in for your account, to paste on the sign-in page. A new
-invite would make a second, separate account instead.
+To use Conch on a second device or another browser, sign in with your name and
+password. A new member link would make a second, separate account instead.
 
 If the page says **Signed out: the credential is no longer valid**, your sign-in has
 ended: it expired, or your access was removed. Tell the person running the test.
 
 ## 4. Chat
+
+Choose **Browse channels** beside your channel list to find other public channels.
+Choose **Join** beside one to enter it and read its full history. The directory
+also lists private channels you are already in. Other private channels are not
+listed; ask a channel manager or operator to add you.
 
 - Your channels are listed on the left (in a row at the top on a phone). A number after a
   channel's name is how many messages you have not read yet.
@@ -144,7 +151,7 @@ Good to know:
 - **Voice is unavailable right now; chat still works** means the voice service is
   down for a moment. Conch keeps trying by itself.
 
-## 6. Share your screen *(lands with #444)*
+## 6. Share your screen
 
 You can share your screen with the others in a channel's voice. One person shares at
 a time.
@@ -180,7 +187,7 @@ If someone else is already sharing, the page says who. Wait until they stop.
 This is what the browsers say they do. Part of the test is finding out whether it is
 true, so please tell us when it is not.
 
-## 7. Watch a share, also on a phone *(lands with #444)*
+## 7. Watch a share, also on a phone
 
 - When someone shares, the Voice strip says who is sharing, and shows **Watch**.
   Choose it to see the share, above the conversation.
@@ -207,11 +214,11 @@ On a phone, keep the Conch page open on the screen while you watch.
 | iPhone or iPad | yes | yes | while the page is on screen | no | no | yes |
 | Android, Chrome | yes | yes | while the page is on screen | not known yet | no | yes |
 
-The three share columns are about screen sharing *(lands with #444)*. Like the table
+The three share columns are about screen sharing. Like the table
 in section 6, this one says what the browsers say they do. Tell us what really
 happens on yours.
 
-## 9. Report a problem *(lands with #446)*
+## 9. Report a problem
 
 When something goes wrong, report it from inside Conch. It takes a minute, and it
 sends us what we need to find the cause.
@@ -254,17 +261,12 @@ recover them from. Keep anything you need somewhere else.
 - **On a phone, voice and watching stop when the page leaves the screen** (the phone
   locks, or you switch app).
 - **Not every browser can share, or share sound.** See the tables in sections 6 and 8.
-- **Signing out cannot be undone by you**, and a private window forgets you. See
+- **A private window forgets your sign-in.** Use your name and password to return. See
   section 3.
-- **No files, search or threads in the browser yet.** They come after the alpha.
-- **No notifications.** Conch does not alert you to new messages while its tab is in
-  the background, though the channel list counts them.
 - **On a slow connection, a message you send may show twice for a moment** while it is
   being sent. It settles to one.
 - **A share stops if the sharer's connection drops** for more than a few seconds. The
-  page says so; share again. *(lands with #444)*
-- **If a share is stopped for you**, for example by the person running the test, the
-  page does not yet say why. *(lands with #444)*
+  page says so; share again.
 
 ## 11. Switching servers
 
