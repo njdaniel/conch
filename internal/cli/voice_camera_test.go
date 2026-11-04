@@ -136,8 +136,8 @@ func TestVoiceStatusHugeParticipantList(t *testing.T) {
 		Rooms: []schema.VoicePresenceRoom{{Participants: people}}}
 	stdout, _, err := runCLI(t, "", "voice", "status", "--server", fake.URL, "general")
 	if err != nil {
-		// Refusing an oversize document is acceptable; panicking is not.
-		return
+		// The document is well under the client's body cap: it must be read.
+		t.Fatalf("5000 people: %v", err)
 	}
 	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
 	if len(lines) != len(people) {
@@ -167,9 +167,9 @@ func TestVoiceCameraStop(t *testing.T) {
 		{name: "owner stops a camera", args: []string{"@", "general", "7"}, status: http.StatusNoContent, wantReq: req},
 		{name: "flag after the positionals", args: []string{"general", "7", "@"}, status: http.StatusNoContent, wantReq: req},
 		{name: "operator without manage_channels", args: []string{"@", "general", "7"}, status: http.StatusForbidden,
-			body: apiError(schema.ErrorCodePermissionDenied, schema.PermManageChannels), wantReq: req, wantErr: "you do not have the manage_channels permission"},
+			body: apiError(schema.ErrorCodePermissionDenied, schema.PermManageChannels), wantReq: req, wantErr: "only an owner, or an operator holding manage_channels"},
 		{name: "permission this client does not know", args: []string{"@", "general", "7"}, status: http.StatusForbidden,
-			body: apiError(schema.ErrorCodePermissionDenied, "evil\x1b[31m"), wantReq: req, wantErr: "you do not have the permission this needs"},
+			body: apiError(schema.ErrorCodePermissionDenied, "evil\x1b[31m"), wantReq: req, wantErr: "only an owner, or an operator holding manage_channels"},
 		{name: "unknown channel", args: []string{"@", "general", "7"}, status: http.StatusNotFound,
 			body: apiError("channel_not_found", ""), wantReq: req, wantErr: "no such channel, or you cannot see it"},
 		{name: "bad request", args: []string{"@", "general", "7"}, status: http.StatusBadRequest,

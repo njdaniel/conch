@@ -1383,7 +1383,9 @@ func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV1,
 var cameraStopRefusals = refusalLines{
 	schema.ErrorCodeVoiceNotConfigured: errVoiceNotConfigured.Error(),
 	schema.ErrorCodeVoiceUnavailable:   errVoiceUnavailable.Error(),
-	"forbidden":                        "the server does not allow this: only an owner, or an operator holding manage_channels, may turn off someone's camera",
+	// A member is told no permission (it would be one their role cannot
+	// hold), an operator is told manage_channels: either way, say who may.
+	schema.ErrorCodePermissionDenied: "only an owner, or an operator holding manage_channels, may turn off someone's camera",
 }
 
 func runVoiceCamera(ctx context.Context, args []string, stdout, stderr io.Writer) error {
