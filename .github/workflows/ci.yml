@@ -10,10 +10,13 @@ permissions:
 
 # One run per pull request and one per main at a time (#1305): the
 # self-hosted runners are shared, so a superseded run should not hold them.
-# A new push to a pull request cancels its older run. On main a run is never
-# cancelled mid-way; while one runs, only the newest pending one is kept, so
-# a burst of merges is checked at its tip instead of once per merge. The
-# merge queue's main check skips the cancelled ones.
+# A new push to a pull request cancels its older run. (So does re-running an
+# older run of the same pull request: re-run the newest instead.) On main a
+# run is never cancelled mid-way; while one runs, one pending run is kept and
+# the others are cancelled, so a burst of merges is checked once, not once per
+# merge. GitHub normally keeps the newest but does not guarantee the order:
+# the merge queue's main check skips cancelled runs and re-runs main's latest
+# run when it was cancelled and nothing is pending, so the tip is checked.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

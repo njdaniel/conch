@@ -87,8 +87,9 @@ web-check: web-node
 # version pins; fetch it once with `cd web && npx playwright install chromium`
 # (CI uses --with-deps, which needs root; do not here). The suite starts and
 # removes its own server and root, and leaves nothing running.
-# E2E_ARGS goes to Playwright as is: CI runs half the specs in each of two
-# jobs with E2E_ARGS=--shard=1/2 and --shard=2/2 (#1290). Empty locally.
+# E2E_ARGS goes to Playwright as is: CI runs a third of the spec files in each
+# of three jobs with E2E_ARGS=--shard=1/3, 2/3 and 3/3 (#1290, #1305). Empty
+# locally.
 E2E_ARGS ?=
 
 web-e2e: web-node
