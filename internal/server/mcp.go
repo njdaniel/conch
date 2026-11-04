@@ -430,6 +430,9 @@ func (s *Server) requestApprovalMCP(ctx context.Context, scope *agentScope, in m
 	if errors.Is(err, approvals.ErrInvalid) {
 		return schema.RequestApprovalOutput{}, &schema.Error{Code: "invalid_request", Message: err.Error()}
 	}
+	if errors.Is(err, errArchivedRefused) {
+		return schema.RequestApprovalOutput{}, errChannelArchived
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "mcp: create approval failed", "error", err)
 		return schema.RequestApprovalOutput{}, &schema.Error{Code: "internal_error", Message: "internal server error"}

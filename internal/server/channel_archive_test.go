@@ -531,9 +531,9 @@ func TestArchiveKeepsHistoryAndReadMarks(t *testing.T) {
 	}
 }
 
-// TestArchiveIsAnApprovalFreeChange: the approval path is not touched (decision
-// 8): an approval request in an archived channel is whatever it was before this
-// issue. This pins that the settings change itself writes no approval row.
+// TestArchiveWritesNoApprovalRows: the settings change itself writes no
+// approval row. What an archived channel does to approvals is issue #1296's
+// (approvals_archive_test.go).
 func TestArchiveWritesNoApprovalRows(t *testing.T) {
 	f := newArchiveFixture(t)
 	f.archive(t)

@@ -227,6 +227,13 @@ func (s *Store) CreateApproval(ctx context.Context, p ApprovalParams) (Approval,
 	}
 
 	err = s.withImmediateTx(ctx, func(tx execer) error {
+		// An archived channel takes no new approvals (issue #1296). The check
+		// shares the insert's transaction, so an archive cannot slip in
+		// between. Approvals already open there are untouched: they can still
+		// be decided, escalate and expire.
+		if err := channelNotArchivedTx(ctx, tx, p.ChannelID); err != nil {
+			return err
+		}
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO approvals (requester_id, channel_id, title, body,
 			   payload_schema, payload_json, options_json,
