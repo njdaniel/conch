@@ -375,9 +375,10 @@ func lostShare(changes []store.PermissionCellChange) bool {
 }
 
 // sharingPrincipals is everyone the poller holds a share or a running claim
-// for, in a live room or a retiring one, each once, in id order: whom a
-// change that may withhold share_screen from a whole column asks again
-// (endWithheldShares). It reads p.mu only.
+// for, in a live room or a retiring one, and everyone whose share a rotation
+// ended in a room still retiring (its withdrawal may be in flight), each
+// once, in id order: whom a change that may withhold share_screen from a
+// whole column asks again (endWithheldShares). It reads p.mu only.
 func (p *voicePoller) sharingPrincipals() []int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -390,9 +391,14 @@ func (p *voicePoller) sharingPrincipals() []int64 {
 			seen[r.claimer] = true
 		}
 	}
-	for _, pid := range p.retiring {
+	for r, pid := range p.retiring {
 		if pid != 0 {
 			seen[pid] = true
+		}
+		// Whose share a rotation ended there and may still be withdrawing
+		// (issue #1265).
+		if r.retiredShare != 0 {
+			seen[r.retiredShare] = true
 		}
 	}
 	out := make([]int64, 0, len(seen))

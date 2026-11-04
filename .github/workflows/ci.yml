@@ -642,3 +642,37 @@ jobs:
       - name: remove any leftover LiveKit container
         if: always()
         run: docker ps -aq --filter "label=conch-isolation-check=$ISOLATION_CHECK_RUN" | xargs -r docker rm -f
+
+  community-check:
+    # The community model's newcomer scenario (issue #989, ADR-013): the owner
+    # makes a member link; alice opens the bare address, redeems it, reads
+    # #general's full history, finds #project once it is public, joins it and
+    # its voice; her voice is switched off and she is out of LiveKit's room
+    # within the design's bound, and on again she rejoins; the closed link no
+    # longer redeems; the server admits no guest. A real conchd and the pinned
+    # LiveKit (Docker) and lk; the API and media-control path only, not the
+    # browser. It runs on every pull request and every push to main, like
+    # check. CI=true makes a skip a failure: without Docker, the image or lk
+    # this job is red, not quietly green.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI: "true"
+      # Labels this run's LiveKit container, so the clean-up step below can
+      # only ever remove its own.
+      COMMUNITY_CHECK_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: community-check
+        run: go run ./e2e/community
+
+      # The program removes its own container on every path; this is for the
+      # case where the runner killed it. Only the container of this run.
+      - name: remove any leftover LiveKit container
+        if: always()
+        run: docker ps -aq --filter "label=conch-community-check=$COMMUNITY_CHECK_RUN" | xargs -r docker rm -f
