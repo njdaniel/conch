@@ -499,6 +499,12 @@ export class VoiceClient {
   private cameraClaims: ReadonlySet<number> = new Set();
   private readonly cameraViews = new Map<number, HTMLVideoElement>();
   private selfView: HTMLVideoElement | null = null;
+  // Numbers the camera's operations (on, off, a switch, and every new
+  // capture or stop, however it came): a switch's outcome counts only while
+  // nothing newer has happened to the camera.
+  private cameraOps = 0;
+  // Whether the call view opens once the button's capture is given.
+  private openOnCapture = false;
   // The gate's changes, carried out one after another: a press's wait for its
   // answer, then a release's report. talk numbers the run of them a
   // connection makes (a drop abandons it); edge counts the gate's changes, so
@@ -543,9 +549,17 @@ export class VoiceClient {
     this.camera = new CameraClient(
       { claim: env.claimCamera ?? noCamera, release: env.stopCamera ?? (() => Promise.resolve()) },
       (camera) => {
+        if (camera.kind === 'capturing' || camera.kind === 'stopping' || camera.kind === 'resuming') this.cameraOps++;
         this.set({ camera, ...this.cameraNow() });
+        // The button's capture given: the call view opens. Anything else
+        // that ends the start opens nothing.
+        if (camera.kind !== 'capturing' && this.openOnCapture) {
+          this.openOnCapture = false;
+          if (camera.kind === 'claiming') this.viewVideo(true);
+        }
       },
       env.clock,
+      () => this.state.cameraChoice?.id ?? null,
     );
     this.reports = new ReportQueue({
       send: (state, signal) => {
@@ -830,28 +844,43 @@ export class VoiceClient {
     if (s.phase !== 'connected' || s.watchOnly || s.listenOnly || channel === null || room === null) return;
     if (s.camera.kind !== 'off' && s.camera.kind !== 'failed') return;
     const mine = this.attempt;
-    this.viewVideo(true);
-    let choice: string | null = null;
-    const chosen = s.cameraChoice;
-    if (chosen !== null) {
-      const list = await room.cameras().catch(() => null);
-      if (mine !== this.attempt || room !== this.room) return;
-      const found = findCamera(list, chosen);
-      if (found === null) {
-        this.set({ cameras: list, camera: { kind: 'failed', reason: 'not_connected' } });
-        return;
-      }
-      if (found.id !== chosen.id) this.set({ cameraChoice: found });
-      choice = found.id;
+    const choice = await this.cameraToUse();
+    if (mine !== this.attempt || room !== this.room) return;
+    if (choice === false) {
+      // The camera chosen is not connected: said, through the camera's own
+      // state, and nothing is captured.
+      this.camera.fail('not_connected');
+      return;
     }
+    // The call view opens once the browser gave the capture (O8): a camera
+    // refused opens nothing.
+    this.openOnCapture = true;
     await this.camera.start(channel, room, choice);
     if (mine !== this.attempt || room !== this.room) return;
     void this.readCameras(mine, room);
   }
 
+  // cameraToUse is the camera to capture: the one chosen, found again by its
+  // name if its id has changed and exactly one camera carries it (N7); null
+  // for none chosen (the browser's own choice); or false for a choice that is
+  // not connected, when nothing is to be captured: never another camera.
+  async cameraToUse(): Promise<string | null | false> {
+    const room = this.room;
+    const chosen = this.state.cameraChoice;
+    if (chosen === null) return null;
+    const list = room === null ? null : await room.cameras().catch(() => null);
+    if (this.state.cameraChoice !== chosen) return this.state.cameraChoice?.id ?? null;
+    if (list !== null) this.set({ cameras: list });
+    const found = findCamera(list, chosen);
+    if (found === null) return false;
+    if (found.id !== chosen.id) this.set({ cameraChoice: found });
+    return found.id;
+  }
+
   // stopCamera is the camera button, off: the capture stops, and conchd is
   // told, naming the claim.
   stopCamera(): Promise<void> {
+    this.cameraOps++;
     return this.camera.stop('self');
   }
 
@@ -862,15 +891,19 @@ export class VoiceClient {
     this.set({ cameraChoice: choice });
     const room = this.room;
     if (room === null || room.cameraTrack() === 'none') return;
+    // A switch answers for the capture it moved: once the camera was turned
+    // off, on again, or moved again, its outcome is not the camera's now.
+    const turn = ++this.cameraOps;
     try {
       await room.switchCamera(choice.id);
     } catch {
-      if (room !== this.room) return;
+      if (room !== this.room || turn !== this.cameraOps) return;
       // The camera chosen could not be had: stopped and released, and no
       // other camera is taken.
       this.camera.ended('not_connected');
       return;
     }
+    if (room !== this.room || turn !== this.cameraOps) return;
     this.set(this.cameraNow());
   }
 
@@ -902,10 +935,15 @@ export class VoiceClient {
   }
 
   // readCameras reads the cameras the browser lists, and the device in use.
+  // The camera chosen is found again by its name when its id is no longer
+  // listed and exactly one camera carries it (N7); one not found stays
+  // chosen, and the picker says it is not connected.
   private async readCameras(mine: number, room: Room): Promise<void> {
     const cameras = await room.cameras().catch(() => null);
     if (mine !== this.attempt || room !== this.room) return;
-    this.set({ cameras, ...this.cameraNow() });
+    const chosen = this.state.cameraChoice;
+    const found = chosen === null || cameras === null ? null : findCamera(cameras, chosen);
+    this.set({ cameras, ...(found !== null && found.id !== chosen?.id ? { cameraChoice: found } : {}), ...this.cameraNow() });
   }
 
   // cameraNow is what the local track says: whether it is captured or
@@ -1010,6 +1048,8 @@ export class VoiceClient {
     this.channel = null;
     this.endAwaiting();
     this.watched = null;
+    // Nobody's camera is received out of voice; the next join reads presence.
+    this.cameraClaims = new Set();
     this.switching = false;
     this.set({
       phase: 'idle',
@@ -1336,6 +1376,7 @@ export class VoiceClient {
       onDevicesChanged: () => {
         if (mine !== this.attempt) return;
         void this.readMicrophones(mine, room);
+        void this.readCameras(mine, room);
       },
       onOutputMoved: (id) => {
         if (mine !== this.attempt) return;
@@ -1348,6 +1389,7 @@ export class VoiceClient {
         if (mine !== this.attempt) return;
         this.camera.ended(cause);
         this.set(this.cameraNow());
+        void this.readCameras(mine, room);
       },
       onCameraChanged: () => {
         if (mine !== this.attempt) return;
@@ -1437,6 +1479,7 @@ export class VoiceClient {
     const now = this.state.microphone?.id ?? null;
     if (publish && !this.state.missing && (now !== microphone || this.state.processing !== processing)) void this.switchTo(room, now);
     void this.readMicrophones(mine, room);
+    void this.readCameras(mine, room);
     this.watchLevel(mine, room);
     this.share.connected(channel, room);
     this.camera.connected(channel, room);

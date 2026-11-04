@@ -72,6 +72,11 @@ export interface CameraRoom {
   // Gives this connection a capture kept from an earlier one, unblanked:
   // publishCamera publishes it.
   readonly adoptCamera: (kept: KeptCamera) => void;
+  // The device the capture is on, or null while nothing is captured.
+  readonly cameraInUse: () => string | null;
+  // Moves the capture to another camera, exactly; rejects, with nothing
+  // captured, if that camera cannot be had.
+  readonly switchCamera: (choice: string) => Promise<void>;
 }
 
 // Why the camera is off: the person's own stop, leaving, the connection
@@ -148,6 +153,9 @@ export const renewalGrace = 3000;
 // is told: the capture is stopped before the wait, and a hung signalling
 // connection does not hold the release back.
 export const unpublishWait = 1000;
+// How long a claim waits for the one before it to be answered: past it, the
+// earlier one is taken to be lost, and the next is asked anyway.
+export const claimWait = 10_000;
 
 type Refusal = Extract<CameraClaimResult, { ok: false }>;
 
@@ -308,11 +316,22 @@ export class CameraClient {
   private keepTimer: unknown = null;
   private graceTimer: unknown = null;
   private reclaiming = false;
+  // The claim being asked for, until it is answered and anything it granted
+  // for an attempt since superseded is let go; and the attempt at which
+  // another device last took this page's place.
+  private inFlight: Promise<void> = Promise.resolve();
+  private displacedAt = -1;
 
-  constructor(api: CameraApi, onChange: (state: CameraState) => void, clock: Clock) {
+  // The camera the person has chosen now, by id, or null for none: read
+  // again before every publish, so a choice made while the capture or the
+  // adoption was under way is the camera sent (N7).
+  private readonly choice: () => string | null;
+
+  constructor(api: CameraApi, onChange: (state: CameraState) => void, clock: Clock, choice: () => string | null = () => null) {
     this.api = api;
     this.onChange = onChange;
     this.clock = clock;
+    this.choice = choice;
   }
 
   get current(): CameraState {
@@ -357,20 +376,16 @@ export class CameraClient {
       return;
     }
     this.set({ kind: 'claiming' });
-    let answer = await this.api.claim(channel);
-    if (!answer.ok && answer.code === 'voice_no_session' && mine === this.attempt) {
+    let answer = await this.claimFor(mine, channel);
+    if (answer !== null && !answer.ok && answer.code === 'voice_no_session') {
       // The connection may not be recorded yet: asked once more after one
       // pass, still for the press that started it.
       await this.wait(passGap);
-      if (mine === this.attempt) answer = await this.api.claim(this.channel);
+      answer = mine === this.attempt ? await this.claimFor(mine, this.channel) : null;
     }
-    if (answer.ok) this.granted(answer.value.started_at);
-    if (mine !== this.attempt) {
-      // Stopped while the claim was on its way: a claim granted since is let
-      // go, unless the camera was started again.
-      if (this.idle()) await this.releaseHeld();
-      return;
-    }
+    // Stopped, or started again, while the claim was on its way: claimFor
+    // has let a claim granted since go.
+    if (answer === null) return;
     if (!answer.ok) {
       await room.stopCamera();
       if (mine === this.attempt) this.set({ kind: 'failed', reason: refusalFailure(answer) });
@@ -382,6 +397,19 @@ export class CameraClient {
   // publish waits for the grant and publishes the capture the room holds.
   private async publish(mine: number, room: CameraRoom): Promise<void> {
     this.set({ kind: 'granted-waiting' });
+    // A camera chosen while this capture was asked for, or kept: the capture
+    // moves to it, exactly, before anything is sent. One that cannot be had
+    // stops the camera; no other is sent in its place.
+    const want = this.choice();
+    if (want !== null && room.cameraInUse() !== want) {
+      try {
+        await room.switchCamera(want);
+      } catch {
+        if (mine === this.attempt) await this.stopAndRelease('not_connected');
+        return;
+      }
+      if (mine !== this.attempt) return;
+    }
     try {
       await room.awaitCameraGrant();
       if (mine !== this.attempt) return;
@@ -413,9 +441,12 @@ export class CameraClient {
     const room = this.room;
     this.dropKept();
     this.set({ kind: 'stopping' });
-    // Called now, so the track is stopped before anything below waits.
+    // Called now, so the track is stopped before anything below waits. A
+    // claim still on its way is waited for too, within the same bound: what
+    // it grants is released while the credential still works (a sign-out
+    // revokes it once this resolves).
     const down = room?.stopCamera() ?? Promise.resolve();
-    await this.bounded(down, unpublishWait);
+    await this.bounded(Promise.all([down, this.inFlight]), unpublishWait);
     await this.releaseHeld();
     if (mine === this.attempt) this.set(isFailure(end) ? { kind: 'failed', reason: end } : { kind: 'off', ended: end });
   }
@@ -472,7 +503,10 @@ export class CameraClient {
     // stops at once, and the claim is not this page's to end any more. A
     // release sent now could end a camera the other device has just turned
     // on, on the same claim.
-    if (loss === 'displaced') this.held = false;
+    if (loss === 'displaced') {
+      this.held = false;
+      this.displacedAt = this.attempt;
+    }
     if (this.state.kind === 'resuming') {
       // A resume under way on the connection going stops where it is; the
       // next connection resumes again, unless this end is a stop.
@@ -510,16 +544,24 @@ export class CameraClient {
     const { channel, claimed } = this;
     if (this.state.kind !== 'sending' || channel === null || claimed === null) return;
     const mine = this.attempt;
-    const answer = await this.api.claim(channel, claimed);
-    if (mine !== this.attempt) return;
-    if (answer.ok) {
-      this.granted(answer.value.started_at);
-      return;
-    }
+    const answer = await this.claimFor(mine, channel, claimed);
+    if (answer === null || answer.ok) return;
+    // Any answer but the claim stops the capture: the server no longer holds
+    // it (stale), no longer lets this person use a camera or voice, has no
+    // session for this connection (it restarted), or could not be asked.
+    // Nothing is claimed again; the person turns the camera on.
     if (answer.code === 'voice_camera_stale') {
       this.held = false;
       await this.stopAndRelease('stale');
+      return;
     }
+    await this.stopAndRelease(answer.code === 'permission_denied' ? 'not_allowed' : 'stale');
+  }
+
+  // fail says why the camera could not start, without anything captured or
+  // claimed: the camera chosen is not connected, say.
+  fail(reason: CameraFailure): void {
+    if (this.idle()) this.set({ kind: 'failed', reason });
   }
 
   // renamed is the channel renamed (issue #728): what is asked of conchd from
@@ -538,6 +580,43 @@ export class CameraClient {
   // a capture held between connections stops.
   abandon(): void {
     if (this.state.kind === 'resuming') void this.giveUp('lost');
+  }
+
+  // claimFor asks conchd for a claim on behalf of one attempt, and is the one
+  // way a claim is asked for. An answer for the attempt that asked is this
+  // page's, and returned. One that comes once a newer attempt began (a stop,
+  // a start again, the connection lost) answers null, and a claim it grants
+  // is released at once, by its own started_at, unless another device has
+  // taken this page's place since (displaced: the claim is that device's to
+  // keep), or it is the claim this page still carries on (inUse). One claim is asked at a time:
+  // the next waits until the last is answered and anything it granted is let
+  // go, so a release never crosses a newer claim of the same person.
+  private async claimFor(mine: number, channel: string, startedAt?: string): Promise<CameraClaimResult | null> {
+    await this.bounded(this.inFlight, claimWait);
+    if (mine !== this.attempt) return null;
+    let done: () => void = () => undefined;
+    this.inFlight = new Promise<void>((resolve) => {
+      done = resolve;
+    });
+    try {
+      const answer = await this.api.claim(channel, startedAt);
+      if (mine === this.attempt) {
+        if (answer.ok) this.granted(answer.value.started_at);
+        return answer;
+      }
+      if (answer.ok && this.displacedAt < mine && !this.inUse(answer.value.started_at)) await this.api.release(channel, answer.value.started_at).catch(() => undefined);
+      return null;
+    } finally {
+      done();
+    }
+  }
+
+  // inUse reports whether a claim is the one this page still carries on: the
+  // camera neither off nor stopping, and the claim it names. A continue
+  // answered after the connection went (the capture held for the next one)
+  // is that claim, and the next connection names it again.
+  private inUse(startedAt: string): boolean {
+    return !this.idle() && this.state.kind !== 'stopping' && this.claimed !== null && sameInstant(this.claimed, startedAt);
   }
 
   // granted records a claim conchd granted. A new time is a new claim, and
@@ -564,11 +643,14 @@ export class CameraClient {
   private suspend(loss: CameraLoss): void {
     this.attempt++;
     this.loss = loss;
-    this.set({ kind: 'resuming' });
     const room = this.room;
     this.room = null;
+    // Kept before the state says so, so that whatever reads the state then
+    // finds the capture held (holdsKept): the indicator says "Camera in use"
+    // for as long as the device captures (S5).
     const kept = room?.keepCamera() ?? null;
     this.kept = kept;
+    this.set({ kind: 'resuming' });
     if (kept === null || !kept.live()) {
       void this.giveUp('lost');
       return;
@@ -603,13 +685,9 @@ export class CameraClient {
     }
     const mine = ++this.attempt;
     this.reclaiming = true;
-    const answer = await this.api.claim(channel, claimed);
+    const answer = await this.claimFor(mine, channel, claimed);
     this.reclaiming = false;
-    if (answer.ok) this.granted(answer.value.started_at);
-    if (mine !== this.attempt) {
-      if (this.idle()) await this.releaseHeld();
-      return;
-    }
+    if (answer === null) return;
     if (!answer.ok) {
       this.held = false;
       await this.giveUp(refusalFailure(answer) === 'stale' ? 'stale' : 'failed');

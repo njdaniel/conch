@@ -65,6 +65,7 @@ class StubCamRoom implements CameraRoom {
     await this.step('capture');
     if (this.captureError !== null) throw this.captureError;
     this.captured = true;
+    this.device = choice ?? 'browser-choice';
   };
   awaitCameraGrant = async (): Promise<void> => {
     this.log.push(`${this.name} grant`);
@@ -106,6 +107,18 @@ class StubCamRoom implements CameraRoom {
     this.log.push(`${this.name} adopt`);
     this.captured = true;
   };
+  device = 'browser-choice';
+  switchError: Error | null = null;
+  cameraInUse = (): string | null => (this.captured ? this.device : null);
+  switchCamera = (choice: string): Promise<void> => {
+    this.log.push(`${this.name} switch ${choice}`);
+    if (this.switchError !== null) {
+      this.captured = false;
+      return Promise.reject(this.switchError);
+    }
+    this.device = choice;
+    return Promise.resolve();
+  };
 }
 
 const started = '2026-11-03T10:00:00.000Z';
@@ -113,7 +126,7 @@ const adopted = '2026-11-03T10:00:30.000Z';
 const granted = (at = started): CameraClaimResult => ({ ok: true, value: { principal_id: 7, started_at: at } });
 const refused = (status: number, code: string): CameraClaimResult => ({ ok: false, failure: 'invalid', status, code });
 
-function setup(answers: CameraClaimResult[] = []) {
+function setup(answers: CameraClaimResult[] = [], choice: { id: string | null } = { id: null }) {
   const clock = new FakeClock();
   const log: string[] = [];
   const states: CameraState[] = [];
@@ -133,9 +146,10 @@ function setup(answers: CameraClaimResult[] = []) {
     },
     (s) => states.push(s),
     clock,
+    () => choice.id,
   );
   const room = new StubCamRoom(log);
-  return { clock, log, states, claims, client, room };
+  return { clock, log, states, claims, client, room, choice };
 }
 
 async function sending(t = setup()) {
@@ -234,12 +248,151 @@ describe('a stop during each step', () => {
     );
     const start = client.start('general', t.room, null);
     await settle();
-    await client.stop('self');
+    const stopped = client.stop('self');
+    await settle();
     answer(granted());
+    await stopped;
     await start;
     await settle();
     expect(t.log).toEqual(['room capture browser', 'POST general', 'room stop', `DELETE general ?started_at=${started}`]);
     expect(t.room.captured).toBe(false);
+  });
+});
+
+// A conchd whose every claim waits for the test to answer it.
+function manual() {
+  const clock = new FakeClock();
+  const log: string[] = [];
+  const pending: ((r: CameraClaimResult) => void)[] = [];
+  const client = new CameraClient(
+    {
+      claim: (channel, at) => {
+        log.push(at === undefined ? `POST ${channel}` : `POST ${channel} ?started_at=${at}`);
+        return new Promise((resolve) => {
+          pending.push(resolve);
+        });
+      },
+      release: (channel, at) => {
+        log.push(`DELETE ${channel} ?started_at=${at}`);
+        return Promise.resolve();
+      },
+    },
+    () => undefined,
+    clock,
+  );
+  const room = new StubCamRoom(log);
+  const answer = async (r: CameraClaimResult) => {
+    const next = pending.shift();
+    if (next === undefined) throw new Error('no claim is waiting');
+    next(r);
+    await settle();
+  };
+  return { clock, log, client, room, answer, waiting: () => pending.length };
+}
+
+describe('a claim answered once its attempt is over', () => {
+  const first = '2026-11-03T10:00:00.000Z';
+  const second = '2026-11-03T10:00:05.000Z';
+
+  it('on, off and on while the first claim is on its way: the first is released by name before the second is asked, and only the second is held', async () => {
+    const t = manual();
+    void t.client.start('general', t.room, null);
+    await settle();
+    expect(t.log).toEqual(['room capture browser', 'POST general']);
+    // The stop waits for the claim no longer than unpublishWait.
+    const stopped = t.client.stop('self');
+    await settle();
+    t.clock.advance(unpublishWait);
+    await stopped;
+    void t.client.start('general', t.room, null);
+    await settle();
+    // The second waits for the first to be answered.
+    expect(t.waiting()).toBe(1);
+    await t.answer(granted(first));
+    expect(t.log.slice(-2)).toEqual([`DELETE general ?started_at=${first}`, 'POST general']);
+    await t.answer(granted(second));
+    expect(t.client.current).toEqual({ kind: 'sending' });
+    await t.client.stop('self');
+    expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([`DELETE general ?started_at=${first}`, `DELETE general ?started_at=${second}`]);
+  });
+
+  it('a grant that arrives while the stop is under way is released, once, and nothing is left held', async () => {
+    const t = manual();
+    void t.client.start('general', t.room, null);
+    await settle();
+    t.room.hold = 'stop';
+    const stopping = t.client.stop('self');
+    await settle();
+    expect(t.client.current).toEqual({ kind: 'stopping' });
+    await t.answer(granted(first));
+    t.clock.advance(unpublishWait);
+    await stopping;
+    expect(t.client.current).toEqual({ kind: 'off', ended: 'self' });
+    expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([`DELETE general ?started_at=${first}`]);
+    // A later stop of a later camera releases that camera's claim alone.
+    void t.client.start('general', t.room, null);
+    await settle();
+    await t.answer(granted(second));
+    await t.client.stop('self');
+    expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([`DELETE general ?started_at=${first}`, `DELETE general ?started_at=${second}`]);
+  });
+
+  it('displaced while the claim is on its way: the claim it grants is left to the other device, never released', async () => {
+    const t = manual();
+    void t.client.start('general', t.room, null);
+    await settle();
+    t.client.lost(cameraAfter('duplicate_identity'));
+    await settle();
+    await t.answer(granted(first));
+    t.clock.advance(unpublishWait);
+    await settle();
+    expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([]);
+    expect(t.room.captured).toBe(false);
+  });
+
+  it('a stop waits for a claim on its way, so its grant is released before the stop is over (sign-out)', async () => {
+    const t = manual();
+    void t.client.start('general', t.room, null);
+    await settle();
+    let over = false;
+    const stopping = t.client.stop('left').then(() => {
+      over = true;
+    });
+    await settle();
+    expect(over).toBe(false);
+    await t.answer(granted(first));
+    await stopping;
+    expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([`DELETE general ?started_at=${first}`]);
+  });
+
+  it('a stop waits for a claim on its way no longer than unpublishWait', async () => {
+    const t = manual();
+    void t.client.start('general', t.room, null);
+    await settle();
+    let over = false;
+    void t.client.stop('left').then(() => {
+      over = true;
+    });
+    await settle();
+    t.clock.advance(unpublishWait);
+    await settle();
+    expect(over).toBe(true);
+  });
+
+  it('a continue answered after the connection went is the claim still carried on: not released, and named again', async () => {
+    const t = manual();
+    void t.client.start('general', t.room, null);
+    await settle();
+    await t.answer(granted(first));
+    expect(t.client.current).toEqual({ kind: 'sending' });
+    void t.client.reconnected();
+    await settle();
+    t.client.lost('keep');
+    await t.answer(granted(first));
+    expect(t.log.filter((l) => l.startsWith('DELETE'))).toEqual([]);
+    t.client.connected('general', new StubCamRoom(t.log, 'next'));
+    await settle();
+    expect(t.log.at(-1)).toBe(`POST general ?started_at=${first}`);
   });
 });
 
@@ -322,6 +475,42 @@ describe('what the person is told (design §7.2)', () => {
   });
 });
 
+describe('the camera chosen while the capture is under way (N7)', () => {
+  it('is the camera sent: the capture moves to it, exactly, before the publish', async () => {
+    const t = setup();
+    t.room.hold = 'capture';
+    const start = t.client.start('general', t.room, null);
+    await settle();
+    t.choice.id = 'cam-2';
+    t.room.held?.open();
+    await start;
+    await settle();
+    expect(t.log).toEqual(['room capture browser', 'POST general', 'room switch cam-2', 'room grant', 'room publish']);
+    expect(t.client.current).toEqual({ kind: 'sending' });
+  });
+
+  it('one that cannot be had stops the camera and releases its claim: no other camera is sent', async () => {
+    const t = setup();
+    t.room.switchError = new DOMException('gone', 'OverconstrainedError');
+    t.choice.id = 'cam-2';
+    await t.client.start('general', t.room, 'cam-1');
+    await settle();
+    expect(t.log).not.toContain('room publish');
+    expect(t.log.at(-1)).toBe(`DELETE general ?started_at=${started}`);
+    expect(t.client.current).toEqual({ kind: 'failed', reason: 'not_connected' });
+  });
+
+  it('a capture kept across a reconnect moves to the camera chosen meanwhile before it is published again', async () => {
+    const t = await sending();
+    t.client.lost('keep');
+    t.choice.id = 'cam-2';
+    const next = new StubCamRoom(t.log, 'next');
+    t.client.connected('general', next);
+    await settle();
+    expect(t.log.slice(-4)).toEqual(['next adopt', 'next switch cam-2', 'next grant', 'next publish']);
+  });
+});
+
 describe('the device lost', () => {
   it('stops, releases and says so, and never captures another camera', async () => {
     const t = await sending();
@@ -346,6 +535,23 @@ describe('the one rule (S2): only the button sends an un-named claim', () => {
     expect(t.log).toEqual([`POST general ?started_at=${started}`, 'room stop']);
     expect(t.client.current).toEqual({ kind: 'failed', reason: 'stale' });
     expect(cameraNote(t.client.current)).toBe('Your camera was turned off.');
+  });
+
+  it.each([
+    ['403 permission_denied', refused(403, 'permission_denied'), 'not_allowed'],
+    ['403 voice_not_allowed', refused(403, 'voice_not_allowed'), 'stale'],
+    ['409 voice_no_session', refused(409, 'voice_no_session'), 'stale'],
+    ['404 channel_not_found', refused(404, 'channel_not_found'), 'stale'],
+    ['401', { ok: false, failure: 'unauthorized' }, 'stale'],
+    ['no answer', { ok: false, failure: 'network' }, 'stale'],
+  ] as const)('the SDK reconnecting answered %s stops the capture and releases the claim by name', async (_what, answer, reason) => {
+    const t = await sending(setup([granted(), answer]));
+    t.log.length = 0;
+    await t.client.reconnected();
+    await settle();
+    expect(t.log).toEqual([`POST general ?started_at=${started}`, 'room stop', `DELETE general ?started_at=${started}`]);
+    expect(t.client.current).toEqual({ kind: 'failed', reason });
+    expect(t.room.captured).toBe(false);
   });
 
   it('the SDK reconnecting, answered with the claim, carries on', async () => {

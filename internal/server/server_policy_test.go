@@ -66,3 +66,27 @@ func TestPermissionsPolicyOnAttachmentsAndReads(t *testing.T) {
 		})
 	}
 }
+
+// TestPermissionsPolicyOnMetricsListener: the metrics listener, a server of
+// its own, carries the deny-all policy too, on /metrics and on its 404.
+func TestPermissionsPolicyOnMetricsListener(t *testing.T) {
+	srv := newTestServerWithConfig(t, Config{AuthMode: AuthRequired, MetricsListen: "127.0.0.1:0"})
+	serveTestServer(t, srv)
+	for _, tt := range []struct {
+		path   string
+		status int
+	}{
+		{"/metrics", http.StatusOK},
+		{"/no-such-path", http.StatusNotFound},
+	} {
+		t.Run(tt.path, func(t *testing.T) {
+			resp, _ := fetch(t, "GET", "http://"+srv.MetricsAddr()+tt.path)
+			if resp.StatusCode != tt.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.status)
+			}
+			if got := resp.Header.Values("Permissions-Policy"); len(got) != 1 || got[0] != denyPermissionsPolicy {
+				t.Errorf("Permissions-Policy = %q, want exactly [%q]", got, denyPermissionsPolicy)
+			}
+		})
+	}
+}

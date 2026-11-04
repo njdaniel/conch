@@ -194,6 +194,10 @@ export function wanted(source: Track.Source, kind: Track.Kind | undefined, want:
   }
 }
 
+// What a track would be wanted for if the page wanted everything: false only
+// for a kind its source disagrees with.
+const everything: Wants = { watching: true, viewing: true, claimed: true };
+
 // ---- the camera
 
 // What a capture of the camera asks for (design §7.5, the desktop's row): the
@@ -653,6 +657,13 @@ class LiveKitAdapter implements Room {
   private camera: LocalVideoTrack | null = null;
   private cameraPub: LocalTrackPublication | null = null;
   private stoppingCamera = false;
+  // Numbers each capture of the camera, and each stop or keep: a capture
+  // that completes after a newer one began, or after a stop, is stopped at
+  // once and never held, so no capture is left running unreferenced.
+  private cameraTurn = 0;
+  // The tracks that arrived with a kind their source disagrees with (S1),
+  // by sid: never subscribed again.
+  private readonly refused = new Set<string>();
   private selfView: HTMLVideoElement | null = null;
   // Whether the call view is shown, who presence shows holding a camera
   // claim, the camera tracks received by principal, and the element each
@@ -693,6 +704,9 @@ class LiveKitAdapter implements Room {
         // what arrived: a track whose kind disagrees with its source is let
         // go, never played or shown (S1).
         if (!wanted(track.source, track.kind, this.wantsOf(participant))) {
+          // A kind its source disagrees with is never wanted, whatever the
+          // page shows: remembered, so no later choice subscribes it again.
+          if (!wanted(track.source, track.kind, everything)) this.refused.add(pub.trackSid);
           pub.setSubscribed(false);
           return;
         }
@@ -1226,8 +1240,10 @@ class LiveKitAdapter implements Room {
 
   private subscribe(pub: RemoteTrackPublication, participant: RemoteParticipant | undefined): void {
     if (this.closed) return;
-    const want = wanted(pub.source, pub.kind, this.wantsOf(participant));
-    if (pub.isSubscribed !== want) pub.setSubscribed(want);
+    const want = !this.refused.has(pub.trackSid) && wanted(pub.source, pub.kind, this.wantsOf(participant));
+    // What was asked, not what has arrived: a subscription on its way is not
+    // asked for again, nor one refused asked back.
+    if (pub.isDesired !== want) pub.setSubscribed(want);
   }
 
   private subscribeAll(): void {
@@ -1260,10 +1276,17 @@ class LiveKitAdapter implements Room {
     // One capture at a time: one held is stopped first.
     await this.stopCamera();
     this.ensureOpen();
+    const turn = ++this.cameraTurn;
     const track = await captureCameraTrack(choice);
     if (this.closed) {
       track.stop();
       throw new ClosedError();
+    }
+    // A newer capture, a stop or a kept capture came while the browser was
+    // asked: this one is not the camera.
+    if (turn !== this.cameraTurn || this.camera !== null) {
+      track.stop();
+      throw new TakenError();
     }
     this.holdCamera(track);
   }
@@ -1271,6 +1294,12 @@ class LiveKitAdapter implements Room {
   // holdCamera makes a capture this connection's camera, captured here or
   // kept from an earlier connection.
   private holdCamera(track: LocalVideoTrack): void {
+    // Never two captures: one held is stopped before another takes its place.
+    const before = this.camera;
+    if (before !== null && before !== track) {
+      before.stop();
+      if (this.selfView !== null) before.detach(this.selfView);
+    }
     this.camera = track;
     this.cameraPub = null;
     track.mediaStreamTrack.addEventListener('ended', () => {
@@ -1340,6 +1369,8 @@ class LiveKitAdapter implements Room {
   }
 
   async stopCamera(): Promise<void> {
+    // A capture still being asked for is not to be held once it comes.
+    this.cameraTurn++;
     const track = this.camera;
     this.camera = null;
     this.cameraPub = null;
@@ -1359,6 +1390,7 @@ class LiveKitAdapter implements Room {
   }
 
   keepCamera(): KeptCamera | null {
+    this.cameraTurn++;
     const track = this.camera;
     this.camera = null;
     this.cameraPub = null;
@@ -1379,6 +1411,7 @@ class LiveKitAdapter implements Room {
 
   adoptCamera(kept: KeptCamera): void {
     this.ensureOpen();
+    this.cameraTurn++;
     if (!(kept instanceof KeptCam)) throw new Error('voice: not a camera this page kept');
     kept.onEnded = null;
     kept.track.mediaStreamTrack.enabled = true;

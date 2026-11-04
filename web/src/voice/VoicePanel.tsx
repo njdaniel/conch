@@ -1079,7 +1079,7 @@ function CameraOptions({ voice, open, cameraAllowed }: { readonly voice: VoiceCo
           closing them takes the test out of the tree, which stops it. */}
       {open && off ? (
         <CameraTest
-          choice={state.cameraChoice?.id ?? null}
+          choose={() => client.cameraToUse()}
           onCaptured={() => {
             client.refreshCameras();
           }}

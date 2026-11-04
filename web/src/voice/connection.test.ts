@@ -232,6 +232,8 @@ class StubRoom implements Room {
     if (this.camState === 'none') return null;
     this.camLog.push('keep camera');
     this.camState = 'none';
+    // As sdk.ts: the room says its own camera changed, at once.
+    this.events?.onCameraChanged();
     const log = this.camLog;
     return {
       live: () => this.keptLiveCamera,
@@ -249,8 +251,17 @@ class StubRoom implements Room {
   cameraInUse = (): string | null => (this.camState === 'none' ? null : 'cam-1');
   cameras = (): Promise<readonly Camera[] | null> => Promise.resolve(this.cameraList);
   switchError: Error | null = null;
+  // When set, the next switch waits, and the test fails it.
+  holdSwitchCamera = false;
+  failHeldSwitch: ((err: Error) => void) | null = null;
   switchCamera = (choice: string): Promise<void> => {
     this.camLog.push(`switch ${choice}`);
+    if (this.holdSwitchCamera) {
+      this.holdSwitchCamera = false;
+      return new Promise((_resolve, reject) => {
+        this.failHeldSwitch = reject;
+      });
+    }
     if (this.switchError === null) return Promise.resolve();
     this.camState = 'none';
     return Promise.reject(this.switchError);
@@ -2452,6 +2463,24 @@ describe('the camera through the client', () => {
     expect(t.client.snapshot().camera).toEqual({ kind: 'off', ended: 'operator' });
   });
 
+  it('the room renewed while sending: "Camera in use" for as long as the capture is held, never "none" (S5)', async () => {
+    const t = setup([okSession(), okSession()]);
+    await cameraOn(t);
+    t.client.presence(cameraPresence([], { reason: 'rotated', started_at: cameraStarted, ended_at: '2026-10-16T00:00:30.000Z' }));
+    expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'resuming' }, cameraTrack: 'captured' });
+    t.rooms[0]?.events?.onDisconnected('room_deleted');
+    expect(t.client.snapshot().cameraTrack).toBe('captured');
+  });
+
+  it('the call view opens once the capture is given, and not for a camera refused (O8)', async () => {
+    const t = setup([okSession()], [], 0, false, (room) => {
+      room.captureError = new DOMException('no', 'NotAllowedError');
+    });
+    await cameraOn(t);
+    expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'failed', reason: 'blocked' }, viewing: false });
+    expect(t.rooms[0]?.viewings).toEqual([false]);
+  });
+
   it('the microphone and the camera are independent: a microphone lost leaves the camera, and the camera lost leaves the microphone', async () => {
     const t = await cameraOn();
     const room = t.rooms[0];
@@ -2499,6 +2528,76 @@ describe('the camera chosen (N7)', () => {
     expect(t.camLog.slice(-2)).toEqual(['switch cam-2', `DELETE general ${named}`]);
     expect(t.client.snapshot().camera).toEqual({ kind: 'failed', reason: 'not_connected' });
     expect(t.camLog.filter((l) => l.startsWith('capture'))).toEqual(['capture browser']);
+  });
+
+  it('a switch that fails after the camera was turned off and on again leaves the new camera alone', async () => {
+    const t = setup([okSession()], [], 0, false, undefined, undefined, undefined, undefined, { answers: [cameraGranted, { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:09.000Z' } }] });
+    await cameraOn(t);
+    const room = t.rooms[0];
+    if (room === undefined) throw new Error('no room');
+    room.holdSwitchCamera = true;
+    const choosing = t.client.chooseCamera({ id: 'cam-2', label: 'Laptop camera' });
+    await settle();
+    await t.client.stopCamera();
+    await t.client.startCamera();
+    await settle();
+    expect(t.client.snapshot().camera).toEqual({ kind: 'sending' });
+    t.camLog.length = 0;
+    room.failHeldSwitch?.(new DOMException('superseded', 'OverconstrainedError'));
+    await choosing;
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'sending' }, cameraTrack: 'published' });
+    expect(t.camLog).toEqual([]);
+  });
+
+  it('leaving forgets who holds a camera claim: the next connection receives nobody until presence says', async () => {
+    const t = setup([okSession(), okSession()]);
+    await joined(t);
+    t.client.presence(cameraPresence([8]));
+    await t.client.leave();
+    t.client.join('general');
+    await settle();
+    expect(t.rooms[1]?.claimedSets[0]).toEqual([]);
+  });
+
+  it('a choice not connected is said through the camera, and joining again forgets it', async () => {
+    const t = setup([okSession(), okSession()], [], 0, false, (room) => {
+      room.cameraList = [{ id: 'cam-2', label: 'Laptop camera' }];
+    }, undefined, undefined, undefined, { choice: desk });
+    await cameraOn(t);
+    expect(t.client.snapshot().camera).toEqual({ kind: 'failed', reason: 'not_connected' });
+    await t.client.leave();
+    t.client.join('random');
+    await settle();
+    expect(t.client.snapshot().camera).toEqual({ kind: 'off', ended: null });
+  });
+
+  it('is found again under a new id when the cameras are read: at a connection, and when devices change', async () => {
+    let list: readonly Camera[] = [{ id: 'cam-2', label: 'Laptop camera' }];
+    const t = setup([okSession()], [], 0, false, (room) => {
+      room.cameras = () => Promise.resolve(list);
+    }, undefined, undefined, undefined, { choice: desk });
+    await joined(t);
+    expect(t.client.snapshot().cameraChoice).toEqual(desk);
+    expect(t.client.snapshot().cameras).toEqual(list);
+    list = [...list, { id: 'plugged-in', label: 'Desk camera' }];
+    t.rooms[0]?.events?.onDevicesChanged();
+    await settle();
+    expect(t.client.snapshot().cameras).toEqual(list);
+    expect(t.client.snapshot().cameraChoice).toEqual({ id: 'plugged-in', label: 'Desk camera' });
+  });
+
+  it('cameraToUse finds the choice again before a test capture, and says false when it is not connected', async () => {
+    const t = setup([okSession()], [], 0, false, (room) => {
+      room.cameraList = [{ id: 'renamed', label: 'Desk camera' }];
+    }, undefined, undefined, undefined, { choice: desk });
+    await joined(t);
+    expect(await t.client.cameraToUse()).toBe('renamed');
+    const u = setup([okSession()], [], 0, false, (room) => {
+      room.cameraList = [];
+    }, undefined, undefined, undefined, { choice: desk });
+    await joined(u);
+    expect(await u.client.cameraToUse()).toBe(false);
   });
 
   it('a camera chosen while on moves the capture to it, exactly', async () => {

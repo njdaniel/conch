@@ -17,9 +17,11 @@ const browser: CameraTestDeps = { capture: captureCameraTest };
 
 export const previewNote = 'Preview: not sent';
 
-export function CameraTest({ choice, onCaptured, deps = browser }: {
-  // The camera chosen, exactly, or null for the browser's own choice.
-  readonly choice: string | null;
+export function CameraTest({ choose, onCaptured, deps = browser }: {
+  // The camera to capture, asked for when the test starts: the one chosen,
+  // found again by its name (N7); null for the browser's own choice; false
+  // for a choice that is not connected, when nothing is captured.
+  readonly choose: () => Promise<string | null | false>;
   // Told once the browser gave a capture: it names its cameras from then.
   readonly onCaptured?: () => void;
   readonly deps?: CameraTestDeps;
@@ -29,33 +31,46 @@ export function CameraTest({ choice, onCaptured, deps = browser }: {
   const preview = useRef<HTMLVideoElement>(null);
   const told = useRef(onCaptured);
   told.current = onCaptured;
+  const chooser = useRef(choose);
+  chooser.current = choose;
 
   useEffect(() => {
     if (!on) return;
+    // Read afresh after each await: the cleanup ends the run.
     let live = true;
+    const over = () => !live;
     let held: CameraTestCapture | null = null;
-    deps.capture(choice).then(
-      (capture) => {
-        // Stopped, or the options closed, while the browser was asked.
-        if (!live) {
-          capture.stop();
-          return;
-        }
-        held = capture;
-        capture.show(preview.current);
-        told.current?.();
-      },
-      (err: unknown) => {
-        if (!live) return;
+    void (async () => {
+      const choice = await chooser.current();
+      if (over()) return;
+      if (choice === false) {
+        setProblem(failureNote('not_connected'));
+        setOn(false);
+        return;
+      }
+      let capture: CameraTestCapture;
+      try {
+        capture = await deps.capture(choice);
+      } catch (err: unknown) {
+        if (over()) return;
         setProblem(failureNote(captureFailure(err)));
         setOn(false);
-      },
-    );
+        return;
+      }
+      // Stopped, or the options closed, while the browser was asked.
+      if (over()) {
+        capture.stop();
+        return;
+      }
+      held = capture;
+      capture.show(preview.current);
+      told.current?.();
+    })();
     return () => {
       live = false;
       held?.stop();
     };
-  }, [on, choice, deps]);
+  }, [on, deps]);
 
   return (
     <div className="camera-test">
