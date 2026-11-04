@@ -603,18 +603,19 @@ jobs:
     # program is neither on this runner nor ever run. The suite takes 17-19
     # minutes on main with the camera specs (44-46), so the bound is 30, not
     # 20: a bound the passing suite runs into cancels a green run (#1268).
-    # On the self-hosted runners for this repository's own branches, as
-    # check is (#1286, #1288); a fork's pull request runs on ubuntu-latest.
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
+    # On GitHub-hosted runners (#1305): it moved to the self-hosted ones for
+    # speed only (#1288), and there it competed with check and with local
+    # work for one machine's CPU. check stays self-hosted for its build cache.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Two jobs, each with its own conchd, fixture community and LiveKit, each
-    # running half the specs one at a time (#1290): 250 tests took 19 minutes
-    # in one.
-    name: web-e2e (${{ matrix.shard }}/2)
+    # Three jobs, each with its own conchd, fixture community and LiveKit, each
+    # running a third of the spec files one at a time (#1290, #1305): 250 tests
+    # took 17-19 minutes in one.
+    name: web-e2e (${{ matrix.shard }}/3)
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3]
     env:
       # Labels this shard's LiveKit container, so the clean-up step below
       # removes only its own (web/e2e/voice-world.ts reads it).
@@ -639,17 +640,11 @@ jobs:
       # --with-deps installs the system libraries Chromium needs, with sudo,
       # which the runner has. Locally, `npx playwright install chromium` alone.
       - name: browser
-        if: runner.environment == 'github-hosted'
         working-directory: web
         run: npx playwright install --with-deps chromium
-      # The self-hosted runner has Chromium's system libraries and no sudo.
-      - name: browser (self-hosted)
-        if: runner.environment == 'self-hosted'
-        working-directory: web
-        run: npx playwright install chromium
 
       - name: web-e2e
-        run: make web-e2e E2E_ARGS=--shard=${{ matrix.shard }}/2
+        run: make web-e2e E2E_ARGS=--shard=${{ matrix.shard }}/3
 
       # The spec removes its own container on every path; this is for the case
       # where the runner killed it. Only the container of this run.
