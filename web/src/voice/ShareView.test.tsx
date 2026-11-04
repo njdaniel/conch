@@ -91,7 +91,7 @@ const session: VoiceSessionResult = {
 const granted: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:00.000Z', audio: true } };
 const busy: ShareClaimResult = { ok: false, failure: 'invalid', status: 409, code: 'voice_share_busy' };
 
-const presence = (sharing: number | null, audio = false): VoicePresenceV1 => ({
+const presence = (sharing: number | null, audio = false, cameras: readonly number[] = []): VoicePresenceV1 => ({
   schema: 'conch.voice_presence.v1',
   channel_id: 1,
   configured: true,
@@ -104,6 +104,7 @@ const presence = (sharing: number | null, audio = false): VoicePresenceV1 => ({
         transmitting: false,
         joined_at: '2026-10-16T00:00:00.000Z',
         ...(id === sharing ? { sharing: true, ...(audio ? { sharing_audio: true } : {}) } : {}),
+        ...(cameras.includes(id) ? { camera: true } : {}),
       })),
     },
   ],
@@ -274,6 +275,45 @@ describe('watching', () => {
     frame.requestFullscreen = requested;
     fireEvent.click(within(view).getByRole('button', { name: 'Full screen' }));
     expect(requested).toHaveBeenCalledTimes(1);
+  });
+
+  // The call view beside it (ADR-015, design §7.4): the share is the main
+  // picture, then a strip item when a camera is enlarged, and its controls
+  // and sound go with it. It is the same view throughout, never attached again.
+  it('keeps its sound, volume and mute when the call view opens around it and a camera takes its place', async () => {
+    const t = await watching();
+    const view = await screen.findByRole('region', { name: 'Shared screen' });
+    const audio = t.rooms[0]?.sink?.audio;
+    const video = t.rooms[0]?.sink?.video;
+    fireEvent.change(within(view).getByLabelText('Share volume'), { target: { value: '0.4' } });
+    fireEvent.click(within(view).getByRole('button', { name: 'Mute share' }));
+    const attach = vi.spyOn(t.client, 'attachShare');
+    t.seen(presence(8, true, [8]));
+    act(() => {
+      t.client.viewVideo(true);
+    });
+    const call = screen.getByRole('region', { name: 'Video call' });
+    expect(within(call).getByRole('region', { name: 'Shared screen' })).toBe(view);
+    expect(view.closest('li')?.className).toBe('call-share main');
+    fireEvent.click(within(call).getByRole('button', { name: "Enlarge bea's video" }));
+    expect(view.closest('li')?.className).toBe('call-share in-strip');
+    // Its controls are still its own, in the strip.
+    expect(within(view).getByRole('button', { name: 'Unmute share' })).toBeTruthy();
+    expect(within(view).getByLabelText<HTMLInputElement>('Share volume').value).toBe('0.4');
+    expect(within(view).getByRole('button', { name: 'Full screen' })).toBeTruthy();
+    fireEvent.click(within(call).getByRole('button', { name: 'Back to the share' }));
+    expect(view.closest('li')?.className).toBe('call-share main');
+    act(() => {
+      t.client.viewVideo(false);
+    });
+    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Shared screen' })).toBe(view);
+    expect(attach).not.toHaveBeenCalled();
+    expect(t.rooms[0]?.sink?.audio).toBe(audio);
+    expect(t.rooms[0]?.sink?.video).toBe(video);
+    expect(video?.isConnected).toBe(true);
+    expect(audio?.volume).toBeCloseTo(0.4);
+    expect(audio?.muted).toBe(true);
   });
 
   it('closes when the share ends, and on Stop watching', async () => {

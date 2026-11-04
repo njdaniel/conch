@@ -3,12 +3,12 @@
 // (S5), "Show video (n)", the roster's "camera", Voice options' words, and
 // the call view's tiles and grid. Driven by a fake VoiceControl: no SDK, no
 // network, no camera.
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VoicePresenceV1 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
 import { cameraOffForYou, watchOnlyCamera, type CameraState } from './camera';
-import { CallView } from './CallView';
+import { CallView, saidFor, type Tile } from './CallView';
 import { CameraTest, previewNote } from './CameraTest';
 import { initialVoice, VoiceClient, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
@@ -18,7 +18,7 @@ import { VoicePanel } from './VoicePanel';
 
 const chrome: ShareFeatures = { canShare: true, chromium: true, platform: 'linux' };
 
-const roomWith = (cameras: readonly number[]): VoicePresenceV1 => ({
+const roomWith = (cameras: readonly number[], sharer: number | null = null): VoicePresenceV1 => ({
   schema: 'conch.voice_presence.v1',
   channel_id: 1,
   configured: true,
@@ -26,10 +26,16 @@ const roomWith = (cameras: readonly number[]): VoicePresenceV1 => ({
   rooms: [
     {
       participants: [
-        { principal_id: 8, can_publish: true, transmitting: false, joined_at: '2026-11-03T10:00:01.000Z', ...(cameras.includes(8) ? { camera: true } : {}) },
-        { principal_id: 7, can_publish: true, transmitting: false, joined_at: '2026-11-03T10:00:00.000Z', ...(cameras.includes(7) ? { camera: true } : {}) },
-        { principal_id: 9, can_publish: true, transmitting: false, joined_at: '2026-11-03T10:00:02.000Z', ...(cameras.includes(9) ? { camera: true } : {}) },
-      ],
+        { principal_id: 8, joined_at: '2026-11-03T10:00:01.000Z' },
+        { principal_id: 7, joined_at: '2026-11-03T10:00:00.000Z' },
+        { principal_id: 9, joined_at: '2026-11-03T10:00:02.000Z' },
+      ].map((p) => ({
+        ...p,
+        can_publish: true,
+        transmitting: false,
+        ...(cameras.includes(p.principal_id) ? { camera: true } : {}),
+        ...(sharer === p.principal_id ? { sharing: true } : {}),
+      })),
     },
   ],
 });
@@ -74,12 +80,12 @@ function newClient(): VoiceClient {
 
 const inVoice = (patch: Partial<VoiceState> = {}): VoiceState => ({ ...initialVoice, mode: 'ptt', phase: 'connected', channel: 'general', ...patch });
 
-function panel(state: VoiceState, { cameras = [] as readonly number[], allowed = true } = {}) {
+function panel(state: VoiceState, { cameras = [] as readonly number[], allowed = true, sharer = null as number | null } = {}) {
   const client = newClient();
-  const snapshot: Snapshot = { kind: 'presence', presence: roomWith(cameras) };
+  const snapshot: Snapshot = { kind: 'presence', presence: roomWith(cameras, sharer) };
   const { rerender } = render(<VoicePanel voice={control(state, snapshot, client)} viewer={7} people={people} viewed="general" cameraAllowed={allowed} onOpen={() => undefined} />);
   const redraw = (next: VoiceState, nextCameras: readonly number[] = cameras) => {
-    rerender(<VoicePanel voice={control(next, { kind: 'presence', presence: roomWith(nextCameras) }, client)} viewer={7} people={people} viewed="general" cameraAllowed={allowed} onOpen={() => undefined} />);
+    rerender(<VoicePanel voice={control(next, { kind: 'presence', presence: roomWith(nextCameras, sharer) }, client)} viewer={7} people={people} viewed="general" cameraAllowed={allowed} onOpen={() => undefined} />);
   };
   return { client, redraw, voice: screen.getByRole('region', { name: 'Voice' }) };
 }
@@ -222,11 +228,323 @@ describe('the call view', () => {
     const client = newClient();
     const attach = vi.spyOn(client, 'attachCamera');
     const tiles = [{ principal: 8, name: 'member-1', me: false, camera: true }];
-    const { unmount } = render(<CallView client={client} state={inVoice({ viewing: true })} tiles={tiles} hidden={0} />);
+    const { unmount } = render(<CallView client={client} state={inVoice({ viewing: true })} tiles={tiles} hidden={0} open share={null} />);
     expect(attach.mock.calls[0]?.[0]).toBe(8);
     expect(attach.mock.calls[0]?.[1]).toBeInstanceOf(HTMLVideoElement);
     unmount();
     expect(attach.mock.calls.at(-1)).toEqual([8, null]);
+  });
+});
+
+// Small groups (C6b, design §7.4, §7.7): the CallView alone, its tiles given.
+const tile = (principal: number, name: string, camera = true, me = false): Tile => ({ principal, name, me, camera });
+const threeTiles = [tile(8, 'member-1'), tile(9, 'member-2', false), tile(7, 'You', true, true)];
+
+function callOf(tiles: readonly Tile[], patch: Partial<VoiceState> = {}) {
+  const client = newClient();
+  const draw = (t: readonly Tile[], p: Partial<VoiceState>, open: boolean) => <CallView client={client} state={inVoice({ viewing: open, ...p })} tiles={t} hidden={0} open={open} share={null} />;
+  const { rerender } = render(draw(tiles, patch, true));
+  const redraw = (t: readonly Tile[], p: Partial<VoiceState> = patch, open = true) => {
+    rerender(draw(t, p, open));
+  };
+  return { client, redraw };
+}
+
+const callRegion = () => screen.getByRole('region', { name: 'Video call' });
+const itemOf = (name: string): HTMLElement => {
+  const li = within(callRegion())
+    .getAllByRole('listitem')
+    .find((x) => x.querySelector('figcaption')?.textContent === name);
+  if (li === undefined) throw new Error(`no tile for ${name}`);
+  return li;
+};
+const captions = () => within(callRegion()).getAllByRole('listitem').map((li) => li.querySelector('figcaption')?.textContent ?? 'share');
+const listClass = () => callRegion().querySelector('ul')?.className;
+const said = () => within(callRegion()).getByRole('status').textContent;
+
+describe('the call view in a small group', () => {
+  it('a speaking person gets a ring and the word "speaking"; the order and the focus stay where they were', () => {
+    const { redraw } = callOf(threeTiles);
+    const enlarge = within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" });
+    enlarge.focus();
+    expect(callRegion().textContent).not.toContain('speaking');
+    redraw(threeTiles, { speaking: new Set([9]) });
+    expect(itemOf('member-2').classList.contains('speaking')).toBe(true);
+    expect(within(itemOf('member-2')).getByText('speaking')).toBeTruthy();
+    expect(itemOf('member-1').classList.contains('speaking')).toBe(false);
+    expect(captions()).toEqual(['member-1', 'member-2', 'You']);
+    redraw(threeTiles, { speaking: new Set([7, 8]) });
+    expect(within(itemOf('You')).getByText('speaking')).toBeTruthy();
+    expect(within(itemOf('member-1')).getByText('speaking')).toBeTruthy();
+    expect(within(itemOf('member-2')).queryByText('speaking')).toBeNull();
+    expect(captions()).toEqual(['member-1', 'member-2', 'You']);
+    expect(document.activeElement).toBe(enlarge);
+  });
+
+  it('only a tile with a camera is a button, the self-view included: a "Camera off" tile enlarges nothing', () => {
+    callOf(threeTiles);
+    const names = within(callRegion())
+      .getAllByRole('button')
+      .map((b) => b.getAttribute('aria-label') ?? b.textContent);
+    expect(names.filter((n) => n.startsWith('Enlarge'))).toEqual(["Enlarge member-1's video", 'Enlarge your video']);
+    expect(within(itemOf('member-2')).queryByRole('button')).toBeNull();
+    // The video keeps its own label, and the name is visible text.
+    expect(within(itemOf('member-1')).getByLabelText("member-1's camera")).toBeInstanceOf(HTMLVideoElement);
+    expect(within(itemOf('member-1')).getByText('member-1').tagName).toBe('FIGCAPTION');
+  });
+
+  it('a click enlarges a tile, the rest go in a strip, and focus moves to it; Escape returns, focus on the tile it came from', () => {
+    callOf(threeTiles);
+    expect(listClass()).toBe('call-grid cols-2 rows-2');
+    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+    expect(listClass()).toBe('call-grid focus');
+    expect(itemOf('member-1').classList.contains('main')).toBe(true);
+    expect(itemOf('member-2').classList.contains('in-strip')).toBe(true);
+    expect(itemOf('You').classList.contains('in-strip')).toBe(true);
+    // The order is the same: only the classes change.
+    expect(captions()).toEqual(['member-1', 'member-2', 'You']);
+    // In words, and focus on the enlarged tile.
+    expect(callRegion().textContent).toContain("member-1's video is enlarged");
+    expect(document.activeElement?.getAttribute('aria-label')).toBe("member-1's video is enlarged");
+    // The enlarged tile is no button now; the self-view in the strip still is.
+    expect(within(callRegion()).queryByRole('button', { name: "Enlarge member-1's video" })).toBeNull();
+    expect(within(callRegion()).getByRole('button', { name: 'Enlarge your video' })).toBeTruthy();
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape', code: 'Escape' });
+    expect(listClass()).toBe('call-grid cols-2 rows-2');
+    expect(callRegion().textContent).not.toContain('enlarged');
+    expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+  });
+
+  it('"Back to grid" returns too; a tile in the strip is enlarged in place of the other, and focus goes back to it', () => {
+    callOf(threeTiles);
+    expect(within(callRegion()).queryByRole('button', { name: 'Back to grid' })).toBeNull();
+    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+    fireEvent.click(within(callRegion()).getByRole('button', { name: 'Enlarge your video' }));
+    expect(itemOf('You').classList.contains('main')).toBe(true);
+    expect(itemOf('member-1').classList.contains('in-strip')).toBe(true);
+    expect(document.activeElement?.getAttribute('aria-label')).toBe('Your video is enlarged');
+    fireEvent.click(within(callRegion()).getByRole('button', { name: 'Back to grid' }));
+    expect(listClass()).toBe('call-grid cols-2 rows-2');
+    expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: 'Enlarge your video' }));
+  });
+
+  it('the enlarged tile has Full screen, as the share has, on the tile alone', () => {
+    callOf(threeTiles);
+    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+    Object.defineProperty(document, 'fullscreenEnabled', { value: true, configurable: true });
+    const frame = itemOf('member-1').querySelector('figure');
+    if (frame === null) throw new Error('no frame');
+    const requested = vi.fn(() => Promise.resolve());
+    frame.requestFullscreen = requested;
+    // Only the enlarged tile has it.
+    expect(within(callRegion()).getAllByRole('button', { name: 'Full screen' })).toHaveLength(1);
+    fireEvent.click(within(itemOf('member-1')).getByRole('button', { name: 'Full screen' }));
+    expect(requested).toHaveBeenCalledTimes(1);
+  });
+
+  it("Escape inside full screen is the browser's, to leave full screen: the tile stays enlarged", () => {
+    callOf(threeTiles);
+    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+    const frame = itemOf('member-1').querySelector('figure');
+    Object.defineProperty(document, 'fullscreenElement', { value: frame, configurable: true });
+    try {
+      fireEvent(document, new Event('fullscreenchange'));
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape', code: 'Escape' });
+      expect(listClass()).toBe('call-grid focus');
+    } finally {
+      Object.defineProperty(document, 'fullscreenElement', { value: null, configurable: true });
+    }
+    // Leaving full screen drops focus; it comes back to Full screen, and the
+    // next Escape returns to the grid.
+    (document.activeElement as HTMLElement | null)?.blur();
+    fireEvent(document, new Event('fullscreenchange'));
+    expect(document.activeElement).toBe(within(itemOf('member-1')).getByRole('button', { name: 'Full screen' }));
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape', code: 'Escape' });
+    expect(listClass()).toBe('call-grid cols-2 rows-2');
+  });
+
+  it("the enlarged person's camera going returns to the grid: focus to Hide video, and the live region says why", () => {
+    const { redraw } = callOf(threeTiles);
+    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+    redraw([tile(8, 'member-1', false), tile(9, 'member-2', false), tile(7, 'You', true, true)]);
+    expect(listClass()).toBe('call-grid cols-2 rows-2');
+    expect(within(itemOf('member-1')).getByText('Camera off')).toBeTruthy();
+    expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: 'Hide video' }));
+    expect(said()).toBe("member-1's camera is off");
+  });
+
+  it('the enlarged person leaving returns to the grid too; focus that was elsewhere stays there', () => {
+    const { redraw } = callOf(threeTiles);
+    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+    redraw([tile(9, 'member-2', false), tile(7, 'You', true, true)]);
+    expect(listClass()).toBe('call-grid cols-2 rows-1');
+    expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: 'Hide video' }));
+    // Someone typing elsewhere keeps their place.
+    const outside = document.createElement('input');
+    document.body.append(outside);
+    try {
+      redraw([tile(8, 'member-1'), tile(9, 'member-2', false), tile(7, 'You', true, true)]);
+      fireEvent.click(within(callRegion()).getByRole('button', { name: 'Enlarge your video' }));
+      outside.focus();
+      redraw([tile(8, 'member-1'), tile(9, 'member-2', false), tile(7, 'You', false, true)]);
+      expect(listClass()).toBe('call-grid cols-2 rows-2');
+      expect(document.activeElement).toBe(outside);
+    } finally {
+      outside.remove();
+    }
+  });
+
+  it("the live region says someone else's camera starting and stopping, never the person's own", () => {
+    const off = [tile(8, 'member-1', false), tile(9, 'member-2', false), tile(7, 'You', false, true)];
+    const { redraw } = callOf(off);
+    expect(said()).toBe('');
+    redraw([tile(8, 'member-1'), tile(9, 'member-2', false), tile(7, 'You', false, true)]);
+    expect(said()).toBe("member-1's camera is on");
+    // The person's own camera is CameraNote's, said once.
+    redraw([tile(8, 'member-1'), tile(9, 'member-2', false), tile(7, 'You', true, true)]);
+    expect(said()).toBe("member-1's camera is on");
+    redraw([tile(8, 'member-1', false), tile(9, 'member-2'), tile(7, 'You', true, true)]);
+    expect(said()).toBe("member-2's camera is on. member-1's camera is off");
+  });
+
+  it('the live region lets go of what it said after a while, so it is not read again as new', () => {
+    vi.useFakeTimers();
+    try {
+      const { redraw } = callOf([tile(8, 'member-1', false), tile(7, 'You', false, true)]);
+      redraw([tile(8, 'member-1'), tile(7, 'You', false, true)]);
+      expect(said()).toBe("member-1's camera is on");
+      act(() => {
+        vi.advanceTimersByTime(saidFor - 1);
+      });
+      expect(said()).toBe("member-1's camera is on");
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(said()).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the enlarged camera going while it is full screen: it leaves full screen, and focus goes to Hide video once it has', () => {
+    const { redraw } = callOf(threeTiles);
+    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+    const frame = itemOf('member-1').querySelector('figure');
+    const exit = vi.fn(() => Promise.resolve());
+    Object.defineProperty(document, 'exitFullscreen', { value: exit, configurable: true });
+    Object.defineProperty(document, 'fullscreenElement', { value: frame, configurable: true });
+    try {
+      fireEvent(document, new Event('fullscreenchange'));
+      redraw([tile(8, 'member-1', false), tile(9, 'member-2', false), tile(7, 'You', true, true)]);
+      expect(exit).toHaveBeenCalledTimes(1);
+      expect(listClass()).toBe('call-grid cols-2 rows-2');
+      const hide = within(callRegion()).getByRole('button', { name: 'Hide video' });
+      expect(document.activeElement).not.toBe(hide);
+      // The browser leaves full screen, dropping focus; then it moves.
+      Object.defineProperty(document, 'fullscreenElement', { value: null, configurable: true });
+      (document.activeElement as HTMLElement | null)?.blur();
+      fireEvent(document, new Event('fullscreenchange'));
+      expect(document.activeElement).toBe(hide);
+      expect(said()).toBe("member-1's camera is off");
+    } finally {
+      Object.defineProperty(document, 'fullscreenElement', { value: null, configurable: true });
+      Reflect.deleteProperty(document, 'exitFullscreen');
+    }
+  });
+
+  it('says nothing while the view is closed, nor for the cameras already on when it opens', () => {
+    const { redraw } = panel(inVoice());
+    redraw(inVoice(), [8]);
+    redraw(inVoice(), [8, 9]);
+    expect(screen.queryByText(/camera is (on|off)/)).toBeNull();
+    redraw(inVoice({ viewing: true }), [8, 9]);
+    expect(said()).toBe('');
+    redraw(inVoice({ viewing: true }), [8]);
+    expect(said()).toBe("member-2's camera is off");
+    // Closed again: nothing.
+    redraw(inVoice(), [8, 9]);
+    expect(screen.queryByText(/camera is (on|off)/)).toBeNull();
+  });
+
+  it('with a share watched and the view closed, changes to cameras are not said', () => {
+    const { redraw } = panel(inVoice({ watching: true }), { sharer: 9 });
+    expect(screen.getByRole('region', { name: 'Shared screen' })).toBeTruthy();
+    redraw(inVoice({ watching: true }), [8]);
+    redraw(inVoice({ watching: true }), []);
+    expect(screen.queryByText(/camera is (on|off)/)).toBeNull();
+  });
+});
+
+describe('the call view beside a watched share', () => {
+  const shareRegion = () => within(callRegion()).getByRole('region', { name: 'Shared screen' });
+  const shareControls = (view: HTMLElement) => {
+    expect(within(view).getByRole('button', { name: 'Mute share' })).toBeTruthy();
+    expect(within(view).getByLabelText('Share volume')).toBeTruthy();
+    expect(within(view).getByRole('button', { name: 'Full screen' })).toBeTruthy();
+    expect(within(view).getByRole('button', { name: 'Stop watching' })).toBeTruthy();
+  };
+
+  it('the share is the main picture and the cameras are the strip; enlarging a camera swaps them; the share keeps its controls', () => {
+    panel(inVoice({ viewing: true, watching: true, cameraTrack: 'published' }), { cameras: [8], sharer: 9 });
+    const share = shareRegion();
+    expect(listClass()).toBe('call-grid focus');
+    expect(share.closest('li')?.className).toBe('call-share main');
+    expect(share.textContent).toContain('member-2 is sharing');
+    expect(captions()).toEqual(['share', 'member-1', 'member-2', 'You']);
+    for (const name of ['member-1', 'member-2', 'You']) expect(itemOf(name).classList.contains('in-strip')).toBe(true);
+    shareControls(share);
+    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+    expect(itemOf('member-1').classList.contains('main')).toBe(true);
+    // The same share, moved into the strip: not drawn again.
+    expect(shareRegion()).toBe(share);
+    expect(share.closest('li')?.className).toBe('call-share in-strip');
+    shareControls(share);
+    fireEvent.click(within(callRegion()).getByRole('button', { name: 'Back to the share' }));
+    expect(share.closest('li')?.className).toBe('call-share main');
+    expect(itemOf('member-1').classList.contains('in-strip')).toBe(true);
+    expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+  });
+
+  it('Stop watching with a camera enlarged and the share in the strip leaves the grid too, focus on the tile that was enlarged', () => {
+    const { client, redraw } = panel(inVoice({ viewing: true, watching: true }), { cameras: [8], sharer: 9 });
+    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+    expect(itemOf('member-1').classList.contains('main')).toBe(true);
+    const watch = vi.spyOn(client, 'watch').mockReturnValue(undefined);
+    const stop = within(shareRegion()).getByRole('button', { name: 'Stop watching' });
+    stop.focus();
+    fireEvent.click(stop);
+    expect(watch).toHaveBeenCalledWith(false);
+    redraw(inVoice({ viewing: true, watching: false }));
+    expect(within(callRegion()).queryByRole('region', { name: 'Shared screen' })).toBeNull();
+    expect(listClass()).toBe('call-grid cols-2 rows-2');
+    expect(callRegion().textContent).not.toContain('enlarged');
+    expect(within(callRegion()).queryByRole('button', { name: /^Back to/ })).toBeNull();
+    expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+  });
+
+  it('Stop watching takes the share away and leaves the grid', () => {
+    const { client, redraw } = panel(inVoice({ viewing: true, watching: true }), { cameras: [8], sharer: 9 });
+    const watch = vi.spyOn(client, 'watch').mockReturnValue(undefined);
+    fireEvent.click(within(shareRegion()).getByRole('button', { name: 'Stop watching' }));
+    expect(watch).toHaveBeenCalledWith(false);
+    redraw(inVoice({ viewing: true, watching: false }));
+    expect(within(callRegion()).queryByRole('region', { name: 'Shared screen' })).toBeNull();
+    expect(listClass()).toBe('call-grid cols-2 rows-2');
+    expect(captions()).toEqual(['member-1', 'member-2', 'You']);
+  });
+
+  it('opening and closing the call view never draws the share again: alone while the view is closed, as before', () => {
+    const { redraw } = panel(inVoice({ watching: true }), { cameras: [8], sharer: 9 });
+    const share = screen.getByRole('region', { name: 'Shared screen' });
+    expect(screen.queryByRole('region', { name: 'Video call' })).toBeNull();
+    // The wrappers holding its place say nothing.
+    expect(share.closest('ul')?.getAttribute('role')).toBe('none');
+    expect(share.closest('li')?.getAttribute('role')).toBe('none');
+    redraw(inVoice({ watching: true, viewing: true }));
+    expect(shareRegion()).toBe(share);
+    expect(share.closest('ul')?.getAttribute('role')).toBeNull();
+    redraw(inVoice({ watching: true }));
+    expect(screen.getByRole('region', { name: 'Shared screen' })).toBe(share);
   });
 });
 
