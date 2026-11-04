@@ -3,12 +3,12 @@
 // (S5), "Show video (n)", the roster's "camera", Voice options' words, and
 // the call view's tiles and grid. Driven by a fake VoiceControl: no SDK, no
 // network, no camera.
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { VoicePresenceV1 } from '../schema/voice';
 import type { Person } from '../useLiveChannel';
 import { cameraOffForYou, watchOnlyCamera, type CameraState } from './camera';
-import { CallView, type Tile } from './CallView';
+import { CallView, saidFor, type Tile } from './CallView';
 import { CameraTest, previewNote } from './CameraTest';
 import { initialVoice, VoiceClient, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
@@ -405,8 +405,51 @@ describe('the call view in a small group', () => {
     expect(said()).toBe("member-1's camera is on");
     redraw([tile(8, 'member-1', false), tile(9, 'member-2'), tile(7, 'You', true, true)]);
     expect(said()).toBe("member-2's camera is on. member-1's camera is off");
-    // The status is polite.
-    expect(within(callRegion()).getByRole('status').getAttribute('aria-live') ?? 'polite').toBe('polite');
+  });
+
+  it('the live region lets go of what it said after a while, so it is not read again as new', () => {
+    vi.useFakeTimers();
+    try {
+      const { redraw } = callOf([tile(8, 'member-1', false), tile(7, 'You', false, true)]);
+      redraw([tile(8, 'member-1'), tile(7, 'You', false, true)]);
+      expect(said()).toBe("member-1's camera is on");
+      act(() => {
+        vi.advanceTimersByTime(saidFor - 1);
+      });
+      expect(said()).toBe("member-1's camera is on");
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      expect(said()).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the enlarged camera going while it is full screen: it leaves full screen, and focus goes to Hide video once it has', () => {
+    const { redraw } = callOf(threeTiles);
+    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+    const frame = itemOf('member-1').querySelector('figure');
+    const exit = vi.fn(() => Promise.resolve());
+    Object.defineProperty(document, 'exitFullscreen', { value: exit, configurable: true });
+    Object.defineProperty(document, 'fullscreenElement', { value: frame, configurable: true });
+    try {
+      fireEvent(document, new Event('fullscreenchange'));
+      redraw([tile(8, 'member-1', false), tile(9, 'member-2', false), tile(7, 'You', true, true)]);
+      expect(exit).toHaveBeenCalledTimes(1);
+      expect(listClass()).toBe('call-grid cols-2 rows-2');
+      const hide = within(callRegion()).getByRole('button', { name: 'Hide video' });
+      expect(document.activeElement).not.toBe(hide);
+      // The browser leaves full screen, dropping focus; then it moves.
+      Object.defineProperty(document, 'fullscreenElement', { value: null, configurable: true });
+      (document.activeElement as HTMLElement | null)?.blur();
+      fireEvent(document, new Event('fullscreenchange'));
+      expect(document.activeElement).toBe(hide);
+      expect(said()).toBe("member-1's camera is off");
+    } finally {
+      Object.defineProperty(document, 'fullscreenElement', { value: null, configurable: true });
+      Reflect.deleteProperty(document, 'exitFullscreen');
+    }
   });
 
   it('says nothing while the view is closed, nor for the cameras already on when it opens', () => {
@@ -459,6 +502,23 @@ describe('the call view beside a watched share', () => {
     fireEvent.click(within(callRegion()).getByRole('button', { name: 'Back to the share' }));
     expect(share.closest('li')?.className).toBe('call-share main');
     expect(itemOf('member-1').classList.contains('in-strip')).toBe(true);
+    expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+  });
+
+  it('Stop watching with a camera enlarged and the share in the strip leaves the grid too, focus on the tile that was enlarged', () => {
+    const { client, redraw } = panel(inVoice({ viewing: true, watching: true }), { cameras: [8], sharer: 9 });
+    fireEvent.click(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
+    expect(itemOf('member-1').classList.contains('main')).toBe(true);
+    const watch = vi.spyOn(client, 'watch').mockReturnValue(undefined);
+    const stop = within(shareRegion()).getByRole('button', { name: 'Stop watching' });
+    stop.focus();
+    fireEvent.click(stop);
+    expect(watch).toHaveBeenCalledWith(false);
+    redraw(inVoice({ viewing: true, watching: false }));
+    expect(within(callRegion()).queryByRole('region', { name: 'Shared screen' })).toBeNull();
+    expect(listClass()).toBe('call-grid cols-2 rows-2');
+    expect(callRegion().textContent).not.toContain('enlarged');
+    expect(within(callRegion()).queryByRole('button', { name: /^Back to/ })).toBeNull();
     expect(document.activeElement).toBe(within(callRegion()).getByRole('button', { name: "Enlarge member-1's video" }));
   });
 

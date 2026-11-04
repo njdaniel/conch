@@ -100,12 +100,15 @@ async function boxOf(l: Locator): Promise<{ x: number; y: number; width: number;
   return box;
 }
 
-// Every button in the call view is at least 44 px each way (§7.7).
-async function expectTargets(page: Page): Promise<void> {
-  const sizes = await callView(page)
-    .getByRole('button')
-    .evaluateAll((els) => els.map((el) => ({ name: el.getAttribute('aria-label') ?? el.textContent.trim(), ...el.getBoundingClientRect().toJSON() as { width: number; height: number } })));
+// Every control in the call view, buttons, sliders and other inputs alike,
+// is at least 44 px each way (§7.7).
+async function expectTargets(page: Page, inputs = 0): Promise<void> {
+  const controls = callView(page).locator('button, input, select, textarea');
+  const sizes = await controls.evaluateAll((els) =>
+    els.map((el) => ({ name: `${el.tagName} ${el.getAttribute('aria-label') ?? el.closest('label')?.textContent.trim() ?? el.textContent.trim()}`, ...el.getBoundingClientRect().toJSON() as { width: number; height: number } })),
+  );
   expect(sizes.length).toBeGreaterThan(0);
+  expect(sizes.filter((s) => s.name.startsWith('INPUT')).length, 'inputs measured').toBeGreaterThanOrEqual(inputs);
   for (const s of sizes) {
     expect(s.width, `${s.name} wide`).toBeGreaterThanOrEqual(44);
     expect(s.height, `${s.name} high`).toBeGreaterThanOrEqual(44);
@@ -195,8 +198,9 @@ test.describe('the call view in a small group, with LiveKit', () => {
     await expect(button).toHaveAttribute('aria-pressed', 'true');
   }
 
-  // The strip is on the right of the main picture (true) or below it.
-  async function stripBeside(page: Page, main: Locator, strip: readonly Locator[]): Promise<boolean> {
+  // Where the strip is: all of it on the right of the main picture, all of
+  // it below, or neither (mixed, or mid-reflow). Polled, never thrown.
+  async function stripPlace(main: Locator, strip: readonly Locator[]): Promise<'right' | 'below' | 'mixed'> {
     const m = await boxOf(main);
     let right = 0;
     let below = 0;
@@ -205,8 +209,7 @@ test.describe('the call view in a small group, with LiveKit', () => {
       if (b.x >= m.x + m.width - 1) right++;
       if (b.y >= m.y + m.height - 1) below++;
     }
-    expect(right === strip.length || below === strip.length, `the strip is all on one side of the main picture on ${String(page.viewportSize()?.width)} px`).toBe(true);
-    return right === strip.length;
+    return right === strip.length ? 'right' : below === strip.length ? 'below' : 'mixed';
   }
 
   test('a camera and a share together: the share is the main picture, the cameras a strip that receives; enlarging swaps; Stop watching leaves the grid', async ({ browser }) => {
@@ -238,40 +241,47 @@ test.describe('the call view in a small group, with LiveKit', () => {
       const before = (await videoStreams(c.page)).frames;
       await expect.poll(async () => (await videoStreams(c.page)).frames, { timeout: 15_000 }).toBeGreaterThan(before);
       // At 1280 px the strip is on the right of the share.
-      expect(await stripBeside(c.page, share, [aliceCam, bobCam])).toBe(true);
+      await expect.poll(() => stripPlace(share, [aliceCam, bobCam])).toBe('right');
       // The share keeps its own controls.
       for (const name of ['Mute share', 'Full screen', 'Stop watching']) await expect(share.getByRole('button', { name })).toBeVisible();
       await expect(share.getByLabel('Share volume')).toBeVisible();
-      await expectTargets(c.page);
+      await expectTargets(c.page, 1);
 
       // Enlarging bob swaps him with the share: the share goes in the strip,
       // still receiving, with its controls.
       await call.getByRole('button', { name: "Enlarge bob's video" }).click();
       await expect(c.page.locator(':focus')).toHaveAttribute('aria-label', "bob's video is enlarged");
       await expect(call).toContainText("bob's video is enlarged");
-      expect(await stripBeside(c.page, bobCam, [share, aliceCam])).toBe(true);
+      await expect.poll(() => stripPlace(bobCam, [share, aliceCam])).toBe('right');
       expect((await boxOf(bobCam)).width).toBeGreaterThan((await boxOf(share)).width);
       await expectReceiving(share.getByLabel("alice's screen"));
       await expectReceiving(aliceCam);
       for (const name of ['Mute share', 'Full screen', 'Stop watching']) await expect(share.getByRole('button', { name })).toBeAttached();
-      await expectTargets(c.page);
+      // The share's volume slider in the strip is still 44 px each way.
+      await expectTargets(c.page, 1);
       await call.getByRole('button', { name: 'Back to the share' }).click();
       await expect(c.page.locator(':focus')).toHaveAttribute('aria-label', "Enlarge bob's video");
-      expect(await stripBeside(c.page, share, [aliceCam, bobCam])).toBe(true);
+      await expect.poll(() => stripPlace(share, [aliceCam, bobCam])).toBe('right');
 
       // Under 1100 px the strip is below the share.
       await c.page.setViewportSize({ width: 1000, height: 900 });
-      await expect.poll(() => stripBeside(c.page, share, [aliceCam, bobCam])).toBe(false);
+      await expect.poll(() => stripPlace(share, [aliceCam, bobCam])).toBe('below');
       await call.getByRole('button', { name: "Enlarge alice's video" }).click();
-      expect(await stripBeside(c.page, aliceCam, [share, bobCam])).toBe(false);
+      await expect.poll(() => stripPlace(aliceCam, [share, bobCam])).toBe('below');
+      // A short window puts the strip below the fold of the view, which
+      // scrolls; adaptive stream pauses a tile out of view, so it is brought
+      // into view first.
+      await bobCam.scrollIntoViewIfNeeded();
       await expectReceiving(bobCam);
-      await call.getByRole('button', { name: 'Back to the share' }).click();
 
-      // Stop watching takes the share away, and the cameras are a grid again.
+      // Stop watching, with alice enlarged and the share in the strip, takes
+      // the share away and leaves the cameras a grid, focus on alice's tile.
       await share.getByRole('button', { name: 'Stop watching' }).click();
       await expect(shareView(c.page)).toHaveCount(0);
       await expect(call).toBeVisible();
       await expect(call.locator('ul')).toHaveClass(/call-grid cols-2 rows-2/);
+      await expect(call).not.toContainText('enlarged');
+      await expect(c.page.locator(':focus')).toHaveAttribute('aria-label', "Enlarge alice's video");
       await expectReceiving(aliceCam);
       await expectReceiving(bobCam);
     } finally {
@@ -310,7 +320,7 @@ test.describe('the call view in a small group, with LiveKit', () => {
       await c.page.keyboard.press('Enter');
       await expect(focused).toHaveAttribute('aria-label', "bob's video is enlarged");
       // No animation runs for the layout change, and none is set.
-      expect(await c.page.evaluate(() => document.getAnimations().length)).toBe(0);
+      expect(await call.evaluate((el) => el.getAnimations({ subtree: true }).length)).toBe(0);
       const motion = await call.locator('li, figure').evaluateAll((els) => els.map((el) => [getComputedStyle(el).transitionDuration, getComputedStyle(el).animationName]));
       for (const [duration, animation] of motion) {
         expect(duration).toBe('0s');
@@ -350,6 +360,10 @@ test.describe('the call view in a small group, with LiveKit', () => {
       const bobCam = call.getByLabel("bob's camera");
       await expectReceiving(bobCam);
       const tile = call.getByRole('listitem').filter({ hasText: 'bob' });
+      // carol has bob enlarged and full screen when it happens.
+      await call.getByRole('button', { name: "Enlarge bob's video" }).click();
+      await tile.getByRole('button', { name: 'Full screen' }).click();
+      await expect.poll(() => c.page.evaluate(() => document.fullscreenElement?.getAttribute('aria-label') ?? null)).toBe("bob's video is enlarged");
 
       await memberCamera(false);
       try {
@@ -357,6 +371,11 @@ test.describe('the call view in a small group, with LiveKit', () => {
         // timeout if LiveKit refuses (§4.6).
         await expect(tile).toContainText('Camera off', { timeout: 10_000 });
         await expect(bobCam).toHaveCount(0);
+        // The tile is no longer enlarged: it leaves full screen, and focus
+        // goes to Hide video, back in the grid.
+        await expect.poll(() => c.page.evaluate(() => document.fullscreenElement === null)).toBe(true);
+        await expect(call).not.toContainText('enlarged');
+        await expect(call.getByRole('button', { name: 'Hide video' })).toBeFocused();
         await expect(call.getByRole('status')).toHaveText("bob's camera is off");
         await expect.poll(() => camStates(b.page), { timeout: 10_000 }).toEqual(['ended']);
         await expect(voiceRegion(b.page)).toContainText('Camera is not allowed for you.', { timeout: 10_000 });

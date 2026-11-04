@@ -2645,8 +2645,11 @@ label {
   display: contents;
 }
 
-/* Every control in the view is 44px each way at least (§7.7). */
-.call-view button {
+/* Every control in the view is 44px each way at least (§7.7), the share's
+   volume slider included: its track is drawn in the middle of the box. */
+.call-view button,
+.call-view input,
+.call-view select {
   min-width: 2.75rem;
   min-height: 2.75rem;
 }
@@ -2785,7 +2788,6 @@ label {
 
 .call-share.in-strip .volume input {
   width: 100%;
-  min-width: 0;
 }
 
 .call-frame {
@@ -2811,10 +2813,9 @@ label {
 }
 
 /* The speaking person's tile: a ring, and the word (never colour alone). The
-   ring is outside the frame, apart from the focus ring inside it. */
+   ring is a shadow outside the frame, so the focus outline shows with it. */
 .call-tile.speaking .call-frame {
-  outline: 3px solid var(--accent);
-  outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 5px var(--accent);
 }
 
 .call-speaking {
@@ -2843,7 +2844,7 @@ label {
 }
 
 .call-view .call-enlarge:hover:not(:disabled) {
-  background: rgb(255 255 255 / 0.06);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
 }
 
 .call-enlarge:focus-visible,

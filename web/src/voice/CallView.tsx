@@ -78,9 +78,17 @@ export const cameraOnWords = (name: string): string => `${name}'s camera is on`;
 export const cameraOffWords = (name: string): string => `${name}'s camera is off`;
 
 // Where focus goes once the view has drawn: the enlarged tile; the enlarge
-// button of the tile it came from; or Hide video, when the enlarged tile went
-// with focus in it.
-type FocusTo = { readonly kind: 'main' } | { readonly kind: 'tile'; readonly principal: number } | { readonly kind: 'gone'; readonly principal: number };
+// button of the tile it came from; Hide video, when the enlarged tile went
+// with focus in it; or the enlarge button of the tile that was enlarged,
+// when the share beside it went with focus in it.
+type FocusTo =
+  | { readonly kind: 'main' }
+  | { readonly kind: 'tile'; readonly principal: number }
+  | { readonly kind: 'gone'; readonly principal: number }
+  | { readonly kind: 'unshared'; readonly principal: number };
+
+// How long the live region keeps what it said.
+export const saidFor = 5000;
 
 // Others' cameras that are on, by principal, as one key that changes when
 // the set does.
@@ -129,7 +137,19 @@ export function CallView({ client, state, tiles, hidden, open, share }: {
   const items = useRef(new Map<number, HTMLLIElement>());
 
   const shown = !open ? [] : selfHidden ? tiles.filter((t) => !t.me) : tiles;
+  const watched = share !== null;
+  const [wasWatched, setWasWatched] = useState(watched);
   const main = enlarged === null ? null : (shown.find((t) => t.principal === enlarged && t.camera) ?? null);
+
+  // Stop watching leaves the grid, whatever was enlarged beside the share:
+  // focus, gone with the share's own button, goes back to that tile.
+  if (wasWatched !== watched) {
+    setWasWatched(watched);
+    if (!watched && enlarged !== null) {
+      setEnlarged(null);
+      setFocusTo({ kind: 'unshared', principal: enlarged });
+    }
+  }
 
   // Closing the view forgets it all; the next opening starts at the grid.
   if (!open) {
@@ -153,6 +173,22 @@ export function CallView({ client, state, tiles, hidden, open, share }: {
     }
   }
 
+  // A focus that waits for full screen to end: the browser drops focus as it
+  // leaves full screen, so focus moved before then would be lost.
+  const afterFull = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    const onChange = () => {
+      const then = afterFull.current;
+      if (then === null || document.fullscreenElement) return;
+      afterFull.current = null;
+      then();
+    };
+    document.addEventListener('fullscreenchange', onChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onChange);
+    };
+  }, []);
+
   useEffect(() => {
     if (focusTo === null) return;
     setFocusTo(null);
@@ -164,12 +200,30 @@ export function CallView({ client, state, tiles, hidden, open, share }: {
       (buttons.current.get(focusTo.principal) ?? hideButton.current)?.focus();
       return;
     }
-    // Only when focus went with the tile: someone typing elsewhere keeps
-    // their place.
+    // Only when focus went with the tile or the share: someone typing
+    // elsewhere keeps their place.
     const at = document.activeElement;
     const lost = at === null || at === document.body || (items.current.get(focusTo.principal)?.contains(at) ?? false);
-    if (lost) hideButton.current?.focus();
+    if (!lost) return;
+    const principal = focusTo.principal;
+    const move = focusTo.kind === 'gone' ? () => hideButton.current?.focus() : () => (buttons.current.get(principal) ?? hideButton.current)?.focus();
+    // The enlarged tile was full screen when its camera went: it leaves full
+    // screen (TileView), and focus moves once it has.
+    if (document.fullscreenElement) afterFull.current = move;
+    else move();
   }, [focusTo]);
+
+  // The live region's words go after a while, so that what it said last is
+  // not read again as if it were new.
+  useEffect(() => {
+    if (said === '') return;
+    const timer = window.setTimeout(() => {
+      setSaid('');
+    }, saidFor);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [said]);
 
   const enlarge = (t: Tile) => {
     setEnlarged(t.principal);
@@ -188,7 +242,6 @@ export function CallView({ client, state, tiles, hidden, open, share }: {
     back();
   };
 
-  const watched = share !== null;
   const focus = main !== null || (open && watched);
   const grid = gridOf(shown.length, narrow);
   const listClass = !open ? 'call-pass' : focus ? 'call-grid focus' : `call-grid cols-${String(grid.columns)} rows-${String(grid.rows)}`;
@@ -308,6 +361,7 @@ function TileView({ client, tile, arrived, speaking, main, frameRef, onEnlarge, 
   const fullButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!main) return;
+    const el = frame.current;
     let full = false;
     const onChange = () => {
       if (document.fullscreenElement === frame.current && frame.current !== null) {
@@ -322,6 +376,9 @@ function TileView({ client, tile, arrived, speaking, main, frameRef, onEnlarge, 
     document.addEventListener('fullscreenchange', onChange);
     return () => {
       document.removeEventListener('fullscreenchange', onChange);
+      // No longer enlarged (its camera went, or its person) while full
+      // screen: the browser would go on showing it. It leaves full screen.
+      if (el !== null && document.fullscreenElement === el) void document.exitFullscreen().catch(() => undefined);
     };
   }, [main]);
 
