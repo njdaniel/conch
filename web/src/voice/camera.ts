@@ -74,8 +74,9 @@ export interface CameraRoom {
   readonly adoptCamera: (kept: KeptCamera) => void;
   // The device the capture is on, or null while nothing is captured.
   readonly cameraInUse: () => string | null;
-  // Moves the capture to another camera, exactly; rejects, with nothing
-  // captured, if that camera cannot be had.
+  // Moves the capture to another camera, exactly. On the latest failure the
+  // capture is stopped, but its wrapper and publication stay held: switch it
+  // again, or call stopCamera.
   readonly switchCamera: (choice: string) => Promise<void>;
 }
 
@@ -441,7 +442,10 @@ export class CameraClient {
         await room.switchCamera(want);
       } catch {
         if (mine !== this.attempt) return false;
-        if (this.choice() !== want) continue;
+        if (this.choice() !== want) {
+          switched = null;
+          continue;
+        }
         await this.stopAndRelease('not_connected');
         return false;
       }
