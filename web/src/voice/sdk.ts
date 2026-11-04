@@ -1412,7 +1412,9 @@ class LiveKitAdapter implements Room {
         // still holds, may stop it: one overtaken while the browser was
         // asked leaves it to the later one.
         if (ours()) {
-          if (turn === this.switchTurn) await this.stopCamera();
+          // Keep the stopped wrapper for a newer choice to restart while the
+          // camera is starting; its caller stops and releases if none is left.
+          if (turn === this.switchTurn) track.stop();
         } else if (this.camera !== track) letGo();
         throw err;
       }

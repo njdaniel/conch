@@ -617,6 +617,7 @@ vi.mock('livekit-client', () => {
 
 import { cameraOptions, cameraPublishOptions, captureOptions, grantWait, newLiveKitRoom, principalOf, sdkLog, shareEncodings, wanted, type ShareLayer } from './sdk';
 import type { Room } from './connection';
+import { CameraClient } from './camera';
 import { Track } from 'livekit-client';
 
 // What the module did to the SDK's loggers when it loaded, before any test.
@@ -2372,6 +2373,45 @@ describe('the camera', () => {
     // Stopping it leaves nothing captured.
     await room.stopCamera();
     expect([...captures()].filter((m) => m.readyState === 'live')).toHaveLength(0);
+  });
+
+  it('a failed switch while starting follows the newer choice and publishes it', async () => {
+    const room = await connected();
+    state.permissions = { canPublish: true, canPublishSources: [] };
+    const choice = { id: 'cam-2' };
+    const releases: string[] = [];
+    const client = new CameraClient(
+      {
+        claim: () => Promise.resolve({ ok: true, value: { principal_id: 7, started_at: '2026-11-03T10:00:00.000Z' } }),
+        release: (_channel, startedAt) => {
+          releases.push(startedAt);
+          return Promise.resolve();
+        },
+      },
+      () => undefined,
+      new FakeClock(),
+      () => choice.id,
+    );
+    const to2 = deferred<undefined>();
+    const to3 = deferred<undefined>();
+    state.videoRestartHolds.push(to2, to3);
+    const starting = client.start('general', room, 'cam-1');
+    await settle();
+    choice.id = 'cam-3';
+    to2.reject(new DOMException('gone', 'OverconstrainedError'));
+    await settle();
+    expect(state.videoOptions.at(-1)).toMatchObject({ deviceId: { exact: 'cam-3' } });
+    expect(client.current).toEqual({ kind: 'granted-waiting' });
+    to3.resolve(undefined);
+    await starting;
+    expect(client.current).toEqual({ kind: 'sending' });
+    expect(room.cameraInUse()).toBe('cam-3');
+    expect(room.cameraTrack()).toBe('published');
+    expect(state.published.map((p) => p.source)).toEqual(['camera']);
+    await client.stop('self');
+    expect(room.cameraTrack()).toBe('none');
+    expect(state.videoTracks.at(-1)?.mediaStreamTrack.readyState).toBe('ended');
+    expect(releases).toEqual(['2026-11-03T10:00:00.000Z']);
   });
 
   it('a switch overtaken by a later one never stops the capture the later one made', async () => {
