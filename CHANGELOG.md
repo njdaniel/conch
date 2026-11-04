@@ -8,6 +8,27 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.14] - 2026-11-04
+
+This is a pre-1.0 release (`v0.1.0-alpha.14`): the API and the wire shapes
+can still change between alphas. There is no breaking change in it, and no
+wire change: an `alpha.13` client works against it unchanged.
+
+The headline is cameras for groups of up to nine and on phones. It also
+brings the client half of hiding members from each other, a round of polish
+from the third browser audit, and the camera load-test tool. Upgrade with
+`conch-server upgrade v0.1.0-alpha.14` from your workstation, or with
+`conch-upgrade.sh` on the droplet (docs/deploy.md step 11).
+
+There is no migration since `alpha.13`, so rolling back to `alpha.13` is a
+plain downgrade. **The camera stays off for everyone but owners until an
+owner turns it on** (`use_camera`), as in `alpha.13`.
+
+**For operators: the sign-in page folds its operator section** behind
+"Operator or script?" (#1042, F24). Open it to paste a credential or to set
+up an operator account; it opens by itself when the credential is the only
+way in, or after a credential was refused.
+
 ### Added
 
 - **Cameras for groups of up to 9, and on a phone** (ADR-015, #973; #1267,
@@ -29,6 +50,48 @@ release that Nick publishes.
     when the page is hidden and never restart by themselves; the capture is
     640 x 360 at 24 fps with one smaller layer, asking for the front camera
     first. These are the SDK's presets, not measurements.
+- **Who you see, and the authors who left** (#996, PR #1281; the client half
+  of hiding members from each other, as ADR-014 narrowed it). When members
+  do not hold `see_member_directory`, the member panel says "You see the
+  people you share a channel with", in the browser and the TUI's community
+  list. Authors who are no longer in the member list are named through
+  `GET /v1/channels/{channel}/authors` in the browser's conversation and
+  threads and in the TUI history, falling back to `#<id>`; a hidden author
+  reads as the server's `hidden-<id>`. The CLI's history lines keep the
+  author id, since their format is pinned for scripts.
+- **The camera load test** (#1284, PR #1293). `scripts/alpha-loadtest.sh
+  --camera-publishers N` (0 to 9) makes each of the first N simulated
+  participants claim its camera before it publishes, so a 9-camera
+  measurement needs no nine real devices. It refuses to start unless
+  members hold `use_camera`, and never changes permissions.
+
+### Changed
+
+- **The third browser audit's polish** (#1042, PR #1292):
+  - the phone's Join voice button keeps its words in one column (F17);
+  - a touch screen shows no keyboard hints, and the editor says "Save or
+    Cancel" there (F18);
+  - the invite page's version badge no longer covers its text, and "guest"
+    names are "reserved" (F19);
+  - the notification hint follows the chosen policy (F20);
+  - an unused invite reads Unused, paused ones Paused, with a banner while
+    invites are paused; Escape closes the invite panel (F21);
+  - the release-delay slider steps 50 ms, and PageUp and PageDown 250 ms
+    (F22);
+  - the sign-in page folds its operator section (F24, above);
+  - every time and date comes from one 24-hour format, an image sent alone
+    shows its name once, "Sent" shows only under your newest message,
+    Escape closes search, the report review shows a summary, and an address
+    naming a channel you cannot see is corrected to the one shown (F26).
+
+### Fixed
+
+- **A hide reaches the readers of the hidden person's messages** (#1282,
+  PR #1283). When members are hidden from each other, someone who held a
+  hidden person's old messages but shared no channel with them kept seeing
+  the old name until a reload. They are now told of the hide, and see
+  `hidden-<id>`. The new audience is exactly the people the authors route
+  already names that person to.
 
 ### Docs
 
@@ -48,6 +111,20 @@ release that Nick publishes.
   browser but Chromium with a fake camera is untried. The video is
   encrypted on each hop but not end-to-end encrypted, and Conch records
   nothing.
+
+### Tests
+
+- **CI runs its heavy jobs on self-hosted runners** for this repository's
+  own branches (#1286, PR #1287; #1288, PR #1289): `check`, `web-e2e`,
+  `voice-check` and `isolation-check`, after the hosted runner ran out of
+  disk restoring the voice build. A fork's pull request stays on GitHub's
+  runners.
+- **`web-e2e` runs as two shards**, each with its own server (#1290,
+  PR #1291), and its job bound is 30 minutes (PR #1276): about 19 minutes
+  became under 10.
+- Test-only fixes: the 30-second empty-list test's budget (#1279, PR #1280),
+  and the phone camera spec runs in a wide font too, so a font cannot hide a
+  clipped strip (PR #1276).
 
 ## [0.1.0-alpha.13] - 2026-11-04
 
