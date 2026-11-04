@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
+import { archivedLine } from './archived';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
@@ -344,12 +345,14 @@ function continues(before: MessageV2 | undefined, message: MessageV2): boolean {
   return Date.parse(message.created_at) - Date.parse(before.created_at) < sameRun;
 }
 
-function ThreadView({ rootId, root, chat, channel, live, people: known, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized }: {
+function ThreadView({ rootId, root, chat, channel, live, archived, people: known, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized }: {
   readonly rootId: number;
   readonly root: MessageV2 | undefined;
   readonly chat: ChannelChat;
   readonly channel: string;
   readonly live: LiveStatus;
+  // The channel is archived (issue #844): the thread reads, and takes no reply.
+  readonly archived: boolean;
   readonly people: ReadonlyMap<number, Person>;
   readonly nets: ReadonlyMap<number, string>;
   readonly viewer: number;
@@ -434,7 +437,9 @@ function ThreadView({ rootId, root, chat, channel, live, people: known, nets, vi
           void load(nextAfter, true);
         }}>Load more replies</button>
       )}
-      {rootMessage === undefined ? null : (
+      {rootMessage === undefined ? null : archived ? (
+        <p role="status" className="hint archived-note">{archivedLine}</p>
+      ) : (
         <form className="reply-composer" onSubmit={(event) => {
           event.preventDefault();
           if (live !== 'open' || draft.trim() === '') return;
@@ -523,7 +528,11 @@ export function Conversation({
   onEditFinal,
   historyBounded = false,
   visibility,
+  archived = false,
 }: {
+  // The channel is archived (issue #844): it opens read-only. History, search
+  // and threads read as before; the composer is replaced by one line.
+  readonly archived?: boolean;
   // The viewer's own membership here has a history bound (history_after), so
   // what was said before they joined is not shown (issue #1034). False when
   // it has none or is not known yet: the page never claims hiding it cannot see.
@@ -993,6 +1002,7 @@ export function Conversation({
                   chat={chat}
                   channel={channel}
                   live={live}
+                  archived={archived}
                   people={people}
                   nets={nets}
                   viewer={viewer}
@@ -1025,6 +1035,9 @@ export function Conversation({
           {String(chat.dropped)} unreadable {chat.dropped === 1 ? 'message was' : 'messages were'} ignored
         </p>
       ) : null}
+      {archived ? (
+        <p role="status" className="hint archived-note">{archivedLine}</p>
+      ) : (
       <Composer
         channel={channel}
         target={target}
@@ -1043,6 +1056,7 @@ export function Conversation({
           onBottom(true);
         }}
       />
+      )}
     </>
   );
 }

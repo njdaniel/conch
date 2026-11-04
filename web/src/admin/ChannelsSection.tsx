@@ -33,6 +33,7 @@ import { useCallback, useContext, useEffect, useId, useRef, useState, type RefOb
 import * as api from '../api';
 import { ChannelSettingsAsk, type SettingsChange } from '../ChannelSettingsAsk';
 import { CreateChannel, nameRule, nameTaken } from '../CreateChannel';
+import { isArchived } from '../archived';
 import { PrivateMark } from '../Icons';
 import { SettingsOpen } from '../joiningSettings';
 import { usePhone } from '../phone';
@@ -54,6 +55,7 @@ type Panel =
   | { readonly kind: 'settings'; readonly change: SettingsChange };
 
 export const defaultMark = 'default channel';
+export const archivedMark = 'archived';
 export const phoneNote = 'Row actions open from the ⋯ button, or a long press.';
 
 // channelRefusal is the page's own words for a channel write the server did
@@ -193,6 +195,7 @@ function Row({ channel, people, personal, reload, reread, notify, loadPeople, ap
 
   const isPrivate = channel.visibility === 'private';
   const isDefault = channel.default === true;
+  const archived = isArchived(channel);
   const close = () => {
     setPanel(null);
     setLine(null);
@@ -233,6 +236,7 @@ function Row({ channel, people, personal, reload, reread, notify, loadPeople, ap
   }
 
   const items: MenuItem[] = [];
+  // An archived channel takes no new person (issue #844).
   const add: MenuItem = {
     key: 'add',
     label: 'Add person…',
@@ -241,7 +245,7 @@ function Row({ channel, people, personal, reload, reread, notify, loadPeople, ap
       setPanel({ kind: 'add' });
     },
   };
-  if (personal) items.push(add);
+  if (personal && !archived) items.push(add);
   items.push({
     key: 'rename',
     label: 'Rename channel…',
@@ -250,7 +254,7 @@ function Row({ channel, people, personal, reload, reread, notify, loadPeople, ap
       setPanel({ kind: 'rename' });
     },
   });
-  if (!personal) items.push(add);
+  if (!personal && !archived) items.push(add);
   items.push({
     key: 'people',
     label: 'People and managers…',
@@ -260,22 +264,42 @@ function Row({ channel, people, personal, reload, reread, notify, loadPeople, ap
       setPanel({ kind: 'people' });
     },
   });
-  items.push({
-    key: 'visibility',
-    label: isPrivate ? 'Make public' : 'Make private',
-    ...(!isPrivate && isDefault ? { disabled: true, reason: 'A default channel must be public. Stop it being a default channel first.' } : {}),
-    onSelect: () => {
-      setPanel({ kind: 'settings', change: { kind: 'visibility', to: isPrivate ? 'public' : 'private' } });
-    },
-  });
-  items.push({
-    key: 'default',
-    label: isDefault ? 'Stop being a default channel' : 'Make default channel',
-    ...(!isDefault && isPrivate ? { disabled: true, reason: 'A default channel must be public. Make it public first.' } : {}),
-    onSelect: () => {
-      setPanel({ kind: 'settings', change: { kind: 'default', to: !isDefault } });
-    },
-  });
+  if (archived) {
+    items.push({
+      key: 'restore',
+      label: 'Restore channel',
+      onSelect: () => {
+        setLine(null);
+        setPanel({ kind: 'settings', change: { kind: 'archived', to: false } });
+      },
+    });
+  } else {
+    items.push({
+      key: 'visibility',
+      label: isPrivate ? 'Make public' : 'Make private',
+      ...(!isPrivate && isDefault ? { disabled: true, reason: 'A default channel must be public. Stop it being a default channel first.' } : {}),
+      onSelect: () => {
+        setPanel({ kind: 'settings', change: { kind: 'visibility', to: isPrivate ? 'public' : 'private' } });
+      },
+    });
+    items.push({
+      key: 'default',
+      label: isDefault ? 'Stop being a default channel' : 'Make default channel',
+      ...(!isDefault && isPrivate ? { disabled: true, reason: 'A default channel must be public. Make it public first.' } : {}),
+      onSelect: () => {
+        setPanel({ kind: 'settings', change: { kind: 'default', to: !isDefault } });
+      },
+    });
+    items.push({
+      key: 'archive',
+      label: 'Archive channel…',
+      ...(isDefault ? { disabled: true, reason: 'Stop it being a default channel first.' } : {}),
+      onSelect: () => {
+        setLine(null);
+        setPanel({ kind: 'settings', change: { kind: 'archived', to: true } });
+      },
+    });
+  }
   // The row is inside the Settings drawer, a dialog: its long press and
   // right-click are opted in.
   const openers = useOpeners(
@@ -292,12 +316,13 @@ function Row({ channel, people, personal, reload, reread, notify, loadPeople, ap
   const count = channel.members;
 
   return (
-    <li className={isPrivate ? 'private' : undefined} data-channel={channel.name} {...openers}>
+    <li className={[isPrivate ? 'private' : '', archived ? 'archived' : ''].filter((c) => c !== '').join(' ') || undefined} data-channel={channel.name} {...openers}>
       <div className="channel-row">
         <span className="channel-title">
           {isPrivate ? <PrivateMark /> : null}
           <strong>{channel.name}</strong>
           {isDefault ? <span className="ag-badge">{defaultMark}</span> : null}
+          {archived ? <span className="ag-badge archived-mark">{archivedMark}</span> : null}
         </span>
         <ActionsMenu label={`Actions for ${channel.name}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
       </div>
@@ -483,7 +508,7 @@ function Row({ channel, people, personal, reload, reread, notify, loadPeople, ap
       {panel?.kind === 'settings' ? (
         <ChannelSettingsAsk
           key={`${panel.change.kind}:${String(panel.change.to)}`}
-          channel={{ id: channel.id, name: channel.name, created_at: channel.created_at, visibility: channel.visibility, default: channel.default === true }}
+          channel={{ id: channel.id, name: channel.name, created_at: channel.created_at, visibility: channel.visibility, default: channel.default === true, ...(channel.archived_at === undefined ? {} : { archived_at: channel.archived_at }) }}
           change={panel.change}
           onApplied={(next) => {
             applied(channel.id, next);
@@ -497,6 +522,15 @@ function Row({ channel, people, personal, reload, reread, notify, loadPeople, ap
       </p>
     </li>
   );
+}
+
+// withArchived sets or clears a row's archived_at from the server's answer: it
+// omits the field while a channel is live.
+function withArchived(row: ChannelListingV1, archivedAt: string | undefined): ChannelListingV1 {
+  const next: ChannelListingV1 = { ...row };
+  if (archivedAt === undefined) delete next.archived_at;
+  else next.archived_at = archivedAt;
+  return next;
 }
 
 export interface ChannelsSectionProps {
@@ -634,7 +668,7 @@ export function ChannelsSection({ who, refresh, directoryTick, onChannelsChanged
               notify={onChannelsChanged}
               loadPeople={loadPeople}
               applied={(id, next) => {
-                setRows((now) => now?.map((r) => (r.id === id ? { ...r, visibility: next.visibility ?? r.visibility, default: next.default === true } : r)) ?? now);
+                setRows((now) => now?.map((r) => (r.id === id ? withArchived({ ...r, visibility: next.visibility ?? r.visibility, default: next.default === true }, next.archived_at) : r)) ?? now);
                 onChannelsChanged();
               }}
               onUnauthorized={onUnauthorized}

@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
+import { isArchived } from './archived';
 import { Glyph } from './Icons';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
 import { leaveLine } from './leaveChannel';
@@ -159,6 +160,7 @@ function ChannelRow({
   const row = useRef<HTMLLIElement>(null);
   const isPrivate = channel.visibility === 'private';
   const isDefault = channel.default === true;
+  const archived = isArchived(channel);
   const more = useRef<HTMLButtonElement>(null);
   const main = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
@@ -223,7 +225,8 @@ function ChannelRow({
   }
 
   const items: MenuItem[] = [];
-  if (onInvite !== undefined) {
+  // An archived channel takes no new member, so it offers no invite.
+  if (onInvite !== undefined && !archived) {
     items.push({
       key: 'invite',
       label: 'Invite people',
@@ -259,7 +262,19 @@ function ChannelRow({
       },
     });
   }
-  if (mayManage && renderSettings !== undefined) {
+  if (mayManage && renderSettings !== undefined && archived) {
+    items.push({
+      key: 'restore',
+      label: 'Restore channel',
+      onSelect: () => {
+        setAskingLeave(false);
+        setLeaveRefusal(null);
+        setRenaming(false);
+        setChange({ kind: 'archived', to: false });
+      },
+    });
+  }
+  if (mayManage && renderSettings !== undefined && !archived) {
     items.push({
       key: 'visibility',
       label: isPrivate ? 'Make public' : 'Make private',
@@ -282,13 +297,24 @@ function ChannelRow({
         setChange({ kind: 'default', to: !isDefault });
       },
     });
+    items.push({
+      key: 'archive',
+      label: 'Archive channel…',
+      ...(isDefault ? { disabled: true, reason: 'Stop it being a default channel first.' } : {}),
+      onSelect: () => {
+        setAskingLeave(false);
+        setLeaveRefusal(null);
+        setRenaming(false);
+        setChange({ kind: 'archived', to: true });
+      },
+    });
   }
   const openers = useOpeners(items.length > 0, () => {
     setMenuOpen(true);
   });
 
   return (
-    <li ref={row} className={[items.length > 0 ? 'has-actions' : '', isPrivate ? 'private' : ''].filter((c) => c !== '').join(' ') || undefined} {...openers}>
+    <li ref={row} className={[items.length > 0 ? 'has-actions' : '', isPrivate ? 'private' : '', archived ? 'archived' : ''].filter((c) => c !== '').join(' ') || undefined} {...openers}>
       <button
         type="button"
         ref={(el) => {
@@ -438,8 +464,18 @@ export function ChannelList({
 }) {
   const buttons = useRef(new Map<string, HTMLButtonElement>());
   const list = useRef<HTMLUListElement>(null);
+  // Archived channels (issue #844) are a collapsed group at the bottom. The
+  // open one, if it is archived, keeps the group open so it is in sight.
+  const live = channels.filter((channel) => !isArchived(channel));
+  const archived = channels.filter(isArchived);
+  const selectedArchived = archived.some((channel) => channel.name === selected);
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    if (selectedArchived) setExpanded(true);
+  }, [selectedArchived]);
+  const shown = expanded ? [...live, ...archived] : live;
   // The one button in the tab order: the open channel, or the first.
-  const stop = selected ?? channels[0]?.name ?? null;
+  const stop = selected !== null && shown.some((channel) => channel.name === selected) ? selected : (shown[0]?.name ?? null);
 
   // The open channel is kept in sight, however it was opened: in a long list
   // it may be off screen. jsdom has no scrollIntoView.
@@ -449,7 +485,7 @@ export function ChannelList({
   }, [selected]);
 
   function move(event: KeyboardEvent, from: number) {
-    const last = channels.length - 1;
+    const last = shown.length - 1;
     const to =
       event.key === 'ArrowDown' ? Math.min(from + 1, last)
       : event.key === 'ArrowUp' ? Math.max(from - 1, 0)
@@ -458,7 +494,7 @@ export function ChannelList({
       : null;
     if (to === null) return;
     event.preventDefault();
-    const target = channels[to];
+    const target = shown[to];
     if (target !== undefined) buttons.current.get(target.name)?.focus();
   }
 
@@ -469,11 +505,11 @@ export function ChannelList({
 
   function left(name: string) {
     if (onLeft === undefined) return;
-    const at = channels.findIndex((channel) => channel.name === name);
+    const at = shown.findIndex((channel) => channel.name === name);
     onLeft(name);
     // The menu item and then its row go. Focus the neighbouring row, or the
     // list when the person left its last channel, rather than losing it to body.
-    const next = channels[at + 1] ?? channels[at - 1];
+    const next = shown[at + 1] ?? shown[at - 1];
     const target = next === undefined ? undefined : buttons.current.get(next.name);
     (target ?? list.current)?.focus();
   }
@@ -481,31 +517,54 @@ export function ChannelList({
   if (channels.length === 0) {
     return <p className="empty">{empty}</p>;
   }
+  const row = (channel: ChannelV0, i: number) => (
+    <ChannelRow
+      key={channel.id}
+      channel={channel}
+      index={i}
+      selected={selected}
+      stop={stop}
+      unread={unread.get(channel.name) ?? 0}
+      voiced={occupancy.get(channel.id)}
+      voiceNames={voiceNames}
+      viewer={viewer}
+      mayRename={canRename?.(channel) === true}
+      renderRename={renderRename}
+      mayManage={canManage}
+      renderSettings={renderSettings}
+      onInvite={onInvite}
+      onLeft={onLeft === undefined ? undefined : left}
+      onUnauthorized={onUnauthorized}
+      register={register}
+      onMove={move}
+      onOpen={onOpen}
+    />
+  );
   return (
-    <ul ref={list} className="channel-list" tabIndex={-1}>
-      {channels.map((channel, i) => (
-        <ChannelRow
-          key={channel.id}
-          channel={channel}
-          index={i}
-          selected={selected}
-          stop={stop}
-          unread={unread.get(channel.name) ?? 0}
-          voiced={occupancy.get(channel.id)}
-          voiceNames={voiceNames}
-          viewer={viewer}
-          mayRename={canRename?.(channel) === true}
-          renderRename={renderRename}
-          mayManage={canManage}
-          renderSettings={renderSettings}
-          onInvite={onInvite}
-          onLeft={onLeft === undefined ? undefined : left}
-          onUnauthorized={onUnauthorized}
-          register={register}
-          onMove={move}
-          onOpen={onOpen}
-        />
-      ))}
-    </ul>
+    <>
+      <ul ref={list} className="channel-list" tabIndex={-1}>
+        {live.map((channel, i) => row(channel, i))}
+      </ul>
+      {archived.length === 0 ? null : (
+        <div className="archived-channels">
+          <button
+            type="button"
+            className="archived-toggle"
+            aria-expanded={expanded}
+            aria-controls="archived-channel-list"
+            onClick={() => {
+              setExpanded(!expanded);
+            }}
+          >
+            Archived ({archived.length})
+          </button>
+          {expanded ? (
+            <ul id="archived-channel-list" className="channel-list" aria-label="Archived channels">
+              {archived.map((channel, i) => row(channel, live.length + i))}
+            </ul>
+          ) : null}
+        </div>
+      )}
+    </>
   );
 }

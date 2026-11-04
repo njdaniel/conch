@@ -789,3 +789,92 @@ describe('the section follows the directory frame (issue #1226)', () => {
     expect(within(row).queryByText('Reading the people…')).toBeNull();
   });
 });
+
+// Issue #844: archive and restore from the console.
+describe('archive and restore', () => {
+  const archivedAt = '2026-11-04T12:00:00Z';
+  const gone: ChannelListingV1 = { ...channelP, visibility: 'public', archived_at: archivedAt };
+  const plain: ChannelListingV1 = { ...channelP, visibility: 'public' };
+
+  it('marks an archived channel and offers Restore in place of the settings', async () => {
+    serve(owner, { rows: [channelA, gone] });
+    const region = await open();
+    const row = rowOf(region, 'channel-p');
+    expect(within(row).getByText('archived')).toBeTruthy();
+    expect(within(rowOf(region, 'channel-a')).queryByText('archived')).toBeNull();
+    const items = within(await menu(row, 'channel-p')).getAllByRole('menuitem').map((i) => i.textContent);
+    expect(items).toContain('Restore channel');
+    expect(items).not.toContain('Archive channel…');
+    expect(items).not.toContain('Make private');
+    expect(items).not.toContain('Add person…');
+  });
+
+  it('archives after asking, sends only archived, and marks the row from the answer', async () => {
+    const rows = [channelA, plain];
+    const calls = serve(owner, {
+      rows,
+      routes: {
+        'PUT /v1/channels/2/settings': () => {
+          rows[1] = { ...plain, archived_at: archivedAt };
+          return json({ channel: { id: 2, name: 'channel-p', created_at: at, visibility: 'public', archived_at: archivedAt } });
+        },
+      },
+    });
+    const region = await open();
+    const row = rowOf(region, 'channel-p');
+    await choose(row, 'channel-p', 'Archive channel…');
+    expect(within(row).getByText(/Its history stays, and nothing new can be posted/)).toBeTruthy();
+    expect(sent(calls, 'PUT', /settings$/)).toEqual([]);
+    fireEvent.click(within(row).getByRole('button', { name: 'Archive channel' }));
+    await waitFor(() => {
+      expect(sent(calls, 'PUT', /settings$/).map((c) => c.body)).toEqual([{ archived: true }]);
+    });
+    await waitFor(() => {
+      expect(within(rowOf(region, 'channel-p')).getByText('archived')).toBeTruthy();
+    });
+  });
+
+  it('restores at once, with no question, and clears the mark', async () => {
+    const rows = [channelA, gone];
+    const calls = serve(owner, {
+      rows,
+      routes: {
+        'PUT /v1/channels/2/settings': () => {
+          rows[1] = plain;
+          return json({ channel: { id: 2, name: 'channel-p', created_at: at, visibility: 'public' } });
+        },
+      },
+    });
+    const region = await open();
+    await choose(rowOf(region, 'channel-p'), 'channel-p', 'Restore channel');
+    await waitFor(() => {
+      expect(sent(calls, 'PUT', /settings$/).map((c) => c.body)).toEqual([{ archived: false }]);
+    });
+    await waitFor(() => {
+      expect(within(rowOf(region, 'channel-p')).queryByText('archived')).toBeNull();
+    });
+  });
+
+  it('disables Archive on a default channel, with the reason', async () => {
+    serve(owner);
+    const region = await open();
+    const a = await menu(rowOf(region, 'channel-a'), 'channel-a');
+    const item = within(a).getByRole('menuitem', { name: 'Archive channel…' });
+    expect(item.getAttribute('aria-disabled')).toBe('true');
+    expect(a.textContent).toContain('Stop it being a default channel first.');
+  });
+
+  it('says the default refusal in the page’s words, not the server’s', async () => {
+    // The list is stale: the channel was made default meanwhile.
+    serve(owner, {
+      rows: [channelA, plain],
+      routes: { 'PUT /v1/channels/2/settings': () => refusal(409, 'channel_archive_default') },
+    });
+    const region = await open();
+    const row = rowOf(region, 'channel-p');
+    await choose(row, 'channel-p', 'Archive channel…');
+    fireEvent.click(within(row).getByRole('button', { name: 'Archive channel' }));
+    expect(await within(row).findByText(/Stop it being a default channel first\./)).toBeTruthy();
+    expect(region.textContent).not.toContain(leak);
+  });
+});

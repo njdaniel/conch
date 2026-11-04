@@ -104,6 +104,7 @@ describe('Leave channel in the row menu', () => {
       'Leave channel',
       'Make private',
       'Stop being a default channel',
+      'Archive channel…',
     ]);
   });
 

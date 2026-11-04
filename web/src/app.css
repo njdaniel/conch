@@ -4824,3 +4824,26 @@ button.link {
 .voice-controls .btn-text {
   min-width: 0;
 }
+
+/* Archived channels (issue #844): a collapsed group under the live ones. */
+.archived-channels {
+  display: grid;
+  gap: 2px;
+  margin-top: var(--s2);
+}
+
+.archived-toggle {
+  justify-content: flex-start;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted, inherit);
+}
+
+.channel-list > li.archived .channel-name {
+  font-style: italic;
+  opacity: 0.8;
+}
+
+.archived-note {
+  margin: 0;
+}

@@ -89,6 +89,22 @@ afterEach(() => {
   cleanup();
 });
 
+describe('an archived channel (issue #844)', () => {
+  it('has no voice to join: the strip says so, and Join voice, Watch only and the test are gone', () => {
+    const calls: string[] = [];
+    render(<VoicePanel voice={control(initialVoice, calls, { kind: 'presence', presence })} viewer={7} people={new Map()} viewed="old" archived onOpen={() => undefined} />);
+    const voice = screen.getByRole('region', { name: 'Voice' });
+    expect(within(voice).getByText('Voice is off. This channel is archived.')).toBeTruthy();
+    expect(within(voice).queryByRole('button', { name: /join voice|watch only|test microphone/i })).toBeNull();
+  });
+
+  it('is the same panel as ever for a live channel', () => {
+    const { voice } = panel(initialVoice, 'general');
+    expect(within(voice).getByRole('button', { name: /join voice/i })).toBeTruthy();
+    expect(within(voice).queryByText(/archived/)).toBeNull();
+  });
+});
+
 describe('the private microphone test (issue #846)', () => {
   it('is offered before joining, and joining voice takes it away', () => {
     const { voice, redraw } = panel(initialVoice, 'general');
