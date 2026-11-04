@@ -217,12 +217,13 @@ type voiceRoomState struct {
 	// under the room's claims, before it clears claimer and closes claimDone.
 	// Empty when none. Under voicePoller.mu.
 	owedWithdraw []int64
-	// withdrawDone is open from the moment forgetRoom ends a held share, with
-	// no claim running, until its caller (retireRoom) has withdrawn the
-	// sharer's grants, and the room is in retiring meanwhile (with the value
-	// 0, which is no principal's id). waitRunningClaims waits on it, so a
-	// hook answers only once the withdrawal is made, whichever forget won the
-	// room's order. Separate from claimDone, which a claim on a retired room
+	// withdrawDone is open from the moment forgetRoom ends a held share or a
+	// started camera until the holders' grants are withdrawn (by retireRoom,
+	// by a claim handed the debt, or by the claim whose own forget it was),
+	// and the room is in retiring meanwhile (with the value 0, which is no
+	// principal's id, once no claim is registered there). waitRunningClaims,
+	// endSharesOf and endCamerasOf wait on it, so a hook answers only once
+	// the withdrawal is made, whichever forget won the room's order. Separate from claimDone, which a claim on a retired room
 	// sets and clears for itself (issue #1087). Under voicePoller.mu.
 	withdrawDone chan struct{}
 	// seq counts evictions from this room and evicted records, per principal,
@@ -274,6 +275,12 @@ type voiceRoomState struct {
 	// retireRoom or a running claim, and a revocation of use_camera waits for
 	// that withdrawal (endCamerasOf). Set once, under voicePoller.mu.
 	retiredCameras []int64
+	// retiredShare is retiredCameras' twin for the screen share (issue
+	// #1265): who held the room's started share when a rotation forgot it,
+	// 0 when nobody did. Their grant is withdrawn after, by retireRoom or a
+	// running claim, and a revocation of share_screen waits for that
+	// withdrawal (endSharesOf). Set once, under voicePoller.mu.
+	retiredShare int64
 	// camTracks is what the passes have seen of the camera tracks nobody
 	// claimed and of the tracks whose kind and source disagree, by track
 	// (voiceCameraTrackKey): each is audited once, and one still listed
@@ -2166,6 +2173,7 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) (*voiceRoomSt
 	if c := r.share; c != nil && !c.pending {
 		events = append(events, p.shareStoppedLocked(r.channelID, c, c.principalID, voiceShareStopRotated))
 		holders = append(holders, c.principalID)
+		r.retiredShare = c.principalID
 	}
 	// Every started camera claim ends with it too (reason=rotated), which is
 	// the end record a renewal's adoption reads. A pending one is its claim's
@@ -2182,11 +2190,12 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) (*voiceRoomSt
 	}
 	if r.claimer != 0 {
 		p.retiring[r] = r.claimer
-		if len(r.retiredCameras) > 0 {
-			// Ended cameras are still to be withdrawn, by the claim or by
-			// retireRoom: a revocation of use_camera waits for that
-			// (endCamerasOf) even if the claim returns first, which then
-			// leaves the room in retiring for the withdrawal (claimRunning).
+		if len(holders) > 0 {
+			// An ended share or ended cameras are still to be withdrawn, by
+			// the claim or by retireRoom: a revocation of share_screen or
+			// use_camera waits for that (endSharesOf, endCamerasOf) even if
+			// the claim returns first, which then leaves the room in
+			// retiring for the withdrawal (claimRunning).
 			r.withdrawDone = make(chan struct{})
 		}
 	} else if len(holders) > 0 {
