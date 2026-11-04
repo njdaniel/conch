@@ -8,12 +8,10 @@ The goal is dependable push-to-talk, clear control over who hears each conversat
 and AI participants with explicit identities and permissions.
 
 The project started with an agent-native messaging and approval core. It now also has
-text nets and an optional LiveKit voice control plane. The full voice client and the
-interfaces described below are still in development or design.
+text nets, a browser client and optional LiveKit voice and screen sharing.
 
-> **Pre-alpha.** The working surface today is the Go CLI/TUI and public APIs.
-> There is no released graphical client or finished end-user voice client yet.
-> Planned features below are product direction, not claims about current availability.
+> **Alpha.** The browser, Go CLI/TUI and public APIs are available.
+> See the [tester guide](docs/alpha-tester-guide.md) for joining in the browser.
 
 ## Why Conch?
 
@@ -40,23 +38,51 @@ today; simultaneous voice listening and per-net PTT are planned.
 
 | Area | Available today | Still to build or validate |
 | --- | --- | --- |
-| Messaging | Channels, typed messages, CLI/TUI, REST/WebSocket APIs | Richer graphical conversation UI |
-| Identity and access | Authentication by default, issued credentials, channel membership, server-enforced agent manifests | Smoother onboarding and administration |
+| Messaging | Channels, typed messages, browser, CLI/TUI, REST/WebSocket APIs | |
+| Identity and access | Member links, passwords, roles and permissions, public and private channels, server-enforced agent manifests | |
 | Scoped conversations | Text nets and whispers, audience-aware delivery, member/monitor roles | Layered voice, independent PTT keys, ducking, stereo placement |
 | Voice | Optional LiveKit control plane, session tokens, presence, transmit reporting, CLI status/watch | Native microphone/playback client and real-world PTT reliability |
 | Agents | MCP messaging and approvals, capability checks, reference auto-reply bot | Persistent run/task views, richer runtime adapters and intervention |
 | Captions and translation | Not implemented as end-user features | Optional live captions, translated captions, then spoken translation |
-| Clients | Go CLI/TUI; Rust voice workspace and toolchain scaffold for the accepted Linux/PipeWire design | GUI, Windows native integrations, packaging and cross-platform validation |
-| Screen sharing | Not implemented | Sharing through the media integration |
+| Clients | Browser and Go CLI/TUI | Windows native integrations, packaging and cross-platform validation |
+| Screen sharing | Browser sharing and watching through optional LiveKit | Browser and network validation |
 
 See the [quickstart](#quickstart), [text-net example](#7-nets-and-whispers-the-squad-layout),
 and [voice setup](#voice-optional) for the implemented surfaces.
 
-What comes next is the [private communications alpha](docs/design/private-alpha.md)
-([ADR-008](docs/adr/ADR-008-private-communications-alpha.md)), and the work is tracked on the
+The [private communications alpha](docs/design/private-alpha.md) records the original
+plan ([ADR-008](docs/adr/ADR-008-private-communications-alpha.md)). Work is tracked on the
 [Conch project board](https://github.com/users/njdaniel/projects/14) (private for now). Found a problem or have an
 idea? Use the [bug report or feedback forms](https://github.com/njdaniel/conch/issues/new/choose). Want to
 work on it? Start with [CONTRIBUTING.md](CONTRIBUTING.md). Found a security problem? Report it privately, as [SECURITY.md](SECURITY.md) describes.
+
+## One server, one community
+
+Members start in the default channels and see their full history. Public channels
+appear under **Browse channels**; members can join them themselves. Private channels
+are listed only to their members in that directory. A channel manager or someone
+with `manage_channels` adds people to a private channel. Reading messages and files and joining voice still need membership,
+including for operators. Members can create public and private channels by default.
+
+The member directory lists the community's members and agents. Owners can narrow
+what members see through `see_member_directory`. See
+[hiding members](docs/deploy.md#hiding-members-from-each-other) for its limits.
+
+Open the member link you were sent to make an account. The bare server address is
+a sign-in page. `open_signup` is off by default on a new server (an upgraded server keeps its old open-joining mode); an owner can turn it on to let
+people make accounts there too. An operator needs `change_server_settings` to do so.
+Member links are reusable, with an optional use limit. Without an explicit expiry,
+a link lasts seven days by default. The setting is
+`member_link_default_expiry_seconds`; `0` means no default expiry.
+
+Voice is on for new members. The per-person `voice_allowed` switch can take it away;
+role permissions still apply. See [the permissions and voice switches](docs/deploy.md#the-eleven-permissions).
+There are **no guests for now**. Guest data is kept; guest visits return with #1004.
+
+Before upgrading an older server, read the
+[one-community upgrade notice](CHANGELOG.md#upgrade-notice-one-community-issue-979)
+and [member-link changes](CHANGELOG.md#010-alpha11---2026-11-02).
+For setup, use the existing [personal or group server guide](docs/deploy.md#running-a-personal-or-a-group-server).
 
 ## Client design and P3 planning
 
@@ -69,8 +95,7 @@ shell sharing that UI, with native Rust voice managed by the client.
 
 Next is [P3 local prototype planning](docs/design/p3-local-prototype.md): one local
 server, multiple independently configured TUI clients, a browser and AI participants,
-plus optional VM/LAN tests. These documents specify intended work; they are not
-installation instructions or claims that the browser/desktop clients already exist.
+plus optional VM/LAN tests. These documents record the plans. Use the [quickstart](#quickstart) for installation.
 
 ## Product direction
 
@@ -150,8 +175,7 @@ Audit records make actions inspectable, but they are not a cryptographic guarant
 against an operator modifying the database. Agent manifests restrict Conch access;
 they do not by themselves sandbox an agent's external tools.
 
-There is no federation or bespoke WebRTC stack. The CLI/TUI remains the implemented
-human interface. The [charter](docs/adr/ADR-000-charter.md) and
+There is no federation or bespoke WebRTC stack. The browser and CLI/TUI are the human interfaces. The [charter](docs/adr/ADR-000-charter.md) and
 [ADRs](docs/adr/) record the accepted implementation constraints; the
 [roadmap](ROADMAP.md) retains the existing phase gates until explicitly amended.
 
@@ -199,7 +223,7 @@ make rust-check              # fmt, clippy, tests, dependency gate, licences and
 
 Without that toolchain `make check` fails and names the script; it does not skip the Rust leg. `make build` is unaffected: it builds only the Go binaries. If you fetched the toolchain before `conch-voice` used PipeWire, run the script once more: what is linked is now a copy of libwebrtc's archive with one member left out, made beside the download and pinned by its own hash (`scripts/voice-pins.sh` says why).
 
-`make check` also checks the browser client under `web/` ([ADR-007](docs/adr/ADR-007-client-interfaces.md)), React and TypeScript built with Vite. So far it is one page that names the server it came from; it does not call the API yet. That leg needs exactly the Node version in `web/.nvmrc` (24.21.0, with the npm it bundles; `nvm install` in `web/` picks it up) and `jq`. Packages come only from `web/package-lock.json`, through `npm ci`; no browser is downloaded.
+`make check` also checks the browser client under `web/` ([ADR-007](docs/adr/ADR-007-client-interfaces.md)), React and TypeScript built with Vite. That leg needs exactly the Node version in `web/.nvmrc` (24.21.0, with the npm it bundles; `nvm install` in `web/` picks it up) and `jq`. Packages come only from `web/package-lock.json`, through `npm ci`; no browser is downloaded.
 
 ```sh
 make web-check   # gates (direct dependencies, exact versions, licences), typecheck, lint, unit tests; part of make check
@@ -216,7 +240,7 @@ Without that Node `make check` fails and names the version to install; it does n
 ```sh
 umask 077   # everything created in this shell — the data directory and the token file — is readable only by you
 mkdir -p /tmp/conch-data
-bin/conchd bootstrap-operator --data /tmp/conch-data --name nick > /tmp/conch-data/operator.token
+bin/conchd bootstrap-operator --data /tmp/conch-data --name owner > /tmp/conch-data/operator.token
 bin/conchd serve --data /tmp/conch-data --listen 127.0.0.1:8080
 ```
 
@@ -227,7 +251,7 @@ bin/conchd serve --data /tmp/conch-data --listen 127.0.0.1:8080
 - `--max-upload-bytes` (or `CONCHD_MAX_UPLOAD_BYTES`) is the largest file an upload may carry (default 10 MiB; `0` disables uploads). See [Files](#files).
 - `--web-dir` (or `CONCHD_WEB_DIR`) serves a built web client (a directory holding `index.html`) at `/app/`, on the API's own origin, and redirects `/` to `/app/`. A path under `/app/` that names no file returns `index.html` (client-side routing); a missing path ending in a file extension is a `404`. There are no directory listings, only `GET` and `HEAD`, nothing outside the directory is reachable, and a file or directory whose name starts with a dot is never served. `/app/` needs no credential (the page must load before sign-in); the API it calls still does. Every `/app/` response carries a strict Content-Security-Policy. Unset, `conchd` serves the web client built into the binary, if there is one, and otherwise there is no `/app/`. `conchd` refuses to start if the directory is missing or has no `index.html`. Whatever is in the directory runs as code on `conchd`'s own origin, so only the operator who runs `conchd` should be able to write to it.
 - Release binaries have the web client built in, so `/app/` works with no Node and no `--web-dir`; `conchd version` prints `web: embedded` or `web: none`, and the start-up output names the source (`conchd web: embedded`, `dir <path>` or `none`). A plain `go build` or `make build` has none (it needs no Node); `make build-web-embedded` builds one that has, and fails to compile if `internal/web/dist` is empty. `--web-dir` wins over the built-in client. `--no-web` (or `CONCHD_NO_WEB` set to a boolean such as `1` or `true`; any other value is refused at start) turns `/app/` off even when a client is built in, and `/` is then not redirected; it is refused together with `--web-dir`.
-- **Signing in at `/app/`.** A member pastes a credential once. The page keeps it in the browser's local storage for that origin, so closing the tab, or the whole browser, no longer signs a member out, and every tab of the origin is signed in with it. How long that lasts is the credential's: one from an invite, or issued with `--renew-days N`, expires N days after it was last used (an invite's default is 90), since each day it is used its expiry moves on; a fixed `--expires-at` stays fixed. **Sign out** (in the lobby's Settings) first asks, saying that coming back into the account will need a new link from an operator (see [Signing a person back in](#signing-a-person-back-in)), then revokes that credential on the server and signs out every tab of this browser; if the server cannot be told, the page still forgets the credential and says so, and it then works until it expires or an operator revokes it. **Sign out everywhere** asks the same way, then revokes every credential the person has, so their other browsers and clients are refused on their next request; if the server does not do it, the page stays signed in and says so. An operator's credential is the exception: after the warning it is kept for that one tab only, and closing the tab drops it. The page runs no third-party script (`script-src 'self'`), which is what makes keeping a credential in local storage acceptable: any script on the origin could read it, which is one more reason only the operator who runs `conchd` may write the web directory.
+- **Signing in at `/app/`.** A member signs in with a name and password, or an issued credential. The page keeps it in the browser's local storage for that origin, so closing the tab, or the whole browser, no longer signs a member out, and every tab of the origin is signed in with it. How long that lasts is the credential's: one from an invite, or issued with `--renew-days N`, expires N days after it was last used (an invite's default is 90), since each day it is used its expiry moves on; a fixed `--expires-at` stays fixed. **Sign out** (in the lobby's Settings) first asks, saying how to return: with a name and password, or a new link from an operator for an account without a password (see [Signing a person back in](#signing-a-person-back-in)). It then revokes that credential on the server and signs out every tab of this browser; if the server cannot be told, the page still forgets the credential and says so, and it then works until it expires or an operator revokes it. **Sign out everywhere** asks the same way, then revokes every credential the person has, so their other browsers and clients are refused on their next request; if the server does not do it, the page stays signed in and says so. An operator's credential is the exception: after the warning it is kept for that one tab only, and closing the tab drops it. The page runs no third-party script (`script-src 'self'`), which is what makes keeping a credential in local storage acceptable: any script on the origin could read it, which is one more reason only the operator who runs `conchd` may write the web directory.
 - `--allowed-origins` (or `CONCHD_ALLOWED_ORIGINS`) is a comma-separated list of extra `Origin`s the WebSocket upgrade accepts, such as `http://localhost:5173`. It exists only so a Vite dev server on another port can connect. Each entry is one exact origin (`http` or `https`, a host, an optional port); wildcards are refused at start-up, and so are empty entries. Unset, the same-origin check is unchanged.
 - `--session-stale` (or `CONCHD_SESSION_STALE`, default `30s`) and `--session-offline` (or `CONCHD_SESSION_OFFLINE`, default `90s`) are how long a session may go without a heartbeat before it shows as `stale` and then as `offline`; `conchd` refuses to start unless stale is shorter than offline. A session is one live client or runtime of a principal (a TUI, a browser tab, an adapter): `POST /v1/sessions` creates one (any caller with a credential; an agent needs `sessions.manage`; at most 16 online or stale per credential, then `429 too_many_sessions`; offline ones do not count, and reviving one is held to the same bound), `POST /v1/sessions/{id}/heartbeat` keeps it alive and revives a stale or offline one, `DELETE /v1/sessions/{id}` ends it, and `GET /v1/sessions?channel=<name>` lists the sessions of the channel's members, for members only (a non-member, an operator who is not a member and an unknown channel all get the same `404 channel_not_found`). A session belongs to the credential that created it: anyone else, another credential of the same principal and operators included, gets `404 session_not_found`. Revoking, rotating or revoking all of a credential, or disabling a principal, ends its sessions, and so does a credential's expiry (at the next sweep, with cause `credential_expired`). Rows are never deleted. Sessions need authentication: with `--auth off` the routes answer `400 sessions_require_auth`. A roster shows `runtime` and `host` only to an operator and to the session's own principal.
 
@@ -337,7 +361,7 @@ bin/conch logout
 
 `conch send --reply-to <id> <channel> <text>` replies to message `<id>` (REST: `POST /v2/channels/{channel}/messages` with `"thread_root_id": <id>`). Threads are one level: a reply to a reply is refused. **A reply has its root's audience and cannot choose its own**: it reaches only people who can see the message it answers, so a reply to a whisper is a whisper to the same people (whoever of them replies; the author of the whisper sees it), a reply on a net goes to those of the root's recipients who are still on the net (someone added to the net later does not get replies to a message they cannot see, and someone taken off it gets no more of its talk through an old thread), and `--reply-to` cannot be combined with `--net` or `--to` (the API refuses `thread_root_id` together with `audience`: `400 thread_audience_conflict`). A message you cannot see, one that does not exist, one in another channel and a reply all give the same `404 thread_not_found`, byte for byte, so a reply cannot be used to find out that a scoped message exists. `GET /v2/channels/{channel}/messages?thread=<id>` (the CLI's `conch thread <channel> <id>`) returns the root and then its replies, in order, with the usual `after` and `limit`, showing you exactly what the channel listing shows you; a non-numeric or zero `thread` is a `400`. The channel listing and the v2 WebSocket still deliver replies in id order like any message, each with `thread_root_id` set, and `conch tail` marks one `[reply:<id>]`. v0 and v1 clients see a reply to a channel-wide message as an ordinary message and never see a scoped one. Threads are not yet available through MCP, and the TUI does not draw them. In the browser, Reply opens the root and its one-level replies inline; a reply offers Open thread instead of another reply, and its composer shows the inherited audience without a way to change it.
 
-`conch voice status <channel>` shows who is connected to the channel's voice and who is transmitting, then exits; `--watch` keeps following and prints a `--- <time>` line and the new state on every change until you interrupt it. It only reads presence; it never joins voice. Each participant is one line, in principal id order: `<id> <name|-> <talking|quiet> <joined-at>` (an RFC 3339 UTC time), for example `3 nick talking 2026-10-09T08:30:00Z`. The API gives a member only their own name, so other participants show as `-`; a name with spaces or unusual characters is double-quoted and escaped. An empty room prints `nobody is connected to voice in <channel>` and exits 0. Voice not configured, or configured but unreachable, prints one line and exits nonzero (under `--watch`, an unreachable voice server is printed and the watch carries on).
+`conch voice status <channel>` shows who is connected to the channel's voice and who is transmitting, then exits; `--watch` keeps following and prints a `--- <time>` line and the new state on every change until you interrupt it. It only reads presence; it never joins voice. Each participant is one line, in principal id order: `<id> <name|-> <talking|quiet> <joined-at>` (an RFC 3339 UTC time), for example `3 alice talking 2026-10-09T08:30:00Z`. The API gives a member only their own name, so other participants show as `-`; a name with spaces or unusual characters is double-quoted and escaped. An empty room prints `nobody is connected to voice in <channel>` and exits 0. Voice not configured, or configured but unreachable, prints one line and exits nonzero (under `--watch`, an unreachable voice server is printed and the watch carries on).
 
 `conch voice where` says which of your channels have people in voice, so you can find where to join: one line per channel, `<channel> <count>`, counting the people in the channel-wide room (a net's room is not counted). Nobody in voice anywhere prints `nobody is in voice in any of your channels` and exits 0; voice not configured or unreachable, or an account without voice, prints one line and exits nonzero. `--json` prints the server's `conch.voice_occupancy.v1` document as it is (channel ids, zero counts included). It reads `GET /v1/voice/occupancy` and never joins.
 
@@ -368,7 +392,7 @@ bin/conch nets archive ops alpha
 
 In the TUI the prompt always says where your next message goes: `ops >` for the whole channel, `ops/alpha >` for a net. `/net alpha` sets that target, `/net` alone returns to the channel, and switching channels resets it. `/w 3,5 quick question` whispers once and leaves the target as it was. A message that really starts with `/` is sent as `//text`; any other `/word` is an error, not a message. Scoped messages start with a `[net:alpha]` or `[whisper:3,5]` badge (a whisper lists the other participants); a body that starts with `[` is shown with a leading `\`. The first whisper of a session reminds you that whispers are recorded in the audit log. If the server refuses a send, your text stays in the input and nothing else is sent: the TUI never falls back to the channel.
 
-The TUI shows who and what is connected. While it runs it holds a session of its own (`POST /v1/sessions` with `client: "tui"`, `DELETE`d when it quits, `SIGINT` and `SIGTERM` included) and follows the events socket (`/v1/events/ws?channel=&session=`) of the channel on screen, reopened when you switch channel. The members line under the input reads `online: nick(2) guest · agents: worker-test ● observer-test ○`: people with a live session (a number after the name when one person has several), then agents with a session (`●` running, idle, blocked, waiting or failed; `◐` stale; `○` offline). Members with no session are not listed there. On a terminal of 120x30 or more the people pane on the right replaces it: every member once, with `online`, `stale` or `offline` (and `×2` for two live sessions), the agents with their status and task, and who is in the channel's voice room. `tab` cycles channels, inbox and agents, and `shift+tab` goes the other way. The Agents view lists each agent member of the channel once, with its status as the server derives it (`idle`, `running`, `blocked`, `waiting`, `failed`, `stale`, `offline`; an agent with no session is `offline`), its current task and when it was last heard from; `enter` unfolds its sessions with their runtime and model, and a stale or offline session with a run still open says `outcome unknown`. Names, tasks, runtimes and models are chosen by other people and agents, so they are printed as text with control characters dropped. When the events socket is down or refused, or the TUI's session could not be created (a server with `--auth off`), both views read `unavailable` rather than showing a roster that may be stale, messaging keeps working, and the socket is retried with the same backoff as the message stream (1 s, doubling to 30 s); a roster is never replayed, so a reconnect takes the next one as the state. When the server has ended the TUI's session (a revoke, a rotate, an expired credential) the socket is refused with `404 session_not_found`: the TUI then creates one new session and reopens the socket with it, and if that fails the views stay `unavailable` and the status line says why (for example `members: session ended; sign in again`). The message stream follows `/v2/ws?after=<last id held>`: after a drop it asks for exactly what it missed, with no reload of the channel. Below 80x24 the Agents view is one pane; below 40x10 the TUI asks for a larger terminal.
+The TUI shows who and what is connected. While it runs it holds a session of its own (`POST /v1/sessions` with `client: "tui"`, `DELETE`d when it quits, `SIGINT` and `SIGTERM` included) and follows the events socket (`/v1/events/ws?channel=&session=`) of the channel on screen, reopened when you switch channel. The members line under the input reads `online: alice(2) bob · agents: worker-test ● observer-test ○`: people with a live session (a number after the name when one person has several), then agents with a session (`●` running, idle, blocked, waiting or failed; `◐` stale; `○` offline). Members with no session are not listed there. On a terminal of 120x30 or more the people pane on the right replaces it: every member once, with `online`, `stale` or `offline` (and `×2` for two live sessions), the agents with their status and task, and who is in the channel's voice room. `tab` cycles channels, inbox and agents, and `shift+tab` goes the other way. The Agents view lists each agent member of the channel once, with its status as the server derives it (`idle`, `running`, `blocked`, `waiting`, `failed`, `stale`, `offline`; an agent with no session is `offline`), its current task and when it was last heard from; `enter` unfolds its sessions with their runtime and model, and a stale or offline session with a run still open says `outcome unknown`. Names, tasks, runtimes and models are chosen by other people and agents, so they are printed as text with control characters dropped. When the events socket is down or refused, or the TUI's session could not be created (a server with `--auth off`), both views read `unavailable` rather than showing a roster that may be stale, messaging keeps working, and the socket is retried with the same backoff as the message stream (1 s, doubling to 30 s); a roster is never replayed, so a reconnect takes the next one as the state. When the server has ended the TUI's session (a revoke, a rotate, an expired credential) the socket is refused with `404 session_not_found`: the TUI then creates one new session and reopens the socket with it, and if that fails the views stay `unavailable` and the status line says why (for example `members: session ended; sign in again`). The message stream follows `/v2/ws?after=<last id held>`: after a drop it asks for exactly what it missed, with no reload of the channel. Below 80x24 the Agents view is one pane; below 40x10 the TUI asks for a larger terminal.
 
 The TUI's layout and keys are described in [docs/design/tui-polish.md](docs/design/tui-polish.md). In short: from 80x24 a title bar names the server, the view (`[Chat] Inbox Agents Runs`), who you are and the state of the text connection (`● text live`, `◐ text reconnecting`); from 120x30 the people pane is added; below 80x24 the layout is compact. `F1` opens the help everywhere (also `?` where nothing is being typed, and `/help` in the chat view, for a terminal that keeps `F1` for itself as GNOME Terminal does), and `esc` closes it; while it is open no key reaches the view underneath. In the chat view `←`/`→` move the focus between the channel list and the messages, and `↑`/`↓` move whichever has it; typing always goes to the input. Long and multi-line messages wrap, their further lines marked `┊`. `pgup`/`pgdn` scroll the history, `home` goes to the oldest message held and `end` back to the newest. Scrolled up, new messages do not move what you are reading: the message pane's bottom border says `↓ 3 newer · end: latest`. The voice strip under the input shows your own voice when the TUI has joined it (`/voice join`, see [Voice in the TUI](#voice-in-the-tui)): `voice: #squad · mic on · hold the talk key to talk`, `TALKING`, `muted`, `reconnecting (connection lost), retry in 3 s`, or `voice stopped: <why>`. Otherwise it says what the channel's voice presence shows of you, and only that: `voice off · /voice join`, or `you: in #general voice from another client` when `conch-voice` or a browser has you in that channel's room. It cannot see other channels' rooms, and says nothing about you while presence is reconnecting. Then it says who is in the room of the channel on screen; browsing never changes where you speak.
 
@@ -964,50 +988,40 @@ With Caddy and nginx absent from the machine that wrote this recipe, the two con
 
 ## Invites
 
-An invite is the second way into a server, beside an operator issuing a credential (ADR-008 §4). Whoever holds its code joins as a new human member, with the channels and the grants the invite names, and gets their first credential. There is no public signup.
+A member link makes a human account with a name and password. It normally lands
+the joiner in the default channels as they are when the link is used, with full
+history, voice on and the per-person member-link switch on. Role permissions still
+apply. With no default channels, the new member starts in no channel and can use
+**Browse channels**. A holder of `manage_channels` may name landing channels instead
+through the API or `--landing-channel` in the CLI.
 
-- **Personal invites** are single-use and expire after 7 days unless the maker says otherwise (at most 30). An operator may make them, and so may a person an operator has given the right to invite (`whoami` says `"may_invite": true`). Such a person holds at most `--invite-allowance` (default 5) open ones at a time, and `whoami` tells them how many more they may make now (`"invites_remaining"`; absent for operators, who have no allowance, and for anyone who may not invite).
-- **Open links** are for operators only: anyone with the link may join until it expires (default 24 hours, at most 7 days) or is closed, with an optional cap on uses (`max_uses`; none by default).
-- **An invite grants only what its maker holds:** a person may name only channels they are in, and grant voice only if they have it. Only an operator grants the right to invite in turn (`"may_invite": true` on the invite), so nobody who joins can make accounts that make accounts unless an operator chose that. An invite is never an operator and never an agent.
-- **Joiners do not decide approvals.** A membership made by an invite does not carry the right to decide the channel's approvals; the joiner sees them read-only, and is refused `403 decision_not_permitted` if they try. An operator grants it per member with `conch admin member decide <channel> <principal-id>` (`PUT /v1/channels/{channel}/members/{principal_id}` with `{"can_decide":true}`).
-- **Voice is a grant.** `whoami` says whether the caller holds it (`"voice_allowed"`; always false for an agent). A joiner whose invite did not include it is refused `403 voice_not_allowed` by every voice route (a channel they are not in is still `404 channel_not_found`).
+Members can make member links by default. Making one needs `make_member_links`
+and, for a member, the `may_invite` switch. Links are reusable until they expire,
+reach their use limit or are closed. A link without an explicit expiry uses
+`member_link_default_expiry_seconds`: seven days by default, or no expiry if the
+setting is `0`. Asking for `never_expires: true` needs `manage_members`.
+The maker can see and close their own links and see their joiners. A holder of
+`manage_members` can do so for every link.
 
-The flow, with `curl` (an operator's token in `$TOKEN`; preview and redeem need none):
+| Route | What it does |
+| --- | --- |
+| `POST /v2/invites` | Make a member link (`kind: "member"`); returns its code once. |
+| `GET /v2/invites` | List your links, or all links with `manage_members`. |
+| `POST /v2/invites/preview` | Preview who made the link, its landing channels and expiry. No credential needed. |
+| `POST /v2/invites/redeem` | Use the code with a name and password to make an account. Needs HTTPS or loopback. |
+| `GET /v2/invites/{id}/joiners` | List who joined through a link you made, or any link with `manage_members`. |
+| `DELETE /v1/invites/{id}` | Close your link, or any link with `manage_members`. Existing accounts stay. |
 
-```sh
-# Make an open link for two channels. The code is in this response and nowhere else.
-curl -s -X POST http://127.0.0.1:8080/v1/invites -H "Authorization: Bearer $TOKEN" \
-     -d '{"kind":"open","channels":["red","blue"],"voice":true}'
-# {"invite":{"id":1,"kind":"open",...},"code":"conch_inv_..."}
+Use `conch admin invite create --expires 24h --uses 5` to make a link.
+The browser's **Invite someone** panel also makes member links. Keep the link
+private: anyone holding it can use it. See [member links and the invite brake](docs/deploy.md#member-links-and-the-invite-brake)
+for closing links and pausing invites.
 
-# What the code grants, without using it: who made it, the channel names, voice, kind and expiry.
-curl -s -X POST http://127.0.0.1:8080/v1/invites/preview -d '{"code":"conch_inv_..."}'
-
-# Use it: a new human member called wren, with the password wren signs in with again from
-# any device, and their first credential (shown once). Over HTTPS, or from loopback as here.
-curl -s -X POST http://127.0.0.1:8080/v2/invites/redeem \
-     -d '{"code":"conch_inv_...","name":"wren","password":"a sentence only wren knows"}'
-# {"principal":{"id":5,"kind":"human","name":"wren",...},"credential":{...},"token":"conch_..."}
-
-# Your own invites, and closing one (uses already made stand).
-curl -s http://127.0.0.1:8080/v1/invites -H "Authorization: Bearer $TOKEN"
-curl -s -X DELETE http://127.0.0.1:8080/v1/invites/1 -H "Authorization: Bearer $TOKEN"
-```
-
-The link a client hands out is `https://<host>/app/#/invite/<code>`. The code is in the fragment, which a browser never sends to any server, and the API takes it only in a `POST` body, never in a path or query, so it does not reach an access log.
-
-What the routes answer:
-
-| Route | Who | Success | Refusals |
-| --- | --- | --- | --- |
-| `POST /v1/invites` | people (an agent gets `403 human_required`) | `201` with the invite and its code, `Cache-Control: no-store` | `400 invalid_request`; `403 invite_not_allowed` (may not make this kind), `invite_grant_exceeds_inviter`, `invite_allowance_exceeded`; `404 channel_not_found` (an operator naming no channel); `409 join_policy_conflict` (`join_as` `guest` or `both`: guests are turned off for now); `503 invites_paused`; `429 rate_limited` |
-| `GET /v1/invites` | people | `200`, newest first: every invite for an operator, the caller's own for anyone else. `?kind=personal\|open`, `?state=open\|used\|expired\|closed` and, for an operator, `?created_by=<id>` narrow it | `400 invalid_request` for a filter value it does not know |
-| `DELETE /v1/invites/{id}` | the invite's maker (or an operator) | `204`, also for one already closed | `404 invite_not_found`, the same for someone else's invite as for no invite |
-| `POST /v1/invites/preview` | anyone | `200` | `404 invite_invalid`; `503 invites_paused`; `429 rate_limited` |
-| `POST /v2/invites/redeem` | anyone, over HTTPS or from loopback | `201` with the principal, its credential and the token, `Cache-Control: no-store` | `404 invite_invalid`; `409 principal_exists` (the invite is not used up: pick another name); `400 invalid_request` for a name or password that is not acceptable, `400 password_unacceptable` for a common one or one that contains the name; `503 invites_paused`; `429 rate_limited`; `403 https_required` |
-| `POST /v1/invites/redeem` | anyone | none: it makes no account any more (it once made one with no password). Every request is `409 password_required`, whatever it is sent, and uses no invite and no rate limit. Redeem through v2 | `409 password_required` |
-
-A code that is unknown, malformed, expired, used up or closed, or whose maker has been disabled or has lost the right to invite, gets one answer, byte for byte: `404 invite_invalid`. While an operator has invites paused, preview and redeem answer `503 invites_paused` whatever the code. Bodies are limited to 4 KiB. No error message quotes the code or the name, and neither does the log or the audit trail.
+Older account-only invites still work until they expire. Their joiners get their
+remaining landing channels and the default channels, with full history and voice.
+`POST /v1/invites` remains available to holders of `manage_members` for legacy
+clients; other callers get `409 invite_kind_retired` and must use v2.
+`POST /v1/invites/redeem` answers `409 password_required`; use v2 to make an account.
 
 **Rate limits.** In memory, so a restart resets them. Past one, the answer is `429 rate_limited` with `Retry-After` in whole seconds.
 
@@ -1024,14 +1038,19 @@ Anyone holding a valid code can learn whether a name is taken, from the `409`, w
 
 A password is up to 128 characters (normalized to NFC first) and may be short, but not empty: any characters, spaces welcome; it may not be on the bundled list of common passwords, be one short run repeated, or contain the account's name. It is stored only as an Argon2id hash (64 MiB, 3 passes) and is in no log, audit row or error.
 
-### Joining and guests: guests are turned off for now
+### Joining and guests: no guests for now
 
-Guest visits (ADR-009) are turned off for now (#1005). They will come back later, on top of ADR-013. Nothing was deleted: the guest tables, the visits already live and the guest attribution of past messages are kept.
+Guests were removed on 2026-10-30. The community migration ends active visits and
+closes invites that admitted guests. Guest records and attribution are kept.
+Guests return with #1004. The bare address admits no guests.
 
-- **No new guest, by any route.** `POST /v1/join/guest` and `POST /v1/invites/redeem-guest` always answer `403 guests_disabled`. They read nothing first, and spend no invite use.
-- **No new way in for guests.** `PUT /v1/join/settings` refuses `guests_enabled: true` and the `open_joining` modes `guest` and `both` with `409 join_policy_conflict`; `account` and `off` work as before. `POST /v1/invites` refuses `join_as` `guest` or `both` the same way, so an invite makes accounts only. `conch admin join set` and `conch admin invite create` pass that answer on.
-- **A server upgraded with guests on.** At start the server turns its stored settings to guests off. A bare address open to `both` is then open to accounts only, and a `guest`-only one is off. This is audited once as `join_settings_changed` by `system`, with `reason=guests_removed`. Starting again changes nothing. An invite made earlier to admit guests still makes accounts if it admitted them.
-- **Visits already live** last until their bounds, at most a day. A guest can still end the visit or create an account, and an operator can still list visits and end them (`GET /v1/guests`, `POST /v1/guests/{id}/end`, `POST /v1/guests/end`, `conch admin guest list|end|end-all`). The front door (`GET /v1/join`) and an invite's preview never offer a visit.
+`open_signup` is off by default. An owner, or an operator with
+`change_server_settings`, can set it through `PUT /v1/join/settings` or
+`conch admin join set --open-signup on`. It needs a public default channel.
+When on, the address offers account creation into the default channels, with full
+history and voice. `GET /v1/join/settings` reads the settings.
+The settings stay on v1; `member_link_default_expiry_seconds` sets the default link
+lifetime. `conch admin join set --link-expiry 7d` sets it from the CLI.
 
 ### Signing in with a password
 
@@ -1039,14 +1058,14 @@ A member who joined with a password (through `POST /v2/invites/redeem`) signs in
 
 ### Administering invites
 
-An operator sees every invite, closes any of them, and has these routes besides (each refuses anyone else with `403 forbidden`, audited as `access_denied`; with authentication off they answer `401`):
+A holder of `manage_members` sees every invite, closes any of them, and has these routes besides (any operator may read `GET /v1/invites/settings`; changing it needs `manage_members`):
 
 | Route | Body | Success |
 | --- | --- | --- |
 | `GET /v1/invites/{id}/principals` | | `200`, everyone who joined through it: id, name, when, and whether disabled |
 | `POST /v1/invites/{id}/disable-joiners` | `{"dry_run":bool,"close":bool}` | `200`, `{"dry_run":…,"count":N,"principal_ids":[…]}`. Disables every enabled joiner the way `POST /v1/principals/{id}/disable` does: credentials revoked, sockets closed, out of voice. `close` (default `true`) closes the invite first. `dry_run` changes nothing and only counts |
 | `POST /v1/principals/{id}/disable-invitees` | `{"dry_run":bool,"depth":"1"\|"all"}` | `200`, the same shape: the people this person invited (`"1"`, the default), or everyone under them (`"all"`). The person themselves is left alone, and plain `disable` never follows the tree |
-| `PUT /v1/principals/{id}/invite-permission` | `{"may_invite":bool}` | `204`. Only an operator grants the right to invite. Taking it away closes the person's open personal invites; giving it back does not reopen them |
+| `PUT /v1/principals/{id}/invite-permission` | `{"may_invite":bool}` | `204`. Needs `manage_members`. The per-person brake applies to members. Turning it off closes their open member links and personal invites; turning it on does not reopen them |
 | `PUT /v1/principals/{id}/voice-permission` | `{"voice_allowed":bool}` | `200` `{principal_id, voice_allowed, changed}`. Needs `manage_members` and a recent proof; an owner target needs an owner; an agent is `409 not_a_person`; a hidden or unknown id is `404 principal_not_found`. Off removes the person (and their companion and viewer, and any share) from every voice room before the answer, with no room rotated; on changes nothing live. Each change is audited `voice_permission_changed` |
 | `GET /v1/invites/settings`, `PUT /v1/invites/settings` | `{"paused":bool}` | `200` with the setting. Paused refuses making, previewing and redeeming any invite. It is stored, so it survives a restart |
 
@@ -1066,7 +1085,7 @@ bin/conch admin principal invite-permission 5 on    # or off
 bin/conch admin principal disable-invitees 5 --all  # a dry run; --yes to do it
 ```
 
-A link is a member link (ADR-013): it lands its joiner in the default channels, and `--open`, `--personal`, `--channel`, `--voice`, `--may-invite` and `--join-as` of the old per-channel invite are gone (`--max-uses` is `--uses`). The rest of the community model, from the command line:
+A link is a member link (ADR-013): it lands its joiner in the default channels unless a holder of `manage_channels` names `--landing-channel`, and `--open`, `--personal`, `--channel`, `--voice`, `--may-invite` and `--join-as` of the old per-channel invite are gone (`--max-uses` is `--uses`). The rest of the community model, from the command line:
 
 ```sh
 bin/conch channels list [--all]                     # <id> <visibility> <default|-> <joined|-> <members|-> <name>; --all is for operators
@@ -1095,7 +1114,7 @@ Removing a person and everyone they invited (`conch admin principal disable-invi
 
 ### Signing a person back in
 
-A person who joined through an invite has no password: their browser keeps a credential, and once they sign out, sign out everywhere or clear the browser, it is gone. The lobby says so before it signs out. To let them back into the same account, not a new one, an operator makes them a **sign-in link**:
+A person who joined with a password can sign in with it again. For an older account without a password, a holder of `act_as_members` can make a **sign-in link** to return to the same account:
 
 ```sh
 LINK=$(bin/conch admin principal sign-in-link 7)               # the link, alone on stdout: <server>/app/#/signin/conch_sil_...
