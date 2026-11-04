@@ -13,7 +13,7 @@ import type { VoicePresenceV1 } from '../schema/voice';
 import { initialChannels } from '../state/channels';
 import type { Person } from '../useLiveChannel';
 import { VoiceClient, type Room, type RoomEvents, type ShareSink } from './connection';
-import { FakeClock, settle } from './fakes';
+import { FakeClock, noCamera, settle } from './fakes';
 import type { Captured, KeptScreen, ShareFeatures } from './share';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { VoicePanel } from './VoicePanel';
@@ -63,6 +63,21 @@ class StubRoom implements Room {
   microphoneProcessing = (): null => null;
   switchOutput = (): Promise<void> => Promise.resolve();
   outputs = (): Promise<never[]> => Promise.resolve([]);
+  private readonly camera = noCamera();
+  captureCamera = this.camera.captureCamera;
+  awaitCameraGrant = this.camera.awaitCameraGrant;
+  publishCamera = this.camera.publishCamera;
+  stopCamera = this.camera.stopCamera;
+  keepCamera = this.camera.keepCamera;
+  adoptCamera = this.camera.adoptCamera;
+  cameraTrack = this.camera.cameraTrack;
+  cameraInUse = this.camera.cameraInUse;
+  cameras = this.camera.cameras;
+  switchCamera = this.camera.switchCamera;
+  attachSelf = this.camera.attachSelf;
+  setViewing = this.camera.setViewing;
+  setCameras = this.camera.setCameras;
+  attachCamera = this.camera.attachCamera;
 }
 
 const session: VoiceSessionResult = {

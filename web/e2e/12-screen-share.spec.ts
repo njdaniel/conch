@@ -270,25 +270,18 @@ test.describe('screen share with LiveKit', () => {
   // Nothing secret in what the page said, and no policy refused anything: the
   // page's Permissions-Policy lets it capture a screen.
   //
-  // One report is expected, once per share on the sharer's page: Chromium
-  // checks the camera's policy too when it opens the screen picker, and
-  // reports camera=() as a violation, though the capture goes ahead (seen on
-  // the pinned Chromium with and without its fake devices). The camera stays
-  // off; the report is counted, so any other one fails.
-  const cameraReport = 'error: Permissions policy violation: camera is not allowed in this document.';
-  async function expectClean(p: Someone, shares = 0): Promise<void> {
+  // Until the camera was the page's own (ADR-015, #1242), Chromium reported
+  // camera=() once per share, from the picker call itself (a bare
+  // getDisplayMedia() made it). With camera=(self) it reports nothing, and
+  // any report fails.
+  async function expectClean(p: Someone): Promise<void> {
     await p.watch.settled();
     const said = p.watch.console.join('\n');
     for (const s of vw.secrets) expect(said, 'a secret in the console').not.toContain(s);
     const reports = p.watch.console.filter((l) => /Content Security Policy|Refused to|[Pp]ermissions policy/.test(l));
-    expect(reports.filter((l) => l !== cameraReport)).toEqual([]);
-    expect(reports.length, 'camera policy reports, one per share').toBe(shares);
-    // The same, as the page's ReportingObserver is told (issue #595). The
-    // camera's report comes from the picker call itself (a bare
-    // getDisplayMedia() makes it, and none is made with the camera allowed),
-    // so it is counted here, not taken away.
-    expect(p.watch.policy.filter((l) => !l.startsWith('camera ')), 'Permissions-Policy reports other than the camera').toEqual([]);
-    expect(p.watch.policy.length, 'camera Permissions-Policy reports, one per share').toBe(shares);
+    expect(reports).toEqual([]);
+    // The same, as the page's ReportingObserver is told (issue #595).
+    expect(p.watch.policy, 'Permissions-Policy reports').toEqual([]);
     // And no request to conchd the browser counts as failed: a stopped
     // share's 204 is read to its end, as a transmit report's is.
     expect(p.watch.failed, 'requests to conchd that failed').toEqual([]);
@@ -298,24 +291,22 @@ test.describe('screen share with LiveKit', () => {
     return (await vw.audit()).filter((e) => e.action.startsWith('voice_share_')).map(({ action, detail }) => ({ action, detail }));
   }
 
-  // Issue #1084 (browser UX audit 4, F7): starting a share leaves one console
-  // error, the camera report that Chromium makes by itself when getDisplayMedia
-  // opens the picker, whatever the options (checked on the pinned Chromium for
-  // a bare call, for { video: true } and for the page's own capture options),
-  // so the page cannot avoid it and the Permissions-Policy stays camera=().
-  // Nothing else is an error: the share asks for no request that is known to
-  // fail.
-  test('F7 starting a share at 1440×900 logs no console error but the one camera report the browser makes itself', async ({ browser }) => {
+  // Issue #1084 (browser UX audit 4, F7): starting a share leaves no console
+  // error. Until #1242 it left one, the camera report that Chromium made by
+  // itself when getDisplayMedia opened the picker under camera=(); with the
+  // camera the page's own there is none. The share asks for no request that
+  // is known to fail.
+  test('F7 starting a share at 1440×900 logs no console error', async ({ browser }) => {
     const a = await person(browser, 'alice', { viewport: { width: 1440, height: 900 } });
     try {
       await join(a, 'Join voice');
       await share(a);
       await a.watch.settled();
       const errors = a.watch.console.filter((l) => l.startsWith('error: '));
-      expect(errors).toEqual([cameraReport]);
+      expect(errors).toEqual([]);
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
-      await expectClean(a, 1);
+      await expectClean(a);
     } finally {
       await a.close();
     }
@@ -363,7 +354,7 @@ test.describe('screen share with LiveKit', () => {
       await voiceRegion(b.page).getByRole('button', { name: 'Use microphone' }).click();
       await expect(voiceRegion(b.page)).not.toContainText('Watch only');
       await expect.poll(() => micAsks(b.page)).toBe(1);
-      await expectClean(a, 1);
+      await expectClean(a);
       for (const p of [b, c]) await expectClean(p);
     } finally {
       for (const p of [a, b, c]) await p.close();
@@ -416,7 +407,7 @@ test.describe('screen share with LiveKit', () => {
           'voice_share_started',
           'voice_share_stopped self',
         ]);
-      await expectClean(a, 3);
+      await expectClean(a);
       await expectClean(b);
     } finally {
       for (const p of [a, b]) await p.close();
@@ -462,7 +453,7 @@ test.describe('screen share with LiveKit', () => {
       await expect(note).toHaveCount(0, { timeout: Math.max(1, stoppedAt + 8000 - Date.now()) });
       // Said for a while, not a flash: it went no sooner than it should.
       expect(Date.now() - stoppedAt, 'how long the note was up').toBeGreaterThan(4000);
-      await expectClean(b, 1);
+      await expectClean(b);
       await expectClean(a);
 
       // The sharer's own note goes at once when another's share starts
@@ -538,7 +529,7 @@ test.describe('screen share with LiveKit', () => {
       await b.page.waitForTimeout(10_000);
       expect((await shareRows()).slice(middle).map((r) => `${r.action} ${/reason=(\w+)/.exec(r.detail)?.[1] ?? ''}`.trim())).toEqual(['voice_share_stopped rotated']);
       await expect(voiceRegion(b.page).getByRole('button', { name: 'Watch' })).toHaveCount(0);
-      await expectClean(a, 1);
+      await expectClean(a);
       for (const p of [b, d]) await expectClean(p);
     } finally {
       for (const p of [a, b, d, e]) await p.close();
@@ -590,7 +581,7 @@ test.describe('screen share with LiveKit', () => {
 
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(voiceRegion(a.page)).toContainText('You stopped sharing.');
-      await expectClean(a, 1);
+      await expectClean(a);
       await expectClean(b);
     } finally {
       for (const p of [a, b, g, h]) await p.close();
@@ -646,7 +637,7 @@ test.describe('screen share with LiveKit', () => {
       await expect(voiceRegion(a.page)).toContainText('You are sharing your screen with its sound.');
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(shareView(b.page)).toHaveCount(0, { timeout: 15_000 });
-      await expectClean(a, 1);
+      await expectClean(a);
       await expectClean(b);
     } finally {
       for (const p of [a, b]) await p.close();
@@ -680,7 +671,7 @@ test.describe('screen share with LiveKit', () => {
       await expectFits(c.page, 'the phone watching a share');
       await voiceRegion(a.page).getByRole('button', { name: 'Stop sharing' }).click();
       await expect(shareView(c.page)).toHaveCount(0, { timeout: 15_000 });
-      await expectClean(a, 1);
+      await expectClean(a);
       for (const p of [b, c]) await expectClean(p);
     } finally {
       for (const p of [a, b, c]) await p.close();

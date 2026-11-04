@@ -392,6 +392,13 @@ func (s *Server) metricsHandler() http.Handler {
 	return mux
 }
 
+// metricsListenerHandler is what the metrics listener serves: the metrics,
+// with the deny-all Permissions-Policy every answer outside the web client
+// carries (ADR-015, design §6.4, N8).
+func (s *Server) metricsListenerHandler() http.Handler {
+	return permissionsPolicyMiddleware(s.metricsHandler())
+}
+
 // serveMetrics serves the metrics listener until ctx ends. Metrics are
 // optional: a failure is logged and the server goes on serving without them.
 // It returns a function that stops the listener and waits until it has.
@@ -402,7 +409,7 @@ func (s *Server) serveMetrics(ctx context.Context) (stop func()) {
 	// One small response per request, so tight timeouts are safe: an idle or
 	// slow-reading client cannot hold a connection open for long.
 	srv := &http.Server{
-		Handler:           s.metricsHandler(),
+		Handler:           s.metricsListenerHandler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       60 * time.Second,

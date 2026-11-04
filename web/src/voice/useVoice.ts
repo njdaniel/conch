@@ -7,6 +7,7 @@ import * as api from '../api';
 import type { ChannelV0 } from '../schema/channel';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
+import type { Camera } from './camera';
 import { VoiceClient, type Microphone, type ModeStore, type Output, type ProcessingStore, type VoiceState } from './connection';
 import { clampTail, defaultTail } from './gate';
 import { defaultTalkKey, isTyping } from './keys';
@@ -141,6 +142,49 @@ function writeOutput(choice: Output | null): void {
   }
 }
 
+// The camera chosen (ADR-015), by device id and by name, for as long as the
+// tab lasts: none stored is the browser's own choice. The name is how the
+// same camera is found again under a new id, and only if exactly one camera
+// carries it (N7).
+const cameraStore = 'conch.web.voice.camera';
+const cameraNameStore = 'conch.web.voice.camera.name';
+
+function readCamera(): Camera | null {
+  try {
+    const id = window.sessionStorage.getItem(cameraStore);
+    if (id === null) return null;
+    return { id, label: window.sessionStorage.getItem(cameraNameStore) ?? '' };
+  } catch {
+    return null;
+  }
+}
+
+function writeCamera(choice: Camera | null): void {
+  try {
+    if (choice === null) {
+      window.sessionStorage.removeItem(cameraStore);
+      window.sessionStorage.removeItem(cameraNameStore);
+    } else {
+      window.sessionStorage.setItem(cameraStore, choice.id);
+      window.sessionStorage.setItem(cameraNameStore, choice.label);
+    }
+  } catch {
+    // The choice lasts until the page is reloaded.
+  }
+}
+
+// Every voice client this page made, for leaveVoice.
+const clients = new Set<VoiceClient>();
+
+// leaveVoice leaves voice on every client of the page, and resolves once each
+// has: the camera stopped and its claim released, naming it, the share
+// stopped, the last report sent. Signing out calls it first, while the
+// credential still works, so nothing of this person's voice or camera is
+// carried into the next identity (ADR-015, design §6.2).
+export async function leaveVoice(): Promise<void> {
+  await Promise.all([...clients].map((c) => c.leave()));
+}
+
 // The voice processing chosen for each microphone (issue #659), for as long
 // as the tab lasts: a device under its id, and System default under a key of
 // its own. A device never set has it on.
@@ -262,6 +306,9 @@ export function useVoice({
       newRoom: newLiveKitRoom,
       claimShare: api.claimVoiceShare,
       stopShare: api.stopVoiceShare,
+      claimCamera: api.claimVoiceCamera,
+      stopCamera: api.stopVoiceCamera,
+      camera: readCamera(),
       microphone: readMicrophone(),
       processing: processingChoices(),
       mode: modeChoice(),
@@ -317,6 +364,20 @@ export function useVoice({
   useEffect(() => {
     writeMicrophone(state.microphone);
   }, [state.microphone]);
+
+  // So is the camera: the person's choice, and the same camera found again
+  // under a new id.
+  useEffect(() => {
+    writeCamera(state.cameraChoice);
+  }, [state.cameraChoice]);
+
+  // Every client of the page, for leaveVoice.
+  useEffect(() => {
+    clients.add(client);
+    return () => {
+      clients.delete(client);
+    };
+  }, [client]);
 
   // So are the speakers: the person's choice, the same output found again
   // under a new id, the one the SDK moved sound to, and the system default
