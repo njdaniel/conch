@@ -2375,10 +2375,10 @@ describe('the camera', () => {
     expect([...captures()].filter((m) => m.readyState === 'live')).toHaveLength(0);
   });
 
-  it('a failed switch while starting follows the newer choice and publishes it', async () => {
+  it('a failed switch after the grant follows a choice changed back and publishes a live track', async () => {
     const room = await connected();
-    state.permissions = { canPublish: true, canPublishSources: [] };
-    const choice = { id: 'cam-2' };
+    state.permissions = { canPublish: true, canPublishSources: [2] };
+    const choice = { id: 'cam-1' };
     const releases: string[] = [];
     const client = new CameraClient(
       {
@@ -2394,24 +2394,76 @@ describe('the camera', () => {
     );
     const to2 = deferred<undefined>();
     const to3 = deferred<undefined>();
-    state.videoRestartHolds.push(to2, to3);
+    const backTo2 = deferred<undefined>();
+    state.videoRestartHolds.push(to2, to3, backTo2);
     const starting = client.start('general', room, 'cam-1');
     await settle();
+    expect(client.current).toEqual({ kind: 'granted-waiting' });
+    choice.id = 'cam-2';
+    state.permissions = { canPublish: true, canPublishSources: [] };
+    state.handlers.get('ppc')?.(undefined, state.room?.localParticipant);
+    await settle();
+    expect(state.videoOptions.at(-1)).toMatchObject({ deviceId: { exact: 'cam-2' } });
+    to2.resolve(undefined);
     choice.id = 'cam-3';
-    to2.reject(new DOMException('gone', 'OverconstrainedError'));
     await settle();
     expect(state.videoOptions.at(-1)).toMatchObject({ deviceId: { exact: 'cam-3' } });
+    choice.id = 'cam-2';
+    to3.reject(new DOMException('gone', 'OverconstrainedError'));
+    await settle();
+    expect(state.videoOptions.at(-1)).toMatchObject({ deviceId: { exact: 'cam-2' } });
     expect(client.current).toEqual({ kind: 'granted-waiting' });
-    to3.resolve(undefined);
+    backTo2.resolve(undefined);
     await starting;
     expect(client.current).toEqual({ kind: 'sending' });
-    expect(room.cameraInUse()).toBe('cam-3');
+    expect(room.cameraInUse()).toBe('cam-2');
     expect(room.cameraTrack()).toBe('published');
+    expect(state.videoTracks.at(-1)?.mediaStreamTrack.readyState).toBe('live');
     expect(state.published.map((p) => p.source)).toEqual(['camera']);
     await client.stop('self');
     expect(room.cameraTrack()).toBe('none');
     expect(state.videoTracks.at(-1)?.mediaStreamTrack.readyState).toBe('ended');
     expect(releases).toEqual(['2026-11-03T10:00:00.000Z']);
+  });
+
+  it('a failed chooseCamera while sending unpublishes the camera and releases its claim', async () => {
+    state.permissions = { canPublish: true, canPublishSources: [] };
+    const session: VoiceSessionResult = {
+      ok: true,
+      value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-11-03T10:00:15.000Z' }] },
+    };
+    const releases: string[] = [];
+    const client = new VoiceClient({
+      clock: new FakeClock(),
+      random: () => 0.5,
+      createSession: () => Promise.resolve(session),
+      report: () => Promise.resolve('ok'),
+      newRoom: newLiveKitRoom,
+      claimShare: () => Promise.resolve({ ok: false, failure: 'network' }),
+      stopShare: () => Promise.resolve(),
+      claimCamera: () => Promise.resolve({ ok: true, value: { principal_id: 7, started_at: '2026-11-03T10:00:00.000Z' } }),
+      stopCamera: (_channel, startedAt) => {
+        releases.push(startedAt);
+        return Promise.resolve();
+      },
+    });
+    client.join('general');
+    await settle();
+    await settle();
+    await client.startCamera();
+    await settle();
+    expect(client.snapshot()).toMatchObject({ camera: { kind: 'sending' }, cameraTrack: 'published' });
+    const failed = deferred<undefined>();
+    state.videoRestartHolds.push(failed);
+    const choosing = client.chooseCamera({ id: 'cam-2', label: 'Laptop camera' });
+    await settle();
+    failed.reject(new DOMException('gone', 'OverconstrainedError'));
+    await choosing;
+    await settle();
+    expect(client.snapshot()).toMatchObject({ camera: { kind: 'failed', reason: 'not_connected' }, cameraTrack: 'none' });
+    expect(state.published).toEqual([]);
+    expect(releases).toEqual(['2026-11-03T10:00:00.000Z']);
+    await client.leave();
   });
 
   it('a switch overtaken by a later one never stops the capture the later one made', async () => {
