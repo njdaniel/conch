@@ -270,7 +270,9 @@ export interface VoiceControl {
   readonly capture: (on: boolean) => void;
   readonly join: () => void;
   // Joins to watch, without the microphone.
-  readonly watchOnly: () => void;
+  // beside: the person's own voice is in another client, so watch as the
+  // viewer (issue #936).
+  readonly watchOnly: (beside?: boolean) => void;
   readonly leave: () => void;
 }
 
@@ -303,6 +305,8 @@ export function useVoice({
       clock: realClock,
       random: Math.random,
       createSession: api.createVoiceSession,
+      createViewer: api.createVoiceViewer,
+      removeViewer: api.removeVoiceViewer,
       report: api.reportVoiceTransmit,
       newRoom: newLiveKitRoom,
       claimShare: api.claimVoiceShare,
@@ -598,10 +602,10 @@ export function useVoice({
     note(channel);
     client.join(channel);
   }, [channel, client, note]);
-  const watchOnly = useCallback(() => {
+  const watchOnly = useCallback((beside = false) => {
     if (channel === null) return;
     note(channel);
-    client.join(channel, { watchOnly: true });
+    client.join(channel, { watchOnly: true, beside });
   }, [channel, client, note]);
   const leave = useCallback(() => {
     void client.leave();

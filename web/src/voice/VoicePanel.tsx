@@ -424,7 +424,7 @@ export function VoicePanel({
                     {state.muted ? 'Muted. ' : ''}
                     {state.deafened ? 'Deafened (you hear no one, and you are muted). ' : ''}
                     {state.listenOnly ? 'Listen only. ' : ''}
-                    {state.watchOnly ? 'Watch only: your microphone is off. ' : ''}
+                    {state.viewer ? 'Watching beside your voice on another device. ' : state.watchOnly ? 'Watch only: your microphone is off. ' : ''}
                     {transmitLabel(state)}
                   </span>
                 </p>
@@ -446,7 +446,7 @@ export function VoicePanel({
               <>
                 <TalkControl voice={voice} silenced={silenced} />
                 <ModeToggle voice={voice} />
-                {state.watchOnly && !state.listenOnly ? (
+                {state.watchOnly && !state.listenOnly && !state.viewer ? (
                   <button type="button" onClick={() => { void client.useMicrophone(); }} disabled={state.phase !== 'connected'}>
                     Use microphone
                   </button>
@@ -457,7 +457,7 @@ export function VoicePanel({
                   <span className="label">{state.deafened ? 'Undeafen' : 'Deafen'}</span>
                 </button>
                 {canCamera ? <CameraButton voice={voice} /> : null}
-                <ShareButton voice={voice} othersShare={theirs !== null} watching={state.watching} />
+                {state.viewer ? null : <ShareButton voice={voice} othersShare={theirs !== null} watching={state.watching} />}
                 {state.viewing ? (
                   <button type="button" aria-pressed="true" onClick={() => { client.viewVideo(false); }}>
                     <Glyph name="camera" />
@@ -488,7 +488,7 @@ export function VoicePanel({
                   {/* One flex item, so the words and the channel read as one line of text (F17). */}
                   <span className="btn-text">Join voice {dest}</span>
                 </button>
-                <button type="button" onClick={voice.watchOnly} disabled={!canJoin} aria-describedby={canJoin ? 'voice-watch-hint' : undefined}>
+                <button type="button" onClick={() => { voice.watchOnly(elsewhere); }} disabled={!canJoin} aria-describedby={canJoin ? 'voice-watch-hint' : undefined}>
                   <span className="btn-text">Watch only {dest}</span>
                 </button>
               </>

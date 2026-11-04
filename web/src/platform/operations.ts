@@ -116,6 +116,8 @@ import {
   totpEnrollmentV1,
   totpLoginRequestV1,
   voiceCameraV1,
+  voiceCompanionRequestV1,
+  voiceCompanionResponseV1,
   voiceOccupancyV1,
   voicePresenceV1,
   voiceSessionResponseV1,
@@ -345,6 +347,12 @@ export const operations = {
   voiceOccupancy: op('GET', '/v1/voice/occupancy', 'bearer', { response: check(voiceOccupancyV1) }),
   claimShare: op('POST', '/v1/channels/{channel}/voice/share', 'bearer', { response: check(voiceShareV1) }),
   stopShare: op('DELETE', '/v1/channels/{channel}/voice/share', 'bearer'),
+  // The viewer (issue #936, voice-control-plane.md §13): the second
+  // participant, p<id>.view, that lets a tab watch beside the voice of
+  // another client. Its answer holds a join token, so the renderer never
+  // invokes it; the DELETE removes it and answers 204.
+  voiceViewer: op('POST', '/v1/channels/{channel}/voice/companion', 'bearer', { request: check(voiceCompanionRequestV1), response: check(voiceCompanionResponseV1), renderer: false, credentials: token }),
+  voiceViewerEnd: op('DELETE', '/v1/channels/{channel}/voice/companion', 'bearer'),
   // The camera claim (ADR-015): claimed by the person's camera button, or
   // continued by naming the claim (?started_at=), and released.
   claimCamera: op('POST', '/v1/channels/{channel}/voice/camera', 'bearer', { response: check(voiceCameraV1) }),

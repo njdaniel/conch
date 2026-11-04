@@ -68,11 +68,11 @@
 // it is shown. Whether the page captures or sends video is read from the
 // local track alone (S5). The microphone and the camera are independent:
 // mute, deafen and the share leave the camera as it is.
-import type { CameraClaimResult, ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
+import type { CameraClaimResult, ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerResult } from '../api';
 import type { VoicePresenceV1, VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
 import { CameraClient, cameraOff, cameraOn, findCamera, type Camera, type CameraLoss, type CameraProfile, type CameraRoom, type CameraState } from './camera';
-import { afterDisconnect, afterRefusal, cameraAfter, retryDelay, type DisconnectCause, type Next } from './disconnect';
+import { afterDisconnect, afterRefusal, afterViewerRefusal, cameraAfter, retryDelay, type DisconnectCause, type Next } from './disconnect';
 import { clampTail, defaultTail, TransmitGate, type GateMode, type GateOptions } from './gate';
 import { cameraHolders, occupants, principalOf, sharer } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
@@ -308,6 +308,10 @@ export interface VoiceState {
   readonly listenOnly: boolean;
   // Joined to watch: connected without the microphone, until asked for it.
   readonly watchOnly: boolean;
+  // Watch only beside the person's own voice in another client (issue #936):
+  // connected as the viewer, p<id>.view, which publishes nothing and so
+  // displaces nobody.
+  readonly viewer: boolean;
   // The gate is open: the key is held (or in its release delay), or the open
   // microphone hears speech. Nothing may be sent yet: see transmitting.
   readonly talking: boolean;
@@ -368,6 +372,10 @@ export interface VoiceEnv {
   readonly clock: Clock;
   readonly random: () => number;
   readonly createSession: (channel: string) => Promise<VoiceSessionResult>;
+  // The viewer grant, and its removal (issue #936). Without them a watch
+  // beside another client is refused, never made as the person's own p<id>.
+  readonly createViewer?: (channel: string) => Promise<VoiceViewerResult>;
+  readonly removeViewer?: (channel: string) => Promise<unknown>;
   readonly report: (channel: string, state: VoiceTransmitState, signal: AbortSignal) => Promise<TransmitAnswer>;
   readonly newRoom: () => Room;
   readonly claimShare: (channel: string) => Promise<ShareClaimResult>;
@@ -425,6 +433,7 @@ export const initialVoice: VoiceState = {
   deafened: false,
   listenOnly: false,
   watchOnly: false,
+  viewer: false,
   talking: false,
   transmitting: false,
   releaseDelay: defaultTail,
@@ -605,7 +614,11 @@ export class VoiceClient {
 
   // join connects to a channel's voice. Watch only connects without the
   // microphone: nothing is captured or published until useMicrophone.
-  join(channel: string, options: { readonly watchOnly?: boolean } = {}): void {
+  //
+  // beside is for Watch only when the person's own voice is in another client
+  // (the helper, the TUI): the page then connects as the viewer and never as
+  // the person's own p<id>, which would knock that client out of the room.
+  join(channel: string, options: { readonly watchOnly?: boolean; readonly beside?: boolean } = {}): void {
     if (this.state.phase !== 'idle' && this.state.phase !== 'stopped') return;
     this.channel = channel;
     this.failures = 0;
@@ -614,7 +627,7 @@ export class VoiceClient {
     this.camera.reset();
     // Joining is the person's own choice: a microphone missing before is
     // asked for again, as chosen.
-    this.set({ phase: 'connecting', channel, why: null, reportNote: null, watchOnly: options.watchOnly === true, watching: false, shareTracks: noTracks, missing: false });
+    this.set({ phase: 'connecting', channel, why: null, reportNote: null, watchOnly: options.watchOnly === true, viewer: options.watchOnly === true && options.beside === true, watching: false, shareTracks: noTracks, missing: false });
     void this.connect();
   }
 
@@ -634,7 +647,7 @@ export class VoiceClient {
   // muted, as on a full join, and the talk controls work from then on.
   async useMicrophone(): Promise<void> {
     const room = this.room;
-    if (!this.state.watchOnly || this.state.listenOnly || this.state.phase !== 'connected' || room === null) return;
+    if (!this.state.watchOnly || this.state.viewer || this.state.listenOnly || this.state.phase !== 'connected' || room === null) return;
     const mine = this.attempt;
     this.set({ watchOnly: false });
     try {
@@ -1089,6 +1102,8 @@ export class VoiceClient {
     this.steps = Promise.resolve();
     this.reports.reset();
     const room = this.room;
+    const left = this.channel;
+    const viewer = this.state.viewer;
     this.room = null;
     this.channel = null;
     this.endAwaiting();
@@ -1119,6 +1134,10 @@ export class VoiceClient {
       cameraInUse: null,
     });
     if (room !== null) await room.close().catch(() => undefined);
+    // The viewer is removed from the room as the page goes; a refusal is not
+    // news, since its token lives seconds and the room drops it anyway.
+    const remove = this.env.removeViewer;
+    if (viewer && left !== null && remove !== undefined) await remove(left).catch(() => undefined);
   }
 
   setMode(mode: GateMode): void {
@@ -1358,13 +1377,13 @@ export class VoiceClient {
     const mine = known ?? ++this.attempt;
     const channel = this.channel;
     if (channel === null) return;
-    const session = await this.env.createSession(channel);
+    const session = this.state.viewer ? await this.viewerSession(channel) : await this.env.createSession(channel);
     if (mine !== this.attempt) return;
     if (!session.ok) {
       // conchd refused the next session: a camera held for it stops (S5).
       // An answer that never came is not a refusal, and is retried.
       if (session.failure !== 'network') this.camera.refused();
-      this.act(afterRefusal(session), mine);
+      this.act(this.state.viewer ? afterViewerRefusal(session) : afterRefusal(session), mine);
       return;
     }
     const grant = session.value.rooms.find((g) => g.audience === undefined);
@@ -1372,7 +1391,8 @@ export class VoiceClient {
       this.act({ kind: 'stop', why: 'This channel has no voice room for everyone' }, mine);
       return;
     }
-    this.me = principalOf(session.value.identity);
+    // The viewer's identity is p<id>.view: the person it stands for is p<id>.
+    this.me = principalOf(session.value.identity.replace(/\.view$/, ''));
     const room = this.env.newRoom();
     this.room = room;
     const events: RoomEvents = {
@@ -1533,6 +1553,18 @@ export class VoiceClient {
     this.env.clock.setTimeout(() => {
       if (mine === this.attempt && this.now() - this.connectedAt >= healthyAfter) this.failures = 0;
     }, healthyAfter);
+  }
+
+  // viewerSession asks for the viewer grant and shapes it as a session, so
+  // that connecting is one path: the same room, a token that publishes
+  // nothing. The page never asks for the person's own session on this path.
+  private async viewerSession(channel: string): Promise<VoiceSessionResult> {
+    const ask = this.env.createViewer;
+    if (ask === undefined) return { ok: false, failure: 'invalid' };
+    const viewer = await ask(channel);
+    if (!viewer.ok) return viewer;
+    const v = viewer.value;
+    return { ok: true, value: { livekit_url: v.livekit_url, identity: v.identity, rooms: [{ room: v.room, token: v.token, can_publish: false, expires_at: v.expires_at }] } };
   }
 
   private watchLevel(mine: number, room: Room): void {

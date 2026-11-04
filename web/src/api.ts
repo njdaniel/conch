@@ -173,11 +173,14 @@ import {
 import { wsTicketV1, type WSTicketV1 } from './schema/ticket';
 import {
   voiceCameraV1,
+  voiceCompanionResponseV1,
   voiceOccupancyV1,
   voicePresenceV1,
   voiceSessionResponseV1,
   voiceShareV1,
   type VoiceCameraV1,
+  type VoiceCompanionRequestV1,
+  type VoiceCompanionResponseV1,
   type VoiceOccupancyV1,
   type VoicePresenceV1,
   type VoiceSessionResponseV1,
@@ -2644,6 +2647,45 @@ export async function createVoiceSession(channel: string): Promise<VoiceSessionR
     // Fall through.
   }
   return { ok: false, failure: 'invalid' };
+}
+
+// The viewer (issue #936, voice-control-plane.md §13). A person whose own
+// voice is in another client (the helper, the TUI) watches a share here as
+// p<id>.view, which publishes nothing, so the page never takes the person's
+// own p<id> from that client. The join token is handed to the caller and kept
+// nowhere here.
+export type VoiceViewerResult =
+  | { readonly ok: true; readonly value: VoiceCompanionResponseV1 }
+  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string };
+
+// createVoiceViewer asks for the viewer grant of a channel's room.
+export async function createVoiceViewer(channel: string): Promise<VoiceViewerResult> {
+  const request: VoiceCompanionRequestV1 = { publish: 'none', subscribe: true };
+  const reply = await authedPost(call('voiceViewer', { channel }), request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  const res = reply.res;
+  if (!res.ok) {
+    const code = await refusalCode(res);
+    return code === undefined ? { ok: false, failure: 'invalid', status: res.status } : { ok: false, failure: 'invalid', status: res.status, code };
+  }
+  try {
+    const parsed: unknown = await res.json();
+    if (voiceCompanionResponseV1(parsed).length === 0) return { ok: true, value: parsed as VoiceCompanionResponseV1 };
+  } catch {
+    // Fall through.
+  }
+  return { ok: false, failure: 'invalid' };
+}
+
+// removeVoiceViewer removes the caller's own viewer from the room: 204 whether
+// or not one was there, and it never touches the person's own p<id>.
+export async function removeVoiceViewer(channel: string): Promise<ApiResult<null>> {
+  const reply = await authedSend(call('voiceViewerEnd', { channel }, queryOf({ publish: 'none' })));
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return refused(reply.res);
+  return { ok: true, value: null };
 }
 
 // getVoicePresence reads who is in a channel's voice, once. The page keeps

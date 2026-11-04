@@ -3,6 +3,8 @@ import {
   changePassword,
   channelAuthors,
   claimVoiceShare,
+  createVoiceViewer,
+  removeVoiceViewer,
   closeInvite,
   convertGuest,
   continueAsOperator,
@@ -595,6 +597,34 @@ describe('invites', () => {
     expect(calls).toEqual([{ path: '/v1/channels/red%20team/voice/share?started_at=2026-10-16T12%3A00%3A04.125Z', method: 'DELETE', auth: `Bearer ${memberToken}` }]);
     serve(() => json({ code: 'voice_share_stale', message: 'that share has already ended' }, 409));
     expect(await stopVoiceShare('red', '2026-10-16T12:00:04.125Z')).toEqual({ ok: false, failure: 'invalid', code: 'voice_share_stale' });
+  });
+
+  // Issue #936: the viewer grant is asked for as publish none with subscribe
+  // true, and nothing else; its removal names publish=none.
+  it('asks for the viewer grant as publish none, reads its answer, and removes it with ?publish=none (issue #936)', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const grant = { livekit_url: 'wss://lk.example', identity: 'p2.view', room: 'room-name', token: 'viewer-token', publish: 'none', subscribe: true, expires_at: at };
+    const calls = serve((c) => (c.method === 'POST' ? json(grant) : new Response(null, { status: 204 })));
+    expect(await createVoiceViewer('red team')).toEqual({ ok: true, value: grant });
+    expect(await removeVoiceViewer('red team')).toEqual({ ok: true, value: null });
+    expect(calls).toEqual([
+      { path: '/v1/channels/red%20team/voice/companion', method: 'POST', auth: `Bearer ${memberToken}` },
+      { path: '/v1/channels/red%20team/voice/companion?publish=none', method: 'DELETE', auth: `Bearer ${memberToken}` },
+    ]);
+    const sent = vi.mocked(fetch).mock.calls.find(([, init]) => init?.method === 'POST')?.[1]?.body;
+    expect(typeof sent === 'string' ? JSON.parse(sent) : null).toEqual({ publish: 'none', subscribe: true });
+  });
+
+  it("answers a refused viewer grant with its status and the server's code, and a malformed one as invalid (issue #936)", async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ code: 'voice_no_session', message: 'no voice here' }, 409));
+    expect(await createVoiceViewer('red')).toEqual({ ok: false, failure: 'invalid', status: 409, code: 'voice_no_session' });
+    serve(() => json({ code: 'channel_not_found', message: 'no such channel' }, 404));
+    expect(await createVoiceViewer('red')).toEqual({ ok: false, failure: 'invalid', status: 404, code: 'channel_not_found' });
+    serve(() => json({ identity: 'p2.view' }));
+    expect(await createVoiceViewer('red')).toEqual({ ok: false, failure: 'invalid' });
+    serve(() => Promise.reject(new Error('offline')));
+    expect(await createVoiceViewer('red')).toEqual({ ok: false, failure: 'network' });
   });
 
   it("answers a refused share claim with its status and the server's code, and a malformed one as invalid", async () => {
