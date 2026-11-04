@@ -5,6 +5,7 @@ import * as api from './api';
 import { forget, recent, record, ringSize, voiceState } from './diagnostics';
 import { createProblemReportRequestV1 } from './schema/report';
 import { VoiceClient, type Room } from './voice/connection';
+import { noCamera } from './voice/fakes';
 import { FakeClock, settle } from './voice/fakes';
 
 const token = 'conch_member_secret_AAAAAAAAAAAA';
@@ -262,6 +263,7 @@ describe('what the voice client records', () => {
       setVolume: () => undefined,
       level: () => 0,
       close: () => Promise.resolve(),
+      ...noCamera(),
     });
     const client = new VoiceClient(
       {

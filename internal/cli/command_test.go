@@ -1549,7 +1549,7 @@ func TestVoiceStatusUsageErrors(t *testing.T) {
 func TestUsageMentionsVoiceStatus(t *testing.T) {
 	var out bytes.Buffer
 	Usage(&out)
-	for _, want := range []string{"conch voice status", "--watch", "talking|quiet", "nobody is connected"} {
+	for _, want := range []string{"conch voice status", "--watch", "talking|quiet", "+camera", "nobody is connected", "conch voice camera stop", "<person-id>", "manage_channels"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("usage lacks %q", want)
 		}

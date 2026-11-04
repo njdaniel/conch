@@ -380,6 +380,9 @@ func New(cfg Config, st *store.Store) *Server {
 	// Outside authentication, so every answer has a request id, a refusal
 	// included (issue #446).
 	handler = s.requestIDMiddleware(handler)
+	// Outermost, so every answer carries a Permissions-Policy: the deny-all
+	// one everywhere but the web client's own (ADR-015, design §6.4, N8).
+	handler = permissionsPolicyMiddleware(handler)
 	s.http = &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           handler,
