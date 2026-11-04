@@ -76,7 +76,7 @@ var (
 	// guard refuses (issue #844). It is said only after the caller's
 	// standing in the channel is known: to anyone else the channel is
 	// errChannelNotFound.
-	errChannelArchived = &schema.Error{Code: schema.ErrorCodeChannelArchived, Message: "the channel is archived: restore it to post, react, upload, join, call, or start an approval or a run in it"}
+	errChannelArchived = &schema.Error{Code: schema.ErrorCodeChannelArchived, Message: "the channel is archived: restore it to post, react, upload, join, call, or start an approval, a run or an intervention in it"}
 	errUnauthenticated = &schema.Error{Code: "unauthenticated", Message: "the credential is no longer valid"}
 )
 

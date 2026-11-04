@@ -19,7 +19,8 @@ import (
 //  2. the operator archives the channel;
 //  3. a request over MCP and one over REST are refused with channel_archived,
 //     and so is starting a run: nothing is stored, notified or audited;
-//  4. a human decides the first approval, the agent reads the resolution,
+//  4. a human decides the first approval while the agent blocks on
+//     await_decision, which wakes with the resolution,
 //     and its audit chain is complete;
 //  5. the operator restores the channel, and a new request runs the chain.
 func archivedPath(bin binaries) error {
@@ -67,21 +68,39 @@ func archivedPath(bin binaries) error {
 		}
 		return created.ID, nil
 	}
+	// decide has the agent block on await_decision first, then the human
+	// decides: the long poll must wake with the resolution, archived or not.
 	decide := func(id int64) error {
+		type awaited struct {
+			out schema.AwaitDecisionOutput
+			err error
+		}
+		done := make(chan awaited, 1)
+		go func() {
+			raw, err := client.CallTool(context.Background(), "await_decision", map[string]any{"approval_id": id, "timeout_ms": 30000})
+			if err != nil {
+				done <- awaited{err: err}
+				return
+			}
+			out, err := mcpclient.Decode[schema.AwaitDecisionOutput](raw)
+			done <- awaited{out: out, err: err}
+		}()
+		time.Sleep(200 * time.Millisecond) // let the poll start before the decision
 		if err := human.call(http.MethodPost, fmt.Sprintf("/v1/approvals/%d/decisions", id),
 			schema.CastDecisionRequestV1{PrincipalID: humanID, OptionID: "approve", Reason: "fine"}, nil); err != nil {
 			return fmt.Errorf("decide approval %d: %w", id, err)
 		}
-		raw, err := client.CallTool(context.Background(), "check_decision", map[string]any{"approval_id": id})
-		if err != nil {
-			return fmt.Errorf("check_decision %d: %w", id, err)
+		var got awaited
+		select {
+		case got = <-done:
+		case <-time.After(40 * time.Second):
+			return fmt.Errorf("await_decision %d never returned", id)
 		}
-		checked, err := mcpclient.Decode[schema.CheckDecisionOutput](raw)
-		if err != nil {
-			return err
+		if got.err != nil {
+			return fmt.Errorf("await_decision %d: %w", id, got.err)
 		}
-		if checked.State != schema.ApprovalStateResolved || checked.Resolution == nil || checked.Resolution.Outcome != schema.OutcomeApproved {
-			return fmt.Errorf("check_decision %d = %+v, want resolved and approved", id, checked)
+		if got.out.State != schema.ApprovalStateResolved || got.out.Resolution == nil || got.out.Resolution.Outcome != schema.OutcomeApproved {
+			return fmt.Errorf("await_decision %d = %+v, want resolved and approved", id, got.out)
 		}
 		return nil
 	}
@@ -160,8 +179,12 @@ func archivedPath(bin binaries) error {
 		return err
 	}
 	for _, e := range events {
-		if strings.Contains(e.Detail, "Refused over") || e.Action == store.AuditRunStarted {
-			return fmt.Errorf("a refused request was audited: %+v", e)
+		if strings.Contains(e.Detail, "Refused over") {
+			return fmt.Errorf("a refused approval request was audited: %+v", e)
+		}
+		// This path starts no run: its only attempt was refused.
+		if e.Action == store.AuditRunStarted {
+			return fmt.Errorf("the refused run start was audited: %+v", e)
 		}
 	}
 	for _, id := range []int64{first, third} {

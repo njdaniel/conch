@@ -126,9 +126,11 @@ func TestArchivedChannelApprovalFullChain(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("alice's decision on %d = %d %s", id, rec.Code, rec.Body)
 		}
-		checked := mcpCallInProcess[schema.CheckDecisionOutput](t, f.srv, 9, "check_decision", map[string]any{"approval_id": id})
-		if checked.State != schema.ApprovalStateResolved || checked.Resolution == nil || checked.Resolution.Outcome != schema.OutcomeApproved {
-			t.Fatalf("check_decision(%d) = %+v, want resolved approved", id, checked)
+		// await_decision, the agent's blocking read, answers in an
+		// archived channel as in a live one.
+		awaited := mcpCallInProcess[schema.AwaitDecisionOutput](t, f.srv, 9, "await_decision", map[string]any{"approval_id": id, "timeout_ms": 5000})
+		if awaited.State != schema.ApprovalStateResolved || awaited.Resolution == nil || awaited.Resolution.Outcome != schema.OutcomeApproved {
+			t.Fatalf("await_decision(%d) = %+v, want resolved approved", id, awaited)
 		}
 	}
 	chainOf := func(id int64) string {
@@ -187,7 +189,11 @@ func TestArchivedChannelApprovalFullChain(t *testing.T) {
 	}
 
 	// Nothing of the refused requests reached ntfy or the audit log, even
-	// late: by now every notification of the other two has been sent.
+	// late. By now every notification of the other two has been sent:
+	// approvals.Manager.announce posts synchronously on create and resolve
+	// (only its load-retry path is deferred, and a healthy store never takes
+	// it), so a notifier that became asynchronous would need this check to
+	// wait for the resolutions first, as the dogfood path does.
 	for _, title := range []string{"while archived over MCP", "while archived over REST"} {
 		if got := ntfy.mentioning(title); len(got) != 0 {
 			t.Errorf("a refused request was notified: %q", got)
@@ -198,11 +204,14 @@ func TestArchivedChannelApprovalFullChain(t *testing.T) {
 			}
 		}
 	}
-	if got := ntfy.mentioning("before the archive"); len(got) == 0 {
-		t.Error("the first approval was never notified")
-	}
-	if got := ntfy.mentioning("after the restore"); len(got) == 0 {
-		t.Error("the approval after the restore was never notified")
+	// Each live approval was notified once when requested and once when
+	// resolved, the one decided while archived included.
+	for _, title := range []string{"before the archive", "after the restore"} {
+		for _, kind := range []string{"Approval requested: ", "Approval resolved: "} {
+			if got := ntfy.mentioning(kind + title); len(got) != 1 {
+				t.Errorf("%q notifications = %d, want 1: %q", kind+title, len(got), got)
+			}
+		}
 	}
 }
 
