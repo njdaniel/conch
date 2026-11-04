@@ -684,3 +684,67 @@ func TestVoiceCameraRemovalWithdrawsAGrantFirst(t *testing.T) {
 		t.Errorf("removals %q, want ann2 camera_unclaimed", got)
 	}
 }
+
+// TestVoiceCameraRemovalWithdrawsAGrantLeftByAnEndedClaim (Kimi, round 5 of
+// #1258): ann holds a claim when the pass plans her removal for a mismatched
+// track; before the removal is made her claim ends, and LiveKit refuses that
+// end's withdrawal, so the camera is still granted. The removal, of someone
+// who no longer holds a claim, withdraws the camera first, so a rejoin does
+// not carry it.
+func TestVoiceCameraRemovalWithdrawsAGrantLeftByAnEndedClaim(t *testing.T) {
+	f, room := newCameraFixture(t)
+	f.at(100)
+	f.mustCamera(t, "ann", "")
+	f.camTrack(room, "ann", true, false)
+	f.lk.update(room, f.identity("ann"), func(p *fakeParticipant) {
+		p.tracks = []fakeTrack{{sid: "TR_k1", typ: "VIDEO", source: "MICROPHONE"}}
+	})
+	p := f.srv.voice
+	r := p.roomNamed(room)
+	r.claims.Lock()
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			r.claims.Unlock()
+		}
+	})
+	passed := make(chan struct{})
+	go func() {
+		defer close(passed)
+		f.at(500)
+		p.runPass(context.Background())
+	}()
+	// The pass has judged (its row is written) and waits for the claims.
+	waitUntil(t, "the pass to plan ann's removal", func() bool {
+		for _, row := range f.cameraRows(t) {
+			if strings.Contains(row, "ann unclaimed") {
+				return true
+			}
+		}
+		return false
+	})
+	// ann's claim ends now, as the holder of the claims, and LiveKit refuses
+	// its withdrawal.
+	f.lk.setUpdateFail(f.identity("ann"), true)
+	p.endHeldCamera(context.Background(), r, f.ids["ann"], voiceCameraStopSelf)
+	f.lk.setUpdateFail(f.identity("ann"), false)
+	if !f.camGranted(room, "ann") {
+		t.Fatal("the fake withdrew a camera it refused to")
+	}
+	from := len(f.lk.calls())
+	locked = false
+	r.claims.Unlock()
+	<-passed
+	var order []string
+	for _, c := range f.lk.calls()[from:] {
+		if c.identity == f.identity("ann") && (c.method == "UpdateParticipant" || c.method == "RemoveParticipant") {
+			order = append(order, c.method)
+		}
+	}
+	if !slices.Equal(order, []string{"UpdateParticipant", "RemoveParticipant"}) {
+		t.Errorf("calls for ann %q, want the withdrawal and then the removal", order)
+	}
+	if got := f.removals(t); !slices.Equal(got, []string{"ann camera_unclaimed"}) {
+		t.Errorf("removals %q, want ann camera_unclaimed", got)
+	}
+}

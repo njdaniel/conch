@@ -1056,9 +1056,11 @@ type cameraWithdrawal struct {
 	// one claim): its publisher is removed even if they hold a claim by the
 	// time the withdrawal is made.
 	mismatch bool
-	// granted says LiveKit listed the camera granted to a participant without
-	// a claim: a removal is preceded by the withdrawal, so that a token
-	// LiveKit sends it does not carry the camera into a rejoin.
+	// granted says LiveKit listed the camera granted, whoever held a claim
+	// when the pass planned: a removal of someone who holds none when it is
+	// made is preceded by the withdrawal, so that a token LiveKit sends them
+	// does not carry the camera into a rejoin (a claim ended since the plan
+	// whose own withdrawal failed leaves the grant behind).
 	granted      bool
 	reason       string
 	canSubscribe bool
@@ -1136,7 +1138,7 @@ func (p *voicePoller) judgeCamerasLocked(r *voiceRoomState, now time.Time, seen 
 		// Still owed, or confirmed after this pass listed the room: what it
 		// saw is a claim's camera being taken away, not a new one.
 		quiet := owed && (stamp == 0 || stamp > since)
-		w := cameraWithdrawal{principalID: pid, role: role, joinedAt: part.JoinedAt, canSubscribe: part.CanSubscribe, reason: voiceReasonCameraUnclaimed, granted: !holder && part.CameraGranted}
+		w := cameraWithdrawal{principalID: pid, role: role, joinedAt: part.JoinedAt, canSubscribe: part.CanSubscribe, reason: voiceReasonCameraUnclaimed, granted: part.CameraGranted}
 		// owes says a withdrawal of this participant's is owed and confirmed
 		// (camWithdrawing): for anyone without a claim. A holder's only
 		// withdrawable track would be a camera, which its claim keeps.
