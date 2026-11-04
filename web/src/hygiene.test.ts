@@ -169,6 +169,8 @@ const screenApi = /getDisplayMedia|mediaDevices/;
 const screenCall = /getDisplayMedia\s*\(/;
 const screenChecker = './voice/share.ts';
 const notVoice = (path: string) => !path.startsWith('./voice/');
+// The SDK's camera shortcuts (N6), banned in every file, comments included.
+const cameraShortcut = /enableCameraAndMicrophone|setCameraEnabled/;
 
 // Where the join token of a voice grant may be read: a property read
 // (grant.token, x.token), an index into rooms, or a destructuring that names
@@ -200,6 +202,26 @@ describe('media devices', () => {
     expect(withoutComments(code).match(/getDisplayMedia/g)).toHaveLength(2);
     expect(code).toContain('readonly mediaDevices?: { readonly getDisplayMedia?: unknown }');
     expect(code).toContain("typeof devices.getDisplayMedia === 'function'");
+  });
+
+  // The camera (ADR-015, N6): the SDK's own ways of turning a camera on,
+  // which capture a device of its choosing and publish it at once, are named
+  // by no file, src/voice/sdk.ts included. The one way a video track is
+  // captured is sdk.ts's createLocalVideoTrack, and only sdk.ts calls it.
+  it('the SDK turns no camera on by itself: enableCameraAndMicrophone and setCameraEnabled are named nowhere, and createLocalVideoTrack only in src/voice/sdk.ts', () => {
+    const naming = Object.entries(sources)
+      .filter(([, code]) => cameraShortcut.test(code))
+      .map(([path]) => path);
+    expect(naming).toEqual([]);
+    const capturing = Object.entries(sources)
+      .filter(([, code]) => /createLocalVideoTrack|createLocalTracks/.test(withoutComments(code)))
+      .map(([path]) => path);
+    expect(capturing).toEqual(['./voice/sdk.ts']);
+    expect(withoutComments(sources['./voice/sdk.ts'] ?? '')).not.toMatch(/createLocalTracks/);
+    for (const example of ['room.localParticipant.enableCameraAndMicrophone()', 'await lp.setCameraEnabled(true)', 'const { setCameraEnabled } = lp;', 'p["setCameraEnabled"](true)']) {
+      expect(cameraShortcut.test(example), example).toBe(true);
+    }
+    expect(cameraShortcut.test('setMicrophone(choice)')).toBe(false);
   });
 
   it('the LiveKit SDK is imported only from src/voice/sdk.ts', () => {

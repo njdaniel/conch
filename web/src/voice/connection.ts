@@ -61,12 +61,20 @@
 // until the page is reloaded and never stored: handed to every new room
 // before it connects, so that it holds through a reconnect, a renewed room,
 // and a Leave and a Join. Nobody else hears a difference.
-import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
+//
+// And the camera (ADR-015): the person's own (camera.ts), the camera chosen,
+// kept by id and by name and re-matched by name only to exactly one camera
+// (N7), and the call view, which receives the cameras of the room only while
+// it is shown. Whether the page captures or sends video is read from the
+// local track alone (S5). The microphone and the camera are independent:
+// mute, deafen and the share leave the camera as it is.
+import type { CameraClaimResult, ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
 import type { VoicePresenceV1, VoiceTransmitState } from '../schema/voice';
 import type { Clock } from '../state/feed';
-import { afterDisconnect, afterRefusal, retryDelay, type DisconnectCause, type Next } from './disconnect';
+import { CameraClient, cameraOff, findCamera, type Camera, type CameraLoss, type CameraRoom, type CameraState } from './camera';
+import { afterDisconnect, afterRefusal, cameraAfter, retryDelay, type DisconnectCause, type Next } from './disconnect';
 import { clampTail, defaultTail, TransmitGate, type GateMode, type GateOptions } from './gate';
-import { occupants, principalOf, sharer } from './presence';
+import { cameraHolders, occupants, principalOf, sharer } from './presence';
 import { ReportQueue, type ReportEvent } from './reports';
 import { idleShare, resumeLimit, ScreenShare, type ScreenEnd, type ShareRoom, type ShareState } from './share';
 import { record } from '../diagnostics';
@@ -192,7 +200,18 @@ export interface RoomEvents {
   readonly onDevicesChanged: () => void;
   // The output in use went, and the SDK moved every voice to this one.
   readonly onOutputMoved: (id: string) => void;
+  // This page's camera is gone: its device ended the capture, or LiveKit
+  // took the source away (camera.ts).
+  readonly onCameraEnded: (cause: 'device' | 'server') => void;
+  // This page's own camera track changed: captured, published or stopped.
+  readonly onCameraChanged: () => void;
+  // Whose camera tracks have arrived, by principal.
+  readonly onCameraTracks: (principals: readonly number[]) => void;
 }
+
+// What this page's own camera is, as its local track says (S5): none,
+// captured but not sent ("Camera in use"), or published ("Sending video").
+export type CameraTrack = 'none' | 'captured' | 'published';
 
 export interface ShareTracks {
   readonly video: boolean;
@@ -207,7 +226,7 @@ export interface ShareSink {
 }
 
 // What the client needs of one LiveKit room connection.
-export interface Room extends ShareRoom {
+export interface Room extends ShareRoom, CameraRoom {
   // Resolves once the room is joined and, when publish is set, the
   // microphone track is published and muted. It rejects if any of that fails
   // (a microphone refused included).
@@ -256,6 +275,20 @@ export interface Room extends ShareRoom {
   setVolume: (principal: number, volume: number) => void;
   // The microphone level, 0 to 1.
   level: () => number;
+  // The camera (ADR-015): what the local track is, the device it is on, the
+  // cameras the browser lists (read without asking for any; null while it
+  // does not name them), a move of the capture to another camera, exactly,
+  // and where the self-view plays.
+  cameraTrack: () => CameraTrack;
+  cameraInUse: () => string | null;
+  cameras: () => Promise<readonly Camera[] | null>;
+  switchCamera: (choice: string) => Promise<void>;
+  attachSelf: (el: HTMLVideoElement | null) => void;
+  // Receiving cameras: whether the call view is shown, who holds a camera
+  // claim (presence), and the element each person's camera plays into.
+  setViewing: (on: boolean) => void;
+  setCameras: (claimed: ReadonlySet<number>) => void;
+  attachCamera: (principal: number, el: HTMLVideoElement | null) => void;
   close: () => Promise<void>;
 }
 
@@ -313,6 +346,19 @@ export interface VoiceState {
   // The volume of each person this page does not play at full volume, by
   // principal, 0 to 1 (issue #661). Anyone not in it is at 1.
   readonly volumes: ReadonlyMap<number, number>;
+  // The person's own camera (camera.ts), and what its local track is: the
+  // indicators come from that alone, never from presence (S5).
+  readonly camera: CameraState;
+  readonly cameraTrack: CameraTrack;
+  // The cameras to choose from, or null while they are not read or the
+  // browser does not name them; the camera chosen, or null for the
+  // browser's own choice; and the device the capture is on.
+  readonly cameras: readonly Camera[] | null;
+  readonly cameraChoice: Camera | null;
+  readonly cameraInUse: string | null;
+  // Whether the call view is shown, and whose camera tracks have arrived.
+  readonly viewing: boolean;
+  readonly cameraTracks: ReadonlySet<number>;
 }
 
 export interface VoiceEnv {
@@ -324,6 +370,13 @@ export interface VoiceEnv {
   readonly claimShare: (channel: string) => Promise<ShareClaimResult>;
   // Releases the share whose claim started at startedAt (issue #487).
   readonly stopShare: (channel: string, startedAt: string) => Promise<unknown>;
+  // The camera's claim, un-named or naming the claim it continues, and its
+  // release, naming the claim (ADR-015). Without them the camera is never
+  // claimed.
+  readonly claimCamera?: (channel: string, startedAt?: string) => Promise<CameraClaimResult>;
+  readonly stopCamera?: (channel: string, startedAt: string) => Promise<unknown>;
+  // The camera chosen earlier in this tab, if any.
+  readonly camera?: Camera | null;
   readonly gate?: GateOptions;
   // A timestamped line for each step of a press and its release, for finding
   // why a roster stayed on "transmitting" (issue #1041). Each line is an event
@@ -390,7 +443,19 @@ export const initialVoice: VoiceState = {
   output: null,
   outputNote: null,
   volumes: new Map(),
+  camera: cameraOff,
+  cameraTrack: 'none',
+  cameras: null,
+  cameraChoice: null,
+  cameraInUse: null,
+  viewing: false,
+  cameraTracks: new Set(),
 };
+
+const noCameraTracks: ReadonlySet<number> = new Set();
+
+// Without the camera's routes, every claim is refused.
+const noCamera = (): Promise<CameraClaimResult> => Promise.resolve({ ok: false, failure: 'invalid' });
 
 const noTracks: ShareTracks = { video: false, audio: false };
 
@@ -419,6 +484,7 @@ export class VoiceClient {
   private connectedAt = 0;
   private now: () => number;
   private readonly share: ScreenShare;
+  private readonly camera: CameraClient;
   // This person, from the identity of the last session.
   private me: number | null = null;
   private sink: ShareSink | null = null;
@@ -428,6 +494,11 @@ export class VoiceClient {
   private holder: number | null = null;
   private watched: number | null = null;
   private awaiting: unknown = null;
+  // Who else holds a camera claim, from presence, and the elements the call
+  // view plays cameras into: handed to every new connection.
+  private cameraClaims: ReadonlySet<number> = new Set();
+  private readonly cameraViews = new Map<number, HTMLVideoElement>();
+  private selfView: HTMLVideoElement | null = null;
   // The gate's changes, carried out one after another: a press's wait for its
   // answer, then a release's report. talk numbers the run of them a
   // connection makes (a drop abandons it); edge counts the gate's changes, so
@@ -456,6 +527,7 @@ export class VoiceClient {
       outputSelection: env.outputSelection === true,
       output: env.output ?? null,
       releaseDelay: clampTail(env.gate?.tail ?? defaultTail),
+      cameraChoice: env.camera ?? null,
     };
     this.gate = new TransmitGate(env.clock, (open) => {
       this.onGate(open);
@@ -465,6 +537,13 @@ export class VoiceClient {
       { claim: env.claimShare, release: env.stopShare },
       (share) => {
         this.set({ share });
+      },
+      env.clock,
+    );
+    this.camera = new CameraClient(
+      { claim: env.claimCamera ?? noCamera, release: env.stopCamera ?? (() => Promise.resolve()) },
+      (camera) => {
+        this.set({ camera, ...this.cameraNow() });
       },
       env.clock,
     );
@@ -503,6 +582,9 @@ export class VoiceClient {
     if (this.state.phase !== 'idle' && this.state.phase !== 'stopped') return;
     this.channel = channel;
     this.failures = 0;
+    // The camera is off on joining (design §3.4): only its button turns it
+    // on, and why the last one ended is not news here.
+    this.camera.reset();
     // Joining is the person's own choice: a microphone missing before is
     // asked for again, as chosen.
     this.set({ phase: 'connecting', channel, why: null, reportNote: null, watchOnly: options.watchOnly === true, watching: false, shareTracks: noTracks, missing: false });
@@ -517,6 +599,7 @@ export class VoiceClient {
     if (this.channel !== from || from === to) return;
     this.channel = to;
     this.share.renamed(to);
+    this.camera.renamed(to);
     if (this.state.channel === from) this.set({ channel: to });
   }
 
@@ -733,6 +816,108 @@ export class VoiceClient {
     void this.share.stop('self');
   }
 
+  // ---- the camera
+
+  // startCamera is the camera button, and nothing else: it turns the camera
+  // on in the room this page is connected to, with the microphone, and opens
+  // the call view. The camera chosen is found again by its name if its id has
+  // changed, and only if exactly one camera carries it; one not found is not
+  // connected, and no other camera is taken.
+  async startCamera(): Promise<void> {
+    const channel = this.channel;
+    const room = this.room;
+    const s = this.state;
+    if (s.phase !== 'connected' || s.watchOnly || s.listenOnly || channel === null || room === null) return;
+    if (s.camera.kind !== 'off' && s.camera.kind !== 'failed') return;
+    const mine = this.attempt;
+    this.viewVideo(true);
+    let choice: string | null = null;
+    const chosen = s.cameraChoice;
+    if (chosen !== null) {
+      const list = await room.cameras().catch(() => null);
+      if (mine !== this.attempt || room !== this.room) return;
+      const found = findCamera(list, chosen);
+      if (found === null) {
+        this.set({ cameras: list, camera: { kind: 'failed', reason: 'not_connected' } });
+        return;
+      }
+      if (found.id !== chosen.id) this.set({ cameraChoice: found });
+      choice = found.id;
+    }
+    await this.camera.start(channel, room, choice);
+    if (mine !== this.attempt || room !== this.room) return;
+    void this.readCameras(mine, room);
+  }
+
+  // stopCamera is the camera button, off: the capture stops, and conchd is
+  // told, naming the claim.
+  stopCamera(): Promise<void> {
+    return this.camera.stop('self');
+  }
+
+  // chooseCamera chooses the camera, kept for every later capture. While the
+  // camera is on, its capture moves to the camera chosen, exactly; a move
+  // that fails stops the camera, and no other camera is taken.
+  async chooseCamera(choice: Camera): Promise<void> {
+    this.set({ cameraChoice: choice });
+    const room = this.room;
+    if (room === null || room.cameraTrack() === 'none') return;
+    try {
+      await room.switchCamera(choice.id);
+    } catch {
+      if (room !== this.room) return;
+      // The camera chosen could not be had: stopped and released, and no
+      // other camera is taken.
+      this.camera.ended('not_connected');
+      return;
+    }
+    this.set(this.cameraNow());
+  }
+
+  // viewVideo shows the call view, or closes it: the room's cameras are
+  // received only while it is shown.
+  viewVideo(on: boolean): void {
+    this.room?.setViewing(on);
+    this.set(on ? { viewing: true } : { viewing: false, cameraTracks: noCameraTracks });
+  }
+
+  // attachCamera plays a person's camera into a tile, on this connection and
+  // on every one after it; attachSelf plays this page's own.
+  attachCamera(principal: number, el: HTMLVideoElement | null): void {
+    if (el === null) this.cameraViews.delete(principal);
+    else this.cameraViews.set(principal, el);
+    this.room?.attachCamera(principal, el);
+  }
+
+  attachSelf(el: HTMLVideoElement | null): void {
+    this.selfView = el;
+    this.room?.attachSelf(el);
+  }
+
+  // refreshCameras reads the cameras the browser lists again: after the
+  // camera test was allowed, the browser names them.
+  refreshCameras(): void {
+    const room = this.room;
+    if (room !== null) void this.readCameras(this.attempt, room);
+  }
+
+  // readCameras reads the cameras the browser lists, and the device in use.
+  private async readCameras(mine: number, room: Room): Promise<void> {
+    const cameras = await room.cameras().catch(() => null);
+    if (mine !== this.attempt || room !== this.room) return;
+    this.set({ cameras, ...this.cameraNow() });
+  }
+
+  // cameraNow is what the local track says: whether it is captured or
+  // published, and on which device. A capture held between connections is
+  // captured.
+  private cameraNow(): Pick<VoiceState, 'cameraTrack' | 'cameraInUse'> {
+    const room = this.room;
+    const track = room?.cameraTrack() ?? 'none';
+    if (track === 'none' && this.camera.holdsKept()) return { cameraTrack: 'captured', cameraInUse: null };
+    return { cameraTrack: track, cameraInUse: room?.cameraInUse() ?? null };
+  }
+
   // watch subscribes to the room's share, or lets it go.
   watch(on: boolean): void {
     this.endAwaiting();
@@ -754,6 +939,13 @@ export class VoiceClient {
   presence(p: VoicePresenceV1): void {
     const holder = sharer(p);
     this.share.presence(holder === null ? 'none' : holder.principal === this.me ? 'me' : 'other', p.share_ended);
+    // Why this person's camera claim ended, if it did; and who else holds
+    // one, whose cameras alone are received.
+    this.camera.presence(p.camera_ended);
+    const holders = cameraHolders(p);
+    if (this.me !== null) holders.delete(this.me);
+    this.cameraClaims = holders;
+    this.room?.setCameras(holders);
     this.holder = holder?.principal ?? null;
     if (this.state.watching) this.follow(holder?.principal ?? null, occupants(p).some((o) => o.principal === this.me));
   }
@@ -798,13 +990,17 @@ export class VoiceClient {
     const mine = ++this.attempt;
     this.clearTimers();
     this.gate.setBlocked(true);
-    // Leaving ends a share: it is stopped and conchd is told, while the
-    // connection and the credential are still there.
+    // Leaving ends the camera first: the capture stops and conchd is told,
+    // naming the claim, before anything else. Then the share: it is stopped
+    // and conchd is told, while the connection and the credential are still
+    // there.
+    const camera = this.camera.stop('left');
     const sharing = this.share.stop('left');
     // The release's `stopped` is queued once its mute is done.
     await this.within(this.steps, leaveDrain);
     await this.reports.drain(leaveDrain);
     await sharing;
+    await camera;
     if (mine !== this.attempt) return;
     this.talk++;
     this.steps = Promise.resolve();
@@ -831,6 +1027,11 @@ export class VoiceClient {
       missing: false,
       outputs: null,
       outputNote: null,
+      viewing: false,
+      cameraTracks: noCameraTracks,
+      cameras: null,
+      cameraTrack: 'none',
+      cameraInUse: null,
     });
     if (room !== null) await room.close().catch(() => undefined);
   }
@@ -1001,18 +1202,24 @@ export class VoiceClient {
       case 'gave_up':
       case 'no_session':
         // Drop the connection, so nothing is delivered late, and ask conchd.
-        this.drop({ kind: 'new_session' });
+        // A camera held is claimed again by name on the next connection.
+        this.drop({ kind: 'new_session' }, 'keep');
         break;
       case 'unauthorized':
-        this.drop({ kind: 'stop', why: 'You are signed out' });
+        this.drop({ kind: 'stop', why: 'You are signed out' }, 'stop');
         break;
     }
   }
 
   // drop ends the current connection and acts on `next`. roomDeleted: LiveKit
-  // deleted the room, as conchd does when it renews one.
-  private drop(next: Next, roomDeleted = false): void {
+  // deleted the room, as conchd does when it renews one. camera is what the
+  // end means for the camera (disconnect.ts cameraAfter); a client that stops
+  // always stops it.
+  private drop(next: Next, camera: CameraLoss, roomDeleted = false): void {
     const mine = ++this.attempt;
+    // The camera first, before anything else is done (S5): stopped and
+    // released, or taken off this connection for the next.
+    this.camera.lost(next.kind === 'stop' && camera !== 'displaced' ? 'stop' : camera);
     this.clearTimers();
     this.gate.setBlocked(true);
     // Nothing the gate asked for on this connection is carried out from here:
@@ -1032,7 +1239,7 @@ export class VoiceClient {
     this.room = null;
     // A switch under way goes with its connection; its choice is kept.
     this.switching = false;
-    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, shareTracks: noTracks, ...nothingInUse });
+    this.set({ speaking: new Set(), level: 0, talking: false, transmitting: false, shareTracks: noTracks, cameraTracks: noCameraTracks, ...nothingInUse, ...this.cameraNow() });
     if (room !== null) void room.close().catch(() => undefined);
     this.act(next, mine);
   }
@@ -1041,7 +1248,8 @@ export class VoiceClient {
     switch (next.kind) {
       case 'stop':
         this.share.abandon();
-        this.set({ phase: 'stopped', why: next.why });
+        this.camera.abandon();
+        this.set({ phase: 'stopped', why: next.why, viewing: false, cameraTracks: noCameraTracks });
         break;
       case 'new_session':
         this.set({ phase: 'connecting', why: null });
@@ -1068,6 +1276,9 @@ export class VoiceClient {
     const session = await this.env.createSession(channel);
     if (mine !== this.attempt) return;
     if (!session.ok) {
+      // conchd refused the next session: a camera held for it stops (S5).
+      // An answer that never came is not a refusal, and is retried.
+      if (session.failure !== 'network') this.camera.refused();
       this.act(afterRefusal(session), mine);
       return;
     }
@@ -1088,7 +1299,7 @@ export class VoiceClient {
           this.reconnectTimer = null;
           if (mine !== this.attempt) return;
           // The SDK did not recover in time: close it and let conchd decide.
-          this.drop({ kind: 'new_session' });
+          this.drop({ kind: 'new_session' }, 'keep');
         }, reconnectLimit);
       },
       onReconnected: () => {
@@ -1098,10 +1309,11 @@ export class VoiceClient {
         this.set({ phase: 'connected' });
         this.applyBlock();
         void this.share.reconnected();
+        void this.camera.reconnected();
       },
       onDisconnected: (cause) => {
         if (mine !== this.attempt) return;
-        this.drop(afterDisconnect(cause), cause === 'room_deleted');
+        this.drop(afterDisconnect(cause), cameraAfter(cause), cause === 'room_deleted');
       },
       onSpeakers: (ids) => {
         if (mine !== this.attempt) return;
@@ -1132,11 +1344,29 @@ export class VoiceClient {
         this.outputTurn++;
         this.set({ output: now, outputNote: outputMoved(now) });
       },
+      onCameraEnded: (cause) => {
+        if (mine !== this.attempt) return;
+        this.camera.ended(cause);
+        this.set(this.cameraNow());
+      },
+      onCameraChanged: () => {
+        if (mine !== this.attempt) return;
+        this.set(this.cameraNow());
+      },
+      onCameraTracks: (principals) => {
+        if (mine !== this.attempt) return;
+        this.set({ cameraTracks: new Set(principals) });
+      },
     };
     // What a share needs is set before connecting, so that a track that
     // arrives with the connection already finds it.
     room.setWatching(this.state.watching);
     room.attachShare(this.sink);
+    // So is what the call view receives, and where it plays.
+    room.setCameras(this.cameraClaims);
+    room.setViewing(this.state.viewing);
+    room.attachSelf(this.selfView);
+    for (const [principal, el] of this.cameraViews) room.attachCamera(principal, el);
     // So is each person's volume, so that nobody is heard at full volume
     // first.
     for (const [principal, volume] of this.state.volumes) room.setVolume(principal, volume);
@@ -1209,6 +1439,7 @@ export class VoiceClient {
     void this.readMicrophones(mine, room);
     this.watchLevel(mine, room);
     this.share.connected(channel, room);
+    this.camera.connected(channel, room);
     // A connection that lasts starts the retry wait over.
     this.env.clock.setTimeout(() => {
       if (mine === this.attempt && this.now() - this.connectedAt >= healthyAfter) this.failures = 0;

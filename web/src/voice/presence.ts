@@ -22,6 +22,11 @@ export interface Occupant {
   // Holds the room's screen share (issue #444), and whether it has sound.
   readonly sharing: boolean;
   readonly sharingAudio: boolean;
+  // Holds a camera claim (ADR-015): what conchd granted, not what this page
+  // receives, and never how the person's own page says it sends (S5).
+  readonly camera: boolean;
+  // When they joined, for the call view's order.
+  readonly joinedAt: string;
 }
 
 // occupants is who is in the channel-wide room (the one with no audience).
@@ -32,12 +37,19 @@ export function occupants(p: VoicePresenceV1 | null): Occupant[] {
     transmitting: x.transmitting,
     sharing: x.sharing === true,
     sharingAudio: x.sharing_audio === true,
+    camera: x.camera === true,
+    joinedAt: x.joined_at,
   }));
 }
 
 // sharer is who shares a screen in the channel-wide room: at most one person.
 export function sharer(p: VoicePresenceV1 | null): Occupant | null {
   return occupants(p).find((o) => o.sharing) ?? null;
+}
+
+// cameraHolders is who holds a camera claim in the channel-wide room.
+export function cameraHolders(p: VoicePresenceV1 | null): Set<number> {
+  return new Set(occupants(p).filter((o) => o.camera).map((o) => o.principal));
 }
 
 // principalOf reads the principal id out of an identity p<id>.

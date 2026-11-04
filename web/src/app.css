@@ -2612,6 +2612,157 @@ label {
   padding-top: var(--s2);
 }
 
+/* The call view (ADR-015, design §7.4): on the stage, under its height rule,
+   below a watched share when both are open. Its title and controls keep their
+   height; the grid gives way. Tiles keep 16:9, and a picture is contained,
+   never cropped. The grid's columns and rows are gridOf's, as classes. */
+.call-view {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  gap: var(--s2);
+  min-height: 0;
+  margin-top: var(--s2);
+  padding: var(--s2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.call-view p {
+  margin: 0;
+}
+
+.call-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.call-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-weight: 600;
+}
+
+.call-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.call-grid {
+  display: grid;
+  gap: var(--s2);
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.call-grid.cols-1 {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.call-grid.cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.call-grid.cols-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.call-grid.cols-1.rows-1 {
+  max-width: calc(40vh * 16 / 9);
+}
+
+.call-tile {
+  min-width: 0;
+}
+
+.call-frame {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  max-height: 40vh;
+  margin: 0;
+  background: #000000;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.call-frame video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* The person's own picture, mirrored as a mirror shows them. */
+.mirrored {
+  transform: scaleX(-1);
+}
+
+.call-off {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  height: 100%;
+  color: #dddddd;
+}
+
+.call-name {
+  position: absolute;
+  inset: auto auto var(--s1) var(--s1);
+  padding: 0 var(--s2);
+  background: rgb(0 0 0 / 0.6);
+  border-radius: var(--radius-sm);
+  color: #ffffff;
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.call-waiting {
+  position: absolute;
+  inset: 0 0 auto;
+  padding: 0.4rem;
+  color: #dddddd;
+}
+
+.video-sending {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.camera-test {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+
+.camera-preview {
+  margin: 0;
+}
+
+.camera-preview video {
+  display: block;
+  width: min(100%, 20rem);
+  aspect-ratio: 16 / 9;
+  background: #000000;
+  border-radius: var(--radius-sm);
+  object-fit: contain;
+}
+
+.camera-preview figcaption {
+  font-size: var(--small);
+  color: var(--muted);
+}
+
 .volume {
   display: inline-flex;
   align-items: center;

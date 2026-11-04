@@ -65,6 +65,7 @@ import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
 import { VoiceStatus } from './VoiceStatus';
 import { useOccupancy } from './voice/useOccupancy';
+import { leaveVoice } from './voice/useVoice';
 import { useOccupantNames } from './voice/useOccupantNames';
 import { needsHttps } from './transport';
 
@@ -668,6 +669,10 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // A server that predates voice_allowed says nothing: voice, as the invite
   // panel reads it. Agents have no voice (ADR-004).
   const voiceAllowed = principal !== null && principal.voice_allowed !== false && principal.kind === 'human';
+  // Whether whoami says the person may turn a camera on (ADR-015): use_camera
+  // held, which the owner always does. A server that sends no permissions
+  // predates the camera, and offers none. The server decides every claim.
+  const cameraAllowed = voiceAllowed && principal.permissions !== undefined && canDo(principal, 'use_camera');
   // How many are in each channel's voice (issue #596): one socket for the
   // page, for the list and the strip. Never opened for someone without voice.
   const occupancy = useOccupancy({ signedIn, voiceAllowed, reachable: connection === 'connected', onUnauthorized });
@@ -921,7 +926,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     }
   }, [freezeSend, reconcile, dispatchChat, post]);
 
-  const releaseSession = agents.release;
+  // Voice is left first, while the credential still works: the camera's
+  // capture stops and its claim is released, naming it, before anything is
+  // done as anyone else (ADR-015, design §6.2). Then the agent session.
+  const releaseAgents = agents.release;
+  const releaseSession = useCallback(async () => {
+    await leaveVoice();
+    await releaseAgents();
+  }, [releaseAgents]);
   // One sign-out at a time: a second click while the first is with the server
   // does nothing.
   const signingOut = useRef(false);
@@ -947,7 +959,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     if (signingOut.current || principalId === null) return;
     signingOut.current = true;
     setEverywhereFailed(null);
-    void api.signOutEverywhere(principalId).then((result) => {
+    void leaveVoice().then(() => api.signOutEverywhere(principalId)).then((result) => {
       signingOut.current = false;
       if (result.ok) {
         forgetChannel();
@@ -1707,6 +1719,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               viewer={auth.principal.id}
               people={live.people}
               voiceAllowed={voiceAllowed}
+              cameraAllowed={cameraAllowed}
               reachable={connection === 'connected'}
               channels={channels.channels}
               occupancy={occupancy}
