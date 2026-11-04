@@ -2,6 +2,7 @@
 // its answers, and "Invite someone". conchd is a stand-in fetch.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { dateTimeOf } from './time';
 import { App } from './App';
 import { goneHeading, heldLine, noLongerWorks } from './Invite';
 import { addressWithoutFragment, inviteFromHash, inviteLink, takeLinkFromAddress } from './route';
@@ -186,7 +187,7 @@ describe('the landing page', () => {
     expect(within(shown).getByText('#red')).toBeDefined();
     expect(within(shown).getByText('#blue')).toBeDefined();
     expect(within(shown).queryByText('Voice')).toBeNull();
-    expect(within(shown).getByText(new Date(expires_at).toLocaleString()).getAttribute('datetime')).toBe(expires_at);
+    expect(within(shown).getByText(dateTimeOf(expires_at)).getAttribute('datetime')).toBe(expires_at);
     expect(screen.getByText(origin)).toBeDefined();
     expect(screen.getByText(/Up to 100 characters/)).toBeDefined();
     expectNoCode(view.container);
@@ -278,6 +279,15 @@ describe('the landing page', () => {
     await chooseName('wren');
     await screen.findByRole('navigation', { name: 'Channels' });
     expect(calls.filter((c) => c.path === '/v2/invites/redeem')).toHaveLength(1);
+  });
+
+  // F19: guests are off (#1005), so the name hint no longer says the prefix is for them.
+  it('says the guest prefix is reserved, and not that it is kept for guests', async () => {
+    opened(joining);
+    const field = await screen.findByLabelText('Your name');
+    expect(field.getAttribute('aria-describedby')).not.toBeNull();
+    expect(document.body.textContent).toContain('Names that begin with “guest” are reserved.');
+    expect(document.body.textContent).not.toContain('kept for guests');
   });
 
   it.each([
@@ -621,7 +631,7 @@ describe('member links', () => {
     });
     const fresh = within(list).getAllByRole('listitem')[0];
     if (fresh === undefined) throw new Error('no link listed');
-    expect(fresh.textContent).toContain('Open');
+    expect(fresh.textContent).toContain('Unused');
     expect(fresh.textContent).toContain('0 joined');
     fireEvent.click(within(fresh).getByRole('button', { name: 'Close' }));
     await waitFor(() => {
@@ -880,7 +890,7 @@ describe('member links', () => {
     const region = screen.getByRole('region', { name: 'Joining' });
     expect(region.hasAttribute('hidden')).toBe(false);
     expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Joining' }));
-    expect((await within(region).findByLabelText<HTMLInputElement>('Pause all invites')).checked).toBe(true);
+    expect((await within(region).findByLabelText<HTMLInputElement>(/^Pause all invites/)).checked).toBe(true);
   });
 
   it('gives a member whose link is refused as paused only the plain line, and no button', async () => {
@@ -891,6 +901,102 @@ describe('member links', () => {
     expect(await within(panel).findByText('Invites are paused on this server for now.')).toBeDefined();
     expect(within(panel).queryByText(/Settings → Joining/)).toBeNull();
     expect(screen.queryByRole('button', { name: /^(Open Settings → )?Joining$/ })).toBeNull();
+  });
+
+  // F21: the states, the pause banner, the link shown once, and the keyboard.
+  it('reads Unused for a link no one has used, and Open for one that has been', async () => {
+    forMember({ 'GET /v2/invites': () => json({ invites: [linkOf(1, 2), linkOf(2, 2, { uses: 1, joiners: 1 })] }) });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const list = await within(panel).findByRole('list', { name: 'Your links' });
+    const [unused, used] = within(list).getAllByRole('listitem');
+    expect(unused?.textContent).toContain('Unused');
+    expect(used?.textContent).toContain('Open');
+    expect(used?.textContent).not.toContain('Unused');
+  });
+
+  it('shows an operator the paused banner while invites are paused, before any refusal', async () => {
+    forOperator({
+      'GET /v1/invites/settings': () => json({ paused: true }),
+      'GET /v2/invites': () => json({ invites: [linkOf(1, 1)] }),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    expect(await within(panel).findByText('Invites are paused on this server. Resume them in Settings → Joining.')).toBeDefined();
+    const list = await within(panel).findByRole('list', { name: 'Your links' });
+    expect(within(list).getAllByRole('listitem')[0]?.textContent).toContain('Paused');
+  });
+
+  it('shows no paused banner to an operator while invites are on', async () => {
+    forOperator({ 'GET /v1/invites/settings': () => json({ paused: false }) });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    await within(panel).findByText('None yet.');
+    expect(within(panel).queryByText(/Invites are paused/)).toBeNull();
+  });
+
+  it('shows a member the paused banner only after a paused refusal, and then marks their links Paused', async () => {
+    forMember({
+      'GET /v2/invites': () => json({ invites: [linkOf(1, 2)] }),
+      'POST /v2/invites': () => refusal(503, 'invites_paused'),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const list = await within(panel).findByRole('list', { name: 'Your links' });
+    expect(within(panel).queryByText(/Invites are paused/)).toBeNull();
+    expect(within(list).getAllByRole('listitem')[0]?.textContent).toContain('Unused');
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
+    expect(await within(panel).findByText('Invites are paused on this server for now.')).toBeDefined();
+    expect(within(list).getAllByRole('listitem')[0]?.textContent).toContain('Paused');
+  });
+
+  it('forgets the link shown once when the panel closes', async () => {
+    forMember({ 'POST /v2/invites': () => json({ invite: linkOf(7, 2), code: newCode }, 201) });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
+    await within(panel).findByRole('textbox', { name: 'Invite link' });
+    const toggle = within(panel).getByRole('button', { name: 'Invite someone' });
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).toBeNull();
+    expect(panel.textContent).not.toContain(newCode);
+  });
+
+  it('forgets the link shown once when its first use is seen', async () => {
+    let uses = 0;
+    forMember({
+      'POST /v2/invites': () => json({ invite: linkOf(7, 2), code: newCode }, 201),
+      'GET /v2/invites': () => json({ invites: [linkOf(7, 2, { uses, joiners: uses })] }),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
+    await within(panel).findByRole('textbox', { name: 'Invite link' });
+    // Read again with the link still unused: it stays.
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh' }));
+    await within(panel).findByText('Unused');
+    expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).not.toBeNull();
+    uses = 1;
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => {
+      expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).toBeNull();
+    });
+  });
+
+  it('closes on Escape from the Invite someone button, and opening moves focus into the panel', async () => {
+    forMember();
+    render(<App origin={origin} />);
+    const panel = await screen.findByRole('region', { name: 'Invites' });
+    const toggle = within(panel).getByRole('button', { name: 'Invite someone' });
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(panel.querySelector('#invites-body')?.contains(document.activeElement)).toBe(true);
+    });
+    toggle.focus();
+    fireEvent.keyDown(toggle, { key: 'Escape' });
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(toggle);
   });
 
   it('says it cannot reach the server when the answer does not come', async () => {

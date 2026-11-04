@@ -83,7 +83,7 @@ async function opened() {
   fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
   fireEvent.click(await screen.findByRole('button', { name: 'Joining' }));
   const region = screen.getByRole('region', { name: 'Joining' });
-  const box = await within(region).findByLabelText<HTMLInputElement>('Pause all invites');
+  const box = await within(region).findByLabelText<HTMLInputElement>(/^Pause all invites/);
   await waitFor(() => {
     expect(box.disabled).toBe(false);
   });
@@ -117,6 +117,13 @@ describe('Settings → Joining: pause all invites', () => {
     const { region, box } = await opened();
     expect(box.checked).toBe(checked);
     expect(within(region).getByText(line)).toBeDefined();
+  });
+
+  // F21: the switch names the sign-up switch, which is separate.
+  it('names the separate sign-up switch in its label', async () => {
+    serve({ 'GET /v1/invites/settings': () => json({ paused: false }) });
+    const { box } = await opened();
+    expect(screen.getByLabelText('Pause all invites (sign-up at the address has its own switch below)')).toBe(box);
   });
 
   it('ticking the box asks, and sends nothing, until the answer is yes', async () => {
@@ -260,7 +267,7 @@ describe('Settings → Joining: pause all invites', () => {
     const { region, box } = await opened();
     fireEvent.click(box);
     await within(region).findByText(/could not be reached, so it is not known whether invites changed/);
-    const again = await within(region).findByLabelText<HTMLInputElement>('Pause all invites');
+    const again = await within(region).findByLabelText<HTMLInputElement>(/^Pause all invites/);
     expect(again.checked).toBe(false);
     expect(within(region).getByText(/Invites are on/)).toBeDefined();
   });
@@ -287,7 +294,7 @@ describe('Settings → Joining: pause all invites', () => {
     fireEvent.click(box);
     await within(region).findByText(/answer could not be read, so it is not known whether invites changed/);
     expect(within(region).queryByText(/Invites were not changed/)).toBeNull();
-    const again = await within(region).findByLabelText<HTMLInputElement>('Pause all invites');
+    const again = await within(region).findByLabelText<HTMLInputElement>(/^Pause all invites/);
     expect(again.checked).toBe(false);
   });
 
@@ -306,7 +313,7 @@ describe('Settings → Joining: pause all invites', () => {
     const { region, box } = await opened();
     fireEvent.click(box);
     await within(region).findByText('Cannot reach the server.');
-    expect(within(region).queryByLabelText('Pause all invites')).toBeNull();
+    expect(within(region).queryByLabelText(/^Pause all invites/)).toBeNull();
     expect(within(region).getByText('Whether invites are paused is not known.')).toBeDefined();
   });
 
@@ -319,10 +326,10 @@ describe('Settings → Joining: pause all invites', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Joining' }));
     const region = screen.getByRole('region', { name: 'Joining' });
     await within(region).findByText('Loading whether invites are paused…');
-    expect(within(region).queryByLabelText('Pause all invites')).toBeNull();
+    expect(within(region).queryByLabelText(/^Pause all invites/)).toBeNull();
     answer(refusal(500, 'internal'));
     await within(region).findByText('Could not read whether invites are paused.');
-    expect(within(region).queryByLabelText('Pause all invites')).toBeNull();
+    expect(within(region).queryByLabelText(/^Pause all invites/)).toBeNull();
   });
 
   it('a read wanted while a change is in flight waits for it, and shows what it left', async () => {
@@ -353,7 +360,7 @@ describe('Settings → Joining: pause all invites', () => {
     await waitFor(() => {
       expect(reads()).toBe(2);
     });
-    const again = await within(region).findByLabelText<HTMLInputElement>('Pause all invites');
+    const again = await within(region).findByLabelText<HTMLInputElement>(/^Pause all invites/);
     await waitFor(() => {
       expect(again.checked).toBe(false);
     });

@@ -8,7 +8,7 @@
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import { createChannelResponse, listChannelMembersResponseV1, type CreateChannelRequest } from '../src/schema/channel';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
-import { channelButton, expect, expectFits, showView, signIn, statusLine, test } from './fixtures';
+import { channelButton, credentialField, expect, expectFits, showView, signIn, statusLine, test } from './fixtures';
 import { call, ok, type World } from './world';
 
 const panel = (page: Page) => page.getByRole('region', { name: 'Members list' });
@@ -19,7 +19,7 @@ function memberRow(page: Page, name: string): Locator {
 
 async function signInAsOperator(page: Page, appUrl: string, token: string): Promise<void> {
   await page.goto(appUrl);
-  await page.getByLabel('Credential').fill(token);
+  await (await credentialField(page)).fill(token);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');

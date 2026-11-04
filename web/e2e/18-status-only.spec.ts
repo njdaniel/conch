@@ -10,7 +10,7 @@ import type { Page } from '@playwright/test';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import type { InvitePermissionRequestV1 } from '../src/schema/generated';
 import { roster } from './api';
-import { expect, signIn, test } from './fixtures';
+import { credentialField, expect, signIn, test } from './fixtures';
 import { call, ok, type World } from './world';
 
 async function done(world: World, token: string, method: 'POST' | 'PUT', path: string, body?: unknown): Promise<void> {
@@ -59,7 +59,7 @@ test('S645 signing out everywhere ends the session first and logs no failed requ
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'Sign out everywhere', exact: true }).click();
   await page.getByRole('group', { name: /^Sign out on every device/ }).getByRole('button', { name: 'Yes, sign out everywhere', exact: true }).click();
-  await expect(page.getByLabel('Credential')).toBeVisible();
+  await expect((await credentialField(page))).toBeVisible();
   expect((await call(world, who.token, 'GET', '/v1/whoami')).status).toBe(401);
 
   await page.waitForTimeout(500);
@@ -102,7 +102,7 @@ test('S622 closing an invite and signing out leave no failed request', async ({ 
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'Sign out', exact: true }).click();
   await page.getByRole('group', { name: /^Sign out of this browser\?/ }).getByRole('button', { name: 'Yes, sign out', exact: true }).click();
-  await expect(page.getByLabel('Credential')).toBeVisible();
+  await expect((await credentialField(page))).toBeVisible();
   expect((await call(world, token, 'GET', '/v1/whoami')).status).toBe(401);
 
   // The browser logs a failed request a few milliseconds after the response.

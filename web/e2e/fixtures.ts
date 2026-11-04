@@ -74,10 +74,25 @@ export { expect };
 
 // ---------------------------------------------------------------- the page
 
+// openOperatorSection opens the sign-in page's "Operator or script?"
+// disclosure (F24), where operator setup and the credential field are, unless
+// it is already open. A page that is signed in has none, and waits in vain.
+export async function openOperatorSection(page: Page): Promise<void> {
+  const disclosure = page.locator('details.operator-signin');
+  await disclosure.waitFor({ state: 'attached' });
+  if (!(await disclosure.evaluate((d) => (d as HTMLDetailsElement).open))) await disclosure.locator('summary').click();
+}
+
+// credentialField opens that disclosure and returns the credential field.
+export async function credentialField(page: Page): Promise<Locator> {
+  await openOperatorSection(page);
+  return page.getByLabel('Credential');
+}
+
 // signIn pastes a credential into the sign-in field and waits for the lobby.
 export async function signIn(page: Page, world: Pick<World, 'appUrl'>, token: string, name: string): Promise<void> {
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(token);
+  await (await credentialField(page)).fill(token);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await expect(statusLine(page)).toContainText(name);
   await expect(statusLine(page)).toContainText('Connected');

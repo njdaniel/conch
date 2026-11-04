@@ -15,7 +15,7 @@
 // test runs against a conchd with LiveKit of its own (voice-world.ts):
 // without Docker it fails when CI is set and is skipped otherwise.
 import type { BrowserContextOptions, Page } from '@playwright/test';
-import { channelButton, consoleErrors, expect, expectFits, messages, openChannel, phones, showView, signIn, statusLine, test } from './fixtures';
+import { channelButton, consoleErrors, conversation, expect, expectFits, messages, openChannel, phones, showView, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, type VoiceWorld } from './voice-world';
 import { findLeak } from './traffic';
 import { watchTraffic, type Traffic } from './watch';
@@ -243,6 +243,47 @@ sizes.forEach(([size, options], n) => {
     await expectFits(page, `${size}: B's lobby after a reconnect`);
     await expectNothingOf(page, traffic, markersOfA, 'after a reconnect', peopleOfA);
   });
+});
+
+// F26 (issue #1042): an address that names another group's channel shows the
+// member their own channel, and the address says that channel, in place: no
+// history entry is added, and nothing on the page names the one asked for.
+test('A14 an address naming a channel of another group is corrected to the channel shown, with no history entry', async ({ meet, world }) => {
+  const api = sharedApi(world);
+  const op = world.tokens.operator;
+  const tag = `a14-addr-${String(Date.now())}`;
+  const aChannel = `${tag}-alpha`;
+  const bChannel = `${tag}-bravo`;
+  for (const name of [aChannel, bChannel]) await must(api, `create ${name}`, op, 'POST', '/v0/channels', { name });
+  const bea = await person(api, op, `${tag}-bea`, bChannel);
+
+  const { page } = await meet(desktop);
+  await signIn(page, world, bea.token, bea.name);
+  await channelButton(page, bChannel).click();
+  const hashOf = () => page.evaluate(() => window.location.hash);
+  const lengthOf = () => page.evaluate(() => window.history.length);
+  await expect.poll(hashOf).toBe(`#/c/${bChannel}`);
+
+  // Pasted over the open page.
+  await page.evaluate((h) => {
+    window.location.hash = h;
+  }, `#/c/${aChannel}`);
+  const pasted = await lengthOf();
+  await expect.poll(hashOf).toBe(`#/c/${bChannel}`);
+  expect(await lengthOf()).toBe(pasted);
+  await expect(conversation(page).getByRole('heading', { name: bChannel })).toBeVisible();
+  await expect(page.locator('body')).not.toContainText(aChannel);
+
+  // Loaded from it.
+  await page.evaluate((h) => {
+    window.history.replaceState(null, '', h);
+  }, `${new URL(page.url()).pathname}#/c/${aChannel}`);
+  await page.reload();
+  await expect(statusLine(page)).toContainText('Connected');
+  const loaded = await lengthOf();
+  await expect.poll(hashOf).toBe(`#/c/${bChannel}`);
+  expect(await lengthOf()).toBe(loaded);
+  await expect(page.locator('body')).not.toContainText(aChannel);
 });
 
 // Issue #515: someone taken out of the channel, or hidden, leaves the panel of

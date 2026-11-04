@@ -347,6 +347,18 @@ describe('browser permission and cleanup', () => {
     expect(screen.getByText(/Browser notifications are not supported/).textContent).toContain('Alerts stay here');
   });
 
+  // F20: the hint follows the choice, and keeps the channel-mute sentence.
+  it.each([
+    ['off', 'Notifications are off.'],
+    ['mentions', 'You’re alerted when someone writes your name.'],
+    ['all', 'You’re alerted for every new message.'],
+  ] as const)('says what the %s policy does', (policy, line) => {
+    render(<NotificationSettings policy={policy} native={false} permission="default" supported={true} onPolicy={() => undefined} onEnable={() => undefined} />);
+    const hint = screen.getByText(/Channel mutes hide alerts/).textContent;
+    expect(hint).toBe(`${line} Channel mutes hide alerts, not unread badges.`);
+    expect(document.body.textContent).not.toContain('until you choose');
+  });
+
   it('toggles channel mutes in settings', () => {
     const onToggleMute = vi.fn();
     render(<NotificationSettings policy="all" native={false} permission="default" supported={true} channels={channels} muted={new Set()} onPolicy={() => undefined} onEnable={() => undefined} onToggleMute={onToggleMute} />);

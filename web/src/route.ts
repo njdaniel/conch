@@ -126,6 +126,15 @@ export function takeLinkFromAddress(): LinkInAddress | null {
   return null;
 }
 
+// showChannelInAddress corrects the address to the channel the page shows,
+// when the hash named one the person cannot open (F26): the address says what
+// the page shows, and the page says nothing of the channel asked for. It
+// replaces the history entry, so it adds none (hygiene.test.ts holds it to
+// this call, beside the one above).
+export function showChannelInAddress(name: string): void {
+  window.history.replaceState(null, '', addressWithoutFragment(window.location) + hashForChannel(name));
+}
+
 // The channel last open in this tab, for a load whose hash names none.
 const lastKey = 'conch.web.lastChannel';
 

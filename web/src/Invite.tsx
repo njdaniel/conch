@@ -16,6 +16,7 @@ import { ServerVersion } from './ServerVersion';
 import { noticeText } from './state/auth';
 import { fallbackChannel } from './state/channels';
 import { insecureLine, needsHttps } from './transport';
+import { dateTimeOf } from './time';
 
 // The one answer for a code that is unknown, used, expired or closed. The
 // server does not say which, so neither does the page. Someone who joined from
@@ -309,7 +310,7 @@ export function Invite({
               {ready.expires_at === undefined ? (
                 'Does not expire'
               ) : (
-                <time dateTime={ready.expires_at}>{new Date(ready.expires_at).toLocaleString()}</time>
+                <time dateTime={ready.expires_at}>{dateTimeOf(ready.expires_at)}</time>
               )}
             </dd>
           </dl>

@@ -11,6 +11,7 @@ import { guestName } from './guestName';
 import { accountRefusal, refusalLine } from './Invite';
 import type { GuestV1 } from './schema/guest';
 import { insecureLine } from './transport';
+import { dateTimeOf } from './time';
 
 // conversionRefusal is the plain words for a Create an account the server
 // refused during a visit. The guest is as it was.
@@ -94,7 +95,7 @@ export function GuestVisit({
       </p>
       <p className="hint">
         End visit signs you out permanently. Your messages remain. Create an account to keep access. The visit ends by{' '}
-        <time dateTime={guest.expires_at}>{expires.toLocaleString()}</time> at the latest, or sooner after a while without
+        <time dateTime={guest.expires_at}>{dateTimeOf(expires)}</time> at the latest, or sooner after a while without
         activity. Closing the tab does not end it.
       </p>
       {creating && canCreate ? (
@@ -159,7 +160,7 @@ export function GuestVisit({
         <div className="guest-unconfirmed">
           <p role="alert" className="notice">
             The server did not confirm that your visit ended, so it may still be on. Try again; it ends on its own by{' '}
-            {expires.toLocaleString()} at the latest.
+            {dateTimeOf(expires)} at the latest.
           </p>
           <div className="actions">
             <button type="button" onClick={end}>

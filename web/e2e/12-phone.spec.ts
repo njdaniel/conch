@@ -6,7 +6,7 @@
 // person it adds to the fixture channels touches no other spec.
 import type { Locator, Page } from '@playwright/test';
 import { makeMemberLink, post, withDefaultChannels } from './api';
-import { accountPassword, channelButton, conversation, expect, expectFits, expectStateReadable, phoneSizes, mainNav, messages, phones, showView, signIn, statusLine, test } from './fixtures';
+import { accountPassword, channelButton, conversation, credentialField, expect, expectFits, expectStateReadable, mainNav, messages, phones, phoneSizes, showView, signIn, statusLine, test } from './fixtures';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import type { InvitePermissionRequestV1 } from '../src/schema/generated';
 import { call, inviteUrl, ok, type World } from './world';
@@ -161,6 +161,15 @@ for (const [size, options] of phones) {
       await expect(messages(page).getByRole('listitem').filter({ hasText: body })).toHaveCount(1);
       await expect(messages(page).getByRole('listitem').filter({ hasText: body })).not.toContainText('Sending');
       await expectFits(page, 'a conversation after a post');
+
+      // F18: a touch screen has no Enter or Esc, so the editor names the
+      // buttons, and nothing names a keyboard key.
+      const mine = messages(page).getByRole('listitem').filter({ hasText: body });
+      await mine.getByRole('button', { name: /^More actions for / }).tap();
+      await page.getByRole('menuitem', { name: 'Edit' }).tap();
+      await expect(page.getByText('Editing. Save or Cancel.')).toBeVisible();
+      await expect(page.getByText(/Enter to save/)).toHaveCount(0);
+      await page.getByRole('button', { name: 'Cancel' }).tap();
 
       // The link panel (issue #990): open it, choose a use limit, make a link,
       // and see it listed, all by tapping.
@@ -381,7 +390,7 @@ for (const [size, options] of phones) {
     test(`P1018 at ${size} the ${section} section opens as a page with Back, fits the screen and has 44 px targets`, async ({ meet, world }) => {
       const { page } = await meet(options);
       await page.goto(world.appUrl);
-      await page.getByLabel('Credential').fill(world.tokens.operator);
+      await (await credentialField(page)).fill(world.tokens.operator);
       await page.getByRole('button', { name: 'Use credential' }).click();
       await page.getByRole('button', { name: 'Continue anyway' }).click();
       await expect(statusLine(page)).toContainText('Connected');

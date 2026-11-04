@@ -24,6 +24,7 @@ import type { ServerMemberV1, WhoAmIResponseV1 } from '../schema/principal';
 import type { SignInLinkPurpose } from '../schema/signin';
 import { canDo, refusalLine, type Refusal } from './permissions';
 import { SecretOnce } from './SecretOnce';
+import { timeOf } from '../time';
 
 type Line = { readonly text: string; readonly refused: boolean } | null;
 type Role = 'member' | 'operator' | 'owner';
@@ -87,7 +88,7 @@ const purposes: readonly { readonly value: SignInLinkPurpose; readonly label: st
   { value: 'enrollment', label: 'Set up their account', note: 'Opening it once lets this person set a password and sign in.' },
 ];
 
-const clock = (at: string) => new Date(at).toLocaleTimeString();
+const clock = (at: string) => timeOf(at);
 
 // The channel choices of the two forms that name a channel, read when one opens.
 type Channels = readonly { readonly id: number; readonly name: string }[] | 'failed' | null;

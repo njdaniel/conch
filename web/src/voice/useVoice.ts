@@ -10,7 +10,7 @@ import type { VoicePresenceV1 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
 import type { Camera } from './camera';
 import { VoiceClient, type Microphone, type ModeStore, type Output, type ProcessingStore, type VoiceState } from './connection';
-import { clampTail, defaultTail } from './gate';
+import { defaultTail, snapTail } from './gate';
 import { defaultTalkKey, isTyping } from './keys';
 import { parsePresence } from './presence';
 import { canChooseOutput, newLiveKitRoom } from './sdk';
@@ -48,7 +48,7 @@ const releaseStore = 'conch.web.voice.release';
 function readRelease(): number {
   try {
     const kept = window.sessionStorage.getItem(releaseStore);
-    return kept === null || !/^\d{1,4}$/.test(kept) ? defaultTail : clampTail(Number(kept));
+    return kept === null || !/^\d{1,4}$/.test(kept) ? defaultTail : snapTail(Number(kept));
   } catch {
     return defaultTail;
   }

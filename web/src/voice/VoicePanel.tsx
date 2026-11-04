@@ -52,7 +52,7 @@ import { CallView, callTiles, type Tile } from './CallView';
 import { CameraTest } from './CameraTest';
 import type { Person } from '../useLiveChannel';
 import type { Phase, Processing, VoiceState } from './connection';
-import { maxTail } from './gate';
+import { clampTail, maxTail, releasePage, releaseStep } from './gate';
 import { keyLabel } from './keys';
 import { occupants, sharer, type Occupant } from './presence';
 import { busyNote, endedNote, oneSharerNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, watchNote } from './share';
@@ -469,10 +469,11 @@ export function VoicePanel({
               <>
                 <button ref={joinButton} type="button" className="primary" onClick={voice.join} disabled={!canJoin}>
                   <Glyph name="headphones" />
-                  Join voice {dest}
+                  {/* One flex item, so the words and the channel read as one line of text (F17). */}
+                  <span className="btn-text">Join voice {dest}</span>
                 </button>
                 <button type="button" onClick={voice.watchOnly} disabled={!canJoin} aria-describedby={canJoin ? 'voice-watch-hint' : undefined}>
-                  Watch only {dest}
+                  <span className="btn-text">Watch only {dest}</span>
                 </button>
               </>
             )}
@@ -1159,7 +1160,7 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
       </fieldset>
       {state.mode === 'ptt' ? (
         <>
-          <p className="hint">
+          <p className="hint talk-key-note">
             Talk key: {keyLabel(voice.talkKey)}.{' '}
             <button type="button" onClick={() => { voice.capture(!voice.capturing); }}>
               {voice.capturing ? 'Press a key (Escape cancels)' : 'Change talk key'}
@@ -1173,9 +1174,15 @@ function Options({ voice, open, sharable, about, others, cameraAllowed }: {
               type="range"
               min={0}
               max={maxTail}
-              step={10}
+              step={releaseStep}
               value={state.releaseDelay}
               aria-valuetext={releaseLabel(state.releaseDelay)}
+              onKeyDown={(e) => {
+                // A browser's own page step varies; here it is 250 ms (F22).
+                if (e.key !== 'PageUp' && e.key !== 'PageDown') return;
+                e.preventDefault();
+                voice.setReleaseDelay(clampTail(state.releaseDelay + (e.key === 'PageUp' ? releasePage : -releasePage)));
+              }}
               onChange={(e) => { voice.setReleaseDelay(Number(e.target.value)); }}
             />
             <output>{releaseLabel(state.releaseDelay)}</output>

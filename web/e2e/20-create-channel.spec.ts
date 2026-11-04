@@ -10,7 +10,7 @@ import type { Page } from '@playwright/test';
 import { listChannelsResponse, type CreateChannelRequest } from '../src/schema/channel';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { errorV0 } from '../src/schema/error';
-import { channelButton, expect, signIn, statusLine, test } from './fixtures';
+import { channelButton, credentialField, expect, signIn, statusLine, test } from './fixtures';
 import { call, ok, type World } from './world';
 
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Channels' });
@@ -37,7 +37,7 @@ test('C695 an operator makes a channel, sees it, reloads and still sees it, with
   const { page } = await meet();
   const voice = voiceRequests(page);
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(page)).fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');

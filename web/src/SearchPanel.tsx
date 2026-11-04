@@ -143,6 +143,11 @@ export function SearchPanel({ channelId, channel, live, people, nets, viewer, on
           <div className="search-query">
             <input id="channel-search" type="search" autoFocus value={draft} onChange={(event) => {
               setDraft(event.target.value);
+            }} onKeyDown={(event) => {
+              // Escape closes search; the page returns focus to Search (F26).
+              if (event.key !== 'Escape' || event.nativeEvent.isComposing) return;
+              event.preventDefault();
+              onClose();
             }} />
             <button type="submit" disabled={draft.trim() === ''}>Search</button>
           </div>

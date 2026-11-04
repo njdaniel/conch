@@ -23,6 +23,7 @@ import { inviteLink } from './route';
 import type { CreateInviteRequestV2 } from './schema/invite';
 import type { InviteJoinerV1, InviteV2 } from './schema/permission';
 import type { WhoAmIResponseV1 } from './schema/principal';
+import { dateTimeOf } from './time';
 
 // How long a link lasts. The marked one is the server's default, sent as no
 // expiry at all so the server applies it. Never is offered to a holder of
@@ -49,7 +50,10 @@ const defaultLabel = '7 days';
 // The most people one link may admit (pkg/schema MaxInviteMaxUses).
 const maxUses = 1_000_000;
 
-// An operator can lift the pause, so is told where (issue #909).
+// An operator can lift the pause, so is told where (issue #909). A member is
+// told the plain line, once a refusal has shown it: they have no route to read
+// the pause state (F21).
+const pausedForMember = 'Invites are paused on this server for now.';
 const pausedForOperator = 'Invites are paused on this server. Resume them in Settings → Joining.';
 
 export const brakeOffLine = 'You may not make invite links. An operator has turned that off for you.';
@@ -59,7 +63,7 @@ const createRefusals: Readonly<Record<string, string>> = {
   invite_not_allowed: brakeOffLine,
   invite_grant_exceeds_inviter: 'A link can land people only in channels you are in.',
   invite_allowance_exceeded: 'You already have as many open links as you may. Close one, or wait until one expires.',
-  invites_paused: 'Invites are paused on this server for now.',
+  invites_paused: pausedForMember,
   invite_kind_retired: 'This server no longer makes that kind of invite.',
   channel_not_found: 'One of those channels does not exist any more.',
   human_required: 'Only people make invite links.',
@@ -88,12 +92,19 @@ function otherLine(result: Refused, what: string): string {
 }
 
 // stateOf is what has become of a link, from what the server says of it.
-function stateOf(invite: InviteV2, now: number): string {
+// A link that can still be used reads Unused until someone has used it, and
+// Paused while invites are paused. "Open" is also the name of a kind of link,
+// so a link never reads Open until it has been used.
+function stateOf(invite: InviteV2, now: number, paused: boolean): string {
   if (invite.closed_at !== undefined) return 'Closed';
   if (invite.max_uses !== undefined && invite.uses >= invite.max_uses) return 'Used up';
   if (invite.expires_at !== undefined && Date.parse(invite.expires_at) <= now) return 'Expired';
-  return 'Open';
+  if (paused) return 'Paused';
+  return invite.uses === 0 ? 'Unused' : 'Open';
 }
+
+// A link no one has closed, used up or let expire: Close still applies.
+const closable = (state: string) => state === 'Unused' || state === 'Open' || state === 'Paused';
 
 function usesOf(invite: InviteV2): string {
   return invite.max_uses === undefined ? `${String(invite.uses)} joined` : `${String(invite.uses)} of ${String(invite.max_uses)} joined`;
@@ -129,11 +140,17 @@ export function InvitePanel({
   const [cap, setCap] = useState('10');
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  // Whether the problem is a pause an operator can lift (issue #909).
-  const [resume, setResume] = useState(false);
   const joining = useContext(JoiningSettings);
   // The link just made: shown until Done, and never again.
-  const [link, setLink] = useState<{ readonly url: string } | null>(null);
+  const [link, setLink] = useState<{ readonly url: string; readonly id: number } | null>(null);
+  // Whether invites are paused: read by an operator, and for a member the
+  // sign is a refusal as paused, since they have no route to read it.
+  const [paused, setPaused] = useState(false);
+  // A member learns of a pause only from a refusal, so what was learnt is
+  // forgotten when the panel closes: the next opening asks again.
+  useEffect(() => {
+    if (!open && !operator) setPaused(false);
+  }, [open, operator]);
   const [copied, setCopied] = useState<'no' | 'yes' | 'failed'>('no');
   const [invites, setInvites] = useState<readonly InviteV2[] | null>(null);
   const [listProblem, setListProblem] = useState<string | null>(null);
@@ -181,18 +198,29 @@ export function InvitePanel({
       if (result.ok) {
         // A holder of manage_members is answered everyone's links (issue
         // #438); this panel is for the person's own.
-        setInvites(result.value.filter((invite) => invite.created_by === meId));
+        const mine = result.value.filter((invite) => invite.created_by === meId);
+        setInvites(mine);
+        // The link shown only once is gone as soon as it is seen used.
+        setLink((shown) => (shown !== null && mine.some((invite) => invite.id === shown.id && invite.uses > 0) ? null : shown));
         setReadAt(Date.now());
         setListProblem(null);
       } else if (result.failure === 'unauthorized') onUnauthorized();
-      else setListProblem('Could not load your links.');
+      else {
+        if (result.code === 'invites_paused') setPaused(true);
+        setListProblem('Could not load your links.');
+      }
     });
+    if (operator) {
+      void api.inviteSettings().then((result) => {
+        if (result.ok) setPaused(result.value.paused);
+      });
+    }
     // Without an answer the count shown is the last one the server gave.
     void api.whoAmI().then((result) => {
       if (result.ok) setLatest(result.value);
       else if (result.failure === 'unauthorized') onUnauthorized();
     });
-  }, [meId, onUnauthorized]);
+  }, [meId, operator, onUnauthorized]);
 
   useEffect(() => {
     if (open && mayMake) refresh();
@@ -230,7 +258,6 @@ export function InvitePanel({
     setLink(null);
     setCopied('no');
     setProblem(null);
-    setResume(false);
     setFocusAsk(asked);
   }, [asked]);
   useEffect(() => {
@@ -265,7 +292,6 @@ export function InvitePanel({
     };
     setBusy(true);
     setProblem(null);
-    setResume(false);
     setLink(null);
     const mine = ++generation.current;
     void api.createMemberLink(made).then((result) => {
@@ -275,14 +301,17 @@ export function InvitePanel({
       if (mine !== generation.current) return;
       setBusy(false);
       if (result.ok) {
-        setLink({ url: inviteLink(origin, result.value.code) });
+        setLink({ url: inviteLink(origin, result.value.code), id: result.value.invite.id });
         setCopied('no');
+        if (!operator) setPaused(false);
         refresh();
       } else if (result.failure === 'unauthorized') onUnauthorized();
       else {
-        const paused = operator && result.code === 'invites_paused';
-        setProblem(paused ? pausedForOperator : createLine(result));
-        setResume(paused);
+        // A pause is the banner's to say, not the problem line's.
+        if (result.code === 'invites_paused') {
+          setPaused(true);
+          setProblem(null);
+        } else setProblem(createLine(result));
       }
     });
   }
@@ -355,6 +384,11 @@ export function InvitePanel({
   }
 
   const now = Date.now();
+  // Focus goes into the panel when the toggle opens it (a count, as `asked`).
+  const closePanel = () => {
+    setOpen(false);
+    toggle.current?.focus();
+  };
 
   return (
     <section className="invites" aria-label="Invites">
@@ -366,6 +400,12 @@ export function InvitePanel({
         aria-controls="invites-body"
         onClick={() => {
           setOpen(!open);
+          if (!open) setFocusAsk((n) => n + 1);
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== 'Escape' || event.defaultPrevented || !open) return;
+          event.preventDefault();
+          closePanel();
         }}
       >
         <Glyph name="invite" />
@@ -380,8 +420,7 @@ export function InvitePanel({
         onKeyDown={(event) => {
           if (event.key !== 'Escape' || event.defaultPrevented) return;
           event.preventDefault();
-          setOpen(false);
-          toggle.current?.focus();
+          closePanel();
         }}
       >
         {!mayMake ? (
@@ -390,6 +429,16 @@ export function InvitePanel({
           </p>
         ) : (
           <>
+            {paused ? (
+              <div className="notice" role="status">
+                <p>{operator ? pausedForOperator : pausedForMember}</p>
+                {operator && joining !== null ? (
+                  <button type="button" onClick={joining.open}>
+                    Open Settings → Joining
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             {link === null ? null : (
               <div className="invite-link" role="group" aria-label="New invite link">
                 <p>
@@ -480,11 +529,6 @@ export function InvitePanel({
               <p role="alert" className="notice">
                 {problem ?? ''}
               </p>
-              {resume && joining !== null ? (
-                <button type="button" onClick={joining.open}>
-                  Open Settings → Joining
-                </button>
-              ) : null}
             </form>
             <h3>Your links</h3>
             {listProblem === null ? null : <p className="notice">{listProblem}</p>}
@@ -500,7 +544,7 @@ export function InvitePanel({
             ) : (
               <ul className="invite-list" aria-label="Your links">
                 {invites.map((invite) => {
-                  const state = stateOf(invite, now);
+                  const state = stateOf(invite, now, paused);
                   const seen = joiners.get(invite.id);
                   return (
                     <li key={invite.id}>
@@ -511,7 +555,7 @@ export function InvitePanel({
                           'never expires'
                         ) : (
                           <>
-                            expires <time dateTime={invite.expires_at}>{new Date(invite.expires_at).toLocaleString()}</time>
+                            expires <time dateTime={invite.expires_at}>{dateTimeOf(invite.expires_at)}</time>
                           </>
                         )}
                       </span>
@@ -537,7 +581,7 @@ export function InvitePanel({
                             Disable joiners
                           </button>
                         ) : null}
-                        {state === 'Open' ? (
+                        {closable(state) ? (
                           <button
                             type="button"
                             onClick={() => {

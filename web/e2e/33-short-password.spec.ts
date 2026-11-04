@@ -6,7 +6,7 @@
 // page's own words, so the end-of-test secret scan means something.
 import type { Page } from '@playwright/test';
 import { makeInvite } from './api';
-import { expect, fillAccount, signInWithPassword, statusLine, test } from './fixtures';
+import { credentialField, expect, fillAccount, signInWithPassword, statusLine, test } from './fixtures';
 import { createSignInLinkResponseV1 } from '../src/schema/signin';
 import { call, inviteUrl, ok, principalId } from './world';
 
@@ -37,7 +37,7 @@ test('G977 a four-letter password creates an account, signs in, changes and rese
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'Sign out', exact: true }).click();
   await page.getByRole('group', { name: /^Sign out of this browser\?/ }).getByRole('button', { name: 'Yes, sign out', exact: true }).click();
-  await expect(page.getByLabel('Credential')).toBeVisible();
+  await expect((await credentialField(page))).toBeVisible();
   await signInWithPassword(page, name, first);
   await expect(statusLine(page)).toContainText(name);
   await expect(statusLine(page)).toContainText('Connected');

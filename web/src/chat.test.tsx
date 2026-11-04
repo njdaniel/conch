@@ -559,7 +559,8 @@ describe('sending', () => {
     server.post = (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201);
     for (const retry of screen.getAllByRole('button', { name: 'Retry' })) fireEvent.click(retry);
     await waitFor(() => { expect(server.posts).toHaveLength(3); });
-    await waitFor(() => { expect(screen.getAllByText('Sent')).toHaveLength(2); });
+    // Both are stored and shown; "Sent" is under the newest of them only (F26).
+    await waitFor(() => { expect(screen.getAllByText('Sent')).toHaveLength(1); });
     expect(server.posts[2]).toEqual({ channel: 'general', body: 'same' });
     expect(lines().filter((line) => line.includes('same'))).toHaveLength(2);
   });

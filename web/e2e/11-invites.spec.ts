@@ -5,7 +5,7 @@
 // touch no other spec.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import { makeMemberLink, memberLinksOf, post, withDefaultChannels } from './api';
-import { channelButton, expect, expectFits, fillAccount, showView, signIn, statusLine, test } from './fixtures';
+import { channelButton, credentialField, expect, expectFits, fillAccount, showView, signIn, statusLine, test } from './fixtures';
 import { joinSettingsResponseV1, type PutJoinSettingsRequestV1 } from '../src/schema/guest';
 import { call, inviteUrl, ok, principalId, setChannelVisibility, type World } from './world';
 
@@ -71,7 +71,7 @@ async function expectCodeGone(page: Page, inviteCode: string, world: World, sign
   }
   await page.goto(world.appUrl);
   if (signedIn) await expect(statusLine(page)).toContainText('Connected');
-  else await expect(page.getByLabel('Credential')).toBeVisible();
+  else await expect((await credentialField(page))).toBeVisible();
 }
 
 for (const [size, options] of sizes) {
@@ -228,7 +228,7 @@ test('A8 a joiner makes a link that another browser redeems, sees who joined, th
     expect(link).toContain('/app/#/invite/conch_inv_');
     const list = panel.getByRole('list', { name: 'Your links' });
     await expect(list.getByRole('listitem')).toHaveCount(1);
-    await expect(list.getByRole('listitem')).toContainText('Open');
+    await expect(list.getByRole('listitem')).toContainText('Unused');
     await expect(list.getByRole('listitem')).toContainText('0 of 1 joined');
     await expect(panel.getByText(/^Read at \d\d:\d\d$/)).toBeVisible();
     // The server made it as asked: a member's link, one use, the default 7 days.
@@ -278,12 +278,14 @@ test('A8 a joiner makes a link that another browser redeems, sees who joined, th
     await expectCodeGone(late.page, inviteCode, world, false);
 
     await panel.getByRole('button', { name: 'Hide joiners' }).click();
-    await panel.getByRole('button', { name: 'Done' }).click();
+    // F21: the link shown only once went when its first use was seen, at the
+    // Refresh above, so there is no Done to press.
     await expect(shown).toHaveCount(0);
+    await expect(panel.getByRole('button', { name: 'Done' })).toHaveCount(0);
     await panel.getByRole('button', { name: 'Make link' }).click();
     await expect(shown).toBeVisible();
     await expect(list.getByRole('listitem')).toHaveCount(2);
-    const open = list.getByRole('listitem').filter({ hasText: 'Open' });
+    const open = list.getByRole('listitem').filter({ hasText: 'Unused' });
     await expect(open).toHaveCount(1);
     await open.getByRole('button', { name: 'Close' }).click();
     await expect(list.getByRole('listitem').first()).toContainText('Closed');
@@ -323,7 +325,7 @@ test('A8 an operator makes a link with its defaults and one that never expires, 
   const operatorId = await principalId(world, world.tokens.operator);
   const { page } = await meet(phone);
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(page)).fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');
@@ -368,7 +370,7 @@ test('A8 an operator makes a link with its defaults and one that never expires, 
   expect(closed?.closed_at).toBeDefined();
   // The first link is the newest open one left: closed too, so the world is as
   // it was. (Other specs' links of the operator stay as they are.)
-  await list.getByRole('listitem').filter({ hasText: 'Open' }).first().getByRole('button', { name: 'Close' }).click();
+  await list.getByRole('listitem').filter({ hasText: 'Unused' }).first().getByRole('button', { name: 'Close' }).click();
   await expect.poll(async () => (await memberLinksOf(world, world.tokens.operator)).find((i) => i.id === first.id)?.closed_at).toBeDefined();
 });
 
@@ -406,6 +408,68 @@ test('F9 a newcomer from open sign-up reads the default channel\'s earlier messa
   }
 });
 
+// F21 (issue #1042): while invites are paused an operator's invite panel says
+// so at its top, and Escape on the "Invite someone" button closes the open
+// panel (opening it moved focus inside). The invites are put back.
+test('F21 an operator’s invite panel says invites are paused, and Escape on its button closes it', async ({ meet, world }) => {
+  const op = world.tokens.operator;
+  try {
+    await call(world, op, 'PUT', '/v1/invites/settings', { paused: true });
+    const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+    await page.goto(world.appUrl);
+    await (await credentialField(page)).fill(op);
+    await page.getByRole('button', { name: 'Use credential' }).click();
+    await page.getByRole('button', { name: 'Continue anyway' }).click();
+    await expect(statusLine(page)).toContainText('Connected');
+    const panel = page.getByRole('region', { name: 'Invites' });
+    const toggle = panel.getByRole('button', { name: 'Invite someone' });
+    await toggle.click();
+    await expect(panel.getByText('Invites are paused on this server. Resume them in Settings → Joining.')).toBeVisible();
+    await expect(panel.locator('#invites-body :focus')).toHaveCount(1);
+    await toggle.focus();
+    await page.keyboard.press('Escape');
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(toggle).toBeFocused();
+  } finally {
+    await call(world, op, 'PUT', '/v1/invites/settings', { paused: false });
+  }
+});
+
+// F19 (issue #1042): on the invite landing the server-version badge is in the
+// card's flow and covers no text, and no page says names are "kept for guests".
+test('F19 the invite landing’s version badge covers no text, and the name hint says reserved', async ({ meet, world }) => {
+  const made = await makeMemberLink(world, world.tokens.operator);
+  const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+  await page.goto(inviteUrl(world, made.code));
+  await expect(page.getByLabel('Your name')).toBeVisible();
+  const badge = page.locator('.version').first();
+  await expect(badge).toBeVisible();
+  const covered = await page.evaluate(() => {
+    const badgeBox = document.querySelector('.version')?.getBoundingClientRect();
+    if (badgeBox === undefined) return ['no badge'];
+    const hit: string[] = [];
+    for (const el of document.querySelectorAll('main *')) {
+      if (el.closest('.version') !== null || el.classList.contains('version')) continue;
+      const own = [...el.childNodes].some((n) => n.nodeType === Node.TEXT_NODE && (n.textContent ?? '').trim() !== '');
+      if (!own) continue;
+      const range = document.createRange();
+      for (const n of el.childNodes) {
+        if (n.nodeType !== Node.TEXT_NODE || (n.textContent ?? '').trim() === '') continue;
+        range.selectNodeContents(n);
+        for (const r of range.getClientRects()) {
+          const across = Math.min(r.right, badgeBox.right) - Math.max(r.left, badgeBox.left);
+          const down = Math.min(r.bottom, badgeBox.bottom) - Math.max(r.top, badgeBox.top);
+          if (across > 1 && down > 1) hit.push((n.textContent ?? '').trim().slice(0, 40));
+        }
+      }
+    }
+    return hit;
+  });
+  expect(covered, 'text the version badge covers').toEqual([]);
+  await expect(page.locator('body')).not.toContainText('kept for guests');
+  await expect(page.locator('body')).toContainText('Names that begin with “guest” are reserved.');
+});
+
 // Issue #1083 (browser UX audit 4, F6): pausing every invite asks first, and
 // says what it stops. Cancel and Escape send nothing; the yes pauses, and an
 // invite then answers paused. Un-ticking resumes at once. At both sizes; on a
@@ -419,7 +483,7 @@ for (const [size, options] of sizes) {
     try {
       const { page } = await meet(options);
       await page.goto(world.appUrl);
-      await page.getByLabel('Credential').fill(op);
+      await (await credentialField(page)).fill(op);
       await page.getByRole('button', { name: 'Use credential' }).click();
       await page.getByRole('button', { name: 'Continue anyway' }).click();
       await expect(statusLine(page)).toContainText('Connected');

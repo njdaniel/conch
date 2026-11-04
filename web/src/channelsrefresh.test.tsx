@@ -359,3 +359,33 @@ describe('a stale answer', () => {
     expect(server.listGets).toBe(before + 3);
   });
 });
+
+// F26: a link to a channel the person cannot open lands them in the one the
+// page shows, and the address says that one, in place: no history entry is
+// added, and the page says nothing of the channel asked for.
+describe('an address that names a channel the person cannot open', () => {
+  it('is corrected on load to the channel shown, without a history entry', async () => {
+    window.sessionStorage.setItem('conch.web.token', secret);
+    window.location.hash = '#/c/channel-x';
+    const before = window.history.length;
+    render(<App origin={origin} />);
+    await screen.findByRole('log', { name: 'Messages' });
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/c/general');
+    });
+    expect(window.history.length).toBe(before);
+    expect(document.body.textContent).not.toContain('channel-x');
+  });
+
+  it('is corrected when it is pasted over an open page, without a history entry', async () => {
+    await openChat();
+    window.location.hash = '#/c/channel-x';
+    const before = window.history.length;
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/c/general');
+    });
+    expect(window.history.length).toBe(before);
+    expect(screen.getByLabelText('Message #general')).toBeDefined();
+    expect(document.body.textContent).not.toContain('channel-x');
+  });
+});

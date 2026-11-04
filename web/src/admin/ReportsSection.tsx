@@ -14,6 +14,7 @@ import { useCallback, useEffect, useId, useRef, useState, type SyntheticEvent } 
 import * as api from '../api';
 import { linkify } from '../linkify';
 import type { ProblemReportOften, ProblemReportSummaryV1, ProblemReportV1 } from '../schema/report';
+import { dateTimeOf } from '../time';
 
 // schema.MaxProblemReportIssueURL, in bytes.
 export const maxIssueAddress = 512;
@@ -55,7 +56,7 @@ function senderOf(id: number, names: ReadonlyMap<number, string>): string {
 }
 
 function when(at: string) {
-  return <time dateTime={at}>{new Date(at).toLocaleString()}</time>;
+  return <time dateTime={at}>{dateTimeOf(at)}</time>;
 }
 
 // IssueLink shows a filed report's address: a link when the message log's

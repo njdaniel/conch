@@ -6,9 +6,11 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
 import { Linkified } from './Linkified';
+import { useCoarsePointer } from './phone';
 import { fileAttachmentPayloadSchema } from './schema/file';
 import { MAX_MESSAGE_EDITS, MESSAGE_EDIT_WINDOW_SECONDS, type MessageRevisionV1, type MessageV2 } from './schema/message';
 import type { PrincipalKind } from './schema/principal';
+import { dateTimeOf, timeOf } from './time';
 
 export const editWindowMs = MESSAGE_EDIT_WINDOW_SECONDS * 1000;
 
@@ -34,16 +36,12 @@ export function editEnds(message: MessageV2): number {
   return Date.parse(message.created_at) + editWindowMs;
 }
 
-function hhmm(d: Date): string {
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
-
 // when is a time as the marker and the versions say it: the local time, and
 // the date too when it is not today.
 export function when(at: string, now: Date = new Date()): string {
   const d = new Date(at);
   const today = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
-  return today ? hhmm(d) : `${d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })} ${hhmm(d)}`;
+  return today ? timeOf(d) : dateTimeOf(d);
 }
 
 // The marker after an edited message's text. For the author it is a button
@@ -308,6 +306,7 @@ export function MessageEditor({
   const limited = useRef(atLimit);
   limited.current = atLimit;
   const hint = useId();
+  const coarse = useCoarsePointer();
   const error = useId();
   const live = useRef(true);
   useEffect(() => {
@@ -408,7 +407,7 @@ export function MessageEditor({
         onKeyDown={key}
       />
       <p id={hint} className="hint">
-        Editing. Enter to save, Esc to cancel
+        {coarse ? 'Editing. Save or Cancel.' : 'Editing. Enter to save, Esc to cancel'}
       </p>
       {refusal === null ? null : (
         <p id={error} role="alert" className="edit-error">

@@ -4,7 +4,7 @@ import { history, post, roster, run, runsIn } from './api';
 import { launchWorker } from './agents';
 import { createChannelResponse, type CreateChannelRequest } from '../src/schema/channel';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
-import { channelButton, conversation, expect, messages, signIn, statusLine, test } from './fixtures';
+import { channelButton, conversation, credentialField, expect, messages, signIn, statusLine, test } from './fixtures';
 import { call, ok, principalId, type World } from './world';
 
 test('P3-05 browser-test cannot open test-private and nothing about a run there shows in its members panel', async ({ meet, world }) => {
@@ -28,7 +28,7 @@ test('P3-05 browser-test cannot open test-private and nothing about a run there 
     // The page is asked for test-private by name, and does not open it.
     const { page } = await meet();
     await page.goto(`${world.appUrl}#/c/test-private`);
-    await page.getByLabel('Credential').fill(world.tokens.browser);
+    await (await credentialField(page)).fill(world.tokens.browser);
     await page.getByRole('button', { name: 'Use credential' }).click();
     await expect(channelButton(page, 'general')).toBeVisible();
     await expect(channelButton(page, 'test-private')).toHaveCount(0);
@@ -174,7 +174,7 @@ async function seedMembership(world: World, secrets: string[], suffix: string) {
 async function ownerPage(meet: () => Promise<{ page: Page }>, world: World): Promise<Page> {
   const { page } = await meet();
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(page)).fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');

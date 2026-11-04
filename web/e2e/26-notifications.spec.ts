@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import { post } from './api';
-import { conversation, expect, signIn, test } from './fixtures';
+import { conversation, credentialField, expect, signIn, test } from './fixtures';
 import { call, principalId } from './world';
 
 async function instrument(page: Page, permission: NotificationPermission = 'denied'): Promise<void> {
@@ -94,7 +94,7 @@ test('notification policy, hidden-tab native alerts, mute, off and logout cleanu
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('button', { name: 'Sign out', exact: true }).click();
   await page.getByRole('button', { name: 'Yes, sign out', exact: true }).click();
-  await expect(page.getByLabel('Credential')).toBeVisible();
+  await expect((await credentialField(page))).toBeVisible();
   expect((await notes(page))[2]?.closed).toBe(true);
 });
 

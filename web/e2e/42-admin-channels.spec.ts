@@ -12,7 +12,7 @@ import type { BrowserContextOptions, Page } from '@playwright/test';
 import { channelDirectoryResponseV1, listChannelMembersResponseV1 } from '../src/schema/channel';
 import { createPrincipalResponse, type CreatePrincipalRequest } from '../src/schema/credential';
 import { permissionsResponseV1, type PermissionChangeV1, type PermissionsResponseV1 } from '../src/schema/permission';
-import { expect, expectFits, statusLine, test } from './fixtures';
+import { credentialField, expect, expectFits, statusLine, test } from './fixtures';
 import { call, ok, type World } from './world';
 
 const stamp = Date.now().toString(36).slice(-6);
@@ -42,7 +42,7 @@ async function personal(world: World): Promise<void> {
 
 async function ownerIn(page: Page, world: World): Promise<void> {
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(page)).fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');

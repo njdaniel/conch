@@ -22,6 +22,7 @@ import type { IssuedByOperatorV1, KnownPermission, KnownPermissionPreset, Permis
 import type { WhoAmIResponseV1 } from '../schema/principal';
 import { canDo, reasonFor, refusalLine } from './permissions';
 import { presetChanges } from './ServerSection';
+import { dateTimeOf } from '../time';
 
 type Role = 'member' | 'operator';
 const roles: readonly Role[] = ['member', 'operator'];
@@ -704,7 +705,7 @@ export function PermissionsSection({ who, refresh, names, focus, onUnauthorized 
   );
 }
 
-const when = (stamp: string) => (Number.isNaN(Date.parse(stamp)) ? stamp : new Date(stamp).toLocaleString());
+const when = (stamp: string) => dateTimeOf(stamp);
 
 // IssuedList is the answer to turning act_as_members off for operators (design
 // §7.5, O13): the live credentials and hooks operators issued to other people,

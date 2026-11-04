@@ -8,7 +8,7 @@
 // page says voice is not set up and asks for no device.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
 import type { PostMessageRequestV2 } from '../src/schema/generated';
-import { channelButton, chooseMicrophone, conversation, expect, expectFits, mainNav, messages, openChannel, phones, rememberPushToTalk, showView, signIn, statusLine, test } from './fixtures';
+import { channelButton, chooseMicrophone, conversation, credentialField, expect, expectFits, mainNav, messages, openChannel, phones, rememberPushToTalk, showView, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld, type Watch } from './voice-world';
 
 // The longest the roster may take to stop saying "transmitting" after the
@@ -438,6 +438,17 @@ test.describe('with LiveKit', () => {
       // Open microphone, under Voice options (issue #536): the steady tone
       // opens it, and it is reported.
       await voice.getByRole('button', { name: 'Voice options' }).click();
+      // F22: the release delay moves 50 ms an arrow key and 250 ms a page key.
+      const delay = voice.getByRole('slider', { name: /Release delay/ });
+      await delay.focus();
+      await expect(delay).toHaveAttribute('aria-valuetext', '200 ms');
+      await a.page.keyboard.press('ArrowRight');
+      await expect(delay).toHaveAttribute('aria-valuetext', '250 ms');
+      await a.page.keyboard.press('PageUp');
+      await expect(delay).toHaveAttribute('aria-valuetext', '500 ms');
+      await a.page.keyboard.press('PageDown');
+      await a.page.keyboard.press('ArrowLeft');
+      await expect(delay).toHaveAttribute('aria-valuetext', '200 ms');
       await voice.getByLabel('Open microphone').check();
       await expect(voice.getByRole('meter', { name: 'Microphone level' })).toHaveAttribute('value', /[1-9]|0\.[1-9]/, { timeout: 10_000 });
       await expect(voice).toContainText('Transmitting', { timeout: 10_000 });
@@ -471,7 +482,7 @@ test.describe('with LiveKit', () => {
       };
 
       await page.goto(vw.appUrl);
-      await page.getByLabel('Credential').focus();
+      await (await credentialField(page)).focus();
       await page.keyboard.type(vw.alice.token);
       await page.keyboard.press('Enter');
       await expect(statusLine(page)).toContainText(vw.alice.name);
@@ -656,6 +667,8 @@ test.describe('with LiveKit', () => {
       // push to talk first, so it taps the switch.
       await chooseMicrophone(voice, 'push to talk', 'tap');
       await expect(voice.getByRole('button', { name: 'Hold to talk' })).toBeVisible();
+      // F18: no talk-key line shows on a touch screen.
+      expect(await voice.locator('.talk-key-note:visible').count(), `${size}: no talk-key line on a phone`).toBe(0);
       await expect(voice.getByRole('list', { name: 'In voice' }).getByRole('listitem')).toHaveCount(3, { timeout: 15_000 });
       await expectFits(a.page, `${size}: the Voice view, joined`);
       // Back under Chat the strip stays, one row of four controls (issue
@@ -752,6 +765,28 @@ test.describe('with LiveKit', () => {
           expect(box?.width ?? 0, `${size}: the room's name is shown`).toBeGreaterThan(40);
         }
         await expectFits(a.page, `${size}: the strip before joining`);
+        // F17: the verb and the room read as one run of text, never as two
+        // columns side by side: the verb stays on one line, and the verb and
+        // the room are one item of the button.
+        if (phone) {
+          for (const button of [join, watch]) {
+            const parts = await button.evaluate((el) => {
+              const text = el.querySelector('.btn-text');
+              const dest = el.querySelector('.dest');
+              const first = text?.firstChild;
+              if (text === null || dest === null || first === null || first === undefined) return null;
+              const range = document.createRange();
+              range.selectNodeContents(first);
+              const verb = range.getBoundingClientRect();
+              const room = dest.getBoundingClientRect();
+              return { verbHeight: verb.height, roomHeight: room.height, items: [...el.children].filter((c) => c.tagName !== 'svg').length, line: parseFloat(getComputedStyle(text).lineHeight) || verb.height };
+            });
+            expect(parts, `${size}: the button's text and room are one item`).not.toBeNull();
+            if (parts === null) continue;
+            expect(parts.verbHeight, `${size}: the verb is one line, not a column of its own`).toBeLessThan(parts.line * 1.5);
+            expect(parts.items, `${size}: the words are one item of the button`).toBe(1);
+          }
+        }
 
         await press(join);
         await expect(voice).toContainText('Connected in #voice-room', { timeout: 30_000 });

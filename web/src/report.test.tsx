@@ -81,6 +81,17 @@ describe('report a problem', () => {
     fireEvent.click(review);
 
     const preview = await screen.findByLabelText('The report as it will be sent');
+    // F26: the sender reads a summary; the JSON is behind "Technical details".
+    const review0 = screen.getByRole('region', { name: 'Review your report' });
+    const summary = review0.querySelector('dl.report-summary');
+    expect(summary?.textContent).toContain('Joined voice');
+    expect(summary?.textContent).toContain('Silence');
+    expect(summary?.textContent).toContain('Sometimes');
+    expect(summary?.textContent).toContain('conch-web');
+    expect(summary?.textContent).not.toContain('"did"');
+    const details = preview.closest('details');
+    expect(details?.querySelector('summary')?.textContent).toBe('Technical details');
+    expect(details?.open).toBe(false);
     const shown: unknown = JSON.parse(preview.textContent);
     expect(createProblemReportRequestV1(shown)).toEqual([]);
     expect(shown).toMatchObject({
