@@ -1,5 +1,12 @@
 # Temporary guests, accounts and signing in again
 
+> **Superseded in part, 2026-10-30.** [ADR-013](../adr/ADR-013-one-community-model.md)
+> makes the bare address a sign-in page, with optional open sign-up for members.
+> It admits no guests. Guests are removed for now; their data is kept. They return
+> with #1004, which also brings O7's conversion change: conversion clears the history
+> bound, so the member sees full history in the channels they keep. The original
+> design below is kept; its guest flows do not describe shipped behaviour.
+
 Issue [#694](https://github.com/njdaniel/conch/issues/694), PR
 [#701](https://github.com/njdaniel/conch/pull/701), decision
 [ADR-009](../adr/ADR-009-guests-and-open-joining.md).
