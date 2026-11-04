@@ -65,7 +65,7 @@ for (const [size, options, phone] of sizes) {
     // focused; Escape closes it and puts focus back.
     await more.focus();
     await page.keyboard.press('Enter');
-    await expect(row.getByRole('menuitem')).toHaveText(['Rename channel…']);
+    await expect(row.getByRole('menuitem')).toHaveText(['Rename channel…', 'Leave channel']);
     await expect(row.getByRole('menuitem', { name: 'Rename channel…' })).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(row.getByRole('menu')).toHaveCount(0);
@@ -124,8 +124,8 @@ for (const [size, options, phone] of sizes) {
 
     const press = async (target: Locator) => (phone ? target.tap() : target.click());
     await press(more);
-    // A plain member who may invite: Invite people alone, no rename.
-    await expect(row.getByRole('menuitem')).toHaveText(['Invite people']);
+    // A plain member who may invite: Invite and Leave, no rename.
+    await expect(row.getByRole('menuitem')).toHaveText(['Invite people', 'Leave channel']);
     await press(row.getByRole('menuitem', { name: 'Invite people' }));
 
     const panel = page.getByRole('region', { name: 'Invites' });

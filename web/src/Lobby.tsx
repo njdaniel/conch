@@ -77,6 +77,8 @@ export function Lobby({
   canManage,
   renderSettings,
   onInviteTo,
+  onLeft,
+  onUnauthorized,
   onAddPerson,
   account,
   signIns,
@@ -121,14 +123,16 @@ export function Lobby({
   // "New channel" (issue #695), under the channel list, or null for a person
   // who may not make one.
   readonly newChannel?: ReactNode;
-  // Per-channel actions in each row's ⋯ menu (issue #1135): who may rename which
-  // channel, the rename form for one, and the opener of the invite panel with
-  // that channel ticked (absent for a person who may not invite).
+  // Per-channel actions in each row's ⋯ menu (issues #1135, #1095): who may
+  // rename which channel, the rename form for one, the opener of the invite
+  // panel, and the channel-removal handler after a Leave succeeds.
   readonly canRename?: (channel: ChannelV0) => boolean;
   readonly renderRename?: (channel: ChannelV0, close: () => void) => ReactNode;
   readonly canManage?: boolean;
   readonly renderSettings?: (channel: ChannelV0, change: SettingsChange, close: () => void) => ReactNode;
   readonly onInviteTo?: (channel: ChannelV0) => void;
+  readonly onLeft?: (name: string) => void;
+  readonly onUnauthorized?: () => void;
   // The console's Members section asks for the member-link panel (issue
   // #1020, "Add a person"): Settings closes, then the page opens it.
   readonly onAddPerson?: () => void;
@@ -404,6 +408,8 @@ export function Lobby({
                   {...(canManage === undefined ? {} : { canManage })}
                   {...(renderSettings === undefined ? {} : { renderSettings })}
                   {...(onInviteTo === undefined ? {} : { onInvite: onInviteTo })}
+                  {...(onLeft === undefined ? {} : { onLeft })}
+                  {...(onUnauthorized === undefined ? {} : { onUnauthorized })}
                   onOpen={(name) => {
                     onOpen(name);
                     if (phone) {

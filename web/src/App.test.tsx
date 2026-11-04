@@ -321,8 +321,8 @@ describe('lobby', () => {
     signIn();
     await screen.findByRole('button', { name: 'general' });
     const list = screen.getByRole('navigation', { name: 'Channels' });
-    // Two channels, a voice-less one aside, and Browse channels.
-    expect(list.querySelectorAll('button')).toHaveLength(4);
+    // Two channels and their ⋯, a voice-less one aside, and Browse channels.
+    expect(list.querySelectorAll('button')).toHaveLength(7);
     expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
     expect(within(screen.getByRole('region', { name: 'Conversation' })).getByRole('heading', { level: 2 }).textContent).toBe('general');
     const status = screen.getByRole('status', { name: 'Status' });
@@ -547,7 +547,7 @@ describe('lobby', () => {
     render(<App origin={origin} />);
     signIn();
     await screen.findByRole('button', { name: 'general' });
-    const stops = screen.getAllByRole('button').filter((b) => b.tabIndex === 0 && b.closest('.channel-list'));
+    const stops = screen.getAllByRole('button').filter((b) => b.tabIndex === 0 && b.closest('.channel-list') && b.getAttribute('aria-haspopup') === null);
     expect(stops).toHaveLength(1);
   });
 
