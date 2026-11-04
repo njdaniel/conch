@@ -16,7 +16,13 @@ describe('gridOf', () => {
     [3, true, 2, 2],
     [4, true, 2, 2],
     [5, false, 3, 2],
+    [5, true, 2, 3],
+    [6, false, 3, 2],
     [6, true, 2, 3],
+    [7, false, 3, 3],
+    [7, true, 3, 3],
+    [8, false, 3, 3],
+    [8, true, 3, 3],
     [9, false, 3, 3],
     [9, true, 3, 3],
   ])('%i tiles, narrow %s: %i columns by %i rows', (tiles, narrow, columns, rows) => {
@@ -37,7 +43,7 @@ const occupant = (principal: number, joinedAt: string, camera = false): Occupant
 const names = (id: number) => `member-${String(id)}`;
 
 describe('callTiles', () => {
-  it('gives everyone in voice a tile while there are at most four, in join order, the viewer last', () => {
+  it('gives everyone in voice a tile while there are at most nine, in join order, the viewer last', () => {
     const roster = [occupant(9, '2026-11-03T10:00:03Z', true), occupant(7, '2026-11-03T10:00:01Z'), occupant(8, '2026-11-03T10:00:02Z')];
     const { tiles, hidden } = callTiles(roster, 8, true, names);
     expect(tiles.map((t) => [t.principal, t.name, t.me, t.camera])).toEqual([
@@ -54,11 +60,35 @@ describe('callTiles', () => {
     expect(callTiles(roster, 7, true, names).tiles[0]?.camera).toBe(true);
   });
 
-  it('with more than four in voice, only cameras get tiles, at most four', () => {
-    const roster = Array.from({ length: 7 }, (_, i) => occupant(i + 1, `2026-11-03T10:00:0${String(i)}Z`, i !== 1));
+  it('with more than nine in voice, only cameras get tiles, at most nine', () => {
+    const roster = Array.from({ length: 12 }, (_, i) => occupant(i + 1, `2026-11-03T10:00:${String(10 + i)}Z`, i !== 1));
     const { tiles, hidden } = callTiles(roster, 1, false, names);
+    expect(maxTiles).toBe(9);
     expect(tiles).toHaveLength(maxTiles);
     expect(tiles.every((t) => t.camera)).toBe(true);
     expect(hidden).toBe(1);
+  });
+
+  it('nine in voice: everyone gets a tile, cameras or not, in join order with the viewer last', () => {
+    const roster = Array.from({ length: 9 }, (_, i) => occupant(9 - i, `2026-11-03T10:00:0${String(9 - i)}Z`, i % 3 === 0));
+    const { tiles, hidden } = callTiles(roster, 4, false, names);
+    expect(tiles.map((t) => t.principal)).toEqual([1, 2, 3, 5, 6, 7, 8, 9, 4]);
+    expect(tiles.filter((t) => !t.camera)).toHaveLength(6);
+    expect(hidden).toBe(0);
+  });
+
+  it('ten in voice with three cameras: the three cameras alone, in join order', () => {
+    const roster = Array.from({ length: 10 }, (_, i) => occupant(i + 1, `2026-11-03T10:00:${String(10 + i)}Z`, [3, 6, 9].includes(i + 1)));
+    const { tiles, hidden } = callTiles(roster, 1, false, names);
+    expect(tiles.map((t) => t.principal)).toEqual([3, 6, 9]);
+    expect(hidden).toBe(0);
+  });
+
+  it('ten in voice with nine cameras: nine tiles, none left over', () => {
+    const roster = Array.from({ length: 10 }, (_, i) => occupant(i + 1, `2026-11-03T10:00:${String(10 + i)}Z`, i + 1 !== 5));
+    const { tiles, hidden } = callTiles(roster, 1, true, names);
+    expect(tiles.map((t) => t.principal)).toEqual([2, 3, 4, 6, 7, 8, 9, 10, 1]);
+    expect(tiles.every((t) => t.camera)).toBe(true);
+    expect(hidden).toBe(0);
   });
 });

@@ -37,7 +37,9 @@
 // alone (S5); others see "camera" on the person's chip. Voice options has
 // the camera picker, under the microphone's, and a private camera test.
 // "Show video (n)" opens the call view (CallView.tsx) while anyone in the
-// room has a camera on, and it never opens by itself (O8).
+// room has a camera on, and it never opens by itself (O8). While a share is
+// watched with the call view open, the share is the main picture and the
+// cameras are a strip beside it (design §7.4).
 import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { Avatar, Glyph } from '../Icons';
@@ -46,7 +48,7 @@ import { MicTestShown, VoiceLive, VoiceStrip } from '../phone';
 import { StageHost } from '../stage';
 import { MicTest } from './MicTest';
 import { cameraNote, cameraOffForYou, cameraOn, listenOnlyCamera, watchOnlyCamera } from './camera';
-import { CallView, callTiles } from './CallView';
+import { CallView, callTiles, type Tile } from './CallView';
 import { CameraTest } from './CameraTest';
 import type { Person } from '../useLiveChannel';
 import type { Phase, Processing, VoiceState } from './connection';
@@ -306,15 +308,15 @@ export function VoicePanel({
   const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly && !state.missing;
   const view =
     theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} /> : null;
-  // The call view, while the person asked for it and is in voice.
+  // The call view, while the person asked for it and is in voice. The share
+  // and the call view are one layout on the stage: the share the main
+  // picture and the cameras a strip beside it while both are open. It is
+  // the one CallView whether or not the call view is open, so the share is
+  // never drawn again by opening or closing it.
   const call = inVoice && state.viewing ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer)) : null;
-  const callView = call === null ? null : <CallView client={client} state={state} tiles={call.tiles} hidden={call.hidden} />;
   const staged =
-    view === null && callView === null ? null : (
-      <>
-        {view}
-        {callView}
-      </>
+    view === null && call === null ? null : (
+      <CallView client={client} state={state} tiles={call?.tiles ?? noTiles} hidden={call?.hidden ?? 0} open={call !== null} share={view} />
     );
   // How many cameras are on in the room: everyone else's claims, and the
   // person's own while their track is published.
@@ -757,6 +759,9 @@ function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
     </div>
   );
 }
+
+// No tiles: the call view closed, and the share alone on the stage.
+const noTiles: readonly Tile[] = [];
 
 // Nobody turned down: the roster while this page is not in voice.
 const noVolumes: ReadonlyMap<number, number> = new Map();
