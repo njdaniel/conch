@@ -31,6 +31,18 @@ var shareRevokeHooks = []struct {
 		f.revokeShareScreen(t)
 		f.srv.endWithheldShares(context.Background())
 	}},
+	// use_voice off, through the route (the security review of #1272): the
+	// hooks a use_voice change runs (voiceWithheld, then endWithheldShares)
+	// must wait as share_screen's does. The document refuses use_voice off in
+	// a column whose share_screen is on (share_screen requires it: 409
+	// permissions_conflict), so share_screen goes off in the same PUT, as an
+	// owner turning voice off must send it.
+	{"permissions PUT/use_voice route", nil, func(t *testing.T, f *presenceFixture) {
+		rec := f.do(t, http.MethodPut, "/v1/permissions", f.rootTok, f.cameraOffBody(t, schema.PermShareScreen, schema.PermUseVoice))
+		if rec.Code != http.StatusOK {
+			t.Errorf("use_voice off = %d %s, want 200", rec.Code, rec.Body)
+		}
+	}},
 	// ann is an operator and only the operator column keeps share_screen, so
 	// demoting her withholds it and the route's hook ends her share.
 	{"role change", func(t *testing.T, f *presenceFixture) {
