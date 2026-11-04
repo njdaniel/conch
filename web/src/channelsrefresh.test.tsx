@@ -272,7 +272,9 @@ describe('the list follows the server', () => {
     await screen.findByRole('button', { name: 'general' }, { timeout: 5000 });
     expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
     expect(server.listGets).toBe(2);
-  });
+    // The whole App renders before the 5 s wait above: the test's own budget
+    // must be larger than that wait, or a loaded runner times it out (#1279).
+  }, 15_000);
 });
 
 describe('a frame is not list information', () => {
