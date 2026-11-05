@@ -194,6 +194,10 @@ var TSTypes = []TSType{
 	// Companion and viewer participants (issue #933).
 	{Value: VoiceCompanionRequestV1{}, Family: "voice-companion-request-v1"},
 	{Value: VoiceCompanionResponseV1{}, Family: "voice-companion-response-v1"},
+	// The companion's share audio (issue #898): the holder's consent, by
+	// scope, and the answer naming the share it belongs to.
+	{Value: VoiceCompanionAudioRequestV1{}, Family: "voice-companion-audio-request-v1"},
+	{Value: VoiceCompanionAudioV1{}, Family: "voice-companion-audio-v1"},
 	// Screen share (issue #443): the claim the page is given when the room's
 	// share is its own. Presence says who shares (VoiceParticipant above).
 	{Value: VoiceShareV1{}, Family: "voice-share-v1"},
@@ -542,6 +546,9 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"SignInLinkPurpose":     TSStrict,
 	"SocketCloseReason":     TSStrict,
 	"VoiceCompanionPublish": TSStrict,
+	// Strict: a consent the desktop writes (issue #898); it sends only a
+	// scope it knows, and a value it does not know it cannot have asked for.
+	"VoiceShareAudioScope": TSStrict,
 	// A new share end reason is a new version of presence, by its contract
 	// (voice.go; webcam-video.md §10 keeps the camera's reasons the same way).
 	"VoiceShareEndReason":  TSStrict,

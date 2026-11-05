@@ -35,10 +35,19 @@ import (
 // listen-only grant: canPublish false with the microphone named, which LiveKit
 // reads as nothing to publish (docs/design/webcam-video.md §4.3's "none";
 // decided in #1241, so a withdrawal is exactly what the token granted).
+//
+// audio says the share's holder has consented to their companion publishing
+// the share's sound (issue #898): the companion is granted screen_share_audio
+// beside the screen. It means nothing without share, and nothing for a
+// person, whose share grant always carries the sound (VoiceShareV1.audio).
+// Every withdrawal passes false; the consent is read, under the room's
+// claims, from the share it belongs to (voiceShare.audioScope), never from a
+// snapshot.
 type publishInput struct {
 	canPublish   bool
 	canSubscribe bool
 	share        bool
+	audio        bool
 }
 
 // publishPermission is the one place a permission conchd writes for a
@@ -53,8 +62,9 @@ type publishInput struct {
 //   - a person in voice: the microphone, with the screen share's two sources
 //     while they hold the share, and the camera while they hold a camera claim;
 //   - a companion (p<id>.screen): the screen while the person holds the share,
-//     nothing otherwise. It never gets the camera until the desktop phase
-//     (§9), so camera is not consulted for it;
+//     and the share's sound as well while they have consented to it (issue
+//     #898); nothing otherwise. It never gets the camera until the desktop
+//     phase (§9), so camera is not consulted for it;
 //   - a viewer (p<id>.view): nothing.
 func publishPermission(role voiceRole, in publishInput, camera bool) livekit.Permission {
 	switch role {
@@ -64,7 +74,10 @@ func publishPermission(role voiceRole, in publishInput, camera bool) livekit.Per
 		}
 		return livekit.Permission{CanPublish: true, ScreenShare: in.share, Camera: camera}
 	case voiceRoleScreen:
-		if in.share {
+		switch {
+		case in.share && in.audio:
+			return livekit.SourcePermission(in.canSubscribe, true, livekit.SourceScreenShare, livekit.SourceScreenShareAudio)
+		case in.share:
 			return livekit.SourcePermission(in.canSubscribe, true, livekit.SourceScreenShare)
 		}
 	}

@@ -190,6 +190,11 @@ func TestChannelContentLeak(t *testing.T) {
 		{"voice companion", "POST", "/v1/channels/%s/voice/companion", `{"publish":"screen","subscribe":true}`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		{"voice companion, malformed body", "POST", "/v1/channels/%s/voice/companion", `{"publish":`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		{"voice companion removal", "DELETE", "/v1/channels/%s/voice/companion", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		// The companion's share audio (issue #898): answered as the
+		// companion route is; the body is read after membership.
+		{"voice companion audio", "PUT", "/v1/channels/%s/voice/companion/audio", `{"scope":"application"}`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		{"voice companion audio, malformed body", "PUT", "/v1/channels/%s/voice/companion/audio", `{"scope":`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		{"voice companion audio withdrawal", "DELETE", "/v1/channels/%s/voice/companion/audio", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		// Voice presence (issue #127): who is connected and who is talking is
 		// channel content. Not configured is still a snapshot for a member
 		// (200, configured false); everyone else gets the unknown-channel 404.

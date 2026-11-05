@@ -625,8 +625,15 @@ func TestVoiceShareByCompanion(t *testing.T) {
 			wantRows:    []string{a + " started audio=true"},
 		},
 		{
+			// The companion's sound needs the holder's consent first (issue
+			// #898, TestVoiceCompanionAudioUnclaimed covers the sound without
+			// it); with it, presence follows the companion's audio track as
+			// it follows the person's.
 			name: "its sound follows the companion's audio track",
 			run: func(t *testing.T, f *presenceFixture, room string) {
+				if res := f.companionAudio(t, "ann", audioApplication); res.status != http.StatusOK {
+					t.Fatalf("ann consents to share audio: %d %s", res.status, res.body)
+				}
 				f.publishScreen(room, true, true)
 				f.at(5_000)
 				f.pass(t)
@@ -638,7 +645,7 @@ func TestVoiceShareByCompanion(t *testing.T) {
 				f.pass(t)
 			},
 			wantSharing: "ann",
-			wantRows:    []string{a + " started audio=true"},
+			wantRows:    []string{a + " started audio=true", a + " audio_started scope=application"},
 		},
 		{
 			name: "the companion's tracks go: idle 5 s after the last pass that saw one",
