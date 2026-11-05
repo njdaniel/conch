@@ -353,6 +353,12 @@ func run(h *harness) (summary, error) {
 	}
 	h.say("ok   sockets at the end: B's %d sockets, open through the matrix, the media half, every revocation and the guests' phase, carried B's second control and %d frames in all, none with anything of A's or anything private of the plaza's", len(bsock.feeds), bsock.frames())
 
+	dn, dr, err := w.aiAdminPhase()
+	if err != nil {
+		return sum, fmt.Errorf("the AI administrator: %w", err)
+	}
+	h.say("ok   AI administrator: B's agent granted every agent-grantable permission was refused on each of %d administrative routes it called directly, exactly as B's ungranted agent was; through the admin door %d of its catalog's reads answered", dn, dr)
+
 	if err := h.checkCalls(table); err != nil {
 		return sum, err
 	}

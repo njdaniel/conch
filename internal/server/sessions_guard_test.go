@@ -97,7 +97,7 @@ func TestAgentSelfCheck(t *testing.T) {
 // to it. A reference that is not a call (passing it as a value) counts: it
 // would be a way round the list.
 var guardedCallers = map[string][]string{
-	"agentSelfCheck": {"agentSelfAllowed"},
+	"agentSelfCheck": {"agentSelfAllowed", "adminDoorCaller"},
 	// ownSessionCaller asks for sessions.manage; the adapter's poll for the
 	// interventions on its own session's runs asks for runs.manage, the
 	// capability that governs runs, and so calls agentSelfAllowed itself

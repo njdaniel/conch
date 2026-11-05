@@ -785,6 +785,15 @@ func coreMatrixRows() []row {
 					Deadline: schema.NewTimestamp(time.Now().Add(time.Hour))})
 			}},
 		own("GET /v1/approvals", "lists the open approvals", func(*world, subject) probe { return get("/v1/approvals") }),
+		// The admin door (issue #1330): a member reads the catalog as it
+		// applies to them, holds nothing that lets it act on A's member, and
+		// runs no approval but its own agent's, the same for a ghost.
+		{route: "GET /v1/admin/actions", what: "reads the admin catalog", own: true,
+			probe: func(*world, subject) probe { return get("/v1/admin/actions") }},
+		{route: "POST /v1/admin/actions", what: "asks the admin door to disable A's member", pick: aMember, want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(_ *world, s subject) probe { return post("/v1/admin/actions", disableThrough(s.id)) }},
+		{route: "POST /v1/admin/actions/{approval_id}/run", what: "runs A's approval through the admin door", pick: aApproval, want: answer{http.StatusNotFound, "approval_not_found"},
+			probe: func(_ *world, s subject) probe { return post("/v1/admin/actions/"+id(s.id)+"/run", nil) }},
 		{route: "GET /v1/approvals/{id}", what: "reads A's approval", pick: aApproval, want: answer{http.StatusNotFound, "approval_not_found"},
 			probe: func(_ *world, s subject) probe { return get("/v1/approvals/" + id(s.id)) }},
 		{route: "POST /v1/approvals/{id}/decisions", what: "decides A's approval", pick: aApproval, want: answer{http.StatusNotFound, "approval_not_found"},

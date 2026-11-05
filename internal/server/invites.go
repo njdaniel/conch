@@ -88,12 +88,17 @@ func decodeBoundedBody(w http.ResponseWriter, r *http.Request, dst any, maxBytes
 // inviteCaller is the check the three authenticated invite routes start with:
 // a verified human. With authentication off there is nobody to make or own an
 // invite, so the answer is the 401 of whoami. Invites are for people: an
-// agent is refused with human_required, audited, before anything is looked at.
+// agent is refused with human_required, audited, before anything is looked at,
+// unless the admin door dispatched this route for it (ai-administrators §3.3):
+// then what it may do is what its grant holds, as the store decides.
 func (s *Server) inviteCaller(w http.ResponseWriter, r *http.Request) (store.Principal, bool) {
 	caller, ok := callerFrom(r.Context())
 	if !ok {
 		writeUnauthenticated(w)
 		return store.Principal{}, false
+	}
+	if _, dispatched := dispatchedHere(r); dispatched && caller.Kind == store.PrincipalAgent {
+		return caller, true
 	}
 	if caller.Kind != store.PrincipalHuman {
 		s.auditAgentDenial(r.Context(), caller.ID, inviteAuditSubject(r), "", 0, denyAgentInvites)

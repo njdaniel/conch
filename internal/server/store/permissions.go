@@ -355,6 +355,29 @@ func permittedTx(ctx context.Context, tx execer, principalID int64, perm schema.
 	return principalHolds(p, d, perm), nil
 }
 
+// standingPermittedTx is permittedTx for a question about what someone made
+// earlier, not about the request at hand: does the principal who listed a
+// channel still hold what the listing needs? An agent's grant counts
+// whatever the context, as for a link it made (makerRightsTx standing), so a
+// listing an AI administrator made stands while its grant does.
+func standingPermittedTx(ctx context.Context, tx execer, principalID int64, perm schema.Permission) (bool, error) {
+	if !perm.Valid() {
+		return false, nil
+	}
+	p, found, err := queryPrincipal(ctx, tx, principalID)
+	if err != nil || !found {
+		return false, err
+	}
+	if p, err = withAgentGrantTx(ctx, tx, p); err != nil {
+		return false, err
+	}
+	d, err := readPermissionDocTx(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	return principalHolds(p, d, perm), nil
+}
+
 // principalPermittedTx is permittedTx for a principal already read inside
 // tx: it reads only the document. A caller that has just re-read the actor
 // under the write lock uses it to decide that actor's standing (§7.2.1).
@@ -711,8 +734,15 @@ func putPermissionsTx(ctx context.Context, tx execer, actor string, actorID int6
 	}
 	denied := &PermissionError{Err: ErrPermissionDenied, Permission: schema.PermChangeServerSettings,
 		Reason: "changing the permissions document needs change_server_settings"}
-	if !found || writer.Kind != PrincipalHuman || writer.guestTarget() || writer.DisabledAt != nil || writer.HiddenAt != nil {
+	// A person writes it, or an AI administrator through the admin door
+	// (issue #1330, set_permissions): an agent holds only its grant, read
+	// here as authority, is never an owner, so it changes the member column
+	// alone and gives members nothing it does not hold.
+	if !found || (writer.Kind != PrincipalHuman && writer.Kind != PrincipalAgent) || writer.guestTarget() || writer.DisabledAt != nil || writer.HiddenAt != nil {
 		return PermissionsWrite{}, denied
+	}
+	if writer, err = withAgentAuthorityTx(ctx, tx, writer); err != nil {
+		return PermissionsWrite{}, err
 	}
 	owner := writer.IsOwner()
 	d, err := readPermissionDocTx(ctx, tx)

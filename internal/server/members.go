@@ -105,6 +105,10 @@ func (s *Server) channelMembersGate(w http.ResponseWriter, r *http.Request) (cha
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return channel, false, false
 	}
+	if dispatchedChannelChanged(r, channel.ID) {
+		writeTargetChanged(w)
+		return channel, false, false
+	}
 	caller, authed := callerFrom(ctx)
 	// A caller without manage_channels sees only a channel it is in; any
 	// other gets the uniform channel-not-found (design §7.3).
@@ -127,7 +131,9 @@ func (s *Server) channelMembersGate(w http.ResponseWriter, r *http.Request) (cha
 			return channel, false, false
 		}
 	}
-	if !s.agentCallerAllowed(w, r, schema.CapabilityMessagesRead, channel.ID, schema.ChannelPermissionRead) {
+	// The admin door's dispatch is judged by manage_channels above, not by
+	// the agent's channel grants (ai-administrators §3.3, list_channel_members).
+	if _, dispatched := dispatchedHere(r); !dispatched && !s.agentCallerAllowed(w, r, schema.CapabilityMessagesRead, channel.ID, schema.ChannelPermissionRead) {
 		return channel, false, false
 	}
 	return channel, seesAll, true

@@ -384,8 +384,20 @@ func (s *Server) guard(rt route) http.Handler {
 				return
 			}
 			// The fixed operator rights (design §4.2): the reports and the
-			// settings reads, and reading the permissions document.
+			// settings reads, and reading the permissions document. The admin
+			// door's dispatch of this route admits an agent holding the
+			// catalog's permission for it (ai-administrators §3.3, §3.4).
 			if !isOperator(caller) {
+				if d, dispatched := dispatchedHere(r); dispatched && caller.Kind == store.PrincipalAgent {
+					allowed, ok := s.canOrFail(w, r, caller, d.permission)
+					if !ok {
+						return
+					}
+					if allowed {
+						handler.ServeHTTP(w, r)
+						return
+					}
+				}
 				s.denyForbidden(w, r, caller, "forbidden", "operator role required")
 				return
 			}
@@ -404,6 +416,14 @@ func (s *Server) guard(rt route) http.Handler {
 			caller, ok := callerFrom(r.Context())
 			if !ok {
 				writeUnauthenticated(w)
+				return
+			}
+			// An agent is refused first, as it always was, unless the admin
+			// door dispatched this very route (ai-administrators §3.4 point 2);
+			// a dispatched agent is then judged by can() like anyone, its grant
+			// read as authority.
+			if _, dispatched := dispatchedHere(r); caller.Kind == store.PrincipalAgent && !dispatched {
+				s.denyForbidden(w, r, caller, "forbidden", memberRefusal)
 				return
 			}
 			allowed, ok := s.canOrFail(w, r, caller, perm)
@@ -462,6 +482,10 @@ func (s *Server) guard(rt route) http.Handler {
 			if err != nil {
 				slog.ErrorContext(r.Context(), "auth: find channel failed", "error", err)
 				writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+				return
+			}
+			if dispatchedChannelChanged(r, channel.ID) {
+				writeTargetChanged(w)
 				return
 			}
 			// The operator branch is a holder of manage_channels (design §7.2):

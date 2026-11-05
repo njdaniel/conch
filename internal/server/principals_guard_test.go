@@ -55,6 +55,10 @@ type principalRead struct {
 }
 
 var principalReads = []principalRead{
+	// #1330: the admin door's target name, read only after the caller is
+	// found to hold the catalog permission (an operator's, or an AI
+	// administrator's grant), and at the run by the agent that asked.
+	{"store/admin_actions.go", "adminTargetNameTx", 1, readOperatorOrMaker},
 	{"store/approvals.go", "Store.castDecision", 2, readGated},
 	{"store/audience.go", "Store.ListChannelAuthors", 1, readGated},
 	// #1282: the humans who hold a message of an author that ListChannelAuthors

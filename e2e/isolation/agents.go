@@ -40,6 +40,16 @@ func coreAgentRows() []row {
 	runNotFound := answer{http.StatusNotFound, "run_not_found"}
 	interNotFound := answer{http.StatusNotFound, "intervention_not_found"}
 	return []row{
+		// The admin door (issue #1330): an agent with no grant is refused at
+		// the door, before any action, target or approval is looked at.
+		{route: "GET /v1/admin/actions", what: "reads the admin catalog without a grant", want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(*world, subject) probe { return get("/v1/admin/actions") }},
+		byID("POST /v1/admin/actions", "asks the admin door to disable A's member", aMember, answer{http.StatusForbidden, "forbidden"}, func(_ *world, s subject) probe {
+			return post("/v1/admin/actions", disableThrough(s.id))
+		}),
+		byID("POST /v1/admin/actions/{approval_id}/run", "runs A's approval through the admin door", aApproval, answer{http.StatusForbidden, "forbidden"}, func(_ *world, s subject) probe {
+			return post("/v1/admin/actions/"+id(s.id)+"/run", nil)
+		}),
 		// The community's member list is for people: an agent is refused,
 		// whoever it is.
 		{route: "GET /v1/directory/members", what: "asks for the community's members", want: answer{http.StatusForbidden, "forbidden"},
