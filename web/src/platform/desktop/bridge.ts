@@ -145,7 +145,7 @@ export interface SignInRefusal {
 // password for an account that also needs a code: the challenge is a handle
 // that only main can redeem, and expiresAt is when it ends.
 export type SignInOutcome =
-  | { readonly ok: true; readonly who: WhoAmIResponseV1 | null; readonly answer: Readonly<Record<string, unknown>> }
+  | { readonly ok: true; readonly who: WhoAmIResponseV1 | null; readonly answer: Readonly<Record<string, unknown>>; readonly handle?: string }
   | ({ readonly ok: false; readonly kind: 'unauthorized' | 'invalid' } & SignInRefusal)
   | { readonly ok: false; readonly kind: 'network'; readonly reason?: NoAnswerReason }
   | { readonly ok: false; readonly kind: 'unkept' }
@@ -217,12 +217,14 @@ export interface ConchDesktopBridge {
   // accepted for its operation alone; main consumes the token the answer holds.
   restore(): Promise<SignInOutcome>;
   // A credential the person pasted (an operator's or a script's): main checks
-  // it with whoami and sets it aside, not yet in force.
+  // it with whoami and sets it aside, not yet in force, and answers with a
+  // one-time handle (outcome.handle) for keepCredential.
   signInWithCredential(credential: string): Promise<SignInOutcome>;
-  // Puts in force the credential signInWithCredential set aside, when the page
-  // keeps it (for an operator's, once the person passed the warning). false
-  // when it is not the one set aside, or it lapsed.
-  keepCredential(credential: string): Promise<boolean>;
+  // Puts in force the credential signInWithCredential set aside, named by the
+  // handle it returned, when the page keeps it (for an operator's, once the
+  // person passed the warning). The credential is never passed again. false
+  // when the handle is not the one issued, was used, or lapsed.
+  keepCredential(handle: string): Promise<boolean>;
   signInWithPassword(request: LoginRequestV1): Promise<SignInOutcome>;
   signInWithCode(request: TOTPLoginRequestV1): Promise<SignInOutcome>;
   redeemInvite(request: RedeemInviteRequestV2): Promise<SignInOutcome>;
