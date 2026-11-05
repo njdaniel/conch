@@ -29,7 +29,9 @@ import {
   type VoicePermissionRequestV1,
   type VoicePermissionResponseV1,
 } from './schema/admin';
-import { createCredentialResponseV1, listOwnCredentialsResponseV1, revokeAllCredentialsResponseV1, type CreateCredentialRequestV1, type OwnCredentialV1 } from './schema/credential';
+import { createCredentialResponseV1, createPrincipalResponse, listOwnCredentialsResponseV1, revokeAllCredentialsResponseV1, type CreateCredentialRequestV1, type CreatePrincipalRequest, type OwnCredentialV1 } from './schema/credential';
+import { getAgentManifestResponseV1, type AgentManifestV1, type PutAgentManifestRequestV1 } from './schema/admin';
+import { listApprovalsResponseV1, type ApprovalV1, type CastDecisionRequestV1 } from './schema/approval';
 import { errorV0, type ErrorV0 } from './schema/error';
 import {
   loginResponseV1,
@@ -1226,10 +1228,46 @@ export async function makeLinkFor(id: number, purpose: SignInLinkPurpose): Promi
 // issueCredentialFor issues a credential that acts as another person (POST
 // /v1/principals/{id}/credentials; act_as_members). The token is in the answer
 // alone, to be shown once.
-export async function issueCredentialFor(id: number, label: string): Promise<InviteResult<{ readonly secret: string }>> {
-  const request: CreateCredentialRequestV1 = { label };
+export async function issueCredentialFor(id: number, label: string, renewLifetimeSeconds?: number): Promise<InviteResult<{ readonly secret: string }>> {
+  const request: CreateCredentialRequestV1 = { label, ...(renewLifetimeSeconds === undefined ? {} : { renew_lifetime_seconds: renewLifetimeSeconds }) };
   const made = await readSent(await authedSend(call('createPrincipalCredential', { id }), request), createCredentialResponseV1);
   return made.ok ? { ok: true, value: { secret: made.value.token } } : made;
+}
+
+// createAgent makes an agent principal (POST /v0/principals; manage_members,
+// a recent proof): the first step of Add an AI administrator (issue #1334).
+export async function createAgent(name: string): Promise<InviteResult<PrincipalV0>> {
+  const request: CreatePrincipalRequest = { kind: 'agent', name };
+  const made = await readSent(await authedSend(call('createPrincipal'), request), createPrincipalResponse);
+  return made.ok ? { ok: true, value: made.value.principal } : made;
+}
+
+// putAgentManifest replaces an agent's manifest (PUT
+// /v1/principals/{id}/manifest). A grant in it is the owner's alone: anyone
+// else is refused with forbidden.
+export async function putAgentManifest(id: number, request: PutAgentManifestRequestV1): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('putManifest', { id }), request));
+}
+
+// agentManifest reads an agent's manifest (GET /v1/principals/{id}/manifest;
+// operators): the agent card shows its grant from it.
+export async function agentManifest(id: number): Promise<InviteResult<AgentManifestV1>> {
+  const reply = await authed(call('getManifest', { id }), getAgentManifestResponseV1);
+  return reply.ok ? { ok: true, value: reply.value.manifest } : reply;
+}
+
+// openApprovals reads the approvals still open in the caller's channels (GET
+// /v1/approvals), with the ids the caller may see but not decide.
+export async function openApprovals(): Promise<ApiResult<{ readonly approvals: ApprovalV1[]; readonly readOnly: readonly number[] }>> {
+  const result = await authed(call('listApprovals'), listApprovalsResponseV1);
+  return result.ok ? { ok: true, value: { approvals: result.value.approvals, readOnly: result.value.read_only ?? [] } } : result;
+}
+
+// castDecision records the viewer's decision on an approval (POST
+// /v1/approvals/{id}/decisions): the admin-action card's two buttons.
+export async function castDecision(approval: number, principal: number, option: string, reason: string): Promise<InviteResult<null>> {
+  const request: CastDecisionRequestV1 = { principal_id: principal, option_id: option, reason };
+  return readDone(await authedSend(call('castDecision', { id: approval }), request));
 }
 
 // bindHookFor binds a webhook that posts in a channel as another person (POST

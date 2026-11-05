@@ -27,7 +27,10 @@ describe('credential handling', () => {
     const sending = Object.entries(sources)
       .filter(([, code]) => /Authorization/.test(withoutComments(code)))
       .map(([path]) => path);
-    expect(sending).toEqual(['./platform/browser/http.ts']);
+    // The one other mention is the header of the MCP entry that Add an AI
+    // administrator shows once (issue #1334): text for another client's
+    // config file, never a request this page makes.
+    expect(sending).toEqual(['./admin/AddAIAdmin.tsx', './platform/browser/http.ts']);
   });
 
   it('is never logged: the page makes no console call', () => {

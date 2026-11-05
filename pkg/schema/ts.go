@@ -162,6 +162,11 @@ var TSTypes = []TSType{
 	// An approval, as a message carries it in its payload.
 	{Value: Option{}, Family: "approval-option-v1"},
 	{Value: ApprovalV1{}, Family: "conch-approval-v1"},
+	// Deciding an admin-action approval from its card (issue #1334).
+	{Value: CastDecisionRequestV1{}, Family: "cast-decision-request-v1"},
+	// The open approvals, which the conversation reads to draw an AI
+	// administrator's request as a card (issue #1334).
+	{Value: ListApprovalsResponseV1{}, Family: "list-approvals-response-v1"},
 
 	// Files (issue #23): the metadata the upload and metadata routes answer,
 	// and the payload a message attaches them with (issue #762).
@@ -448,6 +453,11 @@ var TSTypes = []TSType{
 	{Value: AdminTargetV1{}},
 	{Value: SubmitAdminActionRequestV1{}, Family: "submit-admin-action-request-v1"},
 	{Value: AdminActionV1{}, Family: "admin-action-v1"},
+	{Value: ChannelGrant{}},
+	{Value: RateLimit{}},
+	{Value: AgentManifestV1{}, Family: "agent-manifest-v1", Schema: AgentManifestSchemaV1},
+	{Value: PutAgentManifestRequestV1{}, Family: "put-agent-manifest-request-v1"},
+	{Value: GetAgentManifestResponseV1{}, Family: "get-agent-manifest-response-v1"},
 
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},
