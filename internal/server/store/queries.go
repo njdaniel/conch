@@ -65,6 +65,12 @@ type Principal struct {
 	// MayInvite is the right to make personal invites. Operators may always
 	// invite whatever this says; nobody else holds it until granted.
 	MayInvite bool
+	// agentGrant is the agent-grantable permissions an agent holds by its
+	// manifest (issue #1326, ai-administrators §3.2 rule 1a), one bit per
+	// catalog position, filled only by withAgentGrantTx. Zero, the value of
+	// every principal read any other way, holds nothing: a reader that never
+	// loads the grant fails closed. A bitmask keeps Principal comparable.
+	agentGrant uint64
 	// VoiceAllowed is whether the principal may use voice. True for every
 	// account unless an invite made without it. Every voice route refuses a
 	// person without it (voicePresenceChannel, internal/server/voice.go).
@@ -620,6 +626,19 @@ func (s *Store) ChannelSettings(ctx context.Context, actor string, actorID, chan
 			ok, err := permittedTx(ctx, tx, actorID, schema.PermManageChannels)
 			if err != nil {
 				return err
+			}
+			// An agent never changes its own approval channel's settings
+			// (issue #1326, ai-administrators §3.5.6).
+			if ok {
+				actorP, _, err := queryPrincipal(ctx, tx, actorID)
+				if err != nil {
+					return err
+				}
+				if actorP.Kind != PrincipalHuman {
+					if ok, err = agentStandingTx(ctx, tx, actorP, channelID); err != nil {
+						return err
+					}
+				}
 			}
 			if !ok {
 				return ErrManageChannelsRequired

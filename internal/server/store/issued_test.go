@@ -431,6 +431,9 @@ func TestMigration42IssuedBy(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, stmt := range []string{
+		"DROP TABLE admin_actions",                            // migration 43 (issue #1326)
+		"ALTER TABLE agent_manifests DROP COLUMN admin",       // migration 43
+		"ALTER TABLE agent_manifests DROP COLUMN permissions", // migration 43
 		"ALTER TABLE credentials DROP COLUMN issued_by",
 		"ALTER TABLE hooks DROP COLUMN issued_by",
 		fmt.Sprintf("PRAGMA user_version = %d", issuedByMigration-1),

@@ -420,10 +420,13 @@ func (s *Store) castDecision(ctx context.Context, approvalID, principalID int64,
 			// a guest, whatever its membership row says (issue #706, review
 			// F1): the guest flag is read here, inside the deciding
 			// transaction, so no membership written by any path can let a
-			// guest decide.
+			// guest decide. Nor an agent (issue #1326, ai-administrators
+			// §3.5.4 wall 2): deciding is a human act, whatever an agent's
+			// membership row or grant says, so no AI administrator can
+			// decide the approval its own gated action raised.
 			var can int
 			err := tx.QueryRowContext(ctx,
-				`SELECT m.can_decide AND p.disabled_at IS NULL AND NOT `+activeGuestSQL+` FROM channel_members m
+				`SELECT m.can_decide AND p.kind = 'human' AND p.disabled_at IS NULL AND NOT `+activeGuestSQL+` FROM channel_members m
 				 JOIN principals p ON p.id = m.principal_id
 				 WHERE m.channel_id = ? AND m.principal_id = ?`,
 				a.ChannelID, principalID).Scan(&can)
@@ -453,14 +456,14 @@ func (s *Store) castDecision(ctx context.Context, approvalID, principalID int64,
 
 		// Quorum: concurring decisions select the same option
 		// (approval-object.md §1). For members, only the decisions of those
-		// who hold the right now, are not disabled and are not guests, count
-		// (issues #453, #706).
+		// who hold the right now, are humans, are not disabled and are not
+		// guests, count (issues #453, #706, #1326).
 		count := "SELECT COUNT(*) FROM approval_decisions WHERE approval_id = ? AND option_id = ?"
 		args := []any{approvalID, optionID}
 		if members {
 			count = `SELECT COUNT(*) FROM approval_decisions d
 			 JOIN channel_members m ON m.channel_id = ? AND m.principal_id = d.principal_id AND m.can_decide = 1
-			 JOIN principals p ON p.id = d.principal_id AND p.disabled_at IS NULL AND NOT ` + activeGuestSQL + `
+			 JOIN principals p ON p.id = d.principal_id AND p.kind = 'human' AND p.disabled_at IS NULL AND NOT ` + activeGuestSQL + `
 			 WHERE d.approval_id = ? AND d.option_id = ?`
 			args = []any{a.ChannelID, approvalID, optionID}
 		}

@@ -74,6 +74,16 @@ func (s *Server) handlePutManifest(w http.ResponseWriter, r *http.Request) {
 	case errors.As(err, &noChannel):
 		writeError(w, http.StatusBadRequest, "channel_not_found", "channel "+strconv.FormatInt(noChannel.ChannelID, 10)+" not found")
 		return
+	case errors.Is(err, store.ErrNotOwner):
+		// Granting an agent permissions is an owner's act (issue #1326).
+		writeError(w, http.StatusForbidden, "forbidden", "owner required: only an owner grants an agent permissions")
+		return
+	case errors.Is(err, store.ErrManifestActorNotHuman):
+		writeError(w, http.StatusForbidden, "forbidden", "only a person writes an agent's manifest")
+		return
+	case errors.Is(err, store.ErrAdminChannelNotGranted):
+		writeError(w, http.StatusBadRequest, "invalid_manifest", "the admin approval channel must be one of the manifest's channels, granted read")
+		return
 	case err != nil:
 		slog.ErrorContext(ctx, "manifests: put failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")

@@ -996,6 +996,30 @@ BEGIN SELECT RAISE(ABORT, 'a default channel must be public'); END`,
 		`ALTER TABLE credentials ADD COLUMN issued_by INTEGER REFERENCES principals (id)`,
 		`ALTER TABLE hooks ADD COLUMN issued_by INTEGER REFERENCES principals (id)`,
 	},
+	// 43: AI administrators (issue #1326, slice S2 #1329,
+	// docs/design/ai-administrators.md §7). An agent's manifest may carry a
+	// grant from the agent-grantable subset of the operator permissions
+	// (permissions, a JSON list, '[]' for none) and how its gated actions are
+	// approved (admin, the JSON of AgentAdminV1, '' for none). admin_actions
+	// is written by the admin door (#1330) in the transaction that raises a
+	// gated action's approval, which is how the run proves the approval came
+	// from the door and not from a client (#1330, F1 of #1328's review);
+	// claimed_at is set once, by the run. Nothing changes on upgrade: no
+	// agent holds anything until an owner grants it.
+	{
+		`ALTER TABLE agent_manifests ADD COLUMN permissions TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE agent_manifests ADD COLUMN admin TEXT NOT NULL DEFAULT ''`,
+		`CREATE TABLE admin_actions (
+	approval_id  INTEGER PRIMARY KEY REFERENCES approvals (id),
+	agent_id     INTEGER NOT NULL REFERENCES principals (id),
+	action       TEXT    NOT NULL,
+	requested_at INTEGER NOT NULL,
+	claimed_at   INTEGER,
+	ran_at       INTEGER,
+	http_status  INTEGER,
+	error_code   TEXT
+)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
