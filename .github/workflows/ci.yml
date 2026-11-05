@@ -8,6 +8,19 @@ on:
 permissions:
   contents: read
 
+# One run per pull request and one per main at a time (#1305): a superseded
+# run should not hold runners (the self-hosted ones especially, when used).
+# A new push to a pull request cancels its older run. (So does re-running an
+# older run of the same pull request: re-run the newest instead.) On main a
+# run is never cancelled mid-way; while one runs, one pending run is kept and
+# the others are cancelled, so a burst of merges is checked once, not once per
+# merge. GitHub normally keeps the newest but does not guarantee the order:
+# the merge queue's main check skips cancelled runs and re-runs main's latest
+# run when it was cancelled and nothing is pending, so the tip is checked.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Which kind of change this is (issue #1300). A pull request whose every
   # changed path is documentation (scripts/ci-docs-only.sh) gets the text
@@ -45,34 +58,319 @@ jobs:
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "code=$code (false: docs only, light run)"
 
-  check:
+  # The repository checks, as parallel jobs on GitHub-hosted runners (#1318).
+  # They used to be one job on the self-hosted runners (#1286), which the
+  # hosted runner ran out of disk for: the Rust jobs now free the runner's
+  # unused tool trees first and build with line tables instead of full debug
+  # info. check, at the end, is the one branch protection requires: it runs
+  # the text checks itself and passes only when every job it needs passed.
+  # Docs-only pull requests (#1300) skip every job but changes and check.
+  #
+  # The Rust-heavy jobs (rust here, voice-check below) can go back to the
+  # self-hosted runners without a code change: set the repository variable
+  # HEAVY_RUNNER to "local". A fork's pull request never reaches them.
+  go:
     needs: changes
-    # Runs even if changes failed: then code is unset, which means everything
-    # runs. Only an answer of false (docs only) lightens it.
-    if: ${{ !cancelled() }}
-    # This repository's own branches (pushes to main, and pull requests whose
-    # head is a branch here) run on the self-hosted runner on Nick's 4 TB
-    # drive (#1286): the hosted runner ran out of disk restoring the voice
-    # build. A fork's pull request never does: it runs on ubuntu-latest, so
-    # code from outside never reaches that machine.
-    # A docs-only pull request (issue #1300) runs only the text checks below,
-    # on a hosted runner, so it holds none of the self-hosted ones.
-    runs-on: ${{ needs.changes.outputs.code == 'false' && 'ubuntu-latest' || ((github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest') }}
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # schema-compat diffs against the merge base
 
       - uses: actions/setup-go@v5
-        if: needs.changes.outputs.code != 'false'
         with:
           go-version-file: go.mod
 
       - name: gofmt
-        if: needs.changes.outputs.code != 'false'
         run: |
           out=$(gofmt -l $(git ls-files -co --exclude-standard '*.go'))
           if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # .golangci-lint-version is the one place the linter version is named;
+      # `make lint` and the pre-commit hook refuse to run any other. The
+      # release it names must be built with a Go >= the go directive in
+      # go.mod (1.25). golangci-lint-action@v8 has no version-file input, so
+      # the file is read here.
+      - name: golangci-lint version
+        id: lint-version
+        run: |
+          v=$(tr -d '[:space:]' < .golangci-lint-version)
+          echo "version=v${v#v}" >> "$GITHUB_OUTPUT"
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: ${{ steps.lint-version.outputs.version }}
+          # Off: `config verify` downloads a JSON schema, and the job failed
+          # when that download failed (#143). This step still fails on an
+          # unknown linter or config version, but not on a misspelled key:
+          # run `golangci-lint config verify` after editing .golangci.yml.
+          verify: false
+
+      - name: schema compatibility
+        env:
+          SCHEMA_COMPAT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: ./scripts/schema-compat.sh
+
+      # The web client's wire types are generated from pkg/schema (#348): this
+      # fails when web/src/schema/generated*.ts differ from what
+      # `go generate ./pkg/schema` writes. Go only. The script's own test
+      # runs first.
+      - name: generated TypeScript wire types
+        run: |
+          ./scripts/schema-ts-check-test.sh
+          ./scripts/schema-ts-check.sh
+
+      # The emoji catalog (#953): the vendored third_party/unicode/emoji-test.txt
+      # matches its pinned hash and scripts/emoji-update.sh refuses a mismatch.
+      # Drift of the generated catalog fails in go test (cmd/emoji-gen).
+      - name: emoji catalog
+        run: ./scripts/emoji-update-test.sh
+
+      - name: dependency gate
+        run: ./scripts/depgate.sh
+
+      # The deployment files in ops/deploy (#435): shellcheck, systemd-analyze
+      # verify, and the backup, restore, upgrade and rollback scripts against
+      # a real conchd. sqlite3 and shellcheck are host prerequisites of those
+      # scripts; the image has systemd-analyze, and with CI set the test fails
+      # rather than skips when one is missing.
+      - name: deployment script packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sqlite3 shellcheck
+
+      - name: deployment scripts
+        run: ./scripts/deploy-scripts-test.sh
+
+  # go test -race for internal/server, in five jobs. On a hosted runner the
+  # package alone took 12 minutes and store 5.5, so one job was the run's
+  # longest by ten minutes (#471, #1318). Shards 1 to 4 split the package's
+  # tests by the letter after "Test" (about 1150 tests, counted 2026-11-05);
+  # shard 4 also takes any test whose name continues with something other
+  # than a capital letter, so a test can't fall between the shards. Shard 5
+  # is the subpackages (store, approvals, hub, livekit, names). The package
+  # has no fuzz targets or examples, which -run '^Test' would leave out.
+  go-test-server:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: go-test-server (${{ matrix.shard }}/5)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { shard: 1, run: "^Test[A-E]" }
+          - { shard: 2, run: "^Test[F-M]" }
+          - { shard: 3, run: "^Test[N-S]" }
+          - { shard: 4, run: "^Test([T-Z]|[^A-Z])" }
+          - { shard: 5, run: "" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The pattern comes in through the environment, never through the
+      # shell's parsing: shard 4's "(" and "|" are regexp, not shell.
+      - name: go test (internal/server, shard ${{ matrix.shard }})
+        env:
+          RUN: ${{ matrix.run }}
+        run: |
+          if [ -z "$RUN" ]; then
+            # The package's examples and fuzz targets would match no shard's
+            # "^Test" pattern: fail here so one gets added when the first
+            # lands, rather than leave it unrun.
+            if go test -list '^(Example|Fuzz)' ./internal/server | grep -E '^(Example|Fuzz)'; then
+              echo "internal/server has examples or fuzz targets: give them a shard"; exit 1
+            fi
+            pkgs=$(go list ./internal/server/... | grep -v '/internal/server$')
+            [ -n "$pkgs" ] || { echo "no internal/server subpackages listed"; exit 1; }
+            go test -race -timeout 25m $pkgs
+          else
+            go test -race -timeout 25m ./internal/server -run "$RUN"
+          fi
+
+  go-test:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go test (everything but internal/server)
+        run: |
+          pkgs=$(go list ./... | grep -v -e '/internal/server$' -e '/internal/server/')
+          [ -n "$pkgs" ] || { echo "no packages listed"; exit 1; }
+          go test -race -timeout 25m $pkgs
+
+  # The Rust voice client under voice/ (ADR-006), and the desktop
+  # voice-helper integration, which drives the conch-voice this job builds.
+  rust:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ${{ vars.HEAVY_RUNNER == 'local' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
+    timeout-minutes: 40
+    env:
+      # Line tables, not full debug info: the build directory is a few GB
+      # instead of about 7, which is what filled the hosted runner's disk
+      # (#1286, #1318). Panics still name file and line. Local builds keep
+      # the profile voice/Cargo.toml gives them.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+
+      # The hosted image ships tool trees no job here uses (.NET, Android,
+      # GHC, CodeQL, cached Docker images): about 25-30 GB, removed first.
+      - name: free disk
+        if: runner.environment == 'github-hosted'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The toolchain script fetches one pinned clang, cargo-deny and
+      # libwebrtc and verifies each against the SHA-256 in
+      # scripts/voice-pins.sh, which is therefore the cache key. rustup, on
+      # the runner, installs the Rust version voice/rust-toolchain.toml names.
+      - name: rust toolchain cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/conch/llvm-*
+            ~/.cache/conch/cargo-deny-*
+            ~/.cache/conch/webrtc-*
+          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
+
+      # -lt: built with line tables (above), so never mixed with a cache of
+      # full-debug builds.
+      - name: rust build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            voice/target
+          key: voice-build-lt-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
+          # After a dependency change, start from the last build instead of
+          # from nothing; cargo rebuilds only what changed.
+          restore-keys: |
+            voice-build-lt-${{ runner.os }}-
+
+      # The SDK's build needs GLib's headers (found through pkg-config). So does
+      # dmn-audio's: the PipeWire headers (also found through pkg-config) and
+      # libclang, which generates the Rust bindings to them. Nothing else comes
+      # from the system. scripts/voice-env.sh says so if any is missing.
+      - name: rust system packages
+        if: runner.environment == 'github-hosted'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config
+
+      # The self-hosted runner installs nothing (it has no sudo): it has
+      # these, and this step says so when one is missing.
+      - name: host prerequisites (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: |
+          missing=""
+          for t in pkg-config; do command -v "$t" >/dev/null || missing="$missing $t"; done
+          for p in glib-2.0 libpipewire-0.3; do pkg-config --exists "$p" || missing="$missing $p"; done
+          ls /usr/lib/llvm-*/lib/libclang.so >/dev/null 2>&1 || missing="$missing libclang"
+          if [ -n "$missing" ]; then echo "the self-hosted runner lacks:$missing"; exit 1; fi
+
+      - name: rust toolchain
+        run: ./scripts/voice-toolchain.sh
+
+      - name: rust check
+        run: make rust-check
+
+      # desktop/.nvmrc names the same Node as web/.nvmrc.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      # The voice supervisor against the real conch-voice (#948): the binary
+      # rust check's cargo test built, a stub conchd on loopback, no audio.
+      - name: desktop voice-helper integration
+        run: CONCH_VOICE_BIN="$PWD/voice/target/debug/conch-voice" make desktop-voice-it
+
+      - name: disk after the build
+        if: always()
+        run: df -h / && du -sh voice/target 2>/dev/null || true
+
+  # The web client under web/ (ADR-007). setup-node installs exactly the
+  # Node web/.nvmrc pins and caches npm's download cache by the lockfile.
+  # web-check installs with npm ci only, and downloads no browser.
+  web:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: web/.nvmrc
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: web check
+        run: make web-check
+
+  # The desktop shell under desktop/ (#940): the fetch script's test, the
+  # repository rules, the dependency and licence gates, then npm ci,
+  # typecheck, lint and unit tests. It downloads no Electron binary and
+  # needs no display; the packaged app is the desktop-smoke job's.
+  desktop:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: desktop check
+        run: make desktop-check
+
+  # The required status check. It runs the text checks every pull request
+  # gets, docs-only ones included, then passes only if every job above that
+  # should have run succeeded: skipped is accepted only for a docs-only
+  # change (changes said code=false). It runs even when one of them failed,
+  # so the failure is reported here rather than as a skipped check. changes
+  # itself is not judged: if it fails, code is unset and every job runs in
+  # full, so a pass here still means every check ran and passed.
+  check:
+    needs: [changes, go, go-test-server, go-test, rust, web, desktop]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
 
       # No tracked text file may hold a bidi control, a line or paragraph
       # separator, or a control character other than tab, LF and CR (#244).
@@ -83,169 +381,16 @@ jobs:
           ./scripts/invisible-chars.sh
           ./scripts/ci-docs-only-test.sh
 
-      - name: go vet
-        if: needs.changes.outputs.code != 'false'
-        run: go vet ./...
-
-      # .golangci-lint-version is the one place the linter version is named;
-      # `make lint` and the pre-commit hook refuse to run any other. The
-      # release it names must be built with a Go >= the go directive in
-      # go.mod (1.25). golangci-lint-action@v8 has no version-file input, so
-      # the file is read here.
-      - name: golangci-lint version
-        if: needs.changes.outputs.code != 'false'
-        id: lint-version
-        run: |
-          v=$(tr -d '[:space:]' < .golangci-lint-version)
-          echo "version=v${v#v}" >> "$GITHUB_OUTPUT"
-
-      - name: golangci-lint
-        if: needs.changes.outputs.code != 'false'
-        uses: golangci/golangci-lint-action@v8
-        with:
-          version: ${{ steps.lint-version.outputs.version }}
-          # Off: `config verify` downloads a JSON schema, and the job failed
-          # when that download failed (#143). This step still fails on an
-          # unknown linter or config version, but not on a misspelled key:
-          # run `golangci-lint config verify` after editing .golangci.yml.
-          verify: false
-
-      - name: go test
-        if: needs.changes.outputs.code != 'false'
-        # internal/server alone takes 7–10 minutes under -race on a runner,
-        # past go test's default 10-minute timeout per package (#471);
-        # making it faster is #472.
-        run: go test -race -timeout 25m ./...
-
-      - name: schema compatibility
-        if: needs.changes.outputs.code != 'false'
+      - name: every check passed
         env:
-          SCHEMA_COMPAT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: ./scripts/schema-compat.sh
-
-      # The web client's wire types are generated from pkg/schema (#348): this
-      # fails when web/src/schema/generated*.ts differ from what
-      # `go generate ./pkg/schema` writes. Go only. The script's own test
-      # runs first.
-      - name: generated TypeScript wire types
-        if: needs.changes.outputs.code != 'false'
+          NEEDS: ${{ toJSON(needs) }}
+          DOCS_ONLY: ${{ needs.changes.outputs.code == 'false' }}
         run: |
-          ./scripts/schema-ts-check-test.sh
-          ./scripts/schema-ts-check.sh
-
-      # The emoji catalog (#953): the vendored third_party/unicode/emoji-test.txt
-      # matches its pinned hash and scripts/emoji-update.sh refuses a mismatch.
-      # Drift of the generated catalog fails in go test (cmd/emoji-gen).
-      - name: emoji catalog
-        if: needs.changes.outputs.code != 'false'
-        run: ./scripts/emoji-update-test.sh
-
-      - name: dependency gate
-        if: needs.changes.outputs.code != 'false'
-        run: ./scripts/depgate.sh
-
-      # The deployment files in ops/deploy (#435): shellcheck, systemd-analyze
-      # verify, and the backup, restore, upgrade and rollback scripts against
-      # a real conchd. sqlite3 is a host prerequisite of those scripts; the
-      # runner image has shellcheck and systemd-analyze, and with CI set the
-      # test fails rather than skips when one is missing.
-      # The self-hosted runner installs nothing (it has no sudo): it has
-      # these, and this step says so when one is missing.
-      - name: host prerequisites (self-hosted)
-        if: needs.changes.outputs.code != 'false' && runner.environment == 'self-hosted'
-        run: |
-          missing=""
-          for t in sqlite3 shellcheck systemd-analyze pkg-config; do command -v "$t" >/dev/null || missing="$missing $t"; done
-          for p in glib-2.0 libpipewire-0.3; do pkg-config --exists "$p" || missing="$missing $p"; done
-          ls /usr/lib/llvm-*/lib/libclang.so >/dev/null 2>&1 || missing="$missing libclang"
-          if [ -n "$missing" ]; then echo "the self-hosted runner lacks:$missing"; exit 1; fi
-
-      - name: deployment script packages
-        if: needs.changes.outputs.code != 'false' && runner.environment == 'github-hosted'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends sqlite3 shellcheck
-
-      - name: deployment scripts
-        if: needs.changes.outputs.code != 'false'
-        run: ./scripts/deploy-scripts-test.sh
-
-      # The Rust voice client under voice/ (ADR-006). The toolchain script
-      # fetches one pinned clang, cargo-deny and libwebrtc and verifies each
-      # against the SHA-256 in scripts/voice-pins.sh, which is therefore the
-      # cache key. rustup, already on the runner, installs the Rust version
-      # voice/rust-toolchain.toml names.
-      - name: rust toolchain cache
-        if: needs.changes.outputs.code != 'false'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/conch/llvm-*
-            ~/.cache/conch/cargo-deny-*
-            ~/.cache/conch/webrtc-*
-          key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
-
-      - name: rust build cache
-        if: needs.changes.outputs.code != 'false'
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            voice/target
-          key: voice-build-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
-          # After a dependency change, start from the last build instead of
-          # from nothing; cargo rebuilds only what changed.
-          restore-keys: |
-            voice-build-${{ runner.os }}-
-
-      # The SDK's build needs GLib's headers (found through pkg-config). So does
-      # dmn-audio's: the PipeWire headers (also found through pkg-config) and
-      # libclang, which generates the Rust bindings to them. Nothing else comes
-      # from the system. scripts/voice-env.sh says so if any is missing.
-      - name: rust system packages
-        if: needs.changes.outputs.code != 'false' && runner.environment == 'github-hosted'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config
-
-      - name: rust toolchain
-        if: needs.changes.outputs.code != 'false'
-        run: ./scripts/voice-toolchain.sh
-
-      - name: rust check
-        if: needs.changes.outputs.code != 'false'
-        run: make rust-check
-
-      # The web client under web/ (ADR-007). setup-node installs exactly the
-      # Node web/.nvmrc pins and caches npm's download cache by the lockfile.
-      # web-check installs with npm ci only, and downloads no browser.
-      - uses: actions/setup-node@v4
-        if: needs.changes.outputs.code != 'false'
-        with:
-          node-version-file: web/.nvmrc
-          cache: npm
-          cache-dependency-path: |
-            web/package-lock.json
-            desktop/package-lock.json
-
-      - name: web check
-        if: needs.changes.outputs.code != 'false'
-        run: make web-check
-
-      # The desktop shell under desktop/ (#940): the fetch script's test, the
-      # repository rules, the dependency and licence gates, then npm ci,
-      # typecheck, lint and unit tests. It downloads no Electron binary and
-      # needs no display; the packaged app is the desktop-smoke job's.
-      # desktop/.nvmrc names the same Node as web/.nvmrc (make desktop-check
-      # fails if the installed Node is not the one it names).
-      - name: desktop check
-        if: needs.changes.outputs.code != 'false'
-        run: make desktop-check
-
-      # The voice supervisor against the real conch-voice (#948): the binary
-      # rust check's cargo test built, a stub conchd on loopback, no audio.
-      - name: desktop voice-helper integration
-        if: needs.changes.outputs.code != 'false'
-        run: CONCH_VOICE_BIN="$PWD/voice/target/debug/conch-voice" make desktop-voice-it
+          bad=$(jq -r --arg docs "$DOCS_ONLY" 'to_entries[] | select(.key != "changes")
+            | select(.value.result != "success" and ($docs != "true" or .value.result != "skipped"))
+            | "\(.key): \(.value.result)"' <<<"$NEEDS")
+          if [ -n "$bad" ]; then echo "not every check passed:"; echo "$bad"; exit 1; fi
+          echo "every check passed (docs only: $DOCS_ONLY)"
 
   desktop-smoke:
     needs: changes
@@ -332,7 +477,7 @@ jobs:
     # --web-dir and checks what an operator who downloaded a release binary
     # gets: /app/ with the security headers and no-store on the index, a
     # hashed asset as immutable, `conchd version` saying so, and --no-web
-    # turning it off. The untagged build is what the check job tests.
+    # turning it off. The untagged build is what the go and go-test jobs test.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -556,7 +701,7 @@ jobs:
     # as not run. It runs on every pull request and every push to main, and
     # release.yml runs it before it builds. Its own tests (reset, interrupts,
     # the HOME sentinel, the walkthrough's commands, the screen the terminal
-    # driver reads) run in the check job's go test.
+    # driver reads) run in the go-test jobs.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -603,18 +748,19 @@ jobs:
     # program is neither on this runner nor ever run. The suite takes 17-19
     # minutes on main with the camera specs (44-46), so the bound is 30, not
     # 20: a bound the passing suite runs into cancels a green run (#1268).
-    # On the self-hosted runners for this repository's own branches, as
-    # check is (#1286, #1288); a fork's pull request runs on ubuntu-latest.
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
+    # On GitHub-hosted runners (#1305): it moved to the self-hosted ones for
+    # speed only (#1288), and there it competed with check and with local
+    # work for one machine's CPU. check stays self-hosted for its build cache.
+    runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Two jobs, each with its own conchd, fixture community and LiveKit, each
-    # running half the specs one at a time (#1290): 250 tests took 19 minutes
-    # in one.
-    name: web-e2e (${{ matrix.shard }}/2)
+    # Three jobs, each with its own conchd, fixture community and LiveKit, each
+    # running a third of the spec files one at a time (#1290, #1305): 250 tests
+    # took 17-19 minutes in one.
+    name: web-e2e (${{ matrix.shard }}/3)
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3]
     env:
       # Labels this shard's LiveKit container, so the clean-up step below
       # removes only its own (web/e2e/voice-world.ts reads it).
@@ -639,17 +785,11 @@ jobs:
       # --with-deps installs the system libraries Chromium needs, with sudo,
       # which the runner has. Locally, `npx playwright install chromium` alone.
       - name: browser
-        if: runner.environment == 'github-hosted'
         working-directory: web
         run: npx playwright install --with-deps chromium
-      # The self-hosted runner has Chromium's system libraries and no sudo.
-      - name: browser (self-hosted)
-        if: runner.environment == 'self-hosted'
-        working-directory: web
-        run: npx playwright install chromium
 
       - name: web-e2e
-        run: make web-e2e E2E_ARGS=--shard=${{ matrix.shard }}/2
+        run: make web-e2e E2E_ARGS=--shard=${{ matrix.shard }}/3
 
       # The spec removes its own container on every path; this is for the case
       # where the runner killed it. Only the container of this run.
@@ -681,24 +821,37 @@ jobs:
     # main, like check. CI=true makes a skip a failure: if Docker, the LiveKit
     # image, lk or the Rust toolchain cannot be had, this job is red rather
     # than quietly green.
-    # On the self-hosted runners for this repository's own branches, as
-    # check is (#1286, #1288); a fork's pull request runs on ubuntu-latest.
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
+    # On GitHub-hosted runners (#1318), or on the self-hosted ones for this
+    # repository's own branches when the variable HEAVY_RUNNER is "local".
+    runs-on: ${{ vars.HEAVY_RUNNER == 'local' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
       CI: "true"
       # Labels this run's LiveKit container, so the clean-up step below can
       # only ever remove its own.
       VOICE_CHECK_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+      # As the rust job builds (#1318), so its cache serves this job.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
+
+      # The voice build cache would fill the hosted runner's disk with the
+      # image's unused tool trees still on it (#1286, #1318).
+      - name: free disk
+        if: runner.environment == 'github-hosted'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker image prune -af >/dev/null 2>&1 || true
+          df -h /
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
-      # The same pinned toolchain and build directory as the check job, read
-      # from its caches and never written from here: check builds everything
+      # The same pinned toolchain and build directory as the rust job, read
+      # from its caches and never written from here: rust builds everything
       # this job needs (cargo test builds the conch-voice binary), so with a
       # warm cache the program's own `cargo build` has nothing left to do.
       - name: rust toolchain cache
@@ -717,9 +870,9 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             voice/target
-          key: voice-build-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
+          key: voice-build-lt-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
           restore-keys: |
-            voice-build-${{ runner.os }}-
+            voice-build-lt-${{ runner.os }}-
 
       - name: rust system packages
         if: runner.environment == 'github-hosted'
@@ -749,9 +902,8 @@ jobs:
     # failure: without Docker, the image or lk this job is red, not quietly
     # green. A run takes well under a minute once the image and lk are
     # fetched; the timeout leaves room for a slow pull.
-    # On the self-hosted runners for this repository's own branches, as
-    # check is (#1286, #1288); a fork's pull request runs on ubuntu-latest.
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
+    # On GitHub-hosted runners (#1318): it builds no Rust and needs no disk.
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       CI: "true"
