@@ -2308,9 +2308,12 @@ label {
   color: var(--accent);
 }
 
+/* A button with its border and fill, as the strip's others have, not the
+   quiet kind that reads as text (N08). */
 .voice-elsewhere button {
   padding-block: 0.2rem;
   font-size: var(--small);
+  border-color: var(--border-strong);
 }
 
 /* Who is in voice: how many, then every chip, wrapping onto more lines

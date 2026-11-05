@@ -765,6 +765,34 @@ test.describe('with LiveKit', () => {
           expect(box?.width ?? 0, `${size}: the room's name is shown`).toBeGreaterThan(40);
         }
         await expectFits(a.page, `${size}: the strip before joining`);
+        // N08: one space between the verb and the room, not a space and a
+        // margin: the gap is the width of a single space character.
+        for (const button of [join, watch]) {
+          const gap = await button.evaluate((el) => {
+            const text = el.querySelector('.btn-text');
+            const dest = el.querySelector('.dest');
+            const first = text?.firstChild;
+            if (text === null || dest === null || first === null || first === undefined || first.textContent === null) return null;
+            const words = first.textContent;
+            const range = document.createRange();
+            range.setStart(first, 0);
+            range.setEnd(first, words.trimEnd().length);
+            const end = range.getBoundingClientRect();
+            range.setStart(first, words.length - 1);
+            range.setEnd(first, words.length);
+            const space = range.getBoundingClientRect().width;
+            const room = dest.getBoundingClientRect();
+            return { text: words, space, gap: room.left - end.right, sameLine: Math.abs(room.top - end.top) < end.height };
+          });
+          expect(gap, `${size}: the button's text and room are measurable`).not.toBeNull();
+          if (gap === null) continue;
+          expect(gap.text.endsWith(' ') && !gap.text.endsWith('  '), `${size}: one space in the text`).toBe(true);
+          // On a phone the room may wrap to a line of its own; wide, it follows the verb.
+          if (!phone) {
+            expect(gap.sameLine, `${size}: the room follows the verb on its line`).toBe(true);
+            expect(gap.gap, `${size}: one space between the verb and the room`).toBeLessThanOrEqual(gap.space + 1);
+          }
+        }
         // F17: the verb and the room read as one run of text, never as two
         // columns side by side: the verb stays on one line, and the verb and
         // the room are one item of the button.
@@ -810,6 +838,21 @@ test.describe('with LiveKit', () => {
         await press(back);
         if (phone) await showView(a.page, 'Channels');
         await expect(channelButton(a.page, vw.channel)).toHaveAttribute('aria-current', 'true');
+        if (phone) {
+          // N08: the open channel's button is wholly on screen, with nothing
+          // drawn over its right edge (the row and its fade are gone, #929).
+          const open = channelButton(a.page, vw.channel);
+          await expect(open).toBeInViewport({ ratio: 1 });
+          const box = await open.boundingBox();
+          const width = a.page.viewportSize()?.width ?? 0;
+          expect(box !== null && box.x >= 0 && box.x + box.width <= width, `${size}: the open channel's button lies inside the screen`).toBe(true);
+          const covered = await open.evaluate((el) => {
+            const r = el.getBoundingClientRect();
+            const top = document.elementFromPoint(r.right - 2, r.top + r.height / 2);
+            return top !== null && !el.contains(top) && top !== el;
+          });
+          expect(covered, `${size}: nothing sits over the open channel's right edge`).toBe(false);
+        }
         if (phone) await showView(a.page, 'Chat');
         await expect(conversation(a.page).getByRole('heading', { name: vw.channel })).toBeVisible();
         // Still the same connection: connected all along, and no new session.
@@ -1022,6 +1065,14 @@ test.describe('with LiveKit', () => {
         await expect(nav(r.page).getByRole('listitem').filter({ has: r.page.getByRole('img', { name: / in voice$/ }) })).toContainText(room);
         await expect(channelButton(r.page, room)).toHaveAccessibleName(room);
         await expect(elsewhere(r.page)).toHaveText(`1 in voice in #${room} Open #${room}`, { timeout: 3000 });
+        // N08: the Open button looks like a button: a visible border and a fill.
+        const look = await elsewhere(r.page).getByRole('button').evaluate((el) => {
+          const c = getComputedStyle(el);
+          return { border: c.borderTopColor, width: c.borderTopWidth, fill: c.backgroundColor };
+        });
+        expect(look.width, 'the Open button has a border').not.toBe('0px');
+        expect(look.border, 'the Open button border is drawn').not.toBe('rgba(0, 0, 0, 0)');
+        expect(look.fill, 'the Open button has a fill').not.toBe('rgba(0, 0, 0, 0)');
         // kim, by name, nested under the channel, from a channel she is not
         // in; nobody under the others.
         await expect(named(r.page).getByRole('listitem')).toHaveText([kim.name], { timeout: 3000 });
