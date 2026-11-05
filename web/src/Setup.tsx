@@ -10,9 +10,10 @@
 // gives lives fifteen minutes, in api.ts's memory alone: a reload drops it,
 // and a new token is made on the host. The authenticator's key is shown once,
 // in this view only, behind Reveal, and never while this tab shares its
-// screen (Reveal.tsx). No QR code is drawn (that would be a new dependency,
-// design §5.3): the key is typed into the app.
-import { useEffect, useId, useLayoutEffect, useRef, useState, type SyntheticEvent } from 'react';
+// screen (Reveal.tsx). Beside the key, a QR code of the enrolment's URI is
+// drawn by the client's own encoder (qr.ts, issue #862), on the same terms;
+// where it cannot be drawn the key is typed into the app.
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { waitWords } from './Invite';
 import { revealLimits, sharingLine, useTabSharing } from './Reveal';
@@ -20,6 +21,8 @@ import type { TOTPEnrollmentV1 } from './schema/auth';
 import { ServerVersion } from './ServerVersion';
 import { NewPassword } from './Settings';
 import { passwordProblem } from './CreateAccount';
+import { encodeQR } from './qr';
+import { QRCode } from './QRCode';
 import { typedCode } from './SignIn';
 import { insecureLine, needsHttps } from './transport';
 
@@ -60,6 +63,13 @@ function refusalLine(result: Refusal): string {
 // it can be read and typed without losing one's place.
 function grouped(secret: string): string {
   return secret.replace(/(.{4})/g, '$1 ').trim();
+}
+
+// qrFor draws the enrolment's URI as the server sent it, or says it cannot:
+// the URI must be a TOTP one and fit version 10 at level M.
+function qrFor(uri: string | undefined) {
+  if (uri === undefined || !uri.startsWith('otpauth://totp/')) return null;
+  return encodeQR(uri);
 }
 
 export function Setup({
@@ -265,6 +275,8 @@ export function Setup({
 
   const key = enrollment.current;
   const shown = revealed && !sharing ? key : null;
+  const shownUri = shown?.uri;
+  const code = useMemo(() => qrFor(shownUri), [shownUri]);
 
   return (
     <main className="signin setup" aria-labelledby={`${id}-heading`}>
@@ -329,6 +341,20 @@ export function Setup({
               {sharingLine}
             </p>
           ) : null}
+          {shown === null ? null : (
+            <div className="totp-qr">
+              {code === null ? (
+                <p className="hint">The QR code isn’t available for this key. Type the key below into the app.</p>
+              ) : (
+                <>
+                  <QRCode code={code} label="QR code for the authenticator app" />
+                  <p className="hint">
+                    {shown.algorithm} · {shown.digits} digits · {shown.period_seconds} s
+                  </p>
+                </>
+              )}
+            </div>
+          )}
           {shown === null ? null : (
             <dl className="totp-key" aria-label="Authenticator key">
               <dt>Key</dt>

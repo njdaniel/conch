@@ -993,6 +993,20 @@ label {
   color: var(--text);
 }
 
+/* The authenticator's QR code: dark on white whatever the theme, with its own
+   quiet zone, so a phone's camera reads it. */
+.totp-qr {
+  margin: var(--s3) 0;
+}
+
+.qr {
+  display: block;
+  width: min(100%, 16rem);
+  height: auto;
+  background: #fff;
+  border-radius: var(--radius-sm);
+}
+
 /* An authenticator's key, at an operator's setup: big enough to type from. */
 .totp-key {
   display: grid;
