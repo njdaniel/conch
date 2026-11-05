@@ -213,38 +213,29 @@ func TestGuestsRemovedNoRouteStartsAVisit(t *testing.T) {
 	assertErrorBody(t, rec, http.StatusForbidden, schema.ErrorCodeJoiningClosed)
 }
 
-// No route makes an entry point that admits guests: an invite admits
-// accounts only, and the settings refuse guests_enabled true and the guest
+// No route makes an entry point that admits guests: the v1 invite route is
+// retired for everyone (issue #1134), and the settings refuse guests_enabled true and the guest
 // modes with 409 join_policy_conflict, writing nothing; the rest still
 // work.
 func TestGuestsRemovedNoGuestEntryPoint(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		joinAs schema.InviteJoinMode
-		status int
-		code   string
 	}{
-		{"join_as guest", schema.InviteJoinGuest, http.StatusConflict, schema.ErrorCodeJoinPolicyConflict},
-		{"join_as both", schema.InviteJoinBoth, http.StatusConflict, schema.ErrorCodeJoinPolicyConflict},
-		{"join_as account", schema.InviteJoinAccount, http.StatusCreated, ""},
-		{"join_as left out", "", http.StatusCreated, ""},
+		{"join_as guest", schema.InviteJoinGuest},
+		{"join_as both", schema.InviteJoinBoth},
+		{"join_as account", schema.InviteJoinAccount},
+		{"join_as left out", ""},
 	} {
 		t.Run("invite "+tt.name, func(t *testing.T) {
 			f := newInviteFixture(t, Config{})
 			rec := f.send(t, "POST", "/v1/invites", f.rootTok,
 				inviteJSON(t, schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"red"}, JoinAs: tt.joinAs}), "")
-			if tt.code != "" {
-				assertErrorBody(t, rec, tt.status, tt.code)
-				if n := len(f.auditOf(t, store.AuditInviteCreated)); n != 0 {
-					t.Errorf("%d invite_created rows after a refusal, want none", n)
-				}
-				return
-			}
-			if rec.Code != tt.status {
-				t.Fatalf("create = %d %s", rec.Code, rec.Body)
-			}
-			if got := decodeBody[schema.CreateInviteResponseV1](t, rec).Invite.JoinAs; got != schema.InviteJoinAccount {
-				t.Errorf("join_as = %q, want account", got)
+			// POST /v1/invites is retired for everyone (issue #1134), so no
+			// invite of any join_as is made through it.
+			assertErrorBody(t, rec, http.StatusConflict, schema.ErrorCodeInviteKindRetired)
+			if n := len(f.auditOf(t, store.AuditInviteCreated)); n != 0 {
+				t.Errorf("%d invite_created rows after a refusal, want none", n)
 			}
 		})
 	}

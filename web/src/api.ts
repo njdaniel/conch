@@ -88,13 +88,10 @@ import {
   type InvitePreviewV2,
 } from './schema/invite';
 import {
-  createInviteResponseV1,
   inviteSettingsV1,
   invitePreviewV1,
   listInvitesResponseV1,
   redeemInviteResponseV1,
-  type CreateInviteRequestV1,
-  type CreateInviteResponseV1,
   type InvitePreviewRequestV1,
   type InvitePreviewV1,
   type InviteSettingsV1,
@@ -1745,16 +1742,6 @@ export async function redeemSignInLink(signInCode: string): Promise<RedeemResult
   const redeemed = await readBody(res, redeemSignInLinkResponseV1);
   if (!redeemed.ok) return redeemed;
   return keepRedeemed(redeemed.value.token, redeemed.value.principal.id, 'lasting');
-}
-
-// createInvite makes an invite. The answer carries its code, shown once to
-// whoever made it and nowhere else.
-export async function createInvite(request: CreateInviteRequestV1): Promise<InviteResult<CreateInviteResponseV1>> {
-  const reply = await authedPost(call('createInvite'), request);
-  if (reply.kind === 'none') return { ok: false, failure: 'network' };
-  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
-  if (!reply.res.ok) return inviteRefused(reply.res);
-  return readBody(reply.res, createInviteResponseV1);
 }
 
 // listInvites reads the invites the caller may see, newest first. For an

@@ -228,8 +228,8 @@ func (s *Server) routeTable() []route {
 		// and use it. They carry the code in the body only, are rate-limited
 		// per client address before any store work, and the store decides
 		// everything else. See invites.go.
-		// POST /v1/invites is unchanged until #990 and #1134 (issue #985). A
-		// member link is made with POST /v2/invites, listed with GET
+		// POST /v1/invites is retired for everyone: 409 invite_kind_retired,
+		// before the body is read (issue #1134). A member link is made with POST /v2/invites, listed with GET
 		// /v2/invites, previewed (exempt, as v1's) with POST /v2/invites/preview
 		// and its joiners read by its maker or an operator with GET
 		// /v2/invites/{id}/joiners. The joiners route has no membersOnly: a
@@ -415,9 +415,9 @@ var recentAuthRoutes = map[string]reauthRule{
 	// Signing out everywhere is anyone's for themself; an operator doing it
 	// to someone else is the bulk revoke of the rule.
 	"POST /v1/principals/{id}/credentials/revoke-all": reauthOnOthers,
-	// An invite makes principals; an operator's has no allowance and may never
-	// expire. A member's links are not in the class.
-	"POST /v1/invites": reauthOperators,
+	// A member link makes principals; an operator's has no allowance and may
+	// never expire. A member's links are not in the class. POST /v1/invites
+	// makes nothing for anyone (issue #1134), so it is not in the class.
 	"POST /v2/invites": reauthOperators,
 	// The permissions document grants rights (ADR-014 design §7.2).
 	"PUT /v1/permissions": reauthAlways,

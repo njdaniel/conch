@@ -206,13 +206,6 @@ func writeGuestsRemoved(w http.ResponseWriter) {
 	writeError(w, http.StatusForbidden, schema.ErrorCodeGuestsDisabled, "guests are turned off on this server for now")
 }
 
-// writeGuestsRemovedConflict answers a request for an entry point that
-// would admit guests (issue #1005): 409 join_policy_conflict, as a settings
-// change the server cannot accept is.
-func writeGuestsRemovedConflict(w http.ResponseWriter, reason string) {
-	writeError(w, http.StatusConflict, schema.ErrorCodeJoinPolicyConflict, reason)
-}
-
 // writeGuestsFull is 429 with no Retry-After: visits end on their own, at no
 // time the server can promise.
 func writeGuestsFull(w http.ResponseWriter) {

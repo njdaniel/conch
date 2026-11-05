@@ -2,7 +2,7 @@
 // wide window and on a phone, against the real server. The row keeps one line
 // and the channel is gone from both the page and the member's own channel list.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
-import { makeInvite } from './api';
+import { makeMemberLink } from './api';
 import { createChannelResponse, listChannelsResponse, type ChannelVisibility, type CreateChannelRequest } from '../src/schema/channel';
 import { channelSettingsResponseV1 } from '../src/schema/generated';
 import { channelButton, expect, expectFits, fillAccount, showView, statusLine, test } from './fixtures';
@@ -31,7 +31,7 @@ for (const [size, options, phone] of sizes) {
     const channel = `p1095-${suffix}${phone ? 'p' : 'w'}`;
     const name = `l${suffix}${phone ? 'p' : 'w'}`;
     await makeChannel(world, channel);
-    const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: [channel], voice: false, may_invite: true });
+    const made = await makeMemberLink(world, world.tokens.operator, { kind: 'member', landing_channels: [channel], max_uses: 1 });
 
     const { page } = await meet(options);
     await page.goto(inviteUrl(world, made.code));
@@ -70,7 +70,7 @@ test('P1095 at 390×844 a private-channel confirmation and last-member refusal f
   const channel = `p1095-${suffix}-private`;
   const name = `l${suffix}p`;
   await makeChannel(world, channel, 'private');
-  const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: [channel], voice: false, may_invite: true });
+  const made = await makeMemberLink(world, world.tokens.operator, { kind: 'member', landing_channels: [channel], max_uses: 1 });
 
   const { page } = await meet({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
   await page.goto(inviteUrl(world, made.code));

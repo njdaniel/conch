@@ -4,7 +4,7 @@
 // `conch admin principal sign-in-link` does. Runs after 12-phone, so the
 // people it adds to general touch no other spec.
 import type { BrowserContextOptions, Page } from '@playwright/test';
-import { makeInvite } from './api';
+import { makeMemberLink } from './api';
 import { accountPassword, channelButton, credentialField, expect, fillAccount, showView, signInWithPassword, statusLine, test } from './fixtures';
 import { createSignInLinkResponseV1, type CreateSignInLinkRequestV1, type CreateSignInLinkResponseV1 } from '../src/schema/signin';
 import { createPrincipalResponse, type CreatePrincipalRequest } from '../src/schema/credential';
@@ -49,7 +49,7 @@ async function expectCodeGone(page: Page, signInCode: string): Promise<void> {
 
 test('B493 a joiner signs out, is warned first, and comes back into the same account through an operator link on another device', async ({ meet, secrets, world }) => {
   // A tester joins by invite.
-  const invite = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
+  const invite = await makeMemberLink(world, world.tokens.operator, { kind: 'member', landing_channels: ['general'], max_uses: 1 });
   const name = unique('back');
   const laptop = await meet(desktop);
   await laptop.page.goto(inviteUrl(world, invite.code));
@@ -112,7 +112,7 @@ test('B493 a joiner signs out, is warned first, and comes back into the same acc
 test('G7a a reset link replaces a forgotten password, ends every sign-in, and the new password signs in', async ({ meet, secrets, world }) => {
   const fresh = 'the new passphrase this member chose after a reset';
   secrets.push(accountPassword, fresh);
-  const invite = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
+  const invite = await makeMemberLink(world, world.tokens.operator, { kind: 'member', landing_channels: ['general'], max_uses: 1 });
   const name = unique('reset');
   const laptop = await meet(desktop);
   await laptop.page.goto(inviteUrl(world, invite.code));

@@ -103,79 +103,14 @@ func (s *Server) inviteCaller(w http.ResponseWriter, r *http.Request) (store.Pri
 	return caller, true
 }
 
-// handleCreateInvite serves POST /v1/invites: the caller makes an invite. The
-// code is in the 201 body and nowhere else, sent no-store.
-//
-// It is unchanged for operators beside POST /v2/invites (issue #985); a member is
-// refused here (409 invite_kind_retired, issue #990), and #1134 retires
-// the route.
-func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	caller, ok := s.inviteCaller(w, r)
-	if !ok {
-		return
-	}
-	// Someone without manage_members makes member links (POST /v2/invites)
-	// and no personal or open invite (issue #990): the browser moved to v2 in
-	// the same change. A holder keeps this route until it is retired (#1134).
-	// The permission is read, never the role (ADR-014).
-	if holds, ok := s.canOrFail(w, r, caller, schema.PermManageMembers); !ok {
-		return
-	} else if !holds {
-		writeError(w, http.StatusConflict, schema.ErrorCodeInviteKindRetired, inviteKindRetiredMessage)
-		return
-	}
-	if limit, ok, retry := s.inviteLimits.takeCreate(caller.ID, s.now()); !ok {
-		s.refuseInviteRateLimited(w, r, limit, retry, caller.ID, clientAddr(r, s.cfg.TrustedProxies))
-		return
-	}
-	var req schema.CreateInviteRequestV1
-	if !decodeInviteBody(w, r, &req) {
-		return
-	}
-	now := s.now()
-	// The schema's messages name the rule broken, never the value sent.
-	if err := req.Validate(now); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	resp, err := s.store.CreateInvite(ctx, auditActor(ctx), caller.ID, req, store.InviteOptions{Allowance: s.cfg.InviteAllowance}, now)
-	switch {
-	case errors.Is(err, store.ErrGuestsRemoved):
-		writeGuestsRemovedConflict(w, "guests are turned off on this server for now: an invite may admit accounts only (join_as account)")
-	case errors.Is(err, store.ErrInviteRequestInvalid):
-		// Validated above; the clock moved past a just-valid expiry.
-		writeError(w, http.StatusBadRequest, "invalid_request", "the invite request is not valid")
-	case errors.Is(err, store.ErrInvitesPaused):
-		writeInvitesPaused(w)
-	case errors.Is(err, store.ErrInviteNotAllowed):
-		// Each also names the permission it lacks, to a caller whose role
-		// could hold it (ADR-014 design §7.4): one code per question.
-		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeInviteNotAllowed, "you may not make this kind of invite",
-			refusedPermission(caller, storeRefusalPermission(err)))
-	case errors.Is(err, store.ErrInviteGrantExceedsInviter):
-		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeInviteGrantExceedsInviter, "an invite may grant only what its maker holds, and only an operator grants the right to invite",
-			refusedPermission(caller, storeRefusalPermission(err)))
-	case errors.Is(err, store.ErrInviteAllowanceExceeded):
-		s.denyForbidden(w, r, caller, schema.ErrorCodeInviteAllowanceExceeded, "you already have as many open personal invites as you may")
-	case errors.Is(err, store.ErrChannelArchived):
-		// The store's archived guard (issue #844), after the maker's standing
-		// in the channel is established.
-		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
-	case errors.Is(err, store.ErrNotFound):
-		// Only an operator gets this far with a channel that does not exist;
-		// anyone else gets invite_grant_exceeds_inviter for it.
-		writeChannelNotFound(w)
-	case errors.Is(err, store.ErrPrincipalNotFound):
-		// The caller was resolved a moment ago; fail closed.
-		writeUnauthenticated(w)
-	case err != nil:
-		slog.ErrorContext(ctx, "invites: create failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-	default:
-		slog.InfoContext(ctx, "invites: created", "principal", caller.ID, "invite", resp.Invite.ID, "kind", resp.Invite.Kind)
-		writeSecretJSON(w, http.StatusCreated, resp)
-	}
+// handleCreateInvite serves POST /v1/invites, which makes nothing for anyone:
+// every caller, an operator included, is answered 409 invite_kind_retired
+// (issue #1134). Member links (POST /v2/invites) replaced personal and open
+// invites. The route answers before it reads the body, looks at the caller's
+// permissions or touches the store, so nothing is written: no invite row, no
+// audit row.
+func (s *Server) handleCreateInvite(w http.ResponseWriter, _ *http.Request) {
+	writeError(w, http.StatusConflict, schema.ErrorCodeInviteKindRetired, inviteKindRetiredMessage)
 }
 
 // handleListInvites serves GET /v1/invites, newest first. A holder of
