@@ -23,6 +23,7 @@ import type { PermissionRowV1 } from '../schema/permission';
 import type { ServerMemberV1, WhoAmIResponseV1 } from '../schema/principal';
 import type { SignInLinkPurpose } from '../schema/signin';
 import { canDo, refusalLine, type Refusal } from './permissions';
+import { AIAdminCard } from './AIAdminCard';
 import { SecretOnce } from './SecretOnce';
 import { timeOf } from '../time';
 
@@ -409,6 +410,7 @@ export function PersonActions({ who, person, origin, rows, readRows, open, onOpe
           ) : null}
         </div>
       )}
+      <AIAdminCard who={who} person={person} onChanged={onChanged} onUnauthorized={onUnauthorized} />
       {secret === null ? null : (
         <div
           className="person-panel"

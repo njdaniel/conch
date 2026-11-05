@@ -15,11 +15,12 @@
 // make_member_links. The section is the same for an operator with no member
 // permission at all: it lists the people the server shows them and offers no
 // action.
-import { useContext } from 'react';
+import { useCallback, useContext, useState } from 'react';
 import { AddPerson, SettingsOpen } from '../joiningSettings';
 import { CommunityMembers } from '../Members';
 import { usePhone } from '../phone';
 import type { WhoAmIResponseV1 } from '../schema/principal';
+import { AddAIAdmin } from './AddAIAdmin';
 import { canDo } from './permissions';
 
 export const membersHint = 'Each person has a ⋯ menu with what you may do. A right-click or a long press on a person opens it too.';
@@ -37,9 +38,11 @@ export interface MembersSectionProps {
 }
 
 export function MembersSection({ who, origin, refresh, directoryTick, channelIds, onUnauthorized }: MembersSectionProps) {
+  const [changed, setChanged] = useState(0);
   const shown = useContext(SettingsOpen);
   const addPerson = useContext(AddPerson);
   const phone = usePhone();
+  const refreshList = useCallback(() => { setChanged((n) => n + 1); }, []);
   const mayAdd = canDo(who, 'make_member_links') && addPerson !== null;
   return (
     <CommunityMembers
@@ -48,7 +51,7 @@ export function MembersSection({ who, origin, refresh, directoryTick, channelIds
       origin={origin}
       channelIds={channelIds}
       permissionsTick={refresh}
-      directoryTick={directoryTick}
+      directoryTick={directoryTick + changed}
       title="Members"
       level={4}
       showTitle={!phone}
@@ -62,6 +65,12 @@ export function MembersSection({ who, origin, refresh, directoryTick, channelIds
               Add a person
             </button>
           ) : null}
+          <AddAIAdmin
+            who={who}
+            origin={origin}
+            onChanged={refreshList}
+            onUnauthorized={onUnauthorized}
+          />
         </>
       }
     />
