@@ -19,8 +19,9 @@
 # seconds without data and is retried, and since a download that trickles
 # never trips that, each download attempt is also cut off after
 # APT_DOWNLOAD_SECONDS (default 180; the usual 41 MB takes a few seconds) and
-# retried, resuming what it already has, up to three times, the retries from
-# the primary archive rather than the runner's mirror.
+# retried, resuming what it already has: the second attempt from the primary
+# archive, the third with no bound, so a slow mirror slows the job and never
+# fails it.
 set -euo pipefail
 
 packages=(libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config)
@@ -49,22 +50,22 @@ echo "ci-voice-apt: $(find "$archives" -maxdepth 1 -name '*.deb' | wc -l) cached
 
 sudo apt-get "${apt_opts[@]}" update
 
-attempt=1
-until sudo timeout "$download_seconds" apt-get "${apt_opts[@]}" install -y --no-install-recommends --download-only "${packages[@]}"; do
-    if [ "$attempt" -ge 3 ]; then
-        echo "ci-voice-apt: FAIL: the packages did not download in 3 attempts of ${download_seconds}s" >&2
-        exit 1
+# Two bounded attempts, the second from the primary archive; then the last
+# runs to the end, however slowly. Failing on a slow mirror is worse than
+# being slow: on 2026-11-05 main's first, cold run failed this way (#1352),
+# since a cache saved on a PR branch is not one main can read.
+download() { sudo apt-get "${apt_opts[@]}" install -y --no-install-recommends --download-only "${packages[@]}"; }
+if ! sudo timeout "$download_seconds" apt-get "${apt_opts[@]}" install -y --no-install-recommends --download-only "${packages[@]}"; then
+    # The runner's Azure mirror is the one seen trickling (#1352).
+    echo "ci-voice-apt: switching from the runner's mirror to archive.ubuntu.com" >&2
+    sudo find /etc/apt -name '*.list' -o -name '*.sources' | xargs -r sudo sed -i 's#http://azure\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g'
+    sudo apt-get "${apt_opts[@]}" update
+    echo "ci-voice-apt: download attempt 2 of 3" >&2
+    if ! sudo timeout "$download_seconds" apt-get "${apt_opts[@]}" install -y --no-install-recommends --download-only "${packages[@]}"; then
+        echo "ci-voice-apt: download attempt 3 of 3, unbounded (resuming what it has)" >&2
+        download
     fi
-    attempt=$((attempt + 1))
-    # The runner's Azure mirror is the one that trickles (#1352, twice on
-    # 2026-11-05): a retry goes to the primary archive instead.
-    if [ "$attempt" -eq 2 ]; then
-        echo "ci-voice-apt: switching from the runner's mirror to archive.ubuntu.com" >&2
-        sudo find /etc/apt -name '*.list' -o -name '*.sources' | xargs -r sudo sed -i 's#http://azure\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g'
-        sudo apt-get "${apt_opts[@]}" update
-    fi
-    echo "ci-voice-apt: download attempt $attempt of 3" >&2
-done
+fi
 
 sudo apt-get "${apt_opts[@]}" install -y --no-install-recommends --no-download "${packages[@]}"
 
