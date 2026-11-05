@@ -6,9 +6,11 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -110,18 +112,27 @@ func TestReservedPayloadIsRefusedOnEveryPostRoute(t *testing.T) {
 }
 
 // Structural guard: the refusal lives in the store's two message inserts, so a
-// post route added later cannot forget it. Every function in the store that
-// runs "INSERT INTO messages (" must call schema.ReservedMessagePayload.
+// post route added later cannot forget it. Every function in the server's Go
+// (store included) whose body inserts into messages, however the SQL is
+// spelled, must call schema.ReservedMessagePayload; and no message insert
+// may live outside a function (security review of #1351).
+var messageInsertSQL = regexp.MustCompile(`(?i)insert\s+(or\s+\w+\s+)?into\s+"?messages"?\s*\(`)
+
 func TestEveryMessageInsertChecksReservedPayloads(t *testing.T) {
-	files, err := filepath.Glob("store/*.go")
-	if err != nil || len(files) == 0 {
-		t.Fatalf("no store files: %v", err)
+	var files []string
+	if err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			files = append(files, path)
+		}
+		return nil
+	}); err != nil || len(files) == 0 {
+		t.Fatalf("no server files: %v", err)
 	}
 	found := 0
 	for _, file := range files {
-		if strings.HasSuffix(file, "_test.go") {
-			continue
-		}
 		src, err := os.ReadFile(file) // #nosec G304 -- a glob of this package's own store directory
 		if err != nil {
 			t.Fatal(err)
@@ -131,19 +142,25 @@ func TestEveryMessageInsertChecksReservedPayloads(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		inFuncs := 0
 		for _, decl := range parsed.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
 				continue
 			}
 			body := string(src[fset.Position(fn.Body.Pos()).Offset:fset.Position(fn.Body.End()).Offset])
-			if !strings.Contains(body, "INSERT INTO messages (") {
+			n := len(messageInsertSQL.FindAllStringIndex(body, -1))
+			if n == 0 {
 				continue
 			}
+			inFuncs += n
 			found++
-			if !strings.Contains(body, "schema.ReservedMessagePayload(") {
-				t.Errorf("%s: %s inserts a message without schema.ReservedMessagePayload", file, fn.Name.Name)
+			if !strings.Contains(body, "schema.ReservedMessagePayload(") || !strings.Contains(body, "ErrReservedPayload") {
+				t.Errorf("%s: %s inserts a message without refusing a reserved payload", file, fn.Name.Name)
 			}
+		}
+		if all := len(messageInsertSQL.FindAllIndex(src, -1)); all != inFuncs {
+			t.Errorf("%s: %d message insert(s) outside a function body (a const or var), which this guard cannot check", file, all-inFuncs)
 		}
 	}
 	if found != 2 {
