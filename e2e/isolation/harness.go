@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -285,6 +286,42 @@ type conchdProc struct {
 	// runs beside it (conchd operator setup and recover, issue #709).
 	dataDir string
 	env     []string
+	// ntfy records the approval notifications conchd sends, so a row can
+	// assert the request → notify → resolve chain (issue #860).
+	ntfy *ntfyRecorder
+}
+
+// ntfyRecorder is an ntfy server on loopback that keeps the title of every
+// notification published to it.
+type ntfyRecorder struct {
+	srv    *httptest.Server
+	mu     sync.Mutex
+	titles []string
+}
+
+func newNtfyRecorder() *ntfyRecorder {
+	n := &ntfyRecorder{}
+	n.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		n.mu.Lock()
+		n.titles = append(n.titles, r.Header.Get("Title"))
+		n.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	return n
+}
+
+// mentioning is how many notifications so far have a title containing s.
+func (n *ntfyRecorder) mentioning(s string) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	c := 0
+	for _, t := range n.titles {
+		if strings.Contains(t, s) {
+			c++
+		}
+	}
+	return c
 }
 
 // trustedProxy is the proxy conchd is told to believe: loopback, where this
@@ -333,7 +370,10 @@ func (h *harness) startConchd(srv *lkit.Server) (*conchdProc, error) {
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"serve", "--data", dataDir, "--listen", addr, "--trusted-proxies", trustedProxy}
+	ntfy := newNtfyRecorder()
+	h.onCleanup(ntfy.srv.Close)
+	args := []string{"serve", "--data", dataDir, "--listen", addr, "--trusted-proxies", trustedProxy,
+		"--ntfy-server", ntfy.srv.URL, "--ntfy-topic", "isolation-approvals", "--ntfy-urgent-topic", "isolation-urgent"}
 	if srv != nil {
 		args = append(args, "--livekit-url", srv.WSURL)
 		env = append(env, "CONCHD_LIVEKIT_API_KEY="+srv.Key, "CONCHD_LIVEKIT_API_SECRET="+srv.Secret)
@@ -350,7 +390,7 @@ func (h *harness) startConchd(srv *lkit.Server) (*conchdProc, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	p := &conchdProc{cmd: cmd, baseURL: "http://" + addr, done: make(chan struct{}), dataDir: dataDir, env: env}
+	p := &conchdProc{cmd: cmd, baseURL: "http://" + addr, done: make(chan struct{}), dataDir: dataDir, env: env, ntfy: ntfy}
 	p.op = api{h: h, base: p.baseURL, token: opToken, who: "the operator"}
 	go func() { _ = cmd.Wait(); _ = logFile.Close(); close(p.done) }()
 	h.onCleanup(func() {
