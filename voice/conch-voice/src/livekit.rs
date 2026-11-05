@@ -25,7 +25,7 @@
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use conch_voice_api::Secret;
+use conch_voice_api::{Secret, VoiceSessionResponseV1};
 use conch_voice_audio::{FRAME_LEN, Frame, GatedFrame, SAMPLE_RATE, SILENCE};
 use futures_util::StreamExt;
 use livekit::DisconnectReason as LkReason;
@@ -85,6 +85,17 @@ impl Companion {
     }
 }
 
+/// Who plays other participants' share audio in a session that has a companion: a static
+/// fact of whoever launched the helper, given as `--share-audio-owner` (issue #934).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShareAudioOwner {
+    /// This helper plays it (B1). The default, and what the TUI is.
+    #[default]
+    Helper,
+    /// The companion plays it (B2): this helper subscribes to nothing but voice.
+    Companion,
+}
+
 /// Which of the remote tracks in a room this helper subscribes to: one playback owner per
 /// audio source. With no companion every remote audio track is played, as it always was.
 /// With one, its own tracks never are (that sound is the person's own application), and,
@@ -99,6 +110,19 @@ impl Subscription {
     #[must_use]
     pub fn new(companion: Option<Companion>) -> Self {
         Self { companion }
+    }
+
+    /// The rule for a session `conchd` answered with: the companion it names, if any, and
+    /// whoever the launcher said plays share audio. A session that names none keeps every
+    /// remote audio track, whatever `owner` is: a companion that never connects is
+    /// excluded by nothing, and there is nothing to share playback with.
+    #[must_use]
+    pub fn for_session(session: &VoiceSessionResponseV1, owner: ShareAudioOwner) -> Self {
+        Self::new(
+            session
+                .companion_identity()
+                .map(|identity| Companion::new(identity, owner == ShareAudioOwner::Companion)),
+        )
     }
 
     /// Whether the helper subscribes to a track of `identity` of this kind and source.
@@ -207,29 +231,14 @@ fn current_publications(room: &Room) -> Vec<SdkOffer> {
 #[derive(Debug)]
 pub struct LiveKit {
     scrubber: Arc<Scrubber>,
-    subscription: Subscription,
 }
 
 impl LiveKit {
-    /// A transport whose errors are scrubbed with `scrubber`, for a session with no
-    /// companion.
+    /// A transport whose errors are scrubbed with `scrubber`. Which tracks it subscribes
+    /// to is given with each `connect`, from the session that connection is for.
     #[must_use]
     pub fn new(scrubber: Arc<Scrubber>) -> Self {
-        Self {
-            scrubber,
-            subscription: Subscription::default(),
-        }
-    }
-
-    /// The same transport for a session whose subscriptions follow `subscription`.
-    ///
-    /// Nothing calls this yet, so every session plays every remote audio track, as before.
-    /// No companion exists until #897 defines its identity, and how the owner tells the
-    /// helper about it (a launch option) is part of that work, not of the rule itself.
-    #[must_use]
-    pub fn with_subscription(mut self, subscription: Subscription) -> Self {
-        self.subscription = subscription;
-        self
+        Self { scrubber }
     }
 }
 
@@ -279,7 +288,12 @@ type Publication = Arc<Mutex<Option<LocalTrackPublication>>>;
 impl Transport for LiveKit {
     type Room = LiveKitRoom;
 
-    async fn connect(&self, url: &str, token: &Secret) -> Result<Joined<LiveKitRoom>, SdkError> {
+    async fn connect(
+        &self,
+        url: &str,
+        token: &Secret,
+        subscription: &Subscription,
+    ) -> Result<Joined<LiveKitRoom>, SdkError> {
         let mut options = RoomOptions::default();
         // Nothing is subscribed to unless `Subscription` wants it (`offer`).
         options.auto_subscribe = false;
@@ -295,7 +309,7 @@ impl Transport for LiveKit {
             events,
             forward,
             Arc::clone(&publication),
-            self.subscription.clone(),
+            subscription.clone(),
         ));
         let room = LiveKitRoom {
             room,

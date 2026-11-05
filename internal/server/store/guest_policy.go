@@ -975,7 +975,7 @@ func (s *Store) JoinAsAccount(ctx context.Context, name, record string, now time
 		}
 		lifetime := schema.DefaultInviteCredentialLifetimeSeconds * time.Second
 		exp := now.Add(lifetime)
-		cred, err := insertCredentialTx(ctx, tx, pid, AccountCredentialLabel, token, now, &exp, lifetime)
+		cred, err := insertCredentialTx(ctx, tx, pid, AccountCredentialLabel, token, now, &exp, lifetime, issuerOf(actor))
 		if err != nil {
 			return err
 		}

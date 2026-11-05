@@ -149,7 +149,7 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 			return fmt.Errorf("store: bootstrap: count manifests: %w", err)
 		}
 		if !opts.Setup {
-			if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil, 0); err != nil {
+			if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil, 0, 0); err != nil {
 				return err
 			}
 		}
@@ -474,6 +474,20 @@ func setRoleTx(ctx context.Context, tx execer, actor string, actorID, targetID i
 	out, err := populateRoleChangeResultTx(ctx, tx, targetID, invitesClosed, credsRevoked, hooksRevoked, true, now)
 	if err != nil {
 		return RoleChangeResult{}, err
+	}
+	if target.Role == RoleOperator && role == RoleMember {
+		// A demotion ends none of what the operator issued to others
+		// (ADR-014 O13, issue #1024): the answer lists it, read in this
+		// transaction after the role write (the target is a member now, so
+		// its mark is clear and its issues are listed), for the owner to
+		// revoke. Omitted when there is nothing.
+		issued, err := issuedToOthersTx(ctx, tx, targetID, now)
+		if err != nil {
+			return RoleChangeResult{}, err
+		}
+		if len(issued) > 0 {
+			out.IssuedToOthers = issued
+		}
 	}
 	managesIDs := make([]string, len(out.Manages))
 	for i, id := range out.Manages {

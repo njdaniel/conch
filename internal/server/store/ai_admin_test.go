@@ -360,9 +360,9 @@ func TestAgentDecisionNeverCounts(t *testing.T) {
 	}
 }
 
-// TestMigration42LeavesEveryAgentUngranted: existing manifests read with
+// TestMigration43LeavesEveryAgentUngranted: existing manifests read with
 // no grant after the migration, so nothing changes on upgrade.
-func TestMigration42LeavesEveryAgentUngranted(t *testing.T) {
+func TestMigration43LeavesEveryAgentUngranted(t *testing.T) {
 	ctx := WithAdminDispatch(context.Background())
 	f := newAIAdminFixture(t)
 	f.put(t, "system")

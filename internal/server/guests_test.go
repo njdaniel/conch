@@ -261,7 +261,7 @@ func TestGuestEndClosesItsSockets(t *testing.T) {
 			}
 		}, guestSocketBound},
 		{"operator disables", time.Hour, func(t *testing.T, f *presenceFixture, g store.CreatedGuest) {
-			if rec := f.do(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", g.Principal.ID), f.rootTok, ""); rec.Code != http.StatusNoContent {
+			if rec := f.do(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", g.Principal.ID), f.rootTok, ""); rec.Code != http.StatusOK {
 				t.Fatalf("disable = %d %s", rec.Code, rec.Body)
 			}
 		}, guestSocketBound},

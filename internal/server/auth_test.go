@@ -476,6 +476,9 @@ var routeExpectations = map[string]routeExpectation{
 	// Changing a role or the owner mark (issue #790): an empty body is a 400
 	// before the target is looked up.
 	"PUT /v1/principals/{id}/role": {classOwner, "/v1/principals/1/role", `{}`, 400},
+	// Revoking everything a principal issued to others (issue #1024): an
+	// unknown principal is a 404 for the owner.
+	"POST /v1/principals/{id}/issued/revoke-all": {classOwner, "/v1/principals/9999/issued/revoke-all", "", 404},
 }
 
 // isDeviceLinkRoute reports whether pattern is one of a member's own device

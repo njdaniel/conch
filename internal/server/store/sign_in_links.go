@@ -459,7 +459,9 @@ func (s *Store) RedeemSignInLink(ctx context.Context, codeHash string, now time.
 				label = fmt.Sprintf("device link %d", id)
 			}
 		}
-		cred, err := insertCredentialTx(ctx, tx, p.ID, label, token, now, &exp, lifetime)
+		// Issued by the link, not by a principal: issued_by stays NULL, as
+		// the credential_created row's actor is the link (issue #1024).
+		cred, err := insertCredentialTx(ctx, tx, p.ID, label, token, now, &exp, lifetime, 0)
 		if err != nil {
 			return err
 		}

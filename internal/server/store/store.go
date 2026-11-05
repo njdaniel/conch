@@ -983,7 +983,20 @@ BEGIN SELECT RAISE(ABORT, 'a default channel must be public'); END`,
 	{
 		`ALTER TABLE channels ADD COLUMN archived_at INTEGER`,
 	},
-	// 42 (aiAdminMigration): AI administrators (issue #1326, slice S2 #1329,
+	// 42 (issuedByMigration): who issued each credential and hook (issue
+	// #1024, ADR-014 O13, docs/design/admin-roles.md §7.5, §12 A12). The
+	// principal that issued the row, NULL when no principal did or none is
+	// on record. The Go step (backfillIssuedBy) fills it from the audit
+	// trail: the latest credential_created, credential_rotated or
+	// hook_created row naming the id whose actor is a principal; a row
+	// from before those events carried their actor (e48b6e3, 2026-10-08)
+	// stays NULL. The live paths (insertCredentialTx, CreateHookWithLabel)
+	// write it from then on.
+	{
+		`ALTER TABLE credentials ADD COLUMN issued_by INTEGER REFERENCES principals (id)`,
+		`ALTER TABLE hooks ADD COLUMN issued_by INTEGER REFERENCES principals (id)`,
+	},
+	// 43: AI administrators (issue #1326, slice S2 #1329,
 	// docs/design/ai-administrators.md §7). An agent's manifest may carry a
 	// grant from the agent-grantable subset of the operator permissions
 	// (permissions, a JSON list, '[]' for none) and how its gated actions are
@@ -1027,6 +1040,9 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 
 	// One community: the preflight and steps 3 to 11 (issue #979).
 	communityMigration: migrateToCommunity,
+
+	// Who issued each credential and hook, from the audit trail (issue #1024).
+	issuedByMigration: backfillIssuedBy,
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.

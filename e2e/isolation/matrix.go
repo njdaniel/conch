@@ -672,6 +672,12 @@ func coreMatrixRows() []row {
 			probe: func(_ *world, s subject) probe {
 				return post("/v1/principals/"+id(s.id)+"/credentials/revoke-all", nil)
 			}},
+		// The owner's revoke-all of what someone issued to others (issue
+		// #1024, ADR-014 O13) is an owner route: a member is refused as on
+		// any other.
+		operator("POST /v1/principals/{id}/issued/revoke-all", "revokes what an A member issued to others", aMember, func(_ *world, s subject) probe {
+			return post("/v1/principals/"+id(s.id)+"/issued/revoke-all", nil)
+		}),
 		operator("GET /v1/audit", "reads the audit log", nil, func(*world, subject) probe { return get("/v1/audit") }),
 		// The permissions document (issue #1015): a member neither reads the
 		// matrix nor changes it (ADR-014 O10); the restricted operator's

@@ -2,9 +2,14 @@ module github.com/njdaniel/conch
 
 go 1.25.0
 
-// web/ is the browser client (Node). The go command must not treat Go files
-// that npm packages ship in web/node_modules as packages of this module.
-ignore ./web
+// web/ is the browser client and desktop/ the Electron shell (both Node).
+// The go command must not treat Go files that npm packages ship in their
+// node_modules (flatted does, issue #954) as packages of this module.
+// scripts/go-scope.sh, in make check, holds this.
+ignore (
+	./desktop
+	./web
+)
 
 require (
 	github.com/coder/websocket v1.8.15

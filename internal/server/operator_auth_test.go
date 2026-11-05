@@ -551,6 +551,7 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/principals/hide":                                        {reauthAlways, "removes people in bulk"},
 	"GET /v1/principals":                                              {reauthNone, "a list"},
 	"POST /v1/principals/{id}/credentials/revoke-all":                 {reauthOnOthers, "bulk revoke of someone else; signing oneself out is not"},
+	"POST /v1/principals/{id}/issued/revoke-all":                      {reauthAlways, "bulk revoke of what someone issued to others, always other people's (issue #1024)"},
 	"GET /v1/audit":                                                   {reauthNonOwners, "audit export: names every member and private channel; an owner read it without a proof before ADR-014 and still does (#1015)"},
 	"GET /v1/permissions":                                             {reauthNone, "a read of the permissions document"},
 	"PUT /v1/permissions":                                             {reauthAlways, "grants rights (ADR-014 §7.2)"},

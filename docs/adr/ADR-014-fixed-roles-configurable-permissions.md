@@ -118,7 +118,7 @@ The security review of the first draft found two things on main that any restric
    - `can(principal, permission)` in handlers, and `permittedTx` inside every gated write, re-checked under the write lock.
    - This covers the store's own standing decisions:
      - the channel-manager standing functions;
-     - link creation and redemption (channels beyond the maker's own need `manage_channels`; open links and `may_invite` grants need `manage_members`);
+     - link creation and redemption (channels beyond the maker's own need `manage_channels`; open links need `manage_members`; no link carries a `may_invite` grant, since every member is made with it on, #986);
      - `open_channels`, judged on the state each write leaves, and re-checked at every address join against each channel's `added_by`, which must be an owner or hold `manage_channels`;
      - sign-in links (`act_as_members`, re-checked at redemption);
      - closing another's invite;
@@ -155,6 +155,12 @@ The security review of the first draft found two things on main that any restric
    - Channels.
 
    Each control maps onto a REST route, and `conch admin permissions show|set|preset` gives the CLI the same reach. It works in the phone layout.
+
+> **Amended 2026-11-05 (#1326).**
+> - **Decision 1,** "Agents … hold no role and no permission; their rights stay their manifest's capabilities and channel grants": agents still hold no role. An agent's manifest may now also list permissions from the agent-grantable subset of the catalog (`Permission.AgentGrantable()`), and the agent then holds exactly those, with no cell, brake, column or dependency applied. Everything else an agent may do stays its capabilities and channel grants (ADR-000 D10).
+> - **Decision 6,** the helper: `permittedTx`'s first rule becomes "an agent holds exactly its manifest's agent-grantable permissions; a guest, or a disabled or hidden principal, holds nothing". The store's standing functions ask the permission before refusing a non-human actor, so a granted agent has operator standing for `manage_channels` where it holds it and no standing where it does not. Every change to these is approval-path, as the consequences already say.
+> - **Decision 7,** "No MCP tool is added: administration is a human act, and parity holds through REST": three MCP tools are added (`describe_admin_actions`, `submit_admin_action`, `run_approved_action`) fronting three REST routes, and administration by an agent is a human act *at the gate*: the server raises an approval for every gated action and a human decides it.
+> - The security surface listed in the consequences gains: the manifest's permission grant (owner-only), the dispatcher, the three routes, the agent-admitting branch of `accessPermission` and of the human-only wrappers on catalog routes, the one-shot run, and the approval-channel protection. Every implementing PR gets a `security-reviewer` pass; the dispatcher, the run and the standing-function change are `approval-path`, merged by Nick.
 
 ## Consequences
 

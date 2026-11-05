@@ -44,6 +44,7 @@ use dmn_audio::{
     Playback, PlaybackStatus, PlaybackWriter, SinkTarget,
 };
 
+use crate::devices::DeviceTable;
 use crate::error::Error;
 use crate::receive::Speakers;
 
@@ -100,6 +101,17 @@ impl PipeWire {
     #[must_use]
     pub fn nodes(&self, wait: Duration) -> NodeTable {
         self.context.wait_for_sync(wait)
+    }
+
+    /// [`PipeWire::nodes`] as the backend-neutral table that `devices` formats. Always
+    /// answers on Linux; the signature is the same on a platform with no backend, where it
+    /// is an error.
+    ///
+    /// # Errors
+    ///
+    /// None here.
+    pub fn list_devices(&self, wait: Duration) -> Result<DeviceTable, Error> {
+        Ok(DeviceTable::from(self.nodes(wait)))
     }
 
     /// Opens the microphone: `configured` is a `node.name` as `devices` lists it, or `None`

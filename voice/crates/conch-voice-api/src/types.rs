@@ -580,12 +580,18 @@ pub struct VoiceSessionResponseV1 {
     pub identity: String,
     /// One grant per room the caller may join; never empty.
     pub rooms: Vec<VoiceRoomGrant>,
+    /// The identity `conchd` would issue the caller's companion under, present when the
+    /// server names one (issue #897). Absent, as from an older server, and empty both mean
+    /// no companion; read it with [`VoiceSessionResponseV1::companion_identity`].
+    #[cfg_attr(test, serde(skip_serializing_if = "String::is_empty"))]
+    companion_identity: String,
 }
 
 wire_object!(VoiceSessionResponseV1, "a voice session object", unknown = ignored, {
     livekit_url: required,
     identity: required,
     rooms: required,
+    companion_identity: optional,
 });
 
 impl VoiceSessionResponseV1 {
@@ -606,6 +612,9 @@ impl VoiceSessionResponseV1 {
         if self.rooms.is_empty() {
             return Err("voice session rooms must list at least one grant".into());
         }
+        if self.companion_identity == self.identity {
+            return Err("voice session companion_identity must differ from identity".into());
+        }
         let mut seen = std::collections::BTreeSet::new();
         for grant in &self.rooms {
             grant.check()?;
@@ -614,6 +623,12 @@ impl VoiceSessionResponseV1 {
             }
         }
         Ok(())
+    }
+
+    /// The identity of the caller's companion, if the server named one. An empty value is
+    /// the same as none. A valid session never names the caller's own identity.
+    pub fn companion_identity(&self) -> Option<&str> {
+        Some(self.companion_identity.as_str()).filter(|identity| !identity.is_empty())
     }
 
     /// The grant for the channel-wide room: the one with no audience. A valid session has
@@ -1083,6 +1098,7 @@ mod tests {
         vec![
             ("voice-session-response-v1.json", session),
             ("voice-session-response-v1-net.json", session),
+            ("voice-session-response-v1-companion.json", session),
             ("voice-presence-v1.json", presence),
             ("voice-presence-v1-not-configured.json", presence),
             ("voice-presence-v1-unavailable.json", presence),
@@ -1196,13 +1212,6 @@ mod tests {
         (
             "voice-companion-response-v1-viewer.json",
             "the companion route is the desktop renderer's",
-        ),
-        // The session answer that names the companion identity. This client ignores the
-        // field until it learns to leave its own companion's tracks unplayed (issue #934),
-        // and that issue claims the fixture with the type.
-        (
-            "voice-session-response-v1-companion.json",
-            "companion_identity is read from #934 on",
         ),
     ];
 
@@ -1402,6 +1411,7 @@ mod tests {
             livekit_url: "wss://voice.example".into(),
             identity: "p7".into(),
             rooms,
+            companion_identity: String::new(),
         }
     }
 
@@ -1409,6 +1419,39 @@ mod tests {
         match result {
             Err(Error::Invalid { problem, .. }) => problem,
             other => panic!("expected Error::Invalid, got {other:?}"),
+        }
+    }
+
+    /// Issue #934: the session answer's `companion_identity` is optional, an empty one is
+    /// none, and one equal to the caller's own identity is an invalid session.
+    #[test]
+    fn a_sessions_companion_identity_is_optional_and_never_the_callers_own() {
+        let base = fixture("voice-session-response-v1-companion.json");
+        let table = [
+            ("named", Some("p7.screen"), Some("p7.screen"), None),
+            ("absent", None, None, None),
+            ("empty is absent", Some(""), None, None),
+            (
+                "equal to the callers own identity",
+                Some("p7"),
+                Some("p7"),
+                Some("companion_identity must differ"),
+            ),
+        ];
+        for (name, field, want, refused) in table {
+            let mut doc = base.clone();
+            match field {
+                Some(value) => doc["companion_identity"] = value.into(),
+                None => {
+                    doc.as_object_mut().unwrap().remove("companion_identity");
+                }
+            }
+            let session: VoiceSessionResponseV1 = serde_json::from_value(doc).unwrap();
+            assert_eq!(session.companion_identity(), want, "{name}");
+            match refused {
+                None => session.validate().unwrap_or_else(|e| panic!("{name}: {e}")),
+                Some(text) => assert!(problem(session.validate()).contains(text), "{name}"),
+            }
         }
     }
 

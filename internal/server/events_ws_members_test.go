@@ -129,7 +129,7 @@ func TestEventsMemberListFollowsChanges(t *testing.T) {
 			// the removal after it, and it still lists mute.
 			name: "a member is disabled, then another removed",
 			act: func() {
-				do("POST", fmt.Sprintf("/v1/principals/%d/disable", f.mute.ID), "", http.StatusNoContent)
+				do("POST", fmt.Sprintf("/v1/principals/%d/disable", f.mute.ID), "", http.StatusOK)
 				do("DELETE", fmt.Sprintf("/v1/channels/general/members/%d", f.shy.ID), "", http.StatusNoContent)
 			},
 			match: membersLack(f.shy.ID),

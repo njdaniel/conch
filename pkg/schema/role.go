@@ -54,6 +54,14 @@ type RoleChangeResponseV1 struct {
 	// non-revoked hooks remain bound to this principal after the change.
 	LiveCredentials int `json:"live_credentials"`
 	HooksBound      int `json:"hooks_bound"`
+	// IssuedToOthers is filled when the change demoted an operator to
+	// member and it had issued live credentials or hooks to principals other
+	// than itself (issue #1024, ADR-014 O13): those stay live, since they
+	// belong to their targets, and the owner may revoke them, one by one or
+	// all at once through POST /v1/principals/{id}/issued/revoke-all.
+	// Omitted on a promotion, on an owner-mark change, on a no-op and when
+	// there are none.
+	IssuedToOthers []IssuedByOperatorV1 `json:"issued_to_others,omitempty"`
 }
 
 // MarshalJSON writes Manages as [] when nil so the wire form is always an

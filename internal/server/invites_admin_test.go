@@ -230,7 +230,7 @@ func TestInviteJoinersRoute(t *testing.T) {
 	wren, _ := f.joinThrough(t, link.Code, "wren")
 	piper, _ := f.joinThrough(t, link.Code, "piper")
 	f.joinThrough(t, other.Code, "elsewhere")
-	if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", piper.ID), f.rootTok, "", ""); rec.Code != http.StatusNoContent {
+	if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", piper.ID), f.rootTok, "", ""); rec.Code != http.StatusOK {
 		t.Fatalf("disable = %d", rec.Code)
 	}
 
@@ -313,7 +313,7 @@ func newDisableJoinersFixture(t *testing.T) *disableJoinersFixture {
 	f.piper, f.piperTok = f.joinThrough(t, f.link.Code, "piper")
 	f.gone, _ = f.joinThrough(t, f.link.Code, "gone")
 	f.boss, _ = f.joinThrough(t, f.link.Code, "boss")
-	if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.gone.ID), f.rootTok, "", ""); rec.Code != http.StatusNoContent {
+	if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.gone.ID), f.rootTok, "", ""); rec.Code != http.StatusOK {
 		t.Fatalf("disable = %d", rec.Code)
 	}
 	f.bossTok = f.asOperator(t, f.boss.ID)
@@ -595,7 +595,7 @@ func TestDisableInviteesRefusals(t *testing.T) {
 		t.Error("a refused request changed something")
 	}
 	// Plain disable never follows the tree.
-	if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.ada.ID), f.rootTok, "", ""); rec.Code != http.StatusNoContent {
+	if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.ada.ID), f.rootTok, "", ""); rec.Code != http.StatusOK {
 		t.Fatalf("disable = %d", rec.Code)
 	}
 	for _, tok := range []string{f.benTok, f.cyTok, f.dotTok} {
@@ -688,7 +688,7 @@ func TestDisableClosesTheirInvites(t *testing.T) {
 	pers := f.createInvite(t, deputyTok, personal("red"))
 	rootsLink := f.createInvite(t, f.rootTok, openLink("red"))
 
-	if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", other.ID), f.rootTok, "", ""); rec.Code != http.StatusNoContent {
+	if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", other.ID), f.rootTok, "", ""); rec.Code != http.StatusOK {
 		t.Fatalf("disable = %d %s", rec.Code, rec.Body)
 	}
 	if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/enable", other.ID), f.rootTok, "", ""); rec.Code != http.StatusNoContent {

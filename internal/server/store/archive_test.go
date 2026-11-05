@@ -62,11 +62,15 @@ func TestMigration41ArchivedAt(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, stmt := range []string{
-		// Migration 42 (issue #1326) first, then 41's column.
+		// Migration 43 (issue #1326) first, then 42's columns, then 41's.
 		"DROP TABLE admin_actions",
 		"ALTER TABLE agent_manifests DROP COLUMN admin",
 		"ALTER TABLE agent_manifests DROP COLUMN permissions",
-		"ALTER TABLE channels DROP COLUMN archived_at", fmt.Sprintf("PRAGMA user_version = %d", archiveMigration-1)} {
+		"ALTER TABLE credentials DROP COLUMN issued_by", // migration 42 (issue #1024)
+		"ALTER TABLE hooks DROP COLUMN issued_by",       // migration 42 (issue #1024)
+		"ALTER TABLE channels DROP COLUMN archived_at",
+		fmt.Sprintf("PRAGMA user_version = %d", archiveMigration-1),
+	} {
 		if _, err := rewind.Exec(stmt); err != nil {
 			t.Fatalf("rewind %q: %v", stmt, err)
 		}

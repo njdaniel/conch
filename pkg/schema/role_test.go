@@ -16,6 +16,9 @@ func TestRoleGoldenFixtures(t *testing.T) {
 		{"role-change-request-v1-owner.json", func() any { return new(RoleChangeRequestV1) }},
 		{"role-change-response-v1.json", func() any { return new(RoleChangeResponseV1) }},
 		{"role-change-response-v1-demote.json", func() any { return new(RoleChangeResponseV1) }},
+		// A demotion that lists what the operator issued to others (issue
+		// #1024, ADR-014 O13).
+		{"role-change-response-v1-demote-issued.json", func() any { return new(RoleChangeResponseV1) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.file, func(t *testing.T) {

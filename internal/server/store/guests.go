@@ -385,7 +385,7 @@ func createGuestTx(ctx context.Context, tx execer, actor string, g NewGuest, p p
 		idle.Milliseconds()); err != nil {
 		return CreatedGuest{}, fmt.Errorf("store: create guest: visit: %w", err)
 	}
-	cred, err := insertCredentialTx(ctx, tx, pid, GuestCredentialLabel, p.token, now, &deadline, 0)
+	cred, err := insertCredentialTx(ctx, tx, pid, GuestCredentialLabel, p.token, now, &deadline, 0, issuerOf(actor))
 	if err != nil {
 		return CreatedGuest{}, err
 	}
@@ -1150,7 +1150,7 @@ func (s *Store) ConvertGuest(ctx context.Context, actor string, c GuestConversio
 			}
 		}
 		exp := now.Add(lifetime)
-		cred, err := insertCredentialTx(ctx, tx, c.PrincipalID, label, token, now, &exp, lifetime)
+		cred, err := insertCredentialTx(ctx, tx, c.PrincipalID, label, token, now, &exp, lifetime, issuerOf(actor))
 		if err != nil {
 			return err
 		}

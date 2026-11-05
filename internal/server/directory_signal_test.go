@@ -197,11 +197,11 @@ func TestDirectorySignalHideAndDisable(t *testing.T) {
 	}
 	// dave shares A with zed. (A disabled person's own sockets are dropped, so
 	// they are not owed anything.)
-	do(fmt.Sprintf("/v1/principals/%d/disable", f.dave.ID), http.StatusNoContent)
+	do(fmt.Sprintf("/v1/principals/%d/disable", f.dave.ID), http.StatusOK)
 	if got, want := v.owed(), []string{"root", "zed"}; !slices.Equal(got, want) {
 		t.Errorf("disable owed %v, want %v", got, want)
 	}
-	do(fmt.Sprintf("/v1/principals/%d/disable", f.dave.ID), http.StatusNoContent)
+	do(fmt.Sprintf("/v1/principals/%d/disable", f.dave.ID), http.StatusOK)
 	if got := v.owed(); len(got) != 0 {
 		t.Errorf("a repeated disable owed %v", got)
 	}

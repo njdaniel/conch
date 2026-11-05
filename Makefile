@@ -11,7 +11,7 @@ LINT    = golangci-lint
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS  = -X main.version=$(VERSION)
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate deploy-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -36,7 +36,7 @@ fmt:
 fmt-check:
 	@out=$$(gofmt -l $$(git ls-files -co --exclude-standard '*.go')); if [ -n "$$out" ]; then echo "gofmt needed on:"; echo "$$out"; exit 1; fi
 
-check: fmt-check invisible-check vet lint test schema-compat schema-ts emoji-catalog depgate deploy-test rust-check web-check desktop-check
+check: fmt-check invisible-check go-scope vet lint test schema-compat schema-ts emoji-catalog depgate deploy-test rust-check web-check desktop-check
 
 # No tracked text file may hold a bidi control, a line or paragraph separator
 # or a control character other than tab, LF and CR (issue #244). The script's
@@ -199,6 +199,11 @@ emoji-catalog:
 
 depgate:
 	./scripts/depgate.sh
+
+# go ./... stays out of the Node projects web/ and desktop/, whose
+# node_modules can ship Go source (issue #954).
+go-scope:
+	./scripts/go-scope.sh
 
 # The deployment files in ops/deploy (issue #435): shellcheck, systemd-analyze
 # verify, and the backup, restore, upgrade and rollback scripts run against a
