@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -184,8 +185,34 @@ func parseSetupOrigin(raw string) (string, error) {
 		return "", errors.New("names no host")
 	case u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" || strings.ContainsAny(raw, "?#"):
 		return "", errors.New("must be https://<host>[:port] and nothing more")
+	case !originHost(u.Hostname()):
+		// The origin is printed into links and, by ai-admin create, a shell
+		// command: a host is a DNS name or an IP literal, nothing a shell
+		// reads (security review of #1341).
+		return "", errors.New("the host must be a DNS name or an IP address")
+	}
+	if p := u.Port(); p != "" {
+		if n, err := strconv.Atoi(p); err != nil || n < 1 || n > 65535 {
+			return "", errors.New("the port must be 1 to 65535")
+		}
 	}
 	return "https://" + u.Host, nil
+}
+
+// originHost reports whether h is a DNS name ([A-Za-z0-9.-]) or an IP.
+func originHost(h string) bool {
+	if net.ParseIP(h) != nil {
+		return true
+	}
+	if h == "" {
+		return false
+	}
+	for _, r := range h {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '.' && r != '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func runOperatorBootstrap(args []string, stdout, stderr io.Writer) error {
