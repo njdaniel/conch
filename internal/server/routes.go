@@ -103,6 +103,12 @@ func (s *Server) routeTable() []route {
 		// checked in the handlers; see voice_companion.go.
 		rt("POST /v1/channels/{channel}/voice/companion", accessAuthenticated, hf(s.handleVoiceCompanion)),
 		rt("DELETE /v1/channels/{channel}/voice/companion", accessAuthenticated, hf(s.handleVoiceCompanionDelete)),
+		// The companion's share audio (issue #898): the share's holder
+		// consents, by scope, to their companion publishing the share's
+		// sound, and withdraws it. Checked in the handlers; see
+		// voice_companion_audio.go.
+		rt("PUT /v1/channels/{channel}/voice/companion/audio", accessAuthenticated, hf(s.handleVoiceCompanionAudio)),
+		rt("DELETE /v1/channels/{channel}/voice/companion/audio", accessAuthenticated, hf(s.handleVoiceCompanionAudioDelete)),
 		// Voice presence (issue #127): the snapshot and its socket.
 		rt("GET /v1/channels/{channel}/voice", accessAuthenticated, hf(s.handleVoicePresence)),
 		// Takes ?ticket= (issue #442): a browser cannot set a header on a

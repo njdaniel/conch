@@ -368,6 +368,11 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 			if !share {
 				p.screen, p.screenAudio = false, false
 			}
+			// The share's sound is its own source (issue #898): a
+			// permission that names the screen alone unpublishes it.
+			if !fakeAllows(req.Permission.CanPublish, req.Permission.Sources, "SCREEN_SHARE_AUDIO") {
+				p.screenAudio = false
+			}
 			p.cameraGranted, p.allSources = camera, req.Permission.CanPublish && len(req.Permission.Sources) == 0
 			if !camera {
 				p.camera = false

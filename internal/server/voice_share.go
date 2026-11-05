@@ -83,6 +83,20 @@ type voiceShare struct {
 	published bool
 	lastTrack time.Time
 	audio     bool
+	// audioScope is the holder's recorded consent to their companion
+	// publishing the share's sound (issue #898, voice_companion_audio.go):
+	// the scope they gave, or empty when none is recorded. It is set and
+	// cleared under the room's claims as well as order and voicePoller.mu,
+	// and it goes with the share: every end of the share ends it, and
+	// voice_share_audio_stopped is written beside voice_share_stopped.
+	audioScope schema.VoiceShareAudioScope
+	// audioStarted says the consent's voice_share_audio_started row is in
+	// the log: set under order once it is written, after LiveKit's grant.
+	// Only a consent that started is stopped with a row; one whose grant was
+	// still in flight when the share ended (a pass ended it idle, a rotation
+	// forgot the room) has no started row to close, and its grant is taken
+	// back by the consent's own undo.
+	audioStarted bool
 }
 
 // Errors of the share endpoints, each answered as the handlers say.
@@ -842,6 +856,11 @@ func (p *voicePoller) endHeldShare(ctx context.Context, r *voiceRoomState, room 
 func (p *voicePoller) grantCompanion(ctx context.Context, r *voiceRoomState, room store.VoiceRoom, principalID int64) {
 	p.mu.Lock()
 	c := r.companions[principalID]
+	// The share's sound only with the consent the share carries (issue
+	// #898): a claim restores the screen by itself, never the audio. A
+	// holder claiming again keeps the consent they recorded, so their
+	// companion (perhaps a new connection) is restored to what they hold.
+	audio := r.share != nil && r.share.principalID == principalID && r.share.audioScope != ""
 	p.mu.Unlock()
 	if !c.screen {
 		return
@@ -849,7 +868,7 @@ func (p *voicePoller) grantCompanion(ctx context.Context, r *voiceRoomState, roo
 	// Its own canSubscribe, as the pass listed it: LiveKit replaces the
 	// permission whole, and a publish-only companion must not be handed the
 	// right to receive everyone's voice by being given its screen.
-	if _, err := p.setPublishPermission(ctx, r, principalID, voiceRoleScreen, publishInput{canSubscribe: c.screenSubscribes, share: true}); err != nil {
+	if _, err := p.setPublishPermission(ctx, r, principalID, voiceRoleScreen, publishInput{canSubscribe: c.screenSubscribes, share: true, audio: audio}); err != nil {
 		slog.WarnContext(ctx, "voice: granting the screen to a companion failed; the next claim restores it", "channel", room.ChannelID, "principal", principalID, "error", err)
 	}
 }
@@ -984,7 +1003,7 @@ func (p *voicePoller) stopShare(ctx context.Context, room store.VoiceRoom, calle
 	r.owe(c.principalID)
 	stopped := p.shareStoppedLocked(r.channelID, c, actor, reason)
 	p.mu.Unlock()
-	p.writeEvents(ctx, stopped)
+	p.writeEvents(ctx, stopped...)
 	r.order.Unlock()
 	p.notify(r.channelID)
 	// If LiveKit cannot be asked, the passes try again, and remove the
@@ -997,10 +1016,13 @@ func (p *voicePoller) stopShare(ctx context.Context, room store.VoiceRoom, calle
 
 // shareStoppedLocked records that the started share c of channelID ended
 // with reason: the sharer's own presence says why from now on (issue #487),
-// and the voice_share_stopped row is returned for the caller to write. actor
-// is who stopped it, the sharer for every reason but operator; the row names
-// them, and presence never does. The caller holds p.mu.
-func (p *voicePoller) shareStoppedLocked(channelID int64, c *voiceShare, actor int64, reason schema.VoiceShareEndReason) voiceEvent {
+// and the rows are returned for the caller to write: voice_share_audio_stopped
+// first, when the share carried a consent to the companion's sound (issue
+// #898; the consent ends with the share, for the share's reason, once), then
+// voice_share_stopped. actor is who stopped it, the sharer for every reason
+// but operator; the rows name them, and presence never does. The caller holds
+// p.mu.
+func (p *voicePoller) shareStoppedLocked(channelID int64, c *voiceShare, actor int64, reason schema.VoiceShareEndReason) []voiceEvent {
 	ended := p.now()
 	if ended.Before(c.startedAt) {
 		ended = c.startedAt // a clock stepped back says no earlier end than the start
@@ -1008,10 +1030,18 @@ func (p *voicePoller) shareStoppedLocked(channelID int64, c *voiceShare, actor i
 	p.shareEnded[voiceShareEndKey{channelID: channelID, principalID: c.principalID}] = schema.VoiceShareEnded{
 		Reason: reason, StartedAt: schema.NewTimestamp(c.startedAt), EndedAt: schema.NewTimestamp(ended),
 	}
-	return voiceEvent{
+	var events []voiceEvent
+	if c.audioStarted {
+		events = append(events, voiceEvent{
+			actor: fmt.Sprintf("principal:%d", actor), action: store.AuditVoiceShareAudioStopped, channelID: channelID,
+			detail: fmt.Sprintf("channel=%d principal=%d reason=%s", channelID, c.principalID, reason),
+		})
+	}
+	c.audioScope, c.audioStarted = "", false
+	return append(events, voiceEvent{
 		actor: fmt.Sprintf("principal:%d", actor), action: store.AuditVoiceShareStopped, channelID: channelID,
 		detail: fmt.Sprintf("channel=%d principal=%d reason=%s", channelID, c.principalID, reason),
-	}
+	})
 }
 
 // endShareLocked ends r's share with reason, if principalID holds it and it
@@ -1025,7 +1055,7 @@ func (p *voicePoller) endShareLocked(r *voiceRoomState, principalID int64, reaso
 	}
 	r.share = nil
 	r.owe(principalID)
-	return []voiceEvent{p.shareStoppedLocked(r.channelID, c, principalID, reason)}
+	return p.shareStoppedLocked(r.channelID, c, principalID, reason)
 }
 
 // withdrawLocked asks LiveKit to take the screen-share sources away from
@@ -1078,6 +1108,12 @@ type shareWithdrawal struct {
 	unclaimed    bool
 	canPublish   bool
 	canSubscribe bool
+	// audioOnly is the holder's own companion publishing the share's sound
+	// without a consent recorded (issue #898): only screen_share_audio is
+	// withdrawn, the screen is kept, and it is made only while the person
+	// still holds the share without a consent, checked again under the
+	// claims.
+	audioOnly bool
 }
 
 // judgeShareLocked is a pass's part in the screen share, under r.order and
@@ -1111,7 +1147,10 @@ func (p *voicePoller) judgeShareLocked(r *voiceRoomState, now time.Time, seen ma
 			events = append(events, p.endShareLocked(r, pid, voiceShareStopLeft)...)
 		default:
 			sharing := part.Sharing() || screen.Sharing()
-			audio := part.ScreenShareAudioPublished || screen.ScreenShareAudioPublished
+			// The companion's sound is the share's only under the holder's
+			// consent (issue #898); without it the track is unclaimed and
+			// being withdrawn (consider below), not the share's audio.
+			audio := part.ScreenShareAudioPublished || (screen.ScreenShareAudioPublished && c.audioScope != "")
 			if sharing {
 				c.published, c.lastTrack = true, now
 			}
@@ -1135,15 +1174,44 @@ func (p *voicePoller) judgeShareLocked(r *voiceRoomState, now time.Time, seen ma
 	// the share for.
 	consider := func(pid int64, role voiceRole, part livekit.Participant) {
 		key := voiceWithdrawKey{pid, role}
-		// The holder's own participants are let be, pending or not; a viewer
-		// is never the share's, and publishing anything is unclaimed.
-		if role != voiceRoleView && r.share != nil && r.share.principalID == pid {
-			return
-		}
 		stamp, owed := r.withdrawing[key]
 		// Still owed, or confirmed after this pass listed the room: what it
 		// saw is the share being taken away, not a new one.
 		quiet := owed && (stamp == 0 || stamp > since)
+		// The holder's own participants are let be, pending or not; a viewer
+		// is never the share's, and publishing anything is unclaimed.
+		if role != voiceRoleView && r.share != nil && r.share.principalID == pid {
+			if role != voiceRoleScreen {
+				return
+			}
+			// Except the holder's companion publishing the share's sound
+			// with no consent recorded (issue #898): a stale token that
+			// still names screen_share_audio after a withdrawal. That one
+			// source is unclaimed: it is withdrawn, the screen kept, and
+			// audited once until it is gone, as a whole share is. While the
+			// share is held, the companion's entry in withdrawing is this
+			// audio withdrawal's; a claim clears it and the share's end
+			// owes a whole one.
+			if r.share.audioScope != "" || !part.ScreenShareAudioPublished {
+				if !quiet || stamp == 0 {
+					delete(r.withdrawing, key) // consented, or nothing left to withdraw
+				}
+				return
+			}
+			w := shareWithdrawal{principalID: pid, role: role, joinedAt: part.JoinedAt, sharing: true, canSubscribe: part.CanSubscribe, audioOnly: true}
+			if !quiet {
+				w.unclaimed = true
+				events = append(events, voiceEvent{
+					actor: fmt.Sprintf("principal:%d", pid), action: store.AuditVoiceShareUnclaimed, channelID: r.channelID,
+					detail: fmt.Sprintf("channel=%d sources=screen_share_audio participant=%s source=observed", r.channelID, role.label()),
+				})
+			}
+			if !quiet || stamp == 0 {
+				r.withdrawing[key] = 0
+			}
+			withdraw = append(withdraw, w)
+			return
+		}
 		if !part.Sharing() && !part.ShareSourcesGranted {
 			if !quiet || stamp == 0 {
 				delete(r.withdrawing, key) // nothing left to withdraw
@@ -1248,15 +1316,29 @@ func (p *voicePoller) withdrawShares(ctx context.Context, r *voiceRoomState, lis
 	for _, w := range list {
 		p.mu.Lock()
 		holds := w.role != voiceRoleView && r.share != nil && r.share.principalID == w.principalID
+		consented := holds && r.share.audioScope != ""
 		gone := r.retired
 		p.mu.Unlock()
-		if holds || gone {
+		if gone {
+			continue
+		}
+		if w.audioOnly {
+			// Only while the person still holds the share without a consent:
+			// a share that ended since owes a whole withdrawal, and a consent
+			// recorded since has granted what this would take away.
+			if !holds || consented {
+				continue
+			}
+		} else if holds {
 			continue
 		}
 		key, done := voiceWithdrawKey{w.principalID, w.role}, false
-		if w.role == voiceRolePerson {
+		switch {
+		case w.audioOnly:
+			done = p.withdrawCompanionAudio(ctx, r, w.principalID, w.canSubscribe)
+		case w.role == voiceRolePerson:
 			done = p.withdrawLocked(ctx, r, w.principalID, w.canPublish)
-		} else {
+		default:
 			done = p.withdrawCompanion(ctx, r, w.principalID, w.role, w.canSubscribe)
 		}
 		if done {

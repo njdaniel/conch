@@ -85,6 +85,10 @@ func (w *world) guestPhase(bounds voiceBounds) ([]timing, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the member Sam became: %w", err)
 	}
+	if err := w.convertedMemberApproves(member); err != nil {
+		return nil, fmt.Errorf("the member Sam became, on approvals: %w", err)
+	}
+	h.say("ok   approvals: the member Sam became raises an approval in the plaza and sees it listed, is refused a decision (decision_not_permitted) until his membership may decide, then decides it; created, notified, decided, resolved and notified again, in the audit log and on ntfy")
 	race, err := w.logoutRace()
 	if err != nil {
 		return nil, fmt.Errorf("a conversion racing End visit: %w", err)

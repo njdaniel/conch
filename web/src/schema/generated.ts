@@ -1323,6 +1323,34 @@ export const voiceCompanionResponseV1 = object<VoiceCompanionResponseV1>({
   expires_at: timestamp,
 });
 
+// schema.VoiceShareAudioScope
+export type VoiceShareAudioScope = 'application' | 'system_excluding_call';
+
+export const voiceShareAudioScope = vocab<VoiceShareAudioScope>({
+  application: true,
+  system_excluding_call: true,
+});
+
+// schema.VoiceCompanionAudioRequestV1
+export interface VoiceCompanionAudioRequestV1 {
+  scope: VoiceShareAudioScope;
+}
+
+export const voiceCompanionAudioRequestV1 = object<VoiceCompanionAudioRequestV1>({
+  scope: voiceShareAudioScope,
+});
+
+// schema.VoiceCompanionAudioV1
+export interface VoiceCompanionAudioV1 {
+  scope: VoiceShareAudioScope;
+  started_at: string;
+}
+
+export const voiceCompanionAudioV1 = object<VoiceCompanionAudioV1>({
+  scope: voiceShareAudioScope,
+  started_at: timestamp,
+});
+
 // schema.VoiceShareV1
 export interface VoiceShareV1 {
   principal_id: number;

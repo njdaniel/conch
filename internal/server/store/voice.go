@@ -72,6 +72,21 @@ const (
 	// room's share. Its actor is that participant's principal; the sources
 	// are withdrawn.
 	AuditVoiceShareUnclaimed = "voice_share_unclaimed"
+	// AuditVoiceShareAudioStarted is written by the companion audio endpoint
+	// (issue #898) when the share's holder consents to their companion
+	// publishing the share's sound, before it is answered, and again when
+	// they ask with another scope (the consent recorded changes; the
+	// permission does not). Its actor is the holder and its detail
+	// "channel=<id> scope=<application or system_excluding_call>". Asking
+	// again with the scope already recorded writes nothing.
+	AuditVoiceShareAudioStarted = "voice_share_audio_started"
+	// AuditVoiceShareAudioStopped is written once for every consent that
+	// started, when it ends: by the holder's DELETE (reason=self) or with the
+	// share, for the share's own reason. Its actor is the operator for
+	// reason=operator and the holder otherwise, and its detail
+	// "channel=<id> principal=<holder> reason=<self, operator, left,
+	// access_lost, rotated or idle>", as voice_share_stopped's.
+	AuditVoiceShareAudioStopped = "voice_share_audio_stopped"
 )
 
 // Audit actions of the camera (ADR-015, issue #1241;

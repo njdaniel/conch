@@ -94,13 +94,46 @@ func (p *person) removeCompanion(query string) error {
 	return nil
 }
 
+// requestCompanionAudio asks, as p, for p's companion to be granted the share's
+// sound with scope (PUT /v1/channels/companion/voice/companion/audio, issue
+// #898) and returns the decoded answer, or the status and error code of a
+// refusal.
+func requestCompanionAudio(p *person, scope schema.VoiceShareAudioScope) (schema.VoiceCompanionAudioV1, int, string, error) {
+	var audio schema.VoiceCompanionAudioV1
+	req := schema.VoiceCompanionAudioRequestV1{Scope: scope}
+	status, data, err := p.api.do(http.MethodPut, "/v1/channels/companion/voice/companion/audio", req)
+	if err != nil || status != http.StatusOK {
+		var e schema.Error
+		_ = decodeStrict(data, &e)
+		return audio, status, e.Code, err
+	}
+	if err := decodeStrict(data, &audio); err != nil {
+		return audio, status, "", fmt.Errorf("decode the companion audio answer: %w", err)
+	}
+	if err := audio.Validate(); err != nil {
+		return audio, status, "", fmt.Errorf("the companion audio answer does not satisfy the schema: %w", err)
+	}
+	return audio, status, "", nil
+}
+
 // checkCompanionPermission compares the permission LiveKit reports for a
 // companion or a viewer with exactly its grant, field by field.
 func checkCompanionPermission(perm map[string]any, publishScreen, canSubscribe bool) error {
-	sources := []any{}
 	if publishScreen {
-		sources = []any{"SCREEN_SHARE"}
+		return checkCompanionSources(perm, canSubscribe, "SCREEN_SHARE")
 	}
+	return checkCompanionSources(perm, canSubscribe)
+}
+
+// checkCompanionSources compares the permission LiveKit reports for a
+// companion or a viewer with exactly a grant of the named sources, in order
+// (none: a participant that publishes nothing), field by field.
+func checkCompanionSources(perm map[string]any, canSubscribe bool, named ...string) error {
+	sources := []any{}
+	for _, s := range named {
+		sources = append(sources, s)
+	}
+	publishScreen := len(named) > 0
 	got := map[string]any{}
 	for k, v := range perm {
 		got[k] = v
@@ -472,35 +505,187 @@ func (l *live) companion(ctx context.Context) error {
 	b1LK.Stop()
 	h.say("ok   publish-only companion: LiveKit's permission forbids receiving, it was delivered no track, and its microphone was refused")
 
-	// Share audio is not in the companion's grant either (its sound is
-	// another step, issue #898): the sound is refused.
+	// Share audio is not in the companion's grant either (issue #898): a
+	// fresh companion publishing the sound is refused by LiveKit. The same
+	// attempt is made before any consent and again after the share stops.
+	refuseAudio := func(when string) error {
+		if err := cam.removeCompanion(""); err != nil {
+			return err
+		}
+		snd, err := h.mustCompanion(cam, screenReq)
+		if err != nil {
+			return err
+		}
+		sndLK, err := h.startLK(l.lkBin, hostPort, snd.Token, lkit.NewShareFilter(false).Filter, "--publish", shareAudio)
+		if err != nil {
+			return err
+		}
+		defer sndLK.Stop()
+		if err := waitForOrFail("the companion's share audio to be refused "+when, 45*time.Second, func() (bool, string, error) {
+			if ok, p, _ := l.lkHasIdentity(room, screenID); ok {
+				if _, audio := lkit.ShareTracks(p); audio {
+					return false, "", fmt.Errorf("the companion published share audio %s: %v", when, p.Sources())
+				}
+			}
+			return sndLK.Exited(), "lk is still trying to publish", nil
+		}); err != nil {
+			return err
+		}
+		if !strings.Contains(sndLK.Tail(), "timed out publishing track") {
+			return fmt.Errorf("the companion's lk exited without the refusal %s: %s", when, sndLK.Tail())
+		}
+		return nil
+	}
+	if err := refuseAudio("before any consent"); err != nil {
+		return err
+	}
+	h.say("ok   no share audio: LiveKit refused screen_share_audio from the companion before any consent")
+
+	// With the holder's consent (PUT …/companion/audio, issue #898) the
+	// connected companion is granted the sound beside the screen: LiveKit's
+	// permission names both sources, a refreshed token follows, and the
+	// held publish goes through. The consent is part of the share: its
+	// answer carries the share's started_at.
 	if err := cam.removeCompanion(""); err != nil {
 		return err
 	}
-	snd, err := h.mustCompanion(cam, screenReq)
+	aud, err := h.mustCompanion(cam, screenReq)
 	if err != nil {
 		return err
 	}
-	sndLK, err := h.startLK(l.lkBin, hostPort, snd.Token, lkit.NewShareFilter(false).Filter, "--publish", shareAudio)
+	audGate := lkit.NewShareFilter(true)
+	audLK, err := h.startLK(l.lkBin, hostPort, aud.Token, audGate.Filter, "--publish", shareAudio)
 	if err != nil {
 		return err
 	}
-	defer sndLK.Stop()
-	if err := waitForOrFail("the companion's share audio to be refused", 45*time.Second, func() (bool, string, error) {
-		if ok, p, _ := l.lkHasIdentity(room, screenID); ok {
-			if _, audio := lkit.ShareTracks(p); audio {
-				return false, "", fmt.Errorf("the companion published share audio: %v", p.Sources())
-			}
+	defer audLK.Stop()
+	if err := l.lkWaitHas("the consenting companion", room, screenID, audLK); err != nil {
+		return err
+	}
+	select {
+	case <-audGate.Held():
+	case <-time.After(30 * time.Second):
+		return errors.New("the consenting companion's lk did not try to publish within 30 s")
+	}
+	// Nothing has been published since the first companion was removed, so
+	// cam's share may have ended idle: she claims again (a holder claiming
+	// again is answered with the share she holds), and the consent follows
+	// at once, within the share's first-track grace.
+	share, status, code, err := claimShare(cam, "companion")
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK || share.PrincipalID != cam.id {
+		return fmt.Errorf("cam claims the share before consenting: status %d code %q share %+v", status, code, share)
+	}
+	before = len(audLK.Relay.IssuedTokens())
+	var audio schema.VoiceCompanionAudioV1
+	// The consent needs the poller to have listed the companion, as the
+	// companion request needs the person: refused voice_no_session until then.
+	if err := waitForOrFail("cam's consent to share audio to be recorded", 20*time.Second, func() (bool, string, error) {
+		a, status, code, err := requestCompanionAudio(cam, schema.VoiceShareAudioScopeApplication)
+		if err != nil {
+			return false, "", err
 		}
-		return sndLK.Exited(), "lk is still trying to publish", nil
+		if status == http.StatusOK {
+			audio = a
+			return true, "", nil
+		}
+		if status == http.StatusConflict && code == schema.ErrorCodeVoiceNoSession {
+			return false, fmt.Sprintf("status %d %s", status, code), nil
+		}
+		return false, "", fmt.Errorf("status %d code %q", status, code)
 	}); err != nil {
 		return err
 	}
-	if !strings.Contains(sndLK.Tail(), "timed out publishing track") {
-		return fmt.Errorf("the companion's lk exited without the refusal: %s", sndLK.Tail())
+	if audio.Scope != schema.VoiceShareAudioScopeApplication || !audio.StartedAt.Time().Equal(share.StartedAt.Time()) {
+		return fmt.Errorf("the consent answered %+v, want scope application and the share's started_at %s", audio, share.StartedAt.Time())
 	}
-	sndLK.Stop()
-	h.say("ok   no share audio: LiveKit refused screen_share_audio from the companion")
+	if err := waitFor("LiveKit to grant the companion the share's sound", 20*time.Second, func() (bool, string) {
+		ok, p, saw := l.lkHasIdentity(room, screenID)
+		if !ok {
+			return false, saw
+		}
+		return checkCompanionSources(p.Permission, true, "SCREEN_SHARE", "SCREEN_SHARE_AUDIO") == nil, fmt.Sprint(p.Permission)
+	}); err != nil {
+		return err
+	}
+	if err := waitFor("LiveKit to send the companion a token carrying the sound", 10*time.Second, func() (bool, string) {
+		return len(audLK.Relay.IssuedTokens()) > before, "no token since the consent"
+	}); err != nil {
+		return err
+	}
+	audGate.Release()
+	if err := waitForOrFail("LiveKit to list the companion's share audio", 30*time.Second, func() (bool, string, error) {
+		ok, p, saw := l.lkHasIdentity(room, screenID)
+		if !ok {
+			if audLK.Exited() {
+				return false, "", errors.New("lk exited: " + audLK.Tail())
+			}
+			return false, saw, nil
+		}
+		_, audio := lkit.ShareTracks(p)
+		return audio, fmt.Sprintf("sources %v", p.Sources()), nil
+	}); err != nil {
+		return err
+	}
+	if err := waitFor("wes's presence to show cam sharing with sound", 30*time.Second, func() (bool, string) {
+		doc, err := wes.presence("companion")
+		if err != nil {
+			return false, err.Error()
+		}
+		for _, r := range doc.Rooms {
+			for _, p := range r.Participants {
+				if p.PrincipalID == cam.id {
+					return p.Sharing && p.SharingAudio, fmt.Sprintf("sharing=%v sharing_audio=%v", p.Sharing, p.SharingAudio)
+				}
+			}
+		}
+		return false, "cam not listed"
+	}); err != nil {
+		return err
+	}
+	// The same scope again is a no-op; another scope is recorded, and the
+	// permission stands.
+	for _, scope := range []schema.VoiceShareAudioScope{schema.VoiceShareAudioScopeApplication, schema.VoiceShareAudioScopeSystemExcludingCall} {
+		a, status, code, err := requestCompanionAudio(cam, scope)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK || a.Scope != scope {
+			return fmt.Errorf("consenting again with scope %s: status %d code %q answer %+v", scope, status, code, a)
+		}
+	}
+	if ok, p, saw := l.lkHasIdentity(room, screenID); !ok {
+		return fmt.Errorf("the companion left after a scope change: %s", saw)
+	} else if _, audio := lkit.ShareTracks(p); !audio {
+		return fmt.Errorf("a scope change unpublished the companion's sound: %v", p.Sources())
+	}
+	if err := l.waitAudit("the consent's rows", store.AuditVoiceShareAudioStarted, subject, fmt.Sprintf("principal:%d", cam.id), 2); err != nil {
+		return err
+	}
+	h.say("ok   consented: PUT …/companion/audio granted the companion screen_share and screen_share_audio, it published the sound, presence shows cam sharing with sound, and voice_share_audio_started was written once per scope")
+
+	// The share stops: the sound goes with the screen before the stop
+	// answers, and the consent ends with the share (voice_share_audio_stopped).
+	if err := cam.api.call(http.MethodDelete, "/v1/channels/companion/voice/share", nil, nil); err != nil {
+		return fmt.Errorf("cam stops the share: %w", err)
+	}
+	if ok, p, saw := l.lkHasIdentity(room, screenID); !ok {
+		return fmt.Errorf("the companion left the room when the share stopped: %s", saw)
+	} else if screen, audio := lkit.ShareTracks(p); screen || audio {
+		return fmt.Errorf("LiveKit still lists the companion's share tracks after the stop answered: %v", p.Sources())
+	} else if err := checkCompanionPermission(p.Permission, false, true); err != nil {
+		return fmt.Errorf("after the stop, LiveKit's permission for the companion: %w", err)
+	}
+	if err := l.waitAudit("the consent's end", store.AuditVoiceShareAudioStopped, subject, fmt.Sprintf("principal:%d", cam.id), 1); err != nil {
+		return err
+	}
+	audLK.Stop()
+	if err := refuseAudio("after the share stopped"); err != nil {
+		return err
+	}
+	h.say("ok   stopped: the share's stop took the sound with the screen before it answered, voice_share_audio_stopped was written, and a companion publishing the sound again is refused")
 
 	// The person leaving takes the companion with her, after the grace and a
 	// pass (voiceCompanionGrace).
@@ -545,8 +730,10 @@ func (l *live) companion(ctx context.Context) error {
 		"identity=" + viewID + " grants=companion:view",
 		"identity=" + screenID + " grants=companion:screen:publish_only",
 		"identity=" + screenID + " grants=companion:screen:publish_only",
-		"identity=" + screenID + " grants=companion:screen:subscribe",
-		"identity=" + screenID + " grants=companion:screen:subscribe",
+		"identity=" + screenID + " grants=companion:screen:subscribe", // the sound refused before any consent
+		"identity=" + screenID + " grants=companion:screen:subscribe", // the consenting companion
+		"identity=" + screenID + " grants=companion:screen:subscribe", // the sound refused after the stop
+		"identity=" + screenID + " grants=companion:screen:subscribe", // the last, orphaned
 	}
 	if strings.Join(grants, "|") != strings.Join(wantGrants, "|") {
 		return fmt.Errorf("companion grant rows %q, want %q", grants, wantGrants)

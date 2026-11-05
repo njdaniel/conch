@@ -164,3 +164,118 @@ func (r VoiceCompanionResponseV1) Validate() error {
 	}
 	return VoiceCompanionRequestV1{Publish: r.Publish, Subscribe: r.Subscribe}.Validate()
 }
+
+// The companion's share audio (issue #898, part C of #897;
+// docs/design/voice-control-plane.md §13). A companion's grant never names
+// screen_share_audio (linux-desktop.md §6.4): a renderer could otherwise
+// publish synthesised speech as share audio with no press and no gate. The
+// sound is added to the connected companion by a permission update, only
+// when the share's holder asks through this route, which records an explicit
+// audio-scope consent, and it is withdrawn on DELETE and when the share ends
+// for any reason. The scopes are the desktop designs' vocabulary
+// (windows-desktop.md §8, linux-desktop.md §8), off by default; "none" is the
+// absence of a consent, which is DELETE, not a value.
+//
+// Like the companion request the request is decoded strictly
+// (DecodeVoiceCompanionAudioRequestV1): the scope is a consent, recorded in
+// the audit log as it was given. The response tolerates unknown fields.
+
+// VoiceShareAudioScope is what sound a person consents to their companion
+// publishing as the share's audio. The vocabulary is closed and
+// case-sensitive; a value outside it fails validation. Both scopes grant the
+// same LiveKit source: the scope is consent, recorded, and the capture it
+// names is the desktop's to honour.
+type VoiceShareAudioScope string
+
+const (
+	// VoiceShareAudioScopeApplication: the sound of the shared application
+	// or window alone.
+	VoiceShareAudioScopeApplication VoiceShareAudioScope = "application"
+	// VoiceShareAudioScopeSystemExcludingCall: everything the system plays,
+	// except the call itself (the room's own voice is never fed back).
+	VoiceShareAudioScopeSystemExcludingCall VoiceShareAudioScope = "system_excluding_call"
+)
+
+// Valid reports whether s is a recognized scope.
+func (s VoiceShareAudioScope) Valid() bool {
+	switch s {
+	case VoiceShareAudioScopeApplication, VoiceShareAudioScopeSystemExcludingCall:
+		return true
+	default:
+		return false
+	}
+}
+
+// VoiceCompanionAudioRequestV1 is the body of
+// PUT /v1/channels/{channel}/voice/companion/audio: the share holder's
+// consent to their companion publishing the share's sound, and to which
+// sound. The share and the companion it applies to are the caller's own in
+// the channel's room; nothing else is named.
+type VoiceCompanionAudioRequestV1 struct {
+	// Scope is the sound consented to. Required.
+	Scope VoiceShareAudioScope `json:"scope"`
+}
+
+// Validate reports whether the request is well-formed: a known scope.
+func (r VoiceCompanionAudioRequestV1) Validate() error {
+	if !r.Scope.Valid() {
+		return fmt.Errorf("schema: voice share audio scope %q is not one of application, system_excluding_call", r.Scope)
+	}
+	return nil
+}
+
+// DecodeVoiceCompanionAudioRequestV1 reads one request from r and is the only
+// way a body should become a VoiceCompanionAudioRequestV1. Like
+// DecodeVoiceCompanionRequestV1 it rejects, in this order: a body that is not
+// a JSON object of the declared fields (any unknown field at any depth
+// fails); anything after that one object; and a request that does not satisfy
+// Validate (a JSON null decodes to the zero request, which does not).
+//
+// It does not bound how much it reads; the caller wraps the body (for a
+// handler, http.MaxBytesReader). An error from r is wrapped, so errors.As
+// still finds an *http.MaxBytesError.
+func DecodeVoiceCompanionAudioRequestV1(r io.Reader) (VoiceCompanionAudioRequestV1, error) {
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+	var req VoiceCompanionAudioRequestV1
+	if err := dec.Decode(&req); err != nil {
+		return VoiceCompanionAudioRequestV1{}, fmt.Errorf("schema: decode voice companion audio request: %w", err)
+	}
+	var extra json.RawMessage
+	switch err := dec.Decode(&extra); {
+	case err == nil:
+		return VoiceCompanionAudioRequestV1{}, errors.New("schema: voice companion audio request body must contain one JSON object")
+	case !errors.Is(err, io.EOF):
+		return VoiceCompanionAudioRequestV1{}, fmt.Errorf("schema: decode voice companion audio request: %w", err)
+	}
+	if err := req.Validate(); err != nil {
+		return VoiceCompanionAudioRequestV1{}, err
+	}
+	return req, nil
+}
+
+// VoiceCompanionAudioV1 is the body of a successful
+// PUT /v1/channels/{channel}/voice/companion/audio: the consent as recorded,
+// and which share it belongs to. It carries no token, no identity and no
+// room name.
+type VoiceCompanionAudioV1 struct {
+	// Scope is the consent recorded: the request's, or on a repeated request
+	// the new one.
+	Scope VoiceShareAudioScope `json:"scope"`
+	// StartedAt is the started_at of the caller's share (VoiceShareV1), the
+	// one the consent is part of: it ends with that share. UTC, ms
+	// precision.
+	StartedAt Timestamp `json:"started_at"`
+}
+
+// Validate reports whether the response is well-formed: a known scope and a
+// started_at present.
+func (a VoiceCompanionAudioV1) Validate() error {
+	if !a.Scope.Valid() {
+		return fmt.Errorf("schema: voice share audio scope %q is not one of application, system_excluding_call", a.Scope)
+	}
+	if a.StartedAt.IsZero() {
+		return errors.New("schema: voice companion audio started_at is required")
+	}
+	return nil
+}

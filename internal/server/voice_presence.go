@@ -2171,7 +2171,7 @@ func (p *voicePoller) forgetRoom(ctx context.Context, name string) (*voiceRoomSt
 	var events []voiceEvent
 	var holders []int64
 	if c := r.share; c != nil && !c.pending {
-		events = append(events, p.shareStoppedLocked(r.channelID, c, c.principalID, voiceShareStopRotated))
+		events = append(events, p.shareStoppedLocked(r.channelID, c, c.principalID, voiceShareStopRotated)...)
 		holders = append(holders, c.principalID)
 		r.retiredShare = c.principalID
 	}

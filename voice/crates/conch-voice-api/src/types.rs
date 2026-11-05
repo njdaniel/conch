@@ -1213,6 +1213,20 @@ mod tests {
             "voice-companion-response-v1-viewer.json",
             "the companion route is the desktop renderer's",
         ),
+        // The companion's share audio (issue #898): the share holder's consent to the
+        // sound, asked by the desktop renderer, never by the voice client.
+        (
+            "voice-companion-audio-request-v1.json",
+            "the companion audio route is the desktop renderer's",
+        ),
+        (
+            "voice-companion-audio-request-v1-system.json",
+            "the companion audio route is the desktop renderer's",
+        ),
+        (
+            "voice-companion-audio-v1.json",
+            "the companion audio route is the desktop renderer's",
+        ),
     ];
 
     #[test]

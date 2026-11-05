@@ -58,6 +58,8 @@ vi.mock('../api', () => ({
   stopVoiceShare: () => new Promise(() => undefined),
   claimVoiceCamera: () => new Promise(() => undefined),
   stopVoiceCamera: () => new Promise(() => undefined),
+  createVoiceViewer: () => new Promise(() => undefined),
+  removeVoiceViewer: () => new Promise(() => undefined),
   readVoiceMode: () => fake.mode,
   writeVoiceMode: (mode: 'ptt' | 'open') => {
     fake.mode = mode;

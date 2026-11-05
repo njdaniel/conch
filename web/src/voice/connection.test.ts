@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult } from '../api';
+import type { ShareClaimResult, TransmitAnswer, VoiceSessionResult, VoiceViewerResult } from '../api';
 import type { VoicePresenceV1 } from '../schema/voice';
 import type { CameraClaimResult } from '../api';
 import type { Camera, CameraProfile, KeptCamera } from './camera';
@@ -329,6 +329,20 @@ const okSession = (canPublish = true): VoiceSessionResult => ({
   },
 });
 
+const okViewer = (): VoiceViewerResult => ({
+  ok: true,
+  value: {
+    livekit_url: 'wss://lk.example',
+    identity: 'p7.view',
+    room: roomName,
+    token: viewerToken,
+    publish: 'none',
+    subscribe: true,
+    expires_at: '2026-10-16T00:00:15.000Z',
+  },
+});
+const viewerToken = 'viewer-token-secret-value';
+
 const claim: ShareClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:00.000Z', audio: true } };
 
 // held: each report waits for the test to answer it (answer below), as a
@@ -350,6 +364,8 @@ function setup(
   // ADR-015: conchd's answers to camera claims, in order (a granted claim by
   // default), and the camera remembered from earlier in the tab.
   camera?: { readonly answers?: CameraClaimResult[]; readonly choice?: Camera | null; readonly holdClaims?: boolean },
+  // Issue #936: conchd's answers to the viewer grant, in order.
+  viewers: VoiceViewerResult[] = [],
 ) {
   const clock = new FakeClock();
   const rooms: StubRoom[] = [];
@@ -375,10 +391,20 @@ function setup(
   const cameraAnswers = camera?.answers ?? [];
   // With holdClaims, each claim waits for the test to answer it.
   const claimsWaiting: (() => void)[] = [];
+  // What the page asked of the viewer route, in order, and the body it sent.
+  const viewerLog: string[] = [];
   const client = new VoiceClient(
     {
       clock,
       mode: pushToTalk,
+      createViewer: (channel) => {
+        viewerLog.push(`POST ${channel} publish=none`);
+        return Promise.resolve(viewers.shift() ?? okViewer());
+      },
+      removeViewer: (channel) => {
+        viewerLog.push(`DELETE ${channel} publish=none`);
+        return Promise.resolve();
+      },
       trace: (line) => trace.push(line),
       random: () => 0.999999,
       createSession: (channel) => {
@@ -433,7 +459,7 @@ function setup(
     },
     () => clock.now,
   );
-  return { client, clock, rooms, asked, reports, reportedIn, shares, log, answer, trace, camLog, claimsWaiting };
+  return { client, clock, rooms, asked, reports, reportedIn, shares, log, answer, trace, camLog, claimsWaiting, viewerLog };
 }
 
 const cameraGranted: CameraClaimResult = { ok: true, value: { principal_id: 7, started_at: '2026-10-16T00:00:01.000Z' } };
@@ -2802,5 +2828,106 @@ describe('the video shown here', () => {
     await settle();
     expect(t.camLog).toEqual([]);
     expect(t.client.snapshot()).toMatchObject({ camera: { kind: 'sending' }, cameraTrack: 'published' });
+  });
+});
+
+// Issue #936: Watch only beside the person's own voice in another client
+// (the helper, the TUI) connects as the viewer, p<id>.view, and never asks
+// for the person's own session, which would displace that client.
+describe('watching beside voice in another client', () => {
+  it('asks for the viewer grant, never the session, and connects with the viewer token and no publish', async () => {
+    const t = setup();
+    t.client.join('general', { watchOnly: true, beside: true });
+    await settle();
+    expect(t.viewerLog).toEqual(['POST general publish=none']);
+    expect(t.asked).toEqual([]);
+    expect(t.rooms[0]?.connectArgs).toEqual({ url: 'wss://lk.example', token: viewerToken, roomName, publish: false });
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', watchOnly: true, viewer: true, listenOnly: true });
+  });
+
+  it('keeps the token and the room name out of its state', async () => {
+    const t = setup();
+    t.client.join('general', { watchOnly: true, beside: true });
+    await settle();
+    expect(JSON.stringify({ ...t.client.snapshot(), speaking: [...t.client.snapshot().speaking] })).not.toMatch(/secret/);
+  });
+
+  it('leaving removes the viewer with DELETE ?publish=none and closes the room', async () => {
+    const t = setup();
+    t.client.join('general', { watchOnly: true, beside: true });
+    await settle();
+    await t.client.leave();
+    expect(t.viewerLog).toEqual(['POST general publish=none', 'DELETE general publish=none']);
+    expect(t.rooms[0]?.closed).toBe(true);
+    expect(t.client.snapshot().phase).toBe('idle');
+  });
+
+  it('Use microphone does nothing: a viewer publishes nothing', async () => {
+    const t = setup();
+    t.client.join('general', { watchOnly: true, beside: true });
+    await settle();
+    await t.client.useMicrophone();
+    expect(t.rooms[0]?.calls).not.toContain('microphone');
+    expect(t.client.snapshot()).toMatchObject({ watchOnly: true, viewer: true });
+  });
+
+  it('watch only without a voice elsewhere is the person’s own session, unchanged', async () => {
+    const t = setup();
+    t.client.join('general', { watchOnly: true });
+    await settle();
+    expect(t.asked).toEqual(['general']);
+    expect(t.viewerLog).toEqual([]);
+    expect(t.client.snapshot().viewer).toBe(false);
+    await t.client.leave();
+    expect(t.viewerLog).toEqual([]);
+  });
+
+  it('a full join is the person’s own session, unchanged, even if beside is passed', async () => {
+    const t = setup();
+    t.client.join('general', { beside: true });
+    await settle();
+    expect(t.asked).toEqual(['general']);
+    expect(t.viewerLog).toEqual([]);
+    expect(t.rooms[0]?.connectArgs?.publish).toBe(true);
+  });
+
+  const refused = (status: number, code?: string): VoiceViewerResult => ({ ok: false, failure: 'invalid', status, ...(code === undefined ? {} : { code }) });
+  it.each([
+    ['404 is a channel you are not in', refused(404, 'channel_not_found'), 'You are not a member of this channel'],
+    ['409 voice_no_session is no voice of yours yet', refused(409, 'voice_no_session'), 'Your voice is not connected in this channel yet. Join voice in your other app, then try again.'],
+    ['503 voice_unavailable is voice that cannot be reached', refused(503, 'voice_unavailable'), 'Voice is unavailable right now. Try again in a moment.'],
+    ['voice_not_configured', refused(503, 'voice_not_configured'), 'Voice is not set up on this server'],
+    ['a 500', refused(500), 'The server would not let you watch. Try again in a moment.'],
+  ])('%s: stops, says so in plain words, and asks once', async (_name, answer, why) => {
+    const t = setup([], [], 0, false, undefined, undefined, undefined, undefined, undefined, [answer]);
+    t.client.join('general', { watchOnly: true, beside: true });
+    await settle();
+    t.clock.advance(120_000);
+    await settle();
+    expect(t.client.snapshot()).toMatchObject({ phase: 'stopped', why });
+    expect(t.viewerLog).toEqual(['POST general publish=none']);
+    expect(t.asked).toEqual([]);
+    expect(t.rooms).toHaveLength(0);
+  });
+
+  it('a refusal never falls back to the person’s own session', async () => {
+    const t = setup([okSession()], [], 0, false, undefined, undefined, undefined, undefined, undefined, [refused(409, 'voice_no_session')]);
+    t.client.join('general', { watchOnly: true, beside: true });
+    await settle();
+    t.clock.advance(120_000);
+    await settle();
+    expect(t.asked).toEqual([]);
+  });
+
+  it('an answer that never came is retried, as a session’s is', async () => {
+    const t = setup([], [], 0, false, undefined, undefined, undefined, undefined, undefined, [{ ok: false, failure: 'network' }]);
+    t.client.join('general', { watchOnly: true, beside: true });
+    await settle();
+    expect(t.client.snapshot().phase).toBe('unavailable');
+    t.clock.advance(60_000);
+    await settle();
+    expect(t.client.snapshot().phase).toBe('connected');
+    expect(t.viewerLog).toEqual(['POST general publish=none', 'POST general publish=none']);
+    expect(t.asked).toEqual([]);
   });
 });
