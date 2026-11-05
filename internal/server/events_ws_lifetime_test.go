@@ -67,7 +67,7 @@ func TestEventsClosesWhenAccessIsLost(t *testing.T) {
 		{
 			name: "principal disabled",
 			act: func(t *testing.T, f *runFixture) {
-				if rec := f.do(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.bob.ID), f.rootTok, ""); rec.Code != http.StatusNoContent {
+				if rec := f.do(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.bob.ID), f.rootTok, ""); rec.Code != http.StatusOK {
 					t.Fatalf("disable = %d %s", rec.Code, rec.Body)
 				}
 			},

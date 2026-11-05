@@ -208,7 +208,7 @@ func (s *Store) IssueLoginCredential(ctx context.Context, in LoginIssue, now tim
 			return err
 		}
 		exp := now.Add(lifetime)
-		cred, err := insertCredentialTx(ctx, tx, p.ID, "password sign-in", token, now, &exp, lifetime)
+		cred, err := insertCredentialTx(ctx, tx, p.ID, "password sign-in", token, now, &exp, lifetime, p.ID)
 		if err != nil {
 			return err
 		}
@@ -673,7 +673,7 @@ func rotateSessionTx(ctx context.Context, tx execer, actor string, credentialID 
 	} else if n != 1 {
 		return schema.CredentialV1{}, ErrLoginStale
 	}
-	c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, millisPtr(expiresAt), time.Duration(renews.Int64)*time.Millisecond)
+	c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, millisPtr(expiresAt), time.Duration(renews.Int64)*time.Millisecond, issuerOf(actor))
 	if err != nil {
 		return schema.CredentialV1{}, err
 	}

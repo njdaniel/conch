@@ -505,8 +505,8 @@ func (w *world) restrictedPhase() (int, error) {
 		return rows, fmt.Errorf("the restricted operator's refusals in its own channel wrote %d access_denied rows with permission=manage_channels, want 6", after-before)
 	}
 
-	// The v1 route refuses a caller without manage_members whatever it names
-	// (issue #990): the same 409 for A's channel, a ghost, an open link and
+	// The v1 route refuses every caller whatever it names (issues #990,
+	// #1134): the same 409 for A's channel, a ghost, an open link and
 	// the right to invite, naming no permission.
 	inviteAs := func(req schema.CreateInviteRequestV1) (int, []byte, error) {
 		return r.api.do(http.MethodPost, "/v1/invites", req)

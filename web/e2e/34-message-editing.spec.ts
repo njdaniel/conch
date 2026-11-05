@@ -16,7 +16,9 @@ import { attach, history } from './api';
 import { expect, expectFits, messages, openChannel, phoneSizes, say, signIn, test } from './fixtures';
 import { call, ok, type World } from './world';
 
-const stamp = Date.now().toString(36);
+// The random part keeps two workers that load this file in the same
+// millisecond from naming the same channel.
+const stamp = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 let next = 0;
 // Words of letters and digits only, so the full-text index takes each whole.
 const word = (label: string) => `${label}${stamp}${String(++next)}`;
@@ -78,10 +80,18 @@ async function edit(page: Page, id: number, text: string, touch = false): Promis
   await expect(box).toBeHidden();
 }
 
+// postedId waits for the server to hold the message: say returns when Send is
+// clicked, not when the post has landed, and under load a history read can
+// get there first.
 async function postedId(world: World, token: string, channel: string, body: string): Promise<number> {
-  const found = (await history(world, token, channel)).find((m) => m.body === body);
-  if (found === undefined) throw new Error(`no message "${body}" in ${channel}`);
-  return found.id;
+  let id = 0;
+  await expect
+    .poll(async () => {
+      id = (await history(world, token, channel)).find((m) => m.body === body)?.id ?? 0;
+      return id;
+    }, { message: `no message "${body}" in ${channel}` })
+    .toBeGreaterThan(0);
+  return id;
 }
 
 const marker = (item: Locator) => item.locator('time.edited-marker, button.edited-marker');
@@ -315,25 +325,28 @@ for (const [size, options] of phoneSizes.filter(([name]) => name === '320×640' 
     const body = word('phone');
     await say(page, channel, body);
     const id = await postedId(world, author.token, channel, body);
+    await expect(row(page, id)).toContainText(body);
     const more = row(page, id).getByRole('button', { name: moreName });
     // Shown with no hover and no focus.
     await expect(more).toBeVisible();
-    expect(await more.evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
-    const box = await more.boundingBox();
-    expect(box?.width ?? 0).toBeGreaterThanOrEqual(44);
-    expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    await expect.poll(() => more.evaluate((el) => getComputedStyle(el).opacity)).toBe('1');
+    // boundingBox does not wait, so poll the size until layout has settled.
+    await expect.poll(async () => (await more.boundingBox())?.width ?? 0).toBeGreaterThanOrEqual(44);
+    await expect.poll(async () => (await more.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
     await expectFits(page, `${size}: a message with its ⋯`);
 
     await more.tap();
     const choice = page.getByRole('menuitem', { name: 'Edit' });
-    expect((await choice.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+    await expect(choice).toBeVisible();
+    await expect.poll(async () => (await choice.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
     await choice.tap();
     const editor = page.getByRole('textbox', { name: editName });
     await expect(editor).toBeVisible();
     for (const name of ['Save', 'Cancel']) {
-      const button = await page.getByRole('button', { name, exact: true }).boundingBox();
-      expect(button?.height ?? 0, name).toBeGreaterThanOrEqual(44);
-      expect(button?.width ?? 0, name).toBeGreaterThanOrEqual(44);
+      const button = page.getByRole('button', { name, exact: true });
+      await expect(button).toBeVisible();
+      await expect.poll(async () => (await button.boundingBox())?.height ?? 0, { message: name }).toBeGreaterThanOrEqual(44);
+      await expect.poll(async () => (await button.boundingBox())?.width ?? 0, { message: name }).toBeGreaterThanOrEqual(44);
     }
     await expectFits(page, `${size}: the editor`);
     await editor.fill(`${body} fixed`);
@@ -344,9 +357,8 @@ for (const [size, options] of phoneSizes.filter(([name]) => name === '320×640' 
     await row(page, id).getByRole('button', { name: /^Edited at/ }).tap();
     const versions = page.getByRole('dialog', { name: 'Earlier versions' });
     await expect(versions.getByRole('list', { name: 'Versions, newest first' }).getByRole('listitem')).toHaveCount(2);
-    const sheet = await versions.boundingBox();
-    expect(sheet?.x ?? -1).toBeGreaterThanOrEqual(0);
-    expect(Math.round(sheet?.width ?? 0)).toBe(page.viewportSize()?.width);
+    await expect.poll(async () => (await versions.boundingBox())?.x ?? -1).toBeGreaterThanOrEqual(0);
+    await expect.poll(async () => Math.round((await versions.boundingBox())?.width ?? 0)).toBe(page.viewportSize()?.width);
     await expectFits(page, `${size}: earlier versions`);
     await versions.getByRole('button', { name: 'Close', exact: true }).tap();
     await expect(versions).toBeHidden();

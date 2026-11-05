@@ -35,7 +35,9 @@ const MAX_PENDING = 4;
 // waits for until the person has passed the operator warning. Declined, or never
 // kept, it does nothing and lapses.
 interface Pasted {
+  readonly handle: string;
   readonly token: string;
+  readonly generation: number;
   readonly expiresAt: number;
 }
 
@@ -93,22 +95,28 @@ export class Session {
     return token;
   }
 
-  // holdPasted sets a checked, pasted credential aside, not in force. A later
-  // paste replaces it.
-  holdPasted(token: string, expiresAt: number): void {
-    this.#pasted = { token, expiresAt };
+  // holdPasted sets a checked, pasted credential aside, not in force, and
+  // returns the one-time handle the renderer gets in its place: after this the
+  // page never passes the credential to main again. The handle is bound to the
+  // identity in force now. A later paste replaces it.
+  holdPasted(token: string, expiresAt: number): string {
+    const handle = `paste-${randomBytes(16).toString('hex')}`;
+    this.#pasted = { handle, token, generation: this.#generation, expiresAt };
+    return handle;
   }
 
-  // takePasted says whether token is the credential holdPasted set aside, still
-  // within its time, and consumes it either way it matches. The caller adopts it.
-  takePasted(token: string, now: number): boolean {
+  // takePasted is the credential set aside under handle, when the handle is the
+  // one issued, still within its time and for the identity still in force. It
+  // consumes the handle whenever it matches, so a handle is used once. The
+  // caller adopts the credential.
+  takePasted(handle: string, now: number): string | null {
     const pasted = this.#pasted;
-    if (pasted === null) return false;
-    const a = Buffer.from(pasted.token);
-    const b = Buffer.from(token);
-    if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
+    if (pasted === null) return null;
+    const a = Buffer.from(pasted.handle);
+    const b = Buffer.from(handle);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
     this.#pasted = null;
-    return now < pasted.expiresAt;
+    return now < pasted.expiresAt && pasted.generation === this.#generation ? pasted.token : null;
   }
 
   capture(): Capture {

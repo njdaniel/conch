@@ -328,12 +328,17 @@ func (m Model) statusRow(width int) string {
 			// already fill the line the name goes, never the hints. lipgloss's
 			// Width only pads, so without this clip a long name wraps and breaks
 			// the layout.
-			if room := width - cellWidth(status) - 3; room > 0 {
+			room := width - cellWidth(status) - 3
+			// The permissions take only the room the status and the hints
+			// leave: a message the user has to read is never cut for them.
+			name += m.permissionsFit(room - cellWidth(name))
+			if room > 0 {
 				status = clip(name, room) + " | " + status
 			}
 		}
 	} else {
 		if name := sanitize(m.userName); name != "" {
+			name += m.permissionsFit(width - cellWidth(statusKeys) - cellWidth(name) - 3 - cellWidth(status))
 			status = name + " | " + status
 		}
 		// One line whatever it holds, so the panes are never pushed up off
@@ -620,4 +625,40 @@ func (m Model) people() []human {
 		return out[i].id < out[j].id
 	})
 	return out
+}
+
+// permissionsSummary is the caller's permissions from whoami, compactly, for
+// the status line: "" for a server that sends none (nothing extra is shown),
+// "perms: none" for one that says the caller holds none. A name the server
+// sent is shown as sent, made safe for the terminal.
+func (m Model) permissionsSummary() string {
+	if !m.permsKnown {
+		return ""
+	}
+	if len(m.permissions) == 0 {
+		return "perms: none"
+	}
+	names := make([]string, len(m.permissions))
+	for i, p := range m.permissions {
+		names[i] = sanitize(string(p))
+	}
+	return "perms: " + strings.Join(names, ", ")
+}
+
+// permissionsFit is " | " and the permissions summary, in full if it fits in
+// room cells, as a count if only that does, and "" when neither does. It is
+// what the status line adds after the name.
+func (m Model) permissionsFit(room int) string {
+	full := m.permissionsSummary()
+	if full == "" {
+		return ""
+	}
+	if cellWidth(full)+3 <= room {
+		return " | " + full
+	}
+	short := "perms: " + strconv.Itoa(len(m.permissions))
+	if cellWidth(short)+3 <= room {
+		return " | " + short
+	}
+	return ""
 }

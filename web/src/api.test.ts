@@ -4,11 +4,11 @@ import {
   channelAuthors,
   claimVoiceShare,
   closeInvite,
+  createMemberLink,
   convertGuest,
   continueAsOperator,
   endSession,
   endSignIn,
-  createInvite,
   fetchFileBytes,
   fileAttachmentPayload,
   forgetStored,
@@ -548,7 +548,7 @@ describe('invites', () => {
     expect(window.localStorage.getItem(key)).toBe(joinerToken);
   });
 
-  it('makes, lists and closes invites with the signed-in credential', async () => {
+  it('lists and closes invites with the signed-in credential', async () => {
     await signedInFrom(window.localStorage, memberToken);
     const invite = {
       id: 4,
@@ -564,13 +564,11 @@ describe('invites', () => {
       credential_lifetime_seconds: 60,
     };
     const calls = serve((c) =>
-      c.method === 'POST' ? json({ invite, code: inviteCode }, 201) : c.method === 'DELETE' ? new Response(null, { status: 204 }) : json({ invites: [invite] }),
+      c.method === 'DELETE' ? new Response(null, { status: 204 }) : json({ invites: [invite] }),
     );
-    expect(await createInvite({ kind: 'personal', channels: ['red'], voice: false })).toEqual({ ok: true, value: { invite, code: inviteCode } });
     expect(await listInvites()).toEqual({ ok: true, value: [invite] });
     expect(await closeInvite(4)).toEqual({ ok: true, value: null });
     expect(calls).toEqual([
-      { path: '/v1/invites', method: 'POST', auth: `Bearer ${memberToken}` },
       { path: '/v1/invites', method: 'GET', auth: `Bearer ${memberToken}` },
       { path: '/v1/invites/4', method: 'DELETE', auth: `Bearer ${memberToken}` },
     ]);
@@ -610,7 +608,7 @@ describe('invites', () => {
   it("answers a refused invite with the server's code and line", async () => {
     await signedInFrom(window.localStorage, memberToken);
     serve(() => json({ code: 'invite_allowance_exceeded', message: 'you already have as many open personal invites as you may' }, 403));
-    expect(await createInvite({ kind: 'personal', channels: ['red'], voice: false })).toEqual({
+    expect(await createMemberLink({ kind: 'member' })).toEqual({
       ok: false,
       failure: 'invalid',
       code: 'invite_allowance_exceeded',

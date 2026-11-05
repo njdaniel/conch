@@ -105,6 +105,7 @@ use crate::error::Error;
 use crate::input::{self, Bounded, Ended, LastLine};
 use crate::keydev::{self, DeviceRule, DeviceState, KeyTimings, Problem};
 use crate::lines::{self, EXIT_GRACE, LineQueue};
+use crate::livekit::ShareAudioOwner;
 use crate::receive::BoxedSink;
 use crate::sdk::Transport;
 use crate::secrets::Scrubber;
@@ -1244,6 +1245,9 @@ pub struct Host<T: Transport> {
     pub devices: Devices,
     /// Where key events come from.
     pub keys: KeySource,
+    /// Who plays other participants' share audio when the session names a companion
+    /// (`--share-audio-owner`).
+    pub share_audio_owner: ShareAudioOwner,
     /// The session loop's waits.
     pub timings: Timings,
     /// The key device's waits.
@@ -1263,6 +1267,7 @@ impl<T: Transport> Host<T> {
         scrubber: Arc<Scrubber>,
         devices: Devices,
         keys: KeySource,
+        share_audio_owner: ShareAudioOwner,
     ) -> Self {
         Self {
             environment,
@@ -1270,6 +1275,7 @@ impl<T: Transport> Host<T> {
             scrubber,
             devices,
             keys,
+            share_audio_owner,
             timings: Timings::default(),
             key_timings: KeyTimings::default(),
             start_timeout: Duration::from_millis(VOICE_CONTROL_START_TIMEOUT_MS),
@@ -1364,11 +1370,13 @@ pub async fn run<T: Transport>(
         scrubber,
         devices,
         keys,
+        share_audio_owner,
         timings,
         key_timings,
         ..
     } = host;
     let setup = Setup {
+        share_audio_owner,
         environment: &environment,
         scrubber: &scrubber,
         keys: &keys,
@@ -1468,6 +1476,7 @@ struct Setup<'a> {
     scrubber: &'a Arc<Scrubber>,
     keys: &'a KeySource,
     key_timings: KeyTimings,
+    share_audio_owner: ShareAudioOwner,
     inputs: &'a mpsc::UnboundedSender<Input>,
 }
 
@@ -1881,6 +1890,7 @@ impl Boot {
             ),
             key_device,
             unreachable_note: None,
+            share_audio_owner: setup.share_audio_owner,
             timings,
         };
         Ok((settings, conchd))

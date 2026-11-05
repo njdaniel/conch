@@ -142,8 +142,11 @@ type approvalsLoaded struct {
 	err      error
 }
 type whoAmILoaded struct {
-	who schema.WhoAmIResponseV1
-	err error
+	// refresh marks a re-read after a permissions change: success updates
+	// what the caller holds and nothing else, and a failure changes nothing.
+	refresh bool
+	who     schema.WhoAmIResponseV1
+	err     error
 }
 type decisionCast struct {
 	err error
@@ -711,6 +714,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.eventsActivity(msg)
 	case eventsInterventionReceived:
 		return m.eventsIntervention(msg)
+	case eventsPermissionsReceived:
+		// The frame says only that they may have changed: whoami is read
+		// again, and the pane and the offered commands follow its answer.
+		if msg.gen != m.ev.gen {
+			return m, m.waitEvent()
+		}
+		return m, tea.Batch(m.waitEvent(), m.reloadWhoAmI())
 	case runRead:
 		return m.runRead(msg)
 	case activityRead:
@@ -730,6 +740,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case eventsRetryDue:
 		return m.eventsRetry(msg)
 	case whoAmILoaded:
+		if msg.refresh {
+			if msg.err == nil {
+				m.role = msg.who.Role
+				m.owner = msg.who.Owner
+				m.permissions = msg.who.Permissions
+				m.permsKnown = msg.who.Permissions != nil || msg.who.PermissionsRevision > 0
+				m = m.permissionsMoved()
+			}
+			return m, nil
+		}
 		if msg.err != nil {
 			m.whoErr = msg.err
 			m.setStatus(modeChannels, whoErrText(msg.err))
@@ -1068,6 +1088,24 @@ func whoErrText(err error) string {
 		return err.Error()
 	}
 	return "whoami: " + err.Error()
+}
+
+// reloadWhoAmI reads whoami again after a permissions change.
+func (m Model) reloadWhoAmI() tea.Cmd {
+	return func() tea.Msg {
+		who, err := m.api.WhoAmI(m.ctx)
+		return whoAmILoaded{who: who, err: err, refresh: true}
+	}
+}
+
+// permissionsMoved drops what the caller can no longer use: the directory's
+// every-channel view needs manage_channels. The offered keys and hints are
+// decided from the permissions each time they are drawn.
+func (m Model) permissionsMoved() Model {
+	if m.dir.all && !m.canManageChannels() {
+		m.dir.all, m.dir.rows, m.dir.loaded = false, nil, false
+	}
+	return m
 }
 
 func (m Model) loadWhoAmI() tea.Cmd {

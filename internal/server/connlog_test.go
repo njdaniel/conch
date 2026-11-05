@@ -126,7 +126,7 @@ func TestSocketCloseReasons(t *testing.T) {
 			want: schema.SocketCloseRevoked},
 		{name: "principal disabled", path: "/v1/voice/ws?channel=alpha",
 			cause: func(t *testing.T, s *setup, _ *websocket.Conn) {
-				if rec := s.f.do(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", s.f.alice.ID), s.f.rootTok, ""); rec.Code != http.StatusNoContent {
+				if rec := s.f.do(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", s.f.alice.ID), s.f.rootTok, ""); rec.Code != http.StatusOK {
 					t.Fatalf("disable = %d %s", rec.Code, rec.Body)
 				}
 			},

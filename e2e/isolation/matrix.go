@@ -676,6 +676,12 @@ func coreMatrixRows() []row {
 			probe: func(_ *world, s subject) probe {
 				return post("/v1/principals/"+id(s.id)+"/credentials/revoke-all", nil)
 			}},
+		// The owner's revoke-all of what someone issued to others (issue
+		// #1024, ADR-014 O13) is an owner route: a member is refused as on
+		// any other.
+		operator("POST /v1/principals/{id}/issued/revoke-all", "revokes what an A member issued to others", aMember, func(_ *world, s subject) probe {
+			return post("/v1/principals/"+id(s.id)+"/issued/revoke-all", nil)
+		}),
 		operator("GET /v1/audit", "reads the audit log", nil, func(*world, subject) probe { return get("/v1/audit") }),
 		// The permissions document (issue #1015): a member neither reads the
 		// matrix nor changes it (ADR-014 O10); the restricted operator's
@@ -692,9 +698,9 @@ func coreMatrixRows() []row {
 		operator("DELETE /v1/hooks/{id}", "revokes a hook", nil, func(*world, subject) probe { return del("/v1/hooks/1") }),
 
 		// Invites.
-		// A member is refused the v1 route whatever it names and whatever its
-		// brake (issue #990): the kind is retired for it, and the answer is
-		// the same for A's channel and for a ghost.
+		// The v1 route makes nothing for anyone (issues #990, #1134): the kind
+		// is retired, and the answer is the same for a member, an operator,
+		// A's channel and a ghost.
 		{route: "POST /v1/invites", what: "invites someone to A's channel", pick: aChannel,
 			want: answer{http.StatusConflict, schema.ErrorCodeInviteKindRetired}, mayNot: answer{http.StatusConflict, schema.ErrorCodeInviteKindRetired},
 			probe: func(_ *world, s subject) probe {

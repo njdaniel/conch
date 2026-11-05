@@ -551,6 +551,7 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/principals/hide":                                        {reauthAlways, "removes people in bulk"},
 	"GET /v1/principals":                                              {reauthNone, "a list"},
 	"POST /v1/principals/{id}/credentials/revoke-all":                 {reauthOnOthers, "bulk revoke of someone else; signing oneself out is not"},
+	"POST /v1/principals/{id}/issued/revoke-all":                      {reauthAlways, "bulk revoke of what someone issued to others, always other people's (issue #1024)"},
 	"GET /v1/audit":                                                   {reauthNonOwners, "audit export: names every member and private channel; an owner read it without a proof before ADR-014 and still does (#1015)"},
 	"GET /v1/permissions":                                             {reauthNone, "a read of the permissions document"},
 	"PUT /v1/permissions":                                             {reauthAlways, "grants rights (ADR-014 §7.2)"},
@@ -578,7 +579,7 @@ var reauthDecisions = map[string]reauthDecision{
 
 	// Every write anyone authenticated may make: in the class only where an
 	// operator's use creates a principal or a link (rule: reauthOperators).
-	"POST /v1/invites":                                    {reauthOperators, "an operator's invite makes principals, with no allowance (members are refused, issue #985)"},
+	"POST /v1/invites":                                    {reauthNone, "retired for everyone: answers 409 invite_kind_retired and makes nothing (issue #1134)"},
 	"POST /v2/invites":                                    {reauthOperators, "an operator's member link makes principals, with no allowance, and may never expire"},
 	"DELETE /v1/invites/{id}":                             {reauthNone, "closes an invite"},
 	"POST /v1/ws-tickets":                                 {reauthNone, "a one-use socket ticket for the caller's own credential, no principal or link"},

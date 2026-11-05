@@ -573,7 +573,8 @@ func TestVoiceTransmitRemovedByName(t *testing.T) {
 			}
 			f.at(700)
 			method, path := tt.remove(f)
-			if code := f.doOrdered(t, method, path, f.rootTok); code != 204 {
+			// A removal answers 204, a disable 200 (issue #1024).
+			if code := f.doOrdered(t, method, path, f.rootTok); code != 204 && code != 200 {
 				t.Fatalf("status = %d", code)
 			}
 			if got := f.transmitRows(t); !slices.Equal(got, tt.want) {
@@ -2074,7 +2075,7 @@ func TestVoiceTransmitTimesAreReadUnderTheLock(t *testing.T) {
 	// bob is disabled while his rooms cannot be read: forgetEverywhere.
 	p.memberRooms = func(context.Context, int64) ([]store.VoiceRoom, error) { return nil, errors.New("store unavailable") }
 	f.at(700)
-	if code := f.doOrdered(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.ids["bob"]), f.rootTok); code != 204 {
+	if code := f.doOrdered(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.ids["bob"]), f.rootTok); code != 200 {
 		t.Fatalf("disable status = %d", code)
 	}
 	// ann's credential is replaced: the room is rotated, forgetRoom.

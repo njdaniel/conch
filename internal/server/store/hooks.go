@@ -123,9 +123,11 @@ func (s *Store) CreateHookWithLabel(ctx context.Context, actor, token, label str
 				return ErrOwnerProtected
 			}
 		}
+		// issued_by is the actor's principal (issue #1024): what the
+		// hook_created row says, so the column and the trail agree.
 		res, err := tx.ExecContext(ctx,
-			"INSERT INTO hooks (token_hash, label, channel_id, principal_id, created_at) VALUES (?, ?, ?, ?, ?)",
-			hashHookToken(token), label, channelID, principalID, now.UnixMilli())
+			"INSERT INTO hooks (token_hash, label, channel_id, principal_id, created_at, issued_by) VALUES (?, ?, ?, ?, ?, ?)",
+			hashHookToken(token), label, channelID, principalID, now.UnixMilli(), nullableID(issuerOf(actor)))
 		if isUniqueConstraintErr(err) {
 			return fmt.Errorf("store: create hook: %w", ErrDuplicate)
 		}

@@ -198,8 +198,10 @@ test.describe('the packaged app against a real conchd', () => {
     const seen = await renderer(page);
     expect(seen).not.toContain(server.member.token);
     expect(app.output()).not.toContain(server.member.token);
-    // Nor in the page's memory: the client pinned the stand-in.
-    expect(await heap(page)).not.toContain(server.member.token);
+    // Nor in the page's memory: the client pinned the stand-in, and the
+    // hand-off named the credential by main's one-time handle. Scanned more
+    // than once, so a copy only a later collection frees is not missed.
+    for (let scan = 0; scan < 3; scan++) expect(await heap(page)).not.toContain(server.member.token);
     page = await signOutThroughSettings(browser, page);
   });
 

@@ -241,10 +241,10 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   keepCredential: {
     limit: 30,
     maxBytes: 8 * 1024,
-    parse: (args) => (args.length === 1 && typeof args[0] === 'string' && /^\S{1,4096}$/u.test(args[0]) ? args : null),
-    run: async ({ service, profiles }, [credential]) => {
+    parse: (args) => (args.length === 1 && typeof args[0] === 'string' && /^paste-[0-9a-f]{32}$/u.test(args[0]) ? args : null),
+    run: async ({ service, profiles }, [handle]) => {
       if (!profiles.signInPermitted()) return false;
-      if (!service.keepCredential(credential as string)) return false;
+      if (!service.keepCredential(handle as string)) return false;
       // The credential is in force: bind it to the profile and keep it.
       return profiles.keptCredential();
     },

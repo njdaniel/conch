@@ -22,8 +22,6 @@ import {
   joinChannelResponseV1,
   serverMembersResponseV1,
   createInterventionRequestV1,
-  createInviteRequestV1,
-  createInviteResponseV1,
   createInviteRequestV2,
   createInviteResponseV2,
   disableJoinersRequestV1,
@@ -244,7 +242,6 @@ export const operations = {
     credentials: token,
   }),
   // The invite's code grants an account, once, to whoever holds it.
-  createInvite: op('POST', '/v1/invites', 'bearer', { request: check(createInviteRequestV1), response: check(createInviteResponseV1), renderer: false, credentials: ['code'] }),
   listInvites: op('GET', '/v1/invites', 'bearer', { response: check(listInvitesResponseV1) }),
   // Member links and the permissions document (ADR-014).
   listMemberLinks: op('GET', '/v2/invites', 'bearer', { response: check(listInvitesResponseV2) }),

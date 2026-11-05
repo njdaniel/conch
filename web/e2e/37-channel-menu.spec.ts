@@ -7,7 +7,7 @@
 // Each test makes its own channels and people, so no other spec's channels
 // change name.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
-import { makeInvite } from './api';
+import { makeMemberLink } from './api';
 import { createChannelResponse, listChannelsResponse, type CreateChannelRequest } from '../src/schema/channel';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { channelButton, credentialField, expect, expectFits, fillAccount, showView, signIn, statusLine, test } from './fixtures';
@@ -105,7 +105,7 @@ for (const [size, options, phone] of sizes) {
     const name = `i${suffix}${phone ? 'p' : 'w'}`;
     await makeChannel(world, first);
     await makeChannel(world, second);
-    const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: [first, second], voice: false, may_invite: true });
+    const made = await makeMemberLink(world, world.tokens.operator, { kind: 'member', landing_channels: [first, second], max_uses: 1 });
 
     const { page } = await meet(options);
     await page.goto(inviteUrl(world, made.code));

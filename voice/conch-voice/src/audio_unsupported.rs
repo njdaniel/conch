@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use conch_voice_audio::{AudioError, Frame, MicRead, MicSource, SpeakerSink};
 
+use crate::devices::DeviceTable;
 use crate::error::Error;
 use crate::receive::Speakers;
 
@@ -35,6 +36,16 @@ impl PipeWire {
     ///
     /// [`Error::Audio`] holding [`AudioError::NoBackend`].
     pub fn connect() -> Result<Self, Error> {
+        Err(no_backend())
+    }
+
+    /// Always fails, as [`PipeWire::connect`] does: there is no list to give. The
+    /// signature is the Linux one, so that `devices` needs no `cfg`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Audio`] holding [`AudioError::NoBackend`].
+    pub fn list_devices(&self, _wait: Duration) -> Result<DeviceTable, Error> {
         Err(no_backend())
     }
 
@@ -86,6 +97,39 @@ mod tests {
         let error = error.unwrap_or_default();
         assert!(error.contains("no audio backend"), "{error}");
         assert!(error.contains(std::env::consts::OS), "{error}");
+    }
+
+    #[test]
+    fn listing_devices_answers_no_backend_and_never_panics() {
+        let listed = PipeWire::connect().and_then(|pipewire| pipewire.list_devices(LISTING_WAIT));
+        assert!(matches!(
+            listed,
+            Err(Error::Audio(AudioError::NoBackend { .. }))
+        ));
+    }
+
+    #[test]
+    fn the_devices_command_prints_one_line_for_it_and_exits_cleanly() {
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let environment = crate::cli::Environment::default();
+        let scrubber = crate::secrets::Scrubber::new();
+        let result = crate::devices_with(
+            false,
+            &environment,
+            &scrubber,
+            || {
+                PipeWire::connect()
+                    .and_then(|pipewire| pipewire.list_devices(LISTING_WAIT))
+                    .map_err(|error| error.to_string())
+            },
+            |_| Ok(()),
+            &mut out,
+            &mut err,
+        );
+        assert!(result.is_ok());
+        let text = String::from_utf8(out).unwrap_or_default();
+        assert!(text.contains("not listed: "), "{text}");
+        assert!(text.contains("no audio backend"), "{text}");
     }
 
     #[test]

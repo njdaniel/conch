@@ -6,8 +6,8 @@
 //
 // The one real credential that passes through is a pasted one (Sign in with a
 // credential). Main checks it and sets it aside; when the client keeps it
-// (write), this store hands it to main to put in force (keepCredential) and
-// keeps the stand-in, which is what the client pins. So the pasted credential
+// (write), this store names it to main by the one-time handle main issued
+// (keepCredential), never by the credential, and keeps the stand-in, which is what the client pins. So the pasted credential
 // is not held here, and an operator's that the person declined at the warning
 // is never put in force: a reload does not find it.
 //
@@ -24,7 +24,16 @@ let held: Held | null = null;
 const preferences = new Map<string, string>();
 // The last hand-over of a pasted credential to main, which every call through
 // the bridge waits for, so that none runs before it is in force.
+// The handle main issued for the credential it last checked: all the page
+// holds of it. Used once.
+let handle: string | null = null;
 let keeping: Promise<unknown> = Promise.resolve();
+
+// holdHandle records the handle main issued for a checked pasted credential
+// (null: none, the check failed).
+export function holdHandle(issued: string | null): void {
+  handle = issued;
+}
 
 // isSessionToken says whether a token the client passes is main's session (the
 // stand-in). Anything else is a candidate that main has not seen.
@@ -51,8 +60,10 @@ export const credentials: CredentialStore = {
   write(token: string, place: Place) {
     if (token !== STAND_IN) {
       const b = bridge();
-      if (b === undefined) return null;
-      keeping = b.keepCredential(token).catch(() => false);
+      const issued = handle;
+      handle = null;
+      if (b === undefined || issued === null) return null;
+      keeping = b.keepCredential(issued).catch(() => false);
     }
     held = { token: STAND_IN, place };
     return held;

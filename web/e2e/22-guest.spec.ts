@@ -14,7 +14,7 @@
 // the joining settings back when it is done.
 import { expect, test } from './fixtures';
 import { joinSettingsResponseV1, type PutJoinSettingsRequestV1 } from '../src/schema/guest';
-import { createInviteResponseV1, type CreateInviteRequestV1 } from '../src/schema/invite';
+import { makeMemberLink } from './api';
 import { call, inviteUrl, loadWorld, ok, setChannelVisibility, type World } from './world';
 
 async function setJoining(world: World, request: PutJoinSettingsRequestV1): Promise<void> {
@@ -46,8 +46,7 @@ test('G6 the bare address offers an account and no guest entry', async ({ meet, 
 });
 
 test('G6 an invite offers an account form and no choice of a guest visit', async ({ meet, world }) => {
-  const request: CreateInviteRequestV1 = { kind: 'open', channels: ['general'], voice: false };
-  const made = await ok(world, world.tokens.operator, 'POST', '/v1/invites', createInviteResponseV1, request);
+  const made = await makeMemberLink(world, world.tokens.operator, { kind: 'member', landing_channels: ['general'] });
   const { page } = await meet();
   await page.goto(inviteUrl(world, made.code));
   await expect(page.getByLabel('Choose a password')).toBeVisible();
@@ -65,11 +64,12 @@ test('G6 every route that would make a guest, or admit one, is refused', async (
   const redeemed = await call(world, operator, 'POST', '/v1/invites/redeem-guest', { code: 'conch_inv_unused' });
   expect(redeemed.status).toBe(403);
   expect(redeemed.body).toMatchObject({ code: 'guests_disabled' });
-  // An invite that admits a guest cannot be made.
+  // An invite that admits a guest cannot be made: POST /v1/invites is retired
+  // for everyone, an operator included (issue #1134), whatever join_as asks.
   for (const joinAs of ['guest', 'both'] as const) {
     const made = await call(world, operator, 'POST', '/v1/invites', { kind: 'open', channels: ['general'], voice: false, join_as: joinAs });
     expect(made.status, `join_as ${joinAs}`).toBe(409);
-    expect(made.body).toMatchObject({ code: 'join_policy_conflict' });
+    expect(made.body).toMatchObject({ code: 'invite_kind_retired' });
   }
   // Nor can the settings turn guests on.
   for (const request of [{ guests_enabled: true }, { open_joining: 'guest' }, { open_joining: 'both' }]) {

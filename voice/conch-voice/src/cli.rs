@@ -43,6 +43,7 @@ use conch_voice_control::{
 use log::LevelFilter;
 
 use crate::error::Error;
+use crate::livekit::ShareAudioOwner;
 use crate::secrets::one_line;
 
 /// The environment variable that names the server, as for `conch`.
@@ -134,6 +135,29 @@ fn log_level(text: &str) -> Result<LevelFilter, String> {
         .map_err(|_| "expected off, error, warn, info, debug or trace".to_owned())
 }
 
+/// `--share-audio-owner`, for `join` and `managed` alone: who plays other participants'
+/// share audio when the session names a companion (issue #934). `keys` and `config` do not
+/// take it.
+fn share_audio_owner_arg() -> Arg {
+    Arg::new("share-audio-owner")
+        .long("share-audio-owner")
+        .value_name("OWNER")
+        .value_parser(clap::builder::PossibleValuesParser::new(["helper", "companion"]))
+        .default_value("helper")
+        .help("Who plays other participants' share audio when the session names a companion: helper (this program) or companion (the desktop renderer's)")
+}
+
+/// The value clap accepted for [`share_audio_owner_arg`].
+fn share_audio_owner(matches: &clap::ArgMatches) -> ShareAudioOwner {
+    match matches
+        .get_one::<String>("share-audio-owner")
+        .map(String::as_str)
+    {
+        Some("companion") => ShareAudioOwner::Companion,
+        _ => ShareAudioOwner::Helper,
+    }
+}
+
 /// What `join` was given on the command line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JoinArgs {
@@ -151,6 +175,9 @@ pub struct JoinArgs {
     pub log_level: LevelFilter,
     /// `--stdin-keys`: take commands from standard input only, and open no key device.
     pub stdin_keys: bool,
+    /// `--share-audio-owner`: who plays other participants' share audio when `conchd`
+    /// names a companion. The helper unless the owner says otherwise.
+    pub share_audio_owner: ShareAudioOwner,
 }
 
 /// What `managed` was given on the command line. Every field but the log level is for
@@ -170,6 +197,9 @@ pub struct ManagedArgs {
     /// descriptor 3. Not secret. The desktop owner passes it; nobody types it
     /// (`docs/design/linux-desktop.md` §5.2). Checked by [`crate::channel`], not here.
     pub events_pipe: Option<PathBuf>,
+    /// `--share-audio-owner`, passed by an owner that runs a companion (`helper` for the
+    /// TUI, which passes nothing).
+    pub share_audio_owner: ShareAudioOwner,
 }
 
 /// What the command line asked for.
@@ -264,6 +294,7 @@ pub fn command() -> Command {
                 .action(ArgAction::SetTrue)
                 .help("Take down, up, mute, deafen and quit from standard input only, one per line: do not open the key device the configuration file names"),
         )
+        .arg(share_audio_owner_arg())
         .arg(
             Arg::new("log-level")
                 .long("log-level")
@@ -315,6 +346,7 @@ pub fn command() -> Command {
                 .hide(true)
                 .help("Test only: read key records from this named pipe instead of the key device voice.toml names"),
         )
+        .arg(share_audio_owner_arg())
         .arg(
             Arg::new("events-pipe")
                 .long("events-pipe")
@@ -524,6 +556,7 @@ where
                 events_pipe: managed
                     .get_one::<OsString>("events-pipe")
                     .map(PathBuf::from),
+                share_audio_owner: share_audio_owner(managed),
             }));
         }
         Some(("devices", devices)) => {
@@ -567,6 +600,7 @@ where
             .copied()
             .unwrap_or(LevelFilter::Warn),
         stdin_keys: join.get_flag("stdin-keys"),
+        share_audio_owner: share_audio_owner(join),
     }))
 }
 
@@ -979,6 +1013,7 @@ mod tests {
                 sink: SinkChoice::PipeWire,
                 log_level: LevelFilter::Warn,
                 stdin_keys: false,
+                share_audio_owner: ShareAudioOwner::Helper,
             }
         );
     }
@@ -1040,6 +1075,75 @@ mod tests {
         assert!(parse(["conch-voice", "listen"]).is_err());
     }
 
+    /// Issue #934: `--share-audio-owner` is on `join` and `managed` alone, takes `helper`
+    /// or `companion` and nothing else, and defaults to `helper`.
+    #[test]
+    fn the_share_audio_owner_flag_is_parsed_for_join_and_managed_only() {
+        let owner = |line: &[&str]| match parse(line.iter().copied()) {
+            Ok(Invocation::Join(args)) => Ok(args.share_audio_owner),
+            Ok(Invocation::Managed(args)) => Ok(args.share_audio_owner),
+            Ok(other) => panic!("{line:?}: {other:?}"),
+            Err(error) => Err(error.exit_code()),
+        };
+        let table: [(&[&str], Result<ShareAudioOwner, i32>); 11] = [
+            (&["conch-voice", "join"], Ok(ShareAudioOwner::Helper)),
+            (&["conch-voice", "managed"], Ok(ShareAudioOwner::Helper)),
+            (
+                &["conch-voice", "join", "--share-audio-owner", "helper"],
+                Ok(ShareAudioOwner::Helper),
+            ),
+            (
+                &["conch-voice", "join", "--share-audio-owner", "companion"],
+                Ok(ShareAudioOwner::Companion),
+            ),
+            (
+                &["conch-voice", "managed", "--share-audio-owner", "helper"],
+                Ok(ShareAudioOwner::Helper),
+            ),
+            (
+                &["conch-voice", "managed", "--share-audio-owner", "companion"],
+                Ok(ShareAudioOwner::Companion),
+            ),
+            (
+                &["conch-voice", "managed", "--share-audio-owner=companion"],
+                Ok(ShareAudioOwner::Companion),
+            ),
+            (
+                &["conch-voice", "managed", "--share-audio-owner", "both"],
+                Err(2),
+            ),
+            (
+                &["conch-voice", "managed", "--share-audio-owner", "Companion"],
+                Err(2),
+            ),
+            (
+                &["conch-voice", "managed", "--share-audio-owner", ""],
+                Err(2),
+            ),
+            (&["conch-voice", "join", "--share-audio-owner"], Err(2)),
+        ];
+        for (line, want) in table {
+            assert_eq!(owner(line), want, "{line:?}");
+        }
+        for other in [
+            &[
+                "conch-voice",
+                "keys",
+                "/dev/input/event0",
+                "--share-audio-owner",
+                "helper",
+            ][..],
+            &["conch-voice", "config", "--share-audio-owner", "helper"],
+            &["conch-voice", "devices", "--share-audio-owner", "helper"],
+        ] {
+            assert_eq!(
+                parse(other.iter().copied()).unwrap_err().exit_code(),
+                2,
+                "{other:?}"
+            );
+        }
+    }
+
     #[test]
     fn managed_takes_no_channel_server_or_login_and_hides_its_test_options() {
         assert_eq!(
@@ -1050,6 +1154,7 @@ mod tests {
                 sink: SinkChoice::PipeWire,
                 test_key_device: None,
                 events_pipe: None,
+                share_audio_owner: ShareAudioOwner::Helper,
             })
         );
         assert_eq!(
@@ -1072,6 +1177,7 @@ mod tests {
                 sink: SinkChoice::Count(vec![440.0]),
                 test_key_device: Some(PathBuf::from("/tmp/FAKE-pipe")),
                 events_pipe: None,
+                share_audio_owner: ShareAudioOwner::Helper,
             })
         );
         // Nothing that names what to join, or where, or as whom.

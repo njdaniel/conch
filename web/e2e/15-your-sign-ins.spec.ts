@@ -4,7 +4,7 @@
 // the spec spends nothing of the per-address bucket that invites and
 // sign-in links share, and joins no channel another spec reads.
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
-import { makeInvite } from './api';
+import { makeMemberLink } from './api';
 import { accountPassword, consoleErrors, credentialField, expect, expectFits, fillAccount, phones, signIn, statusLine, test } from './fixtures';
 import { call, inviteUrl, ok, type World } from './world';
 
@@ -74,7 +74,7 @@ async function person(world: World, secrets: string[], name: string): Promise<st
 
 test('G7a a member adds a device with a link revealed once, the other browser switches account on a yes, and the new sign-in is ended', async ({ meet, secrets, world }) => {
   secrets.push(accountPassword);
-  const invite = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
+  const invite = await makeMemberLink(world, world.tokens.operator, { kind: 'member', landing_channels: ['general'], max_uses: 1 });
   const name = `g7a-dev-${String(Date.now())}`;
   const laptop = await meet({ viewport: { width: 1280, height: 800 } });
   await laptop.page.goto(inviteUrl(world, invite.code));
@@ -150,7 +150,7 @@ test('F7 a password change that stays signed in logs no console error and sends 
   const first = accountPassword;
   const second = `${accountPassword} again`;
   secrets.push(first, second);
-  const invite = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
+  const invite = await makeMemberLink(world, world.tokens.operator, { kind: 'member', landing_channels: ['general'], max_uses: 1 });
   const name = `f7-${String(Date.now())}`;
   const { page } = await meet({ viewport: { width: 1440, height: 900 } });
   const errors = consoleErrors(page);

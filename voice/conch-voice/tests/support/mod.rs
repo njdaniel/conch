@@ -23,6 +23,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use conch_voice::Error;
+use conch_voice::livekit::ShareAudioOwner;
 use conch_voice::output::Output;
 use conch_voice::presence::PresenceTimings;
 use conch_voice::receive::BoxedSink;
@@ -221,6 +222,8 @@ pub struct Setup {
     pub key_device: Option<String>,
     /// What the session adds when no connection to `conchd` could be made.
     pub unreachable_note: Option<String>,
+    /// `--share-audio-owner`.
+    pub share_audio_owner: ShareAudioOwner,
     /// Write as the real client does, through the queue and its writer thread, to a
     /// [`Reader`] that the test can stop. Otherwise each line is written where it is
     /// shown, which keeps a test's view of the output exact.
@@ -264,6 +267,7 @@ impl Default for Setup {
             also_stdout: false,
             key_device: None,
             unreachable_note: None,
+            share_audio_owner: ShareAudioOwner::Helper,
             queued: false,
             talk_mode: TalkMode::PushToTalk,
             open_threshold_db: DEFAULT_OPEN_THRESHOLD_DB,
@@ -378,6 +382,7 @@ impl Rig {
             level: transmit::level_config(setup.open_threshold_db, setup.open_hang_ms),
             key_device: setup.key_device,
             unreachable_note: setup.unreachable_note,
+            share_audio_owner: setup.share_audio_owner,
             timings: setup.timings,
         };
         let out = Written::default();

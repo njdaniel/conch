@@ -116,6 +116,8 @@ struct State {
     /// A grant for a net, listed before the channel's own, in every session.
     with_net_grant: bool,
     livekit_url: String,
+    /// The companion identity the sessions carry; none when `None`.
+    companion_identity: Option<String>,
     /// Answers to the next transmit reports; when empty, 204.
     transmit_plan: VecDeque<Reply>,
     on_report: Option<OnReport>,
@@ -152,6 +154,7 @@ impl Stub {
             can_publish: true,
             with_net_grant: false,
             livekit_url: "ws://livekit.invalid:7880".to_owned(),
+            companion_identity: None,
             transmit_plan: VecDeque::new(),
             on_report: None,
             presence: None,
@@ -215,6 +218,12 @@ impl Stub {
     /// The LiveKit address the sessions issued from now on carry.
     pub fn livekit_url(&self, url: &str) {
         self.lock().livekit_url = url.to_owned();
+    }
+
+    /// The sessions issued from now on name this companion identity (`Some("")` writes an
+    /// empty one), or none.
+    pub fn companion_identity(&self, identity: Option<&str>) {
+        self.lock().companion_identity = identity.map(str::to_owned);
     }
 
     /// The next transmit report gets this answer instead of 204.
@@ -298,15 +307,15 @@ fn session(state: &mut State) -> Reply {
         "can_publish": state.can_publish,
         "expires_at": "2026-10-09T12:00:45.000Z",
     }));
-    Reply::Json(
-        200,
-        serde_json::json!({
-            "livekit_url": state.livekit_url,
-            "identity": OWN_IDENTITY,
-            "rooms": rooms,
-        })
-        .to_string(),
-    )
+    let mut body = serde_json::json!({
+        "livekit_url": state.livekit_url,
+        "identity": OWN_IDENTITY,
+        "rooms": rooms,
+    });
+    if let Some(companion) = &state.companion_identity {
+        body["companion_identity"] = companion.clone().into();
+    }
+    Reply::Json(200, body.to_string())
 }
 
 /// What whoami says of a person allowed voice.

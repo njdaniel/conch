@@ -742,7 +742,7 @@ func TestSessionsEndWithTheirCredential(t *testing.T) {
 		}, false, "credential_revoked", http.StatusOK},
 		{"disable", func(t *testing.T, f *sessionFixture, _ int64) *httptest.ResponseRecorder {
 			return f.do(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.alice.ID), f.rootTok, "")
-		}, false, "principal_disabled", http.StatusNoContent},
+		}, false, "principal_disabled", http.StatusOK},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

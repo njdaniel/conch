@@ -63,10 +63,17 @@ const conchd: Handler = (request, res) => {
   }
 };
 
+// pasteHandle checks the canary as a pasted credential and gives the handle main issued.
+async function pasteHandle(service: Service): Promise<string> {
+  const outcome = await service.signInWithCredential(CANARY_TOKEN);
+  if (!outcome.ok || outcome.handle === undefined) throw new Error('no handle issued');
+  return outcome.handle;
+}
+
 // A pasted credential, checked and kept, as the page does for a member's.
 async function paste(service: Service): Promise<void> {
-  expect(await service.signInWithCredential(CANARY_TOKEN)).toMatchObject({ ok: true });
-  expect(service.keepCredential(CANARY_TOKEN)).toBe(true);
+  const handle = await pasteHandle(service);
+  expect(service.keepCredential(handle)).toBe(true);
 }
 
 async function ready(handler: Handler = conchd) {
@@ -165,22 +172,31 @@ describe('sign-in', () => {
     expect(session.signedIn).toBe(false);
   });
 
-  it('checks a pasted credential, and puts it in force only when the page keeps it', async () => {
+  it('checks a pasted credential, and puts it in force only when the page keeps it by its handle', async () => {
     const { service, session } = await ready();
     expect(await service.signInWithCredential('not-the-token')).toMatchObject({ ok: false, kind: 'unauthorized' });
     expect(session.signedIn).toBe(false);
-    expect(service.keepCredential('not-the-token')).toBe(false);
-    expect(await service.signInWithCredential(CANARY_TOKEN)).toEqual({ ok: true, who, answer: {} });
+    expect(service.keepCredential('paste-nothing')).toBe(false);
+    const outcome = await service.signInWithCredential(CANARY_TOKEN);
+    expect(outcome).toMatchObject({ ok: true, who, answer: {} });
+    const handle = (outcome as { handle: string }).handle;
+    expect(handle).toMatch(/^paste-[0-9a-f]{32}$/u);
+    expect(handle).not.toContain(CANARY_TOKEN);
     // Checked, set aside, not in force: nothing runs as it, and a reload finds nothing.
     expect(session.signedIn).toBe(false);
     expect(await service.request({ operation: 'listChannels' })).toEqual({ kind: 'unauthorized' });
     expect(await service.restore()).toMatchObject({ ok: false, kind: 'unauthorized' });
-    // Kept with some other credential: refused, and the one set aside is gone too.
-    expect(service.keepCredential(`${CANARY_TOKEN}x`)).toBe(false);
-    expect(service.keepCredential(CANARY_TOKEN)).toBe(true);
-    expect(session.signedIn).toBe(true);
-    // Once only.
+    // The credential itself is no key to it, and presenting it consumes nothing.
     expect(service.keepCredential(CANARY_TOKEN)).toBe(false);
+    expect(session.signedIn).toBe(false);
+    // A wrong handle is refused and changes nothing.
+    expect(service.keepCredential(`${handle}0`)).toBe(false);
+    // The right one is accepted once only.
+    expect(service.keepCredential(handle)).toBe(true);
+    expect(session.signedIn).toBe(true);
+    expect(service.keepCredential(handle)).toBe(false);
+    // A fresh paste gets a fresh handle.
+    expect(await pasteHandle(service)).not.toBe(handle);
   });
 
   it('lets a pasted credential lapse, and drops it with any change of identity', async () => {
@@ -189,13 +205,30 @@ describe('sign-in', () => {
     const session = new Session();
     const service = new Service({ client: new Client({ fetch: globalThis.fetch, session }), session, now: () => now, log: () => undefined });
     session.setOrigin(fake.origin);
-    await service.signInWithCredential(CANARY_TOKEN);
+    const lapsing = await pasteHandle(service);
     now += PASTED_TTL_MS;
-    expect(service.keepCredential(CANARY_TOKEN)).toBe(false);
+    expect(service.keepCredential(lapsing)).toBe(false);
     expect(session.signedIn).toBe(false);
-    await service.signInWithCredential(CANARY_TOKEN);
+    const ended = await pasteHandle(service);
     expect(await service.signOut()).toBe('ended');
-    expect(service.keepCredential(CANARY_TOKEN)).toBe(false);
+    expect(service.keepCredential(ended)).toBe(false);
+  });
+
+  it('refuses a handle issued under another activation: another server, or an earlier generation', async () => {
+    const first = await ready();
+    const second = await ready();
+    const fromFirst = await pasteHandle(first.service);
+    // Another profile's service never issued it.
+    expect(second.service.keepCredential(fromFirst)).toBe(false);
+    expect(second.session.signedIn).toBe(false);
+    // The same service after its server address changed.
+    first.session.setOrigin(second.fake.origin);
+    expect(first.service.keepCredential(fromFirst)).toBe(false);
+    expect(first.session.signedIn).toBe(false);
+    // Held and then the identity moves on: a credential adopted meanwhile.
+    const held = await pasteHandle(first.service);
+    first.session.adopt('some-other-token');
+    expect(first.service.keepCredential(held)).toBe(false);
   });
 
   it('revokes the credential a change of server ends, and not one a sign-in only repeats', async () => {

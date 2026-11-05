@@ -522,6 +522,7 @@ async fn reconnecting_forces_the_gate_shut_and_a_held_key_does_not_resume() {
 /// gate's own count of frames is what ends the transmission.
 #[tokio::test]
 async fn the_gates_own_cap_ends_a_transmission_when_no_timer_fires() {
+    use conch_voice::livekit::Subscription;
     use conch_voice::sdk::{RoomHandle, Transport};
     use conch_voice::secrets::Scrubber;
     use conch_voice::transmit::{self, BoxedMic, TxCommand, TxEvent};
@@ -532,7 +533,11 @@ async fn the_gates_own_cap_ends_a_transmission_when_no_timer_fires() {
 
     let sdk = FakeSdk::new(Scrubber::new());
     let (room, _events) = sdk
-        .connect("ws://livekit.invalid", &Secret::new("FAKE-join-token"))
+        .connect(
+            "ws://livekit.invalid",
+            &Secret::new("FAKE-join-token"),
+            &Subscription::default(),
+        )
         .await
         .unwrap();
     let (_track, feed) = room.publish_microphone().await.unwrap();
@@ -940,6 +945,7 @@ async fn in_open_mode_the_talk_key_opens_nothing_a_lost_key_device_blocks_nothin
 /// tail, and no frame follows it.
 #[tokio::test]
 async fn a_change_of_talk_mode_shuts_the_gate_at_once_and_no_frame_follows() {
+    use conch_voice::livekit::Subscription;
     use conch_voice::sdk::{RoomHandle, Transport};
     use conch_voice::secrets::Scrubber;
     use conch_voice::transmit::{self, BoxedMic, TxCommand, TxEvent};
@@ -950,7 +956,11 @@ async fn a_change_of_talk_mode_shuts_the_gate_at_once_and_no_frame_follows() {
 
     let sdk = FakeSdk::new(Scrubber::new());
     let (room, _events) = sdk
-        .connect("ws://livekit.invalid", &Secret::new("FAKE-join-token"))
+        .connect(
+            "ws://livekit.invalid",
+            &Secret::new("FAKE-join-token"),
+            &Subscription::default(),
+        )
         .await
         .unwrap();
     let (_track, feed) = room.publish_microphone().await.unwrap();

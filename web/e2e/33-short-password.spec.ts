@@ -5,7 +5,7 @@
 // form says anything of 15 characters. The letters are unlikely in the
 // page's own words, so the end-of-test secret scan means something.
 import type { Page } from '@playwright/test';
-import { makeInvite } from './api';
+import { makeMemberLink } from './api';
 import { credentialField, expect, fillAccount, signInWithPassword, statusLine, test } from './fixtures';
 import { createSignInLinkResponseV1 } from '../src/schema/signin';
 import { call, inviteUrl, ok, principalId } from './world';
@@ -23,7 +23,7 @@ async function keepToken(page: Page, secrets: string[]): Promise<string> {
 
 test('G977 a four-letter password creates an account, signs in, changes and resets', async ({ meet, secrets, world }) => {
   secrets.push(first, second, third);
-  const invite = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
+  const invite = await makeMemberLink(world, world.tokens.operator, { kind: 'member', landing_channels: ['general'], max_uses: 1 });
   const name = `g977-${String(Date.now())}`;
   const { page } = await meet();
   await page.goto(inviteUrl(world, invite.code));

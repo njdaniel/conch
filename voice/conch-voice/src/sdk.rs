@@ -19,6 +19,8 @@ use std::future::Future;
 
 use conch_voice_api::Secret;
 use conch_voice_audio::{Frame, GatedFrame};
+
+use crate::livekit::Subscription;
 use tokio::sync::mpsc;
 
 /// Why the SDK says a connection ended (the second table of the design note's §5).
@@ -120,12 +122,14 @@ pub trait Transport: Send + Sync + 'static {
     /// A joined room.
     type Room: RoomHandle;
 
-    /// Joins the room `token` is for, at `url`. The token is used for this and kept by
-    /// nothing this crate owns.
+    /// Joins the room `token` is for, at `url`, subscribed to the tracks `subscription`
+    /// wants. The token is used for this and kept by nothing this crate owns. The rule is
+    /// built from the session this join is for, so none outlives its session.
     fn connect(
         &self,
         url: &str,
         token: &Secret,
+        subscription: &Subscription,
     ) -> impl Future<Output = Result<Joined<Self::Room>, SdkError>> + Send;
 }
 
