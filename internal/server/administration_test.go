@@ -207,6 +207,7 @@ func TestAdministrationRouteMatrix(t *testing.T) {
 		{"bulk hide principals", "POST", "/v1/principals/hide", `{}`, "", operatorRoute(bad)},
 		{"list principals", "GET", "/v1/principals", "", "", operatorRoute(ok)},
 		{"revoke all credentials", "POST", "/v1/principals/999999/credentials/revoke-all", "", "", selfRoute(want{http.StatusNotFound, "principal_not_found", false})},
+		{"revoke what a principal issued", "POST", "/v1/principals/999999/issued/revoke-all", "", "", ownerRoute(want{http.StatusNotFound, "principal_not_found", false})},
 		{"create a hook", "POST", "/v1/hooks", `{}`, "", operatorRoute(bad)},
 		{"list hooks", "GET", "/v1/hooks", "", "", operatorRoute(ok)},
 		{"revoke a hook", "DELETE", "/v1/hooks/999999", "", "", operatorRoute(want{http.StatusNotFound, "hook_not_found", false})},

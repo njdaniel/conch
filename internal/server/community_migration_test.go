@@ -85,6 +85,8 @@ func TestCommunityMigrationApprovalChain(t *testing.T) {
 	for _, stmt := range []string{
 		// Undo migration 41's DDL (archived_at), then migration 40's: the
 		// database is as a server at 39 held it.
+		"ALTER TABLE credentials DROP COLUMN issued_by", // migration 42 (issue #1024)
+		"ALTER TABLE hooks DROP COLUMN issued_by",       // migration 42 (issue #1024)
 		"ALTER TABLE channels DROP COLUMN archived_at",
 		"DROP TRIGGER channels_default_public_insert",
 		"DROP TRIGGER channels_default_public_update",

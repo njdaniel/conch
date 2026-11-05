@@ -331,7 +331,7 @@ func TestRedeemWSTicket(t *testing.T) {
 					t.Fatal(err)
 				}
 				tk := f.ticketFor(t, tok)
-				if rec := f.do(t, "POST", f.disablePath(p.ID), f.rootTok, ""); rec.Code != 204 {
+				if rec := f.do(t, "POST", f.disablePath(p.ID), f.rootTok, ""); rec.Code != 200 {
 					t.Fatalf("disable = %d", rec.Code)
 				}
 				return wsTicketRequest(tk)

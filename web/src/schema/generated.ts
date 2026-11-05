@@ -2597,6 +2597,30 @@ export const roleChangeRequestV1 = object<RoleChangeRequestV1>({
   owner: optional(bool),
 });
 
+// schema.IssuedKind: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownIssuedKind is the known ones.
+export type KnownIssuedKind = 'credential' | 'hook';
+export type IssuedKind = KnownIssuedKind | (string & {});
+
+export const issuedKind = tolerant<KnownIssuedKind>({ credential: true, hook: true });
+
+// schema.IssuedByOperatorV1
+export interface IssuedByOperatorV1 {
+  kind: IssuedKind;
+  id: number;
+  principal_id: number;
+  issued_by: number;
+  issued_at: string;
+}
+
+export const issuedByOperatorV1 = object<IssuedByOperatorV1>({
+  kind: issuedKind,
+  id: int,
+  principal_id: int,
+  issued_by: int,
+  issued_at: timestamp,
+});
+
 // schema.RoleChangeResponseV1
 export interface RoleChangeResponseV1 {
   principal: PrincipalAdminV1;
@@ -2606,6 +2630,7 @@ export interface RoleChangeResponseV1 {
   hooks_revoked: number;
   live_credentials: number;
   hooks_bound: number;
+  issued_to_others?: IssuedByOperatorV1[];
 }
 
 export const roleChangeResponseV1 = object<RoleChangeResponseV1>({
@@ -2616,6 +2641,7 @@ export const roleChangeResponseV1 = object<RoleChangeResponseV1>({
   hooks_revoked: int,
   live_credentials: int,
   hooks_bound: int,
+  issued_to_others: optional(array(issuedByOperatorV1)),
 });
 
 // schema.GuestAdminV1
@@ -3547,30 +3573,6 @@ export const permissionPresetV1 = object<PermissionPresetV1>({
   member: array(permission),
 });
 
-// schema.IssuedKind: closed on the server and client-tolerant, so a value this
-// bundle does not know is kept and shown by its name; KnownIssuedKind is the known ones.
-export type KnownIssuedKind = 'credential' | 'hook';
-export type IssuedKind = KnownIssuedKind | (string & {});
-
-export const issuedKind = tolerant<KnownIssuedKind>({ credential: true, hook: true });
-
-// schema.IssuedByOperatorV1
-export interface IssuedByOperatorV1 {
-  kind: IssuedKind;
-  id: number;
-  principal_id: number;
-  issued_by: number;
-  issued_at: string;
-}
-
-export const issuedByOperatorV1 = object<IssuedByOperatorV1>({
-  kind: issuedKind,
-  id: int,
-  principal_id: int,
-  issued_by: int,
-  issued_at: timestamp,
-});
-
 // schema.PermissionRole: closed on the server and client-tolerant, so a value this
 // bundle does not know is kept and shown by its name; KnownPermissionRole is the known ones.
 export type KnownPermissionRole = 'member' | 'operator';
@@ -3646,6 +3648,26 @@ export interface PermissionsChangedV1 {
 
 export const permissionsChangedV1 = object<PermissionsChangedV1>({
   schema: vocab<typeof permissionsChangedV1Schema>({ [permissionsChangedV1Schema]: true }),
+});
+
+// schema.DisablePrincipalResponseV1
+export interface DisablePrincipalResponseV1 {
+  issued_to_others?: IssuedByOperatorV1[];
+}
+
+export const disablePrincipalResponseV1 = object<DisablePrincipalResponseV1>({
+  issued_to_others: optional(array(issuedByOperatorV1)),
+});
+
+// schema.RevokeIssuedResponseV1
+export interface RevokeIssuedResponseV1 {
+  credentials_revoked: number;
+  hooks_revoked: number;
+}
+
+export const revokeIssuedResponseV1 = object<RevokeIssuedResponseV1>({
+  credentials_revoked: int,
+  hooks_revoked: int,
 });
 
 // schema.CreateChannelRequestV1

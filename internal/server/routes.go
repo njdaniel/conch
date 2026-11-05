@@ -208,6 +208,10 @@ func (s *Server) routeTable() []route {
 		// Operators, or the principal itself: "sign out everywhere" (issue
 		// #439; checked in the handler).
 		rt("POST /v1/principals/{id}/credentials/revoke-all", accessOperatorOrSelf, hf(s.handleRevokeAllCredentials)),
+		// The owner's one step revoking everything {id} issued to others
+		// (ADR-014 O13, issue #1024): what a demotion, a disable or
+		// act_as_members going listed. See disable.go.
+		rt("POST /v1/principals/{id}/issued/revoke-all", accessOwner, hf(s.handleRevokeIssued)),
 		// The audit export needs read_audit_log (ADR-014 design §7.2), an
 		// owner's alone by default, and a recent proof from anyone but an
 		// owner (reauthNonOwners): the trail names every member and every
@@ -415,6 +419,9 @@ var recentAuthRoutes = map[string]reauthRule{
 	// Signing out everywhere is anyone's for themself; an operator doing it
 	// to someone else is the bulk revoke of the rule.
 	"POST /v1/principals/{id}/credentials/revoke-all": reauthOnOthers,
+	// Revoking everything someone issued to others is a bulk revoke of
+	// other people's credentials, always someone else's (issue #1024).
+	"POST /v1/principals/{id}/issued/revoke-all": reauthAlways,
 	// A member link makes principals; an operator's has no allowance and may
 	// never expire. A member's links are not in the class. POST /v1/invites
 	// makes nothing for anyone (issue #1134), so it is not in the class.

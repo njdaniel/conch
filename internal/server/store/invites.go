@@ -943,7 +943,9 @@ func (s *Store) redeemInvite(ctx context.Context, codeHash, name, record string,
 		// expiry moves to the invite's lifetime past each day's first use.
 		lifetime := time.Duration(r.lifetimeMs) * time.Millisecond
 		exp := now.Add(lifetime)
-		cred, err := insertCredentialTx(ctx, tx, pid, fmt.Sprintf("invite %d", r.id), token, now, &exp, lifetime)
+		// Issued by the invite, not by a principal: issued_by stays NULL
+		// (issue #1024).
+		cred, err := insertCredentialTx(ctx, tx, pid, fmt.Sprintf("invite %d", r.id), token, now, &exp, lifetime, 0)
 		if err != nil {
 			return err
 		}
