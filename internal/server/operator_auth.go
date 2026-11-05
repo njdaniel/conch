@@ -504,7 +504,12 @@ func (s *Server) recentAuthGate(rule reauthRule, next http.Handler) http.Handler
 				return
 			}
 		}
-		if !cred.Session || (cred.RecentAuthUntil != nil && s.now().Before(*cred.RecentAuthUntil)) {
+		// An agent never signs in: whatever bounds its credential carries (an
+		// AI administrator's is renewable), it is a script's and passes, as
+		// every script credential does (ai-administrators §3.4 point 4). The
+		// class check before this gate admits an agent only through the admin
+		// door's dispatch; its compensating control is the approval gate.
+		if !cred.Session || caller.Kind == store.PrincipalAgent || (cred.RecentAuthUntil != nil && s.now().Before(*cred.RecentAuthUntil)) {
 			next.ServeHTTP(w, r)
 			return
 		}

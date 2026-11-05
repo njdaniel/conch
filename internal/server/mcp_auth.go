@@ -25,6 +25,10 @@ type mcpIdentity struct {
 	// credentialID is the stored credential the request presented, or 0 when
 	// it authenticated through a deprecated static --mcp-token mapping.
 	credentialID int64
+	// credential is what the middleware would have learned of that
+	// credential, for the admin door's dispatch (issue #1331); zero for a
+	// static mapping.
+	credential store.RequestCredential
 }
 
 // mcpIdentityKey carries the authenticated identity from the /mcp wrapper to
@@ -91,14 +95,14 @@ func (s *Server) authenticateMCP(r *http.Request) (mcpIdentity, bool) {
 	}
 	ctx := r.Context()
 
-	principal, credentialID, err := s.store.ResolveCredentialDetail(ctx, token)
+	principal, cred, err := s.store.ResolveFullCredential(ctx, token)
 	switch {
 	case err == nil:
 		// MCP is the agent front-end: a human's credential is not accepted here.
 		if principal.Kind != store.PrincipalAgent {
 			return mcpIdentity{}, false
 		}
-		return mcpIdentity{principalID: principal.ID, credentialID: credentialID}, true
+		return mcpIdentity{principalID: principal.ID, credentialID: cred.ID, credential: cred}, true
 	case !errors.Is(err, store.ErrCredentialInvalid):
 		// The store failed. Fail closed rather than fall through to the map.
 		slog.ErrorContext(ctx, "mcp: resolve credential failed", "error", err)

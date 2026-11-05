@@ -386,6 +386,13 @@ func TestEveryMessageReadPathIsInTheLeakTest(t *testing.T) {
 		"remove_reaction": "returns the reaction summary of a message the caller can see: counts and emoji, no body",
 		"read_reactions":  "returns reaction summaries of messages the caller can see: counts and emoji, no body",
 		"list_reactors":   "returns who reacted to a message the caller can see: ids and emoji, no body",
+		// The admin door (#1326, #1331) answers with the catalog, an approval
+		// of the door's own, or the dispatched admin route's answer (members,
+		// channels, credentials, invites, reports, audit rows); none of the
+		// catalog's routes reads messages (admin_actions.go).
+		"describe_admin_actions": "returns the admin catalog as it applies to the caller",
+		"submit_admin_action":    "returns the door's approval or an admin route's answer, none of which reads messages",
+		"run_approved_action":    "returns an admin route's answer, none of which reads messages",
 	}
 	for tool := range schema.MCPToolCapabilities() {
 		if tool == "read_channel" {
