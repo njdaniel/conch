@@ -627,6 +627,19 @@ func (s *Store) ChannelSettings(ctx context.Context, actor string, actorID, chan
 			if err != nil {
 				return err
 			}
+			// An agent never changes its own approval channel's settings
+			// (issue #1326, ai-administrators §3.5.6).
+			if ok {
+				actorP, _, err := queryPrincipal(ctx, tx, actorID)
+				if err != nil {
+					return err
+				}
+				if actorP.Kind != PrincipalHuman {
+					if ok, err = agentStandingTx(ctx, tx, actorP, channelID); err != nil {
+						return err
+					}
+				}
+			}
 			if !ok {
 				return ErrManageChannelsRequired
 			}

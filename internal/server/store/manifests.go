@@ -25,6 +25,9 @@ var (
 	// decoded or fails schema validation. The row is never returned as a
 	// usable manifest (fail closed).
 	ErrInvalidManifest = errors.New("store: stored manifest is invalid")
+	// ErrManifestActorNotHuman is a manifest write by an actor that is
+	// neither the host (system) nor an enabled human (issue #1326).
+	ErrManifestActorNotHuman = errors.New("store: only a person or the host writes an agent's manifest")
 	// ErrAdminChannelNotGranted is a manifest whose admin approval channel is
 	// not among its channel grants with read (issue #1326, ai-administrators
 	// §3.1): the agent could not watch its own approvals there.
@@ -116,6 +119,20 @@ func (s *Store) PutAgentManifest(ctx context.Context, actor string, principalID 
 			}
 			if !ok {
 				return ErrNotOwner
+			}
+		}
+		// Whatever it says, a manifest is written by a person or by the
+		// host, never by an agent (ai-administrators §3.3: the manifest
+		// routes are outside the catalog; this holds the line in the store
+		// too, so no path can let an AI administrator reshape another agent
+		// or itself).
+		if actor != "system" {
+			ok, err := actorIsHumanTx(ctx, tx, actor)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return ErrManifestActorNotHuman
 			}
 		}
 		for _, g := range req.Channels {
@@ -279,6 +296,58 @@ func grantsRead(grants []schema.ChannelGrant, channelID int64) bool {
 		}
 	}
 	return false
+}
+
+// agentApprovalChannelTx is the approval channel the agent's manifest names
+// (admin.approval_channel_id), 0 when it names none or does not validate.
+func agentApprovalChannelTx(ctx context.Context, tx execer, agentID int64) (int64, error) {
+	m, err := agentManifestTx(ctx, tx, agentID)
+	switch {
+	case errors.Is(err, ErrNotFound), errors.Is(err, ErrInvalidManifest):
+		return 0, nil
+	case err != nil:
+		return 0, err
+	}
+	if m.Admin == nil {
+		return 0, nil
+	}
+	return m.Admin.ApprovalChannelID, nil
+}
+
+// agentStandingTx is the standing of a non-human actor in channelID (issue
+// #1326, ai-administrators §3.2, §3.5.6): operator standing where it holds
+// manage_channels (which only the admin door's context grants), never a
+// manager's, and none at all in its own approval channel, whatever it holds.
+// The channel that decides what the agent may do is the one it may not
+// shape: that is wall 3 of §3.5.4, kept here so that no path, the door's
+// dispatcher included, can seat a decider there.
+func agentStandingTx(ctx context.Context, tx execer, actor Principal, channelID int64) (bool, error) {
+	approvalChannel, err := agentApprovalChannelTx(ctx, tx, actor.ID)
+	if err != nil {
+		return false, err
+	}
+	if approvalChannel != 0 && approvalChannel == channelID {
+		return false, nil
+	}
+	return principalPermittedTx(ctx, tx, actor, schema.PermManageChannels)
+}
+
+// actorIsHumanTx reports whether the audit actor ("principal:<id>") is, read
+// inside tx, an enabled, visible human. Any other actor is not.
+func actorIsHumanTx(ctx context.Context, tx execer, actor string) (bool, error) {
+	idText, ok := strings.CutPrefix(actor, "principal:")
+	if !ok {
+		return false, nil
+	}
+	id, perr := strconv.ParseInt(idText, 10, 64)
+	if perr != nil || id <= 0 {
+		return false, nil //nolint:nilerr // a malformed actor is refused, not an error
+	}
+	p, found, err := queryPrincipal(ctx, tx, id)
+	if err != nil || !found {
+		return false, err
+	}
+	return p.Kind == PrincipalHuman && p.DisabledAt == nil && p.HiddenAt == nil && !p.guestTarget(), nil
 }
 
 // actorIsOwnerTx reports whether the audit actor ("principal:<id>") is,

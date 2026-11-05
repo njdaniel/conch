@@ -378,10 +378,11 @@ func memberActorStandingTx(ctx context.Context, tx execer, channelID, actorID in
 	}
 	// A granted agent (issue #1326, ai-administrators §3.2) has operator
 	// standing where it holds manage_channels, and none anywhere else: it is
-	// never a manager. An ungranted agent holds nothing and is refused here,
-	// as before.
+	// never a manager, and it has none in its own approval channel
+	// (agentStandingTx). An ungranted agent holds nothing and is refused
+	// here, as before.
 	if actorP.Kind != PrincipalHuman {
-		switch ok, err := principalPermittedTx(ctx, tx, actorP, schema.PermManageChannels); {
+		switch ok, err := agentStandingTx(ctx, tx, actorP, channelID); {
 		case err != nil:
 			return 0, err
 		case ok:
@@ -564,6 +565,16 @@ func (s *Store) putChannelMember(ctx context.Context, actor string, actorID, cha
 			}
 		}
 		decide := canDecide == nil || *canDecide
+		// An agent's add gives the right to decide only when it says so
+		// (ai-administrators §3.5.4 wall 3): saying so is
+		// set_channel_member_rights, which a person approves.
+		if canDecide == nil && actorID != 0 {
+			agent, err := principalIsAgentTx(ctx, tx, actorID)
+			if err != nil {
+				return err
+			}
+			decide = !agent
+		}
 		mgr := manages != nil && *manages
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide, manages) VALUES (?, ?, ?, ?, ?, ?)
@@ -611,6 +622,15 @@ func (s *Store) putChannelMember(ctx context.Context, actor string, actorID, cha
 	return added, nil
 }
 
+// principalIsAgentTx reports whether id is an agent's.
+func principalIsAgentTx(ctx context.Context, tx execer, id int64) (bool, error) {
+	p, found, err := queryPrincipal(ctx, tx, id)
+	if err != nil || !found {
+		return false, err
+	}
+	return p.Kind == PrincipalAgent, nil
+}
+
 // AddChannelMemberByName adds the principal with exact name to channelID with
 // can_decide = 0 and manages = 0, whoever calls it (issue #789, ADR-010 §3.3).
 // It is AddChannelMemberIfAbsent by name, with no decide right.
@@ -648,6 +668,17 @@ func (s *Store) AddChannelMemberIfAbsent(ctx context.Context, actor string, chan
 		}
 		if standing == standingManager && canDecide != nil {
 			return ErrManagerRefused
+		}
+		// An agent adds a member without the right to decide, on every
+		// channel (ai-administrators §3.5.4 wall 3): it cannot seat a decider
+		// by adding one. Rights change only by set_channel_member_rights,
+		// which a person approves.
+		if canDecide != nil && *canDecide {
+			if agent, err := principalIsAgentTx(ctx, tx, addedBy); err != nil {
+				return err
+			} else if agent {
+				return ErrManagerRefused
+			}
 		}
 		if err := checkChannelExistsTx(ctx, tx, channelID); err != nil {
 			return err

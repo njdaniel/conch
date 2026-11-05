@@ -433,3 +433,140 @@ func TestPrincipalHoldsAgentWall(t *testing.T) {
 		})
 	}
 }
+
+// TestAgentApprovalChannelProtected is wall 3 of ai-administrators §3.5.4
+// in the store (§3.5.6): an agent granted manage_channels shapes every
+// channel but its own approval channel, whatever path it takes; and it
+// never seats a decider by adding a member.
+func TestAgentApprovalChannelProtected(t *testing.T) {
+	ctx := WithAdminDispatch(context.Background())
+	f := newAIAdminFixture(t)
+	f.put(t, f.ownerA, schema.PermManageChannels)
+	agentA := principalActor(f.agent.ID)
+	yes, no := true, false
+	opt := ChannelRenameOptions{CallerID: f.agent.ID, Limits: RenameLimits{Renames: 5, Attempts: 20}}
+	private := schema.ChannelVisibility("private")
+	refused := []struct {
+		name string
+		run  func() error
+		want error
+	}{
+		{"add a member", func() error {
+			_, err := f.s.PutChannelMember(ctx, agentA, f.admin.ID, f.alice.ID, f.agent.ID, nil, nil)
+			return err
+		}, ErrManagerRefused},
+		{"add a member if absent", func() error {
+			_, _, err := f.s.AddChannelMemberIfAbsent(ctx, agentA, f.admin.ID, f.agent.ID, MemberTarget{ID: f.alice.ID}, nil)
+			return err
+		}, ErrManagerRefused},
+		{"take the owner's right to decide", func() error {
+			_, err := f.s.SetChannelMemberCanDecide(ctx, agentA, f.admin.ID, f.owner.ID, false, f.agent.ID)
+			return err
+		}, ErrManagerRefused},
+		{"remove the owner", func() error {
+			_, err := f.s.RemoveChannelMember(ctx, agentA, f.admin.ID, f.owner.ID, f.agent.ID)
+			return err
+		}, ErrManagerRefused},
+		{"rename it", func() error {
+			_, err := f.s.RenameChannel(ctx, agentA, f.admin.ID, "admin", "renamed", time.Now(), opt)
+			return err
+		}, ErrManagerRefused},
+		{"change its settings", func() error {
+			_, err := f.s.ChannelSettings(ctx, agentA, f.agent.ID, f.admin.ID, ChannelSettingsChange{Visibility: &private}, time.Now())
+			return err
+		}, ErrManageChannelsRequired},
+		{"seat a decider elsewhere by adding one", func() error {
+			_, _, err := f.s.AddChannelMemberIfAbsent(ctx, agentA, f.ops.ID, f.agent.ID, MemberTarget{ID: f.op.ID}, &yes)
+			return err
+		}, ErrManagerRefused},
+	}
+	for _, tc := range refused {
+		if err := tc.run(); !errors.Is(err, tc.want) {
+			t.Errorf("%s in the approval channel: err = %v, want %v", tc.name, err, tc.want)
+		}
+	}
+	if members, err := f.s.ListChannelMembers(context.Background(), f.admin.ID); err != nil || len(members) != 2 {
+		t.Errorf("approval channel members = %+v, %v; want the owner and the agent only", members, err)
+	}
+	if ok, err := f.s.CanDecideApprovals(context.Background(), f.admin.ID, f.owner.ID); err != nil || !ok {
+		t.Errorf("the owner's right to decide = %v, %v; want kept", ok, err)
+	}
+
+	// Elsewhere the agent acts with operator standing, and the members it
+	// adds do not decide unless a person approved saying so.
+	if _, err := f.s.PutChannelMember(ctx, agentA, f.ops.ID, f.alice.ID, f.agent.ID, nil, nil); err != nil {
+		t.Fatalf("agent adding alice to ops: %v", err)
+	}
+	if ok, err := f.s.CanDecideApprovals(context.Background(), f.ops.ID, f.alice.ID); err != nil || ok {
+		t.Errorf("alice, added by the agent, decides in ops = %v, %v; want false", ok, err)
+	}
+	if _, _, err := f.s.AddChannelMemberIfAbsent(ctx, agentA, f.ops.ID, f.agent.ID, MemberTarget{ID: f.op.ID}, &no); err != nil {
+		t.Errorf("agent adding opal to ops without the right: %v", err)
+	}
+	if _, err := f.s.RenameChannel(ctx, agentA, f.ops.ID, "ops", "ops2", time.Now(), opt); err != nil {
+		t.Errorf("agent renaming ops: %v", err)
+	}
+	if _, err := f.s.ChannelSettings(ctx, agentA, f.agent.ID, f.ops.ID, ChannelSettingsChange{Visibility: &private}, time.Now()); err != nil {
+		t.Errorf("agent changing ops' settings: %v", err)
+	}
+}
+
+// TestDisablingAnAIAdminRevokesTheGrant: disabling clears the grant, so
+// enabling the agent again gives it nothing back.
+func TestDisablingAnAIAdminRevokesTheGrant(t *testing.T) {
+	ctx := WithAdminDispatch(context.Background())
+	f := newAIAdminFixture(t)
+	f.put(t, f.ownerA, schema.PermManageMembers)
+	if _, err := f.s.DisablePrincipal(ctx, principalActor(f.op.ID), f.agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.s.EnablePrincipal(ctx, principalActor(f.op.ID), f.agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if f.holds(t, f.agent.ID, schema.PermManageMembers) {
+		t.Error("an AI administrator disabled and enabled again holds its old grant")
+	}
+	m, err := f.s.AgentManifestByPrincipal(ctx, f.agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Permissions) != 0 || m.Admin != nil {
+		t.Errorf("manifest after the disable = %v, %+v; want no grant", m.Permissions, m.Admin)
+	}
+	var detail string
+	for _, e := range mustAudit(t, f) {
+		if e.Action == AuditAdminGrantChanged && e.Subject == principalActor(f.agent.ID) {
+			detail = e.Detail
+		}
+	}
+	if !strings.Contains(detail, `->[]`) || !strings.Contains(detail, "reason=disabled") {
+		t.Errorf("last admin_grant_changed detail = %q; want the grant cleared by the disable", detail)
+	}
+}
+
+// TestOnlyAPersonWritesAManifest: an agent's actor never writes a
+// manifest, its own or another's, even one with no grant.
+func TestOnlyAPersonWritesAManifest(t *testing.T) {
+	ctx := WithAdminDispatch(context.Background())
+	f := newAIAdminFixture(t)
+	f.put(t, f.ownerA, schema.PermManageMembers)
+	for _, actor := range []string{principalActor(f.agent.ID), "principal:999999", "nonsense"} {
+		if _, _, err := f.s.PutAgentManifest(ctx, actor, f.agent.ID, f.manifest()); !errors.Is(err, ErrManifestActorNotHuman) {
+			t.Errorf("manifest write by %s: err = %v, want ErrManifestActorNotHuman", actor, err)
+		}
+	}
+	if !f.holds(t, f.agent.ID, schema.PermManageMembers) {
+		t.Error("a refused write changed the grant")
+	}
+	f.put(t, principalActor(f.op.ID))
+	f.put(t, "system")
+}
+
+func mustAudit(t *testing.T, f *aiAdminFixture) []AuditEvent {
+	t.Helper()
+	all, err := f.s.ListAuditEvents(context.Background(), 0, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return all
+}

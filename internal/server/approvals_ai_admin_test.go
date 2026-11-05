@@ -313,10 +313,20 @@ func TestGrantedAgentDirectRESTUnchanged(t *testing.T) {
 		_ = json.Unmarshal(rec.Body.Bytes(), &e)
 		return fmt.Sprintf("%d %s", rec.Code, e.Code)
 	}
+	// Authenticated routes whose authority is decided in the handler or the
+	// store, by the grant S2 reads (security review of #1338).
+	storeDecided := map[string]bool{
+		"POST /v1/invites":        true,
+		"POST /v2/invites":        true,
+		"DELETE /v1/invites/{id}": true,
+	}
 	checked := 0
 	for _, rt := range f.srv.routes {
-		switch rt.access {
-		case accessOperator, accessOwner, accessChannelManager, accessOperatorOrSelf, accessPermission:
+		switch {
+		case storeDecided[rt.pattern]:
+			delete(storeDecided, rt.pattern)
+		case rt.access == accessOperator, rt.access == accessOwner, rt.access == accessChannelManager,
+			rt.access == accessOperatorOrSelf, rt.access == accessPermission:
 		default:
 			continue
 		}
@@ -334,6 +344,9 @@ func TestGrantedAgentDirectRESTUnchanged(t *testing.T) {
 			t.Errorf("%s: granted agent = %s, ungranted agent = %s", rt.pattern, got, want)
 		}
 		checked++
+	}
+	if len(storeDecided) != 0 {
+		t.Errorf("routes no longer in the table: %v", storeDecided)
 	}
 	if checked < 40 {
 		t.Fatalf("checked %d administrative routes; the route table has more", checked)

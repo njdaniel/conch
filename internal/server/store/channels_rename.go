@@ -187,7 +187,7 @@ func channelRenameStandingTx(ctx context.Context, tx execer, channelID, callerID
 	// A granted agent renames where it holds manage_channels and nowhere
 	// else; it is never a manager (issue #1326, ai-administrators §3.2).
 	if caller.Kind != PrincipalHuman {
-		switch ok, err := principalPermittedTx(ctx, tx, caller, schema.PermManageChannels); {
+		switch ok, err := agentStandingTx(ctx, tx, caller, channelID); {
 		case err != nil:
 			return 0, err
 		case ok:

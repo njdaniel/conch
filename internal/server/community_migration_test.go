@@ -88,8 +88,8 @@ func TestCommunityMigrationApprovalChain(t *testing.T) {
 		"DROP TABLE admin_actions",                            // migration 43 (issue #1326)
 		"ALTER TABLE agent_manifests DROP COLUMN admin",       // migration 43
 		"ALTER TABLE agent_manifests DROP COLUMN permissions", // migration 43
-		"ALTER TABLE credentials DROP COLUMN issued_by", // migration 42 (issue #1024)
-		"ALTER TABLE hooks DROP COLUMN issued_by",       // migration 42 (issue #1024)
+		"ALTER TABLE credentials DROP COLUMN issued_by",       // migration 42 (issue #1024)
+		"ALTER TABLE hooks DROP COLUMN issued_by",             // migration 42 (issue #1024)
 		"ALTER TABLE channels DROP COLUMN archived_at",
 		"DROP TRIGGER channels_default_public_insert",
 		"DROP TRIGGER channels_default_public_update",
