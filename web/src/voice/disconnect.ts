@@ -79,6 +79,30 @@ export function afterRefusal(r: Refusal): Next {
   }
 }
 
+// afterViewerRefusal is afterRefusal for the viewer grant (issue #936,
+// voice-control-plane.md §13). Only an answer that never came is tried again,
+// as a session's is: every refusal stops and says why in plain words, so the
+// page never asks the same question in a loop. The person presses Watch only
+// again when they have fixed it.
+export function afterViewerRefusal(r: Refusal): Next {
+  if (r.failure === 'network') return { kind: 'retry' };
+  if (r.failure === 'unauthorized') return { kind: 'stop', why: 'You are signed out' };
+  if (r.code === 'voice_not_configured') return { kind: 'stop', why: 'Voice is not set up on this server' };
+  if (r.code === 'voice_no_session') return { kind: 'stop', why: 'Your voice is not connected in this channel yet. Join voice in your other app, then try again.' };
+  if (r.code === 'voice_unavailable') return { kind: 'stop', why: 'Voice is unavailable right now. Try again in a moment.' };
+  switch (r.status) {
+    case 400:
+      return { kind: 'stop', why: 'Voice needs a server that signs people in' };
+    case 403:
+      if (r.code === 'voice_not_allowed') return { kind: 'stop', why: 'Your account does not include voice. Ask whoever invited you.' };
+      return { kind: 'stop', why: 'Voice is for people, not for this account' };
+    case 404:
+      return { kind: 'stop', why: 'You are not a member of this channel' };
+    default:
+      return { kind: 'stop', why: 'The server would not let you watch. Try again in a moment.' };
+  }
+}
+
 export const firstRetry = 1000;
 export const maxRetry = 30_000;
 

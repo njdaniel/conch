@@ -48,8 +48,8 @@ function control(state: VoiceState, calls: string[], snapshot: Snapshot): VoiceC
     join: () => {
       calls.push('join');
     },
-    watchOnly: () => {
-      calls.push('watch only');
+    watchOnly: (beside?: boolean) => {
+      calls.push(beside === true ? 'watch only beside' : 'watch only');
     },
     leave: () => {
       calls.push('leave');
@@ -844,6 +844,16 @@ describe('what the strip says is true', () => {
         expect(voice.textContent).not.toContain('another device');
       });
     }
+
+    it('Watch only asks to watch beside the voice elsewhere; with no voice elsewhere it does not', () => {
+      const there = panel(initialVoice, 'c', room(one(3), one(7)), bob);
+      fireEvent.click(within(there.voice).getByRole('button', { name: 'Watch only in #c' }));
+      expect(there.calls).toEqual(['watch only beside']);
+      cleanup();
+      const alone = panel(initialVoice, 'c', room(one(3)), bob);
+      fireEvent.click(within(alone.voice).getByRole('button', { name: 'Watch only in #c' }));
+      expect(alone.calls).toEqual(['watch only']);
+    });
 
     it('says so on a page another device took over', () => {
       const why = 'Another device took over your place in this voice room';

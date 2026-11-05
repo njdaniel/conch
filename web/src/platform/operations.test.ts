@@ -70,6 +70,7 @@ describe('the operation table', () => {
         'setupRedeem',
         'totpEnroll',
         'voiceSession',
+        'voiceViewer',
         'wsTicket',
       ].sort(),
     );
@@ -100,6 +101,7 @@ describe('the operation table', () => {
       convertGuest: 'token',
       wsTicket: 'ticket',
       voiceSession: 'rooms',
+      voiceViewer: 'token',
       createSignInLink: 'code',
       createMemberLink: 'code',
       totpEnroll: 'secret',

@@ -241,6 +241,11 @@ test.describe('screen share with LiveKit', () => {
 
   async function join(p: Someone, how: 'Join voice' | 'Watch only'): Promise<void> {
     await showView(p.page, 'Voice');
+    // Watch only beside the person's voice in another client is the viewer
+    // (issue #936), which needs that voice in the room. Presence lingers a few
+    // seconds after an earlier page of the same member closed, and reads as
+    // that other client: wait for it to clear, so this is a plain Watch only.
+    if (how === 'Watch only') await expect(voiceRegion(p.page)).not.toContainText('You are in voice on another device', { timeout: 30_000 });
     await voiceRegion(p.page).getByRole('button', { name: how }).click();
     await expect(voiceRegion(p.page)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
   }
