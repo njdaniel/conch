@@ -1120,6 +1120,10 @@ type EventHandler struct {
 	Run          func(schema.RunV1) error
 	Activity     func(schema.AgentActivityV1) error
 	Intervention func(schema.InterventionV1) error
+	// PermissionsChanged is called when the caller's effective permissions
+	// may have changed (ADR-014); the document carries nothing else, so the
+	// caller re-reads whoami.
+	PermissionsChanged func(schema.PermissionsChangedV1) error
 }
 
 // SubscribeEvents follows channel's events socket and calls the handler with
@@ -1214,6 +1218,15 @@ func dispatchEvent(frame json.RawMessage, handler EventHandler) error {
 			return err
 		}
 		return receiveEvent(handler.Intervention(iv))
+	case schema.PermissionsChangedSchemaV1:
+		if handler.PermissionsChanged == nil {
+			return nil
+		}
+		var doc schema.PermissionsChangedV1
+		if err := decodeEvent(frame, &doc, "permissions changed"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.PermissionsChanged(doc))
 	}
 	return nil
 }
