@@ -1,6 +1,6 @@
 # Design: AI administrators
 
-- **Status:** Proposed, 2026-11-05. Nothing here is built. The decision record is Nick's: this design changes [ADR-010](../adr/ADR-010-delegated-administration.md) decision 6 and [ADR-014](../adr/ADR-014-fixed-roles-configurable-permissions.md) decisions 1 and 7, both accepted, and the proposed amendment text is in §8. Implementation is blocked until he signs the amendment off.
+- **Status:** Accepted, 2026-11-05 (Nick: "approve the recommendations and the ADR amendment"). The §9 decisions are adopted as recommended, and the §8 amendments are in [ADR-010](../adr/ADR-010-delegated-administration.md) decision 6, [ADR-014](../adr/ADR-014-fixed-roles-configurable-permissions.md) decisions 1, 6 and 7, and [ADR-013](../adr/ADR-013-one-community-model.md). Implementation follows the slices in §10 (#1326).
 - **Issue:** [#1326](https://github.com/njdaniel/conch/issues/1326). The implementation slices are in §10.
 - **Pinned to:** `main` at `d7afd8c797d0d95fd2ec0836c6ff2ac3df254539` (merge of #1304, 2026-11-05). Every file and line in §1 is read at that commit.
 - **Owner:** protocol-designer (this note, the wire shapes, the MCP tools); server-engineer (store, dispatcher, routes); cli-engineer and web-engineer (setup); docs-agent (README, CHANGELOG).
