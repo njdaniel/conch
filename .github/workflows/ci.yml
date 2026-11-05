@@ -166,11 +166,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { shard: 1, args: "./internal/server -run '^Test[A-E]'" }
-          - { shard: 2, args: "./internal/server -run '^Test[F-M]'" }
-          - { shard: 3, args: "./internal/server -run '^Test[N-S]'" }
-          - { shard: 4, args: "./internal/server -run '^Test([T-Z]|[^A-Z])'" }
-          - { shard: 5, args: "$(go list ./internal/server/... | grep -v '/internal/server$')" }
+          - { shard: 1, run: "^Test[A-E]" }
+          - { shard: 2, run: "^Test[F-M]" }
+          - { shard: 3, run: "^Test[N-S]" }
+          - { shard: 4, run: "^Test([T-Z]|[^A-Z])" }
+          - { shard: 5, run: "" }
     steps:
       - uses: actions/checkout@v4
 
@@ -178,8 +178,17 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The pattern comes in through the environment, never through the
+      # shell's parsing: shard 4's "(" and "|" are regexp, not shell.
       - name: go test (internal/server, shard ${{ matrix.shard }})
-        run: eval go test -race -timeout 25m ${{ matrix.args }}
+        env:
+          RUN: ${{ matrix.run }}
+        run: |
+          if [ -z "$RUN" ]; then
+            go test -race -timeout 25m $(go list ./internal/server/... | grep -v '/internal/server$')
+          else
+            go test -race -timeout 25m ./internal/server -run "$RUN"
+          fi
 
   go-test:
     needs: changes
