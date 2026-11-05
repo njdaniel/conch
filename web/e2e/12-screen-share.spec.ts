@@ -242,9 +242,10 @@ test.describe('screen share with LiveKit', () => {
   async function join(p: Someone, how: 'Join voice' | 'Watch only'): Promise<void> {
     await showView(p.page, 'Voice');
     // Watch only beside the person's voice in another client is the viewer
-    // (issue #936), which needs that voice in the room. Presence lingers a few
-    // seconds after an earlier page of the same member closed, and reads as
-    // that other client: wait for it to clear, so this is a plain Watch only.
+    // (issue #936), which has no Share screen. Presence lingers a few seconds
+    // after an earlier page of the same member closed, and reads as that other
+    // client; a test that needs the plain Watch only waits for it to clear.
+    // (A real page is no longer refused for it: issue #1340.)
     if (how === 'Watch only') await expect(voiceRegion(p.page)).not.toContainText('You are in voice on another device', { timeout: 30_000 });
     await voiceRegion(p.page).getByRole('button', { name: how }).click();
     await expect(voiceRegion(p.page)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
@@ -314,6 +315,24 @@ test.describe('screen share with LiveKit', () => {
       await expectClean(a);
     } finally {
       await a.close();
+    }
+  });
+
+  // Issue #1340: presence lingers a few seconds after a page closes without
+  // leaving, and reads as the person's voice in another client. Watch only on
+  // a new page at once is not refused as a viewer of a voice that is gone.
+  test('Watch only at once on a new page, after the old one closed in voice, is connected', async ({ browser }) => {
+    const first = await person(browser, 'alice');
+    await join(first, 'Join voice');
+    await first.close();
+    const second = await person(browser, 'alice');
+    try {
+      await showView(second.page, 'Voice');
+      await voiceRegion(second.page).getByRole('button', { name: 'Watch only' }).click();
+      await expect(voiceRegion(second.page)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      await expect(voiceRegion(second.page)).not.toContainText('Your voice is not connected');
+    } finally {
+      await second.close();
     }
   });
 
