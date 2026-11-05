@@ -55,6 +55,11 @@ jobs:
               # the store and guarded by the chain tests above instead.
               internal/server/store/permissions.go|pkg/schema/permission.go)
                 echo "$f" ;;
+              # AI administrators (#1326): the catalog says which actions wait
+              # for an approval, the door runs an approved one once, and the
+              # manifest grant is the agent's standing (agentStandingTx).
+              internal/server/admin_*|internal/server/store/admin_actions*|internal/server/store/ai_admin*|internal/server/store/manifests*)
+                echo "$f" ;;
             esac
           done)
           if [ -z "$touched" ]; then
