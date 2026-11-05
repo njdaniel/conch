@@ -7,8 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -227,6 +229,10 @@ func scrub(err error, token string) error {
 // anything.
 func adminAIAdminCreate(ctx context.Context, r *adminRun) error {
 	const cmd = "cli: admin ai-admin create"
+	// A broken pipe on stdout must come back as an error, not kill the
+	// process between the credential and its printing: the rollback then
+	// disables the agent (security review of #1342).
+	signal.Ignore(syscall.SIGPIPE)
 	o := r.opts.aiAdmin
 	name := r.pos[0]
 	if r.opts.asJSON {
@@ -291,7 +297,7 @@ func adminAIAdminCreate(ctx context.Context, r *adminRun) error {
 	}
 
 	// Step 2: the approval channel, made private if absent.
-	channelID, err := findOrCreateChannel(ctx, r.client, o.channel)
+	channelID, existed, err := findOrCreateChannel(ctx, r.client, o.channel)
 	if err != nil {
 		return rollback("the approval channel", err)
 	}
@@ -323,17 +329,24 @@ func adminAIAdminCreate(ctx context.Context, r *adminRun) error {
 	}
 	token = cred.Token
 
-	snippet, err := renderMCPSnippet(o.client, entry, r.client.resolve("mcp").String(), token)
+	mcpURL := r.client.resolve("mcp")
+	mcpURL.User = nil // a base URL's userinfo is never printed into the entry
+	snippet, err := renderMCPSnippet(o.client, entry, mcpURL.String(), token)
 	if err != nil {
 		return rollback("rendering the MCP entry", err)
 	}
 	if _, err := fmt.Fprint(r.stdout, snippet); err != nil {
 		return rollback("printing the MCP entry", errors.New("write standard output"))
 	}
-	_, err = fmt.Fprintf(r.stderr, "approval channel %s (id %d); you decide its approvals\ncredential %d, renewed by use; the entry above is shown once\n"+
+	decides := "you decide its approvals"
+	if existed {
+		// It keeps the deciders it had (security review of #1342).
+		decides = "it existed: you and everyone who already decides there decide its approvals (review them in the channel's member list; conch admin member decide --off removes the right)"
+	}
+	_, err = fmt.Fprintf(r.stderr, "approval channel %s (id %d); %s\ncredential %d, renewed by use; the entry above is shown once\n"+
 		"add it with --scope user: a project .mcp.json is a file people commit\n"+
 		"deleting the entry on the client revokes nothing; to revoke: conch admin ai-admin revoke %d\n",
-		safeLine(o.channel), channelID, cred.Credential.ID, agent.ID)
+		safeLine(o.channel), channelID, decides, cred.Credential.ID, agent.ID)
 	return err
 }
 
@@ -341,21 +354,21 @@ func adminAIAdminCreate(ctx context.Context, r *adminRun) error {
 // creating it private when it is absent. It reads every channel (scope=all,
 // which an owner holds by manage_channels), so a private channel of that
 // name the caller is not in is found, not created twice.
-func findOrCreateChannel(ctx context.Context, c *Client, name string) (int64, error) {
+func findOrCreateChannel(ctx context.Context, c *Client, name string) (id int64, existed bool, err error) {
 	dir, err := c.ChannelDirectory(ctx, true)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	for _, ch := range dir.Channels {
 		if ch.Name == name && ch.ArchivedAt == nil {
-			return ch.ID, nil
+			return ch.ID, true, nil
 		}
 	}
 	created, err := c.CreateChannelV1(ctx, schema.CreateChannelRequestV1{Name: name, Visibility: schema.ChannelPrivate})
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
-	return created.Channel.ID, nil
+	return created.Channel.ID, false, nil
 }
 
 // aiAdmin is one agent holding a grant, as `list` reads it.
