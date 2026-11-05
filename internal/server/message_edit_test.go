@@ -368,7 +368,14 @@ func TestMessageEditImmutability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approvalMsg := w.mustPost(t, "ann", fmt.Sprintf(`{"body":"approve?","payload":{"schema":%q,"data":%s}}`, schema.ApprovalV1Name, approvalJSON))
+	// The post routes refuse this payload now (issue #1345), so the message is
+	// seeded under the store, as one stored before that is: the next row id
+	// after a marker post.
+	marker := w.mustPost(t, "ann", `{"body":"marker"}`)
+	approvalMsg := marker + 1
+	execOnDB(t, w.srv,
+		"INSERT INTO messages (channel_id, author_id, body, created_at, payload_schema, payload_json) VALUES (?, ?, 'approve?', ?, ?, ?)",
+		w.ops.ID, w.p("ann").ID, time.Now().UnixMilli(), schema.ApprovalV1Name, string(approvalJSON))
 	approvalPath := fmt.Sprintf("/v1/approvals/%d", created.Approval.ID)
 	approvalBefore := w.callREST(t, "GET", approvalPath, w.p("ann").token, "")
 	if res := w.edit(t, "ann", "ops", approvalMsg, editBody("approved already")); res.status != 409 || reactErrCode(res) != schema.ErrorCodeMessageNotEditable {

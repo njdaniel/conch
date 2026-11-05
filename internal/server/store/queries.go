@@ -451,6 +451,11 @@ func (s *Store) InsertMessageV1(
 func insertChannelWideTx(
 	ctx context.Context, tx execer, channelID, authorID int64, body string, payload *schema.Payload, rootID int64, now time.Time,
 ) (int64, error) {
+	// A payload only the server may author is refused here, in the insert
+	// every channel-wide post, reply and webhook post ends in (issue #1345).
+	if payload != nil && schema.ReservedMessagePayload(payload.Schema) {
+		return 0, ErrReservedPayload
+	}
 	// The archived guard of every channel-wide post, reply and webhook post
 	// (issue #844): this is one of the two INSERT INTO messages.
 	if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {

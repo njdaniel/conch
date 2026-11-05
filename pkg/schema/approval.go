@@ -173,3 +173,12 @@ func init() {
 		New:  func() any { return new(ApprovalV1) },
 	})
 }
+
+// ReservedMessagePayload reports whether a payload schema name is one only the
+// server may put on a message. A client-posted message carrying it would be a
+// forged approval card (it can name a real approval id) or a forged admin
+// action, so every message post refuses it (issue #1345). Approvals are
+// raised and read through their own routes, never as message payloads.
+func ReservedMessagePayload(name string) bool {
+	return name == ApprovalV1Name || name == AdminActionV1Name
+}

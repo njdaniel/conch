@@ -347,6 +347,9 @@ func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload
 		// themselves (issue #240).
 		return store.Message{}, errAttachmentRefused
 	}
+	if errors.Is(err, store.ErrReservedPayload) {
+		return store.Message{}, errReservedPayloadRefused
+	}
 	if errors.Is(err, store.ErrChannelArchived) {
 		// The store's archived guard (issue #844): said by the same tools
 		// without reaching into the store themselves.
@@ -364,6 +367,10 @@ func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload
 // errArchivedRefused is the error insertMessage and createApproval give for a
 // write to an archived channel (issues #844 and #1296). Nothing was stored.
 var errArchivedRefused = errors.New("server: channel is archived")
+
+// errReservedPayloadRefused is insertMessage's error for a payload schema only
+// the server may author (issue #1345). Nothing was stored.
+var errReservedPayloadRefused = errors.New("server: reserved payload schema")
 
 // errAttachmentRefused is insertMessage's error for a post whose file
 // attachment cannot be honoured (an agent cannot upload, so for an agent that
