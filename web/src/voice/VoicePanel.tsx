@@ -29,16 +29,31 @@
 // And a volume for each other person in voice (issue #661), on this page
 // only: a slider each, under Voice options, and on a person's chip in the
 // roster how loud they are played while it is not 100%.
+//
+// And the camera (ADR-015, design §7.1): a Camera button beside Mute and
+// Share, offered to someone who holds use_camera on a grant that may
+// publish, and never in Watch only or Listen only. There is no key for it.
+// "Camera in use" and "Sending video" come from the person's own track
+// alone (S5); others see "camera" on the person's chip. Voice options has
+// the camera picker, under the microphone's, and a private camera test.
+// "Show video (n)" opens the call view (CallView.tsx) while anyone in the
+// room has a camera on, and it never opens by itself (O8). While a share is
+// watched with the call view open, the share is the main picture and the
+// cameras are a strip beside it (design §7.4).
 import { useContext, useEffect, useRef, useState, type KeyboardEvent as KeyEvent, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
+import { archivedLine } from '../archived';
 import { Avatar, Glyph } from '../Icons';
 import type { ChannelV0 } from '../schema/channel';
-import { MicTestShown, VoiceLive, VoiceStrip } from '../phone';
+import { MicTestShown, onPhoneCamera, VoiceLive, VoiceStrip } from '../phone';
 import { StageHost } from '../stage';
 import { MicTest } from './MicTest';
+import { cameraNote, cameraOffForYou, cameraOn, listenOnlyCamera, watchOnlyCamera } from './camera';
+import { CallView, callTiles, type Tile } from './CallView';
+import { CameraTest } from './CameraTest';
 import type { Person } from '../useLiveChannel';
 import type { Phase, Processing, VoiceState } from './connection';
-import { maxTail } from './gate';
+import { clampTail, maxTail, releasePage, releaseStep } from './gate';
 import { keyLabel } from './keys';
 import { occupants, sharer, type Occupant } from './presence';
 import { busyNote, endedNote, oneSharerNote, othersShareNote, ownPageNote, resumedNote, resumingNote, sharedNote, shortShareNote, soundNote, watchNote } from './share';
@@ -81,7 +96,7 @@ export function busiest(channels: readonly ChannelV0[], occupancy: InVoice, view
   let best: { readonly channel: ChannelV0; readonly count: number } | null = null;
   let found = 0;
   for (const channel of channels) {
-    const count = occupancy.get(channel.id) ?? 0;
+    const count = occupancy.get(channel.id)?.count ?? 0;
     if (channel.name === viewed || count <= 0) continue;
     found++;
     if (best === null || count > best.count || (count === best.count && channel.id < best.channel.id)) best = { channel, count };
@@ -111,6 +126,8 @@ export function VoicePanel({
   viewed,
   channels = [],
   occupancy = nobody,
+  cameraAllowed = false,
+  archived = false,
   onOpen,
 }: {
   readonly voice: VoiceControl;
@@ -121,6 +138,12 @@ export function VoicePanel({
   // that says where else people are talking.
   readonly channels?: readonly ChannelV0[];
   readonly occupancy?: InVoice;
+  // The channel on screen is archived (issue #844): it has no voice. Someone
+  // in voice there is ended by the server, and the strip follows.
+  readonly archived?: boolean;
+  // Whether whoami says the viewer may turn a camera on (use_camera). The
+  // server decides each claim; this only offers the button.
+  readonly cameraAllowed?: boolean;
   // Opens a channel, as the channel list does: the way back to the one voice
   // is in, from any other.
   readonly onOpen: (name: string) => void;
@@ -144,6 +167,9 @@ export function VoicePanel({
   const toVoiceView = useContext(VoiceStrip);
   const stripOpens = inVoice ? toVoiceView : null;
   const strip = stripOpens !== null;
+  useEffect(() => {
+    client.showVideo(!strip);
+  }, [client, strip]);
   useEffect(() => {
     reportLive(inVoice);
     return () => {
@@ -250,6 +276,17 @@ export function VoicePanel({
       </section>
     );
   }
+  if (!inVoice && archived) {
+    return (
+      <section aria-label="Voice" className="voice">
+        <div className="voice-state">
+          <p className="voice-phase">Not in voice</p>
+          <p className="hint">Voice is off. {archivedLine}</p>
+          {awayLine}
+        </div>
+      </section>
+    );
+  }
   if (!inVoice && presence !== null && !presence.configured) {
     return (
       <section aria-label="Voice" className="voice">
@@ -290,6 +327,28 @@ export function VoicePanel({
   const captured = (state.phase === 'connected' || state.phase === 'reconnecting') && !state.watchOnly && !state.listenOnly && !state.missing;
   const view =
     theirs !== null && state.watching ? <ShareView client={client} state={state} name={theirName} audio={theirs.sharingAudio} /> : null;
+  // The call view, while the person asked for it and is in voice. The share
+  // and the call view are one layout on the stage: the share the main
+  // picture and the cameras a strip beside it while both are open. It is
+  // the one CallView whether or not the call view is open, so the share is
+  // never drawn again by opening or closing it.
+  // In the phone layout under Chat and Channels (the strip) the stage holds a
+  // watched share only: no call view and no camera tile, and no camera
+  // received (showVideo). The person's choice to view is kept, so the view
+  // and the cameras are back with the Voice view, with no tap (O8).
+  const call = inVoice && state.viewing && !strip ? callTiles(roster, viewer, state.cameraTrack !== 'none', (id) => nameOf(people, id, viewer)) : null;
+  const staged =
+    view === null && call === null ? null : (
+      <CallView client={client} state={state} tiles={call?.tiles ?? noTiles} hidden={call?.hidden ?? 0} open={call !== null} share={view} />
+    );
+  // How many cameras are on in the room: everyone else's claims, and the
+  // person's own while their track is published.
+  const cameraCount = roster.filter((o) => o.principal !== viewer && o.camera).length + (state.cameraTrack === 'published' ? 1 : 0);
+  // The Camera button is offered to someone who may publish with a camera:
+  // not in Watch only, not on a grant that cannot publish (O14).
+  // A camera that is on keeps its button, whatever whoami says by now, so it
+  // can always be turned off.
+  const canCamera = (cameraAllowed && !state.listenOnly && !state.watchOnly) || cameraOn(state.camera);
   // Where voice is (UX-09): a button back to that channel while another is on
   // screen, plain text while it is the one on screen.
   const joined = inVoice ? state.channel : null;
@@ -340,7 +399,7 @@ export function VoicePanel({
         {awayLine}
         <div className="voice-row">
           {stripOpens !== null ? (
-            <StripState phase={state.phase} channel={state.channel} onOpen={stripOpens} />
+            <StripState phase={state.phase} channel={state.channel} camera={state.cameraTrack !== 'none'} onOpen={stripOpens} />
           ) : (
             <div className="voice-state">
               <p className="voice-phase">
@@ -350,11 +409,22 @@ export function VoicePanel({
               {inVoice ? (
                 <p className="voice-sub">
                   {captured ? <span className="chip">Microphone in use</span> : null}{' '}
+                  {/* From this page's own camera track, never from presence (S5). */}
+                  {state.cameraTrack === 'captured' ? (
+                    <>
+                      <span className="chip">Camera in use</span>{' '}
+                    </>
+                  ) : null}
+                  {state.cameraTrack === 'published' ? (
+                    <>
+                      <span className="chip video-sending">Sending video</span>{' '}
+                    </>
+                  ) : null}
                   <span className="voice-tx">
                     {state.muted ? 'Muted. ' : ''}
                     {state.deafened ? 'Deafened (you hear no one, and you are muted). ' : ''}
                     {state.listenOnly ? 'Listen only. ' : ''}
-                    {state.watchOnly ? 'Watch only: your microphone is off. ' : ''}
+                    {state.viewer ? 'Watching beside your voice on another device. ' : state.watchOnly ? 'Watch only: your microphone is off. ' : ''}
                     {transmitLabel(state)}
                   </span>
                 </p>
@@ -368,13 +438,15 @@ export function VoicePanel({
             {strip ? (
               <>
                 <TalkControl voice={voice} silenced={silenced} />
+                <ModeToggle voice={voice} />
                 <MuteButton voice={voice} />
                 <LeaveButton onLeave={leave} />
               </>
             ) : inVoice ? (
               <>
                 <TalkControl voice={voice} silenced={silenced} />
-                {state.watchOnly && !state.listenOnly ? (
+                <ModeToggle voice={voice} />
+                {state.watchOnly && !state.listenOnly && !state.viewer ? (
                   <button type="button" onClick={() => { void client.useMicrophone(); }} disabled={state.phase !== 'connected'}>
                     Use microphone
                   </button>
@@ -384,7 +456,19 @@ export function VoicePanel({
                   <Glyph name="headphones" />
                   <span className="label">{state.deafened ? 'Undeafen' : 'Deafen'}</span>
                 </button>
-                <ShareButton voice={voice} othersShare={theirs !== null} watching={state.watching} />
+                {canCamera ? <CameraButton voice={voice} /> : null}
+                {state.viewer ? null : <ShareButton voice={voice} othersShare={theirs !== null} watching={state.watching} />}
+                {state.viewing ? (
+                  <button type="button" aria-pressed="true" onClick={() => { client.viewVideo(false); }}>
+                    <Glyph name="camera" />
+                    <span className="label">Hide video</span>
+                  </button>
+                ) : cameraCount > 0 ? (
+                  <button type="button" onClick={() => { client.viewVideo(true); }}>
+                    <Glyph name="camera" />
+                    <span className="label">Show video ({cameraCount})</span>
+                  </button>
+                ) : null}
                 {theirs !== null && !state.watching ? (
                   <button type="button" onClick={() => { client.watch(true); }} disabled={state.phase !== 'connected'}>
                     <Glyph name="screen" />
@@ -401,10 +485,11 @@ export function VoicePanel({
               <>
                 <button ref={joinButton} type="button" className="primary" onClick={voice.join} disabled={!canJoin}>
                   <Glyph name="headphones" />
-                  Join voice {dest}
+                  {/* One flex item, so the words and the channel read as one line of text (F17). */}
+                  <span className="btn-text">Join voice {dest}</span>
                 </button>
-                <button type="button" onClick={voice.watchOnly} disabled={!canJoin} aria-describedby={canJoin ? 'voice-watch-hint' : undefined}>
-                  Watch only {dest}
+                <button type="button" onClick={() => { voice.watchOnly(elsewhere); }} disabled={!canJoin} aria-describedby={canJoin ? 'voice-watch-hint' : undefined}>
+                  <span className="btn-text">Watch only {dest}</span>
                 </button>
               </>
             )}
@@ -419,6 +504,7 @@ export function VoicePanel({
         {inVoice ? (
           <>
             {cutOff ? <p role="status" className="hint">{cutOffNote}</p> : null}
+            <CameraNote voice={voice} />
             {state.outputNote === null ? null : (
               <p role="status" className="hint">
                 {state.outputNote}
@@ -481,8 +567,8 @@ export function VoicePanel({
         )}
       </div>
 
-      {inVoice ? <Options voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} /> : null}
-      {view === null ? null : stage === null ? view : createPortal(view, stage)}
+      {inVoice ? <Options voice={voice} open={options && !strip} sharable={sharable} about={about} others={others} cameraAllowed={cameraAllowed} /> : null}
+      {staged === null ? null : stage === null ? staged : createPortal(staged, stage)}
     </section>
   );
 }
@@ -490,12 +576,36 @@ export function VoicePanel({
 // StripState is the first of the phone strip's four controls (issue #1028):
 // where voice is, as a button that opens the Voice view, where the rest is.
 // Its words are the state and the channel, on two short lines; a long name
-// ends in an ellipsis.
-function StripState({ phase, channel, onOpen }: { readonly phase: Phase; readonly channel: string | null; readonly onOpen: () => void }) {
+// ends in an ellipsis. While this page's own camera is captured or sent, the
+// state line says "Camera on", with the camera glyph in place of the dot
+// (issue #1268, O10): from the local track alone, never from presence (S5),
+// and for a capture not yet sent too, since the device is in use either way.
+// The control stays one, and still opens the Voice view, where the Camera
+// button is.
+function StripState({
+  phase,
+  channel,
+  camera,
+  onOpen,
+}: {
+  readonly phase: Phase;
+  readonly channel: string | null;
+  readonly camera: boolean;
+  readonly onOpen: () => void;
+}) {
   const going = phase === 'connecting' || phase === 'reconnecting';
   return (
-    <button type="button" className="voice-open" onClick={onOpen}>
-      <span className="voice-open-phase">{phase === 'connected' ? 'In voice' : phaseLabel[phase]}</span>
+    <button type="button" className={camera ? 'voice-open has-camera' : 'voice-open'} onClick={onOpen}>
+      {camera ? (
+        <span className="voice-open-phase camera-on">
+          <Glyph name="camera" />
+          Camera on
+          {/* Where the connection is not up, the state is still read out. */}
+          {phase === 'connected' ? null : <span className="vh">, {phaseLabel[phase]}</span>}
+        </span>
+      ) : (
+        <span className="voice-open-phase">{phase === 'connected' ? 'In voice' : phaseLabel[phase]}</span>
+      )}
       {channel === null ? null : (
         <>
           {/* The spaces are outside the spans, where a flex column draws
@@ -558,6 +668,29 @@ function TalkControl({ voice, silenced }: { readonly voice: VoiceControl; readon
   );
 }
 
+// ModeToggle is the one-tap switch between the open microphone and push to
+// talk (issue #1244), in the bar and in the phone's strip. Pressed is the open
+// microphone; the Voice options radios follow the same state. Listen-only and
+// watch-only have no microphone to switch, as the radios are.
+function ModeToggle({ voice }: { readonly voice: VoiceControl }) {
+  const { state, client } = voice;
+  const open = state.mode === 'open';
+  // With no microphone, nothing is shown as on: not pressed, and disabled.
+  const off = state.listenOnly || state.watchOnly;
+  return (
+    <button
+      type="button"
+      className="mode-toggle"
+      aria-pressed={open && !off}
+      disabled={off}
+      onClick={() => { client.setMode(open ? 'ptt' : 'open'); }}
+    >
+      <Glyph name="wave" />
+      <span className="label">Open mic</span>
+    </button>
+  );
+}
+
 // MuteButton is Mute. Deafened is muted too (UX-11), so Mute shows pressed and
 // cannot be let go of. The choice made before is kept, and is back on
 // Undeafen (issue #591, F13).
@@ -602,7 +735,6 @@ function Elsewhere({ where, onOpen }: { readonly where: Busiest; readonly onOpen
       </span>{' '}
       <button
         type="button"
-        className="quiet"
         onClick={() => {
           onOpen(where.name);
         }}
@@ -659,6 +791,9 @@ function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
             {o.transmitting ? <Tag text="transmitting" /> : null}
             {speaking.has(o.principal) ? <Tag text="speaking" /> : null}
             {o.sharing ? <Tag text="sharing" /> : null}
+            {/* Others' claims; the person's own camera is said from their
+                own track, in the strip (S5). */}
+            {o.camera && o.principal !== viewer ? <Tag text="camera" /> : null}
             {o.principal === viewer ? null : <VolumeTag volume={volumes.get(o.principal)} />}
           </li>
         ))}
@@ -671,6 +806,9 @@ function Roster({ roster, people, viewer, elsewhere, speaking, volumes }: {
     </div>
   );
 }
+
+// No tiles: the call view closed, and the share alone on the stage.
+const noTiles: readonly Tile[] = [];
 
 // Nobody turned down: the roster while this page is not in voice.
 const noVolumes: ReadonlyMap<number, number> = new Map();
@@ -894,10 +1032,121 @@ function ProcessingChoice({ voice }: { readonly voice: VoiceControl }) {
   );
 }
 
+// CameraButton is Camera, with aria-pressed, as Mute is. Turning it off is
+// the button, Tab and Enter; nothing turns it on but a press of it.
+function CameraButton({ voice }: { readonly voice: VoiceControl }) {
+  const { state, client } = voice;
+  const on = cameraOn(state.camera);
+  const stopping = state.camera.kind === 'stopping';
+  return (
+    <button
+      type="button"
+      aria-pressed={on}
+      disabled={stopping || (!on && state.phase !== 'connected')}
+      onClick={() => {
+        if (on) void client.stopCamera();
+        else void client.startCamera(onPhoneCamera() ? 'phone' : 'desktop');
+      }}
+    >
+      <Glyph name="camera" />
+      <span className="label">Camera</span>
+    </button>
+  );
+}
+
+// CameraNote says what the camera is doing, or why it stopped or did not
+// start, in words (design §7.2).
+function CameraNote({ voice }: { readonly voice: VoiceControl }) {
+  const note = cameraNote(voice.state.camera);
+  if (note === null) return null;
+  return (
+    <p role="status" className="hint camera-note">
+      {note}
+    </p>
+  );
+}
+
+// The values of the camera list: a device by id, and the entry shown while
+// nothing listed is chosen. There is no default entry: a camera is never
+// taken by its place or as the default (N7).
+const cameraPrefix = 'camera:';
+
+// CameraChoice is the choice of camera in Voice options, under the
+// microphone's. The cameras are listed once the browser names them, which is
+// after the camera, or its test, was allowed.
+function CameraChoice({ voice }: { readonly voice: VoiceControl }) {
+  const { state, client } = voice;
+  const list = state.cameras;
+  const chosen = state.cameraChoice;
+  if (list === null) {
+    return (
+      <p className="hint">
+        {chosen === null ? 'Cameras are listed once you turn on your camera or test it.' : `Camera: ${chosen.label === '' ? 'your chosen camera' : chosen.label}. Cameras are listed once you turn on your camera or test it.`}
+      </p>
+    );
+  }
+  const listed = chosen !== null && list.some((c) => c.id === chosen.id);
+  const value = listed ? cameraPrefix + chosen.id : unchosen;
+  const inUse = state.cameraInUse === null ? undefined : list.find((c) => c.id === state.cameraInUse);
+  return (
+    <div className="voice-device">
+      <label htmlFor="voice-camera">Camera</label>
+      <select
+        id="voice-camera"
+        value={value}
+        onChange={(e) => {
+          const picked = list.find((c) => cameraPrefix + c.id === e.target.value);
+          if (picked !== undefined) void client.chooseCamera(picked);
+        }}
+      >
+        {value === unchosen ? (
+          <option value={unchosen} disabled>
+            {chosen === null ? 'Choose a camera' : 'Your chosen camera is not connected'}
+          </option>
+        ) : null}
+        {list.map((c) => (
+          <option key={c.id} value={cameraPrefix + c.id}>
+            {c.label}
+          </option>
+        ))}
+      </select>
+      {chosen !== null && !listed ? <p className="hint">Your chosen camera is not connected.</p> : null}
+      {inUse === undefined ? null : <p className="hint">In use: {inUse.label}</p>}
+    </div>
+  );
+}
+
+// CameraOptions is the camera's part of Voice options: why there is none, or
+// the picker and, while the camera is off, its private test.
+function CameraOptions({ voice, open, cameraAllowed }: { readonly voice: VoiceControl; readonly open: boolean; readonly cameraAllowed: boolean }) {
+  const { state, client } = voice;
+  if (state.watchOnly) return <p className="hint">{watchOnlyCamera}</p>;
+  if (state.listenOnly) return <p className="hint">{listenOnlyCamera}</p>;
+  if (!cameraAllowed) return <p className="hint">{cameraOffForYou}</p>;
+  const off = !cameraOn(state.camera);
+  return (
+    <>
+      <CameraChoice voice={voice} />
+      {/* Drawn only while the options are open and the camera is off:
+          closing them takes the test out of the tree, which stops it. */}
+      {open && off ? (
+        <CameraTest
+          choose={() => client.cameraToUse()}
+          chosen={state.cameraChoice?.id ?? ''}
+          onCaptured={() => {
+            client.refreshCameras();
+          }}
+        />
+      ) : null}
+    </>
+  );
+}
+
 // Voice options: the less used choices, out of the strip.
-function Options({ voice, open, sharable, about, others }: {
+function Options({ voice, open, sharable, about, others, cameraAllowed }: {
   readonly voice: VoiceControl;
   readonly open: boolean;
+  readonly cameraAllowed: boolean;
   // Everyone else in the room joined, by name, for their volumes.
   readonly others: readonly { readonly principal: number; readonly name: string }[];
   // Whether the full share notes are said: while the strip's line about
@@ -909,6 +1158,7 @@ function Options({ voice, open, sharable, about, others }: {
   return (
     <div id="voice-options" className="voice-options" hidden={!open}>
       <MicrophoneChoice voice={voice} />
+      <CameraOptions voice={voice} open={open} cameraAllowed={cameraAllowed} />
       <SpeakersChoice voice={voice} />
       <Volumes voice={voice} others={others} />
       <fieldset className="voice-mode" disabled={state.listenOnly || state.watchOnly}>
@@ -925,7 +1175,7 @@ function Options({ voice, open, sharable, about, others }: {
       </fieldset>
       {state.mode === 'ptt' ? (
         <>
-          <p className="hint">
+          <p className="hint talk-key-note">
             Talk key: {keyLabel(voice.talkKey)}.{' '}
             <button type="button" onClick={() => { voice.capture(!voice.capturing); }}>
               {voice.capturing ? 'Press a key (Escape cancels)' : 'Change talk key'}
@@ -939,9 +1189,15 @@ function Options({ voice, open, sharable, about, others }: {
               type="range"
               min={0}
               max={maxTail}
-              step={10}
+              step={releaseStep}
               value={state.releaseDelay}
               aria-valuetext={releaseLabel(state.releaseDelay)}
+              onKeyDown={(e) => {
+                // A browser's own page step varies; here it is 250 ms (F22).
+                if (e.key !== 'PageUp' && e.key !== 'PageDown') return;
+                e.preventDefault();
+                voice.setReleaseDelay(clampTail(state.releaseDelay + (e.key === 'PageUp' ? releasePage : -releasePage)));
+              }}
               onChange={(e) => { voice.setReleaseDelay(Number(e.target.value)); }}
             />
             <output>{releaseLabel(state.releaseDelay)}</output>

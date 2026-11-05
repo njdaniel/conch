@@ -82,6 +82,10 @@ func (s *Store) InsertFile(ctx context.Context, n NewFile) (File, error) {
 		if !member {
 			return ErrNotChannelMember
 		}
+		// The archived guard of an upload (issue #844).
+		if err := channelNotArchivedTx(ctx, tx, n.ChannelID); err != nil {
+			return err
+		}
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO files (channel_id, uploader_id, filename, media_type, size, sha256, created_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?)`,

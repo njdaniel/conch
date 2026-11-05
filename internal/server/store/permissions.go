@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -220,14 +219,24 @@ func readPermissionsRevisionTx(ctx context.Context, tx execer) (int64, time.Time
 //  2. an owner holds everything, and no brake applies to it (§4.3);
 //  3. anyone else holds what its role holds (roleHolds: fixed cells in
 //     code, else the stored cell or its default), only while no brake on
-//     it withholds it (voice_allowed withholds use_voice and share_screen
-//     from members and operators, and may_invite withholds
+//     it withholds it (voice_allowed withholds use_voice, share_screen and
+//     use_camera from members and operators, and may_invite withholds
 //     make_member_links from members only, §5), and only while it holds
-//     every permission perm requires (share_screen needs use_voice,
-//     act_as_members needs manage_members), brakes included.
+//     every permission perm requires (share_screen and use_camera need
+//     use_voice, act_as_members needs manage_members), brakes included.
 func principalHolds(p Principal, d permissionDoc, perm schema.Permission) bool {
 	if !perm.Valid() {
 		return false
+	}
+	// 1a (issue #1326, ai-administrators §3.2): an agent that is not
+	// disabled or hidden holds exactly its manifest's agent-grantable
+	// permissions, as withAgentGrantTx read them; no cell, brake or
+	// dependency applies. An agent whose grant was not loaded holds nothing.
+	if p.Kind == PrincipalAgent {
+		if p.guestTarget() || p.DisabledAt != nil || p.HiddenAt != nil {
+			return false
+		}
+		return perm.AgentGrantable() && p.agentGrant&agentGrantBit(perm) != 0
 	}
 	if p.Kind != PrincipalHuman || p.guestTarget() || p.DisabledAt != nil || p.HiddenAt != nil {
 		return false
@@ -255,6 +264,74 @@ func principalHolds(p Principal, d permissionDoc, perm schema.Permission) bool {
 	return true
 }
 
+// agentGrantBit is perm's bit in Principal.agentGrant: its catalog position.
+// A permission outside the catalog has no bit and is never held.
+func agentGrantBit(perm schema.Permission) uint64 {
+	for i, p := range schema.Permissions {
+		if p == perm && i < 64 {
+			return 1 << uint(i)
+		}
+	}
+	return 0
+}
+
+// adminDispatchKey marks a context as a request the admin door dispatched
+// (issue #1326, ai-administrators §3.4): the one place an agent's grant is
+// authority. No network request can carry a context value, so the mark is
+// set only by code: the server's dispatcher (S3, #1330) and tests.
+type adminDispatchKey struct{}
+
+// WithAdminDispatch returns ctx marked as dispatched by the admin door. An
+// agent's grant authorizes it only in a context so marked: everywhere else
+// (a REST request an agent makes directly, an MCP tool) an agent holds
+// nothing, exactly as before the grant existed, so no gated action can run
+// without its approval by a route that never asks for one.
+func WithAdminDispatch(ctx context.Context) context.Context {
+	return context.WithValue(ctx, adminDispatchKey{}, true)
+}
+
+// adminDispatched reports whether ctx carries the admin door's mark.
+func adminDispatched(ctx context.Context) bool {
+	v, _ := ctx.Value(adminDispatchKey{}).(bool)
+	return v
+}
+
+// withAgentAuthorityTx is withAgentGrantTx for a question of authority (may
+// p do this now?): the grant is read only in a context the admin door
+// dispatched, and an agent anywhere else holds nothing.
+func withAgentAuthorityTx(ctx context.Context, tx execer, p Principal) (Principal, error) {
+	if p.Kind != PrincipalAgent || !adminDispatched(ctx) {
+		p.agentGrant = 0
+		return p, nil
+	}
+	return withAgentGrantTx(ctx, tx, p)
+}
+
+// withAgentGrantTx returns p with its agent grant read from its manifest
+// (issue #1326, ai-administrators §3.2 rule 1a). Anyone but an agent is
+// returned unchanged. An agent with no manifest, or one whose stored row does
+// not decode or validate, holds nothing (fail closed, F3 of #1328's
+// review), and only agent-grantable permissions are ever set.
+func withAgentGrantTx(ctx context.Context, tx execer, p Principal) (Principal, error) {
+	if p.Kind != PrincipalAgent {
+		return p, nil
+	}
+	p.agentGrant = 0
+	m, err := agentManifestTx(ctx, tx, p.ID)
+	switch {
+	case errors.Is(err, ErrNotFound), errors.Is(err, ErrInvalidManifest):
+		return p, nil
+	case err != nil:
+		return p, err
+	}
+	for _, perm := range m.Permissions {
+		if m.HoldsPermission(perm) {
+			p.agentGrant |= agentGrantBit(perm)
+		}
+	}
+	return p, nil
+}
+
 // permittedTx reports whether principalID holds perm now, reading the
 // principal and the document inside tx (design §7.1; principalHolds gives
 // the order). A principal id with no row, and an unknown permission, answer
@@ -266,6 +343,32 @@ func permittedTx(ctx context.Context, tx execer, principalID int64, perm schema.
 	}
 	p, found, err := queryPrincipal(ctx, tx, principalID)
 	if err != nil || !found {
+		return false, err
+	}
+	if p, err = withAgentAuthorityTx(ctx, tx, p); err != nil {
+		return false, err
+	}
+	d, err := readPermissionDocTx(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	return principalHolds(p, d, perm), nil
+}
+
+// standingPermittedTx is permittedTx for a question about what someone made
+// earlier, not about the request at hand: does the principal who listed a
+// channel still hold what the listing needs? An agent's grant counts
+// whatever the context, as for a link it made (makerRightsTx standing), so a
+// listing an AI administrator made stands while its grant does.
+func standingPermittedTx(ctx context.Context, tx execer, principalID int64, perm schema.Permission) (bool, error) {
+	if !perm.Valid() {
+		return false, nil
+	}
+	p, found, err := queryPrincipal(ctx, tx, principalID)
+	if err != nil || !found {
+		return false, err
+	}
+	if p, err = withAgentGrantTx(ctx, tx, p); err != nil {
 		return false, err
 	}
 	d, err := readPermissionDocTx(ctx, tx)
@@ -281,6 +384,10 @@ func permittedTx(ctx context.Context, tx execer, principalID int64, perm schema.
 func principalPermittedTx(ctx context.Context, tx execer, p Principal, perm schema.Permission) (bool, error) {
 	if !perm.Valid() {
 		return false, nil
+	}
+	p, err := withAgentAuthorityTx(ctx, tx, p)
+	if err != nil {
+		return false, err
 	}
 	d, err := readPermissionDocTx(ctx, tx)
 	if err != nil {
@@ -316,9 +423,10 @@ func selfOrAdministratorTx(ctx context.Context, tx execer, actorID, targetID int
 
 // brakeWithholds reports whether a per-person brake on p withholds perm
 // (design §5), whatever the document says of perm: voice_allowed = 0
-// withholds use_voice and share_screen from members and operators, and
-// may_invite = 0 withholds make_member_links from members only. An owner
-// skips brakes (§4.3). It is the one statement of the brakes: principalHolds
+// withholds use_voice, share_screen and use_camera from members and
+// operators (ADR-015 amends ADR-014 decision 4; there is no camera-only
+// brake), and may_invite = 0 withholds make_member_links from members only.
+// An owner skips brakes (§4.3). It is the one statement of the brakes: principalHolds
 // ANDs it in, and SetMayInvite asks it alone, so a permission switched off
 // by the document (reversible) is never taken for the brake (final).
 func brakeWithholds(p Principal, perm schema.Permission) bool {
@@ -326,7 +434,7 @@ func brakeWithholds(p Principal, perm schema.Permission) bool {
 		return false
 	}
 	switch perm {
-	case schema.PermUseVoice, schema.PermShareScreen:
+	case schema.PermUseVoice, schema.PermShareScreen, schema.PermUseCamera:
 		return !p.VoiceAllowed
 	case schema.PermMakeMemberLinks:
 		return PermissionRoleOf(p) == schema.PermissionRoleMember && !p.MayInvite
@@ -377,6 +485,10 @@ func (s *Store) Permitted(ctx context.Context, principalID int64, perm schema.Pe
 // reads only; a write a permission gates asks permittedTx in its own
 // transaction.
 func (s *Store) HeldBy(ctx context.Context, p Principal, perms ...schema.Permission) ([]bool, error) {
+	p, err := withAgentAuthorityTx(ctx, s.db, p)
+	if err != nil {
+		return nil, err
+	}
 	d, err := readPermissionDocTx(ctx, s.db)
 	if err != nil {
 		return nil, err
@@ -389,14 +501,18 @@ func (s *Store) HeldBy(ctx context.Context, p Principal, perms ...schema.Permiss
 }
 
 // effectivePermissionsTx lists what principalID holds now, in catalog
-// order: every permission for an owner, none for an agent, a guest, a
-// disabled, hidden or unknown principal, and otherwise its role's cells
-// with its brakes applied. Never nil.
+// order: every permission for an owner, an agent's manifest grant (issue
+// #1326; none without one), none for a guest, a disabled, hidden or unknown
+// principal, and otherwise its role's cells with its brakes applied. Never
+// nil.
 func effectivePermissionsTx(ctx context.Context, tx execer, principalID int64) ([]schema.Permission, error) {
 	out := []schema.Permission{}
 	p, found, err := queryPrincipal(ctx, tx, principalID)
 	if err != nil || !found {
 		return out, err
+	}
+	if p, err = withAgentAuthorityTx(ctx, tx, p); err != nil {
+		return nil, err
 	}
 	d, err := readPermissionDocTx(ctx, tx)
 	if err != nil {
@@ -618,8 +734,15 @@ func putPermissionsTx(ctx context.Context, tx execer, actor string, actorID int6
 	}
 	denied := &PermissionError{Err: ErrPermissionDenied, Permission: schema.PermChangeServerSettings,
 		Reason: "changing the permissions document needs change_server_settings"}
-	if !found || writer.Kind != PrincipalHuman || writer.guestTarget() || writer.DisabledAt != nil || writer.HiddenAt != nil {
+	// A person writes it, or an AI administrator through the admin door
+	// (issue #1330, set_permissions): an agent holds only its grant, read
+	// here as authority, is never an owner, so it changes the member column
+	// alone and gives members nothing it does not hold.
+	if !found || (writer.Kind != PrincipalHuman && writer.Kind != PrincipalAgent) || writer.guestTarget() || writer.DisabledAt != nil || writer.HiddenAt != nil {
 		return PermissionsWrite{}, denied
+	}
+	if writer, err = withAgentAuthorityTx(ctx, tx, writer); err != nil {
+		return PermissionsWrite{}, err
 	}
 	owner := writer.IsOwner()
 	d, err := readPermissionDocTx(ctx, tx)
@@ -817,130 +940,6 @@ func initializePermissions(ctx context.Context, tx *sql.Tx) error {
 		return err
 	}
 	return appendAuditEventTx(ctx, tx, "system", AuditPermissionsInitialized, "server", detail, now)
-}
-
-// issuedDetail reads the credential or hook a credential_created,
-// credential_rotated or hook_created audit row names: its detail starts
-// "credential=<id>" or "hook=<id>" (credentialDetail, hookDetail).
-var issuedDetail = regexp.MustCompile(`^(credential|hook)=([0-9]+)\b`)
-
-// IssuedToOthers lists the live credentials and hooks that someone other
-// than an owner issued to a principal other than themself (ADR-014 design
-// §7.5, O13): what the answer to a PUT that turns act_as_members off for
-// operators lists, so that the owner can revoke them. Taking the permission
-// away ends none of them.
-//
-// It is joined from the audit trail, the only record of who issued what:
-// credential_created, credential_rotated and hook_created rows (written with
-// their actor since e48b6e3, 2026-10-08), whose actor and subject are both
-// "principal:<id>" and differ. An item issued before those rows existed has
-// no row and is absent. An owner's own issues are left out: owners keep
-// act_as_members. An item is live while it is not revoked (and, for a
-// credential, not expired at now) and still belongs to the subject. Each
-// item is listed once, at its first issuing row, oldest first.
-func (s *Store) IssuedToOthers(ctx context.Context, now time.Time) ([]schema.IssuedByOperatorV1, error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
-	if err != nil {
-		return nil, fmt.Errorf("store: issued to others: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	rows, err := tx.QueryContext(ctx,
-		`SELECT actor, subject, detail, created_at FROM audit_events
-		 WHERE action IN ('credential_created', 'credential_rotated', 'hook_created')
-		   AND actor LIKE 'principal:%' AND subject LIKE 'principal:%' AND actor <> subject
-		 ORDER BY id`)
-	if err != nil {
-		return nil, fmt.Errorf("store: issued to others: read audit rows: %w", err)
-	}
-	type issued struct {
-		kind             schema.IssuedKind
-		id, target, from int64
-		at               int64
-	}
-	var found []issued
-	for rows.Next() {
-		var actor, subject, detail string
-		var at int64
-		if err := rows.Scan(&actor, &subject, &detail, &at); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("store: issued to others: scan audit row: %w", err)
-		}
-		from, ok1 := principalOfActor(actor)
-		target, ok2 := principalOfActor(subject)
-		m := issuedDetail.FindStringSubmatch(detail)
-		if !ok1 || !ok2 || m == nil {
-			continue
-		}
-		id, err := strconv.ParseInt(m[2], 10, 64)
-		if err != nil {
-			continue
-		}
-		kind := schema.IssuedKind(m[1])
-		found = append(found, issued{kind: kind, id: id, target: target, from: from, at: at})
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, fmt.Errorf("store: issued to others: read audit rows: %w", err)
-	}
-	_ = rows.Close()
-
-	out := []schema.IssuedByOperatorV1{}
-	seen := map[string]bool{}
-	owners := map[int64]bool{}
-	for _, it := range found {
-		key := string(it.kind) + ":" + strconv.FormatInt(it.id, 10)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		owner, known := owners[it.from]
-		if !known {
-			p, ok, err := queryPrincipal(ctx, tx, it.from)
-			if err != nil {
-				return nil, fmt.Errorf("store: issued to others: read issuer: %w", err)
-			}
-			owner = ok && p.IsOwner()
-			owners[it.from] = owner
-		}
-		if owner {
-			continue
-		}
-		var holder int64
-		var query string
-		args := []any{it.id}
-		switch it.kind {
-		case schema.IssuedCredential:
-			query = `SELECT principal_id FROM credentials WHERE id = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)`
-			args = append(args, now.UnixMilli())
-		case schema.IssuedHook:
-			query = `SELECT principal_id FROM hooks WHERE id = ? AND revoked_at IS NULL`
-		default:
-			continue
-		}
-		switch err := tx.QueryRowContext(ctx, query, args...).Scan(&holder); {
-		case errors.Is(err, sql.ErrNoRows):
-			continue
-		case err != nil:
-			return nil, fmt.Errorf("store: issued to others: read %s %d: %w", it.kind, it.id, err)
-		}
-		if holder != it.target {
-			continue
-		}
-		out = append(out, schema.IssuedByOperatorV1{Kind: it.kind, ID: it.id, PrincipalID: it.target, IssuedBy: it.from,
-			IssuedAt: schema.NewTimestamp(time.UnixMilli(it.at))})
-	}
-	return out, nil
-}
-
-// principalOfActor reads the id of an audit actor or subject of the form
-// "principal:<id>", positive.
-func principalOfActor(s string) (int64, bool) {
-	rest, ok := strings.CutPrefix(s, "principal:")
-	if !ok {
-		return 0, false
-	}
-	id, err := strconv.ParseInt(rest, 10, 64)
-	return id, err == nil && id > 0
 }
 
 // auditLinkSuspensionsTx writes, for a write that takes the document from

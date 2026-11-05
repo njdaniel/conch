@@ -6,6 +6,7 @@
 // attribution in the conversation. conchd is a stand-in fetch.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { dateTimeOf } from './time';
 import { App } from './App';
 import { authorOf } from './Conversation';
 import { displayName, guestName, memberName } from './guestName';
@@ -181,9 +182,7 @@ describe('the front door', () => {
     // Guests are removed for now (issue #1005): even a server that still
     // says guest: true gets no guest entry here.
     { join: { guest: true, account: true }, offered: ['Create an account'] },
-    { join: { guest: true, account: false }, offered: [] },
     { join: { guest: false, account: true }, offered: ['Create an account'] },
-    { join: { guest: false, account: false }, offered: [] },
     { join: { guest: false, account: true, guests_full: true }, offered: ['Create an account'] },
     { join: { guest: false, account: false, paused: true }, offered: [] },
   ])('offers only what the server says the address allows: $join', async ({ join, offered }) => {
@@ -195,10 +194,26 @@ describe('the front door', () => {
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeDefined();
   });
 
+  // Issue #990: while open sign-up is off the address is a sign-in page and
+  // one line. It offers no account and never a guest visit, whatever the
+  // server says of guests.
+  it.each([{ join: { guest: false, account: false } }, { join: { guest: true, account: false } }, { join: { guest: true, account: false, guests_full: true } }])(
+    'shows Sign in and the one line, and nothing to join, while sign-up is off: $join',
+    async ({ join }) => {
+      serve({ 'GET /v1/join': () => json(frontDoor(join)) });
+      render(<App origin={origin} />);
+      expect(await screen.findByText('This server is invite-only.')).toBeDefined();
+      expect(screen.queryByRole('region', { name: 'Join' })).toBeNull();
+      expect(screen.queryByRole('button', { name: /create an account|guest/i })).toBeNull();
+      expect(screen.queryByText(/guest/i)).toBeNull();
+      expect(screen.getByRole('button', { name: 'Sign in' })).toBeDefined();
+    },
+  );
+
   it.each([
     { join: { guest: false, account: false, paused: true }, line: 'Joining is paused on this server for now. If you have an account, sign in below.' },
-    { join: { guest: true, account: false, guests_full: true }, line: 'This server is invite-only. To join, ask someone on it for an invite link.' },
-    { join: { guest: false, account: false }, line: 'This server is invite-only. To join, ask someone on it for an invite link.' },
+    { join: { guest: true, account: false, guests_full: true }, line: 'This server is invite-only.' },
+    { join: { guest: false, account: false }, line: 'This server is invite-only.' },
   ])('says honestly why: $line', async ({ join, line }) => {
     serve({ 'GET /v1/join': () => json(frontDoor(join)) });
     render(<App origin={origin} />);
@@ -289,7 +304,7 @@ describe('a guest visit', () => {
     expect(panel.textContent).toContain('Temporary guest');
     expect(panel.textContent).toContain('Guest: Pat · a7k4');
     expect(panel.textContent).toContain('End visit signs you out permanently. Your messages remain. Create an account to keep access.');
-    expect(within(panel).getByText(new Date(visit.expires_at).toLocaleString()).getAttribute('datetime')).toBe(visit.expires_at);
+    expect(within(panel).getByText(dateTimeOf(visit.expires_at)).getAttribute('datetime')).toBe(visit.expires_at);
     // It never says closing the browser ends the visit.
     expect(panel.textContent).toContain('Closing the tab does not end it.');
     expect(within(panel).getByRole('button', { name: 'Create an account' })).toBeDefined();
@@ -363,10 +378,13 @@ describe('a guest visit', () => {
     expect(displayName(otherWho)).toBe('ada');
   });
 
-  it('hides what a guest cannot do: renaming, sign-in lists and sign out everywhere', async () => {
+  it('hides what a guest cannot do: leaving a channel, renaming, sign-in lists and sign out everywhere', async () => {
     serve(guestServer());
     render(<App origin={origin} />);
     await joinAsGuest();
+    // End visit is the guest's way out; the row has no channel Leave (#1095).
+    expect(screen.getByRole('button', { name: 'End visit' })).toBeDefined();
+    expect(screen.queryByRole('button', { name: 'Actions for lobby' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
     const settings = await screen.findByRole('dialog', { name: 'Settings' });
     expect(within(settings).queryByRole('button', { name: 'Sign out everywhere' })).toBeNull();
@@ -754,7 +772,7 @@ describe('a returning member', () => {
 });
 
 describe('an invite and its join modes', () => {
-  const preview = (join: object) => ({ kind: 'open', inviter: 'ada', channels: ['red'], voice: false, expires_at: '2099-10-23T12:00:00Z', join });
+  const preview = (join: object) => ({ kind: 'member', server_name: 'Conch', inviter: 'ada', channels: ['red'], expires_at: '2099-10-23T12:00:00Z', join });
 
   function opened(routes: Record<string, Route>) {
     const calls = serve({ ...both, ...routes });
@@ -767,7 +785,7 @@ describe('an invite and its join modes', () => {
     { name: 'both', join: { guest: true, account: true } },
     { name: 'guests only', join: { guest: true, account: false } },
   ])('offers no guest choice for an invite that says $name, and calls no guest route', async ({ join }) => {
-    const { calls } = opened({ 'POST /v1/invites/preview': () => json(preview(join)) });
+    const { calls } = opened({ 'POST /v2/invites/preview': () => json(preview(join)) });
     await screen.findByText('Invited by');
     expect(screen.queryByRole('group', { name: 'How to join' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Join as guest' })).toBeNull();
@@ -776,13 +794,13 @@ describe('an invite and its join modes', () => {
   });
 
   it('offers the account form alone for an invite that allows accounts', async () => {
-    opened({ 'POST /v1/invites/preview': () => json(preview({ guest: true, account: true })) });
+    opened({ 'POST /v2/invites/preview': () => json(preview({ guest: true, account: true })) });
     expect(await screen.findByLabelText('Choose a password')).toBeDefined();
     expect(screen.queryByLabelText('Name to show (optional)')).toBeNull();
   });
 
   it('offers the account form alone for an account-only invite, as invites were', async () => {
-    opened({ 'POST /v1/invites/preview': () => json(preview({ guest: false, account: true })) });
+    opened({ 'POST /v2/invites/preview': () => json(preview({ guest: false, account: true })) });
     expect(await screen.findByLabelText('Choose a password')).toBeDefined();
     expect(screen.queryByLabelText('Name to show (optional)')).toBeNull();
   });
@@ -792,7 +810,7 @@ describe('an invite and its join modes', () => {
     { join: { guest: true, account: false, guests_full: true }, line: 'This invite cannot be used to join right now. Ask ada for another way in.' },
     { join: { guest: false, account: false }, line: 'This invite cannot be used to join right now. Ask ada for another way in.' },
   ])('says honestly why it cannot be used now: $line', async ({ join, line }) => {
-    opened({ 'POST /v1/invites/preview': () => json(preview(join)) });
+    opened({ 'POST /v2/invites/preview': () => json(preview(join)) });
     expect(await screen.findByText(line)).toBeDefined();
     expect(screen.queryByLabelText('Your name')).toBeNull();
     expect(screen.queryByLabelText('Name to show (optional)')).toBeNull();
@@ -800,7 +818,7 @@ describe('an invite and its join modes', () => {
 
   it('tells someone signed in that the invite does not add their account to its channels', async () => {
     window.localStorage.setItem(key, otherToken);
-    opened({ 'POST /v1/invites/preview': () => json(preview({ guest: false, account: true })), ...people({ [otherToken]: otherWho }) });
+    opened({ 'POST /v2/invites/preview': () => json(preview({ guest: false, account: true })), ...people({ [otherToken]: otherWho }) });
     const said = await screen.findByText(/You are signed in here as/);
     expect(said.textContent).toContain('it does not add ada to #red');
     expect(said.textContent).toContain('ask ada to add you');
@@ -808,7 +826,7 @@ describe('an invite and its join modes', () => {
 
   it('signs in instead, uses nothing of the invite, and says which of its channels the account is not in', async () => {
     const { calls } = opened({
-      'POST /v1/invites/preview': () => json(preview({ guest: false, account: true })),
+      'POST /v2/invites/preview': () => json(preview({ guest: false, account: true })),
       'POST /v1/login': () => json({ ...signedIn, token: otherToken, principal: { id: 2, kind: 'human', name: 'ada', created_at: at } }),
       ...people({ [otherToken]: otherWho }),
     });

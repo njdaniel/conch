@@ -65,6 +65,12 @@ type Principal struct {
 	// MayInvite is the right to make personal invites. Operators may always
 	// invite whatever this says; nobody else holds it until granted.
 	MayInvite bool
+	// agentGrant is the agent-grantable permissions an agent holds by its
+	// manifest (issue #1326, ai-administrators §3.2 rule 1a), one bit per
+	// catalog position, filled only by withAgentGrantTx. Zero, the value of
+	// every principal read any other way, holds nothing: a reader that never
+	// loads the grant fails closed. A bitmask keeps Principal comparable.
+	agentGrant uint64
 	// VoiceAllowed is whether the principal may use voice. True for every
 	// account unless an invite made without it. Every voice route refuses a
 	// person without it (voicePresenceChannel, internal/server/voice.go).
@@ -127,21 +133,63 @@ type Channel struct {
 	// I3b).
 	Visibility schema.ChannelVisibility
 	IsDefault  bool
+	// ArchivedAt is when the channel was archived (migration 41, issue
+	// #844), at one-second precision; the zero time while it is live. An
+	// archived channel refuses every write the guards of this package name
+	// (ErrChannelArchived) and keeps its history, members and read state.
+	ArchivedAt time.Time
+}
+
+// Archived reports whether the channel is archived.
+func (c Channel) Archived() bool { return !c.ArchivedAt.IsZero() }
+
+// ErrChannelArchived is a write to an archived channel (HTTP 409
+// channel_archived, issue #844). Every guard answers it from inside the
+// transaction that would have written, so no route can miss it.
+var ErrChannelArchived = errors.New("store: channel is archived")
+
+// ErrChannelArchiveDefault is an archive of a channel that is, or in the same
+// request becomes, a default channel (HTTP 409 channel_archive_default).
+var ErrChannelArchiveDefault = errors.New("store: a default channel cannot be archived")
+
+// channelNotArchivedTx is the archived guard (issue #844): it answers
+// ErrChannelArchived when the channel is archived, from inside the
+// transaction that would write, and nil for a live channel. A channel that
+// does not exist is nil too: the caller's own existence check answers it, so
+// this guard adds no second answer for the callers that have none. Callers
+// run it only after they have established that the caller may see the
+// channel, so the answer leaks nothing to a non-member.
+func channelNotArchivedTx(ctx context.Context, tx execer, channelID int64) error {
+	var archived sql.NullInt64
+	switch err := tx.QueryRowContext(ctx, "SELECT archived_at FROM channels WHERE id = ?", channelID).Scan(&archived); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("store: read archive state of channel %d: %w", channelID, err)
+	}
+	if archived.Valid {
+		return ErrChannelArchived
+	}
+	return nil
 }
 
 // channelColumns are the channel columns every Channel reader selects, in
 // scanChannel's order.
-const channelColumns = "id, name, created_at, visibility, is_default"
+const channelColumns = "id, name, created_at, visibility, is_default, archived_at"
 
 // scanChannel reads one row of channelColumns.
 func scanChannel(scan func(dest ...any) error) (Channel, error) {
 	var c Channel
 	var created int64
 	var vis string
-	if err := scan(&c.ID, &c.Name, &created, &vis, &c.IsDefault); err != nil {
+	var archived sql.NullInt64
+	if err := scan(&c.ID, &c.Name, &created, &vis, &c.IsDefault, &archived); err != nil {
 		return Channel{}, err
 	}
 	c.CreatedAt = time.UnixMilli(created)
+	if archived.Valid {
+		c.ArchivedAt = time.Unix(archived.Int64, 0)
+	}
 	c.Visibility = schema.ChannelVisibility(vis)
 	return c, nil
 }
@@ -403,6 +451,11 @@ func (s *Store) InsertMessageV1(
 func insertChannelWideTx(
 	ctx context.Context, tx execer, channelID, authorID int64, body string, payload *schema.Payload, rootID int64, now time.Time,
 ) (int64, error) {
+	// The archived guard of every channel-wide post, reply and webhook post
+	// (issue #844): this is one of the two INSERT INTO messages.
+	if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
+		return 0, err
+	}
 	var payloadSchema, payloadJSON, thread any
 	if payload != nil {
 		payloadSchema = payload.Schema
@@ -540,6 +593,8 @@ var ErrManageChannelsRequired = errors.New("store: changing a channel's settings
 type ChannelSettingsChange struct {
 	Visibility *schema.ChannelVisibility
 	Default    *bool
+	// Archived archives (true) or restores (false) the channel (issue #844).
+	Archived *bool
 }
 
 // ChannelSettingsResult is what a channel-settings change did.
@@ -572,6 +627,19 @@ func (s *Store) ChannelSettings(ctx context.Context, actor string, actorID, chan
 			if err != nil {
 				return err
 			}
+			// An agent never changes its own approval channel's settings
+			// (issue #1326, ai-administrators §3.5.6).
+			if ok {
+				actorP, _, err := queryPrincipal(ctx, tx, actorID)
+				if err != nil {
+					return err
+				}
+				if actorP.Kind != PrincipalHuman {
+					if ok, err = agentStandingTx(ctx, tx, actorP, channelID); err != nil {
+						return err
+					}
+				}
+			}
 			if !ok {
 				return ErrManageChannelsRequired
 			}
@@ -589,6 +657,18 @@ func (s *Store) ChannelSettings(ctx context.Context, actor string, actorID, chan
 		}
 		if def && vis != schema.ChannelPublic {
 			return ErrChannelSettingsConflict
+		}
+		archived := cur.Archived()
+		if req.Archived != nil {
+			archived = *req.Archived
+		}
+		// A default channel is never archived, and an archived one is never
+		// marked default (decision 4): the same refusal whether the two come
+		// in one request or one is already the channel's state, and even when
+		// the request unmarks it in the same breath, so archiving can never
+		// turn open sign-up off as a side effect.
+		if archived && (def || cur.IsDefault) {
+			return ErrChannelArchiveDefault
 		}
 		var changes []string
 		// Unmark before turning private, and turn public before marking: a
@@ -611,6 +691,16 @@ func (s *Store) ChannelSettings(ctx context.Context, actor string, actorID, chan
 		}
 		if def != cur.IsDefault {
 			changes = append(changes, fmt.Sprintf("default=%t->%t", cur.IsDefault, def))
+		}
+		if archived != cur.Archived() {
+			var at any // NULL restores
+			if archived {
+				at = now.Unix()
+			}
+			if _, err := tx.ExecContext(ctx, "UPDATE channels SET archived_at = ? WHERE id = ?", at, channelID); err != nil {
+				return fmt.Errorf("store: channel settings %d: set archived_at: %w", channelID, err)
+			}
+			changes = append(changes, fmt.Sprintf("archived=%t->%t", cur.Archived(), archived))
 		}
 		if len(changes) == 0 {
 			res.Channel = cur

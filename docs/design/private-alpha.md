@@ -1,5 +1,12 @@
 # The private communications alpha
 
+> **Superseded in part, 2026-10-30.** [ADR-013](../adr/ADR-013-one-community-model.md)
+> replaces §3's per-person grant to invite: every member may now make member links
+> by default. Role permissions and the per-person brake can withhold that right.
+> Exit step 3 now reads: “They chat in their group's channel, and see nothing of
+> the other groups' private channels.” Members and public channels are community-wide
+> by default. The original record below is kept.
+
 Issue [#420](https://github.com/njdaniel/conch/issues/420). The decision is
 [ADR-008](../adr/ADR-008-private-communications-alpha.md). This note is the plan: what
 the alpha is, what is decided, what is still open with a recommendation, the work in

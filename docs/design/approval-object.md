@@ -144,6 +144,20 @@ Notify rows follow their transition but are not written in its transaction, so o
 
 The P1 success criterion (ROADMAP) asserts this exact chain end-to-end, and every approval-path PR ships a test that walks it (CLAUDE.md rule 3).
 
+## 6a. Approvals in an archived channel (issue #1296)
+
+An archived channel (issue #844) takes no new approvals. `request_approval` over MCP and `POST /v1/approvals` answer 409 `channel_archived`. The check runs inside `CreateApproval`'s transaction, so nothing is stored, notified or audited.
+
+An approval already open when its channel is archived carries on unchanged:
+- members can still decide it;
+- it escalates and expires on its deadlines;
+- `await_decision` and `check_decision` answer it;
+- its notifications and audit chain are the same as in a live channel.
+
+The agent waiting on it gets its answer. Cancelling it at archive would decide for a human, and would need a new outcome.
+
+Runs and interventions follow the same rule: no new run or intervention in an archived channel, and the ones already going finish. Restore allows everything again.
+
 ## 7. Explicitly out of scope (for now)
 
 - Delegation ("decide on my behalf"), approval templates, recurring approvals — P2+ if ever, new design doc.

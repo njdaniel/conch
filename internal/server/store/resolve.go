@@ -52,6 +52,15 @@ func (s *Store) ResolveCredentialDetail(ctx context.Context, token string) (Prin
 	return p, c.ID, err
 }
 
+// ResolveFullCredential is ResolveCredentialDetail that returns the whole
+// RequestCredential, for a front that serves a request as the middleware
+// would (the admin door over MCP, issue #1331): the dispatched route's
+// recent-authentication gate reads it. Full scope only, as every caller but
+// the middleware resolves.
+func (s *Store) ResolveFullCredential(ctx context.Context, token string) (Principal, RequestCredential, error) {
+	return s.resolveCredential(ctx, token, false)
+}
+
 // RequestCredential is what the authentication middleware learns of the
 // credential a request came with, beside its principal (issue #709).
 type RequestCredential struct {

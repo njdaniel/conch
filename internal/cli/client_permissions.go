@@ -10,7 +10,7 @@ import (
 )
 
 // maxPermissionsBody caps the permissions document a client reads. The
-// catalog has eleven rows; a server that sends more than this is not one to
+// catalog has twelve rows; a server that sends more than this is not one to
 // believe.
 const maxPermissionsBody = 1 << 20
 

@@ -12,8 +12,10 @@ import (
 // member, and the per-channel manager); what each server role may do is a
 // closed catalog of permissions, each with a member cell and an operator
 // cell. Owners hold every permission and have no column. Agents hold no role
-// and no permission: their rights stay their manifest's capabilities and
-// channel grants (ADR-000 D10).
+// and, by default, no permission: their rights are their manifest's
+// capabilities and channel grants (ADR-000 D10), plus the agent-grantable
+// permissions an owner lists in that manifest (AgentManifestV1.Permissions;
+// ADR-014 as amended by #1326, docs/design/ai-administrators.md).
 //
 // Everything here is additive. The REST bodies carry no schema-name field
 // and are versioned by their V1 suffix; the events document carries one
@@ -70,6 +72,13 @@ const (
 	// PermReadAuditLog: export the audit trail, which names every member and
 	// every private channel. Operator-only; off by default.
 	PermReadAuditLog Permission = "read_audit_log"
+	// PermUseCamera: turn on a camera in voice, in channels one is in
+	// (ADR-015, docs/design/webcam-video.md §3.1). Requires PermUseVoice in
+	// the same column. Members and operators: off by default, because before
+	// it existed nobody could publish a camera and an upgrade changes nothing
+	// (ADR-014 decision 2). Owners always hold it. The voice_allowed brake
+	// withholds it; there is no camera-only brake.
+	PermUseCamera Permission = "use_camera"
 )
 
 // Permissions is the catalog in wire order: the order of every list of
@@ -86,6 +95,7 @@ var Permissions = []Permission{
 	PermManageChannels,
 	PermChangeServerSettings,
 	PermReadAuditLog,
+	PermUseCamera,
 }
 
 // Valid reports whether p is a permission of the catalog.
@@ -93,7 +103,7 @@ func (p Permission) Valid() bool {
 	switch p {
 	case PermCreatePublicChannels, PermCreatePrivateChannels, PermMakeMemberLinks, PermSeeMemberDirectory,
 		PermUseVoice, PermShareScreen, PermManageMembers, PermActAsMembers, PermManageChannels,
-		PermChangeServerSettings, PermReadAuditLog:
+		PermChangeServerSettings, PermReadAuditLog, PermUseCamera:
 		return true
 	default:
 		return false
@@ -102,15 +112,35 @@ func (p Permission) Valid() bool {
 
 // OperatorOnly reports whether p can never be granted to members: rows 7 to
 // 11 of the catalog (manage_members, act_as_members, manage_channels,
-// change_server_settings, read_audit_log). An unknown permission is
-// operator-only, so it can never reach a member.
+// change_server_settings, read_audit_log). Rows 1 to 6 and row 12
+// (use_camera) are member-grantable. An unknown permission is operator-only,
+// so it can never reach a member: the fall-through fails closed and stays.
 func (p Permission) OperatorOnly() bool {
 	switch p {
 	case PermCreatePublicChannels, PermCreatePrivateChannels, PermMakeMemberLinks, PermSeeMemberDirectory,
-		PermUseVoice, PermShareScreen:
+		PermUseVoice, PermShareScreen, PermUseCamera:
 		return false
 	default:
 		return true
+	}
+}
+
+// AgentGrantable reports whether p may be listed in an agent manifest's
+// Permissions (issue #1326, docs/design/ai-administrators.md §3.1): the
+// five operator permissions that administer things without speaking as
+// anyone (manage_members, manage_channels, make_member_links,
+// change_server_settings, read_audit_log). Never act_as_members, which is
+// the one power the design rules out, and never a member permission: an
+// agent has no voice and no camera, does not browse the directory as a
+// member, and creates channels through manage_channels. An unknown
+// permission is not grantable, so the fall-through fails closed and stays.
+func (p Permission) AgentGrantable() bool {
+	switch p {
+	case PermManageMembers, PermManageChannels, PermMakeMemberLinks,
+		PermChangeServerSettings, PermReadAuditLog:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -141,32 +171,39 @@ func (p Permission) Fixed(r PermissionRole) (fixed, value bool) {
 // Default reports p's default for role r: the value a cell has while no row
 // is stored for it (design §4.1). Members hold rows 1 to 6 (channel
 // creation, member links, the directory, voice and screen share); operators
-// hold rows 1 to 9; change_server_settings and read_audit_log are off for
-// both. The defaults reproduce what a server did before ADR-014. An unknown
-// permission or role defaults to off.
+// hold rows 1 to 9; change_server_settings, read_audit_log and use_camera
+// are off for both. The defaults reproduce what a server did before the
+// permission existed (ADR-014 decision 2). An unknown permission or role
+// defaults to off.
+//
+// The six permissions that are on by default for both roles are named, and
+// the switch falls through to off: a permission added to the catalog without
+// a case here is off until someone decides otherwise, never on (ADR-015,
+// design §10).
 func (p Permission) Default(r PermissionRole) bool {
 	if !p.Valid() || !r.Valid() {
 		return false
 	}
 	switch p {
-	case PermChangeServerSettings, PermReadAuditLog:
-		return false
+	case PermCreatePublicChannels, PermCreatePrivateChannels, PermMakeMemberLinks,
+		PermSeeMemberDirectory, PermUseVoice, PermShareScreen:
+		return true
 	case PermManageMembers, PermActAsMembers, PermManageChannels:
 		return r == PermissionRoleOperator
 	default:
-		return true
+		return false
 	}
 }
 
 // Requires lists the permissions p depends on in the same column (design
-// §4.4.2): share_screen needs use_voice, and act_as_members needs
-// manage_members. A cell may be on only while every cell it requires in its
-// column is on; the store checks this on every write and ANDs it into every
-// answer. Nil for a permission with no dependency. The slice is the
+// §4.4.2): share_screen and use_camera need use_voice, and act_as_members
+// needs manage_members. A cell may be on only while every cell it requires
+// in its column is on; the store checks this on every write and ANDs it into
+// every answer. Nil for a permission with no dependency. The slice is the
 // caller's.
 func (p Permission) Requires() []Permission {
 	switch p {
-	case PermShareScreen:
+	case PermShareScreen, PermUseCamera:
 		return []Permission{PermUseVoice}
 	case PermActAsMembers:
 		return []Permission{PermManageMembers}
@@ -388,7 +425,12 @@ func (r PermissionsResponseV1) MarshalJSON() ([]byte, error) {
 // IssuedByOperatorV1 is one live credential or hook an operator issued to
 // someone other than themself. ID is what the revoke route of its Kind
 // takes; PrincipalID is whom it speaks as, and IssuedBy the operator that
-// issued it.
+// issued it. An item held by an owner is never listed, whoever issued it
+// (an owner who has since been demoted, say), and never revoked by
+// POST /v1/principals/{id}/issued/revoke-all: owners' credentials and hooks
+// end deliberately, one by one or through their own revoke-all, never as a
+// side effect of cleaning up after someone else. Nor is an item an owner
+// issued listed: owners keep act_as_members.
 type IssuedByOperatorV1 struct {
 	Kind        IssuedKind `json:"kind"`
 	ID          int64      `json:"id"`

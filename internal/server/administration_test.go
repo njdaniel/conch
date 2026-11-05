@@ -207,6 +207,7 @@ func TestAdministrationRouteMatrix(t *testing.T) {
 		{"bulk hide principals", "POST", "/v1/principals/hide", `{}`, "", operatorRoute(bad)},
 		{"list principals", "GET", "/v1/principals", "", "", operatorRoute(ok)},
 		{"revoke all credentials", "POST", "/v1/principals/999999/credentials/revoke-all", "", "", selfRoute(want{http.StatusNotFound, "principal_not_found", false})},
+		{"revoke what a principal issued", "POST", "/v1/principals/999999/issued/revoke-all", "", "", ownerRoute(want{http.StatusNotFound, "principal_not_found", false})},
 		{"create a hook", "POST", "/v1/hooks", `{}`, "", operatorRoute(bad)},
 		{"list hooks", "GET", "/v1/hooks", "", "", operatorRoute(ok)},
 		{"revoke a hook", "DELETE", "/v1/hooks/999999", "", "", operatorRoute(want{http.StatusNotFound, "hook_not_found", false})},
@@ -493,8 +494,8 @@ func TestSetRoleRoute(t *testing.T) {
 	})
 	t.Run("demote to member closes their invites", func(t *testing.T) {
 		// A legacy open link, as an operator made one before the community
-		// model (POST /v1/invites is retired), and a member link, which a
-		// demotion leaves standing.
+		// model (POST /v1/invites is retired), and a member link, which a member
+		// without the may_invite brake could not hold, so both close (issue #1165).
 		if _, err := f.srv.store.CreateInvite(ctx, "system", f.cand.ID,
 			schema.CreateInviteRequestV1{Kind: schema.InviteKindOpen, Channels: []string{"general"}}, store.InviteOptions{}, time.Now()); err != nil {
 			t.Fatalf("operator invite: %v", err)
@@ -507,8 +508,8 @@ func TestSetRoleRoute(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d %s", rec.Code, rec.Body)
 		}
-		if resp := decodeBody[schema.RoleChangeResponseV1](t, rec); resp.Principal.Role != schema.RoleMember || resp.InvitesClosed != 1 {
-			t.Errorf("response = %+v, want a member with one invite closed", resp)
+		if resp := decodeBody[schema.RoleChangeResponseV1](t, rec); resp.Principal.Role != schema.RoleMember || resp.InvitesClosed != 2 {
+			t.Errorf("response = %+v, want a member with both invites closed", resp)
 		}
 	})
 	t.Run("last owner", func(t *testing.T) {

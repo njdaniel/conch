@@ -23,7 +23,7 @@ var Vocabularies = map[string][]string{
 	"Capability": values(
 		CapabilityMessagesRead, CapabilityMessagesPost,
 		CapabilityApprovalsRequest, CapabilityApprovalsAwait, CapabilityApprovalsCheck,
-		CapabilitySessionsManage, CapabilityRunsManage,
+		CapabilitySessionsManage, CapabilityRunsManage, CapabilityAdminAct,
 	),
 	"ChannelPermission": values(
 		ChannelPermissionRead, ChannelPermissionPost, ChannelPermissionPostNet,
@@ -121,6 +121,7 @@ var Vocabularies = map[string][]string{
 		VoiceControlPTTProblemEnded, VoiceControlPTTProblemPartialRecord,
 	),
 	"VoiceCompanionPublish": values(VoiceCompanionPublishScreen, VoiceCompanionPublishNone),
+	"VoiceShareAudioScope":  values(VoiceShareAudioScopeApplication, VoiceShareAudioScopeSystemExcludingCall),
 	"VoiceControlReason": values(
 		VoiceControlReasonRoomDeleted, VoiceControlReasonParticipantRemoved, VoiceControlReasonConnectionLost,
 		VoiceControlReasonReconnectTimedOut, VoiceControlReasonConnectFailed, VoiceControlReasonServerUnreachable,
@@ -141,14 +142,18 @@ var Vocabularies = map[string][]string{
 		VoiceShareEndSelf, VoiceShareEndOperator, VoiceShareEndLeft,
 		VoiceShareEndAccessLost, VoiceShareEndRotated, VoiceShareEndIdle,
 	),
+	"VoiceCameraEndReason": values(
+		VoiceCameraEndSelf, VoiceCameraEndOperator, VoiceCameraEndLeft,
+		VoiceCameraEndAccessLost, VoiceCameraEndRotated, VoiceCameraEndIdle,
+	),
 	"VoiceTransmitState": values(VoiceTransmitStateStarted, VoiceTransmitStateStopped),
 
 	// Roles and permissions (ADR-014, issue #1012). Permission is in catalog
-	// order, the order of Permissions.
+	// order, the order of Permissions. Row 12, use_camera, is ADR-015's.
 	"Permission": values(
 		PermCreatePublicChannels, PermCreatePrivateChannels, PermMakeMemberLinks, PermSeeMemberDirectory,
 		PermUseVoice, PermShareScreen, PermManageMembers, PermActAsMembers, PermManageChannels,
-		PermChangeServerSettings, PermReadAuditLog,
+		PermChangeServerSettings, PermReadAuditLog, PermUseCamera,
 	),
 	"PermissionRole":     values(PermissionRoleMember, PermissionRoleOperator),
 	"PermissionPreset":   values(PresetPersonal, PresetGroup),
@@ -160,6 +165,34 @@ var Vocabularies = map[string][]string{
 	"ChannelVisibility": values(ChannelPublic, ChannelPrivate),
 	"InviteKindV2":      values(InviteKindMember),
 	"DirectoryScope":    values(DirectoryScopeEveryone, DirectoryScopeSharedChannels),
+
+	// AI administrators (issue #1326, docs/design/ai-administrators.md §3.3
+	// to §3.6). AdminAction is in catalog order, the order of AdminActions.
+	"AdminAction": values(
+		AdminActionListMembers, AdminActionCreateMember, AdminActionRenameMember,
+		AdminActionSetVoicePermission, AdminActionSetInvitePermission,
+		AdminActionDisableMember, AdminActionEnableMember, AdminActionHideMember,
+		AdminActionListCredentials, AdminActionRevokeCredential, AdminActionRevokeAllCredentials,
+		AdminActionListHooks, AdminActionRevokeHook,
+		AdminActionListChannels, AdminActionCreateChannel, AdminActionRenameChannel,
+		AdminActionSetChannelDefault, AdminActionSetChannelVisibility,
+		AdminActionArchiveChannel, AdminActionRestoreChannel,
+		AdminActionListChannelMembers, AdminActionAddChannelMember,
+		AdminActionRemoveChannelMember, AdminActionSetChannelMemberRights,
+		AdminActionCreateMemberLink, AdminActionListMemberLinks, AdminActionCloseMemberLink,
+		AdminActionListLinkJoiners, AdminActionDisableLinkJoiners, AdminActionDisableInvitees,
+		AdminActionPauseInvites, AdminActionResumeInvites,
+		AdminActionGetJoinSettings, AdminActionSetJoinSettings,
+		AdminActionGetPermissions, AdminActionSetPermissions,
+		AdminActionListReports, AdminActionGetReport, AdminActionUpdateReport,
+		AdminActionExportAudit,
+	),
+	"AdminGate": values(AdminGateDirect, AdminGateApproval),
+	"AdminTargetKind": values(
+		AdminTargetPrincipal, AdminTargetChannel, AdminTargetCredential,
+		AdminTargetHook, AdminTargetInvite, AdminTargetReport,
+	),
+	"AdminActionStatus": values(AdminActionRan, AdminActionPendingApproval),
 }
 
 // values lists a vocabulary by its constants, so an entry above cannot hold a

@@ -29,6 +29,9 @@ const fake = vi.hoisted(() => ({
   session: (): Promise<unknown> => new Promise(() => undefined),
   report: (): Promise<string> => Promise.resolve('ok'),
   room: (): unknown => ({}),
+  // Issue #1244: the microphone mode kept in the browser, and what was kept.
+  mode: null as 'ptt' | 'open' | null,
+  kept: [] as string[],
 }));
 
 vi.mock('../api', () => ({
@@ -53,6 +56,15 @@ vi.mock('../api', () => ({
   },
   claimVoiceShare: () => new Promise(() => undefined),
   stopVoiceShare: () => new Promise(() => undefined),
+  claimVoiceCamera: () => new Promise(() => undefined),
+  stopVoiceCamera: () => new Promise(() => undefined),
+  createVoiceViewer: () => new Promise(() => undefined),
+  removeVoiceViewer: () => new Promise(() => undefined),
+  readVoiceMode: () => fake.mode,
+  writeVoiceMode: (mode: 'ptt' | 'open') => {
+    fake.mode = mode;
+    fake.kept.push(mode);
+  },
 }));
 vi.mock('./sdk', () => ({ newLiveKitRoom: () => fake.room(), canChooseOutput: () => true }));
 
@@ -129,6 +141,8 @@ beforeEach(() => {
   fake.reads = [];
   fake.down = false;
   fake.read = () => new Promise(() => undefined);
+  fake.mode = null;
+  fake.kept = [];
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -179,6 +193,12 @@ describe('the release delay', () => {
     expect(second.result.current.state.releaseDelay).toBe(700);
   });
 
+  // F22: the slider's step is 50 ms; a stored value off that grid loads on it.
+  it.each([['230', 250], ['224', 200], ['225', 250], ['2000', 2000], ['1990', 2000]])('kept as %s ms, it loads as %d', (kept, loaded) => {
+    window.sessionStorage.setItem('conch.web.voice.release', kept);
+    expect(hook({ channel: null }).result.current.state.releaseDelay).toBe(loaded);
+  });
+
   it.each([['not a number', 'soon'], ['out of range', '99999'], ['negative', '-5']])('kept as %s, it is the default', (_what, kept) => {
     window.sessionStorage.setItem('conch.web.voice.release', kept);
     expect(hook({ channel: null }).result.current.state.releaseDelay).toBe(200);
@@ -210,6 +230,8 @@ describe('losing focus', () => {
     fake.session = () =>
       Promise.resolve({ ok: true, value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-10-16T00:00:15.000Z' }] } });
     fake.room = () => talkingRoom(sending);
+    // These are of Hold to talk, which is the mode chosen.
+    fake.mode = 'ptt';
     const view = hook({ channel: 'c' });
     act(() => {
       view.result.current.join();
@@ -283,6 +305,84 @@ describe('losing focus', () => {
 // Issue #658: the microphone chosen lasts for the tab, in sessionStorage
 // beside the talk key, and nowhere else: its device id, and its name, by
 // which it is found again under a new id.
+// A hidden page ends the camera on a phone and changes nothing on a desktop
+// (ADR-015 O9, design §6.2, §8). The rule is read when the event fires.
+describe('a hidden page', () => {
+  function window_(phone: boolean) {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn(() => ({ matches: phone, addEventListener: () => undefined, removeEventListener: () => undefined })),
+    );
+  }
+  function visibility(value: 'visible' | 'hidden') {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => value });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+  }
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    Reflect.deleteProperty(document, 'visibilityState');
+  });
+
+  it('on a phone stops the camera, once for each time it is hidden; showing the page again does nothing', () => {
+    window_(true);
+    const { result } = hook({ channel: null });
+    const hidden = vi.spyOn(result.current.client, 'pageHidden');
+    const start = vi.spyOn(result.current.client, 'startCamera');
+    visibility('hidden');
+    expect(hidden).toHaveBeenCalledTimes(1);
+    visibility('visible');
+    expect(hidden).toHaveBeenCalledTimes(1);
+    expect(start).not.toHaveBeenCalled();
+    visibility('hidden');
+    expect(hidden).toHaveBeenCalledTimes(2);
+  });
+
+  it('on a desktop does nothing', () => {
+    window_(false);
+    const { result } = hook({ channel: null });
+    const hidden = vi.spyOn(result.current.client, 'pageHidden');
+    visibility('hidden');
+    visibility('visible');
+    expect(hidden).not.toHaveBeenCalled();
+  });
+
+  it('is read when it happens: a window that became narrow stops, one that became wide does not', () => {
+    window_(false);
+    const { result } = hook({ channel: null });
+    const hidden = vi.spyOn(result.current.client, 'pageHidden');
+    window_(true);
+    visibility('hidden');
+    expect(hidden).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks the wider rule: a touch device is a phone however wide it is held', () => {
+    const queries: string[] = [];
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn((query: string) => {
+        queries.push(query);
+        return { matches: query.includes('(pointer: coarse) and (hover: none)'), addEventListener: () => undefined, removeEventListener: () => undefined };
+      }),
+    );
+    const { result } = hook({ channel: null });
+    const hidden = vi.spyOn(result.current.client, 'pageHidden');
+    visibility('hidden');
+    expect(hidden).toHaveBeenCalledTimes(1);
+    expect(queries.at(-1)).toBe('(max-width: 699px), (pointer: coarse) and (hover: none)');
+  });
+
+  it('stops listening when the page goes', () => {
+    window_(true);
+    const { result, unmount } = hook({ channel: null });
+    const hidden = vi.spyOn(result.current.client, 'pageHidden');
+    unmount();
+    visibility('hidden');
+    expect(hidden).not.toHaveBeenCalled();
+  });
+});
+
 describe('the microphone chosen', () => {
   const key = 'conch.web.voice.microphone';
   const nameKey = 'conch.web.voice.microphone.name';
@@ -741,5 +841,37 @@ describe('a rename', () => {
     await flush();
     expect(result.current.state.channel).toBe('c2');
     expect(live().map((o) => o.channel)).toEqual(['c']);
+  });
+});
+
+// Issue #1244: a browser that has never chosen is in open microphone, and the
+// choice, once made, is kept and read again by the next page.
+describe('the microphone mode', () => {
+  it('is open microphone for a browser that never chose', () => {
+    const view = hook();
+    expect(view.result.current.state.mode).toBe('open');
+  });
+
+  it('is the one kept: push to talk after it was chosen', () => {
+    fake.mode = 'ptt';
+    const view = hook();
+    expect(view.result.current.state.mode).toBe('ptt');
+  });
+
+  it('is kept when chosen, and read by the next page, either way', () => {
+    const first = hook();
+    act(() => {
+      first.result.current.client.setMode('ptt');
+    });
+    expect(fake.kept).toEqual(['ptt']);
+    first.unmount();
+    const second = hook();
+    expect(second.result.current.state.mode).toBe('ptt');
+    act(() => {
+      second.result.current.client.setMode('open');
+    });
+    second.unmount();
+    expect(hook().result.current.state.mode).toBe('open');
+    expect(fake.kept).toEqual(['ptt', 'open']);
   });
 });

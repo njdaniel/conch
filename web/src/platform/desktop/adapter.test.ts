@@ -100,7 +100,7 @@ describe('the desktop transport: a call of the table is a call of the bridge', (
   it('does not ask main for an operation whose answer holds a credential', async () => {
     const request = vi.fn((): Promise<BridgeReply> => Promise.resolve({ kind: 'none' }));
     install(fakeBridge({ request }));
-    await expect(http.send(call('createInvite'), STAND_IN, { body: {}, keepalive: false })).rejects.toBeInstanceOf(TypeError);
+    await expect(http.send(call('createMemberLink'), STAND_IN, { body: {}, keepalive: false })).rejects.toBeInstanceOf(TypeError);
     await expect(http.send(call('voiceSession', { channel: 'a' }), STAND_IN, { keepalive: false })).rejects.toBeInstanceOf(TypeError);
     expect(request).not.toHaveBeenCalled();
   });
@@ -223,11 +223,15 @@ describe('the desktop transport: a pasted credential', () => {
 
   it('is put in force in main only when the client keeps it, and the store keeps the stand-in', async () => {
     let release: (value: boolean) => void = () => undefined;
-    const keepCredential = vi.fn((): Promise<boolean> => new Promise<boolean>((r) => { release = r; }));
+    const keepCredential = vi.fn((...[,]: [string]): Promise<boolean> => new Promise<boolean>((r) => { release = r; }));
     const request = vi.fn((): Promise<BridgeReply> => Promise.resolve({ kind: 'reply', status: 200, body: who }));
-    install(fakeBridge({ keepCredential, request }));
+    const signInWithCredential = vi.fn((): Promise<SignInOutcome> => Promise.resolve({ ok: true, who, answer: {}, handle: 'paste-0123' }));
+    install(fakeBridge({ keepCredential, request, signInWithCredential }));
+    await http.get(call('whoami'), 'conch_pasted_secret');
     const kept = credentials.write('conch_pasted_secret', 'lasting');
-    expect(keepCredential).toHaveBeenCalledWith('conch_pasted_secret');
+    // Main is told the handle it issued, never the credential.
+    expect(keepCredential).toHaveBeenCalledWith('paste-0123');
+    expect(JSON.stringify(keepCredential.mock.calls)).not.toContain('conch_pasted_secret');
     // What the client pins is the stand-in: the page no longer holds the paste.
     expect(kept).toEqual({ token: STAND_IN, place: 'lasting' });
     expect(credentials.read()).toEqual({ token: STAND_IN, place: 'lasting' });
@@ -240,6 +244,28 @@ describe('the desktop transport: a pasted credential', () => {
     await next;
     expect(request).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(request.mock.calls)).not.toContain('conch_pasted_secret');
+  });
+
+  it('uses a handle once: a second keep has none to present', async () => {
+    const keepCredential = vi.fn((...[,]: [string]): Promise<boolean> => Promise.resolve(true));
+    install(fakeBridge({ signInWithCredential: () => Promise.resolve({ ok: true, who, answer: {}, handle: 'paste-0123' }), keepCredential }));
+    await http.get(call('whoami'), 'conch_pasted_secret');
+    expect(credentials.write('conch_pasted_secret', 'lasting')).not.toBeNull();
+    expect(credentials.write('conch_pasted_secret', 'lasting')).toBeNull();
+    expect(keepCredential).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the handle of a credential that failed its check', async () => {
+    const keepCredential = vi.fn((...[,]: [string]): Promise<boolean> => Promise.resolve(true));
+    const outcomes: SignInOutcome[] = [
+      { ok: true, who, answer: {}, handle: 'paste-0123' },
+      { ok: false, kind: 'unauthorized', status: 401 },
+    ];
+    install(fakeBridge({ signInWithCredential: () => Promise.resolve(outcomes.shift() as SignInOutcome), keepCredential }));
+    await http.get(call('whoami'), 'conch_pasted_secret');
+    await http.get(call('whoami'), 'another_secret');
+    expect(credentials.write('another_secret', 'lasting')).toBeNull();
+    expect(keepCredential).not.toHaveBeenCalled();
   });
 
   it('is never put in force when the client does not keep it (an operator declining the warning)', async () => {

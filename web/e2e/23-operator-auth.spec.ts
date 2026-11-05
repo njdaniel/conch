@@ -22,7 +22,7 @@ import {
   type ListOwnCredentialsResponseV1,
 } from '../src/schema/credential';
 import { joinSettingsResponseV1 } from '../src/schema/guest';
-import { expect, statusLine, test } from './fixtures';
+import { expect, openOperatorSection, statusLine, test } from './fixtures';
 import { loadWorld, repoRoot, safePath, type World } from './world';
 
 const operator = 'g7a-root';
@@ -203,6 +203,7 @@ test('G7a an operator sets up from a host-made token, then a password alone sign
   await page.goto(appUrl);
 
   // Setup: the token, a password, the key behind Reveal, and a code.
+  await openOperatorSection(page);
   await page.getByRole('button', { name: 'Set up an operator account' }).click();
   await page.getByLabel('Setup token').fill(setupToken);
   await page.getByRole('button', { name: 'Continue' }).click();
@@ -358,9 +359,8 @@ test('G7a a sign-in with a code is the recent proof: an invite made at once asks
 
   const panel = page.getByRole('region', { name: 'Invites' });
   await panel.getByRole('button', { name: 'Invite someone' }).click();
-  await panel.getByRole('checkbox', { name: `#${channel}` }).check();
-  const made = page.waitForResponse((r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/v1/invites');
-  await panel.getByRole('button', { name: 'Make invite' }).click();
+  const made = page.waitForResponse((r) => r.request().method() === 'POST' && new URL(r.url()).pathname === '/v2/invites');
+  await panel.getByRole('button', { name: 'Make link' }).click();
   const reply = await made;
   expect(reply.status()).toBeGreaterThanOrEqual(200);
   expect(reply.status()).toBeLessThan(300);

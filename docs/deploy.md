@@ -20,6 +20,42 @@ Everything is parameterised by an **instance name** (`alpha` below) and a **doma
 
 Not yet proved on the droplet: voice through TURN from a network that blocks UDP, steps 8 and 9 (off-site backup and the restore drill), and upgrade and rollback.
 
+## The community people join
+
+One server is one community. Members normally see the community's members and
+agents. Public channels are in **Browse channels**, and members join them themselves.
+The directory also lists their own private channels. It lists no other private
+channels and gives members no counts of people. A holder of `manage_channels` can
+list every channel and its member count; reading messages and files and joining voice still need membership.
+See [channel privacy](#channel-privacy-and-default-channels) and
+[operator access](#what-an-operator-can-and-cant-see).
+
+Send newcomers a member link. The browser's links land them in the default channels,
+with full history. With no default channels, they start in no channel. The bare
+address is a sign-in page unless `open_signup` is on. It is off by default on a new server; an upgraded server keeps its old open-joining mode.
+An owner can change it; a delegated operator needs `change_server_settings`.
+Open sign-up needs a public default channel. It makes members with full history too.
+
+A member link without an explicit expiry lasts seven days by default.
+`member_link_default_expiry_seconds` sets that lifetime; `0` means no default expiry.
+An explicit request for a link that never expires needs `manage_members`.
+See [member links](#member-links-and-the-invite-brake) for the controls.
+
+Voice is on for new members. A holder of `manage_members` can change a person's
+`voice_allowed` switch at any time. Turning it off removes them from live voice
+and ends their share; an owner is exempt, and only an owner may change an owner's switch. Turning it on lets them join again,
+subject to role permissions. See [the per-person switches](#the-eleven-permissions).
+
+There are **no guests for now**. Guests were removed on 2026-10-30 and return with
+#1004. The community migration ends active visits and closes invites that admitted
+guests. Their data and past message attribution are kept. The bare address admits
+no guests.
+
+Choose the [personal or group configuration](#running-a-personal-or-a-group-server)
+before inviting people. Before upgrading, read the
+[one-community upgrade notice](../CHANGELOG.md#upgrade-notice-one-community-issue-979)
+and [member-link changes](../CHANGELOG.md#010-alpha11---2026-11-02).
+
 ## Users and who can read what
 
 | User | Runs | Can read |
@@ -214,6 +250,26 @@ printf "otpauth://totp/Conch:your-name?secret=%s&issuer=Conch" "$(printf %s "$k"
 If it prints an error instead of a `key:` prompt, don't paste the key. Afterwards, `clear` the terminal.
 
 `conchd operator bootstrap --data /var/lib/conch/alpha your-name` makes the first operator with a setup token instead of a script credential, if you want no script credential at all; it refuses when an operator exists, as `bootstrap-operator` does.
+
+### An AI administrator, from the host
+
+An AI administrator is an agent that holds a few operator permissions (`manage_members`, `manage_channels`, `make_member_links` by default) and asks the people who decide its approval channel before anything gated; the design is [ai-administrators.md](design/ai-administrators.md). An owner makes one from `conch admin ai-admin create`; on the host, over SSH, with no one signed in, it is:
+
+```sh
+sudo -u conch-alpha /opt/conch/current/conchd ai-admin create --data /var/lib/conch/alpha --origin https://alpha.example.org robo
+```
+
+`--origin` is the server's public address, which `conchd` is never told. It makes the agent, its approval channel (`admin`, private, unless `--channel` names one that exists), the seats of the people who decide there, its manifest and one renewable credential (`--credential-days`, default 90, renewed by use), and audits all of it as `system`. Without `--decider <principal id>` (repeatable) every owner who can sign in is seated as a decider; with it, exactly the people named. It **refuses when no owner is able to sign in** (finish `conchd operator setup` first): nobody could decide what the AI asks for. `--grant <permission,...>`, `--require-approval <action,...>`, `--ttl`, `--run-window`, `--quorum` and `--max-pending` are as in the design, and `--client claude-code` prints a `claude mcp add` line in place of the JSON.
+
+It prints the MCP client entry **once, on stdout, and nowhere else**: the token is not written to stderr, the journal or the audit trail. Put it in the AI's client, with `--scope user` for Claude Code (a project `.mcp.json` is a file people commit), and do not run the command under `set -x`. The entry is named `conch-<server name>`, the name `GET /v1/join` reports (`--server-name`, or `CONCHD_SERVER_NAME`, as for `operator bootstrap`; `--name` overrides it), so one client can hold an entry per server.
+
+A running server accepts the new credential at once, with no restart: it keeps no copy of credentials or manifests, and resolves every request's token against the database, the same file this command wrote.
+
+```sh
+sudo -u conch-alpha /opt/conch/current/conchd ai-admin revoke --data /var/lib/conch/alpha <id>
+```
+
+`revoke` disables the agent: every credential of it ends, its sessions and sockets with them, and its grant is cleared, so enabling it again gives it nothing back. It audits `principal_disabled` and `ai_admin_revoked`. It refuses a principal that is not an agent, and an agent that holds no grant. Deleting the entry from the AI's client revokes nothing.
 
 ### An operator who lost their password or authenticator
 
@@ -464,6 +520,11 @@ After the start:
 
 ## 11. Upgrading and rolling back
 
+Read the [one-community upgrade notice](../CHANGELOG.md#upgrade-notice-one-community-issue-979)
+and [member-link changes](../CHANGELOG.md#010-alpha11---2026-11-02) before upgrading
+an older server. The migration changes channel defaults, member history, voice
+and link-making. Other existing channels stay private.
+
 Releases are tagged, built by `.github/workflows/release.yml`, and name themselves: `conchd version` and `/healthz` report the tag. `conch-upgrade.sh <tag> <instance>...`, as root (name **every** instance on the droplet: they share one binary, so one left out would start on the new release at its next restart, with no pre-upgrade backup; `conch-server upgrade <tag>` on your workstation names them all):
 
 1. downloads `conchd_<tag>_linux_<arch>` and `checksums.txt`, and refuses unless they match (the same limit as step 3: corruption, not tampering);
@@ -485,6 +546,238 @@ A backup restored this way is made safe as in step 10 before the instance starts
 A previous release from before `conchd restore` cannot make restored data safe, and its `conchd serve` does not know `restore-pending`, so on restored data it would serve every sign-in the backup holds. When a rollback would need the pre-upgrade backup, the script checks first that the previous release's usage names `conchd restore`, and if not it stops with **nothing stopped**: the instance keeps running the new release. The script only goes back to the release it recorded, so then roll back **by hand**: either to a release that has `conchd restore`, following [Restoring for real](#10-restoring-for-real) with that release's binary, or, if it has to be the old release, like this: stop the instances, point `/opt/conch/current` at the old release, and restore the pre-upgrade backup as in [Restoring for real](#10-restoring-for-real), knowing that the old release cannot run its `conchd restore` step. On that path nothing the restore would have done is done: every sign-in in the backup works, and the old release also leaves the authenticator record (`totp.last_step`) rolled back, so a code used since the backup can be used again for about a minute. Keep the instance off the network (stop Caddy for it, or firewall it) until, as an operator, you have signed everyone out with `POST /v1/principals/{id}/credentials/revoke-all` for each principal (which also ends a guest's visit) and paused invites; then remove `restore-pending`, which the old release ignores and the next one would refuse.
 
 A release you installed stays in `/opt/conch/releases/`; remove old ones by hand when you are sure.
+
+## Running a personal or a group server
+
+Steps 1 to 11 get a server running. This part is about what the people on it may do. It follows [ADR-014](adr/ADR-014-fixed-roles-configurable-permissions.md) (the reasons are in [the design](design/admin-roles.md)). The examples use `alpha.your.domain` for a **personal server**, one person with family and friends in separate private conversations, and `chat.your.domain` for a **group server**, where everyone sees everyone.
+
+Each task below gives the browser path first and the `conch admin` command after. In the browser, **Settings** (in the lobby) opens **Server administration**, which has the sections **Server**, **Roles and permissions**, **Members**, **Channels** and **Reports**. Operators and owners see it; members don't. **Channels** appears only for someone who holds `manage_channels`. The commands need your operator token (`CONCH_SERVER` and `CONCH_TOKEN`, as in step 6). Changing permissions from the browser asks an operator for their password and authenticator code again if you last gave them more than ten minutes ago.
+
+### The roles and the owner mark
+
+There are three roles on the server and one inside a channel. They are fixed: you can't add, rename or remove one.
+
+| Role | What it is |
+| --- | --- |
+| **Owner** | You, the person who set the server up. An owner is an operator with the owner mark. Owners hold every permission, are never held back by a switch, and are the only ones who change roles and the operators' column. `bootstrap-operator` makes the first owner. |
+| **Operator** | Someone you trust to help run the server. What an operator may do is set per permission, below. |
+| **Member** | Everyone else. |
+| **Channel manager** | A member who manages one channel: adds and removes its people, renames it, moderates. Whoever creates a channel manages it. |
+
+Agents are not a role. What an agent can do stays in its manifest.
+
+In the browser, **Members** lists everyone. Open a person's **⋯** menu (or right-click, or long press on a phone) and choose **Change role…**: Member, Operator, or **Make an owner, who holds every permission**. Only an owner sees it. With the CLI:
+
+```sh
+conch admin principal list
+conch admin principal role 5 operator             # make person 5 an operator
+conch admin principal role 5 operator --owner     # ...and an owner
+conch admin principal role 5 operator --no-owner  # take the owner mark away
+conch admin principal role 5 member               # back to a member
+```
+
+<a id="the-eleven-permissions"></a>
+
+### The twelve permissions
+
+A permission is a switch with one cell for members and one for operators. Owners have no cell: they hold all twelve.
+
+| Permission | Members (default) | Operators (default) |
+| --- | --- | --- |
+| `create_public_channels`, `create_private_channels` | on | on |
+| `make_member_links` | on | on |
+| `see_member_directory` | on | on, and fixed on |
+| `use_voice`, `share_screen` | on | on |
+| `use_camera` | off | off |
+| `manage_members` | fixed off | on |
+| `act_as_members` | fixed off | on |
+| `manage_channels` | fixed off | on |
+| `change_server_settings` | fixed off | off |
+| `read_audit_log` | fixed off | off |
+
+Two of them need a sentence:
+
+- **`act_as_members`** "can sign in as, and post as, any member who isn't an owner": it covers making a credential, a sign-in link or a hook for someone else. It needs `manage_members`.
+- **`read_audit_log`** "sees every member and every private channel's name in the audit trail".
+
+A member's cell can't be on while the operators' is off, `share_screen` and `use_camera` need `use_voice`, and the "fixed" cells can't be changed. The server refuses a change that breaks one of these and says which.
+
+**Turning the camera on for members takes two cells.** `use_camera` is off for members and for operators, and owners always hold it, so an owner can try it at once. For members to have it, the operators' cell must be on first, or in the same save as the members' (**Save changes** applies both together; `conch admin permissions set use_camera --operators on --members on` does the same in one command; `--operators` is for owners). This is the rule stated above: a member's cell can't be on while the operators' is off, and a change that turns the operators' cell off while the members' is on is refused. Turning either cell off ends every affected camera at once. The camera is off for everyone but owners until you do this, and nothing about the camera changes for a server that never does. **What viewers see is not a permission:** anyone in the room receives the cameras in it, as they receive its voice.
+
+Who changes them: an owner changes both columns. An operator holding `change_server_settings` changes the members' column only, and can only turn a cell on if it holds that permission itself. Give that permission only to someone you would trust with opening the server.
+
+Beside the cells, two **switches per person** can only take something away: the voice switch (`use_voice`, `share_screen` and `use_camera`: there is no camera-only switch, so "voice yes, camera no" for one person has no answer short of turning the role's cell off) and the member-link switch (`make_member_links`, for members only; operators' links follow the operators' cell). They are in each person's **⋯** menu in **Members** (**Turn voice off**, **Stop member links**) and in `conch admin principal voice <id> on|off` and `conch admin principal invite-permission <id> on|off`. An owner is never held back by either: if a switch was ever stored on an owner, it no longer counts.
+
+### Choosing and applying a preset
+
+A preset sets the **members' column** and nothing else. It does not touch the operators' column, joining, default channels or anyone's switches. It is applied once; the server doesn't remember a "mode", it only reports which preset the column matches now.
+
+| Members' cell | Personal server | Group server (the defaults) |
+| --- | --- | --- |
+| `create_public_channels` | off | on |
+| `create_private_channels` | off | on |
+| `make_member_links` | off | on |
+| `see_member_directory` | off | on |
+| `use_voice` | on | on |
+| `share_screen` | on | on |
+| `use_camera` | off | off |
+
+Both presets leave the camera off for members, so applying either one turns it off for them if it was on (and ends the cameras then running). It leaves the operators' cell alone. A server that has turned the camera on for members therefore matches neither preset: neither card in **Roles and permissions** is marked as matching the members' column.
+
+A new server is already on the group column. While nothing has been changed, **Settings → Server** shows a card, "How will this server be used?", with **Personal server**, **Group server** and **Decide later**. Choosing one shows what members would gain and lose, and **Apply Personal server** (or **Apply Group server**) does it. Later, **Settings → Roles and permissions** has the two preset cards (**Use Personal preset**, **Use Group preset**) at the top, each listing what it would turn on or off, with the matching one marked. Below them is the matrix, where **Save changes** applies cell edits and **Discard changes** drops them.
+
+With the CLI:
+
+```sh
+conch admin permissions show                   # the table, the matching preset, warnings
+conch admin permissions preset personal        # shows the changes, asks first (--yes skips the question)
+conch admin permissions set make_member_links --members on
+```
+
+`set` takes `--members on|off` and `--operators on|off`; `--operators` is for owners. If someone else changed the permissions while you were looking, nothing is written and you are told to look again.
+
+Warnings come back with `show` and with every change. They are never refusals:
+
+- **`open_signup_on`**: members can't make member links, but open sign-up is on, so the server's address still lets anyone make an account. In the browser it is shown in **Server** and in **Roles and permissions**. On a personal server, turn open sign-up off.
+- **`default_channel_exposes_members`**: members can't see the directory, but a default channel still shows its people to each other. This is the reason a default channel defeats a personal server: everyone who starts in it can see everyone else in it. The server raises it whenever members lack `see_member_directory` and at least one default channel exists. The browser shows it in **Settings → Server** and in **Roles and permissions**; the CLI prints it with `permissions show` and after every `permissions set` and `permissions preset`. It is also in the answer to marking a channel default, and `conch admin channel settings --default on <channel>` prints it then; the browser's **Make default channel** does not show it at that moment, so look in **Server**.
+
+Applying a preset has live effects. Turning `use_voice` off removes everyone it now withholds from voice at once, turning `share_screen` off ends their shares, and turning `use_camera` off ends their cameras. Turning `make_member_links` off doesn't close the links members already made: they stop working while the maker lacks the permission, and work again when it comes back. Nobody's sign-in changes.
+
+### A personal server
+
+You hold the conversations; the people on the server shouldn't see each other. Do this once, in this order.
+
+1. **Apply the personal preset** (above). Do it before anyone joins.
+2. **Make sure no channel is a default channel.** A default channel is where every new person starts, and the people in it see each other. In the browser, **Settings → Channels** marks default channels; for one, open its **⋯** menu and choose **Stop being a default channel**. With the CLI, `conch admin join status` lists "default channels", and `conch admin channel settings --default off <channel>` removes one. A fresh server has none. With no default channel, `conch admin join status` and **Settings → Server → Joining** warn that a member link lands nobody anywhere: on a personal server that is what you want, step 5 puts people in. Also keep **open sign-up** off (**Settings → Server → Joining**; `conch admin join set --open-signup off`).
+3. **Create one private channel for each conversation.** Browser: **Settings → Channels → New channel**, private. CLI: `conch admin channel create alice-chat` (you are its only member, and it is private). Do this first: the browser's **Add a person** button (next step) is offered only once you are in at least one channel.
+4. **Make a member link for each person.** A member link names no channel: whoever opens it picks a name and a password, becomes a member and lands in the server's default channels, which on a personal server are none. As the owner you are never held back by `make_member_links`. In the browser, **Settings → Members → Add a person** opens the **Invite someone** panel; choose how long the link lasts and how many people may use it (one, for a personal server), then **Make link**. It shows the link once. With the CLI:
+
+   ```sh
+   conch admin invite create --uses 1
+   ```
+
+   It prints the link once. Send it to Alice. She opens it and lands in no channel: her list is empty until step 5.
+5. **Add each person to their channel.** Browser: **Settings → Channels**, the channel's **⋯** menu, **Add person…**, then their name; or **Settings → Members**, the person's **⋯** menu, **Add to a channel…**. CLI: `conch admin member add alice-chat --name alice` (or `conch admin member add alice-chat <id>`). On a personal server **Add person…** is the first item in the menu. The browser and `--name` add the person without the right to decide the channel's approvals; adding by id from the CLI gives that right unless you add `--no-decide`.
+
+   To bring Alice into another conversation later, add her to that channel the same way.
+
+What a member sees now: themself and the people in the channels they are in. They can't create channels, make links, or list the directory. To check, sign in as a member and run `conch admin directory members`. It lists the member and whoever shares a channel with them (you, in a one-to-one channel). A second member who isn't in the channel isn't listed.
+
+Three things to keep in mind.
+
+- Two people in the same channel see each other, so keep one channel per conversation.
+- The owner and every operator see everyone, in **Members**.
+- **The preset does not turn off the channel directory.** There is no permission for it. A member's **Browse channels** (REST: `GET /v1/directory/channels`) still lists every public channel on the server, and any member may join one, after which they see its people. Members can't create channels under this preset, so this only matters if you or an operator make a public channel. On a personal server, keep every channel private.
+
+### A group server
+
+The defaults are the group server: members create public and private channels, make member links and see the directory, and use voice. Apply **Group server** if it was ever changed (`conch admin permissions preset group`).
+
+1. **Make one or more public default channels.** New people start in them. Browser: **Channels → New channel** (public), then its **⋯** menu, **Make default channel**. CLI: `conch admin channel create lobby`, then `conch admin channel settings lobby --public --default on`. A default channel must be public, and a private channel can't be one.
+2. **Decide how people get in.** With **member links** (the default) anyone allowed to make one can bring someone in; **Settings → Server → Joining** has **Default link expiry (hours, 0 for none)**, and `conch admin join set --link-expiry <duration|0>` sets it. With **open sign-up** ("anyone who asks at the server's address can make an account") nobody needs a link; turn it on only if you mean it. It needs a default channel. `conch admin join set --open-signup on`.
+3. **Promote helpers** to operator (above). An operator manages people and channels but can't change server settings or read the audit log unless you give it those. If you want a helper to adjust what members may do, give that operator `change_server_settings` in **Roles and permissions** (`conch admin permissions set change_server_settings --operators on`).
+4. **Members** make their own channels (each becomes its manager), join public channels from the channel directory, and bring in friends with member links.
+
+### Member links and the invite brake
+
+A member link is how a person joins. It names no one: whoever opens it picks a name and a password and becomes a full member, in the server's default channels. The browser's link always lands people there: the **Invite someone** panel says "A link lands the people who use it in the server's default channels." and offers no channel. A member can make one only while `make_member_links` is on for members and the member-link switch on them is on. An operator can make one while the operators' cell is on. From the CLI (and the API), a holder of `manage_channels` can name other channels with `--landing-channel`, repeated for each one, in place of the default channels; that is not offered in the browser.
+
+```sh
+conch admin invite create --expires 24h --uses 5 --landing-channel alice-chat
+conch admin invite list [--state open|used|expired|closed] [--created-by <id>]
+conch admin invite joiners <id>        # who came in through link <id>
+conch admin invite close <id>
+```
+
+The browser has two views of the same links. **Settings → Server → Joining → Invites** lists them: "Link #N · made by <name>", its uses, how many joiners, when it expires or closed, the channels it lands in, **Show joiners of link N** (who came in) and **Close link N**. Someone without `manage_members` sees only the links they made. The **Invite someone** panel (the lobby for a member; **Settings → Members → Add a person** for an owner or operator; a channel's **⋯** menu has **Invite people**) lists your own links with **Joiners (N)** and **Close**. **Disable joiners**, which signs out and disables the people a link brought in (and closes the link), is in that panel and needs `manage_members`; the Settings list doesn't have it.
+
+Three brakes:
+
+- **Pause everything.** **Settings → Server → Joining → Pause all invites**, or `conch admin invite pause` (`resume`, `status`). While paused, no one can make, preview or use an invite, including links already sent. Restoring a backup pauses them on purpose.
+- **One person.** **Stop member links** in their **⋯** menu, or `conch admin principal invite-permission <id> off`. It closes their open links. It doesn't bind operators.
+- **Everyone.** Turn `make_member_links` off for members (the personal preset does).
+
+Members who join through **open sign-up** hold the member-link switch on, so, while members hold `make_member_links`, they can make links straight away. They **keep it after open sign-up is switched off**. If that isn't what you want, close their links (`conch admin invite close <id>`), switch their link-making off (`conch admin principal invite-permission <id> off`), or remove the people a link brought in (`conch admin invite disable-joiners <id>`, which asks first; **Disable joiners** in the panel). `conch admin directory members` shows `may-invite on` and no inviter for open sign-up accounts.
+
+### Channel privacy and default channels
+
+A **private** channel is omitted from other members' channel directory. Its messages, files and voice need membership. Holders of `manage_channels` can still list and administer it, as [operator access](#what-an-operator-can-and-cant-see) explains. A **public** channel is listed in the channel directory for every member, who can join and leave it. A **default** channel is public, and every new person starts in it. Making a channel public or private keeps everyone who is already in it.
+
+**Settings → Channels** (for a holder of `manage_channels`, which includes every owner) lists every channel with a lock for private, a default mark, how many people are in it and who manages it. **New channel** makes a public or private channel with no daily cap. Each row's **⋯** menu has **Add person…**, **Rename channel…**, **People and managers…** (remove a person, **Make manager** or **Stop managing**), **Make public** or **Make private**, and **Make default channel** or **Stop being a default channel**.
+
+```sh
+conch channels list --all                         # every channel, with member counts (manage_channels)
+conch admin channel create <name>                 # private, you are its only member
+conch admin channel settings <channel> --public|--private [--default on|off]
+conch admin member add|remove <channel> <id>
+conch admin member manage [--off] <channel> <id>  # make or stop being a channel manager
+conch channels create [--private] <name>          # what a person with the create permission does
+```
+
+A channel manager who isn't an operator manages their own channels from the channel itself, not from here.
+
+### Hiding members from each other
+
+The design called this `hide_members`. Shipped servers use the members'
+`see_member_directory` permission instead; the old setting is mapped to its
+opposite on upgrade.
+
+The switch is `see_member_directory` for members. With it off, a member sees three kinds of people: themself, the people in the channels they are in, and the people who joined through a member link they made. Everything else about anyone else (that they exist, their name) is not shown. Owners and operators always see everyone, whatever the cell says.
+
+A member sees each person's id, name, role and join time and nothing else. Who invited whom is shown only to holders of `manage_members` (**Members** shows "invited by <name>" to them), so a member can't see who invited them, or who invited anyone else. Someone who holds a link's code sees the name of the person who made it when they open it, as before.
+
+Browser: **Settings → Server** has the line "Members see: only people they share a channel with" (or "everyone"), which links to the cell in **Roles and permissions**. CLI: `conch admin permissions set see_member_directory --members off`, or apply the personal preset.
+
+What it doesn't hide: the people in a channel you are both in (a default channel included), and the people who joined through a link the viewer **made**. The server records who made the link a person joined through when they join, and never clears it, so turning link-making off later does not end it. On a server where the personal preset was applied before anyone joined, there are none. On one that ran the defaults first, each member who made a link still sees the people it brought in, and that stays so. **Members** (or `conch admin principal list`) shows "invited by" to holders of `manage_members`, so you can find them. Hiding members is only as strong as your channels.
+
+Everyone in a channel sees everyone else in it. A default channel, or a public
+channel two people both join, shows them to each other. Hiding members cannot keep
+apart private conversations whose people also share such a channel. It hides people
+in Conch's answers; it does not make anyone anonymous or separate processes on the
+server. A message's author stays named in its channel's history.
+
+While members are hidden, use **no default channels** and **one private channel per
+space** whose people should not see each other. Follow the [personal server steps](#a-personal-server).
+Zero default channels is allowed: a member-link joiner starts in no channel until
+added, or until they join a public channel. A default channel draws the
+`default_channel_exposes_members` warning; it is not refused.
+
+### What an operator can and can't see
+
+An operator never reads a channel it isn't a member of: membership is the boundary for messages, and operators get no exemption. What operators can do beyond that is what you grant:
+
+- **With `manage_channels`** (on for operators by default) an operator sees every channel's name, adds and removes members, and so can add itself to a private channel. With `act_as_members` (also on by default) it can sign in as any member who isn't an owner. Treat an operator with these as someone you trust with the content. The way to hold an operator back is to turn these permissions off for the operators' column, not to rely on the title.
+- **Without `manage_channels`** an operator sees only the channels it is in, with a count of the rest: invites, hooks and the joining settings show "and N other channels" (`other_channels`, `other_hooks`, `other_open_channels`), and a request for a channel it isn't in answers as if it didn't exist. Three things remain. The first two show it a channel's name, the third only that channels exist:
+  - **The audit export.** The trail names every member and every private channel. That is why `read_audit_log` is off for operators by default and needs a recent sign-in from anyone but an owner. Turning it on for operators shows them everything.
+  - **A problem report's own text.** The server stores a report as written and only attaches a `redact` list of names at read time. The diagnostics it adds carry no names. The three free-text answers are the reporter's own words and may name a channel or a person, and every operator can read reports.
+  - **The counts**, which say that channels exist but not which. This one gives no name.
+- Whoever has the host can read the database. See [Trust and scope](../README.md#trust-and-scope).
+
+### Taking `act_as_members` away
+
+Turning `act_as_members` off for operators stops new credentials, sign-in links and hooks for someone else, and suspends the sign-in, reset and enrolment links they already made but nobody has used (they work again if you turn it back on). It **does not end** credentials and hooks an operator already issued to other people: those belong to their target and stay live.
+
+The change tells you what it left. In the browser the list "Still working after this change" appears under the matrix, with **Sign out everywhere** and **Revoke** beside each item. On the CLI, `conch admin permissions set act_as_members --operators off` prints each one:
+
+```
+  credential 12 (principal 4, issued by 2): conch admin credential revoke 12
+  hook 3 (principal 4, issued by 2): conch admin hook revoke 3
+```
+
+Revoke what you don't want. The list is only in the answer to that change; it isn't kept, so revoke from it before you leave the page or the terminal. It comes from the audit trail: a credential or hook issued before the trail recorded who issued it (before 2026-10-08) isn't on it, and neither are an owner's own, since owners keep `act_as_members`. The same gap exists when you **demote or disable an operator**: what they issued stays live until you revoke it. The audit trail names the issuer of every credential and hook (`credential_created`, `credential_rotated`, `hook_created`), so `conch audit export` finds them. Recording the issuer on the credential itself, and listing these on demotion and disable, is [#1024](https://github.com/njdaniel/conch/issues/1024), not built yet.
+
+### Camera video and bandwidth
+
+Cameras use the droplet's bandwidth and CPU, and **how much a droplet carries is not yet measured**. Nothing here is a capacity.
+
+What there is is the browser's presets, which are the SDK's figures and not measurements ([README, Camera](../README.md#camera)):
+
+- A computer sends a top layer of at most 1.2 Mbps, with smaller layers of 450 kbps and 150 kbps; a phone sends at most 450 kbps, with one smaller layer of 150 kbps.
+- For scale: in a one-to-one call each side sends at most about 1.8 Mbps across all its layers and receives one layer. In a call with 9 cameras each person receives 8 small layers, and LiveKit sends roughly 9 × 8 streams.
+- LiveKit sends only the layers viewers ask for, so a 3 × 3 grid of small tiles receives the 180p or 360p layers, and a sender stops encoding a layer nobody receives. `conchd` limits no bitrate or resolution.
+- The cap of 9 cameras per room is a constant in `conchd`, not a setting, and it stays what it is until the measurement says what a droplet carries.
+
+To find out for your own droplet, watch **What to watch** (below) while people use cameras: the droplet's bandwidth graph, and `htop` and `docker stats livekit` for CPU. The method for measuring one-to-one and 9-camera calls, with and without a share, is the template [docs/reports/TEMPLATE-camera-bandwidth.md](reports/TEMPLATE-camera-bandwidth.md). On a load generator, `scripts/alpha-loadtest.sh --channel general --viewers 9 --publishers 9 --camera-publishers 9 --duration 5m -- --layout 3x3` simulates nine principals that each claim a camera before publishing it (add the server and credential options from its `--help`). Turn `use_camera` on for operators and members first, and back off afterwards; the script checks the member cell and never changes it. A 9-camera run using this command is not partial. The report still states how many cameras were simulated and real, and no number is a capacity claim.
 
 ## A second instance
 
@@ -570,7 +863,7 @@ It runs `remove-instance.sh` on the droplet over `ssh -t`, then deletes the serv
 
 ## Temporary servers
 
-For a short-lived server holding nothing anyone needs to keep, `conch-server new <name> --temporary` ([A second instance](#a-second-instance)) makes one: its env file says `CONCHD_MODE=temporary`, and it gets no backup timer ([ADR-011](adr/ADR-011-temporary-servers.md), items 2 and 4). To make an existing server temporary, set `CONCHD_MODE=temporary` in its env file, restart `conchd@<name>`, and disable `conch-backup@<name>.timer`. Operators without an enrolled authenticator may sign in with a password alone; those who enrolled still need a code. The sign-in page and lobby show "Temporary server: no backups, and it may be removed. Don't keep anything here you need." If run, backups make a local archive only, even with an off-site destination configured; pre-upgrade backups are unchanged. No restore drill is needed before testers join. `conch-server rm <name>` removes it ([Removing a server](#removing-a-server)). Guest policy, invites, channel isolation, approvals, rate limits, password rules, script credentials and auditing keep their usual rules; members and guests sign in as usual.
+For a short-lived server holding nothing anyone needs to keep, `conch-server new <name> --temporary` ([A second instance](#a-second-instance)) makes one: its env file says `CONCHD_MODE=temporary`, and it gets no backup timer ([ADR-011](adr/ADR-011-temporary-servers.md), items 2 and 4). To make an existing server temporary, set `CONCHD_MODE=temporary` in its env file, restart `conchd@<name>`, and disable `conch-backup@<name>.timer`. Operators without an enrolled authenticator may sign in with a password alone; those who enrolled still need a code. The sign-in page and lobby show "Temporary server: no backups, and it may be removed. Don't keep anything here you need." If run, backups make a local archive only, even with an off-site destination configured; pre-upgrade backups are unchanged. No restore drill is needed before testers join. `conch-server rm <name>` removes it ([Removing a server](#removing-a-server)). Guest policy, invites, channel isolation, approvals, rate limits, password rules, script credentials and auditing keep their usual rules; members sign in as usual. There are no guests for now.
 
 For password-only operators on a normal server, use `CONCHD_OPERATOR_TOTP=optional` instead ([ADR-012](adr/ADR-012-optional-operator-totp.md)). It adds no temporary banner and **keeps off-site backups required**.
 

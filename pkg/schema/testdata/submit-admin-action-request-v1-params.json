@@ -1,0 +1,10 @@
+{
+  "action": "add_channel_member",
+  "target": {
+    "kind": "channel",
+    "id": 9
+  },
+  "params": {
+    "principal_id": 7
+  }
+}

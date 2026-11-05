@@ -123,6 +123,8 @@ func coreHistoryRows() []row {
 			probe: func(_ *world, s subject) probe { return get("/v1/sessions?channel=" + url.QueryEscape(s.name)) }},
 		{route: "POST /v1/channels/{channel}/voice/session", what: "asks for a voice session in A's channel", pick: aChannel, want: channelNotFound,
 			probe: func(_ *world, s subject) probe { return post(ch(s)+"/voice/session", nil) }},
+		{route: "POST /v1/channels/{channel}/voice/camera", what: "claims a camera in A's channel", pick: aChannel, want: channelNotFound,
+			probe: func(_ *world, s subject) probe { return post(ch(s)+"/voice/camera", nil) }},
 		{route: "GET /v1/voice/ws", what: "opens the voice presence socket of A's channel", pick: aChannel, want: channelNotFound,
 			probe: func(_ *world, s subject) probe { return sock("/v1/voice/ws", s.name, nil, false) }},
 		{route: "GET /v2/ws", what: "opens the v2 message socket of A's channel with a ticket", pick: aChannel, want: channelNotFound,
@@ -144,10 +146,23 @@ func guestRows() []row {
 			probe: func(*world, subject) probe { return get("/v1/whoami") }},
 		{route: "GET /v1/channels", what: "lists her channels", own: true, inspect: onlyThePlaza,
 			probe: func(*world, subject) probe { return get("/v1/channels") }},
+		// The channel directory is a community member's (issue #982): a
+		// guest's channels are its link's.
+		refused("GET /v1/directory/channels", "lists the channel directory", notAllowed, func(*world) probe { return get("/v1/directory/channels") }),
 		{route: "GET /v1/credentials/mine", what: "lists her sign-ins", own: true, inspect: oneSignIn,
 			probe: func(*world, subject) probe { return get("/v1/credentials/mine") }},
 		{route: "GET /v1/channels/{channel}/voice", what: "reads the plaza's voice presence (a guest holds no voice since A4, #1016)", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
 			probe: func(w *world, _ subject) probe { return get("/v1/channels/" + pch(w) + "/voice") }},
+		// A guest never claims a camera (ADR-015, S6): on main a guest holds
+		// no voice at all, so the claim is refused at its fourth check, as
+		// every voice route refuses a guest, and so is a release. The
+		// design's row "a guest in voice receives A's camera" (§11.3, O15)
+		// cannot be built while a guest holds no voice; it waits for the
+		// guest column, #1004.
+		{route: "POST /v1/channels/{channel}/voice/camera", what: "claims a camera in the plaza (a guest holds no voice since A4, #1016)", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
+			probe: func(w *world, _ subject) probe { return post("/v1/channels/"+pch(w)+"/voice/camera", nil) }},
+		{route: "DELETE /v1/channels/{channel}/voice/camera", what: "releases a camera in the plaza", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
+			probe: func(w *world, _ subject) probe { return del("/v1/channels/" + pch(w) + "/voice/camera") }},
 		{route: "POST /v1/reports", what: "reports a problem", own: true,
 			probe: func(*world, subject) probe {
 				return post("/v1/reports", schema.CreateProblemReportRequestV1{Did: "d", Expected: "e", Happened: "h", Often: schema.ProblemReportOftenOnce,
@@ -414,15 +429,23 @@ func oneSignIn(w *world, _ api, body []byte) error {
 
 // offersAccounts requires that the front door offers an account and no
 // visit: guests are removed for now (issue #1005).
-func offersAccounts(_ *world, _ api, body []byte) error {
+func offersAccounts(w *world, _ api, body []byte) error {
 	var info schema.JoinInfoV1
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&info); err != nil {
 		return err
 	}
-	if info.Join.Guest || info.Join.GuestsFull || !info.Join.Account || info.ServerName != "conch" || !info.PasswordLogin {
-		return fmt.Errorf("the front door says %+v, want an account and no visit at conch", info)
+	// Issue #987: never a guest, voice always.
+	if info.Join.Guest || info.Join.GuestsFull || !info.Join.Account || !info.Voice || info.ServerName != "conch" || !info.PasswordLogin {
+		return fmt.Errorf("the front door says %+v, want an account, voice and no visit at conch", info)
+	}
+	// It names no channel at all (DisallowUnknownFields above), and so none
+	// of A's private channels; said again in bytes, for the record.
+	for _, name := range w.a.channels {
+		if bytes.Contains(body, []byte(name)) {
+			return fmt.Errorf("the front door names %q, a private channel of A's: %s", name, body)
+		}
 	}
 	return nil
 }

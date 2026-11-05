@@ -221,9 +221,24 @@ type makerRights struct {
 
 // makerRightsTx reads what principalID holds now. A principal with no row
 // holds nothing.
-func makerRightsTx(ctx context.Context, tx execer, principalID int64) (makerRights, error) {
+//
+// standing says what is asked. Making an invite is an act of authority, so
+// an agent's grant counts only where the admin door dispatched the request
+// (standing false; WithAdminDispatch). Whether an invite already made still
+// stands behind its maker is a fact about the maker, judged in whoever's
+// request redeems or previews it (standing true): an agent's grant is read
+// whatever the context, so a link an AI administrator made works while it
+// holds the grant and is suspended when the grant goes (issue #1326).
+func makerRightsTx(ctx context.Context, tx execer, principalID int64, standing bool) (makerRights, error) {
 	p, found, err := queryPrincipal(ctx, tx, principalID)
 	if err != nil || !found {
+		return makerRights{}, err
+	}
+	load := withAgentAuthorityTx
+	if standing {
+		load = withAgentGrantTx
+	}
+	if p, err = load(ctx, tx, p); err != nil {
 		return makerRights{}, err
 	}
 	d, err := readPermissionDocTx(ctx, tx)
@@ -239,7 +254,7 @@ func makerRightsTx(ctx context.Context, tx execer, principalID int64) (makerRigh
 
 // loadMakerTx fills r.maker from the maker as it is now.
 func (r *inviteRow) loadMakerTx(ctx context.Context, tx execer) error {
-	m, err := makerRightsTx(ctx, tx, r.createdBy)
+	m, err := makerRightsTx(ctx, tx, r.createdBy, true)
 	if err != nil {
 		return fmt.Errorf("store: invite maker rights: %w", err)
 	}
@@ -283,7 +298,11 @@ func (r inviteRow) state(now time.Time) InviteState {
 // taking an inviter's right away suspends the invites they left
 // outstanding, and they work again if it comes back.
 func (r inviteRow) makerStillAllowed() bool {
-	if r.creatorOff || !r.creatorHuman {
+	// A disabled maker never stands behind a link. Whether the maker is a
+	// human or a granted agent (issue #1326), what it holds now decides
+	// (r.maker): an agent without the grant, a guest and a hidden principal
+	// hold nothing (principalHolds), so their links stay suspended.
+	if r.creatorOff {
 		return false
 	}
 	// A member link, like a personal invite, stands behind make_member_links:
@@ -296,7 +315,15 @@ func (r inviteRow) makerStillAllowed() bool {
 	return r.maker.members
 }
 
+// wire is the invite as v1 tells it. A member link is projected for old
+// clients (design §3.3, issue #986): kind open, the channels a joiner would
+// land in now (the caller passes them), voice on, no right to invite passed
+// on, joining as an account, and its expiry or the NoExpiryMillis sentinel.
+// Lossy, and for old clients only.
 func (r inviteRow) wire(channels []schema.InviteChannelV1) schema.InviteV1 {
+	if r.link == linkMember {
+		r.kind, r.voice, r.mayInvite, r.joinAs = schema.InviteKindOpen, true, false, schema.InviteJoinAccount
+	}
 	inv := schema.InviteV1{
 		ID:                        r.id,
 		Kind:                      r.kind,
@@ -352,7 +379,32 @@ func inviteChannelsTx(ctx context.Context, tx execer, inviteID int64) ([]schema.
 // landing channels (O5) lands in those instead, and only while its maker
 // still holds manage_channels; without it nothing is kept and every landing
 // channel is dropped, so the link fails closed (usableInviteTx).
+//
+// An archived channel is dropped as one a joiner may not enter (issue #844):
+// the redemption still succeeds for the others, and an invite left with no
+// channel fails as one whose maker lost access does.
 func effectiveChannelsTx(ctx context.Context, tx execer, r inviteRow) (kept, dropped []schema.InviteChannelV1, err error) {
+	kept, dropped, err = permittedChannelsTx(ctx, tx, r)
+	if err != nil {
+		return nil, nil, err
+	}
+	live := kept[:0:0]
+	for _, c := range kept {
+		switch err := channelNotArchivedTx(ctx, tx, c.ID); {
+		case errors.Is(err, ErrChannelArchived):
+			dropped = append(dropped, c)
+		case err != nil:
+			return nil, nil, err
+		default:
+			live = append(live, c)
+		}
+	}
+	return live, dropped, nil
+}
+
+// permittedChannelsTx is effectiveChannelsTx before the archived filter: the
+// split by what the invite's maker still stands behind.
+func permittedChannelsTx(ctx context.Context, tx execer, r inviteRow) (kept, dropped []schema.InviteChannelV1, err error) {
 	all, err := inviteChannelsTx(ctx, tx, r.id)
 	if err != nil {
 		return nil, nil, err
@@ -396,6 +448,23 @@ func effectiveChannelsTx(ctx context.Context, tx execer, r inviteRow) (kept, dro
 		}
 	}
 	return kept, dropped, nil
+}
+
+// unionChannels is a with each channel of b it does not hold already
+// appended, in b's order.
+func unionChannels(a, b []schema.InviteChannelV1) []schema.InviteChannelV1 {
+	seen := make(map[int64]bool, len(a))
+	for _, c := range a {
+		seen[c.ID] = true
+	}
+	out := append([]schema.InviteChannelV1{}, a...)
+	for _, c := range b {
+		if !seen[c.ID] {
+			seen[c.ID] = true
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func invitesPausedTx(ctx context.Context, tx execer) (bool, error) {
@@ -541,7 +610,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 		// link, its allowance and a may_invite grant; manage_channels for a
 		// channel it is not in; make_member_links (with a member's may_invite
 		// brake) for a personal invite.
-		rights, err := makerRightsTx(ctx, tx, creatorID)
+		rights, err := makerRightsTx(ctx, tx, creatorID, false)
 		if err != nil {
 			return fmt.Errorf("store: create invite: %w", err)
 		}
@@ -590,6 +659,11 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 				case err != nil:
 					return fmt.Errorf("store: create invite: check membership: %w", err)
 				}
+			}
+			// The archived guard of an invite naming the channel (issue
+			// #844): after the creator's standing in it is established.
+			if err := channelNotArchivedTx(ctx, tx, id); err != nil {
+				return err
 			}
 			channelIDs = append(channelIDs, id)
 		}
@@ -700,11 +774,14 @@ func (s *Store) PreviewInvite(ctx context.Context, codeHash string, now time.Tim
 	for i, c := range kept {
 		names[i] = c.Name
 	}
+	// Voice is what the joiner gets, and every joiner gets it now, whatever
+	// the invite said (issue #986): a preview that said otherwise would tell
+	// the newcomer less than redemption gives.
 	return schema.InvitePreviewV1{
 		Kind:      r.kind,
 		Inviter:   r.creatorName,
 		Channels:  names,
-		Voice:     r.voice && r.creatorVoice,
+		Voice:     true,
 		ExpiresAt: schema.NewTimestamp(time.UnixMilli(r.expiresAt)),
 		Join:      &join,
 	}, nil
@@ -834,12 +911,24 @@ func (s *Store) redeemInvite(ctx context.Context, codeHash, name, record string,
 			return ErrInviteInvalid
 		}
 
-		voice := r.voice && r.creatorVoice
-		// Only a holder of manage_members grants the right to invite (issue
-		// #457, ADR-014 design §7.3). Checked again here, against the maker as
-		// they are now (usableInviteTx loaded r.maker in this transaction), so
-		// the rule does not rest on what an invite row says.
-		mayInvite := r.mayInvite && r.maker.members
+		// Every member the community model makes has voice and the may_invite
+		// brake on: both are per-person switches that only take away (ADR-014),
+		// set as for open sign-up (#987). That holds for a member link and for
+		// a legacy invite alike, whatever the legacy row said (issue #986,
+		// design §2.1); an operator turns either off for one person.
+		voice, mayInvite := true, true
+		// A legacy invite that makes a member lands its joiner in its own
+		// channels its maker still stands behind (usableInviteTx refused one
+		// with none left) and also in the default channels as they are now. A
+		// member link already lands in the defaults, or in its landing
+		// channels (effectiveChannelsTx).
+		if r.link != linkMember {
+			defaults, err := openChannelsTx(ctx, tx)
+			if err != nil {
+				return err
+			}
+			kept = unionChannels(kept, defaults)
+		}
 		// A name that clashes with another by case or look-alike
 		// characters is taken (issue #441).
 		keys, err := s.claimNameTx(ctx, tx, name, 0)
@@ -865,22 +954,17 @@ func (s *Store) redeemInvite(ctx context.Context, codeHash, name, record string,
 			InvitedBy: r.createdBy, InviteID: r.id, MayInvite: mayInvite, VoiceAllowed: voice,
 		}
 
-		for _, c := range kept {
-			// A member who joins through an invite never gets the right to
-			// decide the channel's approvals (issue #450): the column's
-			// default of 1 is for members an operator adds.
-			if _, err := tx.ExecContext(ctx,
-				"INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide) VALUES (?, ?, ?, ?, 0)",
-				c.ID, pid, r.createdBy, now.UnixMilli()); err != nil {
-				return fmt.Errorf("store: redeem invite: add member: %w", err)
-			}
+		if err := addJoinerMembershipsTx(ctx, tx, pid, sql.NullInt64{Int64: r.createdBy, Valid: true}, kept, now); err != nil {
+			return fmt.Errorf("store: redeem invite: %w", err)
 		}
 
 		// The joiner's credential renews by being used (issue #439): its
 		// expiry moves to the invite's lifetime past each day's first use.
 		lifetime := time.Duration(r.lifetimeMs) * time.Millisecond
 		exp := now.Add(lifetime)
-		cred, err := insertCredentialTx(ctx, tx, pid, fmt.Sprintf("invite %d", r.id), token, now, &exp, lifetime)
+		// Issued by the invite, not by a principal: issued_by stays NULL
+		// (issue #1024).
+		cred, err := insertCredentialTx(ctx, tx, pid, fmt.Sprintf("invite %d", r.id), token, now, &exp, lifetime, 0)
 		if err != nil {
 			return err
 		}
@@ -980,7 +1064,7 @@ func (s *Store) CloseInvite(ctx context.Context, actor string, closerID, inviteI
 			reason = InviteCloseOperator
 		}
 		return appendAuditEventTx(ctx, tx, actor, AuditInviteClosed, inviteSubject(inviteID),
-			inviteClosedDetail(inviteID, r.kind, r.uses, reason), now)
+			inviteClosedDetail(inviteID, r.kind, r.link, r.uses, reason), now)
 	})
 	if err != nil {
 		return false, err
@@ -988,16 +1072,24 @@ func (s *Store) CloseInvite(ctx context.Context, actor string, closerID, inviteI
 	return changed, nil
 }
 
-func inviteClosedDetail(id int64, kind schema.InviteKind, uses int64, reason string) string {
+// inviteClosedDetail is the invite_closed row's detail. A member link says
+// link=member, since its kind is open like a legacy open link's; a legacy
+// invite's row reads as it always did.
+func inviteClosedDetail(id int64, kind schema.InviteKind, link string, uses int64, reason string) string {
+	if link == linkMember {
+		return fmt.Sprintf("invite=%d kind=%s link=%s uses=%d reason=%s", id, kind, link, uses, reason)
+	}
 	return fmt.Sprintf("invite=%d kind=%s uses=%d reason=%s", id, kind, uses, reason)
 }
 
 // inviteSelector says which of a maker's open invites a close or a count
 // touches: those of kind (every kind when empty) that also satisfy where, a
-// fixed SQL condition from the values below, never caller input.
+// fixed SQL condition from the values below whose ? placeholders take args.
+// No caller value is ever part of the SQL text.
 type inviteSelector struct {
 	kind  schema.InviteKind
 	where string
+	args  []any
 }
 
 // clause is the selector's SQL, to append to a WHERE, and its arguments.
@@ -1010,6 +1102,7 @@ func (sel inviteSelector) clause() (string, []any) {
 	}
 	if sel.where != "" {
 		q += " AND " + sel.where
+		args = append(args, sel.args...)
 	}
 	return q, args
 }
@@ -1025,10 +1118,37 @@ var (
 )
 
 // selectDemotedInvites: demoting an operator closes the invites that stood
-// on the role (their legacy open links, or every legacy kind when kind is
-// empty) and leaves their member links standing.
-func selectDemotedInvites(kind schema.InviteKind) inviteSelector {
-	return inviteSelector{kind: kind, where: "link <> 'member'"}
+// on the role: their legacy open links (every legacy kind when kind is
+// empty), and the member links a member in their new state could not hold.
+// A member holds make_member_links only with the may_invite brake on
+// (brakeOn), and even then cannot ask for a link that never expires. So with
+// the brake off every member link goes, and with it on only the
+// never-expiring ones do; the rest stand, as for any member who may invite.
+// Closing at demotion, not when the brake is next turned off, is what stops
+// a link made under the role from outliving it and coming back with the
+// brake (issue #1165).
+//
+// Two near cases are left as they are, on purpose. When the default member
+// link expiry is 0, a member's own default link never expires either; such
+// a link is closed here all the same, which errs on the closed side. And the
+// member allowance binds making a link, not holding one, as when an
+// operator lowers it: a demoted maker over it keeps the links they have,
+// each one a member could make, and makes no more until under it. Landing
+// channels need no close: redemption drops each one the maker can no longer
+// manage, and a link left with none is refused (effectiveChannelsTx).
+func selectDemotedInvites(kind schema.InviteKind, brakeOn bool) inviteSelector {
+	var args []any
+	legacy := "link <> 'member'"
+	if kind != "" {
+		legacy += " AND kind = ?"
+		args = append(args, string(kind))
+	}
+	member := "link = 'member'"
+	if brakeOn {
+		member += " AND expires_at >= ?"
+		args = append(args, schema.NoExpiryMillis)
+	}
+	return inviteSelector{where: "((" + legacy + ") OR (" + member + "))", args: args}
 }
 
 // closeCreatorInvitesTx closes every open invite creatorID made that sel
@@ -1037,7 +1157,7 @@ func selectDemotedInvites(kind schema.InviteKind) inviteSelector {
 // closing. closed_by is left empty, since no principal closed them by hand.
 // The caller holds the write lock.
 func closeCreatorInvitesTx(ctx context.Context, tx execer, actor string, creatorID int64, sel inviteSelector, reason string, now time.Time) error {
-	q := `SELECT id, kind, uses FROM invites
+	q := `SELECT id, kind, link, uses FROM invites
 		 WHERE created_by = ? AND closed_at IS NULL AND expires_at > ? AND (max_uses IS NULL OR uses < max_uses)`
 	args := []any{creatorID, now.UnixMilli()}
 	extra, extraArgs := sel.clause()
@@ -1050,13 +1170,14 @@ func closeCreatorInvitesTx(ctx context.Context, tx execer, actor string, creator
 	type open struct {
 		id   int64
 		kind schema.InviteKind
+		link string
 		uses int64
 	}
 	var found []open
 	for rows.Next() {
 		var o open
 		var k string
-		if err := rows.Scan(&o.id, &k, &o.uses); err != nil {
+		if err := rows.Scan(&o.id, &k, &o.link, &o.uses); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("store: list open invites: scan: %w", err)
 		}
@@ -1075,7 +1196,7 @@ func closeCreatorInvitesTx(ctx context.Context, tx execer, actor string, creator
 			return fmt.Errorf("store: close invite %d: %w", o.id, err)
 		}
 		if err := appendAuditEventTx(ctx, tx, actor, AuditInviteClosed, inviteSubject(o.id),
-			inviteClosedDetail(o.id, o.kind, o.uses, reason), now); err != nil {
+			inviteClosedDetail(o.id, o.kind, o.link, o.uses, reason), now); err != nil {
 			return err
 		}
 	}
@@ -1121,6 +1242,13 @@ func (s *Store) ListInvites(ctx context.Context, f InviteFilter, now time.Time) 
 		channels, err := inviteChannelsTx(ctx, s.db, r.id)
 		if err != nil {
 			return nil, err
+		}
+		// A member link with no landing channels lands in the default
+		// channels as they are now, which is what v1 lists for it.
+		if r.link == linkMember && len(channels) == 0 {
+			if channels, err = openChannelsTx(ctx, s.db); err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, r.wire(channels))
 	}

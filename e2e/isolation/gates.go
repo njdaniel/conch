@@ -71,7 +71,8 @@ func tryInviteGuest(mode schema.InviteJoinMode, want answer) tryEntry {
 
 // tryPersonalGuest has the operator try to make a personal invite to the
 // plaza for a guest: §9.1 names personal invites beside open links, and
-// none may admit a guest now.
+// none may admit a guest now. POST /v1/invites is retired for everyone, the
+// operator included (issue #1134), so it answers 409 invite_kind_retired.
 func tryPersonalGuest(want answer) tryEntry {
 	return tryEntry{what: "is made a personal invite for a guest by the operator", want: want, do: func(w *world, _ api) (int, []byte, error) {
 		return w.op.do(http.MethodPost, "/v1/invites", schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{w.p.channel}, JoinAs: schema.InviteJoinGuest})
@@ -84,6 +85,16 @@ func trySettings(what string, req schema.PutJoinSettingsRequestV1, want answer) 
 	return tryEntry{what: "is let in by the operator, who " + what, want: want, do: func(w *world, _ api) (int, []byte, error) {
 		return w.op.do(http.MethodPut, "/v1/join/settings", req)
 	}}
+}
+
+// tryPrivateOpenChannel has the operator try to open the address to one of
+// A's private channels: a default channel must be public, and listing a
+// private one is refused, never made public (issue #987).
+func tryPrivateOpenChannel() tryEntry {
+	return tryEntry{what: "is let into A's private channel by the operator, who lists it", want: answer{http.StatusConflict, schema.ErrorCodeChannelSettingsConflict},
+		do: func(w *world, _ api) (int, []byte, error) {
+			return w.op.do(http.MethodPut, "/v1/join/settings", schema.PutJoinSettingsRequestV1{OpenChannels: &[]string{w.p.channel, w.a.channels[0]}})
+		}}
 }
 
 func tryAccount(want answer) tryEntry {
@@ -123,6 +134,7 @@ var (
 	joiningPaused  = answer{http.StatusForbidden, schema.ErrorCodeJoiningPaused}
 	invitesPaused  = answer{http.StatusServiceUnavailable, schema.ErrorCodeInvitesPaused}
 	policyConflict = answer{http.StatusConflict, schema.ErrorCodeJoinPolicyConflict}
+	inviteRetired  = answer{http.StatusConflict, schema.ErrorCodeInviteKindRetired}
 )
 
 // gates is the steps, in order.
@@ -133,10 +145,15 @@ func gates() []gate {
 		{what: "guests off, accounts open", set: settings(schema.PutJoinSettingsRequestV1{GuestsEnabled: &no}),
 			front: schema.JoinOptionsV1{Account: true},
 			tries: []tryEntry{tryGuest(guestsDisabled), tryInviteGuest(schema.InviteJoinBoth, guestsDisabled), tryInviteGuest(schema.InviteJoinGuest, guestsDisabled),
-				tryPersonalGuest(policyConflict),
+				tryPersonalGuest(inviteRetired),
 				trySettings("turns guests on", schema.PutJoinSettingsRequestV1{GuestsEnabled: &yes}, policyConflict),
 				trySettings("makes the address guest-only", schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningGuest)}, policyConflict),
 				trySettings("opens the address to guests and accounts", schema.PutJoinSettingsRequestV1{OpenJoining: ptr(schema.OpenJoiningBoth)}, policyConflict),
+				// Issue #987: voice is every member's, a default channel is
+				// public, and the bare address still admits no guest after
+				// the refused attempts to let guests in.
+				trySettings("turns voice off for joiners", schema.PutJoinSettingsRequestV1{JoinVoice: &no}, policyConflict),
+				tryPrivateOpenChannel(), tryGuest(guestsDisabled),
 				tryPreview(schema.InviteJoinBoth, schema.JoinOptionsV1{Account: true}), tryPreview(schema.InviteJoinGuest, schema.JoinOptionsV1{}),
 				tryAccount(answer{}), tryInviteAccount(schema.InviteJoinBoth, answer{})},
 			check: guestsStay},

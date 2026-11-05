@@ -1,7 +1,7 @@
 // P3-04: one person in two clients has two sessions, and revoking one
 // credential ends only what that credential holds.
 import { heartbeat, openSession, roster } from './api';
-import { expect, signIn, test } from './fixtures';
+import { credentialField, expect, signIn, test } from './fixtures';
 import { call } from './world';
 
 test('P3-04 revoking the credential the browser signed in with signs it out and leaves the terminal session', async ({ meet, world }) => {
@@ -29,7 +29,7 @@ test('P3-04 revoking the credential the browser signed in with signs it out and 
 
     // The browser is back at sign-in, told why.
     await expect(page.getByRole('alert')).toHaveText('Signed out: the credential is no longer valid', { timeout: 45_000 });
-    await expect(page.getByLabel('Credential')).toBeVisible();
+    await expect((await credentialField(page))).toBeVisible();
     await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
 
     // The terminal's session is still there and online, the browser's is not.

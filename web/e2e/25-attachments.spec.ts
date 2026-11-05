@@ -5,7 +5,7 @@ import { fileAttachmentPayloadSchema, fileAttachmentV1 } from '../src/schema/fil
 import type { MessageV2 } from '../src/schema/message';
 import { listNetsResponseV1 } from '../src/schema/net';
 import { attach, history, post } from './api';
-import { channelButton, expect, expectFits, messages, phones, signIn, statusLine, test } from './fixtures';
+import { channelButton, credentialField, expect, expectFits, messages, phones, signIn, statusLine, test } from './fixtures';
 import { call, ok, type World } from './world';
 
 const buffer = (globalThis as unknown as { Buffer: {
@@ -457,7 +457,7 @@ test('revocation clears cached previews and a second credential restores the com
 
   await page.getByRole('button', { name: 'Enlarge existing.png' }).click();
   await done(world, 'DELETE', `/v1/credentials/${String(first.credentialId)}`);
-  await expect(page.getByLabel('Credential')).toBeVisible({ timeout: 45_000 });
+  await expect((await credentialField(page))).toBeVisible({ timeout: 45_000 });
   await expect.poll(() => activeObjectURLs(page)).toBe(0);
   const historyMessage = (await history(world, second.token, channel)).find((message) => message.payload !== undefined);
   if (historyMessage === undefined) throw new Error('the history attachment was not stored');
@@ -465,7 +465,7 @@ test('revocation clears cached previews and a second credential restores the com
   release();
   await page.unroute(`**/v2/channels/${channel}/files?*`);
 
-  await page.getByLabel('Credential').fill(second.token);
+  await (await credentialField(page)).fill(second.token);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await expect(statusLine(page)).toContainText(first.name);
   await expect(statusLine(page)).toContainText('Connected');
@@ -499,7 +499,7 @@ test('changing server origin invalidates an in-flight upload without retargeting
   const elsewhere = world.appUrl.replace('127.0.0.1', 'localhost');
   expect(elsewhere).not.toBe(world.appUrl);
   await page.goto(elsewhere);
-  await expect(page.getByLabel('Credential')).toBeVisible();
+  await expect((await credentialField(page))).toBeVisible();
   release();
   await page.unroute(`**/v2/channels/${channel}/files?*`);
   await signIn(page, { appUrl: elsewhere }, author.token, author.name);

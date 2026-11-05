@@ -40,6 +40,16 @@ func coreAgentRows() []row {
 	runNotFound := answer{http.StatusNotFound, "run_not_found"}
 	interNotFound := answer{http.StatusNotFound, "intervention_not_found"}
 	return []row{
+		// The admin door (issue #1330): an agent with no grant is refused at
+		// the door, before any action, target or approval is looked at.
+		{route: "GET /v1/admin/actions", what: "reads the admin catalog without a grant", want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(*world, subject) probe { return get("/v1/admin/actions") }},
+		byID("POST /v1/admin/actions", "asks the admin door to disable A's member", aMember, answer{http.StatusForbidden, "forbidden"}, func(_ *world, s subject) probe {
+			return post("/v1/admin/actions", disableThrough(s.id))
+		}),
+		byID("POST /v1/admin/actions/{approval_id}/run", "runs A's approval through the admin door", aApproval, answer{http.StatusForbidden, "forbidden"}, func(_ *world, s subject) probe {
+			return post("/v1/admin/actions/"+id(s.id)+"/run", nil)
+		}),
 		// The community's member list is for people: an agent is refused,
 		// whoever it is.
 		{route: "GET /v1/directory/members", what: "asks for the community's members", want: answer{http.StatusForbidden, "forbidden"},
@@ -48,6 +58,17 @@ func coreAgentRows() []row {
 		// refused before any name is looked at.
 		byID("POST /v1/channels", "makes a channel with A's private channel's name", aChannel, answer{http.StatusForbidden, "forbidden"}, func(_ *world, s subject) probe {
 			return post("/v1/channels", schema.CreateChannelRequestV1{Name: s.name, Visibility: schema.ChannelPrivate})
+		}),
+		// The channel directory, self-join and leave are a community
+		// member's (issue #982): an agent is refused before any lookup,
+		// the same for A's private channel as for one never made.
+		{route: "GET /v1/directory/channels", what: "lists the channel directory", want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(*world, subject) probe { return get("/v1/directory/channels") }},
+		byID("POST /v1/channels/{channel}/join", "joins A's private channel", aChannel, answer{http.StatusForbidden, schema.ErrorCodeChannelNotJoinable}, func(_ *world, s subject) probe {
+			return post(ch(s)+"/join", nil)
+		}),
+		byID("POST /v1/channels/{channel}/leave", "leaves A's private channel", aChannel, answer{http.StatusForbidden, "forbidden"}, func(_ *world, s subject) probe {
+			return post(ch(s)+"/leave", nil)
 		}),
 		byChannel("GET /v2/channels/{channel}/messages", "reads A's channel", func(_ *world, s subject) probe { return get("/v2/channels/" + s.name + "/messages") }),
 		byChannel("POST /v2/channels/{channel}/messages", "posts to A's channel", func(_ *world, s subject) probe {
@@ -119,6 +140,9 @@ func mcpProbes() []mcpProbe {
 	return []mcpProbe{
 		{"read_channel", aChannel, func(_ *world, s subject) map[string]any { return map[string]any{"channel": s.name} }},
 		{"post_message", aChannel, func(_ *world, s subject) map[string]any { return map[string]any{"channel": s.name, "body": "hello"} }},
+		{"post_message", aChannel, func(_ *world, s subject) map[string]any {
+			return map[string]any{"channel": s.name, "body": "hello", "thread_root_id": 1}
+		}},
 		{"check_decision", aApproval, func(_ *world, s subject) map[string]any { return map[string]any{"approval_id": s.id} }},
 		{"await_decision", aApproval, func(_ *world, s subject) map[string]any { return map[string]any{"approval_id": s.id, "timeout_ms": 1} }},
 		{"heartbeat", aSession, func(_ *world, s subject) map[string]any { return map[string]any{"session_id": s.id} }},

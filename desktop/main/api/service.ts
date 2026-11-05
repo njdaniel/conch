@@ -187,16 +187,18 @@ export class Service {
     if (exchange.kind === 'none' && exchange.reason === 'invalid') this.#deps.onInvalid?.('whoami');
     if (exchange.kind !== 'answer' || !exchange.ok || whoAmIResponseV1(exchange.body).length > 0) return failed(exchange);
     if (!session.current(capture)) return { ok: false, kind: 'network', reason: 'stale' };
-    session.holdPasted(credential, this.#deps.now() + PASTED_TTL_MS);
-    return { ok: true, who: exchange.body as WhoAmIResponseV1, answer: {} };
+    const handle = session.holdPasted(credential, this.#deps.now() + PASTED_TTL_MS);
+    return { ok: true, who: exchange.body as WhoAmIResponseV1, answer: {}, handle };
   }
 
   // keepCredential puts in force the credential signInWithCredential set
-  // aside. The page must present it again: one that was not just pasted and
-  // checked, or has lapsed, is refused and nothing changes.
-  keepCredential(credential: string): boolean {
+  // aside, named by the one-time handle it returned: the page never passes the
+  // credential itself again. A handle that is not the one issued, was used,
+  // has lapsed or belongs to an earlier identity is refused; nothing changes.
+  keepCredential(handle: string): boolean {
     const { session } = this.#deps;
-    if (!session.takePasted(credential, this.#deps.now())) return false;
+    const credential = session.takePasted(handle, this.#deps.now());
+    if (credential === null) return false;
     this.#adopt(credential);
     return true;
   }

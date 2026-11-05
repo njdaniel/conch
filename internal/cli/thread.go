@@ -35,11 +35,11 @@ func (c *Client) ListThreadV2(ctx context.Context, channel string, rootID, after
 	query.Set("after", strconv.FormatInt(after, 10))
 	query.Set("limit", strconv.Itoa(limit))
 	endpoint.RawQuery = query.Encode()
-	var result schema.ListMessagesResponseV2
+	result := messagesV2Doc{rows: pageRows(limit, maxMessagePage)}
 	if err := c.roundTrip(ctx, "list v2 thread", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ListMessagesResponseV2{}, err
 	}
-	return result, nil
+	return result.ListMessagesResponseV2, nil
 }
 
 // threadPage is how many messages `conch thread` asks for at a time.
@@ -69,7 +69,10 @@ func runThread(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	}
 	var names map[int64]string // resolved once, when the first page has messages
 	after := int64(0)
-	for {
+	for n := 0; ; n++ {
+		if n == maxListPages {
+			return errors.New("cli: thread: the server's pages do not end")
+		}
 		page, err := client.ListThreadV2(ctx, channel, root, after, threadPage)
 		if err != nil {
 			return err

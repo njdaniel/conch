@@ -1,5 +1,5 @@
 // The channel list and which channel is open.
-import type { ChannelV0 } from '../schema/channel';
+import type { ChannelV0, ChannelVisibility } from '../schema/channel';
 
 export interface ChannelsState {
   readonly channels: readonly ChannelV0[];
@@ -28,8 +28,27 @@ export type ChannelsAction =
   // channel_not_found. It stays where it is in the list, and stays open if it
   // was.
   | { readonly type: 'renamed'; readonly id: number; readonly name: string }
+  // A channel's visibility and default mark (issue #1183), by its id: the
+  // operator's own answer, or the events socket's conch.channel.v1. What the
+  // server says replaces what is held; a field it omits keeps the value held
+  // (a reader takes an absent visibility as private, so nothing is guessed).
+  //
+  // archivedAt (issue #844) is different: the server omits it while a channel is
+  // live, so an absent value is live, and the channel comes back out of the
+  // Archived group on restore with no reload.
+  | {
+      readonly type: 'settings';
+      readonly id: number;
+      readonly visibility: ChannelVisibility | undefined;
+      readonly default: boolean | undefined;
+      readonly archivedAt?: string | undefined;
+    }
   // The caller's manager grant in one channel, from its accepted member list.
   | { readonly type: 'managed'; readonly id: number; readonly manages: boolean }
+  // The person has left a channel themselves (issue #991): it goes from the
+  // list, and the open one, if it was, gives way to the landing channel. Not a
+  // loss: nothing is said of it.
+  | { readonly type: 'left'; readonly name: string }
   | { readonly type: 'lost'; readonly name: string }
   // The list as the server now answers it (issue #1027): it replaces the one
   // held, never merges. If the open channel is not in it, it is lost.
@@ -90,11 +109,36 @@ export function channelsReducer(state: ChannelsState, action: ChannelsAction): C
       const selected = state.selected === was.name ? action.name : state.selected;
       return { ...state, channels, selected };
     }
+    case 'settings': {
+      const held = state.channels.find((channel) => channel.id === action.id);
+      if (held === undefined) return state;
+      const visibility = action.visibility ?? held.visibility;
+      const isDefault = action.default ?? held.default;
+      if (held.visibility === visibility && held.default === isDefault && held.archived_at === action.archivedAt) return state;
+      const next: ChannelV0 = {
+        id: held.id,
+        name: held.name,
+        created_at: held.created_at,
+        ...(held.manages === undefined ? {} : { manages: held.manages }),
+        ...(visibility === undefined ? {} : { visibility }),
+        ...(isDefault === undefined ? {} : { default: isDefault }),
+        ...(action.archivedAt === undefined ? {} : { archived_at: action.archivedAt }),
+      };
+      return { ...state, channels: state.channels.map((channel) => (channel.id === action.id ? next : channel)) };
+    }
     case 'managed': {
       const held = state.channels.find((channel) => channel.id === action.id);
       if (held === undefined || (held.manages ?? false) === action.manages) return state;
       const channels = state.channels.map((channel) => (channel.id === action.id ? { ...channel, manages: action.manages } : channel));
       return { ...state, channels };
+    }
+    case 'left': {
+      const channels = state.channels.filter((c) => c.name !== action.name);
+      // The channels_changed refresh may land before the 204 and have called the
+      // channel lost already: leaving is not a loss, so that notice goes too.
+      const cleared: ChannelsState = state.lost === action.name ? { channels: state.channels, loaded: state.loaded, selected: state.selected } : state;
+      if (channels.length === state.channels.length) return cleared;
+      return { ...cleared, channels, selected: state.selected === action.name ? fallback(channels) : state.selected };
     }
     case 'lost': {
       const channels = state.channels.filter((c) => c.name !== action.name);

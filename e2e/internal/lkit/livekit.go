@@ -345,6 +345,10 @@ type Relay struct {
 	// scenarios use it (share.go): lk cannot say that a track is a screen
 	// share, and cannot wait to publish one until conchd has granted it.
 	Filter func(ctx context.Context, frame []byte) []byte
+	// FilterFor, when set, chooses a filter for one connection from the token
+	// its client presented. It is called after Mint. A nil result passes that
+	// connection's frames unchanged. Filter applies when FilterFor is nil.
+	FilterFor func(clientToken string) func(ctx context.Context, frame []byte) []byte
 
 	srv *http.Server
 	ln  net.Listener
@@ -400,7 +404,11 @@ func ServeRelay(r *Relay) (*Relay, error) {
 			}
 		}
 		if strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
-			r.serveSocket(w, req, token)
+			filter := r.Filter
+			if r.FilterFor != nil {
+				filter = r.FilterFor(ClientToken(req))
+			}
+			r.serveSocket(w, req, token, filter)
 			return
 		}
 		rp.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), relayTokenKey{}, token)))
@@ -446,7 +454,7 @@ func (r *Relay) swap(u *url.URL, h http.Header, token string) {
 	}
 }
 
-func (r *Relay) serveSocket(w http.ResponseWriter, req *http.Request, token string) {
+func (r *Relay) serveSocket(w http.ResponseWriter, req *http.Request, token string, filter func(context.Context, []byte) []byte) {
 	out := req.URL
 	hdr := http.Header{}
 	if a := req.Header.Get("Authorization"); a != "" {
@@ -487,8 +495,8 @@ func (r *Relay) serveSocket(w http.ResponseWriter, req *http.Request, token stri
 			if err != nil {
 				return
 			}
-			if !capture && r.Filter != nil {
-				data = r.Filter(ctx, data)
+			if !capture && filter != nil {
+				data = filter(ctx, data)
 			}
 			if capture {
 				if found := JWT.FindAll(data, -1); len(found) > 0 {

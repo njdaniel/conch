@@ -4,11 +4,13 @@
 // releases (blur, hidden, pagehide).
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as api from '../api';
+import { pageHiddenOnPhone } from '../phone';
 import type { ChannelV0 } from '../schema/channel';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
-import { VoiceClient, type Microphone, type Output, type ProcessingStore, type VoiceState } from './connection';
-import { clampTail, defaultTail } from './gate';
+import type { Camera } from './camera';
+import { VoiceClient, type Microphone, type ModeStore, type Output, type ProcessingStore, type VoiceState } from './connection';
+import { defaultTail, snapTail } from './gate';
 import { defaultTalkKey, isTyping } from './keys';
 import { parsePresence } from './presence';
 import { canChooseOutput, newLiveKitRoom } from './sdk';
@@ -46,7 +48,7 @@ const releaseStore = 'conch.web.voice.release';
 function readRelease(): number {
   try {
     const kept = window.sessionStorage.getItem(releaseStore);
-    return kept === null || !/^\d{1,4}$/.test(kept) ? defaultTail : clampTail(Number(kept));
+    return kept === null || !/^\d{1,4}$/.test(kept) ? defaultTail : snapTail(Number(kept));
   } catch {
     return defaultTail;
   }
@@ -141,6 +143,49 @@ function writeOutput(choice: Output | null): void {
   }
 }
 
+// The camera chosen (ADR-015), by device id and by name, for as long as the
+// tab lasts: none stored is the browser's own choice. The name is how the
+// same camera is found again under a new id, and only if exactly one camera
+// carries it (N7).
+const cameraStore = 'conch.web.voice.camera';
+const cameraNameStore = 'conch.web.voice.camera.name';
+
+function readCamera(): Camera | null {
+  try {
+    const id = window.sessionStorage.getItem(cameraStore);
+    if (id === null) return null;
+    return { id, label: window.sessionStorage.getItem(cameraNameStore) ?? '' };
+  } catch {
+    return null;
+  }
+}
+
+function writeCamera(choice: Camera | null): void {
+  try {
+    if (choice === null) {
+      window.sessionStorage.removeItem(cameraStore);
+      window.sessionStorage.removeItem(cameraNameStore);
+    } else {
+      window.sessionStorage.setItem(cameraStore, choice.id);
+      window.sessionStorage.setItem(cameraNameStore, choice.label);
+    }
+  } catch {
+    // The choice lasts until the page is reloaded.
+  }
+}
+
+// Every voice client this page made, for leaveVoice.
+const clients = new Set<VoiceClient>();
+
+// leaveVoice leaves voice on every client of the page, and resolves once each
+// has: the camera stopped and its claim released, naming it, the share
+// stopped, the last report sent. Signing out calls it first, while the
+// credential still works, so nothing of this person's voice or camera is
+// carried into the next identity (ADR-015, design §6.2).
+export async function leaveVoice(): Promise<void> {
+  await Promise.all([...clients].map((c) => c.leave()));
+}
+
 // The voice processing chosen for each microphone (issue #659), for as long
 // as the tab lasts: a device under its id, and System default under a key of
 // its own. A device never set has it on.
@@ -177,6 +222,14 @@ function processingChoices(): ProcessingStore {
       writeProcessing(device, on);
     },
   };
+}
+
+// The microphone mode the person chose (issue #1244), kept in this browser
+// through the platform's preferences: a per-viewer convenience. Storage that
+// throws or holds anything else reads as no choice, and the client starts in
+// open microphone.
+function modeChoice(): ModeStore {
+  return { get: api.readVoiceMode, set: api.writeVoiceMode };
 }
 
 // What is known about the channel's voice, as the strip says it. loading is
@@ -217,7 +270,9 @@ export interface VoiceControl {
   readonly capture: (on: boolean) => void;
   readonly join: () => void;
   // Joins to watch, without the microphone.
-  readonly watchOnly: () => void;
+  // beside: the person's own voice is in another client, so watch as the
+  // viewer (issue #936).
+  readonly watchOnly: (beside?: boolean) => void;
   readonly leave: () => void;
 }
 
@@ -250,12 +305,18 @@ export function useVoice({
       clock: realClock,
       random: Math.random,
       createSession: api.createVoiceSession,
+      createViewer: api.createVoiceViewer,
+      removeViewer: api.removeVoiceViewer,
       report: api.reportVoiceTransmit,
       newRoom: newLiveKitRoom,
       claimShare: api.claimVoiceShare,
       stopShare: api.stopVoiceShare,
+      claimCamera: api.claimVoiceCamera,
+      stopCamera: api.stopVoiceCamera,
+      camera: readCamera(),
       microphone: readMicrophone(),
       processing: processingChoices(),
+      mode: modeChoice(),
       outputSelection: canChooseOutput(),
       output: readOutput(),
       gate: { tail: readRelease() },
@@ -309,12 +370,39 @@ export function useVoice({
     writeMicrophone(state.microphone);
   }, [state.microphone]);
 
+  // So is the camera: the person's choice, and the same camera found again
+  // under a new id.
+  useEffect(() => {
+    writeCamera(state.cameraChoice);
+  }, [state.cameraChoice]);
+
+  // Every client of the page, for leaveVoice.
+  useEffect(() => {
+    clients.add(client);
+    return () => {
+      clients.delete(client);
+    };
+  }, [client]);
+
   // So are the speakers: the person's choice, the same output found again
   // under a new id, the one the SDK moved sound to, and the system default
   // after one the browser refused.
   useEffect(() => {
     writeOutput(state.output);
   }, [state.output]);
+
+  // A hidden page on a phone ends the camera as its button does (design §8,
+  // O9); the desktop's hidden page changes nothing. Showing the page again
+  // starts nothing: only the button does.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (pageHiddenOnPhone()) client.pageHidden();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [client]);
 
   // Signing out ends voice.
   useEffect(() => {
@@ -514,10 +602,10 @@ export function useVoice({
     note(channel);
     client.join(channel);
   }, [channel, client, note]);
-  const watchOnly = useCallback(() => {
+  const watchOnly = useCallback((beside = false) => {
     if (channel === null) return;
     note(channel);
-    client.join(channel, { watchOnly: true });
+    client.join(channel, { watchOnly: true, beside });
   }, [channel, client, note]);
   const leave = useCallback(() => {
     void client.leave();

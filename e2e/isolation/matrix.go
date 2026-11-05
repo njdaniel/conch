@@ -224,6 +224,7 @@ func coreMatrixRows() []row {
 	bChannel := func(w *world) string { return w.b.main() }
 	transmit := schema.VoiceTransmitReportV1{State: schema.VoiceTransmitStateStarted}
 	companion := schema.VoiceCompanionRequestV1{Publish: schema.VoiceCompanionPublishScreen, Subscribe: true}
+	companionAudio := schema.VoiceCompanionAudioRequestV1{Scope: schema.VoiceShareAudioScopeApplication}
 	return []row{
 		// Sockets: refused before the upgrade.
 		byChannel("GET /v0/ws", "opens the v0 message socket of A's channel", func(_ *world, s subject) probe { return sock("/v0/ws", s.name, nil, false) }),
@@ -266,6 +267,24 @@ func coreMatrixRows() []row {
 			public := schema.ChannelPublic
 			return put("/v1/channels/"+id(s.id)+"/settings", schema.ChannelSettingsRequestV1{Visibility: &public})
 		}),
+		// Archiving is the same route and the same gate (issue #844): refused
+		// before the id is looked up, so the archived field tells B nothing
+		// of A's channel, and A's channel is not archived by the attempt.
+		operator("PUT /v1/channels/{id}/settings", "archives A's private channel", aChannel, func(_ *world, s subject) probe {
+			archived := true
+			return put("/v1/channels/"+id(s.id)+"/settings", schema.ChannelSettingsRequestV1{Archived: &archived})
+		}),
+		// The channel directory (issue #982): B's member finds A's public
+		// channel and none of A's private ones, with no counts; the
+		// listing of every channel is manage_channels', refused to her.
+		{route: "GET /v1/directory/channels", what: "lists the channel directory", own: true, inspect: checkDirectory,
+			probe: func(*world, subject) probe { return get("/v1/directory/channels") }},
+		{route: "GET /v1/directory/channels", what: "lists every channel with ?scope=all", want: operatorOnly,
+			probe: func(*world, subject) probe { return get("/v1/directory/channels?scope=all") }},
+		// Self-join and leave (issue #982): A's private channel is the
+		// ghost's 404, whichever she asks.
+		byChannel("POST /v1/channels/{channel}/join", "joins A's private channel", func(_ *world, s subject) probe { return post(ch(s)+"/join", nil) }),
+		byChannel("POST /v1/channels/{channel}/leave", "leaves A's private channel", func(_ *world, s subject) probe { return post(ch(s)+"/leave", nil) }),
 		// Renaming a channel (issue #791) hides A's channel from B's members,
 		// including a manager of a different channel.
 		byChannel("PUT /v1/channels/{id}/name", "renames A's channel", func(_ *world, s subject) probe {
@@ -415,6 +434,11 @@ func coreMatrixRows() []row {
 
 		// Members and nets.
 		byChannel("GET /v1/channels/{channel}/members", "lists A's channel's members", func(_ *world, s subject) probe { return get(ch(s) + "/members") }),
+		// Naming authors (issue #988) sits behind the member list's gate: A's
+		// channel is the one channel-not-found to B, whoever it asks about.
+		byChannel("GET /v1/channels/{channel}/authors", "asks who wrote in A's channel", func(w *world, s subject) probe {
+			return get(ch(s) + "/authors?ids=" + id(w.a.people[0].id))
+		}),
 		byChannel("POST /v1/channels/{channel}/members", "adds an A member by name to A's channel", func(w *world, s subject) probe {
 			return post(ch(s)+"/members", schema.AddChannelMemberRequestV1{Name: w.a.people[0].name})
 		}),
@@ -437,6 +461,13 @@ func coreMatrixRows() []row {
 			want: answer{http.StatusNotFound, "principal_not_found"},
 			probe: func(w *world, s subject) probe {
 				return post("/v1/channels/"+bChannel(w)+"/members", schema.AddChannelMemberRequestV1{Name: s.name})
+			}},
+		// The add by id (issue #1206) answers A's hidden principal exactly as
+		// by name and as the PUT.
+		{route: "POST /v1/channels/{channel}/members", what: "has B's manager add A's hidden principal by id to B's channel", pick: aHidden, manager: true,
+			want: answer{http.StatusNotFound, "principal_not_found"},
+			probe: func(w *world, s subject) probe {
+				return post("/v1/channels/"+bChannel(w)+"/members", schema.AddChannelMemberRequestV1{ID: s.id})
 			}},
 		// The community's member list: a member of B sees A's people (which
 		// are not markers after the split, design section 8), and not the
@@ -462,8 +493,19 @@ func coreMatrixRows() []row {
 		byChannel("POST /v1/channels/{channel}/voice/transmit", "reports transmitting in A's channel", func(_ *world, s subject) probe { return post(ch(s)+"/voice/transmit", transmit) }),
 		byChannel("POST /v1/channels/{channel}/voice/share", "claims A's room's share", func(_ *world, s subject) probe { return post(ch(s)+"/voice/share", nil) }),
 		byChannel("DELETE /v1/channels/{channel}/voice/share", "stops A's room's share", func(_ *world, s subject) probe { return del(ch(s) + "/voice/share") }),
+		// The camera (issue #1241, ADR-015): a claim, a release, and the stop
+		// of an A member's camera, which needs manage_channels that no member
+		// of B holds, all answered as for a channel that never existed.
+		byChannel("POST /v1/channels/{channel}/voice/camera", "claims a camera in A's room", func(_ *world, s subject) probe { return post(ch(s)+"/voice/camera", nil) }),
+		byChannel("DELETE /v1/channels/{channel}/voice/camera", "releases a camera in A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/camera") }),
+		byChannel("DELETE /v1/channels/{channel}/voice/camera", "stops an A member's camera in A's room", func(w *world, s subject) probe {
+			return del(ch(s) + "/voice/camera?" + schema.VoiceCameraPrincipalParam + "=" + id(w.a.people[0].id))
+		}),
 		byChannel("POST /v1/channels/{channel}/voice/companion", "asks for a screen companion in A's room", func(_ *world, s subject) probe { return post(ch(s)+"/voice/companion", companion) }),
 		byChannel("DELETE /v1/channels/{channel}/voice/companion", "removes a companion from A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/companion") }),
+		// The companion's share audio (issue #898): the consent and its withdrawal.
+		byChannel("PUT /v1/channels/{channel}/voice/companion/audio", "consents to share audio in A's room", func(_ *world, s subject) probe { return put(ch(s)+"/voice/companion/audio", companionAudio) }),
+		byChannel("DELETE /v1/channels/{channel}/voice/companion/audio", "withdraws share audio in A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/companion/audio") }),
 		byChannel("GET /v1/channels/{channel}/voice", "reads A's voice presence", func(_ *world, s subject) probe { return get(ch(s) + "/voice") }),
 
 		// Sessions, runs and interventions.
@@ -634,6 +676,12 @@ func coreMatrixRows() []row {
 			probe: func(_ *world, s subject) probe {
 				return post("/v1/principals/"+id(s.id)+"/credentials/revoke-all", nil)
 			}},
+		// The owner's revoke-all of what someone issued to others (issue
+		// #1024, ADR-014 O13) is an owner route: a member is refused as on
+		// any other.
+		operator("POST /v1/principals/{id}/issued/revoke-all", "revokes what an A member issued to others", aMember, func(_ *world, s subject) probe {
+			return post("/v1/principals/"+id(s.id)+"/issued/revoke-all", nil)
+		}),
 		operator("GET /v1/audit", "reads the audit log", nil, func(*world, subject) probe { return get("/v1/audit") }),
 		// The permissions document (issue #1015): a member neither reads the
 		// matrix nor changes it (ADR-014 O10); the restricted operator's
@@ -650,8 +698,11 @@ func coreMatrixRows() []row {
 		operator("DELETE /v1/hooks/{id}", "revokes a hook", nil, func(*world, subject) probe { return del("/v1/hooks/1") }),
 
 		// Invites.
+		// The v1 route makes nothing for anyone (issues #990, #1134): the kind
+		// is retired, and the answer is the same for a member, an operator,
+		// A's channel and a ghost.
 		{route: "POST /v1/invites", what: "invites someone to A's channel", pick: aChannel,
-			want: answer{http.StatusForbidden, schema.ErrorCodeInviteGrantExceedsInviter}, mayNot: answer{http.StatusForbidden, schema.ErrorCodeInviteNotAllowed},
+			want: answer{http.StatusConflict, schema.ErrorCodeInviteKindRetired}, mayNot: answer{http.StatusConflict, schema.ErrorCodeInviteKindRetired},
 			probe: func(_ *world, s subject) probe {
 				return post("/v1/invites", schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{s.name}})
 			}},
@@ -734,6 +785,15 @@ func coreMatrixRows() []row {
 					Deadline: schema.NewTimestamp(time.Now().Add(time.Hour))})
 			}},
 		own("GET /v1/approvals", "lists the open approvals", func(*world, subject) probe { return get("/v1/approvals") }),
+		// The admin door (issue #1330): a member reads the catalog as it
+		// applies to them, holds nothing that lets it act on A's member, and
+		// runs no approval but its own agent's, the same for a ghost.
+		{route: "GET /v1/admin/actions", what: "reads the admin catalog", own: true,
+			probe: func(*world, subject) probe { return get("/v1/admin/actions") }},
+		{route: "POST /v1/admin/actions", what: "asks the admin door to disable A's member", pick: aMember, want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(_ *world, s subject) probe { return post("/v1/admin/actions", disableThrough(s.id)) }},
+		{route: "POST /v1/admin/actions/{approval_id}/run", what: "runs A's approval through the admin door", pick: aApproval, want: answer{http.StatusNotFound, "approval_not_found"},
+			probe: func(_ *world, s subject) probe { return post("/v1/admin/actions/"+id(s.id)+"/run", nil) }},
 		{route: "GET /v1/approvals/{id}", what: "reads A's approval", pick: aApproval, want: answer{http.StatusNotFound, "approval_not_found"},
 			probe: func(_ *world, s subject) probe { return get("/v1/approvals/" + id(s.id)) }},
 		{route: "POST /v1/approvals/{id}/decisions", what: "decides A's approval", pick: aApproval, want: answer{http.StatusNotFound, "approval_not_found"},

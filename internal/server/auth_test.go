@@ -188,14 +188,26 @@ var routeExpectations = map[string]routeExpectation{
 	// The permissions document (issue #1015): any operator reads it; a PUT
 	// of nothing is refused as malformed.
 	"GET /v1/permissions": {classOp, "/v1/permissions", "", 200},
-	"PUT /v1/permissions": {classPerm, "/v1/permissions", `{}`, 400},
-	"GET /v1/channels":    {classAuth, "/v1/channels", "", 200},
+	// The admin door (issue #1330): anyone reads the catalog as it applies
+	// to them; an empty submit names no action; nobody but the requesting
+	// agent runs an approval.
+	"GET /v1/admin/actions":                    {classAuth, "/v1/admin/actions", "", 200},
+	"POST /v1/admin/actions":                   {classAuth, "/v1/admin/actions", `{}`, 400},
+	"POST /v1/admin/actions/{approval_id}/run": {classAuth, "/v1/admin/actions/1/run", "", 404},
+	"PUT /v1/permissions":                      {classPerm, "/v1/permissions", `{}`, 400},
+	"GET /v1/channels":                         {classAuth, "/v1/channels", "", 200},
 	// Member channel creation and channel settings (issue #981).
 	"POST /v1/channels":              {classAuth, "/v1/channels", `{}`, 400},
 	"PUT /v1/channels/{id}/settings": {classPerm, "/v1/channels/9999/settings", `{}`, 400},
+	// The channel directory, self-join and leave (issue #982). Join and
+	// leave name a channel that does not exist, so they change nothing.
+	"GET /v1/directory/channels":        {classAuth, "/v1/directory/channels", "", 200},
+	"POST /v1/channels/{channel}/join":  {classAuth, "/v1/channels/never-made/join", "", 404},
+	"POST /v1/channels/{channel}/leave": {classAuth, "/v1/channels/never-made/leave", "", 404},
 	// Both membership writes are no-ops in the fixture (alice is already a
 	// member; ghost, id 4, is not), so they change nothing and audit nothing.
 	"GET /v1/channels/{channel}/members":                   {classAuth, "/v1/channels/general/members", "", 200},
+	"GET /v1/channels/{channel}/authors":                   {classAuth, "/v1/channels/general/authors?ids=2", "", 200},
 	"PUT /v1/channels/{channel}/members/{principal_id}":    {classManager, "/v1/channels/general/members/2", "", 204},
 	"DELETE /v1/channels/{channel}/members/{principal_id}": {classManager, "/v1/channels/general/members/4", "", 204},
 	// Adding a member by name (issue #790): an empty body is a 400 before
@@ -236,10 +248,18 @@ var routeExpectations = map[string]routeExpectation{
 	// 503 a member does.
 	"POST /v1/channels/{channel}/voice/share":   {classAuth, "/v1/channels/general/voice/share", "", 503},
 	"DELETE /v1/channels/{channel}/voice/share": {classAuth, "/v1/channels/general/voice/share", "", 503},
+	// Camera (ADR-015, issue #1241): checked as the share routes, so 503 for
+	// a member here, 400 under AuthOff, 403 for an agent.
+	"POST /v1/channels/{channel}/voice/camera":   {classAuth, "/v1/channels/general/voice/camera", "", 503},
+	"DELETE /v1/channels/{channel}/voice/camera": {classAuth, "/v1/channels/general/voice/camera", "", 503},
 	// Companion and viewer participants (issue #933): checked as the session
 	// route is, so 503 for a member here, 400 under AuthOff, 403 for an agent.
 	"POST /v1/channels/{channel}/voice/companion":   {classAuth, "/v1/channels/general/voice/companion", `{"publish":"screen","subscribe":true}`, 503},
 	"DELETE /v1/channels/{channel}/voice/companion": {classAuth, "/v1/channels/general/voice/companion", "", 503},
+	// The companion's share audio (issue #898): checked as the companion
+	// route is.
+	"PUT /v1/channels/{channel}/voice/companion/audio":    {classAuth, "/v1/channels/general/voice/companion/audio", `{"scope":"application"}`, 503},
+	"DELETE /v1/channels/{channel}/voice/companion/audio": {classAuth, "/v1/channels/general/voice/companion/audio", "", 503},
 	// Voice presence (issue #127). Not configured is a valid snapshot, so a
 	// member gets 200; AuthOff gets 400 and an agent 403 on the snapshot (both
 	// special-cased below). The socket needs a channel parameter, so every
@@ -355,12 +375,13 @@ var routeExpectations = map[string]routeExpectation{
 	// whatever it is sent (#713): 409 password_required, for every caller
 	// and under AuthOff alike. People only: an agent gets 403 and AuthOff
 	// 401 on the three authenticated routes (both special-cased below).
-	// POST /v1/invites is retired (issue #985): 409 invite_kind_retired for
-	// every person. Member links (v2): an empty create is a 400, the list is
+	// POST /v1/invites answers every authenticated caller 409
+	// invite_kind_retired, before it reads the body (issues #990, #1134).
+	// Member links (v2): an empty create is a 400, the list is
 	// the caller's own, preview sends no code, and the joiners of an invite
 	// that does not exist are a 404 for a person and for an agent alike (no
 	// route refuses an agent by name: that would say which ids exist).
-	"POST /v1/invites":             {classAuth, "/v1/invites", `{}`, 400},
+	"POST /v1/invites":             {classAuth, "/v1/invites", `{}`, 409},
 	"GET /v1/invites":              {classAuth, "/v1/invites", "", 200},
 	"DELETE /v1/invites/{id}":      {classAuth, "/v1/invites/9999", "", 404},
 	"POST /v1/invites/preview":     {classExempt, "/v1/invites/preview", `{}`, 404},
@@ -465,6 +486,9 @@ var routeExpectations = map[string]routeExpectation{
 	// Changing a role or the owner mark (issue #790): an empty body is a 400
 	// before the target is looked up.
 	"PUT /v1/principals/{id}/role": {classOwner, "/v1/principals/1/role", `{}`, 400},
+	// Revoking everything a principal issued to others (issue #1024): an
+	// unknown principal is a 404 for the owner.
+	"POST /v1/principals/{id}/issued/revoke-all": {classOwner, "/v1/principals/9999/issued/revoke-all", "", 404},
 }
 
 // isDeviceLinkRoute reports whether pattern is one of a member's own device
@@ -634,13 +658,20 @@ func TestRoleMatrix(t *testing.T) {
 			if rt.pattern == "PUT /v1/channels/{id}/name" {
 				memberWant = exp.allowed // a non-member cannot discover the channel id
 			}
+			// Nobody makes v1 invites (issue #1134): the route answers
+			// 409 invite_kind_retired to every authenticated caller, agents
+			// and operators included, before reading the body.
+			inviteRetired := rt.pattern == "POST /v1/invites"
+			if inviteRetired {
+				memberWant = http.StatusConflict
+			}
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
 			agentWant := memberWant
 			if rt.pattern == "PUT /v1/channels/{id}/name" {
 				agentWant = http.StatusForbidden // kind is refused before channel lookup
 			}
-			if rt.pattern == "GET /v1/directory/members" || strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
+			if rt.pattern == "GET /v1/directory/members" || strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/camera") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// Runs are started by agents only (issue #266): the humans get the
@@ -668,7 +699,13 @@ func TestRoleMatrix(t *testing.T) {
 			// reports (issue #446) and message edits (issue #845: message
 			// 9999 does not exist, so a person gets message_not_found, and an
 			// agent is refused before any lookup).
-			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" || rt.pattern == "POST /v1/channels" || isMessageEditRoute(rt.pattern) {
+			if (isInviteRoute(rt.pattern) && !inviteRetired) || rt.pattern == "POST /v1/reports" || rt.pattern == "POST /v1/channels" || isSelfMembershipRoute(rt.pattern) || isMessageEditRoute(rt.pattern) {
+				agentWant = http.StatusForbidden
+			}
+			// The admin door (issue #1330): an agent with no grant is refused
+			// at the door; an empty submit is malformed before any caller is
+			// looked at.
+			if rt.pattern == "GET /v1/admin/actions" || rt.pattern == "POST /v1/admin/actions/{approval_id}/run" {
 				agentWant = http.StatusForbidden
 			}
 			// Signing out (issue #439) succeeds for any member and revokes
@@ -732,7 +769,7 @@ func TestAuthOffUnchanged(t *testing.T) {
 					rt.pattern == "GET /v1/credentials/mine" || rt.pattern == "DELETE /v1/credentials/mine/{id}" {
 					want = http.StatusUnauthorized // no caller to report, nor a credential of its own to list or revoke
 				}
-				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") {
+				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/camera") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") {
 					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous
 				}
 				if rt.pattern == "PUT /v1/channels/{id}/name" {
@@ -759,11 +796,17 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if isInviteRoute(rt.pattern) || rt.pattern == "GET /v2/invites/{id}/joiners" {
 					want = http.StatusUnauthorized // like whoami: no one to make or own an invite
 				}
+				if rt.pattern == "POST /v1/invites" {
+					want = http.StatusConflict // retired for everyone, before any caller is looked at (issue #1134)
+				}
 				if rt.pattern == "POST /v1/reports" {
 					want = http.StatusUnauthorized // like whoami: no one to say who reported
 				}
 				if rt.pattern == "POST /v1/principals/hide" {
 					want = http.StatusUnauthorized // like the bulk disables: no caller to leave out
+				}
+				if strings.HasPrefix(rt.pattern, "GET /v1/admin/actions") || strings.HasPrefix(rt.pattern, "POST /v1/admin/actions") {
+					want = http.StatusUnauthorized // like whoami: no one to administer as
 				}
 				if isGuestPolicyRoute(rt.pattern) {
 					want = http.StatusForbidden // accounts_require_auth: no guest exists, nor anyone to admit one (design §7.4)
@@ -1538,4 +1581,14 @@ func TestUnsetAuthModeRequiresCredentials(t *testing.T) {
 			}
 		})
 	}
+}
+
+// isSelfMembershipRoute: the channel directory, self-join and leave are a
+// community member's (issue #982); an agent is refused before any lookup.
+func isSelfMembershipRoute(pattern string) bool {
+	switch pattern {
+	case "GET /v1/directory/channels", "POST /v1/channels/{channel}/join", "POST /v1/channels/{channel}/leave":
+		return true
+	}
+	return false
 }

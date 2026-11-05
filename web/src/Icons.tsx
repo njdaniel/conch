@@ -36,6 +36,7 @@ const paths = {
       <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
     </>
   ),
+  wave: <path d="M3 12h2M7 8v8M11 4v16M15 8v8M19 10v4M21 12h0" />,
   micOff: (
     <>
       <path d="M15 10V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 5 2.2M5 11a7 7 0 0 0 11.2 5.6M19 11a7 7 0 0 1-.6 2.8M12 18v3M3 3l18 18" />
@@ -52,6 +53,12 @@ const paths = {
     <>
       <rect x="3" y="4" width="18" height="12" rx="2" />
       <path d="M8 20h8M12 16v4M9.5 7.5l5 5M14.5 7.5l-5 5" />
+    </>
+  ),
+  camera: (
+    <>
+      <rect x="3" y="6" width="13" height="12" rx="2" />
+      <path d="m16 10 5-3v10l-5-3" />
     </>
   ),
   leave: <path d="M3 15.5c5-4.7 13-4.7 18 0l-2.3 2.3-3.2-1.6v-2.5a9 9 0 0 0-7 0v2.5l-3.2 1.6z" />,
@@ -74,6 +81,12 @@ const paths = {
   bell: <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />,
   fullscreen: <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />,
   options: <path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 5v4M8 15v4" />,
+  lock: (
+    <>
+      <rect x="5" y="11" width="14" height="10" rx="2" />
+      <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+    </>
+  ),
   chat: <path d="M4 5h16v11H9.5L5 20v-4H4z" />,
   channels: <path d="M9.5 4 7.5 20M16.5 4l-2 16M4 9h16M4 15h16" />,
 } as const;
@@ -82,6 +95,19 @@ export type IconName = keyof typeof paths;
 
 export function Glyph({ name }: { readonly name: IconName }) {
   return <Icon>{paths[name]}</Icon>;
+}
+
+// The mark of a private channel (issue #991, Nick's decision of 2026-11-01): a
+// lock before its name, with "Private" for a screen reader, so it says
+// "Private, <name>". It is drawn from a channel's visibility alone, never from
+// how many are in it; a public channel has none.
+export function PrivateMark() {
+  return (
+    <span className="private-mark">
+      <Glyph name="lock" />
+      <span className="vh">Private</span>
+    </span>
+  );
 }
 
 // A person's initial in a coloured circle. The letter comes from CSS

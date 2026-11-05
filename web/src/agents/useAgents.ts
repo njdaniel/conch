@@ -292,6 +292,8 @@ export function useAgents({
   onMessage,
   onMessageEdited,
   onChannelsChanged,
+  onPermissionsChanged,
+  onDirectoryChanged,
 }: {
   readonly signedIn: boolean;
   readonly channel: string | null;
@@ -317,6 +319,12 @@ export function useAgents({
   // The person's channel list may have changed (issue #1027): the frame, and
   // each reconnect of the socket, which may have missed one.
   readonly onChannelsChanged?: () => void;
+  // The permissions may have changed (conch.permissions_changed.v1), or the
+  // socket was down and they may have meanwhile.
+  readonly onPermissionsChanged?: () => void;
+  // The directory answer may have changed (conch.directory_changed.v1, issue
+  // #993): the community is read again and replaced.
+  readonly onDirectoryChanged?: () => void;
 }): Agents {
   const [state, dispatch] = useReducer(agentsReducer, initialAgents);
   const [members, setMembers] = useState<readonly ChannelMemberV1[]>([]);
@@ -424,6 +432,10 @@ export function useAgents({
             interrupted = false;
             onChannelsChanged?.();
           }
+          // Every subscription that is established reads the permissions
+          // again, the first of a feed too: a feed made after a channel was
+          // selected has missed whatever changed before it, and no event says so.
+          onPermissionsChanged?.();
           break;
         case 'waiting':
           interrupted = true;
@@ -511,6 +523,12 @@ export function useAgents({
           case 'channelsChanged':
             onChannelsChanged?.();
             break;
+          case 'permissionsChanged':
+            onPermissionsChanged?.();
+            break;
+          case 'directoryChanged':
+            onDirectoryChanged?.();
+            break;
         }
       },
       onStatus,
@@ -521,7 +539,7 @@ export function useAgents({
       if (retry !== null) realClock.clearTimeout(retry);
       feed.stop();
     };
-  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, onMessageEdited, onChannelsChanged, replace, healthy]);
+  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, onMessageEdited, onChannelsChanged, onPermissionsChanged, onDirectoryChanged, replace, healthy]);
 
   // The members line is read again each time the socket comes back.
   useEffect(() => {

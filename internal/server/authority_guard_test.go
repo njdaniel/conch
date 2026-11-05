@@ -75,7 +75,8 @@ func TestEveryPermissionIsChecked(t *testing.T) {
 // notYetGated is each permission no route or store check reads yet, with
 // the issue that wires its gate (ADR-014 design §12). Rows 1 and 2 left with
 // #981 (member channel creation), row 4 with I4 (#983), row 5 with A4
-// (#1016), and rows 10 and 11 with A3b (#1015).
+// (#1016), rows 10 and 11 with A3b (#1015), and row 12, use_camera, with the
+// camera routes (C4, #1241). It is empty: every permission is checked.
 var notYetGated = map[schema.Permission]string{}
 
 // permissionConsts names each schema.Permission constant, so the scan can
@@ -93,6 +94,7 @@ var permissionConsts = map[string]schema.Permission{
 	"PermManageChannels":        schema.PermManageChannels,
 	"PermChangeServerSettings":  schema.PermChangeServerSettings,
 	"PermReadAuditLog":          schema.PermReadAuditLog,
+	"PermUseCamera":             schema.PermUseCamera,
 }
 
 func permissionValues() []schema.Permission {
@@ -170,6 +172,8 @@ var authorityAllowlist = []authorityAllowed{
 	{"sign_in_links.go", "Server.deviceLinkCaller", kindIsOperator, 1, whySignIn + ": an operator never signs in by a device link"},
 
 	// internal/server/store.
+	{"store/directory.go", "directoryKnowersTx", kindRoleSQL, 1, "the operator cell of see_member_directory is fixed on (schema.Permission.Fixed), so every operator and the owner is in the audience of the directory signal (design §13.6); it addresses a frame and grants nothing"},
+	{"store/directory.go", "Store.DirectoryMembershipAudience", kindRoleSQL, 1, "the operator cell of see_member_directory is fixed on (schema.Permission.Fixed), so every operator and the owner is in the audience of the directory signal (design §13.6); it addresses a frame and grants nothing"},
 	{"store/credentials.go", "Store.RotateCredential", kindRoleCompare, 1, whyTarget + ": an owner's credential"},
 	{"store/credentials.go", "Store.revokeCredential", kindRoleCompare, 2, whyTarget + ": an owner's credential, and the last owner's sign-in"},
 	{"store/disable.go", "Store.RevokeAllCredentialsAs", kindRoleCompare, 1, whyTarget + ": the last owner's sign-in"},
@@ -196,7 +200,8 @@ var authorityAllowlist = []authorityAllowed{
 	{"store/voice_permission.go", "Store.SetVoiceAllowed", kindRoleCompare, 1, whyOwnerMark + ": the caller side of owner protection, read under the write lock"},
 	{"store/roles.go", "Store.BootstrapOperatorWith", kindRoleSQL, 1, whyRoleAdmin + ": the first operator"},
 	{"store/roles.go", "reportPromotedOwners", kindRoleSQL, 1, whyRoleAdmin + ": the migration's report of owners"},
-	{"store/roles.go", "setRoleTx", kindRoleCompare, 7, whyRoleAdmin},
+	{"store/roles.go", "setRoleTx", kindRoleCompare, 9, whyRoleAdmin},
+	{"store/issued.go", "<package>", kindRoleSQL, 2, whyOwnerMark + ": the issuer and holder predicates (issuerNotOwnerSQL, holderNotOwnerSQL) shared by the issued list and the sweep; an owner's issues are never listed, an owner's credentials and hooks never swept (ADR-014 O13, the security review of #1024 NB-1); neither grants anything"},
 	{"store/hide.go", "Store.ListPrincipals", kindRoleCompare, 1, whyFilter},
 	{"store/passwords.go", "recheckLoginTx", kindRoleCompare, 1, whySignIn + ": a login finishes only for the role it began under, so a promotion mid-login cannot skip the operator's second factor"},
 	{"store/operator_auth.go", "Store.BeginTOTPEnrollment", kindRoleHelper, 1, whySignIn},

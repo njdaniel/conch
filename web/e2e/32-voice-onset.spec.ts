@@ -19,7 +19,7 @@
 //
 // Without Docker it fails when CI is set and is skipped otherwise.
 import type { Page } from '@playwright/test';
-import { expect, openChannel, signIn, test } from './fixtures';
+import { chooseMicrophone, expect, openChannel, signIn, test } from './fixtures';
 import { burstMeasure, median, pressMeasure, type Sample } from './onset';
 import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld } from './voice-world';
 
@@ -192,6 +192,8 @@ test.describe('speech kept at the edges of a transmission', () => {
       await tv.getByRole('button', { name: 'Join voice' }).click();
       await voiceRegion(listener).getByRole('button', { name: 'Join voice' }).click();
       for (const p of [talker, listener]) await expect(voiceRegion(p)).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
+      // The open microphone is the default (issue #1244); the first half is of push to talk.
+      for (const p of [talker, listener]) await chooseMicrophone(voiceRegion(p), 'push to talk');
       await expect(voiceRegion(listener).getByRole('list', { name: 'In voice' })).toContainText('alice');
       await talker.getByRole('heading', { name: 'Conch' }).click();
       await startListening(listener);

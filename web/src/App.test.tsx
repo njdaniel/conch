@@ -199,6 +199,49 @@ describe('sign-in', () => {
     expect(screen.getByRole('status', { name: 'Status' }).textContent).toContain('ada');
   });
 
+  // F24: operator setup is for operators, so the page folds it behind a closed
+  // disclosure; a refused credential opens it, so its answer is read where it
+  // is typed.
+  it('folds the operator and script section behind a closed disclosure, and opening it shows the credential field', () => {
+    serve(asMember);
+    const { container } = render(<App origin={origin} />);
+    const details = container.querySelector('details.operator-signin');
+    if (!(details instanceof HTMLDetailsElement)) throw new Error('no disclosure');
+    expect(details.querySelector('summary')?.textContent).toBe('Operator or script?');
+    expect(details.open).toBe(false);
+    // Everything of operators and scripts is inside it, and nothing else is.
+    const section = screen.getByRole('region', { name: 'Operators and scripts' });
+    expect(details.contains(section)).toBe(true);
+    expect(details.contains(screen.getByLabelText('Credential'))).toBe(true);
+    expect(details.contains(screen.getByLabelText('Name'))).toBe(false);
+    expect(details.contains(screen.getByRole('button', { name: 'Sign in' }))).toBe(false);
+    fireEvent.click(details.querySelector('summary') as HTMLElement);
+    expect(details.open).toBe(true);
+  });
+
+  it('opens the disclosure for a refused credential', async () => {
+    serve(asMember);
+    const { container } = render(<App origin={origin} />);
+    expect((container.querySelector('details.operator-signin') as HTMLDetailsElement).open).toBe(false);
+    signIn('wrong-token');
+    await screen.findByText('That credential was not accepted');
+    expect((container.querySelector('details.operator-signin') as HTMLDetailsElement).open).toBe(true);
+  });
+
+  it('keeps the disclosure open while a retried credential is checked', async () => {
+    serve(asMember);
+    const { container } = render(<App origin={origin} />);
+    const details = container.querySelector('details.operator-signin') as HTMLDetailsElement;
+    signIn('wrong-token');
+    await screen.findByText('That credential was not accepted');
+    expect(details.open).toBe(true);
+    // The retry clears the notice while it is checked: the fold stays open.
+    signIn('wrong-token');
+    expect(details.open).toBe(true);
+    await screen.findByText('That credential was not accepted');
+    expect(details.open).toBe(true);
+  });
+
   it('shows one line for a refused credential, keeps focus in the field and stores nothing', async () => {
     serve(asMember);
     const { container } = render(<App origin={origin} />);
@@ -321,7 +364,8 @@ describe('lobby', () => {
     signIn();
     await screen.findByRole('button', { name: 'general' });
     const list = screen.getByRole('navigation', { name: 'Channels' });
-    expect(list.querySelectorAll('button')).toHaveLength(3);
+    // Two channels and their ⋯, a voice-less one aside, and Browse channels.
+    expect(list.querySelectorAll('button')).toHaveLength(7);
     expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
     expect(within(screen.getByRole('region', { name: 'Conversation' })).getByRole('heading', { level: 2 }).textContent).toBe('general');
     const status = screen.getByRole('status', { name: 'Status' });
@@ -341,9 +385,16 @@ describe('lobby', () => {
     expect(within(voice).getByRole('button', { name: 'Join voice in #general' }).hasAttribute('disabled')).toBe(true);
   });
 
-  it('shows in the list how many are in each channel\'s voice, from one socket, and only the strip offers to join (issue #596)', async () => {
+  it('shows in the list how many are in each channel\'s voice and who, from one socket, and only the strip offers to join (issues #596, #1103)', async () => {
     const sockets = socketsOf();
-    const fetchMock = serve({ ...asMember, '/v1/ws-tickets': () => json({ ticket: ticketValue, expires_at: created_at }, 201) });
+    // ops's members, read once for the names of the people in its voice
+    // (issue #1103); the viewer, ada (2), is named without a read.
+    const opsMembers = { members: [member, { principal_id: 5, name: 'eve', kind: 'human', created_at }, { principal_id: 6, name: 'fay', kind: 'human', created_at }].map((p) => ('principal_id' in p ? p : { principal_id: p.id, name: p.name, kind: p.kind, created_at })) };
+    const fetchMock = serve({
+      ...asMember,
+      '/v1/ws-tickets': () => json({ ticket: ticketValue, expires_at: created_at }, 201),
+      '/v1/channels/ops/members': () => json(opsMembers),
+    });
     render(<App origin={origin} />);
     signIn();
     const voice = await screen.findByRole('region', { name: 'Voice' });
@@ -362,9 +413,9 @@ describe('lobby', () => {
           configured: true,
           available: true,
           channels: [
-            { channel_id: 1, in_voice: 1 },
-            { channel_id: 2, in_voice: 3 },
-            { channel_id: 3, in_voice: 0 },
+            { channel_id: 1, in_voice: 1, principal_ids: [2] },
+            { channel_id: 2, in_voice: 3, principal_ids: [2, 5, 6] },
+            { channel_id: 3, in_voice: 0, principal_ids: [] },
           ],
         }),
       });
@@ -376,8 +427,29 @@ describe('lobby', () => {
     expect(within(list).queryAllByRole('img', { name: /in voice/ })).toHaveLength(2);
     expect(list.textContent).toContain('3');
     expect(screen.getByRole('button', { name: 'ops' }).textContent).toBe('ops');
+    // Who is there, by name, nested under each channel (issue #1103): the
+    // viewer as You, and ops's people once its members have been read.
+    const inOps = within(list).getByRole('list', { name: 'In voice in #ops' });
+    await waitFor(() => {
+      expect(within(inOps).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['You', 'eve', 'fay']);
+    });
+    expect(within(within(list).getByRole('list', { name: 'In voice in #general' })).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['You']);
+    expect(within(list).queryByRole('list', { name: 'In voice in #dev' })).toBeNull();
+    // One read of ops's members for the names, and none of dev's (nobody
+    // there); general's is the page's own, for the channel on screen.
+    const membersReads = () => fetchMock.mock.calls.map(([input]) => (typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url)).filter((p) => p.endsWith('/members'));
+    expect(membersReads().filter((p) => p !== '/v1/channels/general/members')).toEqual(['/v1/channels/ops/members']);
     // Still nothing outside the strip offers to join, or names voice.
     expect(controlsOutside(voice, /join|voice/i)).toEqual([]);
+    // A name opens the channel, and nothing more.
+    fireEvent.click(within(inOps).getByRole('button', { name: 'eve' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'ops' }).getAttribute('aria-current')).toBe('true');
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'general' }));
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
+    });
 
     // The strip, not in voice, says where the others are, and opens it.
     expect(voice.querySelector('.voice-elsewhere')?.textContent).toBe('3 in voice in #ops Open #ops');
@@ -478,7 +550,7 @@ describe('lobby', () => {
     serve({ ...asMember, '/v1/channels': () => json({ channels: [] }) });
     render(<App origin={origin} />);
     signIn();
-    await screen.findByText('No channels yet: an operator needs to add you to one');
+    await screen.findByText('No channels yet');
     expect(screen.getByRole('region', { name: 'Conversation' }).textContent).toBe('');
   });
 
@@ -518,7 +590,7 @@ describe('lobby', () => {
     render(<App origin={origin} />);
     signIn();
     await screen.findByRole('button', { name: 'general' });
-    const stops = screen.getAllByRole('button').filter((b) => b.tabIndex === 0 && b.closest('.channel-list'));
+    const stops = screen.getAllByRole('button').filter((b) => b.tabIndex === 0 && b.closest('.channel-list') && b.getAttribute('aria-haspopup') === null);
     expect(stops).toHaveLength(1);
   });
 

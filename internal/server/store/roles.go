@@ -149,7 +149,7 @@ func (s *Store) BootstrapOperatorWith(ctx context.Context, name string, opts Boo
 			return fmt.Errorf("store: bootstrap: count manifests: %w", err)
 		}
 		if !opts.Setup {
-			if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil, 0); err != nil {
+			if res.Credential, err = insertCredentialTx(ctx, tx, id, BootstrapCredentialLabel, token, now, nil, 0, 0); err != nil {
 				return err
 			}
 		}
@@ -335,7 +335,10 @@ type RoleChangeResult struct {
 //     links.
 //   - Demoting an operator to member closes the open invite links and sign-in
 //     links they made, and their personal invites unless targetID holds
-//     may_invite.
+//     may_invite. Their member links are closed too when the may_invite
+//     brake is off, and otherwise only those that never expire: a link a
+//     member could not make is never left to come back with the brake
+//     (issue #1165).
 //   - Every effective change appends one principal_role_changed audit row.
 func (s *Store) SetRole(ctx context.Context, actor string, actorID, targetID int64, role Role, owner *bool) (RoleChangeResult, error) {
 	now := credentialNow().Truncate(time.Millisecond)
@@ -454,9 +457,9 @@ func setRoleTx(ctx context.Context, tx execer, actor string, actorID, targetID i
 		if target.MayInvite {
 			kind = schema.InviteKindOpen
 		}
-		// Their member links stand: a member who may invite still holds them
-		// (and one the brake binds has them suspended, not closed).
-		sel := selectDemotedInvites(kind)
+		// Their member links go unless a member who may invite could hold them
+		// (brake on, and not never-expiring); see selectDemotedInvites.
+		sel := selectDemotedInvites(kind, target.MayInvite)
 		if invitesClosed, err = countOpenCreatorInvitesTx(ctx, tx, targetID, sel, now); err != nil {
 			return RoleChangeResult{}, err
 		}
@@ -471,6 +474,20 @@ func setRoleTx(ctx context.Context, tx execer, actor string, actorID, targetID i
 	out, err := populateRoleChangeResultTx(ctx, tx, targetID, invitesClosed, credsRevoked, hooksRevoked, true, now)
 	if err != nil {
 		return RoleChangeResult{}, err
+	}
+	if target.Role == RoleOperator && role == RoleMember {
+		// A demotion ends none of what the operator issued to others
+		// (ADR-014 O13, issue #1024): the answer lists it, read in this
+		// transaction after the role write (the target is a member now, so
+		// its mark is clear and its issues are listed), for the owner to
+		// revoke. Omitted when there is nothing.
+		issued, err := issuedToOthersTx(ctx, tx, targetID, now)
+		if err != nil {
+			return RoleChangeResult{}, err
+		}
+		if len(issued) > 0 {
+			out.IssuedToOthers = issued
+		}
 	}
 	managesIDs := make([]string, len(out.Manages))
 	for i, id := range out.Manages {

@@ -15,7 +15,7 @@ import { operations, type Call, type OperationId } from '../operations';
 import type { HttpTransport } from '../types';
 import type { BridgeReply, BridgeRequest, ConchDesktopBridge, NoAnswerReason, SignInOutcome } from './bridge';
 import { bridge } from './access';
-import { isSessionToken, kept, STAND_IN } from './credentials';
+import { holdHandle, isSessionToken, kept, STAND_IN } from './credentials';
 
 const json = 'application/json';
 
@@ -172,6 +172,7 @@ export const http: HttpTransport = {
     // account. Every other call is main's session.
     if (call.op === 'whoami' && !isSessionToken(token)) {
       const outcome = await b.signInWithCredential(token);
+      holdHandle(outcome.ok ? (outcome.handle ?? null) : null);
       return outcome.ok && outcome.who !== null ? jsonResponse(200, outcome.who) : fromOutcome(call.op, outcome);
     }
     return fromReply(await b.request(requestOf(call)));

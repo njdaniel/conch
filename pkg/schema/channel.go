@@ -26,6 +26,11 @@ type ChannelV0 struct {
 	// Default is true when new members start in this channel (ADR-013
 	// decision 5). Omitted when false. A default channel is always public.
 	Default bool `json:"default,omitempty"`
+	// ArchivedAt is when the channel was archived (issue #844). Omitted
+	// while the channel is live, and by a server that predates archiving. An
+	// archived channel keeps its history and members and refuses anything
+	// new (ErrorCodeChannelArchived).
+	ArchivedAt *time.Time `json:"archived_at,omitempty"`
 }
 
 // The community model (ADR-013, docs/design/community-model.md §3.2, issue
@@ -73,8 +78,20 @@ const (
 	ErrorCodeChannelSettingsConflict = "channel_settings_conflict"
 	// ErrorCodeChannelLastMember (HTTP 409): the caller is the last member
 	// of a private channel and may not leave it; an operator adds someone
-	// first, or archives the channel once archiving exists.
+	// first, or archives the channel (issue #844).
 	ErrorCodeChannelLastMember = "channel_last_member"
+	// ErrorCodeChannelArchived (HTTP 409, issue #844): the channel is
+	// archived, so the write is refused: a post, an edit, a reaction, an
+	// upload, a voice claim, a join, adding a member, or an invite naming
+	// it. It is answered only to a caller who may see the channel; to
+	// anyone else it is the uniform 404. Restoring the channel allows the
+	// write again.
+	ErrorCodeChannelArchived = "channel_archived"
+	// ErrorCodeChannelArchiveDefault (HTTP 409, issue #844): the channel is
+	// a default channel, or the request marks it one, and so cannot be
+	// archived. Stop it being a default channel first, so that open sign-up
+	// turning off stays a deliberate step.
+	ErrorCodeChannelArchiveDefault = "channel_archive_default"
 )
 
 // CreateChannelRequestV1 is the body of POST /v1/channels: a member makes a
@@ -117,6 +134,16 @@ type CreateChannelResponseV1 struct {
 // (ADR-014), which also lists every private channel; the member view
 // carries no counts and no names, so a count on a private channel can
 // never be an oracle (community-model §5).
+//
+// Managers (issue #1202, additive) names the channel's managers, the
+// members whose manages bit is set, ordered by principal_id; each is the
+// principal reference the authors route uses (ChannelAuthorV1: id, name,
+// kind). Like Members it is present only on the ?scope=all listing, where
+// it is always an array, empty when nobody manages the channel; the member
+// view never carries it, and a server that predates it omits it on every
+// row. It is what GET /v1/channels/{channel}/members says of each member's
+// manages, gathered so an operator's console reads one list, not one
+// member list per channel.
 type ChannelListingV1 struct {
 	ID         int64             `json:"id"`
 	Name       string            `json:"name"`
@@ -126,6 +153,11 @@ type ChannelListingV1 struct {
 	Joined     bool              `json:"joined"`
 	Manages    bool              `json:"manages,omitempty"`
 	Members    *int64            `json:"members,omitempty"`
+	Managers   []ChannelAuthorV1 `json:"managers,omitzero"`
+	// ArchivedAt (issue #844, additive) is when the channel was archived;
+	// omitted while it is live. An archived channel is listed to its
+	// members, and to a ?scope=all operator, never to other callers.
+	ArchivedAt *Timestamp `json:"archived_at,omitempty"`
 }
 
 // ChannelDirectoryResponseV1 is the body of GET /v1/directory/channels.
@@ -148,16 +180,21 @@ type JoinChannelResponseV1 struct {
 // (manage_channels, ADR-014): the fields to change; one left out keeps its
 // value. At least one must be present. Marking a private channel default,
 // or turning a default channel private, is 409 channel_settings_conflict.
+//
+// Archived (issue #844, additive) archives the channel when true and
+// restores it when false; archiving a default channel, or in the same
+// request as marking it default, is 409 channel_archive_default.
 type ChannelSettingsRequestV1 struct {
 	Visibility *ChannelVisibility `json:"visibility,omitempty"`
 	Default    *bool              `json:"default,omitempty"`
+	Archived   *bool              `json:"archived,omitempty"`
 }
 
 // Validate reports whether the request changes something and names a known
 // visibility when it names one. Whether the result is consistent with the
 // channel (a default channel is public) is the server's to decide.
 func (r ChannelSettingsRequestV1) Validate() error {
-	if r.Visibility == nil && r.Default == nil {
+	if r.Visibility == nil && r.Default == nil && r.Archived == nil {
 		return errors.New("schema: the request changes no setting")
 	}
 	if r.Visibility != nil && !r.Visibility.Valid() {
@@ -276,6 +313,8 @@ type ChannelDocV1 struct {
 	// not default.
 	Visibility ChannelVisibility `json:"visibility,omitempty"`
 	Default    bool              `json:"default,omitempty"`
+	// ArchivedAt is as on ChannelV0: omitted while the channel is live.
+	ArchivedAt *Timestamp `json:"archived_at,omitempty"`
 }
 
 // Validate reports whether the document is structurally well-formed: the v1

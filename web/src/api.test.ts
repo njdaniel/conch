@@ -1,13 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   changePassword,
+  channelAuthors,
   claimVoiceShare,
+  createVoiceViewer,
+  removeVoiceViewer,
   closeInvite,
+  createMemberLink,
   convertGuest,
   continueAsOperator,
   endSession,
   endSignIn,
-  createInvite,
   fetchFileBytes,
   fileAttachmentPayload,
   forgetStored,
@@ -37,9 +40,11 @@ import {
   signOut,
   setPassword,
   signOutEverywhere,
+  readVoiceMode,
   stopVoiceShare,
   uploadFile,
   whoAmI,
+  writeVoiceMode,
 } from './api';
 
 afterEach(async () => {
@@ -545,7 +550,7 @@ describe('invites', () => {
     expect(window.localStorage.getItem(key)).toBe(joinerToken);
   });
 
-  it('makes, lists and closes invites with the signed-in credential', async () => {
+  it('lists and closes invites with the signed-in credential', async () => {
     await signedInFrom(window.localStorage, memberToken);
     const invite = {
       id: 4,
@@ -561,13 +566,11 @@ describe('invites', () => {
       credential_lifetime_seconds: 60,
     };
     const calls = serve((c) =>
-      c.method === 'POST' ? json({ invite, code: inviteCode }, 201) : c.method === 'DELETE' ? new Response(null, { status: 204 }) : json({ invites: [invite] }),
+      c.method === 'DELETE' ? new Response(null, { status: 204 }) : json({ invites: [invite] }),
     );
-    expect(await createInvite({ kind: 'personal', channels: ['red'], voice: false })).toEqual({ ok: true, value: { invite, code: inviteCode } });
     expect(await listInvites()).toEqual({ ok: true, value: [invite] });
     expect(await closeInvite(4)).toEqual({ ok: true, value: null });
     expect(calls).toEqual([
-      { path: '/v1/invites', method: 'POST', auth: `Bearer ${memberToken}` },
       { path: '/v1/invites', method: 'GET', auth: `Bearer ${memberToken}` },
       { path: '/v1/invites/4', method: 'DELETE', auth: `Bearer ${memberToken}` },
     ]);
@@ -594,6 +597,34 @@ describe('invites', () => {
     expect(await stopVoiceShare('red', '2026-10-16T12:00:04.125Z')).toEqual({ ok: false, failure: 'invalid', code: 'voice_share_stale' });
   });
 
+  // Issue #936: the viewer grant is asked for as publish none with subscribe
+  // true, and nothing else; its removal names publish=none.
+  it('asks for the viewer grant as publish none, reads its answer, and removes it with ?publish=none (issue #936)', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const grant = { livekit_url: 'wss://lk.example', identity: 'p2.view', room: 'room-name', token: 'viewer-token', publish: 'none', subscribe: true, expires_at: at };
+    const calls = serve((c) => (c.method === 'POST' ? json(grant) : new Response(null, { status: 204 })));
+    expect(await createVoiceViewer('red team')).toEqual({ ok: true, value: grant });
+    expect(await removeVoiceViewer('red team')).toEqual({ ok: true, value: null });
+    expect(calls).toEqual([
+      { path: '/v1/channels/red%20team/voice/companion', method: 'POST', auth: `Bearer ${memberToken}` },
+      { path: '/v1/channels/red%20team/voice/companion?publish=none', method: 'DELETE', auth: `Bearer ${memberToken}` },
+    ]);
+    const sent = vi.mocked(fetch).mock.calls.find(([, init]) => init?.method === 'POST')?.[1]?.body;
+    expect(typeof sent === 'string' ? JSON.parse(sent) : null).toEqual({ publish: 'none', subscribe: true });
+  });
+
+  it("answers a refused viewer grant with its status and the server's code, and a malformed one as invalid (issue #936)", async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ code: 'voice_no_session', message: 'no voice here' }, 409));
+    expect(await createVoiceViewer('red')).toEqual({ ok: false, failure: 'invalid', status: 409, code: 'voice_no_session' });
+    serve(() => json({ code: 'channel_not_found', message: 'no such channel' }, 404));
+    expect(await createVoiceViewer('red')).toEqual({ ok: false, failure: 'invalid', status: 404, code: 'channel_not_found' });
+    serve(() => json({ identity: 'p2.view' }));
+    expect(await createVoiceViewer('red')).toEqual({ ok: false, failure: 'invalid' });
+    serve(() => Promise.reject(new Error('offline')));
+    expect(await createVoiceViewer('red')).toEqual({ ok: false, failure: 'network' });
+  });
+
   it("answers a refused share claim with its status and the server's code, and a malformed one as invalid", async () => {
     await signedInFrom(window.localStorage, memberToken);
     serve(() => json({ code: 'voice_share_busy', message: 'someone else is sharing in this room' }, 409));
@@ -607,12 +638,29 @@ describe('invites', () => {
   it("answers a refused invite with the server's code and line", async () => {
     await signedInFrom(window.localStorage, memberToken);
     serve(() => json({ code: 'invite_allowance_exceeded', message: 'you already have as many open personal invites as you may' }, 403));
-    expect(await createInvite({ kind: 'personal', channels: ['red'], voice: false })).toEqual({
+    expect(await createMemberLink({ kind: 'member' })).toEqual({
       ok: false,
       failure: 'invalid',
       code: 'invite_allowance_exceeded',
       message: 'you already have as many open personal invites as you may',
     });
+  });
+
+  // Issue #1051: a newer server names a permission this bundle does not know.
+  // The error document still reads, so the code is passed through rather than
+  // dropped with the document.
+  it('passes a refusal naming an unknown permission through by its code', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ code: 'permission_denied', message: 'no', permission: 'fly_the_server' }, 403));
+    expect(await listChannels()).toEqual({ ok: false, failure: 'invalid', code: 'permission_denied' });
+  });
+
+  it('reads a whoami naming an unknown permission, and keeps it', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ ...member, permissions: ['use_voice', 'fly_the_server'] }));
+    const result = await whoAmI();
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.permissions).toEqual(['use_voice', 'fly_the_server']);
   });
 });
 
@@ -1578,5 +1626,87 @@ describe('a credential replaced while a call was out', () => {
     expect(calls.filter((c) => c.path === '/v1/whoami').map((c) => c.auth)).toEqual([`Bearer ${memberToken}`, `Bearer ${otherMemberToken}`]);
     await whoAmI();
     expect(calls.at(-1)?.auth).toBe(`Bearer ${otherMemberToken}`);
+  });
+});
+
+// Issue #1244: the microphone mode kept in this browser. Nothing kept, a value
+// that is neither mode, and a storage that throws are all no choice (null), so
+// the voice client starts in open microphone and shows no error.
+describe('the voice mode kept in the browser', () => {
+  it('reads nothing as no choice, and what was written back', () => {
+    expect(readVoiceMode()).toBeNull();
+    writeVoiceMode('ptt');
+    expect(readVoiceMode()).toBe('ptt');
+    writeVoiceMode('open');
+    expect(readVoiceMode()).toBe('open');
+  });
+
+  it('reads anything else as no choice', () => {
+    window.localStorage.setItem('conch.web.voice.mode.v1', 'loud');
+    expect(readVoiceMode()).toBeNull();
+  });
+
+  it('is tolerated when the storage throws', () => {
+    const refuse = () => {
+      throw new Error('storage is off');
+    };
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(refuse);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(refuse);
+    expect(readVoiceMode()).toBeNull();
+    expect(() => { writeVoiceMode('ptt'); }).not.toThrow();
+    vi.restoreAllMocks();
+  });
+});
+
+describe('channelAuthors (design §13.5)', () => {
+  const author = (id: number) => ({ principal_id: id, name: `p${String(id)}`, kind: 'human' });
+
+  it('asks in batches of at most 100 ids, once each, and gathers the answers', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const ids = Array.from({ length: 250 }, (_, i) => i + 10);
+    const asked: number[][] = [];
+    serve((call) => {
+      const wanted = new URL(call.path, 'http://x').searchParams.get('ids')?.split(',').map(Number) ?? [];
+      asked.push(wanted);
+      return json({ authors: wanted.map(author) });
+    });
+    const result = await channelAuthors('general', [...ids, ...ids.slice(0, 5)]);
+    expect(asked.map((a) => a.length)).toEqual([100, 100, 50]);
+    expect(result.ok && result.value.length).toBe(250);
+  });
+
+  it('puts the channel in the path as one segment', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const calls = serve(() => json({ authors: [] }));
+    await channelAuthors('a/b c', [3]);
+    expect(calls.map((c) => c.path)).toEqual(['/v1/channels/a%2Fb%20c/authors?ids=3']);
+  });
+
+  it('keeps only names for ids it asked, and skips a batch that did not answer', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    let n = 0;
+    serve(() => (++n === 1 ? json({ authors: [author(10), author(999)] }) : json({ code: 'internal_error', message: 'x' }, 500)));
+    const ids = Array.from({ length: 101 }, (_, i) => i + 10);
+    const result = await channelAuthors('general', ids);
+    expect(result).toEqual({ ok: true, value: [author(10)] });
+  });
+
+  it('refuses a body that is not the schema’s shape, naming nobody', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ authors: [{ principal_id: 'x', name: 1 }] }));
+    expect(await channelAuthors('general', [3])).toEqual({ ok: true, value: [] });
+  });
+
+  it('is a failure on a 401, so the page signs out', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({}, 401));
+    expect(await channelAuthors('general', [3])).toEqual({ ok: false, failure: 'unauthorized' });
+  });
+
+  it('asks nothing for no ids', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const calls = serve(() => json({ authors: [] }));
+    expect(await channelAuthors('general', [])).toEqual({ ok: true, value: [] });
+    expect(calls).toEqual([]);
   });
 });

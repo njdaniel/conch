@@ -27,6 +27,14 @@
 //     its sound on the same connection, another subscribes to them, the share
 //     is stopped and its tracks disappear; publishing those sources without a
 //     claim is refused by LiveKit.
+//   - Within the live half, the camera (ADR-015, issue #1241, camera.go), on a
+//     conchd of its own: claims, a viewer receiving, the stops (the person's,
+//     the operator's), the cap, a camera and a share stopped apart, a
+//     refreshed token, a restart, and LiveKit's behaviours K1 to K8 of
+//     docs/design/webcam-video.md §12, each printed as a finding.
+//   - The camera load test (issue #1284, loadtest.go) runs lk load-test with
+//     two claimed, gated camera publishers and one viewer for ten seconds, then
+//     checks that hiding the run's principals ends both claims.
 //
 // Also checked throughout: the join token's own claims (claims.go); that no
 // token, secret or room name appears in anything conchd sends to a client
@@ -381,6 +389,8 @@ func (l *live) run(ctx context.Context) error {
 		{"credential expiring by itself", l.credentialExpires},
 		{"conch-voice clients", l.voiceClients},
 		{"screen share", l.screenShare},
+		{"camera", l.camera},
+		{"camera load test", l.cameraLoadtest},
 		{"companion and viewer", l.companion},
 		{"LiveKit down", l.liveKitDown},
 	}

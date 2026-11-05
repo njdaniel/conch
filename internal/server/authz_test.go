@@ -127,6 +127,12 @@ func (f *authzFixture) call(t *testing.T, agent, tool string, arguments map[stri
 // callWithToken is call with an explicit bearer token and no testing.T, so it
 // is safe to use from a goroutine.
 func (f *authzFixture) callWithToken(token, tool string, arguments map[string]any) (mcpOutcome, error) {
+	return mcpCallOutcome(f.srv, token, tool, arguments)
+}
+
+// mcpCallOutcome is one tools/call on srv as the bearer of token, reduced to
+// its outcome, with no testing.T, so it is safe to use from a goroutine.
+func mcpCallOutcome(srv *Server, token, tool string, arguments map[string]any) (mcpOutcome, error) {
 	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": tool, "arguments": arguments}})
 	if err != nil {
 		return mcpOutcome{}, err
@@ -136,7 +142,7 @@ func (f *authzFixture) callWithToken(token, tool string, arguments map[string]an
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
-	f.srv.Handler().ServeHTTP(rec, req)
+	srv.Handler().ServeHTTP(rec, req)
 	out := mcpOutcome{status: rec.Code, body: rec.Body.String()}
 	if rec.Code != http.StatusOK {
 		return out, nil

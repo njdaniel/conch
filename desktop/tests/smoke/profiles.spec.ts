@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test';
 
 import { startConchd, type Disposable } from './conchd.ts';
-import { launch, livePage, type Launched } from './launch.ts';
+import { credentialField, launch, livePage, type Launched } from './launch.ts';
 import { delayProxy, type DelayProxy } from './proxy.ts';
 
 const SESSION_ONLY = ['--password-store=basic'] as const;
@@ -97,7 +97,7 @@ test.describe('saved server profiles', () => {
     await page.getByLabel('Server address').fill(proxyA.origin);
     page = await swap(browser, page, () => page.getByRole('button', { name: 'Continue' }).click());
     await expect(bar(page)).toContainText(hostA);
-    await page.getByLabel('Credential').fill(a.member.token);
+    await (await credentialField(page)).fill(a.member.token);
     await page.getByRole('button', { name: 'Use credential' }).click();
     await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
     // The strip shows the account once the sign-in has bound the profile.
@@ -237,7 +237,7 @@ test.describe('saved server profiles', () => {
     await expect(page.getByRole('status', { name: 'Sign-in storage' })).toContainText('You will sign in again next time');
     page = await swap(browser, page, () => page.getByRole('button', { name: 'Switch to ' + hostA }).click());
     await expect(bar(page)).toContainText(hostA);
-    await expect(page.getByLabel('Credential')).toBeVisible();
+    await expect(await credentialField(page)).toBeVisible();
     // The reason and the Retry are in the server list.
     await page.getByRole('button', { name: 'Servers' }).click();
     await expect(page.getByRole('status', { name: 'Sign-in storage' })).toContainText('You will sign in again next time');

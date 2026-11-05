@@ -1,6 +1,7 @@
 // What to do after a voice connection ends or a session is refused: the table
 // of conch-voice.md section 5, as a pure function.
 import type { VoiceSessionResult } from '../api';
+import type { CameraLoss } from './camera';
 
 // Why a connection ended, in Conch's words; sdk.ts maps the SDK's reasons.
 export type DisconnectCause =
@@ -30,6 +31,31 @@ export function afterDisconnect(cause: DisconnectCause): Next {
   }
 }
 
+// cameraAfter is what a connection's end means for the camera (ADR-015,
+// design §6.2, S5): every end that is not the SDK's own resume and not the
+// room's renewal stops the capture, before anything is done on the next
+// connection. A removal stops it and releases the claim. Another device
+// taking this one's place (duplicate_identity, which is not reconnected)
+// stops it at once too, and leaves the claim, which is the person's and now
+// that device's, to end idle unless it sends a camera (design §4.6). A
+// deleted room is how a renewal reaches the page, and the capture is held only
+// until presence confirms it (camera.ts, renewalGrace). A connection merely
+// lost is reconnected through conchd, and the capture held for it is claimed
+// again by name, which conchd refuses once it no longer holds the claim.
+export function cameraAfter(cause: DisconnectCause): CameraLoss {
+  switch (cause) {
+    case 'duplicate_identity':
+      return 'displaced';
+    case 'participant_removed':
+      return 'stop';
+    case 'room_deleted':
+      return 'renewal';
+    case 'server_shutdown':
+    case 'lost':
+      return 'keep';
+  }
+}
+
 type Refusal = Extract<VoiceSessionResult, { ok: false }>;
 
 export function afterRefusal(r: Refusal): Next {
@@ -50,6 +76,30 @@ export function afterRefusal(r: Refusal): Next {
     default:
       // 5xx, or an answer that is not a refusal conchd would give.
       return r.status !== undefined && r.status < 500 ? { kind: 'stop', why: 'The server refused voice' } : { kind: 'retry' };
+  }
+}
+
+// afterViewerRefusal is afterRefusal for the viewer grant (issue #936,
+// voice-control-plane.md §13). Only an answer that never came is tried again,
+// as a session's is: every refusal stops and says why in plain words, so the
+// page never asks the same question in a loop. The person presses Watch only
+// again when they have fixed it.
+export function afterViewerRefusal(r: Refusal): Next {
+  if (r.failure === 'network') return { kind: 'retry' };
+  if (r.failure === 'unauthorized') return { kind: 'stop', why: 'You are signed out' };
+  if (r.code === 'voice_not_configured') return { kind: 'stop', why: 'Voice is not set up on this server' };
+  if (r.code === 'voice_no_session') return { kind: 'stop', why: 'Your voice is not connected in this channel yet. Join voice in your other app, then try again.' };
+  if (r.code === 'voice_unavailable') return { kind: 'stop', why: 'Voice is unavailable right now. Try again in a moment.' };
+  switch (r.status) {
+    case 400:
+      return { kind: 'stop', why: 'Voice needs a server that signs people in' };
+    case 403:
+      if (r.code === 'voice_not_allowed') return { kind: 'stop', why: 'Your account does not include voice. Ask whoever invited you.' };
+      return { kind: 'stop', why: 'Voice is for people, not for this account' };
+    case 404:
+      return { kind: 'stop', why: 'You are not a member of this channel' };
+    default:
+      return { kind: 'stop', why: 'The server would not let you watch. Try again in a moment.' };
   }
 }
 

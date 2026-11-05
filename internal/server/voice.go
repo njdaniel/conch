@@ -47,13 +47,17 @@ func (s *Server) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
 	// for any reason (metrics.go).
 	issued := false
 	defer func() { s.metrics.voiceSession(issued) }()
-	channel, caller, ok := s.voiceSessionCaller(w, r)
+	channel, caller, ok := s.voiceClaimCaller(w, r)
 	if !ok {
 		return
 	}
 
 	resp, grants, err := s.voiceSession(ctx, caller, channel)
 	switch {
+	case errors.Is(err, errVoiceChannelArchived):
+		// Archived between the check and the token (issue #844).
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
+		return
 	case errors.Is(err, errVoiceNotAllowed):
 		// Lost use_voice while LiveKit was being asked: the answer a person
 		// without voice gets up front.
@@ -121,6 +125,43 @@ func (s *Server) voiceSessionCaller(w http.ResponseWriter, r *http.Request) (sto
 		return store.Channel{}, store.Principal{}, false
 	}
 	return channel, caller, true
+}
+
+// errVoiceChannelArchived is voiceGrantOnce's refusal when the channel was
+// archived between the handler's check and the token being signed (issue
+// #844). Answered as 409 channel_archived; nothing is issued.
+var errVoiceChannelArchived = errors.New("voice: the channel is archived")
+
+// voiceClaimCaller is voiceSessionCaller for the routes that claim something
+// in voice: a session, a share, a camera, a companion. After the caller is
+// known to be a member who may use voice (so a non-member got the
+// unknown-channel 404 first and learns nothing), it refuses an archived
+// channel with 409 channel_archived (issue #844), before any token is signed,
+// any room is created and any holder recorded. The routes that let go
+// (DELETE companion, the stop routes) and the transmit report use
+// voiceSessionCaller and keep working in an archived channel.
+func (s *Server) voiceClaimCaller(w http.ResponseWriter, r *http.Request) (store.Channel, store.Principal, bool) {
+	channel, caller, ok := s.voiceSessionCaller(w, r)
+	if !ok {
+		return store.Channel{}, store.Principal{}, false
+	}
+	// The archived check of voice: channel came from ChannelByName in
+	// voicePresenceChannel, read just now.
+	if channel.Archived() {
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
+		return store.Channel{}, store.Principal{}, false
+	}
+	return channel, caller, true
+}
+
+// voiceChannelStillLive reports whether the channel is not archived now, read
+// from the store: the re-check of a claim in flight.
+func (s *Server) voiceChannelStillLive(ctx context.Context, channelID int64) (bool, error) {
+	ch, err := s.store.ChannelByID(ctx, channelID)
+	if err != nil {
+		return false, err
+	}
+	return !ch.Archived(), nil
 }
 
 // voicePresenceChannel resolves the channel for a voice request and applies
@@ -394,6 +435,15 @@ func (s *Server) voiceGrantOnce(ctx context.Context, p store.Principal, ch store
 	if !entitled {
 		return schema.VoiceRoomGrant{}, false, errVoiceNoLongerEntitled
 	}
+	// The archived guard of a claim in flight (issue #844), before a holder
+	// is recorded and again before the token is signed.
+	chLive, err := s.voiceChannelStillLive(ctx, ch.ID)
+	if err != nil {
+		return schema.VoiceRoomGrant{}, false, fmt.Errorf("voice: check channel: %w", err)
+	}
+	if !chLive {
+		return schema.VoiceRoomGrant{}, false, errVoiceChannelArchived
+	}
 	room, err := a.room(ctx)
 	if err != nil {
 		return schema.VoiceRoomGrant{}, false, fmt.Errorf("voice: room for channel %d: %w", ch.ID, err)
@@ -427,6 +477,15 @@ func (s *Server) voiceGrantOnce(ctx context.Context, p store.Principal, ch store
 	}
 	if !entitled {
 		return schema.VoiceRoomGrant{}, false, errVoiceNoLongerEntitled
+	}
+	// A channel archived while LiveKit was being asked: no token (issue
+	// #844); the deferred voiceDropIfRetired cleans up as for any refusal.
+	stillLive, err := s.voiceChannelStillLive(ctx, ch.ID)
+	if err != nil {
+		return schema.VoiceRoomGrant{}, false, fmt.Errorf("voice: re-check channel: %w", err)
+	}
+	if !stillLive {
+		return schema.VoiceRoomGrant{}, false, errVoiceChannelArchived
 	}
 	live, err := s.store.VoiceRoomLive(ctx, room.ID)
 	if err != nil {

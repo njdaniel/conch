@@ -2,7 +2,7 @@
 // (never a second tab of one), and every page of every context is checked,
 // when the test ends, for a credential in the address bar or in
 // performance.getEntries(): the one thing that must hold throughout.
-import { expect, test as base, type BrowserContext, type BrowserContextOptions, type Page } from '@playwright/test';
+import { expect, test as base, type BrowserContext, type BrowserContextOptions, type Locator, type Page } from '@playwright/test';
 import { allTokens, loadWorld, type World } from './world';
 
 // leaks lists where in a page a credential shows, none when it does not.
@@ -74,10 +74,25 @@ export { expect };
 
 // ---------------------------------------------------------------- the page
 
+// openOperatorSection opens the sign-in page's "Operator or script?"
+// disclosure (F24), where operator setup and the credential field are, unless
+// it is already open. A page that is signed in has none, and waits in vain.
+export async function openOperatorSection(page: Page): Promise<void> {
+  const disclosure = page.locator('details.operator-signin');
+  await disclosure.waitFor({ state: 'attached' });
+  if (!(await disclosure.evaluate((d) => (d as HTMLDetailsElement).open))) await disclosure.locator('summary').click();
+}
+
+// credentialField opens that disclosure and returns the credential field.
+export async function credentialField(page: Page): Promise<Locator> {
+  await openOperatorSection(page);
+  return page.getByLabel('Credential');
+}
+
 // signIn pastes a credential into the sign-in field and waits for the lobby.
 export async function signIn(page: Page, world: Pick<World, 'appUrl'>, token: string, name: string): Promise<void> {
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(token);
+  await (await credentialField(page)).fill(token);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await expect(statusLine(page)).toContainText(name);
   await expect(statusLine(page)).toContainText('Connected');
@@ -112,9 +127,48 @@ export const mainNav = (page: Page) => page.getByRole('navigation', { name: 'Mai
 
 // showView taps the phone navigation's Chat, Channels or Voice. Where there is
 // none (700 px and wider) every view is already on screen and it does nothing.
+// chooseMicrophone puts a joined voice panel in push to talk or the open
+// microphone with the one-tap switch (issue #1244), and waits for it. A browser
+// that never chose joins in the open microphone, so a test of Hold to talk
+// chooses push to talk explicitly. A phone taps; a desktop clicks.
+export async function chooseMicrophone(voice: Locator, mode: 'push to talk' | 'open', how: 'click' | 'tap' = 'click'): Promise<void> {
+  const toggle = voice.getByRole('button', { name: 'Open mic', exact: true });
+  const want = mode === 'open' ? 'true' : 'false';
+  // Right after a join the strip can still be settling, and a press then may
+  // not take: press again until the toggle says the mode asked for. A press
+  // that did take is never repeated, because the state is read first.
+  await expect(async () => {
+    await expect(toggle).toBeEnabled({ timeout: 2000 });
+    if ((await toggle.getAttribute('aria-pressed')) !== want) {
+      if (how === 'tap') await toggle.tap();
+      else await toggle.click();
+    }
+    await expect(toggle).toHaveAttribute('aria-pressed', want, { timeout: 2000 });
+  }).toPass({ timeout: 20_000 });
+}
+
+// rememberPushToTalk is a browser that chose push to talk before it joined:
+// the choice a person's browser keeps (issue #1244), set before each page
+// load. A browser that never chose joins in the open microphone, which opens
+// the gate on any sound and so reports a transmission nobody held a key for;
+// a test that counts what a held key sends starts from this, not from a blip.
+export async function rememberPushToTalk(where: BrowserContext | Page): Promise<void> {
+  await where.addInitScript(() => {
+    try {
+      window.localStorage.setItem('conch.web.voice.mode.v1', 'ptt');
+    } catch {
+      // No storage, no choice: the open microphone.
+    }
+  });
+}
+
 export async function showView(page: Page, view: 'Chat' | 'Channels' | 'Voice'): Promise<void> {
   const nav = mainNav(page);
-  if ((await nav.count()) === 0) return;
+  // Whether there is a navigation is the width's to say, not the page's at this
+  // instant: just after a reload the lobby is not drawn yet, and a page with no
+  // navigation yet is not a page with none. A phone waits for it (issue #1214).
+  if ((page.viewportSize()?.width ?? Infinity) >= 700) return;
+  await expect(nav).toBeVisible();
   // The members panel is drawn over the page, the navigation's right end
   // included; a person closes it before moving on, as Escape does.
   const members = page.getByRole('region', { name: 'Members list' });

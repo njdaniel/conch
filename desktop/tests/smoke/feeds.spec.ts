@@ -8,7 +8,7 @@
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test';
 
 import { startConchd, type Disposable } from './conchd.ts';
-import { launch, livePage, type Launched } from './launch.ts';
+import { credentialField, launch, livePage, type Launched } from './launch.ts';
 
 const TOKEN_SHAPE = /conch_[A-Za-z0-9_-]{20,}/;
 
@@ -141,7 +141,7 @@ test.describe('live feeds through main, beside a browser user', () => {
     await desktop.getByRole('button', { name: 'Yes, sign out', exact: true }).click();
     // Sign-out replaces the window: a new web contents in a fresh session.
     desktop = await livePage(cdp, desktop);
-    await expect(desktop.getByLabel('Credential')).toBeVisible();
+    await expect(await credentialField(desktop)).toBeVisible();
     await expect.poll(() => heldSockets(app.output())).toBe(0);
   });
 

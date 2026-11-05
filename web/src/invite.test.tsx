@@ -2,6 +2,7 @@
 // its answers, and "Invite someone". conchd is a stand-in fetch.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { dateTimeOf } from './time';
 import { App } from './App';
 import { goneHeading, heldLine, noLongerWorks } from './Invite';
 import { addressWithoutFragment, inviteFromHash, inviteLink, takeLinkFromAddress } from './route';
@@ -20,7 +21,7 @@ const joiner = { id: 9, kind: 'human', name: 'wren', role: 'member' };
 const member = { id: 2, kind: 'human', name: 'ada', role: 'member' };
 const inviter = { ...member, may_invite: true };
 const operator = { id: 1, kind: 'human', name: 'nick', role: 'operator', may_invite: true };
-const preview = { kind: 'personal', inviter: 'ada', channels: ['red', 'blue'], voice: true, expires_at };
+const preview = { kind: 'member', server_name: 'Conch', inviter: 'ada', channels: ['red', 'blue'], expires_at, join: { guest: false, account: true } };
 const channelList = (...names: string[]) => ({ channels: names.map((name, i) => ({ id: i + 1, name, created_at })) });
 const redeemed = {
   principal: { id: 9, kind: 'human', name: 'wren', created_at },
@@ -68,7 +69,7 @@ function as(token: string, who: object, channels: object): Record<string, Route>
 
 // A joiner's server: the preview, a redemption, and the joiner's lobby.
 const joining: Record<string, Route> = {
-  'POST /v1/invites/preview': () => json(preview),
+  'POST /v2/invites/preview': () => json(preview),
   'POST /v2/invites/redeem': () => json(redeemed, 201),
   ...as(joinerToken, joiner, channelList('red', 'blue')),
 };
@@ -185,8 +186,8 @@ describe('the landing page', () => {
     expect(within(shown).getByText('ada')).toBeDefined();
     expect(within(shown).getByText('#red')).toBeDefined();
     expect(within(shown).getByText('#blue')).toBeDefined();
-    expect(within(shown).getByText('Included')).toBeDefined();
-    expect(within(shown).getByText(new Date(expires_at).toLocaleString()).getAttribute('datetime')).toBe(expires_at);
+    expect(within(shown).queryByText('Voice')).toBeNull();
+    expect(within(shown).getByText(dateTimeOf(expires_at)).getAttribute('datetime')).toBe(expires_at);
     expect(screen.getByText(origin)).toBeDefined();
     expect(screen.getByText(/Up to 100 characters/)).toBeDefined();
     expectNoCode(view.container);
@@ -200,7 +201,7 @@ describe('the landing page', () => {
     // The code went only in the bodies of preview and redeem, never in a URL
     // or a header; the credential is kept to last, as a member's is.
     expect(calls.filter((c) => JSON.stringify(c).includes(inviteCode)).map((c) => `${c.method} ${c.path}`)).toEqual([
-      'POST /v1/invites/preview',
+      'POST /v2/invites/preview',
       'POST /v2/invites/redeem',
     ]);
     expect(calls.find((c) => c.path === '/v2/invites/redeem')?.body).toEqual({ code: inviteCode, name: 'wren', password });
@@ -218,12 +219,40 @@ describe('the landing page', () => {
     expect(window.location.hash).toBe('#/c/red');
   });
 
+  // Issue #990: a member link is previewed and redeemed through v2 alone, and
+  // the page shows no voice row, a link that does not expire, and never the
+  // guest flow.
+  it('previews through v2 alone, says a link does not expire, and offers no guest flow', async () => {
+    const { calls } = opened({
+      ...joining,
+      'POST /v2/invites/preview': () => json({ kind: 'member', server_name: 'Conch', inviter: 'ada', channels: ['red'], join: { guest: true, account: true } }),
+    });
+    const shown = await screen.findByLabelText('What the invite gives');
+    expect(within(shown).getByText('Does not expire')).toBeDefined();
+    expect(within(shown).queryByText('Voice')).toBeNull();
+    expect(screen.queryByRole('button', { name: /guest/i })).toBeNull();
+    expect(calls.some((c) => c.path.startsWith('/v1/invites'))).toBe(false);
+    expect(calls.some((c) => c.path.includes('guest'))).toBe(false);
+  });
+
+  // A refused code shows the page's words for its code, never the server's.
+  it.each([
+    { status: 404, code: 'invite_invalid', line: noLongerWorks },
+    { status: 503, code: 'invites_paused', line: 'Invites are paused on this server for now. Try the link again later.' },
+    { status: 429, code: 'rate_limited', line: 'Too many tries from your network. Try again in 2 minutes.' },
+    { status: 500, code: 'something_new', line: 'The server gave an unexpected reply. Try again.' },
+  ])('says $code of a preview in the page\u2019s words, never the server\u2019s', async ({ status, code, line }) => {
+    opened({ ...joining, 'POST /v2/invites/preview': () => refusal(status, code, 'SERVER WORDS', { 'Retry-After': '90' }) });
+    expect(await screen.findByText(line)).toBeDefined();
+    expect(document.body.textContent).not.toContain('SERVER WORDS');
+  });
+
   // Issue #556: a guest whose invite grants #general lands there, even when
   // another granted channel comes first.
   it('lands the joiner in #general when the invite grants it', async () => {
     opened({
       ...joining,
-      'POST /v1/invites/preview': () => json({ ...preview, channels: ['red', 'general'] }),
+      'POST /v2/invites/preview': () => json({ ...preview, channels: ['red', 'general'] }),
       ...as(joinerToken, joiner, channelList('red', 'general')),
     });
     await chooseName('wren');
@@ -252,6 +281,15 @@ describe('the landing page', () => {
     expect(calls.filter((c) => c.path === '/v2/invites/redeem')).toHaveLength(1);
   });
 
+  // F19: guests are off (#1005), so the name hint no longer says the prefix is for them.
+  it('says the guest prefix is reserved, and not that it is kept for guests', async () => {
+    opened(joining);
+    const field = await screen.findByLabelText('Your name');
+    expect(field.getAttribute('aria-describedby')).not.toBeNull();
+    expect(document.body.textContent).toContain('Names that begin with “guest” are reserved.');
+    expect(document.body.textContent).not.toContain('kept for guests');
+  });
+
   it.each([
     ['invisible characters', 'schema: principal name must not contain invisible formatting characters', 'A name cannot contain invisible characters.'],
     ['whitespace at an end', 'schema: principal name must not begin or end with whitespace', 'A name cannot start or end with a space.'],
@@ -275,8 +313,24 @@ describe('the landing page', () => {
     });
   });
 
+  // Item: the server's words for a request it could not take are other
+  // people's text; the page says its own, matched on the rule's words.
+  it.each([
+    { message: 'SERVER WORDS <img src=x>', line: 'The server did not accept that name or password. Check both and try again.', field: 'Your name' },
+    { message: 'schema: password SERVER WORDS <img src=x>', line: 'That password cannot be used. Choose another.', field: 'Choose a password' },
+  ])('never shows the server\u2019s words for an invalid_request: $message', async ({ message, line, field }) => {
+    opened({ ...joining, 'POST /v2/invites/redeem': () => refusal(400, 'invalid_request', message) });
+    await chooseName('wren');
+    expect(await screen.findByText(line)).toBeDefined();
+    expect(document.body.textContent).not.toContain('SERVER WORDS');
+    expect(document.body.innerHTML).not.toContain('<img');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByLabelText(field));
+    });
+  });
+
   it.each<{ readonly when: string; readonly routes: Record<string, Route> }>([
-    { when: 'previewed', routes: { 'POST /v1/invites/preview': () => refusal(404, 'invite_invalid', 'this invite is not valid') } },
+    { when: 'previewed', routes: { 'POST /v2/invites/preview': () => refusal(404, 'invite_invalid', 'this invite is not valid') } },
     { when: 'redeemed', routes: { 'POST /v2/invites/redeem': () => refusal(404, 'invite_invalid', 'this invite is not valid') } },
   ])('says the one "can\'t be used" when the invite is invalid, $when', async ({ routes }) => {
     const { view } = opened({ ...joining, ...routes });
@@ -299,7 +353,7 @@ describe('the landing page', () => {
     { cause: 'expired', hash: `#/invite/${inviteCode}` },
     { cause: 'malformed', hash: '#/invite/%E0%A4%A' },
   ])('shows the same heading and alert for a $cause invite, sharing no sentence', async ({ hash }) => {
-    serve({ ...joining, 'POST /v1/invites/preview': () => refusal(404, 'invite_invalid', 'this invite is not valid') });
+    serve({ ...joining, 'POST /v2/invites/preview': () => refusal(404, 'invite_invalid', 'this invite is not valid') });
     window.location.hash = hash;
     const view = render(<App origin={origin} />);
     const alert = await screen.findByRole('alert');
@@ -316,7 +370,7 @@ describe('the landing page', () => {
     window.localStorage.setItem(key, memberToken);
     const { calls, view } = opened({
       ...as(memberToken, member, channelList('general')),
-      'POST /v1/invites/preview': () => refusal(404, 'invite_invalid', 'this invite is not valid'),
+      'POST /v2/invites/preview': () => refusal(404, 'invite_invalid', 'this invite is not valid'),
     });
     expect(await screen.findByText(noLongerWorks)).toBeDefined();
     expect(screen.queryByRole('button', { name: 'Go back' })).toBeNull();
@@ -333,7 +387,7 @@ describe('the landing page', () => {
     { name: 'rate-limited, briefly', answer: () => refusal(429, 'rate_limited', 'slow down', { 'Retry-After': '30' }), line: 'Too many tries from your network. Try again in 30 seconds.' },
     { name: 'unreachable', answer: (): Response => { throw new TypeError('Failed to fetch'); }, line: 'Cannot reach the server. Check your connection and try again.' },
   ])('says so when the preview is $name, and can try again', async ({ answer, line }) => {
-    const { calls } = opened({ ...joining, 'POST /v1/invites/preview': answer });
+    const { calls } = opened({ ...joining, 'POST /v2/invites/preview': answer });
     expect(await screen.findByText(line)).toBeDefined();
     serve(joining);
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
@@ -389,7 +443,7 @@ describe('the landing page', () => {
         if (!up) throw new TypeError('Failed to fetch');
         return json(joiner);
       },
-      'POST /v1/invites/preview': (): Response => {
+      'POST /v2/invites/preview': (): Response => {
         if (!up) throw new TypeError('Failed to fetch');
         return json(preview);
       },
@@ -442,17 +496,16 @@ describe('the landing page', () => {
 });
 
 // The invite panel: an inviter's own invites, as the server lists them.
-const inviteOf = (id: number, createdBy: number, extra: object = {}) => ({
+// A member link as GET /v2/invites lists it (issue #990).
+const linkOf = (id: number, createdBy: number, extra: object = {}) => ({
   id,
-  kind: 'personal',
+  kind: 'member',
   created_by: createdBy,
+  created_by_name: createdBy === 1 ? 'nick' : 'ada',
   created_at,
   expires_at: '2099-01-01T00:00:00Z',
-  max_uses: 1,
   uses: 0,
-  channels: [{ id: 1, name: 'general' }],
-  voice: false,
-  may_invite: false,
+  joiners: 0,
   credential_lifetime_seconds: 7776000,
   ...extra,
 });
@@ -465,26 +518,54 @@ async function openPanel(): Promise<HTMLElement> {
   return panel;
 }
 
-describe('invite someone', () => {
-  it('is not offered to a person who may not invite', async () => {
-    serve(as(memberToken, member, channelList('general')));
+const forMember = (extra: Record<string, Route> = {}) => {
+  window.localStorage.setItem(key, memberToken);
+  return serve({ ...as(memberToken, { ...inviter, invites_remaining: 5 }, channelList('general', 'ops')), 'GET /v2/invites': () => json({ invites: [] }), ...extra });
+};
+const forOperator = (extra: Record<string, Route> = {}) => {
+  window.sessionStorage.setItem(key, operatorToken);
+  return serve({ ...as(operatorToken, operator, channelList('general')), 'GET /v2/invites': () => json({ invites: [] }), ...extra });
+};
+
+describe('member links', () => {
+  // A member whose right to make links is off (the brake) is told why and is
+  // offered no form; nothing of links is asked of the server.
+  it('tells a member whose right is off why, and offers no form', async () => {
+    const calls = serve(as(memberToken, { ...member, may_invite: false }, channelList('general')));
     window.localStorage.setItem(key, memberToken);
     render(<App origin={origin} />);
+    const panel = await openPanel();
+    expect(within(panel).getByText('You may not make invite links. An operator has turned that off for you.')).toBeDefined();
+    expect(within(panel).queryByRole('button', { name: 'Make link' })).toBeNull();
+    expect(within(panel).queryByRole('combobox')).toBeNull();
+    expect(calls.some((c) => c.path.startsWith('/v2/invites'))).toBe(false);
+    // The channel row's ⋯ is only Leave, not Invite (issues #1135, #1095).
     await screen.findByRole('button', { name: 'general' });
-    expect(screen.queryByRole('button', { name: 'Invite someone' })).toBeNull();
-    expect(screen.queryByRole('region', { name: 'Invites' })).toBeNull();
-    // Nor does any channel row carry a ⋯ (issue #1135).
-    expect(screen.queryByRole('button', { name: /^Actions for/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Actions for general' }));
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
   });
 
-  // Issue #1135: a channel's ⋯ menu opens this panel with that channel ticked.
-  it('opens from a channel\'s ⋯ menu with that channel ticked and the others not, and makes the invite to it', async () => {
-    const calls = serve({
-      ...as(memberToken, inviter, channelList('general', 'ops')),
-      'GET /v1/invites': () => json({ invites: [] }),
-      'POST /v1/invites': () => json({ invite: inviteOf(7, 2), code: newCode }, 201),
+  // The form never shows more than the server last answered: a right turned
+  // off since the page loaded is shown off once the panel reads whoami again.
+  it('hides the form once the server says the right has been turned off', async () => {
+    let reads = 0;
+    forMember({
+      'GET /v1/whoami': (c) => {
+        if (c.auth !== `Bearer ${memberToken}`) return json({}, 401);
+        reads++;
+        return json({ ...inviter, may_invite: reads <= 1 });
+      },
     });
-    window.localStorage.setItem(key, memberToken);
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    expect(await within(panel).findByText('You may not make invite links. An operator has turned that off for you.')).toBeDefined();
+    expect(within(panel).queryByRole('button', { name: 'Make link' })).toBeNull();
+  });
+
+  // Issue #1135: a channel's ⋯ menu opens this panel. A member link names no
+  // channel, so none is ticked or sent.
+  it("opens from a channel's ⋯ menu, and makes a link that names no channel", async () => {
+    const calls = forMember({ 'POST /v2/invites': () => json({ invite: linkOf(7, 2), code: newCode }, 201) });
     render(<App origin={origin} />);
     const nav = within(await screen.findByRole('navigation', { name: 'Channels' }));
     await nav.findByRole('button', { name: 'ops' });
@@ -492,113 +573,25 @@ describe('invite someone', () => {
     expect(within(panel).getByRole('button', { name: 'Invite someone' }).getAttribute('aria-expanded')).toBe('false');
 
     fireEvent.click(nav.getByRole('button', { name: 'Actions for ops' }));
-    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Invite people']);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
-
     expect(within(panel).getByRole('button', { name: 'Invite someone' }).getAttribute('aria-expanded')).toBe('true');
-    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#ops' }).checked).toBe(true);
-    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#general' }).checked).toBe(false);
+    expect(within(panel).queryByRole('checkbox', { name: '#ops' })).toBeNull();
     await waitFor(() => {
       expect(panel.contains(document.activeElement)).toBe(true);
     });
-
-    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
-    await waitFor(() => {
-      expect(calls.filter((c) => c.method === 'POST' && c.path === '/v1/invites').map((c) => (c.body as { channels: string[] }).channels)).toEqual([['ops']]);
-    });
-  });
-
-  it('asked for another channel after an invite was made, drops the old link and its copy state', async () => {
-    serve({
-      ...as(memberToken, inviter, channelList('private', 'public')),
-      'GET /v1/invites': () => json({ invites: [] }),
-      'POST /v1/invites': () => json({ invite: inviteOf(7, 2), code: newCode }, 201),
-    });
-    window.localStorage.setItem(key, memberToken);
-    render(<App origin={origin} />);
-    const nav = within(await screen.findByRole('navigation', { name: 'Channels' }));
-    await nav.findByRole('button', { name: 'public' });
-    const panel = screen.getByRole('region', { name: 'Invites' });
-    fireEvent.click(nav.getByRole('button', { name: 'Actions for private' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
-    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
     await within(panel).findByRole('textbox', { name: 'Invite link' });
-
-    fireEvent.click(nav.getByRole('button', { name: 'Actions for public' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
-    expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).toBeNull();
-    expect(within(panel).queryByRole('group', { name: 'New invite link' })).toBeNull();
-    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#public' }).checked).toBe(true);
-    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#private' }).checked).toBe(false);
-    await act(async () => {});
+    expect(calls.filter((c) => c.method === 'POST' && c.path === '/v2/invites').map((c) => c.body)).toEqual([{ kind: 'member' }]);
   });
 
-  it('asked for another channel while an invite is still being made, ignores the late answer', async () => {
-    let answer: (res: Response) => void = () => undefined;
-    serve({
-      ...as(memberToken, inviter, channelList('private', 'public')),
-      'GET /v1/invites': () => json({ invites: [] }),
-      'POST /v1/invites': () => new Promise<Response>((resolve) => (answer = resolve)),
-    });
-    window.localStorage.setItem(key, memberToken);
-    render(<App origin={origin} />);
-    const nav = within(await screen.findByRole('navigation', { name: 'Channels' }));
-    await nav.findByRole('button', { name: 'public' });
-    const panel = screen.getByRole('region', { name: 'Invites' });
-    fireEvent.click(nav.getByRole('button', { name: 'Actions for private' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
-    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
-
-    fireEvent.click(nav.getByRole('button', { name: 'Actions for public' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
-    answer(json({ invite: inviteOf(7, 2), code: newCode }, 201));
-    await act(async () => {});
-    expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).toBeNull();
-    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#public' }).checked).toBe(true);
-    expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: '#private' }).checked).toBe(false);
-    expect(within(panel).getByRole('button', { name: 'Make invite' }).hasAttribute('disabled')).toBe(false);
-  });
-
-  it('asked again for another channel, re-ticks only that one', async () => {
-    serve({ ...as(memberToken, inviter, channelList('general', 'ops')), 'GET /v1/invites': () => json({ invites: [] }) });
-    window.localStorage.setItem(key, memberToken);
-    render(<App origin={origin} />);
-    const nav = within(await screen.findByRole('navigation', { name: 'Channels' }));
-    await nav.findByRole('button', { name: 'ops' });
-    const panel = screen.getByRole('region', { name: 'Invites' });
-    for (const [chosen, other] of [['ops', 'general'], ['general', 'ops']] as const) {
-      fireEvent.click(nav.getByRole('button', { name: `Actions for ${chosen}` }));
-      fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
-      expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: `#${chosen}` }).checked).toBe(true);
-      expect(within(panel).getByRole<HTMLInputElement>('checkbox', { name: `#${other}` }).checked).toBe(false);
-    }
-    await act(async () => {});
-  });
-
-  // Issue #536: the form opens over the page, so Escape closes it.
-  it('closes on Escape, and focus goes back to Invite someone', async () => {
-    serve({ ...as(memberToken, inviter, channelList('general')), 'GET /v1/invites': () => json({ invites: [] }) });
-    window.localStorage.setItem(key, memberToken);
-    render(<App origin={origin} />);
-    const panel = await openPanel();
-    const button = within(panel).getByRole('button', { name: 'Invite someone' });
-    expect(button.getAttribute('aria-expanded')).toBe('true');
-    fireEvent.keyDown(within(panel).getByRole('checkbox', { name: '#general' }), { key: 'Escape' });
-    expect(button.getAttribute('aria-expanded')).toBe('false');
-    expect(within(panel).queryByRole('button', { name: 'Make invite' })).toBeNull();
-    expect(document.activeElement).toBe(button);
-    await act(async () => {});
-  });
-
-  it('lets a member make a personal invite to their own channels, copy the link once, see it listed and close it', async () => {
-    let listed = [inviteOf(5, 2, { uses: 1 })];
-    const calls = serve({
-      ...as(memberToken, inviter, channelList('general', 'ops')),
-      'POST /v1/invites': () => {
-        listed = [inviteOf(7, 2), ...listed];
-        return json({ invite: inviteOf(7, 2), code: newCode }, 201);
+  it('lets a member make a link with the default expiry, copy it once, see it listed and close it', async () => {
+    let listed = [linkOf(5, 2, { uses: 1, joiners: 1, max_uses: 1 })];
+    const calls = forMember({
+      'POST /v2/invites': () => {
+        listed = [linkOf(7, 2), ...listed];
+        return json({ invite: linkOf(7, 2), code: newCode }, 201);
       },
-      'GET /v1/invites': () => json({ invites: listed }),
+      'GET /v2/invites': () => json({ invites: listed }),
       'DELETE /v1/invites/7': () => {
         listed = listed.map((i) => (i.id === 7 ? { ...i, closed_at: '2026-10-16T00:00:00Z' } : i));
         return new Response(null, { status: 204 });
@@ -606,40 +599,40 @@ describe('invite someone', () => {
     });
     const writeText = vi.fn(() => Promise.resolve());
     Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText } });
-    window.localStorage.setItem(key, memberToken);
     render(<App origin={origin} />);
     const panel = await openPanel();
 
-    // A member gets personal invites only: no kind, no cap, no right to invite.
+    // A member's form: an expiry without "never", and a use limit; no kind, no
+    // channels, no voice, no right to pass on.
     expect(within(panel).queryByRole('radio')).toBeNull();
+    expect(within(panel).queryByRole('checkbox', { name: 'Voice' })).toBeNull();
     expect(within(panel).queryByText(/Joiners may invite/)).toBeNull();
-    expect(within(panel).queryByText(/Limit the number/)).toBeNull();
-    expect(within(panel).getByRole<HTMLSelectElement>('combobox').value).toBe('7 days');
-    const make = within(panel).getByRole('button', { name: 'Make invite' });
-    expect(make.hasAttribute('disabled')).toBe(true);
-    await within(panel).findByText('Used');
+    const expiry = within(panel).getByRole<HTMLSelectElement>('combobox');
+    expect(expiry.value).toBe('7 days');
+    expect([...expiry.options].map((o) => o.value)).toEqual(['1 day', '7 days', '30 days']);
+    expect(await within(panel).findByText('5 links left')).toBeDefined();
+    await within(panel).findByText('Used up');
 
-    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
-    fireEvent.click(make);
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
     const link = await within(panel).findByRole<HTMLInputElement>('textbox', { name: 'Invite link' });
     expect(link.value).toBe(`${origin}/app/#/invite/${newCode}`);
-    expect(within(panel).getByText(/The first person to open this link joins/)).toBeDefined();
-    expect(within(panel).queryByText(/Anyone with this link/)).toBeNull();
-    // The default expiry is the server's: none is sent.
-    expect(calls.find((c) => c.method === 'POST' && c.path === '/v1/invites')?.body).toEqual({ kind: 'personal', channels: ['general'], voice: false });
+    expect(within(panel).getByText(/Anyone with this link can join/)).toBeDefined();
+    // The default expiry is the server's: none is sent, and no limit.
+    expect(calls.find((c) => c.method === 'POST' && c.path === '/v2/invites')?.body).toEqual({ kind: 'member' });
 
     fireEvent.click(within(panel).getByRole('button', { name: 'Copy link' }));
     await within(panel).findByText('Copied.');
     expect(writeText).toHaveBeenCalledWith(`${origin}/app/#/invite/${newCode}`);
 
     // Listed, open, with a close button; closing it shows it closed.
-    const list = await within(panel).findByRole('list', { name: 'Your invites' });
+    const list = await within(panel).findByRole('list', { name: 'Your links' });
     await waitFor(() => {
       expect(within(list).getAllByRole('listitem')).toHaveLength(2);
     });
     const fresh = within(list).getAllByRole('listitem')[0];
-    if (fresh === undefined) throw new Error('no invite listed');
-    expect(fresh.textContent).toContain('Open');
+    if (fresh === undefined) throw new Error('no link listed');
+    expect(fresh.textContent).toContain('Unused');
+    expect(fresh.textContent).toContain('0 joined');
     fireEvent.click(within(fresh).getByRole('button', { name: 'Close' }));
     await waitFor(() => {
       expect(within(list).getAllByRole('listitem')[0]?.textContent).toContain('Closed');
@@ -653,342 +646,449 @@ describe('invite someone', () => {
     Reflect.deleteProperty(window.navigator, 'clipboard');
   });
 
-  it.each([
-    { code: 'invite_allowance_exceeded', line: 'You already have as many unused personal invites as you may. Close one, or wait until one is used or expires.' },
-    { code: 'invite_grant_exceeds_inviter', line: 'An invite can give only what you have: channels you are in, and voice only if you have it.' },
-    { code: 'invites_paused', line: 'Invites are paused on this server for now.', status: 503 },
-    { code: 'rate_limited', line: 'You have made too many invites for now. Try again in 15 minutes.', status: 429 },
-  ])('says $code in words', async ({ code, line, status }) => {
-    serve({
-      ...as(memberToken, inviter, channelList('general')),
-      'POST /v1/invites': () => refusal(status ?? 403, code, 'no', { 'Retry-After': '900' }),
-      'GET /v1/invites': () => json({ invites: [] }),
-    });
-    window.localStorage.setItem(key, memberToken);
+  it('sends the expiry and the use limit a member chose', async () => {
+    const calls = forMember({ 'POST /v2/invites': () => json({ invite: linkOf(7, 2, { max_uses: 3 }), code: newCode }, 201) });
     render(<App origin={origin} />);
     const panel = await openPanel();
-    fireEvent.click(within(panel).getByRole('checkbox', { name: 'Voice' }));
-    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
-    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+    const before = Date.now();
+    fireEvent.change(within(panel).getByRole('combobox'), { target: { value: '1 day' } });
+    fireEvent.click(within(panel).getByRole('checkbox', { name: 'Limit the number of people' }));
+    fireEvent.change(within(panel).getByRole('spinbutton'), { target: { value: '3' } });
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
+    await within(panel).findByRole('textbox', { name: 'Invite link' });
+    const sent = calls.find((c) => c.method === 'POST' && c.path === '/v2/invites')?.body as { kind: string; expires_at: string; max_uses: number; never_expires?: boolean };
+    expect(sent.kind).toBe('member');
+    expect(sent.max_uses).toBe(3);
+    expect(sent.never_expires).toBeUndefined();
+    expect(Math.abs(Date.parse(sent.expires_at) - (before + 24 * 60 * 60 * 1000))).toBeLessThan(60_000);
+  });
+
+  it('disables Make link for a use limit that is no whole number of people', async () => {
+    forMember();
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(within(panel).getByRole('checkbox', { name: 'Limit the number of people' }));
+    for (const bad of ['0', '1.5', '', '2000000']) {
+      fireEvent.change(within(panel).getByRole('spinbutton'), { target: { value: bad } });
+      expect(within(panel).getByRole('button', { name: 'Make link' }).hasAttribute('disabled'), bad).toBe(true);
+    }
+    fireEvent.change(within(panel).getByRole('spinbutton'), { target: { value: '2' } });
+    expect(within(panel).getByRole('button', { name: 'Make link' }).hasAttribute('disabled')).toBe(false);
+  });
+
+  it('offers "Never expires" to an operator alone, and sends it as never_expires', async () => {
+    const calls = forOperator({ 'POST /v2/invites': () => json({ invite: linkOf(8, 1, { expires_at: undefined }), code: newCode }, 201) });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const expiry = within(panel).getByRole<HTMLSelectElement>('combobox');
+    expect([...expiry.options].map((o) => o.value)).toEqual(['1 day', '7 days', '30 days', 'Never expires']);
+    fireEvent.change(expiry, { target: { value: 'Never expires' } });
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
+    await within(panel).findByRole('textbox', { name: 'Invite link' });
+    expect(calls.find((c) => c.method === 'POST' && c.path === '/v2/invites')?.body).toEqual({ kind: 'member', never_expires: true });
+  });
+
+  it('offers no "Never expires" to an operator who lacks manage_members', async () => {
+    window.sessionStorage.setItem(key, operatorToken);
+    serve({
+      ...as(operatorToken, { ...operator, permissions: ['make_member_links'] }, channelList('general')),
+      'GET /v2/invites': () => json({ invites: [] }),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    expect([...within(panel).getByRole<HTMLSelectElement>('combobox').options].map((o) => o.value)).not.toContain('Never expires');
+  });
+
+  it("lists only the caller's own links, with their uses, a link that never expires and who joined", async () => {
+    const calls = forOperator({
+      'GET /v2/invites': () =>
+        json({ invites: [linkOf(3, 1, { joiners: 2, uses: 2, max_uses: 5, expires_at: undefined }), linkOf(4, 2, { joiners: 1 })] }),
+      'GET /v2/invites/3/joiners': () =>
+        json({ joiners: [{ id: 20, name: 'wren', created_at, disabled: false }, { id: 21, name: '<b>cy</b>', created_at, disabled: true }] }),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const list = await within(panel).findByRole('list', { name: 'Your links' });
+    const items = within(list).getAllByRole('listitem');
+    expect(items).toHaveLength(1);
+    expect(items[0]?.textContent).toContain('2 of 5 joined');
+    expect(items[0]?.textContent).toContain('never expires');
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Joiners (2)' }));
+    const names = await within(panel).findByRole('list', { name: 'Joiners of this link' });
+    // Other people's names are text, never markup.
+    expect(within(names).getAllByRole('listitem').map((i) => i.textContent)).toEqual(['wren', '<b>cy</b> (disabled)']);
+    expect(names.querySelector('b')).toBeNull();
+    expect(calls.some((c) => c.path === '/v2/invites/3/joiners')).toBe(true);
+    fireEvent.click(within(panel).getByRole('button', { name: 'Hide joiners' }));
+    expect(within(panel).queryByRole('list', { name: 'Joiners of this link' })).toBeNull();
+  });
+
+  it('says in its own words when the joiners cannot be read', async () => {
+    forMember({
+      'GET /v2/invites': () => json({ invites: [linkOf(3, 2, { joiners: 1 })] }),
+      'GET /v2/invites/3/joiners': () => refusal(404, 'invite_not_found', 'SERVER WORDS'),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(await within(panel).findByRole('button', { name: 'Joiners (1)' }));
+    expect(await within(panel).findByText('That link is gone.')).toBeDefined();
+    expect(panel.textContent).not.toContain('SERVER WORDS');
+  });
+
+  // Design O2: members get no control to remove the people a link brought in.
+  it('gives a member no way to disable the people a link brought in', async () => {
+    forMember({ 'GET /v2/invites': () => json({ invites: [linkOf(3, 2, { joiners: 2, uses: 2 })] }) });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    await within(panel).findByRole('button', { name: 'Joiners (2)' });
+    expect(within(panel).queryByRole('button', { name: /disable/i })).toBeNull();
+  });
+
+  it('gives an operator Disable joiners on a link, which asks how many first and disables them only on a yes', async () => {
+    const calls = forOperator({
+      'GET /v2/invites': () => json({ invites: [linkOf(3, 1, { joiners: 2, uses: 2 })] }),
+      'POST /v1/invites/3/disable-joiners': (c) => {
+        const dry = (c.body as { dry_run: boolean }).dry_run;
+        return json({ dry_run: dry, count: 2, principal_ids: [20, 21] });
+      },
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(await within(panel).findByRole('button', { name: 'Disable joiners' }));
+    const ask = await within(panel).findByRole('group', { name: 'Disable joiners' });
+    expect(ask.textContent).toContain('signs out and disables 2 people');
+    expect(calls.filter((c) => c.path.endsWith('/disable-joiners')).map((c) => c.body)).toEqual([{ dry_run: true }]);
+
+    // Cancel changes nothing.
+    fireEvent.click(within(ask).getByRole('button', { name: 'Cancel' }));
+    expect(within(panel).queryByRole('group', { name: 'Disable joiners' })).toBeNull();
+    expect(calls.filter((c) => c.path.endsWith('/disable-joiners'))).toHaveLength(1);
+
+    fireEvent.click(within(panel).getByRole('button', { name: 'Disable joiners' }));
+    fireEvent.click(await within(panel).findByRole('button', { name: 'Disable 2 people' }));
+    expect(await within(panel).findByText('Disabled 2 people.')).toBeDefined();
+    expect(calls.filter((c) => c.path.endsWith('/disable-joiners')).map((c) => c.body)).toEqual([{ dry_run: true }, { dry_run: true }, { dry_run: false }]);
+  });
+
+  it('closes the Disable joiners question when whoami is read again without manage_members, and sends nothing more', async () => {
+    let stripped = false;
+    const calls = forOperator({
+      'GET /v1/whoami': (c) => (c.auth === `Bearer ${operatorToken}` ? json(stripped ? { ...operator, permissions: ['make_member_links'] } : operator) : json({}, 401)),
+      'GET /v2/invites': () => json({ invites: [linkOf(3, 1, { joiners: 2, uses: 2 })] }),
+      'POST /v1/invites/3/disable-joiners': (c) => json({ dry_run: (c.body as { dry_run: boolean }).dry_run, count: 2, principal_ids: [20, 21] }),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(await within(panel).findByRole('button', { name: 'Disable joiners' }));
+    const ask = await within(panel).findByRole('group', { name: 'Disable joiners' });
+    // The question says the link is closed too.
+    expect(ask.textContent).toContain('closes the link too');
+
+    stripped = true;
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => {
+      expect(within(panel).queryByRole('group', { name: 'Disable joiners' })).toBeNull();
+    });
+    expect(within(panel).queryByRole('button', { name: /Disable/ })).toBeNull();
+    expect(calls.filter((c) => c.path.endsWith('/disable-joiners')).map((c) => c.body)).toEqual([{ dry_run: true }]);
+  });
+
+  it('puts "Never expires" back to the default when manage_members goes', async () => {
+    let stripped = false;
+    forOperator({
+      'GET /v1/whoami': (c) => (c.auth === `Bearer ${operatorToken}` ? json(stripped ? { ...operator, permissions: ['make_member_links'] } : operator) : json({}, 401)),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const expiry = within(panel).getByRole<HTMLSelectElement>('combobox');
+    fireEvent.change(expiry, { target: { value: 'Never expires' } });
+    expect(expiry.value).toBe('Never expires');
+    stripped = true;
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => {
+      expect(within(panel).getByRole<HTMLSelectElement>('combobox').value).toBe('7 days');
+    });
+  });
+
+  it('keeps focus in the panel, on Refresh, when Cancel, Disable or Close removes the button pressed', async () => {
+    forOperator({
+      'GET /v2/invites': () => json({ invites: [linkOf(3, 1, { joiners: 2, uses: 2 })] }),
+      'POST /v1/invites/3/disable-joiners': (c) => json({ dry_run: (c.body as { dry_run: boolean }).dry_run, count: 2, principal_ids: [20, 21] }),
+      'DELETE /v1/invites/3': () => new Response(null, { status: 204 }),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const refreshButton = within(panel).getByRole('button', { name: 'Refresh' });
+    fireEvent.click(await within(panel).findByRole('button', { name: 'Disable joiners' }));
+    fireEvent.click(await within(panel).findByRole('button', { name: 'Cancel' }));
+    expect(document.activeElement).toBe(refreshButton);
+    fireEvent.click(within(panel).getByRole('button', { name: 'Disable joiners' }));
+    (within(panel).getByRole('button', { name: 'Refresh' })).focus();
+    fireEvent.click(await within(panel).findByRole('button', { name: 'Disable 2 people' }));
+    expect(document.activeElement).toBe(refreshButton);
+    within(panel).getByRole('button', { name: 'Close' }).focus();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Close' }));
+    expect(document.activeElement).toBe(refreshButton);
+  });
+
+  it('sends one request however often Make link is pressed before the answer', async () => {
+    let release: (r: Response) => void = () => undefined;
+    const calls = forMember({ 'POST /v2/invites': () => new Promise<Response>((resolve) => (release = resolve)) });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const form = within(panel).getByRole('button', { name: 'Make link' }).closest('form');
+    if (form === null) throw new Error('no form');
+    // All inside one act: busy has not rendered between the presses.
+    act(() => {
+      for (let i = 0; i < 4; i++) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    expect(calls.filter((c) => c.method === 'POST' && c.path === '/v2/invites')).toHaveLength(1);
+    await act(async () => {
+      release(json({ invite: linkOf(7, 2), code: newCode }, 201));
+      await Promise.resolve();
+    });
+    await within(panel).findByRole('textbox', { name: 'Invite link' });
+    expect(calls.filter((c) => c.method === 'POST' && c.path === '/v2/invites')).toHaveLength(1);
+  });
+
+  // The refusal is the page's words for its code: the server's message, which
+  // is other people's text as far as the page goes, is never shown.
+  it.each([
+    { code: 'invite_not_allowed', status: 403, line: 'You may not make invite links. An operator has turned that off for you.' },
+    { code: 'invite_allowance_exceeded', status: 403, line: 'You already have as many open links as you may. Close one, or wait until one expires.' },
+    { code: 'invite_grant_exceeds_inviter', status: 403, line: 'A link can land people only in channels you are in.' },
+    { code: 'invites_paused', status: 503, line: 'Invites are paused on this server for now.' },
+    { code: 'invite_kind_retired', status: 409, line: 'This server no longer makes that kind of invite.' },
+    { code: 'rate_limited', status: 429, line: 'You have made too many links for now. Try again in 15 minutes.' },
+    { code: 'invalid_request', status: 400, line: 'The server did not accept those settings. Check the number of people.' },
+    { code: 'something_new', status: 500, line: 'The server refused the link.' },
+  ])('says $code in its own words, never the server’s', async ({ code, status, line }) => {
+    forMember({ 'POST /v2/invites': () => refusal(status, code, 'SERVER WORDS <img src=x>', { 'Retry-After': '900' }) });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
     expect(await within(panel).findByText(line)).toBeDefined();
+    expect(panel.textContent).not.toContain('SERVER WORDS');
     expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).toBeNull();
   });
 
   // Issue #909: an operator is told where the resume switch is, and the button
   // opens Settings with Joining expanded; a member gets the plain line.
-  it('tells an operator whose invite is refused as paused where to resume, and the button opens the switch', async () => {
-    serve({
-      ...as(operatorToken, operator, channelList('general')),
-      'POST /v1/invites': () => refusal(503, 'invites_paused'),
-      'GET /v1/invites': () => json({ invites: [] }),
+  it('tells an operator whose link is refused as paused where to resume, and the button opens the switch', async () => {
+    forOperator({
+      'POST /v2/invites': () => refusal(503, 'invites_paused'),
       'GET /v1/invites/settings': () => json({ paused: true }),
     });
-    window.sessionStorage.setItem(key, operatorToken);
     render(<App origin={origin} />);
     const panel = await openPanel();
-    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
-    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
     expect(await within(panel).findByText('Invites are paused on this server. Resume them in Settings → Joining.')).toBeDefined();
     expect(screen.queryByRole('region', { name: 'Joining' })?.hasAttribute('hidden') ?? true).toBe(true);
 
     fireEvent.click(within(panel).getByRole('button', { name: 'Open Settings → Joining' }));
     const region = screen.getByRole('region', { name: 'Joining' });
     expect(region.hasAttribute('hidden')).toBe(false);
-    const toggle = screen.getByRole('button', { name: 'Joining' });
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    // The section has focus, not the Settings heading, so it is scrolled to.
-    expect(document.activeElement).toBe(toggle);
-    const box = await within(region).findByLabelText<HTMLInputElement>('Pause all invites');
-    expect(box.checked).toBe(true);
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Joining' }));
+    expect((await within(region).findByLabelText<HTMLInputElement>(/^Pause all invites/)).checked).toBe(true);
   });
 
-  // Joining stays expanded when Settings closes; a jump must still
-  // show what the server holds now, not what it held when the section opened.
-  it('reads the switch afresh when an operator is sent to a section left open', async () => {
-    let paused = false;
-    serve({
-      ...as(operatorToken, operator, channelList('general')),
-      'POST /v1/invites': () => refusal(503, 'invites_paused'),
-      'GET /v1/invites': () => json({ invites: [] }),
-      'GET /v1/invites/settings': () => json({ paused }),
-    });
-    window.sessionStorage.setItem(key, operatorToken);
-    render(<App origin={origin} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Joining' }));
-    const region = screen.getByRole('region', { name: 'Joining' });
-    expect((await within(region).findByLabelText<HTMLInputElement>('Pause all invites')).checked).toBe(false);
-    fireEvent.click(within(screen.getByRole('dialog', { name: 'Settings' })).getByRole('button', { name: 'Close' }));
-
-    paused = true; // another operator paused them meanwhile
-    const panel = await openPanel();
-    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
-    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
-    fireEvent.click(await within(panel).findByRole('button', { name: 'Open Settings → Joining' }));
-    await waitFor(() => {
-      expect(within(region).getByLabelText<HTMLInputElement>('Pause all invites').checked).toBe(true);
-    });
-  });
-
-  it('gives a member whose invite is refused as paused only the plain line, and no button', async () => {
-    serve({
-      ...as(memberToken, inviter, channelList('general')),
-      'POST /v1/invites': () => refusal(503, 'invites_paused'),
-      'GET /v1/invites': () => json({ invites: [] }),
-    });
-    window.localStorage.setItem(key, memberToken);
+  it('gives a member whose link is refused as paused only the plain line, and no button', async () => {
+    forMember({ 'POST /v2/invites': () => refusal(503, 'invites_paused') });
     render(<App origin={origin} />);
     const panel = await openPanel();
-    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
-    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
     expect(await within(panel).findByText('Invites are paused on this server for now.')).toBeDefined();
     expect(within(panel).queryByText(/Settings → Joining/)).toBeNull();
     expect(screen.queryByRole('button', { name: /^(Open Settings → )?Joining$/ })).toBeNull();
   });
 
-  it("gives an operator an open link with its defaults, and lists only the operator's own invites", async () => {
-    const calls = serve({
-      ...as(operatorToken, operator, channelList('general')),
-      'POST /v1/invites': () => json({ invite: inviteOf(8, 1, { kind: 'open' }), code: newCode }, 201),
-      'GET /v1/invites': () => json({ invites: [inviteOf(3, 1), inviteOf(4, 2)] }),
-    });
-    window.sessionStorage.setItem(key, operatorToken);
+  // F21: the states, the pause banner, the link shown once, and the keyboard.
+  it('reads Unused for a link no one has used, and Open for one that has been', async () => {
+    forMember({ 'GET /v2/invites': () => json({ invites: [linkOf(1, 2), linkOf(2, 2, { uses: 1, joiners: 1 })] }) });
     render(<App origin={origin} />);
     const panel = await openPanel();
-    const list = await within(panel).findByRole('list', { name: 'Your invites' });
-    expect(within(list).getAllByRole('listitem')).toHaveLength(1);
+    const list = await within(panel).findByRole('list', { name: 'Your links' });
+    const [unused, used] = within(list).getAllByRole('listitem');
+    expect(unused?.textContent).toContain('Unused');
+    expect(used?.textContent).toContain('Open');
+    expect(used?.textContent).not.toContain('Unused');
+  });
 
-    fireEvent.click(within(panel).getByRole('radio', { name: 'Open link: anyone with it' }));
-    expect(within(panel).getByRole<HTMLSelectElement>('combobox').value).toBe('24 hours');
-    const capped = within(panel).getByRole<HTMLInputElement>('checkbox', { name: 'Limit the number of people' });
-    const mayInvite = within(panel).getByRole<HTMLInputElement>('checkbox', { name: 'Joiners may invite others' });
-    expect(capped.checked).toBe(false);
-    expect(mayInvite.checked).toBe(false);
-    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
-    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
+  it('shows an operator the paused banner while invites are paused, before any refusal', async () => {
+    forOperator({
+      'GET /v1/invites/settings': () => json({ paused: true }),
+      'GET /v2/invites': () => json({ invites: [linkOf(1, 1)] }),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    expect(await within(panel).findByText('Invites are paused on this server. Resume them in Settings → Joining.')).toBeDefined();
+    const list = await within(panel).findByRole('list', { name: 'Your links' });
+    expect(within(list).getAllByRole('listitem')[0]?.textContent).toContain('Paused');
+  });
+
+  it('shows no paused banner to an operator while invites are on', async () => {
+    forOperator({ 'GET /v1/invites/settings': () => json({ paused: false }) });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    await within(panel).findByText('None yet.');
+    expect(within(panel).queryByText(/Invites are paused/)).toBeNull();
+  });
+
+  it('shows a member the paused banner only after a paused refusal, and then marks their links Paused', async () => {
+    forMember({
+      'GET /v2/invites': () => json({ invites: [linkOf(1, 2)] }),
+      'POST /v2/invites': () => refusal(503, 'invites_paused'),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const list = await within(panel).findByRole('list', { name: 'Your links' });
+    expect(within(panel).queryByText(/Invites are paused/)).toBeNull();
+    expect(within(list).getAllByRole('listitem')[0]?.textContent).toContain('Unused');
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
+    expect(await within(panel).findByText('Invites are paused on this server for now.')).toBeDefined();
+    expect(within(list).getAllByRole('listitem')[0]?.textContent).toContain('Paused');
+  });
+
+  it('forgets the link shown once when the panel closes', async () => {
+    forMember({ 'POST /v2/invites': () => json({ invite: linkOf(7, 2), code: newCode }, 201) });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
     await within(panel).findByRole('textbox', { name: 'Invite link' });
-    expect(calls.find((c) => c.method === 'POST' && c.path === '/v1/invites')?.body).toEqual({ kind: 'open', channels: ['general'], voice: false });
-  });
-
-  it('sends what an operator chose: an expiry, a use cap and the right to invite', async () => {
-    const calls = serve({
-      ...as(operatorToken, operator, channelList('general', 'ops')),
-      'POST /v1/invites': () => json({ invite: inviteOf(8, 1, { kind: 'open' }), code: newCode }, 201),
-      'GET /v1/invites': () => json({ invites: [] }),
-    });
-    window.sessionStorage.setItem(key, operatorToken);
-    render(<App origin={origin} />);
-    const panel = await openPanel();
-    fireEvent.click(within(panel).getByRole('radio', { name: 'Open link: anyone with it' }));
-    fireEvent.change(within(panel).getByRole('combobox'), { target: { value: '1 hour' } });
-    fireEvent.click(within(panel).getByRole('checkbox', { name: 'Limit the number of people' }));
-    const make = within(panel).getByRole('button', { name: 'Make invite' });
-    fireEvent.change(within(panel).getByRole('spinbutton'), { target: { value: '0' } });
-    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#ops' }));
-    // A cap that is not a number of people is not sent as no cap.
-    expect(make.hasAttribute('disabled')).toBe(true);
-    fireEvent.change(within(panel).getByRole('spinbutton'), { target: { value: '12' } });
-    fireEvent.click(within(panel).getByRole('checkbox', { name: 'Joiners may invite others' }));
-    const before = Date.now();
-    fireEvent.click(make);
-    await within(panel).findByRole('textbox', { name: 'Invite link' });
-    const body = calls.find((c) => c.method === 'POST' && c.path === '/v1/invites')?.body as { expires_at?: string };
-    expect(body).toEqual({ kind: 'open', channels: ['ops'], voice: false, expires_at: body.expires_at, max_uses: 12, may_invite: true });
-    const expires = Date.parse(body.expires_at ?? '');
-    expect(expires - before).toBeGreaterThanOrEqual(60 * 60 * 1000 - 1000);
-    expect(expires - before).toBeLessThanOrEqual(60 * 60 * 1000 + 5000);
-  });
-
-  // Issue #468: what whoami says of voice and of the allowance.
-  it('does not offer voice to a person who does not hold it', async () => {
-    const calls = serve({
-      ...as(memberToken, { ...inviter, voice_allowed: false, invites_remaining: 5 }, channelList('general')),
-      'POST /v1/invites': () => json({ invite: inviteOf(7, 2), code: newCode }, 201),
-      'GET /v1/invites': () => json({ invites: [] }),
-    });
-    window.localStorage.setItem(key, memberToken);
-    render(<App origin={origin} />);
-    const panel = await openPanel();
-    await within(panel).findByText('5 invites left');
-    expect(within(panel).queryByRole('checkbox', { name: /voice/i })).toBeNull();
-    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
-    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
-    await within(panel).findByRole('textbox', { name: 'Invite link' });
-    expect(calls.find((c) => c.method === 'POST' && c.path === '/v1/invites')?.body).toEqual({ kind: 'personal', channels: ['general'], voice: false });
-  });
-
-  it('offers voice to a person who holds it, and counts the invites left down as they make one and up as they close it', async () => {
-    let remaining = 2;
-    let listed: ReturnType<typeof inviteOf>[] = [];
-    const calls = serve({
-      'GET /v1/whoami': (c) =>
-        c.auth === `Bearer ${memberToken}` ? json({ ...inviter, voice_allowed: true, invites_remaining: remaining }) : json({}, 401),
-      'GET /v1/channels': () => json(channelList('general')),
-      'POST /v1/invites': () => {
-        remaining -= 1;
-        listed = [inviteOf(7, 2, { voice: true })];
-        return json({ invite: inviteOf(7, 2, { voice: true }), code: newCode }, 201);
-      },
-      'GET /v1/invites': () => json({ invites: listed }),
-      'DELETE /v1/invites/7': () => {
-        remaining += 1;
-        listed = listed.map((i) => ({ ...i, closed_at: '2026-10-16T00:00:00Z' }));
-        return new Response(null, { status: 204 });
-      },
-    });
-    window.localStorage.setItem(key, memberToken);
-    render(<App origin={origin} />);
-    const panel = await openPanel();
-    await within(panel).findByText('2 invites left');
-
-    fireEvent.click(within(panel).getByRole('checkbox', { name: 'Voice' }));
-    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
-    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
-    await within(panel).findByText('1 invite left');
-    expect(calls.find((c) => c.method === 'POST' && c.path === '/v1/invites')?.body).toEqual({ kind: 'personal', channels: ['general'], voice: true });
-
-    const list = await within(panel).findByRole('list', { name: 'Your invites' });
-    fireEvent.click(await within(list).findByRole('button', { name: 'Close' }));
-    await within(panel).findByText('2 invites left');
-  });
-
-  // Issue #593 (F18): the new link's words follow its kind.
-  it.each([
-    { kind: 'personal', says: /The first person to open this link joins/, not: /Anyone with this link/ },
-    { kind: 'open', says: /Anyone with this link can join/, not: /The first person to open this link/ },
-  ])('says who a new $kind link lets in', async ({ kind, says, not }) => {
-    serve({
-      ...as(operatorToken, operator, channelList('general')),
-      'POST /v1/invites': () => json({ invite: inviteOf(8, 1, { kind }), code: newCode }, 201),
-      'GET /v1/invites': () => json({ invites: [] }),
-    });
-    window.sessionStorage.setItem(key, operatorToken);
-    render(<App origin={origin} />);
-    const panel = await openPanel();
-    if (kind === 'open') fireEvent.click(within(panel).getByRole('radio', { name: 'Open link: anyone with it' }));
-    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
-    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
-    const box = await within(panel).findByRole('group', { name: 'New invite link' });
-    expect(within(box).getByText(says)).toBeDefined();
-    expect(box.textContent).not.toMatch(not);
-    expect(box.textContent).toContain('It is shown only now: copy it and send it to the person you are inviting.');
-  });
-
-  it('puts focus on Make invite after Done, reads the list again, and Escape still closes the panel', async () => {
-    const calls = serve({
-      ...as(memberToken, inviter, channelList('general')),
-      'POST /v1/invites': () => json({ invite: inviteOf(7, 2), code: newCode }, 201),
-      'GET /v1/invites': () => json({ invites: [inviteOf(7, 2)] }),
-    });
-    const reads = () => calls.filter((c) => c.path === '/v1/invites' && c.method === 'GET').length;
-    window.localStorage.setItem(key, memberToken);
-    render(<App origin={origin} />);
-    const panel = await openPanel();
-    fireEvent.click(await within(panel).findByRole('checkbox', { name: '#general' }));
-    fireEvent.click(within(panel).getByRole('button', { name: 'Make invite' }));
-    const done = await within(panel).findByRole('button', { name: 'Done' });
-    await within(panel).findByRole('list', { name: 'Your invites' });
-    await act(async () => {});
-    const before = reads();
-    done.focus();
-    fireEvent.click(done);
-    const make = within(panel).getByRole('button', { name: 'Make invite' });
-    expect(document.activeElement).toBe(make);
-    await waitFor(() => {
-      expect(reads()).toBe(before + 1);
-    });
-    fireEvent.keyDown(make, { key: 'Escape' });
     const toggle = within(panel).getByRole('button', { name: 'Invite someone' });
+    fireEvent.click(toggle);
+    fireEvent.click(toggle);
+    expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).toBeNull();
+    expect(panel.textContent).not.toContain(newCode);
+  });
+
+  it('forgets the link shown once when its first use is seen', async () => {
+    let uses = 0;
+    forMember({
+      'POST /v2/invites': () => json({ invite: linkOf(7, 2), code: newCode }, 201),
+      'GET /v2/invites': () => json({ invites: [linkOf(7, 2, { uses, joiners: uses })] }),
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
+    await within(panel).findByRole('textbox', { name: 'Invite link' });
+    // Read again with the link still unused: it stays.
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh' }));
+    await within(panel).findByText('Unused');
+    expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).not.toBeNull();
+    uses = 1;
+    fireEvent.click(within(panel).getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => {
+      expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).toBeNull();
+    });
+  });
+
+  it('closes on Escape from the Invite someone button, and opening moves focus into the panel', async () => {
+    forMember();
+    render(<App origin={origin} />);
+    const panel = await screen.findByRole('region', { name: 'Invites' });
+    const toggle = within(panel).getByRole('button', { name: 'Invite someone' });
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(panel.querySelector('#invites-body')?.contains(document.activeElement)).toBe(true);
+    });
+    toggle.focus();
+    fireEvent.keyDown(toggle, { key: 'Escape' });
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(document.activeElement).toBe(toggle);
-    await act(async () => {});
   });
 
-  it('says when the list was read, and reads it again when the page is shown again while open', async () => {
-    let listed = [inviteOf(7, 2)];
-    const calls = serve({
-      ...as(memberToken, inviter, channelList('general')),
-      'GET /v1/invites': () => json({ invites: listed }),
-    });
-    const reads = () => calls.filter((c) => c.path === '/v1/invites' && c.method === 'GET').length;
-    window.localStorage.setItem(key, memberToken);
+  it('says it cannot reach the server when the answer does not come', async () => {
+    forMember({ 'POST /v2/invites': () => Promise.reject(new TypeError('Failed to fetch')) });
     render(<App origin={origin} />);
     const panel = await openPanel();
-    const list = await within(panel).findByRole('list', { name: 'Your invites' });
-    expect(await within(list).findByRole('button', { name: 'Close' })).toBeDefined();
-    const readAt = await within(panel).findByText((_, el) => el?.tagName === 'SPAN' && /^Read at \d\d:\d\d$/.test(el.textContent));
-    expect(readAt.querySelector('time')?.getAttribute('datetime')).toMatch(/^\d{4}-\d\d-\d\dT/);
-    await act(async () => {});
-
-    // Someone redeems it elsewhere; the tab is hidden, then shown again.
-    listed = [inviteOf(7, 2, { uses: 1 })];
-    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
-    const before = reads();
-    act(() => {
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
-    expect(reads()).toBe(before);
-    visibility.mockReturnValue('visible');
-    act(() => {
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
-    await within(list).findByText('Used');
-    expect(within(list).getByText('· joined')).toBeDefined();
-    expect(within(list).queryByRole('button', { name: 'Close' })).toBeNull();
-    expect(reads()).toBe(before + 1);
-
-    // Once closed, the panel does not read on being shown again.
-    fireEvent.click(within(panel).getByRole('button', { name: 'Invite someone' }));
-    await act(async () => {});
-    const closed = reads();
-    act(() => {
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
-    expect(reads()).toBe(closed);
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
+    expect(await within(panel).findByText('Cannot reach the server. Try again.')).toBeDefined();
   });
 
-  it('shows a use elsewhere on Refresh', async () => {
-    let listed = [inviteOf(7, 2)];
-    serve({
-      ...as(memberToken, inviter, channelList('general')),
-      'GET /v1/invites': () => json({ invites: listed }),
-    });
-    window.localStorage.setItem(key, memberToken);
+  it('closes on Escape, and focus goes back to Invite someone', async () => {
+    forMember();
     render(<App origin={origin} />);
     const panel = await openPanel();
-    const list = await within(panel).findByRole('list', { name: 'Your invites' });
-    await within(list).findByText('Open');
-    listed = [inviteOf(7, 2, { uses: 1 })];
+    const button = within(panel).getByRole('button', { name: 'Invite someone' });
+    fireEvent.keyDown(within(panel).getByRole('button', { name: 'Make link' }), { key: 'Escape' });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(button);
+  });
+
+  it('puts focus on Make link after Done, and reads the list again', async () => {
+    let reads = 0;
+    forMember({
+      'POST /v2/invites': () => json({ invite: linkOf(7, 2), code: newCode }, 201),
+      'GET /v2/invites': () => {
+        reads++;
+        return json({ invites: [] });
+      },
+    });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
+    await within(panel).findByRole('textbox', { name: 'Invite link' });
+    const before = reads;
+    fireEvent.click(within(panel).getByRole('button', { name: 'Done' }));
+    expect(document.activeElement).toBe(within(panel).getByRole('button', { name: 'Make link' }));
+    await waitFor(() => {
+      expect(reads).toBeGreaterThan(before);
+    });
+  });
+
+  it('shows a use made elsewhere on Refresh, and says when the list was read', async () => {
+    let listed = [linkOf(3, 2)];
+    forMember({ 'GET /v2/invites': () => json({ invites: listed }) });
+    render(<App origin={origin} />);
+    const panel = await openPanel();
+    const list = await within(panel).findByRole('list', { name: 'Your links' });
+    expect(list.textContent).toContain('0 joined');
+    expect(within(panel).getByText(/^Read at/)).toBeDefined();
+    listed = [linkOf(3, 2, { uses: 1, joiners: 1 })];
     fireEvent.click(within(panel).getByRole('button', { name: 'Refresh' }));
-    await within(list).findByText('Used');
+    await waitFor(() => {
+      expect(within(panel).getByRole('list', { name: 'Your links' }).textContent).toContain('1 joined');
+    });
   });
 
-  it('shows an operator no count, since operators have no allowance', async () => {
-    serve({
-      ...as(operatorToken, { ...operator, voice_allowed: true }, channelList('general')),
-      'GET /v1/invites': () => json({ invites: [inviteOf(3, 1)] }),
+  it('drops the answer of a link made before the panel was asked for again', async () => {
+    let release: (r: Response) => void = () => undefined;
+    forMember({ 'POST /v2/invites': () => new Promise<Response>((resolve) => (release = resolve)) });
+    render(<App origin={origin} />);
+    const nav = within(await screen.findByRole('navigation', { name: 'Channels' }));
+    await nav.findByRole('button', { name: 'ops' });
+    const panel = screen.getByRole('region', { name: 'Invites' });
+    fireEvent.click(nav.getByRole('button', { name: 'Actions for ops' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
+    fireEvent.click(nav.getByRole('button', { name: 'Actions for general' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Invite people' }));
+    await act(async () => {
+      release(json({ invite: linkOf(7, 2), code: newCode }, 201));
+      await Promise.resolve();
     });
-    window.sessionStorage.setItem(key, operatorToken);
+    expect(within(panel).queryByRole('textbox', { name: 'Invite link' })).toBeNull();
+    expect(document.body.innerHTML).not.toContain(newCode);
+  });
+
+  it('goes back to sign-in when the server stops knowing the credential', async () => {
+    forMember({ 'POST /v2/invites': () => json({}, 401) });
     render(<App origin={origin} />);
     const panel = await openPanel();
-    await within(panel).findByRole('list', { name: 'Your invites' });
-    expect(within(panel).getByRole('checkbox', { name: 'Voice' })).toBeDefined();
-    expect(within(panel).queryByText(/invites? left/)).toBeNull();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Make link' }));
+    expect(await screen.findByRole('button', { name: 'Sign in' })).toBeDefined();
   });
 });
 
-// Design §5.4 (security review of #713, B-1): on plain HTTP beyond this
-// machine the landing page offers no form that would send a password or
-// start a visit, whatever the invite allows, and says what the operator has
-// to do. Signing in instead is still offered: that page is held to the same
-// rule.
 describe('the landing page over plain HTTP', () => {
   it.each([
     { name: 'an account-only invite', join: undefined },
     { name: 'an invite that admits both', join: { guest: true, account: true } },
     { name: 'a guest-only invite', join: { guest: true, account: false } },
   ])('offers no password or guest form for $name, and explains HTTPS', async ({ join }) => {
-    const calls = serve({ ...joining, 'POST /v1/invites/preview': () => json(join === undefined ? preview : { ...preview, join }) });
+    const calls = serve({ ...joining, 'POST /v2/invites/preview': () => json({ ...preview, join: join ?? preview.join }) });
     window.location.hash = `#/invite/${inviteCode}`;
     render(<App origin="http://192.168.1.20:8080" />);
     expect(await screen.findByText(insecureLine)).toBeDefined();

@@ -72,6 +72,47 @@ const (
 	// room's share. Its actor is that participant's principal; the sources
 	// are withdrawn.
 	AuditVoiceShareUnclaimed = "voice_share_unclaimed"
+	// AuditVoiceShareAudioStarted is written by the companion audio endpoint
+	// (issue #898) when the share's holder consents to their companion
+	// publishing the share's sound, before it is answered, and again when
+	// they ask with another scope (the consent recorded changes; the
+	// permission does not). Its actor is the holder and its detail
+	// "channel=<id> scope=<application or system_excluding_call>". Asking
+	// again with the scope already recorded writes nothing.
+	AuditVoiceShareAudioStarted = "voice_share_audio_started"
+	// AuditVoiceShareAudioStopped is written once for every consent that
+	// started, when it ends: by the holder's DELETE (reason=self) or with the
+	// share, for the share's own reason. Its actor is the operator for
+	// reason=operator and the holder otherwise, and its detail
+	// "channel=<id> principal=<holder> reason=<self, operator, left,
+	// access_lost, rotated or idle>", as voice_share_stopped's.
+	AuditVoiceShareAudioStopped = "voice_share_audio_stopped"
+)
+
+// Audit actions of the camera (ADR-015, issue #1241;
+// docs/design/webcam-video.md §4.7). Their subject is "channel:<id>"; none
+// carries a token, a room name, a device name or a device id. A refused claim
+// writes none of them.
+const (
+	// AuditVoiceCameraStarted is written by the camera endpoint when a claim
+	// is granted, before it is answered. Its actor is the person and its
+	// detail "channel=<id>".
+	AuditVoiceCameraStarted = "voice_camera_started"
+	// AuditVoiceCameraStopped is written once for every camera claim that
+	// started, when it ends. Its actor is the person for reason=self, the
+	// operator for reason=operator, and "system" for every end conchd decided
+	// (left, access_lost, rotated, idle); its detail "channel=<id>
+	// principal=<person> reason=<self, operator, left, access_lost, rotated
+	// or idle>".
+	AuditVoiceCameraStopped = "voice_camera_stopped"
+	// AuditVoiceCameraUnclaimed is written by the poller, once per track, when
+	// it sees a camera track published by a participant who holds no camera
+	// claim, or a track whose kind and declared source disagree. Its actor is
+	// that participant's principal and its detail "channel=<id>
+	// source=observed track_source=<declared> track_type=<declared>", with
+	// " participant=screen|view" for a companion or a viewer. The source is
+	// withdrawn, or the publisher removed.
+	AuditVoiceCameraUnclaimed = "voice_camera_unclaimed"
 )
 
 // AuditVoiceCompanionRemoved is written by the poller (issue #932) when
@@ -97,6 +138,9 @@ const (
 	VoiceRotateRevoked           = "credential_revoked"
 	VoiceRotateExpired           = "credential_expired"
 	VoiceRotateNotHuman          = "not_human"
+	// VoiceRotateChannelArchived is the reason of a rotation the server asks
+	// for when a channel is archived (issue #844); no holder is invalid.
+	VoiceRotateChannelArchived = "channel_archived"
 )
 
 // DefaultVoiceRoomPrefix starts every room name when --livekit-room-prefix is not

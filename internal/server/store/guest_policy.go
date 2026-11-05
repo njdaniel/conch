@@ -20,22 +20,25 @@ import (
 // both the server's guests_enabled switch and the entry point's guest mode.
 //
 // The policy is checked again inside the IMMEDIATE transaction that starts a
-// visit (JoinAsGuest, RedeemInviteGuest), so a preview read a moment before,
-// or a settings change racing the join, cannot admit anyone the policy at
-// commit refuses. The same predicates answer the previews (AddressJoinOptions,
+// visit (RedeemInviteGuest), so a preview read a moment before, or a
+// settings change racing the join, cannot admit anyone the policy at commit
+// refuses. The same predicates answer the previews (AddressJoinOptions,
 // PreviewInvite's join), so what a preview offers and what a write allows
 // agree.
 //
-// An account from the bare address (JoinAsAccount, issue #711) is held to
-// the same settings, in the same way: its mode is checked in the creating
-// transaction, and the account exists only with its password.
+// An account from the bare address (JoinAsAccount: open sign-up, issue
+// #987) is held to the same settings, in the same way: open_signup is
+// checked in the creating transaction, and the account exists only with its
+// password.
 //
-// Guests are removed for now (issue #1005): no entry point may admit them.
-// The settings can no longer turn guests on or make the bare address admit
-// them (PutJoinSettings), no invite may admit them (CreateInvite), and a
-// store whose rows still do is normalized when it is opened
-// (NormalizeGuestSettings). The guest tables, the visits already live and
-// the code that starts a visit stay, unused, for when guests come back.
+// The bare address never admits a guest (ADR-013, issue #987): its guest
+// visit path is gone, and guests, when they return, come through guest
+// links (#1004). Guests are removed for now everywhere else too (issue
+// #1005): the settings can no longer turn guests on (PutJoinSettings), no
+// invite may admit them (CreateInvite), and a store whose rows still do is
+// normalized when it is opened (NormalizeGuestSettings). The guest tables,
+// the visits already live and the invite's guest path stay, unused, for
+// when guests come back.
 
 // The server_settings keys of the joining settings.
 const (
@@ -90,6 +93,10 @@ var (
 	// guests, and guests are removed for now (issue #1005).
 	ErrGuestsRemoved = errors.New("store: guests are turned off on this server for now")
 )
+
+// joinVoiceAlwaysOnReason is what a settings change asking join_voice false
+// is answered (issue #987).
+const joinVoiceAlwaysOnReason = "join_voice is always on: every member may use voice"
 
 // guestsRemovedReason is what a refused settings change says.
 const guestsRemovedReason = "guests are turned off on this server for now: guests_enabled cannot be turned on, and open_joining may be off or account"
@@ -146,13 +153,6 @@ func invalidSettings(reason string) error {
 	return &JoinSettingsError{Err: ErrJoinSettingsInvalid, Reason: reason}
 }
 
-// AddressAdmitsGuests reports whether the bare address admits guests under
-// s, before the pause, the channels and the caps: guests are enabled and the
-// address's mode offers them.
-func AddressAdmitsGuests(s schema.JoinSettingsV1) bool {
-	return s.GuestsEnabled && (s.OpenJoining == schema.OpenJoiningGuest || s.OpenJoining == schema.OpenJoiningBoth)
-}
-
 // InviteAdmitsGuests reports whether an invite of mode m admits guests; the
 // server's guests_enabled switch still has to be on.
 func InviteAdmitsGuests(m schema.InviteJoinMode) bool {
@@ -175,38 +175,28 @@ func GuestCapReached(s schema.JoinSettingsV1, live, addressLive int) bool {
 	return s.MaxGuestsPerAddress > 0 && int64(addressLive) >= s.MaxGuestsPerAddress
 }
 
-// AddressAdmitsAccounts reports whether the bare address's mode offers
-// accounts under s, before the pause and the channels (issue #711). The
-// guests_enabled switch plays no part: it is about guests only.
+// AddressAdmitsAccounts reports whether open sign-up is on under s, before
+// the pause and the channels (issue #711, ADR-013 decision 5). Since
+// migration 40 the mode reads account exactly while open_signup is on.
 func AddressAdmitsAccounts(s schema.JoinSettingsV1) bool {
 	return s.OpenJoining == schema.OpenJoiningAccount || s.OpenJoining == schema.OpenJoiningBoth
 }
 
-// AddressJoinOptions is what the bare address offers now: Guest when a visit
-// may start, GuestsFull when only a cap stops one, Account when an account
-// may be made (addressAccountPolicy), and Paused, with neither, when joining
-// is paused. They are the predicates JoinAsGuest and JoinAsAccount apply.
-func AddressJoinOptions(s schema.JoinSettingsV1, openChannels, live, addressLive int) schema.JoinOptionsV1 {
+// AddressJoinOptions is what the bare address offers now: Account when an
+// account may be made (addressAccountPolicy), and Paused, with nothing else,
+// when open sign-up is on but paused. The bare address never admits a guest
+// (ADR-013, issue #987): Guest and GuestsFull are always false, whatever
+// guests_enabled says. It is the predicate JoinAsAccount applies.
+func AddressJoinOptions(s schema.JoinSettingsV1) schema.JoinOptionsV1 {
 	var out schema.JoinOptionsV1
-	if s.OpenJoining == schema.OpenJoiningOff {
+	if !AddressAdmitsAccounts(s) {
 		return out
 	}
 	if s.JoiningPaused {
 		out.Paused = true
 		return out
 	}
-	if openChannels == 0 {
-		return out
-	}
-	out.Account = AddressAdmitsAccounts(s)
-	if !AddressAdmitsGuests(s) {
-		return out
-	}
-	if GuestCapReached(s, live, addressLive) {
-		out.GuestsFull = true
-	} else {
-		out.Guest = true
-	}
+	out.Account = len(s.OpenChannels) > 0
 	return out
 }
 
@@ -400,7 +390,7 @@ func admittingOpenChannelsTx(ctx context.Context, tx execer) (kept, dropped []sc
 	for _, l := range all {
 		ok := !l.addedBy.Valid
 		if !ok {
-			if ok, err = permittedTx(ctx, tx, l.addedBy.Int64, schema.PermManageChannels); err != nil {
+			if ok, err = standingPermittedTx(ctx, tx, l.addedBy.Int64, schema.PermManageChannels); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -417,6 +407,9 @@ func admittingOpenChannelsTx(ctx context.Context, tx execer) (kept, dropped []sc
 // it needs beside the settings.
 type JoinState struct {
 	Settings schema.JoinSettingsV1
+	// DefaultChannels are the default channels by id and name, in id order:
+	// the channels Settings.OpenChannels names (ADR-013, issue #987).
+	DefaultChannels []schema.InviteChannelV1
 	// LiveGuests is how many visits are live now: what max_guests counts.
 	LiveGuests int
 	// ReservedNames is how many permanent principals hold a name in the
@@ -475,7 +468,11 @@ func (s *Store) joinStateTx(ctx context.Context, tx execer, now time.Time) (Join
 	if err != nil {
 		return JoinState{}, err
 	}
-	return JoinState{Settings: set, LiveGuests: live, ReservedNames: len(reserved), ServerNameHolders: len(holders)}, nil
+	defaults, err := openChannelsTx(ctx, tx)
+	if err != nil {
+		return JoinState{}, err
+	}
+	return JoinState{Settings: set, DefaultChannels: defaults, LiveGuests: live, ReservedNames: len(reserved), ServerNameHolders: len(holders)}, nil
 }
 
 // PutJoinSettings applies req to the joining settings in one IMMEDIATE
@@ -501,6 +498,12 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 	}
 	if requestAdmitsGuests(req) {
 		return JoinState{}, conflict(guestsRemovedReason)
+	}
+	// Voice is every member's under the community model (ADR-013 decision
+	// 5, design §3.4 Option B): join_voice reads true and cannot be turned
+	// off (issue #987).
+	if req.JoinVoice != nil && !*req.JoinVoice {
+		return JoinState{}, conflict(joinVoiceAlwaysOnReason)
 	}
 	var out JoinState
 	err := s.withImmediateTx(ctx, func(tx execer) error {
@@ -556,6 +559,18 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 		if err := checkOpenChannelsWriterTx(ctx, tx, actorID, next, curChannels, nextIDs); err != nil {
 			return err
 		}
+		// A default channel is public (ADR-013 O5): a private channel named
+		// in open_channels is refused, never made public (issue #987,
+		// design §3.4 Option B). Checked after the writer check, so a writer
+		// without manage_channels learns nothing here about a private
+		// channel it is not in. A channel already listed is a default
+		// channel, public by the trigger, so only the request's names can
+		// be private.
+		if req.OpenChannels != nil {
+			if err := checkOpenChannelsPublicTx(ctx, tx, nextIDs); err != nil {
+				return err
+			}
+		}
 		if err := refreshOpenChannelsListerTx(ctx, tx, actorID, nextIDs); err != nil {
 			return err
 		}
@@ -602,13 +617,13 @@ func (s *Store) PutJoinSettings(ctx context.Context, actor string, actorID int64
 			if err != nil {
 				return err
 			}
-			// Listing a private channel makes it public (until I7 refuses it):
-			// the row says so, as it changes who may find the channel.
-			detail := ""
 			if madePublic {
-				detail = "visibility=private->public"
+				// checkOpenChannelsPublicTx refused every private channel
+				// above, in this transaction: reaching here is a bug, and
+				// nothing is written.
+				return fmt.Errorf("store: put join settings: channel %d was private", id)
 			}
-			if err := appendAuditEventTx(ctx, tx, actor, AuditOpenChannelAdded, channelSubject(id), detail, now); err != nil {
+			if err := appendAuditEventTx(ctx, tx, actor, AuditOpenChannelAdded, channelSubject(id), "", now); err != nil {
 				return err
 			}
 		}
@@ -683,6 +698,22 @@ func errOpenChannelNotYours() error {
 		Reason: "listing a channel you are not in, or opening the address to one, needs manage_channels"}
 }
 
+// checkOpenChannelsPublicTx refuses, with ErrChannelSettingsConflict, a
+// joining-settings write that names a private channel in open_channels: a
+// default channel must be public (ADR-013 O5, issue #987).
+func checkOpenChannelsPublicTx(ctx context.Context, tx execer, ids map[int64]bool) error {
+	for id := range ids {
+		var vis string
+		if err := tx.QueryRowContext(ctx, "SELECT visibility FROM channels WHERE id = ?", id).Scan(&vis); err != nil {
+			return fmt.Errorf("store: put join settings: read visibility: %w", err)
+		}
+		if vis != string(schema.ChannelPublic) {
+			return ErrChannelSettingsConflict
+		}
+	}
+	return nil
+}
+
 // refreshOpenChannelsListerTx makes an owner's write of the joining
 // settings the lister of every channel it leaves listed (ADR-014 design
 // §7.3): open_channels.added_by is who stands behind each channel at every
@@ -709,10 +740,8 @@ func refreshOpenChannelsListerTx(ctx context.Context, tx execer, actorID int64, 
 // communityJoinSettings applies Option B's write mapping (design §3.4) to
 // next, the settings req makes: open_joining account or off and open_signup
 // say the same thing, so a request naming both must agree, and either one
-// sets the other; join_voice is always on. The route-level refusals of a
-// join_voice false and of a private open channel are I7's (issue #987);
-// until then join_voice false is not stored, and listing a channel makes it
-// public (setDefaultChannelTx), as migration 40 made every open channel.
+// sets the other; join_voice is always on. PutJoinSettings refuses a
+// join_voice false and a private open channel before this (issue #987).
 func communityJoinSettings(req schema.PutJoinSettingsRequestV1, next schema.JoinSettingsV1) (schema.JoinSettingsV1, error) {
 	if req.OpenSignup != nil {
 		mode := schema.OpenJoiningOff
@@ -832,66 +861,6 @@ type AdmittedGuest struct {
 	Channels []schema.InviteChannelV1
 }
 
-// JoinAsGuest starts a visit from the bare address (POST /v1/join/guest),
-// in one IMMEDIATE transaction that reads the policy again: guests enabled
-// and the address's mode offering them (else ErrGuestsDisabled), not paused
-// (ErrJoiningPaused), at least one open channel (ErrGuestsDisabled), and the
-// caps (ErrGuestsFull). The visit is admitted to every open channel with the
-// settings' bounds and join_voice, as actor "system". A label the rules
-// refuse is ErrGuestLabelInvalid, before anything is read.
-func (s *Store) JoinAsGuest(ctx context.Context, e GuestEntry) (AdmittedGuest, error) {
-	p, err := prepareGuest(e.Label, e.ServerName)
-	if err != nil {
-		return AdmittedGuest{}, err
-	}
-	var out AdmittedGuest
-	err = s.withImmediateTx(ctx, func(tx execer) error {
-		now := credentialNow().Truncate(time.Millisecond)
-		set, err := joinSettingsTx(ctx, tx)
-		if err != nil {
-			return err
-		}
-		if !AddressAdmitsGuests(set) {
-			return ErrGuestsDisabled
-		}
-		if set.JoiningPaused {
-			return ErrJoiningPaused
-		}
-		// The channels whose lister still stands behind them, as for an
-		// account (ADR-014 design §7.3). Guests are removed for now (#1005);
-		// this keeps the path from becoming a hole if they return.
-		channels, dropped, err := admittingOpenChannelsTx(ctx, tx)
-		if err != nil {
-			return err
-		}
-		if len(channels) == 0 {
-			return ErrGuestsDisabled
-		}
-		for _, c := range dropped {
-			if err := appendAuditEventTx(ctx, tx, "system", AuditJoinChannelDropped, channelSubject(c.ID), "reason=permission", now); err != nil {
-				return err
-			}
-		}
-		ids := make([]int64, len(channels))
-		for i, c := range channels {
-			ids[i] = c.ID
-		}
-		g := guestUnder(set, e)
-		g.Origin, g.Channels, g.VoiceAllowed = schema.GuestOriginAddress, ids, set.JoinVoice
-		created, err := createGuestTx(ctx, tx, "system", g, p, now)
-		if err != nil {
-			return err
-		}
-		out = AdmittedGuest{CreatedGuest: created, Channels: channels}
-		return nil
-	})
-	if err != nil {
-		return AdmittedGuest{}, err
-	}
-	out.Token = p.token
-	return out, nil
-}
-
 // CheckJoinAccount is what POST /v1/join/account asks before it hashes
 // anything: whether the bare address could make an account now
 // (addressAccountPolicy: ErrJoiningClosed, ErrJoiningPaused). JoinAsAccount
@@ -927,12 +896,11 @@ const AccountCredentialLabel = "account created"
 // the hidden and guest namespaces and the server's name, ErrNameInvalid),
 // and makes the principal, its password, its memberships of every open
 // channel and its first credential together, so a refusal or a failure leaves nothing
-// behind. The account gets what a bare-address joiner gets and nothing
-// more: join_voice, no right to invite, can_decide 0 in every channel, and,
-// as a guest's, a history bound at each channel's last message, since the
-// bare address is open to anyone and designating a channel for it does not
-// publish its earlier history (design §2). The credential renews as an
-// invited member's does, with an invite's default lifetime. Every row is
+// behind. Under open sign-up (ADR-013, issue #987, design §2.1) the account
+// is the member a member link makes, apart from invited_by: the default
+// channels with no history bound, can_decide 0 in each, voice on and the
+// may_invite brake on (addOpenSignupMembershipsTx). The credential renews as
+// an invited member's does, with an invite's default lifetime. Every row is
 // attributed to "system": principal_created, password_set (via=join),
 // member_added for each channel and credential_created. now is the invite
 // clock, as for RedeemInvite.
@@ -977,10 +945,12 @@ func (s *Store) JoinAsAccount(ctx context.Context, name, record string, now time
 				return err
 			}
 		}
+		// The member a member link makes (issue #987, design §2.1): voice
+		// on and the may_invite brake on, as every member's are by default.
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO principals (kind, name, name_key, name_skel, role, created_at, voice_allowed)
-			 VALUES ('human', ?, ?, ?, 'member', ?, ?)`,
-			name, keys.Folded, keys.Skeletal, now.UnixMilli(), boolInt(set.JoinVoice))
+			`INSERT INTO principals (kind, name, name_key, name_skel, role, created_at, voice_allowed, may_invite)
+			 VALUES ('human', ?, ?, ?, 'member', ?, 1, 1)`,
+			name, keys.Folded, keys.Skeletal, now.UnixMilli())
 		if isUniqueConstraintErr(err) {
 			return fmt.Errorf("store: join as an account: create principal %q: %w", name, ErrDuplicate)
 		}
@@ -1000,27 +970,12 @@ func (s *Store) JoinAsAccount(ctx context.Context, name, record string, now time
 		if err := appendAuditEventTx(ctx, tx, actor, AuditPasswordSet, principalActor(pid), "via=join", now); err != nil {
 			return err
 		}
-		for _, c := range channels {
-			watermark, err := historyWatermarkTx(ctx, tx, c.ID)
-			if err != nil {
-				return err
-			}
-			// A joiner from the bare address never gets the right to decide
-			// the channel's approvals, as a joiner through an invite does
-			// not (issue #450): the column's default of 1 is for members an
-			// operator adds.
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO channel_members (channel_id, principal_id, created_at, can_decide, history_after) VALUES (?, ?, ?, 0, ?)`,
-				c.ID, pid, now.UnixMilli(), watermark); err != nil {
-				return fmt.Errorf("store: join as an account: add member: %w", err)
-			}
-			if err := appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(c.ID), memberDetail(pid), now); err != nil {
-				return err
-			}
+		if err := addOpenSignupMembershipsTx(ctx, tx, actor, pid, channels, now); err != nil {
+			return err
 		}
 		lifetime := schema.DefaultInviteCredentialLifetimeSeconds * time.Second
 		exp := now.Add(lifetime)
-		cred, err := insertCredentialTx(ctx, tx, pid, AccountCredentialLabel, token, now, &exp, lifetime)
+		cred, err := insertCredentialTx(ctx, tx, pid, AccountCredentialLabel, token, now, &exp, lifetime, issuerOf(actor))
 		if err != nil {
 			return err
 		}
@@ -1028,7 +983,7 @@ func (s *Store) JoinAsAccount(ctx context.Context, name, record string, now time
 			return err
 		}
 		out = AdmittedAccount{
-			Principal:  Principal{ID: pid, Kind: PrincipalHuman, Name: name, Role: RoleMember, CreatedAt: now, VoiceAllowed: set.JoinVoice},
+			Principal:  Principal{ID: pid, Kind: PrincipalHuman, Name: name, Role: RoleMember, CreatedAt: now, VoiceAllowed: true, MayInvite: true},
 			Credential: cred,
 			Channels:   channels,
 		}
@@ -1039,6 +994,39 @@ func (s *Store) JoinAsAccount(ctx context.Context, name, record string, now time
 	}
 	out.Token = token
 	return out, nil
+}
+
+// addOpenSignupMembershipsTx adds pid, a member open sign-up just made, to
+// channels, the default channels its lister still stands behind, through
+// addJoinerMembershipsTx, and audits each member_added as actor.
+func addOpenSignupMembershipsTx(ctx context.Context, tx execer, actor string, pid int64, channels []schema.InviteChannelV1, now time.Time) error {
+	if err := addJoinerMembershipsTx(ctx, tx, pid, sql.NullInt64{}, channels, now); err != nil {
+		return fmt.Errorf("store: join as an account: %w", err)
+	}
+	for _, c := range channels {
+		if err := appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(c.ID), memberDetail(pid), now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// addJoinerMembershipsTx is the one membership write of a member who has
+// just joined, through open sign-up or through a member link or a legacy
+// invite (issues #986, #987; design §2.1): pid joins each of channels with
+// no history bound and no right to decide the channel's approvals (issue
+// #450; the column's default of 1 is for members an operator adds), added
+// by addedBy (an invite's maker; none for open sign-up). It is the place the
+// directory signal (#988, design §13.11 O14) hooks. Callers audit.
+func addJoinerMembershipsTx(ctx context.Context, tx execer, pid int64, addedBy sql.NullInt64, channels []schema.InviteChannelV1, now time.Time) error {
+	for _, c := range channels {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide) VALUES (?, ?, ?, ?, 0)`,
+			c.ID, pid, addedBy, now.UnixMilli()); err != nil {
+			return fmt.Errorf("add member: %w", err)
+		}
+	}
+	return nil
 }
 
 // guestUnder is a visit under the settings' bounds and caps, for e.

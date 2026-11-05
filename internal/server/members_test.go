@@ -150,6 +150,8 @@ func TestChannelContentLeak(t *testing.T) {
 		{"v2 websocket", "GET", "/v2/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
 		// Listing members is allowed to members and to operators only.
 		{"member list", "GET", "/v1/channels/%s/members", "", false, [4]int{ok, notFound, notFound, ok}},
+		// Naming authors (design §13.5) sits behind the same gate.
+		{"authors", "GET", "/v1/channels/%s/authors?ids=1", "", false, [4]int{ok, notFound, notFound, ok}},
 		// The membership writes (issue #790) are an operator's or a manager's:
 		// an agent is refused before any lookup (the same 403 for an unknown
 		// channel), a member who does not manage gets 403, and a non-member
@@ -173,12 +175,26 @@ func TestChannelContentLeak(t *testing.T) {
 		// non-member is told nothing.
 		{"voice share claim", "POST", "/v1/channels/%s/voice/share", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		{"voice share stop", "DELETE", "/v1/channels/%s/voice/share", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, http.StatusServiceUnavailable}},
+		// Camera (issue #1241): claiming answers as the session endpoint
+		// does, and so does a person's own release, operators included. An
+		// operator's stop of someone else's camera lets a holder of
+		// manage_channels through, member or not; a member without it is
+		// refused 403 (the channel is theirs to see), and any other
+		// non-member is told nothing.
+		{"voice camera claim", "POST", "/v1/channels/%s/voice/camera", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		{"voice camera release", "DELETE", "/v1/channels/%s/voice/camera", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		{"voice camera operator stop", "DELETE", "/v1/channels/%s/voice/camera?principal=9999", "", false, [4]int{http.StatusForbidden, notFound, notFound, http.StatusServiceUnavailable}},
 		// Companion and viewer participants (issue #933): answered as the
 		// session endpoint is. The body is read after membership, so a
 		// non-member gets the 404 with a valid body, a malformed one and none.
 		{"voice companion", "POST", "/v1/channels/%s/voice/companion", `{"publish":"screen","subscribe":true}`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		{"voice companion, malformed body", "POST", "/v1/channels/%s/voice/companion", `{"publish":`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		{"voice companion removal", "DELETE", "/v1/channels/%s/voice/companion", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		// The companion's share audio (issue #898): answered as the
+		// companion route is; the body is read after membership.
+		{"voice companion audio", "PUT", "/v1/channels/%s/voice/companion/audio", `{"scope":"application"}`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		{"voice companion audio, malformed body", "PUT", "/v1/channels/%s/voice/companion/audio", `{"scope":`, false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
+		{"voice companion audio withdrawal", "DELETE", "/v1/channels/%s/voice/companion/audio", "", false, [4]int{http.StatusServiceUnavailable, notFound, notFound, notFound}},
 		// Voice presence (issue #127): who is connected and who is talking is
 		// channel content. Not configured is still a snapshot for a member
 		// (200, configured false); everyone else gets the unknown-channel 404.
@@ -186,6 +202,11 @@ func TestChannelContentLeak(t *testing.T) {
 		{"voice presence websocket", "GET", "/v1/voice/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
 		// The events socket (issue #269) is gated like the roster: a non-member is told nothing.
 		{"events websocket", "GET", "/v1/events/ws?channel=%s", "", true, [4]int{upgraded, notFound, notFound, notFound}},
+		// Self-join (issue #982): alpha is private, so a member gets their
+		// membership back (200) and a non-member the unknown channel's
+		// 404; an agent is refused before any lookup, the same 403 for an
+		// unknown channel.
+		{"self-join", "POST", "/v1/channels/%s/join", "", false, [4]int{ok, notFound, http.StatusForbidden, notFound}},
 	}
 	// Completeness guard: every route that addresses a channel must either have
 	// a row above or be listed here with the reason it is not a content path.
@@ -194,6 +215,7 @@ func TestChannelContentLeak(t *testing.T) {
 		"POST /v2/channels/{channel}/files":                               "humans-only upload: an agent is refused before the channel is looked up; covered by TestFileUploadRefusals and the file visibility matrix",
 		"POST /v1/channels/{channel}/nets":                                "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"PUT /v1/channels/{channel}/read-state":                           "humans-only: an agent is refused 403 before the channel is looked up, whichever channel it names, and a human non-member gets the unknown-channel 404; covered by TestReadStatePut",
+		"POST /v1/channels/{channel}/leave":                               "a member's leave ends their membership, which later rows need; a non-member's leave is the unknown channel's 404 and an agent is refused before any lookup, covered by TestLeaveChannelRefusals (byte-identical per caller class) and e2e/isolation",
 		"POST /v1/ws-tickets":                                             "names no channel (it only matches the \"/ws\" test above by its spelling); a ticket opens the same v2 socket, which is checked per channel at the upgrade by the row above and by TestWSTicketOpensSocket",
 		"DELETE /v1/channels/{channel}/nets/{net}":                        "operator-only net write; covered by the role matrix and TestNetEndpoints",
 		"PUT /v1/channels/{channel}/members/{principal_id}":               "a membership write (operator or manager, issue #790); covered by the \"member put\" row above, whose path names a principal id",

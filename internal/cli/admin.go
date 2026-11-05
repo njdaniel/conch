@@ -52,6 +52,12 @@ type adminOpts struct {
 	join joinOpts
 	// permissions holds the flags of `permissions set` (issue #1022).
 	permissions permissionsOpts
+	// community holds the flags of `channel settings` (issue #994), in
+	// admin_community.go.
+	community communityOpts
+	// aiAdmin holds the flags of `ai-admin create` (issue #1332), in
+	// admin_ai_admin.go.
+	aiAdmin aiAdminOpts
 }
 
 // principalOpts holds the flags of the principal list, hide and sign-in-link
@@ -108,6 +114,9 @@ type adminCommand struct {
 // lists the groups.
 var adminCommands = []adminCommand{
 	{group: "channel", verb: "create", args: []string{"name"}, run: adminChannelCreate},
+	// The community model (ADR-013, issue #994), in admin_community.go.
+	{group: "channel", verb: "settings", args: []string{"channel"}, flags: "[--public|--private] [--default on|off] [--archive|--restore] ",
+		bind: bindChannelSettings, run: adminChannelSettings},
 	{group: "principal", verb: "create", args: []string{"name"}, flags: "--kind human|agent ", required: []string{"kind"},
 		bind: func(fs *flag.FlagSet, o *adminOpts) { fs.StringVar(&o.kind, "kind", "", "human or agent") },
 		run:  adminPrincipalCreate},
@@ -165,10 +174,17 @@ var adminCommands = []adminCommand{
 		},
 		run: adminManifestPut},
 	{group: "manifest", verb: "get", args: []string{"principal-id"}, idAt: 1, run: adminManifestGet},
+	// AI administrators (issue #1332), in admin_ai_admin.go.
+	{group: "ai-admin", verb: "create", args: []string{"name"},
+		flags: "[--channel <name>] [--grant <perm,...>] [--require-approval <action,...>] [--ttl <duration>] [--run-window <duration>] [--quorum <n>] [--max-pending <n>] [--credential-days <n>] [--client json|claude-code] [--entry-name <entry>] ",
+		bind:  bindAIAdminCreate, run: adminAIAdminCreate},
+	{group: "ai-admin", verb: "list", run: adminAIAdminList},
+	{group: "ai-admin", verb: "show", args: []string{"id"}, idAt: 1, run: adminAIAdminShow},
+	{group: "ai-admin", verb: "revoke", args: []string{"id"}, idAt: 1, run: adminAIAdminRevoke},
 	// Invites and their administration (issue #438), in admin_invite.go.
-	{group: "invite", verb: "create", flags: "--open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] [--join-as account|guest|both] ",
-		required: []string{"channel", "expires"}, bind: bindInviteCreate, run: adminInviteCreate},
-	{group: "invite", verb: "list", flags: "[--state open|used|expired|closed] [--kind personal|open] [--created-by <id>] ",
+	{group: "invite", verb: "create", flags: "[--expires <duration|RFC3339> | --never-expires] [--uses <n>] [--credential-days <n>] [--landing-channel <name>...] ",
+		bind: bindInviteCreate, run: adminInviteCreate},
+	{group: "invite", verb: "list", flags: "[--state open|used|expired|closed] [--created-by <id>] ",
 		bind: bindInviteList, run: adminInviteList},
 	{group: "invite", verb: "close", args: []string{"id"}, idAt: 1, run: adminInviteClose},
 	{group: "invite", verb: "joiners", args: []string{"id"}, idAt: 1, run: adminInviteJoiners},
@@ -184,12 +200,13 @@ var adminCommands = []adminCommand{
 	// admin_invite.go.
 	{group: "principal", verb: "sign-in-link", args: []string{"id"}, idAt: 1, flags: "[--purpose sign_in|reset|enrollment] [--expires <duration|RFC3339>] ",
 		bind: bindSignInLink, run: adminPrincipalSignInLink},
+	{group: "principal", verb: "voice", args: []string{"id", "on|off"}, idAt: 1, run: adminPrincipalVoice},
 	// Closing one that leaked, by the link's id (the id `principal
 	// sign-in-link` prints), without disabling its person.
 	{group: "sign-in-link", verb: "close", args: []string{"id"}, idAt: 1, run: adminSignInLinkClose},
 	// The joining policy and guest visits (issue #715), in admin_guest.go.
 	{group: "join", verb: "status", run: adminJoinStatus},
-	{group: "join", verb: "set", flags: "[--open-joining off|guest|account|both] [--guests on|off] [--paused on|off] [--voice on|off] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels] ",
+	{group: "join", verb: "set", flags: "[--open-signup on|off] [--link-expiry <duration|0>] [--open-joining off|account] [--guests off] [--paused on|off] [--voice on] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels] ",
 		bind: bindJoinSet, run: adminJoinSet},
 	{group: "guest", verb: "list", flags: "[--state active|ended|converted] [--origin address|invite] ", bind: bindGuestList, run: adminGuestList},
 	{group: "guest", verb: "end", args: []string{"id"}, idAt: 1, run: adminGuestEnd},
@@ -201,13 +218,17 @@ var adminCommands = []adminCommand{
 		bind: bindPermissionsSet, run: adminPermissionsSet},
 	{group: "permissions", verb: "preset", args: []string{"personal|group"}, flags: "[--yes] ",
 		bind: bindYes, run: adminPermissionsPreset},
+	{group: "directory", verb: "members", run: adminDirectoryMembers},
+	// Webhook hooks (issue #1228), in admin_hook.go.
+	{group: "hook", verb: "list", run: adminHookList},
+	{group: "hook", verb: "revoke", args: []string{"hook-id"}, idAt: 1, run: adminHookRevoke},
 	// Problem reports (issue #446), in admin_report.go.
 	{group: "reports", verb: "list", flags: "[--limit <n>] ", bind: bindReportsList, run: adminReportsList},
 	{group: "reports", verb: "show", args: []string{"id"}, idAt: 1, flags: "[--markdown] ", bind: bindReportsShow, run: adminReportsShow},
 	{group: "reports", verb: "file", args: []string{"id", "issue-url"}, idAt: 1, run: adminReportsFile},
 }
 
-const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions"
+const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions|directory|ai-admin"
 
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {
@@ -414,7 +435,7 @@ func principalState(p schema.PrincipalAdminV1) schema.PrincipalState {
 }
 
 // adminPrincipalList prints
-// `<id> <kind> <role>[ owner] <active|disabled|hidden> creds <n> invite <id|-> <name>`
+// `<id> <kind> <role>[ owner] <active|disabled|hidden> creds <n> invite <id|-> voice <on|off|-> may-invite <on|off|-> <name>`
 // per principal, newest first, following the server's pages to the end. The
 // name is last because it may contain spaces.
 func adminPrincipalList(ctx context.Context, r *adminRun) error {
@@ -430,7 +451,10 @@ func adminPrincipalList(ctx context.Context, r *adminRun) error {
 	}
 	filter := PrincipalListFilter{State: o.state, NamePrefix: o.prefix, Kind: r.opts.kind, InviteID: o.inviteID, Limit: schema.MaxListPrincipalsLimit}
 	all := []schema.PrincipalAdminV1{}
-	for {
+	for n := 0; ; n++ {
+		if n == maxListPages {
+			return errors.New("cli: admin principal list: the server's pages do not end")
+		}
 		page, err := r.client.ListPrincipals(ctx, filter)
 		if err != nil {
 			return err
@@ -457,8 +481,8 @@ func adminPrincipalList(ctx context.Context, r *adminRun) error {
 		if p.Owner {
 			owner = " owner"
 		}
-		if _, err := fmt.Fprintf(r.stdout, "%d %s %s%s %s creds %d invite %s %s\n", p.ID, safeLine(string(p.Kind)), safeLine(string(p.Role)), owner,
-			principalState(p), p.LiveCredentials, invite, safeLine(p.Name)); err != nil {
+		if _, err := fmt.Fprintf(r.stdout, "%d %s %s%s %s creds %d invite %s voice %s may-invite %s %s\n", p.ID, safeLine(string(p.Kind)), safeLine(string(p.Role)), owner,
+			principalState(p), p.LiveCredentials, invite, optionalOnOff(p.VoiceAllowed), optionalOnOff(p.MayInvite), safeLine(p.Name)); err != nil {
 			return err
 		}
 	}
@@ -791,8 +815,17 @@ func adminManifestGet(ctx context.Context, r *adminRun) error {
 		}
 		grants[i] = strconv.FormatInt(g.ChannelID, 10) + ":" + strings.Join(perms, ",")
 	}
-	_, err = fmt.Fprintf(r.stdout, "%d tier %s capabilities %s channels %s %s\n",
-		m.PrincipalID, safeLine(string(m.Tier)), dashIfEmpty(strings.Join(caps, ",")), dashIfEmpty(strings.Join(grants, " ")), safeLine(m.DisplayName))
+	// A grant (issue #1332) is shown only when there is one, so the line of an
+	// ordinary agent is unchanged.
+	granted := ""
+	if len(m.Permissions) > 0 {
+		granted = " permissions " + permissionNames(m)
+		if m.Admin != nil {
+			granted += " approvals-in " + strconv.FormatInt(m.Admin.ApprovalChannelID, 10)
+		}
+	}
+	_, err = fmt.Fprintf(r.stdout, "%d tier %s capabilities %s channels %s%s %s\n",
+		m.PrincipalID, safeLine(string(m.Tier)), dashIfEmpty(strings.Join(caps, ",")), dashIfEmpty(strings.Join(grants, " ")), granted, safeLine(m.DisplayName))
 	return err
 }
 

@@ -5,6 +5,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import * as api from './api';
 import { uploadRefusalLine } from './fileSize';
 import { ChangeName } from './ChangeName';
+import { ChannelDirectory } from './ChannelDirectory';
 import { CreateChannel } from './CreateChannel';
 import { Conversation } from './Conversation';
 import { GuestVisit } from './Guest';
@@ -15,17 +16,19 @@ import { FirstRun } from './FirstRun';
 import { Lobby } from './Lobby';
 import { ReportProblem } from './Report';
 import { OperatorWarning } from './OperatorWarning';
+import { archivedLine, channelArchived, isArchived } from './archived';
+import { ChannelSettingsAsk } from './ChannelSettingsAsk';
 import { RenameChannel } from './RenameChannel';
-import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, takeLinkFromAddress } from './route';
-import type { ChannelDocV1, ChannelV0 } from './schema/channel';
+import { channelFromHash, forgetChannel, hashForChannel, rememberChannel, rememberedChannel, showChannelInAddress, takeLinkFromAddress } from './route';
+import type { ChannelDocV1 } from './schema/channel';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import type { ReadStateV1 } from './schema/readstate';
 import { SignIn } from './SignIn';
 import { YourSignIns } from './SignIns';
 import { SignInLink } from './SignInLink';
 import { AddDevice } from './AddDevice';
-import { ReportsSection } from './admin/ReportsSection';
-import { GuestSettings } from './GuestSettings';
+import { AdminConsole } from './AdminConsole';
+import { canDo, memberLine } from './admin/permissions';
 import { Reauth } from './Reauth';
 import { PasswordSettings } from './Settings';
 import { Setup } from './Setup';
@@ -56,11 +59,15 @@ import { SearchPanel } from './SearchPanel';
 import { useReadState } from './useReadState';
 import { useChannelRefresh } from './useChannelRefresh';
 import { MembersPanel } from './agents/MembersPanel';
+import { CommunityMembers } from './Members';
+import { useDirectoryChanged } from './useDirectoryChanged';
 import { RunDetail } from './agents/RunDetail';
 import { useAgents } from './agents/useAgents';
 import { useNow } from './agents/useNow';
 import { VoiceStatus } from './VoiceStatus';
 import { useOccupancy } from './voice/useOccupancy';
+import { leaveVoice } from './voice/useVoice';
+import { useOccupantNames } from './voice/useOccupantNames';
 import { needsHttps } from './transport';
 
 const checkingAudience = 'Checking who this draft goes to…';
@@ -318,11 +325,19 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   }, [auth.phase]);
 
   // The hash names the open channel, so back, forward and a pasted link work.
+  // A hash that names a channel this person cannot open is corrected to the one
+  // shown, in place (F26); nothing is said of the one asked for.
   useEffect(() => {
     if (!signedIn) return;
     function onHash() {
       const name = channelFromHash(window.location.hash);
-      if (name !== null) dispatchChannels({ type: 'select', name });
+      if (name === null) return;
+      const held = channelsNow.current;
+      if (held.selected !== null && !held.channels.some((c) => c.name === name)) {
+        showChannelInAddress(held.selected);
+        return;
+      }
+      dispatchChannels({ type: 'select', name });
     }
     window.addEventListener('hashchange', onHash);
     return () => {
@@ -337,7 +352,12 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     if (channels.selected === null) return;
     rememberChannel(channels.selected);
     const hash = hashForChannel(channels.selected);
-    if (window.location.hash !== hash) window.location.hash = hash;
+    if (window.location.hash === hash) return;
+    // The address names a channel that is not this person's to open (a pasted
+    // link, say): it is corrected in place, not added to the history.
+    const asked = channelFromHash(window.location.hash);
+    if (asked !== null && !channels.channels.some((c) => c.name === asked)) showChannelInAddress(channels.selected);
+    else window.location.hash = hash;
   }, [channels.selected]);
 
   // A channel renamed (issue #728), however the page learned it: the
@@ -406,6 +426,12 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     if (principalNow.current !== null) forgetChannelStored(principalNow.current, id);
   }, [invalidateChannel, dispatchAttachments, dispatchChat]);
 
+  const leftChannel = useCallback((name: string) => {
+    const left = channelsNow.current.channels.find((c) => c.name === name);
+    if (left !== undefined) dropChannel(left.id, left.name);
+    dispatchChannels({ type: 'left', name });
+  }, [dispatchChannels, dropChannel]);
+
   const loseChannel = useCallback((id: number, name: string) => {
     dropChannel(id, name);
     dispatchChannels({ type: 'lost', name });
@@ -450,8 +476,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const onChannel = useCallback(
     (doc: ChannelDocV1) => {
       renamed(doc.channel_id, doc.name);
+      dispatchChannels({ type: 'settings', id: doc.channel_id, visibility: doc.visibility, default: doc.default, archivedAt: doc.archived_at });
     },
-    [renamed],
+    [renamed, dispatchChannels],
   );
   const onManages = useCallback(
     (id: number, manages: boolean) => {
@@ -473,9 +500,9 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   const [searchOpen, setSearchOpen] = useState(false);
   // Asks from the first-run panel for the New channel form (issue #1032).
   const [createAsks, setCreateAsks] = useState(0);
-  // A channel's ⋯ menu asked for the invite panel with that channel ticked
-  // (issue #1135): the channel and a count, so asking twice opens it twice.
-  const [inviteAsk, setInviteAsk] = useState<{ readonly channel: string; readonly n: number } | undefined>(undefined);
+  // A channel's ⋯ menu (issue #1135) or Add a person asked for the invite
+  // panel: a count, so asking twice opens it twice.
+  const [inviteAsk, setInviteAsk] = useState<{ readonly n: number } | undefined>(undefined);
   const restoreSearchFocus = useRef(false);
   useEffect(() => {
     if (searchOpen) {
@@ -550,6 +577,26 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     setEditEvent(message);
     edited(message);
   }, [edited]);
+  // The server's word that the permissions changed (ADR-014 design §8.6):
+  // whoami is read again, and what the console shows from them via the tick.
+  const [permissionsTick, setPermissionsTick] = useState(0);
+  // whoami read again, newest request wins: an answer to an earlier read that
+  // arrives after a later one's is dropped, so it cannot restore older
+  // permissions.
+  const whoReads = useRef(0);
+  const readWho = useCallback(() => {
+    const mine = ++whoReads.current;
+    void api.whoAmI().then((result) => {
+      if (mine !== whoReads.current) return;
+      if (result.ok) dispatchAuth({ type: 'refreshed', principal: result.value });
+      else if (result.failure === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
+    });
+  }, []);
+  const permissionsChanged = useCallback(() => {
+    setPermissionsTick((n) => n + 1);
+    readWho();
+  }, [readWho]);
+  const directory = useDirectoryChanged();
   const agents = useAgents({
     signedIn,
     channel: channelId === null ? null : selected,
@@ -564,7 +611,15 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     onMessage: setMessageEvent,
     onMessageEdited,
     onChannelsChanged: refreshChannels,
+    onPermissionsChanged: permissionsChanged,
+    onDirectoryChanged: directory.signal,
   });
+  // The server's word that the directory changed (issue #993): the community
+  // panel, the picker and this channel's people are read again and replaced.
+  const refreshMembers = agents.refreshMembers;
+  useEffect(() => {
+    if (directory.tick > 0) refreshMembers();
+  }, [directory.tick, refreshMembers]);
   // The people the page knows by name, for Settings → Reports (issue #1029):
   // the open channel's members. A sender it does not know is "person #id".
   const memberNames = useMemo(() => {
@@ -634,9 +689,16 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
   // A server that predates voice_allowed says nothing: voice, as the invite
   // panel reads it. Agents have no voice (ADR-004).
   const voiceAllowed = principal !== null && principal.voice_allowed !== false && principal.kind === 'human';
+  // Whether whoami says the person may turn a camera on (ADR-015): use_camera
+  // held, which the owner always does. A server that sends no permissions
+  // predates the camera, and offers none. The server decides every claim.
+  const cameraAllowed = voiceAllowed && principal.permissions !== undefined && canDo(principal, 'use_camera');
   // How many are in each channel's voice (issue #596): one socket for the
   // page, for the list and the strip. Never opened for someone without voice.
   const occupancy = useOccupancy({ signedIn, voiceAllowed, reachable: connection === 'connected', onUnauthorized });
+  // Their names (issue #1103), from the channel's members; the page's own
+  // people first.
+  const voiceNames = useOccupantNames({ occupancy, channels: channels.channels, people: live.people, viewer: principal?.id ?? 0 });
 
   // Go to message: run detail closes, and once the conversation is on screen
   // again it scrolls to the message the run answers and puts focus on it. A
@@ -736,7 +798,11 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
       } else {
         // A refusal stays as a Failed line with Retry and Dismiss, so the text
         // is never lost; the server's own line is shown beside the composer.
-        if (result.outcome === 'refused') dispatchTargets({ type: 'refused', channel: name, line: result.reason });
+        // A channel archived under the page: say so in the page's words, and read
+        // the list again so the composer gives way (issue #844).
+        const archived = result.outcome === 'refused' && result.code === channelArchived;
+        if (result.outcome === 'refused') dispatchTargets({ type: 'refused', channel: name, line: archived ? archivedLine : result.reason });
+        if (archived) refreshChannels();
         if (result.outcome === 'refused' && result.code === api.channelNotFound) onMissing(send.channelId);
         const uncertainAttachment = result.outcome === 'refused' && result.code === 'invalid_file_attachment';
         dispatchChat({
@@ -748,7 +814,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
         });
       }
     });
-  }, [activeSend, nameOf, markSent, dispatchChat, onMissing]);
+  }, [activeSend, nameOf, markSent, dispatchChat, onMissing, refreshChannels]);
 
   const uploadOne = useCallback(async (send: FrozenSend, attachment: DraftAttachment): Promise<DraftAttachment> => {
     if (attachment.status === 'ready') return attachment;
@@ -884,7 +950,14 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     }
   }, [freezeSend, reconcile, dispatchChat, post]);
 
-  const releaseSession = agents.release;
+  // Voice is left first, while the credential still works: the camera's
+  // capture stops and its claim is released, naming it, before anything is
+  // done as anyone else (ADR-015, design §6.2). Then the agent session.
+  const releaseAgents = agents.release;
+  const releaseSession = useCallback(async () => {
+    await leaveVoice();
+    await releaseAgents();
+  }, [releaseAgents]);
   // One sign-out at a time: a second click while the first is with the server
   // does nothing.
   const signingOut = useRef(false);
@@ -910,7 +983,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
     if (signingOut.current || principalId === null) return;
     signingOut.current = true;
     setEverywhereFailed(null);
-    void api.signOutEverywhere(principalId).then((result) => {
+    void leaveVoice().then(() => api.signOutEverywhere(principalId)).then((result) => {
       signingOut.current = false;
       if (result.ok) {
         forgetChannel();
@@ -1111,12 +1184,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
 
   // whoami read again after a change to the person's own account (a
   // password set or changed).
-  const refreshWho = useCallback(() => {
-    void api.whoAmI().then((result) => {
-      if (result.ok) dispatchAuth({ type: 'refreshed', principal: result.value });
-      else if (result.failure === 'unauthorized') dispatchAuth({ type: 'unauthorized' });
-    });
-  }, []);
+  const refreshWho = readWho;
 
   // End visit: the session is ended first, as for a sign-out, then the
   // visit. Only the server's word that it ended signs the guest out here.
@@ -1553,29 +1621,42 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
           channels={channels}
           unread={unread}
           occupancy={occupancy}
+          voiceNames={voiceNames}
           notificationCenter={<NotificationCenter alerts={notifications.alerts} onOpen={notifications.openAlert} onClear={notifications.clearAlerts} />}
           connection={connection}
           panel={
-            <MembersPanel
-              agents={agents}
-              now={now}
-              controls={
-                currentChannel === null
-                  ? null
-                  : {
-                      channel: currentChannel,
-                      channels: channels.channels,
-                      viewer: { role: auth.principal.role, guest: visit !== null },
-                      onUnauthorized,
-                    }
-              }
-            />
+            <>
+              <MembersPanel
+                agents={agents}
+                now={now}
+                controls={
+                  currentChannel === null
+                    ? null
+                    : {
+                        channel: currentChannel,
+                        channels: channels.channels,
+                        viewer: { id: auth.principal.id, role: auth.principal.role, guest: visit !== null },
+                        // A reconnect owes no frame for what changed while it was down, so the
+                        // picker also re-reads on the permission tick every socket open bumps.
+                        directoryTick: directory.tick + permissionsTick,
+                        onUnauthorized,
+                      }
+                }
+              />
+              {auth.principal.kind === 'human' && visit === null ? (
+                <CommunityMembers viewer={auth.principal.id} who={auth.principal} origin={origin} permissionsTick={permissionsTick} directoryTick={directory.tick} channelIds={channels.channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
+              ) : null}
+            </>
           }
           account={
             <>
               <div className="standing">
                 <h3>Who can administer</h3>
                 <p>{administrationLine(auth.principal, channels.channels, visit !== null)}</p>
+                {/* A member's rights, read from whoami (design §10.1). */}
+                {auth.principal.role === 'member' && visit === null && memberLine(auth.principal) !== null ? (
+                  <p className="hint">{memberLine(auth.principal)}</p>
+                ) : null}
               </div>
               <NotificationSettings
                 policy={notifications.policy}
@@ -1633,13 +1714,20 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 ),
               }
             : {})}
+          onSettingsOpen={readWho}
           admin={
             auth.principal.role === 'operator' ? (
-              <>
-                <GuestSettings channels={channels.channels} onUnauthorized={onUnauthorized} />
-                {/* The names the page knows are the open channel's members. */}
-                <ReportsSection names={memberNames} onUnauthorized={onUnauthorized} />
-              </>
+              // The names the page knows are the open channel's members.
+              <AdminConsole
+                who={auth.principal}
+                origin={origin}
+                channels={channels.channels}
+                names={memberNames}
+                permissionsChanged={permissionsTick}
+                directoryChanged={directory.tick}
+                onChannelsChanged={refreshChannels}
+                onUnauthorized={onUnauthorized}
+              />
             ) : null
           }
           overlay={
@@ -1655,6 +1743,7 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               viewer={auth.principal.id}
               people={live.people}
               voiceAllowed={voiceAllowed}
+              cameraAllowed={cameraAllowed}
               reachable={connection === 'connected'}
               channels={channels.channels}
               occupancy={occupancy}
@@ -1676,29 +1765,74 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
               onClose={close}
             />
           )}
+          // Holders of manage_channels make a channel public or private, a
+          // default or not, from its ⋯ menu (issue #1183). whoami says who
+          // holds it; the server decides each change. An account member may
+          // leave a listed channel; a guest visit uses End visit (#1095).
+          canManage={visit === null && canDo(auth.principal, 'manage_channels')}
+          renderSettings={(channel, change, close) => (
+            <ChannelSettingsAsk
+              channel={channel}
+              change={change}
+              onApplied={(now) => {
+                dispatchChannels({ type: 'settings', id: now.id, visibility: now.visibility, default: now.default, archivedAt: now.archived_at });
+              }}
+              onUnauthorized={onUnauthorized}
+              onClose={close}
+            />
+          )}
+          {...(auth.principal.kind === 'human' && visit === null ? { onLeft: leftChannel } : {})}
+          onUnauthorized={onUnauthorized}
+          {...(auth.principal.may_invite === true && channels.channels.length > 0
+            ? {
+                onAddPerson: () => {
+                  // The member-link panel. A member link names no channel (#990):
+                  // it lands people in the server's default channels.
+                  setInviteAsk((ask) => ({ n: (ask?.n ?? 0) + 1 }));
+                },
+              }
+            : {})}
           {...(auth.principal.may_invite === true
             ? {
-                onInviteTo: (channel: ChannelV0) => {
-                  setInviteAsk((ask) => ({ channel: channel.name, n: (ask?.n ?? 0) + 1 }));
+                onInviteTo: () => {
+                  setInviteAsk((ask) => ({ n: (ask?.n ?? 0) + 1 }));
                 },
               }
             : {})}
           newChannel={
-            // The server allows operators alone; anyone else is not offered it.
-            auth.principal.role === 'operator' ? (
-              <CreateChannel
-                asks={createAsks}
-                onCreated={(channel) => {
-                  dispatchChannels({ type: 'created', channel });
-                }}
-                onUnauthorized={onUnauthorized}
-              />
+            // Any member browses the directory and, where whoami says they may,
+            // makes a public or private channel; the server decides each.
+            auth.principal.kind === 'human' && visit === null ? (
+              <>
+                <ChannelDirectory
+                  channels={channels.channels}
+                  onJoined={(channel) => {
+                    setSearchOpen(false);
+                    dispatchChannels({ type: 'created', channel });
+                  }}
+                  onLeft={leftChannel}
+                  onOpen={onOpen}
+                  onUnauthorized={onUnauthorized}
+                />
+                {canDo(auth.principal, 'create_public_channels') || canDo(auth.principal, 'create_private_channels') ? (
+                  <CreateChannel
+                    asks={createAsks}
+                    canPublic={canDo(auth.principal, 'create_public_channels')}
+                    canPrivate={canDo(auth.principal, 'create_private_channels')}
+                    onCreated={(channel) => {
+                      dispatchChannels({ type: 'created', channel });
+                    }}
+                    onUnauthorized={onUnauthorized}
+                  />
+                ) : null}
+              </>
             ) : null
           }
           invites={
-            auth.principal.may_invite === true ? (
-              <InvitePanel origin={origin} me={auth.principal} channels={channels.channels} request={inviteAsk} onUnauthorized={onUnauthorized} />
-            ) : null
+            // Everyone signed in is offered the panel; one whose right to make
+            // links is off is told why and gets no form (issue #990). A guest
+            // visit has none.
+            visit === null ? <InvitePanel origin={origin} me={auth.principal} request={inviteAsk} onUnauthorized={onUnauthorized} /> : null
           }
           firstRun={
             // An operator on a server with no channels is shown what to do
@@ -1737,6 +1871,8 @@ function Session({ origin, onRestart }: { readonly origin: string; readonly onRe
                 historyBounded={agents.membersFor === channelId && (agents.members.find((m) => m.principal_id === auth.principal.id)?.history_after ?? 0) > 0}
                 channelId={channelId}
                 channel={selected}
+                {...(currentChannel?.visibility === undefined ? {} : { visibility: currentChannel.visibility })}
+                archived={isArchived(currentChannel)}
                 chat={chatFor(chat, selected)}
                 live={live.status}
                 people={live.people}

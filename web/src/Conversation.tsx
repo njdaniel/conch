@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
+import { archivedLine } from './archived';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
-import { Avatar } from './Icons';
+import { Avatar, PrivateMark } from './Icons';
 import { Linkified } from './Linkified';
 import { ImageAttachment } from './ImageAttachment';
 import { loadStored, saveEdit, saveReplies } from './state/draftStore';
 import { canEdit, EditedMarker, editEnds, editsLeft, editWindowMs, MessageEditor } from './MessageEdit';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
+import { AdminApprovals } from './AdminApprovals';
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
+import type { ChannelVisibility } from './schema/channel';
 import { fileAttachmentPayloadSchema, fileAttachmentV1, type FileAttachmentV1 } from './schema/file';
 import { MAX_MESSAGE_EDITS, type Audience, type MessageV2 } from './schema/message';
 import type { Target, TargetAction } from './state/drafts';
@@ -16,11 +19,23 @@ import type { ChannelChat, PendingSend } from './state/messages';
 import { canLoadOlder, editsKnown, isLater, lastId, oldestId, ordered } from './state/messages';
 import type { LiveStatus, Person } from './useLiveChannel';
 import { mentions } from './useNotifications';
+import { useAuthorNames } from './useAuthorNames';
+import { timeOf } from './time';
 
-// HH:MM in the reader's own time zone.
+// The time of day, in the reader's own locale and time zone (time.ts).
 export function clock(when: string | number): string {
-  const d = new Date(when);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  return timeOf(when);
+}
+
+// newestSent: the id of the viewer's newest message among those shown, when it
+// is one sent from this page and confirmed; null otherwise. "Sent" shows under
+// that one only, not under every message (F26).
+export function newestSent(messages: readonly MessageV2[], viewer: number, sentIds: ReadonlySet<number>): number | null {
+  let newest: MessageV2 | null = null;
+  for (const message of messages) {
+    if (message.author_id === viewer && (newest === null || message.id > newest.id)) newest = message;
+  }
+  return newest !== null && sentIds.has(newest.id) ? newest.id : null;
 }
 
 // The author's name from the members list; #<id> for anyone not on it.
@@ -45,6 +60,11 @@ function approvalOf(message: MessageV2): ApprovalV1 | null {
   return payload.data as ApprovalV1;
 }
 
+// ApprovalCard draws an approval a message carries. Anyone in the channel can
+// post such a message with any payload, so it is never a place to decide:
+// the deciding card, AI administrators' included, is drawn only from the
+// server's own approval objects (AdminApprovals, GET /v1/approvals), never
+// from a message (security review of #1344).
 function ApprovalCard({ approval, people }: { readonly approval: ApprovalV1; readonly people: ReadonlyMap<number, Person> }) {
   return (
     <article className="approval-card" aria-label="Approval request">
@@ -171,6 +191,11 @@ export function Message({
   const who = messageName(message, people);
   const approval = approvalOf(message);
   const attachments = attachmentsOf(message);
+  // An image sent with no text has its filename as the body, and the figure
+  // shows that name already: the name shows once. Display only; the post is
+  // unchanged (F26).
+  const [fileName, setFileName] = useState<string | null>(null);
+  const nameOnly = attachments !== null && attachments.file_ids.length === 1 && fileName !== null && message.body === fileName;
   const items = editor === undefined ? actions ?? [] : [];
   const [menuOpen, setMenuOpen] = useState(false);
   const more = useRef<HTMLButtonElement>(null);
@@ -197,14 +222,14 @@ export function Message({
       >
         {editor ?? (approval === null ? (
           <>
-            <Linkified text={message.body} />
+            {nameOnly ? null : <Linkified text={message.body} />}
             <EditedMarker message={message} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} />
           </>
         ) : <ApprovalCard approval={approval} people={people} />)}
         {attachments === null ? null : (
           <span className="attachments">
             {attachments.file_ids.map((fileId) => (
-              <ImageAttachment key={fileId} fileId={fileId} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} />
+              <ImageAttachment key={fileId} fileId={fileId} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} onFilename={setFileName} />
             ))}
           </span>
         )}
@@ -326,12 +351,14 @@ function continues(before: MessageV2 | undefined, message: MessageV2): boolean {
   return Date.parse(message.created_at) - Date.parse(before.created_at) < sameRun;
 }
 
-function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized }: {
+function ThreadView({ rootId, root, chat, channel, live, archived, people: known, nets, viewer, draft, onDraft, onClose, onReplySend, onRetrySend, onDismissSend, onUnauthorized }: {
   readonly rootId: number;
   readonly root: MessageV2 | undefined;
   readonly chat: ChannelChat;
   readonly channel: string;
   readonly live: LiveStatus;
+  // The channel is archived (issue #844): the thread reads, and takes no reply.
+  readonly archived: boolean;
   readonly people: ReadonlyMap<number, Person>;
   readonly nets: ReadonlyMap<number, string>;
   readonly viewer: number;
@@ -386,6 +413,9 @@ function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, d
     if (held === undefined || isLater(message, held)) byId.set(message.id, message);
   }
   const messages = [...byId.values()].sort((a, b) => a.id - b.id);
+  const sentMark = newestSent(messages, viewer, chat.sentIds);
+  const threadAuthors = useMemo(() => [...new Set(messages.filter((m) => m.guest_author === undefined).map((m) => m.author_id))], [messages]);
+  const people = useAuthorNames(channel, threadAuthors, known, onUnauthorized);
   const rootMessage = byId.get(rootId);
   const me = people.get(viewer) ?? { name: `#${String(viewer)}`, kind: null };
   const pending = chat.pending.filter((send) => send.threadRootId === rootId);
@@ -405,7 +435,7 @@ function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, d
         </div>
       ) : null}
       <ol className="messages" aria-label="Root and replies">
-        {messages.map((message) => <Message key={message.id} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={chat.sentIds.has(message.id)} cont={false} onUnauthorized={onUnauthorized} />)}
+        {messages.map((message) => <Message key={message.id} message={message} people={people} nets={nets} viewer={viewer} channel={channel} sent={message.id === sentMark} cont={false} onUnauthorized={onUnauthorized} />)}
         {pending.map((send) => <Pending key={`local-${String(send.localId)}`} send={send} me={me} nets={nets} viewer={viewer} onRetry={onRetrySend} onDismiss={onDismissSend} />)}
       </ol>
       {nextAfter === undefined ? null : (
@@ -413,7 +443,9 @@ function ThreadView({ rootId, root, chat, channel, live, people, nets, viewer, d
           void load(nextAfter, true);
         }}>Load more replies</button>
       )}
-      {rootMessage === undefined ? null : (
+      {rootMessage === undefined ? null : archived ? (
+        <p role="status" className="hint archived-note">{archivedLine}</p>
+      ) : (
         <form className="reply-composer" onSubmit={(event) => {
           event.preventDefault();
           if (live !== 'open' || draft.trim() === '') return;
@@ -481,7 +513,7 @@ export function Conversation({
   channel,
   chat,
   live,
-  people,
+  people: members,
   nets,
   viewer,
   draft,
@@ -501,11 +533,19 @@ export function Conversation({
   onEdited,
   onEditFinal,
   historyBounded = false,
+  visibility,
+  archived = false,
 }: {
+  // The channel is archived (issue #844): it opens read-only. History, search
+  // and threads read as before; the composer is replaced by one line.
+  readonly archived?: boolean;
   // The viewer's own membership here has a history bound (history_after), so
   // what was said before they joined is not shown (issue #1034). False when
   // it has none or is not known yet: the page never claims hiding it cannot see.
   readonly historyBounded?: boolean;
+  // The channel's visibility (issue #991): a private one has a lock before its
+  // name. Drawn from this alone, never from how many are in the channel.
+  readonly visibility?: ChannelVisibility;
   // The channel's id, for keeping an open edit across a reload (issue #1039);
   // without it nothing is kept.
   readonly channelId?: number;
@@ -536,6 +576,11 @@ export function Conversation({
   // A refusal ended a message's edits for good (issue #1031).
   readonly onEditFinal?: (id: number) => void;
 }) {
+  // Whoever wrote here and is not in the member list is named by the
+  // channel's authors route (design §13.5); the composer's mention candidates
+  // stay the member list alone.
+  const authorIds = useMemo(() => [...new Set([...chat.byId.values()].filter((m) => m.guest_author === undefined).map((m) => m.author_id))], [chat.byId]);
+  const people = useAuthorNames(channel, authorIds, members, onUnauthorized);
   const log = useRef<HTMLDivElement>(null);
   // Whether the reader is at the bottom, so new messages follow them.
   const atBottom = useRef(true);
@@ -709,6 +754,7 @@ export function Conversation({
   }, [repliesSettled, channelId, viewer, replyDrafts]);
 
   const shown = ordered(chat);
+  const sentMark = newestSent(shown, viewer, chat.sentIds);
   // The log's roving tab stop (issue #1040): the message last focused, else the
   // newest. A message arriving moves the stop, never focus.
   const list = useRef<HTMLOListElement>(null);
@@ -838,6 +884,7 @@ export function Conversation({
         <span className="hash" aria-hidden="true">
           #
         </span>
+        {visibility === 'private' ? <PrivateMark /> : null}
         <h2 id={headingId} tabIndex={-1}>
           {channel}
         </h2>
@@ -852,6 +899,7 @@ export function Conversation({
           </button>
         </div>
       ) : null}
+      <AdminApprovals channelId={channelId} viewer={viewer} names={(id) => nameOf(members, id)} onUnauthorized={onUnauthorized} />
       <div className="log-wrap">
       <div
         ref={log}
@@ -909,7 +957,7 @@ export function Conversation({
               nets={nets}
               viewer={viewer}
               channel={channel}
-              sent={chat.sentIds.has(message.id)}
+              sent={message.id === sentMark}
               cont={continues(shown[i - 1], message)}
               onUnauthorized={onUnauthorized}
               onReply={openFrom}
@@ -961,6 +1009,7 @@ export function Conversation({
                   chat={chat}
                   channel={channel}
                   live={live}
+                  archived={archived}
                   people={people}
                   nets={nets}
                   viewer={viewer}
@@ -993,12 +1042,15 @@ export function Conversation({
           {String(chat.dropped)} unreadable {chat.dropped === 1 ? 'message was' : 'messages were'} ignored
         </p>
       ) : null}
+      {archived ? (
+        <p role="status" className="hint archived-note">{archivedLine}</p>
+      ) : (
       <Composer
         channel={channel}
         target={target}
         nets={nets}
         monitored={monitored}
-        people={people}
+        people={members}
         viewer={viewer}
         draft={draft}
         enabled={live === 'open'}
@@ -1011,6 +1063,7 @@ export function Conversation({
           onBottom(true);
         }}
       />
+      )}
     </>
   );
 }

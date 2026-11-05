@@ -185,13 +185,15 @@ func (s *Store) CreateMemberLink(ctx context.Context, actor string, creatorID in
 		case !found:
 			return ErrPrincipalNotFound
 		}
-		if creator.DisabledAt != nil || creator.Kind != PrincipalHuman {
+		// A human, or an agent an owner granted make_member_links (issue
+		// #1326): what it may make is what it holds, below.
+		if creator.DisabledAt != nil || (creator.Kind != PrincipalHuman && creator.Kind != PrincipalAgent) {
 			return ErrInviteNotAllowed
 		}
 		// What the maker may do is what it holds now, by permission (ADR-014
 		// design §7.3), never its role. make_member_links already folds in
 		// the may_invite brake for a member and refuses a guest.
-		rights, err := makerRightsTx(ctx, tx, creatorID)
+		rights, err := makerRightsTx(ctx, tx, creatorID, false)
 		if err != nil {
 			return fmt.Errorf("store: create member link: %w", err)
 		}
@@ -215,6 +217,11 @@ func (s *Store) CreateMemberLink(ctx context.Context, actor string, creatorID in
 				return fmt.Errorf("store: create member link: channel %q: %w", name, ErrNotFound)
 			case err != nil:
 				return fmt.Errorf("store: create member link: find channel: %w", err)
+			}
+			// The archived guard of a link naming the channel (issue #844);
+			// landing channels are named only by a holder of manage_channels.
+			if err := channelNotArchivedTx(ctx, tx, id); err != nil {
+				return err
 			}
 			channelIDs = append(channelIDs, id)
 		}

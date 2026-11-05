@@ -60,3 +60,18 @@ test('search paginates ordered scoped results, opens context, and loses access o
   const restoredNet = await call(world, world.tokens.operator, 'PUT', `/v1/channels/nets-demo/nets/blue/members/${String(guest)}`, { role: 'member' });
   expect(restoredNet.status).toBe(204);
 });
+
+// F26 (issue #1042): Escape in the search box closes search and returns focus
+// to the Search button.
+test('Escape in the search box closes search and returns focus to Search', async ({ meet, world }) => {
+  const { page } = await meet();
+  await signIn(page, world, world.tokens.browser, 'browser-test');
+  await channelButton(page, 'general').click();
+  const open = page.getByRole('button', { name: 'Search', exact: true });
+  await open.click();
+  const box = page.getByRole('searchbox', { name: 'Messages in #general' });
+  await expect(box).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('region', { name: 'Search #general' })).toHaveCount(0);
+  await expect(open).toBeFocused();
+});

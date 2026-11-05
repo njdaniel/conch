@@ -1,0 +1,33 @@
+{
+  "display_name": "deploy-admin",
+  "tier": "A",
+  "capabilities": [
+    "messages.read",
+    "messages.post",
+    "approvals.await",
+    "approvals.check",
+    "admin.act"
+  ],
+  "channels": [
+    {
+      "channel_id": 11,
+      "permissions": [
+        "read",
+        "post"
+      ]
+    }
+  ],
+  "rate_limits": [
+    {
+      "capability": "admin.act",
+      "max": 60,
+      "window_seconds": 3600
+    }
+  ],
+  "permissions": [
+    "manage_members"
+  ],
+  "admin": {
+    "approval_channel_id": 11
+  }
+}

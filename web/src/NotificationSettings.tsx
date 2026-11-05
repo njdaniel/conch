@@ -1,6 +1,13 @@
 import type { ChannelV0 } from './schema/channel';
 import type { BrowserPermission, NotificationPolicy } from './useNotifications';
 
+// What the chosen policy does, in words (F20).
+const policyLine: Record<NotificationPolicy, string> = {
+  off: 'Notifications are off.',
+  mentions: 'You’re alerted when someone writes your name.',
+  all: 'You’re alerted for every new message.',
+};
+
 export function NotificationSettings({ policy, native, permission, supported, channels = [], muted = new Set<number>(), onPolicy, onEnable, onToggleMute }: {
   readonly policy: NotificationPolicy;
   readonly native: boolean;
@@ -25,7 +32,7 @@ export function NotificationSettings({ policy, native, permission, supported, ch
           <option value="all">All messages</option>
         </select>
       </label>
-      <p className="hint">Notifications are off until you choose a policy. Channel mutes hide alerts, not unread badges.</p>
+      <p className="hint">{policyLine[policy]} Channel mutes hide alerts, not unread badges.</p>
       {channels.length === 0 || onToggleMute === undefined ? null : (
         <details>
           <summary>Channel mutes</summary>

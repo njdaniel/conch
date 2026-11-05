@@ -29,6 +29,12 @@ func rewindToBeforeCommunity(t *testing.T, path string) {
 	}
 	defer func() { _ = db.Close() }()
 	for _, stmt := range []string{
+		"DROP TABLE admin_actions",                            // migration 43 (issue #1326)
+		"ALTER TABLE agent_manifests DROP COLUMN admin",       // migration 43
+		"ALTER TABLE agent_manifests DROP COLUMN permissions", // migration 43
+		"ALTER TABLE credentials DROP COLUMN issued_by",       // migration 42 (issue #1024)
+		"ALTER TABLE hooks DROP COLUMN issued_by",             // migration 42 (issue #1024)
+		"ALTER TABLE channels DROP COLUMN archived_at",        // migration 41 (issue #844)
 		"DROP TRIGGER channels_default_public_insert",
 		"DROP TRIGGER channels_default_public_update",
 		"ALTER TABLE channels DROP COLUMN visibility",
@@ -457,47 +463,53 @@ func TestIsMemberTx(t *testing.T) {
 	}
 }
 
-// Listing a private channel in the joining settings makes it public and a
-// default (until I7 refuses it), and its open_channel_added row says
-// visibility=private->public; listing one already public says nothing more,
-// and unlisting leaves it public (security review SF1, issue #979).
-func TestListingAChannelAuditsItsVisibility(t *testing.T) {
+// Listing a private channel in the joining settings is refused, never made
+// public (issue #987, which retires #979's private->public listing): the
+// whole write is ErrChannelSettingsConflict and changes nothing. A public
+// channel lists with no detail, and unlisting leaves it public.
+func TestListingAPrivateChannelIsRefused(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	red, err := s.CreateChannel(ctx, "red")
 	if err != nil {
 		t.Fatal(err)
 	}
-	account := schema.OpenJoiningAccount
-	put := func(names ...string) {
-		t.Helper()
-		if _, err := s.PutJoinSettings(ctx, "system", 0, schema.PutJoinSettingsRequestV1{OpenJoining: &account, OpenChannels: &names}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	added := func() []string {
-		t.Helper()
-		var out []string
-		for _, e := range allAuditEvents(t, s) {
-			if e.Action == AuditOpenChannelAdded && e.Subject == channelSubject(red.ID) {
-				out = append(out, e.Detail)
-			}
-		}
-		return out
-	}
-	if _, err := s.CreateChannel(ctx, "blue"); err != nil {
+	blue, err := s.CreateChannel(ctx, "blue")
+	if err != nil {
 		t.Fatal(err)
 	}
-	put("red")
-	if got := added(); len(got) != 1 || got[0] != "visibility=private->public" {
-		t.Fatalf("open_channel_added details = %q, want one visibility=private->public", got)
+	pub := schema.ChannelPublic
+	if _, err := s.ChannelSettings(ctx, "system", 0, blue.ID, ChannelSettingsChange{Visibility: &pub}, time.Now()); err != nil {
+		t.Fatal(err)
 	}
-	put("blue")
-	if ch, err := s.ChannelByID(ctx, red.ID); err != nil || ch.Visibility != schema.ChannelPublic || ch.IsDefault {
-		t.Fatalf("red after unlisting = %+v, %v; want public, not default", ch, err)
+	account := schema.OpenJoiningAccount
+	put := func(names ...string) error {
+		_, err := s.PutJoinSettings(ctx, "system", 0, schema.PutJoinSettingsRequestV1{OpenJoining: &account, OpenChannels: &names})
+		return err
 	}
-	put("red", "blue")
-	if got := added(); len(got) != 2 || got[1] != "" {
-		t.Fatalf("open_channel_added details = %q, want the second with no detail", got)
+	before := len(allAuditEvents(t, s))
+	for _, names := range [][]string{{"red"}, {"blue", "red"}} {
+		if err := put(names...); !errors.Is(err, ErrChannelSettingsConflict) {
+			t.Fatalf("listing %q = %v, want ErrChannelSettingsConflict", names, err)
+		}
+	}
+	if n := len(allAuditEvents(t, s)); n != before {
+		t.Errorf("the refusals wrote %d audit rows", n-before)
+	}
+	for _, id := range []int64{red.ID, blue.ID} {
+		if ch, err := s.ChannelByID(ctx, id); err != nil || ch.IsDefault || (id == red.ID && ch.Visibility != schema.ChannelPrivate) {
+			t.Fatalf("channel %d after the refusals = %+v, %v", id, ch, err)
+		}
+	}
+	if set, _, err := s.JoinSettings(ctx); err != nil || set.OpenJoining != schema.OpenJoiningOff {
+		t.Fatalf("settings after the refusals = %+v, %v; want open sign-up still off", set, err)
+	}
+	if err := put("blue"); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range allAuditEvents(t, s) {
+		if e.Action == AuditOpenChannelAdded && e.Detail != "" {
+			t.Errorf("open_channel_added detail %q, want none", e.Detail)
+		}
 	}
 }

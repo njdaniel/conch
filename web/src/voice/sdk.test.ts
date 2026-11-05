@@ -138,6 +138,17 @@ interface Stub {
   outputSelection: boolean;
   outputs: string[];
   outputFails: Error | null;
+  // ADR-015: what each camera capture was asked for, the captures made, a
+  // refusal of the next one, and this connection's permission as LiveKit
+  // last told it.
+  videoOptions: unknown[];
+  videoTracks: StubVideo[];
+  videoFails: Error | null;
+  // When set, each camera capture waits for the next of these, in order.
+  videoHolds: Deferred<undefined>[];
+  // When set, each restart of the camera waits for the next of these.
+  videoRestartHolds: Deferred<undefined>[];
+  permissions: { canPublish: boolean; canPublishSources: number[] } | undefined;
 }
 interface StubSettings {
   channelCount?: number;
@@ -153,9 +164,24 @@ interface StubScreenTrack {
   settings: StubSettings;
   stop: () => void;
 }
+// A camera's capture, as the browser gives it and as the page wraps it.
+interface StubVideo {
+  source: string;
+  stopped: number;
+  userProvided: boolean;
+  attached: unknown[];
+  mediaStreamTrack: { readyState: string; enabled: boolean; deviceId: string; getSettings: () => { deviceId: string }; addEventListener: (type: string, fn: () => void) => void; ended: () => void };
+  stop: () => void;
+  attach: (el: unknown) => unknown;
+  detach: (el?: unknown) => unknown[];
+  restartTrack: (options: unknown) => Promise<void>;
+}
 interface StubRemotePub {
   source: string;
+  kind: string;
   isSubscribed: boolean;
+  isDesired?: boolean;
+  trackSid?: string;
   setSubscribed: (on: boolean) => void;
 }
 const state = vi.hoisted((): Stub => {
@@ -206,6 +232,12 @@ const state = vi.hoisted((): Stub => {
     outputSelection: true,
     outputs: [],
     outputFails: null,
+    videoOptions: [],
+    videoTracks: [],
+    videoFails: null,
+    videoHolds: [],
+    videoRestartHolds: [],
+    permissions: undefined,
   };
 });
 
@@ -335,6 +367,80 @@ vi.mock('livekit-client', () => {
       for (const fn of this.ends) fn();
     };
   }
+  // A camera's capture of the device a constraint names exactly, or of the
+  // browser's own choice.
+  const videoMedia = (options: unknown): StubVideo['mediaStreamTrack'] => {
+    const asked: Record<string, unknown> = typeof options === 'object' && options !== null ? { ...options } : {};
+    const deviceId = asked['deviceId'];
+    const exact = typeof deviceId === 'object' && deviceId !== null && 'exact' in deviceId ? String(deviceId.exact) : 'browser-choice';
+    const listeners: (() => void)[] = [];
+    const m: StubVideo['mediaStreamTrack'] = {
+      readyState: 'live',
+      enabled: true,
+      deviceId: exact,
+      getSettings: () => ({ deviceId: m.deviceId }),
+      addEventListener: (type, fn) => {
+        if (type === 'ended') listeners.push(fn);
+      },
+      // The device ends the capture (unplugged, taken by another app).
+      ended: () => {
+        m.readyState = 'ended';
+        for (const fn of listeners) fn();
+      },
+    };
+    return m;
+  };
+  class LocalVideoTrack implements StubVideo {
+    source = 'unknown';
+    stopped = 0;
+    userProvided: boolean;
+    attached: unknown[] = [];
+    mediaStreamTrack: StubVideo['mediaStreamTrack'];
+    private readonly ends = new Set<() => void>();
+    constructor(mediaStreamTrack: StubVideo['mediaStreamTrack'], _constraints: unknown, userProvided = false) {
+      this.mediaStreamTrack = mediaStreamTrack;
+      this.userProvided = userProvided;
+      this.wire(mediaStreamTrack);
+      state.videoTracks.push(this);
+    }
+    // As the SDK's LocalTrack: the MediaStreamTrack's end is told as the
+    // track's Ended, from whichever MediaStreamTrack it has now.
+    private wire(m: StubVideo['mediaStreamTrack']): void {
+      m.addEventListener('ended', () => {
+        if (m !== this.mediaStreamTrack) return;
+        for (const fn of [...this.ends]) fn();
+      });
+    }
+    on = (event: string, fn: () => void) => {
+      if (event === 'ended') this.ends.add(fn);
+      return this;
+    };
+    off = (event: string, fn: () => void) => {
+      if (event === 'ended') this.ends.delete(fn);
+      return this;
+    };
+    stop = () => {
+      this.stopped++;
+      state.calls.push('stop camera track');
+      this.mediaStreamTrack.readyState = 'ended';
+    };
+    attach = (el: unknown) => {
+      this.attached.push(el);
+      return el;
+    };
+    detach = (el?: unknown) => {
+      this.attached = this.attached.filter((e) => el !== undefined && e !== el);
+      return [];
+    };
+    restartTrack = async (options: unknown) => {
+      state.videoOptions.push(options);
+      const hold = state.videoRestartHolds.shift();
+      if (hold !== undefined) await hold.promise;
+      const m = videoMedia(options);
+      this.mediaStreamTrack = m;
+      this.wire(m);
+    };
+  }
   class Room {
     // Read with permission requests as asked: the stub never asks for any.
     static getLocalDevices(kind: string, requestPermissions: boolean) {
@@ -344,6 +450,9 @@ vi.mock('livekit-client', () => {
     remoteParticipants = state.remote;
     localParticipant = {
       identity: 'p7',
+      get permissions() {
+        return state.permissions;
+      },
       publishTrack: (track: { source?: string }, options?: { source?: string }) => {
         if (options?.source !== undefined && options.source !== 'microphone') {
           if (!state.shareGranted) {
@@ -458,11 +567,12 @@ vi.mock('livekit-client', () => {
     TrackEvent: { Ended: 'ended' },
     PublishTrackError,
     DisconnectReason: { ROOM_DELETED: 5, PARTICIPANT_REMOVED: 4, DUPLICATE_IDENTITY: 2, SERVER_SHUTDOWN: 3 },
+    ConnectionState: { Disconnected: 'disconnected' },
     LogLevel: { warn: 3 },
     LoggerNames: { Default: 'livekit' },
     Track: {
       Kind: { Audio: 'audio', Video: 'video' },
-      Source: { Microphone: 'microphone', Camera: 'camera', ScreenShare: 'screen_share', ScreenShareAudio: 'screen_share_audio' },
+      Source: { Microphone: 'microphone', Camera: 'camera', ScreenShare: 'screen_share', ScreenShareAudio: 'screen_share_audio', Unknown: 'unknown' },
     },
     VideoPreset: class {
       width: number;
@@ -476,6 +586,16 @@ vi.mock('livekit-client', () => {
     },
     AudioPresets: { musicHighQuality: { maxBitrate: 96000 }, musicHighQualityStereo: { maxBitrate: 128000 } },
     LocalAudioTrack,
+    LocalVideoTrack,
+    // The SDK's camera capture: the browser's track, which the adapter wraps.
+    createLocalVideoTrack: (options: unknown) => {
+      state.videoOptions.push(options);
+      state.calls.push('capture camera');
+      if (state.videoFails !== null) return Promise.reject(state.videoFails);
+      const hold = state.videoHolds.shift();
+      if (hold !== undefined) return hold.promise.then(() => new LocalVideoTrack(videoMedia(options), options, false));
+      return Promise.resolve(new LocalVideoTrack(videoMedia(options), options, false));
+    },
     // The SDK's capture: the browser's track and the constraints it was
     // captured with, which the adapter wraps as its own.
     createLocalAudioTrack: (options: unknown) => {
@@ -495,7 +615,10 @@ vi.mock('livekit-client', () => {
   };
 });
 
-import { captureOptions, grantWait, newLiveKitRoom, principalOf, sdkLog, shareEncodings, type ShareLayer } from './sdk';
+import { cameraOptions, cameraPublishOptions, captureOptions, grantWait, newLiveKitRoom, principalOf, sdkLog, shareEncodings, wanted, type ShareLayer } from './sdk';
+import type { Room } from './connection';
+import { CameraClient } from './camera';
+import { Track } from 'livekit-client';
 
 // What the module did to the SDK's loggers when it loaded, before any test.
 const atLoad = { levelCalls: [...state.levelCalls], factoryReplaced: state.logger.methodFactory !== state.stubFactory, calls: [...state.calls] };
@@ -545,6 +668,12 @@ beforeEach(() => {
   state.outputSelection = true;
   state.outputs.length = 0;
   state.outputFails = null;
+  state.videoOptions.length = 0;
+  state.videoTracks.length = 0;
+  state.videoFails = null;
+  state.videoHolds.length = 0;
+  state.videoRestartHolds.length = 0;
+  state.permissions = undefined;
   vi.stubGlobal(
     'AudioContext',
     class {
@@ -583,6 +712,9 @@ const events = {
   onMicrophoneLost: () => undefined,
   onDevicesChanged: () => undefined,
   onOutputMoved: () => undefined,
+  onCameraEnded: () => undefined,
+  onCameraChanged: () => undefined,
+  onCameraTracks: () => undefined,
 };
 
 describe('the SDK adapter', () => {
@@ -982,9 +1114,10 @@ describe('the microphone chosen', () => {
 });
 
 describe('the watch view', () => {
-  const remotePub = (source: string): StubRemotePub => {
+  const remotePub = (source: string, kind = source === 'microphone' || source === 'screen_share_audio' ? 'audio' : 'video'): StubRemotePub => {
     const p: StubRemotePub = {
       source,
+      kind,
       isSubscribed: false,
       setSubscribed: (on) => {
         p.isSubscribed = on;
@@ -1043,11 +1176,13 @@ describe('the watch view', () => {
     });
     const video = remote('screen_share', 'video');
     const audio = remote('screen_share_audio', 'audio');
+    room.setWatching(true);
+    const sharer = { identity: 'p8' };
     // Arrives before the view is open: kept, and attached once it opens.
-    state.handlers.get('ts')?.(video);
+    state.handlers.get('ts')?.(video, remotePub('screen_share'), sharer);
     const sink = { video: document.createElement('video'), audio: document.createElement('audio') };
     room.attachShare(sink);
-    state.handlers.get('ts')?.(audio);
+    state.handlers.get('ts')?.(audio, remotePub('screen_share_audio'), sharer);
     expect(attached).toEqual(['screen_share VIDEO', 'screen_share_audio AUDIO']);
     expect(document.body.querySelectorAll('audio')).toHaveLength(0);
     expect(told).toEqual([{ video: true, audio: false }, { video: true, audio: true }]);
@@ -1753,7 +1888,8 @@ describe('the volume of each person', () => {
     room.attachShare(sink);
     const sound = { source: 'screen_share_audio', kind: 'audio', sid: 's', attach: (el?: HTMLMediaElement) => el, detach: () => [] };
     room.setVolume(8, 0);
-    state.handlers.get('ts')?.(sound, undefined, { identity: 'p8' });
+    room.setWatching(true);
+    state.handlers.get('ts')?.(sound, { isSubscribed: true, setSubscribed: () => undefined }, { identity: 'p8' });
     room.setVolume(8, 0.2);
     expect(sink.audio.volume).toBe(0.7);
     expect(played()).toHaveLength(0);
@@ -1930,5 +2066,589 @@ describe('a switch while the first capture is under way', () => {
     expect(state.calls).not.toContain('publish');
     expect(live()).toHaveLength(0);
     expect(state.contexts).toHaveLength(0);
+  });
+});
+
+// ---- the camera (ADR-015)
+
+describe('wanted: kind and source together (S1)', () => {
+  const none = { watching: false, viewing: false, shown: false, claimed: false };
+  const all = { watching: true, viewing: true, shown: true, claimed: true };
+  const { Source, Kind } = Track;
+  it.each([
+    // source, kind, with everything wanted, with nothing wanted
+    [Source.Microphone, Kind.Audio, true, true],
+    [Source.Microphone, Kind.Video, false, false],
+    [Source.Camera, Kind.Video, true, false],
+    [Source.Camera, Kind.Audio, false, false],
+    [Source.ScreenShare, Kind.Video, true, false],
+    [Source.ScreenShare, Kind.Audio, false, false],
+    [Source.ScreenShareAudio, Kind.Audio, true, false],
+    [Source.ScreenShareAudio, Kind.Video, false, false],
+    [Source.Unknown, Kind.Video, false, false],
+    [Source.Microphone, undefined, false, false],
+  ])('%s as %s: %s while viewing, watching and claimed; %s otherwise', (source, kind, wantedAll, wantedNone) => {
+    expect(wanted(source, kind, all)).toBe(wantedAll);
+    expect(wanted(source, kind, none)).toBe(wantedNone);
+  });
+
+  it('no camera is wanted while the video is not shown here, even with the call view open; microphones and a watched share are unaffected', () => {
+    const away = { watching: true, viewing: true, shown: false, claimed: true };
+    expect(wanted(Source.Camera, Kind.Video, away)).toBe(false);
+    expect(wanted(Source.Microphone, Kind.Audio, away)).toBe(true);
+    expect(wanted(Source.ScreenShare, Kind.Video, away)).toBe(true);
+    expect(wanted(Source.ScreenShareAudio, Kind.Audio, away)).toBe(true);
+  });
+
+  it('a camera is wanted only while the call view is shown, and only from someone holding a claim', () => {
+    expect(wanted(Source.Camera, Kind.Video, { watching: false, viewing: true, shown: true, claimed: true })).toBe(true);
+    expect(wanted(Source.Camera, Kind.Video, { watching: true, viewing: false, shown: true, claimed: true })).toBe(false);
+    expect(wanted(Source.Camera, Kind.Video, { watching: true, viewing: true, shown: true, claimed: false })).toBe(false);
+  });
+});
+
+describe('receiving cameras', () => {
+  const remotePub = (source: string, kind: string): StubRemotePub => {
+    const p: StubRemotePub = {
+      source,
+      kind,
+      isSubscribed: false,
+      setSubscribed: (on) => {
+        p.isSubscribed = on;
+      },
+    };
+    return p;
+  };
+
+  it('subscribes a camera only while viewing, only from a claim holder, only as video, and lets it go when the view closes', async () => {
+    const camera = remotePub('camera', 'video');
+    const soundAsCamera = remotePub('camera', 'audio');
+    const videoAsMic = remotePub('microphone', 'video');
+    const mic = remotePub('microphone', 'audio');
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', camera], ['b', soundAsCamera], ['c', videoAsMic], ['d', mic]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    const subscribed = () => [camera.isSubscribed, soundAsCamera.isSubscribed, videoAsMic.isSubscribed, mic.isSubscribed];
+    expect(subscribed()).toEqual([false, false, false, true]);
+    room.setViewing(true);
+    // Nobody holds a claim yet.
+    expect(subscribed()).toEqual([false, false, false, true]);
+    room.setCameras(new Set([8]));
+    expect(subscribed()).toEqual([true, false, false, true]);
+    room.setViewing(false);
+    expect(subscribed()).toEqual([false, false, false, true]);
+    room.setViewing(true);
+    room.setCameras(new Set());
+    expect(subscribed()).toEqual([false, false, false, true]);
+  });
+
+  it('lets every camera go while the video is not shown here, and keeps the choice to view: the cameras are back with the view, with no other call', async () => {
+    const camera = remotePub('camera', 'video');
+    const mic = remotePub('microphone', 'audio');
+    const share = remotePub('screen_share', 'video');
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', camera], ['b', mic], ['c', share]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setWatching(true);
+    room.setViewing(true);
+    room.setCameras(new Set([8]));
+    const subscribed = () => [camera.isSubscribed, mic.isSubscribed, share.isSubscribed];
+    expect(subscribed()).toEqual([true, true, true]);
+    room.setShown(false);
+    expect(subscribed()).toEqual([false, true, true]);
+    // Presence and the view's own choice change nothing while it is hidden.
+    room.setCameras(new Set([8, 9]));
+    room.setViewing(true);
+    expect(subscribed()).toEqual([false, true, true]);
+    room.setShown(true);
+    expect(subscribed()).toEqual([true, true, true]);
+  });
+
+  it('a camera that arrives while the video is not shown is let go, never played', async () => {
+    const told: (readonly number[])[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onCameraTracks: (p) => told.push(p) });
+    room.setViewing(true);
+    room.setCameras(new Set([8]));
+    room.setShown(false);
+    const attached: string[] = [];
+    const pub = remotePub('camera', 'video');
+    pub.isSubscribed = true;
+    state.handlers.get('ts')?.(
+      { source: 'camera', kind: 'video', sid: 'c', attach: () => attached.push('camera') && undefined, detach: () => [] },
+      pub,
+      { identity: 'p8' },
+    );
+    expect(attached).toEqual([]);
+    expect(pub.isSubscribed).toBe(false);
+    expect(told).toEqual([]);
+  });
+
+  it('a track that arrives with a kind its source disagrees with is let go, never played or shown', async () => {
+    const told: (readonly number[])[] = [];
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, { ...events, onCameraTracks: (p) => told.push(p) });
+    room.setViewing(true);
+    room.setCameras(new Set([8]));
+    const attached: string[] = [];
+    const track = (source: string, kind: string) => ({
+      source,
+      kind,
+      sid: `${source}-${kind}`,
+      attach: (el?: HTMLMediaElement) => {
+        attached.push(`${source}/${kind}`);
+        return el ?? document.createElement('audio');
+      },
+      detach: () => [],
+    });
+    const pubs = [remotePub('microphone', 'video'), remotePub('camera', 'audio')];
+    state.handlers.get('ts')?.(track('microphone', 'video'), pubs[0], { identity: 'p8' });
+    state.handlers.get('ts')?.(track('camera', 'audio'), pubs[1], { identity: 'p8' });
+    expect(attached).toEqual([]);
+    expect(document.body.querySelectorAll('audio, video')).toHaveLength(0);
+    expect(told).toEqual([]);
+    // A camera as video, from a claim holder, is kept and played in its tile.
+    const tile = document.createElement('video');
+    room.attachCamera(8, tile);
+    state.handlers.get('ts')?.(track('camera', 'video'), remotePub('camera', 'video'), { identity: 'p8' });
+    expect(attached).toEqual(['camera/video']);
+    expect(told).toEqual([[8]]);
+    // From someone without a claim: let go.
+    const stray = remotePub('camera', 'video');
+    stray.isSubscribed = true;
+    state.handlers.get('ts')?.(track('camera', 'video'), stray, { identity: 'p9' });
+    expect(stray.isSubscribed).toBe(false);
+    expect(told).toEqual([[8]]);
+  });
+
+  it('a track refused for its kind is never subscribed again, however often presence comes', async () => {
+    // Published as a camera picture, it arrives as sound.
+    const pub = { ...remotePub('camera', 'video'), trackSid: 'TR_smuggled' };
+    pub.setSubscribed = (on) => {
+      pub.isSubscribed = on;
+      pub.isDesired = on;
+    };
+    state.remote.set('p8', { identity: 'p8', trackPublications: new Map([['a', pub]]) } as unknown as { trackPublications: Map<string, StubRemotePub> });
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, events);
+    room.setViewing(true);
+    room.setCameras(new Set([8]));
+    expect(pub.isDesired).toBe(true);
+    state.handlers.get('ts')?.({ source: 'camera', kind: 'audio', sid: 'x', attach: () => undefined, detach: () => [] }, pub, { identity: 'p8' });
+    expect(pub.isDesired).toBe(false);
+    room.setCameras(new Set([8]));
+    room.setViewing(true);
+    expect(pub.isDesired).toBe(false);
+  });
+});
+
+describe('the camera', () => {
+  let ended: string[] = [];
+  let changed = 0;
+  async function connected(): Promise<Room> {
+    ended = [];
+    changed = 0;
+    const room = newLiveKitRoom();
+    await room.connect('wss://lk.example', 'tok-abcdef', 'room-abcdef', false, {
+      ...events,
+      onCameraEnded: (cause) => ended.push(cause),
+      onCameraChanged: () => {
+        changed++;
+      },
+    });
+    return room;
+  }
+
+  it('asks for the camera chosen exactly, at 1280x720 and 30 fps as an ideal, or the browser own choice', () => {
+    expect(cameraOptions('cam-1')).toEqual({ resolution: { width: 1280, height: 720, frameRate: 30 }, deviceId: { exact: 'cam-1' } });
+    expect(cameraOptions(null)).toEqual({ resolution: { width: 1280, height: 720, frameRate: 30 } });
+  });
+
+  // Design §7.5: the profile is chosen as the capture starts. facingMode is
+  // present only for a phone with no camera chosen, and exact only with one.
+  it.each([
+    ['desktop', null, { resolution: { width: 1280, height: 720, frameRate: 30 } }],
+    ['desktop', 'cam-1', { resolution: { width: 1280, height: 720, frameRate: 30 }, deviceId: { exact: 'cam-1' } }],
+    ['phone', null, { resolution: { width: 640, height: 360, frameRate: 24 }, facingMode: 'user' }],
+    ['phone', 'cam-1', { resolution: { width: 640, height: 360, frameRate: 24 }, deviceId: { exact: 'cam-1' } }],
+  ] as const)('%s capture with %s chosen asks %j', (profile, choice, expected) => {
+    const options = cameraOptions(choice, profile);
+    expect(options).toEqual(expected);
+    expect('facingMode' in options).toBe(profile === 'phone' && choice === null);
+    expect('deviceId' in options).toBe(choice !== null);
+  });
+
+  it('publishes a phone camera as VP8, a 450 kbps top layer of 360p and one 180p layer at 150 kbps', () => {
+    const options = cameraPublishOptions('phone');
+    expect(options).toMatchObject({ source: 'camera', simulcast: true, videoCodec: 'vp8', videoEncoding: { maxBitrate: 450_000, maxFramerate: 24 } });
+    expect(options.videoSimulcastLayers?.map((l) => [l.width, l.height, l.encoding.maxBitrate])).toEqual([[320, 180, 150_000]]);
+    // The desktop is as it was: no codec of its own, two layers.
+    expect(cameraPublishOptions('desktop')).toEqual(cameraPublishOptions());
+    expect(cameraPublishOptions().videoCodec).toBeUndefined();
+  });
+
+  it('a phone capture keeps its profile for its publish and its switches', async () => {
+    const room = await connected();
+    await room.captureCamera(null, 'phone');
+    expect(state.videoOptions.at(-1)).toEqual({ resolution: { width: 640, height: 360, frameRate: 24 }, facingMode: 'user' });
+    state.permissions = { canPublish: true, canPublishSources: [1] };
+    await room.publishCamera();
+    expect(state.published.at(-1)?.options).toMatchObject({ videoCodec: 'vp8', videoEncoding: { maxBitrate: 450_000 } });
+    await room.switchCamera('cam-2');
+    expect(state.videoOptions.at(-1)).toEqual({ resolution: { width: 640, height: 360, frameRate: 24 }, deviceId: { exact: 'cam-2' } });
+    // A desktop capture after it is the desktop's.
+    await room.captureCamera(null);
+    expect(state.videoOptions.at(-1)).toEqual({ resolution: { width: 1280, height: 720, frameRate: 30 } });
+  });
+
+  it('publishes as the camera, with simulcast layers of 360p and 180p under 1.2 Mbps', () => {
+    const options = cameraPublishOptions();
+    expect(options).toMatchObject({ source: 'camera', simulcast: true, videoEncoding: { maxBitrate: 1_200_000, maxFramerate: 30 } });
+    expect(options.videoSimulcastLayers?.map((l) => [l.width, l.height, l.encoding.maxBitrate])).toEqual([
+      [320, 180, 150_000],
+      [640, 360, 450_000],
+    ]);
+  });
+
+  it('captures as a track the page provides, and publishes only once LiveKit has granted the camera', async () => {
+    const room = await connected();
+    await room.captureCamera('cam-1');
+    expect(state.videoTracks.at(-1)?.userProvided).toBe(true);
+    expect(state.videoTracks.at(-1)?.source).toBe('camera');
+    expect(room.cameraTrack()).toBe('captured');
+    state.permissions = { canPublish: true, canPublishSources: [2] };
+    let granted = false;
+    const waiting = room.awaitCameraGrant().then(() => {
+      granted = true;
+    });
+    await settle();
+    expect(granted).toBe(false);
+    // LiveKit says the claim granted the camera (TrackSource.CAMERA is 1).
+    state.permissions = { canPublish: true, canPublishSources: [2, 1] };
+    state.handlers.get('ppc')?.(undefined, state.room?.localParticipant);
+    await waiting;
+    expect(granted).toBe(true);
+    await room.publishCamera();
+    expect(state.published.at(-1)?.source).toBe('camera');
+    expect(room.cameraTrack()).toBe('published');
+    expect(changed).toBeGreaterThan(0);
+  });
+
+  it('a grant that does not come in grantWait fails the wait', async () => {
+    vi.useFakeTimers();
+    try {
+      const room = await connected();
+      await room.captureCamera(null);
+      state.permissions = { canPublish: true, canPublishSources: [2] };
+      const waiting = room.awaitCameraGrant().then(
+        () => 'granted',
+        () => 'refused',
+      );
+      await vi.advanceTimersByTimeAsync(grantWait + 10);
+      expect(await waiting).toBe('refused');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stopping stops the capture at once, before the unpublish answers, and is never reported as the server', async () => {
+    const room = await connected();
+    await room.captureCamera(null);
+    state.permissions = { canPublish: true, canPublishSources: [] };
+    await room.awaitCameraGrant();
+    await room.publishCamera();
+    state.unpublishHangs = true;
+    state.calls.length = 0;
+    void room.stopCamera();
+    expect(state.calls).toEqual(['stop camera track', 'unpublish camera']);
+    expect(state.videoTracks.at(-1)?.mediaStreamTrack.readyState).toBe('ended');
+    expect(room.cameraTrack()).toBe('none');
+    expect(ended).toEqual([]);
+  });
+
+  it('a device that ends the capture is told as the device, and nothing is captured again', async () => {
+    const room = await connected();
+    await room.captureCamera('cam-1');
+    state.calls.length = 0;
+    state.videoTracks.at(-1)?.mediaStreamTrack.ended();
+    expect(ended).toEqual(['device']);
+    expect(state.calls).not.toContain('capture camera');
+  });
+
+  it('LiveKit taking the published camera away is told as the server, once the event is over', async () => {
+    const room = await connected();
+    await room.captureCamera(null);
+    state.permissions = { canPublish: true, canPublishSources: [] };
+    await room.publishCamera();
+    state.handlers.get('ltu')?.({ source: 'camera', track: state.videoTracks.at(-1) });
+    expect(room.cameraTrack()).toBe('captured');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ended).toEqual(['server']);
+  });
+
+  it('the unpublish the SDK makes as the server ends the connection is not told as the server: the end is (S5)', async () => {
+    const room = await connected();
+    await room.captureCamera(null);
+    state.permissions = { canPublish: true, canPublishSources: [] };
+    await room.publishCamera();
+    // As the SDK's handleDisconnect: every track unpublished, then the room
+    // disconnected.
+    state.handlers.get('ltu')?.({ source: 'camera', track: state.videoTracks.at(-1) });
+    if (state.room !== null) (state.room as { state?: string }).state = 'disconnected';
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ended).toEqual([]);
+  });
+
+  it('a capture kept for the next connection is blanked, not stopped, and the next one unblanks it', async () => {
+    const room = await connected();
+    await room.captureCamera(null);
+    const track = state.videoTracks.at(-1);
+    const kept = room.keepCamera();
+    expect(kept?.live()).toBe(true);
+    expect(track?.mediaStreamTrack.enabled).toBe(false);
+    expect(track?.stopped).toBe(0);
+    expect(room.cameraTrack()).toBe('none');
+    const next = await connected();
+    if (kept === null) throw new Error('nothing kept');
+    next.adoptCamera(kept);
+    expect(track?.mediaStreamTrack.enabled).toBe(true);
+    expect(next.cameraTrack()).toBe('captured');
+  });
+
+  it('a Leave stops the camera, and a capture that completes after it is stopped', async () => {
+    const room = await connected();
+    await room.captureCamera(null);
+    const first = state.videoTracks.at(-1);
+    await room.close();
+    expect(first?.stopped).toBe(1);
+    const late = await connected();
+    const capture = late.captureCamera(null);
+    void late.close();
+    await expect(capture).rejects.toThrow();
+    expect(state.videoTracks.at(-1)?.stopped).toBe(1);
+  });
+
+  it.each([
+    ['in reverse order', [1, 0]],
+    ['in order', [0, 1]],
+  ] as const)('on, off and on while the first capture is asked for, the captures answered %s: one capture lives, the newer, and the other is stopped (S5)', async (_order, answering) => {
+    const room = await connected();
+    const holds = [deferred<undefined>(), deferred<undefined>()];
+    state.videoHolds.push(...holds);
+    const first = room.captureCamera('cam-1').then(
+      () => 'held',
+      () => 'taken',
+    );
+    await settle();
+    await room.stopCamera();
+    const second = room.captureCamera('cam-1').then(
+      () => 'held',
+      () => 'taken',
+    );
+    await settle();
+    for (const i of answering) {
+      holds[i]?.resolve(undefined);
+      await settle();
+    }
+    expect([await first, await second]).toEqual(['taken', 'held']);
+    // Each capture is the browser's track and the page's wrapper of it: one
+    // device capture each.
+    const captures = () => new Set(state.videoTracks.map((t) => t.mediaStreamTrack));
+    expect(captures().size).toBe(2);
+    expect([...captures()].filter((m) => m.readyState === 'live')).toHaveLength(1);
+    expect(room.cameraTrack()).toBe('captured');
+    // Stopping it leaves nothing captured.
+    await room.stopCamera();
+    expect([...captures()].filter((m) => m.readyState === 'live')).toHaveLength(0);
+  });
+
+  it('a failed switch after the grant follows a choice changed back and publishes a live track', async () => {
+    const room = await connected();
+    state.permissions = { canPublish: true, canPublishSources: [2] };
+    const choice = { id: 'cam-1' };
+    const releases: string[] = [];
+    const client = new CameraClient(
+      {
+        claim: () => Promise.resolve({ ok: true, value: { principal_id: 7, started_at: '2026-11-03T10:00:00.000Z' } }),
+        release: (_channel, startedAt) => {
+          releases.push(startedAt);
+          return Promise.resolve();
+        },
+      },
+      () => undefined,
+      new FakeClock(),
+      () => choice.id,
+    );
+    const to2 = deferred<undefined>();
+    const to3 = deferred<undefined>();
+    const backTo2 = deferred<undefined>();
+    state.videoRestartHolds.push(to2, to3, backTo2);
+    const starting = client.start('general', room, 'cam-1');
+    await settle();
+    expect(client.current).toEqual({ kind: 'granted-waiting' });
+    choice.id = 'cam-2';
+    state.permissions = { canPublish: true, canPublishSources: [] };
+    state.handlers.get('ppc')?.(undefined, state.room?.localParticipant);
+    await settle();
+    expect(state.videoOptions.at(-1)).toMatchObject({ deviceId: { exact: 'cam-2' } });
+    to2.resolve(undefined);
+    choice.id = 'cam-3';
+    await settle();
+    expect(state.videoOptions.at(-1)).toMatchObject({ deviceId: { exact: 'cam-3' } });
+    choice.id = 'cam-2';
+    to3.reject(new DOMException('gone', 'OverconstrainedError'));
+    await settle();
+    expect(state.videoOptions.at(-1)).toMatchObject({ deviceId: { exact: 'cam-2' } });
+    expect(client.current).toEqual({ kind: 'granted-waiting' });
+    backTo2.resolve(undefined);
+    await starting;
+    expect(client.current).toEqual({ kind: 'sending' });
+    expect(room.cameraInUse()).toBe('cam-2');
+    expect(room.cameraTrack()).toBe('published');
+    expect(state.videoTracks.at(-1)?.mediaStreamTrack.readyState).toBe('live');
+    expect(state.published.map((p) => p.source)).toEqual(['camera']);
+    await client.stop('self');
+    expect(room.cameraTrack()).toBe('none');
+    expect(state.videoTracks.at(-1)?.mediaStreamTrack.readyState).toBe('ended');
+    expect(releases).toEqual(['2026-11-03T10:00:00.000Z']);
+  });
+
+  it('a failed chooseCamera while sending unpublishes the camera and releases its claim', async () => {
+    state.permissions = { canPublish: true, canPublishSources: [] };
+    const session: VoiceSessionResult = {
+      ok: true,
+      value: { livekit_url: 'wss://lk.example', identity: 'p7', rooms: [{ room: 'r', token: 't', can_publish: true, expires_at: '2026-11-03T10:00:15.000Z' }] },
+    };
+    const releases: string[] = [];
+    const client = new VoiceClient({
+      clock: new FakeClock(),
+      random: () => 0.5,
+      createSession: () => Promise.resolve(session),
+      report: () => Promise.resolve('ok'),
+      newRoom: newLiveKitRoom,
+      claimShare: () => Promise.resolve({ ok: false, failure: 'network' }),
+      stopShare: () => Promise.resolve(),
+      claimCamera: () => Promise.resolve({ ok: true, value: { principal_id: 7, started_at: '2026-11-03T10:00:00.000Z' } }),
+      stopCamera: (_channel, startedAt) => {
+        releases.push(startedAt);
+        return Promise.resolve();
+      },
+    });
+    client.join('general');
+    await settle();
+    await settle();
+    await client.startCamera();
+    await settle();
+    expect(client.snapshot()).toMatchObject({ camera: { kind: 'sending' }, cameraTrack: 'published' });
+    const failed = deferred<undefined>();
+    state.videoRestartHolds.push(failed);
+    const choosing = client.chooseCamera({ id: 'cam-2', label: 'Laptop camera' });
+    await settle();
+    failed.reject(new DOMException('gone', 'OverconstrainedError'));
+    await choosing;
+    await settle();
+    expect(client.snapshot()).toMatchObject({ camera: { kind: 'failed', reason: 'not_connected' }, cameraTrack: 'none' });
+    expect(state.published).toEqual([]);
+    expect(releases).toEqual(['2026-11-03T10:00:00.000Z']);
+    await client.leave();
+  });
+
+  it('a switch overtaken by a later one never stops the capture the later one made', async () => {
+    const room = await connected();
+    await room.captureCamera('cam-a');
+    const toB = deferred<undefined>();
+    const toC = deferred<undefined>();
+    state.videoRestartHolds.push(toB, toC);
+    const b = room.switchCamera('cam-b').then(
+      () => 'switched',
+      () => 'failed',
+    );
+    // B's restart is under way when C is asked for.
+    await settle();
+    const c = room.switchCamera('cam-c').then(
+      () => 'switched',
+      () => 'failed',
+    );
+    await settle();
+    // C's camera is had first; B's fails after it.
+    toC.resolve(undefined);
+    await settle();
+    toB.reject(new DOMException('gone', 'OverconstrainedError'));
+    expect([await b, await c]).toEqual(['failed', 'switched']);
+    expect(room.cameraTrack()).toBe('captured');
+    expect(room.cameraInUse()).toBe('cam-c');
+  });
+
+  it('a camera unplugged after a switch is still told as the device', async () => {
+    const room = await connected();
+    await room.captureCamera('cam-a');
+    await room.switchCamera('cam-b');
+    expect(room.cameraInUse()).toBe('cam-b');
+    const wrapper = state.videoTracks.find((t) => t.userProvided);
+    wrapper?.mediaStreamTrack.ended();
+    expect(ended).toEqual(['device']);
+  });
+
+  it('a switch overtaken by a stop leaves nothing captured, and does not fail the stop', async () => {
+    const room = await connected();
+    await room.captureCamera('cam-a');
+    const toB = deferred<undefined>();
+    state.videoRestartHolds.push(toB);
+    const b = room.switchCamera('cam-b').then(
+      () => 'switched',
+      () => 'failed',
+    );
+    await settle();
+    await room.stopCamera();
+    toB.resolve(undefined);
+    expect(await b).toBe('failed');
+    const wrapper = state.videoTracks.find((t) => t.userProvided);
+    expect(wrapper?.mediaStreamTrack.readyState).toBe('ended');
+    expect(room.cameraTrack()).toBe('none');
+  });
+
+  it('a switch overtaken by a keep never stops the capture kept for, and adopted by, the next connection', async () => {
+    const room = await connected();
+    await room.captureCamera('cam-a');
+    const toB = deferred<undefined>();
+    state.videoRestartHolds.push(toB);
+    const b = room.switchCamera('cam-b').then(
+      () => 'switched',
+      () => 'failed',
+    );
+    await settle();
+    const kept = room.keepCamera();
+    if (kept === null) throw new Error('nothing kept');
+    const next = await connected();
+    next.adoptCamera(kept);
+    toB.reject(new DOMException('gone', 'OverconstrainedError'));
+    expect(await b).toBe('failed');
+    expect(next.cameraTrack()).toBe('captured');
+    const wrapper = state.videoTracks.find((t) => t.userProvided);
+    expect(wrapper?.stopped).toBe(0);
+  });
+
+  it('a capture that completes after a stop is stopped, never held', async () => {
+    const room = await connected();
+    const hold = deferred<undefined>();
+    state.videoHolds.push(hold);
+    const capture = room.captureCamera(null).then(
+      () => 'held',
+      () => 'taken',
+    );
+    await settle();
+    await room.stopCamera();
+    hold.resolve(undefined);
+    expect(await capture).toBe('taken');
+    expect(state.videoTracks.at(-1)?.mediaStreamTrack.readyState).toBe('ended');
+    expect(room.cameraTrack()).toBe('none');
+  });
+
+  it('plays the self-view from the local track', async () => {
+    const room = await connected();
+    const self = document.createElement('video');
+    room.attachSelf(self);
+    await room.captureCamera(null);
+    expect(state.videoTracks.at(-1)?.attached).toEqual([self]);
   });
 });

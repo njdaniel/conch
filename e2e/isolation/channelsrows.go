@@ -24,6 +24,8 @@ import (
 //   - L4: ann's own frames are exactly the wire form, nothing more.
 //   - L7: cove is renamed; only its human members (the operator and ann) are
 //     sent the frame, and bob, ola and the agents stay quiet.
+//   - L8: cove is archived and then restored (issue #844); the same two, and
+//     nobody else, is sent the frame each time.
 //
 // A quiet socket is checked after the subject's own frame has arrived and a
 // further ccQuiet has passed: the frame is trailing-edge, one roster floor
@@ -116,7 +118,7 @@ func (c *ccWatch) step(row string, act func() error, want ...*feed) error {
 	return nil
 }
 
-// channelsChangedRows runs L1–L4 and L7 with bob's sockets (bsock), open
+// channelsChangedRows runs L1–L4, L7 and L8 with bob's sockets (bsock), open
 // since before A was active, and sockets of its own. It leaves cove with the
 // operator alone in it.
 func (w *world) channelsChangedRows(bsock *bSockets) (int, error) {
@@ -195,6 +197,14 @@ func (w *world) channelsChangedRows(bsock *bSockets) (int, error) {
 		{"ann added back to cove", member(http.MethodPut, cove, ann), []*feed{annF}},
 		{"L7: cove renamed", func() error {
 			return w.op.call(http.MethodPut, fmt.Sprintf("/v1/channels/%d/name", created.Channel.ID), schema.RenameChannelRequestV1{From: cove, Name: renamed}, nil)
+		}, []*feed{annF, opF}},
+		{"L8: cove archived", func() error {
+			archived := true
+			return w.op.call(http.MethodPut, fmt.Sprintf("/v1/channels/%d/settings", created.Channel.ID), schema.ChannelSettingsRequestV1{Archived: &archived}, nil)
+		}, []*feed{annF, opF}},
+		{"L8: cove restored", func() error {
+			archived := false
+			return w.op.call(http.MethodPut, fmt.Sprintf("/v1/channels/%d/settings", created.Channel.ID), schema.ChannelSettingsRequestV1{Archived: &archived}, nil)
 		}, []*feed{annF, opF}},
 		{"ann removed from cove again", member(http.MethodDelete, renamed, ann), []*feed{annF}},
 	}

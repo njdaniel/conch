@@ -96,6 +96,10 @@ func (s *Server) handleCreateMemberLink(w http.ResponseWriter, r *http.Request) 
 		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeInviteGrantExceedsInviter, "you may not name a channel you are not in as a landing channel", perm)
 	case errors.Is(err, store.ErrInviteAllowanceExceeded):
 		s.denyForbidden(w, r, caller, schema.ErrorCodeInviteAllowanceExceeded, "you already have as many open member links as you may")
+	case errors.Is(err, store.ErrChannelArchived):
+		// The store's archived guard (issue #844): landing channels are
+		// named only by a holder of manage_channels.
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
 	case errors.Is(err, store.ErrNotFound):
 		// Only a holder of manage_channels gets this far with a channel that
 		// does not exist; anyone else is refused before any lookup.

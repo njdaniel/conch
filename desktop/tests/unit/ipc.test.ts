@@ -128,6 +128,8 @@ describe('arguments', () => {
     ['signInWithCredential', ['']],
     ['signInWithCredential', ['x'.repeat(5000)]],
     ['keepCredential', ['has space']],
+    ['keepCredential', ['conch_pasted_credential']],
+    ['keepCredential', ['paste-xyz']],
     ['keepCredential', ['']],
     ['keepCredential', [7]],
     ['signInWithPassword', [{ name: 'a' }]],
@@ -185,7 +187,7 @@ describe('arguments', () => {
 
   it('refuses every operation the renderer may not invoke, and a socket, and logout', async () => {
     const f = fixture();
-    for (const operation of ['login', 'loginTotp', 'redeemInvite', 'resetPassword', 'setupRedeem', 'wsTicket', 'voiceSession', 'createInvite', 'totpEnroll', 'reauth', 'changePassword', 'messagesSocket', 'eventsSocket', 'logout']) {
+    for (const operation of ['login', 'loginTotp', 'redeemInvite', 'resetPassword', 'setupRedeem', 'wsTicket', 'voiceSession', 'createMemberLink', 'totpEnroll', 'reauth', 'changePassword', 'messagesSocket', 'eventsSocket', 'logout']) {
       expect(await f.ipc.invoke(f.event(), 'request', [{ operation, params: operation === 'voiceSession' ? { channel: 'a' } : undefined }]), operation).toEqual({ ok: false, kind: 'refused' });
     }
     expect(f.calls).toEqual([]);
@@ -211,7 +213,7 @@ describe('arguments', () => {
     ['joinAsGuest', [{ label: 'ada' }]],
     ['createAccount', [{ name: 'ada', password: 'pw' }]],
     ['signInWithCredential', ['conch_pasted']],
-    ['keepCredential', ['conch_pasted']],
+    ['keepCredential', ['paste-00000000000000000000000000000000']],
   ] as const)('does not carry %s when the server is not one the app may sign in to (issue #946)', async (name, args) => {
     const f = fixture();
     f.permit.value = false;

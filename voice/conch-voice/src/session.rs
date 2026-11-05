@@ -105,6 +105,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::error::Error;
 use crate::keydev::DeviceState;
+use crate::livekit::{ShareAudioOwner, Subscription};
 use crate::managed::{
     Capture, Control, Ending, Handoff, KeyView, OWNER_LOST_STEP, Owner, PROTOCOL_ERROR,
     REPORT_LIMIT, ROOM_LIMIT, Snapshot,
@@ -381,6 +382,9 @@ pub struct Settings {
     /// the stored logins, when the server is the default and they are for others
     /// (`cli::Resolved::unreachable_note`).
     pub unreachable_note: Option<String>,
+    /// Who plays other participants' share audio when the session names a companion
+    /// (`--share-audio-owner`; the helper for the TUI).
+    pub share_audio_owner: ShareAudioOwner,
     /// Waits and limits.
     pub timings: Timings,
 }
@@ -537,12 +541,16 @@ async fn establish<T: Transport>(
     transport: Arc<T>,
     channel: String,
     scrubber: Arc<Scrubber>,
+    share_audio_owner: ShareAudioOwner,
     limits: AttemptLimits,
 ) -> Result<Established<T>, Failure> {
     // A new session, immediately before the attempt it is for.
     let session = client.session(&channel).await.map_err(Failure::Session)?;
     // The room of the grant with no audience. Any other grant is ignored: nets are V5.
     let grant = session.channel_grant().ok_or(Failure::NoChannelGrant)?;
+    // The rule is built from this session and no other: a re-join asks for a new session
+    // and so builds a new rule, and none outlives the connection it was made for.
+    let subscription = Subscription::for_session(&session, share_audio_owner);
     // From here on, whatever the SDK writes is searched for these two values. They are not
     // forgotten when the connection ends: the SDK's tasks for a room go on, and may log,
     // after the room was left.
@@ -556,6 +564,7 @@ async fn establish<T: Transport>(
         grant.token.clone(),
         grant.can_publish,
         session.identity.clone(),
+        subscription,
         limits,
     );
     let runtime = tokio::runtime::Handle::current();
@@ -599,9 +608,10 @@ async fn join_room<T: Transport>(
     token: Secret,
     can_publish: bool,
     identity: String,
+    subscription: Subscription,
     limits: AttemptLimits,
 ) -> Result<Established<T>, Failure> {
-    let joining = transport.connect(&livekit_url, &token);
+    let joining = transport.connect(&livekit_url, &token, &subscription);
     let (room, events) = match tokio::time::timeout(limits.connect, joining).await {
         Ok(joined) => joined.map_err(Failure::Sdk)?,
         Err(_) => return Err(took_too_long("joining the voice room", limits.connect)),
@@ -756,6 +766,7 @@ struct Session<T: Transport> {
     client: Client,
     transport: Arc<T>,
     scrubber: Arc<Scrubber>,
+    share_audio_owner: ShareAudioOwner,
     out: Output,
     key_device: Option<String>,
     unreachable_note: Option<String>,
@@ -920,6 +931,7 @@ impl<T: Transport> Session<T> {
             level,
             key_device,
             unreachable_note,
+            share_audio_owner,
             timings,
         } = settings;
         let transmitter = transmit::spawn_with_level(
@@ -958,6 +970,7 @@ impl<T: Transport> Session<T> {
             client: conchd.client,
             transport: Arc::new(transport),
             scrubber,
+            share_audio_owner,
             out,
             key_device,
             unreachable_note,
@@ -1186,6 +1199,7 @@ impl<T: Transport> Session<T> {
                     Arc::clone(&self.transport),
                     self.channel.clone(),
                     Arc::clone(&self.scrubber),
+                    self.share_audio_owner,
                     AttemptLimits {
                         connect: self.timings.connect_limit,
                         publish: self.timings.publish_limit,
@@ -2183,7 +2197,12 @@ mod tests {
     impl Transport for Nowhere {
         type Room = NoRoom;
 
-        async fn connect(&self, _url: &str, _token: &Secret) -> Result<Joined<NoRoom>, SdkError> {
+        async fn connect(
+            &self,
+            _url: &str,
+            _token: &Secret,
+            _subscription: &Subscription,
+        ) -> Result<Joined<NoRoom>, SdkError> {
             std::future::pending().await
         }
     }
@@ -2251,6 +2270,7 @@ mod tests {
             level: transmit::level_config(-40, 400),
             key_device: None,
             unreachable_note: None,
+            share_audio_owner: ShareAudioOwner::Helper,
             timings: Timings::default(),
         };
         let (_inputs, received) = mpsc::unbounded_channel();

@@ -218,6 +218,32 @@ func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalI
 	if err := appendAuditEventTx(ctx, tx, actor, "principal_disabled", principalActor(principalID), "", now); err != nil {
 		return false, err
 	}
+	// Disabling an AI administrator revokes it (issue #1326,
+	// ai-administrators §3.1, §4.5): its grant is cleared here, so enabling
+	// the agent again gives it nothing back, and only an owner can grant
+	// it again. The trail records the change and the revocation beside the
+	// disable. Hiding disables first, so it revokes too.
+	var prevPerms, prevAdmin string
+	switch err := tx.QueryRowContext(ctx,
+		"SELECT permissions, admin FROM agent_manifests WHERE principal_id = ?", principalID).Scan(&prevPerms, &prevAdmin); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return false, fmt.Errorf("store: disable principal: read grant: %w", err)
+	case prevPerms != "[]" || prevAdmin != "":
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE agent_manifests SET permissions = '[]', admin = '' WHERE principal_id = ?", principalID); err != nil {
+			return false, fmt.Errorf("store: disable principal: clear grant: %w", err)
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditAdminGrantChanged, principalActor(principalID),
+			fmt.Sprintf("permissions=%s->[] approval_channel=0 reason=disabled", prevPerms), now); err != nil {
+			return false, err
+		}
+		if prevPerms != "[]" {
+			if err := appendAuditEventTx(ctx, tx, actor, AuditAIAdminRevoked, principalActor(principalID), "reason=disabled", now); err != nil {
+				return false, err
+			}
+		}
+	}
 	// Every session of the principal ends first, whatever credential it
 	// was made with, so each is recorded as ended by the disabling and not
 	// by the revocations that follow (issue #265).

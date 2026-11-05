@@ -27,7 +27,10 @@ describe('credential handling', () => {
     const sending = Object.entries(sources)
       .filter(([, code]) => /Authorization/.test(withoutComments(code)))
       .map(([path]) => path);
-    expect(sending).toEqual(['./platform/browser/http.ts']);
+    // The one other mention is the header of the MCP entry that Add an AI
+    // administrator shows once (issue #1334): text for another client's
+    // config file, never a request this page makes.
+    expect(sending).toEqual(['./admin/AddAIAdmin.tsx', './platform/browser/http.ts']);
   });
 
   it('is never logged: the page makes no console call', () => {
@@ -106,10 +109,12 @@ describe('local storage', () => {
     expect(code).not.toMatch(storageCallOtherKey);
     expect(code).not.toMatch(/\.(key|clear)\(|[sS]torage\.length/);
     // The preference methods take the key from their caller, and the only
-    // caller names the notification preferences' key.
+    // callers name the notification preferences' key, the setup card's
+    // (a per-account mark that the card was put off) and the voice mode's
+    // (issue #1244).
     const api = withoutComments(sources['./api.ts'] ?? '');
-    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\()/g) ?? []).toEqual([]);
-    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(2);
+    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|setupCardKey\(|voiceModeKey\b)/g) ?? []).toEqual([]);
+    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(6);
   });
 
   it('is not missed by the rules: a bare test of each', () => {
@@ -167,6 +172,14 @@ const screenApi = /getDisplayMedia|mediaDevices/;
 const screenCall = /getDisplayMedia\s*\(/;
 const screenChecker = './voice/share.ts';
 const notVoice = (path: string) => !path.startsWith('./voice/');
+// The SDK's camera shortcuts (N6), banned in every file, comments included:
+// the participant's own switches, and its createTracks, which captures a
+// camera and a microphone of the SDK's choosing together. (createScreenTracks,
+// the share's picker, is another name.)
+const cameraShortcut = /enableCameraAndMicrophone|setCameraEnabled|\bcreateTracks\b/;
+// The SDK's module specifier, or one of its subpaths, as a string: every
+// spelling of an import of it (static, dynamic, re-export, require) names it.
+const sdkImport = /['"`]livekit-client(\/[^'"`]*)?['"`]/;
 
 // Where the join token of a voice grant may be read: a property read
 // (grant.token, x.token), an index into rooms, or a destructuring that names
@@ -200,11 +213,45 @@ describe('media devices', () => {
     expect(code).toContain("typeof devices.getDisplayMedia === 'function'");
   });
 
+  // The camera (ADR-015, N6): the SDK's own ways of turning a camera on,
+  // which capture a device of its choosing and publish it at once, are named
+  // by no file, src/voice/sdk.ts included. The one way a video track is
+  // captured is sdk.ts's createLocalVideoTrack, and only sdk.ts calls it.
+  it('the SDK turns no camera on by itself: enableCameraAndMicrophone and setCameraEnabled are named nowhere, and createLocalVideoTrack only in src/voice/sdk.ts', () => {
+    const naming = Object.entries(sources)
+      .filter(([, code]) => cameraShortcut.test(code))
+      .map(([path]) => path);
+    expect(naming).toEqual([]);
+    const capturing = Object.entries(sources)
+      .filter(([, code]) => /createLocalVideoTrack|createLocalTracks/.test(withoutComments(code)))
+      .map(([path]) => path);
+    expect(capturing).toEqual(['./voice/sdk.ts']);
+    expect(withoutComments(sources['./voice/sdk.ts'] ?? '')).not.toMatch(/createLocalTracks/);
+    for (const example of ['room.localParticipant.enableCameraAndMicrophone()', 'await lp.setCameraEnabled(true)', 'const { setCameraEnabled } = lp;', 'p["setCameraEnabled"](true)', 'await lp.createTracks({ video: true })', "lp['createTracks']()"]) {
+      expect(cameraShortcut.test(example), example).toBe(true);
+    }
+    for (const example of ['setMicrophone(choice)', 'room.localParticipant.createScreenTracks(captureOptions())']) {
+      expect(cameraShortcut.test(example), example).toBe(false);
+    }
+  });
+
   it('the LiveKit SDK is imported only from src/voice/sdk.ts', () => {
     const hits = Object.entries(sources)
-      .filter(([, code]) => /from\s+['"]livekit-client['"]/.test(code))
+      .filter(([, code]) => sdkImport.test(code))
       .map(([path]) => path);
     expect(hits).toEqual(['./voice/sdk.ts']);
+    // And the rule sees a dynamic import, which a bundle would load as well.
+    for (const example of [
+      "const lk = await import('livekit-client');",
+      'import ( "livekit-client" )',
+      "import { Room } from 'livekit-client';",
+      "export { Room } from 'livekit-client';",
+      'const m = `livekit-client`;',
+      "import x from 'livekit-client/dist/livekit-client.esm.mjs';",
+    ]) {
+      expect(sdkImport.test(example), example).toBe(true);
+    }
+    expect(sdkImport.test("import x from 'livekit-client-other';")).toBe(false);
   });
 
   it('the join token is in src/api.ts and src/voice/ only, and never logged', () => {
@@ -288,19 +335,26 @@ const navigation: readonly RegExp[] = [
 // is in neither the address bar nor the back history.
 const inviteReplace = "window.history.replaceState(null, '', addressWithoutFragment(window.location))";
 
+// The other (F26): route.ts, once, replaces the history entry with the address
+// and the hash of the channel the page shows, when the hash named one the
+// person cannot open. It adds no history entry and writes no hash but the
+// shown channel's.
+const channelReplace = "window.history.replaceState(null, '', addressWithoutFragment(window.location) + hashForChannel(name))";
+
 // navigates says whether a source writes the address bar other than through
 // the hash. Comments are left out first; then the exception is taken out
 // (from route.ts only, and only once).
 function navigates(path: string, code: string): boolean {
   const bare = withoutComments(code);
-  const checked = path === './route.ts' ? bare.replace(inviteReplace, '') : bare;
+  const checked = path === './route.ts' ? bare.replace(inviteReplace, '').replace(channelReplace, '') : bare;
   return navigation.some((rule) => rule.test(checked));
 }
 
 describe('the history exception', () => {
-  it('is one call in src/route.ts, given the address without its fragment', () => {
+  it('is two calls in src/route.ts, each once: the address without its fragment, and the shown channel’s hash', () => {
     const code = sources['./route.ts'] ?? '';
     expect(code.split(inviteReplace)).toHaveLength(2);
+    expect(code.split(channelReplace)).toHaveLength(2);
     // That address is origin, path and query, and nothing else: no hash.
     const built = /export function addressWithoutFragment\([^)]*\): string \{\n\s*return (.*);\n\}/.exec(code)?.[1];
     expect(built).toBe('`${location.origin}${location.pathname}${location.search}`');
@@ -343,10 +397,15 @@ describe('the history exception', () => {
       "window.history.replaceState(null, '', addressWithoutFragment(window.location) + window.location.hash);",
       'location.replace(u);',
       `${inviteReplace};\n${inviteReplace};`,
+      `${channelReplace};\n${channelReplace};`,
+      "window.history.replaceState(null, '', addressWithoutFragment(window.location) + hashForChannel(name) + window.location.search);",
     ]) {
       expect(navigates('./route.ts', example), example).toBe(true);
     }
     expect(navigates('./route.ts', `${inviteReplace};`)).toBe(false);
+    expect(navigates('./route.ts', `${channelReplace};`)).toBe(false);
+    // Outside route.ts the second is no exception either.
+    expect(navigates('./App.tsx', channelReplace)).toBe(true);
     // Allowed: setting the hash, reading location, comparing it, and saying
     // in a comment what the code does not do.
     for (const example of [
@@ -388,7 +447,7 @@ describe('the invite code', () => {
       .map(([path]) => path);
     expect(calling).toEqual(['./platform/operations.ts']);
     const asking = Object.entries(sources)
-      .filter(([path, code]) => !path.startsWith('./platform/') && /\b(previewInvite|redeemInvite|redeemInviteGuest|createInvite|listInvites|closeInvite)'/.test(code))
+      .filter(([path, code]) => !path.startsWith('./platform/') && /\b(previewInvite|previewMemberLink|redeemInvite|redeemInviteGuest|createMemberLink|listInvites|closeInvite)'/.test(code))
       .map(([path]) => path);
     expect(asking).toEqual(['./api.ts']);
   });
@@ -762,4 +821,15 @@ describe('the platform seam', () => {
     // And the browser's credential store is then not in it.
     expect(code).not.toContain('conch.web.token');
   }, 60_000);
+});
+
+// Every time and date the page shows comes from src/time.ts (F26), so they
+// share one locale and hour cycle: no other module formats one itself.
+describe('times and dates', () => {
+  it('are formatted in src/time.ts alone', () => {
+    const formatting = Object.entries(sources)
+      .filter(([path, code]) => path !== './time.ts' && /\.toLocale(Date|Time)?String\(|\bIntl\.DateTimeFormat\b/.test(withoutComments(code)))
+      .map(([path]) => path);
+    expect(formatting).toEqual([]);
+  });
 });

@@ -100,6 +100,28 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// F26: an image sent with no text has its filename as the body; the filename
+// shows once. The post is unchanged.
+describe('a message whose text is only its attachment’s filename', () => {
+  const attachment: Payload = { schema: 'conch.file_attachment.v1', data: { file_ids: [17] } };
+
+  it('shows the name once, in the attachment', async () => {
+    conversation([message(1, 'photo.png', attachment)]);
+    await screen.findByRole('button', { name: 'Enlarge photo.png' });
+    await waitFor(() => {
+      expect(screen.getAllByText('photo.png')).toHaveLength(1);
+    });
+    expect(screen.getByText('photo.png').tagName).toBe('FIGCAPTION');
+  });
+
+  it('keeps a caption that is more than the name, and a name on a message with no attachment', async () => {
+    conversation([message(1, 'photo.png from the trip', attachment), message(2, 'photo.png')]);
+    await screen.findByRole('button', { name: 'Enlarge photo.png' });
+    expect(screen.getByText('photo.png from the trip')).toBeDefined();
+    expect(screen.getAllByText('photo.png').filter((el) => el.tagName !== 'FIGCAPTION')).toHaveLength(1);
+  });
+});
+
 describe('received attachment payloads', () => {
   it('renders only a valid conch.file_attachment.v1 payload', async () => {
     conversation([

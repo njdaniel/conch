@@ -6,7 +6,7 @@
 import { mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Browser, BrowserContextOptions, Page } from '@playwright/test';
-import { channelButton, expect, signIn, test } from '../fixtures';
+import { channelButton, credentialField, expect, signIn, test } from '../fixtures';
 import { dockerAvailable, startVoiceWorld, type Member, type VoiceWorld } from '../voice-world';
 import { inviteUrl, loadWorld } from '../world';
 
@@ -58,10 +58,10 @@ test('screenshots for design review', async ({ browser }, info) => {
       opened.push(signInPage);
       const s = await signInPage.newPage();
       await s.goto(vw.appUrl);
-      await expect(s.getByLabel('Credential')).toBeVisible();
+      await expect((await credentialField(s))).toBeVisible();
       await shot(s, 'signin');
 
-      const invite = await vw.api(vw.operator, 'POST', '/v1/invites', { kind: 'personal', channels: [vw.channel], voice: true });
+      const invite = await vw.api(vw.operator, 'POST', '/v2/invites', { kind: 'member', landing_channels: [vw.channel], max_uses: 1 });
       expect(invite.status).toBe(201);
       const code = (JSON.parse(invite.text) as { code: string }).code;
       const guest = await signInPage.newPage();
@@ -106,7 +106,7 @@ test('screenshots for design review', async ({ browser }, info) => {
       const l = await lost.newPage();
       await l.route('**/v1/channels', (route) => route.abort());
       await l.goto(vw.appUrl);
-      await l.getByLabel('Credential').fill(vw.alice.token);
+      await (await credentialField(l)).fill(vw.alice.token);
       await l.getByRole('button', { name: 'Sign in' }).click();
       await expect(l.getByText('Cannot reach the server')).toBeVisible();
       await shot(l, 'error');

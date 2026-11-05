@@ -1,0 +1,48 @@
+{
+  "status": "pending_approval",
+  "approval_id": 58,
+  "approval": {
+    "id": 58,
+    "requester_id": 12,
+    "channel_id": 11,
+    "title": "AI admin deploy-admin: disable member \"alice\" (#7)",
+    "body": "Requested by AI administrator \"deploy-admin\" (agent #12) over MCP at 2026-11-05T10:14:00Z.\nAction:     disable_member\nWill run:   POST /v1/principals/7/disable\nTarget:     principal #7 \"alice\" (member, joined 2026-10-30)\nParameters: {}\nThe agent's stated reason: \"alice asked to leave the server in #general\"\nIf approved, conchd runs exactly this action once, as agent #12, within 24h of the decision. Nothing else runs.",
+    "payload": {
+      "schema": "conch.admin_action.v1",
+      "data": {
+        "action": "disable_member",
+        "route": "POST /v1/principals/7/disable",
+        "target": {
+          "kind": "principal",
+          "id": 7,
+          "name": "alice"
+        },
+        "params": {},
+        "agent_id": 12,
+        "reason": "alice asked to leave the server in #general",
+        "requested_at": "2026-11-05T10:14:00.000Z"
+      }
+    },
+    "options": [
+      {
+        "id": "run",
+        "label": "Run it",
+        "kind": "approve"
+      },
+      {
+        "id": "refuse",
+        "label": "Do not run",
+        "kind": "reject"
+      }
+    ],
+    "deadline": "2026-11-06T10:14:00.000Z",
+    "quorum": 1,
+    "escalation_target": {
+      "kind": "ntfy_topic",
+      "topic": "conch-admin-urgent"
+    },
+    "state": "pending",
+    "created_at": "2026-11-05T10:14:00.000Z"
+  },
+  "deadline": "2026-11-06T10:14:00.000Z"
+}

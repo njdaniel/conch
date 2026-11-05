@@ -83,7 +83,14 @@ func TestCommunityMigrationApprovalChain(t *testing.T) {
 	// rewindToBeforeCommunity in internal/server/store) with your DDL in
 	// reverse, or the database stays newer than 39 and migration 40 never runs.
 	for _, stmt := range []string{
-		// Undo migration 40's DDL: the database is as a server at 39 held it.
+		// Undo migration 41's DDL (archived_at), then migration 40's: the
+		// database is as a server at 39 held it.
+		"DROP TABLE admin_actions",                            // migration 43 (issue #1326)
+		"ALTER TABLE agent_manifests DROP COLUMN admin",       // migration 43
+		"ALTER TABLE agent_manifests DROP COLUMN permissions", // migration 43
+		"ALTER TABLE credentials DROP COLUMN issued_by",       // migration 42 (issue #1024)
+		"ALTER TABLE hooks DROP COLUMN issued_by",             // migration 42 (issue #1024)
+		"ALTER TABLE channels DROP COLUMN archived_at",
 		"DROP TRIGGER channels_default_public_insert",
 		"DROP TRIGGER channels_default_public_update",
 		"ALTER TABLE channels DROP COLUMN visibility",

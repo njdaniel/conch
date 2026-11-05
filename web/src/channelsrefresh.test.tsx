@@ -269,10 +269,12 @@ describe('the list follows the server', () => {
       for (const timer of timers) timer.run();
       await Promise.resolve();
     });
-    await screen.findByRole('button', { name: 'general' });
+    await screen.findByRole('button', { name: 'general' }, { timeout: 5000 });
     expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
     expect(server.listGets).toBe(2);
-  });
+    // The whole App renders before the 5 s wait above: the test's own budget
+    // must be larger than that wait, or a loaded runner times it out (#1279).
+  }, 15_000);
 });
 
 describe('a frame is not list information', () => {
@@ -295,6 +297,7 @@ describe('a lost channel leaves nothing behind', () => {
     fireEvent.change(screen.getByLabelText<HTMLTextAreaElement>('Message #general'), { target: { value: 'a draft for the old general' } });
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('a draft for the old general');
     server.channels = [ops];
+    const sockets = eventsSockets().length;
     events.send(frame);
     await screen.findByText('You no longer have access to #general');
     // Another channel, new, is given the name, and the person is added to it.
@@ -302,6 +305,11 @@ describe('a lost channel leaves nothing behind', () => {
     server.channels = [ops, reborn];
     // Its history is slow: what the page shows meanwhile is what it held.
     server.holdHistory = new Promise<void>(() => undefined);
+    // The page opens its events socket again for the channel it moved to, after
+    // a ticket is read: the one opened for #general is closed and deaf.
+    await waitFor(() => {
+      expect(eventsSockets().length).toBeGreaterThan(sockets);
+    });
     const opsEvents = eventsSockets().at(-1);
     if (opsEvents === undefined) throw new Error('no events socket');
     opsEvents.open();
@@ -349,5 +357,35 @@ describe('a stale answer', () => {
     // The stale answer was not applied but read again: the focus read, the
     // 1008 path's own, and the one after the discard.
     expect(server.listGets).toBe(before + 3);
+  });
+});
+
+// F26: a link to a channel the person cannot open lands them in the one the
+// page shows, and the address says that one, in place: no history entry is
+// added, and the page says nothing of the channel asked for.
+describe('an address that names a channel the person cannot open', () => {
+  it('is corrected on load to the channel shown, without a history entry', async () => {
+    window.sessionStorage.setItem('conch.web.token', secret);
+    window.location.hash = '#/c/channel-x';
+    const before = window.history.length;
+    render(<App origin={origin} />);
+    await screen.findByRole('log', { name: 'Messages' });
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/c/general');
+    });
+    expect(window.history.length).toBe(before);
+    expect(document.body.textContent).not.toContain('channel-x');
+  });
+
+  it('is corrected when it is pasted over an open page, without a history entry', async () => {
+    await openChat();
+    window.location.hash = '#/c/channel-x';
+    const before = window.history.length;
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/c/general');
+    });
+    expect(window.history.length).toBe(before);
+    expect(screen.getByLabelText('Message #general')).toBeDefined();
+    expect(document.body.textContent).not.toContain('channel-x');
   });
 });

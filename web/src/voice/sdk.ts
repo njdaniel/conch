@@ -69,10 +69,32 @@
 // sent black frames and silence until the capture is adopted by the next
 // connection. A track whose publish was under way is taken down when that
 // publish completes, and the share's other track is not published at all.
+//
+// The camera (ADR-015, design §7). It is captured here alone, with
+// createLocalVideoTrack, and only when the person presses the camera button
+// or tests the camera: the device chosen exactly, or, with none chosen, the
+// browser's own choice; at 1280x720 and 30 fps as an ideal, never exact. It
+// is published as a track the page provides, so the SDK never captures a
+// camera by itself, not another one when the device goes. It is published
+// only once LiveKit has said the claim granted the camera (#525), with
+// simulcast layers of 360p and 180p below a top layer of at most 1.2 Mbps.
+// Stopping stops the capture at once, so the device light goes off, and then
+// unpublishes it. A capture kept for the next connection is blanked (black
+// frames) and published nowhere until it is adopted.
+//
+// Tracks are subscribed by kind and source together (S1): a microphone only
+// if it is sound, a camera only if it is a picture, from someone presence
+// shows holding a camera claim, and only while the call view is shown; a
+// share's picture only if it is a picture, and its sound only if it is
+// sound, while the share is watched. A track whose kind disagrees with its
+// source is never subscribed, so a picture published as a microphone is never
+// shown, and a sound published as a camera is never played.
 import {
   AudioPresets,
+  ConnectionState,
   DisconnectReason,
   LocalAudioTrack,
+  LocalVideoTrack,
   LogLevel,
   LoggerNames,
   PublishTrackError,
@@ -82,6 +104,7 @@ import {
   TrackEvent,
   VideoPreset,
   createLocalAudioTrack,
+  createLocalVideoTrack,
   getLogger,
   supportsAudioOutputSelection,
   type AudioCaptureOptions,
@@ -96,9 +119,11 @@ import {
   type ScreenShareCaptureOptions,
   type TrackPublication,
   type TrackPublishOptions,
+  type VideoCaptureOptions,
 } from 'livekit-client';
 import type { DisconnectCause } from './disconnect';
-import type { Microphone, Output, Processing, Room, RoomEvents, ShareSink } from './connection';
+import type { Camera, CameraProfile, KeptCamera } from './camera';
+import type { CameraTrack, Microphone, Output, Processing, Room, RoomEvents, ShareSink } from './connection';
 import { principalOf } from './presence';
 import { LogRing, Redactor } from './redact';
 import type { Captured, KeptScreen } from './share';
@@ -139,13 +164,141 @@ quietSdk();
 export const roomOptions: RoomOptions = { adaptiveStream: true, dynacast: true, stopLocalTrackOnUnpublish: false };
 export const connectOptions: RoomConnectOptions = { autoSubscribe: false };
 
-// wanted is the subscription choice for a remote track: a microphone always,
-// a share's picture and sound only while the share is watched, nothing else.
-export function wanted(source: Track.Source, watching: boolean): boolean {
-  if (source === Track.Source.Microphone) return true;
-  if (source === Track.Source.ScreenShare || source === Track.Source.ScreenShareAudio) return watching;
-  return false;
+// What this page receives besides microphones: whether it watches the share,
+// whether the call view is open (the person's choice), whether the video is
+// shown here now (false only in the phone layout outside the Voice view,
+// design §8), and whether the track's publisher holds a camera claim, as
+// presence says.
+export interface Wants {
+  readonly watching: boolean;
+  readonly viewing: boolean;
+  readonly shown: boolean;
+  readonly claimed: boolean;
 }
+
+// wanted is the subscription choice for a remote track, by its declared
+// source and its kind together (S1): a microphone always, if it is sound; a
+// camera if it is a picture, from someone holding a claim, while the call
+// view is open and shown here; a share's picture and its sound while the share is watched,
+// each of its own kind. Anything else, and any track whose kind disagrees
+// with its source, never.
+export function wanted(source: Track.Source, kind: Track.Kind | undefined, want: Wants): boolean {
+  switch (source) {
+    case Track.Source.Microphone:
+      return kind === Track.Kind.Audio;
+    case Track.Source.Camera:
+      return kind === Track.Kind.Video && want.viewing && want.shown && want.claimed;
+    case Track.Source.ScreenShare:
+      return kind === Track.Kind.Video && want.watching;
+    case Track.Source.ScreenShareAudio:
+      return kind === Track.Kind.Audio && want.watching;
+    default:
+      return false;
+  }
+}
+
+// What a track would be wanted for if the page wanted everything: false only
+// for a kind its source disagrees with.
+const everything: Wants = { watching: true, viewing: true, shown: true, claimed: true };
+
+// ---- the camera
+
+// What a capture of the camera asks for (design §7.5): the chosen device
+// exactly, as an object, which the SDK leaves alone (a bare id it tries as
+// exact and then again as ideal, which captures some other camera). The
+// desktop asks 1280x720 at 30 fps, the phone (O11) 640x360 at 24 fps, each as
+// an ideal. With none chosen, the browser chooses, and the person with it in
+// its prompt; on a phone it is asked for the front camera first
+// (facingMode user, which a browser takes as an ideal, never exact). A
+// remembered choice is exact and carries no facingMode.
+export const cameraAsk = { width: 1280, height: 720, frameRate: 30 } as const;
+export const phoneCameraAsk = { width: 640, height: 360, frameRate: 24 } as const;
+
+export function cameraOptions(choice: string | null, profile: CameraProfile = 'desktop'): VideoCaptureOptions {
+  const resolution = { ...(profile === 'phone' ? phoneCameraAsk : cameraAsk) };
+  if (choice !== null) return { resolution, deviceId: { exact: choice } };
+  return profile === 'phone' ? { resolution, facingMode: 'user' } : { resolution };
+}
+
+// How the camera is published (design §7.5). The desktop: a top layer of at
+// most 1.2 Mbps, and simulcast layers of 360p at 450 kbps and 180p at
+// 150 kbps, VP8 the SDK's default. The phone (O11): a top layer of 360p at
+// most 450 kbps, one simulcast layer of 180p at 150 kbps, VP8.
+export function cameraPublishOptions(profile: CameraProfile = 'desktop'): TrackPublishOptions {
+  if (profile === 'phone') {
+    return {
+      source: Track.Source.Camera,
+      simulcast: true,
+      videoCodec: 'vp8',
+      videoEncoding: { maxBitrate: 450_000, maxFramerate: phoneCameraAsk.frameRate },
+      videoSimulcastLayers: [new VideoPreset(320, 180, 150_000, 15)],
+    };
+  }
+  return {
+    source: Track.Source.Camera,
+    simulcast: true,
+    videoEncoding: { maxBitrate: 1_200_000, maxFramerate: cameraAsk.frameRate },
+    videoSimulcastLayers: [new VideoPreset(320, 180, 150_000, 15), new VideoPreset(640, 360, 450_000, 30)],
+  };
+}
+
+// The profile each capture was made with: its switches and its publish keep
+// it, including a capture kept for the next connection.
+const captureProfiles = new WeakMap<LocalVideoTrack, CameraProfile>();
+
+// captureCameraTrack captures the camera and wraps it as a track the page
+// provides: the SDK restarts nothing it did not capture, so a camera that
+// goes is never replaced by another.
+async function captureCameraTrack(choice: string | null, profile: CameraProfile): Promise<LocalVideoTrack> {
+  const captured = await createLocalVideoTrack(cameraOptions(choice, profile));
+  const track = new LocalVideoTrack(captured.mediaStreamTrack, captured.constraints, true);
+  track.source = Track.Source.Camera;
+  captureProfiles.set(track, profile);
+  return track;
+}
+
+// listCameras lists the cameras without asking for any: null while the
+// browser does not name them (no camera allowed yet).
+async function listCameras(): Promise<readonly Camera[] | null> {
+  const inputs = await LiveKitRoom.getLocalDevices('videoinput', false);
+  if (inputs.some((d) => d.label === '')) return null;
+  return inputs.map((d) => ({ id: d.deviceId, label: d.label }));
+}
+
+// LiveKit's own number for the camera source in a participant's permission
+// (livekit.TrackSource.CAMERA in its protocol), which the SDK does not
+// export.
+const protoCamera = 1;
+
+// ---- the private camera test (design §7.1)
+//
+// A capture that belongs to no room: nothing connects, claims, publishes or
+// records. The page shows it in a local preview and stops it.
+
+export interface CameraTestCapture {
+  // Plays the preview into a video element, or into none.
+  show(el: HTMLVideoElement | null): void;
+  stop(): void;
+}
+
+export async function captureCameraTest(choice: string | null, profile: CameraProfile = 'desktop'): Promise<CameraTestCapture> {
+  const captured = await createLocalVideoTrack(cameraOptions(choice, profile));
+  let shown: HTMLVideoElement | null = null;
+  return {
+    show: (el) => {
+      if (shown !== null) captured.detach(shown);
+      shown = el;
+      if (el !== null) captured.attach(el);
+    },
+    stop: () => {
+      if (shown !== null) captured.detach(shown);
+      shown = null;
+      captured.stop();
+    },
+  };
+}
+
+export const testCameras = listCameras;
 
 // ---- the microphone
 
@@ -446,6 +599,39 @@ class Kept implements KeptScreen {
   };
 }
 
+// A camera's capture between two connections: still capturing, blanked,
+// published on neither.
+class KeptCam implements KeptCamera {
+  readonly track: LocalVideoTrack;
+  onEnded: (() => void) | null = null;
+
+  constructor(track: LocalVideoTrack) {
+    this.track = track;
+    // The track's own event, which follows the capture through a switch of
+    // camera (the SDK moves it to each new MediaStreamTrack).
+    track.on(TrackEvent.Ended, this.ended);
+  }
+
+  private readonly ended = (): void => {
+    const ended = this.onEnded;
+    this.onEnded = null;
+    ended?.();
+  };
+
+  live = (): boolean => this.track.mediaStreamTrack.readyState === 'live';
+
+  stop = (): void => {
+    this.forget();
+    this.track.stop();
+  };
+
+  // forget stops listening: the capture is another connection's now.
+  forget = (): void => {
+    this.onEnded = null;
+    this.track.off(TrackEvent.Ended, this.ended);
+  };
+}
+
 // How many samples the level is read from: 512, about 10 ms at 48 kHz, the
 // frame conch-voice's open microphone judges (conch-voice.md section 3).
 // It was 1024 until issue #965; with the level read every 10 ms, a longer
@@ -499,6 +685,36 @@ class LiveKitAdapter implements Room {
   private sink: ShareSink | null = null;
   private shareVideo: RemoteTrack | null = null;
   private shareAudio: RemoteTrack | null = null;
+  // The camera this page captured, until it is stopped or kept; its
+  // publication once published; whether this adapter is taking it down, so
+  // its own unpublish is not reported; and the element of the self-view.
+  private camera: LocalVideoTrack | null = null;
+  private cameraPub: LocalTrackPublication | null = null;
+  private stoppingCamera = false;
+  // Numbers each capture of the camera, and each stop or keep: a capture
+  // that completes after a newer one began, or after a stop, is stopped at
+  // once and never held, so no capture is left running unreferenced.
+  private cameraTurn = 0;
+  // The switch of camera under way, and the number of the last one asked
+  // for (switchCamera).
+  private switching: Promise<void> = Promise.resolve();
+  private switchTurn = 0;
+  // Stops listening for the held camera's end (holdCamera).
+  private forgetEnded: () => void = () => undefined;
+  // The captures this connection kept for the next one: never its to stop.
+  private readonly keptTracks = new WeakSet<LocalVideoTrack>();
+  // The tracks that arrived with a kind their source disagrees with (S1),
+  // by sid: never subscribed again.
+  private readonly refused = new Set<string>();
+  private selfView: HTMLVideoElement | null = null;
+  // Whether the call view is shown, who presence shows holding a camera
+  // claim, the camera tracks received by principal, and the element each
+  // plays into.
+  private viewing = false;
+  private shown = true;
+  private claimed: ReadonlySet<number> = new Set();
+  private readonly remoteCameras = new Map<number, RemoteTrack>();
+  private readonly cameraViews = new Map<number, HTMLVideoElement>();
 
   async connect(url: string, token: string, roomName: string, publish: boolean, events: RoomEvents): Promise<void> {
     this.ensureOpen();
@@ -521,14 +737,28 @@ class LiveKitAdapter implements Room {
         const ids = speakers.map((p) => principalOf(p.identity)).filter((n): n is number => n !== null);
         events.onSpeakers(ids);
       })
-      .on(RoomEvent.TrackPublished, (pub: RemoteTrackPublication) => {
-        this.subscribe(pub);
+      .on(RoomEvent.TrackPublished, (pub: RemoteTrackPublication, participant: RemoteParticipant) => {
+        this.subscribe(pub, participant);
       })
-      .on(RoomEvent.TrackSubscribed, (track: RemoteTrack, _pub: RemoteTrackPublication, participant: RemoteParticipant) => {
+      .on(RoomEvent.TrackSubscribed, (track: RemoteTrack, pub: RemoteTrackPublication, participant: RemoteParticipant) => {
         // Nothing is played, or left in the page, after a close.
         if (this.closed) return;
+        // Subscribed by choice alone, and the choice is made again here, on
+        // what arrived: a track whose kind disagrees with its source is let
+        // go, never played or shown (S1).
+        if (!wanted(track.source, track.kind, this.wantsOf(participant))) {
+          // A kind its source disagrees with is never wanted, whatever the
+          // page shows: remembered, so no later choice subscribes it again.
+          if (!wanted(track.source, track.kind, everything)) this.refused.add(pub.trackSid);
+          pub.setSubscribed(false);
+          return;
+        }
         if (isShare(track.source)) {
           this.shared(track);
+          return;
+        }
+        if (track.source === Track.Source.Camera) {
+          this.cameraArrived(track, participant);
           return;
         }
         if (track.kind !== Track.Kind.Audio) return;
@@ -544,6 +774,10 @@ class LiveKitAdapter implements Room {
           this.unshared(track);
           return;
         }
+        if (track.source === Track.Source.Camera) {
+          this.cameraGone(track);
+          return;
+        }
         for (const el of track.detach()) el.remove();
         this.elements.delete(track.sid ?? '');
       })
@@ -552,6 +786,24 @@ class LiveKitAdapter implements Room {
         if (pub.source === Track.Source.Microphone && !this.wantSending) void pub.mute().catch(() => undefined);
       })
       .on(RoomEvent.LocalTrackUnpublished, (pub: LocalTrackPublication) => {
+        // The camera went without this adapter taking it down: LiveKit took
+        // the source away (the claim ended, or the pass withdrew it). The SDK
+        // also unpublishes every track when the server ends the connection,
+        // just before it says the room is disconnected, so the cause is read
+        // once that is over: a connection's end is the client's to act on
+        // (disconnect.ts cameraAfter), and not the server taking the camera.
+        if (pub.source === Track.Source.Camera) {
+          if (this.stoppingCamera || this.closed) return;
+          const track = pub.track;
+          if (track !== undefined && track !== this.camera) return;
+          this.cameraPub = null;
+          window.setTimeout(() => {
+            if (this.closed || room.state === ConnectionState.Disconnected) return;
+            if (track !== undefined && track !== this.camera) return;
+            events.onCameraEnded('server');
+          }, 0);
+          return;
+        }
         // The share's picture went without this adapter taking it down: the
         // server withdrew the share, unless the browser's own stop control
         // ended the capture. The SDK unpublishes an ended capture from inside
@@ -943,25 +1195,26 @@ class LiveKitAdapter implements Room {
   // the share's deadline (grantWait). This is the SDK's own check, made
   // early: LiveKit checks every publish against the grant whatever the page
   // does.
-  private async publishGranted(track: LocalTrack, options: TrackPublishOptions, deadline: number): Promise<void> {
+  private async publishGranted(track: LocalTrack, options: TrackPublishOptions, deadline: number, held: () => boolean = () => this.screen.includes(track)): Promise<LocalTrackPublication> {
     for (;;) {
       // Stopped or kept for another connection while an earlier track was
       // published: not to publish here.
-      if (!this.screen.includes(track)) throw new TakenError();
+      if (!held()) throw new TakenError();
       // Listened for before publishing: the grant may come while the SDK is
       // getting there.
       const changed = new Promise<void>((resolve) => {
         this.grantWaiters.push(resolve);
       });
+      let publication: LocalTrackPublication;
       try {
-        await this.room.localParticipant.publishTrack(track, options);
+        publication = await this.room.localParticipant.publishTrack(track, options);
       } catch (err) {
         if (!(err instanceof PublishTrackError) || err.status !== 403) throw err;
         const left = deadline - performance.now();
         if (left <= 0 || !(await within(changed, left))) throw err;
         this.ensureOpen();
         // Stopped or kept for another connection meanwhile: not to publish.
-        if (!this.screen.includes(track)) throw err;
+        if (!held()) throw err;
         continue;
       }
       // Taken while the publish was on its way: taken down here. The
@@ -970,11 +1223,11 @@ class LiveKitAdapter implements Room {
       // registers a publish only after waiting out a reconnect), and the
       // room conchd retired may live on for a while. A 403 publishes
       // nothing, so the retry above has nothing to take down.
-      if (!this.screen.includes(track)) {
+      if (!held()) {
         await this.room.localParticipant.unpublishTrack(track, false).catch(() => undefined);
         throw new TakenError();
       }
-      return;
+      return publication;
     }
   }
 
@@ -1023,16 +1276,23 @@ class LiveKitAdapter implements Room {
     }
   }
 
-  private subscribe(pub: RemoteTrackPublication): void {
+  private wantsOf(participant: Participant | undefined): Wants {
+    const principal = participant === undefined ? null : principalOf(participant.identity);
+    return { watching: this.watching, viewing: this.viewing, shown: this.shown, claimed: principal !== null && this.claimed.has(principal) };
+  }
+
+  private subscribe(pub: RemoteTrackPublication, participant: RemoteParticipant | undefined): void {
     if (this.closed) return;
-    const want = wanted(pub.source, this.watching);
-    if (pub.isSubscribed !== want) pub.setSubscribed(want);
+    const want = !this.refused.has(pub.trackSid) && wanted(pub.source, pub.kind, this.wantsOf(participant));
+    // What was asked, not what has arrived: a subscription on its way is not
+    // asked for again, nor one refused asked back.
+    if (pub.isDesired !== want) pub.setSubscribed(want);
   }
 
   private subscribeAll(): void {
     this.room.remoteParticipants.forEach((p: RemoteParticipant) => {
       p.trackPublications.forEach((pub) => {
-        this.subscribe(pub);
+        this.subscribe(pub, p);
       });
     });
   }
@@ -1052,17 +1312,300 @@ class LiveKitAdapter implements Room {
     this.events?.onShareTracks({ video: this.shareVideo !== null, audio: this.shareAudio !== null });
   }
 
+  // ---- the camera
+
+  async captureCamera(choice: string | null, profile: CameraProfile = 'desktop'): Promise<void> {
+    this.ensureOpen();
+    // One capture at a time: one held is stopped first.
+    await this.stopCamera();
+    this.ensureOpen();
+    const turn = ++this.cameraTurn;
+    const track = await captureCameraTrack(choice, profile);
+    if (this.closed) {
+      track.stop();
+      throw new ClosedError();
+    }
+    // A newer capture, a stop or a kept capture came while the browser was
+    // asked: this one is not the camera.
+    if (turn !== this.cameraTurn || this.camera !== null) {
+      track.stop();
+      throw new TakenError();
+    }
+    this.holdCamera(track);
+  }
+
+  // holdCamera makes a capture this connection's camera, captured here or
+  // kept from an earlier connection.
+  private holdCamera(track: LocalVideoTrack): void {
+    // Never two captures: one held is stopped before another takes its place.
+    const before = this.camera;
+    if (before !== null && before !== track) {
+      before.stop();
+      if (this.selfView !== null) before.detach(this.selfView);
+    }
+    this.camera = track;
+    this.cameraPub = null;
+    // The track's own event, not its MediaStreamTrack's: a switch of camera
+    // replaces the MediaStreamTrack, and the SDK moves its listener to each.
+    this.forgetEnded();
+    const ended = () => {
+      // Kept for another connection since, or stopped by this adapter (a
+      // track stopped by script fires no ended event): not this one's.
+      if (this.camera !== track || this.stoppingCamera || this.closed) return;
+      this.events?.onCameraEnded('device');
+    };
+    track.on(TrackEvent.Ended, ended);
+    this.forgetEnded = () => {
+      track.off(TrackEvent.Ended, ended);
+      this.forgetEnded = () => undefined;
+    };
+    if (this.selfView !== null) track.attach(this.selfView);
+    this.events?.onCameraChanged();
+  }
+
+  // cameraGranted reports whether LiveKit's last word on this connection's
+  // permission lets it publish a camera: an empty list of sources is every
+  // source.
+  private cameraGranted(): boolean {
+    const p = this.room.localParticipant.permissions;
+    if (p === undefined || !p.canPublish) return false;
+    const sources: readonly number[] = p.canPublishSources;
+    return sources.length === 0 || sources.includes(protoCamera);
+  }
+
+  async awaitCameraGrant(): Promise<void> {
+    this.ensureOpen();
+    const track = this.camera;
+    const deadline = performance.now() + grantWait;
+    for (;;) {
+      if (track === null || this.camera !== track) throw new TakenError();
+      if (this.cameraGranted()) return;
+      const changed = new Promise<void>((resolve) => {
+        this.grantWaiters.push(resolve);
+      });
+      const left = deadline - performance.now();
+      if (left <= 0 || !(await within(changed, left))) throw new Error('voice: the camera was not granted in time');
+      this.ensureOpen();
+    }
+  }
+
+  async publishCamera(): Promise<void> {
+    this.ensureOpen();
+    const track = this.camera;
+    if (track === null) throw new TakenError();
+    const publication = await this.publishGranted(track, cameraPublishOptions(captureProfiles.get(track)), performance.now() + grantWait, () => this.camera === track);
+    this.ensureOpen();
+    this.cameraPub = publication;
+    this.events?.onCameraChanged();
+  }
+
+  // switchCamera moves the capture to another camera, exactly, keeping its
+  // publication. On the latest switch's failure the capture is stopped, but
+  // its wrapper and publication stay held: the caller must switch it again or
+  // call stopCamera.
+  //
+  // Switches run one after another, and only the last one asked for runs: one
+  // overtaken while it waited does nothing, so an earlier switch's failure
+  // can never stop a capture a later one made.
+  async switchCamera(choice: string): Promise<void> {
+    this.ensureOpen();
+    const turn = ++this.switchTurn;
+    const before = this.switching;
+    let finished: () => void = () => undefined;
+    this.switching = new Promise<void>((resolve) => {
+      finished = resolve;
+    });
+    try {
+      await before;
+      if (turn !== this.switchTurn) return;
+      this.ensureOpen();
+      const track = this.camera;
+      if (track === null) return;
+      // The capture this switch moves: a stop, a keep or a new capture since
+      // moves cameraTurn on, and the switch then answers for nothing held.
+      const owned = this.cameraTurn;
+      const ours = () => owned === this.cameraTurn && this.camera === track;
+      // What the switch leaves behind once the track is not this
+      // connection's: stopped, unless it was kept for the next connection,
+      // which holds it now.
+      const letGo = () => {
+        if (!this.keptTracks.has(track)) track.stop();
+      };
+      try {
+        await track.restartTrack(cameraOptions(choice, captureProfiles.get(track)));
+      } catch (err) {
+        // Only the last switch asked for, on the capture this connection
+        // still holds, may stop it: one overtaken while the browser was
+        // asked leaves it to the later one.
+        if (ours()) {
+          // Keep the stopped wrapper for a newer choice to restart while the
+          // camera is starting; its caller stops and releases if none is left.
+          if (turn === this.switchTurn) track.stop();
+        } else if (this.camera !== track) letGo();
+        throw err;
+      }
+      if (this.closed || !ours()) {
+        if (this.camera !== track) letGo();
+        throw new ClosedError();
+      }
+      this.events?.onCameraChanged();
+    } finally {
+      finished();
+    }
+  }
+
+  async stopCamera(): Promise<void> {
+    // A capture still being asked for is not to be held once it comes.
+    this.cameraTurn++;
+    const track = this.camera;
+    this.camera = null;
+    this.cameraPub = null;
+    this.wakeGrant();
+    this.forgetEnded();
+    if (track === null) return;
+    this.stoppingCamera = true;
+    // The capture stops first, at once: the device light goes off even if
+    // the signalling connection hangs and the unpublish never answers.
+    track.stop();
+    if (this.selfView !== null) track.detach(this.selfView);
+    this.events?.onCameraChanged();
+    try {
+      await this.room.localParticipant.unpublishTrack(track, true).catch(() => undefined);
+    } finally {
+      this.stoppingCamera = false;
+    }
+  }
+
+  keepCamera(): KeptCamera | null {
+    this.cameraTurn++;
+    const track = this.camera;
+    this.camera = null;
+    this.cameraPub = null;
+    this.wakeGrant();
+    this.forgetEnded();
+    if (track === null) return null;
+    this.keptTracks.add(track);
+    // Blanked at once: black frames until the next connection adopts it.
+    track.mediaStreamTrack.enabled = false;
+    if (this.selfView !== null) track.detach(this.selfView);
+    this.stoppingCamera = true;
+    try {
+      void this.room.localParticipant.unpublishTrack(track, false).catch(() => undefined);
+    } finally {
+      this.stoppingCamera = false;
+    }
+    this.events?.onCameraChanged();
+    return new KeptCam(track);
+  }
+
+  adoptCamera(kept: KeptCamera): void {
+    this.ensureOpen();
+    this.cameraTurn++;
+    if (!(kept instanceof KeptCam)) throw new Error('voice: not a camera this page kept');
+    kept.forget();
+    kept.track.mediaStreamTrack.enabled = true;
+    this.holdCamera(kept.track);
+  }
+
+  // cameraTrack says what this page's own camera is, from the local track
+  // alone: none, captured and not published, or published.
+  cameraTrack(): CameraTrack {
+    const track = this.camera;
+    if (track === null || track.mediaStreamTrack.readyState !== 'live') return 'none';
+    return this.cameraPub === null ? 'captured' : 'published';
+  }
+
+  cameraInUse(): string | null {
+    const track = this.camera;
+    if (track === null || track.mediaStreamTrack.readyState !== 'live') return null;
+    return track.mediaStreamTrack.getSettings().deviceId ?? null;
+  }
+
+  cameras(): Promise<readonly Camera[] | null> {
+    return listCameras();
+  }
+
+  attachSelf(el: HTMLVideoElement | null): void {
+    const old = this.selfView;
+    if (old !== null) this.camera?.detach(old);
+    this.selfView = el;
+    if (el !== null) this.camera?.attach(el);
+  }
+
+  // setViewing subscribes the cameras of the people who hold a claim while
+  // the call view is shown, and lets every camera go, explicitly, when it
+  // closes.
+  setViewing(on: boolean): void {
+    this.viewing = on;
+    this.subscribeAll();
+  }
+
+  // setShown is whether the video is shown here now: false in the phone
+  // layout outside the Voice view, where every camera is let go, explicitly,
+  // and none is received. The person's own choice (setViewing) is kept, so
+  // that the cameras come back with the Voice view and need no tap (O8).
+  setShown(on: boolean): void {
+    this.shown = on;
+    this.subscribeAll();
+  }
+
+  // setCameras is who presence shows holding a camera claim: a camera from
+  // anyone else is not subscribed, and one subscribed is let go.
+  setCameras(claimed: ReadonlySet<number>): void {
+    this.claimed = new Set(claimed);
+    this.subscribeAll();
+  }
+
+  attachCamera(principal: number, el: HTMLVideoElement | null): void {
+    const old = this.cameraViews.get(principal);
+    const track = this.remoteCameras.get(principal);
+    if (old !== undefined) track?.detach(old);
+    if (el === null) this.cameraViews.delete(principal);
+    else {
+      this.cameraViews.set(principal, el);
+      track?.attach(el);
+    }
+  }
+
+  private cameraArrived(track: RemoteTrack, participant: RemoteParticipant): void {
+    const principal = principalOf(participant.identity);
+    if (principal === null) return;
+    const before = this.remoteCameras.get(principal);
+    if (before !== undefined && before !== track) before.detach();
+    this.remoteCameras.set(principal, track);
+    const el = this.cameraViews.get(principal);
+    if (el !== undefined) track.attach(el);
+    this.events?.onCameraTracks([...this.remoteCameras.keys()]);
+  }
+
+  private cameraGone(track: RemoteTrack): void {
+    track.detach();
+    for (const [principal, t] of this.remoteCameras) {
+      if (t === track) this.remoteCameras.delete(principal);
+    }
+    this.events?.onCameraTracks([...this.remoteCameras.keys()]);
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     this.wantSending = false;
-    // A share's publish waiting for a grant stops waiting.
+    // A share's or a camera's publish waiting for a grant stops waiting.
     this.wakeGrant();
     for (const { el } of this.elements.values()) el.remove();
     this.elements.clear();
     this.attachShare(null);
     this.shareVideo = null;
     this.shareAudio = null;
+    for (const t of this.remoteCameras.values()) t.detach();
+    this.remoteCameras.clear();
+    this.cameraViews.clear();
+    // The camera stops with the connection, unless it was kept for the next.
+    const camera = this.camera;
+    this.camera = null;
+    this.cameraPub = null;
+    camera?.stop();
+    this.selfView = null;
     const untapped = this.untap();
     const track = this.track;
     this.track = null;

@@ -46,6 +46,18 @@ afterEach(() => {
 });
 
 describe('channel search', () => {
+  // F26: Escape in the search box closes search (the page returns focus to Search).
+  it('closes on Escape in the search box, and on no other key', () => {
+    const onClose = vi.fn();
+    render(<SearchPanel {...props} onClose={onClose} />);
+    const box = screen.getByRole('searchbox', { name: 'Messages in #general' });
+    fireEvent.keyDown(box, { key: 'a' });
+    fireEvent.keyDown(box, { key: 'Escape', isComposing: true });
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(box, { key: 'Escape' });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('orders and deduplicates pages, then opens context and returns to the same results', async () => {
     const search = vi.spyOn(api, 'searchMessages')
       .mockResolvedValueOnce({ ok: true, value: { messages: [message(3), message(2)], next_before: 2 } })

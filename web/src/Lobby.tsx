@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
+import type { SettingsChange } from './ChannelSettingsAsk';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
 import { ServerVersion, TemporaryBanner } from './ServerVersion';
-import { JoiningSettings, type JoiningRequest } from './joiningSettings';
-import { MicTestShown, phoneViews, useAppHeight, usePhone, VoiceLive, VoiceStrip, type PhoneView } from './phone';
+import { AddPerson, JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
+import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceStrip, type PhoneView } from './phone';
 import type { ChannelV0 } from './schema/channel';
 import { StageHost } from './stage';
 import type { ChannelsState } from './state/channels';
@@ -62,6 +63,7 @@ export function Lobby({
   channels,
   unread,
   occupancy,
+  voiceNames,
   notificationCenter,
   connection,
   conversation,
@@ -72,7 +74,12 @@ export function Lobby({
   newChannel,
   canRename,
   renderRename,
+  canManage,
+  renderSettings,
   onInviteTo,
+  onLeft,
+  onUnauthorized,
+  onAddPerson,
   account,
   signIns,
   report,
@@ -85,6 +92,7 @@ export function Lobby({
   banner,
   visit,
   admin,
+  onSettingsOpen,
   overlay,
 }: {
   readonly origin: string;
@@ -95,8 +103,10 @@ export function Lobby({
   readonly temporary?: boolean;
   readonly channels: ChannelsState;
   readonly unread: ReadonlyMap<string, number>;
-  // How many are in each channel's voice (issue #596), shown in the list.
+  // Who is in each channel's voice (issues #596, #1103), shown in the list,
+  // and the names the page has for them by principal id.
   readonly occupancy?: InVoice;
+  readonly voiceNames?: ReadonlyMap<number, string>;
   readonly notificationCenter?: ReactNode;
   readonly connection: ConnectionState;
   readonly conversation: ReactNode;
@@ -113,12 +123,19 @@ export function Lobby({
   // "New channel" (issue #695), under the channel list, or null for a person
   // who may not make one.
   readonly newChannel?: ReactNode;
-  // Per-channel actions in each row's ⋯ menu (issue #1135): who may rename which
-  // channel, the rename form for one, and the opener of the invite panel with
-  // that channel ticked (absent for a person who may not invite).
+  // Per-channel actions in each row's ⋯ menu (issues #1135, #1095): who may
+  // rename which channel, the rename form for one, the opener of the invite
+  // panel, and the channel-removal handler after a Leave succeeds.
   readonly canRename?: (channel: ChannelV0) => boolean;
   readonly renderRename?: (channel: ChannelV0, close: () => void) => ReactNode;
+  readonly canManage?: boolean;
+  readonly renderSettings?: (channel: ChannelV0, change: SettingsChange, close: () => void) => ReactNode;
   readonly onInviteTo?: (channel: ChannelV0) => void;
+  readonly onLeft?: (name: string) => void;
+  readonly onUnauthorized?: () => void;
+  // The console's Members section asks for the member-link panel (issue
+  // #1020, "Add a person"): Settings closes, then the page opens it.
+  readonly onAddPerson?: () => void;
   // The caller's standing and own account settings, in Settings.
   readonly account?: ReactNode;
   // "Your sign-ins" (issue #496), in Settings. Ending this browser's own
@@ -146,6 +163,8 @@ export function Lobby({
   // The server's own settings, for an operator (issue #714): joining and
   // guests, in Settings.
   readonly admin?: ReactNode;
+  // Called each time Settings opens, so what it shows from whoami is fresh.
+  readonly onSettingsOpen?: () => void;
   // A question over the whole page, Settings included (issue #714: a recent
   // proof of the password). While it is shown everything else is inert and
   // stays as it was, so what was being typed is kept.
@@ -273,6 +292,9 @@ export function Lobby({
   // button is inert behind it, and cannot take focus.
   const settingsClosed = useRef(false);
   useEffect(() => {
+    if (settingsOpen) onSettingsOpen?.();
+  }, [settingsOpen, onSettingsOpen]);
+  useEffect(() => {
     if (settingsOpen) {
       if (toJoining.current) toJoining.current = false;
       else settingsHeading.current?.focus();
@@ -304,6 +326,10 @@ export function Lobby({
     setConfirming(null);
     settingsClosed.current = true;
   }
+  function addPerson() {
+    closeSettings();
+    onAddPerson?.();
+  }
   function closeMembers() {
     setPanelOpen(false);
     membersButton.current?.focus();
@@ -317,6 +343,8 @@ export function Lobby({
 
   return (
     <JoiningSettings.Provider value={joining}>
+    <SettingsOpen.Provider value={settingsOpen}>
+    <AddPerson.Provider value={onAddPerson === undefined ? null : addPerson}>
       <div ref={lobbyEl} className={phone ?`lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}>
         {/* While Settings is open the rest of the page is inert: the panel is
             modal, and focus cannot wander behind its backdrop. */}
@@ -372,10 +400,16 @@ export function Lobby({
                   selected={channels.selected}
                   unread={unread}
                   occupancy={occupancy}
+                  voiceNames={voiceNames}
+                  viewer={me}
                   empty={newChannel === null || newChannel === undefined ? undefined : 'No channels yet'}
                   {...(canRename === undefined ? {} : { canRename })}
                   {...(renderRename === undefined ? {} : { renderRename })}
+                  {...(canManage === undefined ? {} : { canManage })}
+                  {...(renderSettings === undefined ? {} : { renderSettings })}
                   {...(onInviteTo === undefined ? {} : { onInvite: onInviteTo })}
+                  {...(onLeft === undefined ? {} : { onLeft })}
+                  {...(onUnauthorized === undefined ? {} : { onUnauthorized })}
                   onOpen={(name) => {
                     onOpen(name);
                     if (phone) {
@@ -384,7 +418,15 @@ export function Lobby({
                     }
                   }}
                 />
-                {newChannel}
+                <ShowChat.Provider
+                  value={() => {
+                    if (!phone) return;
+                    toHeading.current = true;
+                    setView('chat');
+                  }}
+                >
+                  {newChannel}
+                </ShowChat.Provider>
                 {phone ? firstRun : null}
               </>
             ) : connection === 'reconnecting' ? (
@@ -500,7 +542,7 @@ export function Lobby({
             })}
           </section>
           {admin === undefined || admin === null ? null : (
-            <section aria-label="Server" className="drawer-section">
+            <section aria-label="Administration" className="drawer-section">
               {admin}
             </section>
           )}
@@ -577,6 +619,8 @@ export function Lobby({
         </div>
         {overlay}
       </div>
+    </AddPerson.Provider>
+    </SettingsOpen.Provider>
     </JoiningSettings.Provider>
   );
 }

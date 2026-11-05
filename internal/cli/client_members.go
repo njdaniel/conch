@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -12,11 +14,55 @@ import (
 // the server knows them by.
 func (c *Client) ListChannelMembers(ctx context.Context, channel string) (schema.ListChannelMembersResponseV1, error) {
 	endpoint := c.resolve("v1", "channels", channel, "members")
-	var result schema.ListChannelMembersResponseV1
+	var result channelMembersDoc
 	if err := c.roundTrip(ctx, "list channel members", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ListChannelMembersResponseV1{}, err
 	}
-	return result, nil
+	return result.ListChannelMembersResponseV1, nil
+}
+
+// ChannelAuthors names the people who wrote in channel and may no longer be on
+// its member list (GET /v1/channels/{channel}/authors?ids=, design §13.5): the
+// ids go in batches of at most schema.MaxChannelAuthorIDs. What it returns is
+// only what the server named for an id that was asked: a row for another id,
+// or a second row for one, is dropped. A batch that fails names nobody; the
+// first failure is returned beside what the other batches named, so a caller
+// shows #<id> for the rest and still sees why.
+func (c *Client) ChannelAuthors(ctx context.Context, channel string, ids []int64) ([]schema.ChannelAuthorV1, error) {
+	wanted := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id > 0 && !slices.Contains(wanted, id) {
+			wanted = append(wanted, id)
+		}
+	}
+	var named []schema.ChannelAuthorV1
+	var first error
+	seen := map[int64]bool{}
+	for start := 0; start < len(wanted); start += schema.MaxChannelAuthorIDs {
+		batch := wanted[start:min(start+schema.MaxChannelAuthorIDs, len(wanted))]
+		parts := make([]string, len(batch))
+		for i, id := range batch {
+			parts[i] = strconv.FormatInt(id, 10)
+		}
+		endpoint := c.resolve("v1", "channels", channel, "authors")
+		query := endpoint.Query()
+		query.Set("ids", strings.Join(parts, ","))
+		endpoint.RawQuery = query.Encode()
+		var result channelAuthorsDoc
+		if err := c.roundTrip(ctx, "name channel authors", http.MethodGet, endpoint, nil, &result); err != nil {
+			if first == nil {
+				first = err
+			}
+			continue
+		}
+		for _, a := range result.Authors {
+			if slices.Contains(batch, a.PrincipalID) && !seen[a.PrincipalID] {
+				seen[a.PrincipalID] = true
+				named = append(named, a)
+			}
+		}
+	}
+	return named, first
 }
 
 // ChangePrincipalRole sets a principal's role and, when request.Owner is not

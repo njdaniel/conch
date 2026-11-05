@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/njdaniel/conch/internal/server/store"
@@ -83,29 +85,37 @@ func (s *Server) channelForCaller(w http.ResponseWriter, r *http.Request, name s
 	return channel, true
 }
 
-// handleListChannelMembers serves GET /v1/channels/{channel}/members for
-// members of the channel and for operators; anyone else gets the
-// channel-not-found response.
-func (s *Server) handleListChannelMembers(w http.ResponseWriter, r *http.Request) {
+// channelMembersGate is the gate of GET /v1/channels/{channel}/members and of
+// the channel's authors route (design §13.5), written once: it resolves the
+// channel and admits a member of it, or a caller holding manage_channels
+// (seesAll), or no caller (authentication off). Anyone else, and an unknown
+// channel, get the one channel-not-found 404; an agent additionally needs
+// messages.read with read on the channel (issue #79), since who else is in a
+// channel is channel content. It writes the response and returns ok=false
+// when the request may not go on.
+func (s *Server) channelMembersGate(w http.ResponseWriter, r *http.Request) (channel store.Channel, seesAll, ok bool) {
 	ctx := r.Context()
 	channel, err := s.store.ChannelByName(ctx, r.PathValue("channel"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeChannelNotFound(w)
-		return
+		return channel, false, false
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "members: find channel failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
-		return
+		return channel, false, false
+	}
+	if dispatchedChannelChanged(r, channel.ID) {
+		writeTargetChanged(w)
+		return channel, false, false
 	}
 	caller, authed := callerFrom(ctx)
 	// A caller without manage_channels sees only a channel it is in; any
 	// other gets the uniform channel-not-found (design §7.3).
-	seesAll := !authed
+	seesAll = !authed
 	if authed {
-		var ok bool
 		if seesAll, ok = s.canOrFail(w, r, caller, schema.PermManageChannels); !ok {
-			return
+			return channel, false, false
 		}
 	}
 	if !seesAll {
@@ -113,19 +123,91 @@ func (s *Server) handleListChannelMembers(w http.ResponseWriter, r *http.Request
 		if err != nil {
 			slog.ErrorContext(ctx, "members: check membership failed", "error", err)
 			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
-			return
+			return channel, false, false
 		}
 		if !member {
 			s.auditAgentNonMember(r, schema.CapabilityMessagesRead, channel.ID)
 			writeChannelNotFound(w)
-			return
+			return channel, false, false
 		}
 	}
-	// Who else is in a channel is channel content: an agent needs the same
-	// grant to see it as to read the channel's messages (issue #79).
-	if !s.agentCallerAllowed(w, r, schema.CapabilityMessagesRead, channel.ID, schema.ChannelPermissionRead) {
+	// The admin door's dispatch is judged by manage_channels above, not by
+	// the agent's channel grants (ai-administrators §3.3, list_channel_members).
+	if _, dispatched := dispatchedHere(r); !dispatched && !s.agentCallerAllowed(w, r, schema.CapabilityMessagesRead, channel.ID, schema.ChannelPermissionRead) {
+		return channel, false, false
+	}
+	return channel, seesAll, true
+}
+
+// handleListChannelAuthors serves GET /v1/channels/{channel}/authors?ids=
+// (design §13.5, O14d): behind the member list's gate, it names each asked
+// id that authored at least one message the caller may read in the channel,
+// through the store's message visibility, and omits every other id, known or
+// not. At most MaxChannelAuthorIDs ids; more, none, or one that is not a
+// positive number is 400 invalid_request. The answer does not depend on who
+// the caller may know, and discloses only what a visible message already
+// told the channel.
+func (s *Server) handleListChannelAuthors(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	channel, _, ok := s.channelMembersGate(w, r)
+	if !ok {
 		return
 	}
+	ids, err := parseAuthorIDs(r.URL.Query()["ids"])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	authors, err := s.store.ListChannelAuthors(ctx, channel.ID, readerFor(r, apiV2), ids)
+	if err != nil {
+		slog.ErrorContext(ctx, "members: list authors failed", "channel", channel.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	out := schema.ChannelAuthorsResponseV1{Authors: make([]schema.ChannelAuthorV1, 0, len(authors))}
+	for _, a := range authors {
+		out.Authors = append(out.Authors, schema.ChannelAuthorV1{PrincipalID: a.PrincipalID, Name: a.Name, Kind: schema.PrincipalKind(a.Kind)})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// parseAuthorIDs reads the ids of ?ids=<id>,<id>…, given once or repeated.
+func parseAuthorIDs(values []string) ([]int64, error) {
+	var ids []int64
+	seen := map[int64]bool{}
+	for _, v := range values {
+		for _, part := range strings.Split(v, ",") {
+			id, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+			if err != nil || id <= 0 {
+				return nil, errors.New("ids must be a comma-separated list of positive principal ids")
+			}
+			// The cap is on distinct ids, as the store's is.
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+			ids = append(ids, id)
+			if len(ids) > schema.MaxChannelAuthorIDs {
+				return nil, fmt.Errorf("at most %d ids may be asked at once", schema.MaxChannelAuthorIDs)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil, errors.New("ids is required: a comma-separated list of principal ids")
+	}
+	return ids, nil
+}
+
+// handleListChannelMembers serves GET /v1/channels/{channel}/members for
+// members of the channel and for operators; anyone else gets the
+// channel-not-found response.
+func (s *Server) handleListChannelMembers(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	channel, seesAll, ok := s.channelMembersGate(w, r)
+	if !ok {
+		return
+	}
+	caller, authed := callerFrom(ctx)
 	members, err := s.store.ListChannelMembers(ctx, channel.ID)
 	if err != nil {
 		slog.ErrorContext(ctx, "members: list failed", "channel", channel.ID, "error", err)
@@ -294,13 +376,19 @@ func (s *Server) handlePutChannelMember(w http.ResponseWriter, r *http.Request) 
 	if added || req.Manages != nil {
 		s.events.notifyChannelsChanged(principalID)
 	}
+	if added {
+		s.directoryMembershipChanged(ctx, channel.ID, principalID)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleAddChannelMemberByName serves POST /v1/channels/{channel}/members
-// (operator or channel manager; issue #790, ADR-010 §3.3). It adds the named
-// human member with can_decide = 0 and manages = 0, returning 201 on a new
-// membership and 200 when the person is already in the channel.
+// (operator or channel manager; issue #790, ADR-010 §3.3, #1206). It adds the
+// person named by name or id only if they are not in the channel: 201 with a
+// new membership (manages = 0, can_decide as an operator asked, else 0), or
+// 200 with the membership as it stands, unchanged, when they are already in
+// it. Unlike PUT .../members/{id}, it can never change an existing member's
+// right to decide approvals.
 func (s *Server) handleAddChannelMemberByName(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req schema.AddChannelMemberRequestV1
@@ -332,12 +420,17 @@ func (s *Server) handleAddChannelMemberByName(w http.ResponseWriter, r *http.Req
 		addedBy = caller.ID
 	}
 	if manager {
+		if req.CanDecide != nil {
+			s.denyForbiddenFor(w, r, caller, "forbidden", "only an operator may set can_decide or manages", refused)
+			return
+		}
 		if err := s.store.CheckMemberAddLimit(ctx, caller.ID, renameAttemptsPerDay, now); err != nil {
 			s.writeMemberAddLimitError(w, r, err, now)
 			return
 		}
 	}
-	member, added, err := s.store.AddChannelMemberByName(ctx, auditActor(ctx), channel.ID, addedBy, req.Name)
+	target := store.MemberTarget{Name: req.Name, ID: req.ID}
+	member, added, err := s.store.AddChannelMemberIfAbsent(ctx, auditActor(ctx), channel.ID, addedBy, target, req.CanDecide)
 	if errors.Is(err, store.ErrNotAddable) || errors.Is(err, store.ErrPrincipalNotFound) {
 		if manager {
 			if rerr := s.store.RecordMemberAddRefusedFor(context.WithoutCancel(ctx), caller.ID, channel.ID, refused, renameAttemptsPerDay, now); rerr != nil {
@@ -359,6 +452,7 @@ func (s *Server) handleAddChannelMemberByName(w http.ResponseWriter, r *http.Req
 	if added {
 		s.events.notifyChannelRoster(channel.ID)
 		s.events.notifyChannelsChanged(member.PrincipalID)
+		s.directoryMembershipChanged(ctx, channel.ID, member.PrincipalID)
 		writeJSON(w, http.StatusCreated, doc)
 		return
 	}
@@ -418,6 +512,7 @@ func (s *Server) handleDeleteChannelMember(w http.ResponseWriter, r *http.Reques
 	// that removed nobody sends nothing.
 	if removed {
 		s.events.notifyChannelsChanged(principalID)
+		s.directoryMembershipChanged(ctx, channel.ID, principalID)
 	}
 	// Voice: close their presence sockets and remove them from the channel's
 	// rooms before the response is written. It cannot fail the request;
@@ -448,6 +543,10 @@ func (s *Server) writeMemberError(w http.ResponseWriter, r *http.Request, err er
 		} else {
 			writeError(w, http.StatusForbidden, "forbidden", err.Error())
 		}
+	case errors.Is(err, store.ErrChannelArchived):
+		// The store's archived guard (issue #844): said after the actor's
+		// standing is known, so only to someone who may see the channel.
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
 	case errors.Is(err, store.ErrManageNotAllowed):
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 	case errors.Is(err, store.ErrPrincipalNotFound):

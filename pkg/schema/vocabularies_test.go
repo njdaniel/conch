@@ -213,7 +213,9 @@ var validators = map[string]func(string) bool{
 	"VoiceControlTalkMode":     validOf[VoiceControlTalkMode](),
 	"VoiceDevicesConfig":       validOf[VoiceDevicesConfig](),
 	"VoiceDevicesPipeWire":     validOf[VoiceDevicesPipeWire](),
+	"VoiceShareAudioScope":     validOf[VoiceShareAudioScope](),
 	"VoiceShareEndReason":      validOf[VoiceShareEndReason](),
+	"VoiceCameraEndReason":     validOf[VoiceCameraEndReason](),
 	"VoiceTransmitState":       validOf[VoiceTransmitState](),
 
 	// Roles and permissions (ADR-014, issue #1012).
@@ -227,6 +229,12 @@ var validators = map[string]func(string) bool{
 	"ChannelVisibility": validOf[ChannelVisibility](),
 	"InviteKindV2":      validOf[InviteKindV2](),
 	"DirectoryScope":    validOf[DirectoryScope](),
+
+	// AI administrators (issue #1326).
+	"AdminAction":       validOf[AdminAction](),
+	"AdminGate":         validOf[AdminGate](),
+	"AdminTargetKind":   validOf[AdminTargetKind](),
+	"AdminActionStatus": validOf[AdminActionStatus](),
 }
 
 // namers is every …Names() func, by the type it names. TestVocabularies fails

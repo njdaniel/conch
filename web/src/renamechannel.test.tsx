@@ -241,7 +241,7 @@ describe('the rename control', () => {
   it('is offered to an operator, for the open channel', async () => {
     await open();
     fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
-    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Rename channel…']);
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Rename channel…', 'Leave channel', 'Make private', 'Make default channel', 'Archive channel…']);
     // Nothing is shown under the list any more: the form is reached by the menu only.
     expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
     expect(within(nav()).queryByRole('button', { name: /^Rename #/ })).toBeNull();
@@ -276,12 +276,13 @@ describe('the rename control', () => {
     });
   });
 
-  it('is not offered to a member', async () => {
+  it('is not offered to a member, whose menu still offers Leave', async () => {
     window.sessionStorage.clear();
     window.localStorage.setItem(key, secret);
     install(member);
     await open();
-    expect(within(nav()).queryByRole('button', { name: /^(Rename|Actions for)/ })).toBeNull();
+    fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
     expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
     expect(renames()).toEqual([]);
   });
@@ -292,7 +293,9 @@ describe('the rename control', () => {
     install(member);
     (server.channels[1] as Channel).manages = true;
     await open();
-    expect(within(nav()).queryByRole('button', { name: 'Actions for general' })).toBeNull();
+    fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
     expect(within(nav()).getByRole('button', { name: 'Actions for ops' })).toBeDefined();
   });
 
@@ -377,7 +380,7 @@ describe('an operator renames the open channel', () => {
     [
       'a name already taken',
       () => Promise.resolve(json({ code: 'channel_exists', message: 'taken' }, 409)),
-      'There is already a channel with that name, or one that reads the same, perhaps one you are not in. Choose another name.',
+      'That name is taken',
     ],
     ['no answer at all', () => Promise.reject(new TypeError('failed')), 'Cannot reach the server. Try again.'],
   ])('says so for %s, keeps the name as typed and renames nothing', async (_case, answer, line) => {
@@ -388,6 +391,7 @@ describe('an operator renames the open channel', () => {
     fireEvent.click(within(screen.getByRole('form', { name: 'Rename channel' })).getByRole('button', { name: 'Rename channel' }));
     const said = await within(nav()).findByText(line);
     expect(said.getAttribute('role')).toBe('status');
+    expect(said.textContent).not.toContain('perhaps one you are not in');
     expect(screen.getByRole('form', { name: 'Rename channel' }).hidden).toBe(false);
     expect(field().value).toBe(' lounge');
     expect(within(nav()).getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
@@ -479,6 +483,23 @@ describe('a rename made elsewhere', () => {
     expect(FakeSocket.all).toHaveLength(socketsBefore);
     expect(chat.closed || events.closed).toBe(false);
     expect(renames()).toEqual([]);
+  });
+
+  it('a frame that makes the channel private puts the lock on its row, and one that makes it public takes it off (issue #1183)', async () => {
+    const { events } = await open();
+    const described = () => {
+      const ids = (within(nav()).getByRole('button', { name: 'general' }).getAttribute('aria-describedby') ?? '').split(' ');
+      return ids.map((id) => document.getElementById(id)?.textContent ?? '').join(' ');
+    };
+    expect(described()).not.toContain('private channel');
+    events.send({ schema: 'conch.channel.v1', channel_id: 7, name: 'general', created_at: at, visibility: 'private' });
+    await waitFor(() => {
+      expect(described()).toContain('private channel');
+    });
+    events.send({ schema: 'conch.channel.v1', channel_id: 7, name: 'general', created_at: at, visibility: 'public' });
+    await waitFor(() => {
+      expect(described()).not.toContain('private channel');
+    });
   });
 
   it('a channel document for another channel, or one that does not validate, changes nothing', async () => {

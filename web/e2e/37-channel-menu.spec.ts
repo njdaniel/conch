@@ -7,10 +7,10 @@
 // Each test makes its own channels and people, so no other spec's channels
 // change name.
 import type { BrowserContextOptions, Locator, Page } from '@playwright/test';
-import { makeInvite } from './api';
+import { makeMemberLink } from './api';
 import { createChannelResponse, listChannelsResponse, type CreateChannelRequest } from '../src/schema/channel';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
-import { channelButton, expect, expectFits, fillAccount, showView, signIn, statusLine, test } from './fixtures';
+import { channelButton, credentialField, expect, expectFits, fillAccount, showView, signIn, statusLine, test } from './fixtures';
 import { call, inviteUrl, ok, type World } from './world';
 
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Channels' });
@@ -65,7 +65,7 @@ for (const [size, options, phone] of sizes) {
     // focused; Escape closes it and puts focus back.
     await more.focus();
     await page.keyboard.press('Enter');
-    await expect(row.getByRole('menuitem')).toHaveText(['Rename channel…']);
+    await expect(row.getByRole('menuitem')).toHaveText(['Rename channel…', 'Leave channel']);
     await expect(row.getByRole('menuitem', { name: 'Rename channel…' })).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(row.getByRole('menu')).toHaveCount(0);
@@ -105,7 +105,7 @@ for (const [size, options, phone] of sizes) {
     const name = `i${suffix}${phone ? 'p' : 'w'}`;
     await makeChannel(world, first);
     await makeChannel(world, second);
-    const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: [first, second], voice: false, may_invite: true });
+    const made = await makeMemberLink(world, world.tokens.operator, { kind: 'member', landing_channels: [first, second], max_uses: 1 });
 
     const { page } = await meet(options);
     await page.goto(inviteUrl(world, made.code));
@@ -124,14 +124,15 @@ for (const [size, options, phone] of sizes) {
 
     const press = async (target: Locator) => (phone ? target.tap() : target.click());
     await press(more);
-    // A plain member who may invite: Invite people alone, no rename.
-    await expect(row.getByRole('menuitem')).toHaveText(['Invite people']);
+    // A plain member who may invite: Invite and Leave, no rename.
+    await expect(row.getByRole('menuitem')).toHaveText(['Invite people', 'Leave channel']);
     await press(row.getByRole('menuitem', { name: 'Invite people' }));
 
     const panel = page.getByRole('region', { name: 'Invites' });
-    await expect(panel.getByRole('checkbox', { name: `#${second}` })).toBeChecked();
-    await expect(panel.getByRole('checkbox', { name: `#${first}` })).not.toBeChecked();
-    await expect(panel.getByRole('button', { name: 'Make invite' })).toBeEnabled();
+    // A member link names no channel (issue #990): the panel opens, with its
+    // form, and nothing is ticked.
+    await expect(panel.getByRole('checkbox', { name: /^#/ })).toHaveCount(0);
+    await expect(panel.getByRole('button', { name: 'Make link' })).toBeEnabled();
     await expectFits(page, `${size}: the invite panel opened from a channel`);
   });
 }
@@ -151,7 +152,7 @@ async function watchContextMenus(page: Page): Promise<void> {
 test('P1135 a right-click on a channel row with actions opens its menu and is claimed; on the heading, the native menu stays', async ({ meet, world }) => {
   const { page } = await meet({ viewport: { width: 1440, height: 900 } });
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(page)).fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');

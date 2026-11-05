@@ -9,7 +9,7 @@
 // permission-aware context menu of issue #972 can adopt it: the caller says
 // which items there are (only those the person may use), and an item list
 // that is empty draws nothing at all.
-import { useEffect, useId, useRef, type KeyboardEvent, type RefObject, type TouchEvent } from 'react';
+import { Fragment, useEffect, useId, useRef, type KeyboardEvent, type RefObject, type TouchEvent } from 'react';
 
 export interface MenuItem {
   // Unique within the menu.
@@ -19,6 +19,8 @@ export interface MenuItem {
   // Shown, and announced, as unavailable for now (a request is pending);
   // choosing it does nothing and leaves the menu open. Absent means usable.
   readonly disabled?: boolean;
+  // Why it is unavailable, shown under it and announced with it.
+  readonly reason?: string;
 }
 
 // How long a finger rests on a message before its menu opens.
@@ -126,20 +128,27 @@ export function ActionsMenu({
       {open ? (
         <div ref={menu} id={id} role="menu" aria-label={label} className="actions-menu" onKeyDown={key}>
           {items.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              role="menuitem"
-              tabIndex={-1}
-              {...(item.disabled === true ? { 'aria-disabled': true } : {})}
-              onClick={() => {
-                if (item.disabled === true) return;
-                onOpenChange(false);
-                item.onSelect();
-              }}
-            >
-              {item.label}
-            </button>
+            <Fragment key={item.key}>
+              <button
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                {...(item.disabled === true ? { 'aria-disabled': true } : {})}
+                {...(item.reason === undefined ? {} : { 'aria-describedby': `${id}-${item.key}-reason` })}
+                onClick={() => {
+                  if (item.disabled === true) return;
+                  onOpenChange(false);
+                  item.onSelect();
+                }}
+              >
+                {item.label}
+              </button>
+              {item.reason === undefined ? null : (
+                <span id={`${id}-${item.key}-reason`} className="menu-reason" role="presentation">
+                  {item.reason}
+                </span>
+              )}
+            </Fragment>
           ))}
         </div>
       ) : null}
@@ -152,7 +161,13 @@ export function ActionsMenu({
 // box, a link or an image, whose own menus people use), and a long press.
 // Android opens the context menu on a long press itself; iOS does not, so
 // the timer is the way there. Both only ever open.
-export function useOpeners(enabled: boolean, open: () => void) {
+//
+// A press inside a dialog is left alone by default, so a dialog's own content
+// keeps the browser's menu. A row that is itself drawn inside a dialog (the
+// console's Channels section, in the Settings drawer, issue #1021) opts in
+// with `insideDialog`; a press in a text box, a link, an image or the menu is
+// still left alone.
+export function useOpeners(enabled: boolean, open: () => void, options: { readonly insideDialog?: boolean; readonly skip?: string } = {}) {
   const timer = useRef<number | null>(null);
   const start = useRef<{ readonly x: number; readonly y: number } | null>(null);
   useEffect(() => () => {
@@ -163,7 +178,9 @@ export function useOpeners(enabled: boolean, open: () => void) {
     timer.current = null;
     start.current = null;
   };
-  const own = (target: EventTarget) => !(target instanceof Element && target.closest('textarea, input, a, img, [role="menu"], [role="dialog"]') !== null);
+  const base = options.insideDialog === true ? 'textarea, input, a, img, [role="menu"]' : 'textarea, input, a, img, [role="menu"], [role="dialog"]';
+  const skipped = options.skip === undefined ? base : `${base}, ${options.skip}`;
+  const own = (target: EventTarget) => !(target instanceof Element && target.closest(skipped) !== null);
   if (!enabled) return {};
   return {
     onContextMenu: (event: { readonly target: EventTarget; preventDefault: () => void }) => {

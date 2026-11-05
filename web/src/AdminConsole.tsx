@@ -1,0 +1,199 @@
+// The administration console (ADR-014 design §10.1, §10.3, issue #1018): the
+// area of Settings an operator or the owner sees, and a member does not. It is
+// a list of sections, each one an issue of its own:
+//
+//   Server (#1018), Roles and permissions (A7, #1019), Members (A8, #1020)
+//   and Channels (A9, #1021), then Reports (#1029).
+//
+// A section whose issue has not merged is omitted, never shown as working: a
+// later issue adds its row to `sections` below and nothing else here moves.
+//
+// On a wide window the sections are one under another in the Settings drawer.
+// On a phone Settings is a page and the sections are a list; each opens as its
+// own page with a Back control, and no section scrolls sideways.
+//
+// Every control inside keys on whoami (admin/permissions.ts). The server
+// decides every request again: nothing here is enforcement.
+import { useContext, useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { JoiningSettings } from './joiningSettings';
+import { usePhone } from './phone';
+import type { ChannelV0 } from './schema/channel';
+import type { Permission } from './schema/permission';
+import type { WhoAmIResponseV1 } from './schema/principal';
+import { canDo } from './admin/permissions';
+import { ChannelsSection } from './admin/ChannelsSection';
+import { MembersSection } from './admin/MembersSection';
+import { PermissionsSection } from './admin/PermissionsSection';
+import { ReportsSection } from './admin/ReportsSection';
+import { ServerSection } from './admin/ServerSection';
+
+interface Section {
+  readonly id: string;
+  readonly label: string;
+  readonly render: () => ReactNode;
+}
+
+export interface AdminConsoleProps {
+  readonly who: WhoAmIResponseV1;
+  readonly origin: string;
+  readonly channels: readonly ChannelV0[];
+  // The names the page knows, for the Reports section.
+  readonly names?: ReadonlyMap<number, string>;
+  // Counts the times the server said the permissions changed.
+  readonly permissionsChanged: number;
+  // Counts the server's words that the directory changed (conch.directory_changed.v1).
+  readonly directoryChanged: number;
+  // The page's channel list is read again after a change made in Channels.
+  readonly onChannelsChanged: () => void;
+  readonly onUnauthorized: () => void;
+}
+
+export function AdminConsole({ who, origin, channels, names, permissionsChanged, directoryChanged, onChannelsChanged, onUnauthorized }: AdminConsoleProps) {
+  const phone = usePhone();
+  const id = useId();
+  // The section open as a page on a phone; null is the list.
+  const [page, setPage] = useState<string | null>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const opener = useRef<string | null>(null);
+  const list = useRef<HTMLUListElement>(null);
+  // A request from the Server section's summary lines to bring a cell of the
+  // matrix into view; n counts them so each is met once.
+  const [jump, setJump] = useState<{ readonly permission: Permission; readonly n: number } | undefined>(undefined);
+
+  // An operator sent to Joining from a refused invite lands on the Server
+  // section, whichever page the phone was on.
+  const sentHere = useContext(JoiningSettings)?.count ?? 0;
+  useEffect(() => {
+    if (sentHere > 0) setPage('server');
+  }, [sentHere]);
+
+  // The sections that exist, in order.
+  const sections: readonly Section[] = [
+    {
+      id: 'server',
+      label: 'Server',
+      render: () => (
+        <ServerSection
+          who={who}
+          origin={origin}
+          channels={channels}
+          refresh={permissionsChanged}
+          onOpenRoles={(permission) => {
+            setJump((now) => ({ permission, n: (now?.n ?? 0) + 1 }));
+            setPage('roles');
+          }}
+          onUnauthorized={onUnauthorized}
+        />
+      ),
+    },
+    {
+      id: 'roles',
+      label: 'Roles and permissions',
+      render: () => (
+        <PermissionsSection
+          who={who}
+          refresh={permissionsChanged}
+          {...(names === undefined ? {} : { names })}
+          {...(jump === undefined ? {} : { focus: jump })}
+          onUnauthorized={onUnauthorized}
+        />
+      ),
+    },
+    // Members (A8, #1020): the directory with the operator fields, and the
+    // one menu of what the viewer may do to each person.
+    {
+      id: 'members',
+      label: 'Members',
+      render: () => (
+        <MembersSection who={who} origin={origin} refresh={permissionsChanged} directoryTick={directoryChanged} channelIds={channels.map((c) => String(c.id)).join(',')} onUnauthorized={onUnauthorized} />
+      ),
+    },
+    // Channels (A9, #1021): only for a holder of manage_channels, who is the
+    // one the server lets list every channel. A channel manager without it
+    // manages their own channels from the channel itself.
+    ...(canDo(who, 'manage_channels')
+      ? [
+          {
+            id: 'channels',
+            label: 'Channels',
+            render: () => <ChannelsSection who={who} refresh={permissionsChanged} directoryTick={directoryChanged} onChannelsChanged={onChannelsChanged} onUnauthorized={onUnauthorized} />,
+          },
+        ]
+      : []),
+    {
+      id: 'reports',
+      label: 'Reports',
+      render: () => <ReportsSection {...(names === undefined ? {} : { names })} onUnauthorized={onUnauthorized} />,
+    },
+  ];
+
+  const current = sections.find((s) => s.id === page) ?? null;
+  // The id, not the section: the sections are made afresh on every render, and
+  // an effect that depended on them would take focus back on each one.
+  const currentId = current?.id ?? null;
+
+  // A page takes focus when it opens; the list gets it back on Back.
+  useEffect(() => {
+    if (!phone) return;
+    if (currentId !== null) heading.current?.focus();
+    else if (opener.current !== null) {
+      list.current?.querySelector<HTMLElement>(`[data-section="${opener.current}"]`)?.focus();
+      opener.current = null;
+    }
+  }, [phone, currentId]);
+
+  if (!phone) {
+    return (
+      <div className="admin-console">
+        <h3 id={`${id}-title`}>Server administration</h3>
+        {sections.map((s) => (
+          <div key={s.id} className="admin-section">
+            {s.render()}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (current === null) {
+    return (
+      <div className="admin-console phone">
+        <h3 id={`${id}-title`}>Server administration</h3>
+        <ul ref={list} className="section-list" aria-labelledby={`${id}-title`}>
+          {sections.map((s) => (
+            <li key={s.id}>
+              <button
+                type="button"
+                data-section={s.id}
+                onClick={() => {
+                  opener.current = s.id;
+                  setPage(s.id);
+                }}
+              >
+                {s.label}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+
+  return (
+    <div className="admin-console phone page">
+      <button
+        type="button"
+        className="back"
+        onClick={() => {
+          setPage(null);
+        }}
+      >
+        Back to administration
+      </button>
+      <h3 ref={heading} tabIndex={-1}>
+        {current.label}
+      </h3>
+      {current.render()}
+    </div>
+  );
+}

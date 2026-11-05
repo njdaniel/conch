@@ -32,6 +32,13 @@ func (s *Server) routeTable() []route {
 		// agent and a guest are refused before the handler runs.
 		rt("POST /v1/channels", accessAuthenticated, s.humansOnlyBecause(denyAgentChannelCreate, "agents cannot create channels", s.membersOnly(hf(s.handleCreateChannelV1)))),
 		rt("GET /v1/channels", accessAuthenticated, hf(s.handleListChannels)),
+		// The channel directory, self-join and leave (issue #982). The
+		// directory and leave are for community members: an agent and a
+		// guest are refused before the handler runs. Join refuses them in
+		// the handler, with its own code, before any lookup.
+		rt("GET /v1/directory/channels", accessAuthenticated, s.humansOnlyBecause(denyAgentDirectory, "agents cannot list the channel directory", s.membersOnly(hf(s.handleChannelDirectory)))),
+		rt("POST /v1/channels/{channel}/join", accessAuthenticated, hf(s.handleJoinChannel)),
+		rt("POST /v1/channels/{channel}/leave", accessAuthenticated, s.humansOnlyBecause(denyAgentLeave, "an agent's channels are its operator's to change", s.membersOnly(hf(s.handleLeaveChannel)))),
 		// Channel settings (issue #981, ADR-013 O5): visibility and the
 		// default mark. manage_channels, refused before any lookup, so a
 		// caller without it learns nothing of which ids exist.
@@ -63,6 +70,9 @@ func (s *Server) routeTable() []route {
 		// Members of the channel and operators (checked in the handler); anyone
 		// else gets the channel-not-found response.
 		rt("GET /v1/channels/{channel}/members", accessAuthenticated, hf(s.handleListChannelMembers)),
+		// Who wrote what the caller may read here (design §13.5): behind the
+		// member list's gate, through the message visibility.
+		rt("GET /v1/channels/{channel}/authors", accessAuthenticated, hf(s.handleListChannelAuthors)),
 		rt("POST /v1/channels/{channel}/members", accessChannelManager, hf(s.handleAddChannelMemberByName)),
 		rt("PUT /v1/channels/{channel}/members/{principal_id}", accessChannelManager, hf(s.handlePutChannelMember)),
 		rt("DELETE /v1/channels/{channel}/members/{principal_id}", accessChannelManager, hf(s.handleDeleteChannelMember)),
@@ -83,11 +93,22 @@ func (s *Server) routeTable() []route {
 		// it. Checked in the handlers; see voice_share.go.
 		rt("POST /v1/channels/{channel}/voice/share", accessAuthenticated, hf(s.handleVoiceShareStart)),
 		rt("DELETE /v1/channels/{channel}/voice/share", accessAuthenticated, hf(s.handleVoiceShareStop)),
+		// Camera (ADR-015, issue #1241): a member who holds a session and
+		// use_camera claims a camera; the person or a holder of manage_channels
+		// stops it. Checked in the handlers; see voice_camera.go.
+		rt("POST /v1/channels/{channel}/voice/camera", accessAuthenticated, hf(s.handleVoiceCameraStart)),
+		rt("DELETE /v1/channels/{channel}/voice/camera", accessAuthenticated, hf(s.handleVoiceCameraStop)),
 		// Companion and viewer participants (issue #933): the second
 		// participant of a person in voice. Human members who hold voice;
 		// checked in the handlers; see voice_companion.go.
 		rt("POST /v1/channels/{channel}/voice/companion", accessAuthenticated, hf(s.handleVoiceCompanion)),
 		rt("DELETE /v1/channels/{channel}/voice/companion", accessAuthenticated, hf(s.handleVoiceCompanionDelete)),
+		// The companion's share audio (issue #898): the share's holder
+		// consents, by scope, to their companion publishing the share's
+		// sound, and withdraws it. Checked in the handlers; see
+		// voice_companion_audio.go.
+		rt("PUT /v1/channels/{channel}/voice/companion/audio", accessAuthenticated, hf(s.handleVoiceCompanionAudio)),
+		rt("DELETE /v1/channels/{channel}/voice/companion/audio", accessAuthenticated, hf(s.handleVoiceCompanionAudioDelete)),
 		// Voice presence (issue #127): the snapshot and its socket.
 		rt("GET /v1/channels/{channel}/voice", accessAuthenticated, hf(s.handleVoicePresence)),
 		// Takes ?ticket= (issue #442): a browser cannot set a header on a
@@ -193,6 +214,10 @@ func (s *Server) routeTable() []route {
 		// Operators, or the principal itself: "sign out everywhere" (issue
 		// #439; checked in the handler).
 		rt("POST /v1/principals/{id}/credentials/revoke-all", accessOperatorOrSelf, hf(s.handleRevokeAllCredentials)),
+		// The owner's one step revoking everything {id} issued to others
+		// (ADR-014 O13, issue #1024): what a demotion, a disable or
+		// act_as_members going listed. See disable.go.
+		rt("POST /v1/principals/{id}/issued/revoke-all", accessOwner, hf(s.handleRevokeIssued)),
 		// The audit export needs read_audit_log (ADR-014 design §7.2), an
 		// owner's alone by default, and a recent proof from anyone but an
 		// owner (reauthNonOwners): the trail names every member and every
@@ -203,6 +228,14 @@ func (s *Server) routeTable() []route {
 		// change_server_settings, and the operator column an owner (checked in
 		// the handler and the store). See permissions.go.
 		rt("GET /v1/permissions", accessOperator, hf(s.handleGetPermissions)),
+		// The admin door (issue #1326, ai-administrators §3.4): humans and
+		// agents alike. What it may run is the catalog's, each action
+		// judged by its own route's class, handler and store once
+		// dispatched; its own checks are the caller's grant, the gate and
+		// the one-shot run.
+		rt("GET /v1/admin/actions", accessAuthenticated, s.membersOnly(hf(s.handleAdminCatalog))),
+		rt("POST /v1/admin/actions", accessAuthenticated, s.membersOnly(hf(s.handleSubmitAdminAction))),
+		rt("POST /v1/admin/actions/{approval_id}/run", accessAuthenticated, s.membersOnly(hf(s.handleRunAdminAction))),
 		rt("PUT /v1/permissions", accessPermission, hf(s.handlePutPermissions)).needs(schema.PermChangeServerSettings),
 		rt("POST /v1/hooks", accessPermission, hf(s.handleCreateHook)).needs(schema.PermActAsMembers),
 		rt("GET /v1/hooks", accessPermission, hf(s.handleListHooks)).needs(schema.PermManageMembers),
@@ -213,8 +246,8 @@ func (s *Server) routeTable() []route {
 		// and use it. They carry the code in the body only, are rate-limited
 		// per client address before any store work, and the store decides
 		// everything else. See invites.go.
-		// POST /v1/invites is unchanged until #990 and #1134 (issue #985). A
-		// member link is made with POST /v2/invites, listed with GET
+		// POST /v1/invites is retired for everyone: 409 invite_kind_retired,
+		// before the body is read (issue #1134). A member link is made with POST /v2/invites, listed with GET
 		// /v2/invites, previewed (exempt, as v1's) with POST /v2/invites/preview
 		// and its joiners read by its maker or an operator with GET
 		// /v2/invites/{id}/joiners. The joiners route has no membersOnly: a
@@ -400,9 +433,12 @@ var recentAuthRoutes = map[string]reauthRule{
 	// Signing out everywhere is anyone's for themself; an operator doing it
 	// to someone else is the bulk revoke of the rule.
 	"POST /v1/principals/{id}/credentials/revoke-all": reauthOnOthers,
-	// An invite makes principals; an operator's has no allowance and may never
-	// expire. A member's links are not in the class.
-	"POST /v1/invites": reauthOperators,
+	// Revoking everything someone issued to others is a bulk revoke of
+	// other people's credentials, always someone else's (issue #1024).
+	"POST /v1/principals/{id}/issued/revoke-all": reauthAlways,
+	// A member link makes principals; an operator's has no allowance and may
+	// never expire. A member's links are not in the class. POST /v1/invites
+	// makes nothing for anyone (issue #1134), so it is not in the class.
 	"POST /v2/invites": reauthOperators,
 	// The permissions document grants rights (ADR-014 design §7.2).
 	"PUT /v1/permissions": reauthAlways,

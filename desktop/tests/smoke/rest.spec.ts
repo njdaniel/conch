@@ -7,7 +7,7 @@ import { chromium, expect, test, type Browser, type Page } from '@playwright/tes
 
 import { makePki, sendJson, startHttps, type Fake, type Pki } from '../unit/support.ts';
 import { listedVersion, startConchd, type Disposable } from './conchd.ts';
-import { launch, livePage, type Launched } from './launch.ts';
+import { credentialField, launch, livePage, type Launched } from './launch.ts';
 
 // A conch credential has this shape; none may be anywhere the renderer or the
 // log can see, except a pasted one while it is being typed.
@@ -80,7 +80,7 @@ async function signOutThroughSettings(browser: Browser, page: Page): Promise<Pag
   await page.getByRole('button', { name: 'Sign out', exact: true }).click();
   await page.getByRole('button', { name: 'Yes, sign out', exact: true }).click();
   const next = await livePage(browser, page);
-  await expect(next.getByLabel('Credential')).toBeVisible();
+  await expect(await credentialField(next)).toBeVisible();
   return next;
 }
 
@@ -187,7 +187,7 @@ test.describe('the packaged app against a real conchd', () => {
   test('signs in with a pasted credential, which main keeps and the page does not, in its DOM, storage or memory', async () => {
     // Typed, not filled: fill() leaves the value in Playwright's own utility
     // world in the same renderer, which the heap scan would then find.
-    await page.getByLabel('Credential').click();
+    await (await credentialField(page)).click();
     await page.keyboard.type(server.member.token);
     await page.getByRole('button', { name: 'Use credential' }).click();
     await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
@@ -198,8 +198,10 @@ test.describe('the packaged app against a real conchd', () => {
     const seen = await renderer(page);
     expect(seen).not.toContain(server.member.token);
     expect(app.output()).not.toContain(server.member.token);
-    // Nor in the page's memory: the client pinned the stand-in.
-    expect(await heap(page)).not.toContain(server.member.token);
+    // Nor in the page's memory: the client pinned the stand-in, and the
+    // hand-off named the credential by main's one-time handle. Scanned more
+    // than once, so a copy only a later collection frees is not missed.
+    for (let scan = 0; scan < 3; scan++) expect(await heap(page)).not.toContain(server.member.token);
     page = await signOutThroughSettings(browser, page);
   });
 
@@ -207,7 +209,7 @@ test.describe('the packaged app against a real conchd', () => {
   // operator warning. Declined, it was never in force: nothing runs as the
   // operator, and a reload does not sign the window in.
   async function pasteOperator(): Promise<void> {
-    await page.getByLabel('Credential').click();
+    await (await credentialField(page)).click();
     await page.keyboard.type(server.operatorToken);
     await page.getByRole('button', { name: 'Use credential' }).click();
     await expect(page.getByRole('heading', { name: 'This is an operator credential' })).toBeVisible();
@@ -220,20 +222,20 @@ test.describe('the packaged app against a real conchd', () => {
     // Declining signs nobody out of anything: the client only drops what it
     // held, so the window stays.
     await page.getByRole('button', { name: 'Sign out', exact: true }).click();
-    await expect(page.getByLabel('Credential')).toBeVisible();
+    await expect(await credentialField(page)).toBeVisible();
     expect(await invoke(page, 'restore')).toMatchObject({ ok: false, kind: 'unauthorized' });
     expect(await invoke(page, 'request', { operation: 'listChannels' })).toEqual({ kind: 'unauthorized' });
     // (Main still has it set aside until it lapses: keeping it needs the
     // credential itself, which a script in the page could as well paste anew.)
     await page.reload();
-    await expect(page.getByLabel('Credential')).toBeVisible();
+    await expect(await credentialField(page)).toBeVisible();
     expect(await invoke(page, 'restore')).toMatchObject({ ok: false, kind: 'unauthorized' });
   });
 
   test('a reload while the operator warning is showing signs nobody in', async () => {
     await pasteOperator();
     await page.reload();
-    await expect(page.getByLabel('Credential')).toBeVisible();
+    await expect(await credentialField(page)).toBeVisible();
     expect(await invoke(page, 'restore')).toMatchObject({ ok: false, kind: 'unauthorized' });
   });
 

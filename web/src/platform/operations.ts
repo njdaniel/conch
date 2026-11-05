@@ -15,11 +15,18 @@ import {
   confirmTOTPRequestV1,
   convertGuestRequestV1,
   convertGuestResponseV1,
-  createChannelRequest,
-  createChannelResponse,
+  createChannelRequestV1,
+  createChannelResponseV1,
+  channelDirectoryResponseV1,
+  channelAuthorsResponseV1,
+  joinChannelResponseV1,
+  serverMembersResponseV1,
   createInterventionRequestV1,
-  createInviteRequestV1,
-  createInviteResponseV1,
+  createInviteRequestV2,
+  createInviteResponseV2,
+  disableJoinersRequestV1,
+  disableJoinersResponseV1,
+  invitePreviewV2,
   createProblemReportRequestV1,
   createProblemReportResponseV1,
   listProblemReportsResponseV1,
@@ -27,7 +34,24 @@ import {
   updateProblemReportRequestV1,
   createSessionRequestV1,
   createSignInLinkResponseV1,
+  createCredentialRequestV1,
+  createCredentialResponseV1,
   createDeviceLinkRequestV1,
+  createHookRequest,
+  createPrincipalRequest,
+  createPrincipalResponse,
+  getAgentManifestResponseV1,
+  putAgentManifestRequestV1,
+  castDecisionRequestV1,
+  listApprovalsResponseV1,
+  createHookResponse,
+  createSignInLinkRequestV1,
+  hidePrincipalResponseV1,
+  invitePermissionRequestV1,
+  roleChangeRequestV1,
+  roleChangeResponseV1,
+  voicePermissionRequestV1,
+  voicePermissionResponseV1,
   editMessageRequestV1,
   editMessageResponseV1,
   endGuestsRequestV1,
@@ -36,6 +60,10 @@ import {
   health,
   interventionV1,
   inviteSettingsV1,
+  inviteJoinersResponseV1,
+  listInvitesResponseV2,
+  permissionsResponseV1,
+  putPermissionsRequestV1,
   invitePreviewRequestV1,
   invitePreviewV1,
   joinAccountRequestV1,
@@ -74,6 +102,8 @@ import {
   redeemSetupTokenResponseV1,
   redeemSignInLinkRequestV1,
   redeemSignInLinkResponseV1,
+  channelSettingsRequestV1,
+  channelSettingsResponseV1,
   renameChannelRequestV1,
   renameChannelResponseV1,
   renamePrincipalRequestV1,
@@ -89,6 +119,9 @@ import {
   signInLinkPreviewV1,
   totpEnrollmentV1,
   totpLoginRequestV1,
+  voiceCameraV1,
+  voiceCompanionRequestV1,
+  voiceCompanionResponseV1,
   voiceOccupancyV1,
   voicePresenceV1,
   voiceSessionResponseV1,
@@ -152,6 +185,10 @@ export const operations = {
   revokeAll: op('POST', '/v1/principals/{principal}/credentials/revoke-all', 'bearer', { response: check(revokeAllCredentialsResponseV1) }),
   listOwnCredentials: op('GET', '/v1/credentials/mine', 'bearer', { response: check(listOwnCredentialsResponseV1) }),
   endOwnCredential: op('DELETE', '/v1/credentials/mine/{id}', 'bearer'),
+  // An operator revokes a credential or a hook issued to someone else
+  // (manage_members), as the permissions console's issued_to_others list does.
+  revokeCredential: op('DELETE', '/v1/credentials/{id}', 'bearer'),
+  revokeHook: op('DELETE', '/v1/hooks/{id}', 'bearer'),
   reauth: op('POST', '/v1/reauth', 'bearer', { request: check(reauthRequestV1), response: check(reauthResponseV1), secret: true, renderer: false }),
   changePassword: op('PUT', '/v1/password/mine', 'bearer', {
     request: check(changePasswordRequestV1),
@@ -213,8 +250,16 @@ export const operations = {
     credentials: token,
   }),
   // The invite's code grants an account, once, to whoever holds it.
-  createInvite: op('POST', '/v1/invites', 'bearer', { request: check(createInviteRequestV1), response: check(createInviteResponseV1), renderer: false, credentials: ['code'] }),
   listInvites: op('GET', '/v1/invites', 'bearer', { response: check(listInvitesResponseV1) }),
+  // Member links and the permissions document (ADR-014).
+  listMemberLinks: op('GET', '/v2/invites', 'bearer', { response: check(listInvitesResponseV2) }),
+  memberLinkJoiners: op('GET', '/v2/invites/{id}/joiners', 'bearer', { response: check(inviteJoinersResponseV1) }),
+  // A member link's code is in the answer of its creation, as an invite's was.
+  createMemberLink: op('POST', '/v2/invites', 'bearer', { request: check(createInviteRequestV2), response: check(createInviteResponseV2), renderer: false, credentials: ['code'] }),
+  previewMemberLink: op('POST', '/v2/invites/preview', 'none', { request: check(invitePreviewRequestV1), response: check(invitePreviewV2) }),
+  disableJoiners: op('POST', '/v1/invites/{id}/disable-joiners', 'bearer', { request: check(disableJoinersRequestV1), response: check(disableJoinersResponseV1) }),
+  getPermissions: op('GET', '/v1/permissions', 'bearer', { response: check(permissionsResponseV1) }),
+  putPermissions: op('PUT', '/v1/permissions', 'bearer', { request: check(putPermissionsRequestV1), response: check(permissionsResponseV1) }),
   closeInvite: op('DELETE', '/v1/invites/{id}', 'bearer'),
   previewInvite: op('POST', '/v1/invites/preview', 'none', { request: check(invitePreviewRequestV1), response: check(invitePreviewV1) }),
   redeemInvite: op('POST', '/v2/invites/redeem', 'none', { request: check(redeemInviteRequestV2), response: check(redeemInviteResponseV1), renderer: false, credentials: token }),
@@ -226,11 +271,49 @@ export const operations = {
   }),
 
   // People and channels.
+  // The Members section's actions on a person (ADR-014 design §10.2, issue
+  // #1020). The answers that hold a link's code or a token are kept out of the
+  // desktop renderer's hands, as every credential is.
+  setRole: op('PUT', '/v1/principals/{id}/role', 'bearer', { request: check(roleChangeRequestV1), response: check(roleChangeResponseV1) }),
+  setVoicePermission: op('PUT', '/v1/principals/{id}/voice-permission', 'bearer', { request: check(voicePermissionRequestV1), response: check(voicePermissionResponseV1) }),
+  setInvitePermission: op('PUT', '/v1/principals/{id}/invite-permission', 'bearer', { request: check(invitePermissionRequestV1) }),
+  hidePrincipal: op('POST', '/v1/principals/{id}/hide', 'bearer', { response: check(hidePrincipalResponseV1) }),
+  disablePrincipal: op('POST', '/v1/principals/{id}/disable', 'bearer'),
+  enablePrincipal: op('POST', '/v1/principals/{id}/enable', 'bearer'),
+  // Add an AI administrator (issue #1334, docs/design/ai-administrators.md
+  // §4.2): the same routes as `conch admin ai-admin create`.
+  createPrincipal: op('POST', '/v0/principals', 'bearer', { request: check(createPrincipalRequest), response: check(createPrincipalResponse) }),
+  getManifest: op('GET', '/v1/principals/{id}/manifest', 'bearer', { response: check(getAgentManifestResponseV1) }),
+  putManifest: op('PUT', '/v1/principals/{id}/manifest', 'bearer', { request: check(putAgentManifestRequestV1) }),
+  // A decision on an approval, cast from an admin-action card.
+  listApprovals: op('GET', '/v1/approvals', 'bearer', { response: check(listApprovalsResponseV1) }),
+  castDecision: op('POST', '/v1/approvals/{id}/decisions', 'bearer', { request: check(castDecisionRequestV1) }),
+  createPrincipalSignInLink: op('POST', '/v1/principals/{id}/sign-in-links', 'bearer', {
+    request: check(createSignInLinkRequestV1),
+    response: check(createSignInLinkResponseV1),
+    renderer: false,
+    credentials: ['code'],
+  }),
+  createPrincipalCredential: op('POST', '/v1/principals/{id}/credentials', 'bearer', {
+    request: check(createCredentialRequestV1),
+    response: check(createCredentialResponseV1),
+    renderer: false,
+    credentials: token,
+  }),
+  createHook: op('POST', '/v1/hooks', 'bearer', { request: check(createHookRequest), response: check(createHookResponse), renderer: false, credentials: token }),
   renamePrincipal: op('PUT', '/v1/principals/{id}/name', 'bearer', { request: check(renamePrincipalRequestV1), response: check(renamePrincipalResponseV1) }),
   listChannels: op('GET', '/v1/channels', 'bearer', { response: check(listChannelsResponse) }),
-  createChannel: op('POST', '/v0/channels', 'bearer', { request: check(createChannelRequest), response: check(createChannelResponse) }),
+  createChannel: op('POST', '/v1/channels', 'bearer', { request: check(createChannelRequestV1), response: check(createChannelResponseV1) }),
+  // The directory, self-join and leave (issues #982, #991), and the
+  // community's member list (issue #983).
+  channelDirectory: op('GET', '/v1/directory/channels', 'bearer', { response: check(channelDirectoryResponseV1) }),
+  joinChannel: op('POST', '/v1/channels/{channel}/join', 'bearer', { response: check(joinChannelResponseV1) }),
+  leaveChannel: op('POST', '/v1/channels/{channel}/leave', 'bearer'),
+  directoryMembers: op('GET', '/v1/directory/members', 'bearer', { response: check(serverMembersResponseV1) }),
   renameChannel: op('PUT', '/v1/channels/{id}/name', 'bearer', { request: check(renameChannelRequestV1), response: check(renameChannelResponseV1) }),
+  channelSettings: op('PUT', '/v1/channels/{id}/settings', 'bearer', { request: check(channelSettingsRequestV1), response: check(channelSettingsResponseV1) }),
   listMembers: op('GET', '/v1/channels/{channel}/members', 'bearer', { response: check(listChannelMembersResponseV1) }),
+  channelAuthors: op('GET', '/v1/channels/{channel}/authors', 'bearer', { response: check(channelAuthorsResponseV1) }),
   addMember: op('POST', '/v1/channels/{channel}/members', 'bearer', { request: check(addChannelMemberRequestV1), response: check(channelMemberV1) }),
   putMember: op('PUT', '/v1/channels/{channel}/members/{principal}', 'bearer', { request: check(putChannelMemberRequestV1) }),
   removeMember: op('DELETE', '/v1/channels/{channel}/members/{principal}', 'bearer'),
@@ -275,6 +358,16 @@ export const operations = {
   voiceOccupancy: op('GET', '/v1/voice/occupancy', 'bearer', { response: check(voiceOccupancyV1) }),
   claimShare: op('POST', '/v1/channels/{channel}/voice/share', 'bearer', { response: check(voiceShareV1) }),
   stopShare: op('DELETE', '/v1/channels/{channel}/voice/share', 'bearer'),
+  // The viewer (issue #936, voice-control-plane.md §13): the second
+  // participant, p<id>.view, that lets a tab watch beside the voice of
+  // another client. Its answer holds a join token, so the renderer never
+  // invokes it; the DELETE removes it and answers 204.
+  voiceViewer: op('POST', '/v1/channels/{channel}/voice/companion', 'bearer', { request: check(voiceCompanionRequestV1), response: check(voiceCompanionResponseV1), renderer: false, credentials: token }),
+  voiceViewerEnd: op('DELETE', '/v1/channels/{channel}/voice/companion', 'bearer'),
+  // The camera claim (ADR-015): claimed by the person's camera button, or
+  // continued by naming the claim (?started_at=), and released.
+  claimCamera: op('POST', '/v1/channels/{channel}/voice/camera', 'bearer', { response: check(voiceCameraV1) }),
+  stopCamera: op('DELETE', '/v1/channels/{channel}/voice/camera', 'bearer'),
 
   // Report a problem.
   sendReport: op('POST', '/v1/reports', 'bearer', { request: check(createProblemReportRequestV1), response: check(createProblemReportResponseV1) }),

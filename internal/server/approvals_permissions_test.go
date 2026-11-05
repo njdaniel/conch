@@ -184,3 +184,124 @@ func restrictedManagerApprovalChain(t *testing.T, cut func(t *testing.T, f *rest
 		t.Errorf("refusals audited with permission=manage_channels = %v, want 3 access_denied and 1 member_add_refused", refusals)
 	}
 }
+
+// TestUseCameraToggleKeepsAnOpenApprovalFullChain (webcam C3, #1240;
+// CLAUDE.md rule 3): request → notify → resolve → audit, with the owner
+// turning use_camera on for both columns and off again through
+// PUT /v1/permissions while the approval is open. use_camera is no part of
+// deciding: the approval stays pending, who may decide is unchanged, and it
+// resolves with the quorum it had.
+func TestUseCameraToggleKeepsAnOpenApprovalFullChain(t *testing.T) {
+	ctx := context.Background()
+	var mu sync.Mutex
+	var notified []string
+	ntfy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		notified = append(notified, r.URL.Path)
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ntfy.Close()
+	f := newRestrictedFixture(t, Config{
+		AuthMode: AuthRequired,
+		Ntfy:     approvals.NtfyConfig{Server: ntfy.URL, ApprovalsTopic: "approvals", UrgentTopic: "urgent", Timeout: time.Second},
+	})
+	defer f.srv.approvals.Close()
+	waitNtfy := func(want int, what string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			mu.Lock()
+			n := len(notified)
+			mu.Unlock()
+			if n >= want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s was never notified (got %d, want %d)", what, n, want)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// Request, and notify.
+	rec := f.do(t, "POST", "/v1/approvals", f.memberTok, createApprovalBody(f.chanB.ID, 0))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body)
+	}
+	created := decodeBody[schema.CreateApprovalResponseV1](t, rec).Approval
+	id := created.ID
+	waitNtfy(1, "approval request")
+
+	// use_camera on for both columns, then off again, while it is open.
+	cell := func(role schema.PermissionRole, on bool) schema.PermissionChangeV1 {
+		return schema.PermissionChangeV1{Permission: schema.PermUseCamera, Role: role, Granted: on}
+	}
+	for _, step := range []struct {
+		name    string
+		changes []schema.PermissionChangeV1
+	}{
+		{"on", []schema.PermissionChangeV1{cell(schema.PermissionRoleOperator, true), cell(schema.PermissionRoleMember, true)}},
+		{"off", []schema.PermissionChangeV1{cell(schema.PermissionRoleMember, false), cell(schema.PermissionRoleOperator, false)}},
+	} {
+		res := f.putPermissions(t, f.rootTok, schema.PutPermissionsRequestV1{Revision: revisionOf(t, f), Changes: step.changes})
+		if res.code != http.StatusOK {
+			t.Fatalf("the owner's PUT (use_camera %s) = %d %s", step.name, res.code, res.body)
+		}
+		if a, err := f.srv.store.ApprovalByID(ctx, id); err != nil || a.State != schema.ApprovalStatePending || a.Quorum != created.Quorum {
+			t.Fatalf("after use_camera %s approval = %+v, %v; want pending with quorum %d", step.name, a, err, created.Quorum)
+		}
+		if ok, err := f.srv.store.CanDecideApprovals(ctx, f.chanB.ID, f.member.ID); err != nil || !ok {
+			t.Fatalf("after use_camera %s member-1 may decide channel-b = %v, %v; want yes", step.name, ok, err)
+		}
+		if ok, err := f.srv.store.CanDecideApprovals(ctx, f.chanB.ID, f.member2.ID); err != nil || ok {
+			t.Fatalf("after use_camera %s member-2 may decide channel-b = %v, %v; want not", step.name, ok, err)
+		}
+	}
+
+	// Resolve, with the quorum it had.
+	rec = f.do(t, "POST", fmt.Sprintf("/v1/approvals/%d/decisions", id), f.memberTok, decisionBody(0))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("member-1's decision = %d %s", rec.Code, rec.Body)
+	}
+	if resp := decodeBody[schema.CastDecisionResponseV1](t, rec); resp.State != schema.ApprovalStateResolved || resp.Resolution == nil || len(resp.Resolution.Decisions) != created.Quorum {
+		t.Fatalf("after member-1 = %+v, want resolved with %d decision(s)", resp, created.Quorum)
+	}
+	waitNtfy(2, "approval resolution")
+
+	// Audit, through the export: the chain, and the two permission changes.
+	rec = f.do(t, "GET", "/v1/audit", f.rootTok, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("audit export = %d %s", rec.Code, rec.Body)
+	}
+	var chain []string
+	changes := 0
+	sc := bufio.NewScanner(strings.NewReader(rec.Body.String()))
+	for sc.Scan() {
+		var e schema.AuditEventV1
+		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
+			t.Fatalf("export line %q: %v", sc.Text(), err)
+		}
+		switch {
+		case e.Subject == fmt.Sprintf("approval:%d", id) &&
+			(e.Action == store.AuditApprovalCreated || e.Action == store.AuditDecisionCast || e.Action == store.AuditApprovalResolved):
+			chain = append(chain, e.Action+" "+e.Actor)
+		case e.Action == store.AuditPermissionsChanged && strings.Contains(e.Detail, "use_camera"):
+			changes++
+		}
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		store.AuditApprovalCreated + " " + fmt.Sprintf("principal:%d", f.member.ID),
+		store.AuditDecisionCast + " " + fmt.Sprintf("principal:%d", f.member.ID),
+		store.AuditApprovalResolved + " system",
+	}
+	if strings.Join(chain, "|") != strings.Join(want, "|") {
+		t.Errorf("audit chain = %q, want %q", chain, want)
+	}
+	if changes != 2 {
+		t.Errorf("%d permissions_changed rows name use_camera, want 2 (on, then off)", changes)
+	}
+}

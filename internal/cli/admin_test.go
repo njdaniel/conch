@@ -396,7 +396,7 @@ func TestAdminUsageErrors(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"no subcommand", []string{"admin"}, "usage: conch admin <channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions>"},
+		{"no subcommand", []string{"admin"}, "usage: conch admin <channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions|directory|ai-admin>"},
 		{"unknown group", []string{"admin", "frob"}, `unknown subcommand "frob"`},
 		{"group without verb", []string{"admin", "member"}, "usage: conch admin member <add|manage|decide|remove>"},
 		{"principal group lists role", []string{"admin", "principal"}, "create|disable|enable|rename|role|list|hide"},
@@ -593,21 +593,21 @@ func TestAdminPrincipalListAndHide(t *testing.T) {
 		{"create a", []string{"principal", "create", "--kind", "human", "test-a"}, "created human test-a (id 3)\n"},
 		{"create b", []string{"principal", "create", "--kind", "agent", "test-b"}, "created agent test-b (id 4)\n"},
 		{"create keeper", []string{"principal", "create", "--kind", "human", "keeper"}, "created human keeper (id 5)\n"},
-		{"list", []string{"principal", "list"}, "5 human member active creds 0 invite - keeper\n" +
-			"4 agent member active creds 0 invite - test-b\n" +
-			"3 human member active creds 0 invite - test-a\n" +
-			"2 human member active creds 1 invite - mallory\n" +
-			"1 human operator owner active creds 1 invite - root\n"},
+		{"list", []string{"principal", "list"}, "5 human member active creds 0 invite - voice on may-invite off keeper\n" +
+			"4 agent member active creds 0 invite - voice - may-invite - test-b\n" +
+			"3 human member active creds 0 invite - voice on may-invite off test-a\n" +
+			"2 human member active creds 1 invite - voice on may-invite off mallory\n" +
+			"1 human operator owner active creds 1 invite - voice on may-invite off root\n"},
 		{"dry run", []string{"principal", "hide", "--prefix", "test-"}, "3 test-a\n4 test-b\nwould hide 2 principal(s); run again with --yes to do it\n"},
-		{"nothing hidden by the dry run", []string{"principal", "list", "--prefix", "test-"}, "4 agent member active creds 0 invite - test-b\n" +
-			"3 human member active creds 0 invite - test-a\n"},
+		{"nothing hidden by the dry run", []string{"principal", "list", "--prefix", "test-"}, "4 agent member active creds 0 invite - voice - may-invite - test-b\n" +
+			"3 human member active creds 0 invite - voice on may-invite off test-a\n"},
 		{"agents only", []string{"principal", "hide", "--prefix", "test-", "--kind", "agent", "--yes"}, "4 test-b\nhid 1 principal(s)\n"},
 		{"by id", []string{"principal", "hide", "3"}, "hid principal 3; it is now called hidden-3\n"},
-		{"hidden", []string{"principal", "list", "--state", "hidden"}, "4 agent member hidden creds 0 invite - hidden-4\n" +
-			"3 human member hidden creds 0 invite - hidden-3\n"},
-		{"not hidden", []string{"principal", "list", "--state", "active", "--kind", "human"}, "5 human member active creds 0 invite - keeper\n" +
-			"2 human member active creds 1 invite - mallory\n" +
-			"1 human operator owner active creds 1 invite - root\n"},
+		{"hidden", []string{"principal", "list", "--state", "hidden"}, "4 agent member hidden creds 0 invite - voice - may-invite - hidden-4\n" +
+			"3 human member hidden creds 0 invite - voice on may-invite off hidden-3\n"},
+		{"not hidden", []string{"principal", "list", "--state", "active", "--kind", "human"}, "5 human member active creds 0 invite - voice on may-invite off keeper\n" +
+			"2 human member active creds 1 invite - voice on may-invite off mallory\n" +
+			"1 human operator owner active creds 1 invite - voice on may-invite off root\n"},
 		{"nothing left", []string{"principal", "hide", "--prefix", "test-", "--yes"}, "hid 0 principal(s)\n"},
 		{"the name is free", []string{"principal", "create", "--kind", "human", "test-a"}, "created human test-a (id 6)\n"},
 	}
@@ -682,7 +682,7 @@ func TestAdminPrincipalListPages(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if want := "9 human member active creds 0 invite - a\n4 agent member active creds 0 invite - b\n"; stdout != want {
+			if want := "9 human member active creds 0 invite - voice - may-invite - a\n4 agent member active creds 0 invite - voice - may-invite - b\n"; stdout != want {
 				t.Errorf("stdout = %q, want %q", stdout, want)
 			}
 			if want := []string{"limit=200&name_prefix=x+y", "before=9&limit=200&name_prefix=x+y"}; !slices.Equal(queries, want) {
@@ -795,7 +795,7 @@ func TestAdminPrincipalListOwnerMarks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "2 human operator owner active creds 1 invite - root\n1 human operator active creds 0 invite - alice\n"
+	want := "2 human operator owner active creds 1 invite - voice - may-invite - root\n1 human operator active creds 0 invite - voice - may-invite - alice\n"
 	if stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
 	}

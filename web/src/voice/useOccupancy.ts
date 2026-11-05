@@ -1,12 +1,14 @@
 // Voice occupancy (issue #596, docs/design/voice-occupancy.md §6): how many
-// people are in each channel's voice room, for every channel the viewer may
-// see voice in, so that "meet in voice" can be found from any channel. One
-// socket per signed-in page, not one per channel.
+// people are in each channel's voice room, and who (issue #1103), for every
+// channel the viewer may see voice in, so that "meet in voice" can be found
+// from any channel. One socket per signed-in page, not one per channel.
 //
-// It is counts and nothing else. It joins nothing: this file reaches neither
-// the SDK nor the voice client, and asks for no device. Seeing that people
-// are in voice somewhere only says so; opening that channel is the reader's
-// choice, and joining it is the strip's Join voice, as everywhere.
+// It is counts and principal ids and nothing else: names are resolved from
+// the channel's members (useOccupantNames.ts). It joins nothing: this file
+// reaches neither the SDK nor the voice client, and asks for no device.
+// Seeing that people are in voice somewhere only says so; opening that
+// channel is the reader's choice, and joining it is the strip's Join voice,
+// as everywhere.
 import { useEffect, useRef, useState } from 'react';
 import * as api from '../api';
 import { voiceOccupancyV1, type VoiceOccupancyV1 } from '../schema/voice';
@@ -19,9 +21,17 @@ const realClock = {
   },
 };
 
-// How many are in each channel's voice, by channel id. A channel with nobody
-// in voice, or one the viewer may not see voice in, has no entry.
-export type InVoice = ReadonlyMap<number, number>;
+// Who is in one channel's voice: how many, and, when the server states it,
+// which principals, ascending by id. `people` is null for a document that
+// did not state them (a conchd from before issue #1103): the count alone.
+export interface Voices {
+  readonly count: number;
+  readonly people: readonly number[] | null;
+}
+
+// Who is in each channel's voice, by channel id. A channel with nobody in
+// voice, or one the viewer may not see voice in, has no entry.
+export type InVoice = ReadonlyMap<number, Voices>;
 
 export const nobody: InVoice = new Map();
 
@@ -42,16 +52,26 @@ export function parseOccupancy(data: unknown): VoiceOccupancyV1 | null {
 // anywhere: a count last seen is not shown as if it were current.
 export function countsOf(doc: VoiceOccupancyV1): InVoice {
   if (!doc.configured || !doc.available) return nobody;
-  const counts = new Map<number, number>();
-  for (const c of doc.channels) if (c.in_voice > 0) counts.set(c.channel_id, c.in_voice);
+  const counts = new Map<number, Voices>();
+  for (const c of doc.channels) if (c.in_voice > 0) counts.set(c.channel_id, { count: c.in_voice, people: c.principal_ids ?? null });
   return counts;
 }
 
-// same says whether two sets of counts are equal, so that a frame that
+// sameVoices says whether two channels' voices are the same people.
+function sameVoices(a: Voices, b: Voices): boolean {
+  if (a.count !== b.count) return false;
+  if (a.people === null || b.people === null) return a.people === b.people;
+  return a.people.length === b.people.length && a.people.every((id, i) => id === b.people?.[i]);
+}
+
+// same says whether two sets of voices are equal, so that a frame that
 // changes nothing the page shows does not draw it again.
 function same(a: InVoice, b: InVoice): boolean {
   if (a.size !== b.size) return false;
-  for (const [id, n] of a) if (b.get(id) !== n) return false;
+  for (const [id, v] of a) {
+    const other = b.get(id);
+    if (other === undefined || !sameVoices(v, other)) return false;
+  }
   return true;
 }
 

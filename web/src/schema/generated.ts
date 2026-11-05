@@ -5,7 +5,7 @@
 // validate.ts. To change one, change the Go type or the table and run
 // `go generate ./pkg/schema`; scripts/schema-ts-check.sh fails while this file
 // differs from what that writes.
-import { array, bool, int, json, object, optional, str, tagged, timestamp, vocab } from './validate';
+import { array, bool, int, json, object, optional, str, tagged, timestamp, tolerant, vocab } from './validate';
 
 // Constants of pkg/schema the client must agree with the server on.
 export const EMOJI_VERSION = '18.0';
@@ -42,6 +42,16 @@ export const VOICE_CONTROL_PIPE_NONCE_BYTES = 32;
 export const VOICE_CONTROL_PIPE_NONCE_CHARS = 43;
 export const MAX_CHANNEL_AUTHOR_IDS = 100;
 export const DEFAULT_MEMBER_LINK_EXPIRY_SECONDS = 604800;
+export const DEFAULT_ADMIN_APPROVAL_TTL_SECONDS = 86400;
+export const MIN_ADMIN_APPROVAL_TTL_SECONDS = 300;
+export const MAX_ADMIN_APPROVAL_TTL_SECONDS = 604800;
+export const DEFAULT_ADMIN_RUN_WINDOW_SECONDS = 86400;
+export const MIN_ADMIN_RUN_WINDOW_SECONDS = 60;
+export const MAX_ADMIN_RUN_WINDOW_SECONDS = 604800;
+export const DEFAULT_ADMIN_QUORUM = 1;
+export const DEFAULT_ADMIN_MAX_PENDING = 8;
+export const MAX_ADMIN_MAX_PENDING = 32;
+export const MAX_ADMIN_REASON_CHARS = 500;
 
 // schema.PrincipalKind
 export type PrincipalKind = 'human' | 'agent';
@@ -144,8 +154,9 @@ export type ServerMode = 'temporary';
 
 export const serverMode = vocab<ServerMode>({ temporary: true });
 
-// schema.Permission
-export type Permission =
+// schema.Permission: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPermission is the known ones.
+export type KnownPermission =
   | 'create_public_channels'
   | 'create_private_channels'
   | 'make_member_links'
@@ -156,9 +167,11 @@ export type Permission =
   | 'act_as_members'
   | 'manage_channels'
   | 'change_server_settings'
-  | 'read_audit_log';
+  | 'read_audit_log'
+  | 'use_camera';
+export type Permission = KnownPermission | (string & {});
 
-export const permission = vocab<Permission>({
+export const permission = tolerant<KnownPermission>({
   create_public_channels: true,
   create_private_channels: true,
   make_member_links: true,
@@ -170,6 +183,7 @@ export const permission = vocab<Permission>({
   manage_channels: true,
   change_server_settings: true,
   read_audit_log: true,
+  use_camera: true,
 });
 
 // schema.WhoAmIResponseV1
@@ -222,6 +236,7 @@ export interface ChannelV0 {
   manages?: boolean;
   visibility?: ChannelVisibility;
   default?: boolean;
+  archived_at?: string;
 }
 
 export const channelV0 = object<ChannelV0>({
@@ -231,6 +246,7 @@ export const channelV0 = object<ChannelV0>({
   manages: optional(bool),
   visibility: optional(channelVisibility),
   default: optional(bool),
+  archived_at: optional(timestamp),
 });
 
 // schema.ListChannelsResponse
@@ -290,6 +306,7 @@ export interface ChannelDocV1 {
   created_at: string;
   visibility?: ChannelVisibility;
   default?: boolean;
+  archived_at?: string;
 }
 
 export const channelDocV1 = object<ChannelDocV1>({
@@ -299,6 +316,7 @@ export const channelDocV1 = object<ChannelDocV1>({
   created_at: timestamp,
   visibility: optional(channelVisibility),
   default: optional(bool),
+  archived_at: optional(timestamp),
 });
 
 // schema.GuestAttributionV1
@@ -378,11 +396,15 @@ export const putChannelMemberRequestV1 = object<PutChannelMemberRequestV1>({
 
 // schema.AddChannelMemberRequestV1
 export interface AddChannelMemberRequestV1 {
-  name: string;
+  name?: string;
+  id?: number;
+  can_decide?: boolean;
 }
 
 export const addChannelMemberRequestV1 = object<AddChannelMemberRequestV1>({
-  name: str,
+  name: optional(str),
+  id: optional(int),
+  can_decide: optional(bool),
 });
 
 // schema.Payload
@@ -664,6 +686,30 @@ export const approvalV1 = object<ApprovalV1>({
   escalation_target: optional(escalationTarget),
   state: approvalState,
   created_at: timestamp,
+});
+
+// schema.CastDecisionRequestV1
+export interface CastDecisionRequestV1 {
+  principal_id: number;
+  option_id: string;
+  reason: string;
+}
+
+export const castDecisionRequestV1 = object<CastDecisionRequestV1>({
+  principal_id: int,
+  option_id: str,
+  reason: str,
+});
+
+// schema.ListApprovalsResponseV1
+export interface ListApprovalsResponseV1 {
+  approvals: ApprovalV1[];
+  read_only?: number[];
+}
+
+export const listApprovalsResponseV1 = object<ListApprovalsResponseV1>({
+  approvals: array(approvalV1),
+  read_only: optional(array(int)),
 });
 
 // schema.FileV1
@@ -1145,6 +1191,7 @@ export interface VoiceParticipant {
   joined_at: string;
   sharing?: boolean;
   sharing_audio?: boolean;
+  camera?: boolean;
 }
 
 export const voiceParticipant = object<VoiceParticipant>({
@@ -1154,6 +1201,7 @@ export const voiceParticipant = object<VoiceParticipant>({
   joined_at: timestamp,
   sharing: optional(bool),
   sharing_audio: optional(bool),
+  camera: optional(bool),
 });
 
 // schema.VoicePresenceRoom
@@ -1192,6 +1240,37 @@ export const voiceShareEnded = object<VoiceShareEnded>({
   ended_at: timestamp,
 });
 
+// schema.VoiceCameraEndReason
+export type VoiceCameraEndReason =
+  | 'self'
+  | 'operator'
+  | 'left'
+  | 'access_lost'
+  | 'rotated'
+  | 'idle';
+
+export const voiceCameraEndReason = vocab<VoiceCameraEndReason>({
+  self: true,
+  operator: true,
+  left: true,
+  access_lost: true,
+  rotated: true,
+  idle: true,
+});
+
+// schema.VoiceCameraEnded
+export interface VoiceCameraEnded {
+  reason: VoiceCameraEndReason;
+  started_at: string;
+  ended_at: string;
+}
+
+export const voiceCameraEnded = object<VoiceCameraEnded>({
+  reason: voiceCameraEndReason,
+  started_at: timestamp,
+  ended_at: timestamp,
+});
+
 // schema.VoicePresenceV1
 export const voicePresenceV1Schema = 'conch.voice_presence.v1';
 
@@ -1202,6 +1281,7 @@ export interface VoicePresenceV1 {
   available: boolean;
   rooms: VoicePresenceRoom[];
   share_ended?: VoiceShareEnded;
+  camera_ended?: VoiceCameraEnded;
 }
 
 export const voicePresenceV1 = object<VoicePresenceV1>({
@@ -1211,6 +1291,7 @@ export const voicePresenceV1 = object<VoicePresenceV1>({
   available: bool,
   rooms: array(voicePresenceRoom),
   share_ended: optional(voiceShareEnded),
+  camera_ended: optional(voiceCameraEnded),
 });
 
 // schema.VoiceTransmitState
@@ -1266,6 +1347,34 @@ export const voiceCompanionResponseV1 = object<VoiceCompanionResponseV1>({
   expires_at: timestamp,
 });
 
+// schema.VoiceShareAudioScope
+export type VoiceShareAudioScope = 'application' | 'system_excluding_call';
+
+export const voiceShareAudioScope = vocab<VoiceShareAudioScope>({
+  application: true,
+  system_excluding_call: true,
+});
+
+// schema.VoiceCompanionAudioRequestV1
+export interface VoiceCompanionAudioRequestV1 {
+  scope: VoiceShareAudioScope;
+}
+
+export const voiceCompanionAudioRequestV1 = object<VoiceCompanionAudioRequestV1>({
+  scope: voiceShareAudioScope,
+});
+
+// schema.VoiceCompanionAudioV1
+export interface VoiceCompanionAudioV1 {
+  scope: VoiceShareAudioScope;
+  started_at: string;
+}
+
+export const voiceCompanionAudioV1 = object<VoiceCompanionAudioV1>({
+  scope: voiceShareAudioScope,
+  started_at: timestamp,
+});
+
 // schema.VoiceShareV1
 export interface VoiceShareV1 {
   principal_id: number;
@@ -1279,15 +1388,28 @@ export const voiceShareV1 = object<VoiceShareV1>({
   audio: bool,
 });
 
+// schema.VoiceCameraV1
+export interface VoiceCameraV1 {
+  principal_id: number;
+  started_at: string;
+}
+
+export const voiceCameraV1 = object<VoiceCameraV1>({
+  principal_id: int,
+  started_at: timestamp,
+});
+
 // schema.VoiceChannelOccupancy
 export interface VoiceChannelOccupancy {
   channel_id: number;
   in_voice: number;
+  principal_ids?: number[];
 }
 
 export const voiceChannelOccupancy = object<VoiceChannelOccupancy>({
   channel_id: int,
   in_voice: int,
+  principal_ids: optional(array(int)),
 });
 
 // schema.VoiceOccupancyV1
@@ -2388,6 +2510,30 @@ export const createCredentialResponseV1 = object<CreateCredentialResponseV1>({
   token: str,
 });
 
+// schema.CreateHookRequest
+export interface CreateHookRequest {
+  channel: string;
+  principal: number;
+  label?: string;
+}
+
+export const createHookRequest = object<CreateHookRequest>({
+  channel: str,
+  principal: int,
+  label: optional(str),
+});
+
+// schema.CreateHookResponse
+export interface CreateHookResponse {
+  id?: number;
+  token: string;
+}
+
+export const createHookResponse = object<CreateHookResponse>({
+  id: optional(int),
+  token: str,
+});
+
 // schema.RenamePrincipalRequestV1
 export interface RenamePrincipalRequestV1 {
   name: string;
@@ -2513,6 +2659,30 @@ export const roleChangeRequestV1 = object<RoleChangeRequestV1>({
   owner: optional(bool),
 });
 
+// schema.IssuedKind: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownIssuedKind is the known ones.
+export type KnownIssuedKind = 'credential' | 'hook';
+export type IssuedKind = KnownIssuedKind | (string & {});
+
+export const issuedKind = tolerant<KnownIssuedKind>({ credential: true, hook: true });
+
+// schema.IssuedByOperatorV1
+export interface IssuedByOperatorV1 {
+  kind: IssuedKind;
+  id: number;
+  principal_id: number;
+  issued_by: number;
+  issued_at: string;
+}
+
+export const issuedByOperatorV1 = object<IssuedByOperatorV1>({
+  kind: issuedKind,
+  id: int,
+  principal_id: int,
+  issued_by: int,
+  issued_at: timestamp,
+});
+
 // schema.RoleChangeResponseV1
 export interface RoleChangeResponseV1 {
   principal: PrincipalAdminV1;
@@ -2522,6 +2692,7 @@ export interface RoleChangeResponseV1 {
   hooks_revoked: number;
   live_credentials: number;
   hooks_bound: number;
+  issued_to_others?: IssuedByOperatorV1[];
 }
 
 export const roleChangeResponseV1 = object<RoleChangeResponseV1>({
@@ -2532,6 +2703,7 @@ export const roleChangeResponseV1 = object<RoleChangeResponseV1>({
   hooks_revoked: int,
   live_credentials: int,
   hooks_bound: int,
+  issued_to_others: optional(array(issuedByOperatorV1)),
 });
 
 // schema.GuestAdminV1
@@ -2726,16 +2898,18 @@ export const putJoinSettingsRequestV1 = object<PutJoinSettingsRequestV1>({
   member_link_default_expiry_seconds: optional(int),
 });
 
-// schema.JoinWarning
-export type JoinWarning =
+// schema.JoinWarning: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownJoinWarning is the known ones.
+export type KnownJoinWarning =
   | 'live_guests_remain'
   | 'trusted_proxy_unset'
   | 'one_address'
   | 'reserved_names_in_use'
   | 'server_name_in_use'
   | 'no_default_channel';
+export type JoinWarning = KnownJoinWarning | (string & {});
 
-export const joinWarning = vocab<JoinWarning>({
+export const joinWarning = tolerant<KnownJoinWarning>({
   live_guests_remain: true,
   trusted_proxy_unset: true,
   one_address: true,
@@ -3443,10 +3617,12 @@ export const permissionRowV1 = object<PermissionRowV1>({
   operator_fixed: optional(bool),
 });
 
-// schema.PermissionPreset
-export type PermissionPreset = 'personal' | 'group';
+// schema.PermissionPreset: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPermissionPreset is the known ones.
+export type KnownPermissionPreset = 'personal' | 'group';
+export type PermissionPreset = KnownPermissionPreset | (string & {});
 
-export const permissionPreset = vocab<PermissionPreset>({ personal: true, group: true });
+export const permissionPreset = tolerant<KnownPermissionPreset>({ personal: true, group: true });
 
 // schema.PermissionPresetV1
 export interface PermissionPresetV1 {
@@ -3459,37 +3635,19 @@ export const permissionPresetV1 = object<PermissionPresetV1>({
   member: array(permission),
 });
 
-// schema.IssuedKind
-export type IssuedKind = 'credential' | 'hook';
+// schema.PermissionRole: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPermissionRole is the known ones.
+export type KnownPermissionRole = 'member' | 'operator';
+export type PermissionRole = KnownPermissionRole | (string & {});
 
-export const issuedKind = vocab<IssuedKind>({ credential: true, hook: true });
+export const permissionRole = tolerant<KnownPermissionRole>({ member: true, operator: true });
 
-// schema.IssuedByOperatorV1
-export interface IssuedByOperatorV1 {
-  kind: IssuedKind;
-  id: number;
-  principal_id: number;
-  issued_by: number;
-  issued_at: string;
-}
+// schema.PermissionsWarning: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownPermissionsWarning is the known ones.
+export type KnownPermissionsWarning = 'default_channel_exposes_members' | 'open_signup_on';
+export type PermissionsWarning = KnownPermissionsWarning | (string & {});
 
-export const issuedByOperatorV1 = object<IssuedByOperatorV1>({
-  kind: issuedKind,
-  id: int,
-  principal_id: int,
-  issued_by: int,
-  issued_at: timestamp,
-});
-
-// schema.PermissionRole
-export type PermissionRole = 'member' | 'operator';
-
-export const permissionRole = vocab<PermissionRole>({ member: true, operator: true });
-
-// schema.PermissionsWarning
-export type PermissionsWarning = 'default_channel_exposes_members' | 'open_signup_on';
-
-export const permissionsWarning = vocab<PermissionsWarning>({
+export const permissionsWarning = tolerant<KnownPermissionsWarning>({
   default_channel_exposes_members: true,
   open_signup_on: true,
 });
@@ -3554,6 +3712,26 @@ export const permissionsChangedV1 = object<PermissionsChangedV1>({
   schema: vocab<typeof permissionsChangedV1Schema>({ [permissionsChangedV1Schema]: true }),
 });
 
+// schema.DisablePrincipalResponseV1
+export interface DisablePrincipalResponseV1 {
+  issued_to_others?: IssuedByOperatorV1[];
+}
+
+export const disablePrincipalResponseV1 = object<DisablePrincipalResponseV1>({
+  issued_to_others: optional(array(issuedByOperatorV1)),
+});
+
+// schema.RevokeIssuedResponseV1
+export interface RevokeIssuedResponseV1 {
+  credentials_revoked: number;
+  hooks_revoked: number;
+}
+
+export const revokeIssuedResponseV1 = object<RevokeIssuedResponseV1>({
+  credentials_revoked: int,
+  hooks_revoked: int,
+});
+
 // schema.CreateChannelRequestV1
 export interface CreateChannelRequestV1 {
   name: string;
@@ -3574,6 +3752,19 @@ export const createChannelResponseV1 = object<CreateChannelResponseV1>({
   channel: channelV0,
 });
 
+// schema.ChannelAuthorV1
+export interface ChannelAuthorV1 {
+  principal_id: number;
+  name: string;
+  kind: PrincipalKind;
+}
+
+export const channelAuthorV1 = object<ChannelAuthorV1>({
+  principal_id: int,
+  name: str,
+  kind: principalKind,
+});
+
 // schema.ChannelListingV1
 export interface ChannelListingV1 {
   id: number;
@@ -3584,6 +3775,8 @@ export interface ChannelListingV1 {
   joined: boolean;
   manages?: boolean;
   members?: number;
+  managers?: ChannelAuthorV1[];
+  archived_at?: string;
 }
 
 export const channelListingV1 = object<ChannelListingV1>({
@@ -3595,6 +3788,8 @@ export const channelListingV1 = object<ChannelListingV1>({
   joined: bool,
   manages: optional(bool),
   members: optional(int),
+  managers: optional(array(channelAuthorV1)),
+  archived_at: optional(timestamp),
 });
 
 // schema.ChannelDirectoryResponseV1
@@ -3621,11 +3816,13 @@ export const joinChannelResponseV1 = object<JoinChannelResponseV1>({
 export interface ChannelSettingsRequestV1 {
   visibility?: ChannelVisibility;
   default?: boolean;
+  archived?: boolean;
 }
 
 export const channelSettingsRequestV1 = object<ChannelSettingsRequestV1>({
   visibility: optional(channelVisibility),
   default: optional(bool),
+  archived: optional(bool),
 });
 
 // schema.ChannelSettingsResponseV1
@@ -3641,10 +3838,12 @@ export const channelSettingsResponseV1 = object<ChannelSettingsResponseV1>({
   warnings: optional(array(permissionsWarning)),
 });
 
-// schema.InviteKindV2
-export type InviteKindV2 = 'member';
+// schema.InviteKindV2: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownInviteKindV2 is the known ones.
+export type KnownInviteKindV2 = 'member';
+export type InviteKindV2 = KnownInviteKindV2 | (string & {});
 
-export const inviteKindV2 = vocab<InviteKindV2>({ member: true });
+export const inviteKindV2 = tolerant<KnownInviteKindV2>({ member: true });
 
 // schema.InviteV2
 export interface InviteV2 {
@@ -3766,10 +3965,15 @@ export const serverMemberV1 = object<ServerMemberV1>({
   invited_by: optional(int),
 });
 
-// schema.DirectoryScope
-export type DirectoryScope = 'everyone' | 'shared_channels';
+// schema.DirectoryScope: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownDirectoryScope is the known ones.
+export type KnownDirectoryScope = 'everyone' | 'shared_channels';
+export type DirectoryScope = KnownDirectoryScope | (string & {});
 
-export const directoryScope = vocab<DirectoryScope>({ everyone: true, shared_channels: true });
+export const directoryScope = tolerant<KnownDirectoryScope>({
+  everyone: true,
+  shared_channels: true,
+});
 
 // schema.ServerMembersResponseV1
 export interface ServerMembersResponseV1 {
@@ -3793,19 +3997,6 @@ export interface DirectoryChangedV1 {
 
 export const directoryChangedV1 = object<DirectoryChangedV1>({
   schema: vocab<typeof directoryChangedV1Schema>({ [directoryChangedV1Schema]: true }),
-});
-
-// schema.ChannelAuthorV1
-export interface ChannelAuthorV1 {
-  principal_id: number;
-  name: string;
-  kind: PrincipalKind;
-}
-
-export const channelAuthorV1 = object<ChannelAuthorV1>({
-  principal_id: int,
-  name: str,
-  kind: principalKind,
 });
 
 // schema.ChannelAuthorsResponseV1
@@ -3837,6 +4028,345 @@ export const voicePermissionResponseV1 = object<VoicePermissionResponseV1>({
   principal_id: int,
   voice_allowed: bool,
   changed: bool,
+});
+
+// schema.AdminAction: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownAdminAction is the known ones.
+export type KnownAdminAction =
+  | 'list_members'
+  | 'create_member'
+  | 'rename_member'
+  | 'set_voice_permission'
+  | 'set_invite_permission'
+  | 'disable_member'
+  | 'enable_member'
+  | 'hide_member'
+  | 'list_credentials'
+  | 'revoke_credential'
+  | 'revoke_all_credentials'
+  | 'list_hooks'
+  | 'revoke_hook'
+  | 'list_channels'
+  | 'create_channel'
+  | 'rename_channel'
+  | 'set_channel_default'
+  | 'set_channel_visibility'
+  | 'archive_channel'
+  | 'restore_channel'
+  | 'list_channel_members'
+  | 'add_channel_member'
+  | 'remove_channel_member'
+  | 'set_channel_member_rights'
+  | 'create_member_link'
+  | 'list_member_links'
+  | 'close_member_link'
+  | 'list_link_joiners'
+  | 'disable_link_joiners'
+  | 'disable_invitees'
+  | 'pause_invites'
+  | 'resume_invites'
+  | 'get_join_settings'
+  | 'set_join_settings'
+  | 'get_permissions'
+  | 'set_permissions'
+  | 'list_reports'
+  | 'get_report'
+  | 'update_report'
+  | 'export_audit';
+export type AdminAction = KnownAdminAction | (string & {});
+
+export const adminAction = tolerant<KnownAdminAction>({
+  list_members: true,
+  create_member: true,
+  rename_member: true,
+  set_voice_permission: true,
+  set_invite_permission: true,
+  disable_member: true,
+  enable_member: true,
+  hide_member: true,
+  list_credentials: true,
+  revoke_credential: true,
+  revoke_all_credentials: true,
+  list_hooks: true,
+  revoke_hook: true,
+  list_channels: true,
+  create_channel: true,
+  rename_channel: true,
+  set_channel_default: true,
+  set_channel_visibility: true,
+  archive_channel: true,
+  restore_channel: true,
+  list_channel_members: true,
+  add_channel_member: true,
+  remove_channel_member: true,
+  set_channel_member_rights: true,
+  create_member_link: true,
+  list_member_links: true,
+  close_member_link: true,
+  list_link_joiners: true,
+  disable_link_joiners: true,
+  disable_invitees: true,
+  pause_invites: true,
+  resume_invites: true,
+  get_join_settings: true,
+  set_join_settings: true,
+  get_permissions: true,
+  set_permissions: true,
+  list_reports: true,
+  get_report: true,
+  update_report: true,
+  export_audit: true,
+});
+
+// schema.AgentAdminV1
+export interface AgentAdminV1 {
+  approval_channel_id: number;
+  approval_ttl_seconds?: number;
+  run_window_seconds?: number;
+  quorum?: number;
+  escalation_target?: EscalationTarget;
+  require_approval?: AdminAction[];
+  max_pending?: number;
+}
+
+export const agentAdminV1 = object<AgentAdminV1>({
+  approval_channel_id: int,
+  approval_ttl_seconds: optional(int),
+  run_window_seconds: optional(int),
+  quorum: optional(int),
+  escalation_target: optional(escalationTarget),
+  require_approval: optional(array(adminAction)),
+  max_pending: optional(int),
+});
+
+// schema.AdminGate
+export type AdminGate = 'direct' | 'approval';
+
+export const adminGate = vocab<AdminGate>({ direct: true, approval: true });
+
+// schema.AdminCatalogEntryV1
+export interface AdminCatalogEntryV1 {
+  action: AdminAction;
+  route: string;
+  permission: Permission;
+  gate: AdminGate;
+  held: boolean;
+  gated: boolean;
+}
+
+export const adminCatalogEntryV1 = object<AdminCatalogEntryV1>({
+  action: adminAction,
+  route: str,
+  permission: permission,
+  gate: adminGate,
+  held: bool,
+  gated: bool,
+});
+
+// schema.AdminCatalogResponseV1
+export interface AdminCatalogResponseV1 {
+  actions: AdminCatalogEntryV1[];
+  admin?: AgentAdminV1;
+}
+
+export const adminCatalogResponseV1 = object<AdminCatalogResponseV1>({
+  actions: array(adminCatalogEntryV1),
+  admin: optional(agentAdminV1),
+});
+
+// schema.AdminTargetKind: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownAdminTargetKind is the known ones.
+export type KnownAdminTargetKind =
+  | 'principal'
+  | 'channel'
+  | 'credential'
+  | 'hook'
+  | 'invite'
+  | 'report';
+export type AdminTargetKind = KnownAdminTargetKind | (string & {});
+
+export const adminTargetKind = tolerant<KnownAdminTargetKind>({
+  principal: true,
+  channel: true,
+  credential: true,
+  hook: true,
+  invite: true,
+  report: true,
+});
+
+// schema.AdminTargetV1
+export interface AdminTargetV1 {
+  kind: AdminTargetKind;
+  id: number;
+  name?: string;
+}
+
+export const adminTargetV1 = object<AdminTargetV1>({
+  kind: adminTargetKind,
+  id: int,
+  name: optional(str),
+});
+
+// schema.SubmitAdminActionRequestV1
+export interface SubmitAdminActionRequestV1 {
+  action: AdminAction;
+  target?: AdminTargetV1;
+  params?: unknown;
+  reason?: string;
+}
+
+export const submitAdminActionRequestV1 = object<SubmitAdminActionRequestV1>({
+  action: adminAction,
+  target: optional(adminTargetV1),
+  params: optional(json),
+  reason: optional(str),
+});
+
+// schema.AdminActionV1
+// A message payload of schema adminActionV1PayloadSchema carries one as its data.
+export const adminActionV1PayloadSchema = 'conch.admin_action.v1';
+
+export interface AdminActionV1 {
+  action: AdminAction;
+  route: string;
+  target?: AdminTargetV1;
+  params?: unknown;
+  agent_id: number;
+  reason?: string;
+  requested_at: string;
+}
+
+export const adminActionV1 = object<AdminActionV1>({
+  action: adminAction,
+  route: str,
+  target: optional(adminTargetV1),
+  params: optional(json),
+  agent_id: int,
+  reason: optional(str),
+  requested_at: timestamp,
+});
+
+// schema.ChannelPermission
+export type ChannelPermission = 'read' | 'post' | 'post_net' | 'whisper' | 'whisper_agent';
+
+export const channelPermission = vocab<ChannelPermission>({
+  read: true,
+  post: true,
+  post_net: true,
+  whisper: true,
+  whisper_agent: true,
+});
+
+// schema.ChannelGrant
+export interface ChannelGrant {
+  channel_id: number;
+  permissions: ChannelPermission[];
+}
+
+export const channelGrant = object<ChannelGrant>({
+  channel_id: int,
+  permissions: array(channelPermission),
+});
+
+// schema.Capability
+export type Capability =
+  | 'messages.read'
+  | 'messages.post'
+  | 'approvals.request'
+  | 'approvals.await'
+  | 'approvals.check'
+  | 'sessions.manage'
+  | 'runs.manage'
+  | 'admin.act';
+
+export const capability = vocab<Capability>({
+  'messages.read': true,
+  'messages.post': true,
+  'approvals.request': true,
+  'approvals.await': true,
+  'approvals.check': true,
+  'sessions.manage': true,
+  'runs.manage': true,
+  'admin.act': true,
+});
+
+// schema.RateLimit
+export interface RateLimit {
+  capability: Capability;
+  max: number;
+  window_seconds: number;
+}
+
+export const rateLimit = object<RateLimit>({
+  capability: capability,
+  max: int,
+  window_seconds: int,
+});
+
+// schema.AgentTier
+export type AgentTier = 'C' | 'A' | 'H';
+
+export const agentTier = vocab<AgentTier>({ C: true, A: true, H: true });
+
+// schema.AgentManifestV1
+export const agentManifestV1Schema = 'conch.agent_manifest.v1';
+
+export interface AgentManifestV1 {
+  schema: typeof agentManifestV1Schema;
+  principal_id: number;
+  display_name: string;
+  tier: AgentTier;
+  capabilities?: Capability[];
+  channels?: ChannelGrant[];
+  rate_limits?: RateLimit[];
+  permissions?: Permission[];
+  admin?: AgentAdminV1;
+  created_at: string;
+  updated_at: string;
+}
+
+export const agentManifestV1 = object<AgentManifestV1>({
+  schema: vocab<typeof agentManifestV1Schema>({ [agentManifestV1Schema]: true }),
+  principal_id: int,
+  display_name: str,
+  tier: agentTier,
+  capabilities: optional(array(capability)),
+  channels: optional(array(channelGrant)),
+  rate_limits: optional(array(rateLimit)),
+  permissions: optional(array(permission)),
+  admin: optional(agentAdminV1),
+  created_at: timestamp,
+  updated_at: timestamp,
+});
+
+// schema.PutAgentManifestRequestV1
+export interface PutAgentManifestRequestV1 {
+  display_name: string;
+  tier: AgentTier;
+  capabilities?: Capability[];
+  channels?: ChannelGrant[];
+  rate_limits?: RateLimit[];
+  permissions?: Permission[];
+  admin?: AgentAdminV1;
+}
+
+export const putAgentManifestRequestV1 = object<PutAgentManifestRequestV1>({
+  display_name: str,
+  tier: agentTier,
+  capabilities: optional(array(capability)),
+  channels: optional(array(channelGrant)),
+  rate_limits: optional(array(rateLimit)),
+  permissions: optional(array(permission)),
+  admin: optional(agentAdminV1),
+});
+
+// schema.GetAgentManifestResponseV1
+export interface GetAgentManifestResponseV1 {
+  manifest: AgentManifestV1;
+}
+
+export const getAgentManifestResponseV1 = object<GetAgentManifestResponseV1>({
+  manifest: agentManifestV1,
 });
 
 // schema.Error
@@ -3886,5 +4416,40 @@ export const loginResponseV1 = tagged<LoginResponseV1, 'next'>('next', {
     next: vocab<'totp'>({ totp: true }),
     challenge: str,
     challenge_expires_at: timestamp,
+  }),
+});
+
+// schema.AdminActionStatus
+export type AdminActionStatus = 'ran' | 'pending_approval';
+
+export const adminActionStatus = vocab<AdminActionStatus>({ ran: true, pending_approval: true });
+
+// schema.AdminActionResultV1, by status.
+export type AdminActionResultV1 = RanAdminActionResultV1 | PendingApprovalAdminActionResultV1;
+
+export interface RanAdminActionResultV1 {
+  status: 'ran';
+  http_status: number;
+  result: unknown;
+}
+
+export interface PendingApprovalAdminActionResultV1 {
+  status: 'pending_approval';
+  approval_id: number;
+  approval: ApprovalV1;
+  deadline: string;
+}
+
+export const adminActionResultV1 = tagged<AdminActionResultV1, 'status'>('status', {
+  ran: object<RanAdminActionResultV1>({
+    status: vocab<'ran'>({ ran: true }),
+    http_status: int,
+    result: json,
+  }),
+  pending_approval: object<PendingApprovalAdminActionResultV1>({
+    status: vocab<'pending_approval'>({ pending_approval: true }),
+    approval_id: int,
+    approval: approvalV1,
+    deadline: timestamp,
   }),
 });

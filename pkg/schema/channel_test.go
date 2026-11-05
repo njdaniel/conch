@@ -126,11 +126,18 @@ func TestCommunityChannelGoldenFixtures(t *testing.T) {
 		{"channel-listing-v1-manages.json", func() any { return new(ChannelListingV1) }},
 		{"channel-listing-v1-not-joined.json", func() any { return new(ChannelListingV1) }},
 		{"channel-listing-v1-scope-all.json", func() any { return new(ChannelListingV1) }},
+		{"channel-listing-v1-scope-all-managers.json", func() any { return new(ChannelListingV1) }},
+		{"channel-listing-v1-scope-all-no-managers.json", func() any { return new(ChannelListingV1) }},
 		{"channel-directory-response-v1.json", func() any { return new(ChannelDirectoryResponseV1) }},
 		{"channel-directory-response-v1-empty.json", func() any { return new(ChannelDirectoryResponseV1) }},
+		{"channel-directory-response-v1-scope-all.json", func() any { return new(ChannelDirectoryResponseV1) }},
 		{"join-channel-response-v1.json", func() any { return new(JoinChannelResponseV1) }},
 		{"channel-settings-request-v1.json", func() any { return new(ChannelSettingsRequestV1) }},
 		{"channel-settings-request-v1-default.json", func() any { return new(ChannelSettingsRequestV1) }},
+		{"channel-v0-archived.json", func() any { return new(ChannelV0) }},
+		{"channel-listing-v1-archived.json", func() any { return new(ChannelListingV1) }},
+		{"channel-settings-request-v1-archived.json", func() any { return new(ChannelSettingsRequestV1) }},
+		{"channel-settings-request-v1-restored.json", func() any { return new(ChannelSettingsRequestV1) }},
 		{"channel-settings-response-v1.json", func() any { return new(ChannelSettingsResponseV1) }},
 		{"channel-settings-response-v1-open-signup-off.json", func() any { return new(ChannelSettingsResponseV1) }},
 		{"channel-settings-response-v1-warning.json", func() any { return new(ChannelSettingsResponseV1) }},
@@ -144,13 +151,16 @@ func TestCommunityChannelGoldenFixtures(t *testing.T) {
 	t.Run("channel-v1-public.json", func(t *testing.T) {
 		assertP3GoldenFixture(t, "channel-v1-public.json", func() any { return new(ChannelDocV1) })
 	})
+	t.Run("channel-v1-archived.json", func(t *testing.T) {
+		assertP3GoldenFixture(t, "channel-v1-archived.json", func() any { return new(ChannelDocV1) })
+	})
 	// And the request fixtures are requests the schema accepts.
 	t.Run("create-channel-request-v1.json validates", func(t *testing.T) {
 		var r CreateChannelRequestV1
 		decodeFixture(t, "create-channel-request-v1.json", &r)
 		assertValidation(t, r.Validate(), "")
 	})
-	for _, file := range []string{"channel-settings-request-v1.json", "channel-settings-request-v1-default.json"} {
+	for _, file := range []string{"channel-settings-request-v1.json", "channel-settings-request-v1-default.json", "channel-settings-request-v1-archived.json", "channel-settings-request-v1-restored.json"} {
 		t.Run(file+" validates", func(t *testing.T) {
 			var r ChannelSettingsRequestV1
 			decodeFixture(t, file, &r)
@@ -192,6 +202,8 @@ func TestChannelVisibility(t *testing.T) {
 		ErrorCodeChannelNotJoinable:      "channel_not_joinable",
 		ErrorCodeChannelSettingsConflict: "channel_settings_conflict",
 		ErrorCodeChannelLastMember:       "channel_last_member",
+		ErrorCodeChannelArchived:         "channel_archived",
+		ErrorCodeChannelArchiveDefault:   "channel_archive_default",
 	}
 	for got, w := range want {
 		if got != w {
@@ -245,6 +257,8 @@ func TestChannelSettingsRequestV1Validate(t *testing.T) {
 		// A private default channel is the server's 409, not this rule's.
 		{"private and default", ChannelSettingsRequestV1{Visibility: vis(ChannelPrivate), Default: b(true)}, ""},
 
+		{"archive", ChannelSettingsRequestV1{Archived: b(true)}, ""},
+		{"restore", ChannelSettingsRequestV1{Archived: b(false)}, ""},
 		{"nothing", ChannelSettingsRequestV1{}, "the request changes no setting"},
 		{"empty visibility", ChannelSettingsRequestV1{Visibility: vis("")}, "channel visibility must be one of: public, private"},
 		{"unknown visibility", ChannelSettingsRequestV1{Visibility: vis("secret"), Default: b(true)}, "channel visibility must be one of: public, private"},
@@ -286,6 +300,33 @@ func TestChannelDocV1Visibility(t *testing.T) {
 	assertValidation(t, d.Validate(), "")
 	d.Visibility = "secret"
 	assertValidation(t, d.Validate(), "channel visibility must be one of: public, private")
+}
+
+// TestChannelListingV1ManagersPresence (issue #1202): managers is omitted
+// when nil (the member view) and kept as an empty array when the producer
+// sets an empty slice (a ?scope=all row nobody manages), so a client can
+// tell "no managers" from a server that does not send the field.
+func TestChannelListingV1ManagersPresence(t *testing.T) {
+	tests := []struct {
+		name     string
+		managers []ChannelAuthorV1
+		want     string
+	}{
+		{"nil is omitted", nil, `{"id":9,"name":"belgium","created_at":"2026-10-29T18:00:00.000Z","visibility":"private","joined":false}`},
+		{"empty is sent", []ChannelAuthorV1{}, `{"id":9,"name":"belgium","created_at":"2026-10-29T18:00:00.000Z","visibility":"private","joined":false,"managers":[]}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := ChannelListingV1{ID: 9, Name: "belgium", CreatedAt: NewTimestamp(time.Date(2026, 10, 29, 18, 0, 0, 0, time.UTC)), Visibility: ChannelPrivate, Managers: tt.managers}
+			got, err := json.Marshal(row)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tt.want {
+				t.Fatalf("got %s, want %s", got, tt.want)
+			}
+		})
+	}
 }
 
 func TestChannelDirectoryResponseV1EmptyEncodesArray(t *testing.T) {

@@ -1,22 +1,27 @@
 // Command isolation-check is the private alpha's cross-group check (issue
 // #447, docs/design/private-alpha.md §1, exit steps 3 and 7): two groups on
-// one server, and a member of one finds nothing of the other, over REST, the
-// sockets and LiveKit's media; and a revoked tester is out at once.
+// one server, and a member of one sees nothing of the other's private
+// channels, over REST, the sockets and LiveKit's media; and a revoked tester
+// is out at once. The private register holds private channel names and ids,
+// their content, member lists and voice room names. Principal names and ids,
+// public channel names and public content are not private markers: members
+// and public channels are community-wide by default (ADR-013, design §8).
+// Public content still needs channel membership. The hide-members phase
+// checks the narrower view when see_member_directory is off.
 //
 // It runs a real conchd and, when Docker is there, the pinned LiveKit and lk
 // (e2e/internal/lkit, the same as e2e/voice), and calls the public API only:
 // every request it makes is checked against internal/server/routes.go at the
 // end.
 //
-//   - The world (world.go): group A joins through an operator's open link,
-//     group B through personal invites, the second made by a B tester the
-//     operator let invite. Each posts, replies in a thread, whispers, posts to
-//     a net, uploads a file, runs an agent's session and run, asks for an
+//   - The world (world.go): both groups join through member links, including
+//     a link made by a B member. Each posts, replies in a thread, whispers,
+//     posts to a net, uploads a file, runs an agent's session and run, asks for an
 //     intervention and an approval and sends a problem report; A talks in
 //     voice and shares a screen.
 //   - The sockets (sockets.go): every socket variant stays open on both of
 //     B's channels from before A is active to the end of the run, carries
-//     B's controls, and nothing of A in any frame.
+//     B's controls, and no private marker of A in any frame.
 //   - The matrix (matrix.go): for every route of the table, B tries A's
 //     objects by name and id, as an invited tester, as a member the operator
 //     made, and on the agent routes as B's agent (agents.go). Each answer is
@@ -36,8 +41,8 @@
 //   - Revocation (revoke.go): a second credential of a tester's, holding
 //     every socket variant, is revoked alone, and the sockets of her first
 //     stay open; then the tester, holding every socket variant, a LiveKit
-//     participant and the share, is disabled, then everyone from A's open
-//     link, then the link is closed. Each is timed and held to its
+//     participant and the share, is disabled, then everyone from A's
+//     member link, then the link is closed. Each is timed and held to its
 //     bound: 2 s for a socket, one voice poller pass plus a room rotation for
 //     LiveKit (read from the server's source). Then the revoked must stay
 //     out: a kept ticket and a kept join grant no longer work.
@@ -223,7 +228,7 @@ func run(h *harness) (summary, error) {
 	if err := w.buildGroups(); err != nil {
 		return sum, fmt.Errorf("the groups: %w", err)
 	}
-	h.say("ok   the groups: A (%d people and an agent) joined through an open link; B (%d people) through personal invites, the second made by a B tester, and one the operator made by hand, with an agent",
+	h.say("ok   the groups: A (%d people and an agent) joined through the operator's member link; B (%d people) through member links, the second made by a B tester, and one the operator made by hand, with an agent",
 		len(w.a.people), len(w.b.people))
 
 	bob := w.b.people[1]
@@ -282,10 +287,20 @@ func run(h *harness) (summary, error) {
 	}
 	h.say("ok   MCP: %d tool calls as B's agent about A's objects and ghosts, each refused alike and with nothing of A (%s)", n, strings.Join(codes, ", "))
 
+	if err := w.checkMemberLinkRedemption(); err != nil {
+		return sum, fmt.Errorf("member-link redemption: %w", err)
+	}
+	h.say("ok   member link: a newcomer through A's member link landed in the default channels as they are now and in none of A's private channels")
+
 	if n, err = w.channelsChangedRows(bsock); err != nil {
 		return sum, fmt.Errorf("the channel-list signal: %w", err)
 	}
-	h.say("ok   channel list: ann added to and removed from a channel of A's, with ola of B in it, and the channel renamed; each conch.channels_changed.v1 went to its subject alone, exactly %s, and none of %d events sockets (bob's, ola's, the operator's, both agents') carried one of another's (L1-L4, L7)", channelsChangedWire, n)
+	h.say("ok   channel list: ann added to and removed from a channel of A's, with ola of B in it, the channel renamed, archived and restored; each conch.channels_changed.v1 went to its subject alone, exactly %s, and none of %d events sockets (bob's, ola's, the operator's, both agents') carried one of another's (L1-L4, L7, L8)", channelsChangedWire, n)
+
+	if n, err = w.directoryChangedRows(bsock); err != nil {
+		return sum, fmt.Errorf("the directory signal: %w", err)
+	}
+	h.say("ok   directory: a membership change sent no events socket a conch.directory_changed.v1, and ann's rename (and rename back) sent exactly one, exactly %s, to each human one (ann's, the operator's, ola's and bob's) and to neither agent's, of %d events sockets (D1-D3)", directoryChangedWire, n)
 
 	if v != nil {
 		if err := w.mediaB(v); err != nil {
@@ -320,6 +335,14 @@ func run(h *harness) (summary, error) {
 	}
 	h.say("ok   restricted operator: %d rows; with manage_members, act_as_members and manage_channels cut through PUT /v1/permissions, every permission route named its permission, A's channel answered as one that never existed, its own channel gave it a manager's rights, and what it made before the cut was judged again", rn)
 
+	// The personal preset (issue #1017, design §7.7 item 3): the owner
+	// applies personal and group through the real PUT.
+	pn, err := w.presetPhase()
+	if err != nil {
+		return sum, fmt.Errorf("the personal preset: %w", err)
+	}
+	h.say("ok   personal preset: %d rows; with personal applied through PUT /v1/permissions a member's link (v1 and v2) was refused invite_not_allowed naming make_member_links and its channel creation permission_denied naming the permission of the visibility; the directory narrowed to the people a member may know (bob's and zed's names and ids in none of the routes alice reads, carol known through her link, the authors route naming the departed author alone), conch.directory_changed.v1 reached exactly the viewers whose answer changed; group gave link and channel creation back, widened the directory and signalled it", pn)
+
 	// B's sockets have been open through all of it: a second control, and
 	// every frame since they opened is scanned again.
 	if c, err = w.controlB(2); err != nil {
@@ -329,6 +352,12 @@ func run(h *harness) (summary, error) {
 		return sum, fmt.Errorf("group B's sockets, at the end: %w", err)
 	}
 	h.say("ok   sockets at the end: B's %d sockets, open through the matrix, the media half, every revocation and the guests' phase, carried B's second control and %d frames in all, none with anything of A's or anything private of the plaza's", len(bsock.feeds), bsock.frames())
+
+	dn, dr, err := w.aiAdminPhase()
+	if err != nil {
+		return sum, fmt.Errorf("the AI administrator: %w", err)
+	}
+	h.say("ok   AI administrator: B's agent granted every agent-grantable permission was refused on each of %d administrative routes it called directly, exactly as B's ungranted agent was; through the admin door %d of its catalog's reads answered", dn, dr)
 
 	if err := h.checkCalls(table); err != nil {
 		return sum, err

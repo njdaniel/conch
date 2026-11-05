@@ -89,6 +89,7 @@ func (s *Server) handleSetRole(w http.ResponseWriter, r *http.Request) {
 		// the document (the security review of #1061, S1). The credential
 		// revocation above returns before any share is ended.
 		s.events.notifyPermissionsChanged(id)
+		s.directoryPrincipalChanged(ctx, id, nil)
 		if heldVoice {
 			// use_voice may have gone with the role: remove the target from
 			// voice now, as PUT /v1/permissions does (#1016), not at the
@@ -96,6 +97,8 @@ func (s *Server) handleSetRole(w http.ResponseWriter, r *http.Request) {
 			s.voiceWithheldFor(ctx, id)
 		}
 		s.endShareIfWithheld(ctx, id)
+		// And a camera it may no longer hold (ADR-015 decision 6).
+		s.endCameraIfWithheld(ctx, id)
 	}
 	writeJSON(w, http.StatusOK, res.RoleChangeResponseV1)
 }

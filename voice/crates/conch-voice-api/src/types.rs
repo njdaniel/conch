@@ -580,12 +580,18 @@ pub struct VoiceSessionResponseV1 {
     pub identity: String,
     /// One grant per room the caller may join; never empty.
     pub rooms: Vec<VoiceRoomGrant>,
+    /// The identity `conchd` would issue the caller's companion under, present when the
+    /// server names one (issue #897). Absent, as from an older server, and empty both mean
+    /// no companion; read it with [`VoiceSessionResponseV1::companion_identity`].
+    #[cfg_attr(test, serde(skip_serializing_if = "String::is_empty"))]
+    companion_identity: String,
 }
 
 wire_object!(VoiceSessionResponseV1, "a voice session object", unknown = ignored, {
     livekit_url: required,
     identity: required,
     rooms: required,
+    companion_identity: optional,
 });
 
 impl VoiceSessionResponseV1 {
@@ -606,6 +612,9 @@ impl VoiceSessionResponseV1 {
         if self.rooms.is_empty() {
             return Err("voice session rooms must list at least one grant".into());
         }
+        if self.companion_identity == self.identity {
+            return Err("voice session companion_identity must differ from identity".into());
+        }
         let mut seen = std::collections::BTreeSet::new();
         for grant in &self.rooms {
             grant.check()?;
@@ -614,6 +623,12 @@ impl VoiceSessionResponseV1 {
             }
         }
         Ok(())
+    }
+
+    /// The identity of the caller's companion, if the server named one. An empty value is
+    /// the same as none. A valid session never names the caller's own identity.
+    pub fn companion_identity(&self) -> Option<&str> {
+        Some(self.companion_identity.as_str()).filter(|identity| !identity.is_empty())
     }
 
     /// The grant for the channel-wide room: the one with no audience. A valid session has
@@ -641,6 +656,11 @@ pub struct VoiceParticipant {
     /// Whether the share carries sound. Never true without `sharing`.
     #[serde(skip_serializing_if = "is_false")]
     pub sharing_audio: bool,
+    /// Whether the participant holds a camera claim (ADR-015). Absent, as from a server
+    /// that has no camera, is false. This client never holds one (the Rust helper gets
+    /// no video); it reads the field as presence shows it.
+    #[serde(skip_serializing_if = "is_false")]
+    pub camera: bool,
 }
 
 wire_object!(VoiceParticipant, "a voice participant object", unknown = ignored, {
@@ -650,6 +670,7 @@ wire_object!(VoiceParticipant, "a voice participant object", unknown = ignored, 
     joined_at: required,
     sharing: optional,
     sharing_audio: optional,
+    camera: optional,
 });
 
 fn is_false(b: &bool) -> bool {
@@ -679,6 +700,12 @@ impl VoiceParticipant {
         if self.sharing_audio && !self.sharing {
             return Err(format!(
                 "voice participant {} cannot have sharing_audio without sharing",
+                self.principal_id
+            ));
+        }
+        if self.camera && !self.can_publish {
+            return Err(format!(
+                "voice participant {} cannot have a camera without can_publish",
                 self.principal_id
             ));
         }
@@ -983,6 +1010,20 @@ mod tests {
         audio: required,
     });
 
+    /// `schema.VoiceCameraV1`, the answer to claiming a camera (ADR-015). The Rust
+    /// helper gets no video, so the client has no such type; this copy is here so that
+    /// the fixture is still read and written by a Rust type, as the share's is.
+    #[derive(Debug, Serialize)]
+    struct VoiceCameraV1 {
+        principal_id: i64,
+        started_at: Timestamp,
+    }
+
+    wire_object!(VoiceCameraV1, "a voice camera object", unknown = ignored, {
+        principal_id: required,
+        started_at: required,
+    });
+
     fn round_trip<T>(name: &str, validate: impl Fn(&T) -> Result<(), Error>)
     where
         T: DeserializeOwned + Serialize,
@@ -1011,18 +1052,26 @@ mod tests {
         // past the field as it reads past any it does not know; everything else
         // must survive.
         fn presence_of_a_sharer(name: &str) {
+            presence_but_for(name, "share_ended");
+        }
+        // camera_ended (ADR-015) likewise: only in the document of the person
+        // whose camera ended, and this client never holds a camera.
+        fn presence_of_a_camera_holder(name: &str) {
+            presence_but_for(name, "camera_ended");
+        }
+        fn presence_but_for(name: &str, field: &str) {
             let mut want = fixture(name);
             let typed: VoicePresenceV1 = serde_json::from_value(want.clone())
                 .unwrap_or_else(|e| panic!("{name} does not decode: {e}"));
             typed
                 .validate()
                 .unwrap_or_else(|e| panic!("{name} does not validate: {e}"));
-            let ended = want.as_object_mut().and_then(|o| o.remove("share_ended"));
-            assert!(ended.is_some(), "{name} has no share_ended");
+            let ended = want.as_object_mut().and_then(|o| o.remove(field));
+            assert!(ended.is_some(), "{name} has no {field}");
             assert_eq!(
                 serde_json::to_value(&typed).unwrap(),
                 want,
-                "{name} lost more than share_ended"
+                "{name} lost more than {field}"
             );
         }
         fn report(name: &str) {
@@ -1040,15 +1089,29 @@ mod tests {
                 Ok(())
             });
         }
+        fn camera(name: &str) {
+            round_trip::<VoiceCameraV1>(name, |c| {
+                assert!(c.principal_id > 0 && !c.started_at.is_zero(), "{name}");
+                Ok(())
+            });
+        }
         vec![
             ("voice-session-response-v1.json", session),
             ("voice-session-response-v1-net.json", session),
+            ("voice-session-response-v1-companion.json", session),
             ("voice-presence-v1.json", presence),
             ("voice-presence-v1-not-configured.json", presence),
             ("voice-presence-v1-unavailable.json", presence),
             ("voice-presence-v1-sharing.json", presence),
             ("voice-presence-v1-share-ended.json", presence_of_a_sharer),
             ("voice-share-v1.json", share),
+            // The camera (ADR-015, issue #1238).
+            ("voice-presence-v1-camera.json", presence),
+            (
+                "voice-presence-v1-camera-ended.json",
+                presence_of_a_camera_holder,
+            ),
+            ("voice-camera-v1.json", camera),
             ("voice-transmit-report-v1-started.json", report),
             ("voice-transmit-report-v1-stopped.json", report),
             ("voice-transmit-report-v1-net.json", report),
@@ -1111,9 +1174,14 @@ mod tests {
     /// Voice fixtures of documents `conch-voice` never reads, each with the reason, so
     /// that a new one is still a decision: claim it with a type, or say here why not.
     const NOT_READ: &[(&str, &str)] = &[
-        // Voice occupancy (issue #596): how many are in each channel's voice, for a
-        // channel list. The voice client joins one channel it is told and shows no list.
+        // Voice occupancy (issue #596): how many are in each channel's voice, and who
+        // (issue #1103), for a channel list. The voice client joins one channel it is
+        // told and shows no list.
         ("voice-occupancy-v1.json", "occupancy is for a channel list"),
+        (
+            "voice-occupancy-v1-people.json",
+            "occupancy is for a channel list",
+        ),
         (
             "voice-occupancy-v1-unavailable.json",
             "occupancy is for a channel list",
@@ -1145,12 +1213,19 @@ mod tests {
             "voice-companion-response-v1-viewer.json",
             "the companion route is the desktop renderer's",
         ),
-        // The session answer that names the companion identity. This client ignores the
-        // field until it learns to leave its own companion's tracks unplayed (issue #934),
-        // and that issue claims the fixture with the type.
+        // The companion's share audio (issue #898): the share holder's consent to the
+        // sound, asked by the desktop renderer, never by the voice client.
         (
-            "voice-session-response-v1-companion.json",
-            "companion_identity is read from #934 on",
+            "voice-companion-audio-request-v1.json",
+            "the companion audio route is the desktop renderer's",
+        ),
+        (
+            "voice-companion-audio-request-v1-system.json",
+            "the companion audio route is the desktop renderer's",
+        ),
+        (
+            "voice-companion-audio-v1.json",
+            "the companion audio route is the desktop renderer's",
         ),
     ];
 
@@ -1350,6 +1425,7 @@ mod tests {
             livekit_url: "wss://voice.example".into(),
             identity: "p7".into(),
             rooms,
+            companion_identity: String::new(),
         }
     }
 
@@ -1357,6 +1433,39 @@ mod tests {
         match result {
             Err(Error::Invalid { problem, .. }) => problem,
             other => panic!("expected Error::Invalid, got {other:?}"),
+        }
+    }
+
+    /// Issue #934: the session answer's `companion_identity` is optional, an empty one is
+    /// none, and one equal to the caller's own identity is an invalid session.
+    #[test]
+    fn a_sessions_companion_identity_is_optional_and_never_the_callers_own() {
+        let base = fixture("voice-session-response-v1-companion.json");
+        let table = [
+            ("named", Some("p7.screen"), Some("p7.screen"), None),
+            ("absent", None, None, None),
+            ("empty is absent", Some(""), None, None),
+            (
+                "equal to the callers own identity",
+                Some("p7"),
+                Some("p7"),
+                Some("companion_identity must differ"),
+            ),
+        ];
+        for (name, field, want, refused) in table {
+            let mut doc = base.clone();
+            match field {
+                Some(value) => doc["companion_identity"] = value.into(),
+                None => {
+                    doc.as_object_mut().unwrap().remove("companion_identity");
+                }
+            }
+            let session: VoiceSessionResponseV1 = serde_json::from_value(doc).unwrap();
+            assert_eq!(session.companion_identity(), want, "{name}");
+            match refused {
+                None => session.validate().unwrap_or_else(|e| panic!("{name}: {e}")),
+                Some(text) => assert!(problem(session.validate()).contains(text), "{name}"),
+            }
         }
     }
 
@@ -1538,6 +1647,7 @@ mod tests {
             joined_at: Timestamp::parse("2026-10-09T12:00:31.000Z").unwrap(),
             sharing: false,
             sharing_audio: false,
+            camera: false,
         }
     }
 
@@ -1722,6 +1832,38 @@ mod tests {
                     ],
                 )]),
                 Some("principals 3 and 7 as sharing"),
+            ),
+            // The camera (ADR-015): it needs can_publish, and a room may hold
+            // any number; the cap is the server's, not the schema's.
+            (
+                "two participants with cameras, one sharing",
+                presence(vec![room(
+                    None,
+                    vec![
+                        VoiceParticipant {
+                            sharing: true,
+                            camera: true,
+                            ..participant(3)
+                        },
+                        VoiceParticipant {
+                            camera: true,
+                            ..participant(7)
+                        },
+                    ],
+                )]),
+                None,
+            ),
+            (
+                "a camera without being able to publish",
+                presence(vec![room(
+                    None,
+                    vec![VoiceParticipant {
+                        can_publish: false,
+                        camera: true,
+                        ..participant(3)
+                    }],
+                )]),
+                Some("cannot have a camera without can_publish"),
             ),
             (
                 "two channel rooms",

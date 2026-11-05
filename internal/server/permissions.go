@@ -37,6 +37,10 @@ import (
 //     in A4 (#1016), which ships in the same release: the store's making and
 //     redeeming of links, every voice route, the poller's passes and the
 //     share routes read them.
+//   - Row 12 (use_camera) joined with webcam C3 (#1240), enforced
+//     vacuously: nothing reads it until C4 (#1241) adds
+//     POST /v1/channels/{channel}/voice/camera, whose route asks it. Until
+//     then an owner may turn the cell on, and it grants nothing.
 //
 // TestEnforcedPermissionsAreHonest fails when a permission is listed here
 // while one of its gates still reads only the role or the brake.
@@ -52,6 +56,7 @@ var enforcedPermissions = []schema.Permission{
 	schema.PermManageChannels,
 	schema.PermChangeServerSettings,
 	schema.PermReadAuditLog,
+	schema.PermUseCamera,
 }
 
 // handleGetPermissions serves GET /v1/permissions: the document, for any
@@ -138,14 +143,24 @@ func memberCell(rows []schema.PermissionRowV1, perm schema.Permission) bool {
 // permissionsWarnings are the conditions of design §6, shown and never
 // refused:
 //
-//   - default_channel_exposes_members: the member directory is off and at
-//     least one default channel exists. There are no default channels until
-//     #979 adds them, so it is never raised yet.
+//   - default_channel_exposes_members: members do not hold
+//     see_member_directory and at least one default channel exists, which
+//     shows its members to each other whatever the cell says (design
+//     §13.7).
 //   - open_signup_on: member links are off for members, and the address
 //     still admits accounts (open joining that takes accounts, not paused;
 //     open sign-up once #987 replaces the joining modes).
 func (s *Server) permissionsWarnings(ctx context.Context, doc store.PermissionsDocument) ([]schema.PermissionsWarning, error) {
 	out := []schema.PermissionsWarning{}
+	if !memberCell(doc.Rows, schema.PermSeeMemberDirectory) {
+		has, err := s.store.HasDefaultChannel(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if has {
+			out = append(out, schema.PermissionsWarningDefaultChannelExposesMembers)
+		}
+	}
 	if !memberCell(doc.Rows, schema.PermMakeMemberLinks) {
 		join, _, err := s.store.JoinSettings(ctx)
 		if err != nil {
@@ -228,14 +243,21 @@ func (s *Server) handlePutPermissions(w http.ResponseWriter, r *http.Request) {
 		// The document is server-wide, so telling everyone it changed
 		// tells no one anything about anyone (design §8.6).
 		s.events.notifyPermissionsChangedAll()
+		// The member directory switched: every member's list may now be
+		// everyone or only the people they may know (design §13.6).
+		s.directorySettingChanged(out.Changes)
 		// Before the answer, in this order: everyone who lost use_voice
-		// leaves voice (their shares end with them), then whoever lost
-		// only share_screen loses the share (design §7.5).
+		// leaves voice (their shares and cameras end with them), then
+		// whoever lost only share_screen loses the share (design §7.5), and
+		// whoever lost only use_camera their camera (ADR-015 decision 6).
 		if lostVoice(out.Changes) {
 			s.voiceWithheld(ctx)
 		}
 		if lostShare(out.Changes) {
 			s.endWithheldShares(ctx)
+		}
+		if lostCamera(out.Changes) {
+			s.endWithheldCameras(ctx)
 		}
 		if turnedOff(out.Changes, schema.PermissionRoleOperator, schema.PermActAsMembers) {
 			issued, err := s.store.IssuedToOthers(ctx, s.now())
@@ -353,9 +375,10 @@ func lostShare(changes []store.PermissionCellChange) bool {
 }
 
 // sharingPrincipals is everyone the poller holds a share or a running claim
-// for, in a live room or a retiring one, each once, in id order: whom a
-// change that may withhold share_screen from a whole column asks again
-// (endWithheldShares). It reads p.mu only.
+// for, in a live room or a retiring one, and everyone whose share a rotation
+// ended in a room still retiring (its withdrawal may be in flight), each
+// once, in id order: whom a change that may withhold share_screen from a
+// whole column asks again (endWithheldShares). It reads p.mu only.
 func (p *voicePoller) sharingPrincipals() []int64 {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -368,9 +391,14 @@ func (p *voicePoller) sharingPrincipals() []int64 {
 			seen[r.claimer] = true
 		}
 	}
-	for _, pid := range p.retiring {
+	for r, pid := range p.retiring {
 		if pid != 0 {
 			seen[pid] = true
+		}
+		// Whose share a rotation ended there and may still be withdrawing
+		// (issue #1265).
+		if r.retiredShare != 0 {
+			seen[r.retiredShare] = true
 		}
 	}
 	out := make([]int64, 0, len(seen))
@@ -423,5 +451,51 @@ func (s *Server) endWithheldShares(ctx context.Context) {
 			continue
 		}
 		s.endWithheldShare(ctx, pid)
+	}
+}
+
+// lostCamera reports whether changes may have withheld use_camera from
+// someone: use_camera, or use_voice, which it needs, turned off in a column.
+func lostCamera(changes []store.PermissionCellChange) bool {
+	return slices.ContainsFunc(changes, func(c store.PermissionCellChange) bool {
+		return !c.Granted && (c.Permission == schema.PermUseCamera || c.Permission == schema.PermUseVoice)
+	})
+}
+
+// endCameraIfWithheld ends principalID's camera claims, in every room, if
+// they no longer hold use_camera: after a change to that principal alone (a
+// role change). A read that fails ends them (fail closed).
+func (s *Server) endCameraIfWithheld(ctx context.Context, principalID int64) {
+	if s.lk == nil {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	holds, err := s.store.Permitted(ctx, principalID, schema.PermUseCamera)
+	if err != nil {
+		slog.ErrorContext(ctx, "permissions: read use_camera failed; ending the camera", "principal", principalID, "error", err)
+	} else if holds {
+		return
+	}
+	s.voice.endCamerasOf(ctx, principalID, 0, voiceCameraStopAccessLost)
+}
+
+// endWithheldCameras ends the camera claims of everyone the poller holds one
+// or a running claim for who no longer holds use_camera (ADR-015 decision 6,
+// design §4.6): through the stop path, under each room's claims, after the
+// change is committed and before it is answered. A read that fails ends them
+// (fail closed). It never fails the request.
+func (s *Server) endWithheldCameras(ctx context.Context) {
+	if s.lk == nil {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	for _, pid := range s.voice.cameraPrincipals() {
+		holds, err := s.store.Permitted(ctx, pid, schema.PermUseCamera)
+		if err != nil {
+			slog.ErrorContext(ctx, "permissions: read use_camera failed; ending the camera", "principal", pid, "error", err)
+		} else if holds {
+			continue
+		}
+		s.voice.endCamerasOf(ctx, pid, 0, voiceCameraStopAccessLost)
 	}
 }

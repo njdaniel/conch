@@ -88,12 +88,17 @@ func decodeBoundedBody(w http.ResponseWriter, r *http.Request, dst any, maxBytes
 // inviteCaller is the check the three authenticated invite routes start with:
 // a verified human. With authentication off there is nobody to make or own an
 // invite, so the answer is the 401 of whoami. Invites are for people: an
-// agent is refused with human_required, audited, before anything is looked at.
+// agent is refused with human_required, audited, before anything is looked at,
+// unless the admin door dispatched this route for it (ai-administrators §3.3):
+// then what it may do is what its grant holds, as the store decides.
 func (s *Server) inviteCaller(w http.ResponseWriter, r *http.Request) (store.Principal, bool) {
 	caller, ok := callerFrom(r.Context())
 	if !ok {
 		writeUnauthenticated(w)
 		return store.Principal{}, false
+	}
+	if _, dispatched := dispatchedHere(r); dispatched && caller.Kind == store.PrincipalAgent {
+		return caller, true
 	}
 	if caller.Kind != store.PrincipalHuman {
 		s.auditAgentDenial(r.Context(), caller.ID, inviteAuditSubject(r), "", 0, denyAgentInvites)
@@ -103,65 +108,14 @@ func (s *Server) inviteCaller(w http.ResponseWriter, r *http.Request) (store.Pri
 	return caller, true
 }
 
-// handleCreateInvite serves POST /v1/invites: the caller makes an invite. The
-// code is in the 201 body and nowhere else, sent no-store.
-//
-// It is unchanged beside POST /v2/invites (issue #985); refusing members here
-// moves to #990 with the browser's switch to member links, and #1134 retires
-// the route.
-func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	caller, ok := s.inviteCaller(w, r)
-	if !ok {
-		return
-	}
-	if limit, ok, retry := s.inviteLimits.takeCreate(caller.ID, s.now()); !ok {
-		s.refuseInviteRateLimited(w, r, limit, retry, caller.ID, clientAddr(r, s.cfg.TrustedProxies))
-		return
-	}
-	var req schema.CreateInviteRequestV1
-	if !decodeInviteBody(w, r, &req) {
-		return
-	}
-	now := s.now()
-	// The schema's messages name the rule broken, never the value sent.
-	if err := req.Validate(now); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	resp, err := s.store.CreateInvite(ctx, auditActor(ctx), caller.ID, req, store.InviteOptions{Allowance: s.cfg.InviteAllowance}, now)
-	switch {
-	case errors.Is(err, store.ErrGuestsRemoved):
-		writeGuestsRemovedConflict(w, "guests are turned off on this server for now: an invite may admit accounts only (join_as account)")
-	case errors.Is(err, store.ErrInviteRequestInvalid):
-		// Validated above; the clock moved past a just-valid expiry.
-		writeError(w, http.StatusBadRequest, "invalid_request", "the invite request is not valid")
-	case errors.Is(err, store.ErrInvitesPaused):
-		writeInvitesPaused(w)
-	case errors.Is(err, store.ErrInviteNotAllowed):
-		// Each also names the permission it lacks, to a caller whose role
-		// could hold it (ADR-014 design §7.4): one code per question.
-		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeInviteNotAllowed, "you may not make this kind of invite",
-			refusedPermission(caller, storeRefusalPermission(err)))
-	case errors.Is(err, store.ErrInviteGrantExceedsInviter):
-		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeInviteGrantExceedsInviter, "an invite may grant only what its maker holds, and only an operator grants the right to invite",
-			refusedPermission(caller, storeRefusalPermission(err)))
-	case errors.Is(err, store.ErrInviteAllowanceExceeded):
-		s.denyForbidden(w, r, caller, schema.ErrorCodeInviteAllowanceExceeded, "you already have as many open personal invites as you may")
-	case errors.Is(err, store.ErrNotFound):
-		// Only an operator gets this far with a channel that does not exist;
-		// anyone else gets invite_grant_exceeds_inviter for it.
-		writeChannelNotFound(w)
-	case errors.Is(err, store.ErrPrincipalNotFound):
-		// The caller was resolved a moment ago; fail closed.
-		writeUnauthenticated(w)
-	case err != nil:
-		slog.ErrorContext(ctx, "invites: create failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-	default:
-		slog.InfoContext(ctx, "invites: created", "principal", caller.ID, "invite", resp.Invite.ID, "kind", resp.Invite.Kind)
-		writeSecretJSON(w, http.StatusCreated, resp)
-	}
+// handleCreateInvite serves POST /v1/invites, which makes nothing for anyone:
+// every caller, an operator included, is answered 409 invite_kind_retired
+// (issue #1134). Member links (POST /v2/invites) replaced personal and open
+// invites. The route answers before it reads the body, looks at the caller's
+// permissions or touches the store, so nothing is written: no invite row, no
+// audit row.
+func (s *Server) handleCreateInvite(w http.ResponseWriter, _ *http.Request) {
+	writeError(w, http.StatusConflict, schema.ErrorCodeInviteKindRetired, inviteKindRetiredMessage)
 }
 
 // handleListInvites serves GET /v1/invites, newest first. A holder of
@@ -503,6 +457,7 @@ func (s *Server) writeRedeemed(w http.ResponseWriter, r *http.Request, res store
 		// A new principal has no socket open yet; the call covers a later
 		// route that redeems for an existing one (issue #1027).
 		s.events.notifyChannelsChanged(res.Principal.ID)
+		s.directoryPrincipalChanged(ctx, res.Principal.ID, nil)
 		writeSecretJSON(w, http.StatusCreated, schema.RedeemInviteResponseV1{
 			Principal:  principalFromStore(res.Principal),
 			Credential: res.Credential,
@@ -689,6 +644,7 @@ func (s *Server) disablePrincipals(ctx context.Context, ids []int64, forbidOwner
 		}
 		s.principalDisabled(ctx, id)
 		if changed {
+			s.directoryPrincipalChanged(ctx, id, nil)
 			done = append(done, id)
 		}
 	}

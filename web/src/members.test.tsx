@@ -187,6 +187,15 @@ describe('administration controls', () => {
     expect(screen.getAllByText('Approver')).toHaveLength(2);
   });
 
+  it('gives the viewer own row no menu and leaves the native one alone (issue #1020: no self-removal, the last owner too)', () => {
+    // olivia is the viewer: an operator whose own row would otherwise offer all three items.
+    draw({ ...props('operator'), viewer: { id: 1, role: 'operator', guest: false } });
+    expect(within(row('olivia')).queryByRole('button', { name: 'Actions for olivia' })).toBeNull();
+    expect(fireEvent.contextMenu(row('olivia'))).toBe(true);
+    // Another person row still has its menu.
+    expect(labels(openMenu('ada'))).toContain('Remove from channel');
+  });
+
   it('gives a manager add and a menu of only the removals the rules allow, with no per-row explanations', () => {
     draw(props('member'));
     expect(screen.getByRole('form', { name: 'Add person by name' })).toBeDefined();
@@ -197,8 +206,11 @@ describe('administration controls', () => {
     expect(screen.queryByText('Operators can only be removed by an operator.')).toBeNull();
     expect(screen.queryByText('Approvers are removed by an operator.')).toBeNull();
     expect(screen.queryByText('Agents are managed by operators.')).toBeNull();
-    expect(screen.getByText('Only operators choose who manages a channel.')).toBeDefined();
-    expect(screen.getByText('Only operators choose who decides approvals.')).toBeDefined();
+    // One line, not three (issue #1020, F23).
+    expect(screen.getByText('Only operators choose who manages a channel or decides approvals.')).toBeDefined();
+    expect(screen.queryByText('Only operators choose who manages a channel.')).toBeNull();
+    expect(screen.queryByText('Only operators choose who decides approvals.')).toBeNull();
+    expect(document.querySelectorAll('.hint').length).toBe(1);
     expect(screen.queryByRole('checkbox')).toBeNull();
   });
 
@@ -207,10 +219,10 @@ describe('administration controls', () => {
     expect(screen.queryByRole('form', { name: 'Add person by name' })).toBeNull();
     expect(screen.queryByRole('button', { name: /^(Add|Remove|Make|Actions)/ })).toBeNull();
     expect(screen.queryByRole('checkbox')).toBeNull();
-    expect(screen.getByText('Only operators and this channel\'s managers add people.')).toBeDefined();
-    expect(screen.getByText('Only operators choose who manages a channel.')).toBeDefined();
-    expect(screen.getByText('Only operators choose who decides approvals.')).toBeDefined();
+    // At most one explanatory line (issue #1020, F23).
+    expect(document.querySelectorAll('.hint').length).toBeLessThanOrEqual(1);
     if (guest) expect(screen.getByText('A guest visit cannot do this; create an account and ask an operator.')).toBeDefined();
+    else expect(screen.getByText('Only operators and this channel\'s managers add people.')).toBeDefined();
     // The native menu is left alone on a row with no actions.
     expect(fireEvent.contextMenu(row('ada'))).toBe(true);
   });
@@ -313,6 +325,33 @@ describe('the shared-channel picker', () => {
       expect(api.putChannelMember).toHaveBeenCalledWith('general', 6, {});
     });
     expect(refreshMembers).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the shared-channel picker follows the directory (issue #993)', () => {
+  it('reads again on a directory tick and replaces its candidates: a renamed person shows, a hidden one is not offered, a chosen one that is gone is unchosen', async () => {
+    const cara: ChannelMemberV1 = { principal_id: 6, created_at: at, name: 'cara', kind: 'human', can_decide: false };
+    const dan: ChannelMemberV1 = { principal_id: 7, created_at: at, name: 'dan', kind: 'human', can_decide: false };
+    let ops: ChannelMemberV1[] = [cara, dan];
+    vi.mocked(api.listMembers).mockImplementation((name) => Promise.resolve({ ok: true, value: name === 'ops' ? ops : [] }));
+    const view = draw(props('member'));
+    fireEvent.click(screen.getByRole('button', { name: 'Add from another channel' }));
+    const form = await screen.findByRole('form', { name: 'Add person from another channel' });
+    await within(form).findByRole('option', { name: 'dan' });
+    fireEvent.change(within(form).getByLabelText('Person from another channel'), { target: { value: '7' } });
+    ops = [{ ...cara, name: 'karen' }];
+    view.rerender(controlsView({ ...props('member'), directoryTick: 1 }));
+    await within(form).findByRole('option', { name: 'karen' });
+    expect(within(form).getAllByRole('option').map((option) => option.textContent)).toEqual(['Choose a person', 'karen']);
+    expect(within(form).getByLabelText<HTMLSelectElement>('Person from another channel').value).toBe('');
+    expect(within(form).getByRole<HTMLButtonElement>('button', { name: 'Add selected person' }).disabled).toBe(true);
+  });
+
+  it('reads nothing on a tick while the picker is closed', async () => {
+    const view = draw(props('member'));
+    view.rerender(controlsView({ ...props('member'), directoryTick: 1 }));
+    await Promise.resolve();
+    expect(api.listMembers).not.toHaveBeenCalled();
   });
 });
 
