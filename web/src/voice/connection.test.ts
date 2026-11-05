@@ -2833,7 +2833,8 @@ describe('the video shown here', () => {
 
 // Issue #936: Watch only beside the person's own voice in another client
 // (the helper, the TUI) connects as the viewer, p<id>.view, and never asks
-// for the person's own session, which would displace that client.
+// for the person's own session, which would displace that client (unless
+// conchd says that voice is gone: issue #1340).
 describe('watching beside voice in another client', () => {
   it('asks for the viewer grant, never the session, and connects with the viewer token and no publish', async () => {
     const t = setup();
@@ -2894,7 +2895,6 @@ describe('watching beside voice in another client', () => {
   const refused = (status: number, code?: string): VoiceViewerResult => ({ ok: false, failure: 'invalid', status, ...(code === undefined ? {} : { code }) });
   it.each([
     ['404 is a channel you are not in', refused(404, 'channel_not_found'), 'You are not a member of this channel'],
-    ['409 voice_no_session is no voice of yours yet', refused(409, 'voice_no_session'), 'Your voice is not connected in this channel yet. Join voice in your other app, then try again.'],
     ['503 voice_unavailable is voice that cannot be reached', refused(503, 'voice_unavailable'), 'Voice is unavailable right now. Try again in a moment.'],
     ['voice_not_configured', refused(503, 'voice_not_configured'), 'Voice is not set up on this server'],
     ['a 500', refused(500), 'The server would not let you watch. Try again in a moment.'],
@@ -2910,8 +2910,20 @@ describe('watching beside voice in another client', () => {
     expect(t.rooms).toHaveLength(0);
   });
 
-  it('a refusal never falls back to the person’s own session', async () => {
+  // Issue #1340: presence lingers after a page closed, so the viewer grant can
+  // find no voice of the person's. Then it is a plain Watch only.
+  it('voice_no_session on the viewer grant falls back to a plain Watch only, once', async () => {
     const t = setup([okSession()], [], 0, false, undefined, undefined, undefined, undefined, undefined, [refused(409, 'voice_no_session')]);
+    t.client.join('general', { watchOnly: true, beside: true });
+    await settle();
+    expect(t.viewerLog).toEqual(['POST general publish=none']);
+    expect(t.asked).toEqual(['general']);
+    expect(t.client.snapshot()).toMatchObject({ phase: 'connected', watchOnly: true, viewer: false });
+    expect(t.rooms[0]?.connectArgs?.publish).toBe(false);
+  });
+
+  it('any other viewer refusal never falls back to the person’s own session', async () => {
+    const t = setup([okSession()], [], 0, false, undefined, undefined, undefined, undefined, undefined, [refused(503, 'voice_unavailable')]);
     t.client.join('general', { watchOnly: true, beside: true });
     await settle();
     t.clock.advance(120_000);
