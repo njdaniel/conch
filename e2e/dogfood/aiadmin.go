@@ -59,9 +59,12 @@ func aiAdminPath(bin binaries) error {
 			Headers map[string]string `json:"headers"`
 		} `json:"mcpServers"`
 	}
-	if err := json.Unmarshal(entry, &mcpEntry); err != nil || len(mcpEntry.MCPServers) != 1 {
-		// The count, not the bytes: the entry carries the bearer token.
-		return fmt.Errorf("ai-admin create stdout is not one MCP entry (%d entries, err %v)", len(mcpEntry.MCPServers), err)
+	// The count, not the bytes: the entry carries the bearer token.
+	if err := json.Unmarshal(entry, &mcpEntry); err != nil {
+		return fmt.Errorf("ai-admin create stdout is not an MCP entry: %w", err)
+	}
+	if len(mcpEntry.MCPServers) != 1 {
+		return fmt.Errorf("ai-admin create stdout holds %d MCP entries, want 1", len(mcpEntry.MCPServers))
 	}
 	var agentToken string
 	for _, s := range mcpEntry.MCPServers {
@@ -151,7 +154,7 @@ func aiAdminPath(bin binaries) error {
 		return fmt.Errorf("check_decision: %w", err)
 	}
 	if open, err := mcpclient.Decode[schema.CheckDecisionOutput](raw); err != nil || open.State != schema.ApprovalStatePending {
-		return fmt.Errorf("check_decision before the decision = %+v (%v), want pending", open, err)
+		return fmt.Errorf("check_decision before the decision = %+v (%w), want pending", open, err)
 	}
 	fmt.Println("ok  submit_admin_action disable_member answered pending_approval; running early is refused")
 
