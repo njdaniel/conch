@@ -8,8 +8,8 @@ on:
 permissions:
   contents: read
 
-# One run per pull request and one per main at a time (#1305): the
-# self-hosted runners are shared, so a superseded run should not hold them.
+# One run per pull request and one per main at a time (#1305): a superseded
+# run should not hold runners (the self-hosted ones especially, when used).
 # A new push to a pull request cancels its older run. (So does re-running an
 # older run of the same pull request: re-run the newest instead.) On main a
 # run is never cancelled mid-way; while one runs, one pending run is kept and
@@ -185,7 +185,15 @@ jobs:
           RUN: ${{ matrix.run }}
         run: |
           if [ -z "$RUN" ]; then
-            go test -race -timeout 25m $(go list ./internal/server/... | grep -v '/internal/server$')
+            # The package's examples and fuzz targets would match no shard's
+            # "^Test" pattern: fail here so one gets added when the first
+            # lands, rather than leave it unrun.
+            if go test -list '^(Example|Fuzz)' ./internal/server | grep -E '^(Example|Fuzz)'; then
+              echo "internal/server has examples or fuzz targets: give them a shard"; exit 1
+            fi
+            pkgs=$(go list ./internal/server/... | grep -v '/internal/server$')
+            [ -n "$pkgs" ] || { echo "no internal/server subpackages listed"; exit 1; }
+            go test -race -timeout 25m $pkgs
           else
             go test -race -timeout 25m ./internal/server -run "$RUN"
           fi
@@ -203,7 +211,10 @@ jobs:
           go-version-file: go.mod
 
       - name: go test (everything but internal/server)
-        run: go test -race -timeout 25m $(go list ./... | grep -v -e '/internal/server$' -e '/internal/server/')
+        run: |
+          pkgs=$(go list ./... | grep -v -e '/internal/server$' -e '/internal/server/')
+          [ -n "$pkgs" ] || { echo "no packages listed"; exit 1; }
+          go test -race -timeout 25m $pkgs
 
   # The Rust voice client under voice/ (ADR-006), and the desktop
   # voice-helper integration, which drives the conch-voice this job builds.
@@ -350,7 +361,9 @@ jobs:
   # gets, docs-only ones included, then passes only if every job above that
   # should have run succeeded: skipped is accepted only for a docs-only
   # change (changes said code=false). It runs even when one of them failed,
-  # so the failure is reported here rather than as a skipped check.
+  # so the failure is reported here rather than as a skipped check. changes
+  # itself is not judged: if it fails, code is unset and every job runs in
+  # full, so a pass here still means every check ran and passed.
   check:
     needs: [changes, go, go-test-server, go-test, rust, web, desktop]
     if: ${{ !cancelled() }}
@@ -808,8 +821,8 @@ jobs:
     # main, like check. CI=true makes a skip a failure: if Docker, the LiveKit
     # image, lk or the Rust toolchain cannot be had, this job is red rather
     # than quietly green.
-    # On the self-hosted runners for this repository's own branches, as
-    # check is (#1286, #1288); a fork's pull request runs on ubuntu-latest.
+    # On GitHub-hosted runners (#1318), or on the self-hosted ones for this
+    # repository's own branches when the variable HEAVY_RUNNER is "local".
     runs-on: ${{ vars.HEAVY_RUNNER == 'local' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
@@ -889,8 +902,7 @@ jobs:
     # failure: without Docker, the image or lk this job is red, not quietly
     # green. A run takes well under a minute once the image and lk are
     # fetched; the timeout leaves room for a slow pull.
-    # On the self-hosted runners for this repository's own branches, as
-    # check is (#1286, #1288); a fork's pull request runs on ubuntu-latest.
+    # On GitHub-hosted runners (#1318): it builds no Rust and needs no disk.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
