@@ -682,7 +682,7 @@ An AI administrator is an ordinary agent (kind `agent`) to which an owner has gr
 
 ```sh
 # as an owner, from a machine that can reach the server
-bin/conch admin ai-admin create deploy-admin > deploy-admin.mcp.json
+(umask 077; bin/conch admin ai-admin create deploy-admin > deploy-admin.mcp.json)
 
 # or on the host, offline, over SSH (works on the database directly, audited as `system`)
 conchd ai-admin create --data /var/lib/conch --origin https://chat.example.org deploy-admin
@@ -701,7 +701,7 @@ Agents hold no permission unless an owner grants one, and only an owner can writ
 
 **Audit.** Every action leaves the rows a person's would, with the agent as actor, plus `admin_action_requested`, `admin_action_ran`, `admin_action_refused`, `admin_grant_changed` and `ai_admin_created` / `ai_admin_revoked`. A gated disable reads `approval_created`, `admin_action_requested`, `decision_cast`, `approval_resolved`, `principal_disabled`, `admin_action_ran`; `go run ./e2e/dogfood` checks exactly that chain.
 
-**Revoke.** `conch admin ai-admin revoke <id>` (or `conchd ai-admin revoke --data <dir> <id>` on the host) disables the agent: its credentials, sessions and sockets end at once and its grant is cleared. To narrow without revoking, write a new manifest with `conch admin manifest put`. Deleting the entry from the AI's client settings revokes nothing; the credential still works until you revoke it.
+**Revoke.** `conch admin ai-admin revoke <id>` (or `conchd ai-admin revoke --data <dir> <id>` on the host) disables the agent: its credentials and sessions end at once and its grant is cleared; its open sockets close at once after `conch admin ai-admin revoke`, and at the server's next re-check after the offline `conchd ai-admin revoke`. To narrow without revoking, write a new manifest with `conch admin manifest put`. Deleting the entry from the AI's client settings revokes nothing; the credential still works until you revoke it.
 
 #### Reporting from outside Conch: a CI job or a remote script
 

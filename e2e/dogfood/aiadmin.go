@@ -60,7 +60,8 @@ func aiAdminPath(bin binaries) error {
 		} `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(entry, &mcpEntry); err != nil || len(mcpEntry.MCPServers) != 1 {
-		return fmt.Errorf("ai-admin create stdout is not one MCP entry: %q", entry)
+		// The count, not the bytes: the entry carries the bearer token.
+		return fmt.Errorf("ai-admin create stdout is not one MCP entry (%d entries, err %v)", len(mcpEntry.MCPServers), err)
 	}
 	var agentToken string
 	for _, s := range mcpEntry.MCPServers {
@@ -167,7 +168,7 @@ func aiAdminPath(bin binaries) error {
 	// An agent can never decide an approval, its own included.
 	if err := proc.as(agentToken).expectStatus("the agent deciding its own approval", http.MethodPost,
 		fmt.Sprintf("/v1/approvals/%d/decisions", id),
-		schema.CastDecisionRequestV1{PrincipalID: agentID, OptionID: "run", Reason: "self"}, nil, http.StatusForbidden, ""); err != nil {
+		schema.CastDecisionRequestV1{PrincipalID: agentID, OptionID: "run", Reason: "self"}, nil, http.StatusForbidden, "forbidden"); err != nil {
 		return err
 	}
 
