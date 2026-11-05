@@ -19,7 +19,8 @@
 # seconds without data and is retried, and since a download that trickles
 # never trips that, each download attempt is also cut off after
 # APT_DOWNLOAD_SECONDS (default 180; the usual 41 MB takes a few seconds) and
-# retried, resuming what it already has, up to three times.
+# retried, resuming what it already has, up to three times, the retries from
+# the primary archive rather than the runner's mirror.
 set -euo pipefail
 
 packages=(libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config)
@@ -55,6 +56,13 @@ until sudo timeout "$download_seconds" apt-get "${apt_opts[@]}" install -y --no-
         exit 1
     fi
     attempt=$((attempt + 1))
+    # The runner's Azure mirror is the one that trickles (#1352, twice on
+    # 2026-11-05): a retry goes to the primary archive instead.
+    if [ "$attempt" -eq 2 ]; then
+        echo "ci-voice-apt: switching from the runner's mirror to archive.ubuntu.com" >&2
+        sudo find /etc/apt -name '*.list' -o -name '*.sources' | xargs -r sudo sed -i 's#http://azure\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g'
+        sudo apt-get "${apt_opts[@]}" update
+    fi
     echo "ci-voice-apt: download attempt $attempt of 3" >&2
 done
 
