@@ -185,7 +185,9 @@ func (s *Store) CreateMemberLink(ctx context.Context, actor string, creatorID in
 		case !found:
 			return ErrPrincipalNotFound
 		}
-		if creator.DisabledAt != nil || creator.Kind != PrincipalHuman {
+		// A human, or an agent an owner granted make_member_links (issue
+		// #1326): what it may make is what it holds, below.
+		if creator.DisabledAt != nil || (creator.Kind != PrincipalHuman && creator.Kind != PrincipalAgent) {
 			return ErrInviteNotAllowed
 		}
 		// What the maker may do is what it holds now, by permission (ADR-014

@@ -218,6 +218,19 @@ func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalI
 	if err := appendAuditEventTx(ctx, tx, actor, "principal_disabled", principalActor(principalID), "", now); err != nil {
 		return false, err
 	}
+	// Disabling an AI administrator ends its access (issue #1326,
+	// ai-administrators §4.5): a disabled agent holds nothing, and the
+	// trail says so beside the disable.
+	var granted int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM agent_manifests WHERE principal_id = ? AND permissions <> '[]'", principalID).Scan(&granted); err != nil {
+		return false, fmt.Errorf("store: disable principal: read grant: %w", err)
+	}
+	if granted > 0 {
+		if err := appendAuditEventTx(ctx, tx, actor, AuditAIAdminRevoked, principalActor(principalID), "reason=disabled", now); err != nil {
+			return false, err
+		}
+	}
 	// Every session of the principal ends first, whatever credential it
 	// was made with, so each is recorded as ended by the disabling and not
 	// by the revocations that follow (issue #265).

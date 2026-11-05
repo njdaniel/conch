@@ -181,7 +181,18 @@ func channelRenameStandingTx(ctx context.Context, tx execer, channelID, callerID
 	if err != nil {
 		return 0, err
 	}
-	if !found || caller.DisabledAt != nil || caller.HiddenAt != nil || caller.Kind != PrincipalHuman || caller.guestTarget() {
+	if !found || caller.DisabledAt != nil || caller.HiddenAt != nil || caller.guestTarget() {
+		return 0, ErrManagerRefused
+	}
+	// A granted agent renames where it holds manage_channels and nowhere
+	// else; it is never a manager (issue #1326, ai-administrators §3.2).
+	if caller.Kind != PrincipalHuman {
+		switch ok, err := principalPermittedTx(ctx, tx, caller, schema.PermManageChannels); {
+		case err != nil:
+			return 0, err
+		case ok:
+			return standingOperator, nil
+		}
 		return 0, ErrManagerRefused
 	}
 	// The same standing rule as memberActorStandingTx (design §7.2.1): an

@@ -226,6 +226,9 @@ func makerRightsTx(ctx context.Context, tx execer, principalID int64) (makerRigh
 	if err != nil || !found {
 		return makerRights{}, err
 	}
+	if p, err = withAgentGrantTx(ctx, tx, p); err != nil {
+		return makerRights{}, err
+	}
 	d, err := readPermissionDocTx(ctx, tx)
 	if err != nil {
 		return makerRights{}, err
@@ -283,7 +286,11 @@ func (r inviteRow) state(now time.Time) InviteState {
 // taking an inviter's right away suspends the invites they left
 // outstanding, and they work again if it comes back.
 func (r inviteRow) makerStillAllowed() bool {
-	if r.creatorOff || !r.creatorHuman {
+	// A disabled maker never stands behind a link. Whether the maker is a
+	// human or a granted agent (issue #1326), what it holds now decides
+	// (r.maker): an agent without the grant, a guest and a hidden principal
+	// hold nothing (principalHolds), so their links stay suspended.
+	if r.creatorOff {
 		return false
 	}
 	// A member link, like a personal invite, stands behind make_member_links:

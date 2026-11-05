@@ -373,7 +373,20 @@ func memberActorStandingTx(ctx context.Context, tx execer, channelID, actorID in
 	if err != nil {
 		return 0, err
 	}
-	if !found || actorP.DisabledAt != nil || actorP.HiddenAt != nil || actorP.Kind != PrincipalHuman || actorP.guestTarget() {
+	if !found || actorP.DisabledAt != nil || actorP.HiddenAt != nil || actorP.guestTarget() {
+		return 0, ErrManagerRefused
+	}
+	// A granted agent (issue #1326, ai-administrators §3.2) has operator
+	// standing where it holds manage_channels, and none anywhere else: it is
+	// never a manager. An ungranted agent holds nothing and is refused here,
+	// as before.
+	if actorP.Kind != PrincipalHuman {
+		switch ok, err := principalPermittedTx(ctx, tx, actorP, schema.PermManageChannels); {
+		case err != nil:
+			return 0, err
+		case ok:
+			return standingOperator, nil
+		}
 		return 0, ErrManagerRefused
 	}
 	if actorP.IsOwner() {
