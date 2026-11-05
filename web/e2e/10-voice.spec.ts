@@ -22,10 +22,13 @@ const firstPressBound = 200 + 1500 + 1000;
 // the LiveKit client allows a call (defaultTimeout in
 // internal/server/livekit/client.go, 2 s); then the longest gap between
 // passes (voicePassGapMax, 1.5 s); then the pass that sees the change, as
-// long again. That is 5.5 s before the presence frame is sent. It is doubled
-// for a loaded machine, where the client's own disconnect, the frame and the
-// render all queue behind the load: the 3 s this replaced failed at a load
-// average of 15 to 20.
+// long again. That is 5.5 s before the presence frame is sent. Doubled, it
+// is 11 s, for a loaded machine, where the client's own disconnect, the
+// frame and the render all queue behind the load: the 3 s this replaced
+// failed at a load average of 15 to 20. The room sweep (every 30 s, one more
+// 2 s call) can run just before the pass that sees the change, so the worst
+// case unloaded is 7.5 s, and 11 s still leaves 3.5 s for load. Store reads
+// inside a pass have no deadline of their own: the margin covers them too.
 const rosterBound = 2 * (2000 + 1500 + 2000);
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -845,8 +848,9 @@ test.describe('with LiveKit', () => {
 
   // Issue #585 (F02): the roster of a channel not joined is live. Bob watches
   // the strip without joining; alice joining and leaving shows within the
-  // poller's worst case (rosterBound), with no channel opened again. Bob's page holds one presence socket all
-  // along, and asks for no session, no device and no LiveKit connection.
+  // poller's worst case (rosterBound), with no channel opened again. Bob's
+  // page holds one presence socket all along, and asks for no session, no
+  // device and no LiveKit connection.
   test('the roster of a channel not joined shows people arriving and leaving', async ({ browser }) => {
     // Each presence socket bob's page opens: its channel, and whether it is
     // still open.
