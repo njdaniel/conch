@@ -24,8 +24,9 @@ import (
 // via ("rest" or "mcp") so the MCP tools (S4) and the REST routes are one path.
 
 const (
-	// viaREST is the door over REST; the MCP tools (S4) pass "mcp".
+	// viaREST is the door over REST; viaMCP the three tools (S4, #1331).
 	viaREST = "rest"
+	viaMCP  = "mcp"
 
 	// adminDoorBodyMaxBytes bounds a submit body: the action, a target, a
 	// reason and the route's params, which are each route's own small body.
@@ -634,4 +635,88 @@ func (s *Server) handleRunAdminAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, status, out)
+}
+
+// The three MCP tools (issue #1331, design §3.6) are fronts on the same core
+// as the REST handlers above, so the two are allowed and refused alike.
+//
+// Who checks what, so each is done once per call on either front:
+//
+//   - The capability. addAgentTool checks admin.act on the agent's manifest
+//     before a tool body runs, and audits a refusal under mcp:<tool> as
+//     access_denied capability_not_granted; nothing below runs then. The core
+//     (adminDoorCaller) reads the manifest again, for the admin settings it
+//     decides with, and asks the capability of that read, which is the REST
+//     front's one check. On MCP it is a second read of the same row; it is
+//     kept so the core stands on its own and the later read decides, as it
+//     must for a grant revoked between the two.
+//   - The budget. addAgentTool spends nothing; a tool body spends through
+//     scope.spend, and these bodies never call it. The core spends admin.act
+//     once per submitted action (adminSpend, in submitAdminAction), after
+//     every check of the door's own, for both fronts; the catalog read and
+//     the run of an approved action spend nothing on either, the run being
+//     the second half of a spent submit. TestMCPAdminToolsSpendOnce pins
+//     one use per submit and none for a refusal.
+//   - The dispatch. A dispatched route is served under the caller, its
+//     credential id and its request credential, which the REST middleware
+//     puts on a request and adminMCPCaller puts on the tool call's context
+//     from the authenticated identity. The dispatch mark is the core's.
+
+// adminMCPCaller is the start of the three tools: the agent as the door's
+// caller, read here so a tool body never touches the store, and the context
+// the door serves it in. A static --mcp-token identity has no credential;
+// the dispatched routes' recent-authentication gate answers nothing without
+// one, so it is refused here, as the session tools refuse it.
+func (s *Server) adminMCPCaller(ctx context.Context, scope *agentScope) (context.Context, store.Principal, *adminRefusal) {
+	if scope.identity.credentialID == 0 {
+		return ctx, store.Principal{}, doorRefuse(http.StatusForbidden, errForbidden.Code, "the admin door needs an issued credential; a static --mcp-token has none")
+	}
+	p, err := s.store.PrincipalByID(ctx, scope.identity.principalID)
+	if err != nil {
+		slog.ErrorContext(ctx, "admin door: read caller failed", "principal", scope.identity.principalID, "error", err)
+		return ctx, store.Principal{}, doorRefuse(http.StatusInternalServerError, errInternal.Code, errInternal.Message)
+	}
+	ctx = withRequestCredential(withCredentialID(withCaller(ctx, p), scope.identity.credentialID), scope.identity.credential)
+	return ctx, p, nil
+}
+
+// describeAdminActionsMCP is describe_admin_actions: GET /v1/admin/actions.
+func (s *Server) describeAdminActionsMCP(ctx context.Context, scope *agentScope) (schema.AdminCatalogResponseV1, *schema.Error) {
+	ctx, p, refusal := s.adminMCPCaller(ctx, scope)
+	if refusal != nil {
+		return schema.AdminCatalogResponseV1{}, &refusal.err
+	}
+	out, refusal := s.adminCatalogFor(ctx, p, scope.subject)
+	if refusal != nil {
+		return schema.AdminCatalogResponseV1{}, &refusal.err
+	}
+	return out, nil
+}
+
+// submitAdminActionMCP is submit_admin_action: POST /v1/admin/actions, with
+// via=mcp on the approval's body and the audit rows.
+func (s *Server) submitAdminActionMCP(ctx context.Context, scope *agentScope, req schema.SubmitAdminActionRequestV1) (schema.AdminActionResultV1, *schema.Error) {
+	ctx, p, refusal := s.adminMCPCaller(ctx, scope)
+	if refusal != nil {
+		return schema.AdminActionResultV1{}, &refusal.err
+	}
+	out, _, refusal := s.submitAdminAction(ctx, p, req, viaMCP, scope.subject)
+	if refusal != nil {
+		return schema.AdminActionResultV1{}, &refusal.err
+	}
+	return out, nil
+}
+
+// runApprovedActionMCP is run_approved_action: POST
+// /v1/admin/actions/{approval_id}/run.
+func (s *Server) runApprovedActionMCP(ctx context.Context, scope *agentScope, approvalID int64) (schema.AdminActionResultV1, *schema.Error) {
+	ctx, p, refusal := s.adminMCPCaller(ctx, scope)
+	if refusal != nil {
+		return schema.AdminActionResultV1{}, &refusal.err
+	}
+	out, _, refusal := s.runApprovedAction(ctx, p, approvalID, viaMCP, scope.subject)
+	if refusal != nil {
+		return schema.AdminActionResultV1{}, &refusal.err
+	}
+	return out, nil
 }

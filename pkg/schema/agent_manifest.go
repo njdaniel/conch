@@ -108,8 +108,7 @@ func Capabilities() []Capability {
 // capabilities.
 //
 // The three admin tools of issue #1326 (describe_admin_actions,
-// submit_admin_action, run_approved_action) map to CapabilityAdminAct and
-// are added here by the PR that registers them (slice S4), as
+// submit_admin_action, run_approved_action) map to CapabilityAdminAct, as
 // agent-manifest.md §6 requires: the server's structural tests hold this
 // table and the registered tools to the same set.
 var mcpToolCapabilities = map[string]Capability{
@@ -136,6 +135,13 @@ var mcpToolCapabilities = map[string]Capability{
 	"post_activity":      CapabilityRunsManage,
 	"poll_interventions": CapabilityRunsManage,
 	"ack_intervention":   CapabilityRunsManage,
+
+	// The admin door (issue #1326, docs/design/ai-administrators.md §3.6):
+	// one capability says the agent may use the door; the permissions its
+	// manifest grants say what it may do through it.
+	"describe_admin_actions": CapabilityAdminAct,
+	"submit_admin_action":    CapabilityAdminAct,
+	"run_approved_action":    CapabilityAdminAct,
 }
 
 // MCPToolCapability returns the capability required to call the named MCP

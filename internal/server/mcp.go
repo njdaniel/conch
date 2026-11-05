@@ -250,6 +250,7 @@ func (s *Server) mcpServerFor(identity mcpIdentity) *mcp.Server {
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("listed %d reactors", len(out.Reactors))}}}, out, nil
 		})
 	s.addSessionTools(server, identity)
+	s.addAdminTools(server, identity)
 	return server
 }
 
@@ -579,6 +580,83 @@ type mcpPollInterventionsInput struct {
 type mcpAckInterventionInput struct {
 	InterventionID int64 `json:"intervention_id" jsonschema:"the intervention's id, as poll_interventions returned it"`
 	schema.AckInterventionRequestV1
+}
+
+// The admin door over MCP (issue #1331, #1326 slice S4; design §3.6): three
+// tools fronting GET /v1/admin/actions, POST /v1/admin/actions and POST
+// /v1/admin/actions/{approval_id}/run, over the functions those routes call
+// (admin_handlers.go). One capability, admin.act, says the agent may use the
+// door; its permissions say what it may do through it; the manifest's rate
+// limit on admin.act bounds how often. As the session tools, each returns the
+// pkg/schema document its route returns, with no output schema declared: an
+// AdminActionResultV1 carries a raw JSON result and Timestamps.
+
+// mcpAdminTargetInput is schema.AdminTargetV1 as a tool argument: kind and
+// id. The server reads the entity's name itself; none is taken here.
+type mcpAdminTargetInput struct {
+	Kind string `json:"kind" jsonschema:"what id names: principal, channel, credential, hook, invite or report"`
+	ID   int64  `json:"id" jsonschema:"the entity's id"`
+}
+
+// mcpSubmitAdminActionInput is schema.SubmitAdminActionRequestV1 with its
+// params as a JSON object: the SDK infers a json.RawMessage as a byte array.
+// As for every MCP argument, the library decodes and re-encodes the object,
+// so its keys come out sorted and its numbers pass through float64.
+type mcpSubmitAdminActionInput struct {
+	Action string               `json:"action" jsonschema:"the catalog action, as describe_admin_actions lists it"`
+	Target *mcpAdminTargetInput `json:"target,omitempty" jsonschema:"what the action acts on, kind and id; omit for a server-wide action"`
+	Params map[string]any       `json:"params,omitempty" jsonschema:"the dispatched route's body, a JSON object, which the catalog clamps; omit when the route takes none"`
+	Reason string               `json:"reason,omitempty" jsonschema:"why, in at most 500 characters; shown to the person who decides a gated action, labelled as the agent's words"`
+}
+
+type mcpRunApprovedActionInput struct {
+	ApprovalID int64 `json:"approval_id" jsonschema:"the approval submit_admin_action returned as pending_approval, once await_decision or check_decision says it is resolved"`
+}
+
+// addAdminTools registers the three tools of the admin door.
+func (s *Server) addAdminTools(server *mcp.Server, identity mcpIdentity) {
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "describe_admin_actions", Description: "List the admin actions of this server as they apply to the authenticated agent: each action's route, the permission it needs, whether the agent holds that permission (held), and whether running it first needs a person's approval (gated); and the agent's admin settings (approval channel, approval deadline, run window, pending cap). Returns a conch.admin_catalog.v1 document. Needs admin.act."},
+		func(ctx context.Context, scope *agentScope, _ struct{}) (*mcp.CallToolResult, any, error) {
+			out, serr := s.describeAdminActionsMCP(ctx, scope)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			return mcpText("%d admin actions", len(out.Actions)), out, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "submit_admin_action", Description: "Submit one admin action through the admin door as the authenticated agent: an action describe_admin_actions lists, its target (kind and id) where it takes one, the route's parameters, and a reason. An action the agent holds the permission for and that is not gated is run at once: the answer is status ran, with the route's http_status and its result verbatim. A gated action is not run: the server raises an approval in the agent's approval channel, composed by the server out of the stored action, with the reason shown to the decider as the agent's words, and answers status pending_approval with approval_id and the approval. Watch it with await_decision or check_decision (which need approvals.await or approvals.check, and read in the approval channel), and when it is approved, run it with run_approved_action; it is run once, within the run window after the decision, and never by itself. Nothing is retried: a refused or failed action is reported, not repeated. An action naming the agent itself or its approval channel is refused, as is one the agent holds no permission for."},
+		func(ctx context.Context, scope *agentScope, in mcpSubmitAdminActionInput) (*mcp.CallToolResult, any, error) {
+			req := schema.SubmitAdminActionRequestV1{Action: schema.AdminAction(in.Action), Reason: in.Reason}
+			if in.Target != nil {
+				req.Target = &schema.AdminTargetV1{Kind: schema.AdminTargetKind(in.Target.Kind), ID: in.Target.ID}
+			}
+			if in.Params != nil {
+				params, err := json.Marshal(in.Params)
+				if err != nil {
+					return mcpToolError(&schema.Error{Code: "invalid_request", Message: "params must be a JSON object"}), nil, nil //nolint:nilerr // a refusal is the tool's result, as for every other refusal here
+				}
+				req.Params = params
+			}
+			out, serr := s.submitAdminActionMCP(ctx, scope, req)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			if out.Status == schema.AdminActionPendingApproval {
+				return mcpText("%s awaits approval %d", in.Action, out.ApprovalID), out, nil
+			}
+			return mcpText("%s ran: %d", in.Action, out.HTTPStatus), out, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "run_approved_action", Description: "Run an admin action a person approved: the approval submit_admin_action returned as pending_approval, once its state is resolved and approved. The server performs exactly the stored action, once, as the agent, and answers status ran with the route's http_status and result. It is refused when the approval is not the agent's, not approved (pending, rejected or expired), older than the run window, already run, or its target has changed since the decider saw it; then submit the action again, if it is still wanted. Nothing is retried."},
+		func(ctx context.Context, scope *agentScope, in mcpRunApprovedActionInput) (*mcp.CallToolResult, any, error) {
+			if in.ApprovalID <= 0 {
+				// As the REST route's path check answers.
+				return mcpToolError(&schema.Error{Code: "invalid_request", Message: "approval id must be a positive integer"}), nil, nil
+			}
+			out, serr := s.runApprovedActionMCP(ctx, scope, in.ApprovalID)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			return mcpText("approval %d ran: %d", in.ApprovalID, out.HTTPStatus), out, nil
+		})
 }
 
 // mcpText is a tool result's human-readable line; the document is the

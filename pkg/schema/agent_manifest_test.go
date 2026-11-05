@@ -460,6 +460,7 @@ var currentMCPTools = []string{
 	"ack_intervention",
 	"await_decision",
 	"check_decision",
+	"describe_admin_actions",
 	"end_session",
 	"heartbeat",
 	"list_reactors",
@@ -471,8 +472,10 @@ var currentMCPTools = []string{
 	"register_session",
 	"remove_reaction",
 	"request_approval",
+	"run_approved_action",
 	"set_reaction",
 	"start_run",
+	"submit_admin_action",
 	"update_run",
 }
 
