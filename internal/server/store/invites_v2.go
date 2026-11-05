@@ -193,7 +193,7 @@ func (s *Store) CreateMemberLink(ctx context.Context, actor string, creatorID in
 		// What the maker may do is what it holds now, by permission (ADR-014
 		// design §7.3), never its role. make_member_links already folds in
 		// the may_invite brake for a member and refuses a guest.
-		rights, err := makerRightsTx(ctx, tx, creatorID)
+		rights, err := makerRightsTx(ctx, tx, creatorID, false)
 		if err != nil {
 			return fmt.Errorf("store: create member link: %w", err)
 		}

@@ -221,12 +221,24 @@ type makerRights struct {
 
 // makerRightsTx reads what principalID holds now. A principal with no row
 // holds nothing.
-func makerRightsTx(ctx context.Context, tx execer, principalID int64) (makerRights, error) {
+//
+// standing says what is asked. Making an invite is an act of authority, so
+// an agent's grant counts only where the admin door dispatched the request
+// (standing false; WithAdminDispatch). Whether an invite already made still
+// stands behind its maker is a fact about the maker, judged in whoever's
+// request redeems or previews it (standing true): an agent's grant is read
+// whatever the context, so a link an AI administrator made works while it
+// holds the grant and is suspended when the grant goes (issue #1326).
+func makerRightsTx(ctx context.Context, tx execer, principalID int64, standing bool) (makerRights, error) {
 	p, found, err := queryPrincipal(ctx, tx, principalID)
 	if err != nil || !found {
 		return makerRights{}, err
 	}
-	if p, err = withAgentGrantTx(ctx, tx, p); err != nil {
+	load := withAgentAuthorityTx
+	if standing {
+		load = withAgentGrantTx
+	}
+	if p, err = load(ctx, tx, p); err != nil {
 		return makerRights{}, err
 	}
 	d, err := readPermissionDocTx(ctx, tx)
@@ -242,7 +254,7 @@ func makerRightsTx(ctx context.Context, tx execer, principalID int64) (makerRigh
 
 // loadMakerTx fills r.maker from the maker as it is now.
 func (r *inviteRow) loadMakerTx(ctx context.Context, tx execer) error {
-	m, err := makerRightsTx(ctx, tx, r.createdBy)
+	m, err := makerRightsTx(ctx, tx, r.createdBy, true)
 	if err != nil {
 		return fmt.Errorf("store: invite maker rights: %w", err)
 	}
@@ -598,7 +610,7 @@ func (s *Store) CreateInvite(ctx context.Context, actor string, creatorID int64,
 		// link, its allowance and a may_invite grant; manage_channels for a
 		// channel it is not in; make_member_links (with a member's may_invite
 		// brake) for a personal invite.
-		rights, err := makerRightsTx(ctx, tx, creatorID)
+		rights, err := makerRightsTx(ctx, tx, creatorID, false)
 		if err != nil {
 			return fmt.Errorf("store: create invite: %w", err)
 		}

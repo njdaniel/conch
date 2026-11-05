@@ -242,3 +242,103 @@ func TestAIAdminDecisionNeverCountsFullChain(t *testing.T) {
 		t.Errorf("audit chain = %q, want %q", chain, want)
 	}
 }
+
+// TestGrantedAgentDirectRESTUnchanged (issue #1329; ai-administrators §3.4):
+// a grant is authority only through the admin door. On every administrative
+// route of the table, a REST request by an agent granted every
+// agent-grantable permission answers exactly what an ungranted agent's does,
+// status and error code, so no gated action runs without its approval
+// by calling its route directly.
+func TestGrantedAgentDirectRESTUnchanged(t *testing.T) {
+	ctx := context.Background()
+	f := newAuthFixture(t, AuthRequired)
+	general, err := f.srv.store.ChannelByName(ctx, "general")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var grantable []schema.Permission
+	for _, perm := range schema.Permissions {
+		if perm.AgentGrantable() {
+			grantable = append(grantable, perm)
+		}
+	}
+	agentWith := func(name string, perms []schema.Permission) string {
+		t.Helper()
+		a, err := f.srv.store.CreatePrincipal(ctx, store.PrincipalAgent, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, tok, err := f.srv.store.CreateCredential(ctx, "system", a.ID, "test", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := schema.PutAgentManifestRequestV1{
+			DisplayName: name, Tier: schema.AgentTierA,
+			Capabilities: []schema.Capability{schema.CapabilityMessagesRead},
+			Channels:     []schema.ChannelGrant{{ChannelID: general.ID, Permissions: []schema.ChannelPermission{schema.ChannelPermissionRead}}},
+			Permissions:  perms,
+		}
+		if len(perms) > 0 {
+			req.Admin = &schema.AgentAdminV1{ApprovalChannelID: general.ID}
+		}
+		if _, _, err := f.srv.store.PutAgentManifest(ctx, "system", a.ID, req); err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+	grantedTok := agentWith("granted", grantable)
+	plainTok := agentWith("plain", nil)
+
+	fill := func(pattern string) (method, path string) {
+		method, path, _ = strings.Cut(pattern, " ")
+		for {
+			i := strings.Index(path, "{")
+			if i < 0 {
+				return method, path
+			}
+			j := strings.Index(path[i:], "}")
+			name := strings.TrimSuffix(path[i+1:i+j], "...")
+			val := fmt.Sprint(f.alice.ID)
+			switch name {
+			case "channel":
+				val = "general"
+			case "net":
+				val = "nosuch"
+			}
+			path = path[:i] + val + path[i+j+1:]
+		}
+	}
+	answer := func(rec *httptest.ResponseRecorder) string {
+		var e schema.Error
+		_ = json.Unmarshal(rec.Body.Bytes(), &e)
+		return fmt.Sprintf("%d %s", rec.Code, e.Code)
+	}
+	checked := 0
+	for _, rt := range f.srv.routes {
+		switch rt.access {
+		case accessOperator, accessOwner, accessChannelManager, accessOperatorOrSelf, accessPermission:
+		default:
+			continue
+		}
+		if isSocketRoute(rt.pattern) {
+			continue
+		}
+		method, path := fill(rt.pattern)
+		body := ""
+		if method != http.MethodGet && method != http.MethodDelete {
+			body = "{}"
+		}
+		got := answer(f.do(t, method, path, grantedTok, body))
+		want := answer(f.do(t, method, path, plainTok, body))
+		if got != want {
+			t.Errorf("%s: granted agent = %s, ungranted agent = %s", rt.pattern, got, want)
+		}
+		checked++
+	}
+	if checked < 40 {
+		t.Fatalf("checked %d administrative routes; the route table has more", checked)
+	}
+	if a, err := f.srv.store.PrincipalByID(ctx, f.alice.ID); err != nil || a.DisabledAt != nil || a.HiddenAt != nil {
+		t.Fatalf("alice after the sweep = %+v, %v; a direct request acted on her", a, err)
+	}
+}

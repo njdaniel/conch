@@ -276,6 +276,38 @@ func agentGrantBit(perm schema.Permission) uint64 {
 	return 0
 }
 
+// adminDispatchKey marks a context as a request the admin door dispatched
+// (issue #1326, ai-administrators §3.4): the one place an agent's grant is
+// authority. No network request can carry a context value, so the mark is
+// set only by code: the server's dispatcher (S3, #1330) and tests.
+type adminDispatchKey struct{}
+
+// WithAdminDispatch returns ctx marked as dispatched by the admin door. An
+// agent's grant authorizes it only in a context so marked: everywhere else
+// (a REST request an agent makes directly, an MCP tool) an agent holds
+// nothing, exactly as before the grant existed, so no gated action can run
+// without its approval by a route that never asks for one.
+func WithAdminDispatch(ctx context.Context) context.Context {
+	return context.WithValue(ctx, adminDispatchKey{}, true)
+}
+
+// adminDispatched reports whether ctx carries the admin door's mark.
+func adminDispatched(ctx context.Context) bool {
+	v, _ := ctx.Value(adminDispatchKey{}).(bool)
+	return v
+}
+
+// withAgentAuthorityTx is withAgentGrantTx for a question of authority (may
+// p do this now?): the grant is read only in a context the admin door
+// dispatched, and an agent anywhere else holds nothing.
+func withAgentAuthorityTx(ctx context.Context, tx execer, p Principal) (Principal, error) {
+	if p.Kind != PrincipalAgent || !adminDispatched(ctx) {
+		p.agentGrant = 0
+		return p, nil
+	}
+	return withAgentGrantTx(ctx, tx, p)
+}
+
 // withAgentGrantTx returns p with its agent grant read from its manifest
 // (issue #1326, ai-administrators §3.2 rule 1a). Anyone but an agent is
 // returned unchanged. An agent with no manifest, or one whose stored row does
@@ -314,7 +346,7 @@ func permittedTx(ctx context.Context, tx execer, principalID int64, perm schema.
 	if err != nil || !found {
 		return false, err
 	}
-	if p, err = withAgentGrantTx(ctx, tx, p); err != nil {
+	if p, err = withAgentAuthorityTx(ctx, tx, p); err != nil {
 		return false, err
 	}
 	d, err := readPermissionDocTx(ctx, tx)
@@ -331,7 +363,7 @@ func principalPermittedTx(ctx context.Context, tx execer, p Principal, perm sche
 	if !perm.Valid() {
 		return false, nil
 	}
-	p, err := withAgentGrantTx(ctx, tx, p)
+	p, err := withAgentAuthorityTx(ctx, tx, p)
 	if err != nil {
 		return false, err
 	}
@@ -431,7 +463,7 @@ func (s *Store) Permitted(ctx context.Context, principalID int64, perm schema.Pe
 // reads only; a write a permission gates asks permittedTx in its own
 // transaction.
 func (s *Store) HeldBy(ctx context.Context, p Principal, perms ...schema.Permission) ([]bool, error) {
-	p, err := withAgentGrantTx(ctx, s.db, p)
+	p, err := withAgentAuthorityTx(ctx, s.db, p)
 	if err != nil {
 		return nil, err
 	}
@@ -457,7 +489,7 @@ func effectivePermissionsTx(ctx context.Context, tx execer, principalID int64) (
 	if err != nil || !found {
 		return out, err
 	}
-	if p, err = withAgentGrantTx(ctx, tx, p); err != nil {
+	if p, err = withAgentAuthorityTx(ctx, tx, p); err != nil {
 		return nil, err
 	}
 	d, err := readPermissionDocTx(ctx, tx)

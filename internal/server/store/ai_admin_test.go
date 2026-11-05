@@ -87,7 +87,7 @@ func (f *aiAdminFixture) put(t *testing.T, actor string, perms ...schema.Permiss
 
 func (f *aiAdminFixture) holds(t *testing.T, id int64, perm schema.Permission) bool {
 	t.Helper()
-	ok, err := f.s.Permitted(context.Background(), id, perm)
+	ok, err := f.s.Permitted(WithAdminDispatch(context.Background()), id, perm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func (f *aiAdminFixture) auditCount(t *testing.T, action string) int {
 // the grant with one, nothing once disabled, nothing from a stored row that
 // does not validate, and never act_as_members.
 func TestAgentHoldsExactlyItsGrant(t *testing.T) {
-	ctx := context.Background()
+	ctx := WithAdminDispatch(context.Background())
 	f := newAIAdminFixture(t)
 	f.put(t, "system")
 	for _, perm := range schema.Permissions {
@@ -158,11 +158,52 @@ func TestAgentHoldsExactlyItsGrant(t *testing.T) {
 	}
 }
 
+// TestUndispatchedAgentHoldsNothing: a grant is authority only through the
+// admin door (WithAdminDispatch). In any other context, such as a REST request the
+// agent makes directly or an MCP tool, a granted agent holds nothing,
+// so no gated action can run by a route that never asks for an approval;
+// but a link it made through the door still stands behind its grant.
+func TestUndispatchedAgentHoldsNothing(t *testing.T) {
+	plain := context.Background()
+	door := WithAdminDispatch(plain)
+	f := newAIAdminFixture(t)
+	f.put(t, f.ownerA, schema.PermManageMembers, schema.PermManageChannels, schema.PermMakeMemberLinks)
+	for _, perm := range []schema.Permission{schema.PermManageMembers, schema.PermManageChannels, schema.PermMakeMemberLinks} {
+		if ok, err := f.s.Permitted(plain, f.agent.ID, perm); err != nil || ok {
+			t.Errorf("undispatched: Permitted(%s) = %v, %v; want false", perm, ok, err)
+		}
+		if ok, err := f.s.Permitted(door, f.agent.ID, perm); err != nil || !ok {
+			t.Errorf("dispatched: Permitted(%s) = %v, %v; want true", perm, ok, err)
+		}
+	}
+	if held, _, err := f.s.EffectivePermissions(plain, f.agent.ID); err != nil || len(held) != 0 {
+		t.Errorf("undispatched effective permissions = %v, %v; want none", held, err)
+	}
+	if held, err := f.s.HeldBy(plain, f.agent, schema.PermManageMembers); err != nil || held[0] {
+		t.Errorf("undispatched HeldBy = %v, %v; want false", held, err)
+	}
+	if _, err := f.s.PutChannelMember(plain, principalActor(f.agent.ID), f.ops.ID, f.alice.ID, f.agent.ID, nil, nil); !errors.Is(err, ErrManagerRefused) {
+		t.Errorf("undispatched member add: err = %v, want ErrManagerRefused", err)
+	}
+	req := schema.CreateInviteRequestV2{Kind: schema.InviteKindMember}
+	if _, err := f.s.CreateMemberLink(plain, principalActor(f.agent.ID), f.agent.ID, req, InviteOptions{}, time.Now()); !errors.Is(err, ErrInviteNotAllowed) {
+		t.Errorf("undispatched member link: err = %v, want ErrInviteNotAllowed", err)
+	}
+	made, err := f.s.CreateMemberLink(door, principalActor(f.agent.ID), f.agent.ID, req, InviteOptions{}, time.Now())
+	if err != nil {
+		t.Fatalf("dispatched member link: %v", err)
+	}
+	// A joiner's preview is nobody's dispatch: the link stands on the grant.
+	if _, err := f.s.PreviewMemberLink(plain, HashInviteCode(made.Code), time.Now()); err != nil {
+		t.Errorf("preview of the agent's link in a plain context: %v", err)
+	}
+}
+
 // TestOnlyAnOwnerGrants: a non-empty grant from a non-owner is ErrNotOwner
 // and writes nothing; an owner's is audited; emptying it is anyone's the
 // route admits; the approval channel must be granted read.
 func TestOnlyAnOwnerGrants(t *testing.T) {
-	ctx := context.Background()
+	ctx := WithAdminDispatch(context.Background())
 	f := newAIAdminFixture(t)
 	f.put(t, "system")
 	for _, actor := range []string{principalActor(f.op.ID), principalActor(f.alice.ID), principalActor(f.agent.ID), "principal:999999", "nonsense"} {
@@ -210,7 +251,7 @@ func TestOnlyAnOwnerGrants(t *testing.T) {
 // channel membership with operator standing; without the grant it is
 // refused, even with a manages row (an agent is never a manager).
 func TestGrantedAgentStanding(t *testing.T) {
-	ctx := context.Background()
+	ctx := WithAdminDispatch(context.Background())
 	f := newAIAdminFixture(t)
 	f.put(t, "system")
 	// A manages row on the agent, written raw: no path may make it count.
@@ -244,9 +285,10 @@ func TestGrantedAgentStanding(t *testing.T) {
 func memberActorStandingOf(t *testing.T, f *aiAdminFixture, channelID int64) (memberActorStanding, error) {
 	t.Helper()
 	var st memberActorStanding
-	err := f.s.withImmediateTx(context.Background(), func(tx execer) error {
+	ctx := WithAdminDispatch(context.Background())
+	err := f.s.withImmediateTx(ctx, func(tx execer) error {
 		var err error
-		st, err = memberActorStandingTx(context.Background(), tx, channelID, f.agent.ID)
+		st, err = memberActorStandingTx(ctx, tx, channelID, f.agent.ID)
 		return err
 	})
 	return st, err
@@ -256,7 +298,7 @@ func memberActorStandingOf(t *testing.T, f *aiAdminFixture, channelID int64) (me
 // member link, and the link stands behind the grant: emptying it suspends
 // the link.
 func TestGrantedAgentMakesMemberLinks(t *testing.T) {
-	ctx := context.Background()
+	ctx := WithAdminDispatch(context.Background())
 	f := newAIAdminFixture(t)
 	f.put(t, "system")
 	req := schema.CreateInviteRequestV2{Kind: schema.InviteKindMember}
@@ -282,7 +324,7 @@ func TestGrantedAgentMakesMemberLinks(t *testing.T) {
 // agent cannot decide an approval, and a decision row of an agent, however
 // written, does not count toward the quorum.
 func TestAgentDecisionNeverCounts(t *testing.T) {
-	ctx := context.Background()
+	ctx := WithAdminDispatch(context.Background())
 	f := newAIAdminFixture(t)
 	f.put(t, f.ownerA, schema.PermManageMembers)
 	// can_decide on the agent's membership, written raw: the deciding
@@ -321,7 +363,7 @@ func TestAgentDecisionNeverCounts(t *testing.T) {
 // TestMigration42LeavesEveryAgentUngranted: existing manifests read with
 // no grant after the migration, so nothing changes on upgrade.
 func TestMigration42LeavesEveryAgentUngranted(t *testing.T) {
-	ctx := context.Background()
+	ctx := WithAdminDispatch(context.Background())
 	f := newAIAdminFixture(t)
 	f.put(t, "system")
 	m, err := f.s.AgentManifestByPrincipal(ctx, f.agent.ID)
