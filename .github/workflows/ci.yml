@@ -148,15 +148,29 @@ jobs:
       - name: deployment scripts
         run: ./scripts/deploy-scripts-test.sh
 
-  # go test -race, in two jobs: internal/server (with its store and approval
-  # packages) alone takes 7-10 minutes under -race on a runner, past go
-  # test's default 10-minute timeout per package (#471); the rest runs beside
-  # it.
+  # go test -race for internal/server, in five jobs. On a hosted runner the
+  # package alone took 12 minutes and store 5.5, so one job was the run's
+  # longest by ten minutes (#471, #1318). Shards 1 to 4 split the package's
+  # tests by the letter after "Test" (about 1150 tests, counted 2026-11-05);
+  # shard 4 also takes any test whose name continues with something other
+  # than a capital letter, so a test can't fall between the shards. Shard 5
+  # is the subpackages (store, approvals, hub, livekit, names). The package
+  # has no fuzz targets or examples, which -run '^Test' would leave out.
   go-test-server:
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    name: go-test-server (${{ matrix.shard }}/5)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { shard: 1, args: "./internal/server -run '^Test[A-E]'" }
+          - { shard: 2, args: "./internal/server -run '^Test[F-M]'" }
+          - { shard: 3, args: "./internal/server -run '^Test[N-S]'" }
+          - { shard: 4, args: "./internal/server -run '^Test([T-Z]|[^A-Z])'" }
+          - { shard: 5, args: "$(go list ./internal/server/... | grep -v '/internal/server$')" }
     steps:
       - uses: actions/checkout@v4
 
@@ -164,8 +178,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: go test (internal/server)
-        run: go test -race -timeout 25m ./internal/server/...
+      - name: go test (internal/server, shard ${{ matrix.shard }})
+        run: eval go test -race -timeout 25m ${{ matrix.args }}
 
   go-test:
     needs: changes
