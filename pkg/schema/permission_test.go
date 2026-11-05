@@ -758,3 +758,36 @@ func TestPermissionErrorCodes(t *testing.T) {
 		}
 	}
 }
+
+// AgentGrantable is exactly the five administrative permissions that speak
+// as nobody (ai-administrators.md §3.1): never act_as_members, never a
+// member permission, never a value outside the catalog.
+func TestPermissionAgentGrantable(t *testing.T) {
+	want := map[Permission]bool{
+		PermManageMembers:        true,
+		PermManageChannels:       true,
+		PermMakeMemberLinks:      true,
+		PermChangeServerSettings: true,
+		PermReadAuditLog:         true,
+	}
+	var grantable []Permission
+	for _, p := range Permissions {
+		if got := p.AgentGrantable(); got != want[p] {
+			t.Errorf("%s.AgentGrantable() = %v, want %v", p, got, want[p])
+		}
+		if p.AgentGrantable() {
+			grantable = append(grantable, p)
+		}
+	}
+	if len(grantable) != 5 {
+		t.Errorf("agent-grantable permissions = %v, want five", grantable)
+	}
+	if PermActAsMembers.AgentGrantable() {
+		t.Error("act_as_members is agent-grantable; speaking as people is the one power the design rules out")
+	}
+	for _, unknown := range []Permission{"", "*", "owner", "manages", "can_decide", "MANAGE_MEMBERS", "manage_members "} {
+		if unknown.AgentGrantable() {
+			t.Errorf("AgentGrantable(%q) = true, want false", unknown)
+		}
+	}
+}

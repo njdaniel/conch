@@ -228,6 +228,12 @@ var validators = map[string]func(string) bool{
 	"ChannelVisibility": validOf[ChannelVisibility](),
 	"InviteKindV2":      validOf[InviteKindV2](),
 	"DirectoryScope":    validOf[DirectoryScope](),
+
+	// AI administrators (issue #1326).
+	"AdminAction":       validOf[AdminAction](),
+	"AdminGate":         validOf[AdminGate](),
+	"AdminTargetKind":   validOf[AdminTargetKind](),
+	"AdminActionStatus": validOf[AdminActionStatus](),
 }
 
 // namers is every …Names() func, by the type it names. TestVocabularies fails

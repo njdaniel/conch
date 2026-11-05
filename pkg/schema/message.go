@@ -48,6 +48,9 @@ type Error struct {
 	// member on an operator route, voice_not_allowed, invite_not_allowed).
 	// Omitted on every other error. A client chooses its words from it,
 	// not from Message, and shows a value it does not know by its name.
-	// MCP tool errors never carry it: agents hold no permissions.
+	// An MCP tool error carries it only when a permission_denied passes
+	// through from a route the admin door dispatched (issue #1326,
+	// docs/design/ai-administrators.md §3.6), since an AI administrator
+	// can hold one; an agent's own refusals never carry it.
 	Permission Permission `json:"permission,omitempty"`
 }

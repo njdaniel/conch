@@ -1,0 +1,12 @@
+{
+  "status": "ran",
+  "http_status": 200,
+  "result": {
+    "principal": {
+      "id": 7,
+      "name": "alice",
+      "kind": "human",
+      "role": "member"
+    }
+  }
+}

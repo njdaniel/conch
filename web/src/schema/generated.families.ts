@@ -2,6 +2,8 @@
 import type { Validator } from './validate';
 import {
   addChannelMemberRequestV1,
+  adminActionV1,
+  adminCatalogResponseV1,
   agentActivityV1,
   approvalV1,
   authStateV1,
@@ -148,6 +150,7 @@ import {
   signInLinkPreviewRequestV1,
   signInLinkPreviewV1,
   signInLinkV1,
+  submitAdminActionRequestV1,
   totpEnrollmentV1,
   totpLoginRequestV1,
   updateProblemReportRequestV1,
@@ -329,5 +332,8 @@ export const families: [string, Validator<unknown>][] = [
   ['channel-authors-response-v1', channelAuthorsResponseV1],
   ['principal-voice-permission-request-v1', voicePermissionRequestV1],
   ['principal-voice-permission-response-v1', voicePermissionResponseV1],
+  ['admin-catalog-response-v1', adminCatalogResponseV1],
+  ['submit-admin-action-request-v1', submitAdminActionRequestV1],
+  ['admin-action-v1', adminActionV1],
   ['error', errorV0],
 ];

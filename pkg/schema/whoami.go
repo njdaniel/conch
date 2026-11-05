@@ -109,8 +109,10 @@ type WhoAmIResponseV1 struct {
 	ServerMode ServerMode `json:"server_mode,omitempty"`
 	// Permissions is what the caller holds now (ADR-014,
 	// docs/design/admin-roles.md §8.3): its role's cells with its brakes and
-	// the dependencies applied; every permission for an owner; none for an
-	// agent. Catalog order, omitted when empty. A client keys its controls
+	// the dependencies applied; every permission for an owner; for an agent,
+	// the grant its manifest lists (AgentManifestV1.Permissions, issue
+	// #1326), which is how an AI administrator learns what it may do over
+	// REST. Catalog order, omitted when empty. A client keys its controls
 	// on it and shows a value it does not know by its name; the server
 	// decides every request regardless.
 	Permissions []Permission `json:"permissions,omitempty"`

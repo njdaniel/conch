@@ -1,0 +1,15 @@
+{
+  "action": "remove_channel_member",
+  "route": "DELETE /v1/channels/9/members/7",
+  "target": {
+    "kind": "channel",
+    "id": 9,
+    "name": "ops"
+  },
+  "params": {
+    "principal_id": 7
+  },
+  "agent_id": 12,
+  "reason": "alice moved off the ops rota",
+  "requested_at": "2026-11-05T10:14:00.000Z"
+}

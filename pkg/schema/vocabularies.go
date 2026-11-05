@@ -23,7 +23,7 @@ var Vocabularies = map[string][]string{
 	"Capability": values(
 		CapabilityMessagesRead, CapabilityMessagesPost,
 		CapabilityApprovalsRequest, CapabilityApprovalsAwait, CapabilityApprovalsCheck,
-		CapabilitySessionsManage, CapabilityRunsManage,
+		CapabilitySessionsManage, CapabilityRunsManage, CapabilityAdminAct,
 	),
 	"ChannelPermission": values(
 		ChannelPermissionRead, ChannelPermissionPost, ChannelPermissionPostNet,
@@ -164,6 +164,34 @@ var Vocabularies = map[string][]string{
 	"ChannelVisibility": values(ChannelPublic, ChannelPrivate),
 	"InviteKindV2":      values(InviteKindMember),
 	"DirectoryScope":    values(DirectoryScopeEveryone, DirectoryScopeSharedChannels),
+
+	// AI administrators (issue #1326, docs/design/ai-administrators.md §3.3
+	// to §3.6). AdminAction is in catalog order, the order of AdminActions.
+	"AdminAction": values(
+		AdminActionListMembers, AdminActionCreateMember, AdminActionRenameMember,
+		AdminActionSetVoicePermission, AdminActionSetInvitePermission,
+		AdminActionDisableMember, AdminActionEnableMember, AdminActionHideMember,
+		AdminActionListCredentials, AdminActionRevokeCredential, AdminActionRevokeAllCredentials,
+		AdminActionListHooks, AdminActionRevokeHook,
+		AdminActionListChannels, AdminActionCreateChannel, AdminActionRenameChannel,
+		AdminActionSetChannelDefault, AdminActionSetChannelVisibility,
+		AdminActionArchiveChannel, AdminActionRestoreChannel,
+		AdminActionListChannelMembers, AdminActionAddChannelMember,
+		AdminActionRemoveChannelMember, AdminActionSetChannelMemberRights,
+		AdminActionCreateMemberLink, AdminActionListMemberLinks, AdminActionCloseMemberLink,
+		AdminActionListLinkJoiners, AdminActionDisableLinkJoiners, AdminActionDisableInvitees,
+		AdminActionPauseInvites, AdminActionResumeInvites,
+		AdminActionGetJoinSettings, AdminActionSetJoinSettings,
+		AdminActionGetPermissions, AdminActionSetPermissions,
+		AdminActionListReports, AdminActionGetReport, AdminActionUpdateReport,
+		AdminActionExportAudit,
+	),
+	"AdminGate": values(AdminGateDirect, AdminGateApproval),
+	"AdminTargetKind": values(
+		AdminTargetPrincipal, AdminTargetChannel, AdminTargetCredential,
+		AdminTargetHook, AdminTargetInvite, AdminTargetReport,
+	),
+	"AdminActionStatus": values(AdminActionRan, AdminActionPendingApproval),
 }
 
 // values lists a vocabulary by its constants, so an entry above cannot hold a

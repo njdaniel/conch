@@ -1,0 +1,8 @@
+{
+  "action": "disable_member",
+  "target": {
+    "kind": "principal",
+    "id": 7
+  },
+  "reason": "alice asked to leave the server in #general"
+}

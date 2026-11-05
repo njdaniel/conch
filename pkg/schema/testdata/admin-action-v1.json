@@ -1,0 +1,13 @@
+{
+  "action": "disable_member",
+  "route": "POST /v1/principals/7/disable",
+  "target": {
+    "kind": "principal",
+    "id": 7,
+    "name": "alice"
+  },
+  "params": {},
+  "agent_id": 12,
+  "reason": "alice asked to leave the server in #general",
+  "requested_at": "2026-11-05T10:14:00.000Z"
+}

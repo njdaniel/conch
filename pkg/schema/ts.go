@@ -105,6 +105,20 @@ var TSConstants = []TSConstant{
 	// size, and the default expiry the link form shows when none is typed.
 	{Name: "MAX_CHANNEL_AUTHOR_IDS", Value: MaxChannelAuthorIDs},
 	{Name: "DEFAULT_MEMBER_LINK_EXPIRY_SECONDS", Value: DefaultMemberLinkExpirySeconds},
+
+	// AI administrators (issue #1326): the bounds of an agent's admin
+	// settings, so the console's form refuses what the server refuses, and
+	// the reason cap the approval card explains.
+	{Name: "DEFAULT_ADMIN_APPROVAL_TTL_SECONDS", Value: DefaultAdminApprovalTTLSeconds},
+	{Name: "MIN_ADMIN_APPROVAL_TTL_SECONDS", Value: MinAdminApprovalTTLSeconds},
+	{Name: "MAX_ADMIN_APPROVAL_TTL_SECONDS", Value: MaxAdminApprovalTTLSeconds},
+	{Name: "DEFAULT_ADMIN_RUN_WINDOW_SECONDS", Value: DefaultAdminRunWindowSeconds},
+	{Name: "MIN_ADMIN_RUN_WINDOW_SECONDS", Value: MinAdminRunWindowSeconds},
+	{Name: "MAX_ADMIN_RUN_WINDOW_SECONDS", Value: MaxAdminRunWindowSeconds},
+	{Name: "DEFAULT_ADMIN_QUORUM", Value: DefaultAdminQuorum},
+	{Name: "DEFAULT_ADMIN_MAX_PENDING", Value: DefaultAdminMaxPending},
+	{Name: "MAX_ADMIN_MAX_PENDING", Value: MaxAdminMaxPending},
+	{Name: "MAX_ADMIN_REASON_CHARS", Value: MaxAdminReasonChars},
 }
 
 // TSTypes is every struct the web client reads or sends, and the refusal
@@ -413,6 +427,19 @@ var TSTypes = []TSType{
 	{Value: VoicePermissionRequestV1{}, Family: "principal-voice-permission-request-v1"},
 	{Value: VoicePermissionResponseV1{}, Family: "principal-voice-permission-response-v1"},
 
+	// AI administrators (issue #1326, docs/design/ai-administrators.md §3.4
+	// to §3.6): the catalog as it applies to the caller, with an agent's
+	// admin settings; what an action names; the submit body; and the payload
+	// a gated action's approval carries, which the inbox renders as a card.
+	// The result is a union by status (TSUnions). The manifest shapes that
+	// carry the grant are not generated: no page reads a manifest yet.
+	{Value: AgentAdminV1{}},
+	{Value: AdminCatalogEntryV1{}},
+	{Value: AdminCatalogResponseV1{}, Family: "admin-catalog-response-v1"},
+	{Value: AdminTargetV1{}},
+	{Value: SubmitAdminActionRequestV1{}, Family: "submit-admin-action-request-v1"},
+	{Value: AdminActionV1{}, Family: "admin-action-v1"},
+
 	// The body of every refusal.
 	{Value: Error{}, Name: "ErrorV0", Family: "error"},
 }
@@ -446,6 +473,16 @@ var TSUnions = []TSUnion{
 		Variants: map[string][]string{
 			string(LoginNextSignedIn): {"principal", "credential", "token"},
 			string(LoginNextTOTP):     {"challenge", "challenge_expires_at"},
+		},
+	},
+	// What the admin door answers: the dispatched route's answer, or the
+	// approval it raised instead (AdminActionResultV1.Validate, issue #1326).
+	{
+		Value: AdminActionResultV1{},
+		Tag:   "status",
+		Variants: map[string][]string{
+			string(AdminActionRan):             {"http_status", "result"},
+			string(AdminActionPendingApproval): {"approval_id", "approval", "deadline"},
 		},
 	},
 }
@@ -495,12 +532,20 @@ var TSVocabularyModes = map[string]TSVocabularyMode{
 	"JoinWarning":    TSTolerant,
 	"InviteKindV2":   TSTolerant,
 	"DirectoryScope": TSTolerant,
+	// AI administrators (admin_action.go, issue #1326): a later catalog row,
+	// and a later kind of thing one acts on, which the page shows by name.
+	"AdminAction":     TSTolerant,
+	"AdminTargetKind": TSTolerant,
 
 	// Strict: a union's tag. tagged() picks the variant by it and has no
 	// shape for a value it does not know.
 	"AudienceKind":         TSStrict,
 	"EscalationTargetKind": TSStrict,
 	"LoginNext":            TSStrict,
+	"AdminActionStatus":    TSStrict,
+	// Strict: the page switches on an action's gate class to say whether a
+	// person will be asked.
+	"AdminGate": TSStrict,
 
 	// Strict: a state, kind, mode, role, outcome or reason the page switches
 	// on to decide what to show or offer. A value it does not know it cannot
