@@ -10,6 +10,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use conch_voice::livekit::Subscription;
 use conch_voice::sdk::{
     DisconnectReason, Joined, MicFeed, MicTrack, RoomHandle, SdkError, SdkEvent, Transport,
 };
@@ -57,6 +58,8 @@ struct Inner {
     last_mute_at: Option<Instant>,
     /// The address and join token of every connection attempt.
     connects: Vec<(String, String)>,
+    /// The subscription rule every connection attempt was given.
+    subscriptions: Vec<Subscription>,
     /// The events of the room that is joined now.
     events: Option<mpsc::UnboundedSender<SdkEvent>>,
     /// What the next connection attempts fail with; when empty they succeed.
@@ -282,6 +285,11 @@ impl FakeSdk {
             .collect()
     }
 
+    /// The subscription rule every connection attempt was given, in order.
+    pub fn subscriptions(&self) -> Vec<Subscription> {
+        self.lock().subscriptions.clone()
+    }
+
     /// When the track was last muted.
     pub fn last_mute_at(&self) -> Option<Instant> {
         self.lock().last_mute_at
@@ -301,10 +309,16 @@ impl FakeSdk {
 impl Transport for FakeSdk {
     type Room = FakeRoom;
 
-    async fn connect(&self, url: &str, token: &Secret) -> Result<Joined<FakeRoom>, SdkError> {
+    async fn connect(
+        &self,
+        url: &str,
+        token: &Secret,
+        subscription: &Subscription,
+    ) -> Result<Joined<FakeRoom>, SdkError> {
         let (failure, records, hangs, blocks) = {
             let mut inner = self.lock();
             inner.calls.push(Call::Connect);
+            inner.subscriptions.push(subscription.clone());
             inner
                 .connects
                 .push((url.to_owned(), token.expose().to_owned()));

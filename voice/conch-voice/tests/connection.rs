@@ -9,6 +9,7 @@ mod support;
 use std::time::Duration;
 
 use conch_voice::Error;
+use conch_voice::livekit::{Companion, ShareAudioOwner, Subscription};
 use conch_voice::sdk::{DisconnectReason, SdkEvent};
 use conch_voice_control::LineCommand::{Down, Up};
 use serde_json::{Value, json};
@@ -54,6 +55,90 @@ async fn the_client_joins_with_the_token_of_the_grant_that_has_no_audience() {
         .unwrap();
     assert_eq!(request.method, "POST");
     assert_eq!(request.target, "/v1/channels/ops/voice/session");
+}
+
+/// Issue #934: the subscription rule handed to the SDK comes from the session `conchd`
+/// answered with and from the owner's flag; a session that names no companion keeps every
+/// remote audio track whatever the flag says.
+#[tokio::test]
+async fn the_subscription_follows_the_sessions_companion_and_the_owners_flag() {
+    let table = [
+        (
+            "named, the helper plays share audio",
+            Some("p7.screen"),
+            ShareAudioOwner::Helper,
+            Subscription::new(Some(Companion::new("p7.screen", false))),
+        ),
+        (
+            "named, the companion plays share audio",
+            Some("p7.screen"),
+            ShareAudioOwner::Companion,
+            Subscription::new(Some(Companion::new("p7.screen", true))),
+        ),
+        (
+            "absent, helper",
+            None,
+            ShareAudioOwner::Helper,
+            Subscription::default(),
+        ),
+        (
+            "absent, companion",
+            None,
+            ShareAudioOwner::Companion,
+            Subscription::default(),
+        ),
+        (
+            "empty is absent",
+            Some(""),
+            ShareAudioOwner::Companion,
+            Subscription::default(),
+        ),
+    ];
+    for (name, named, owner, want) in table {
+        let conchd = Stub::start().await;
+        conchd.companion_identity(named);
+        let setup = Setup {
+            share_audio_owner: owner,
+            ..Setup::default()
+        };
+        let rig = Rig::start_with(conchd, setup, |_| {}).await;
+        rig.connected(1).await;
+        assert_eq!(rig.sdk.subscriptions(), [want], "{name}");
+    }
+}
+
+/// Issue #934: a re-join asks for a new session and builds its rule from that answer, so
+/// a rule from the earlier session cannot outlive it.
+#[tokio::test]
+async fn a_rejoin_builds_its_subscription_from_the_new_session() {
+    let conchd = Stub::start().await;
+    conchd.companion_identity(Some("p7.screen"));
+    let rig = Rig::start_with(conchd, Setup::default(), |_| {}).await;
+    rig.connected(1).await;
+    rig.conchd.companion_identity(None);
+    rig.sdk.disconnect(DisconnectReason::RoomDeleted);
+    rig.connected(2).await;
+
+    assert_eq!(
+        rig.sdk.subscriptions(),
+        [
+            Subscription::new(Some(Companion::new("p7.screen", false))),
+            Subscription::default()
+        ]
+    );
+}
+
+/// Issue #934: a session naming the caller's own identity as the companion is invalid; it
+/// is refused, and nothing is joined.
+#[tokio::test]
+async fn a_session_naming_the_callers_own_identity_as_the_companion_joins_nothing() {
+    let conchd = Stub::start().await;
+    conchd.companion_identity(Some(support::stub::OWN_IDENTITY));
+    let rig = Rig::start_with(conchd, Setup::default(), |_| {}).await;
+    support::several_frames().await;
+    assert!(rig.conchd.session_requests() >= 1);
+    assert!(rig.sdk.subscriptions().is_empty());
+    assert!(rig.sdk.tokens().is_empty());
 }
 
 #[tokio::test]
