@@ -60,6 +60,8 @@ func run(args []string) error {
 		return runBootstrapOperator(args[1:], os.Stdout, os.Stderr)
 	case "operator":
 		return runOperator(args[1:], os.Stdout, os.Stderr)
+	case "ai-admin":
+		return runAIAdmin(args[1:], os.Stdout, os.Stderr)
 	case "restore":
 		return runRestore(args[1:], os.Stdout, os.Stderr)
 	case "version":
@@ -91,6 +93,9 @@ Usage:
                      [--server-name <name>] <name>
   conchd operator setup     --data <dir> <principal id>
   conchd operator recover   --data <dir> <principal id>
+  conchd ai-admin create --data <dir> --origin https://<host> [--channel admin]
+                     [--grant <permission,...>] [--decider <principal id>]... <name>
+  conchd ai-admin revoke --data <dir> <principal id>
   conchd restore --data <dir> [--force]
   conchd version
 
@@ -113,6 +118,12 @@ gives an existing operator whose setup is incomplete a token and revokes
 nothing; "operator recover" revokes every credential of the operator, removes
 its authenticator and ends its pending sign-ins first. There is no network
 route that resets an operator.
+
+ai-admin works offline too: "create" makes an AI administrator (an agent that
+holds a few operator permissions and asks the approval channel's deciders
+before anything gated), prints its MCP client entry once on stdout, and
+refuses when no owner is able to sign in; "revoke" disables it. Run
+"conchd ai-admin help" for the flags.
 
 restore works offline too, on a data directory unpacked from a backup and
 before any conchd serves it: every credential, sign-in link, pending sign-in,
