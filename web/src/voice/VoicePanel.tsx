@@ -735,7 +735,6 @@ function Elsewhere({ where, onOpen }: { readonly where: Busiest; readonly onOpen
       </span>{' '}
       <button
         type="button"
-        className="quiet"
         onClick={() => {
           onOpen(where.name);
         }}

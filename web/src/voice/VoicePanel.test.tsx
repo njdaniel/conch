@@ -139,6 +139,14 @@ describe('Join voice and Watch only', () => {
     expect(calls).toEqual(['join', 'watch only']);
   });
 
+  // N08: one space between the verb and the channel, in the text itself; the
+  // stylesheet adds no margin to the span.
+  it('have one space between the verb and the channel', () => {
+    const { voice } = panel(initialVoice, 'general');
+    expect(within(voice).getByRole('button', { name: 'Join voice in #general' }).textContent).toBe('Join voice in #general');
+    expect(within(voice).getByRole('button', { name: 'Watch only in #general' }).textContent).toBe('Watch only in #general');
+  });
+
   // F17: the verb and the channel are in one flex item, so the button's text is
   // one run and cannot lay out as two columns.
   it('keep the verb and the channel in one text item of the button', () => {
@@ -990,6 +998,8 @@ describe('where else people are in voice', () => {
     fireEvent.click(within(voice).getByRole('button', { name: 'Open #game-night' }));
     expect(opened).toEqual(['game-night']);
     expect(calls).toEqual([]);
+    // A button of its own, not the borderless quiet kind that reads as text (N08).
+    expect(within(voice).getByRole('button', { name: 'Open #game-night' }).classList.contains('quiet')).toBe(false);
     // Join voice still goes where it went: the channel on screen.
     expect(within(voice).getByRole('button', { name: 'Join voice in #general' })).toBeTruthy();
   });
