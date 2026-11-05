@@ -1,0 +1,54 @@
+{
+  "actions": [
+    {
+      "action": "list_members",
+      "route": "GET /v1/principals",
+      "permission": "manage_members",
+      "gate": "direct",
+      "held": true,
+      "gated": false
+    },
+    {
+      "action": "rename_member",
+      "route": "PUT /v1/principals/{id}/name",
+      "permission": "manage_members",
+      "gate": "direct",
+      "held": true,
+      "gated": true
+    },
+    {
+      "action": "disable_member",
+      "route": "POST /v1/principals/{id}/disable",
+      "permission": "manage_members",
+      "gate": "approval",
+      "held": true,
+      "gated": true
+    },
+    {
+      "action": "set_join_settings",
+      "route": "PUT /v1/join/settings",
+      "permission": "change_server_settings",
+      "gate": "approval",
+      "held": false,
+      "gated": true
+    },
+    {
+      "action": "export_audit",
+      "route": "GET /v1/audit",
+      "permission": "read_audit_log",
+      "gate": "direct",
+      "held": false,
+      "gated": false
+    }
+  ],
+  "admin": {
+    "approval_channel_id": 11,
+    "approval_ttl_seconds": 86400,
+    "run_window_seconds": 86400,
+    "quorum": 1,
+    "require_approval": [
+      "rename_member"
+    ],
+    "max_pending": 8
+  }
+}

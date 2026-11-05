@@ -65,6 +65,13 @@ const (
 	// state, append activity and answer interventions. Each of those also
 	// needs the channel permission that posting to the run's audience needs.
 	CapabilityRunsManage Capability = "runs.manage"
+	// CapabilityAdminAct permits an agent to use the admin door over MCP
+	// (issue #1326, docs/design/ai-administrators.md §3.6): to read the
+	// action catalog, submit an action and run an approved one. It says only
+	// that the agent may use the door; what it may do through it is the
+	// Permissions of its manifest, and a manifest with neither grants no
+	// administration. Like sessions.manage it is checked without a channel.
+	CapabilityAdminAct Capability = "admin.act"
 )
 
 // Valid reports whether c is a recognized capability.
@@ -72,7 +79,7 @@ func (c Capability) Valid() bool {
 	switch c {
 	case CapabilityMessagesRead, CapabilityMessagesPost,
 		CapabilityApprovalsRequest, CapabilityApprovalsAwait, CapabilityApprovalsCheck,
-		CapabilitySessionsManage, CapabilityRunsManage:
+		CapabilitySessionsManage, CapabilityRunsManage, CapabilityAdminAct:
 		return true
 	default:
 		return false
@@ -90,6 +97,7 @@ func Capabilities() []Capability {
 		CapabilityApprovalsCheck,
 		CapabilitySessionsManage,
 		CapabilityRunsManage,
+		CapabilityAdminAct,
 	}
 }
 
@@ -98,6 +106,12 @@ func Capabilities() []Capability {
 // has no capability and therefore cannot be authorized (fail closed). The
 // session and run tools (issue #267) front the REST routes that need the same
 // capabilities.
+//
+// The three admin tools of issue #1326 (describe_admin_actions,
+// submit_admin_action, run_approved_action) map to CapabilityAdminAct and
+// are added here by the PR that registers them (slice S4), as
+// agent-manifest.md §6 requires: the server's structural tests hold this
+// table and the registered tools to the same set.
 var mcpToolCapabilities = map[string]Capability{
 	"post_message":     CapabilityMessagesPost,
 	"read_channel":     CapabilityMessagesRead,
@@ -266,16 +280,159 @@ func (l RateLimit) Validate() error {
 	return nil
 }
 
+// Bounds and defaults of AgentAdminV1 (docs/design/ai-administrators.md
+// §3.1, §3.8). A zero field on the wire means the default; the server fills
+// it in when it answers the catalog.
+const (
+	// DefaultAdminApprovalTTLSeconds is the deadline of a gated action's
+	// approval, from its creation, when the manifest sets none: a day.
+	DefaultAdminApprovalTTLSeconds int64 = 86400
+	// MinAdminApprovalTTLSeconds is the shortest approval deadline: five
+	// minutes.
+	MinAdminApprovalTTLSeconds int64 = 300
+	// MaxAdminApprovalTTLSeconds is the longest: a week.
+	MaxAdminApprovalTTLSeconds int64 = 604800
+	// DefaultAdminRunWindowSeconds is how long after an approval resolves
+	// approved its action may still be run, when the manifest sets none: a
+	// day.
+	DefaultAdminRunWindowSeconds int64 = 86400
+	// MinAdminRunWindowSeconds is the shortest run window: a minute.
+	MinAdminRunWindowSeconds int64 = 60
+	// MaxAdminRunWindowSeconds is the longest: a week.
+	MaxAdminRunWindowSeconds int64 = 604800
+	// DefaultAdminQuorum is the approval's quorum when the manifest sets
+	// none.
+	DefaultAdminQuorum = 1
+	// DefaultAdminMaxPending is how many gated approvals an agent may have
+	// open at once when the manifest sets none.
+	DefaultAdminMaxPending = 8
+	// MaxAdminMaxPending is the most a manifest may allow.
+	MaxAdminMaxPending = 32
+)
+
+// AgentAdminV1 configures how an AI administrator's gated actions are
+// approved (issue #1326, docs/design/ai-administrators.md §3.1). It is
+// required on a manifest whose Permissions is non-empty, since an agent with
+// a grant and nowhere to ask is refused on write, and refused on one whose
+// Permissions is empty, so that a manifest has one spelling.
+type AgentAdminV1 struct {
+	// ApprovalChannelID is the channel the server raises this agent's
+	// gated actions in. The agent must be a member with read there (it
+	// watches its approvals through await_decision and check_decision),
+	// and it may never change that channel's roster or rights (§3.5.6).
+	ApprovalChannelID int64 `json:"approval_channel_id"`
+	// ApprovalTTLSeconds is the deadline of each gated action's approval,
+	// from its creation. Default 86400; min 300; max 604800.
+	ApprovalTTLSeconds int64 `json:"approval_ttl_seconds,omitempty"`
+	// RunWindowSeconds is how long after an approval resolves approved the
+	// action may still be run. Default 86400; min 60; max 604800.
+	RunWindowSeconds int64 `json:"run_window_seconds,omitempty"`
+	// Quorum is the approval's quorum. Default 1.
+	Quorum int `json:"quorum,omitempty"`
+	// EscalationTarget is copied onto each approval. Optional.
+	EscalationTarget *EscalationTarget `json:"escalation_target,omitempty"`
+	// RequireApproval adds actions to the gated set for this agent (§3.3).
+	// It can only widen the server's fixed set, never narrow it.
+	RequireApproval []AdminAction `json:"require_approval,omitempty"`
+	// MaxPending caps this agent's open admin approvals. Default 8; max 32.
+	MaxPending int `json:"max_pending,omitempty"`
+}
+
+// Validate reports whether the settings are well-formed: a positive approval
+// channel, each bound within its range or zero for the default, a valid
+// escalation target when present, and known actions listed at most once. It
+// cannot check that the channel exists or that the agent reads it; the store
+// does.
+func (a AgentAdminV1) Validate() error {
+	if a.ApprovalChannelID <= 0 {
+		return fmt.Errorf("schema: agent admin approval_channel_id must be positive, got %d", a.ApprovalChannelID)
+	}
+	if a.ApprovalTTLSeconds != 0 && (a.ApprovalTTLSeconds < MinAdminApprovalTTLSeconds || a.ApprovalTTLSeconds > MaxAdminApprovalTTLSeconds) {
+		return fmt.Errorf("schema: agent admin approval_ttl_seconds must be %d to %d, got %d", MinAdminApprovalTTLSeconds, MaxAdminApprovalTTLSeconds, a.ApprovalTTLSeconds)
+	}
+	if a.RunWindowSeconds != 0 && (a.RunWindowSeconds < MinAdminRunWindowSeconds || a.RunWindowSeconds > MaxAdminRunWindowSeconds) {
+		return fmt.Errorf("schema: agent admin run_window_seconds must be %d to %d, got %d", MinAdminRunWindowSeconds, MaxAdminRunWindowSeconds, a.RunWindowSeconds)
+	}
+	if a.Quorum < 0 {
+		return fmt.Errorf("schema: agent admin quorum must not be negative, got %d", a.Quorum)
+	}
+	if a.EscalationTarget != nil {
+		if err := a.EscalationTarget.Validate(); err != nil {
+			return err
+		}
+	}
+	seen := make(map[AdminAction]struct{}, len(a.RequireApproval))
+	for _, action := range a.RequireApproval {
+		if !action.Valid() {
+			return fmt.Errorf("schema: agent admin require_approval action %q is not in the catalog", action)
+		}
+		if _, dup := seen[action]; dup {
+			return fmt.Errorf("schema: agent admin require_approval lists %q more than once", action)
+		}
+		seen[action] = struct{}{}
+	}
+	if a.MaxPending < 0 || a.MaxPending > MaxAdminMaxPending {
+		return fmt.Errorf("schema: agent admin max_pending must be 1 to %d, got %d", MaxAdminMaxPending, a.MaxPending)
+	}
+	return nil
+}
+
+// EffectiveApprovalTTLSeconds is ApprovalTTLSeconds, or the default when it
+// is zero.
+func (a AgentAdminV1) EffectiveApprovalTTLSeconds() int64 {
+	if a.ApprovalTTLSeconds == 0 {
+		return DefaultAdminApprovalTTLSeconds
+	}
+	return a.ApprovalTTLSeconds
+}
+
+// EffectiveRunWindowSeconds is RunWindowSeconds, or the default when it is
+// zero.
+func (a AgentAdminV1) EffectiveRunWindowSeconds() int64 {
+	if a.RunWindowSeconds == 0 {
+		return DefaultAdminRunWindowSeconds
+	}
+	return a.RunWindowSeconds
+}
+
+// EffectiveQuorum is Quorum, or the default when it is zero.
+func (a AgentAdminV1) EffectiveQuorum() int {
+	if a.Quorum == 0 {
+		return DefaultAdminQuorum
+	}
+	return a.Quorum
+}
+
+// EffectiveMaxPending is MaxPending, or the default when it is zero.
+func (a AgentAdminV1) EffectiveMaxPending() int {
+	if a.MaxPending == 0 {
+		return DefaultAdminMaxPending
+	}
+	return a.MaxPending
+}
+
+// RequiresApproval reports whether the manifest moves action to the gated
+// set for this agent. It says nothing about the server's own gated set,
+// which it can only widen.
+func (a AgentAdminV1) RequiresApproval(action AdminAction) bool {
+	for _, held := range a.RequireApproval {
+		if held == action {
+			return true
+		}
+	}
+	return false
+}
+
 // AgentManifestV1 is the v1 wire representation of an agent capability
 // manifest (ADR-000 D10, docs/design/agent-manifest.md): the complete
 // declaration of what one agent principal may do. There is exactly one
 // manifest per agent principal, addressed by PrincipalID.
 //
 // The manifest fails closed by construction. Every list defaults to empty and
-// an empty list grants nothing: no capabilities, no channels. There is no
-// wildcard value and no field that widens access implicitly. The one list
-// whose absence is permissive is RateLimits, where a capability with no entry
-// is not rate limited by the manifest.
+// an empty list grants nothing: no capabilities, no channels, no permissions.
+// There is no wildcard value and no field that widens access implicitly. The
+// one list whose absence is permissive is RateLimits, where a capability with
+// no entry is not rate limited by the manifest.
 type AgentManifestV1 struct {
 	// Schema is the manifest version discriminator; always
 	// AgentManifestSchemaV1.
@@ -295,6 +452,16 @@ type AgentManifestV1 struct {
 	// RateLimits is the rate-limit policy, at most one entry per capability.
 	// A capability with no entry is not rate limited by this manifest.
 	RateLimits []RateLimit `json:"rate_limits,omitempty"`
+	// Permissions is the subset of operator permissions this agent holds
+	// (ADR-014 as amended by #1326). Omitted or empty grants nothing. Only
+	// values for which Permission.AgentGrantable() is true are accepted; the
+	// store refuses a write that grants any permission by an actor who is not
+	// an owner (ErrNotOwner), and audits every change (admin_grant_changed).
+	Permissions []Permission `json:"permissions,omitempty"`
+	// Admin configures how this agent's gated actions are approved. Required
+	// when Permissions is non-empty (an agent with a grant and nowhere to ask
+	// is refused on write); omitted otherwise.
+	Admin *AgentAdminV1 `json:"admin,omitempty"`
 	// CreatedAt is when the manifest was first stored (server-assigned).
 	CreatedAt Timestamp `json:"created_at"`
 	// UpdatedAt is when the manifest was last replaced (server-assigned).
@@ -302,9 +469,10 @@ type AgentManifestV1 struct {
 }
 
 // Validate reports whether the manifest is structurally well-formed: a known
-// tier, capabilities, and channel permissions, with no duplicates. It cannot
-// check that the principal exists or is an agent, or that the channels exist;
-// those are the store's job.
+// tier, capabilities, channel permissions and agent-grantable permissions,
+// with no duplicates, and admin settings exactly when permissions are
+// granted. It cannot check that the principal exists or is an agent, or that
+// the channels exist; those are the store's job.
 func (m AgentManifestV1) Validate() error {
 	if m.Schema != AgentManifestSchemaV1 {
 		return fmt.Errorf("schema: agent manifest schema must be %q, got %q", AgentManifestSchemaV1, m.Schema)
@@ -312,7 +480,7 @@ func (m AgentManifestV1) Validate() error {
 	if m.PrincipalID <= 0 {
 		return fmt.Errorf("schema: agent manifest principal_id must be positive, got %d", m.PrincipalID)
 	}
-	if err := validateManifestPolicy(m.DisplayName, m.Tier, m.Capabilities, m.Channels, m.RateLimits); err != nil {
+	if err := validateManifestPolicy(m.DisplayName, m.Tier, m.Capabilities, m.Channels, m.RateLimits, m.Permissions, m.Admin); err != nil {
 		return err
 	}
 	if m.CreatedAt.IsZero() {
@@ -362,10 +530,28 @@ func (m AgentManifestV1) RateLimitFor(c Capability) (l RateLimit, ok bool) {
 	return RateLimit{}, false
 }
 
+// HoldsPermission reports whether the manifest grants operator permission p
+// (docs/design/ai-administrators.md §3.2, rule 1a of principalHolds): p is
+// listed and agent-grantable, and nothing else. No brake, cell, dependency or
+// column applies, and no permission implies another. A permission that is
+// not agent-grantable is never held, whatever the list says, so a stored
+// manifest that predates a narrowing of AgentGrantable fails closed.
+func (m AgentManifestV1) HoldsPermission(p Permission) bool {
+	if !p.AgentGrantable() {
+		return false
+	}
+	for _, held := range m.Permissions {
+		if held == p {
+			return true
+		}
+	}
+	return false
+}
+
 // validateManifestPolicy checks the caller-supplied part of a manifest, shared
 // by AgentManifestV1 and PutAgentManifestRequestV1 so a body that is accepted
 // on write is one that validates on read.
-func validateManifestPolicy(displayName string, tier AgentTier, caps []Capability, channels []ChannelGrant, limits []RateLimit) error {
+func validateManifestPolicy(displayName string, tier AgentTier, caps []Capability, channels []ChannelGrant, limits []RateLimit, perms []Permission, admin *AgentAdminV1) error {
 	if strings.TrimSpace(displayName) == "" {
 		return errors.New("schema: agent manifest display_name is required")
 	}
@@ -402,6 +588,27 @@ func validateManifestPolicy(displayName string, tier AgentTier, caps []Capabilit
 		}
 		seenLimits[l.Capability] = struct{}{}
 	}
+	seenPerms := make(map[Permission]struct{}, len(perms))
+	for _, p := range perms {
+		if !p.Valid() {
+			return fmt.Errorf("schema: agent manifest permission %q is not in the catalog", p)
+		}
+		if !p.AgentGrantable() {
+			return fmt.Errorf("schema: agent manifest permission %q cannot be granted to an agent", p)
+		}
+		if _, dup := seenPerms[p]; dup {
+			return fmt.Errorf("schema: agent manifest lists permission %q more than once", p)
+		}
+		seenPerms[p] = struct{}{}
+	}
+	switch {
+	case len(perms) > 0 && admin == nil:
+		return errors.New("schema: agent manifest admin is required when permissions are granted")
+	case len(perms) == 0 && admin != nil:
+		return errors.New("schema: agent manifest admin is set but no permissions are granted")
+	case admin != nil:
+		return admin.Validate()
+	}
 	return nil
 }
 
@@ -427,12 +634,22 @@ type PutAgentManifestRequestV1 struct {
 	// RateLimits is the rate-limit policy. A capability with no entry is not
 	// rate limited by this manifest.
 	RateLimits []RateLimit `json:"rate_limits,omitempty"`
+	// Permissions is the subset of operator permissions this agent holds
+	// (ADR-014 as amended by #1326). Omitted or empty grants nothing. Only
+	// values for which Permission.AgentGrantable() is true are accepted; the
+	// store refuses a write that grants any permission by an actor who is not
+	// an owner (ErrNotOwner), and audits every change (admin_grant_changed).
+	Permissions []Permission `json:"permissions,omitempty"`
+	// Admin configures how this agent's gated actions are approved. Required
+	// when Permissions is non-empty (an agent with a grant and nowhere to ask
+	// is refused on write); omitted otherwise.
+	Admin *AgentAdminV1 `json:"admin,omitempty"`
 }
 
 // Validate reports whether the request is structurally well-formed. Its rules
 // are exactly AgentManifestV1's for every caller-supplied field.
 func (r PutAgentManifestRequestV1) Validate() error {
-	return validateManifestPolicy(r.DisplayName, r.Tier, r.Capabilities, r.Channels, r.RateLimits)
+	return validateManifestPolicy(r.DisplayName, r.Tier, r.Capabilities, r.Channels, r.RateLimits, r.Permissions, r.Admin)
 }
 
 // PutAgentManifestResponseV1 is the response body after a manifest is created

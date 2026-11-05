@@ -1,0 +1,20 @@
+{
+  "actions": [
+    {
+      "action": "list_members",
+      "route": "GET /v1/principals",
+      "permission": "manage_members",
+      "gate": "direct",
+      "held": true,
+      "gated": false
+    },
+    {
+      "action": "disable_member",
+      "route": "POST /v1/principals/{id}/disable",
+      "permission": "manage_members",
+      "gate": "approval",
+      "held": true,
+      "gated": true
+    }
+  ]
+}

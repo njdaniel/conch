@@ -255,6 +255,17 @@ func TestReactionConstants(t *testing.T) {
 		// The community model (ADR-013, issue #978).
 		"MAX_CHANNEL_AUTHOR_IDS":             MaxChannelAuthorIDs,
 		"DEFAULT_MEMBER_LINK_EXPIRY_SECONDS": DefaultMemberLinkExpirySeconds,
+		// AI administrators (issue #1326).
+		"DEFAULT_ADMIN_APPROVAL_TTL_SECONDS": DefaultAdminApprovalTTLSeconds,
+		"MIN_ADMIN_APPROVAL_TTL_SECONDS":     MinAdminApprovalTTLSeconds,
+		"MAX_ADMIN_APPROVAL_TTL_SECONDS":     MaxAdminApprovalTTLSeconds,
+		"DEFAULT_ADMIN_RUN_WINDOW_SECONDS":   DefaultAdminRunWindowSeconds,
+		"MIN_ADMIN_RUN_WINDOW_SECONDS":       MinAdminRunWindowSeconds,
+		"MAX_ADMIN_RUN_WINDOW_SECONDS":       MaxAdminRunWindowSeconds,
+		"DEFAULT_ADMIN_QUORUM":               DefaultAdminQuorum,
+		"DEFAULT_ADMIN_MAX_PENDING":          DefaultAdminMaxPending,
+		"MAX_ADMIN_MAX_PENDING":              MaxAdminMaxPending,
+		"MAX_ADMIN_REASON_CHARS":             MaxAdminReasonChars,
 	}
 	if len(TSConstants) != len(want) {
 		t.Errorf("TSConstants has %d entries, want %d", len(TSConstants), len(want))

@@ -20,9 +20,11 @@ There is **exactly one manifest per agent principal**, addressed by the principa
 | `capabilities` | Set of granted capabilities (§3). Omitted or empty grants nothing. No duplicates. |
 | `channels` | List of `{channel_id, permissions}` grants (§4), at most one per channel. A channel not listed is denied. |
 | `rate_limits` | List of `{capability, max, window_seconds}` (§5), at most one per capability. |
+| `permissions` | The operator permissions this agent holds ([ai-administrators.md](ai-administrators.md) §3.1, #1326): a set drawn from `Permission.AgentGrantable()` (`manage_members`, `manage_channels`, `make_member_links`, `change_server_settings`, `read_audit_log`), never `act_as_members` or a member permission. Omitted or empty grants nothing. No duplicates. Only an owner may write a non-empty set; the store enforces that. |
+| `admin` | `AgentAdminV1`: how the agent's gated actions are approved. `approval_channel_id` (required), `approval_ttl_seconds` (default 86400, 300 to 604800), `run_window_seconds` (default 86400, 60 to 604800), `quorum` (default 1), `escalation_target`, `require_approval` (catalog actions that are gated for this agent beyond the server's fixed set), `max_pending` (default 8, at most 32). Required exactly when `permissions` is non-empty; refused otherwise, so a manifest has one spelling. |
 | `created_at` / `updated_at` | Server-assigned, UTC millisecond timestamps. |
 
-**Fail closed by construction.** Every list defaults to empty, and an empty `capabilities` or `channels` list grants nothing. There is no wildcard value (`*` fails validation), no capability that implies another, no tier that grants anything, and no "admin" flag. An agent with no manifest has no access; so does an agent whose stored manifest fails `Validate()`.
+**Fail closed by construction.** Every list defaults to empty, and an empty `capabilities`, `channels` or `permissions` list grants nothing. There is no wildcard value (`*` fails validation), no capability that implies another, no tier that grants anything, and no "admin" flag: the `admin` block configures how a grant is approved and grants nothing by itself, and `admin.act` (§3) opens a door through which the agent can do only what `permissions` lists. An agent with no manifest has no access; so does an agent whose stored manifest fails `Validate()`.
 
 Lists are sets: order carries no meaning, and duplicates are rejected rather than merged so that a manifest has one spelling.
 
@@ -43,8 +45,9 @@ Type `Capability`, a closed string enum. Names describe the permission (`<resour
 | `approvals.check` | `CapabilityApprovalsCheck` | Polling an approval's current state. |
 | `sessions.manage` | `CapabilitySessionsManage` | Registering, heartbeating and ending the agent's own sessions (P3, #264). Checked without a channel, because a session belongs to no channel (#263, D9). |
 | `runs.manage` | `CapabilityRunsManage` | Reporting runs and activity, and reading and answering interventions on the agent's own runs (P3, #264). Reporting on a run also needs the channel permission that posting to the run's audience needs; reading the interventions on its own runs is checked without a channel, like a session call. |
+| `admin.act` | `CapabilityAdminAct` | Using the admin door over MCP ([ai-administrators.md](ai-administrators.md) §3.6, #1326): reading the action catalog, submitting an action and running an approved one. It says only that the agent may use the door; *what* it may do through it is the manifest's `permissions` (§1), and an agent with the capability and no grant is answered an empty catalog. Checked without a channel, like a session call. |
 
-Message and approval capabilities are independent, and each approval operation is its own grant (#79): an agent that may post cannot thereby raise approvals, and one that may raise them cannot thereby observe them. The two P3 capabilities are independent of those and of each other in the same way. No MCP tool uses them yet: their tools arrive with #267, which adds them to the mapping below.
+Message and approval capabilities are independent, and each approval operation is its own grant (#79): an agent that may post cannot thereby raise approvals, and one that may raise them cannot thereby observe them. The two P3 capabilities are independent of those and of each other in the same way, and so is `admin.act`: an AI administrator that must watch its own gated actions also needs `approvals.await` or `approvals.check` and `read` in its approval channel.
 
 ### Tool to capability mapping
 
@@ -57,8 +60,13 @@ Message and approval capabilities are independent, and each approval operation i
 | `request_approval` | `approvals.request` |
 | `await_decision` | `approvals.await` |
 | `check_decision` | `approvals.check` |
+| `set_reaction`, `remove_reaction` | `messages.post` |
+| `read_reactions`, `list_reactors` | `messages.read` |
+| `register_session`, `heartbeat`, `end_session` | `sessions.manage` |
+| `start_run`, `update_run`, `post_activity`, `poll_interventions`, `ack_intervention` | `runs.manage` |
+| `describe_admin_actions`, `submit_admin_action`, `run_approved_action` | `admin.act` (#1326; the rows are added by the PR that registers the tools, per §6) |
 
-A tool absent from the table returns `ok == false`, which enforcement must treat as a denial. A test pins the table to exactly these five names; `pkg/schema` cannot import the server, so that list is restated in the test. #79 should add the matching server-side test that every tool `conchd` actually registers has a mapping.
+A tool absent from the table returns `ok == false`, which enforcement must treat as a denial. A test pins the table to exactly the registered names; `pkg/schema` cannot import the server, so that list is restated in the test, and the server's own structural tests hold the table and the tools it registers to the same set.
 
 The mapping is keyed by MCP tool name, but the capability is the unit of authorization: a REST or WebSocket path that acts for an agent principal checks the same capability (parity, rule 4).
 
@@ -98,8 +106,8 @@ Later decisions add permissions. Transmitting on a net and whispering ([ADR-005]
 
 - **Adding a value is compatible** and needs no version bump: add the constant, add it to `Valid()` (and to `Capabilities()` for a capability), add a row to the tables here, and add a *new* fixture that uses it. Existing fixtures stay byte-identical, which is what `scripts/schema-compat.sh` gates. Per-channel grants such as net transmit and whisper are new `ChannelPermission` constants; server-wide ones such as voice publishing are new `Capability` constants.
 - **A new MCP tool** adds a row to the tool mapping in the same PR that registers the tool. Until then it is unmapped and denied.
-- **New optional fields** on the manifest, a grant, or a rate limit (for example a burst size) are compatible.
-- **Breaking, requiring `conch.agent_manifest.v2` and Nick's sign-off:** removing or renaming a value; changing what an existing value permits, including splitting one capability into two or making one imply another; changing the meaning of an absent list.
+- **New optional fields** on the manifest, a grant, or a rate limit (for example a burst size) are compatible. The administrative grant (`permissions`, `admin`; #1326) landed this way: two optional fields, the `admin.act` capability, and the `AdminAction` vocabulary of `pkg/schema/admin_action.go`, with `agent-manifest-v1-admin.json` and `put-agent-manifest-request-v1-admin.json` as the new fixtures and every older fixture byte-identical, decoding with no grant. The `AdminAction` catalog grows the same way: a new action is a new constant at the end, in `AdminActions` and in `Vocabularies`.
+- **Breaking, requiring `conch.agent_manifest.v2` and Nick's sign-off:** removing or renaming a value; changing what an existing value permits, including splitting one capability into two or making one imply another; changing the meaning of an absent list; widening `Permission.AgentGrantable()` (a stored manifest would then grant more than its writer wrote). Narrowing it is safe in the other direction, since `HoldsPermission` never answers true for a value that is no longer grantable, but it still needs an issue, because it silently revokes.
 
 A value is only ever written through a server that knows it, because the server validates on write. The one way to meet an unknown value is a binary older than the stored data. In that case the manifest fails `Validate()` and the agent is denied, which is the safe direction. Clients that only display a manifest should decode it without calling `Validate()`, so that a newer server's value does not break an older `conch`.
 
@@ -137,9 +145,10 @@ Errors use the existing `schema.Error` body (`{code, message}`); a failed `Valid
 ## 9. Explicitly out of scope
 
 - Enforcement, audit events, authorization error shapes, credentials, and rate-limit counters.
-- Manifests for human principals. Human roles are #89.
+- Manifests for human principals. Human roles are #89; the fixed roles and configurable permissions are ADR-014.
 - Listing manifests, partial updates (`PATCH`), and deleting a manifest. An agent is cut off by replacing its manifest with an empty one.
-- Any MCP tool for reading or writing manifests. Agents do not administer their own permissions.
+- Any MCP tool for reading or writing manifests. Agents do not administer their own permissions: the manifest route is not in the admin catalog, so an AI administrator cannot widen its own grant, and only an owner can write one that grants anything ([ai-administrators.md](ai-administrators.md) §3.1).
+- How a granted agent holds a permission in the store, the admin door, the catalog table, the gate and the one-shot run. Those are [ai-administrators.md](ai-administrators.md) §3.2 to §3.5; this note owns only the manifest's shape.
 
 ## Open questions
 

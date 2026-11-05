@@ -14,6 +14,10 @@ func TestApprovalGoldenFixtures(t *testing.T) {
 		{name: "option", file: "approval-option-v1.json", new: func() any { return &Option{} }},
 		{name: "decision", file: "approval-decision-v1.json", new: func() any { return &Decision{} }},
 		{name: "approval", file: "conch-approval-v1.json", new: func() any { return &ApprovalV1{} }},
+		// A gated admin action's approval (issue #1326, ai-administrators.md
+		// §3.5.1): the server-rendered title and body, the two fixed options
+		// and the conch.admin_action.v1 payload.
+		{name: "approval of an admin action", file: "conch-approval-v1-admin-action.json", new: func() any { return &ApprovalV1{} }},
 		{name: "resolution approved", file: "approval-resolution-v1.json", new: func() any { return &ApprovalResolutionV1{} }},
 		{name: "resolution expired", file: "approval-resolution-v1-expired.json", new: func() any { return &ApprovalResolutionV1{} }},
 	}

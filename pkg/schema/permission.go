@@ -12,8 +12,10 @@ import (
 // member, and the per-channel manager); what each server role may do is a
 // closed catalog of permissions, each with a member cell and an operator
 // cell. Owners hold every permission and have no column. Agents hold no role
-// and no permission: their rights stay their manifest's capabilities and
-// channel grants (ADR-000 D10).
+// and, by default, no permission: their rights are their manifest's
+// capabilities and channel grants (ADR-000 D10), plus the agent-grantable
+// permissions an owner lists in that manifest (AgentManifestV1.Permissions;
+// ADR-014 as amended by #1326, docs/design/ai-administrators.md).
 //
 // Everything here is additive. The REST bodies carry no schema-name field
 // and are versioned by their V1 suffix; the events document carries one
@@ -120,6 +122,25 @@ func (p Permission) OperatorOnly() bool {
 		return false
 	default:
 		return true
+	}
+}
+
+// AgentGrantable reports whether p may be listed in an agent manifest's
+// Permissions (issue #1326, docs/design/ai-administrators.md §3.1): the
+// five operator permissions that administer things without speaking as
+// anyone (manage_members, manage_channels, make_member_links,
+// change_server_settings, read_audit_log). Never act_as_members, which is
+// the one power the design rules out, and never a member permission: an
+// agent has no voice and no camera, does not browse the directory as a
+// member, and creates channels through manage_channels. An unknown
+// permission is not grantable, so the fall-through fails closed and stays.
+func (p Permission) AgentGrantable() bool {
+	switch p {
+	case PermManageMembers, PermManageChannels, PermMakeMemberLinks,
+		PermChangeServerSettings, PermReadAuditLog:
+		return true
+	default:
+		return false
 	}
 }
 

@@ -42,6 +42,16 @@ export const VOICE_CONTROL_PIPE_NONCE_BYTES = 32;
 export const VOICE_CONTROL_PIPE_NONCE_CHARS = 43;
 export const MAX_CHANNEL_AUTHOR_IDS = 100;
 export const DEFAULT_MEMBER_LINK_EXPIRY_SECONDS = 604800;
+export const DEFAULT_ADMIN_APPROVAL_TTL_SECONDS = 86400;
+export const MIN_ADMIN_APPROVAL_TTL_SECONDS = 300;
+export const MAX_ADMIN_APPROVAL_TTL_SECONDS = 604800;
+export const DEFAULT_ADMIN_RUN_WINDOW_SECONDS = 86400;
+export const MIN_ADMIN_RUN_WINDOW_SECONDS = 60;
+export const MAX_ADMIN_RUN_WINDOW_SECONDS = 604800;
+export const DEFAULT_ADMIN_QUORUM = 1;
+export const DEFAULT_ADMIN_MAX_PENDING = 8;
+export const MAX_ADMIN_MAX_PENDING = 32;
+export const MAX_ADMIN_REASON_CHARS = 500;
 
 // schema.PrincipalKind
 export type PrincipalKind = 'human' | 'agent';
@@ -3996,6 +4006,222 @@ export const voicePermissionResponseV1 = object<VoicePermissionResponseV1>({
   changed: bool,
 });
 
+// schema.AdminAction: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownAdminAction is the known ones.
+export type KnownAdminAction =
+  | 'list_members'
+  | 'create_member'
+  | 'rename_member'
+  | 'set_voice_permission'
+  | 'set_invite_permission'
+  | 'disable_member'
+  | 'enable_member'
+  | 'hide_member'
+  | 'list_credentials'
+  | 'revoke_credential'
+  | 'revoke_all_credentials'
+  | 'list_hooks'
+  | 'revoke_hook'
+  | 'list_channels'
+  | 'create_channel'
+  | 'rename_channel'
+  | 'set_channel_default'
+  | 'set_channel_visibility'
+  | 'archive_channel'
+  | 'restore_channel'
+  | 'list_channel_members'
+  | 'add_channel_member'
+  | 'remove_channel_member'
+  | 'set_channel_member_rights'
+  | 'create_member_link'
+  | 'list_member_links'
+  | 'close_member_link'
+  | 'list_link_joiners'
+  | 'disable_link_joiners'
+  | 'disable_invitees'
+  | 'pause_invites'
+  | 'resume_invites'
+  | 'get_join_settings'
+  | 'set_join_settings'
+  | 'get_permissions'
+  | 'set_permissions'
+  | 'list_reports'
+  | 'get_report'
+  | 'update_report'
+  | 'export_audit';
+export type AdminAction = KnownAdminAction | (string & {});
+
+export const adminAction = tolerant<KnownAdminAction>({
+  list_members: true,
+  create_member: true,
+  rename_member: true,
+  set_voice_permission: true,
+  set_invite_permission: true,
+  disable_member: true,
+  enable_member: true,
+  hide_member: true,
+  list_credentials: true,
+  revoke_credential: true,
+  revoke_all_credentials: true,
+  list_hooks: true,
+  revoke_hook: true,
+  list_channels: true,
+  create_channel: true,
+  rename_channel: true,
+  set_channel_default: true,
+  set_channel_visibility: true,
+  archive_channel: true,
+  restore_channel: true,
+  list_channel_members: true,
+  add_channel_member: true,
+  remove_channel_member: true,
+  set_channel_member_rights: true,
+  create_member_link: true,
+  list_member_links: true,
+  close_member_link: true,
+  list_link_joiners: true,
+  disable_link_joiners: true,
+  disable_invitees: true,
+  pause_invites: true,
+  resume_invites: true,
+  get_join_settings: true,
+  set_join_settings: true,
+  get_permissions: true,
+  set_permissions: true,
+  list_reports: true,
+  get_report: true,
+  update_report: true,
+  export_audit: true,
+});
+
+// schema.AgentAdminV1
+export interface AgentAdminV1 {
+  approval_channel_id: number;
+  approval_ttl_seconds?: number;
+  run_window_seconds?: number;
+  quorum?: number;
+  escalation_target?: EscalationTarget;
+  require_approval?: AdminAction[];
+  max_pending?: number;
+}
+
+export const agentAdminV1 = object<AgentAdminV1>({
+  approval_channel_id: int,
+  approval_ttl_seconds: optional(int),
+  run_window_seconds: optional(int),
+  quorum: optional(int),
+  escalation_target: optional(escalationTarget),
+  require_approval: optional(array(adminAction)),
+  max_pending: optional(int),
+});
+
+// schema.AdminGate
+export type AdminGate = 'direct' | 'approval';
+
+export const adminGate = vocab<AdminGate>({ direct: true, approval: true });
+
+// schema.AdminCatalogEntryV1
+export interface AdminCatalogEntryV1 {
+  action: AdminAction;
+  route: string;
+  permission: Permission;
+  gate: AdminGate;
+  held: boolean;
+  gated: boolean;
+}
+
+export const adminCatalogEntryV1 = object<AdminCatalogEntryV1>({
+  action: adminAction,
+  route: str,
+  permission: permission,
+  gate: adminGate,
+  held: bool,
+  gated: bool,
+});
+
+// schema.AdminCatalogResponseV1
+export interface AdminCatalogResponseV1 {
+  actions: AdminCatalogEntryV1[];
+  admin?: AgentAdminV1;
+}
+
+export const adminCatalogResponseV1 = object<AdminCatalogResponseV1>({
+  actions: array(adminCatalogEntryV1),
+  admin: optional(agentAdminV1),
+});
+
+// schema.AdminTargetKind: closed on the server and client-tolerant, so a value this
+// bundle does not know is kept and shown by its name; KnownAdminTargetKind is the known ones.
+export type KnownAdminTargetKind =
+  | 'principal'
+  | 'channel'
+  | 'credential'
+  | 'hook'
+  | 'invite'
+  | 'report';
+export type AdminTargetKind = KnownAdminTargetKind | (string & {});
+
+export const adminTargetKind = tolerant<KnownAdminTargetKind>({
+  principal: true,
+  channel: true,
+  credential: true,
+  hook: true,
+  invite: true,
+  report: true,
+});
+
+// schema.AdminTargetV1
+export interface AdminTargetV1 {
+  kind: AdminTargetKind;
+  id: number;
+  name?: string;
+}
+
+export const adminTargetV1 = object<AdminTargetV1>({
+  kind: adminTargetKind,
+  id: int,
+  name: optional(str),
+});
+
+// schema.SubmitAdminActionRequestV1
+export interface SubmitAdminActionRequestV1 {
+  action: AdminAction;
+  target?: AdminTargetV1;
+  params?: unknown;
+  reason?: string;
+}
+
+export const submitAdminActionRequestV1 = object<SubmitAdminActionRequestV1>({
+  action: adminAction,
+  target: optional(adminTargetV1),
+  params: optional(json),
+  reason: optional(str),
+});
+
+// schema.AdminActionV1
+// A message payload of schema adminActionV1PayloadSchema carries one as its data.
+export const adminActionV1PayloadSchema = 'conch.admin_action.v1';
+
+export interface AdminActionV1 {
+  action: AdminAction;
+  route: string;
+  target?: AdminTargetV1;
+  params?: unknown;
+  agent_id: number;
+  reason?: string;
+  requested_at: string;
+}
+
+export const adminActionV1 = object<AdminActionV1>({
+  action: adminAction,
+  route: str,
+  target: optional(adminTargetV1),
+  params: optional(json),
+  agent_id: int,
+  reason: optional(str),
+  requested_at: timestamp,
+});
+
 // schema.Error
 export interface ErrorV0 {
   code: string;
@@ -4043,5 +4269,40 @@ export const loginResponseV1 = tagged<LoginResponseV1, 'next'>('next', {
     next: vocab<'totp'>({ totp: true }),
     challenge: str,
     challenge_expires_at: timestamp,
+  }),
+});
+
+// schema.AdminActionStatus
+export type AdminActionStatus = 'ran' | 'pending_approval';
+
+export const adminActionStatus = vocab<AdminActionStatus>({ ran: true, pending_approval: true });
+
+// schema.AdminActionResultV1, by status.
+export type AdminActionResultV1 = RanAdminActionResultV1 | PendingApprovalAdminActionResultV1;
+
+export interface RanAdminActionResultV1 {
+  status: 'ran';
+  http_status: number;
+  result: unknown;
+}
+
+export interface PendingApprovalAdminActionResultV1 {
+  status: 'pending_approval';
+  approval_id: number;
+  approval: ApprovalV1;
+  deadline: string;
+}
+
+export const adminActionResultV1 = tagged<AdminActionResultV1, 'status'>('status', {
+  ran: object<RanAdminActionResultV1>({
+    status: vocab<'ran'>({ ran: true }),
+    http_status: int,
+    result: json,
+  }),
+  pending_approval: object<PendingApprovalAdminActionResultV1>({
+    status: vocab<'pending_approval'>({ pending_approval: true }),
+    approval_id: int,
+    approval: approvalV1,
+    deadline: timestamp,
   }),
 });
