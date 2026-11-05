@@ -55,6 +55,9 @@ type adminOpts struct {
 	// community holds the flags of `channel settings` (issue #994), in
 	// admin_community.go.
 	community communityOpts
+	// aiAdmin holds the flags of `ai-admin create` (issue #1332), in
+	// admin_ai_admin.go.
+	aiAdmin aiAdminOpts
 }
 
 // principalOpts holds the flags of the principal list, hide and sign-in-link
@@ -171,6 +174,13 @@ var adminCommands = []adminCommand{
 		},
 		run: adminManifestPut},
 	{group: "manifest", verb: "get", args: []string{"principal-id"}, idAt: 1, run: adminManifestGet},
+	// AI administrators (issue #1332), in admin_ai_admin.go.
+	{group: "ai-admin", verb: "create", args: []string{"name"},
+		flags: "[--channel <name>] [--grant <perm,...>] [--require-approval <action,...>] [--ttl <duration>] [--run-window <duration>] [--quorum <n>] [--max-pending <n>] [--credential-days <n>] [--client json|claude-code] [--entry-name <entry>] ",
+		bind:  bindAIAdminCreate, run: adminAIAdminCreate},
+	{group: "ai-admin", verb: "list", run: adminAIAdminList},
+	{group: "ai-admin", verb: "show", args: []string{"id"}, idAt: 1, run: adminAIAdminShow},
+	{group: "ai-admin", verb: "revoke", args: []string{"id"}, idAt: 1, run: adminAIAdminRevoke},
 	// Invites and their administration (issue #438), in admin_invite.go.
 	{group: "invite", verb: "create", flags: "[--expires <duration|RFC3339> | --never-expires] [--uses <n>] [--credential-days <n>] [--landing-channel <name>...] ",
 		bind: bindInviteCreate, run: adminInviteCreate},
@@ -218,7 +228,7 @@ var adminCommands = []adminCommand{
 	{group: "reports", verb: "file", args: []string{"id", "issue-url"}, idAt: 1, run: adminReportsFile},
 }
 
-const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions|directory"
+const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions|directory|ai-admin"
 
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {
@@ -805,8 +815,17 @@ func adminManifestGet(ctx context.Context, r *adminRun) error {
 		}
 		grants[i] = strconv.FormatInt(g.ChannelID, 10) + ":" + strings.Join(perms, ",")
 	}
-	_, err = fmt.Fprintf(r.stdout, "%d tier %s capabilities %s channels %s %s\n",
-		m.PrincipalID, safeLine(string(m.Tier)), dashIfEmpty(strings.Join(caps, ",")), dashIfEmpty(strings.Join(grants, " ")), safeLine(m.DisplayName))
+	// A grant (issue #1332) is shown only when there is one, so the line of an
+	// ordinary agent is unchanged.
+	granted := ""
+	if len(m.Permissions) > 0 {
+		granted = " permissions " + permissionNames(m)
+		if m.Admin != nil {
+			granted += " approvals-in " + strconv.FormatInt(m.Admin.ApprovalChannelID, 10)
+		}
+	}
+	_, err = fmt.Fprintf(r.stdout, "%d tier %s capabilities %s channels %s%s %s\n",
+		m.PrincipalID, safeLine(string(m.Tier)), dashIfEmpty(strings.Join(caps, ",")), dashIfEmpty(strings.Join(grants, " ")), granted, safeLine(m.DisplayName))
 	return err
 }
 
