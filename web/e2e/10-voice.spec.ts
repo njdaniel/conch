@@ -15,6 +15,19 @@ import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWor
 // first press since a join is released: see the test that uses it.
 const firstPressBound = 200 + 1500 + 1000;
 
+// The longest a viewer not in voice may wait to see someone arrive in, or
+// leave, the roster (issue #633). It learns of either from conchd's presence
+// poller (internal/server/voice_presence.go), and the worst case is a pass
+// that began just before the change and so cannot see it, lasting as long as
+// the LiveKit client allows a call (defaultTimeout in
+// internal/server/livekit/client.go, 2 s); then the longest gap between
+// passes (voicePassGapMax, 1.5 s); then the pass that sees the change, as
+// long again. That is 5.5 s before the presence frame is sent. It is doubled
+// for a loaded machine, where the client's own disconnect, the frame and the
+// render all queue behind the load: the 3 s this replaced failed at a load
+// average of 15 to 20.
+const rosterBound = 2 * (2000 + 1500 + 2000);
+
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
 
 test('P3-F9c voice is not set up on a server without LiveKit, and the page asks for no microphone', async ({ meet, world }) => {
@@ -831,8 +844,8 @@ test.describe('with LiveKit', () => {
   });
 
   // Issue #585 (F02): the roster of a channel not joined is live. Bob watches
-  // the strip without joining; alice joining and leaving shows within 3 s,
-  // with no channel opened again. Bob's page holds one presence socket all
+  // the strip without joining; alice joining and leaving shows within the
+  // poller's worst case (rosterBound), with no channel opened again. Bob's page holds one presence socket all
   // along, and asks for no session, no device and no LiveKit connection.
   test('the roster of a channel not joined shows people arriving and leaving', async ({ browser }) => {
     // Each presence socket bob's page opens: its channel, and whether it is
@@ -865,12 +878,12 @@ test.describe('with LiveKit', () => {
 
       await alice.getByRole('button', { name: 'Join voice' }).click();
       await expect(alice).toContainText('Connected in #voice-room', { timeout: 30_000 });
-      await expect(listed).toHaveCount(1, { timeout: 3000 });
+      await expect(listed).toHaveCount(1, { timeout: rosterBound });
       await expect(bob).toContainText('Not in voice');
 
       await alice.getByRole('button', { name: 'Leave voice' }).click();
       await expect(alice).toContainText('Not in voice', { timeout: 10_000 });
-      await expect(listed).toHaveCount(0, { timeout: 3000 });
+      await expect(listed).toHaveCount(0, { timeout: rosterBound });
 
       // One presence socket, for the channel on screen, all along: none
       // opened again for alice's coming and going.
