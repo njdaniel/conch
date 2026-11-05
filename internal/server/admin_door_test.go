@@ -697,3 +697,42 @@ func TestRequestApprovalRefusesTheDoorsPayload(t *testing.T) {
 		t.Fatalf("approvals after the refusal = %d, %v", n, err)
 	}
 }
+
+// TestAdminActionWithARenewableCredential (security review of #1343): the
+// setup commands issue an AI administrator a renewable credential, which the
+// store marks a session; the dispatched route's recent-auth gate still
+// passes it, since an agent never signs in.
+func TestAdminActionWithARenewableCredential(t *testing.T) {
+	d := newDoorFixture(t, schema.PermManageMembers)
+	_, tok, err := d.srv.store.CreateRenewableCredential(context.Background(), "system", d.agent.ID, "ai-admin", 90*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.agentTok = tok
+	id := d.submitGated(t, submitBody(schema.AdminActionDisableMember, principalTarget(d.alice.ID), "", ""))
+	d.decide(t, id, "run")
+	rec := d.run(t, id, d.agentTok)
+	res := decodeBody[schema.AdminActionResultV1](t, rec)
+	if rec.Code != http.StatusOK || res.HTTPStatus != http.StatusOK || !d.aliceDisabled(t) {
+		t.Fatalf("run with a renewable credential = %d %+v (%s), alice disabled %v; want the route's 200", rec.Code, res, res.Result, d.aliceDisabled(t))
+	}
+}
+
+// TestRefusedRunsAreCoalesced (security review of #1343): a run refused over
+// and over spends no budget, so its audit rows are thinned like access_denied.
+func TestRefusedRunsAreCoalesced(t *testing.T) {
+	d := newDoorFixture(t, schema.PermManageMembers)
+	id := d.submitGated(t, submitBody(schema.AdminActionDisableMember, principalTarget(d.alice.ID), "", ""))
+	for range 30 {
+		assertErrorBody(t, d.run(t, id, d.agentTok), http.StatusConflict, schema.ErrorCodeApprovalNotApproved)
+	}
+	rows := 0
+	for _, e := range d.audit(t) {
+		if e.Action == store.AuditAdminActionRefused {
+			rows++
+		}
+	}
+	if rows == 0 || rows >= 30 {
+		t.Errorf("admin_action_refused rows for 30 refused runs = %d; want some, thinned", rows)
+	}
+}

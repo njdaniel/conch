@@ -481,7 +481,13 @@ func (s *Server) runApprovedAction(ctx context.Context, p store.Principal, appro
 		return schema.AdminActionResultV1{}, 0, doorRefuse(http.StatusInternalServerError, errInternal.Code, errInternal.Message)
 	}
 	if code != "" {
-		s.auditDoor(ctx, c.actor(), store.AuditAdminActionRefused, subjectApproval, fmt.Sprintf("reason=%s via=%s", code, via))
+		// Coalesced as access_denied is (issue #80): a run refused over and
+		// over spends no budget, so it must not grow the trail without bound
+		// (security review of #1343).
+		detail := fmt.Sprintf("reason=%s via=%s", code, via)
+		if write, count := s.denials.admit(p.ID, subjectApproval+"|"+detail, s.now()); write {
+			s.auditDoor(ctx, c.actor(), store.AuditAdminActionRefused, subjectApproval, denialDetail(detail, count))
+		}
 		return schema.AdminActionResultV1{}, 0, doorRefuse(status, code, adminRunRefusalMessage(code))
 	}
 	entry, ok := adminCatalogByAction[action.Action]
@@ -669,6 +675,7 @@ func (s *Server) handleRunAdminAction(w http.ResponseWriter, r *http.Request) {
 // one, so it is refused here, as the session tools refuse it.
 func (s *Server) adminMCPCaller(ctx context.Context, scope *agentScope) (context.Context, store.Principal, *adminRefusal) {
 	if scope.identity.credentialID == 0 {
+		s.auditAgentDenial(ctx, scope.identity.principalID, scope.subject, schema.CapabilityAdminAct, 0, "static_token")
 		return ctx, store.Principal{}, doorRefuse(http.StatusForbidden, errForbidden.Code, "the admin door needs an issued credential; a static --mcp-token has none")
 	}
 	p, err := s.store.PrincipalByID(ctx, scope.identity.principalID)
