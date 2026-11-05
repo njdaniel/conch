@@ -234,11 +234,16 @@ jobs:
       - uses: actions/checkout@v4
 
       # The hosted image ships tool trees no job here uses (.NET, Android,
-      # GHC, CodeQL, cached Docker images): about 25-30 GB, removed first.
+      # GHC, CodeQL, cached Docker images): about 20 GB. On the image that had
+      # about 14 GB free they had to go (#1286, #1318). Today's has about 88
+      # GB free and this job uses about 11, while removing them takes 3½
+      # minutes (#1352), so they go only when less than 30 GB is free.
       - name: free disk
         if: runner.environment == 'github-hosted'
         run: |
           df -h /
+          avail=$(df --output=avail -BG / | tail -n1 | tr -dc 0-9)
+          if [ "$avail" -ge 30 ]; then echo "free disk: ${avail} GB free, nothing removed"; exit 0; fi
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           docker image prune -af >/dev/null 2>&1 || true
           df -h /
@@ -246,6 +251,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      # The runner image names the apt cache below: its .debs are the image
+      # release's packages. Runner environment variables, so not in `env`.
+      - name: runner image
+        id: image
+        if: runner.environment == 'github-hosted'
+        run: |
+          echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
+          echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
 
       # The toolchain script fetches one pinned clang, cargo-deny and
       # libwebrtc and verifies each against the SHA-256 in
@@ -275,13 +289,28 @@ jobs:
           restore-keys: |
             voice-build-lt-${{ runner.os }}-
 
+      # The .debs of the system packages, kept so a run downloads only the
+      # package indexes and not 40 MB from a mirror that can stall (13
+      # minutes once, #1352). Keyed on the script, which holds the package
+      # list, and on the image; a new image version starts from the last
+      # one's .debs and fetches only what changed.
+      - name: rust system packages cache
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch-apt
+          key: voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-${{ steps.image.outputs.version }}
+          restore-keys: |
+            voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-
+
       # The SDK's build needs GLib's headers (found through pkg-config). So does
       # dmn-audio's: the PipeWire headers (also found through pkg-config) and
       # libclang, which generates the Rust bindings to them. Nothing else comes
-      # from the system. scripts/voice-env.sh says so if any is missing.
+      # from the system. scripts/voice-env.sh says so if any is missing. The
+      # script installs from the cache above and bounds every download.
       - name: rust system packages
         if: runner.environment == 'github-hosted'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config
+        run: ./scripts/ci-voice-apt.sh ~/.cache/conch-apt
 
       # The self-hosted runner installs nothing (it has no sudo): it has
       # these, and this step says so when one is missing.
@@ -824,7 +853,9 @@ jobs:
     # On GitHub-hosted runners (#1318), or on the self-hosted ones for this
     # repository's own branches when the variable HEAVY_RUNNER is "local".
     runs-on: ${{ vars.HEAVY_RUNNER == 'local' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
-    timeout-minutes: 30
+    # About twice a normal run (6 to 9 minutes), so a stall fails it early
+    # rather than holding main's status for half an hour (#1352).
+    timeout-minutes: 15
     env:
       CI: "true"
       # Labels this run's LiveKit container, so the clean-up step below can
@@ -837,11 +868,15 @@ jobs:
       - uses: actions/checkout@v4
 
       # The voice build cache would fill the hosted runner's disk with the
-      # image's unused tool trees still on it (#1286, #1318).
+      # image's unused tool trees still on it (#1286, #1318), on the image
+      # that had about 14 GB free. As in the rust job, they go only when less
+      # than 30 GB is free: removing them takes 3½ minutes (#1352).
       - name: free disk
         if: runner.environment == 'github-hosted'
         run: |
           df -h /
+          avail=$(df --output=avail -BG / | tail -n1 | tr -dc 0-9)
+          if [ "$avail" -ge 30 ]; then echo "free disk: ${avail} GB free, nothing removed"; exit 0; fi
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           docker image prune -af >/dev/null 2>&1 || true
           df -h /
@@ -849,6 +884,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: runner image
+        id: image
+        if: runner.environment == 'github-hosted'
+        run: |
+          echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
+          echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
 
       # The same pinned toolchain and build directory as the rust job, read
       # from its caches and never written from here: rust builds everything
@@ -874,9 +916,21 @@ jobs:
           restore-keys: |
             voice-build-lt-${{ runner.os }}-
 
+      # The same apt cache as the rust job's, which this job, unlike its two
+      # caches above, writes as well as reads: the jobs run side by side, and this is where a stalled
+      # mirror cost 13 minutes (#1352). Whichever finishes first saves it.
+      - name: rust system packages cache
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch-apt
+          key: voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-${{ steps.image.outputs.version }}
+          restore-keys: |
+            voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-
+
       - name: rust system packages
         if: runner.environment == 'github-hosted'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config
+        run: ./scripts/ci-voice-apt.sh ~/.cache/conch-apt
 
       - name: rust toolchain
         run: ./scripts/voice-toolchain.sh
