@@ -9,9 +9,7 @@ import { ImageAttachment } from './ImageAttachment';
 import { loadStored, saveEdit, saveReplies } from './state/draftStore';
 import { canEdit, EditedMarker, editEnds, editsLeft, editWindowMs, MessageEditor } from './MessageEdit';
 import { ActionsMenu, useOpeners, type MenuItem } from './MessageMenu';
-import { AdminActionCard } from './AdminActionCard';
 import { AdminApprovals } from './AdminApprovals';
-import { adminActionV1, adminActionV1PayloadSchema, type AdminActionV1 } from './schema/admin';
 import { approvalPayloadSchema, approvalV1, type ApprovalV1 } from './schema/approval';
 import type { ChannelVisibility } from './schema/channel';
 import { fileAttachmentPayloadSchema, fileAttachmentV1, type FileAttachmentV1 } from './schema/file';
@@ -62,18 +60,12 @@ function approvalOf(message: MessageV2): ApprovalV1 | null {
   return payload.data as ApprovalV1;
 }
 
-// adminActionOf reads the admin action an approval carries, or null for any
-// other payload, or one that is not the shape this client knows: the card then
-// shows the approval's title as before.
-function adminActionOf(approval: ApprovalV1): AdminActionV1 | null {
-  const payload = approval.payload;
-  if (payload?.schema !== adminActionV1PayloadSchema || adminActionV1(payload.data).length > 0) return null;
-  return payload.data as AdminActionV1;
-}
-
-function ApprovalCard({ approval, people, viewer, onUnauthorized }: { readonly approval: ApprovalV1; readonly people: ReadonlyMap<number, Person>; readonly viewer: number; readonly onUnauthorized?: (() => void) | undefined }) {
-  const action = adminActionOf(approval);
-  if (action !== null) return <AdminActionCard approval={approval} action={action} requester={nameOf(people, approval.requester_id)} viewer={viewer} onUnauthorized={onUnauthorized} />;
+// ApprovalCard draws an approval a message carries. Anyone in the channel can
+// post such a message with any payload, so it is never a place to decide:
+// the deciding card, AI administrators' included, is drawn only from the
+// server's own approval objects (AdminApprovals, GET /v1/approvals), never
+// from a message (security review of #1344).
+function ApprovalCard({ approval, people }: { readonly approval: ApprovalV1; readonly people: ReadonlyMap<number, Person> }) {
   return (
     <article className="approval-card" aria-label="Approval request">
       <strong>{approval.title}</strong>
@@ -233,7 +225,7 @@ export function Message({
             {nameOnly ? null : <Linkified text={message.body} />}
             <EditedMarker message={message} channel={channel} viewer={viewer} onUnauthorized={onUnauthorized} />
           </>
-        ) : <ApprovalCard approval={approval} people={people} viewer={viewer} onUnauthorized={onUnauthorized} />)}
+        ) : <ApprovalCard approval={approval} people={people} />)}
         {attachments === null ? null : (
           <span className="attachments">
             {attachments.file_ids.map((fileId) => (

@@ -396,13 +396,28 @@ describe('the approval card', () => {
   });
   const message = (id: number, data: unknown) => ({ schema: 'conch.message.v2', id, channel_id: 7, author_id: 3, created_at: at, body: 'fallback body', payload: { schema: 'conch.approval.v1', data } });
 
+  // The deciding card is drawn from the server's approvals (GET
+  // /v1/approvals), never from a message (security review of #1344).
   async function card(state = 'pending', extra: Record<string, Route> = {}): Promise<{ calls: Call[]; card: HTMLElement }> {
-    const calls = serve(owner, { messages: [message(1, approval({ schema: 'conch.admin_action.v1', data: action }, state))], routes: extra });
+    const listed = approval({ schema: 'conch.admin_action.v1', data: action }, state);
+    const calls = serve(owner, { routes: { 'GET /v1/approvals': () => json({ approvals: [listed], read_only: [] }), ...extra } });
     window.sessionStorage.setItem(key, 'conch_owner_session_token');
     window.location.hash = '#/c/channel-a';
     render(<App origin={origin} />);
     return { calls, card: await screen.findByRole('article', { name: 'AI administrator request' }) };
   }
+
+  it('draws no deciding card from a message, whatever its payload says', async () => {
+    // Any member may post a message carrying a conch.approval.v1 payload
+    // that names a real approval id: it must never be a place to decide.
+    serve(owner, { messages: [message(1, approval({ schema: 'conch.admin_action.v1', data: action }))], routes: { 'GET /v1/approvals': () => json({ approvals: [], read_only: [] }) } });
+    window.sessionStorage.setItem(key, 'conch_owner_session_token');
+    window.location.hash = '#/c/channel-a';
+    render(<App origin={origin} />);
+    const plain = await screen.findByRole('article', { name: 'Approval request' });
+    expect(within(plain).queryAllByRole('button', { name: /Run it|Do not run/ })).toHaveLength(0);
+    expect(screen.queryByRole('article', { name: 'AI administrator request' })).toBeNull();
+  });
 
   it('shows the action, route, target, params and the agent’s reason, labelled, all as text', async () => {
     const { card: shown } = await card();
@@ -491,13 +506,22 @@ describe('the approvals inbox poll', () => {
     return asked;
   }
 
-  it('stops asking once the server refuses it', async () => {
-    const asked = await rendered(() => refusal(403, 'forbidden'));
+  it('stops asking once the server refuses a guest', async () => {
+    const asked = await rendered(() => refusal(403, 'guest_not_allowed'));
     const before = asked();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(60_000);
     });
     expect(asked()).toBe(before);
+  });
+
+  it('keeps asking after a server hiccup, so no request is hidden by one bad answer', async () => {
+    const asked = await rendered(() => refusal(500, 'internal_error'));
+    const before = asked();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_000);
+    });
+    expect(asked()).toBeGreaterThan(before);
   });
 
   it('keeps asking while the answers are good', async () => {

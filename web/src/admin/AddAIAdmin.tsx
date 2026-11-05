@@ -94,6 +94,9 @@ export function AddAIAdmin({ who, origin, onChanged, onUnauthorized }: AddAIAdmi
   const [client, setClient] = useState<Client>('json');
   const [line, setLine] = useState<string | null>(null);
   const [step, setStep] = useState('');
+  // The approval channel was found, not made (security review of #1344):
+  // it keeps the deciders it had, which the entry panel says.
+  const [found, setFound] = useState<'public' | 'private' | null>(null);
   // The entry, until Done.
   const [entry, setEntry] = useState<{ readonly label: string; readonly value: string } | null>(null);
   const live = useRef(true);
@@ -125,6 +128,7 @@ export function AddAIAdmin({ who, origin, onChanged, onUnauthorized }: AddAIAdmi
     setLine(null);
     setStep('');
     setEntry(null);
+    setFound(null);
     opener.current?.focus();
   }
 
@@ -187,7 +191,9 @@ export function AddAIAdmin({ who, origin, onChanged, onUnauthorized }: AddAIAdmi
         await fail('Reading the channels', listed);
         return;
       }
-      let channelId = listed.value.find((c) => c.name === channelName)?.id;
+      const existing = listed.value.find((c) => c.name === channelName);
+      let channelId = existing?.id;
+      setFound(existing === undefined ? null : existing.visibility === 'public' ? 'public' : 'private');
       if (channelId === undefined) {
         const created = await api.createChannel(channelName, 'private');
         if (!created.ok) {
@@ -228,7 +234,14 @@ export function AddAIAdmin({ who, origin, onChanged, onUnauthorized }: AddAIAdmi
       const url = new URL('/mcp', origin).toString();
       const text = entryText(client, entryName(serverName), url, credential.value.secret);
       onChanged();
-      if (!live.current) return;
+      if (!live.current) {
+        // The panel closed before the entry could be shown: nobody holds
+        // the credential, so the agent is disabled rather than left live
+        // (security review of #1344).
+        await api.disablePrincipal(agent.id);
+        onChanged();
+        return;
+      }
       setEntry({ label: `MCP entry for ${agentName}`, value: text });
       setStep('');
       setStage('shown');
@@ -324,6 +337,11 @@ export function AddAIAdmin({ who, origin, onChanged, onUnauthorized }: AddAIAdmi
           }}
         >
           <p className="hint">The AI administrator is ready. Put this entry in its MCP client now: it is shown once and holds its credential.</p>
+          {found === null ? null : (
+            <p className="notice">
+              {`#${channel.trim()} already existed: you and everyone who already decides there decide this agent's requests${found === 'public' ? ', and it is public, so everyone can read them' : ''}. Check who decides in its member list.`}
+            </p>
+          )}
           <SecretOnce label={entry.label} value={entry.value} onDone={reset} />
         </div>
       ) : null}

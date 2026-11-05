@@ -47,10 +47,11 @@ export function AdminApprovals({
         if (!live) return;
         if (!result.ok) {
           if (result.failure === 'unauthorized') unauthorized.current?.();
-          // A refusal (a guest, or anyone the route turns away) is the same
-          // every time: stop asking rather than add a refused, audited
-          // request every few seconds. A network failure is tried again.
-          if (result.failure === 'invalid') {
+          // A guest is refused every time: stop asking rather than add a
+          // refused, audited request every few seconds. Anything else (a
+          // server hiccup, a network failure) is tried again, so an approval
+          // is never hidden by one bad answer.
+          if (result.failure === 'invalid' && result.code === 'guest_not_allowed') {
             live = false;
             clearInterval(timer);
           }
