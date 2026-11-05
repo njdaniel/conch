@@ -2,8 +2,8 @@
 //! configuration takes; and the keyboards, whether this user can read each, and how to grant
 //! read access to one (`docs/design/conch-voice.md` §4 and §8).
 //!
-//! Input: PipeWire's list of devices (a `NodeTable`, which the caller reads and this module
-//! only formats), and the entries of `/dev/input/by-id/`. Output: text on standard output; or,
+//! Input: the platform's list of devices (a [`DeviceTable`], which the caller reads and this
+//! module only formats), and the entries of `/dev/input/by-id/`. Output: text on standard output; or,
 //! for `--json`, the audio half only, as one `conch.voice_devices.v1` document
 //! ([`device_list`]), built from the same table without looking at any keyboard.
 //! Owns nothing: **no audio device is opened**, and each keyboard is opened read-only to see
@@ -38,12 +38,88 @@ use conch_voice_api::{
     is_writable_device_name,
 };
 use conch_voice_control::DEFAULT_MAX_TRANSMIT_SECS;
-use dmn_audio::NodeTable;
 
 use crate::cli::{Environment, read_config};
 use crate::error::Error;
 use crate::keydev::{self, DeviceRule, Problem};
 use crate::secrets::{CUT_MARK, cut, one_line};
+
+/// One microphone or speaker of a [`DeviceTable`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceEntry {
+    /// The name the configuration takes (on Linux, PipeWire's `node.name`).
+    pub name: String,
+    /// What the device calls itself, for people.
+    pub description: String,
+}
+
+/// The microphones and speakers a platform has, whichever audio system it is: the neutral
+/// shape that [`audio_report`] and [`device_list`] format. Linux fills it from `dmn-audio`'s
+/// `NodeTable`; a platform with no backend has none to fill it from, and answers
+/// [`AudioError::NoBackend`](conch_voice_audio::AudioError::NoBackend) before it exists.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeviceTable {
+    /// Whether the listing finished; `false` means the lists may be incomplete.
+    pub synced: bool,
+    /// The microphones, in the order the audio system lists them.
+    pub sources: Vec<DeviceEntry>,
+    /// The speakers, in the order the audio system lists them.
+    pub sinks: Vec<DeviceEntry>,
+    /// The name of the default microphone, if the audio system says.
+    pub default_source: Option<String>,
+    /// The name of the default speakers, if the audio system says.
+    pub default_sink: Option<String>,
+}
+
+impl DeviceTable {
+    fn sources(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.sources
+            .iter()
+            .map(|device| (device.name.as_str(), device.description.as_str()))
+    }
+
+    fn sinks(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.sinks
+            .iter()
+            .map(|device| (device.name.as_str(), device.description.as_str()))
+    }
+}
+
+impl From<&Self> for DeviceTable {
+    fn from(table: &Self) -> Self {
+        table.clone()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<&dmn_audio::NodeTable> for DeviceTable {
+    fn from(table: &dmn_audio::NodeTable) -> Self {
+        let entry = |name: &str, description: &str| DeviceEntry {
+            name: name.to_owned(),
+            description: description.to_owned(),
+        };
+        Self {
+            synced: table.synced,
+            sources: table
+                .sources()
+                .map(|node| entry(&node.name, &node.description))
+                .collect(),
+            sinks: table
+                .sinks()
+                .map(|node| entry(&node.name, &node.description))
+                .collect(),
+            default_source: table.default_source.clone(),
+            default_sink: table.default_sink.clone(),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<dmn_audio::NodeTable> for DeviceTable {
+    fn from(table: dmn_audio::NodeTable) -> Self {
+        Self::from(&table)
+    }
+}
 
 /// The longest description shown; PipeWire's descriptions are a device's marketing name.
 const DESCRIPTION_CHARS: usize = 80;
@@ -116,7 +192,11 @@ fn audio_section<'a>(
 /// # Errors
 ///
 /// What the operating system said, if `out` cannot be written to.
-pub fn audio_report(table: &NodeTable, out: &mut dyn Write) -> io::Result<()> {
+pub fn audio_report<'a, T>(table: &'a T, out: &mut dyn Write) -> io::Result<()>
+where
+    DeviceTable: From<&'a T>,
+{
+    let table = DeviceTable::from(table);
     let mut lines: Vec<String> = vec![
         "Audio devices (PipeWire)".to_owned(),
         "  Name one under [audio] in the configuration file, or leave `input` and `output`"
@@ -134,9 +214,7 @@ pub fn audio_report(table: &NodeTable, out: &mut dyn Write) -> io::Result<()> {
         &mut lines,
         "Microphones",
         "input",
-        table
-            .sources()
-            .map(|node| (node.name.as_str(), node.description.as_str())),
+        table.sources(),
         table.default_source.as_deref(),
     );
     lines.push(String::new());
@@ -144,9 +222,7 @@ pub fn audio_report(table: &NodeTable, out: &mut dyn Write) -> io::Result<()> {
         &mut lines,
         "Speakers",
         "output",
-        table
-            .sinks()
-            .map(|node| (node.name.as_str(), node.description.as_str())),
+        table.sinks(),
         table.default_sink.as_deref(),
     );
     if input.is_some() || output.is_some() {
@@ -580,19 +656,14 @@ fn document_description(name: &str, description: &str) -> String {
 /// The device list as the document `conch-voice devices --json` writes it. Only reads
 /// `table`: nothing is opened, and no keyboard is looked at.
 #[must_use]
-pub fn device_list(table: &NodeTable, config: &ConfigView) -> VoiceDevicesV1 {
-    let (microphones, unshown_microphones) = device_section(
-        table
-            .sources()
-            .map(|node| (node.name.as_str(), node.description.as_str())),
-        table.default_source.as_deref(),
-    );
-    let (speakers, unshown_speakers) = device_section(
-        table
-            .sinks()
-            .map(|node| (node.name.as_str(), node.description.as_str())),
-        table.default_sink.as_deref(),
-    );
+pub fn device_list<'a, T>(table: &'a T, config: &ConfigView) -> VoiceDevicesV1
+where
+    DeviceTable: From<&'a T>,
+{
+    let table = DeviceTable::from(table);
+    let (microphones, unshown_microphones) =
+        device_section(table.sources(), table.default_source.as_deref());
+    let (speakers, unshown_speakers) = device_section(table.sinks(), table.default_sink.as_deref());
     VoiceDevicesV1 {
         schema: VOICE_DEVICES_SCHEMA_V1.to_owned(),
         pipewire: VoiceDevicesPipeWire::Ok,
@@ -642,7 +713,7 @@ pub fn write_device_list(list: &VoiceDevicesV1, out: &mut dyn Write) -> io::Resu
 
 #[cfg(test)]
 mod tests {
-    use dmn_audio::RegistryEvent;
+    use dmn_audio::{NodeTable, RegistryEvent};
 
     use super::*;
 
