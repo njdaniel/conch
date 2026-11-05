@@ -158,6 +158,10 @@ The agent waiting on it gets its answer. Cancelling it at archive would decide f
 
 Runs and interventions follow the same rule: no new run or intervention in an archived channel, and the ones already going finish. Restore allows everything again.
 
+## 6b. Administrator approvals (issue #1326)
+
+An approval raised for an AI administrator's gated action carries the registered payload `conch.admin_action.v1` (`pkg/schema/admin_action.go`), which binds the action, its target and its canonical params to the agent that asked. Only the admin door (`POST /v1/admin/actions`, and the `submit_admin_action` MCP tool over it) may write one: the approval create routes (REST and `request_approval`) refuse that payload name, so an agent cannot forge a card the server would run. The options are the usual approve and reject pair, the approve one with id `run`. Resolving the approval runs nothing. The requester runs it once after it resolves approved, with `POST /v1/admin/actions/{id}/run` (the `run_approved_action` tool), within the run window; a second run, a run before approval and a run on a changed target are refused. The chain gains `admin_action_requested` after `approval_created` and `admin_action_ran` last. Design: [ai-administrators.md](ai-administrators.md) section 3.5.
+
 ## 7. Explicitly out of scope (for now)
 
 - Delegation ("decide on my behalf"), approval templates, recurring approvals — P2+ if ever, new design doc.
