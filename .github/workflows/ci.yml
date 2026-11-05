@@ -853,9 +853,9 @@ jobs:
     # On GitHub-hosted runners (#1318), or on the self-hosted ones for this
     # repository's own branches when the variable HEAVY_RUNNER is "local".
     runs-on: ${{ vars.HEAVY_RUNNER == 'local' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
-    # About twice a normal run (6 to 9 minutes), so a stall fails it early
-    # rather than holding main's status for half an hour (#1352).
-    timeout-minutes: 15
+    # About three times a warm run (5 to 9 minutes): room for a cold run
+    # whose packages come slowly (#1352), still well short of half an hour.
+    timeout-minutes: 25
     env:
       CI: "true"
       # Labels this run's LiveKit container, so the clean-up step below can
