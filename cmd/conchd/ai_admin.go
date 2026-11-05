@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/njdaniel/conch/internal/server"
@@ -167,7 +169,10 @@ func mcpSnippet(client, entryName, origin, token string) (string, error) {
 		}
 		return string(b) + "\n", nil
 	case "claude-code":
-		return fmt.Sprintf("claude mcp add --transport http --scope user %s %s \\\n  --header \"Authorization: %s\"\n", entryName, url, auth), nil
+		// The URL is single-quoted: whatever the origin holds, the shell reads
+		// it as one word. The entry name is [A-Za-z0-9_-] and the token
+		// base64url, both safe as they are.
+		return fmt.Sprintf("claude mcp add --transport http --scope user %s '%s' \\\n  --header \"Authorization: %s\"\n", entryName, strings.ReplaceAll(url, "'", `'\''`), auth), nil
 	default:
 		return "", fmt.Errorf("--client must be json or claude-code, got %q", client)
 	}
@@ -175,6 +180,10 @@ func mcpSnippet(client, entryName, origin, token string) (string, error) {
 
 func runAIAdminCreate(args []string, stdout, stderr io.Writer) error {
 	const cmd = "ai-admin create"
+	// A broken pipe on stdout must come back as an error, not kill the
+	// process between the credential and its printing: the rollback below
+	// then disables the agent (security review of #1341).
+	signal.Ignore(syscall.SIGPIPE)
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dataDir := fs.String("data", os.Getenv("CONCHD_DATA"), "directory for the SQLite database")
@@ -258,8 +267,10 @@ func runAIAdminCreate(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("%s: %w; nothing changed", cmd, err)
 	}
 
-	if err := refuseUnfinishedRestore(cmd, *dataDir); err != nil {
-		return err
+	if *dataDir != "" {
+		if err := refuseUnfinishedRestore(cmd, *dataDir); err != nil {
+			return err
+		}
 	}
 	ctx := context.Background()
 	st, err := openExisting(ctx, cmd, *dataDir)
@@ -283,6 +294,23 @@ func runAIAdminCreate(args []string, stdout, stderr io.Writer) error {
 		_, _ = fmt.Fprintf(stderr, "note: channel %q is not private; the agent's approvals and their reasons are read by everyone who can read it\n", *channelName)
 	case err != nil && !errors.Is(err, store.ErrNotFound):
 		return fmt.Errorf("%s: %w", cmd, err)
+	}
+	// An existing channel keeps the deciders it has: say who they are, so
+	// nobody decides the agent's approvals unnamed (security review of #1341).
+	if err == nil {
+		members, err := st.ListChannelMembers(ctx, ch.ID)
+		if err != nil {
+			return fmt.Errorf("%s: %w", cmd, err)
+		}
+		seated := map[int64]bool{}
+		for _, id := range seats {
+			seated[id] = true
+		}
+		for _, m := range members {
+			if m.CanDecide && !seated[m.PrincipalID] && m.Kind == store.PrincipalHuman {
+				_, _ = fmt.Fprintf(stderr, "note: %q (principal %d) already decides in channel %q and will decide the agent's approvals too\n", m.Name, m.PrincipalID, *channelName)
+			}
+		}
 	}
 	snippet, agentID, err := aiAdminCreate(ctx, st, aiAdminPlan{
 		cmd: cmd, name: name, channelName: *channelName, channel: ch, req: req, seats: seats,

@@ -239,7 +239,7 @@ func TestAIAdminCreateClientFormats(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSuffix(stdout, "\n"), "\n")
 	if len(lines) != 2 ||
-		!strings.HasPrefix(lines[0], "claude mcp add --transport http --scope user conch_home "+aiOrigin+"/mcp \\") ||
+		!strings.HasPrefix(lines[0], "claude mcp add --transport http --scope user conch_home '"+aiOrigin+"/mcp' \\") ||
 		!strings.HasPrefix(lines[1], `  --header "Authorization: Bearer `+schema.CredentialTokenPrefix) || !strings.HasSuffix(lines[1], `"`) {
 		t.Errorf("stdout = %q", stdout)
 	}
@@ -538,5 +538,69 @@ func TestAIAdminCreateRefusesATracedShell(t *testing.T) {
 	err := runAIAdmin([]string{"create", "--data", t.TempDir(), "--origin", "https://conch.example", "helper"}, &stdout, &stderr)
 	if err == nil || !strings.Contains(err.Error(), "set -x") || stdout.Len() != 0 {
 		t.Fatalf("create under xtrace: err = %v, stdout %q", err, stdout.String())
+	}
+}
+
+// failWriter fails every write, as a stdout whose reader went away does once
+// SIGPIPE is ignored.
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+// TestAIAdminCreateUnprintedEntryDisables (security review of #1341): when
+// the entry cannot be written, the agent is disabled, so no live credential
+// is left that nobody holds.
+func TestAIAdminCreateUnprintedEntryDisables(t *testing.T) {
+	w := newAIWorld(t, true)
+	var stderr strings.Builder
+	err := runAIAdmin([]string{"create", "--data", w.dir, "--origin", aiOrigin, "robo"}, failWriter{}, &stderr)
+	if err == nil || !strings.Contains(err.Error(), "disabled again") {
+		t.Fatalf("create with a broken stdout: err = %v", err)
+	}
+	p, perr := w.st.PrincipalByID(context.Background(), w.agentID(t, "robo"))
+	if perr != nil || p.DisabledAt == nil {
+		t.Fatalf("the agent after an unprinted entry = %+v, %v; want disabled", p, perr)
+	}
+	if strings.Contains(err.Error()+stderr.String(), "conch_") {
+		t.Error("a token is in the error or on stderr")
+	}
+}
+
+// TestAIAdminCreateNamesExistingDeciders: an existing approval channel's
+// deciders are named on stderr.
+func TestAIAdminCreateNamesExistingDeciders(t *testing.T) {
+	w := newAIWorld(t, true)
+	ctx := context.Background()
+	wren, err := w.st.CreatePrincipal(ctx, store.PrincipalHuman, "wren")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := w.st.CreateChannel(ctx, "ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.st.AddChannelMember(ctx, "system", ch.ID, wren.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := w.create(t, "--channel", "ops", "robo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, `"wren"`) || !strings.Contains(stderr, "will decide the agent's approvals") {
+		t.Errorf("stderr does not name wren as a decider:\n%s", stderr)
+	}
+}
+
+// TestParseSetupOriginRefusesShellCharacters (security review of #1341).
+func TestParseSetupOriginRefusesShellCharacters(t *testing.T) {
+	for _, bad := range []string{"https://$(id).example", "https://a;id.example", "https://a&b.example", "https://a'b.example", "https://a\"b.example", "https://host:99999", "https://host:0"} {
+		if _, err := parseSetupOrigin(bad); err == nil {
+			t.Errorf("parseSetupOrigin(%q) accepted it", bad)
+		}
+	}
+	for _, good := range []string{"https://alpha.gankbears.com", "https://localhost:8443", "https://192.0.2.1", "https://[2001:db8::1]:8443"} {
+		if _, err := parseSetupOrigin(good); err != nil {
+			t.Errorf("parseSetupOrigin(%q): %v", good, err)
+		}
 	}
 }
