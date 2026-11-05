@@ -484,6 +484,10 @@ func (s *Server) guard(rt route) http.Handler {
 				writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 				return
 			}
+			if dispatchedChannelChanged(r, channel.ID) {
+				writeTargetChanged(w)
+				return
+			}
 			// The operator branch is a holder of manage_channels (design §7.2):
 			// an operator without it is a member here, so a channel it is
 			// not in is the uniform 404 and one it does not manage a 403, as

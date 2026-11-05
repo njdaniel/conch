@@ -31,6 +31,25 @@ type adminDispatch struct {
 	pattern    string
 	permission schema.Permission
 	approvalID int64
+	// channelID is the target channel of a channel action, 0 otherwise.
+	// Routes that name the channel by {channel} look it up by name; the
+	// binding is the id (design §3.5.2), so a dispatched request whose name
+	// now resolves to another channel is refused target_changed
+	// (dispatchedChannelChanged; security review of #1339).
+	channelID int64
+}
+
+// dispatchedChannelChanged reports whether r is the door's dispatch for a
+// target channel other than channelID, the channel its {channel} name
+// resolved to now: a rename raced the run.
+func dispatchedChannelChanged(r *http.Request, channelID int64) bool {
+	d, ok := dispatchedHere(r)
+	return ok && d.channelID != 0 && d.channelID != channelID
+}
+
+// writeTargetChanged answers a dispatched request whose target moved.
+func writeTargetChanged(w http.ResponseWriter) {
+	writeError(w, http.StatusConflict, schema.ErrorCodeTargetChanged, "the target channel is not the one the action names")
 }
 
 // withAdminDispatch marks ctx as dispatched by the door for d. It also marks
@@ -92,6 +111,8 @@ type adminRequest struct {
 	path   string
 	query  string
 	body   []byte
+	// channelID is the target channel's id, bound through the dispatch.
+	channelID int64
 }
 
 // route is the display form of the request, "POST /v1/principals/7/disable".
@@ -122,6 +143,7 @@ func (s *Server) dispatch(ctx context.Context, entry adminCatalogEntry, approval
 		pattern:    entry.pattern,
 		permission: entry.permission,
 		approvalID: approvalID,
+		channelID:  req.channelID,
 	})
 	hr, err := http.NewRequestWithContext(dctx, req.method, target, body)
 	if err != nil {

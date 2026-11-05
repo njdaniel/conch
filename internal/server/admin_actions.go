@@ -194,6 +194,23 @@ func fillPath(pattern string, target *schema.AdminTargetV1, member int64) (metho
 	}
 }
 
+// canonicalJSON re-encodes a JSON value: keys sorted, duplicates collapsed to
+// the last (as the route's decoder takes them), numbers kept as written. What
+// the decider is shown, what is stored and what runs are these same bytes
+// (security review of #1339).
+func canonicalJSON(raw json.RawMessage) (json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	if dec.More() {
+		return nil, errors.New("trailing data")
+	}
+	return json.Marshal(v)
+}
+
 func emptyParams(p json.RawMessage) bool {
 	t := bytes.TrimSpace(p)
 	return len(t) == 0 || bytes.Equal(t, []byte("{}")) || bytes.Equal(t, []byte("null"))
@@ -248,8 +265,11 @@ func passBody(def string) adminBuilder {
 			if _, err := paramsObject(in.params); err != nil {
 				return adminRequest{}, adminTouches{}, badParams(e.action, "params must be a JSON object")
 			}
-			body = append([]byte(nil), in.params...)
-			stored = in.params
+			canon, err := canonicalJSON(in.params)
+			if err != nil {
+				return adminRequest{}, adminTouches{}, badParams(e.action, "params must be a JSON object")
+			}
+			body, stored = canon, canon
 		}
 		if len(body) == 0 {
 			body = nil
@@ -314,7 +334,7 @@ func queryParams(allowed ...string) adminBuilder {
 		method, path := fillPath(e.pattern, in.target, 0)
 		var stored json.RawMessage
 		if len(m) > 0 {
-			stored = in.params
+			stored, _ = json.Marshal(m)
 		}
 		return adminRequest{method: method, path: path, query: q.Encode()}, adminTouches{params: stored}, nil
 	}
@@ -338,7 +358,11 @@ func onlyFields(fields ...string) adminBuilder {
 			}
 		}
 		method, path := fillPath(e.pattern, in.target, 0)
-		return adminRequest{method: method, path: path, body: append([]byte(nil), in.params...)}, adminTouches{channels: touchedIf(e, in), params: in.params}, nil
+		canon, err := json.Marshal(m)
+		if err != nil {
+			return adminRequest{}, adminTouches{}, badParams(e.action, "params must be a JSON object")
+		}
+		return adminRequest{method: method, path: path, body: canon}, adminTouches{channels: touchedIf(e, in), params: canon}, nil
 	}
 }
 
@@ -524,5 +548,9 @@ func buildJoinSettings(ctx context.Context, s *Server, in adminBuildInput) (admi
 			touched = append(touched, ch.ID)
 		}
 	}
-	return adminRequest{method: http.MethodPut, path: "/v1/join/settings", body: append([]byte(nil), in.params...)}, adminTouches{channels: touched, params: in.params}, nil
+	canon, err := canonicalJSON(in.params)
+	if err != nil {
+		return adminRequest{}, adminTouches{}, badParams(e.action, "params must be a PutJoinSettingsRequestV1")
+	}
+	return adminRequest{method: http.MethodPut, path: "/v1/join/settings", body: canon}, adminTouches{channels: touched, params: canon}, nil
 }

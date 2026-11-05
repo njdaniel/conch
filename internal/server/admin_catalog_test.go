@@ -202,3 +202,71 @@ func TestDispatchRoutesToItsCatalogRoute(t *testing.T) {
 	}
 	_ = store.PrincipalAgent
 }
+
+// TestDispatchBindsTheChannelByID (security review of #1339): a member action
+// names its channel by {channel} in the path, but the binding is the id. If a
+// rename moves the name to another channel between the run's check and the
+// dispatch, the route refuses target_changed instead of acting on the other.
+func TestDispatchBindsTheChannelByID(t *testing.T) {
+	ctx := context.Background()
+	d := newParityFixture(t)
+	entry := adminCatalogByAction[schema.AdminActionRemoveChannelMember]
+	target := &schema.AdminTargetV1{Kind: schema.AdminTargetChannel, ID: d.side.ID}
+	b, refusal := d.srv.buildAdminRequest(store.WithAdminDispatch(ctx), adminCaller{p: d.opal}, entry, target, json.RawMessage(fmt.Sprintf(`{"principal_id":%d}`, d.alice.ID)))
+	if refusal != nil {
+		t.Fatal(refusal)
+	}
+	if b.req.channelID != d.side.ID {
+		t.Fatalf("built request binds channel %d, want %d", b.req.channelID, d.side.ID)
+	}
+	// side becomes side-old; general takes the name side.
+	for _, r := range []struct{ id, from, to string }{
+		{fmt.Sprint(d.side.ID), "side", "side-old"},
+		{fmt.Sprint(d.general.ID), "general", "side"},
+	} {
+		if rec := d.do(t, "PUT", "/v1/channels/"+r.id+"/name", d.rootTok, fmt.Sprintf(`{"name":%q,"from":%q}`, r.to, r.from)); rec.Code != http.StatusOK {
+			t.Fatalf("rename %s = %d %s", r.from, rec.Code, rec.Body)
+		}
+	}
+	_, cred, err := d.srv.store.ResolveRequestCredential(ctx, d.opalTok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dctx := withRequestCredential(withCredentialID(withCaller(ctx, d.opal), cred.ID), cred)
+	out, err := d.srv.dispatch(dctx, entry, 0, b.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.status != http.StatusConflict || out.code != schema.ErrorCodeTargetChanged {
+		t.Fatalf("dispatch after the rename = %d %s %s, want 409 target_changed", out.status, out.code, out.body)
+	}
+	if ok, err := d.srv.store.IsChannelMember(ctx, d.general.ID, d.alice.ID); err != nil || !ok {
+		t.Errorf("alice in general (now named side) = %v, %v; the action reached the other channel", ok, err)
+	}
+}
+
+// TestAdminParamsAreCanonical (security review of #1339): what is stored,
+// shown and dispatched are the same canonical bytes, so a duplicate key
+// cannot make the decider's card read otherwise than what runs.
+func TestAdminParamsAreCanonical(t *testing.T) {
+	ctx := context.Background()
+	d := newParityFixture(t)
+	for _, tc := range []struct {
+		action schema.AdminAction
+		target *schema.AdminTargetV1
+		params string
+		want   string
+	}{
+		{schema.AdminActionSetChannelVisibility, &schema.AdminTargetV1{Kind: schema.AdminTargetChannel, ID: d.side.ID}, `{"visibility":"private","visibility":"public"}`, `{"visibility":"public"}`},
+		{schema.AdminActionSetPermissions, nil, `{"revision":2,"revision":3}`, `{"revision":3}`},
+		{schema.AdminActionSetJoinSettings, nil, `{"joining_paused":false,"joining_paused":true}`, `{"joining_paused":true}`},
+	} {
+		b, refusal := d.srv.buildAdminRequest(store.WithAdminDispatch(ctx), adminCaller{p: d.opal}, adminCatalogByAction[tc.action], tc.target, json.RawMessage(tc.params))
+		if refusal != nil {
+			t.Fatalf("%s: %v", tc.action, refusal)
+		}
+		if string(b.params) != tc.want || string(b.req.body) != tc.want {
+			t.Errorf("%s: stored %s, dispatched %s; want both %s", tc.action, b.params, b.req.body, tc.want)
+		}
+	}
+}

@@ -243,6 +243,9 @@ func (s *Store) CreateApproval(ctx context.Context, p ApprovalParams) (Approval,
 		if (p.Payload != nil && p.Payload.Schema == schema.AdminActionV1Name) != (p.AdminAction != nil) {
 			return ErrAdminPayloadReserved
 		}
+		if p.AdminAction != nil && p.AdminAction.Action.AgentID != p.RequesterID {
+			return ErrAdminPayloadReserved
+		}
 		if p.AdminAction != nil {
 			if err := checkAdminActionBoundsTx(ctx, tx, p.AdminAction); err != nil {
 				return err

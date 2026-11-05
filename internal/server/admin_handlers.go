@@ -181,6 +181,10 @@ func (s *Server) submitAdminAction(ctx context.Context, p store.Principal, req s
 		}
 		return schema.AdminActionResultV1{}, 0, refusal
 	}
+	// The budget is spent here, after every check of the door's own, and
+	// before the approval's bounds (max_pending, the duplicate rule), which
+	// are decided in the approval's transaction: a loop that keeps hitting
+	// them is slowed by the budget too.
 	if refusal := s.adminSpend(ctx, c, subject); refusal != nil {
 		return schema.AdminActionResultV1{}, 0, refusal
 	}
@@ -247,6 +251,9 @@ func (s *Server) buildAdminRequest(ctx context.Context, c adminCaller, entry adm
 		return b, refusal
 	}
 	b.req, b.params = built, touches.params
+	if b.target != nil && b.target.Kind == schema.AdminTargetChannel {
+		b.req.channelID = b.target.ID
+	}
 	if touches.member != 0 {
 		name, err := s.store.AdminTargetName(ctx, schema.AdminTargetV1{Kind: schema.AdminTargetPrincipal, ID: touches.member})
 		if errors.Is(err, store.ErrNotFound) {
@@ -529,11 +536,16 @@ func (s *Server) adminCatalogFor(ctx context.Context, p store.Principal, subject
 	}
 	dctx := store.WithAdminDispatch(ctx)
 	out := schema.AdminCatalogResponseV1{Actions: make([]schema.AdminCatalogEntryV1, 0, len(adminCatalog))}
+	holds := map[schema.Permission]bool{}
 	for _, e := range adminCatalog {
-		held, err := s.can(dctx, p, e.permission)
-		if err != nil {
-			slog.ErrorContext(ctx, "admin door: permission check failed", "error", err)
-			return schema.AdminCatalogResponseV1{}, doorRefuse(http.StatusInternalServerError, errInternal.Code, errInternal.Message)
+		held, asked := holds[e.permission]
+		if !asked {
+			var err error
+			if held, err = s.can(dctx, p, e.permission); err != nil {
+				slog.ErrorContext(ctx, "admin door: permission check failed", "error", err)
+				return schema.AdminCatalogResponseV1{}, doorRefuse(http.StatusInternalServerError, errInternal.Code, errInternal.Message)
+			}
+			holds[e.permission] = held
 		}
 		out.Actions = append(out.Actions, schema.AdminCatalogEntryV1{
 			Action: e.action, Route: e.pattern, Permission: e.permission, Gate: e.gate,

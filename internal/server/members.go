@@ -105,6 +105,10 @@ func (s *Server) channelMembersGate(w http.ResponseWriter, r *http.Request) (cha
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return channel, false, false
 	}
+	if dispatchedChannelChanged(r, channel.ID) {
+		writeTargetChanged(w)
+		return channel, false, false
+	}
 	caller, authed := callerFrom(ctx)
 	// A caller without manage_channels sees only a channel it is in; any
 	// other gets the uniform channel-not-found (design §7.3).
