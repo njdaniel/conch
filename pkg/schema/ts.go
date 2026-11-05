@@ -382,6 +382,11 @@ var TSTypes = []TSType{
 	{Value: PermissionChangeV1{}},
 	{Value: PutPermissionsRequestV1{}, Family: "put-permissions-request-v1"},
 	{Value: PermissionsChangedV1{}, Family: "permissions-changed-v1", Schema: PermissionsChangedSchemaV1},
+	// What an operator issued to others, on disable and on the owner's
+	// revoke-all of it (issue #1024, ADR-014 O13); the demotion answer is
+	// RoleChangeResponseV1 above, with the same optional list.
+	{Value: DisablePrincipalResponseV1{}, Family: "disable-principal-response-v1"},
+	{Value: RevokeIssuedResponseV1{}, Family: "revoke-issued-response-v1"},
 
 	// The community model (ADR-013, issue #978,
 	// docs/design/community-model.md §3): channels a member creates and

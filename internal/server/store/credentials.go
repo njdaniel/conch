@@ -99,16 +99,20 @@ func nullableMillis(t *time.Time) any {
 // moves to renew past each day's first use. A renewable credential must have
 // an expiry, which the table enforces. The row records the principal's
 // authentication generation as it is in this transaction (issue #707), so a
-// credential lives only until the generation next moves.
-func insertCredentialTx(ctx context.Context, tx execer, principalID int64, label, token string, now time.Time, expiresAt *time.Time, renew time.Duration) (schema.CredentialV1, error) {
+// credential lives only until the generation next moves. issuedBy is the
+// principal issuing it (issue #1024): the operator creating or rotating it,
+// the person signing in, or 0 when no principal is (a bootstrap, a link or
+// invite redemption), stored NULL. It is what the credential_created or
+// credential_rotated row's actor says, so the column and the trail agree.
+func insertCredentialTx(ctx context.Context, tx execer, principalID int64, label, token string, now time.Time, expiresAt *time.Time, renew time.Duration, issuedBy int64) (schema.CredentialV1, error) {
 	var renewMs any
 	if renew > 0 {
 		renewMs = renew.Milliseconds()
 	}
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO credentials (principal_id, label, token_hash, created_at, expires_at, renew_ms, auth_generation)
-		 SELECT ?, ?, ?, ?, ?, ?, auth_generation FROM principals WHERE id = ?`,
-		principalID, label, hashCredentialToken(token), now.UnixMilli(), nullableMillis(expiresAt), renewMs, principalID)
+		`INSERT INTO credentials (principal_id, label, token_hash, created_at, expires_at, renew_ms, auth_generation, issued_by)
+		 SELECT ?, ?, ?, ?, ?, ?, auth_generation, ? FROM principals WHERE id = ?`,
+		principalID, label, hashCredentialToken(token), now.UnixMilli(), nullableMillis(expiresAt), renewMs, nullableID(issuedBy), principalID)
 	if err != nil {
 		return schema.CredentialV1{}, fmt.Errorf("store: insert credential: %w", err)
 	}
@@ -204,7 +208,7 @@ func (s *Store) createCredential(ctx context.Context, actor string, principalID 
 		if (Principal{GuestState: schema.GuestState(guest.String)}).guestTarget() {
 			return ErrGuestNotAllowed
 		}
-		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, renew)
+		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, renew, issuerOf(actor))
 		if err != nil {
 			return err
 		}
@@ -370,7 +374,9 @@ func (s *Store) RotateCredential(ctx context.Context, actor string, credentialID
 		} else if n != 1 {
 			return ErrCredentialRevoked
 		}
-		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, time.Duration(renewMs.Int64)*time.Millisecond)
+		// The replacement is issued by whoever rotates it, not by the
+		// maker of the one it replaces (issue #1024).
+		c, err := insertCredentialTx(ctx, tx, principalID, label, token, now, exp, time.Duration(renewMs.Int64)*time.Millisecond, issuerOf(actor))
 		if err != nil {
 			return err
 		}

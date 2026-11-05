@@ -666,7 +666,7 @@ func TestVoiceImmediateRemoval(t *testing.T) {
 		// audited is whether voice_participant_removed names the reason.
 	}{
 		{"member removed", "DELETE", func(f *presenceFixture) string { return fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]) }, 204, []string{"ops"}, voiceReasonMemberRemoved},
-		{"principal disabled", "POST", func(f *presenceFixture) string { return fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]) }, 204, []string{"ops", "ops2"}, voiceReasonPrincipalOff},
+		{"principal disabled", "POST", func(f *presenceFixture) string { return fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]) }, 200, []string{"ops", "ops2"}, voiceReasonPrincipalOff},
 	}
 	for _, tt := range tests {
 		for _, failing := range []bool{false, true} {
@@ -1549,7 +1549,7 @@ func TestVoiceDisableWhenTheRoomListCannotBeRead(t *testing.T) {
 	}
 	f.srv.voice.memberRooms = func(context.Context, int64) ([]store.VoiceRoom, error) { return nil, errors.New("store unavailable") }
 	before := f.lk.count("RemoveParticipant")
-	if code := f.doOrdered(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]), f.rootTok); code != 204 {
+	if code := f.doOrdered(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]), f.rootTok); code != 200 {
 		t.Fatalf("disable = %d: a store failure in the voice hook must not fail the request", code)
 	}
 	if got := f.who(t, f.ops); got != "ann2" {
@@ -1722,8 +1722,9 @@ func TestVoiceRemovalHookReadIsBounded(t *testing.T) {
 				if !read.bounded || read.budget > limit || (!stall && read.budget <= 0) {
 					t.Errorf("the read's context: deadline set = %v, %v away; want one at most %v away", read.bounded, read.budget, limit)
 				}
-				if code != http.StatusNoContent {
-					t.Fatalf("status = %d, want 204: the voice hook must not fail the request", code)
+				// A removal answers 204, a disable 200 (issue #1024).
+				if code != http.StatusNoContent && code != http.StatusOK {
+					t.Fatalf("status = %d, want 2xx: the voice hook must not fail the request", code)
 				}
 				logs := f.logs.buf.String()
 				// The buffer is not printed on failure: the point of one of
@@ -2100,7 +2101,7 @@ func voiceTriggers() []voiceTrigger {
 		}, 204, []string{"ops"}, store.VoiceRotateMemberRemoved},
 		{"principal disabled", "POST", func(t *testing.T, f *presenceFixture, who string) string {
 			return fmt.Sprintf("/v1/principals/%d/disable", f.ids[who])
-		}, 204, []string{"ops", "ops2"}, store.VoiceRotatePrincipalDisabled},
+		}, 200, []string{"ops", "ops2"}, store.VoiceRotatePrincipalDisabled},
 		{"all credentials revoked", "POST", func(t *testing.T, f *presenceFixture, who string) string {
 			return fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", f.ids[who])
 		}, 200, []string{"ops", "ops2"}, store.VoiceRotateRevoked},

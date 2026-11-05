@@ -923,7 +923,7 @@ func TestReauthProofInvalidation(t *testing.T) {
 			}
 		}},
 		{"a disable", func(t *testing.T, f *recoveryFixture, _ int64, _, _ string) {
-			if rec := f.send(t, "POST", f.disablePath(f.alice.ID), f.rootTok, "", ""); rec.Code != http.StatusNoContent {
+			if rec := f.send(t, "POST", f.disablePath(f.alice.ID), f.rootTok, "", ""); rec.Code != http.StatusOK {
 				t.Fatalf("disable = %d %s", rec.Code, rec.Body)
 			}
 		}},

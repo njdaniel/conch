@@ -652,7 +652,8 @@ func TestVoiceShareEndsWithRotation(t *testing.T) {
 			f.publish(room, "ann", true, true)
 			f.at(500)
 			f.pass(t)
-			if code := f.doOrdered(t, tt.method, fmt.Sprintf(tt.path, f.ids["ann"]), f.rootTok); code != http.StatusNoContent {
+			// A removal answers 204, a disable 200 (issue #1024).
+			if code := f.doOrdered(t, tt.method, fmt.Sprintf(tt.path, f.ids["ann"]), f.rootTok); code != http.StatusNoContent && code != http.StatusOK {
 				t.Fatalf("status = %d", code)
 			}
 			want := []string{"ann started audio=true", "ann stopped principal=ann reason=rotated"}
