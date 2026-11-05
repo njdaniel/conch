@@ -4,6 +4,8 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -50,6 +52,47 @@ func TestBuildCLIWith(t *testing.T) {
 				if !strings.Contains(out, s) {
 					t.Errorf("output lacks %q:\n%s", s, out)
 				}
+			}
+		})
+	}
+}
+
+func TestGoVCSRoot(t *testing.T) {
+	tmp := t.TempDir()
+	mk := func(rel string, file bool) {
+		p := filepath.Join(tmp, rel)
+		if file {
+			if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(p, []byte("gitdir: /elsewhere\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		if err := os.MkdirAll(p, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("main/.git", false)
+	mk("main/pkg/sub", false)
+	mk("main/.claude/worktrees/wt/.git", true) // linked worktree nested in a checkout
+	mk("main/.claude/worktrees/wt/cmd/conch", false)
+	mk("loose/wt/.git", true) // linked worktree outside any checkout
+	mk("loose/wt/cmd", false)
+	tests := []struct{ name, dir, want string }{
+		{"plain checkout", "main/pkg/sub", "main"},
+		{"nested linked worktree: go uses the enclosing checkout", "main/.claude/worktrees/wt/cmd/conch", "main"},
+		{"linked worktree outside any checkout: go finds nothing", "loose/wt/cmd", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			want := ""
+			if tc.want != "" {
+				want = filepath.Join(tmp, tc.want)
+			}
+			if got := goVCSRoot(filepath.Join(tmp, tc.dir)); got != want {
+				t.Errorf("goVCSRoot = %q, want %q", got, want)
 			}
 		})
 	}
