@@ -92,6 +92,9 @@ type ApprovalParams struct {
 	GraceDeadline time.Time
 	Quorum        int
 	Escalation    *schema.EscalationTarget
+	// AdminAction, set only by the admin door (issue #1330), makes this a
+	// gated admin action's approval: see AdminActionRequest.
+	AdminAction *AdminActionRequest
 }
 
 // execer is the subset of *sql.Conn / *sql.DB used inside a transaction body.
@@ -234,6 +237,17 @@ func (s *Store) CreateApproval(ctx context.Context, p ApprovalParams) (Approval,
 		if err := channelNotArchivedTx(ctx, tx, p.ChannelID); err != nil {
 			return err
 		}
+		// The admin door's payload is the door's alone (F1 of #1328's
+		// review): an approval carrying it without the door's request is
+		// refused here, whatever route asked.
+		if (p.Payload != nil && p.Payload.Schema == schema.AdminActionV1Name) != (p.AdminAction != nil) {
+			return ErrAdminPayloadReserved
+		}
+		if p.AdminAction != nil {
+			if err := checkAdminActionBoundsTx(ctx, tx, p.AdminAction); err != nil {
+				return err
+			}
+		}
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO approvals (requester_id, channel_id, title, body,
 			   payload_schema, payload_json, options_json,
@@ -254,10 +268,20 @@ func (s *Store) CreateApproval(ctx context.Context, p ApprovalParams) (Approval,
 			return fmt.Errorf("store: insert approval: %w", err)
 		}
 		a.ID = id
-		return appendAuditEventTx(ctx, tx,
+		if err := appendAuditEventTx(ctx, tx,
 			principalActor(p.RequesterID), AuditApprovalCreated, approvalSubject(id),
 			fmt.Sprintf("title=%q deadline=%s quorum=%d", p.Title, schema.NewTimestamp(a.Deadline).Time().Format(time.RFC3339), p.Quorum),
-			now)
+			now); err != nil {
+			return err
+		}
+		// The door's row, in the approval's own transaction: it is how the
+		// run proves this approval came from the door (#1330, F1 of #1328's
+		// review), and admin_action_requested follows approval_created in
+		// the trail (ai-administrators §3.5.1).
+		if p.AdminAction != nil {
+			return insertAdminActionTx(ctx, tx, id, p.AdminAction, now)
+		}
+		return nil
 	})
 	if err != nil {
 		return Approval{}, err

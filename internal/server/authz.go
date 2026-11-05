@@ -796,9 +796,17 @@ func (s *Server) membersOnly(next http.Handler) http.Handler {
 }
 
 // humansOnlyBecause is humansOnly with the audit reason and the message of the
-// refusal.
+// refusal. The admin door's dispatch of the catalog route this wraps is let
+// through (ai-administrators §3.4): the agent is then judged by the route's
+// class and the handler like an operator, with its grant as authority. No
+// network request carries the mark, and the mark admits only the route it
+// names.
 func (s *Server) humansOnlyBecause(reason, message string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, dispatched := dispatchedHere(r); dispatched {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if caller, ok := callerFrom(r.Context()); ok && caller.Kind == store.PrincipalAgent {
 			subject := r.Pattern
 			if subject == "" {

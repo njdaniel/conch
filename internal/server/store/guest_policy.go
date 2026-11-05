@@ -390,7 +390,7 @@ func admittingOpenChannelsTx(ctx context.Context, tx execer) (kept, dropped []sc
 	for _, l := range all {
 		ok := !l.addedBy.Valid
 		if !ok {
-			if ok, err = permittedTx(ctx, tx, l.addedBy.Int64, schema.PermManageChannels); err != nil {
+			if ok, err = standingPermittedTx(ctx, tx, l.addedBy.Int64, schema.PermManageChannels); err != nil {
 				return nil, nil, err
 			}
 		}

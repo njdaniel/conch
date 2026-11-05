@@ -222,6 +222,14 @@ func (s *Server) routeTable() []route {
 		// change_server_settings, and the operator column an owner (checked in
 		// the handler and the store). See permissions.go.
 		rt("GET /v1/permissions", accessOperator, hf(s.handleGetPermissions)),
+		// The admin door (issue #1326, ai-administrators §3.4): humans and
+		// agents alike. What it may run is the catalog's, each action
+		// judged by its own route's class, handler and store once
+		// dispatched; its own checks are the caller's grant, the gate and
+		// the one-shot run.
+		rt("GET /v1/admin/actions", accessAuthenticated, s.membersOnly(hf(s.handleAdminCatalog))),
+		rt("POST /v1/admin/actions", accessAuthenticated, s.membersOnly(hf(s.handleSubmitAdminAction))),
+		rt("POST /v1/admin/actions/{approval_id}/run", accessAuthenticated, s.membersOnly(hf(s.handleRunAdminAction))),
 		rt("PUT /v1/permissions", accessPermission, hf(s.handlePutPermissions)).needs(schema.PermChangeServerSettings),
 		rt("POST /v1/hooks", accessPermission, hf(s.handleCreateHook)).needs(schema.PermActAsMembers),
 		rt("GET /v1/hooks", accessPermission, hf(s.handleListHooks)).needs(schema.PermManageMembers),

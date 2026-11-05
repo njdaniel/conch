@@ -420,6 +420,9 @@ func (s *Server) requestApprovalMCP(ctx context.Context, scope *agentScope, in m
 	if err := req.Validate(); err != nil {
 		return schema.RequestApprovalOutput{}, &schema.Error{Code: "invalid_request", Message: err.Error()}
 	}
+	if adminPayloadAuthored(req.Payload) {
+		return schema.RequestApprovalOutput{}, &schema.Error{Code: "invalid_request", Message: errAdminPayloadAuthored}
+	}
 	// Raising an approval writes into the channel, so it needs the post
 	// permission there (agent-manifest.md).
 	channel, serr := scope.channelByID(ctx, in.ChannelID, schema.ChannelPermissionPost)

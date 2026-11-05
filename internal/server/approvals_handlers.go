@@ -54,6 +54,10 @@ func (s *Server) handleCreateApproval(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if adminPayloadAuthored(req.Payload) {
+		writeError(w, http.StatusBadRequest, "invalid_request", errAdminPayloadAuthored)
+		return
+	}
 
 	if _, err := s.store.PrincipalByID(ctx, req.RequesterID); errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusBadRequest, "requester_not_found", "requester not found")

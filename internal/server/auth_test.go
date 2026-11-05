@@ -188,8 +188,14 @@ var routeExpectations = map[string]routeExpectation{
 	// The permissions document (issue #1015): any operator reads it; a PUT
 	// of nothing is refused as malformed.
 	"GET /v1/permissions": {classOp, "/v1/permissions", "", 200},
-	"PUT /v1/permissions": {classPerm, "/v1/permissions", `{}`, 400},
-	"GET /v1/channels":    {classAuth, "/v1/channels", "", 200},
+	// The admin door (issue #1330): anyone reads the catalog as it applies
+	// to them; an empty submit names no action; nobody but the requesting
+	// agent runs an approval.
+	"GET /v1/admin/actions":                    {classAuth, "/v1/admin/actions", "", 200},
+	"POST /v1/admin/actions":                   {classAuth, "/v1/admin/actions", `{}`, 400},
+	"POST /v1/admin/actions/{approval_id}/run": {classAuth, "/v1/admin/actions/1/run", "", 404},
+	"PUT /v1/permissions":                      {classPerm, "/v1/permissions", `{}`, 400},
+	"GET /v1/channels":                         {classAuth, "/v1/channels", "", 200},
 	// Member channel creation and channel settings (issue #981).
 	"POST /v1/channels":              {classAuth, "/v1/channels", `{}`, 400},
 	"PUT /v1/channels/{id}/settings": {classPerm, "/v1/channels/9999/settings", `{}`, 400},
@@ -692,6 +698,12 @@ func TestRoleMatrix(t *testing.T) {
 			if (isInviteRoute(rt.pattern) && !inviteRetired) || rt.pattern == "POST /v1/reports" || rt.pattern == "POST /v1/channels" || isSelfMembershipRoute(rt.pattern) || isMessageEditRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
+			// The admin door (issue #1330): an agent with no grant is refused
+			// at the door; an empty submit is malformed before any caller is
+			// looked at.
+			if rt.pattern == "GET /v1/admin/actions" || rt.pattern == "POST /v1/admin/actions/{approval_id}/run" {
+				agentWant = http.StatusForbidden
+			}
 			// Signing out (issue #439) succeeds for any member and revokes
 			// the credential it was sent with, so it runs on a fixture of its
 			// own and the other routes' callers stay signed in.
@@ -788,6 +800,9 @@ func TestAuthOffUnchanged(t *testing.T) {
 				}
 				if rt.pattern == "POST /v1/principals/hide" {
 					want = http.StatusUnauthorized // like the bulk disables: no caller to leave out
+				}
+				if strings.HasPrefix(rt.pattern, "GET /v1/admin/actions") || strings.HasPrefix(rt.pattern, "POST /v1/admin/actions") {
+					want = http.StatusUnauthorized // like whoami: no one to administer as
 				}
 				if isGuestPolicyRoute(rt.pattern) {
 					want = http.StatusForbidden // accounts_require_auth: no guest exists, nor anyone to admit one (design §7.4)
