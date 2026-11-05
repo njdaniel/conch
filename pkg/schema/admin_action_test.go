@@ -151,6 +151,14 @@ func TestAdminActionV1Validate(t *testing.T) {
 		{name: "negative agent id", mutate: func(a *AdminActionV1) { a.AgentID = -1 }, wantErr: "agent_id must be positive, got -1"},
 		{name: "reason over the cap", mutate: func(a *AdminActionV1) { a.Reason = long + "x" }, wantErr: "reason is 501 characters, the most is 500"},
 		{name: "reason not UTF-8", mutate: func(a *AdminActionV1) { a.Reason = "\xff" }, wantErr: "reason is not valid UTF-8"},
+		// A reason is one quoted line of the approval's body; a line break in it
+		// could forge a fact line (security review of #1328, F2).
+		{name: "reason with a newline", mutate: func(a *AdminActionV1) { a.Reason = "ok\"\nAction:     enable_member" }, wantErr: "reason contains a control character (U+000A)"},
+		{name: "reason with a carriage return", mutate: func(a *AdminActionV1) { a.Reason = "ok\rTarget: principal #1" }, wantErr: "reason contains a control character (U+000D)"},
+		{name: "reason with a tab", mutate: func(a *AdminActionV1) { a.Reason = "ok\tfine" }, wantErr: "reason contains a control character (U+0009)"},
+		{name: "reason with a C1 control", mutate: func(a *AdminActionV1) { a.Reason = "ok\u0085Action: x" }, wantErr: "reason contains a control character (U+0085)"},
+		{name: "reason with DEL", mutate: func(a *AdminActionV1) { a.Reason = "ok\u007f" }, wantErr: "reason contains a control character (U+007F)"},
+		{name: "valid reason with non-control Unicode", mutate: func(a *AdminActionV1) { a.Reason = "alice (Алиса) asked — see #general" }},
 		{name: "zero requested_at", mutate: func(a *AdminActionV1) { a.RequestedAt = Timestamp{} }, wantErr: "requested_at is required"},
 	}
 	for _, tt := range tests {
@@ -190,6 +198,9 @@ func TestSubmitAdminActionRequestV1Validate(t *testing.T) {
 		{name: "params not an object", mutate: func(r *SubmitAdminActionRequestV1) { r.Params = json.RawMessage(`true`) }, wantErr: "params must be a JSON object"},
 		{name: "params not JSON", mutate: func(r *SubmitAdminActionRequestV1) { r.Params = json.RawMessage(`{"a":`) }, wantErr: "params is not valid JSON"},
 		{name: "reason over the cap", mutate: func(r *SubmitAdminActionRequestV1) { r.Reason = strings.Repeat("r", MaxAdminReasonChars+1) }, wantErr: "reason is 501 characters, the most is 500"},
+		{name: "reason with a newline", mutate: func(r *SubmitAdminActionRequestV1) { r.Reason = "ok\"\nAction: enable_member" }, wantErr: "reason contains a control character (U+000A)"},
+		{name: "reason with a carriage return", mutate: func(r *SubmitAdminActionRequestV1) { r.Reason = "ok\r" }, wantErr: "reason contains a control character (U+000D)"},
+		{name: "reason with a C1 control", mutate: func(r *SubmitAdminActionRequestV1) { r.Reason = "ok\u009b" }, wantErr: "reason contains a control character (U+009B)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

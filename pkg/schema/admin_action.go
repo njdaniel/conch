@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -197,8 +198,10 @@ type AdminTargetV1 struct {
 	ID int64 `json:"id"`
 	// Name is the entity's name as the server read it at request time: a
 	// principal's or channel's name, a credential's or hook's label, an
-	// invite's code, a report's title. The server fills it; a request may
-	// leave it out, and it is empty for an entity that has none.
+	// invite's code, a report's title. The server fills it when it composes
+	// an AdminActionV1 and ignores it in a request; it is empty for an entity
+	// that has none. At run time the target_changed check compares it with
+	// the entity's current name (design §3.5.2).
 	Name string `json:"name,omitempty"`
 }
 
@@ -219,10 +222,19 @@ func (t AdminTargetV1) Validate() error {
 const MaxAdminReasonChars = 500
 
 // validateAdminReason holds a reason to MaxAdminReasonChars characters (code
-// points, not bytes) of valid UTF-8.
+// points, not bytes) of valid UTF-8 with no control character. The reason is
+// quoted on one line of the approval's body, among lines the server composed
+// (design §3.5.1); a newline, carriage return or tab in it could add a line
+// that reads as one of the server's facts to a plain-text client, so every
+// rune for which unicode.IsControl is true (C0, DEL and C1) is refused.
 func validateAdminReason(reason string) error {
 	if !utf8.ValidString(reason) {
 		return errors.New("schema: admin action reason is not valid UTF-8")
+	}
+	for _, r := range reason {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("schema: admin action reason contains a control character (%U)", r)
+		}
 	}
 	if n := utf8.RuneCountInString(reason); n > MaxAdminReasonChars {
 		return fmt.Errorf("schema: admin action reason is %d characters, the most is %d", n, MaxAdminReasonChars)
@@ -264,6 +276,14 @@ func validateAdminRoute(route string) error {
 
 // AdminActionV1Name is the registered versioned name of the admin-action
 // payload: what a gated action's approval carries (design §3.5.1, §3.5.2).
+//
+// The payload is server-composed only. Registering it here lets every client
+// decode it; it does not let a client author it. An approval whose payload
+// merely has this schema and shape proves nothing: the run step proves an
+// approval's origin by the row the admin door writes in the same transaction
+// as the approval, never by the payload's shape. The approval create routes
+// (REST and request_approval) refuse a client-supplied payload of this
+// schema (S3, #1330).
 const AdminActionV1Name = "conch.admin_action.v1"
 
 // AdminActionV1 is the machine form of a gated action, stored on its
@@ -274,16 +294,35 @@ const AdminActionV1Name = "conch.admin_action.v1"
 // the stored request; Reason is the agent's words, labelled as such and
 // capped.
 //
+// Origin, and what is trusted (security review of #1328):
+//
+//   - The payload is server-composed only. The run step proves that an
+//     approval was raised by the admin door by a row the door writes in the
+//     same transaction as the approval, never by the payload's shape: an
+//     approval carrying this schema that a client authored through
+//     request_approval or POST /v1/approvals is not an admin action, and the
+//     approval create routes refuse a client-supplied payload of this schema
+//     (S3, #1330).
+//   - Route is display only. The dispatcher rebuilds the method and path from
+//     its catalog entry for Action and the target ids, and never parses Route.
+//   - Target.Name is server-filled at request time, and is what the run
+//     step's target_changed check compares against the entity's current name.
+//
 // Clients that know the schema render it as a card; those that do not show
 // the approval's body, which says the same in prose.
 type AdminActionV1 struct {
-	// Action is the catalog action.
+	// Action is the catalog action: the one field the dispatcher runs from,
+	// with Target.ID and Params.
 	Action AdminAction `json:"action"`
 	// Route is the route the action runs, with the target's ids filled:
-	// "POST /v1/principals/7/disable".
+	// "POST /v1/principals/7/disable". Display only: a client shows it, and
+	// the dispatcher rebuilds the method and path from the catalog entry for
+	// Action and the target ids, never from this string.
 	Route string `json:"route"`
 	// Target is what the action acts on, with its name at request time;
-	// omitted for a server-wide action.
+	// omitted for a server-wide action. The server fills Name when it
+	// composes the payload, and the run step's target_changed check compares
+	// it with the entity's current name.
 	Target *AdminTargetV1 `json:"target,omitempty"`
 	// Params is the route's body as the agent sent it, verbatim, after the
 	// catalog's clamps; omitted when there is none.
@@ -568,6 +607,12 @@ const (
 )
 
 func init() {
+	// Registered so that every client can decode the payload. Registration is
+	// not authorship: the payload is server-composed only, the run step
+	// proves an approval's origin by the admin door's own row written in the
+	// same transaction as the approval and never by the payload's shape, and
+	// the approval create routes refuse a client-supplied payload of this
+	// schema (S3, #1330).
 	RegisterPayload(PayloadSchema{
 		Name: AdminActionV1Name,
 		New:  func() any { return new(AdminActionV1) },
