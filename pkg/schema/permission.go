@@ -404,7 +404,12 @@ func (r PermissionsResponseV1) MarshalJSON() ([]byte, error) {
 // IssuedByOperatorV1 is one live credential or hook an operator issued to
 // someone other than themself. ID is what the revoke route of its Kind
 // takes; PrincipalID is whom it speaks as, and IssuedBy the operator that
-// issued it.
+// issued it. An item held by an owner is never listed, whoever issued it
+// (an owner who has since been demoted, say), and never revoked by
+// POST /v1/principals/{id}/issued/revoke-all: owners' credentials and hooks
+// end deliberately, one by one or through their own revoke-all, never as a
+// side effect of cleaning up after someone else. Nor is an item an owner
+// issued listed: owners keep act_as_members.
 type IssuedByOperatorV1 struct {
 	Kind        IssuedKind `json:"kind"`
 	ID          int64      `json:"id"`

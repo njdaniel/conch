@@ -149,22 +149,39 @@ func (s *Store) issuedToOthers(ctx context.Context, issuer int64, now time.Time)
 	return issuedToOthersTx(ctx, tx, issuer, now)
 }
 
+// The owner tests of the issued queries. An owner is an operator with the
+// mark (Principal.IsOwner), fixed, not a permission. Both the list
+// (issuedToOthersTx) and the sweep (RevokeIssued) use holderNotOwnerSQL,
+// so what is listed and what is revoked cannot diverge: a credential or
+// hook held by an owner is never listed and never revoked by the sweep
+// (security review of #1024, NB-1). Owners' credentials end deliberately,
+// one by one or through their own revoke-all, never as a side effect of
+// cleaning up after someone else: an ex-owner X may have issued one to
+// owner O, and the sweep of X must not sign O out. The list alone also
+// leaves out owner issuers (issuerNotOwnerSQL): owners keep act_as_members,
+// and the sweep refuses an owner issuer before it reads anything.
+const (
+	issuerNotOwnerSQL = "NOT (i.role = 'operator' AND i.owner = 1)"
+	holderNotOwnerSQL = "NOT (p.role = 'operator' AND p.owner = 1)"
+)
+
 // issuedToOthersTx is IssuedToOthers inside tx; issuer 0 is every issuer.
-// The join on the issuer leaves out rows whose issued_by is NULL.
+// The join on the issuer (i) leaves out rows whose issued_by is NULL; the
+// join on the holder (p) is for holderNotOwnerSQL.
 func issuedToOthersTx(ctx context.Context, tx execer, issuer int64, now time.Time) ([]schema.IssuedByOperatorV1, error) {
 	rows, err := tx.QueryContext(ctx,
 		`SELECT kind, id, principal_id, issued_by, created_at FROM (
 		   SELECT 'credential' AS kind, c.id AS id, c.principal_id AS principal_id, c.issued_by AS issued_by, c.created_at AS created_at
-		     FROM credentials c JOIN principals i ON i.id = c.issued_by
+		     FROM credentials c JOIN principals i ON i.id = c.issued_by JOIN principals p ON p.id = c.principal_id
 		    WHERE c.issued_by <> c.principal_id AND c.revoked_at IS NULL
 		      AND (c.expires_at IS NULL OR c.expires_at > ?)
-		      AND NOT (i.role = 'operator' AND i.owner = 1)
+		      AND `+issuerNotOwnerSQL+` AND `+holderNotOwnerSQL+`
 		      AND (? = 0 OR c.issued_by = ?)
 		   UNION ALL
 		   SELECT 'hook', h.id, h.principal_id, h.issued_by, h.created_at
-		     FROM hooks h JOIN principals i ON i.id = h.issued_by
+		     FROM hooks h JOIN principals i ON i.id = h.issued_by JOIN principals p ON p.id = h.principal_id
 		    WHERE h.issued_by <> h.principal_id AND h.revoked_at IS NULL
-		      AND NOT (i.role = 'operator' AND i.owner = 1)
+		      AND `+issuerNotOwnerSQL+` AND `+holderNotOwnerSQL+`
 		      AND (? = 0 OR h.issued_by = ?)
 		 ) ORDER BY created_at, kind, id`,
 		now.UnixMilli(), issuer, issuer, issuer, issuer)
@@ -207,6 +224,8 @@ type RevokedIssued struct {
 // step after a demotion, a disable or act_as_members going, revoking
 // everything those answers listed. An expired but unrevoked credential is
 // revoked too, as a sign-out everywhere does (revokePrincipalCredentialsTx).
+// A credential or hook held by an owner is never revoked by it, as it is
+// never listed (holderNotOwnerSQL): an ex-owner's issue to an owner stays.
 //   - actorID is re-read under the write lock and must be an enabled,
 //     non-hidden human owner (else ErrNotOwner): what an operator issued is
 //     the owner's to end. actorID 0 is the system (a server under AuthOff),
@@ -218,8 +237,8 @@ type RevokedIssued struct {
 //   - Each credential is revoked as DELETE /v1/credentials/{id} revokes it:
 //     audited credential_revoked (reason=issued revoke-all), its sessions
 //     ended, its holder's device links closed and, for a guest, the visit
-//     ended. A credential that is the last way any owner could sign in is
-//     ErrLastOperator, writing nothing.
+//     ended. No owner's credential is among them, so the last-owner guard
+//     has nothing to ask.
 //   - Each hook is revoked and audited hook_revoked with the same reason.
 //   - One issued_revoked_all row records the call and the counts, even when
 //     both are zero.
@@ -252,22 +271,23 @@ func (s *Store) RevokeIssued(ctx context.Context, actor string, actorID, issuerI
 		const reason = "issued revoke-all"
 
 		type cred struct {
-			id, holder               int64
-			label, scope, holderRole string
-			holderOwner              bool
-			holderDisabled           sql.NullInt64
+			id, holder int64
+			label      string
 		}
 		var creds []cred
+		// The holder join and holderNotOwnerSQL are the list's: what the
+		// owner was shown is what goes, and an owner's credential never.
 		rows, err := tx.QueryContext(ctx,
-			`SELECT c.id, c.principal_id, c.label, c.scope, p.role, p.owner, p.disabled_at
+			`SELECT c.id, c.principal_id, c.label
 			   FROM credentials c JOIN principals p ON p.id = c.principal_id
-			  WHERE c.issued_by = ? AND c.principal_id <> ? AND c.revoked_at IS NULL ORDER BY c.id`, issuerID, issuerID)
+			  WHERE c.issued_by = ? AND c.principal_id <> ? AND c.revoked_at IS NULL
+			    AND `+holderNotOwnerSQL+` ORDER BY c.id`, issuerID, issuerID)
 		if err != nil {
 			return fmt.Errorf("store: revoke issued: list credentials: %w", err)
 		}
 		for rows.Next() {
 			var c cred
-			if err := rows.Scan(&c.id, &c.holder, &c.label, &c.scope, &c.holderRole, &c.holderOwner, &c.holderDisabled); err != nil {
+			if err := rows.Scan(&c.id, &c.holder, &c.label); err != nil {
 				_ = rows.Close()
 				return fmt.Errorf("store: revoke issued: scan credential: %w", err)
 			}
@@ -281,19 +301,8 @@ func (s *Store) RevokeIssued(ctx context.Context, actor string, actorID, issuerI
 			return fmt.Errorf("store: revoke issued: list credentials: %w", err)
 		}
 		for _, c := range creds {
-			// The same guard as a single revoke: never the last way an
-			// owner could sign in. No live credential of an owner should
-			// have a non-owner issuer (ADR-010 D1 revokes them when the mark
-			// is set), so this refuses nothing in practice.
-			if Role(c.holderRole) == RoleOperator && c.holderOwner && !c.holderDisabled.Valid && schema.CredentialScope(c.scope) != schema.CredentialScopeSetup {
-				others, err := liveOperatorCredentialsTx(ctx, tx, 0, c.id, 0, now)
-				if err != nil {
-					return err
-				}
-				if others == 0 {
-					return ErrLastOperator
-				}
-			}
+			// No last-owner guard: no owner's credential is selected above,
+			// so the sweep can never end the last way an owner signs in.
 			res, err := tx.ExecContext(ctx,
 				"UPDATE credentials SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", now.UnixMilli(), c.id)
 			if err != nil {
@@ -327,8 +336,10 @@ func (s *Store) RevokeIssued(ctx context.Context, actor string, actorID, issuerI
 		}
 		var hooks []hook
 		rows, err = tx.QueryContext(ctx,
-			`SELECT id, channel_id, principal_id, label FROM hooks
-			  WHERE issued_by = ? AND principal_id <> ? AND revoked_at IS NULL ORDER BY id`, issuerID, issuerID)
+			`SELECT h.id, h.channel_id, h.principal_id, h.label
+			   FROM hooks h JOIN principals p ON p.id = h.principal_id
+			  WHERE h.issued_by = ? AND h.principal_id <> ? AND h.revoked_at IS NULL
+			    AND `+holderNotOwnerSQL+` ORDER BY h.id`, issuerID, issuerID)
 		if err != nil {
 			return fmt.Errorf("store: revoke issued: list hooks: %w", err)
 		}

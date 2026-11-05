@@ -27,7 +27,10 @@ type DisablePrincipalResponseV1 struct {
 // issued to principals other than itself the call revoked. Both are counts
 // of rows this call revoked; a repeat answers zeros. An unrevoked credential
 // that had expired is revoked and counted too, so the counts can exceed the
-// list the owner was shown, which has live items only.
+// list the owner was shown, which has live items only. A credential or hook
+// held by an owner is never revoked by this call, as it is never listed
+// (IssuedByOperatorV1): what an ex-owner issued to an owner stays until
+// that owner's credentials are ended deliberately.
 type RevokeIssuedResponseV1 struct {
 	CredentialsRevoked int `json:"credentials_revoked"`
 	HooksRevoked       int `json:"hooks_revoked"`

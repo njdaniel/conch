@@ -69,7 +69,11 @@ func (s *Server) handleDisablePrincipal(w http.ResponseWriter, r *http.Request) 
 		issued, err := s.store.IssuedToOthersBy(ctx, id, s.now())
 		if err != nil {
 			// The disable is done; the list is a help to the owner, so
-			// the answer goes without it and says so in the log.
+			// the answer goes without it and says so in the log. Accepted
+			// as is by the security review of #1024 (NB-2): the answer
+			// fails open on this read, after the commit; nothing is lost,
+			// since the revoke-all route reads the columns, not this
+			// answer, and the log names the principal.
 			slog.ErrorContext(ctx, "principals: list what the disabled principal issued to others failed", "principal", id, "error", err)
 		} else if len(issued) > 0 {
 			resp.IssuedToOthers = issued
@@ -110,9 +114,6 @@ func (s *Server) handleRevokeIssued(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
-		return
-	case errors.Is(err, store.ErrLastOperator):
-		writeError(w, http.StatusConflict, "last_operator", lastOperatorMessage)
 		return
 	case err != nil:
 		slog.ErrorContext(ctx, "credentials: revoke issued failed", "principal", id, "error", err)

@@ -276,6 +276,54 @@ func TestRevokeIssuedRoute(t *testing.T) {
 	})
 }
 
+// An owner's credential is never listed and never revoked by the sweep,
+// whoever issued it (security review of #1024, NB-1): owner X issues one to
+// the owner and one to member-1, X is demoted, and the sweep of X ends
+// member-1's while the owner's session survives.
+func TestRevokeIssuedSparesOwnerHolders(t *testing.T) {
+	f := newRestrictedFixture(t, Config{})
+	ctx := context.Background()
+	rootActor := fmt.Sprintf("principal:%d", f.root.ID)
+	yes := true
+	if _, err := f.srv.store.SetRole(ctx, rootActor, f.root.ID, f.op.ID, store.RoleOperator, &yes); err != nil {
+		t.Fatal(err)
+	}
+	opActor := fmt.Sprintf("principal:%d", f.op.ID)
+	toRoot, rootTok2, err := f.srv.store.CreateCredential(ctx, opActor, f.root.ID, "x to the owner", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toMember, memberTok2, err := f.srv.store.CreateCredential(ctx, opActor, f.member.ID, "x to member-1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := f.do(t, "PUT", fmt.Sprintf("/v1/principals/%d/role", f.op.ID), f.rootTok, `{"role":"member"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("demote = %d %s", rec.Code, rec.Body)
+	}
+	resp := decodeBody[schema.RoleChangeResponseV1](t, rec)
+	if len(resp.IssuedToOthers) != 1 || resp.IssuedToOthers[0].ID != toMember.ID || resp.IssuedToOthers[0].Kind != schema.IssuedCredential {
+		t.Fatalf("demotion listed %+v, want member-1's credential %d alone, never the owner's %d", resp.IssuedToOthers, toMember.ID, toRoot.ID)
+	}
+
+	rec = f.do(t, "POST", issuedRevokeAllPath(f.op.ID), rootTok2, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke-all = %d %s", rec.Code, rec.Body)
+	}
+	if res := decodeBody[schema.RevokeIssuedResponseV1](t, rec); res.CredentialsRevoked != 1 || res.HooksRevoked != 0 {
+		t.Errorf("revoke-all = %+v, want member-1's credential alone", res)
+	}
+	if code := f.do(t, "GET", "/v1/whoami", memberTok2, "").Code; code != http.StatusUnauthorized {
+		t.Errorf("member-1's credential by the ex-owner = %d, want 401", code)
+	}
+	// The owner's session, made by the ex-owner and used for the call,
+	// survives it.
+	if code := f.do(t, "GET", "/v1/whoami", rootTok2, "").Code; code != http.StatusOK {
+		t.Errorf("the owner's credential by the ex-owner = %d, want 200", code)
+	}
+}
+
 // The PUT that turns act_as_members off still lists what operators issued,
 // now from the columns, and the owner's revoke-all per issuer clears it.
 func TestPermissionsPutIssuedToOthersFromColumns(t *testing.T) {

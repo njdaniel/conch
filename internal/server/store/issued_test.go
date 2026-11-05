@@ -603,6 +603,48 @@ func TestRevokeIssued(t *testing.T) {
 			t.Errorf("revoked = %+v, %v; want 2 credentials (one expired) and no hook", res, err)
 		}
 	})
+	t.Run("an owner holder's are neither listed nor revoked", func(t *testing.T) {
+		// Owner X issues a credential and a hook to owner O and a
+		// credential to member-1, then is demoted (security review of
+		// #1024, NB-1). The sweep of X ends member-1's and leaves O's: an
+		// owner's credentials end deliberately, never as a side effect.
+		x, member := f.ids["operator-no-settings"], f.ids["member-1"]
+		promoteToOwner(t, f.s, owner, x)
+		toOwner, _, err := f.s.CreateCredential(f.ctx, principalActor(x), owner, "x to the owner", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ch, err := f.s.ChannelByName(f.ctx, "channel-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		hookToOwner, err := f.s.CreateHook(f.ctx, principalActor(x), "x-hook-to-owner", ch.ID, owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		toMember, _, err := f.s.CreateCredential(f.ctx, principalActor(x), member, "x to member-1", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.s.SetRole(f.ctx, ownerActor, owner, x, RoleMember, nil); err != nil {
+			t.Fatal(err)
+		}
+		listed, err := f.s.IssuedToOthersBy(f.ctx, x, time.Now())
+		if err != nil || len(listed) != 1 || listed[0].ID != toMember.ID || listed[0].Kind != schema.IssuedCredential {
+			t.Fatalf("listed for the ex-owner = %+v, %v; want member-1's credential alone", listed, err)
+		}
+		res, err := f.s.RevokeIssued(f.ctx, ownerActor, owner, x)
+		if err != nil || res.CredentialsRevoked != 1 || res.HooksRevoked != 0 || len(res.Credentials) != 1 || res.Credentials[0] != toMember.ID {
+			t.Errorf("revoked = %+v, %v; want member-1's credential alone", res, err)
+		}
+		var revoked sql.NullInt64
+		if err := f.s.db.QueryRow("SELECT revoked_at FROM credentials WHERE id = ?", toOwner.ID).Scan(&revoked); err != nil || revoked.Valid {
+			t.Errorf("the owner's credential: revoked_at = %v, %v; want NULL", revoked, err)
+		}
+		if err := f.s.db.QueryRow("SELECT revoked_at FROM hooks WHERE id = ?", hookToOwner.ID).Scan(&revoked); err != nil || revoked.Valid {
+			t.Errorf("the owner's hook: revoked_at = %v, %v; want NULL", revoked, err)
+		}
+	})
 	t.Run("a demoted issuer's still revoke", func(t *testing.T) {
 		member := f.ids["member-1"]
 		c, _, err := f.s.CreateCredential(f.ctx, principalActor(op1), member, "before the demotion", nil)
