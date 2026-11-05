@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -38,27 +39,54 @@ func runCmd(name string, args ...string) (string, error) {
 	return string(out), err
 }
 
-// vcsDiagnostics runs the commands go build runs for VCS stamping, from the
-// package directory, and returns their combined output (stderr included).
+// goVCSRoot returns the directory go build runs its VCS commands in for a
+// package in dir: the nearest ancestor holding a ".git" DIRECTORY. cmd/go
+// (1.25) ignores a ".git" file, which is what a linked worktree has, so in a
+// worktree nested inside another checkout (".claude/worktrees/<name>") it
+// stamps from, and runs git in, the enclosing checkout, not the worktree; in
+// a worktree outside any checkout it finds nothing and does not stamp. The
+// diagnosis has to look where go looked. It returns "" when go finds nothing.
+func goVCSRoot(dir string) string {
+	for {
+		if fi, err := os.Stat(filepath.Join(dir, ".git")); err == nil && fi.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// vcsDiagnostics runs the commands go build runs for VCS stamping, in the
+// directory go runs them in (goVCSRoot), and returns their combined output
+// (stderr included). It also runs rev-parse in the package directory, which
+// differs from go's directory in a linked worktree.
 func vcsDiagnostics() string {
 	var b strings.Builder
 	wd, _ := os.Getwd()
-	b.WriteString("cwd: " + wd + "\n")
+	root := goVCSRoot(wd)
+	b.WriteString("cwd: " + wd + "\ngo's VCS root (nearest ancestor with a .git directory): " + root + "\n")
 	for _, k := range []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"} {
 		if v, ok := os.LookupEnv(k); ok {
 			b.WriteString(k + "=" + v + "\n")
 		}
 	}
-	for _, args := range [][]string{
-		{"rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"},
-		{"status", "--porcelain"},
-		{"-c", "log.showsignature=false", "log", "-1", "--format=%H:%ct"},
-	} {
-		out, err := runCmd("git", args...)
-		b.WriteString("$ git " + strings.Join(args, " ") + "\n" + out)
-		if err != nil {
-			b.WriteString("-> " + err.Error() + "\n")
-		}
+	b.WriteString(gitIn(wd, "rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel"))
+	if root == "" {
+		return b.String()
 	}
+	b.WriteString(gitIn(root, "status", "--porcelain"))
+	b.WriteString(gitIn(root, "-c", "log.showsignature=false", "log", "-1", "--format=%H:%ct"))
 	return b.String()
+}
+
+func gitIn(dir string, args ...string) string {
+	out, err := runCmd("git", append([]string{"-C", dir}, args...)...)
+	s := "$ git -C " + dir + " " + strings.Join(args, " ") + "\n" + out
+	if err != nil {
+		s += "-> " + err.Error() + "\n"
+	}
+	return s
 }
