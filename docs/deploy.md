@@ -251,6 +251,26 @@ If it prints an error instead of a `key:` prompt, don't paste the key. Afterward
 
 `conchd operator bootstrap --data /var/lib/conch/alpha your-name` makes the first operator with a setup token instead of a script credential, if you want no script credential at all; it refuses when an operator exists, as `bootstrap-operator` does.
 
+### An AI administrator, from the host
+
+An AI administrator is an agent that holds a few operator permissions (`manage_members`, `manage_channels`, `make_member_links` by default) and asks the people who decide its approval channel before anything gated; the design is [ai-administrators.md](design/ai-administrators.md). An owner makes one from `conch admin ai-admin create`; on the host, over SSH, with no one signed in, it is:
+
+```sh
+sudo -u conch-alpha /opt/conch/current/conchd ai-admin create --data /var/lib/conch/alpha --origin https://alpha.example.org robo
+```
+
+`--origin` is the server's public address, which `conchd` is never told. It makes the agent, its approval channel (`admin`, private, unless `--channel` names one that exists), the seats of the people who decide there, its manifest and one renewable credential (`--credential-days`, default 90, renewed by use), and audits all of it as `system`. Without `--decider <principal id>` (repeatable) every owner who can sign in is seated as a decider; with it, exactly the people named. It **refuses when no owner is able to sign in** (finish `conchd operator setup` first): nobody could decide what the AI asks for. `--grant <permission,...>`, `--require-approval <action,...>`, `--ttl`, `--run-window`, `--quorum` and `--max-pending` are as in the design, and `--client claude-code` prints a `claude mcp add` line in place of the JSON.
+
+It prints the MCP client entry **once, on stdout, and nowhere else**: the token is not written to stderr, the journal or the audit trail. Put it in the AI's client, with `--scope user` for Claude Code (a project `.mcp.json` is a file people commit), and do not run the command under `set -x`. The entry is named `conch-<server name>`, the name `GET /v1/join` reports (`--server-name`, or `CONCHD_SERVER_NAME`, as for `operator bootstrap`; `--name` overrides it), so one client can hold an entry per server.
+
+A running server accepts the new credential at once, with no restart: it keeps no copy of credentials or manifests, and resolves every request's token against the database, the same file this command wrote.
+
+```sh
+sudo -u conch-alpha /opt/conch/current/conchd ai-admin revoke --data /var/lib/conch/alpha <id>
+```
+
+`revoke` disables the agent: every credential of it ends, its sessions and sockets with them, and its grant is cleared, so enabling it again gives it nothing back. It audits `principal_disabled` and `ai_admin_revoked`. It refuses a principal that is not an agent, and an agent that holds no grant. Deleting the entry from the AI's client revokes nothing.
+
 ### An operator who lost their password or authenticator
 
 There is no way to reset an operator over the network; it is done on the host, by whoever can run `conchd` there:
