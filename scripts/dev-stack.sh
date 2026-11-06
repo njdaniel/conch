@@ -7,7 +7,9 @@
 # LiveKit is limited to 2 CPUs and 4 GB by default, the alpha droplet's size
 # (docs/design/private-alpha.md, O7), so what is seen here compares with it.
 # Everything listens on 127.0.0.1 except LiveKit's media ports, which listen
-# on every interface (docs/manual.md, "Run LiveKit beside conchd"). State lives
+# on every interface (docs/manual.md, "Run LiveKit beside conchd"), unless
+# CONCH_DEV_LAN names one of this machine's addresses (a phone on Wi-Fi): then
+# conchd and LiveKit listen on that address instead. State lives
 # outside the checkout, in ${XDG_CACHE_HOME:-~/.cache}/conch-dev. The script
 # stops only what it started: conchd by the PID it recorded, and the
 # container by its own name.
@@ -33,7 +35,14 @@ usage: scripts/dev-stack.sh <command>
 
 environment (defaults in brackets):
   CONCH_DEV_STATE      state directory [${XDG_CACHE_HOME:-~/.cache}/conch-dev]
-  CONCH_DEV_PORT       conchd's port on 127.0.0.1 [28080]
+  CONCH_DEV_LAN        an IPv4 address of this machine's interfaces (ip -o -4
+                       addr), for a phone on the same network: conchd and
+                       LiveKit listen on it, not on 127.0.0.1, and LiveKit
+                       advertises it. Plain HTTP, open to the LAN. Unset
+                       means loopback only. Use the same value for up and
+                       the commands after it; stop with down before changing
+                       it [unset]
+  CONCH_DEV_PORT       conchd's port on 127.0.0.1, or on CONCH_DEV_LAN [28080]
   CONCH_DEV_LK_PORT    LiveKit's signalling port; media TCP is the next one
                        [27880]
   CONCH_DEV_UDP        first of LiveKit's 100 media UDP ports, above the
@@ -58,7 +67,8 @@ cpus=${CONCH_DEV_CPUS:-0,1}
 memory=${CONCH_DEV_MEMORY:-4g}
 channel=${CONCH_DEV_CHANNEL:-general}
 container=conch-dev-livekit
-server=http://127.0.0.1:$port
+host=${CONCH_DEV_LAN:-127.0.0.1}
+server=http://$host:$port
 
 say() { echo "dev-stack: $*"; }
 fail() { echo "dev-stack: FAIL: $*" >&2; exit 1; }
@@ -69,6 +79,25 @@ image() {
     img=$(sed -n 's/^[[:space:]]*Image = "\(livekit\/livekit-server:[^"]*@sha256:[0-9a-f]\{64\}\)"$/\1/p' "$root/e2e/internal/lkit/kit.go")
     [ -n "$img" ] || fail "could not read the pinned LiveKit image from e2e/internal/lkit/kit.go"
     echo "$img"
+}
+
+# CONCH_DEV_LAN must be an address of one of this machine's interfaces: a bind
+# to anything else fails late, or worse, somewhere else.
+check_lan() {
+    [ -n "${CONCH_DEV_LAN:-}" ] || return 0
+    command -v ip >/dev/null || fail "CONCH_DEV_LAN needs ip (iproute2)"
+    ip -o -4 addr | awk '{sub("/.*", "", $4); print $4}' | grep -qxF -- "$CONCH_DEV_LAN" ||
+        fail "CONCH_DEV_LAN=$CONCH_DEV_LAN is not an IPv4 address of this machine (see: ip -o -4 addr)"
+}
+
+# What is running was started on one address; a different CONCH_DEV_LAN would
+# silently reuse it, so that is refused until down.
+check_bind() {
+    local was=127.0.0.1
+    [ ! -f "$state/bind" ] || was=$(cat "$state/bind")
+    if [ "$was" != "$host" ] && { conchd_running || docker inspect "$container" >/dev/null 2>&1; }; then
+        fail "already running on $was, not $host; stop it first: $0 down"
+    fi
 }
 
 # The recorded PID is conchd's only while a process by that name holds it: a
@@ -110,7 +139,7 @@ start_livekit() {
         [ -f "$state/livekit.secret" ] || openssl rand -hex 32 > "$state/livekit.secret"
         cat > "$state/livekit.yaml" <<EOF
 port: $lk_port
-bind_addresses: ["127.0.0.1"]
+bind_addresses: ["$host"]
 rtc:
   tcp_port: $lk_tcp
   port_range_start: $udp
@@ -128,10 +157,10 @@ EOF
             docker run -d --name "$container" --network host \
             --cpuset-cpus "$cpus" --memory "$memory" --memory-swap "$memory" \
             -e LIVEKIT_KEYS -v "$state/livekit.yaml:/etc/livekit.yaml:ro" \
-            "$img" --config /etc/livekit.yaml --node-ip 127.0.0.1 >/dev/null
+            "$img" --config /etc/livekit.yaml --node-ip "$host" >/dev/null
     fi
     for _ in $(seq 50); do
-        curl -fsS "http://127.0.0.1:$lk_port/" >/dev/null 2>&1 && return
+        curl -fsS "http://$host:$lk_port/" >/dev/null 2>&1 && return
         sleep 0.2
     done
     docker logs --tail 5 "$container" >&2 || true
@@ -151,8 +180,8 @@ start_conchd() {
         fi
         say "starting conchd on $server"
         CONCHD_LIVEKIT_API_KEY=conch-dev CONCHD_LIVEKIT_API_SECRET=$(cat "$state/livekit.secret") \
-            nohup "$root/bin/conchd" serve --data "$state/data" --listen "127.0.0.1:$port" \
-            --livekit-url "ws://127.0.0.1:$lk_port" --web-dir "$root/web/dist" \
+            nohup "$root/bin/conchd" serve --data "$state/data" --listen "$host:$port" \
+            --livekit-url "ws://$host:$lk_port" --web-dir "$root/web/dist" \
             > "$state/conchd.log" 2>&1 &
         echo $! > "$state/conchd.pid"
     fi
@@ -165,9 +194,15 @@ start_conchd() {
 
 up() {
     command -v docker >/dev/null || fail "docker is not installed"
+    check_lan
     umask 077
     mkdir -p "$state"
+    check_bind
     build
+    if [ -n "${CONCH_DEV_LAN:-}" ]; then
+        say "WARNING: conchd and LiveKit are reachable on the LAN at $host over plain HTTP, with no TLS; use this only on a network you trust"
+    fi
+    if [ "$host" = 127.0.0.1 ]; then rm -f "$state/bind"; else echo "$host" > "$state/bind"; fi
     start_livekit
     start_conchd
     # After the first run the channel and the membership exist already; that
@@ -246,7 +281,7 @@ down() {
         for _ in $(seq 50); do conchd_running || break; sleep 0.1; done
         say "conchd stopped"
     fi
-    rm -f "$state/conchd.pid"
+    rm -f "$state/conchd.pid" "$state/bind"
     if docker inspect "$container" >/dev/null 2>&1; then
         docker rm -f "$container" >/dev/null
         say "LiveKit stopped"
@@ -257,7 +292,7 @@ down() {
         conchd_running && fail "conchd is still running; not deleting its data"
         rm -rf "$state/data"
         rm -f "$state"/operator.token "$state"/operator.token.new "$state"/livekit.secret \
-            "$state"/livekit.yaml "$state"/conchd.log "$state"/conchd.pid
+            "$state"/livekit.yaml "$state"/bind "$state"/conchd.log "$state"/conchd.pid
         rmdir "$state" 2>/dev/null || true
         say "state deleted"
     fi
