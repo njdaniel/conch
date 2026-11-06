@@ -1,6 +1,6 @@
 # ADR-016: A phone app for Android and iOS
 
-- **Status:** Proposed. Nothing here is accepted. It is accepted, in whole or with the amendments Nick names, when he says so on [#1106](https://github.com/njdaniel/conch/issues/1106) and merges the PR that adds it. Even then it accepts a **track and an experiment candidate**, not a production stack: the stack is accepted at M6 ([#1111](https://github.com/njdaniel/conch/issues/1111)) from the Android and iOS receipts, and every dependency is signed where it lands.
+- **Status:** Accepted, with one amendment. Nick, 2026-11-05, in session, recorded on [#1106](https://github.com/njdaniel/conch/issues/1106): "accept ADR-016 as recommended, include the phone camera". M1-1 to M1-8 are accepted as recommended; M1-9 is amended so that the phone camera is in scope (Decision 10). As written below, this accepts a **track and an experiment candidate**, not a production stack: the stack is accepted at M6 ([#1111](https://github.com/njdaniel/conch/issues/1111)) from the Android and iOS receipts, and every dependency is signed where it lands.
 - **Date:** 2026-11-01
 - **Decider:** Nick (Tier-H)
 - **Proposal:** [#757](https://github.com/njdaniel/conch/issues/757) (the track), [#1106](https://github.com/njdaniel/conch/issues/1106) (this ADR)
@@ -35,7 +35,9 @@ A phone app adds a toolchain the charter does not name, dependencies the allowli
 7. **OS floors for the experiments:** Android 12 (API 31) with Android 14 as the primary lane; iOS 16.4 with the current iOS on Nick's iPhone as the primary lane. A combination is **supported** only when an M4 or M5 receipt and then an alpha acceptance record (M14, M15) say so for that OS **and device model**; vendor power management is measured per model.
 8. **Isolation of the experiments.** M4 and M5 live under `spikes/mobile/android/` and `spikes/mobile/ios/` (a **new top-level `spikes/` directory**, as #757 names it; the existing spike under `docs/design/spikes/` is an inventory script, these are buildable projects; Nick may direct them under `docs/design/spikes/mobile/` instead), each with its own lockfile, a spike-local dependency allowlist and licence report that Nick signs in those PRs, outside `make check`, `web/package.json`, `go.mod` and `voice/`. No production `mobile/` directory, no shared-module import by path and no CI leg before M6. No credential, address, device identifier or audio in any receipt.
 9. **No guests, no store.** The phone offers no guest entry point (the server has none, #1005). Distribution for the experiments is a hand-installed APK and a free-provisioning or TestFlight development build; any store listing, tester invitation or release is its own owner authorisation (#757).
-10. **Out of scope in this phase** (the same list as the design's §8 and M1-9): phone screen broadcasting; the camera; global, background or hardware push-to-talk; DMs; administration beyond what every member already has; SSO; guests; store submission; approval decisions.
+10. **Out of scope in this phase** (the same list as the design's §8 and M1-9): phone screen broadcasting; global, background or hardware push-to-talk; DMs; administration beyond what every member already has; SSO; guests; store submission; approval decisions.
+
+    **Amended on acceptance (Nick, 2026-11-05): the phone camera is in scope.** A phone turns its camera on in a channel's voice room and receives the room's cameras under [ADR-015](ADR-015-webcam-video.md) as it stands (amended by #1361): `use_camera`, a server claim through `POST /v1/channels/{channel}/voice/camera`, off on joining, and the poller's checks. It adds no route, field or server rule (Decision 1). The camera follows the same lifecycle rule as the microphone: background, lock and interruption end the claim and stop capture, and nothing turns it back on by itself on resume. M4 and M5 measure the camera's lifecycle on each OS beside the microphone's. A phone camera is **supported** on an OS and model only when those receipts and an alpha acceptance record say so (Decision 7).
 
 ## Alternatives considered
 
@@ -73,7 +75,7 @@ Each is a separate yes, no or amendment; the design's §0 carries the same list 
 | M1-6 | OS floors: Android 12 (API 31), iOS 16.4; supported only per tested model | as written |
 | M1-7 | Push | nothing here; M3 brings its list |
 | M1-8 | Whether to join the Apple Developer Program now (99 USD a year) for TestFlight, or run M5 on free provisioning (7-day profiles, 3 devices) | free provisioning for M5 if one Mac and one iPhone suffice; the program before a second iPhone tests |
-| M1-9 | The scope line (Decision 10, design §8): out are phone screen broadcasting; the camera; global, background or hardware push-to-talk; DMs; administration beyond what every member already has; SSO; guests; store submission; approval decisions | as written |
+| M1-9 | The scope line (Decision 10, design §8): out are phone screen broadcasting; global, background or hardware push-to-talk; DMs; administration beyond what every member already has; SSO; guests; store submission; approval decisions | **amended by Nick on acceptance: the phone camera is in** (Decision 10) |
 
 ## Sources
 
