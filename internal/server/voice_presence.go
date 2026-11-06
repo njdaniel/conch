@@ -1991,7 +1991,9 @@ func (s *voiceSub) cancel() {
 
 // dropCause reports why the subscription was dropped, under the lock the
 // drop paths take: a removal that reached the poller before this read wins
-// over the kick.
+// over the kick. Known limit (#1458 review): a removal that commits after this
+// read and before the frame is sent is still told voice_removed; the window
+// is microseconds wide, and their other sockets close with "removed" at once.
 func (s *voiceSub) dropCause() voiceDropCause {
 	s.p.mu.Lock()
 	defer s.p.mu.Unlock()

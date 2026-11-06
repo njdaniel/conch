@@ -292,6 +292,7 @@ async fn removed_from_voice_by_a_moderator_stops_the_client_and_asks_for_no_sess
 // The room's own disconnect for the kick can come first, and the room is still being closed
 // when the presence socket says `voice_removed`. The stop must not drop that close half way
 // (#1458 review): the client ends only once the room is closed, and asks for no session.
+// The close is held behind a barrier the test releases, so nothing here depends on time.
 #[tokio::test]
 async fn removed_from_voice_while_the_room_is_still_closing_lets_the_close_finish() {
     let rig = Rig::start().await;
@@ -300,12 +301,18 @@ async fn removed_from_voice_while_the_room_is_still_closing_lets_the_close_finis
         rig.conchd.presence_sockets() == 1
     })
     .await;
-    rig.sdk.close_takes(Duration::from_secs(1));
+    let release = rig.sdk.hold_close();
     rig.sdk.disconnect(DisconnectReason::ParticipantRemoved);
     rig.until("the room closing", |rig| rig.sdk.count(Call::Close) == 1)
         .await;
-    assert_eq!(rig.sdk.closed(), 0, "the close is still under way");
     rig.conchd.close_presence(1008, "voice_removed");
+    // The stop is decided while the close is still held.
+    rig.until("the stop", |rig| {
+        rig.connection_states().last().map(String::as_str) == Some("stopped")
+    })
+    .await;
+    assert_eq!(rig.sdk.closed(), 0, "the close is still under way");
+    release.notify_one();
 
     let (result, ended) = rig.ended().await;
     assert!(

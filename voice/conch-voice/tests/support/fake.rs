@@ -79,7 +79,10 @@ struct Inner {
     /// While set, the next frame handed over waits here before the SDK takes it.
     send_hold: Option<Arc<SendHold>>,
     close_takes: Duration,
-    /// Closes that ran to their end (after `close_takes`): the client waited for them.
+    /// While set, `close` waits here, after it has begun, until the test lets it finish.
+    close_hold: Option<Arc<Notify>>,
+    /// Closes that ran to their end (after `close_takes`, or the hold): the client waited
+    /// for them.
     closed: usize,
     /// How long a mute holds the thread it is called on before it takes effect.
     mute_takes: Duration,
@@ -175,6 +178,14 @@ impl FakeSdk {
     /// Leaving a room takes this long.
     pub fn close_takes(&self, time: Duration) {
         self.lock().close_takes = time;
+    }
+
+    /// Makes the next `close` stop after it has begun (`Call::Close` is recorded) until the
+    /// returned handle is notified: a room still being left, for as long as the test says.
+    pub fn hold_close(&self) -> Arc<Notify> {
+        let hold = Arc::new(Notify::new());
+        self.lock().close_hold = Some(Arc::clone(&hold));
+        hold
     }
 
     /// How many closes ran to their end: a close dropped half way is not counted.
@@ -403,14 +414,17 @@ impl RoomHandle for FakeRoom {
     }
 
     async fn close(self) {
-        let takes = {
+        let (takes, hold) = {
             let mut inner = self.inner.lock().unwrap();
             inner.calls.push(Call::Close);
             inner.events = None;
-            inner.close_takes
+            (inner.close_takes, inner.close_hold.take())
         };
         if !takes.is_zero() {
             tokio::time::sleep(takes).await;
+        }
+        if let Some(hold) = hold {
+            hold.notified().await;
         }
         self.inner.lock().unwrap().closed += 1;
     }
