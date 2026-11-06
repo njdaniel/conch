@@ -22,6 +22,44 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 describe('reaction controls', () => {
+  it.each(['success', 'rollback'] as const)('moves focus before optimistic last-chip removal and keeps it after %s', async (result) => {
+    let finish!: (result: api.ApiResult<ReactionSummaryV1>) => void;
+    vi.mocked(api.writeReaction).mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    render(<li data-message-id="4" tabIndex={0}>{view()}</li>);
+    const button = await screen.findByRole('button', { name: 'thumbs up: 1 reaction' });
+    button.focus();
+    // jsdom does not synthesize a button click from Enter; exercise its activation.
+    fireEvent.click(button);
+    expect(screen.queryByRole('button', { name: /thumbs up:/ })).toBeNull();
+    expect(document.activeElement).toBe(add());
+    await act(async () => { finish(result === 'success' ? { ok: true, value: sum(0) } : { ok: false, failure: 'network' }); await Promise.resolve(); });
+    expect(screen.queryByRole('button', { name: /thumbs up:/ }) !== null).toBe(result === 'rollback');
+    expect(document.activeElement).toBe(add());
+    fireEvent.keyDown(add(), { key: 'Escape' });
+    expect(document.activeElement).toBe(screen.getByRole('listitem'));
+  });
+  it.each(['chip', 'list'] as const)('moves focus before authoritative removal of the focused %s', async (control) => {
+    render(view());
+    await screen.findByRole('button', { name: 'thumbs up: 1 reaction' });
+    (control === 'chip' ? chip() : screen.getByRole('button', { name: 'Who reacted with thumbs up' })).focus();
+    act(() => { receive({ kind: 'summary', summary: sum(0, false, '2026-11-06T10:00:01Z') }); });
+    expect(screen.queryByRole('button', { name: /thumbs up:/ })).toBeNull();
+    expect(document.activeElement).toBe(add());
+  });
+  it('falls back to the message when removal also disables Add reaction', async () => {
+    render(<li data-message-id="4" tabIndex={0}>{view()}</li>);
+    (await screen.findByRole('button', { name: 'thumbs up: 1 reaction' })).focus();
+    act(() => { receive({ kind: 'closed' }); });
+    expect(add().hasAttribute('disabled')).toBe(true);
+    expect(document.activeElement).toBe(screen.getByRole('listitem'));
+  });
+  it('does not move focus when an authoritative removal affects another control', async () => {
+    render(view());
+    await screen.findByRole('button', { name: 'thumbs up: 1 reaction' });
+    add().focus();
+    act(() => { receive({ kind: 'summary', summary: sum(0, false, '2026-11-06T10:00:01Z') }); });
+    expect(document.activeElement).toBe(add());
+  });
   it('names the emoji, shows pressed/loading state and serializes duplicate touches', async () => {
     let resolve: (result: api.ApiResult<ReactionSummaryV1>) => void = () => undefined;
     vi.mocked(api.writeReaction).mockReturnValue(new Promise((done) => { resolve = done; }));

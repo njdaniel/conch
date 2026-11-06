@@ -100,9 +100,31 @@ test('two clients converge on add/remove/count/list/reload/reconnect without mov
   await expect(a.getByRole('button', { name: /^Add reaction to / })).toBeFocused();
   await first.page.keyboard.press('ArrowRight');
   await expect(chip(a, 1)).toBeFocused();
+  // Hold a failed removal so focus is checked during the optimistic update
+  // as well as after rollback. The server's reaction state stays unchanged.
+  let failRemoval!: () => void;
+  const removalHeld = new Promise<void>((resolve) => { failRemoval = resolve; });
+  await first.page.route(`**${path('general', message.id, '👍')}`, async (route) => {
+    expect(route.request().method()).toBe('DELETE');
+    await removalHeld;
+    await route.abort('failed');
+  }, { times: 1 });
+  await first.page.keyboard.press('Enter');
+  await expect(a.getByRole('button', { name: /thumbs up:/ })).toHaveCount(0);
+  const add = a.getByRole('button', { name: /^Add reaction to / });
+  await expect(add).toBeFocused();
+  failRemoval();
+  await expect(a.getByText('Reaction could not be saved. Try again.')).toBeVisible();
+  await expect(chip(a, 1)).toBeEnabled();
+  await expect(add).toBeFocused();
+  await first.page.keyboard.press('ArrowRight');
+  await expect(chip(a, 1)).toBeFocused();
   await first.page.keyboard.press('Enter');
   await expect(a.getByRole('button', { name: /thumbs up:/ })).toHaveCount(0);
   await expect(b.getByRole('button', { name: /thumbs up:/ })).toHaveCount(0);
+  await expect(add).toBeFocused();
+  await first.page.keyboard.press('Escape');
+  await expect(a).toBeFocused();
   await second.page.reload();
   await expect(b.getByRole('button', { name: /^Add reaction to / })).toBeEnabled();
   await expect(b.getByRole('button', { name: /thumbs up:/ })).toHaveCount(0);

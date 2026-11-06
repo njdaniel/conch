@@ -227,6 +227,17 @@ export function ReactionBar({ id, channel, label, people, onUnauthorized, logNav
   // The main log enters reactions with Right Arrow and keeps explicit -1
   // stops. Thread controls use normal Tab access; both support toolbar arrows.
   const toolbar = useRef<HTMLDivElement>(null);
+  const reactionPair = useCallback((node: HTMLSpanElement | null) => {
+    if (node === null) return;
+    // Ref cleanup runs before React removes the pair. Recover focus while
+    // the active chip or reactor-list button is still in the document.
+    return () => {
+      if (!node.contains(document.activeElement)) return;
+      const add = toolbar.current?.querySelector<HTMLButtonElement>('button.reaction-add');
+      if (add !== undefined && add !== null && !add.disabled) add.focus();
+      else toolbar.current?.closest<HTMLElement>('li[data-message-id]')?.focus();
+    };
+  }, []);
   function onControlKey(event: KeyboardEvent<HTMLDivElement>) {
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.nativeEvent.isComposing) return;
     const buttons = Array.from(toolbar.current?.querySelectorAll<HTMLButtonElement>('button[data-reaction-control]') ?? []).filter((button) => !button.disabled && button.getAttribute('aria-disabled') !== 'true');
@@ -258,7 +269,7 @@ export function ReactionBar({ id, channel, label, people, onUnauthorized, logNav
     {/* Keep the opener focusable during a save so choosing an emoji returns
         focus reliably; aria-disabled and the click guard block repeat opens. */}
     <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" className="reaction-add" aria-label={`Add reaction to ${label}`} aria-expanded={picker} aria-busy={busy} aria-disabled={busy || !ready || cooling} disabled={!ready || cooling} onClick={(event) => { if (busy) return; opener.current = event.currentTarget; setListing(null); setPicker(!picker); }}>Add reaction</button>
-    {counts.map((r) => <span className="reaction-pair" key={r.emoji}>
+    {counts.map((r) => <span ref={reactionPair} className="reaction-pair" key={r.emoji}>
       <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" className="reaction-chip" aria-label={`${names.get(r.emoji) ?? 'Emoji'}: ${String(r.count)} reaction${r.count === 1 ? '' : 's'}`} aria-pressed={Boolean(r.me)} aria-busy={busy} disabled={busy || !ready || cooling} onClick={() => { controls.change(id, r.emoji, !r.me); }}><span aria-hidden="true">{r.emoji} {r.count}</span></button>
       <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" className="reaction-list-button" aria-label={`Who reacted with ${names.get(r.emoji) ?? 'this emoji'}`} onClick={(event) => { opener.current = event.currentTarget; setPicker(false); setListing(r.emoji); }}>Who?</button>
     </span>)}
