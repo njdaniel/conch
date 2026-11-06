@@ -63,6 +63,10 @@ proposed sequence and parallel groups before dispatching implementation.
 
 ## The brief
 
+Before writing/launching an implementation brief, follow [Issue claims](#issue-claims).
+Include the successful claim's session, receipt and reserved files in the Task
+and Scope sections. The dispatcher owns the claim on behalf of restricted workers.
+
 Every dispatch gets a written brief (scratchpad file, not committed) with
 exactly these sections — the template that worked for #5, #6, and #9:
 
@@ -85,6 +89,85 @@ exactly these sections — the template that worked for #5, #6, and #9:
   *before* launching it (`issue-N/codex`). The dispatcher does not touch the
   tree while codex runs.
 - Branch naming `issue-N/<worker>` keeps authorship visible in history.
+
+## Issue claims
+
+Every implementation session, whether manual, unattended or external, must have
+one dispatcher-owned claim before work starts. Read the live issue's comments,
+labels, linked PRs and Project status first. If someone is already working it,
+contact the dispatcher for a handoff; do not remove their claim. Also check
+other active claims for overlapping files: the issue lock does not reserve all
+the files of a different issue. One worker per file area still applies.
+
+From the checkout, using a session name unique to this dispatch:
+
+```sh
+bash ops/issue-claim.sh claim 123 --agent 'codex-session-20261026-01' \
+  --branch issue-123/codex --files 'internal/cli/example.go; internal/cli/example_test.go'
+```
+
+The helper checks for closed, blocked or busy issues and existing PRs, then
+creates `refs/heads/agent-claims/issue-123` on origin using an explicit empty
+Git lease (create only if absent). Separate clones cannot both obtain it.
+Its commit has the unchanged origin/main tree and a unique claim record, not
+implementation changes. It records agent/session, branch, UTC start and files
+in an issue comment, applies `agent/in-progress`, discovers the Project's
+Status field and options, and sets and reads back In progress. Only a success
+return permits launch. This is cooperative coordination, not an authorization
+boundary against someone deliberately bypassing the procedure.
+
+`gh` needs existing repository write and Project access. The default is
+`njdaniel` Project 14; `CONCH_PROJECT_OWNER` and `CONCH_PROJECT_NUMBER` select
+another existing project. The helper never creates fields, expands permissions,
+applies `agent/todo`, changes `agent/ready`, merges, or releases software. Both
+Kanban views of the same project see its updated Status. A separate project
+is not automatically synchronized.
+
+The unattended runner calls this helper before launching its session. A
+network-restricted worker receives the existing receipt in its brief; its
+dispatcher performs all GitHub and claim operations. Other contributors without
+write access ask the maintainer to claim for them. Comments/labels alone are
+not an atomic claim, and the runner's local `flock` does not span machines.
+
+Lifecycle commands, from the same clone and with the recorded session:
+
+```sh
+bash ops/issue-claim.sh status 123
+bash ops/issue-claim.sh resume 123 --agent 'codex-session-20261026-01'
+bash ops/issue-claim.sh review 123 --agent 'codex-session-20261026-01'
+bash ops/issue-claim.sh complete 123 --agent 'codex-session-20261026-01'
+bash ops/issue-claim.sh release 123 --agent 'codex-session-20261026-01' \
+  --reason 'Worker stopped; scope needs refinement'
+```
+
+- `status` shows the live issue/comments, remote reservation and local receipt.
+- `resume` reconciles a partially published claim after access/API problems;
+  it does not start a model or take over another session.
+- `review` requires one open PR on the recorded branch, records its link, and
+  moves to Review. The reservation and busy label remain through review.
+- `complete` requires a merged PR on that branch, moves to Ready to test and
+  removes the busy label/reservation. It does not close acceptance issues or
+  mark Done: deployed acceptance evidence is still required.
+- `release` requires an explicit reason, no linked/open PR, and that the worker
+  has stopped. It returns to Backlog, clears the busy label and removes only
+  the matching remote reservation. Working files and branches are preserved.
+
+There is no timeout-based stealing. If visibility updates fail after reservation,
+the helper exits nonzero and leaves its receipt and remote claim for repair;
+no implementation may start. Repair the named error and resume. A crashed or
+timed-out runner retains its claim and worktree until the dispatcher inspects
+the session and explicitly resumes or releases it. Never launch a duplicate
+because an old comment looks stale.
+
+Receipts live under the checkout's Git common directory, in
+`conch-claims/issue-N.json`, shared by that clone's linked worktrees. A failed
+competing push can leave a local receipt which does not own the remote ref;
+`status` identifies it, and owner checks refuse transitions. After verifying
+the remote belongs to someone else, discard only that losing local receipt.
+If the owner clone/receipt was lost, stop: the dispatcher must confirm the old
+session is stopped, inspect the remote claim commit, and reconcile the issue,
+Project and reservation using the exact inspected SHA as the deletion lease.
+Never blindly delete or force-update a claim ref.
 
 ## The review gate
 
@@ -148,12 +231,14 @@ similar issues start from the real number.
 ## Unattended runner
 
 `ops/conch-agent.sh` (systemd timer, 3×/day) is a separate, headless path that
-dispatches issues without a dispatcher session. Work state is a two-tag model:
+dispatches issues without a dispatcher session. Two tags control approval and
+readiness; the shared claim adds the busy state:
 
 | Label | Managed by | Meaning |
 |---|---|---|
 | `agent/todo` | human | approved / needs doing — phase scoping happens by labeling just the current phase's issues |
 | `agent/ready` | auto (`sync`) | not labeled `blocked` and nothing in its `## Blocked by` is still open — ready to work *now* |
+| `agent/in-progress` | claim helper / dispatcher | reserved by an agent; skip even when otherwise ready |
 
 The runner is **opt-in**: it picks from `agent/todo` ∩ unblocked (it recomputes
 blocked-ness live; the `agent/ready` label is a materialized view of that same
@@ -164,7 +249,8 @@ disjoint `area/*` labels may be worked in parallel (see Isolation above).
 warnings), approved-but-blocked with their blockers, awaiting approval, and
 busy issues.
 
-`agent/todo` survives failed runs (auto-retry on the next firing); a session
+`agent/todo` survives failed runs, but the busy reservation suppresses automatic
+retries until the dispatcher reconciles it through the claim lifecycle. A session
 that finds an issue not executable removes `agent/todo` along with adding
 `blocked`, so a rewritten issue needs fresh approval before the runner touches
 it again.

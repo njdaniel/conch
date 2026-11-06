@@ -40,7 +40,11 @@ delegated.
       requirement for local runs).
    6. *Conventions* — concrete existing files to imitate.
 
-3. **Isolate, then launch.**
+3. **Claim, isolate, then launch** (CLAUDE.md rule 8, #831).
+   - Claim first, so Nick and every other session see the issue is taken:
+     `bash ops/issue-claim.sh claim N --agent <session>-<worker> --branch issue-N/<worker> --files "<areas>"`.
+     A refusal (busy, blocked, a linked PR, a board status past Ready) means
+     do not launch: inspect the issue, and pick another or ask for a handoff.
    - Claude agents: `isolation: worktree`, always.
    - Codex: create `issue-N/codex` in the main working tree *before* launch;
      do not touch the tree while it runs.
@@ -84,7 +88,10 @@ delegated.
    update the Dispatch block's estimate.
 
 6. **Open the PR referencing the issue.** Never merge — merges are Nick's;
-   verify merge state with `gh pr view`, never assume it.
+   verify merge state with `gh pr view`, never assume it. Then run
+   `bash ops/issue-claim.sh review N --agent <same session>` (board: Review),
+   and after the merge `complete` (board: Ready to test). Work abandoned
+   after its worker has stopped is `release N --agent … --reason …`.
 
 ## Externally-originated PRs
 

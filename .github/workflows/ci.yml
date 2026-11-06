@@ -410,6 +410,11 @@ jobs:
           ./scripts/invisible-chars.sh
           ./scripts/ci-docs-only-test.sh
 
+      # The issue-claim helper's lifecycle (#831): real local Git remotes,
+      # mocked GitHub and model calls, no network.
+      - name: agent claims
+        run: make agent-claim-test
+
       - name: every check passed
         env:
           NEEDS: ${{ toJSON(needs) }}

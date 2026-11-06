@@ -43,6 +43,7 @@ IN_PROGRESS_LABEL="agent/in-progress"
 TODO_LABEL="agent/todo"
 READY_LABEL="agent/ready"
 WORKTREE_ROOT="$LOG_DIR/worktrees"
+CLAIM_HELPER="$SCRIPT_DIR/issue-claim.sh"
 
 mkdir -p "$LOG_DIR" "$WORKTREE_ROOT"
 LOG_FILE="$LOG_DIR/run-$(date +%Y%m%d-%H%M%S).log"
@@ -138,8 +139,12 @@ sync_ready() {
 # Human view of the work queue: what is up for grabs (and parallel-safe),
 # what is approved but blocked, what waits on approval, what is busy.
 show_queue() {
-    local issues linked n c
+    local issues linked claims n c
     issues=$(fetch_open_issues)
+    # Include partially published claims whose label update failed. They are
+    # reserved remotely even if issue metadata still looks unclaimed.
+    claims=$(git ls-remote --refs origin 'refs/heads/agent-claims/issue-*' | \
+        sed -n 's|.*refs/heads/agent-claims/issue-\([0-9][0-9]*\)$|\1|p' | jq -s .)
     linked="{}"
     for n in $(jq -r '.[].number' <<<"$issues"); do
         c=$(gh issue view "$n" --json closedByPullRequestsReferences \
@@ -147,7 +152,7 @@ show_queue() {
         linked=$(jq --arg n "$n" --argjson c "$c" '. + {($n): $c}' <<<"$linked")
     done
     jq -r --arg todo "$TODO_LABEL" --arg wip "$IN_PROGRESS_LABEL" \
-          --argjson linked "$linked" "
+          --argjson linked "$linked" --argjson claims "$claims" "
         . as \$all
         | [ \$all[].number ] as \$open
         | [ \$all[]
@@ -156,7 +161,8 @@ show_queue() {
                 prio: ((.title | capture(\"^P(?<p>[0-9])\") | .p) // \"9\"),
                 areas: (\$lab | map(select(startswith(\"area/\")))),
                 todo: ((\$lab | index(\$todo)) != null),
-                wip: ((\$lab | index(\$wip)) != null),
+                wip: (((\$lab | index(\$wip)) != null)
+                    or (.number as \$n | \$claims | index(\$n) != null)),
                 haspr: ((\$linked[.number | tostring] // 0) > 0),
                 blockers: ($JQ_BLOCKERS),
                 blockedlab: ((\$lab | index(\"blocked\")) != null) }
@@ -263,23 +269,40 @@ fi
 TITLE=$(gh issue view "$ISSUE" --json title --jq .title)
 BRANCH="issue-$ISSUE/agent"
 WORKTREE="$WORKTREE_ROOT/issue-$ISSUE"
+CLAIM_AGENT="conch-agent:$CLAUDE_MODEL:$(date -u +%Y%m%dT%H%M%SZ):$$"
+FILES=$(gh issue view "$ISSUE" --json body --jq .body | \
+    awk '/^## Files/{p=1;next} /^## /{p=0} p')
+[ -n "$FILES" ] || { log "issue #$ISSUE has no Files section; not dispatching"; exit 1; }
+# Preserve a previous failed session for inspection. Never delete its work to
+# make a new session fit; an explicit handoff/release must settle it first.
+if [ -e "$WORKTREE" ] || git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    log "existing work for #$ISSUE; inspect the claim and worktree before retrying"
+    exit 1
+fi
 
 log "picked issue #$ISSUE: $TITLE"
-gh issue edit "$ISSUE" --add-label "$IN_PROGRESS_LABEL"
+bash "$CLAIM_HELPER" claim "$ISSUE" --agent "$CLAIM_AGENT" \
+    --branch "$BRANCH" --files "$FILES" >>"$LOG_FILE" 2>&1 || {
+    log "claim or Project update failed for #$ISSUE; no worker started; inspect issue-claim.sh status"
+    exit 1
+}
+HAS_PR=false
 
 cleanup() {
-    git -C "$REPO_DIR" worktree remove --force "$WORKTREE" 2>/dev/null || true
-    git -C "$REPO_DIR" branch -D "$BRANCH" 2>/dev/null || true
+    if [ "$HAS_PR" = true ]; then
+        git -C "$REPO_DIR" worktree remove "$WORKTREE" 2>/dev/null || true
+    fi
 }
 trap cleanup EXIT
 
 # Fresh branch off origin/main in an isolated worktree.
-git worktree remove --force "$WORKTREE" 2>/dev/null || true
-git branch -D "$BRANCH" 2>/dev/null || true
 git worktree add "$WORKTREE" -b "$BRANCH" origin/main
 
 PROMPT="You are running unattended in a dedicated git worktree on branch \
 $BRANCH. Your task is GitHub issue #$ISSUE of this repository.
+The dispatcher has already claimed it as $CLAIM_AGENT. The successful claim
+receipt is in the runner log and issue comment. Do not acquire another claim,
+remove its busy label, release it or change Project status yourself.
 
 1. Read the issue: gh issue view $ISSUE --comments
 2. Read CLAUDE.md and follow every rule there. Stay strictly within the
@@ -310,10 +333,14 @@ log "claude session exited with status $STATUS"
 # Verify the outcome: a PR from our branch must exist.
 PR_URL=$(gh pr list --state open --head "$BRANCH" --json url --jq '.[0].url // empty')
 if [ -n "$PR_URL" ]; then
+    HAS_PR=true
+    bash "$CLAIM_HELPER" review "$ISSUE" --agent "$CLAIM_AGENT" >>"$LOG_FILE" 2>&1 || {
+        log "PR exists but Review status failed; claim retained for reconciliation: $PR_URL"
+        exit 1
+    }
     log "success: $PR_URL (issue #$ISSUE)"
 else
-    log "no PR created for issue #$ISSUE; releasing it for a future run"
-    git push origin --delete "$BRANCH" 2>/dev/null || true
-    gh issue edit "$ISSUE" --remove-label "$IN_PROGRESS_LABEL" || true
+    log "no PR for #$ISSUE; claim and worktree retained, no automatic retry or branch deletion"
+    log "inspect with: bash $CLAIM_HELPER status $ISSUE; session=$CLAIM_AGENT"
     exit 1
 fi

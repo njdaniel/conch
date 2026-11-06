@@ -12,7 +12,17 @@ You do not need Claude or any other AI tool to contribute. The files under `.cla
 
 1. **Find or file an issue.** Every change starts from one. Use the [issue forms](https://github.com/njdaniel/conch/issues/new/choose): a bug report, or feedback and ideas. Blank issues are turned off.
 2. **Check that it is ready.** Work is written up as issues a newcomer can pick up with no other context, using the [task template](.github/ISSUE_TEMPLATE/task.md): Context, Files, Acceptance criteria, Required tests, Blocked by. An issue that has these and is not blocked is ready.
-3. **Say you are taking it.** Comment on the issue before you start, and ask there if anything is unclear. For anything larger than a small fix, agree the approach on the issue first: it saves a rewrite.
+3. **Claim before working.** Read the issue comments, labels, linked PRs and
+   Project status. Check other active claims for overlapping files. Agents and
+   their dispatchers use `bash ops/issue-claim.sh claim ISSUE --agent SESSION
+   --branch BRANCH --files PATHS` with a unique session name; start only after
+   success. The command records the claim, sets `agent/in-progress`, and verifies
+   the board's In progress status. If another person/agent is working it, ask
+   for a handoff instead of duplicating it. Contributors without repository or
+   Project write access ask the maintainer to claim on their behalf. For anything
+   larger than a small fix, agree the approach on the issue first. Follow the
+   [claim lifecycle](docs/design/agent-dispatch.md#issue-claims) for review,
+   abandonment and merged work.
 4. **Check the settled decisions.** The non-goals in [ADR-000](docs/adr/ADR-000-charter.md) (for example no end-to-end encryption, no federation, no multi-tenancy) and the locked decisions there and in later ADRs are not reopened by a pull request. Reopening one takes an [ADR proposal](.github/ISSUE_TEMPLATE/adr-proposal.md) with new evidence, and the maintainer's sign-off.
 
 ## Set up
