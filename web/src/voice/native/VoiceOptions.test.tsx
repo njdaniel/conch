@@ -58,7 +58,7 @@ async function open(fake: Fake, view: NativeVoiceView = idle) {
 
 const mic = () => screen.getByLabelText<HTMLSelectElement>('Microphone');
 const speakers = () => screen.getByLabelText<HTMLSelectElement>('Speakers');
-const texts = (s: HTMLSelectElement) => Array.from(s.options).map((o) => o.text.replace(/[⁨⁩]/gu, ''));
+const texts = (s: HTMLSelectElement) => Array.from(s.options).map((o) => o.text.replace(/[\u2068\u2069]/gu, ''));
 
 describe('VoiceOptions devices', () => {
   it('lists System default, then the microphones and speakers, marking the defaults', async () => {

@@ -42,9 +42,9 @@ const oneShotWords: Readonly<Record<VoiceOneShotError, string>> = {
 };
 
 // Bidi format characters: marks, embeddings and overrides, isolates.
-const bidi = /[؜‎‏‪-‮⁦-⁩]/gu;
-const isolateStart = '⁨';
-const isolateEnd = '⁩';
+const bidi = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu;
+const isolateStart = '\u2068';
+const isolateEnd = '\u2069';
 
 // shown is a device's text for people: its description, else its name, with no
 // bidi control.
