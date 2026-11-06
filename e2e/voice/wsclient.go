@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -114,6 +115,23 @@ func (s *presenceSocket) problem() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.bad
+}
+
+// closeReason is the text of the server's close frame, once the socket has
+// ended; "" before that, or when it ended without one.
+func (s *presenceSocket) closeReason() string {
+	select {
+	case <-s.done:
+	default:
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var ce websocket.CloseError
+	if errors.As(s.err, &ce) {
+		return ce.Reason
+	}
+	return ""
 }
 
 // closeStatus reports whether the socket has ended and how the server closed it.

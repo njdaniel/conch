@@ -1082,6 +1082,16 @@ export class VoiceClient {
   }
 
   // leave shuts the gate, lets the last report go, and disconnects.
+  // removed is conchd saying, on the presence socket, that a moderator put
+  // this person out of voice (close 1008 `voice_removed`, issue #1409). They
+  // are still a member, so the client stops with why rather than asking for
+  // the next session, which conchd would grant: nothing rejoins by itself,
+  // and a deliberate join works at once. Out of voice already, nothing to do.
+  removed(why: string): void {
+    if (this.state.phase === 'idle' || this.state.phase === 'stopped') return;
+    this.drop({ kind: 'stop', why }, 'stop');
+  }
+
   async leave(): Promise<void> {
     const mine = ++this.attempt;
     this.clearTimers();

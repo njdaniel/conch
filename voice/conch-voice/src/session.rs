@@ -109,7 +109,7 @@ use crate::managed::{
     REPORT_LIMIT, ROOM_LIMIT, Snapshot,
 };
 use crate::output::{Connection, Event, Output, Stats, speaker_label};
-use crate::presence::{self, PresenceTimings, Roster};
+use crate::presence::{self, Presence, PresenceTimings};
 use crate::receive::{self, BoxedSink, MixCommand, MixStats, Playing};
 use crate::reports::{Answer, MakeClient, ReportEvent, ReportTimings, Reports};
 use crate::sdk::{DisconnectReason, MicTrack, RoomHandle, SdkError, SdkEvent, Transport};
@@ -783,7 +783,7 @@ struct Session<T: Transport> {
     reports: Reports,
     /// A press whose `started` is not yet answered. The press itself does not wait for it.
     opening: Option<Opening>,
-    rosters: mpsc::UnboundedReceiver<Roster>,
+    rosters: mpsc::UnboundedReceiver<Presence>,
     phase: Phase<T>,
     live: Option<Live<T>>,
     shown: Option<Connection>,
@@ -1040,7 +1040,10 @@ impl<T: Transport> Session<T> {
                     reason: "reconnect_timed_out",
                     detail: None,
                 }),
-                Some(roster) = self.rosters.recv() => self.out.show(&Event::Presence(&roster)),
+                Some(presence) = self.rosters.recv() => match presence {
+                    Presence::Roster(roster) => self.out.show(&Event::Presence(&roster)),
+                    Presence::VoiceRemoved => self.voice_removed(),
+                },
                 Some(report) = self.reports.events.recv() => self.on_report(&report),
                 Some(received) = self.receiver.stats.recv() => self.on_stats(received),
                 Some(said) = self.receiver.playing.recv() => self.on_playing(said),
@@ -1497,6 +1500,31 @@ impl<T: Transport> Session<T> {
             }),
             ended,
         );
+    }
+
+    /// `conchd`'s presence socket said a moderator removed this person from voice only
+    /// (issue #1409). The room, if one is joined, is left; either way the policy stops the
+    /// client with the reason, and nothing asks for the session `conchd` would grant.
+    ///
+    /// Not joined, the phase is left as it is: the outcome is a stop, so the loop ends on
+    /// it, and the shutdown drains what the phase holds, a room still closing after the
+    /// SDK's own disconnect for the kick, or an attempt under way, as it does for `quit`.
+    /// Replacing the phase here would drop that close half way (#1458 review).
+    fn voice_removed(&mut self) {
+        let ended = Ended {
+            outcome: Outcome::VoiceRemoved,
+            reason: "voice_removed",
+            detail: None,
+        };
+        if self.live.is_some() {
+            self.disconnected(ended);
+        } else {
+            debug_assert!(
+                ended.outcome.stops(),
+                "a non-stop would need the phase reset"
+            );
+            self.decide(ended);
+        }
     }
 
     fn on_transmit(&mut self, event: TxEvent) {

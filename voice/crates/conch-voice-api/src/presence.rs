@@ -68,6 +68,11 @@ pub enum StreamEnd {
         /// The close frame's text.
         reason: String,
     },
+    /// A moderator removed the caller from voice only (close code 1008, text exactly
+    /// [`CLOSE_VOICE_REMOVED`]; `schema.SocketCloseVoiceRemoved`, issue #1409). They are
+    /// still a member of the channel: `conchd` would grant the next session, so a client
+    /// that wants to stay out of voice must not ask for one by itself.
+    VoiceRemoved,
     /// Any other close frame: a normal closure (1000), an internal error (1011), or a
     /// frame with no code at all (reported as 1005).
     Closed {
@@ -292,6 +297,10 @@ fn snapshot(text: &[u8]) -> Result<VoicePresenceV1, Error> {
     Ok(presence)
 }
 
+/// The close frame text of a voice-only removal: the one 1008 close whose text is the
+/// server's reason word itself rather than a sentence (`schema.SocketCloseVoiceRemoved`).
+pub const CLOSE_VOICE_REMOVED: &str = "voice_removed";
+
 fn close_reason(scrubber: &Scrubber, frame: Option<CloseFrame>) -> StreamEnd {
     let (code, reason) = match frame {
         Some(frame) => (
@@ -302,6 +311,7 @@ fn close_reason(scrubber: &Scrubber, frame: Option<CloseFrame>) -> StreamEnd {
     };
     match code {
         CLOSE_GOING_AWAY => StreamEnd::ServerGoingAway { reason },
+        CLOSE_POLICY_VIOLATION if reason == CLOSE_VOICE_REMOVED => StreamEnd::VoiceRemoved,
         CLOSE_POLICY_VIOLATION => StreamEnd::PolicyViolation { reason },
         code => StreamEnd::Closed { code, reason },
     }
@@ -419,6 +429,25 @@ mod tests {
             ),
             StreamEnd::PolicyViolation {
                 reason: "no longer a member of this channel".into()
+            }
+        );
+        // The one 1008 whose text is the reason word (issue #1409); the word under another
+        // code, or a sentence that mentions it, is not it.
+        assert_eq!(
+            close_reason(&scrubber(), frame(1008, "voice_removed")),
+            StreamEnd::VoiceRemoved
+        );
+        assert_eq!(
+            close_reason(&scrubber(), frame(1011, "voice_removed")),
+            StreamEnd::Closed {
+                code: 1011,
+                reason: "voice_removed".into()
+            }
+        );
+        assert_eq!(
+            close_reason(&scrubber(), frame(1008, "voice_removed by a moderator")),
+            StreamEnd::PolicyViolation {
+                reason: "voice_removed by a moderator".into()
             }
         );
         assert_eq!(

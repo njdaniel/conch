@@ -142,8 +142,14 @@ func (l *live) kickedFromVoice(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	// Closed 1008 with the reason word itself (schema.SocketCloseVoiceRemoved,
+	// issue #1409): removed from voice, not from the channel. A client keys on
+	// the value, and does not rejoin by itself.
 	if _, st := eveWS.closeStatus(); st != websocket.StatusPolicyViolation {
 		return fmt.Errorf("eve's presence socket was closed with status %d, want %d", st, websocket.StatusPolicyViolation)
+	}
+	if got := eveWS.closeReason(); got != string(schema.SocketCloseVoiceRemoved) {
+		return fmt.Errorf("eve's presence socket was closed with reason %q, want %q", got, schema.SocketCloseVoiceRemoved)
 	}
 	if ended, _ := finnWS.closeStatus(); ended {
 		return fmt.Errorf("finn's presence socket was closed by eve's removal")

@@ -6,12 +6,24 @@
 //! connection is doing. When the socket ends it is opened again after a wait that doubles
 //! from one second to thirty. A refusal that no retry can change ends the task: the session
 //! request meets the same refusal, and the connection policy stops the client with the
-//! reason.
+//! reason. One end is news in itself: `conchd` closing the socket for a moderator's
+//! voice-only removal (`voice_removed`, issue #1409), which the task passes on as
+//! [`Presence::VoiceRemoved`] and then stops, since the session stops on it.
 
 use std::time::Duration;
 
-use conch_voice_api::{Client, Error as ApiError, PresenceEvent, VoicePresenceV1};
+use conch_voice_api::{Client, Error as ApiError, PresenceEvent, StreamEnd, VoicePresenceV1};
 use tokio::sync::mpsc;
+
+/// What the presence task tells the session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Presence {
+    /// What is known about the room changed.
+    Roster(Roster),
+    /// A moderator removed this person from voice only. They are still a member, so
+    /// `conchd` would grant the next session; the client stops instead of asking.
+    VoiceRemoved,
+}
 
 /// One participant of the channel's room, as shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,13 +95,14 @@ impl Default for PresenceTimings {
 }
 
 /// Starts the task that follows `channel`'s presence. Each change of the roster is sent
-/// once; the task ends when the receiver is dropped.
+/// once; the task ends when the receiver is dropped, or after it has said
+/// [`Presence::VoiceRemoved`].
 #[must_use]
 pub fn spawn(
     client: Client,
     channel: String,
     timings: PresenceTimings,
-) -> mpsc::UnboundedReceiver<Roster> {
+) -> mpsc::UnboundedReceiver<Presence> {
     let (rosters, receiver) = mpsc::unbounded_channel();
     tokio::spawn(follow(client, channel, timings, rosters));
     receiver
@@ -113,7 +126,7 @@ async fn follow(
     client: Client,
     channel: String,
     timings: PresenceTimings,
-    rosters: mpsc::UnboundedSender<Roster>,
+    rosters: mpsc::UnboundedSender<Presence>,
 ) {
     let mut last: Option<Roster> = None;
     let mut wait = timings.first_wait;
@@ -123,7 +136,7 @@ async fn follow(
                 return true;
             }
             last = Some(roster.clone());
-            rosters.send(roster).is_ok()
+            rosters.send(Presence::Roster(roster)).is_ok()
         };
         match client.presence_stream(&channel).await {
             Ok(mut stream) => loop {
@@ -137,6 +150,14 @@ async fn follow(
                         if !say(Roster::from_snapshot(&snapshot)) {
                             return;
                         }
+                    }
+                    Ok(PresenceEvent::Ended(StreamEnd::VoiceRemoved)) => {
+                        // Not a loss of the socket to be made good: the session stops on
+                        // this, and nothing here subscribes again on its own.
+                        log::debug!("the presence socket ended: removed from voice");
+                        say(Roster::Unknown);
+                        let _ = rosters.send(Presence::VoiceRemoved);
+                        return;
                     }
                     Ok(PresenceEvent::Ended(end)) => {
                         log::debug!("the presence socket ended: {end:?}");

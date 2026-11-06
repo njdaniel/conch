@@ -138,6 +138,20 @@ func TestSocketCloseReasons(t *testing.T) {
 				}
 			},
 			want: schema.SocketCloseRemoved},
+		{name: "removed from the channel, voice", path: "/v1/voice/ws?channel=alpha",
+			cause: func(t *testing.T, s *setup, _ *websocket.Conn) {
+				if rec := s.f.do(t, "DELETE", fmt.Sprintf("/v1/channels/alpha/members/%d", s.f.alice.ID), s.f.rootTok, ""); rec.Code != http.StatusNoContent {
+					t.Fatalf("remove = %d %s", rec.Code, rec.Body)
+				}
+			},
+			want: schema.SocketCloseRemoved},
+		{name: "removed from voice only", path: "/v1/voice/ws?channel=alpha",
+			cause: func(t *testing.T, s *setup, _ *websocket.Conn) {
+				if rec := s.f.do(t, "DELETE", fmt.Sprintf("/v1/channels/alpha/voice/participants/%d", s.f.alice.ID), s.f.rootTok, ""); rec.Code != http.StatusNoContent {
+					t.Fatalf("voice kick = %d %s", rec.Code, rec.Body)
+				}
+			},
+			want: schema.SocketCloseVoiceRemoved},
 		{name: "slow consumer", path: "/v1/events/ws?channel=alpha",
 			cause: func(t *testing.T, s *setup, _ *websocket.Conn) {
 				// What a full queue does (eventsSub.push): the subscriber is
