@@ -147,6 +147,12 @@ type InviteV1 struct {
 	MayInvite                 bool              `json:"may_invite"`
 	CredentialLifetimeSeconds int64             `json:"credential_lifetime_seconds"`
 	JoinAs                    InviteJoinMode    `json:"join_as,omitempty"`
+	// OtherChannels is how many channels the invite lands its joiner in
+	// beyond those Channels lists: the ones the reader is not in, left out
+	// because the reader does not hold manage_channels (ADR-014,
+	// docs/design/admin-roles.md §7.3), so the invite does not seem to grant
+	// less than it does. Omitted when 0, and by a server that predates it.
+	OtherChannels int64 `json:"other_channels,omitempty"`
 }
 
 // CreateInviteRequestV1 is the body of the route that makes an invite.

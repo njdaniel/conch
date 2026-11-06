@@ -771,8 +771,14 @@ async fn a_slow_server_is_a_timeout_and_the_request_is_not_sent_again() {
         "waited for the server: {waited:?}"
     );
     assert_eq!(Error::Timeout.status(), None);
-    // Three calls, three requests.
-    assert_eq!(stub.requests().len(), 3);
+    // Three calls, three requests. The stub records a request when its own task has read
+    // it, which on a loaded machine can be after the client has given up, so it is waited
+    // for (not slept for) until all three are in. A request sent again would already have
+    // been sent by the time the calls returned: it gets the same chance to show up.
+    let requests = stub.requests_after(3, Duration::from_secs(30)).await;
+    assert_eq!(requests.len(), 3, "{requests:#?}");
+    let again = stub.requests_after(4, Duration::from_millis(500)).await;
+    assert_eq!(again.len(), 3, "sent again: {again:#?}");
 }
 
 #[tokio::test]

@@ -1,0 +1,93 @@
+{
+  "revision": 2,
+  "rows": [
+    {
+      "permission": "create_public_channels",
+      "member": false,
+      "operator": true
+    },
+    {
+      "permission": "create_private_channels",
+      "member": false,
+      "operator": true
+    },
+    {
+      "permission": "make_member_links",
+      "member": false,
+      "operator": true
+    },
+    {
+      "permission": "see_member_directory",
+      "member": false,
+      "operator": true,
+      "operator_fixed": true
+    },
+    {
+      "permission": "use_voice",
+      "member": true,
+      "operator": true
+    },
+    {
+      "permission": "share_screen",
+      "member": true,
+      "operator": true
+    },
+    {
+      "permission": "manage_members",
+      "member": false,
+      "operator": true,
+      "member_fixed": true
+    },
+    {
+      "permission": "act_as_members",
+      "member": false,
+      "operator": true,
+      "member_fixed": true
+    },
+    {
+      "permission": "manage_channels",
+      "member": false,
+      "operator": true,
+      "member_fixed": true
+    },
+    {
+      "permission": "change_server_settings",
+      "member": false,
+      "operator": false,
+      "member_fixed": true
+    },
+    {
+      "permission": "read_audit_log",
+      "member": false,
+      "operator": false,
+      "member_fixed": true
+    }
+  ],
+  "preset": "personal",
+  "presets": [
+    {
+      "preset": "personal",
+      "member": [
+        "use_voice",
+        "share_screen"
+      ]
+    },
+    {
+      "preset": "group",
+      "member": [
+        "create_public_channels",
+        "create_private_channels",
+        "make_member_links",
+        "see_member_directory",
+        "use_voice",
+        "share_screen"
+      ]
+    }
+  ],
+  "editable": [],
+  "warnings": [
+    "default_channel_exposes_members",
+    "open_signup_on"
+  ],
+  "updated_at": "2026-10-31T09:00:00.000Z"
+}

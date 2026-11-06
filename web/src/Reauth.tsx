@@ -1,5 +1,5 @@
 // The question a recent-auth refusal asks (issue #714, design §5.3, §6.2):
-// an action that needs a recent proof of the password (and an operator's
+// an action that needs a recent proof of the password (and an enrolled operator's
 // code) was answered reauth_required. The page asks here, over whatever the
 // person was doing, which stays as it was underneath: the form they filled
 // in keeps what they typed, and once the proof stands the same request is
@@ -23,7 +23,8 @@ export function Reauth({
   onDone,
   onUnauthorized,
 }: {
-  // An operator proves a code with the password.
+  // An operator with an authenticator enrolled proves a code with the
+  // password; one without (ADR-012) sends the password alone.
   readonly operator: boolean;
   readonly insecure: boolean;
   // Whether a proof now stands: true sends the action again, false leaves it.

@@ -308,6 +308,8 @@ func (c *voiceClient) heard(what string, from, to time.Time, lines int, want map
 		return fmt.Errorf("%s: %s printed %d stats lines in the window, want at least %d", what, c.who.name, len(stats), lines)
 	}
 	self := identity(c.who.id)
+	// What each wanted speaker was heard to send over the whole window.
+	totals := map[string]struct{ frames, audible float64 }{}
 	for _, line := range stats {
 		encoded, _ := json.Marshal(line)
 		saw := c.h.redact(string(encoded))
@@ -328,11 +330,17 @@ func (c *voiceClient) heard(what string, from, to time.Time, lines int, want map
 				continue
 			}
 			found[id] = true
-			// Four fifths, not all: a loaded machine drops a frame now and
-			// then, and that is not what this checks.
-			if frames < 50 || audible*5 < frames*4 {
-				return fmt.Errorf("%s: %s counted %v frames from %s, %v audible; want at least 50, four fifths of them audible: %s", what, c.who.name, frames, id, audible, saw)
+			// Each second must carry a speaker's frames, and some of them
+			// audible. How many are audible is judged over the whole window
+			// below: a starved process loses a burst of frames in one second
+			// (issue #1316), and that second says nothing of the audio path.
+			if frames < 50 || audible == 0 {
+				return fmt.Errorf("%s: %s counted %v frames from %s, %v audible; want at least 50, some of them audible: %s", what, c.who.name, frames, id, audible, saw)
 			}
+			total := totals[id]
+			total.frames += frames
+			total.audible += audible
+			totals[id] = total
 			if number(s["dominant_hz"]) != float64(tone) {
 				return fmt.Errorf("%s: %s hears %v Hz strongest from %s, want %d: %s", what, c.who.name, s["dominant_hz"], id, tone, saw)
 			}
@@ -350,19 +358,35 @@ func (c *voiceClient) heard(what string, from, to time.Time, lines int, want map
 			return fmt.Errorf("%s: %s's mix is silent while someone is holding a key: %s", what, c.who.name, saw)
 		}
 	}
+	// Four fifths of what a speaker sent over the window, not of each second
+	// and not all: a loaded machine drops frames in bursts, and that is not
+	// what this checks. A speaker that is mostly not heard still fails.
+	for id, total := range totals {
+		if total.audible*5 < total.frames*4 {
+			return fmt.Errorf("%s: %s heard %v of %v frames from %s audibly over %d stats lines; want four fifths of them", what, c.who.name, total.audible, total.frames, id, len(stats))
+		}
+	}
 	return nil
 }
 
 // sending checks the client's own frames_sent in the stats lines of the
-// window: at least four fifths of a second's worth in each when it should be
-// sending, and none at all when it should not.
+// window: when it should be sending, at least four fifths of a second's worth
+// over the window (a starved process hands over a few frames late, and the
+// second it does so says nothing of the send path: issue #1316) and some in
+// every second; none at all when it should not.
 func (c *voiceClient) sending(what string, from, to time.Time, on bool) error {
-	for _, line := range c.statsWithin(from, to) {
+	var sentTotal float64
+	lines := c.statsWithin(from, to)
+	for _, line := range lines {
 		sent := number(line["frames_sent"])
-		if on && sent < 80 || !on && sent != 0 {
+		sentTotal += sent
+		if on && sent == 0 || !on && sent != 0 {
 			return fmt.Errorf("%s: %s handed %v frames to its track in a second, want %s", what, c.who.name, sent,
-				map[bool]string{true: "at least 80", false: "none"}[on])
+				map[bool]string{true: "some", false: "none"}[on])
 		}
+	}
+	if on && sentTotal < 80*float64(len(lines)) {
+		return fmt.Errorf("%s: %s handed %v frames to its track in %d seconds, want at least %d", what, c.who.name, sentTotal, len(lines), 80*len(lines))
 	}
 	return nil
 }

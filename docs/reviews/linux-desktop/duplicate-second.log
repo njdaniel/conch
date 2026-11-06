@@ -1,0 +1,13 @@
+{"capture_logs":false,"ev":"start","t_ms":0.0,"unix_us":1793194756474003}
+{"ev":"connect_call","t_ms":0.619}
+Nvidia Decoder is supported.
+{"connect_ms":615.241,"ev":"connected","t_ms":615.862,"who":"client"}
+{"ev":"published","muted":true,"publish_ms":0.5480000000000018,"rtc_enabled":true,"t_ms":616.502}
+{"ev":"disabled","muted":true,"rtc_enabled":false,"t_ms":617.852}
+{"ev":"other_event","name":"Connected","t_ms":617.877}
+{"ev":"connection_state","state":"Connected","t_ms":617.88}
+{"ev":"token_refreshed","same_as_join_token":false,"t_ms":617.883}
+{"ev":"local_track_published","t_ms":617.885}
+{"ev":"audio","fed":501,"speakers":[],"t_ms":5622.761}
+{"close_ms":1.1760000000003856,"ev":"closed","outcome":"closed","t_ms":5623.944}
+{"ev":"exit","t_ms":5717.255,"unix_us":1793194762191260}

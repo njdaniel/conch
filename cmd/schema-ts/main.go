@@ -14,7 +14,10 @@
 //	bool                           bool
 //	time.Time, schema.Timestamp    timestamp
 //	json.RawMessage                json
-//	a named string type            vocab over its schema.Vocabularies entry
+//	a named string type            vocab over its schema.Vocabularies entry,
+//	                               or tolerant where schema.TSVocabularyModes
+//	                               says the client keeps a value it does not
+//	                               know (issue #1051)
 //	[]T                            array(T)
 //	a struct                       that struct's validator, which must be listed
 //	omitempty or omitzero          optional(T)
@@ -23,6 +26,8 @@
 //	json:"-" or unexported         skipped
 //
 // Anything else is refused, with the field it is in, rather than guessed at.
+// The scalars in schema.TSConstants (a string or a signed integer each) are
+// written first, as exported constants (issue #953).
 package main
 
 import (
@@ -35,6 +40,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -55,7 +61,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: schema-ts -out <dir>")
 		os.Exit(2)
 	}
-	files, err := generate(schema.TSTypes, schema.TSUnions, schema.Vocabularies, payloadNames())
+	files, err := generate(schema.TSTypes, schema.TSUnions, schema.Vocabularies, schema.TSVocabularyModes, payloadNames(), schema.TSConstants)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "schema-ts:", err)
 		os.Exit(1)
@@ -89,7 +95,7 @@ var (
 
 // combinators is what validate.ts exports for generated code to use, in the
 // order the import names them. No generated name may be one of them.
-var combinators = []string{"array", "bool", "int", "json", "object", "optional", "str", "tagged", "timestamp", "vocab"}
+var combinators = []string{"array", "bool", "int", "json", "object", "optional", "str", "tagged", "timestamp", "tolerant", "vocab"}
 
 // decl is one struct to write: a TSTypes or a TSUnions entry.
 type decl struct {
@@ -126,6 +132,7 @@ type field struct {
 
 type generator struct {
 	vocab  map[string][]string
+	modes  map[string]schema.TSVocabularyMode
 	decls  map[reflect.Type]*decl
 	vocabs map[string]bool   // the vocabularies written so far
 	names  map[string]string // each name declared in generated.ts, and whose it is
@@ -134,9 +141,13 @@ type generator struct {
 }
 
 // generate returns the content of each file this program writes, by name.
-func generate(types []schema.TSType, unions []schema.TSUnion, vocab map[string][]string, payloads map[reflect.Type]string) (map[string][]byte, error) {
+// consts are written first, before any type. modes says, for each vocabulary
+// a type uses, whether its validator is strict or tolerant; one with no mode
+// is refused.
+func generate(types []schema.TSType, unions []schema.TSUnion, vocab map[string][]string, modes map[string]schema.TSVocabularyMode, payloads map[reflect.Type]string, consts []schema.TSConstant) (map[string][]byte, error) {
 	g := &generator{
 		vocab:  vocab,
+		modes:  modes,
 		decls:  map[reflect.Type]*decl{},
 		vocabs: map[string]bool{},
 		names:  map[string]string{},
@@ -145,7 +156,10 @@ func generate(types []schema.TSType, unions []schema.TSUnion, vocab map[string][
 	for _, c := range combinators {
 		g.names[c] = "validate.ts"
 	}
-	if err := plainTables(types, unions, vocab, payloads); err != nil {
+	if err := plainTables(types, unions, vocab, payloads, consts); err != nil {
+		return nil, err
+	}
+	if err := g.writeConstants(consts); err != nil {
 		return nil, err
 	}
 	var order []*decl
@@ -222,10 +236,43 @@ func familiesTS(order []*decl) []byte {
 	return []byte(b.String())
 }
 
+// writeConstants writes each TSConstants entry as an exported constant: a
+// string as a literal, a signed integer as a number. Anything else, a name
+// that is not a TypeScript identifier, or a name already taken is refused.
+func (g *generator) writeConstants(consts []schema.TSConstant) error {
+	if len(consts) == 0 {
+		return nil
+	}
+	b := &g.body
+	b.WriteString("\n// Constants of pkg/schema the client must agree with the server on.\n")
+	for _, c := range consts {
+		if err := g.claim(c.Name, "TSConstants"); err != nil {
+			return err
+		}
+		var value string
+		switch v := reflect.ValueOf(c.Value); v.Kind() {
+		case reflect.String:
+			value = quote(v.String())
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			value = strconv.FormatInt(v.Int(), 10)
+		default:
+			return fmt.Errorf("TSConstants %s: %T is not a string or a signed integer", c.Name, c.Value)
+		}
+		fmt.Fprintf(b, "export const %s = %s;\n", c.Name, value)
+	}
+	return nil
+}
+
 // plainTables refuses any string in the tables that is not printable ASCII,
 // before any of them is written into TypeScript.
-func plainTables(types []schema.TSType, unions []schema.TSUnion, vocab map[string][]string, payloads map[reflect.Type]string) error {
+func plainTables(types []schema.TSType, unions []schema.TSUnion, vocab map[string][]string, payloads map[reflect.Type]string, consts []schema.TSConstant) error {
 	var errs []error
+	for _, c := range consts {
+		errs = append(errs, plain(c.Name, "a TSConstants Name"))
+		if s, ok := c.Value.(string); ok {
+			errs = append(errs, plain(s, "TSConstants "+c.Name))
+		}
+	}
 	for _, t := range types {
 		errs = append(errs, plain(t.Family, "a TSTypes Family"), plain(t.Schema, "a TSTypes Schema"))
 	}
@@ -406,6 +453,9 @@ func (g *generator) writeUnion(d *decl) error {
 	if tagType.Kind() != reflect.String || tagType.Name() == "string" || !ok {
 		return fmt.Errorf("%s.%s: a union's tag must be a type in Vocabularies", d.typ.Name(), u.Tag)
 	}
+	if g.modes[tagType.Name()] == schema.TSTolerant {
+		return fmt.Errorf("%s.%s: a union's tag cannot be a tolerant vocabulary; tagged() has no variant for a value it does not know", d.typ.Name(), u.Tag)
+	}
 	for tag := range u.Variants {
 		if !slices.Contains(tags, tag) {
 			return fmt.Errorf("%s: variant %q is not a value of %s", d.typ.Name(), tag, tagType.Name())
@@ -577,7 +627,11 @@ func (g *generator) ref(t reflect.Type, where string) (expr, error) {
 }
 
 // vocabulary writes, once, the union type and validator of a named string
-// type, and returns their names.
+// type, and returns their names. A strict vocabulary is the union of its
+// values and a vocab validator. A tolerant one (schema.TSTolerant) is
+// written as Known<Name>, that union, then <Name>, the union or any other
+// string, and a tolerant validator, so a bundle keeps a value it does not
+// know (issue #1051).
 func (g *generator) vocabulary(t reflect.Type, where string) (expr, error) {
 	name := t.Name()
 	members, ok := g.vocab[name]
@@ -591,6 +645,21 @@ func (g *generator) vocabulary(t reflect.Type, where string) (expr, error) {
 	if len(members) == 0 {
 		return expr{}, fmt.Errorf("%s: vocabulary %s is empty", where, name)
 	}
+	mode, ok := g.modes[name]
+	if !ok {
+		return expr{}, fmt.Errorf("%s: %s is not in schema.TSVocabularyModes; say whether its validator is strict or tolerant", where, name)
+	}
+	known, check := name, "vocab"
+	switch mode {
+	case schema.TSStrict:
+	case schema.TSTolerant:
+		known, check = "Known"+name, "tolerant"
+		if err := g.claim(known, name); err != nil {
+			return expr{}, err
+		}
+	default:
+		return expr{}, fmt.Errorf("%s: TSVocabularyModes[%s] = %d is not a mode", where, name, mode)
+	}
 	if err := g.claim(name, name); err != nil {
 		return expr{}, err
 	}
@@ -598,7 +667,7 @@ func (g *generator) vocabulary(t reflect.Type, where string) (expr, error) {
 		return expr{}, err
 	}
 	g.vocabs[name] = true
-	g.used["vocab"] = true
+	g.used[check] = true
 	lits := make([]string, len(members))
 	entries := make([]string, len(members))
 	for i, m := range members {
@@ -606,17 +675,24 @@ func (g *generator) vocabulary(t reflect.Type, where string) (expr, error) {
 		entries[i] = key(m) + ": true"
 	}
 	b := &g.body
-	fmt.Fprintf(b, "\n// schema.%s\n", name)
-	if line := fmt.Sprintf("export type %s = %s;", name, strings.Join(lits, " | ")); len(line) <= maxLine {
+	if mode == schema.TSTolerant {
+		fmt.Fprintf(b, "\n// schema.%s: closed on the server and client-tolerant, so a value this\n// bundle does not know is kept and shown by its name; %s is the known ones.\n", name, known)
+	} else {
+		fmt.Fprintf(b, "\n// schema.%s\n", name)
+	}
+	if line := fmt.Sprintf("export type %s = %s;", known, strings.Join(lits, " | ")); len(line) <= maxLine {
 		b.WriteString(line + "\n")
 	} else {
-		fmt.Fprintf(b, "export type %s =\n  | %s;\n", name, strings.Join(lits, "\n  | "))
+		fmt.Fprintf(b, "export type %s =\n  | %s;\n", known, strings.Join(lits, "\n  | "))
+	}
+	if mode == schema.TSTolerant {
+		fmt.Fprintf(b, "export type %s = %s | (string & {});\n", name, known)
 	}
 	b.WriteString("\n")
-	if line := fmt.Sprintf("export const %s = vocab<%s>({ %s });", value, name, strings.Join(entries, ", ")); len(line) <= maxLine {
+	if line := fmt.Sprintf("export const %s = %s<%s>({ %s });", value, check, known, strings.Join(entries, ", ")); len(line) <= maxLine {
 		b.WriteString(line + "\n")
 	} else {
-		fmt.Fprintf(b, "export const %s = vocab<%s>({\n  %s,\n});\n", value, name, strings.Join(entries, ",\n  "))
+		fmt.Fprintf(b, "export const %s = %s<%s>({\n  %s,\n});\n", value, check, known, strings.Join(entries, ",\n  "))
 	}
 	return expr{ts: name, check: value}, nil
 }

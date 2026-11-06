@@ -77,15 +77,17 @@ func conchBinary(t *testing.T) string {
 		}
 		buildDir = dir
 		bin := filepath.Join(dir, "conch")
-		out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput() // #nosec G204 -- fixed arguments
+		out, err := buildCLI(bin)
 		if err != nil {
-			buildErr = err.Error() + "\n" + string(out)
+			buildErr = err.Error() + "\n" + out
 			return
 		}
 		builtBin = bin
 	})
 	if buildErr != "" {
-		t.Fatalf("go build: %s", buildErr)
+		// The build runs once per test binary, so every test using it fails
+		// with this same original error.
+		t.Fatalf("shared conch test build failed (same error for every test that needs the binary): go build: %s", buildErr)
 	}
 	return builtBin
 }
@@ -299,8 +301,16 @@ func TestLoginReadsExactlyTheTypedToken(t *testing.T) {
 		t.Fatalf("no token prompt within %v; output %q", fastLimit, s.output())
 	}
 	t.Logf("prompt after %v", time.Since(start))
-	if echoOn(t, s.slave) {
-		t.Error("echo is on while the token is read")
+	// The prompt is printed just before term.ReadPassword turns echo off
+	// (readToken in internal/cli/command.go), so echo may still be on for a
+	// few microseconds after the prompt is seen. That window is accepted
+	// (#1068): poll until echo goes off rather than racing it.
+	echoDeadline := time.Now().Add(250 * time.Millisecond)
+	for echoOn(t, s.slave) {
+		if time.Now().After(echoDeadline) {
+			t.Fatal("echo is still on 250ms after the prompt")
+		}
+		time.Sleep(time.Millisecond)
 	}
 	s.send(fakeToken + "\n")
 	exited, err := s.waitExit(fastLimit)

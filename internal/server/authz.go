@@ -57,6 +57,14 @@ const (
 	denyNetNotOn          = "net_not_on"
 	denyAgentOnHumanRoute = "agents_use_mcp"
 	denyAgentVoice        = "agents_no_voice"
+	// denyAgentChannelCreate: channels are made by community members
+	// (issue #981); an agent is never one.
+	denyAgentChannelCreate = "agents_no_channel_create"
+	// denyAgentDirectory and denyAgentLeave: the channel directory and
+	// leaving are a community member's (issue #982); an agent's channels
+	// are set by its operator.
+	denyAgentDirectory = "agents_no_directory"
+	denyAgentLeave     = "agents_no_leave"
 )
 
 var (
@@ -64,6 +72,11 @@ var (
 	errChannelNotFound = &schema.Error{Code: "channel_not_found", Message: "channel not found"}
 	errApprovalMissing = &schema.Error{Code: "approval_not_found", Message: "approval not found"}
 	errInternal        = &schema.Error{Code: "internal_error", Message: "internal server error"}
+	// errChannelArchived is the answer of every write the store's archived
+	// guard refuses (issue #844). It is said only after the caller's
+	// standing in the channel is known: to anyone else the channel is
+	// errChannelNotFound.
+	errChannelArchived = &schema.Error{Code: schema.ErrorCodeChannelArchived, Message: "the channel is archived: restore it to post, react, upload, join, call, or start an approval, a run or an intervention in it"}
 	errUnauthenticated = &schema.Error{Code: "unauthenticated", Message: "the credential is no longer valid"}
 )
 
@@ -334,12 +347,30 @@ func (g *grantedChannel) insertMessage(ctx context.Context, body string, payload
 		// themselves (issue #240).
 		return store.Message{}, errAttachmentRefused
 	}
+	if errors.Is(err, store.ErrReservedPayload) {
+		return store.Message{}, errReservedPayloadRefused
+	}
+	if errors.Is(err, store.ErrChannelArchived) {
+		// The store's archived guard (issue #844): said by the same tools
+		// without reaching into the store themselves.
+		return store.Message{}, errArchivedRefused
+	}
 	if err == nil {
 		// A grant is only ever an agent's.
 		g.scope.s.metrics.messagePosted(store.PrincipalAgent)
+		g.scope.s.events.notifyReadState(g.channel.ID, g.scope.identity.principalID)
+		g.scope.s.events.notifyMessage(g.channel.ID, msg.ID, g.scope.identity.principalID)
 	}
 	return msg, err
 }
+
+// errArchivedRefused is the error insertMessage and createApproval give for a
+// write to an archived channel (issues #844 and #1296). Nothing was stored.
+var errArchivedRefused = errors.New("server: channel is archived")
+
+// errReservedPayloadRefused is insertMessage's error for a payload schema only
+// the server may author (issue #1345). Nothing was stored.
+var errReservedPayloadRefused = errors.New("server: reserved payload schema")
 
 // errAttachmentRefused is insertMessage's error for a post whose file
 // attachment cannot be honoured (an agent cannot upload, so for an agent that
@@ -379,7 +410,7 @@ func (g *grantedChannel) createApproval(ctx context.Context, req schema.CreateAp
 	if quorum == 0 {
 		quorum = 1
 	}
-	return g.scope.s.approvals.Create(ctx, store.ApprovalParams{
+	a, err := g.scope.s.approvals.Create(ctx, store.ApprovalParams{
 		RequesterID: g.scope.identity.principalID,
 		ChannelID:   g.channel.ID,
 		Title:       req.Title,
@@ -390,6 +421,12 @@ func (g *grantedChannel) createApproval(ctx context.Context, req schema.CreateAp
 		Quorum:      quorum,
 		Escalation:  req.EscalationTarget,
 	})
+	if errors.Is(err, store.ErrChannelArchived) {
+		// The channel was archived (issue #1296): nothing was written and
+		// nobody was told.
+		return store.Approval{}, errArchivedRefused
+	}
+	return a, err
 }
 
 // grantedApproval is an approval the agent has been authorized to observe.
@@ -473,6 +510,55 @@ func (a *agentScope) channelForAudience(ctx context.Context, name string, aud sc
 		return nil, errForbidden
 	}
 	return &grantedChannel{scope: a, channel: channel, audience: &aud}, nil
+}
+
+// memberChannel resolves the channel named name for an agent that is a member
+// of it, deciding nothing about its manifest: a reply's grant depends on its
+// root's audience, which is not known yet. An unknown channel and one the
+// agent is not a member of are the same answer.
+func (a *agentScope) memberChannel(ctx context.Context, name string) (*replyChannel, *schema.Error) {
+	channel, err := a.s.store.ChannelByName(ctx, name)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, errChannelNotFound
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "authz: find channel failed", "error", err)
+		return nil, errInternal
+	}
+	member, err := a.s.store.IsChannelMember(ctx, channel.ID, a.identity.principalID)
+	if err != nil {
+		slog.ErrorContext(ctx, "authz: check membership failed", "error", err)
+		return nil, errInternal
+	}
+	if !member {
+		a.s.auditAgentDenial(ctx, a.identity.principalID, a.subject, a.capability, channel.ID, denyNotMember)
+		return nil, errChannelNotFound
+	}
+	return &replyChannel{scope: a, channel: channel}, nil
+}
+
+// replyChannel is a channel the agent is a member of and nothing more: its
+// manifest has not been consulted. It is deliberately not a grantedChannel and
+// exposes only the two operations a reply needs, so that no tool can read or
+// post through a lookup that was never authorized. postReplyMCP decides the
+// manifest from the root's audience, between replyRoot and insertReply.
+type replyChannel struct {
+	scope   *agentScope
+	channel store.Channel
+}
+
+// replyRoot reads the root of a reply as the agent. An unseen, missing,
+// other-channel or reply root is store.ErrThreadNotFound.
+func (g *replyChannel) replyRoot(ctx context.Context, rootID int64) (store.Message, error) {
+	return g.scope.s.store.ReplyRootMessage(ctx, g.channel.ID, g.scope.reader(), rootID)
+}
+
+// insertReply stores the agent's reply to rootID and returns it with the
+// recipients resolved at post time. The author is the agent.
+func (g *replyChannel) insertReply(ctx context.Context, rootID int64, body string, payload *schema.Payload) (store.Message, []int64, error) {
+	return g.scope.s.store.InsertReplyMessage(ctx, store.ReplyPost{
+		ChannelID: g.channel.ID, AuthorID: g.scope.identity.principalID, RootID: rootID, Body: body, Payload: payload,
+	}, g.scope.reader())
 }
 
 // channelByID is channelByName for a channel id.
@@ -717,9 +803,17 @@ func (s *Server) membersOnly(next http.Handler) http.Handler {
 }
 
 // humansOnlyBecause is humansOnly with the audit reason and the message of the
-// refusal.
+// refusal. The admin door's dispatch of the catalog route this wraps is let
+// through (ai-administrators §3.4): the agent is then judged by the route's
+// class and the handler like an operator, with its grant as authority. No
+// network request carries the mark, and the mark admits only the route it
+// names.
 func (s *Server) humansOnlyBecause(reason, message string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, dispatched := dispatchedHere(r); dispatched {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if caller, ok := callerFrom(r.Context()); ok && caller.Kind == store.PrincipalAgent {
 			subject := r.Pattern
 			if subject == "" {
@@ -745,4 +839,64 @@ func (s *Server) logAgentsWithoutManifest(ctx context.Context) {
 	if n > 0 {
 		slog.Warn("authz: agent principals without a manifest can do nothing until one is written with PUT /v1/principals/{id}/manifest", "agents", n)
 	}
+}
+
+// postReplyMCP is postReply (messages.go) for an agent, with the same order of
+// checks: channel membership (the unknown-channel answer); whether the agent
+// can see the root, where unknown, other-channel, a reply and not-visible all
+// give errThreadNotFound; only then the manifest, decided from the root's
+// audience (a channel-wide root needs the post permission, a net or whisper
+// root its own grant). The store judges the root's visibility again inside the
+// insert transaction.
+func (s *Server) postReplyMCP(ctx context.Context, scope *agentScope, channelName string, rootID int64, body string, payload *schema.Payload) (schema.PostMessageResponseV2, *schema.Error) {
+	authorID := scope.identity.principalID
+	granted, serr := scope.memberChannel(ctx, channelName)
+	if serr != nil {
+		return schema.PostMessageResponseV2{}, serr
+	}
+	root, err := granted.replyRoot(ctx, rootID)
+	if errors.Is(err, store.ErrThreadNotFound) {
+		return schema.PostMessageResponseV2{}, errThreadNotFound
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "mcp: find thread root failed", "error", err)
+		return schema.PostMessageResponseV2{}, errInternal
+	}
+	if root.Audience == nil {
+		if serr := scope.channel(ctx, granted.channel, schema.ChannelPermissionPost, errChannelNotFound); serr != nil {
+			return schema.PostMessageResponseV2{}, serr
+		}
+	} else {
+		agent := store.Principal{ID: authorID, Kind: store.PrincipalAgent}
+		allowed, err := s.authorizeScopedPost(ctx, agent, scope.subject, granted.channel.ID, root.Audience.Normalize(authorID))
+		var limited *rateLimitedError
+		if errors.As(err, &limited) {
+			return schema.PostMessageResponseV2{}, limited.schemaError()
+		}
+		if err != nil {
+			slog.ErrorContext(ctx, "mcp: authorize reply failed", "error", err)
+			return schema.PostMessageResponseV2{}, errInternal
+		}
+		if !allowed {
+			return schema.PostMessageResponseV2{}, errForbidden
+		}
+	}
+	stored, recipients, err := granted.insertReply(ctx, rootID, body, payload)
+	if serr := s.scopedPostRefusal(ctx, err, granted.channel.ID, authorID, scope.subject); serr != nil {
+		return schema.PostMessageResponseV2{}, serr
+	}
+	s.metrics.messagePosted(store.PrincipalAgent)
+	message := messageV2FromStore(stored)
+	// Persist-then-broadcast, as for the REST reply.
+	if stored.Audience != nil {
+		s.hub.BroadcastMessageV2(ctx, message, recipients)
+	} else {
+		messageV0 := messageV0FromStore(stored)
+		s.hub.BroadcastMessage(ctx, messageV0)
+		s.hub.BroadcastReply(ctx, messageV1FromStore(stored), message)
+		s.broadcaster.BroadcastMessage(ctx, messageV0)
+	}
+	s.events.notifyReadState(granted.channel.ID, authorID)
+	s.events.notifyMessage(granted.channel.ID, stored.ID, authorID)
+	return schema.PostMessageResponseV2{Message: message}, nil
 }

@@ -13,16 +13,16 @@ import (
 // read a channel, and the unread count is how many messages after it they may
 // see. The mark is the principal's, so a person's two clients share it.
 //
-// The count goes through store.CountVisibleMessagesAfter and the clamp inside
+// The count goes through store.CountVisibleUnreadMessagesAfter and the clamp inside
 // store.MarkRead, both of which embed the one visibility condition of
 // store/audience.go: a whisper or net message the caller is not in is never
-// counted and never moves a mark. This file reads no message rows itself
+// counted and never moves a mark. The caller's own posts are not unread. This file reads no message rows itself
 // (TestReadStateHandlersCountThroughTheStore pins that).
 //
 // Read state is for people. An agent has no read state (its cursors are its
 // own), so both routes refuse an agent with human_required. A mark is not an
-// action on anyone else, so it is not audited. There is no events frame:
-// clients poll GET /v1/read-state.
+// action on anyone else, so it is not audited. The events socket sends the same
+// documents after posts and marks; GET /v1/read-state remains the reconnect read.
 
 // readStateCaller is the check both routes start with: a verified human. With
 // authentication off there is no one to hold a mark for.
@@ -44,7 +44,7 @@ func readStateCaller(w http.ResponseWriter, r *http.Request) (store.Principal, b
 // the store's statement.
 func (s *Server) readStateDoc(r *http.Request, channelID int64, mark store.ReadMark) (schema.ReadStateV1, error) {
 	// The reader is built here, in the call, as the guard test requires.
-	unread, err := s.store.CountVisibleMessagesAfter(r.Context(), channelID, readerFor(r, apiV2), mark.LastReadID, schema.MaxUnreadCount)
+	unread, err := s.store.CountVisibleUnreadMessagesAfter(r.Context(), channelID, readerFor(r, apiV2), mark.LastReadID, schema.MaxUnreadCount)
 	if err != nil {
 		return schema.ReadStateV1{}, err
 	}
@@ -133,4 +133,5 @@ func (s *Server) handlePutReadState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, doc)
+	s.events.notifyReadMarked(channel.ID, caller.ID)
 }

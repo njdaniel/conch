@@ -1,0 +1,9 @@
+{
+  "action": "resume_invites",
+  "route": "PUT /v1/invites/settings",
+  "params": {
+    "paused": false
+  },
+  "agent_id": 12,
+  "requested_at": "2026-11-05T10:14:00.000Z"
+}

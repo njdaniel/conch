@@ -23,9 +23,18 @@ import (
 // the documents a client needs to follow a channel's agents live: the roster
 // of its members' sessions on connect and whenever it changes, the member
 // list whenever it changes (issue #515), the channel itself when it is
-// renamed (issue #727; never on connect), and the runs, activity and
-// interventions of runs in the channel that the reader may see. Each frame is
-// one pkg/schema document, told apart by its schema field.
+// renamed (issue #727; never on connect), the runs, activity and interventions
+// of runs in the channel that the reader may see, and the reader's unread state
+// wherever a post or shared read mark changes it. Each frame is one pkg/schema
+// document, told apart by its schema field.
+//
+// A human socket is also sent conch.channels_changed.v1 (issue #1027,
+// docs/design/membership-live.md) when its principal's own answer to
+// GET /v1/channels may have changed: they were added to or removed from a
+// channel, given manages, created one, or a channel they are in was renamed.
+// The frame names nothing: the client re-reads its channel list and counts.
+// It goes to no one but that principal, never to an agent, and changes
+// within the roster floor coalesce into one trailing frame per socket.
 //
 // This file holds no visibility rule and no SQL. A change commits, and the
 // handler that made it enqueues a reference ("the roster changed", "run 41
@@ -60,6 +69,8 @@ const (
 	// goroutine reading. Owed rosters coalesce: one is sent when the floor
 	// has passed, and it is the whole state then.
 	defaultEventsRosterFloor = 250 * time.Millisecond
+	// eventsReadStateFloor bounds whole read-state rebuilds per human socket.
+	eventsReadStateFloor = 250 * time.Millisecond
 )
 
 type eventKind uint8
@@ -70,13 +81,22 @@ const (
 	eventIntervention
 	// eventChannel is the channel itself (issue #727): today, its name.
 	eventChannel
+	// eventMessage is a newly committed message for the notification client.
+	eventMessage
+	// eventReactions is one message whose reactions changed (issue #765): id
+	// is the message and channelID its channel.
+	eventReactions
+	// eventMessageEdited is one message whose text its author changed (issue
+	// #845): id is the message and channelID its channel.
+	eventMessageEdited
 )
 
 // eventRef names a document that changed. It carries no content.
 type eventRef struct {
-	kind  eventKind
-	runID int64 // the run an activity entry belongs to
-	id    int64 // the run, activity entry, intervention or channel
+	kind      eventKind
+	runID     int64 // the run an activity entry belongs to
+	id        int64 // the run, activity entry, intervention, message or channel
+	channelID int64 // the channel of a message
 }
 
 // eventsHub is the registry of events sockets.
@@ -102,9 +122,27 @@ type eventsSub struct {
 	wake    chan struct{}
 	dropped chan struct{}
 
-	roster bool // a roster is owed: one is enough, it is the whole state
-	refs   []eventRef
-	gone   bool
+	roster           bool // a roster is owed: one is enough, it is the whole state
+	readState        bool // read-state changes coalesce into one refresh
+	readStateAll     bool
+	readStateDirty   map[int64]struct{}
+	readStateRemoved map[int64]struct{}
+	memberships      map[int64]struct{}
+	membershipDirty  bool
+	readStateEpoch   uint64
+	human            bool
+	// channelsChanged owes a human socket one conch.channels_changed.v1
+	// (notifyChannelsChanged). It is a flag, not a queue: the frame carries
+	// nothing, so any number of changes owe the same one.
+	channelsChanged bool
+	// permissionsChanged owes a human socket one conch.permissions_changed.v1
+	// (notifyPermissionsChanged, design §8.6): a flag, as channelsChanged is.
+	permissionsChanged bool
+	// directoryChanged owes a human socket one conch.directory_changed.v1
+	// (notifyDirectoryChanged, design §13.6): a flag, as the two above are.
+	directoryChanged bool
+	refs             []eventRef
+	gone             bool
 }
 
 // subscribe registers a subscriber, owed its first roster: that roster goes
@@ -112,7 +150,11 @@ type eventsSub struct {
 // committed meanwhile has been seen and membership and the manifest have been
 // asked again. After closeAll it returns one that is already dropped.
 func (h *eventsHub) subscribe(channelID, principalID, credentialID int64) *eventsSub {
-	sub := &eventsSub{hub: h, channelID: channelID, principalID: principalID, credentialID: credentialID, wake: make(chan struct{}, 1), dropped: make(chan struct{}), roster: true}
+	return h.subscribeKind(channelID, principalID, credentialID, true)
+}
+
+func (h *eventsHub) subscribeKind(channelID, principalID, credentialID int64, human bool) *eventsSub {
+	sub := &eventsSub{hub: h, channelID: channelID, principalID: principalID, credentialID: credentialID, wake: make(chan struct{}, 1), dropped: make(chan struct{}), roster: true, readState: human, readStateAll: human, readStateDirty: map[int64]struct{}{}, readStateRemoved: map[int64]struct{}{}, memberships: map[int64]struct{}{}, human: human, readStateEpoch: 1}
 	sub.signal()
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -133,15 +175,33 @@ func (sub *eventsSub) cancel() {
 
 // take returns what is waiting and empties it, or live=false when the
 // subscription was dropped.
-func (sub *eventsSub) take() (roster bool, refs []eventRef, live bool) {
+func (sub *eventsSub) take() (roster, readState, channelsChanged bool, refs []eventRef, live bool) {
 	sub.hub.mu.Lock()
 	defer sub.hub.mu.Unlock()
 	if sub.gone {
-		return false, nil, false
+		return false, false, false, nil, false
 	}
-	roster, refs = sub.roster, sub.refs
-	sub.roster, sub.refs = false, nil
-	return roster, refs, true
+	roster, readState, channelsChanged, refs = sub.roster, sub.readState, sub.channelsChanged, sub.refs
+	sub.roster, sub.readState, sub.channelsChanged, sub.refs = false, false, false, nil
+	return roster, readState, channelsChanged, refs, true
+}
+
+// takePermissions reports and clears an owed conch.permissions_changed.v1.
+func (sub *eventsSub) takePermissions() bool {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	owed := sub.permissionsChanged
+	sub.permissionsChanged = false
+	return owed && !sub.gone
+}
+
+// takeDirectory reports and clears an owed conch.directory_changed.v1.
+func (sub *eventsSub) takeDirectory() bool {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	owed := sub.directoryChanged
+	sub.directoryChanged = false
+	return owed && !sub.gone
 }
 
 func (sub *eventsSub) signal() {
@@ -149,6 +209,67 @@ func (sub *eventsSub) signal() {
 	case sub.wake <- struct{}{}:
 	default: // one signal is already queued
 	}
+}
+
+func (sub *eventsSub) readStateVersion() uint64 {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	return sub.readStateEpoch
+}
+
+// invalidateReadState discards an in-flight build and owes a fresh one. The
+// hub lock is already held by a membership or credential change.
+func (sub *eventsSub) invalidateReadState() {
+	sub.readStateEpoch++
+	sub.readStateAll = true
+	sub.readState = true
+	sub.signal()
+}
+
+func (sub *eventsSub) setMemberships(channels []store.Channel) {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	sub.memberships = make(map[int64]struct{}, len(channels))
+	for _, channel := range channels {
+		sub.memberships[channel.ID] = struct{}{}
+	}
+}
+
+func (sub *eventsSub) setMembershipsIfCurrent(channels []store.Channel, epoch uint64) bool {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	if sub.readStateEpoch != epoch {
+		return false
+	}
+	sub.memberships = make(map[int64]struct{}, len(channels))
+	for _, channel := range channels {
+		sub.memberships[channel.ID] = struct{}{}
+	}
+	return true
+}
+
+func (sub *eventsSub) hasMembership(channelID int64) bool {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	_, ok := sub.memberships[channelID]
+	return ok
+}
+
+func (sub *eventsSub) readStateTargets() (all bool, ids, removed []int64) {
+	sub.hub.mu.Lock()
+	defer sub.hub.mu.Unlock()
+	all = sub.readStateAll || sub.membershipDirty
+	for id := range sub.readStateDirty {
+		ids = append(ids, id)
+	}
+	for id := range sub.readStateRemoved {
+		removed = append(removed, id)
+	}
+	sub.readStateAll = false
+	sub.membershipDirty = false
+	sub.readStateDirty = map[int64]struct{}{}
+	sub.readStateRemoved = map[int64]struct{}{}
+	return all, ids, removed
 }
 
 // push queues ref, unless the same document is already waiting (a run or an
@@ -200,8 +321,110 @@ func (h *eventsHub) notifyChannelRoster(channelID int64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for sub := range h.subs {
+		if sub.human {
+			sub.membershipDirty = true
+			sub.readState = true
+		}
 		if sub.channelID == channelID {
 			sub.roster = true
+		}
+		sub.signal()
+	}
+}
+
+// notifyChannelsChanged owes every human events socket of each of
+// principalIDs one conch.channels_changed.v1 (issue #1027,
+// membership-live.md §2): that principal's answer to GET /v1/channels may
+// have changed. A handler calls it after the change commits, and only for a
+// change that took effect. A zero id matches nothing, and an agent's socket
+// is never owed it: an agent learns its memberships over MCP.
+func (h *eventsHub) notifyChannelsChanged(principalIDs ...int64) {
+	if len(principalIDs) == 0 {
+		return
+	}
+	want := make(map[int64]struct{}, len(principalIDs))
+	for _, id := range principalIDs {
+		if id != 0 {
+			want[id] = struct{}{}
+		}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if _, ok := want[sub.principalID]; ok && sub.human {
+			sub.channelsChanged = true
+			sub.signal()
+		}
+	}
+}
+
+// notifyPermissionsChangedAll owes every human events socket one
+// conch.permissions_changed.v1 (ADR-014 design §8.6): the permissions
+// document changed, so anyone's effective permissions may have. The document
+// is server-wide, so telling every person tells no one anything about
+// anyone. A handler calls it after a change that took effect. An agent's
+// socket is never owed it: agents hold no permissions.
+func (h *eventsHub) notifyPermissionsChangedAll() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.human {
+			sub.permissionsChanged = true
+			sub.signal()
+		}
+	}
+}
+
+// notifyPermissionsChanged owes one conch.permissions_changed.v1 to the
+// human events sockets of principalIDs alone: after a change to one
+// person's brake (may_invite, and #984's voice switch), which changes only
+// that person's permissions. A zero id matches nothing.
+func (h *eventsHub) notifyPermissionsChanged(principalIDs ...int64) {
+	want := make(map[int64]bool, len(principalIDs))
+	for _, id := range principalIDs {
+		if id != 0 {
+			want[id] = true
+		}
+	}
+	if len(want) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if sub.human && want[sub.principalID] {
+			sub.permissionsChanged = true
+			sub.signal()
+		}
+	}
+}
+
+// notifyDirectoryChanged owes the human events sockets of principalIDs one
+// conch.directory_changed.v1 (design §13.6): their answer to GET
+// /v1/directory/members may have changed. everyone owes every human socket
+// instead, for a change every member's answer shows (the directory
+// permission switched, or members all holding it). The frame carries
+// nothing, so any number of changes owe the same one. A zero id matches
+// nothing, and an agent's socket is never owed it: an agent has no
+// directory (O11). The caller decides the audience; this tells exactly it.
+func (h *eventsHub) notifyDirectoryChanged(everyone bool, principalIDs ...int64) {
+	want := make(map[int64]struct{}, len(principalIDs))
+	for _, id := range principalIDs {
+		if id != 0 {
+			want[id] = struct{}{}
+		}
+	}
+	if !everyone && len(want) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if !sub.human {
+			continue
+		}
+		if _, ok := want[sub.principalID]; everyone || ok {
+			sub.directoryChanged = true
 			sub.signal()
 		}
 	}
@@ -242,6 +465,79 @@ func (h *eventsHub) notifyChannel(channelID int64, ref eventRef) {
 	}
 }
 
+// notifyMessage queues a new message for each human who may read the channel,
+// except its author. Visibility is checked again with the subscriber's reader.
+func (h *eventsHub) notifyMessage(channelID, messageID, authorID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		_, member := sub.memberships[channelID]
+		if sub.human && member && sub.principalID != authorID {
+			sub.push(eventRef{kind: eventMessage, id: messageID, channelID: channelID})
+		}
+	}
+}
+
+// notifyReactions queues, for every subscriber of channelID, the re-reading of
+// one message's reactions after a committed change to them (issue #765,
+// message-reactions.md §8.1). Humans and agents alike, and the actor's own
+// other sockets too. The reference names the message and nothing more: each
+// subscriber's goroutine reads the summary, at the moment it sends, with its
+// own reader and the explicit member-and-enabled clause, so a subscriber who
+// cannot see the message, or has just been removed from the channel, is sent
+// nothing. References for one message coalesce in a queue (push), so a burst of
+// reactions costs one read when the socket drains.
+func (h *eventsHub) notifyReactions(channelID, messageID int64) {
+	h.notifyChannel(channelID, eventRef{kind: eventReactions, id: messageID, channelID: channelID})
+}
+
+// notifyMessageEdited queues an edited message for every human who holds a
+// membership of channelID, the author's own other sockets included
+// (docs/design/message-editing.md §7.2). Agents are not sent it, as they are
+// not sent a new message. The reference names the message and nothing more:
+// each subscriber's goroutine reads it, when it sends, with its own reader,
+// and sends conch.message_edited.v1 or, if it may not see it, nothing.
+// References for one message coalesce in the queue (push). An edit is not a
+// new message: no read state is owed.
+func (h *eventsHub) notifyMessageEdited(channelID, messageID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		if _, member := sub.memberships[channelID]; sub.human && member {
+			sub.push(eventRef{kind: eventMessageEdited, id: messageID, channelID: channelID})
+		}
+	}
+}
+
+// notifyReadState owes every other reader the count in a channel with a new
+// message. The subscriber checks membership and scoped visibility when sending.
+func (h *eventsHub) notifyReadState(channelID int64, authorID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		_, member := sub.memberships[channelID]
+		if sub.human && member && sub.principalID != authorID {
+			sub.readStateDirty[channelID] = struct{}{}
+			sub.readState = true
+			sub.signal()
+		}
+	}
+}
+
+// notifyReadMarked owes all of one reader's sockets their shared mark and count.
+func (h *eventsHub) notifyReadMarked(channelID int64, principalID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for sub := range h.subs {
+		_, member := sub.memberships[channelID]
+		if sub.human && member && sub.principalID == principalID {
+			sub.readStateDirty[channelID] = struct{}{}
+			sub.readState = true
+			sub.signal()
+		}
+	}
+}
+
 // dropPrincipal closes principalID's events sockets on channelID. A zero
 // principal matches nothing.
 func (h *eventsHub) dropPrincipal(channelID, principalID int64) {
@@ -251,8 +547,14 @@ func (h *eventsHub) dropPrincipal(channelID, principalID int64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for sub := range h.subs {
-		if sub.principalID == principalID && sub.channelID == channelID {
-			h.dropLocked(sub)
+		if sub.principalID == principalID {
+			delete(sub.memberships, channelID)
+			sub.readStateDirty[channelID] = struct{}{}
+			sub.readStateRemoved[channelID] = struct{}{}
+			sub.invalidateReadState()
+			if sub.channelID == channelID {
+				h.dropLocked(sub)
+			}
 		}
 	}
 }
@@ -266,6 +568,7 @@ func (h *eventsHub) dropPrincipalAll(principalID int64) {
 	defer h.mu.Unlock()
 	for sub := range h.subs {
 		if sub.principalID == principalID {
+			sub.invalidateReadState()
 			h.dropLocked(sub)
 		}
 	}
@@ -359,8 +662,15 @@ func (s *Server) handleEventsWS(w http.ResponseWriter, r *http.Request) {
 	// what is registered, so a removal, a disable or a revoke of this
 	// credential that committed after the checks above has either been seen
 	// below or closes this subscription.
-	sub := s.events.subscribe(channel.ID, caller.ID, credID)
+	sub := s.events.subscribeKind(channel.ID, caller.ID, credID, caller.Kind == store.PrincipalHuman)
 	defer sub.cancel()
+	memberships, err := s.store.ListChannelsForPrincipal(ctx, caller.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "events ws: list memberships failed", "error", err)
+		writeInternalError(w)
+		return
+	}
+	sub.setMemberships(memberships)
 	live, err := s.store.CredentialLive(ctx, credID)
 	if err != nil {
 		slog.ErrorContext(ctx, "events ws: check credential failed", "error", err)
@@ -413,6 +723,20 @@ type eventsStream struct {
 	// while none is owed.
 	rosterBuilt time.Time
 	rosterLater <-chan time.Time
+	// channelsLater fires when an owed conch.channels_changed.v1 goes, one
+	// roster floor after the first change that owed it; nil while none is
+	// owed (trailing-edge coalescing, membership-live.md §3).
+	channelsLater <-chan time.Time
+	// permissionsLater is channelsLater for conch.permissions_changed.v1:
+	// coalesced under the same roster floor (design §8.6).
+	permissionsLater <-chan time.Time
+	// directoryLater is channelsLater for conch.directory_changed.v1 (design
+	// §13.6): coalesced under the same roster floor.
+	directoryLater   <-chan time.Time
+	readStateBuilt   time.Time
+	readStateLater   <-chan time.Time
+	lastReadStates   map[int64][]byte
+	readStateWriting uint64
 }
 
 // run sends frames until the peer leaves, the subscription is dropped, or the
@@ -470,6 +794,52 @@ func (e *eventsStream) run(ctx context.Context, recheck <-chan time.Time) {
 			default:
 			}
 			if !e.stillMember(ctx) || !e.sendRoster(ctx) {
+				return
+			}
+		case <-e.readStateLater:
+			e.readStateLater = nil
+			select {
+			case <-e.sub.dropped:
+				e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+				return
+			default:
+			}
+			if !e.stillMember(ctx) || !e.sendReadStates(ctx) {
+				return
+			}
+		case <-e.channelsLater:
+			e.channelsLater = nil
+			// As for the roster: a drop that is ready too wins, and the
+			// socket closes with its reason and no frame.
+			select {
+			case <-e.sub.dropped:
+				e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+				return
+			default:
+			}
+			if !e.stillMember(ctx) || !e.sendDoc(ctx, schema.ChannelsChangedV1{Schema: schema.ChannelsChangedSchemaV1}) {
+				return
+			}
+		case <-e.permissionsLater:
+			e.permissionsLater = nil
+			select {
+			case <-e.sub.dropped:
+				e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+				return
+			default:
+			}
+			if !e.stillMember(ctx) || !e.sendDoc(ctx, schema.PermissionsChangedV1{Schema: schema.PermissionsChangedSchemaV1}) {
+				return
+			}
+		case <-e.directoryLater:
+			e.directoryLater = nil
+			select {
+			case <-e.sub.dropped:
+				e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
+				return
+			default:
+			}
+			if !e.stillMember(ctx) || !e.sendDoc(ctx, schema.DirectoryChangedV1{Schema: schema.DirectoryChangedSchemaV1}) {
 				return
 			}
 		case <-e.sub.dropped:
@@ -547,6 +917,17 @@ func (e *eventsStream) stillMember(ctx context.Context) bool {
 		closeWS(ctx, e.conn, schema.SocketCloseError, websocket.StatusInternalError, "membership check failed")
 		return false
 	case !member:
+		// A principal that was hidden or disabled lost its membership and
+		// its credential in one store change; this check can run between
+		// that change and the hub's drop. The close then says what
+		// closeDropped says (the credential), not the membership, so the
+		// reason does not depend on which of the two got there first.
+		if e.credID != 0 {
+			if live, err := e.s.store.CredentialLive(cctx, e.credID); err == nil && !live {
+				closeWS(ctx, e.conn, schema.SocketCloseRevoked, websocket.StatusPolicyViolation, reasonCredentialInvalid)
+				return false
+			}
+		}
 		closeWS(ctx, e.conn, schema.SocketCloseRemoved, websocket.StatusPolicyViolation, "no longer a member of this channel")
 		return false
 	case e.s.agentMayNoLongerRead(cctx, e.principalID, e.channel.ID):
@@ -558,7 +939,7 @@ func (e *eventsStream) stillMember(ctx context.Context) bool {
 
 // flush sends what is waiting. It reports false when the socket is closed.
 func (e *eventsStream) flush(ctx context.Context) bool {
-	roster, refs, live := e.sub.take()
+	roster, readState, channelsChanged, refs, live := e.sub.take()
 	if !live {
 		e.s.closeEventsDropped(ctx, e.conn, e.channel.ID, e.principalID, e.credID)
 		return false
@@ -569,12 +950,124 @@ func (e *eventsStream) flush(ctx context.Context) bool {
 	if roster && !e.rosterNowOrLater(ctx) {
 		return false
 	}
+	if readState && !e.readStateNowOrLater(ctx) {
+		return false
+	}
+	if channelsChanged && e.channelsLater == nil {
+		e.channelsLater = time.After(e.s.eventsRosterFloor)
+	}
+	if e.sub.takePermissions() && e.permissionsLater == nil {
+		e.permissionsLater = time.After(e.s.eventsRosterFloor)
+	}
+	if e.sub.takeDirectory() && e.directoryLater == nil {
+		e.directoryLater = time.After(e.s.eventsRosterFloor)
+	}
 	for _, ref := range refs {
 		if !e.sendRef(ctx, ref) {
 			return false
 		}
 	}
 	return true
+}
+
+func (e *eventsStream) readStateNowOrLater(ctx context.Context) bool {
+	if e.readStateLater != nil {
+		return true
+	}
+	if wait := eventsReadStateFloor - time.Since(e.readStateBuilt); !e.readStateBuilt.IsZero() && wait > 0 {
+		e.readStateLater = time.After(wait)
+		return true
+	}
+	return e.sendReadStates(ctx)
+}
+
+// sendReadStates refreshes only dirty channels, or every current membership on
+// connect and membership changes. The final write is held to the build's epoch.
+func (e *eventsStream) sendReadStates(ctx context.Context) bool {
+	e.readStateBuilt = time.Now()
+	epoch := e.sub.readStateVersion()
+	viewer, err := e.s.store.PrincipalByID(ctx, e.principalID)
+	if err != nil {
+		return e.failed(ctx, "read the read-state viewer", err)
+	}
+	if viewer.Kind != store.PrincipalHuman {
+		return true
+	}
+	all, ids, removed := e.sub.readStateTargets()
+	if all {
+		channels, err := e.s.store.ListChannelsForPrincipal(ctx, e.principalID)
+		if err != nil {
+			return e.failed(ctx, "list read-state channels", err)
+		}
+		if !e.sub.setMembershipsIfCurrent(channels, epoch) {
+			return true
+		}
+		ids = ids[:0]
+		for _, channel := range channels {
+			ids = append(ids, channel.ID)
+		}
+	}
+	var marks map[int64]store.ReadMark
+	if len(ids) > 0 {
+		marks, err = e.s.store.ReadMarksFor(ctx, e.principalID)
+		if err != nil {
+			return e.failed(ctx, "list read marks", err)
+		}
+	}
+	next := make(map[int64][]byte, len(e.lastReadStates))
+	if !all {
+		for id, raw := range e.lastReadStates {
+			next[id] = raw
+		}
+	}
+	for _, id := range ids {
+		if !all && !e.sub.hasMembership(id) {
+			delete(next, id)
+			continue
+		}
+		doc, err := e.s.readStateDoc(e.r, id, marks[id])
+		if err != nil {
+			return e.failed(ctx, "count unread messages", err)
+		}
+		raw, ok := e.encode(ctx, doc)
+		if !ok {
+			return false
+		}
+		next[id] = raw
+		previous, existed := e.lastReadStates[id]
+		if existed && !bytes.Equal(previous, raw) || !existed && doc.Unread > 0 {
+			if !e.writeReadState(ctx, epoch, raw) {
+				return false
+			}
+			if e.sub.readStateVersion() != epoch {
+				return true
+			}
+		}
+	}
+	for _, id := range removed {
+		delete(next, id)
+		raw, ok := e.encode(ctx, schema.ReadStateV1{Schema: schema.ReadStateSchemaV1, ChannelID: id})
+		if !ok {
+			return false
+		}
+		if !e.writeReadState(ctx, epoch, raw) {
+			return false
+		}
+		if e.sub.readStateVersion() != epoch {
+			return true
+		}
+	}
+	e.lastReadStates = next
+	return true
+}
+
+func (e *eventsStream) writeReadState(ctx context.Context, epoch uint64, raw []byte) bool {
+	if hook := e.s.eventsBeforeEpochWrite; hook != nil {
+		hook(raw)
+	}
+	e.readStateWriting = epoch
+	defer func() { e.readStateWriting = 0 }()
+	return e.write(ctx, raw)
 }
 
 // rosterNowOrLater sends the owed roster now, or, when one was built less
@@ -599,7 +1092,16 @@ func (e *eventsStream) sendRoster(ctx context.Context) bool {
 	if err != nil {
 		return e.failed(ctx, "read the viewer", err)
 	}
-	roster, err := e.s.channelRoster(ctx, e.r, e.channel, viewer)
+	// What the viewer holds, read once per roster from the viewer just read
+	// (ADR-014 design §7.3): manage_members shows every session's runtime
+	// and host, manage_channels the member list's roles and every
+	// can_decide.
+	held, err := e.s.store.HeldBy(ctx, viewer, schema.PermManageMembers, schema.PermManageChannels)
+	if err != nil {
+		return e.failed(ctx, "read the viewer's permissions", err)
+	}
+	seesHosts, seesAll := held[0], held[1]
+	roster, err := e.s.channelRoster(ctx, e.r, e.channel, viewer, seesHosts)
 	if err != nil {
 		return e.failed(ctx, "build a roster", err)
 	}
@@ -613,7 +1115,7 @@ func (e *eventsStream) sendRoster(ctx context.Context) bool {
 	// may have missed: read afterwards, the baseline would already hold it,
 	// and the change would never be sent.
 	if e.lastMembers == nil {
-		if e.lastMembers, ok = e.membersFrame(ctx, viewer); !ok {
+		if e.lastMembers, ok = e.membersFrame(ctx, viewer, seesAll); !ok {
 			return false
 		}
 	}
@@ -623,7 +1125,7 @@ func (e *eventsStream) sendRoster(ctx context.Context) bool {
 		}
 		e.lastRoster = raw
 	}
-	return e.sendMembers(ctx, viewer)
+	return e.sendMembers(ctx, viewer, seesAll)
 }
 
 // sendMembers builds the member list for this reader now and sends it if it
@@ -635,8 +1137,8 @@ func (e *eventsStream) sendRoster(ctx context.Context) bool {
 // the list over REST once the socket is live, as it always has, and learns
 // here only what changed after.
 // A channel the change did not touch hears nothing.
-func (e *eventsStream) sendMembers(ctx context.Context, viewer store.Principal) bool {
-	raw, ok := e.membersFrame(ctx, viewer)
+func (e *eventsStream) sendMembers(ctx context.Context, viewer store.Principal, seesAll bool) bool {
+	raw, ok := e.membersFrame(ctx, viewer, seesAll)
 	if !ok {
 		return false
 	}
@@ -650,13 +1152,14 @@ func (e *eventsStream) sendMembers(ctx context.Context, viewer store.Principal) 
 	return true
 }
 
-// membersFrame is the encoded member list as viewer sees it now.
-func (e *eventsStream) membersFrame(ctx context.Context, viewer store.Principal) ([]byte, bool) {
+// membersFrame is the encoded member list as viewer sees it now; seesAll is
+// whether viewer holds manage_channels (memberDocs).
+func (e *eventsStream) membersFrame(ctx context.Context, viewer store.Principal, seesAll bool) ([]byte, bool) {
 	members, err := e.s.store.ListChannelMembers(ctx, e.channel.ID)
 	if err != nil {
 		return nil, e.failed(ctx, "list members", err)
 	}
-	doc := schema.ChannelMembersV1{Schema: schema.ChannelMembersSchemaV1, ChannelID: e.channel.ID, Members: memberDocs(members, &viewer)}
+	doc := schema.ChannelMembersV1{Schema: schema.ChannelMembersSchemaV1, ChannelID: e.channel.ID, Members: memberDocs(members, &viewer, seesAll)}
 	return e.encode(ctx, doc)
 }
 
@@ -697,6 +1200,55 @@ func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
 			return e.failed(ctx, "read an intervention", err)
 		}
 		return e.sendDoc(ctx, interventionDoc(iv))
+	case eventMessage:
+		if !e.sub.hasMembership(ref.channelID) {
+			return true
+		}
+		epoch := e.sub.readStateVersion()
+		messages, err := s.store.ListVisibleMessages(ctx, ref.channelID, readerFor(e.r, apiV2), ref.id-1, 1)
+		if err != nil {
+			return e.failed(ctx, "read a notification message", err)
+		}
+		if len(messages) != 1 || messages[0].ID != ref.id || !e.sub.hasMembership(ref.channelID) {
+			return true
+		}
+		raw, ok := e.encode(ctx, messageV2FromStore(messages[0]))
+		return ok && e.writeReadState(ctx, epoch, raw)
+	case eventMessageEdited:
+		// The message as this reader may see it now, read as eventMessage
+		// reads one; nothing if the reader cannot, or is no longer a member.
+		// It never touches read state: an edit changes no count.
+		if !e.sub.hasMembership(ref.channelID) {
+			return true
+		}
+		messages, err := s.store.ListVisibleMessages(ctx, ref.channelID, readerFor(e.r, apiV2), ref.id-1, 1)
+		if err != nil {
+			return e.failed(ctx, "read an edited message", err)
+		}
+		if len(messages) != 1 || messages[0].ID != ref.id || messages[0].EditedAt.IsZero() || !e.sub.hasMembership(ref.channelID) {
+			return true
+		}
+		return e.sendDoc(ctx, schema.MessageEditedV1{Schema: schema.MessageEditedSchemaV1, Message: messageV2FromStore(messages[0])})
+	case eventReactions:
+		// The message's whole reaction state for this reader, or nothing: no
+		// row when the message is not visible to the reader, or when the reader
+		// is no longer a current, enabled member (the store's explicit clause,
+		// for a channel-wide message as for a scoped one). A frame is never
+		// computed once and fanned out.
+		if ref.channelID != e.channel.ID || !e.sub.hasMembership(ref.channelID) {
+			return true
+		}
+		if hook := s.reactionBeforeRead; hook != nil {
+			hook()
+		}
+		sum, err := s.store.ReactionSummaryOf(ctx, ref.channelID, readerFor(e.r, apiV2), ref.id, s.reactionClock)
+		if errors.Is(err, store.ErrMessageNotFound) || errors.Is(err, store.ErrNotChannelMember) {
+			return true
+		}
+		if err != nil {
+			return e.failed(ctx, "read reactions", err)
+		}
+		return e.sendDoc(ctx, reactionSummaryDoc(ctx, sum))
 	case eventChannel:
 		// The channel as it is now, read by the id the socket is bound to:
 		// flush has just checked that this reader is still a member. Two
@@ -711,10 +1263,13 @@ func (e *eventsStream) sendRef(ctx context.Context, ref eventRef) bool {
 		}
 		e.channel = ch
 		return e.sendDoc(ctx, schema.ChannelDocV1{
-			Schema:    schema.ChannelSchemaV1,
-			ChannelID: ch.ID,
-			Name:      ch.Name,
-			CreatedAt: schema.NewTimestamp(ch.CreatedAt),
+			Schema:     schema.ChannelSchemaV1,
+			ChannelID:  ch.ID,
+			Name:       ch.Name,
+			CreatedAt:  schema.NewTimestamp(ch.CreatedAt),
+			Visibility: ch.Visibility,
+			Default:    ch.IsDefault,
+			ArchivedAt: archivedAtWire(ch),
 		})
 	}
 	return true
@@ -746,6 +1301,10 @@ func (e *eventsStream) encode(ctx context.Context, doc validated) ([]byte, bool)
 func (e *eventsStream) write(ctx context.Context, raw []byte) bool {
 	if hook := e.s.eventsBeforeWrite; hook != nil {
 		hook()
+	}
+	if e.readStateWriting != 0 && e.sub.readStateVersion() != e.readStateWriting {
+		e.readStateLater = time.After(0)
+		return true
 	}
 	// The last point a drop can stop a frame (issue #519): one that was
 	// being built when a revoke, a disable or a removal dropped the

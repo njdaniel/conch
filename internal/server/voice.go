@@ -47,13 +47,23 @@ func (s *Server) handleVoiceSession(w http.ResponseWriter, r *http.Request) {
 	// for any reason (metrics.go).
 	issued := false
 	defer func() { s.metrics.voiceSession(issued) }()
-	channel, caller, ok := s.voiceSessionCaller(w, r)
+	channel, caller, ok := s.voiceClaimCaller(w, r)
 	if !ok {
 		return
 	}
 
 	resp, grants, err := s.voiceSession(ctx, caller, channel)
 	switch {
+	case errors.Is(err, errVoiceChannelArchived):
+		// Archived between the check and the token (issue #844).
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
+		return
+	case errors.Is(err, errVoiceNotAllowed):
+		// Lost use_voice while LiveKit was being asked: the answer a person
+		// without voice gets up front.
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server",
+			refusedPermission(caller, schema.PermUseVoice))
+		return
 	case errors.Is(err, errVoiceNoLongerEntitled):
 		// Removed, disabled or signed out while LiveKit was being asked: the
 		// same answer as if it had happened before the request.
@@ -117,6 +127,43 @@ func (s *Server) voiceSessionCaller(w http.ResponseWriter, r *http.Request) (sto
 	return channel, caller, true
 }
 
+// errVoiceChannelArchived is voiceGrantOnce's refusal when the channel was
+// archived between the handler's check and the token being signed (issue
+// #844). Answered as 409 channel_archived; nothing is issued.
+var errVoiceChannelArchived = errors.New("voice: the channel is archived")
+
+// voiceClaimCaller is voiceSessionCaller for the routes that claim something
+// in voice: a session, a share, a camera, a companion. After the caller is
+// known to be a member who may use voice (so a non-member got the
+// unknown-channel 404 first and learns nothing), it refuses an archived
+// channel with 409 channel_archived (issue #844), before any token is signed,
+// any room is created and any holder recorded. The routes that let go
+// (DELETE companion, the stop routes) and the transmit report use
+// voiceSessionCaller and keep working in an archived channel.
+func (s *Server) voiceClaimCaller(w http.ResponseWriter, r *http.Request) (store.Channel, store.Principal, bool) {
+	channel, caller, ok := s.voiceSessionCaller(w, r)
+	if !ok {
+		return store.Channel{}, store.Principal{}, false
+	}
+	// The archived check of voice: channel came from ChannelByName in
+	// voicePresenceChannel, read just now.
+	if channel.Archived() {
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
+		return store.Channel{}, store.Principal{}, false
+	}
+	return channel, caller, true
+}
+
+// voiceChannelStillLive reports whether the channel is not archived now, read
+// from the store: the re-check of a claim in flight.
+func (s *Server) voiceChannelStillLive(ctx context.Context, channelID int64) (bool, error) {
+	ch, err := s.store.ChannelByID(ctx, channelID)
+	if err != nil {
+		return false, err
+	}
+	return !ch.Archived(), nil
+}
+
 // voicePresenceChannel resolves the channel for a voice request and applies
 // the checks of the caller that every voice route shares, in one order: a
 // verified caller, then the unknown-channel 404 for a non-member, then the
@@ -173,16 +220,39 @@ func (s *Server) voicePresenceChannel(w http.ResponseWriter, r *http.Request, na
 		writeError(w, http.StatusForbidden, errForbidden.Code, "agents do not use voice")
 		return store.Channel{}, store.Principal{}, false
 	}
-	// A person whose invite did not grant voice (issue #437). Checked here,
-	// after membership and after the agent refusal, so that every voice
-	// route inherits it in the same order: a non-member still gets the 404,
-	// and only a member learns that voice is withheld. The caller is the
-	// principal as resolved for this request, so the grant is read fresh.
-	if !caller.VoiceAllowed {
-		s.denyForbidden(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server")
+	// A person who does not hold use_voice (ADR-014 design §7.3): the role's
+	// cell, or the person's brake (voice_allowed, issue #437), which can()
+	// ANDs in for members and operators and skips for owners. Checked here,
+	// after membership and after the agent refusal, so that every voice route
+	// inherits it in the same order: a non-member still gets the 404, and only
+	// a member learns that voice is withheld. One code, whichever check said
+	// no. The caller is the principal as resolved for this request and the
+	// document is read now, so the grant is fresh. A guest holds nothing
+	// (permittedTx answers false for every guest, the security review of
+	// #1013), so a guest whose visit allowed voice no longer has it; guests
+	// are removed for now (#1005), so this only narrows access.
+	if !s.requireVoicePermission(w, r, caller, schema.PermUseVoice) {
 		return store.Channel{}, store.Principal{}, false
 	}
 	return channel, caller, true
+}
+
+// requireVoicePermission answers a caller who does not hold perm (use_voice
+// or share_screen) with 403 voice_not_allowed carrying the permission, to a
+// caller whose role could hold it (design §7.4), and reports whether the
+// request may go on. A failed read is a 500: the check fails closed. It is
+// the one place the voice routes ask can().
+func (s *Server) requireVoicePermission(w http.ResponseWriter, r *http.Request, caller store.Principal, perm schema.Permission) bool {
+	holds, ok := s.canOrFail(w, r, caller, perm)
+	if !ok {
+		return false
+	}
+	if !holds {
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server",
+			refusedPermission(caller, perm))
+		return false
+	}
+	return true
 }
 
 // handleVoicePresence serves GET /v1/channels/{channel}/voice: the whole voice
@@ -208,9 +278,16 @@ func (s *Server) handleVoicePresence(w http.ResponseWriter, r *http.Request) {
 // being entitled between the handler's checks and the signing of a token.
 var errVoiceNoLongerEntitled = errors.New("voice: caller is no longer entitled")
 
+// errVoiceNotAllowed is the refusal when what stopped them was use_voice:
+// answered as the up-front check answers a person without voice, 403
+// voice_not_allowed, not as a removal.
+var errVoiceNotAllowed = errors.New("voice: caller no longer holds use_voice")
+
 // voiceStillEntitled re-checks, immediately before a token is signed, what the
-// handler checked on the way in: the caller is a member of the channel and the
-// credential it used is still live (which also covers a disabled principal).
+// handler checked on the way in: the caller is a member of the channel, the
+// credential it used is still live (which also covers a disabled principal)
+// and it still holds use_voice, which a change of the role's cell or of the
+// person's brake can take away in that time (errVoiceNotAllowed).
 // Asking LiveKit to create the room can take seconds, and a removal that lands
 // in that time must not be answered with a fresh token. A window of
 // microseconds remains; closing it for good is the poller's job (issue #127),
@@ -221,7 +298,17 @@ func (s *Server) voiceStillEntitled(ctx context.Context, p store.Principal, ch s
 		return false, err
 	}
 	if credID, ok := credentialIDFrom(ctx); ok {
-		return s.store.CredentialLive(ctx, credID)
+		live, err := s.store.CredentialLive(ctx, credID)
+		if err != nil || !live {
+			return false, err
+		}
+	}
+	holds, err := s.can(ctx, p, schema.PermUseVoice)
+	if err != nil {
+		return false, err
+	}
+	if !holds {
+		return false, errVoiceNotAllowed
 	}
 	return true, nil
 }
@@ -235,6 +322,10 @@ type voiceAudience struct {
 	// label names the grant in the audit detail, e.g. "channel:publish".
 	label string
 	room  func(context.Context) (store.VoiceRoom, error)
+	// companion is nil for the person's own grant. Set, the token is the
+	// companion's or the viewer's (voice_companion.go) and canPublish stays
+	// false.
+	companion *livekit.CompanionJoin
 }
 
 // voiceAudiences lists the rooms principal p may join in channel ch. In V3
@@ -282,7 +373,12 @@ func (s *Server) voiceSession(ctx context.Context, p store.Principal, ch store.C
 	if !ok {
 		return schema.VoiceSessionResponseV1{}, nil, errors.New("voice: the request carries no credential to record")
 	}
-	resp := schema.VoiceSessionResponseV1{LivekitURL: s.cfg.LiveKit.URL, Identity: identity}
+	resp := schema.VoiceSessionResponseV1{
+		LivekitURL: s.cfg.LiveKit.URL, Identity: identity,
+		// Not a credential: tells a voice client whose screen share to leave
+		// unplayed (issue #933).
+		CompanionIdentity: voiceParticipantIdentity(p.ID, voiceRoleScreen),
+	}
 	var labels []string
 	for _, a := range s.voiceAudiences(p, ch) {
 		grant, err := s.voiceGrant(ctx, p, ch, credID, identity, a)
@@ -339,6 +435,15 @@ func (s *Server) voiceGrantOnce(ctx context.Context, p store.Principal, ch store
 	if !entitled {
 		return schema.VoiceRoomGrant{}, false, errVoiceNoLongerEntitled
 	}
+	// The archived guard of a claim in flight (issue #844), before a holder
+	// is recorded and again before the token is signed.
+	chLive, err := s.voiceChannelStillLive(ctx, ch.ID)
+	if err != nil {
+		return schema.VoiceRoomGrant{}, false, fmt.Errorf("voice: check channel: %w", err)
+	}
+	if !chLive {
+		return schema.VoiceRoomGrant{}, false, errVoiceChannelArchived
+	}
 	room, err := a.room(ctx)
 	if err != nil {
 		return schema.VoiceRoomGrant{}, false, fmt.Errorf("voice: room for channel %d: %w", ch.ID, err)
@@ -373,6 +478,15 @@ func (s *Server) voiceGrantOnce(ctx context.Context, p store.Principal, ch store
 	if !entitled {
 		return schema.VoiceRoomGrant{}, false, errVoiceNoLongerEntitled
 	}
+	// A channel archived while LiveKit was being asked: no token (issue
+	// #844); the deferred voiceDropIfRetired cleans up as for any refusal.
+	stillLive, err := s.voiceChannelStillLive(ctx, ch.ID)
+	if err != nil {
+		return schema.VoiceRoomGrant{}, false, fmt.Errorf("voice: re-check channel: %w", err)
+	}
+	if !stillLive {
+		return schema.VoiceRoomGrant{}, false, errVoiceChannelArchived
+	}
 	live, err := s.store.VoiceRoomLive(ctx, room.ID)
 	if err != nil {
 		return schema.VoiceRoomGrant{}, false, fmt.Errorf("voice: re-check room: %w", err)
@@ -387,6 +501,7 @@ func (s *Server) voiceGrantOnce(ctx context.Context, p store.Principal, ch store
 		Identity:   identity,
 		Room:       room.RoomName,
 		CanPublish: a.canPublish,
+		Companion:  a.companion,
 		Lifetime:   voiceTokenLifetime,
 	})
 	if err != nil {
@@ -421,6 +536,6 @@ func (s *Server) voiceDropIfRetired(ctx context.Context, room store.VoiceRoom) {
 	if live {
 		return
 	}
-	s.voice.forgetRoom(ctx, room.RoomName)
+	s.voice.retireRoom(ctx, room)
 	s.voice.deleteRooms(ctx, []store.VoiceRoom{room})
 }

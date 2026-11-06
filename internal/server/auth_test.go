@@ -114,7 +114,56 @@ const (
 	classAuth   routeClass = "auth"
 	classOp     routeClass = "operator"
 	classSelf   routeClass = "operator-or-self"
+	// classOwner routes need an operator holding the owner mark, and
+	// classManager routes an operator or a manager of the channel (issue #790).
+	classOwner   routeClass = "owner"
+	classManager routeClass = "channel-manager"
+	// classPerm routes need a permission (ADR-014, issue #1015), named in
+	// routePermissions, pinned as the class is.
+	classPerm routeClass = "permission"
 )
+
+// routePermissions is the permission each classPerm route needs (design
+// §7.2): 21 manage_members, 4 act_as_members and 5 manage_channels of the
+// operator routes, change_server_settings for the joining settings and the
+// permissions PUT, read_audit_log for the audit export.
+var routePermissions = map[string]schema.Permission{
+	"POST /v0/principals":                                             schema.PermManageMembers,
+	"PUT /v1/principals/{id}/manifest":                                schema.PermManageMembers,
+	"GET /v1/principals/{id}/credentials":                             schema.PermManageMembers,
+	"DELETE /v1/credentials/{credential_id}":                          schema.PermManageMembers,
+	"POST /v1/principals/{id}/disable":                                schema.PermManageMembers,
+	"POST /v1/principals/{id}/enable":                                 schema.PermManageMembers,
+	"POST /v1/principals/{id}/hide":                                   schema.PermManageMembers,
+	"POST /v1/principals/hide":                                        schema.PermManageMembers,
+	"GET /v1/principals":                                              schema.PermManageMembers,
+	"GET /v1/hooks":                                                   schema.PermManageMembers,
+	"DELETE /v1/hooks/{id}":                                           schema.PermManageMembers,
+	"GET /v1/guests":                                                  schema.PermManageMembers,
+	"POST /v1/guests/{id}/end":                                        schema.PermManageMembers,
+	"POST /v1/guests/end":                                             schema.PermManageMembers,
+	"POST /v1/guests/{id}/conversion-permit":                          schema.PermManageMembers,
+	"GET /v1/invites/{id}/principals":                                 schema.PermManageMembers,
+	"POST /v1/invites/{id}/disable-joiners":                           schema.PermManageMembers,
+	"POST /v1/principals/{id}/disable-invitees":                       schema.PermManageMembers,
+	"PUT /v1/principals/{id}/invite-permission":                       schema.PermManageMembers,
+	"PUT /v1/principals/{id}/voice-permission":                        schema.PermManageMembers,
+	"PUT /v1/invites/settings":                                        schema.PermManageMembers,
+	"DELETE /v1/sign-in-links/{id}":                                   schema.PermManageMembers,
+	"POST /v1/principals/{id}/credentials":                            schema.PermActAsMembers,
+	"POST /v1/credentials/{credential_id}/rotate":                     schema.PermActAsMembers,
+	"POST /v1/hooks":                                                  schema.PermActAsMembers,
+	"POST /v1/principals/{id}/sign-in-links":                          schema.PermActAsMembers,
+	"POST /v0/channels":                                               schema.PermManageChannels,
+	"PUT /v1/channels/{id}/settings":                                  schema.PermManageChannels,
+	"POST /v1/channels/{channel}/nets":                                schema.PermManageChannels,
+	"DELETE /v1/channels/{channel}/nets/{net}":                        schema.PermManageChannels,
+	"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    schema.PermManageChannels,
+	"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": schema.PermManageChannels,
+	"PUT /v1/join/settings":                                           schema.PermChangeServerSettings,
+	"PUT /v1/permissions":                                             schema.PermChangeServerSettings,
+	"GET /v1/audit":                                                   schema.PermReadAuditLog,
+}
 
 // routeExpectation pins, per route pattern: its class, the request to send,
 // and the status an authorized caller gets (the same status AuthOff gives).
@@ -135,21 +184,43 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v1/ws":        {classAuth, "/v1/ws", "", 400},
 	"GET /v2/ws":        {classAuth, "/v2/ws", "", 400},
 	"GET /v1/whoami":    {classAuth, "/v1/whoami", "", 200},
-	"POST /v0/channels": {classOp, "/v0/channels", `{}`, 400},
-	"GET /v1/channels":  {classAuth, "/v1/channels", "", 200},
+	"POST /v0/channels": {classPerm, "/v0/channels", `{}`, 400},
+	// The permissions document (issue #1015): any operator reads it; a PUT
+	// of nothing is refused as malformed.
+	"GET /v1/permissions": {classOp, "/v1/permissions", "", 200},
+	// The admin door (issue #1330): anyone reads the catalog as it applies
+	// to them; an empty submit names no action; nobody but the requesting
+	// agent runs an approval.
+	"GET /v1/admin/actions":                    {classAuth, "/v1/admin/actions", "", 200},
+	"POST /v1/admin/actions":                   {classAuth, "/v1/admin/actions", `{}`, 400},
+	"POST /v1/admin/actions/{approval_id}/run": {classAuth, "/v1/admin/actions/1/run", "", 404},
+	"PUT /v1/permissions":                      {classPerm, "/v1/permissions", `{}`, 400},
+	"GET /v1/channels":                         {classAuth, "/v1/channels", "", 200},
+	// Member channel creation and channel settings (issue #981).
+	"POST /v1/channels":              {classAuth, "/v1/channels", `{}`, 400},
+	"PUT /v1/channels/{id}/settings": {classPerm, "/v1/channels/9999/settings", `{}`, 400},
+	// The channel directory, self-join and leave (issue #982). Join and
+	// leave name a channel that does not exist, so they change nothing.
+	"GET /v1/directory/channels":        {classAuth, "/v1/directory/channels", "", 200},
+	"POST /v1/channels/{channel}/join":  {classAuth, "/v1/channels/never-made/join", "", 404},
+	"POST /v1/channels/{channel}/leave": {classAuth, "/v1/channels/never-made/leave", "", 404},
 	// Both membership writes are no-ops in the fixture (alice is already a
 	// member; ghost, id 4, is not), so they change nothing and audit nothing.
 	"GET /v1/channels/{channel}/members":                   {classAuth, "/v1/channels/general/members", "", 200},
-	"PUT /v1/channels/{channel}/members/{principal_id}":    {classOp, "/v1/channels/general/members/2", "", 204},
-	"DELETE /v1/channels/{channel}/members/{principal_id}": {classOp, "/v1/channels/general/members/4", "", 204},
+	"GET /v1/channels/{channel}/authors":                   {classAuth, "/v1/channels/general/authors?ids=2", "", 200},
+	"PUT /v1/channels/{channel}/members/{principal_id}":    {classManager, "/v1/channels/general/members/2", "", 204},
+	"DELETE /v1/channels/{channel}/members/{principal_id}": {classManager, "/v1/channels/general/members/4", "", 204},
+	// Adding a member by name (issue #790): an empty body is a 400 before
+	// anyone is looked up.
+	"POST /v1/channels/{channel}/members": {classManager, "/v1/channels/general/members", `{}`, 400},
 	// Nets (issue #115). The net-addressed routes use a net that does not
 	// exist, so they change and audit nothing.
-	"POST /v1/channels/{channel}/nets":                                {classOp, "/v1/channels/general/nets", `{}`, 400},
+	"POST /v1/channels/{channel}/nets":                                {classPerm, "/v1/channels/general/nets", `{}`, 400},
 	"GET /v1/channels/{channel}/nets":                                 {classAuth, "/v1/channels/general/nets", "", 200},
-	"DELETE /v1/channels/{channel}/nets/{net}":                        {classOp, "/v1/channels/general/nets/nosuch", "", 404},
-	"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    {classOp, "/v1/channels/general/nets/nosuch/members/2", `{"role":"member"}`, 404},
-	"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": {classOp, "/v1/channels/general/nets/nosuch/members/2", "", 404},
-	"POST /v0/principals":                                             {classOp, "/v0/principals", `{}`, 400},
+	"DELETE /v1/channels/{channel}/nets/{net}":                        {classPerm, "/v1/channels/general/nets/nosuch", "", 404},
+	"PUT /v1/channels/{channel}/nets/{net}/members/{principal_id}":    {classPerm, "/v1/channels/general/nets/nosuch/members/2", `{"role":"member"}`, 404},
+	"DELETE /v1/channels/{channel}/nets/{net}/members/{principal_id}": {classPerm, "/v1/channels/general/nets/nosuch/members/2", "", 404},
+	"POST /v0/principals":                                             {classPerm, "/v0/principals", `{}`, 400},
 	"POST /v0/channels/{channel}/messages":                            {classAuth, "/v0/channels/general/messages", `{}`, 400},
 	"GET /v0/channels/{channel}/messages":                             {classAuth, "/v0/channels/general/messages", "", 200},
 	"POST /v1/channels/{channel}/messages":                            {classAuth, "/v1/channels/general/messages", `{}`, 400},
@@ -177,6 +248,18 @@ var routeExpectations = map[string]routeExpectation{
 	// 503 a member does.
 	"POST /v1/channels/{channel}/voice/share":   {classAuth, "/v1/channels/general/voice/share", "", 503},
 	"DELETE /v1/channels/{channel}/voice/share": {classAuth, "/v1/channels/general/voice/share", "", 503},
+	// Camera (ADR-015, issue #1241): checked as the share routes, so 503 for
+	// a member here, 400 under AuthOff, 403 for an agent.
+	"POST /v1/channels/{channel}/voice/camera":   {classAuth, "/v1/channels/general/voice/camera", "", 503},
+	"DELETE /v1/channels/{channel}/voice/camera": {classAuth, "/v1/channels/general/voice/camera", "", 503},
+	// Companion and viewer participants (issue #933): checked as the session
+	// route is, so 503 for a member here, 400 under AuthOff, 403 for an agent.
+	"POST /v1/channels/{channel}/voice/companion":   {classAuth, "/v1/channels/general/voice/companion", `{"publish":"screen","subscribe":true}`, 503},
+	"DELETE /v1/channels/{channel}/voice/companion": {classAuth, "/v1/channels/general/voice/companion", "", 503},
+	// The companion's share audio (issue #898): checked as the companion
+	// route is.
+	"PUT /v1/channels/{channel}/voice/companion/audio":    {classAuth, "/v1/channels/general/voice/companion/audio", `{"scope":"application"}`, 503},
+	"DELETE /v1/channels/{channel}/voice/companion/audio": {classAuth, "/v1/channels/general/voice/companion/audio", "", 503},
 	// Voice presence (issue #127). Not configured is a valid snapshot, so a
 	// member gets 200; AuthOff gets 400 and an agent 403 on the snapshot (both
 	// special-cased below). The socket needs a channel parameter, so every
@@ -227,15 +310,28 @@ var routeExpectations = map[string]routeExpectation{
 	// Read state (issue #351): people only, so an agent gets 403 on both and
 	// AuthOff 400 read_state_require_auth (both special-cased below). A mark of
 	// 0 writes nothing.
-	"GET /v1/read-state":                          {classAuth, "/v1/read-state", "", 200},
-	"PUT /v1/channels/{channel}/read-state":       {classAuth, "/v1/channels/general/read-state", `{"last_read_id":0}`, 200},
-	"PUT /v1/principals/{id}/manifest":            {classOp, "/v1/principals/1/manifest", `{}`, 400},
-	"GET /v1/principals/{id}/manifest":            {classSelf, "/v1/principals/1/manifest", "", 404},
-	"PUT /v1/principals/{id}/name":                {classSelf, "/v1/principals/1/name", `{}`, 400},
-	"POST /v1/principals/{id}/credentials":        {classOp, "/v1/principals/1/credentials", `{}`, 400},
-	"GET /v1/principals/{id}/credentials":         {classOp, "/v1/principals/1/credentials", "", 200},
-	"POST /v1/credentials/{credential_id}/rotate": {classOp, "/v1/credentials/9999/rotate", "", 404},
-	"DELETE /v1/credentials/{credential_id}":      {classOp, "/v1/credentials/9999", "", 404},
+	"GET /v1/read-state":                    {classAuth, "/v1/read-state", "", 200},
+	"PUT /v1/channels/{channel}/read-state": {classAuth, "/v1/channels/general/read-state", `{"last_read_id":0}`, 200},
+	// Reactions (issue #765): message 9999 does not exist, so an authorized
+	// caller gets message_not_found; an agent is refused only at the two
+	// moderation routes (humans only), and AuthOff gets 400
+	// reactions_require_auth on all seven (special-cased below).
+	"PUT /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                   {classAuth, "/v2/channels/general/messages/9999/reactions/%F0%9F%91%8D", "", 404},
+	"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                {classAuth, "/v2/channels/general/messages/9999/reactions/%F0%9F%91%8D", "", 404},
+	"GET /v2/channels/{channel}/messages/{message_id}/reactions":                           {classAuth, "/v2/channels/general/messages/9999/reactions", "", 404},
+	"GET /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                   {classAuth, "/v2/channels/general/messages/9999/reactions/%F0%9F%91%8D", "", 404},
+	"GET /v2/channels/{channel}/reactions":                                                 {classAuth, "/v2/channels/general/reactions?messages=9999", "", 200},
+	"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}": {classManager, "/v2/channels/general/messages/9999/reactions/%F0%9F%91%8D/2", "", 404},
+	"DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}":          {classManager, "/v2/channels/general/messages/9999/reactors/2", "", 404},
+	"PUT /v2/channels/{channel}/messages/{message_id}/body":                                {classAuth, "/v2/channels/general/messages/9999/body", `{"body":"x"}`, 404},
+	"GET /v2/channels/{channel}/messages/{message_id}/revisions":                           {classAuth, "/v2/channels/general/messages/9999/revisions", "", 404},
+	"PUT /v1/principals/{id}/manifest":                                                     {classPerm, "/v1/principals/1/manifest", `{}`, 400},
+	"GET /v1/principals/{id}/manifest":                                                     {classSelf, "/v1/principals/1/manifest", "", 404},
+	"PUT /v1/principals/{id}/name":                                                         {classSelf, "/v1/principals/1/name", `{}`, 400},
+	"POST /v1/principals/{id}/credentials":                                                 {classPerm, "/v1/principals/1/credentials", `{}`, 400},
+	"GET /v1/principals/{id}/credentials":                                                  {classPerm, "/v1/principals/1/credentials", "", 200},
+	"POST /v1/credentials/{credential_id}/rotate":                                          {classPerm, "/v1/credentials/9999/rotate", "", 404},
+	"DELETE /v1/credentials/{credential_id}":                                               {classPerm, "/v1/credentials/9999", "", 404},
 	// Signing out (issue #439) revokes the caller's own credential, so the
 	// role matrix sends it from a fixture of its own (special-cased below).
 	// The fixture's operator holds the only operator credential: 409. AuthOff
@@ -252,21 +348,23 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/guest/end": {classAuth, "/v1/guest/end", "", 403},
 	// Unknown principal / already-enabled ghost: no-ops that write no audit
 	// event, so the AuthOff audit count below is unaffected.
-	"POST /v1/principals/{id}/disable":                {classOp, "/v1/principals/9999/disable", "", 404},
-	"POST /v1/principals/{id}/enable":                 {classOp, "/v1/principals/4/enable", "", 204},
+	"POST /v1/principals/{id}/disable":                {classPerm, "/v1/principals/9999/disable", "", 404},
+	"POST /v1/principals/{id}/enable":                 {classPerm, "/v1/principals/4/enable", "", 204},
 	"POST /v1/principals/{id}/credentials/revoke-all": {classSelf, "/v1/principals/9999/credentials/revoke-all", "", 404},
-	"POST /v1/hooks":                                  {classOp, "/v1/hooks", `{}`, 400},
-	"GET /v1/hooks":                                   {classOp, "/v1/hooks", "", 200},
-	"DELETE /v1/hooks/{id}":                           {classOp, "/v1/hooks/9999", "", 404},
+	"POST /v1/hooks":                                  {classPerm, "/v1/hooks", `{}`, 400},
+	"GET /v1/hooks":                                   {classPerm, "/v1/hooks", "", 200},
+	"DELETE /v1/hooks/{id}":                           {classPerm, "/v1/hooks/9999", "", 404},
 	"POST /v1/hooks/{token}":                          {classExempt, "/v1/hooks/nope", `{}`, 404},
 	"POST /v1/approvals":                              {classAuth, "/v1/approvals", `{}`, 400},
 	"GET /v1/approvals":                               {classAuth, "/v1/approvals", "", 200},
-	"GET /v1/approvals/{id}":                          {classAuth, "/v1/approvals/9999", "", 404},
-	"POST /v1/approvals/{id}/decisions":               {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
-	"/mcp":                                            {classExempt, "/mcp", `{}`, 401},
+	// The community's member list (issue #983): any member; an agent is refused.
+	"GET /v1/directory/members":         {classAuth, "/v1/directory/members", "", 200},
+	"GET /v1/approvals/{id}":            {classAuth, "/v1/approvals/9999", "", 404},
+	"POST /v1/approvals/{id}/decisions": {classAuth, "/v1/approvals/1/decisions", `{}`, 400},
+	"/mcp":                              {classExempt, "/mcp", `{}`, 401},
 	// limit=0 is a 400 before anything is exported or recorded, so the AuthOff
 	// audit count below is unaffected by a route that audits every success.
-	"GET /v1/audit": {classOp, "/v1/audit?limit=0", "", 400},
+	"GET /v1/audit": {classPerm, "/v1/audit?limit=0", "", 400},
 	// A ticket is for a credential: AuthOff gets 400 tickets_require_auth
 	// (special-cased below). Issuing one writes no audit row.
 	"POST /v1/ws-tickets": {classAuth, "/v1/ws-tickets", "", 201},
@@ -277,11 +375,21 @@ var routeExpectations = map[string]routeExpectation{
 	// whatever it is sent (#713): 409 password_required, for every caller
 	// and under AuthOff alike. People only: an agent gets 403 and AuthOff
 	// 401 on the three authenticated routes (both special-cased below).
-	"POST /v1/invites":         {classAuth, "/v1/invites", `{}`, 400},
-	"GET /v1/invites":          {classAuth, "/v1/invites", "", 200},
-	"DELETE /v1/invites/{id}":  {classAuth, "/v1/invites/9999", "", 404},
-	"POST /v1/invites/preview": {classExempt, "/v1/invites/preview", `{}`, 404},
-	"POST /v1/invites/redeem":  {classExempt, "/v1/invites/redeem", `{}`, 409},
+	// POST /v1/invites answers every authenticated caller 409
+	// invite_kind_retired, before it reads the body (issues #990, #1134).
+	// Member links (v2): an empty create is a 400, the list is
+	// the caller's own, preview sends no code, and the joiners of an invite
+	// that does not exist are a 404 for a person and for an agent alike (no
+	// route refuses an agent by name: that would say which ids exist).
+	"POST /v1/invites":             {classAuth, "/v1/invites", `{}`, 409},
+	"GET /v1/invites":              {classAuth, "/v1/invites", "", 200},
+	"DELETE /v1/invites/{id}":      {classAuth, "/v1/invites/9999", "", 404},
+	"POST /v1/invites/preview":     {classExempt, "/v1/invites/preview", `{}`, 404},
+	"POST /v1/invites/redeem":      {classExempt, "/v1/invites/redeem", `{}`, 409},
+	"POST /v2/invites":             {classAuth, "/v2/invites", `{}`, 400},
+	"GET /v2/invites":              {classAuth, "/v2/invites", "", 200},
+	"POST /v2/invites/preview":     {classExempt, "/v2/invites/preview", `{}`, 404},
+	"GET /v2/invites/{id}/joiners": {classAuth, "/v2/invites/9999/joiners", "", 404},
 	// Guest entry (issue #710). The front door is open to anyone. Join as
 	// guest and the guest redemption answer a bearer token, so they are 403
 	// https_required to this fixture's plain HTTP from a test address before
@@ -298,16 +406,16 @@ var routeExpectations = map[string]routeExpectation{
 	// audited; AuthOff is 403 accounts_require_auth (special-cased below).
 	"POST /v1/join/account":                  {classExempt, "/v1/join/account", `{}`, 403},
 	"POST /v1/guest/convert":                 {classAuth, "/v1/guest/convert", `{}`, 403},
-	"POST /v1/guests/{id}/conversion-permit": {classOp, "/v1/guests/9999/conversion-permit", `{}`, 404},
+	"POST /v1/guests/{id}/conversion-permit": {classPerm, "/v1/guests/9999/conversion-permit", `{}`, 404},
 	// The operator's guest routes (issue #710). A settings change with no
 	// field and a bulk end with no dry_run are 400s before anything is
 	// written; the per-id end names a principal that does not exist. AuthOff
 	// is 403 accounts_require_auth (special-cased below).
 	"GET /v1/join/settings":    {classOp, "/v1/join/settings", "", 200},
-	"PUT /v1/join/settings":    {classOp, "/v1/join/settings", `{}`, 400},
-	"GET /v1/guests":           {classOp, "/v1/guests", "", 200},
-	"POST /v1/guests/{id}/end": {classOp, "/v1/guests/9999/end", "", 404},
-	"POST /v1/guests/end":      {classOp, "/v1/guests/end", `{}`, 400},
+	"PUT /v1/join/settings":    {classPerm, "/v1/join/settings", `{}`, 400},
+	"GET /v1/guests":           {classPerm, "/v1/guests", "", 200},
+	"POST /v1/guests/{id}/end": {classPerm, "/v1/guests/9999/end", "", 404},
+	"POST /v1/guests/end":      {classPerm, "/v1/guests/end", `{}`, 400},
 	// The v2 redeem and the sign-in take a password (issue #707), so they
 	// answer 403 before reading anything: https_required to this fixture's
 	// plain HTTP from a test address, and accounts_require_auth under AuthOff.
@@ -323,21 +431,22 @@ var routeExpectations = map[string]routeExpectation{
 	// or a principal that does not exist, or sets the pause switch to the
 	// value it has, so it changes and audits nothing. Like the routes above,
 	// AuthOff gets 401 (special-cased below).
-	"GET /v1/invites/{id}/principals":           {classOp, "/v1/invites/9999/principals", "", 404},
-	"POST /v1/invites/{id}/disable-joiners":     {classOp, "/v1/invites/9999/disable-joiners", `{"dry_run":true}`, 404},
-	"POST /v1/principals/{id}/disable-invitees": {classOp, "/v1/principals/9999/disable-invitees", `{"dry_run":true}`, 404},
-	"PUT /v1/principals/{id}/invite-permission": {classOp, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
+	"GET /v1/invites/{id}/principals":           {classPerm, "/v1/invites/9999/principals", "", 404},
+	"POST /v1/invites/{id}/disable-joiners":     {classPerm, "/v1/invites/9999/disable-joiners", `{"dry_run":true}`, 404},
+	"POST /v1/principals/{id}/disable-invitees": {classPerm, "/v1/principals/9999/disable-invitees", `{"dry_run":true}`, 404},
+	"PUT /v1/principals/{id}/invite-permission": {classPerm, "/v1/principals/9999/invite-permission", `{"may_invite":false}`, 404},
+	"PUT /v1/principals/{id}/voice-permission":  {classPerm, "/v1/principals/9999/voice-permission", `{"voice_allowed":false}`, 404},
 	"GET /v1/invites/settings":                  {classOp, "/v1/invites/settings", "", 200},
-	"PUT /v1/invites/settings":                  {classOp, "/v1/invites/settings", `{"paused":false}`, 200},
+	"PUT /v1/invites/settings":                  {classPerm, "/v1/invites/settings", `{"paused":false}`, 200},
 	// Sign-in links (issue #493). The create names a principal that does not
 	// exist, and preview and redeem send no code, which is the
 	// sign_in_link_invalid 404 before anything is looked up or audited.
 	// AuthOff gets 401 on the create and the close (special-cased below).
-	"POST /v1/principals/{id}/sign-in-links": {classOp, "/v1/principals/9999/sign-in-links", `{}`, 404},
+	"POST /v1/principals/{id}/sign-in-links": {classPerm, "/v1/principals/9999/sign-in-links", `{}`, 404},
 	"POST /v1/sign-in-links/preview":         {classExempt, "/v1/sign-in-links/preview", `{}`, 404},
 	"POST /v1/sign-in-links/redeem":          {classExempt, "/v1/sign-in-links/redeem", `{}`, 404},
 	// Closing one names a link that does not exist: 404, nothing audited.
-	"DELETE /v1/sign-in-links/{id}": {classOp, "/v1/sign-in-links/9999", "", 404},
+	"DELETE /v1/sign-in-links/{id}": {classPerm, "/v1/sign-in-links/9999", "", 404},
 	// Problem reports (issue #446). An empty report is a 400 before anything
 	// is stored or audited; the operator routes name a report that does not
 	// exist. Sending one is for people: an agent gets 403 and AuthOff 401
@@ -351,9 +460,9 @@ var routeExpectations = map[string]routeExpectation{
 	// before anything is read), and the list only reads. The bulk hide, like
 	// the bulk disables, needs a caller to leave out: AuthOff gets 401
 	// (special-cased below).
-	"POST /v1/principals/{id}/hide": {classOp, "/v1/principals/9999/hide", "", 404},
-	"POST /v1/principals/hide":      {classOp, "/v1/principals/hide", `{"dry_run":true}`, 400},
-	"GET /v1/principals":            {classOp, "/v1/principals", "", 200},
+	"POST /v1/principals/{id}/hide": {classPerm, "/v1/principals/9999/hide", "", 404},
+	"POST /v1/principals/hide":      {classPerm, "/v1/principals/hide", `{"dry_run":true}`, 400},
+	"GET /v1/principals":            {classPerm, "/v1/principals", "", 200},
 	// Device links (issue #712): a member's own. The member gets 403
 	// reauth_required (no proof on the fixture's credential), an empty
 	// list, and 404 for a link that does not exist; agents and operators are
@@ -370,9 +479,16 @@ var routeExpectations = map[string]routeExpectation{
 	"POST /v1/totp/enroll":  {classAuth, "/v1/totp/enroll", "", 403},
 	"POST /v1/totp/confirm": {classAuth, "/v1/totp/confirm", `{}`, 403},
 
-	// Renaming a channel (issue #727): an empty body is a 400 before the
-	// channel is looked up, so it changes and audits nothing.
-	"PUT /v1/channels/{id}/name": {classOp, "/v1/channels/9999/name", `{}`, 400},
+	// Renaming a channel (issues #727, #791): the manager class resolves the
+	// id before the body, so an unknown channel is 404 and changes nothing.
+	"PUT /v1/channels/{id}/name": {classManager, "/v1/channels/9999/name", `{}`, 404},
+
+	// Changing a role or the owner mark (issue #790): an empty body is a 400
+	// before the target is looked up.
+	"PUT /v1/principals/{id}/role": {classOwner, "/v1/principals/1/role", `{}`, 400},
+	// Revoking everything a principal issued to others (issue #1024): an
+	// unknown principal is a 404 for the owner.
+	"POST /v1/principals/{id}/issued/revoke-all": {classOwner, "/v1/principals/9999/issued/revoke-all", "", 404},
 }
 
 // isDeviceLinkRoute reports whether pattern is one of a member's own device
@@ -397,6 +513,7 @@ func isFileRoute(pattern string) bool {
 func isInviteRoute(pattern string) bool {
 	switch pattern {
 	case "POST /v1/invites", "GET /v1/invites", "DELETE /v1/invites/{id}",
+		"POST /v2/invites", "GET /v2/invites",
 		"GET /v1/invites/{id}/principals", "POST /v1/invites/{id}/disable-joiners",
 		"POST /v1/principals/{id}/disable-invitees", "PUT /v1/principals/{id}/invite-permission",
 		"GET /v1/invites/settings", "PUT /v1/invites/settings",
@@ -440,9 +557,23 @@ func TestRouteTable(t *testing.T) {
 			t.Errorf("route %q has no entry in routeExpectations: decide its authentication class", rt.pattern)
 			continue
 		}
-		want := map[routeClass]access{classExempt: accessExempt, classAuth: accessAuthenticated, classOp: accessOperator, classSelf: accessOperatorOrSelf}[exp.class]
+		want := map[routeClass]access{classExempt: accessExempt, classAuth: accessAuthenticated, classOp: accessOperator, classSelf: accessOperatorOrSelf, classOwner: accessOwner, classManager: accessChannelManager, classPerm: accessPermission}[exp.class]
 		if rt.access != want {
 			t.Errorf("route %q access = %d, expectation says %s", rt.pattern, rt.access, exp.class)
+		}
+		// A permission route's permission is pinned like its class; every
+		// other route names none.
+		perm, isPerm := routePermissions[rt.pattern]
+		if isPerm != (exp.class == classPerm) {
+			t.Errorf("route %q: class %s, but routePermissions %s it", rt.pattern, exp.class, map[bool]string{true: "names", false: "does not name"}[isPerm])
+		}
+		if rt.perm != perm {
+			t.Errorf("route %q needs %q, expectation says %q", rt.pattern, rt.perm, perm)
+		}
+	}
+	for p := range routePermissions {
+		if _, ok := routeExpectations[p]; !ok {
+			t.Errorf("routePermissions names %q, which routeExpectations does not", p)
 		}
 	}
 	var want []string
@@ -474,7 +605,8 @@ func TestRoutesRequireAuth(t *testing.T) {
 	f := newAuthFixture(t, AuthRequired)
 	exemptList := map[string]bool{"GET /healthz": true, "POST /v1/hooks/{token}": true, "/mcp": true,
 		"POST /v1/invites/preview": true, "POST /v1/invites/redeem": true, "POST /v2/invites/redeem": true,
-		"GET /v1/join": true, "POST /v1/join/guest": true, "POST /v1/invites/redeem-guest": true, "POST /v1/join/account": true,
+		"POST /v2/invites/preview": true,
+		"GET /v1/join":             true, "POST /v1/join/guest": true, "POST /v1/invites/redeem-guest": true, "POST /v1/join/account": true,
 		"POST /v1/login": true, "POST /v1/password/reset": true,
 		"POST /v1/sign-in-links/preview": true, "POST /v1/sign-in-links/redeem": true,
 		"POST /v1/login/totp": true, "POST /v1/setup/redeem": true}
@@ -520,13 +652,26 @@ func TestRoleMatrix(t *testing.T) {
 		t.Run(rt.pattern, func(t *testing.T) {
 			method := routeMethod(rt.pattern)
 			memberWant := exp.allowed
-			if exp.class == classOp || exp.class == classSelf {
+			if exp.class == classOp || exp.class == classSelf || exp.class == classOwner || exp.class == classManager || exp.class == classPerm {
 				memberWant = http.StatusForbidden
+			}
+			if rt.pattern == "PUT /v1/channels/{id}/name" {
+				memberWant = exp.allowed // a non-member cannot discover the channel id
+			}
+			// Nobody makes v1 invites (issue #1134): the route answers
+			// 409 invite_kind_retired to every authenticated caller, agents
+			// and operators included, before reading the body.
+			inviteRetired := rt.pattern == "POST /v1/invites"
+			if inviteRetired {
+				memberWant = http.StatusConflict
 			}
 			// The approval REST routes are the human surface: an agent
 			// credential is refused there and uses MCP instead (issue #79).
 			agentWant := memberWant
-			if strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
+			if rt.pattern == "PUT /v1/channels/{id}/name" {
+				agentWant = http.StatusForbidden // kind is refused before channel lookup
+			}
+			if rt.pattern == "GET /v1/directory/members" || strings.Contains(rt.pattern, "/v1/approvals") || strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/camera") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") || isFileRoute(rt.pattern) {
 				agentWant = http.StatusForbidden
 			}
 			// Runs are started by agents only (issue #266): the humans get the
@@ -545,9 +690,22 @@ func TestRoleMatrix(t *testing.T) {
 			if strings.HasSuffix(rt.pattern, "/read-state") {
 				agentWant = http.StatusForbidden
 			}
+			// The moderation routes of reactions (issue #765) administer a
+			// channel: an agent is refused by the class, before any lookup.
+			if exp.class == classManager && isReactionRoute(rt.pattern) {
+				agentWant = http.StatusForbidden
+			}
 			// Invites are for people (issue #437), and so are problem
-			// reports (issue #446).
-			if isInviteRoute(rt.pattern) || rt.pattern == "POST /v1/reports" {
+			// reports (issue #446) and message edits (issue #845: message
+			// 9999 does not exist, so a person gets message_not_found, and an
+			// agent is refused before any lookup).
+			if (isInviteRoute(rt.pattern) && !inviteRetired) || rt.pattern == "POST /v1/reports" || rt.pattern == "POST /v1/channels" || isSelfMembershipRoute(rt.pattern) || isMessageEditRoute(rt.pattern) {
+				agentWant = http.StatusForbidden
+			}
+			// The admin door (issue #1330): an agent with no grant is refused
+			// at the door; an empty submit is malformed before any caller is
+			// looked at.
+			if rt.pattern == "GET /v1/admin/actions" || rt.pattern == "POST /v1/admin/actions/{approval_id}/run" {
 				agentWant = http.StatusForbidden
 			}
 			// Signing out (issue #439) succeeds for any member and revokes
@@ -584,6 +742,19 @@ func TestRoleMatrix(t *testing.T) {
 	}
 }
 
+// isReactionRoute reports whether pattern is one of the seven reaction routes
+// (issue #765).
+func isReactionRoute(pattern string) bool {
+	return strings.Contains(pattern, "/v2/channels/{channel}/") && (strings.Contains(pattern, "/reactions") || strings.Contains(pattern, "/reactors"))
+}
+
+// isMessageEditRoute reports whether pattern is one of the two message edit
+// routes (issue #845).
+func isMessageEditRoute(pattern string) bool {
+	return pattern == "PUT /v2/channels/{channel}/messages/{message_id}/body" ||
+		pattern == "GET /v2/channels/{channel}/messages/{message_id}/revisions"
+}
+
 // TestAuthOffUnchanged runs the route table with AuthOff and no credential:
 // the statuses are what the handlers gave before authentication existed, no
 // route reads a credential, and no role check applies.
@@ -598,8 +769,11 @@ func TestAuthOffUnchanged(t *testing.T) {
 					rt.pattern == "GET /v1/credentials/mine" || rt.pattern == "DELETE /v1/credentials/mine/{id}" {
 					want = http.StatusUnauthorized // no caller to report, nor a credential of its own to list or revoke
 				}
-				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") {
+				if strings.Contains(rt.pattern, "/voice/session") || strings.Contains(rt.pattern, "/voice/transmit") || strings.Contains(rt.pattern, "/voice/share") || strings.Contains(rt.pattern, "/voice/camera") || strings.Contains(rt.pattern, "/voice/companion") || rt.pattern == "GET /v1/channels/{channel}/voice" || strings.Contains(rt.pattern, "/v1/voice/occupancy") {
 					want = http.StatusBadRequest // voice_requires_auth: voice is never anonymous
+				}
+				if rt.pattern == "PUT /v1/channels/{id}/name" {
+					want = http.StatusBadRequest // AuthOff skips the guard and reaches body validation
 				}
 				if isFileRoute(rt.pattern) {
 					want = http.StatusBadRequest // files_require_auth: files are never anonymous
@@ -610,17 +784,29 @@ func TestAuthOffUnchanged(t *testing.T) {
 				if strings.HasSuffix(rt.pattern, "/read-state") {
 					want = http.StatusBadRequest // read_state_require_auth: a mark belongs to a principal
 				}
+				if isReactionRoute(rt.pattern) {
+					want = http.StatusBadRequest // reactions_require_auth: a reaction belongs to a principal
+				}
 				if rt.pattern == "POST /v1/ws-tickets" {
 					want = http.StatusBadRequest // tickets_require_auth: a ticket is bound to a credential
 				}
-				if isInviteRoute(rt.pattern) {
+				if isMessageEditRoute(rt.pattern) {
+					want = http.StatusBadRequest // message_edit_requires_auth: no one to be the author
+				}
+				if isInviteRoute(rt.pattern) || rt.pattern == "GET /v2/invites/{id}/joiners" {
 					want = http.StatusUnauthorized // like whoami: no one to make or own an invite
+				}
+				if rt.pattern == "POST /v1/invites" {
+					want = http.StatusConflict // retired for everyone, before any caller is looked at (issue #1134)
 				}
 				if rt.pattern == "POST /v1/reports" {
 					want = http.StatusUnauthorized // like whoami: no one to say who reported
 				}
 				if rt.pattern == "POST /v1/principals/hide" {
 					want = http.StatusUnauthorized // like the bulk disables: no caller to leave out
+				}
+				if strings.HasPrefix(rt.pattern, "GET /v1/admin/actions") || strings.HasPrefix(rt.pattern, "POST /v1/admin/actions") {
+					want = http.StatusUnauthorized // like whoami: no one to administer as
 				}
 				if isGuestPolicyRoute(rt.pattern) {
 					want = http.StatusForbidden // accounts_require_auth: no guest exists, nor anyone to admit one (design §7.4)
@@ -991,11 +1177,18 @@ func TestWhoAmI(t *testing.T) {
 		// classed (issue #705); a guest's case is in guests_test.go. People
 		// are told how they are authenticated (issue #708): neither has a
 		// password yet, so neither has finished setting up.
+		// Each is told what it holds (ADR-014 design §8.3, issue #1015):
+		// every permission for an owner, the member column with alice's
+		// may_invite brake applied for alice, none for an agent; and always
+		// the document's revision.
 		{"operator", f.rootTok, schema.WhoAmIResponseV1{ID: f.root.ID, Kind: schema.PrincipalHuman, Name: "root", Role: schema.RoleOperator, ServerVersion: "v1.2.3-test", MayInvite: true, VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityOperator,
-			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}}},
+			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}, Owner: true, // the bootstrap operator is the owner (issue #790)
+			Permissions: schema.Permissions, PermissionsRevision: 1}},
 		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityMember,
-			Auth: &schema.AuthStateV1{Scope: schema.CredentialScopeFull}}},
-		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false), IdentityClass: schema.IdentityAgent}},
+			Auth:        &schema.AuthStateV1{Scope: schema.CredentialScopeFull},
+			Permissions: []schema.Permission{schema.PermCreatePublicChannels, schema.PermCreatePrivateChannels, schema.PermSeeMemberDirectory, schema.PermUseVoice, schema.PermShareScreen}, PermissionsRevision: 1}},
+		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false), IdentityClass: schema.IdentityAgent,
+			PermissionsRevision: 1}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1045,13 +1238,25 @@ func TestOperatorOnlyRoutesDeny(t *testing.T) {
 	f := newAuthFixture(t, AuthRequired)
 	for _, rt := range f.srv.routes {
 		exp := routeExpectations[rt.pattern]
-		if exp.class != classOp && exp.class != classSelf {
+		if exp.class != classOp && exp.class != classSelf && exp.class != classPerm {
 			continue
 		}
 		t.Run(rt.pattern, func(t *testing.T) {
 			before := countAction(f.audit(t), "access_denied")
 			rec := f.do(t, routeMethod(rt.pattern), exp.path, f.aliceTok, exp.body)
 			assertErrorBody(t, rec, http.StatusForbidden, "forbidden")
+			// A member's answer on a permission route is the one it got
+			// before ADR-014, byte for byte (design §7.2): no permission named,
+			// and the old message.
+			if exp.class == classPerm {
+				want := `{"code":"forbidden","message":"operator role required"}`
+				if rt.pattern == "PUT /v1/join/settings" || rt.pattern == "GET /v1/audit" {
+					want = `{"code":"forbidden","message":"owner required"}`
+				}
+				if got := strings.TrimSpace(rec.Body.String()); got != want {
+					t.Errorf("a member's answer = %s, want %s", got, want)
+				}
+			}
 			var last store.AuditEvent
 			for _, e := range f.audit(t) {
 				if e.Action == "access_denied" {
@@ -1376,4 +1581,14 @@ func TestUnsetAuthModeRequiresCredentials(t *testing.T) {
 			}
 		})
 	}
+}
+
+// isSelfMembershipRoute: the channel directory, self-join and leave are a
+// community member's (issue #982); an agent is refused before any lookup.
+func isSelfMembershipRoute(pattern string) bool {
+	switch pattern {
+	case "GET /v1/directory/channels", "POST /v1/channels/{channel}/join", "POST /v1/channels/{channel}/leave":
+		return true
+	}
+	return false
 }

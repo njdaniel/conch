@@ -317,11 +317,14 @@ func (s *Store) PutNetMember(ctx context.Context, actor string, channelID int64,
 // channelID and writes net_member_removed. It is idempotent: a principal who is
 // not on the net returns removed=false and writes nothing. It returns
 // ErrNotFound for an unknown channel or net.
-func (s *Store) RemoveNetMember(ctx context.Context, actor string, channelID int64, netName string, principalID int64) (removed bool, err error) {
+func (s *Store) RemoveNetMember(ctx context.Context, actor string, channelID int64, netName string, principalID int64, forbidOwner ...bool) (removed bool, err error) {
 	now := time.Now().Truncate(time.Millisecond)
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		n, err := liveNetTx(ctx, tx, channelID, netName)
 		if err != nil {
+			return err
+		}
+		if err := ownerProtectedTx(ctx, tx, principalID, len(forbidOwner) > 0 && forbidOwner[0]); err != nil {
 			return err
 		}
 		var role schema.NetRole

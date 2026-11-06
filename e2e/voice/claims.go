@@ -41,6 +41,41 @@ type joinClaims struct {
 // It also requires that no two tokens seen in this run share a jti. It never
 // returns the token in an error.
 func (h *harness) checkJoinToken(token string, lk *livekitSettings, sub, room string, canPublish bool, expiresAt time.Time) error {
+	want := map[string]any{
+		"roomJoin":          true,
+		"room":              room,
+		"canSubscribe":      true,
+		"canPublish":        canPublish,
+		"canPublishData":    false,
+		"canPublishSources": []any{"microphone"},
+	}
+	return h.checkClaims(token, lk, sub, room, want, expiresAt, "join+subscribe+publish(microphone only) for the one room")
+}
+
+// checkCompanionToken is checkJoinToken for the second participant of a person
+// (issue #933): the companion (publishScreen) may publish the screen-share
+// source and nothing else; the viewer publishes nothing, and its source list
+// is an empty array. Neither names a microphone, share audio or data, and
+// neither sets hidden. canSubscribe is what the request asked for.
+func (h *harness) checkCompanionToken(token string, lk *livekitSettings, sub, room string, publishScreen, canSubscribe bool, expiresAt time.Time) error {
+	sources := []any{}
+	if publishScreen {
+		sources = []any{"screen_share"}
+	}
+	want := map[string]any{
+		"roomJoin":          true,
+		"room":              room,
+		"canSubscribe":      canSubscribe,
+		"canPublish":        publishScreen,
+		"canPublishData":    false,
+		"canPublishSources": sources,
+	}
+	return h.checkClaims(token, lk, sub, room, want, expiresAt, "exactly the companion's grant for the one room")
+}
+
+// checkClaims is the check both share: the token's signature, its top-level
+// claims, its lifetime, and its video grant, which must be exactly want.
+func (h *harness) checkClaims(token string, lk *livekitSettings, sub, room string, want map[string]any, expiresAt time.Time, grantName string) error {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return errors.New("join token is not a three-part JWT")
@@ -86,14 +121,6 @@ func (h *harness) checkJoinToken(token string, lk *livekitSettings, sub, room st
 	case c.Exp-expiresAt.Unix() > 1 || expiresAt.Unix()-c.Exp > 1:
 		return fmt.Errorf("join token exp differs from the response's expires_at by %d s", c.Exp-expiresAt.Unix())
 	}
-	want := map[string]any{
-		"roomJoin":          true,
-		"room":              room,
-		"canSubscribe":      true,
-		"canPublish":        canPublish,
-		"canPublishData":    false,
-		"canPublishSources": []any{"microphone"},
-	}
 	if !reflect.DeepEqual(c.Video, want) {
 		// Say which grants differ without printing the room name.
 		var diff []string
@@ -115,7 +142,7 @@ func (h *harness) checkJoinToken(token string, lk *livekitSettings, sub, room st
 				diff = append(diff, "missing grant "+k)
 			}
 		}
-		return fmt.Errorf("join token video grant is not exactly join+subscribe+publish(microphone only) for the one room: %s", strings.Join(diff, "; "))
+		return fmt.Errorf("join token video grant is not %s: %s", grantName, strings.Join(diff, "; "))
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -132,12 +159,17 @@ func (h *harness) checkJoinToken(token string, lk *livekitSettings, sub, room st
 // the two places it can be seen: the permission LiveKit reports for the
 // connection, and the token LiveKit then sends the connection of its own.
 
-// shareSources is what a connection may publish: the microphone, and while it
-// holds the room's share the screen and its sound.
-func shareSources(share bool, names ...string) []any {
+// publishSources is what a connection may publish: the microphone, while it
+// holds the room's share the screen and its sound, and while it holds a
+// camera claim (ADR-015, issue #1241) the camera, in that order. names are
+// the four sources' spellings, in that order.
+func publishSources(share, camera bool, names ...string) []any {
 	out := []any{names[0]}
 	if share {
 		out = append(out, names[1], names[2])
+	}
+	if camera {
+		out = append(out, names[3])
 	}
 	return out
 }
@@ -148,11 +180,18 @@ func shareSources(share bool, names ...string) []any {
 // a grant conchd set wider than that (data, metadata, hidden, an empty source
 // list, which LiveKit reads as every source) is a failure.
 func checkSharePermission(perm map[string]any, share bool) error {
+	return checkPublishPermission(perm, share, false)
+}
+
+// checkPublishPermission is checkSharePermission with the camera: the join
+// grant, the share's two sources while share is true, and the camera while
+// camera is true (ADR-015). Nothing else, exactly.
+func checkPublishPermission(perm map[string]any, share, camera bool) error {
 	want := map[string]any{
 		"can_subscribe":            true,
 		"can_publish":              true,
 		"can_publish_data":         false,
-		"can_publish_sources":      shareSources(share, "MICROPHONE", "SCREEN_SHARE", "SCREEN_SHARE_AUDIO"),
+		"can_publish_sources":      publishSources(share, camera, "MICROPHONE", "SCREEN_SHARE", "SCREEN_SHARE_AUDIO", "CAMERA"),
 		"hidden":                   false,
 		"recorder":                 false,
 		"can_update_metadata":      false,
@@ -173,6 +212,13 @@ func checkSharePermission(perm map[string]any, share bool) error {
 // permissions as false once a permission has been set (measured on 1.13.7);
 // they are part of the exact grant. The token is never put in an error.
 func (h *harness) checkLiveKitToken(token string, lk *livekitSettings, sub, room string, share bool) error {
+	return h.checkLiveKitTokenGrant(token, lk, sub, room, share, false)
+}
+
+// checkLiveKitTokenGrant is checkLiveKitToken with the camera too (ADR-015):
+// the token LiveKit sends after conchd granted or withdrew a camera carries
+// exactly the camera's source while camera is true (K4).
+func (h *harness) checkLiveKitTokenGrant(token string, lk *livekitSettings, sub, room string, share, camera bool) error {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return errors.New("LiveKit's token is not a three-part JWT")
@@ -202,7 +248,7 @@ func (h *harness) checkLiveKitToken(token string, lk *livekitSettings, sub, room
 		"canSubscribe":          true,
 		"canPublish":            true,
 		"canPublishData":        false,
-		"canPublishSources":     shareSources(share, "microphone", "screen_share", "screen_share_audio"),
+		"canPublishSources":     publishSources(share, camera, "microphone", "screen_share", "screen_share_audio", "camera"),
 		"canUpdateOwnMetadata":  false,
 		"canSubscribeMetrics":   false,
 		"canManageAgentSession": false,
@@ -227,7 +273,7 @@ func (h *harness) checkLiveKitToken(token string, lk *livekitSettings, sub, room
 				diff = append(diff, "missing grant "+k)
 			}
 		}
-		return fmt.Errorf("LiveKit's token does not grant exactly the join grant with share=%v: %s", share, strings.Join(diff, "; "))
+		return fmt.Errorf("LiveKit's token does not grant exactly the join grant with share=%v camera=%v: %s", share, camera, strings.Join(diff, "; "))
 	}
 	return nil
 }

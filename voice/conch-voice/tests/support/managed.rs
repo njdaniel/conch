@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use conch_voice::Error;
 use conch_voice::cli::Environment;
+use conch_voice::livekit::ShareAudioOwner;
 use conch_voice::managed::{self, Devices, Host, KeySource, Watchdog};
 use conch_voice::receive::BoxedSink;
 use conch_voice::secrets::Scrubber;
@@ -343,6 +344,7 @@ impl ManagedRig {
             home: None,
             server: None,
             token,
+            ..Environment::default()
         };
 
         // The keyboard's end is opened to read and write, so that it does not wait for the
@@ -425,6 +427,7 @@ impl ManagedRig {
             } else {
                 KeySource::Configured
             },
+            share_audio_owner: ShareAudioOwner::Helper,
             timings,
             key_timings: quick_keys(),
             start_timeout: setup.start_timeout,

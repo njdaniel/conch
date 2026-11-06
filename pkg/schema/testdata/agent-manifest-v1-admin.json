@@ -1,0 +1,51 @@
+{
+  "schema": "conch.agent_manifest.v1",
+  "principal_id": 12,
+  "display_name": "deploy-admin",
+  "tier": "A",
+  "capabilities": [
+    "messages.read",
+    "messages.post",
+    "approvals.await",
+    "approvals.check",
+    "admin.act"
+  ],
+  "channels": [
+    {
+      "channel_id": 11,
+      "permissions": [
+        "read",
+        "post"
+      ]
+    }
+  ],
+  "rate_limits": [
+    {
+      "capability": "admin.act",
+      "max": 60,
+      "window_seconds": 3600
+    }
+  ],
+  "permissions": [
+    "manage_members",
+    "manage_channels",
+    "make_member_links"
+  ],
+  "admin": {
+    "approval_channel_id": 11,
+    "approval_ttl_seconds": 43200,
+    "run_window_seconds": 3600,
+    "quorum": 1,
+    "escalation_target": {
+      "kind": "ntfy_topic",
+      "topic": "conch-admin-urgent"
+    },
+    "require_approval": [
+      "create_member_link",
+      "rename_member"
+    ],
+    "max_pending": 4
+  },
+  "created_at": "2026-11-05T10:00:00.000Z",
+  "updated_at": "2026-11-05T10:00:00.000Z"
+}

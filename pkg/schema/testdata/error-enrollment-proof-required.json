@@ -1,0 +1,4 @@
+{
+  "code": "enrollment_proof_required",
+  "message": "setting a first password needs an enrollment code from an operator"
+}

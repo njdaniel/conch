@@ -315,6 +315,11 @@ const minContextWordRunes = 4
 // rule and no online lookup.
 func checkPasswordPolicy(password string, words ...string) error {
 	key := passwordKey(password)
+	if key == "" {
+		// Nothing but spaces: whitespace repeated, which no other rule sees,
+		// since the key has removed it (security review of #975).
+		return errPasswordUnacceptable
+	}
 	if _, common := loadCommonPasswords()[key]; common {
 		return errPasswordUnacceptable
 	}
@@ -331,10 +336,13 @@ func checkPasswordPolicy(password string, words ...string) error {
 }
 
 // repeatedUnit reports whether s is one unit of at most four characters
-// written over and over ("aaaa…", "abab…", "1234123412341234").
+// written over and over ("aaaa…", "abab…", "1234123412341234"): at least two
+// whole copies of it, so that a short word whose last letters happen to
+// restart it ("test", "noon", "salsa") is not mistaken for a repetition, now
+// that short passwords are allowed (#975).
 func repeatedUnit(s string) bool {
 	r := []rune(s)
-	for unit := 1; unit <= 4 && unit < len(r); unit++ {
+	for unit := 1; unit <= 4 && 2*unit <= len(r); unit++ {
 		same := true
 		for i := unit; i < len(r); i++ {
 			if r[i] != r[i%unit] {

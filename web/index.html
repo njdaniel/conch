@@ -2,13 +2,29 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- No favicon request: there is none to serve, and a 404 is a console error. -->
-    <link rel="icon" href="data:," />
+    <!-- viewport-fit=cover lets the phone layout pad for the safe areas;
+         interactive-widget=resizes-content makes the on-screen keyboard
+         shorten the page (Chromium) instead of covering its bottom (issue
+         #929). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
+    <!-- The Conch tile (issue #917), from the supplied app icon. Vite copies
+         public/ into the build and prefixes these with the /app/ base. -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <!-- The loading screen's stylesheet: a file, because the page is served
+         with style-src 'self' (issue #1037). -->
+    <link rel="stylesheet" href="/boot.css" />
     <title>Conch</title>
   </head>
   <body>
-    <div id="root"></div>
+    <!-- Shown until React replaces #root's contents. -->
+    <div id="root">
+      <div class="boot" role="status">
+        <span class="boot-spinner" aria-hidden="true"></span>
+        <span>Loading Conch…</span>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

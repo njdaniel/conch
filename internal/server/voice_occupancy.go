@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"net/http"
 	"slices"
 	"time"
@@ -133,9 +134,11 @@ func (p *voicePoller) occupancy(channelIDs []int64) schema.VoiceOccupancyV1 {
 
 // occupancyLocked builds the occupancy document for channelIDs, which are
 // ascending and distinct, from the room states the passes have written. A
-// count is what that channel's presence would list (snapshotLocked): nobody
-// in a stale room, nothing at all while LiveKit is unavailable, and each
-// principal once. Every room the poller holds is a channel-wide one.
+// count, and the principal ids behind it (issue #1103), are what that
+// channel's presence would list (snapshotLocked): nobody in a stale room,
+// nothing at all while LiveKit is unavailable, and each principal once.
+// Every room the poller holds is a channel-wide one, so no net's people are
+// ever in a row. Ids are always stated, as [] for nobody.
 func (p *voicePoller) occupancyLocked(channelIDs []int64) schema.VoiceOccupancyV1 {
 	doc := schema.VoiceOccupancyV1{Schema: schema.VoiceOccupancySchemaV1, Channels: []schema.VoiceChannelOccupancy{}}
 	if p.s.lk == nil {
@@ -160,7 +163,11 @@ func (p *voicePoller) occupancyLocked(channelIDs []int64) schema.VoiceOccupancyV
 		}
 	}
 	for _, id := range channelIDs {
-		doc.Channels = append(doc.Channels, schema.VoiceChannelOccupancy{ChannelID: id, InVoice: len(present[id])})
+		ids := slices.Sorted(maps.Keys(present[id]))
+		if ids == nil {
+			ids = []int64{}
+		}
+		doc.Channels = append(doc.Channels, schema.VoiceChannelOccupancy{ChannelID: id, InVoice: len(ids), PrincipalIDs: ids})
 	}
 	return doc
 }
@@ -236,8 +243,9 @@ func (s *Server) voiceOccupancyCaller(w http.ResponseWriter, r *http.Request) (s
 		writeError(w, http.StatusForbidden, errForbidden.Code, "agents do not use voice")
 		return store.Principal{}, false
 	}
-	if !caller.VoiceAllowed {
-		s.denyForbidden(w, r, caller, schema.ErrorCodeVoiceNotAllowed, "voice is not part of your access to this server")
+	// use_voice, the role's cell and the person's brake together (design
+	// §7.3); one code, whichever said no.
+	if !s.requireVoicePermission(w, r, caller, schema.PermUseVoice) {
 		return store.Principal{}, false
 	}
 	return caller, true

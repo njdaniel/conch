@@ -4,8 +4,8 @@
 // `conch admin principal sign-in-link` does. Runs after 12-phone, so the
 // people it adds to general touch no other spec.
 import type { BrowserContextOptions, Page } from '@playwright/test';
-import { makeInvite } from './api';
-import { accountPassword, channelButton, expect, fillAccount, signInWithPassword, statusLine, test } from './fixtures';
+import { makeMemberLink } from './api';
+import { accountPassword, channelButton, credentialField, expect, fillAccount, showView, signInWithPassword, statusLine, test } from './fixtures';
 import { createSignInLinkResponseV1, type CreateSignInLinkRequestV1, type CreateSignInLinkResponseV1 } from '../src/schema/signin';
 import { createPrincipalResponse, type CreatePrincipalRequest } from '../src/schema/credential';
 import { call, inviteUrl, ok, principalId, type World } from './world';
@@ -49,7 +49,7 @@ async function expectCodeGone(page: Page, signInCode: string): Promise<void> {
 
 test('B493 a joiner signs out, is warned first, and comes back into the same account through an operator link on another device', async ({ meet, secrets, world }) => {
   // A tester joins by invite.
-  const invite = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
+  const invite = await makeMemberLink(world, world.tokens.operator, { kind: 'member', landing_channels: ['general'], max_uses: 1 });
   const name = unique('back');
   const laptop = await meet(desktop);
   await laptop.page.goto(inviteUrl(world, invite.code));
@@ -72,7 +72,7 @@ test('B493 a joiner signs out, is warned first, and comes back into the same acc
   expect((await call(world, firstToken, 'GET', '/v1/whoami')).status).toBe(200);
   await laptop.page.getByRole('button', { name: 'Sign out', exact: true }).click();
   await asked.getByRole('button', { name: 'Yes, sign out', exact: true }).click();
-  await expect(laptop.page.getByLabel('Credential')).toBeVisible();
+  await expect((await credentialField(laptop.page))).toBeVisible();
   expect((await call(world, firstToken, 'GET', '/v1/whoami')).status).toBe(401);
 
   // The operator makes a sign-in link; the tester opens it on a phone.
@@ -86,6 +86,7 @@ test('B493 a joiner signs out, is warned first, and comes back into the same acc
   await handset.page.getByRole('button', { name: `Sign in as ${name}` }).click();
   await expect(statusLine(handset.page)).toContainText(name);
   await expect(statusLine(handset.page)).toContainText('Connected');
+  await showView(handset.page, 'Channels');
   await expect(channelButton(handset.page, 'general')).toBeVisible();
 
   // The same account, on a new credential that lasts.
@@ -111,7 +112,7 @@ test('B493 a joiner signs out, is warned first, and comes back into the same acc
 test('G7a a reset link replaces a forgotten password, ends every sign-in, and the new password signs in', async ({ meet, secrets, world }) => {
   const fresh = 'the new passphrase this member chose after a reset';
   secrets.push(accountPassword, fresh);
-  const invite = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general'], voice: false });
+  const invite = await makeMemberLink(world, world.tokens.operator, { kind: 'member', landing_channels: ['general'], max_uses: 1 });
   const name = unique('reset');
   const laptop = await meet(desktop);
   await laptop.page.goto(inviteUrl(world, invite.code));

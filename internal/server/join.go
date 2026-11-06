@@ -185,8 +185,25 @@ func (s *Server) admitGuest(key string, admit func(peers []int64) (store.Admitte
 	return g, err
 }
 
+// guestsRemoved is the owner's decision of 2026-10-30 (issue #1005): guests
+// are removed for now, turned off and hidden but not deleted. No route
+// starts a visit (403 guests_disabled), none makes an entry point that
+// admits one (409 join_policy_conflict), and no front door or preview
+// offers one; the store turns off any stored setting that admitted guests
+// when it is opened. What a visit already live needs stays: End visit, the
+// operators' end, the guest list and conversion. A later issue brings guests
+// back on top of ADR-013.
+const guestsRemoved = true
+
 func writeGuestsDisabled(w http.ResponseWriter) {
 	writeError(w, http.StatusForbidden, schema.ErrorCodeGuestsDisabled, "guests cannot join here now")
+}
+
+// writeGuestsRemoved answers a route that would start a visit: guests are
+// removed for now (issue #1005). Nothing about the request is read first, so
+// the answer says nothing about a code, a label or the policy.
+func writeGuestsRemoved(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, schema.ErrorCodeGuestsDisabled, "guests are turned off on this server for now")
 }
 
 // writeGuestsFull is 429 with no Retry-After: visits end on their own, at no
@@ -206,7 +223,7 @@ func (s *Server) handleJoinInfo(w http.ResponseWriter, r *http.Request) {
 		s.refuseInviteRateLimited(w, r, limit, retry, 0, addr)
 		return
 	}
-	set, live, err := s.store.JoinSettings(ctx)
+	set, _, err := s.store.JoinSettings(ctx)
 	if err != nil {
 		slog.ErrorContext(ctx, "join: read the joining policy failed", "error", err)
 		writeInternalError(w)
@@ -221,85 +238,39 @@ func (s *Server) handleJoinInfo(w http.ResponseWriter, r *http.Request) {
 		GuestAbsoluteSeconds: set.GuestAbsoluteSeconds,
 	}
 	// With authentication off there is no identity to join as (design
-	// §7.4): the address offers nothing and no voice.
+	// §7.4): the address offers nothing and no voice. With it on, the
+	// address offers an account while open sign-up is on and not paused,
+	// never a guest, and voice always (ADR-013, issue #987).
 	if s.cfg.authRequired() {
-		addrLive, err := s.store.LiveGuestsAmong(ctx, s.guestAddrs.peers(limitKey(addr)))
-		if err != nil {
-			slog.ErrorContext(ctx, "join: count this address's visits failed", "error", err)
-			writeInternalError(w)
-			return
-		}
-		info.Join = store.AddressJoinOptions(set, len(set.OpenChannels), live, addrLive)
-		info.Voice = set.JoinVoice
+		info.Join = store.AddressJoinOptions(set)
+		info.Voice = true
 	}
 	writeJSON(w, http.StatusOK, info)
 }
 
-// handleJoinGuest serves POST /v1/join/guest, exempt from authentication:
-// Join as guest from the bare address. The order is redemption's: the
-// per-address limit before the body is read, a bad label a 400, the
-// server-wide limit last and given back when the store refuses. The store
-// decides the rest in the transaction that starts the visit, so a stale
-// front door admits nobody the policy now refuses.
-func (s *Server) handleJoinGuest(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	if !s.cfg.authRequired() {
-		writeAccountsRequireAuth(w)
-		return
-	}
-	// The request takes no code, but its answer is a new bearer token, and
-	// sending that over plain HTTP beyond loopback is the exposure the
-	// password and code routes refuse (design §5.4, §7.2): so is this.
-	if !secureTransport(r, s.cfg.TrustedProxies) {
-		writeGuestHTTPSRequired(w)
-		return
-	}
-	addr := clientAddr(r, s.cfg.TrustedProxies)
-	if limit, ok, retry := s.inviteLimits.takeAddress(true, addr, s.now()); !ok {
-		s.refuseInviteRateLimited(w, r, limit, retry, 0, addr)
-		return
-	}
-	var req schema.JoinGuestRequestV1
-	if !decodeInviteBody(w, r, &req) {
-		return
-	}
-	if req.Validate() != nil {
-		writeGuestLabelInvalid(w)
-		return
-	}
-	if limit, ok, retry := s.inviteLimits.takeGlobal(s.now()); !ok {
-		s.refuseInviteRateLimited(w, r, limit, retry, 0, addr)
-		return
-	}
-	g, err := s.admitGuest(limitKey(addr), func(peers []int64) (store.AdmittedGuest, error) {
-		return s.store.JoinAsGuest(ctx, store.GuestEntry{Label: req.Label, ServerName: s.serverName(), AddressPeers: peers})
-	})
-	if err != nil {
-		s.inviteLimits.refundGlobal(s.now())
-	}
-	switch {
-	case errors.Is(err, store.ErrGuestsDisabled):
-		writeGuestsDisabled(w)
-	case errors.Is(err, store.ErrJoiningPaused):
-		writeError(w, http.StatusForbidden, schema.ErrorCodeJoiningPaused, "joining is paused on this server")
-	case errors.Is(err, store.ErrGuestsFull):
-		writeGuestsFull(w)
-	case errors.Is(err, store.ErrGuestLabelInvalid):
-		writeGuestLabelInvalid(w)
-	case err != nil:
-		slog.ErrorContext(ctx, "join: guest visit failed", "error", err)
-		writeInternalError(w)
-	default:
-		s.writeGuestJoined(ctx, w, g)
-	}
+// handleJoinGuest serves POST /v1/join/guest, exempt from authentication.
+// The bare address never admits a guest (ADR-013, issue #987): it answers
+// 403 guests_disabled always, whatever guests_enabled says and before the
+// body is read, and starts no visit. Guests, when they return, come through
+// guest links (#1004), not this route.
+func (s *Server) handleJoinGuest(w http.ResponseWriter, _ *http.Request) {
+	writeError(w, http.StatusForbidden, schema.ErrorCodeGuestsDisabled, "the server's address admits no guests")
 }
 
 // handleRedeemInviteGuest serves POST /v1/invites/redeem-guest, exempt from
 // authentication: Join as guest through an invite. It is redemption's order
 // and limits: a malformed code is the same 404 as any invalid one, a bad
 // label a 400 that says nothing about the code.
+//
+// Guests are removed for now (issue #1005): it answers 403 guests_disabled
+// before the body is read, so it says nothing about any code, and neither
+// starts a visit nor spends a use.
 func (s *Server) handleRedeemInviteGuest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	if guestsRemoved {
+		writeGuestsRemoved(w)
+		return
+	}
 	if !s.cfg.authRequired() {
 		writeAccountsRequireAuth(w)
 		return
@@ -435,6 +406,11 @@ func (s *Server) handleJoinAccount(w http.ResponseWriter, r *http.Request) {
 	for _, ch := range acct.Channels {
 		s.events.notifyChannelRoster(ch.ID)
 	}
+	// A new principal has no socket open yet; this covers a later route
+	// that adds an existing one (issue #1027).
+	s.events.notifyChannelsChanged(acct.Principal.ID)
+	// A new member, in the default channels they joined (design §13.6).
+	s.directoryPrincipalChanged(ctx, acct.Principal.ID, nil)
 	slog.InfoContext(ctx, "join: account created", "principal", acct.Principal.ID)
 	writeSecretJSON(w, http.StatusCreated, schema.JoinAccountResponseV1{
 		Principal:  principalFromStore(acct.Principal),
@@ -520,6 +496,7 @@ func (s *Server) writeGuestJoined(ctx context.Context, w http.ResponseWriter, g 
 	for _, ch := range g.Channels {
 		s.events.notifyChannelRoster(ch.ID)
 	}
+	s.events.notifyChannelsChanged(g.Principal.ID)
 	slog.InfoContext(ctx, "join: guest visit started", "principal", g.Principal.ID, "origin", string(g.Visit.Origin))
 	writeSecretJSON(w, http.StatusCreated, schema.JoinGuestResponseV1{
 		Principal:  principalFromStore(g.Principal),
@@ -546,10 +523,42 @@ func (s *Server) operatorGuestCaller(w http.ResponseWriter, r *http.Request) (st
 	return caller, true
 }
 
-// joinSettingsResponse is the answer of both settings routes.
-func (s *Server) joinSettingsResponse(ctx context.Context, st store.JoinState) schema.JoinSettingsResponseV1 {
+// joinSettingsResponse is the answer of both settings routes, as caller
+// sees it: without manage_channels, open_channels lists only the channels
+// caller is in and counts the rest in other_open_channels (ADR-014 design
+// §7.3, SF-1).
+func (s *Server) joinSettingsResponse(ctx context.Context, caller store.Principal, st store.JoinState) (schema.JoinSettingsResponseV1, error) {
+	sight, err := s.channelSightFor(ctx, caller)
+	if err != nil {
+		return schema.JoinSettingsResponseV1{}, err
+	}
+	// Whether any channel is a default channel is told before the list is
+	// cut to what caller sees: the warning is about the server.
+	noDefault := len(st.DefaultChannels) == 0
+	defaults := make([]schema.InviteChannelV1, 0, len(st.DefaultChannels))
+	for _, c := range st.DefaultChannels {
+		if sight.all || sight.seesName(c.Name) {
+			defaults = append(defaults, c)
+		}
+	}
+	if !sight.all {
+		shown := make([]string, 0, len(st.Settings.OpenChannels))
+		for _, name := range st.Settings.OpenChannels {
+			if sight.seesName(name) {
+				shown = append(shown, name)
+				continue
+			}
+			st.Settings.OtherOpenChannels++
+		}
+		st.Settings.OpenChannels = shown
+	}
 	out := schema.JoinSettingsResponseV1{Settings: st.Settings, ServerName: s.serverName(), LiveGuests: int64(st.LiveGuests),
-		Warnings: []schema.JoinWarning{}}
+		Warnings: []schema.JoinWarning{}, DefaultChannels: defaults}
+	if noDefault {
+		// A member link or open sign-up would make a member who is in
+		// nothing (ADR-013, issue #987).
+		out.Warnings = append(out.Warnings, schema.JoinWarningNoDefaultChannel)
+	}
 	if !st.Settings.GuestsEnabled && st.LiveGuests > 0 {
 		out.Warnings = append(out.Warnings, schema.JoinWarningLiveGuestsRemain)
 	}
@@ -569,14 +578,26 @@ func (s *Server) joinSettingsResponse(ctx context.Context, st store.JoinState) s
 	if st.ServerNameHolders > 0 {
 		out.Warnings = append(out.Warnings, schema.JoinWarningServerNameInUse)
 	}
-	return out
+	return out, nil
+}
+
+// writeJoinSettings answers either settings route with st as caller sees it.
+func (s *Server) writeJoinSettings(w http.ResponseWriter, r *http.Request, caller store.Principal, st store.JoinState) {
+	out, err := s.joinSettingsResponse(r.Context(), caller, st)
+	if err != nil {
+		slog.ErrorContext(r.Context(), "join: read channel sight failed", "principal", caller.ID, "error", err)
+		writeInternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleGetJoinSettings serves GET /v1/join/settings: the joining policy,
 // the live visits and the warnings that apply.
 func (s *Server) handleGetJoinSettings(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, ok := s.operatorGuestCaller(w, r); !ok {
+	caller, ok := s.operatorGuestCaller(w, r)
+	if !ok {
 		return
 	}
 	st, err := s.store.JoinState(ctx)
@@ -585,7 +606,7 @@ func (s *Server) handleGetJoinSettings(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.joinSettingsResponse(ctx, st))
+	s.writeJoinSettings(w, r, caller, st)
 }
 
 // handlePutJoinSettings serves PUT /v1/join/settings: an operator changes
@@ -602,20 +623,35 @@ func (s *Server) handlePutJoinSettings(w http.ResponseWriter, r *http.Request) {
 	if !decodeBoundedBody(w, r, &req, joinSettingsBodyMaxBytes) {
 		return
 	}
+	// Guests are removed for now (issue #1005): the store refuses
+	// guests_enabled true and the guest modes as a conflict, 409.
 	st, err := s.store.PutJoinSettings(ctx, auditActor(ctx), caller.ID, req)
 	var refused *store.JoinSettingsError
+	var denied *store.PermissionError
 	switch {
 	case errors.As(err, &refused) && errors.Is(err, store.ErrJoinPolicyConflict):
 		writeError(w, http.StatusConflict, schema.ErrorCodeJoinPolicyConflict, refused.Reason)
 	case errors.As(err, &refused):
 		writeError(w, http.StatusBadRequest, "invalid_request", refused.Reason)
+	case errors.Is(err, store.ErrChannelSettingsConflict):
+		// A private channel named in open_channels: a default channel must
+		// be public, and listing one no longer makes it so (issue #987).
+		writeError(w, http.StatusConflict, schema.ErrorCodeChannelSettingsConflict, "an open channel must be public: make it public first, or leave it out")
+	case errors.Is(err, store.ErrChannelArchiveDefault):
+		// An archived channel is never a default channel (issue #844): an
+		// open_channels entry naming one is refused, and nothing changes.
+		writeError(w, http.StatusConflict, schema.ErrorCodeChannelArchiveDefault, "an archived channel cannot be a default channel: restore it first")
+	case errors.As(err, &denied) && errors.Is(err, store.ErrPermissionDenied):
+		// The resulting state admits people to a channel the writer is not
+		// in, and it lacks manage_channels (ADR-014 design §7.3).
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodePermissionDenied, denied.Reason, denied.Permission)
 	case err != nil:
 		slog.ErrorContext(ctx, "join: write settings failed", "error", err)
 		writeInternalError(w)
 	default:
 		slog.InfoContext(ctx, "join: settings changed", "principal", caller.ID,
 			"guests_enabled", st.Settings.GuestsEnabled, "open_joining", string(st.Settings.OpenJoining), "live_guests", st.LiveGuests)
-		writeJSON(w, http.StatusOK, s.joinSettingsResponse(ctx, st))
+		s.writeJoinSettings(w, r, caller, st)
 	}
 }
 

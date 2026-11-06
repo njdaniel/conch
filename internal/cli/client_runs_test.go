@@ -45,6 +45,7 @@ type eventsGot struct {
 	runs          []schema.RunV1
 	activity      []schema.AgentActivityV1
 	interventions []schema.InterventionV1
+	permissions   int
 }
 
 func (g *eventsGot) handler() EventHandler {
@@ -53,6 +54,10 @@ func (g *eventsGot) handler() EventHandler {
 		Run:          func(r schema.RunV1) error { g.runs = append(g.runs, r); return nil },
 		Activity:     func(a schema.AgentActivityV1) error { g.activity = append(g.activity, a); return nil },
 		Intervention: func(i schema.InterventionV1) error { g.interventions = append(g.interventions, i); return nil },
+		PermissionsChanged: func(schema.PermissionsChangedV1) error {
+			g.permissions++
+			return nil
+		},
 	}
 }
 
@@ -78,6 +83,8 @@ func TestClientSubscribeEventsDocuments(t *testing.T) {
 		{"a frame with no schema is skipped", []any{map[string]any{"id": 1}, testActivity()},
 			eventsGot{activity: []schema.AgentActivityV1{testActivity()}}, ""},
 		{"a session frame is skipped", []any{testSession(1), testRun(5)}, eventsGot{runs: []schema.RunV1{testRun(5)}}, ""},
+		{"a permissions_changed frame reaches its handler", []any{schema.PermissionsChangedV1{Schema: schema.PermissionsChangedSchemaV1}, testRun(5)},
+			eventsGot{permissions: 1, runs: []schema.RunV1{testRun(5)}}, ""},
 		{"an invalid run ends the subscription", []any{badRun, testRun(6)}, eventsGot{}, "invalid run"},
 		{"an invalid activity entry ends it", []any{badActivity}, eventsGot{}, "invalid activity"},
 		{"an invalid intervention ends it", []any{badIntervention}, eventsGot{}, "invalid intervention"},

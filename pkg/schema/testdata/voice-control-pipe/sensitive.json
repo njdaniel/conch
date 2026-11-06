@@ -1,0 +1,27 @@
+{
+  "description": "What the attach line may and may not carry (issue #893; docs/design/windows-desktop.md §3.4 rule 5). fake_nonces are the stand-ins the fixtures and the helper's tests attach with: the first is the golden line's, the second the mismatch value; both are well-formed nonces, and neither may appear in any fixture under voice-control/ or voice-control-v2/, which is how 'the nonce is not echoed in any later event' is asserted without touching those immutable directories. forbidden_field_fragments may not occur in the name of any field of the attach line: voice-control's ten, plus the endpoint (path, dir, server) and the process (pid), so that nothing but the nonce rides on it. never_in_events may not occur in the name of any field of any message of conch.voice_control.v1 or v2: the nonce is spent when the owner reads it, and no later line may carry it or speak of the attach.",
+  "fake_nonces": [
+    "FAKE_nonce_do_not_print_0123456789abcdefghA",
+    "FAKE_other_nonce_not_the_one_0123456789abcA"
+  ],
+  "forbidden_field_fragments": [
+    "token",
+    "secret",
+    "password",
+    "room",
+    "livekit",
+    "authorization",
+    "bearer",
+    "cookie",
+    "url",
+    "identity",
+    "path",
+    "dir",
+    "server",
+    "pid"
+  ],
+  "never_in_events": [
+    "nonce",
+    "attach"
+  ]
+}

@@ -228,7 +228,7 @@ func TestEnrollRefusals(t *testing.T) {
 	}{
 		{"no proof", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			return f.enroll(t, f.wrenTok, wrenPassword, "")
-		}, http.StatusForbidden, schema.ErrorCodeReauthRequired},
+		}, http.StatusForbidden, schema.ErrorCodeEnrollmentProofRequired},
 		{"a proof made for another member", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			kit, err := f.srv.store.CreatePrincipal(context.Background(), store.PrincipalHuman, "kit")
 			if err != nil {
@@ -269,8 +269,8 @@ func TestEnrollRefusals(t *testing.T) {
 		{"an unacceptable password", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			return f.enroll(t, f.wrenTok, "correct horse battery staple", f.link(t, schema.SignInLinkPurposeEnrollment, f.wren.ID).Code)
 		}, http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable},
-		{"a password too short", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
-			return f.enroll(t, f.wrenTok, "short", f.link(t, schema.SignInLinkPurposeEnrollment, f.wren.ID).Code)
+		{"an empty password", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
+			return f.enroll(t, f.wrenTok, "", f.link(t, schema.SignInLinkPurposeEnrollment, f.wren.ID).Code)
 		}, http.StatusBadRequest, "invalid_request"},
 		{"an operator on an ordinary credential", func(t *testing.T, f *recoveryFixture) *httptest.ResponseRecorder {
 			f.exec(t, "DELETE FROM passwords WHERE principal_id = ?", f.root.ID)
@@ -923,7 +923,7 @@ func TestReauthProofInvalidation(t *testing.T) {
 			}
 		}},
 		{"a disable", func(t *testing.T, f *recoveryFixture, _ int64, _, _ string) {
-			if rec := f.send(t, "POST", f.disablePath(f.alice.ID), f.rootTok, "", ""); rec.Code != http.StatusNoContent {
+			if rec := f.send(t, "POST", f.disablePath(f.alice.ID), f.rootTok, "", ""); rec.Code != http.StatusOK {
 				t.Fatalf("disable = %d %s", rec.Code, rec.Body)
 			}
 		}},

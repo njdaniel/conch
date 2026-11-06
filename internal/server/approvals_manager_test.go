@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,8 +17,8 @@ import (
 )
 
 // Issue #789 (CLAUDE.md rule 3): full request -> notify -> resolve -> audit
-// chain when a channel manager adds members via PutChannelMember and
-// AddChannelMemberByName. Each manager-added member receives can_decide = 0,
+// chain when a channel manager adds members through the membership PUT and
+// by-name POST routes. Each manager-added member receives can_decide = 0,
 // sees the channel's approval as read-only, is refused on decision
 // (403 decision_not_permitted, audited access_denied), and the approval
 // resolves by the channel's existing approver with its full audit chain intact.
@@ -61,6 +60,10 @@ func TestManagerAddedMemberCannotDecideFullChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_, mgrTok, err := f.srv.store.CreateCredential(ctx, "system", mgr.ID, "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	byID, err := f.srv.store.CreatePrincipal(ctx, store.PrincipalHuman, "added-by-id")
 	if err != nil {
 		t.Fatal(err)
@@ -79,9 +82,8 @@ func TestManagerAddedMemberCannotDecideFullChain(t *testing.T) {
 	}
 
 	decideFalse := false
-	managesTrue := true
-	if _, err := f.srv.store.PutChannelMember(ctx, fmt.Sprintf("principal:%d", f.root.ID), general.ID, mgr.ID, f.root.ID, &decideFalse, &managesTrue); err != nil {
-		t.Fatalf("grant mgr on general: %v", err)
+	if rec := f.do(t, "PUT", fmt.Sprintf("/v1/channels/general/members/%d", mgr.ID), f.rootTok, `{"can_decide":false,"manages":true}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("grant mgr on general = %d %s", rec.Code, rec.Body)
 	}
 	for _, pid := range []int64{mgr.ID, byID.ID, byName.ID} {
 		if _, err := f.srv.store.PutChannelMember(ctx, fmt.Sprintf("principal:%d", f.root.ID), lobby.ID, pid, f.root.ID, &decideFalse); err != nil {
@@ -89,17 +91,28 @@ func TestManagerAddedMemberCannotDecideFullChain(t *testing.T) {
 		}
 	}
 
-	// Manager adds byID via PutChannelMember and byName via AddChannelMemberByName.
-	mgrActor := fmt.Sprintf("principal:%d", mgr.ID)
-	if added, err := f.srv.store.PutChannelMember(ctx, mgrActor, general.ID, byID.ID, mgr.ID, nil); err != nil || !added {
-		t.Fatalf("manager PutChannelMember(byID) = %v, %v; want true, nil", added, err)
+	// Manager adds byID through the membership PUT and byName through the
+	// by-name POST.
+	if rec := f.do(t, "PUT", fmt.Sprintf("/v1/channels/general/members/%d", byID.ID), mgrTok, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("manager PUT byID = %d %s", rec.Code, rec.Body)
 	}
-	if cm, added, err := f.srv.store.AddChannelMemberByName(ctx, mgrActor, general.ID, mgr.ID, byName.Name); err != nil || !added || cm.CanDecide || cm.Manages {
-		t.Fatalf("manager AddChannelMemberByName(byName) = %+v, %v, %v", cm, added, err)
+	rec := f.do(t, "POST", "/v1/channels/general/members", mgrTok, fmt.Sprintf(`{"name":%q}`, byName.Name))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("manager POST byName = %d %s", rec.Code, rec.Body)
+	}
+	added := decodeBody[schema.ChannelMemberV1](t, rec)
+	if added.PrincipalID != byName.ID || added.CanDecide == nil || *added.CanDecide || added.Manages == nil || *added.Manages {
+		t.Fatalf("manager POST byName member = %+v, want can_decide and manages false", added)
+	}
+	members := decodeBody[schema.ListChannelMembersResponseV1](t, f.do(t, "GET", "/v1/channels/general/members", mgrTok, ""))
+	for _, member := range members.Members {
+		if member.PrincipalID == byID.ID && (member.CanDecide == nil || *member.CanDecide || member.Manages == nil || *member.Manages) {
+			t.Fatalf("manager PUT byID member = %+v, want can_decide and manages false", member)
+		}
 	}
 
 	// Request an approval in general.
-	rec := f.do(t, "POST", "/v1/approvals", f.aliceTok, createApprovalBody(general.ID, 0))
+	rec = f.do(t, "POST", "/v1/approvals", f.aliceTok, createApprovalBody(general.ID, 0))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create = %d %s", rec.Code, rec.Body)
 	}
@@ -190,10 +203,10 @@ func TestManagerAddedMemberCannotDecideFullChain(t *testing.T) {
 
 // Issue #789 (CLAUDE.md rule 3): under a quorum of two, a channel manager's
 // attempt to remove an approver who has cast a decision (or an approver who
-// has yet to decide) is refused by the store (ErrManagerRefused), so a
-// manager cannot drop a cast decision or strip a channel's approvers. The
-// second approver's concurring decision resolves the approval with its
-// notifications and audit chain intact.
+// has yet to decide) is refused by the DELETE route with 403, so a manager
+// cannot drop a cast decision or strip a channel's approvers. The second
+// approver's concurring decision resolves the approval with its notifications
+// and audit chain intact.
 func TestManagerCannotRemoveApproverOrAlterQuorumFullChain(t *testing.T) {
 	ctx := context.Background()
 	var mu sync.Mutex
@@ -229,7 +242,7 @@ func TestManagerCannotRemoveApproverOrAlterQuorumFullChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec := f.do(t, "PUT", fmt.Sprintf("/v1/channels/general/members/%d", carol.ID), f.rootTok, ""); rec.Code != http.StatusNoContent {
+	if rec := f.do(t, "PUT", fmt.Sprintf("/v1/channels/general/members/%d", carol.ID), f.rootTok, `{"can_decide":true}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("add carol = %d %s", rec.Code, rec.Body)
 	}
 
@@ -237,10 +250,12 @@ func TestManagerCannotRemoveApproverOrAlterQuorumFullChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	decideFalse := false
-	managesTrue := true
-	if _, err := f.srv.store.PutChannelMember(ctx, fmt.Sprintf("principal:%d", f.root.ID), general.ID, mgr.ID, f.root.ID, &decideFalse, &managesTrue); err != nil {
-		t.Fatalf("grant mgr on general: %v", err)
+	_, mgrTok, err := f.srv.store.CreateCredential(ctx, "system", mgr.ID, "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := f.do(t, "PUT", fmt.Sprintf("/v1/channels/general/members/%d", mgr.ID), f.rootTok, `{"can_decide":false,"manages":true}`); rec.Code != http.StatusNoContent {
+		t.Fatalf("grant mgr on general = %d %s", rec.Code, rec.Body)
 	}
 
 	// Request an approval with quorum 2.
@@ -284,13 +299,10 @@ func TestManagerCannotRemoveApproverOrAlterQuorumFullChain(t *testing.T) {
 	}
 
 	// Manager attempts to remove alice (who has cast a decision) and carol
-	// (who holds can_decide): both are refused with ErrManagerRefused.
-	mgrActor := fmt.Sprintf("principal:%d", mgr.ID)
+	// (who holds can_decide): the DELETE route refuses both with 403.
 	for _, approver := range []store.Principal{f.alice, carol} {
-		removed, err := f.srv.store.RemoveChannelMember(ctx, mgrActor, general.ID, approver.ID, mgr.ID)
-		if removed || !errors.Is(err, store.ErrManagerRefused) {
-			t.Fatalf("manager RemoveChannelMember(%s) = %v, %v; want false, ErrManagerRefused", approver.Name, removed, err)
-		}
+		rec := f.do(t, "DELETE", fmt.Sprintf("/v1/channels/general/members/%d", approver.ID), mgrTok, "")
+		assertErrorBody(t, rec, http.StatusForbidden, "forbidden")
 	}
 
 	// Carol casts the second decision: because alice's membership and

@@ -54,6 +54,9 @@ type HideOptions struct {
 	// RefuseOperator makes an operator target ErrHideOperator. A bulk hide
 	// sets it; an operator hiding one other operator by id does not.
 	RefuseOperator bool
+	// ForbidOwner makes an owner target ErrOwnerProtected, rechecked in the
+	// hide's transaction.
+	ForbidOwner bool
 }
 
 // HideResult is what a hide did.
@@ -63,6 +66,12 @@ type HideResult struct {
 	// Changed is false when the principal was already hidden: nothing was
 	// written.
 	Changed bool
+	// KnowersEveryone and Knowers are who could know the principal just
+	// before it was hidden (DirectoryKnowers), read inside the transaction
+	// that hid it, for the directory signal: hiding drops its memberships,
+	// so the audience cannot be read afterwards. Empty when Changed is false.
+	KnowersEveryone bool
+	Knowers         []int64
 }
 
 // HidePrincipal hides principal id in one IMMEDIATE transaction:
@@ -98,6 +107,9 @@ func (s *Store) HidePrincipal(ctx context.Context, actor string, id int64, opts 
 		if err != nil {
 			return err
 		}
+		if err := ownerProtectedTx(ctx, tx, id, opts.ForbidOwner); err != nil {
+			return err
+		}
 		// A guest's name is its handle and is never replaced (issue #705,
 		// review F10): End visit is the lever, and its posts keep their
 		// attribution whatever happens to it.
@@ -112,7 +124,10 @@ func (s *Store) HidePrincipal(ctx context.Context, actor string, id int64, opts 
 			return ErrHideOperator
 		}
 		now := credentialNow().Truncate(time.Millisecond)
-		if _, err := disablePrincipalTx(ctx, tx, actor, id, now, &runs); err != nil {
+		if out.KnowersEveryone, out.Knowers, err = directoryKnowersTx(ctx, tx, id); err != nil {
+			return err
+		}
+		if _, err := disablePrincipalTx(ctx, tx, actor, id, now, &runs, opts.ForbidOwner); err != nil {
 			return err
 		}
 		if err := removeAllMembershipsTx(ctx, tx, actor, id, now); err != nil {
@@ -430,7 +445,7 @@ func (s *Store) adminPrincipals(ctx context.Context, cond string, args []any, li
 }
 
 func adminPrincipalsTx(ctx context.Context, q execer, cond string, args []any, limit int, now time.Time) ([]schema.PrincipalAdminV1, error) {
-	query := `SELECT p.id, p.kind, p.name, p.role, p.owner, p.created_at, p.disabled_at, p.hidden_at, p.invited_by, p.invite_id,
+	query := `SELECT p.id, p.kind, p.name, p.role, p.owner, p.created_at, p.disabled_at, p.hidden_at, p.invited_by, p.invite_id, p.may_invite, p.voice_allowed,
 		(SELECT COUNT(*) FROM credentials c
 		 WHERE c.principal_id = p.id AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
 		   AND (c.idle_ms IS NULL OR COALESCE(c.last_used_at, c.created_at) + c.idle_ms > ?)
@@ -451,8 +466,9 @@ func adminPrincipalsTx(ctx context.Context, q execer, cond string, args []any, l
 			createdAt                               int64
 			disabledAt, hiddenAt, invitedBy, invite sql.NullInt64
 			guest                                   sql.NullString
+			mayInvite, voiceAllowed                 bool
 		)
-		if err := rows.Scan(&p.ID, &kind, &p.Name, &role, &p.Owner, &createdAt, &disabledAt, &hiddenAt, &invitedBy, &invite, &p.LiveCredentials, &guest); err != nil {
+		if err := rows.Scan(&p.ID, &kind, &p.Name, &role, &p.Owner, &createdAt, &disabledAt, &hiddenAt, &invitedBy, &invite, &mayInvite, &voiceAllowed, &p.LiveCredentials, &guest); err != nil {
 			return nil, fmt.Errorf("store: list principals: %w", err)
 		}
 		p.Kind = schema.PrincipalKind(kind)
@@ -461,6 +477,10 @@ func adminPrincipalsTx(ctx context.Context, q execer, cond string, args []any, l
 		p.DisabledAt = msToTimestampPtr(disabledAt)
 		p.HiddenAt = msToTimestampPtr(hiddenAt)
 		p.GuestState = schema.GuestState(guest.String)
+		// Both brakes belong to people; an agent holds neither (omitted).
+		if p.Kind == schema.PrincipalHuman {
+			p.VoiceAllowed, p.MayInvite = &voiceAllowed, &mayInvite
+		}
 		if invitedBy.Valid {
 			p.InvitedBy = &invitedBy.Int64
 		}

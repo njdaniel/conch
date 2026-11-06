@@ -39,7 +39,7 @@ func parseAdvertise(raw string, keep, reset bool, isLocal func(net.IP) bool) (*a
 		return nil, fmt.Errorf("--advertise %q is not a URL: %w", raw, err)
 	}
 	if u.Scheme == "https" {
-		return nil, fmt.Errorf("--advertise %q: https needs a TLS front end on its own address, which this flag does not start; see #380 (README, Optional: TLS and a reverse proxy)", raw)
+		return nil, fmt.Errorf("--advertise %q: https needs a TLS front end on its own address, which this flag does not start; see #380 (docs/manual.md, Optional: TLS and a reverse proxy)", raw)
 	}
 	if u.Scheme != "http" {
 		return nil, fmt.Errorf("--advertise %q: the scheme must be http", raw)

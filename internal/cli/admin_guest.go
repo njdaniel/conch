@@ -34,6 +34,10 @@ type joinOpts struct {
 	lifetime       string
 	openChannels   stringList
 	noOpenChannels bool
+	// openSignup is on, off or "" (not given); linkExpiry is the default
+	// lifetime of a member link, "0" for none (ADR-013, issue #994).
+	openSignup string
+	linkExpiry string
 	// state, origin and inviteID select guests; yes ends them, and dryRun
 	// says out loud that it must not.
 	state    string
@@ -45,16 +49,18 @@ type joinOpts struct {
 }
 
 func bindJoinSet(fs *flag.FlagSet, o *adminOpts) {
-	fs.StringVar(&o.join.openJoining, "open-joining", "", "what the bare address offers: off, guest, account or both")
-	fs.StringVar(&o.join.guests, "guests", "", "on or off: whether any entry point, invites included, may start a guest visit")
+	fs.StringVar(&o.join.openJoining, "open-joining", "", "off or account, the same as --open-signup off|on (guests are turned off for now, so the server refuses guest and both)")
+	fs.StringVar(&o.join.openSignup, "open-signup", "", "on or off: whether the bare address makes an account for anyone who asks (needs a default channel)")
+	fs.StringVar(&o.join.linkExpiry, "link-expiry", "", "how long a member link lasts when it names no expiry, such as 7d or 48h (0 for none; at most a year)")
+	fs.StringVar(&o.join.guests, "guests", "", "on or off: whether any entry point, invites included, may start a guest visit (guests are turned off for now, so the server refuses on)")
 	fs.StringVar(&o.join.paused, "paused", "", "on or off: pause joining from the bare address")
-	fs.StringVar(&o.join.voice, "voice", "", "on or off: whether people who join from the bare address may use voice")
+	fs.StringVar(&o.join.voice, "voice", "", "on (the only setting): voice follows each member's own switch, 'conch admin principal voice'; the server refuses off")
 	fs.Int64Var(&o.join.maxGuests, "max-guests", -1, "the most live guest visits at once")
 	fs.Int64Var(&o.join.maxPerAddress, "max-guests-per-address", -1, "the most live guest visits from one client address")
 	fs.StringVar(&o.join.idle, "guest-idle", "", "how long a visit may go unused, such as 2h (a minute to its lifetime)")
 	fs.StringVar(&o.join.lifetime, "guest-lifetime", "", "the most a visit lasts, such as 24h (at most 24h)")
-	fs.Var(&o.join.openChannels, "open-channel", "a channel the bare address admits to (repeat for more; replaces the list)")
-	fs.BoolVar(&o.join.noOpenChannels, "no-open-channels", false, "clear the list of open channels")
+	fs.Var(&o.join.openChannels, "open-channel", "deprecated: use 'conch admin channel settings --default'. A channel to mark default (repeat for more; replaces the list)")
+	fs.BoolVar(&o.join.noOpenChannels, "no-open-channels", false, "deprecated: clear the default channels")
 }
 
 func bindGuestList(fs *flag.FlagSet, o *adminOpts) {
@@ -101,6 +107,31 @@ func seconds(flagName, v string) (*int64, error) {
 	return &n, nil
 }
 
+// linkExpiry reads --link-expiry: 0 for no default expiry, otherwise a
+// duration of whole seconds, such as 48h or 7d; "" is not given. The server
+// holds it to a year.
+func linkExpiry(v string) (*int64, error) {
+	if v == "" {
+		return nil, nil
+	}
+	if v == "0" {
+		n := int64(0)
+		return &n, nil
+	}
+	if days, ok := strings.CutSuffix(v, "d"); ok {
+		if n, err := strconv.ParseInt(days, 10, 64); err == nil && n > 0 && n <= schema.MaxMemberLinkExpirySeconds/86400 {
+			secs := n * 86400
+			return &secs, nil
+		}
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 || d%time.Second != 0 || int64(d/time.Second) > schema.MaxMemberLinkExpirySeconds {
+		return nil, errors.New("--link-expiry must be 0 (none), or a duration of at most a year such as 48h or 7d")
+	}
+	n := int64(d / time.Second)
+	return &n, nil
+}
+
 // joinSetRequest builds the settings change from the flags and checks its
 // shape as the server will; the result's consistency is the server's to
 // decide, against the settings it holds.
@@ -127,6 +158,12 @@ func joinSetRequest(o joinOpts) (schema.PutJoinSettingsRequestV1, error) {
 	if o.maxPerAddress != -1 {
 		n := o.maxPerAddress
 		req.MaxGuestsPerAddress = &n
+	}
+	if req.OpenSignup, err = onOff("open-signup", o.openSignup); err != nil {
+		return req, err
+	}
+	if req.MemberLinkDefaultExpirySeconds, err = linkExpiry(o.linkExpiry); err != nil {
+		return req, err
 	}
 	if req.GuestIdleSeconds, err = seconds("guest-idle", o.idle); err != nil {
 		return req, err
@@ -155,6 +192,8 @@ func warningText(w schema.JoinWarning, live int64) string {
 		return "no trusted proxy is configured, so every caller may share one address and the per-address guest cap binds them together"
 	case schema.JoinWarningOneAddress:
 		return "every live guest arrived from one address"
+	case schema.JoinWarningNoDefaultChannel:
+		return "no channel is a default channel, so open sign-up cannot be on and a member link lands nobody anywhere; mark one with 'conch admin channel settings --default on'"
 	case schema.JoinWarningReservedNamesInUse:
 		return "a lasting account has a name in the reserved guest namespace; rename it before guests can be turned on"
 	}
@@ -178,10 +217,45 @@ func (r *adminRun) sayJoinSettings(resp schema.JoinSettingsResponseV1) error {
 	for i, c := range s.OpenChannels {
 		channels[i] = safeLine(c)
 	}
-	if err := r.say("server name: %s\nopen joining: %s\nguests: %s\njoining paused: %s\nvoice for joiners: %s\nmax guests: %d (%d per address)\na guest visit lasts: at most %s, and ends after %s unused\nopen channels: %s\nlive guests: %d\n",
+	if err := r.say("server name: %s\nopen joining: %s\nguests: %s\njoining paused: %s\nvoice for joiners: %s\nmax guests: %d (%d per address)\na guest visit lasts: at most %s, and ends after %s unused\nlive guests: %d\n",
 		safeLine(resp.ServerName), safeLine(string(s.OpenJoining)), either(s.GuestsEnabled, "on", "off"), yesNo(s.JoiningPaused), yesNo(s.JoinVoice),
-		s.MaxGuests, s.MaxGuestsPerAddress, span(s.GuestAbsoluteSeconds), span(s.GuestIdleSeconds), dashIfEmpty(strings.Join(channels, ", ")), resp.LiveGuests); err != nil {
+		s.MaxGuests, s.MaxGuestsPerAddress, span(s.GuestAbsoluteSeconds), span(s.GuestIdleSeconds), resp.LiveGuests); err != nil {
 		return err
+	}
+	// Under the community model the open channels are the default channels,
+	// which are printed below as such.
+	if s.OpenSignup == nil {
+		if err := r.say("open channels: %s\n", dashIfEmpty(strings.Join(channels, ", "))); err != nil {
+			return err
+		}
+	}
+	// The community model's fields, only when the server sent them.
+	if s.OpenSignup != nil {
+		if err := r.say("open sign-up: %s\n", onOffText(*s.OpenSignup)); err != nil {
+			return err
+		}
+	}
+	if s.MemberLinkDefaultExpirySeconds != nil {
+		expiry := "none"
+		if *s.MemberLinkDefaultExpirySeconds > 0 {
+			expiry = span(*s.MemberLinkDefaultExpirySeconds)
+		}
+		if err := r.say("member link expiry: %s\n", expiry); err != nil {
+			return err
+		}
+	}
+	if s.OpenSignup != nil {
+		defaults := make([]string, len(resp.DefaultChannels))
+		for i, c := range resp.DefaultChannels {
+			defaults[i] = safeLine(c.Name)
+		}
+		more := ""
+		if s.OtherOpenChannels > 0 {
+			more = fmt.Sprintf(" (and %d more you are not in)", s.OtherOpenChannels)
+		}
+		if err := r.say("default channels: %s%s\n", dashIfEmpty(strings.Join(defaults, ", ")), more); err != nil {
+			return err
+		}
 	}
 	for _, w := range resp.Warnings {
 		if err := r.say("warning: %s\n", warningText(w, resp.LiveGuests)); err != nil {
@@ -191,10 +265,20 @@ func (r *adminRun) sayJoinSettings(resp schema.JoinSettingsResponseV1) error {
 	return nil
 }
 
+// joinRefusals are the joining policy's refusals in this client's words. The
+// guest settings and a bare-address voice switch are gone while guests are
+// removed (ADR-013, community model §3.4 Option B): the server answers 409 and
+// the reader is told why.
+var joinRefusals = refusalLines{
+	"forbidden":                             operatorOnly,
+	schema.ErrorCodeJoinPolicyConflict:      "the server does not take that: guests are turned off for now (so not --open-joining guest|both, --guests on or a guest cap), and voice for joiners follows each member's own switch (so not --voice off; use 'conch admin principal voice'). Open sign-up needs a default channel. Nothing was changed",
+	schema.ErrorCodeChannelSettingsConflict: "a default channel must be public: nothing was changed",
+}
+
 func adminJoinStatus(ctx context.Context, r *adminRun) error {
 	resp, err := r.client.JoinSettings(ctx)
 	if err != nil {
-		return olderServer(err, "joining settings")
+		return refused(olderServer(err, "joining settings"), joinRefusals)
 	}
 	return r.sayJoinSettings(resp)
 }
@@ -208,9 +292,15 @@ func adminJoinSet(ctx context.Context, r *adminRun) error {
 	if err != nil {
 		return fmt.Errorf("cli: admin join set: %w", err)
 	}
+	if len(r.opts.join.openChannels) > 0 || r.opts.join.noOpenChannels {
+		// On standard error, so a script reading standard output is not told.
+		if _, err := fmt.Fprintln(r.stderr, "note: --open-channel now marks the default channels and is deprecated; use 'conch admin channel settings <channel> --default on|off'"); err != nil {
+			return err
+		}
+	}
 	resp, err := r.client.PutJoinSettings(ctx, req)
 	if err != nil {
-		return olderServer(err, "joining settings")
+		return refused(olderServer(err, "joining settings"), joinRefusals)
 	}
 	return r.sayJoinSettings(resp)
 }
@@ -239,7 +329,10 @@ func adminGuestList(ctx context.Context, r *adminRun) error {
 	}
 	filter := GuestListFilter{State: o.state, Origin: o.origin, Limit: schema.MaxListGuestsLimit}
 	all := []schema.GuestAdminV1{}
-	for {
+	for n := 0; ; n++ {
+		if n == maxListPages {
+			return errors.New("cli: admin guest list: the server's pages do not end")
+		}
 		page, err := r.client.ListGuests(ctx, filter)
 		if err != nil {
 			return olderServer(err, "guest visits")

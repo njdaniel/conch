@@ -29,6 +29,14 @@ const (
 	MinHideNamePrefixLength = 3
 	// MaxListPrincipalsLimit is the largest page of the principal list.
 	MaxListPrincipalsLimit = 200
+	// MaxListMessagesLimit is the largest page of a message list, thread or
+	// search, on both the REST and the MCP reads.
+	MaxListMessagesLimit = 100
+	// MaxListRunsLimit is the largest page of the run reads (runs, activity,
+	// interventions).
+	MaxListRunsLimit = 100
+	// MaxListReportsLimit is the largest page of the problem report list.
+	MaxListReportsLimit = 200
 	// DefaultListPrincipalsLimit is the page size when none is asked for.
 	DefaultListPrincipalsLimit = 100
 )
@@ -80,6 +88,12 @@ type PrincipalAdminV1 struct {
 	InviteID        *int64     `json:"invite_id,omitempty"`
 	LiveCredentials int        `json:"live_credentials"`
 	GuestState      GuestState `json:"guest_state,omitempty"`
+	// VoiceAllowed is the person's voice switch and MayInvite their
+	// may_invite brake (ADR-013 decisions 4 and 7, issue #978). Both are
+	// filled for humans by a server with the community model and omitted
+	// by one that predates it, and for agents, which hold neither.
+	VoiceAllowed *bool `json:"voice_allowed,omitempty"`
+	MayInvite    *bool `json:"may_invite,omitempty"`
 }
 
 // ListPrincipalsResponseV1 is one page of the principal list, newest first.

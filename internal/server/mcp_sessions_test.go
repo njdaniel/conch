@@ -28,6 +28,12 @@ type mcpToolResult struct {
 
 func (f *interventionFixture) tool(t *testing.T, token, name string, args map[string]any) mcpToolResult {
 	t.Helper()
+	return mcpTool(t, f.srv, token, name, args)
+}
+
+// mcpTool is one tools/call on srv as the bearer of token.
+func mcpTool(t *testing.T, srv *Server, token, name string, args map[string]any) mcpToolResult {
+	t.Helper()
 	body, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": name, "arguments": args}})
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +43,7 @@ func (f *interventionFixture) tool(t *testing.T, token, name string, args map[st
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	rec := httptest.NewRecorder()
-	f.srv.Handler().ServeHTTP(rec, req)
+	srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("%s: http %d %s", name, rec.Code, rec.Body)
 	}

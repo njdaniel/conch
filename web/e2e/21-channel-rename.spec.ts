@@ -13,7 +13,7 @@ import type { Browser, Page } from '@playwright/test';
 import { createChannelResponse, listChannelsResponse, renameChannelResponseV1, type CreateChannelRequest, type RenameChannelRequestV1 } from '../src/schema/channel';
 import { errorV0 } from '../src/schema/error';
 import { post } from './api';
-import { channelButton, expect, messages, signIn, statusLine, test } from './fixtures';
+import { channelButton, credentialField, expect, messages, rememberPushToTalk, signIn, statusLine, test } from './fixtures';
 import { dockerAvailable, startVoiceWorld, watchPage, type Member, type VoiceWorld } from './voice-world';
 import { call, ok, type World } from './world';
 
@@ -32,7 +32,7 @@ function fallback(names: readonly string[]): string | undefined {
 async function operatorPage(meet: () => Promise<{ page: Page }>, world: World, hash = ''): Promise<Page> {
   const { page } = await meet();
   await page.goto(world.appUrl + hash);
-  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(page)).fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');
@@ -95,12 +95,13 @@ test('C728 an operator renames the open channel; a second page moves too; a relo
   for (const page of [a, b]) await page.evaluate(() => Object.assign(window, { c728: 'not reloaded' }));
 
   // A renames from the channel list.
-  await nav(a).getByRole('button', { name: `Rename #${from}` }).click();
+  await nav(a).getByRole('button', { name: `Actions for ${from}` }).click();
+  await nav(a).getByRole('menuitem', { name: 'Rename channel…' }).click();
   const form = a.getByRole('form', { name: 'Rename channel' });
   await expect(form.getByLabel('New name')).toHaveValue(from);
   await form.getByLabel('New name').fill(to);
   await form.getByRole('button', { name: 'Rename channel' }).click();
-  await expect(nav(a).getByText(`Renamed to #${to}`)).toBeVisible();
+  await expect(form).toHaveCount(0);
   await showsOpen(a, to);
   await expect(channelButton(a, from)).toHaveCount(0);
   expect(asked.filter((r) => r.startsWith('PUT') && r.endsWith('/name'))).toEqual([`PUT /v1/channels/${String(channel.id)}/name`]);
@@ -149,13 +150,14 @@ test('C728 a rename refused because the channel was renamed meanwhile says so, m
   const { page } = await meet();
   await page.routeWebSocket(/\/v1\/events\/ws/, () => undefined);
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(page)).fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');
   await channelButton(page, from).click();
   await showsOpen(page, from);
-  await nav(page).getByRole('button', { name: `Rename #${from}` }).click();
+  await nav(page).getByRole('button', { name: `Actions for ${from}` }).click();
+  await nav(page).getByRole('menuitem', { name: 'Rename channel…' }).click();
   const form = page.getByRole('form', { name: 'Rename channel' });
 
   // Another operator renames it first, as a script would.
@@ -209,6 +211,8 @@ test.describe('in voice, with LiveKit', () => {
 
   async function person(browser: Browser, who: 'alice' | Member) {
     const context = await browser.newContext();
+    // Not about the mode: push to talk, chosen before joining (issue #1244).
+    await rememberPushToTalk(context);
     const page = await context.newPage();
     const watch = await watchPage(page, vw);
     const opened = sockets(page);

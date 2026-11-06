@@ -1,0 +1,109 @@
+{
+  "revision": 4,
+  "rows": [
+    {
+      "permission": "create_public_channels",
+      "member": true,
+      "operator": true
+    },
+    {
+      "permission": "create_private_channels",
+      "member": true,
+      "operator": true
+    },
+    {
+      "permission": "make_member_links",
+      "member": true,
+      "operator": true
+    },
+    {
+      "permission": "see_member_directory",
+      "member": true,
+      "operator": true,
+      "operator_fixed": true
+    },
+    {
+      "permission": "use_voice",
+      "member": true,
+      "operator": true
+    },
+    {
+      "permission": "share_screen",
+      "member": true,
+      "operator": true
+    },
+    {
+      "permission": "manage_members",
+      "member": false,
+      "operator": true,
+      "member_fixed": true
+    },
+    {
+      "permission": "act_as_members",
+      "member": false,
+      "operator": false,
+      "member_fixed": true
+    },
+    {
+      "permission": "manage_channels",
+      "member": false,
+      "operator": true,
+      "member_fixed": true
+    },
+    {
+      "permission": "change_server_settings",
+      "member": false,
+      "operator": false,
+      "member_fixed": true
+    },
+    {
+      "permission": "read_audit_log",
+      "member": false,
+      "operator": false,
+      "member_fixed": true
+    }
+  ],
+  "preset": "group",
+  "presets": [
+    {
+      "preset": "personal",
+      "member": [
+        "use_voice",
+        "share_screen"
+      ]
+    },
+    {
+      "preset": "group",
+      "member": [
+        "create_public_channels",
+        "create_private_channels",
+        "make_member_links",
+        "see_member_directory",
+        "use_voice",
+        "share_screen"
+      ]
+    }
+  ],
+  "editable": [
+    "member",
+    "operator"
+  ],
+  "warnings": [],
+  "updated_at": "2026-10-31T09:30:00.000Z",
+  "issued_to_others": [
+    {
+      "kind": "credential",
+      "id": 14,
+      "principal_id": 5,
+      "issued_by": 2,
+      "issued_at": "2026-10-20T08:00:00.000Z"
+    },
+    {
+      "kind": "hook",
+      "id": 3,
+      "principal_id": 6,
+      "issued_by": 2,
+      "issued_at": "2026-10-21T10:15:00.000Z"
+    }
+  ]
+}

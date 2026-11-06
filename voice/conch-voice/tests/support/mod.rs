@@ -13,6 +13,7 @@
 pub mod fake;
 pub mod keyboard;
 pub mod managed;
+pub mod reaped;
 pub mod script;
 pub mod stub;
 
@@ -22,6 +23,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use conch_voice::Error;
+use conch_voice::livekit::ShareAudioOwner;
 use conch_voice::output::Output;
 use conch_voice::presence::PresenceTimings;
 use conch_voice::receive::BoxedSink;
@@ -196,6 +198,9 @@ pub fn quick() -> Timings {
             longest_wait: Duration::from_millis(40),
         },
         jitter: || u32::MAX,
+        // The real clock. A test whose microphone is a script gives the transmit task one
+        // that counts the script's frames instead ([`script::Played::clock`]).
+        transmit_clock: transmit::TxClock::real(),
     }
 }
 
@@ -217,6 +222,8 @@ pub struct Setup {
     pub key_device: Option<String>,
     /// What the session adds when no connection to `conchd` could be made.
     pub unreachable_note: Option<String>,
+    /// `--share-audio-owner`.
+    pub share_audio_owner: ShareAudioOwner,
     /// Write as the real client does, through the queue and its writer thread, to a
     /// [`Reader`] that the test can stop. Otherwise each line is written where it is
     /// shown, which keeps a test's view of the output exact.
@@ -249,12 +256,18 @@ impl Default for Setup {
             timings: quick(),
             release_tail_ms: 20,
             max_transmit: Duration::from_secs(120),
-            report_timeout: Duration::from_millis(200),
+            // As long as every other request is given (`Rig::start_scrubbing`). An attempt
+            // that runs out is tried again, and the stub, which had the first and answered it
+            // late, records the state twice: on a loaded machine a stub's answer can take
+            // longer than 200 ms, and with that bound a test that counts reports failed one
+            // run in twenty (issue #957). A test of a report that runs out sets its own.
+            report_timeout: Duration::from_secs(2),
             sink_tones: vec![440.0, 880.0],
             server: None,
             also_stdout: false,
             key_device: None,
             unreachable_note: None,
+            share_audio_owner: ShareAudioOwner::Helper,
             queued: false,
             talk_mode: TalkMode::PushToTalk,
             open_threshold_db: DEFAULT_OPEN_THRESHOLD_DB,
@@ -369,6 +382,7 @@ impl Rig {
             level: transmit::level_config(setup.open_threshold_db, setup.open_hang_ms),
             key_device: setup.key_device,
             unreachable_note: setup.unreachable_note,
+            share_audio_owner: setup.share_audio_owner,
             timings: setup.timings,
         };
         let out = Written::default();

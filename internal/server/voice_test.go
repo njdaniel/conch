@@ -982,8 +982,8 @@ func TestVoiceSessionRecordsNoHolderForACallerAlreadyGone(t *testing.T) {
 }
 
 // joinWithoutVoice adds a person "vic" to the fixture through an operator's
-// invite to ops that does not grant voice, so vic is a member of ops with
-// voice_allowed = 0 (issue #437), and of nothing else.
+// invite to ops, then turns vic's voice off (issue #984), so vic is a member
+// of ops with voice_allowed = 0, and of nothing else.
 func (f *voiceFixture) joinWithoutVoice(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
@@ -996,8 +996,13 @@ func (f *voiceFixture) joinWithoutVoice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if joined.Principal.VoiceAllowed {
-		t.Fatal("the joiner holds voice")
+	// Every member who joins has voice (issue #986): an operator takes it
+	// away from vic with the per-person switch (issue #984).
+	if _, err := f.srv.store.SetVoiceAllowed(ctx, "system", f.root.ID, joined.Principal.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := f.srv.store.PrincipalByID(ctx, joined.Principal.ID); err != nil || p.VoiceAllowed {
+		t.Fatalf("vic = %+v, %v; want no voice", p, err)
 	}
 	f.tokens["vic"], f.ids["vic"] = joined.Token, joined.Principal.ID
 }
@@ -1013,6 +1018,9 @@ func TestVoiceNotAllowed(t *testing.T) {
 	}{
 		{"session", http.MethodPost, "/v1/channels/%s/voice/session", ""},
 		{"transmit", http.MethodPost, "/v1/channels/%s/voice/transmit", `{"state":"started"}`},
+		// A malformed body: the refusal comes before the body is read (issue #933).
+		{"companion", http.MethodPost, "/v1/channels/%s/voice/companion", `{`},
+		{"companion removal", http.MethodDelete, "/v1/channels/%s/voice/companion?publish=bogus", ""},
 		{"presence", http.MethodGet, "/v1/channels/%s/voice", ""},
 		{"socket", http.MethodGet, "/v1/voice/ws?channel=%s", ""},
 	}

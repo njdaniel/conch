@@ -125,17 +125,20 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 				// ListThreadMessages, ReplyRootMessage and InsertReplyMessage
 				// (issue #25) ask the visibility question about a thread's root
 				// and are held to the same reader rule below.
-				// CountVisibleMessagesAfter (issue #351) is the unread count: the
-				// same condition, in the same statement, held to the same reader
-				// rule below.
-				case "ListVisibleMessages", "ListVisibleMessagesPage", "SearchVisibleMessages", "CountVisibleMessagesAfter", "ListThreadMessages", "ReplyRootMessage", "InsertReplyMessage",
-					"InsertMessage", "InsertMessageV1", "InsertScopedMessage":
+				// The count functions are the unread counts: the same condition,
+				// in the same statement, held to the same reader rule below.
+				// EditOwnMessage and OwnMessageRevisions (issue #845) select the
+				// reader's own message by the same condition and are held to
+				// the same reader rule below.
+				case "ListVisibleMessages", "ListVisibleMessagesPage", "SearchVisibleMessages", "CountVisibleMessagesAfter", "CountVisibleUnreadMessagesAfter", "ListThreadMessages", "ReplyRootMessage", "InsertReplyMessage",
+					"InsertMessage", "InsertMessageV1", "InsertScopedMessage", "EditOwnMessage", "OwnMessageRevisions":
 				default:
 					t.Errorf("%s: %s calls the store's %s; server code may only use the visibility functions and the inserts", path, fset.Position(x.Pos()), name)
 					return true
 				}
 			}
-			takesReader := name == "ReplyRootMessage" || name == "InsertReplyMessage" || name == "ListThreadMessages"
+			takesReader := name == "ReplyRootMessage" || name == "InsertReplyMessage" || name == "ListThreadMessages" ||
+				name == "EditOwnMessage" || name == "OwnMessageRevisions"
 			listsMessages := takesReader || strings.Contains(name, "Message") &&
 				(strings.HasPrefix(name, "List") || strings.HasPrefix(name, "Read") || strings.HasPrefix(name, "Get") ||
 					strings.HasPrefix(name, "Fetch") || strings.HasPrefix(name, "Query") || strings.HasPrefix(name, "Search") ||
@@ -146,7 +149,7 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 			if !listsMessages {
 				return true
 			}
-			if name != "ListVisibleMessages" && name != "ListVisibleMessagesPage" && name != "SearchVisibleMessages" && name != "CountVisibleMessagesAfter" && !takesReader {
+			if name != "ListVisibleMessages" && name != "ListVisibleMessagesPage" && name != "SearchVisibleMessages" && name != "CountVisibleMessagesAfter" && name != "CountVisibleUnreadMessagesAfter" && !takesReader {
 				// The Client types in internal/cli list over HTTP; nothing under
 				// the walked roots has such a method, so any other is a store read.
 				t.Errorf("%s: %s calls %s; use ListVisibleMessages so the audience filter applies", path, fset.Position(x.Pos()), name)

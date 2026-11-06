@@ -13,12 +13,14 @@ import (
 )
 
 // Joining a server, guest visits and creating an account (ADR-009, design
-// §3 and §7.5): `conch join info|guest|account`, `conch account create` and
+// §3 and §7.5): `conch join info|account`, `conch account create` and
 // `conch end-visit`. Each is the public route the browser uses; the server
 // decides every policy, and nothing here grants or refuses anything itself.
-
-// guestNotice is what a person is told on joining as a guest (design §3.1).
-const guestNotice = "Temporary guest. End visit ('conch end-visit') signs you out permanently. Your messages remain. Create an account ('conch account create <name>') to keep access."
+//
+// Guests are removed for now (issue #1005): no route starts a visit, so this
+// client offers none (`conch join guest` is gone). A visit already stored
+// here can still be ended (`conch end-visit`) or made an account (`conch
+// account create`).
 
 // olderServer turns a refusal of a route the server does not have into what
 // it means: the server is older than this client. It fails closed: nothing
@@ -32,18 +34,16 @@ func olderServer(err error, feature string) error {
 
 func runJoin(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("cli: join requires a subcommand (info, guest, account)")
+		return errors.New("cli: join requires a subcommand (info, account)")
 	}
 	switch args[0] {
 	case "info":
 		return runJoinInfo(ctx, args[1:], stdout)
-	case "guest":
-		return runJoinGuest(ctx, args[1:], stdin, stdout, stderr)
 	case "account":
 		return runJoinAccount(ctx, args[1:], stdin, stdout, stderr)
 	default:
 		// Not repeated: what was typed there may be an invite's code.
-		return errors.New("cli: join: unknown subcommand (want info, guest or account)")
+		return errors.New("cli: join: unknown subcommand (want info or account)")
 	}
 }
 
@@ -74,16 +74,12 @@ func runJoinInfo(ctx context.Context, args []string, stdout io.Writer) error {
 	if *asJSON {
 		return json.NewEncoder(stdout).Encode(info)
 	}
-	guest := yesNo(info.Join.Guest)
-	switch {
-	case info.Join.Paused:
-		guest += " (joining is paused)"
-	case info.Join.GuestsFull:
-		guest += " (no room for more guests now; try later)"
+	account := yesNo(info.Join.Account)
+	if info.Join.Paused {
+		account += " (joining is paused)"
 	}
-	_, err = fmt.Fprintf(stdout, "server: %s\njoin as guest: %s\ncreate an account: %s\npassword sign-in: %s\nvoice for joiners: %s\na guest visit lasts: at most %s, and ends after %s unused\n",
-		safeLine(info.ServerName), guest, yesNo(info.Join.Account), yesNo(info.PasswordLogin), yesNo(info.Voice),
-		span(info.GuestAbsoluteSeconds), span(info.GuestIdleSeconds))
+	_, err = fmt.Fprintf(stdout, "server: %s\ncreate an account: %s\npassword sign-in: %s\nvoice for joiners: %s\n",
+		safeLine(info.ServerName), account, yesNo(info.PasswordLogin), yesNo(info.Voice))
 	return err
 }
 
@@ -103,103 +99,6 @@ func channelNames(channels []schema.InviteChannelV1) string {
 		names[i] = safeLine(c.Name)
 	}
 	return dashIfEmpty(strings.Join(names, ", "))
-}
-
-// runJoinGuest starts a guest visit: from the bare address (POST
-// /v1/join/guest), or with --invite through an invite whose code is asked
-// for (POST /v1/invites/redeem-guest). The visit's credential is kept in the
-// temporary guest file, never with the member logins.
-func runJoinGuest(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	const command = "join guest"
-	if err := refuseSecretArgs(command, args, "invite"); err != nil {
-		return err
-	}
-	fs := quietFlags(command)
-	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
-	label := fs.String("label", "", "a display label others see beside your guest tag")
-	viaInvite := fs.Bool("invite", false, "join through an invite; its link or code is asked for")
-	pos, err := parseQuiet(fs, command, args)
-	if err != nil {
-		return err
-	}
-	if len(pos) != 0 {
-		return errors.New("cli: join guest takes no arguments; the invite's code is asked for (--invite)")
-	}
-	if *label != "" {
-		if err := schema.ValidateGuestLabel(*label); err != nil {
-			return fmt.Errorf("cli: join guest: --label: %w", err)
-		}
-	}
-	if err := requireSecureServer(command, *server); err != nil {
-		return err
-	}
-	client, err := NewClient(*server, nil)
-	if err != nil {
-		return err
-	}
-	// Refused before anything is asked or sent: a visit that could not be
-	// stored would be a credential nobody holds.
-	if err := refuseGuestOver(client.Server()); err != nil {
-		return err
-	}
-	var resp schema.JoinGuestResponseV1
-	if *viaInvite {
-		code, err := readInviteCode(newPrompter(ctx, stdin, stderr))
-		if err != nil {
-			return err
-		}
-		resp, err = client.RedeemInviteGuest(ctx, schema.RedeemInviteGuestRequestV1{Code: code, Label: *label})
-		if err != nil {
-			return olderServer(err, "guest visits")
-		}
-	} else {
-		resp, err = client.JoinGuest(ctx, schema.JoinGuestRequestV1{Label: *label})
-		if err != nil {
-			return olderServer(err, "guest visits")
-		}
-	}
-	if err := checkJoinedGuest(resp); err != nil {
-		return err
-	}
-	if err := saveGuestVisit(client.Server(), storedGuestVisit{Token: resp.Token, Handle: resp.Guest.Handle, ExpiresAt: resp.Guest.ExpiresAt.Time()}); err != nil {
-		return err
-	}
-	g := resp.Guest
-	if _, err := fmt.Fprintf(stdout, "joined %s as %s, a temporary guest\nchannels: %s\nthe visit ends at %s at the latest, or after %s unused\n",
-		safeLine(client.Server()), safeLine(schema.GuestDisplayName(g.Label, g.Handle)), channelNames(resp.Channels),
-		clock(g.ExpiresAt), idleText(g)); err != nil {
-		return err
-	}
-	_, err = fmt.Fprintln(stderr, guestNotice)
-	return err
-}
-
-// idleText is how long a visit may go unused, from its own bounds.
-func idleText(g schema.GuestV1) string {
-	d := g.IdleExpiresAt.Time().Sub(g.StartedAt.Time()).Round(time.Minute)
-	if d <= 0 {
-		return "a while"
-	}
-	return span(int64(d / time.Second))
-}
-
-// checkJoinedGuest fails closed on a join answer this client cannot hold
-// with certainty: a visit that is not well-formed or not live, a token not
-// in a credential's form, or a principal that is not the visit's handle. The
-// token is never stored then, and the error says nothing of it.
-func checkJoinedGuest(resp schema.JoinGuestResponseV1) error {
-	const bad = "cli: join guest: the server's answer is not one this conch can use (%s); nothing was stored"
-	switch {
-	case resp.Guest.Validate() != nil:
-		return fmt.Errorf(bad, "a malformed visit")
-	case resp.Guest.State != schema.GuestStateActive:
-		return fmt.Errorf(bad, "a visit that is not live")
-	case !wellFormedToken(resp.Token):
-		return fmt.Errorf(bad, "a credential in an unexpected form")
-	case resp.Principal.ID <= 0 || resp.Principal.Name != resp.Guest.Handle:
-		return fmt.Errorf(bad, "a guest that is not the visit's")
-	}
-	return nil
 }
 
 // checkPermanentName is the check the server makes first on a name for a

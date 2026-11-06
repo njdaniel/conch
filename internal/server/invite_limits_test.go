@@ -226,23 +226,23 @@ func TestInviteCreateLimitedPerPrincipal(t *testing.T) {
 	limits := looseInviteLimits()
 	limits.createPerPrincipal = inviteLimit{"create_per_principal", 2, time.Hour}
 	f.srv.setInviteLimits(limits)
-	f.createInvite(t, f.rootTok, openLink("general"))
+	f.createMemberLink(t, f.rootTok, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
 	// A refused create spends a token as well.
-	assertErrorBody(t, f.send(t, "POST", "/v1/invites", f.rootTok, `{}`, ""), http.StatusBadRequest, "invalid_request")
-	rec := f.send(t, "POST", "/v1/invites", f.rootTok, inviteJSON(t, openLink("general")), "")
+	assertErrorBody(t, f.send(t, "POST", "/v2/invites", f.rootTok, `{}`, ""), http.StatusBadRequest, "invalid_request")
+	rec := f.send(t, "POST", "/v2/invites", f.rootTok, `{"kind":"member"}`, "")
 	assertErrorBody(t, rec, http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
 	if rec.Header().Get("Retry-After") != "1800" {
 		t.Errorf("Retry-After = %q, want 1800", rec.Header().Get("Retry-After"))
 	}
 	// alice has a bucket of her own (and is refused for want of the right).
-	assertErrorBody(t, f.send(t, "POST", "/v1/invites", f.aliceTok, inviteJSON(t, personal("red")), ""), http.StatusForbidden, schema.ErrorCodeInviteNotAllowed)
+	assertErrorBody(t, f.send(t, "POST", "/v2/invites", f.aliceTok, `{"kind":"member"}`, ""), http.StatusForbidden, schema.ErrorCodeInviteNotAllowed)
 	var rows []string
 	for _, e := range f.audit(t) {
 		if e.Action == auditInviteRateLimited {
 			rows = append(rows, e.Actor+" "+e.Subject+" "+e.Detail)
 		}
 	}
-	want := fmt.Sprintf("principal:%d POST /v1/invites limit=create_per_principal max=2 window_seconds=3600 count=1", f.root.ID)
+	want := fmt.Sprintf("principal:%d POST /v2/invites limit=create_per_principal max=2 window_seconds=3600 count=1", f.root.ID)
 	if len(rows) != 1 || rows[0] != want {
 		t.Errorf("invite_rate_limited rows = %q, want %q", rows, want)
 	}

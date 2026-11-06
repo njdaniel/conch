@@ -18,12 +18,12 @@ import (
 // against what group A made, and what the answer must be.
 //
 // The matrix runs twice, as two members of B (w.prober): bea, who joined
-// through the operator's invite, may invite, holds voice and is in both of
-// B's channels, so she holds every right a tester can; and ola, whom the
-// operator made by hand, in B's first channel only. The rows an agent's
-// credential reaches differently run a third time as B's agent (agentRows).
-// Each row names one of A's objects (by name or id) or, for a route that
-// only ever answers about the caller, nothing of A at all.
+// through the operator's invite, may invite, holds voice, manages B's first
+// channel and is in both of B's channels, so she holds every right a tester
+// can; and ola, whom the operator made by hand, in B's first channel only.
+// The rows an agent's credential reaches differently run a third time as B's
+// agent (agentRows). Each row names one of A's objects (by name or id) or, for
+// a route that only ever answers about the caller, nothing of A at all.
 //
 // Every answer is checked three ways:
 //
@@ -89,6 +89,8 @@ type row struct {
 	own bool
 	// spare sends the request with B's spare credential (it signs out).
 	spare bool
+	// manager sends the request as B's manager rather than the current prober.
+	manager bool
 	// noGhost says why a row that names A's object has no ghost
 	// comparison: the route never looks the thing up.
 	noGhost string
@@ -137,6 +139,7 @@ func aIntervention(w *world) subject { return subject{kind: "intervention", id: 
 func aApproval(w *world) subject     { return subject{kind: "approval", id: w.a.approval} }
 func aOpenLink(w *world) subject     { return subject{kind: "invite", id: w.a.openInviteID} }
 func aPersonal(w *world) subject     { return subject{kind: "invite", id: w.a.invites[1]} }
+func aMemberLink(w *world) subject   { return subject{kind: "invite", id: w.a.memberLinkID} }
 func aSignInLink(w *world) subject   { return subject{kind: "sign_in_link", id: w.a.signInLink} }
 
 // aSignInCode is the code of A's sign-in link, by name: the password rows
@@ -144,7 +147,44 @@ func aSignInLink(w *world) subject   { return subject{kind: "sign_in_link", id: 
 func aSignInCode(w *world) subject { return subject{kind: "sign_in_link", name: w.a.signInCode} }
 func aReport(w *world) subject     { return subject{kind: "report", id: w.a.reportID} }
 func aMemberName(w *world) subject { return subject{kind: "principal", name: w.a.people[0].name} }
+
+// aHidden is the principal of A's that the operator hid, by id; aHiddenName
+// by the name hiding gave it.
+func aHidden(w *world) subject     { return subject{kind: "principal", id: w.a.hidden.id} }
+func aHiddenName(w *world) subject { return subject{kind: "principal", name: w.a.hidden.name} }
 func aWord(w *world) subject       { return subject{name: w.aName("word-root")} }
+
+// checkDirectoryOfB checks a member of B's list of the community: every one of
+// A's people is in it, A's hidden principal is not, the scope is everyone, and
+// a member sees none of the operator fields.
+func checkDirectoryOfB(w *world, _ api, body []byte) error {
+	var page schema.ServerMembersResponseV1
+	if err := json.Unmarshal(body, &page); err != nil {
+		return fmt.Errorf("the directory is not a member list: %w", err)
+	}
+	if err := page.Validate(); err != nil {
+		return err
+	}
+	if page.Scope != schema.DirectoryScopeEveryone {
+		return fmt.Errorf("the directory's scope is %q, want everyone", page.Scope)
+	}
+	listed := map[int64]bool{}
+	for _, m := range page.Members {
+		listed[m.ID] = true
+		if m.VoiceAllowed != nil || m.MayInvite != nil || m.InvitedBy != nil || m.Owner {
+			return fmt.Errorf("a member sees the operator fields of %s", m.Name)
+		}
+	}
+	for _, m := range append(slices.Clone(w.a.people), w.a.agent, w.b.agent) {
+		if !listed[m.id] {
+			return fmt.Errorf("%s (%d) is not in the directory", m.name, m.id)
+		}
+	}
+	if listed[w.a.hidden.id] {
+		return fmt.Errorf("the hidden principal %d of A's is in the directory", w.a.hidden.id)
+	}
+	return nil
+}
 
 // ghost is the subject of the comparison request: nothing by that name or id
 // was ever made.
@@ -168,6 +208,10 @@ func id(n int64) string   { return itoa(n) }
 
 // matrixRows is the matrix.
 func matrixRows() []row {
+	return slices.Concat(coreMatrixRows(), reactionMatrixRows(), editMatrixRows())
+}
+
+func coreMatrixRows() []row {
 	byChannel := func(route, what string, p func(w *world, s subject) probe) row {
 		return row{route: route, what: what, pick: aChannel, probe: p, want: channelNotFound}
 	}
@@ -179,6 +223,8 @@ func matrixRows() []row {
 	}
 	bChannel := func(w *world) string { return w.b.main() }
 	transmit := schema.VoiceTransmitReportV1{State: schema.VoiceTransmitStateStarted}
+	companion := schema.VoiceCompanionRequestV1{Publish: schema.VoiceCompanionPublishScreen, Subscribe: true}
+	companionAudio := schema.VoiceCompanionAudioRequestV1{Scope: schema.VoiceShareAudioScopeApplication}
 	return []row{
 		// Sockets: refused before the upgrade.
 		byChannel("GET /v0/ws", "opens the v0 message socket of A's channel", func(_ *world, s subject) probe { return sock("/v0/ws", s.name, nil, false) }),
@@ -202,9 +248,46 @@ func matrixRows() []row {
 		operator("POST /v0/channels", "makes a channel with A's channel's name", aChannel, func(_ *world, s subject) probe {
 			return post("/v0/channels", schema.CreateChannelRequest{Name: s.name})
 		}),
-		// Renaming a channel (issue #727) is for operators: refused by the
-		// route class before the body is read or the channel looked up.
-		operator("PUT /v1/channels/{id}/name", "renames A's channel", aChannel, func(_ *world, s subject) probe {
+		// Member channel creation (issue #981) is the documented existence
+		// oracle on private names (community model §5, R2): A's private
+		// channel's name collides, and the answer is the one 409 every
+		// collision gets, counted against B's daily attempts and audited
+		// without the name.
+		{route: "POST /v1/channels", what: "makes a channel with A's private channel's name", pick: aChannel,
+			want:    answer{http.StatusConflict, "channel_exists"},
+			noGhost: "the documented oracle: a name nobody holds is created, not refused; the 409 is bounded and audited instead",
+			after:   checkCreateRefusedAudited,
+			probe: func(_ *world, s subject) probe {
+				return post("/v1/channels", schema.CreateChannelRequestV1{Name: s.name, Visibility: schema.ChannelPrivate})
+			}},
+		// Channel settings (issue #981) are an operator's: refused before
+		// the id is looked up, the same for A's private channel as for one
+		// that never existed.
+		operator("PUT /v1/channels/{id}/settings", "changes A's private channel's settings", aChannel, func(_ *world, s subject) probe {
+			public := schema.ChannelPublic
+			return put("/v1/channels/"+id(s.id)+"/settings", schema.ChannelSettingsRequestV1{Visibility: &public})
+		}),
+		// Archiving is the same route and the same gate (issue #844): refused
+		// before the id is looked up, so the archived field tells B nothing
+		// of A's channel, and A's channel is not archived by the attempt.
+		operator("PUT /v1/channels/{id}/settings", "archives A's private channel", aChannel, func(_ *world, s subject) probe {
+			archived := true
+			return put("/v1/channels/"+id(s.id)+"/settings", schema.ChannelSettingsRequestV1{Archived: &archived})
+		}),
+		// The channel directory (issue #982): B's member finds A's public
+		// channel and none of A's private ones, with no counts; the
+		// listing of every channel is manage_channels', refused to her.
+		{route: "GET /v1/directory/channels", what: "lists the channel directory", own: true, inspect: checkDirectory,
+			probe: func(*world, subject) probe { return get("/v1/directory/channels") }},
+		{route: "GET /v1/directory/channels", what: "lists every channel with ?scope=all", want: operatorOnly,
+			probe: func(*world, subject) probe { return get("/v1/directory/channels?scope=all") }},
+		// Self-join and leave (issue #982): A's private channel is the
+		// ghost's 404, whichever she asks.
+		byChannel("POST /v1/channels/{channel}/join", "joins A's private channel", func(_ *world, s subject) probe { return post(ch(s)+"/join", nil) }),
+		byChannel("POST /v1/channels/{channel}/leave", "leaves A's private channel", func(_ *world, s subject) probe { return post(ch(s)+"/leave", nil) }),
+		// Renaming a channel (issue #791) hides A's channel from B's members,
+		// including a manager of a different channel.
+		byChannel("PUT /v1/channels/{id}/name", "renames A's channel", func(_ *world, s subject) probe {
 			return put("/v1/channels/"+id(s.id)+"/name", schema.RenameChannelRequestV1{Name: "renamed", From: s.name})
 		}),
 		operator("POST /v0/principals", "makes a principal with an A member's name", aMemberName, func(_ *world, s subject) probe {
@@ -212,6 +295,9 @@ func matrixRows() []row {
 		}),
 		operator("PUT /v1/principals/{id}/name", "renames an A member", aMember, func(_ *world, s subject) probe {
 			return put("/v1/principals/"+id(s.id)+"/name", schema.RenamePrincipalRequestV1{Name: "renamed"})
+		}),
+		operator("PUT /v1/principals/{id}/role", "changes an A member's role", aMember, func(_ *world, s subject) probe {
+			return put("/v1/principals/"+id(s.id)+"/role", schema.RoleChangeRequestV1{Role: schema.RoleOperator})
 		}),
 		// Password sign-in (issue #707): B tries an A member's name with a
 		// password of her own. The answer is the one auth_failed, and the
@@ -348,12 +434,46 @@ func matrixRows() []row {
 
 		// Members and nets.
 		byChannel("GET /v1/channels/{channel}/members", "lists A's channel's members", func(_ *world, s subject) probe { return get(ch(s) + "/members") }),
-		operator("PUT /v1/channels/{channel}/members/{principal_id}", "adds herself to A's channel", aChannel, func(w *world, s subject) probe {
+		// Naming authors (issue #988) sits behind the member list's gate: A's
+		// channel is the one channel-not-found to B, whoever it asks about.
+		byChannel("GET /v1/channels/{channel}/authors", "asks who wrote in A's channel", func(w *world, s subject) probe {
+			return get(ch(s) + "/authors?ids=" + id(w.a.people[0].id))
+		}),
+		byChannel("POST /v1/channels/{channel}/members", "adds an A member by name to A's channel", func(w *world, s subject) probe {
+			return post(ch(s)+"/members", schema.AddChannelMemberRequestV1{Name: w.a.people[0].name})
+		}),
+		byChannel("PUT /v1/channels/{channel}/members/{principal_id}", "adds herself to A's channel", func(w *world, s subject) probe {
 			return put(ch(s)+"/members/"+id(w.prober.id), nil)
 		}),
-		operator("DELETE /v1/channels/{channel}/members/{principal_id}", "removes an A member from A's channel", aChannel, func(w *world, s subject) probe {
+		byChannel("DELETE /v1/channels/{channel}/members/{principal_id}", "removes an A member from A's channel", func(w *world, s subject) probe {
 			return del(ch(s) + "/members/" + id(w.a.people[0].id))
 		}),
+		// A manager adds any member (issue #983, ADR-013 O10), so A's people are
+		// no longer refused to B's manager. What stays refused, with the one
+		// 404 of a principal never issued, is whoever is not a member: A's
+		// hidden principal, a ghost id and a ghost name answer identical bytes.
+		{route: "PUT /v1/channels/{channel}/members/{principal_id}", what: "has B's manager add A's hidden principal by id to B's channel", pick: aHidden, manager: true,
+			want: answer{http.StatusNotFound, "principal_not_found"},
+			probe: func(w *world, s subject) probe {
+				return put("/v1/channels/"+bChannel(w)+"/members/"+id(s.id), nil)
+			}},
+		{route: "POST /v1/channels/{channel}/members", what: "has B's manager add A's hidden principal by name to B's channel", pick: aHiddenName, manager: true,
+			want: answer{http.StatusNotFound, "principal_not_found"},
+			probe: func(w *world, s subject) probe {
+				return post("/v1/channels/"+bChannel(w)+"/members", schema.AddChannelMemberRequestV1{Name: s.name})
+			}},
+		// The add by id (issue #1206) answers A's hidden principal exactly as
+		// by name and as the PUT.
+		{route: "POST /v1/channels/{channel}/members", what: "has B's manager add A's hidden principal by id to B's channel", pick: aHidden, manager: true,
+			want: answer{http.StatusNotFound, "principal_not_found"},
+			probe: func(w *world, s subject) probe {
+				return post("/v1/channels/"+bChannel(w)+"/members", schema.AddChannelMemberRequestV1{ID: s.id})
+			}},
+		// The community's member list: a member of B sees A's people (which
+		// are not markers after the split, design section 8), and not the
+		// hidden one, and none of the operator fields.
+		{route: "GET /v1/directory/members", what: "lists the community's members", own: true, inspect: checkDirectoryOfB,
+			probe: func(*world, subject) probe { return get("/v1/directory/members") }},
 		operator("POST /v1/channels/{channel}/nets", "makes a net in A's channel", aChannel, func(_ *world, s subject) probe {
 			return post(ch(s)+"/nets", schema.CreateNetRequestV1{Name: "b-net"})
 		}),
@@ -373,6 +493,19 @@ func matrixRows() []row {
 		byChannel("POST /v1/channels/{channel}/voice/transmit", "reports transmitting in A's channel", func(_ *world, s subject) probe { return post(ch(s)+"/voice/transmit", transmit) }),
 		byChannel("POST /v1/channels/{channel}/voice/share", "claims A's room's share", func(_ *world, s subject) probe { return post(ch(s)+"/voice/share", nil) }),
 		byChannel("DELETE /v1/channels/{channel}/voice/share", "stops A's room's share", func(_ *world, s subject) probe { return del(ch(s) + "/voice/share") }),
+		// The camera (issue #1241, ADR-015): a claim, a release, and the stop
+		// of an A member's camera, which needs manage_channels that no member
+		// of B holds, all answered as for a channel that never existed.
+		byChannel("POST /v1/channels/{channel}/voice/camera", "claims a camera in A's room", func(_ *world, s subject) probe { return post(ch(s)+"/voice/camera", nil) }),
+		byChannel("DELETE /v1/channels/{channel}/voice/camera", "releases a camera in A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/camera") }),
+		byChannel("DELETE /v1/channels/{channel}/voice/camera", "stops an A member's camera in A's room", func(w *world, s subject) probe {
+			return del(ch(s) + "/voice/camera?" + schema.VoiceCameraPrincipalParam + "=" + id(w.a.people[0].id))
+		}),
+		byChannel("POST /v1/channels/{channel}/voice/companion", "asks for a screen companion in A's room", func(_ *world, s subject) probe { return post(ch(s)+"/voice/companion", companion) }),
+		byChannel("DELETE /v1/channels/{channel}/voice/companion", "removes a companion from A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/companion") }),
+		// The companion's share audio (issue #898): the consent and its withdrawal.
+		byChannel("PUT /v1/channels/{channel}/voice/companion/audio", "consents to share audio in A's room", func(_ *world, s subject) probe { return put(ch(s)+"/voice/companion/audio", companionAudio) }),
+		byChannel("DELETE /v1/channels/{channel}/voice/companion/audio", "withdraws share audio in A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/companion/audio") }),
 		byChannel("GET /v1/channels/{channel}/voice", "reads A's voice presence", func(_ *world, s subject) probe { return get(ch(s) + "/voice") }),
 
 		// Sessions, runs and interventions.
@@ -510,9 +643,9 @@ func matrixRows() []row {
 		// are operators'.
 		own("GET /v1/join", "reads the front door", func(*world, subject) probe { return get("/v1/join") }),
 		operator("GET /v1/join/settings", "reads the joining settings", nil, func(*world, subject) probe { return get("/v1/join/settings") }),
-		operator("PUT /v1/join/settings", "opens the bare address to guests in A's channel", aChannel, func(_ *world, s subject) probe {
-			on, mode := true, schema.OpenJoiningGuest
-			return put("/v1/join/settings", schema.PutJoinSettingsRequestV1{GuestsEnabled: &on, OpenJoining: &mode, OpenChannels: &[]string{s.name}})
+		operator("PUT /v1/join/settings", "opens the bare address to accounts in A's channel", aChannel, func(_ *world, s subject) probe {
+			mode := schema.OpenJoiningAccount
+			return put("/v1/join/settings", schema.PutJoinSettingsRequestV1{OpenJoining: &mode, OpenChannels: &[]string{s.name}})
 		}),
 		operator("GET /v1/guests", "lists the guest visits", nil, func(*world, subject) probe { return get("/v1/guests") }),
 		operator("POST /v1/guests/{id}/end", "ends an A member's visit", aMember, func(_ *world, s subject) probe {
@@ -543,7 +676,21 @@ func matrixRows() []row {
 			probe: func(_ *world, s subject) probe {
 				return post("/v1/principals/"+id(s.id)+"/credentials/revoke-all", nil)
 			}},
+		// The owner's revoke-all of what someone issued to others (issue
+		// #1024, ADR-014 O13) is an owner route: a member is refused as on
+		// any other.
+		operator("POST /v1/principals/{id}/issued/revoke-all", "revokes what an A member issued to others", aMember, func(_ *world, s subject) probe {
+			return post("/v1/principals/"+id(s.id)+"/issued/revoke-all", nil)
+		}),
 		operator("GET /v1/audit", "reads the audit log", nil, func(*world, subject) probe { return get("/v1/audit") }),
+		// The permissions document (issue #1015): a member neither reads the
+		// matrix nor changes it (ADR-014 O10); the restricted operator's
+		// rows are restricted.go's.
+		operator("GET /v1/permissions", "reads the permissions document", nil, func(*world, subject) probe { return get("/v1/permissions") }),
+		operator("PUT /v1/permissions", "turns a permission on for members", nil, func(*world, subject) probe {
+			return put("/v1/permissions", schema.PutPermissionsRequestV1{Revision: 1,
+				Changes: []schema.PermissionChangeV1{{Permission: schema.PermCreatePrivateChannels, Role: schema.PermissionRoleMember, Granted: true}}})
+		}),
 		operator("POST /v1/hooks", "makes a hook into A's channel", aChannel, func(w *world, s subject) probe {
 			return post("/v1/hooks", schema.CreateHookRequest{Channel: s.name, Principal: w.prober.id})
 		}),
@@ -551,11 +698,41 @@ func matrixRows() []row {
 		operator("DELETE /v1/hooks/{id}", "revokes a hook", nil, func(*world, subject) probe { return del("/v1/hooks/1") }),
 
 		// Invites.
+		// The v1 route makes nothing for anyone (issues #990, #1134): the kind
+		// is retired, and the answer is the same for a member, an operator,
+		// A's channel and a ghost.
 		{route: "POST /v1/invites", what: "invites someone to A's channel", pick: aChannel,
-			want: answer{http.StatusForbidden, schema.ErrorCodeInviteGrantExceedsInviter}, mayNot: answer{http.StatusForbidden, schema.ErrorCodeInviteNotAllowed},
+			want: answer{http.StatusConflict, schema.ErrorCodeInviteKindRetired}, mayNot: answer{http.StatusConflict, schema.ErrorCodeInviteKindRetired},
 			probe: func(_ *world, s subject) probe {
 				return post("/v1/invites", schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{s.name}})
 			}},
+		// Member links (issue #985). A member without manage_channels who names
+		// a landing channel gets one answer for A's private channel and for one
+		// that never existed (the ghost row), and a tester whose brake is off
+		// is told so, whatever channel it names.
+		{route: "POST /v2/invites", what: "makes a link landing in A's channel", pick: aChannel,
+			want: answer{http.StatusForbidden, schema.ErrorCodeInviteGrantExceedsInviter}, mayNot: answer{http.StatusForbidden, schema.ErrorCodeInviteNotAllowed},
+			probe: func(_ *world, s subject) probe {
+				return post("/v2/invites", schema.CreateInviteRequestV2{Kind: schema.InviteKindMember, LandingChannels: []string{s.name}})
+			}},
+		own("GET /v2/invites", "lists her links", func(*world, subject) probe { return get("/v2/invites") }),
+		// The joiners of a link are its maker's and the operators': B's member
+		// gets the answer of an id that never existed, for a member link, a
+		// legacy open link and a legacy personal invite alike.
+		{route: "GET /v2/invites/{id}/joiners", what: "lists who joined through A's member link", pick: aMemberLink, want: answer{http.StatusNotFound, schema.ErrorCodeInviteNotFound},
+			probe: func(_ *world, s subject) probe { return get("/v2/invites/" + id(s.id) + "/joiners") }},
+		{route: "GET /v2/invites/{id}/joiners", what: "lists who joined through A's open link", pick: aOpenLink, want: answer{http.StatusNotFound, schema.ErrorCodeInviteNotFound},
+			probe: func(_ *world, s subject) probe { return get("/v2/invites/" + id(s.id) + "/joiners") }},
+		{route: "GET /v2/invites/{id}/joiners", what: "lists who joined through an A tester's personal invite", pick: aPersonal, want: answer{http.StatusNotFound, schema.ErrorCodeInviteNotFound},
+			probe: func(_ *world, s subject) probe { return get("/v2/invites/" + id(s.id) + "/joiners") }},
+		// A holder of a member link's code is shown the inviter's name, the
+		// server's and the default channels, and nothing else (design §3.3).
+		{route: "POST /v2/invites/preview", what: "previews A's member link", own: true, noGhost: "the preview is the code holder's, by design",
+			pick: func(w *world) subject { return subject{kind: "principal", name: w.a.people[0].name} },
+			probe: func(w *world, _ subject) probe {
+				return post("/v2/invites/preview", schema.InvitePreviewRequestV1{Code: w.a.memberLinkCode})
+			},
+			inspect: func(w *world, _ api, body []byte) error { return w.checkMemberLinkPreview(body) }},
 		own("GET /v1/invites", "lists her invites", func(*world, subject) probe { return get("/v1/invites") }),
 		{route: "DELETE /v1/invites/{id}", what: "closes A's open link", pick: aOpenLink, want: answer{http.StatusNotFound, schema.ErrorCodeInviteNotFound},
 			probe: func(_ *world, s subject) probe { return del("/v1/invites/" + id(s.id)) }},
@@ -572,6 +749,9 @@ func matrixRows() []row {
 		}),
 		operator("PUT /v1/principals/{id}/invite-permission", "takes an A tester's right to invite", aMember, func(_ *world, s subject) probe {
 			return put("/v1/principals/"+id(s.id)+"/invite-permission", schema.InvitePermissionRequestV1{})
+		}),
+		operator("PUT /v1/principals/{id}/voice-permission", "switches an A tester's voice off", aMember, func(_ *world, s subject) probe {
+			return put("/v1/principals/"+id(s.id)+"/voice-permission", schema.VoicePermissionRequestV1{VoiceAllowed: false})
 		}),
 		operator("GET /v1/invites/settings", "reads the invite settings", nil, func(*world, subject) probe { return get("/v1/invites/settings") }),
 		operator("PUT /v1/invites/settings", "pauses invites", nil, func(*world, subject) probe {
@@ -605,6 +785,15 @@ func matrixRows() []row {
 					Deadline: schema.NewTimestamp(time.Now().Add(time.Hour))})
 			}},
 		own("GET /v1/approvals", "lists the open approvals", func(*world, subject) probe { return get("/v1/approvals") }),
+		// The admin door (issue #1330): a member reads the catalog as it
+		// applies to them, holds nothing that lets it act on A's member, and
+		// runs no approval but its own agent's, the same for a ghost.
+		{route: "GET /v1/admin/actions", what: "reads the admin catalog", own: true,
+			probe: func(*world, subject) probe { return get("/v1/admin/actions") }},
+		{route: "POST /v1/admin/actions", what: "asks the admin door to disable A's member", pick: aMember, want: answer{http.StatusForbidden, "forbidden"},
+			probe: func(_ *world, s subject) probe { return post("/v1/admin/actions", disableThrough(s.id)) }},
+		{route: "POST /v1/admin/actions/{approval_id}/run", what: "runs A's approval through the admin door", pick: aApproval, want: answer{http.StatusNotFound, "approval_not_found"},
+			probe: func(_ *world, s subject) probe { return post("/v1/admin/actions/"+id(s.id)+"/run", nil) }},
 		{route: "GET /v1/approvals/{id}", what: "reads A's approval", pick: aApproval, want: answer{http.StatusNotFound, "approval_not_found"},
 			probe: func(_ *world, s subject) probe { return get("/v1/approvals/" + id(s.id)) }},
 		{route: "POST /v1/approvals/{id}/decisions", what: "decides A's approval", pick: aApproval, want: answer{http.StatusNotFound, "approval_not_found"},
@@ -735,6 +924,9 @@ func (w *world) runMatrix(prober *member, rows []row) (int, error) {
 // runRow runs one row and its ghost.
 func (w *world) runRow(r row) (int, error) {
 	as := w.prober.api
+	if r.manager {
+		as = w.b.people[0].api
+	}
 	if r.spare {
 		spare, ok := w.spares[w.prober.id]
 		if !ok {

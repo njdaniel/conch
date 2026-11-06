@@ -41,6 +41,10 @@ via LiveKit, never bespoke WebRTC.
 > - Live transcription follows the alpha.
 > - The voice track's native Linux exit (#189) continues, and the alpha does not wait for it.
 
+> **Amended 2026-11-03 (ADR-015, #973):** webcam video moves into the alpha from P9,
+> starting with one-to-one calls and small groups in the voice rooms channels already
+> have. Nick's decision.
+
 **Two invariants hold the whole way:**
 
 - **Usable at every phase.** Each phase ends in a deployment you actually run, not
@@ -219,6 +223,10 @@ Ships:
 - **Browser voice and screen share** through LiveKit's JavaScript SDK:
   - push-to-talk while the tab has focus, mute and deafen;
   - one share per room, with sound where the browser can.
+- **Webcam video in channel voice rooms** ([ADR-015](docs/adr/ADR-015-webcam-video.md)), starting one to one and in small groups:
+  - a camera is a permission (`use_camera`), off until an owner turns it on, and the voice switch withholds it;
+  - at most nine cameras a room, and the call view shows up to four;
+  - `conchd` decides who may publish, and LiveKit only moves the media.
 - **Separate groups as private channels on one server,** checked end to end so one group finds nothing of another.
 - **A deployed, versioned server,** with the build's version visible, backups with a tried restore, keepalive and reconnects, and in-product problem reports.
 
@@ -373,7 +381,8 @@ auditable), or hold a `publish:audio` capability and speak via TTS.
 ### P9 — Screen sharing + session media
 
 > **Amended by ADR-008:** basic screen sharing (one share per room, with sound where
-> the browser can) moves into the private alpha. Recording and agent visual participation stay here.
+> the browser can) moves into the private alpha. **Amended by ADR-015 (2026-11-03):**
+> webcam video moves into the private alpha too. Recording and agent visual participation stay here.
 Screen-share is a second track type on the same LiveKit rooms as voice — one design, not
 two. Agents can watch a share and raise a `request_approval` off what they see. Session
 recording/transcription flows into the audit log.
@@ -392,14 +401,14 @@ Mobile (PWA, then native if warranted), Matrix bridge, federation-if-ever. The
 | ----- | ----- | ---------- |
 | P2 ✅ | Security, auth, capabilities, search, threads, files | Core, local, solo+agents |
 | P3 ✅ | Agent presence, sessions, runs, activity, adapters; local multi-client prototype first | Core, local, TUI + minimal browser (ADR-007) |
-| **Alpha** | **Private communications alpha: invites, browser chat, voice and screen share** (ADR-008) | One droplet, conchd + Caddy + LiveKit, browsers |
+| **Alpha** | **Private communications alpha: invites, browser chat, voice, screen share and webcam** (ADR-008, ADR-015) | One droplet, conchd + Caddy + LiveKit, browsers |
 | P4 ⏸ | Assemblies / floor-controlled multi-agent rooms (deferred) | Core, local, solo+agents |
 | P5 ⏸ | Deliberation, critique, ranking, convergence (deferred) | Core, local, solo+agents |
 | P6 | Solo daily-driver polish (R2 candidate) | Your daily instance |
 | P7 | Small-team multi-human + Slack-style GUI ⚠️ | Small self-hosted, humans+agents |
 | V0–V6 | Nets and voice track (parallel): auth, membership, text nets, PTT voice | Core, then + optional LiveKit |
 | P8 | Agents in voice | Self-hosted + LiveKit |
-| P9 | Recording, agent visual participation (basic screen share moved to the alpha) | Self-hosted + LiveKit |
+| P9 | Recording, agent visual participation (basic screen share and webcam moved to the alpha) | Self-hosted + LiveKit |
 | P10+ | Mobile, bridges, broader reach | As earned |
 
 ---

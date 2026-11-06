@@ -24,24 +24,6 @@ func (c *Client) JoinInfo(ctx context.Context) (schema.JoinInfoV1, error) {
 	return result, nil
 }
 
-// JoinGuest starts a guest visit from the bare address.
-func (c *Client) JoinGuest(ctx context.Context, request schema.JoinGuestRequestV1) (schema.JoinGuestResponseV1, error) {
-	var result schema.JoinGuestResponseV1
-	if err := c.roundTrip(ctx, "join as guest", http.MethodPost, c.resolve("v1", "join", "guest"), request, &result); err != nil {
-		return schema.JoinGuestResponseV1{}, err
-	}
-	return result, nil
-}
-
-// RedeemInviteGuest starts a guest visit through an invite.
-func (c *Client) RedeemInviteGuest(ctx context.Context, request schema.RedeemInviteGuestRequestV1) (schema.JoinGuestResponseV1, error) {
-	var result schema.JoinGuestResponseV1
-	if err := c.roundTrip(ctx, "join as guest", http.MethodPost, c.resolve("v1", "invites", "redeem-guest"), request, &result); err != nil {
-		return schema.JoinGuestResponseV1{}, err
-	}
-	return result, nil
-}
-
 // JoinAccount creates an account from the bare address, name and password
 // together.
 func (c *Client) JoinAccount(ctx context.Context, request schema.JoinAccountRequestV1) (schema.JoinAccountResponseV1, error) {
@@ -194,11 +176,11 @@ func (c *Client) CreateDeviceLink(ctx context.Context, request schema.CreateDevi
 
 // ListOwnDeviceLinks returns the caller's open device links, without codes.
 func (c *Client) ListOwnDeviceLinks(ctx context.Context) (schema.ListOwnSignInLinksResponseV1, error) {
-	var result schema.ListOwnSignInLinksResponseV1
+	var result deviceLinksDoc
 	if err := c.roundTrip(ctx, "list device links", http.MethodGet, c.resolve("v1", "sign-in-links", "mine"), nil, &result); err != nil {
 		return schema.ListOwnSignInLinksResponseV1{}, err
 	}
-	return result, nil
+	return result.ListOwnSignInLinksResponseV1, nil
 }
 
 // CloseOwnDeviceLink closes one of the caller's device links.

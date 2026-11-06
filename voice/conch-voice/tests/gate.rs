@@ -185,6 +185,50 @@ async fn the_release_tail_is_sent_and_then_the_track_is_muted() {
     assert_frames_only_while_unmuted(&rig.sdk.calls());
 }
 
+/// Issue #686: in push-to-talk, a microphone that stops delivering frames during the release
+/// tail, which the gate counts in frames, does not keep the person transmitting: the tail is
+/// cut once it has run for its length by the clock, and the track is muted.
+#[tokio::test]
+async fn a_microphone_that_stalls_in_the_release_tail_ends_the_transmission() {
+    const TAIL_MS: u32 = 100;
+    let (mic, source) = support::script::Switch::make();
+    let setup = Setup {
+        release_tail_ms: TAIL_MS,
+        microphone: Some(mic),
+        ..Setup::default()
+    };
+    let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
+    rig.ready().await;
+    rig.line(Down);
+    rig.talking().await;
+    rig.frames_beyond(2).await;
+    let mutes = rig.sdk.count(Call::Mute);
+    rig.line(Up);
+    // The source stalls as the key is let go: none of the tail's frames can arrive.
+    source.stall(true);
+    let stalled_at = std::time::Instant::now();
+    rig.not_talking().await;
+    // When the client muted the track, not when this test noticed: a test thread starved
+    // by a loaded machine notices late, and that is not the client stopping late.
+    let muted_at = rig.sdk.last_mute_at().expect("the track was muted");
+    let took = muted_at.saturating_duration_since(stalled_at);
+    // The tail is cut by the clock once it has run its length and a little more, so the
+    // transmission ends about a tail after the stall. A client that did not cut it would
+    // never stop (the tail is counted in frames and none come), which `not_talking` above
+    // turns into a timeout; this bound is the second line, and is wide enough to hold when
+    // the machine is loaded enough to starve the transmit task for most of a second (#1144).
+    assert!(
+        took <= Duration::from_millis(u64::from(TAIL_MS) + 1000),
+        "stopped {took:?} after the stall, tail {TAIL_MS} ms"
+    );
+    rig.reported(2).await;
+    assert_eq!(rig.conchd.reported(), ["started", "stopped"]);
+    assert_eq!(rig.sdk.count(Call::Mute), mutes + 1);
+    assert!(rig.sdk.is_muted());
+    assert_eq!(rig.sdk.frames_while_muted(), 0);
+    assert_frames_only_while_unmuted(&rig.sdk.calls());
+}
+
 #[tokio::test]
 async fn no_frame_is_sent_in_any_state_where_the_gate_must_be_shut() {
     let rig = Rig::start().await;
@@ -478,6 +522,7 @@ async fn reconnecting_forces_the_gate_shut_and_a_held_key_does_not_resume() {
 /// gate's own count of frames is what ends the transmission.
 #[tokio::test]
 async fn the_gates_own_cap_ends_a_transmission_when_no_timer_fires() {
+    use conch_voice::livekit::Subscription;
     use conch_voice::sdk::{RoomHandle, Transport};
     use conch_voice::secrets::Scrubber;
     use conch_voice::transmit::{self, BoxedMic, TxCommand, TxEvent};
@@ -488,7 +533,11 @@ async fn the_gates_own_cap_ends_a_transmission_when_no_timer_fires() {
 
     let sdk = FakeSdk::new(Scrubber::new());
     let (room, _events) = sdk
-        .connect("ws://livekit.invalid", &Secret::new("FAKE-join-token"))
+        .connect(
+            "ws://livekit.invalid",
+            &Secret::new("FAKE-join-token"),
+            &Subscription::default(),
+        )
         .await
         .unwrap();
     let (_track, feed) = room.publish_microphone().await.unwrap();
@@ -538,9 +587,12 @@ async fn the_gates_own_cap_ends_a_transmission_when_no_timer_fires() {
 // every 10 ms, the default level (-40 dBFS) and hang (400 ms, forty frames), and the rig's
 // release tail of 20 ms (two frames).
 
+use std::sync::Arc;
+
+use conch_voice::session::Timings;
 use conch_voice_control::{Key, KeyAction, KeyEvent, TalkMode};
 use support::MakeMic;
-use support::script::{After, Script, Switch, frame_number};
+use support::script::{After, Played, Script, Switch, frame_number};
 
 /// The hang, in frames.
 const HANG: u64 = 40;
@@ -556,6 +608,19 @@ fn open_mode(microphone: MakeMic) -> Setup {
         talk_mode: TalkMode::Open,
         microphone: Some(microphone),
         ..Setup::default()
+    }
+}
+
+/// As [`open_mode`], for a script that never stops delivering: what the transmit task
+/// measures by the clock is measured in the script's frames ([`Played::clock`]), so that
+/// which frames are sent is the script's doing, however late a loaded machine reads it.
+fn scripted(microphone: MakeMic, played: &Arc<Played>) -> Setup {
+    Setup {
+        timings: Timings {
+            transmit_clock: played.clock(),
+            ..support::quick()
+        },
+        ..open_mode(microphone)
     }
 }
 
@@ -585,7 +650,7 @@ async fn in_open_mode_two_utterances_are_two_transmissions_sent_from_onset_to_ha
         &[(100, false), (100, true), (100, false), (50, true)],
         After::Quiet,
     );
-    let rig = Rig::start_with(Stub::start().await, open_mode(mic), |_| {}).await;
+    let rig = Rig::start_with(Stub::start().await, scripted(mic, &played), |_| {}).await;
     rig.connected(1).await;
     transmissions(&rig, 2).await;
     several_frames().await;
@@ -698,13 +763,13 @@ async fn in_open_mode_nothing_is_sent_muted_or_deafened_and_unmuting_needs_a_fre
 /// not open again until quiet and a new onset.
 #[tokio::test]
 async fn in_open_mode_the_limit_cuts_a_long_tone_and_stands_until_quiet_and_a_new_onset() {
-    let (mic, _) = Script::make(
+    let (mic, played) = Script::make(
         &[(50, false), (300, true), (60, false), (30, true)],
         After::Quiet,
     );
     let setup = Setup {
         max_transmit: Duration::from_secs(1),
-        ..open_mode(mic)
+        ..scripted(mic, &played)
     };
     let rig = Rig::start_with(Stub::start().await, setup, |_| {}).await;
     rig.connected(1).await;
@@ -880,6 +945,7 @@ async fn in_open_mode_the_talk_key_opens_nothing_a_lost_key_device_blocks_nothin
 /// tail, and no frame follows it.
 #[tokio::test]
 async fn a_change_of_talk_mode_shuts_the_gate_at_once_and_no_frame_follows() {
+    use conch_voice::livekit::Subscription;
     use conch_voice::sdk::{RoomHandle, Transport};
     use conch_voice::secrets::Scrubber;
     use conch_voice::transmit::{self, BoxedMic, TxCommand, TxEvent};
@@ -890,7 +956,11 @@ async fn a_change_of_talk_mode_shuts_the_gate_at_once_and_no_frame_follows() {
 
     let sdk = FakeSdk::new(Scrubber::new());
     let (room, _events) = sdk
-        .connect("ws://livekit.invalid", &Secret::new("FAKE-join-token"))
+        .connect(
+            "ws://livekit.invalid",
+            &Secret::new("FAKE-join-token"),
+            &Subscription::default(),
+        )
         .await
         .unwrap();
     let (_track, feed) = room.publish_microphone().await.unwrap();

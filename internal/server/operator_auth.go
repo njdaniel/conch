@@ -420,7 +420,7 @@ type setupLimiter struct {
 func newSetupLimiter(cfg Config) *setupLimiter {
 	l := inviteLimit{"setup_redeem_per_address", defaultRedeemPerAddress, defaultAddressWindow}
 	if cfg.TestRelaxInviteLimits {
-		l.burst = testRelaxedPerAddressBurst
+		l.burst = testRelaxedBurst
 	}
 	return &setupLimiter{limit: l}
 }
@@ -443,7 +443,9 @@ func writeSetupTokenInvalid(w http.ResponseWriter) {
 // other than themself (an operator-or-self route, such as signing everyone
 // out); or only when the caller is an operator (a route anyone may use but
 // that, from an operator, creates what the class covers, such as an invite,
-// which makes principals; a member's use is unaffected).
+// which makes principals; a member's use is unaffected); or for anyone but
+// an owner (ADR-014 design §7.2: the audit export, which an owner read
+// without a proof before ADR-014 and still does).
 type reauthRule int
 
 const (
@@ -451,6 +453,7 @@ const (
 	reauthAlways
 	reauthOnOthers
 	reauthOperators
+	reauthNonOwners
 )
 
 type requestCredentialKey struct{}
@@ -495,8 +498,18 @@ func (s *Server) recentAuthGate(rule reauthRule, next http.Handler) http.Handler
 				next.ServeHTTP(w, r)
 				return
 			}
+		case reauthNonOwners:
+			if isOwner(caller) {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
-		if !cred.Session || (cred.RecentAuthUntil != nil && s.now().Before(*cred.RecentAuthUntil)) {
+		// An agent never signs in: whatever bounds its credential carries (an
+		// AI administrator's is renewable), it is a script's and passes, as
+		// every script credential does (ai-administrators §3.4 point 4). The
+		// class check before this gate admits an agent only through the admin
+		// door's dispatch; its compensating control is the approval gate.
+		if !cred.Session || caller.Kind == store.PrincipalAgent || (cred.RecentAuthUntil != nil && s.now().Before(*cred.RecentAuthUntil)) {
 			next.ServeHTTP(w, r)
 			return
 		}

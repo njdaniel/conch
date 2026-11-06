@@ -47,4 +47,9 @@ type HookV1 struct {
 // is [] rather than null.
 type ListHooksResponseV1 struct {
 	Hooks []HookV1 `json:"hooks"`
+	// OtherHooks is how many hooks the list leaves out because they post in
+	// a channel the reader is not in and the reader does not hold
+	// manage_channels (ADR-014, docs/design/admin-roles.md §7.3). Omitted
+	// when 0, and by a server that predates it.
+	OtherHooks int64 `json:"other_hooks,omitempty"`
 }

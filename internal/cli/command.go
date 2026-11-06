@@ -55,6 +55,8 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runDownload(ctx, args[1:], stdout, stderr)
 	case "nets":
 		return runNets(ctx, args[1:], stdout, stderr)
+	case "channels":
+		return runChannels(ctx, args[1:], stdout, stderr)
 	case "admin":
 		return runAdmin(ctx, args[1:], stdin, stdout, stderr)
 	case "voice":
@@ -119,38 +121,55 @@ Usage:
   conch nets archive [--server <url>] <channel> <name>
   conch nets add [--server <url>] <channel> <name> <principal-id> [--monitor]
   conch nets remove [--server <url>] <channel> <name> <principal-id>
+  conch channels list [--server <url>] [--json] [--all]
+  conch channels join [--server <url>] [--json] <channel>
+  conch channels leave [--server <url>] [--json] <channel>
+  conch channels create [--server <url>] [--json] [--private] <name>
   conch admin channel create [--server <url>] [--json] <name>
+  conch admin channel settings [--server <url>] [--json] [--public|--private] [--default on|off] [--archive|--restore] <channel>
   conch admin principal create [--server <url>] [--json] --kind human|agent <name>
   conch admin principal disable|enable [--server <url>] [--json] <id>
   conch admin principal rename [--server <url>] [--json] <id> <name>
+  conch admin principal role [--server <url>] [--json] [--owner|--no-owner] <id> operator|member
   conch admin principal list [--server <url>] [--json] [--state active|disabled|hidden] [--prefix <name-prefix>] [--invite <id>] [--kind human|agent]
   conch admin principal hide [--server <url>] [--json] <id>
   conch admin principal hide [--server <url>] [--json] --prefix <name-prefix>|--invite <id> [--kind human|agent] [--yes]
   conch admin credential issue [--server <url>] [--json] --label <label> [--expires-at <RFC3339>] <principal-id>
   conch admin credential list [--server <url>] [--json] <principal-id>
   conch admin credential revoke [--server <url>] [--json] <credential-id>
-  conch admin member add|remove [--server <url>] [--json] <channel> <principal-id>
+  conch admin member add [--server <url>] [--json] [--no-decide] <channel> <principal-id>
+  conch admin member add [--server <url>] [--json] <channel> --name <name>
+  conch admin member manage|decide [--server <url>] [--json] [--off] <channel> <principal-id>
+  conch admin member remove [--server <url>] [--json] <channel> <principal-id>
   conch admin manifest put [--server <url>] [--json] [--file <path>] <principal-id>
   conch admin manifest get [--server <url>] [--json] <principal-id>
-  conch admin invite create [--server <url>] [--json] --open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] [--join-as account|guest|both]
-  conch admin invite list [--server <url>] [--json] [--state open|used|expired|closed] [--kind personal|open] [--created-by <id>]
+  conch admin invite create [--server <url>] [--json] [--expires <duration|RFC3339> | --never-expires] [--uses <n>] [--credential-days <n>] [--landing-channel <name>...]
+  conch admin invite list [--server <url>] [--json] [--state open|used|expired|closed] [--created-by <id>]
   conch admin invite close|joiners [--server <url>] [--json] <id>
   conch admin invite disable-joiners [--server <url>] [--json] [--yes] <id>
   conch admin invite pause|resume|status [--server <url>] [--json]
   conch admin principal invite-permission [--server <url>] [--json] <id> on|off
   conch admin principal disable-invitees [--server <url>] [--json] [--all] [--yes] <id>
   conch admin principal sign-in-link [--server <url>] [--json] [--purpose sign_in|reset|enrollment] [--expires <duration|RFC3339>] <id>
+  conch admin principal voice [--server <url>] [--json] <id> on|off
   conch admin sign-in-link close [--server <url>] [--json] <id>
   conch admin join status [--server <url>] [--json]
-  conch admin join set [--server <url>] [--json] [--open-joining off|guest|account|both] [--guests on|off] [--paused on|off] [--voice on|off] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels]
+  conch admin join set [--server <url>] [--json] [--open-signup on|off] [--link-expiry <duration|0>] [--open-joining off|account] [--guests off] [--paused on|off] [--voice on] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels]
   conch admin guest list [--server <url>] [--json] [--state active|ended|converted] [--origin address|invite]
   conch admin guest end [--server <url>] [--json] <id>
   conch admin guest end-all [--server <url>] [--json] [--origin address|invite] [--invite <id>] [--dry-run | --yes]
   conch admin guest permit [--server <url>] [--json] [--expires <duration|RFC3339>] <id>
+  conch admin permissions show [--server <url>] [--json]
+  conch admin permissions set [--server <url>] [--json] [--members on|off] [--operators on|off] <permission>
+  conch admin permissions preset [--server <url>] [--json] [--yes] personal|group
+  conch admin directory members [--server <url>] [--json]
+  conch admin hook list [--server <url>] [--json]
+  conch admin hook revoke [--server <url>] <hook-id>
   conch admin reports list [--server <url>] [--json] [--limit <n>]
   conch admin reports show [--server <url>] [--json] [--markdown] <id>
   conch admin reports file [--server <url>] [--json] <id> <issue-url>
   conch voice status [--server <url>] [--watch] <channel>
+  conch voice camera stop [--server <url>] <channel> <person-id>
   conch voice where [--server <url>] [--json]
   conch audit export [--server <url>] [--after <id>] [--limit <n>]
   conch approvals list [--server <url>]
@@ -162,7 +181,6 @@ Usage:
   conch logout [--server <url>]
   conch whoami [--server <url>]
   conch join info [--server <url>] [--json]
-  conch join guest [--server <url>] [--label <label>] [--invite]
   conch join account [--server <url>] [--invite] <name>
   conch account create [--server <url>] [--permit] <name>
   conch end-visit [--server <url>]
@@ -208,14 +226,21 @@ Scope:
   voice status shows who is connected to a channel's voice and who is talking;
   it only reads presence and never joins. One line per participant, in
   principal id order:
-    <id> <name|-> <talking|quiet> <joined-at, RFC 3339 UTC>
-  (a room narrower than the channel adds a fifth field naming it, net:<id>)
+    <id> <name|-> <talking|quiet>[+camera] <joined-at, RFC 3339 UTC>
+  (+camera follows the third field of someone whose camera is on; a room
+  narrower than the channel adds a fifth field naming it, net:<id>)
   The name is shown for yourself only (the API tells a non-operator no one
   else's) and is "-" when unknown; a name with spaces or odd characters is
   double-quoted and escaped. An empty room prints "nobody is connected" and
   exits 0; voice not configured or unavailable prints one line and exits
   nonzero. --watch prints "--- <time>" and then the state on every change,
   until interrupted (exit 0).
+  voice camera stop turns off one person's camera in a channel's voice room, for
+  an owner or an operator holding the manage_channels permission. <person-id>
+  is the principal id, as in 'admin principal voice'; there is no self-stop
+  (the browser that turned a camera on turns it off). It prints nothing and
+  exits 0 whether or not that person had a camera on; a refusal prints one line
+  and exits nonzero.
   voice where shows which of your channels have people in voice, so you can
   find where to join; it only reads and never joins. One line per channel with
   anyone in its channel-wide voice room, in channel id order:
@@ -247,14 +272,14 @@ Scope:
   environment: on a terminal without echo, otherwise one line each from
   standard input, in the order asked (name, password, code). They are sent
   only over https, or plain http to this machine. join info shows what the
-  server's address offers. join guest starts a temporary guest visit, from
-  the address or, with --invite, an invite (its link or code is asked for);
-  its credential is kept apart from your logins, in guest-visits.json, and
-  is dropped when the visit's deadline passes or the server refuses it. A
-  guest is shown everywhere as "Guest: <label> · <tag>". end-visit (and
-  logout, on a visit) ends it on the server first, and says whether that was
-  confirmed. account create turns the live visit into an account with the
-  same access, and join account makes a new one; both ask for a password.
+  server's address offers. Guest visits are turned off for now: nothing
+  here starts one. A visit already stored here keeps its credential apart
+  from your logins, in guest-visits.json, dropped when the visit's deadline
+  passes or the server refuses it; a guest is shown everywhere as "Guest:
+  <label> · <tag>". end-visit (and logout, on a visit) ends it on the server
+  first, and says whether that was confirmed. account create turns the live
+  visit into an account with the same access, and join account makes a new
+  one; both ask for a password.
   login --password signs in with a name and password, and an operator's
   authenticator code; login --link with a sign-in or device link, after
   saying whose account it opens. An operator's commands that need a recent
@@ -1090,12 +1115,46 @@ func runWhoAmI(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
+	if who.Owner {
+		if _, err := fmt.Fprintln(stdout, "owner: true"); err != nil {
+			return err
+		}
+	}
 	if who.ServerVersion != "" { // a server that predates the field says nothing
 		if _, err := fmt.Fprintf(stdout, "server: %s\n", safeLine(who.ServerVersion)); err != nil {
 			return err
 		}
 	}
-	return writeIdentity(stdout, who)
+	if who.ServerMode == schema.ServerModeTemporary {
+		if _, err := fmt.Fprintln(stdout, "Temporary server: no backups, and it may be removed. Don't keep anything here you need."); err != nil {
+			return err
+		}
+	}
+	if err := writeIdentity(stdout, who); err != nil {
+		return err
+	}
+	return writeWhoAmIPermissions(stdout, who)
+}
+
+// writeWhoAmIPermissions prints what the caller holds (ADR-014), in catalog
+// order, each by the name the server sent: one this client does not know
+// reads as well as one it does. A server that predates permissions sends
+// neither them nor a revision, and nothing is printed; one that sends a
+// revision and no permissions means the caller holds none.
+func writeWhoAmIPermissions(w io.Writer, who schema.WhoAmIResponseV1) error {
+	if len(who.Permissions) == 0 {
+		if who.PermissionsRevision == 0 {
+			return nil
+		}
+		_, err := fmt.Fprintln(w, "permissions: none")
+		return err
+	}
+	names := make([]string, len(who.Permissions))
+	for i, p := range who.Permissions {
+		names[i] = safeLine(string(p))
+	}
+	_, err := fmt.Fprintf(w, "permissions: %s\n", strings.Join(names, ", "))
+	return err
 }
 
 // writeIdentity prints what a server with guests and passwords adds to
@@ -1200,13 +1259,15 @@ var voiceNow = time.Now
 
 func runVoice(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("cli: voice requires a subcommand (status, where)")
+		return errors.New("cli: voice requires a subcommand (status, where, camera stop)")
 	}
 	switch args[0] {
 	case "status":
 		return runVoiceStatus(ctx, args[1:], stdout, stderr)
 	case "where":
 		return runVoiceWhere(ctx, args[1:], stdout, stderr)
+	case "camera":
+		return runVoiceCamera(ctx, args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("cli: unknown voice subcommand %q", args[0])
 	}
@@ -1282,7 +1343,10 @@ func voiceName(name string) string {
 // nobody is connected. The first four fields are always the same. A room that
 // carries a narrower audience than the channel adds a fifth, naming it
 // (net:<id>), so its people can never read as being in the channel-wide room;
-// V3 servers send only the channel-wide room.
+// V3 servers send only the channel-wide room. A camera is shown inside the
+// third field (quiet+camera, talking+camera) so the field count never moves.
+// A camera is only ever in the channel-wide room (ADR-015), so one a server
+// claims in a narrower room is not shown.
 func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV1, names map[int64]string) error {
 	lines := 0
 	for _, room := range doc.Rooms {
@@ -1298,6 +1362,9 @@ func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV1,
 			if p.Transmitting {
 				state = "talking"
 			}
+			if p.Camera && room.Audience == nil {
+				state += "+camera"
+			}
 			if _, err := fmt.Fprintf(w, "%d %s %s %s%s\n", p.PrincipalID, voiceName(names[p.PrincipalID]), state, p.JoinedAt.Time().Format(time.RFC3339), scope); err != nil {
 				return err
 			}
@@ -1307,6 +1374,61 @@ func writeVoicePresence(w io.Writer, channel string, doc schema.VoicePresenceV1,
 	if lines == 0 {
 		_, err := fmt.Fprintf(w, "nobody is connected to voice in %s\n", safeLine(channel))
 		return err
+	}
+	return nil
+}
+
+// cameraStopRefusals are voice camera stop's own sentences for a refusal, by
+// the server's code; what the server wrote is never printed.
+var cameraStopRefusals = refusalLines{
+	schema.ErrorCodeVoiceNotConfigured: errVoiceNotConfigured.Error(),
+	schema.ErrorCodeVoiceUnavailable:   errVoiceUnavailable.Error(),
+	// A member is told no permission (it would be one their role cannot
+	// hold), an operator is told manage_channels: either way, say who may.
+	schema.ErrorCodePermissionDenied: "only an owner, or an operator holding manage_channels, may turn off someone's camera",
+}
+
+func runVoiceCamera(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("cli: voice camera requires a subcommand (stop)")
+	}
+	if args[0] != "stop" {
+		return fmt.Errorf("cli: unknown voice camera subcommand %q", args[0])
+	}
+	return runVoiceCameraStop(ctx, args[1:], stdout, stderr)
+}
+
+// runVoiceCameraStop turns off one person's camera: DELETE
+// /v1/channels/{channel}/voice/camera?principal=<id>. It prints nothing on
+// success, which also does not say whether a camera was on (the route never
+// says whether the person exists).
+func runVoiceCameraStop(ctx context.Context, args []string, _, stderr io.Writer) error {
+	fs := newFlagSet("voice camera stop", stderr)
+	server := fs.String("server", serverEnvOr(), "conchd HTTP URL")
+	var positional []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return fmt.Errorf("cli: voice camera stop: %w", err)
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		positional = append(positional, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+	if len(positional) != 2 {
+		return errors.New("cli: voice camera stop: expected <channel> <person-id>")
+	}
+	id, err := strconv.ParseInt(positional[1], 10, 64)
+	if err != nil || id <= 0 || positional[1] != strconv.FormatInt(id, 10) {
+		return errors.New("cli: voice camera stop: <person-id> must be a principal id (a positive number)")
+	}
+	client, _, err := NewAuthClient(*server)
+	if err != nil {
+		return err
+	}
+	if err := client.StopVoiceCamera(ctx, positional[0], id); err != nil {
+		return voiceFailure(refused(err, cameraStopRefusals))
 	}
 	return nil
 }

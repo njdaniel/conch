@@ -203,8 +203,8 @@ func TestStaticServing(t *testing.T) {
 }
 
 // TestStaticPermissionsPolicy pins the page's powers directive by directive
-// (issue #444): its own origin may capture a microphone and a screen, nothing
-// may use a camera, and nothing else is named.
+// (issues #444, #1242): its own origin may capture a microphone, a camera and
+// a screen, no other origin may, and nothing else is named.
 func TestStaticPermissionsPolicy(t *testing.T) {
 	directives := strings.Split(webPermissionsPolicy, ", ")
 	tests := []struct {
@@ -212,7 +212,7 @@ func TestStaticPermissionsPolicy(t *testing.T) {
 		want    string
 	}{
 		{"microphone", "microphone=(self)"},
-		{"camera", "camera=()"},
+		{"camera", "camera=(self)"},
 		{"display-capture", "display-capture=(self)"},
 	}
 	if len(directives) != len(tests) {
@@ -229,7 +229,7 @@ func TestStaticPermissionsPolicy(t *testing.T) {
 
 // The policy text is part of the contract; pin it character for character.
 func TestStaticCSPIsExact(t *testing.T) {
-	const want = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+	const want = "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 	if webCSP != want {
 		t.Errorf("webCSP = %q", webCSP)
 	}
@@ -645,7 +645,7 @@ func TestSocketOriginMatrix(t *testing.T) {
 // LiveKit origin, as socket and http scheme; with it not configured the policy
 // is webCSP, character for character (issue #442).
 func TestStaticCSPWithVoice(t *testing.T) {
-	const base = "default-src 'self'; connect-src 'self'%s; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+	const base = "default-src 'self'; connect-src 'self'%s; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; object-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
 	tests := []struct {
 		name  string
 		url   string
@@ -694,8 +694,8 @@ func TestStaticCSPWithVoice(t *testing.T) {
 					t.Errorf("CSP = %q, want %q", got, tt.want)
 				}
 				// Screen capture is the page's own since #444, as the
-				// microphone is since #442; the camera stays off.
-				if got := resp.Header.Get("Permissions-Policy"); got != "microphone=(self), camera=(), display-capture=(self)" {
+				// microphone is since #442 and the camera since #1242.
+				if got := resp.Header.Get("Permissions-Policy"); got != "microphone=(self), camera=(self), display-capture=(self)" {
 					t.Errorf("Permissions-Policy = %q", got)
 				}
 			})

@@ -11,7 +11,7 @@ LINT    = golangci-lint
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null)
 LDFLAGS  = -X main.version=$(VERSION)
 
-.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts depgate deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e p3-local p3-reset hooks-install clean
+.PHONY: build test lint vet fmt fmt-check invisible-check check schema-compat schema-ts emoji-catalog depgate go-scope deploy-test agent-claim-test rust-check rust-build web-node web-check web-build web-embed build-web-embedded web-e2e desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it p3-local p3-reset hooks-install clean
 
 build:
 	$(GO) build ./...
@@ -36,7 +36,7 @@ fmt:
 fmt-check:
 	@out=$$(gofmt -l $$(git ls-files -co --exclude-standard '*.go')); if [ -n "$$out" ]; then echo "gofmt needed on:"; echo "$$out"; exit 1; fi
 
-check: fmt-check invisible-check vet lint test schema-compat schema-ts depgate deploy-test agent-claim-test rust-check web-check
+check: fmt-check invisible-check go-scope vet lint test schema-compat schema-ts emoji-catalog depgate deploy-test agent-claim-test rust-check web-check desktop-check
 
 # Real local Git remotes and mocked gh/model calls; no network or AI account.
 agent-claim-test:
@@ -48,6 +48,7 @@ agent-claim-test:
 invisible-check:
 	./scripts/invisible-chars-test.sh
 	./scripts/invisible-chars.sh
+	./scripts/ci-docs-only-test.sh
 
 # The Rust voice client under voice/ (ADR-006): fmt, clippy, tests, the
 # dependency gate and cargo-deny, with the pinned toolchain. Fetch that once
@@ -90,10 +91,66 @@ web-check: web-node
 # version pins; fetch it once with `cd web && npx playwright install chromium`
 # (CI uses --with-deps, which needs root; do not here). The suite starts and
 # removes its own server and root, and leaves nothing running.
+# E2E_ARGS goes to Playwright as is: CI runs a third of the spec files in each
+# of three jobs with E2E_ARGS=--shard=1/3, 2/3 and 3/3 (#1290, #1305). Empty
+# locally.
+E2E_ARGS ?=
+
 web-e2e: web-node
 	cd web && npm ci --no-audit
 	@cd web && node --input-type=module -e "import { chromium } from '@playwright/test'; import { existsSync } from 'node:fs'; if (!existsSync(chromium.executablePath())) { console.error('web-e2e: FAIL: the browser Playwright pins is not installed; run: cd web && npx playwright install chromium'); process.exit(1); }"
-	cd web && npm run e2e
+	cd web && npm run e2e -- $(E2E_ARGS)
+
+# The desktop shell under desktop/ (issue #940, ADR-007, linux-desktop.md): an
+# Electron app that serves the web client from packaged files. desktop-check
+# runs the repository's gates for it (the fetch script's test, the lint rules,
+# the dependency and licence gates), then npm ci, typecheck, lint and unit
+# tests. It downloads no Electron binary and needs no display. Only `npm ci`
+# installs, from the committed lockfile. It needs the Node desktop/.nvmrc pins;
+# without it this fails and names that version, it does not skip.
+DESKTOP_NODE = $(shell cat desktop/.nvmrc)
+DESKTOP_NODE_BIN = $(HOME)/.nvm/versions/node/v$(DESKTOP_NODE)/bin
+desktop-node desktop-check desktop-build desktop-smoke desktop-voice-it: export PATH := $(if $(wildcard $(DESKTOP_NODE_BIN)/node),$(DESKTOP_NODE_BIN):)$(PATH)
+
+desktop-node:
+	@v=$$(node --version 2>/dev/null) || { echo "desktop: FAIL: Node.js is not installed; install Node $(DESKTOP_NODE) (desktop/.nvmrc)"; exit 1; }; \
+	if [ "$$v" != "v$(DESKTOP_NODE)" ]; then echo "desktop: FAIL: Node $$v is installed; install Node $(DESKTOP_NODE) (desktop/.nvmrc)"; exit 1; fi
+
+desktop-check: desktop-node
+	./scripts/desktop-electron-test.sh
+	./scripts/desktop-lint-test.sh
+	./scripts/desktop-lint.sh
+	./scripts/web-depgate.sh desktop
+	./scripts/web-licences.sh desktop/package-lock.json desktop/licences-allowlist.txt
+	cd desktop && npm ci --no-audit
+	cd desktop && npm run typecheck
+	cd desktop && npm run lint
+	cd desktop && npm test
+
+# The unpacked Linux app, desktop/dist/linux-unpacked/. Fetches the pinned
+# Electron into ~/.cache/conch/electron once (scripts/desktop-electron.sh checks its
+# SHA-256 twice) and builds web/ for it without touching web/dist. Not part of
+# `make check`.
+desktop-build: desktop-node
+	./scripts/desktop-build.sh
+
+# The packaged smoke test: drives the built app over Chromium's remote-debugging
+# port (desktop/tests/smoke/launch.ts says why). Needs a display: CI runs it
+# under xvfb-run; CONCH_SMOKE_HEADLESS=1 uses Chromium's headless Ozone
+# platform where there is no X server. Not part of `make check`.
+desktop-smoke: desktop-node
+	cd desktop && npm ci --no-audit
+	cd desktop && npm run smoke
+
+# The voice supervisor with the real conch-voice (issue #948): a stub conchd
+# on loopback, no audio device. Builds bin/conch-voice with rust-build unless
+# CONCH_VOICE_BIN names a binary already built (CI uses the one rust-check's
+# cargo test built). Not part of check; CI runs it after desktop-check. With
+# CI set, a missing binary fails rather than skips.
+desktop-voice-it: desktop-node
+	@if [ -z "$$CONCH_VOICE_BIN" ]; then $(MAKE) rust-build; fi
+	cd desktop && npm ci --no-audit
+	cd desktop && npm run test:integration
 
 # The P3 local prototype (issue #283, docs/p3-walkthrough.md): p3-local builds
 # the binaries and the web client, starts a disposable conchd, creates the test
@@ -136,8 +193,21 @@ schema-ts:
 	./scripts/schema-ts-check-test.sh
 	./scripts/schema-ts-check.sh
 
+# The emoji catalog is generated from the vendored third_party/unicode/
+# emoji-test.txt by `go generate ./pkg/schema` (issue #953): the vendored file
+# must match its pinned hash, and scripts/emoji-update.sh, the one way it
+# changes, must refuse a hash mismatch. Drift of the generated outputs fails
+# in `go test ./cmd/emoji-gen`, which `test` runs.
+emoji-catalog:
+	./scripts/emoji-update-test.sh
+
 depgate:
 	./scripts/depgate.sh
+
+# go ./... stays out of the Node projects web/ and desktop/, whose
+# node_modules can ship Go source (issue #954).
+go-scope:
+	./scripts/go-scope.sh
 
 # The deployment files in ops/deploy (issue #435): shellcheck, systemd-analyze
 # verify, and the backup, restore, upgrade and rollback scripts run against a

@@ -1,9 +1,14 @@
 package server
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -47,7 +52,218 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
+	// The creator's other tabs list the new channel (issue #1027).
+	s.events.notifyChannelsChanged(creatorID)
+	if creatorID != 0 {
+		s.directoryMembershipChanged(ctx, channel.ID, creatorID)
+	}
 	writeJSON(w, http.StatusCreated, schema.CreateChannelResponse{Channel: channelFromStore(channel)})
+}
+
+// The daily bounds on a member's channel creations (issue #981, community
+// model §5): creating is the rename limiter's pattern, as a collision is an
+// existence oracle on private names. A holder of manage_channels is not
+// bounded.
+const (
+	createsPerDay        = 10
+	createAttemptsPerDay = 30
+)
+
+// handleCreateChannelV1 serves POST /v1/channels (issue #981, ADR-013
+// decision 2): a community member makes a public or private channel and is
+// its only member and its manager (O9). Agents and guests are refused before
+// the handler runs (humansOnly, membersOnly); the store decides membership
+// and the create permission again under its write lock. Every collision is
+// the one 409 channel_exists, recorded without the name and counted against
+// the caller's attempts.
+func (s *Server) handleCreateChannelV1(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var req schema.CreateChannelRequestV1
+	if err := decodeJSONBody(w, r, &req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the maximum size")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be valid JSON")
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	caller, authed := callerFrom(ctx)
+	if !authed {
+		// --auth off: no member to make the manager; the channel is the
+		// system's, as POST /v0/channels makes it.
+		s.handleCreateChannelUnowned(w, r, req)
+		return
+	}
+	create := store.ChannelCreate{
+		CallerID:   caller.ID,
+		Name:       req.Name,
+		Visibility: req.Visibility,
+		Limits:     store.RenameLimits{Renames: createsPerDay, Attempts: createAttemptsPerDay},
+	}
+	channel, err := s.store.CreateChannelV1(ctx, create, s.now())
+	if errors.Is(err, store.ErrDuplicate) {
+		err = s.store.RecordChannelCreateRefused(context.WithoutCancel(ctx), create, s.now())
+		if err == nil {
+			writeError(w, http.StatusConflict, "channel_exists", channelExistsMessage)
+			return
+		}
+	}
+	var limited *store.RenameLimitedError
+	var denied *store.ChannelCreatePermissionError
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrNotCommunityMember):
+		s.denyForbidden(w, r, caller, "forbidden", "only a member of the community may create a channel")
+		return
+	case errors.As(err, &denied):
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodePermissionDenied, "you may not create a "+string(req.Visibility)+" channel", refusedPermission(caller, denied.Perm))
+		return
+	case errors.As(err, &limited):
+		s.writeChannelCreateLimitError(w, limited)
+		return
+	case errors.Is(err, store.ErrNameInvalid):
+		writeError(w, http.StatusBadRequest, "invalid_request", channelNameInvisibleMessage)
+		return
+	default:
+		slog.ErrorContext(ctx, "channels: create failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	s.events.notifyChannelsChanged(caller.ID)
+	s.directoryMembershipChanged(ctx, channel.ID, caller.ID)
+	writeJSON(w, http.StatusCreated, schema.CreateChannelResponseV1{Channel: channelDoc(channel)})
+}
+
+// handleCreateChannelUnowned is POST /v1/channels with no caller (--auth
+// off): the channel has no member, as POST /v0/channels makes it, with the
+// visibility asked for.
+func (s *Server) handleCreateChannelUnowned(w http.ResponseWriter, r *http.Request, req schema.CreateChannelRequestV1) {
+	ctx := r.Context()
+	channel, err := s.store.CreateUnownedChannel(ctx, auditActor(ctx), req.Name, req.Visibility)
+	switch {
+	case errors.Is(err, store.ErrDuplicate):
+		writeError(w, http.StatusConflict, "channel_exists", channelExistsMessage)
+		return
+	case errors.Is(err, store.ErrNameInvalid):
+		writeError(w, http.StatusBadRequest, "invalid_request", channelNameInvisibleMessage)
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "channels: create failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	writeJSON(w, http.StatusCreated, schema.CreateChannelResponseV1{Channel: channelFromStore(channel)})
+}
+
+func (s *Server) writeChannelCreateLimitError(w http.ResponseWriter, limited *store.RenameLimitedError) {
+	seconds := max(1, int(math.Ceil(limited.Until.Sub(s.now()).Seconds())))
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeJSON(w, http.StatusTooManyRequests, schema.Error{
+		Code:              schema.ErrorCodeRateLimited,
+		Message:           fmt.Sprintf("you may create channels at most %d times, and try at most %d times, a day", createsPerDay, createAttemptsPerDay),
+		RetryAfterSeconds: seconds,
+	})
+}
+
+// handleChannelSettings serves PUT /v1/channels/{id}/settings (issue #981,
+// ADR-013 O5): an operator holding manage_channels changes a channel's
+// visibility and default mark. The route class refuses every non-operator
+// with one 403 before anything is looked up, and a restricted operator is
+// refused here before the id is read, so no answer to either says whether
+// a channel exists. Turning private keeps every member; unmarking the last
+// default channel while open sign-up is on turns sign-up off.
+func (s *Server) handleChannelSettings(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	caller, authed := callerFrom(ctx)
+	var actorID int64
+	if authed {
+		allowed, ok := s.canOrFail(w, r, caller, schema.PermManageChannels)
+		if !ok {
+			return
+		}
+		if !allowed {
+			s.denyForbiddenFor(w, r, caller, schema.ErrorCodePermissionDenied, "changing a channel's settings needs manage_channels", refusedPermission(caller, schema.PermManageChannels))
+			return
+		}
+		actorID = caller.ID
+	}
+	id, ok := pathID(w, r, "id", "channel")
+	if !ok {
+		return
+	}
+	var req schema.ChannelSettingsRequestV1
+	if err := decodeJSONBody(w, r, &req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "request body exceeds the maximum size")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid_request", "request body must be valid JSON")
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	res, err := s.store.ChannelSettings(ctx, auditActor(ctx), actorID, id, store.ChannelSettingsChange{Visibility: req.Visibility, Default: req.Default, Archived: req.Archived}, s.now())
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeChannelNotFound(w)
+		return
+	case errors.Is(err, store.ErrManageChannelsRequired):
+		s.denyForbiddenFor(w, r, caller, schema.ErrorCodePermissionDenied, "changing a channel's settings needs manage_channels", refusedPermission(caller, schema.PermManageChannels))
+		return
+	case errors.Is(err, store.ErrChannelSettingsConflict):
+		writeError(w, http.StatusConflict, schema.ErrorCodeChannelSettingsConflict, "a default channel must be public: unmark it to make it private, or make it public to mark it")
+		return
+	case errors.Is(err, store.ErrChannelArchiveDefault):
+		// Decision 4 (issue #844): a default channel is never archived, so
+		// archiving cannot turn open sign-up off as a side effect.
+		writeError(w, http.StatusConflict, schema.ErrorCodeChannelArchiveDefault, "a default channel cannot be archived: stop it being a default channel first")
+		return
+	case err != nil:
+		slog.ErrorContext(ctx, "channels: settings failed", "channel", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	if res.Changed && req.Archived != nil && *req.Archived && res.Channel.Archived() {
+		// Archived by this request (the store's archived guard now refuses
+		// every write in the channel): voice in progress ends before the
+		// answer (issue #844, decision 7). Restore starts nothing.
+		s.voiceChannelArchived(ctx, id)
+	}
+	if res.Changed {
+		// Every open events socket of the channel is sent the channel as it
+		// now is, and its members' channel lists carry the new fields.
+		s.events.notifyChannel(id, eventRef{kind: eventChannel, id: id})
+		s.channelRenamedLists(ctx, id)
+	}
+	resp := schema.ChannelSettingsResponseV1{Channel: channelFromStore(res.Channel), OpenSignupTurnedOff: res.OpenSignupTurnedOff}
+	// Marking a channel default while members cannot see the directory is
+	// allowed, and says what it does to it (design §13.7, O14a): everyone in
+	// a default channel sees everyone else in it.
+	if req.Default != nil && *req.Default && res.Channel.IsDefault {
+		// The change is made; a warning is a help, so a failed read logs and
+		// the answer goes without it.
+		if doc, err := s.store.Permissions(ctx); err != nil {
+			slog.ErrorContext(ctx, "channels: read the permissions for the warning failed", "channel", id, "error", err)
+		} else if !memberCell(doc.Rows, schema.PermSeeMemberDirectory) {
+			resp.Warnings = []schema.PermissionsWarning{schema.PermissionsWarningDefaultChannelExposesMembers}
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// channelDoc is channelFromStore with the caller's manager grant.
+func channelDoc(channel store.Channel) schema.ChannelV0 {
+	doc := channelFromStore(channel)
+	doc.Manages = channel.Manages
+	return doc
 }
 
 // The refusals every channel name write shares (issue #727). A channel name
@@ -59,19 +275,13 @@ const (
 	channelNameStaleMessage     = "the channel is no longer called that: it was renamed meanwhile; list the channels and try again"
 )
 
-// handleRenameChannel serves PUT /v1/channels/{id}/name (issue #727,
-// docs/design/channel-rename.md). The route is for operators: a member is
-// refused by the route class (403 forbidden, audited access_denied) before
-// the body is read or the channel looked up, so nobody else learns which ids
-// exist. The answers, in the order they are decided: a body that is not a
-// valid RenameChannelRequestV1 is 400; an unknown id is 404
-// channel_not_found; a name that is already the channel's is 200 with
-// nothing written; a from that is not the channel's name now is 409
-// channel_name_stale; a name nobody can see is 400; a name another channel's
-// reads the same as is 409 channel_exists. A rename writes one
-// channel_renamed row and tells every events socket of the channel, which
-// stays open. The old name is then free, and answers 404 like any name
-// nobody has.
+// handleRenameChannel serves PUT /v1/channels/{id}/name (issues #727, #791).
+// An owner, and an operator holding manage_channels, are unlimited (the
+// store decides the standing, ADR-014 design §7.2.1); a channel manager,
+// a restricted operator included, has the same rename and attempt
+// bounds as a principal self-rename. The route class hides an unknown or
+// non-member channel before the body is read. A duplicate-name refusal is
+// audited without either name and counts toward the manager's attempt limit.
 func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, ok := pathID(w, r, "id", "channel")
@@ -93,10 +303,19 @@ func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := s.store.RenameChannel(ctx, auditActor(ctx), id, req.From, req.Name, s.now())
+	caller, authed := callerFrom(ctx)
+	var opt store.ChannelRenameOptions
+	if authed {
+		opt = store.ChannelRenameOptions{CallerID: caller.ID, Limits: store.RenameLimits{Renames: renamesPerDay, Attempts: renameAttemptsPerDay}}
+	}
+	res, err := s.store.RenameChannel(ctx, auditActor(ctx), id, req.From, req.Name, s.now(), opt)
+	var limited *store.RenameLimitedError
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeChannelNotFound(w)
+		return
+	case errors.Is(err, store.ErrManagerRefused):
+		s.denyForbiddenFor(w, r, caller, "forbidden", "operator role or channel manager required", refusedPermission(caller, schema.PermManageChannels))
 		return
 	case errors.Is(err, store.ErrChannelNameStale):
 		writeError(w, http.StatusConflict, schema.ErrorCodeChannelNameStale, channelNameStaleMessage)
@@ -105,7 +324,26 @@ func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", channelNameInvisibleMessage)
 		return
 	case errors.Is(err, store.ErrDuplicate):
+		if authed {
+			if rerr := s.store.RecordChannelRenameRefused(context.WithoutCancel(ctx), caller.ID, id, opt.Limits, s.now()); rerr != nil {
+				switch {
+				case errors.As(rerr, &limited):
+					s.writeChannelRenameLimitError(w, limited)
+				case errors.Is(rerr, store.ErrNotFound):
+					writeChannelNotFound(w)
+				case errors.Is(rerr, store.ErrManagerRefused):
+					s.denyForbiddenFor(w, r, caller, "forbidden", "operator role or channel manager required", refusedPermission(caller, schema.PermManageChannels))
+				default:
+					slog.ErrorContext(ctx, "channels: audit refused rename failed", "channel", id, "error", rerr)
+					writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+				}
+				return
+			}
+		}
 		writeError(w, http.StatusConflict, "channel_exists", channelExistsMessage)
+		return
+	case errors.As(err, &limited):
+		s.writeChannelRenameLimitError(w, limited)
 		return
 	case err != nil:
 		slog.ErrorContext(ctx, "channels: rename failed", "channel", id, "error", err)
@@ -117,8 +355,39 @@ func (s *Server) handleRenameChannel(w http.ResponseWriter, r *http.Request) {
 		// now is. The message and voice sockets are bound to the id and need
 		// nothing; no socket is closed.
 		s.events.notifyChannel(id, eventRef{kind: eventChannel, id: id})
+		s.channelRenamedLists(ctx, id)
 	}
 	writeJSON(w, http.StatusOK, schema.RenameChannelResponseV1{Channel: channelFromStore(res.Channel)})
+}
+
+// channelRenamedLists tells every human member of a renamed channel that
+// their channel list changed (issue #1027, membership-live.md §2): the name
+// is in it. The members are read after the commit, so each one told can read
+// the new name. A failed read is logged and does not fail the rename; the
+// member's next re-read of the list catches up.
+func (s *Server) channelRenamedLists(ctx context.Context, channelID int64) {
+	members, err := s.store.ListChannelMembers(ctx, channelID)
+	if err != nil {
+		slog.ErrorContext(ctx, "channels: list members after rename failed", "channel", channelID, "error", err)
+		return
+	}
+	ids := make([]int64, 0, len(members))
+	for _, m := range members {
+		if m.Kind == store.PrincipalHuman {
+			ids = append(ids, m.PrincipalID)
+		}
+	}
+	s.events.notifyChannelsChanged(ids...)
+}
+
+func (s *Server) writeChannelRenameLimitError(w http.ResponseWriter, limited *store.RenameLimitedError) {
+	seconds := max(1, int(math.Ceil(limited.Until.Sub(s.now()).Seconds())))
+	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	writeJSON(w, http.StatusTooManyRequests, schema.Error{
+		Code:              schema.ErrorCodeRateLimited,
+		Message:           fmt.Sprintf("you may rename channels at most %d times, and try at most %d times, a day", renamesPerDay, renameAttemptsPerDay),
+		RetryAfterSeconds: seconds,
+	})
 }
 
 func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
@@ -139,17 +408,35 @@ func (s *Server) handleListChannels(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := schema.ListChannelsResponse{Channels: make([]schema.ChannelV0, 0, len(channels))}
 	for _, ch := range channels {
-		resp.Channels = append(resp.Channels, channelFromStore(ch))
+		resp.Channels = append(resp.Channels, channelDoc(ch))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// archivedAtWire is a channel's archive time as the wire carries it: nil while
+// the channel is live, so archived_at is omitted (issue #844).
+func archivedAtWire(channel store.Channel) *schema.Timestamp {
+	if !channel.Archived() {
+		return nil
+	}
+	ts := schema.NewTimestamp(channel.ArchivedAt)
+	return &ts
+}
+
 func channelFromStore(channel store.Channel) schema.ChannelV0 {
+	var archivedAt *time.Time
+	if channel.Archived() {
+		at := channel.ArchivedAt.UTC()
+		archivedAt = &at
+	}
 	return schema.ChannelV0{
-		ID:   channel.ID,
-		Name: channel.Name,
+		ArchivedAt: archivedAt,
+		ID:         channel.ID,
+		Name:       channel.Name,
 		// The wire timestamp is always UTC; store values carry the server's
 		// local zone.
-		CreatedAt: channel.CreatedAt.UTC(),
+		CreatedAt:  channel.CreatedAt.UTC(),
+		Visibility: channel.Visibility,
+		Default:    channel.IsDefault,
 	}
 }

@@ -385,7 +385,7 @@ func createGuestTx(ctx context.Context, tx execer, actor string, g NewGuest, p p
 		idle.Milliseconds()); err != nil {
 		return CreatedGuest{}, fmt.Errorf("store: create guest: visit: %w", err)
 	}
-	cred, err := insertCredentialTx(ctx, tx, pid, GuestCredentialLabel, p.token, now, &deadline, 0)
+	cred, err := insertCredentialTx(ctx, tx, pid, GuestCredentialLabel, p.token, now, &deadline, 0, issuerOf(actor))
 	if err != nil {
 		return CreatedGuest{}, err
 	}
@@ -439,6 +439,11 @@ func createGuestTx(ctx context.Context, tx execer, actor string, g NewGuest, p p
 // its approvals and a history bound at the channel's last message, and
 // audits member_added. addedBy is the acting principal, or 0.
 func admitGuestTx(ctx context.Context, tx execer, actor string, channelID, pid, addedBy int64, now time.Time) error {
+	// The archived guard of every membership add (issue #844), fail closed
+	// for a path that reached here with an archived channel.
+	if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
+		return err
+	}
 	watermark, err := historyWatermarkTx(ctx, tx, channelID)
 	if err != nil {
 		return err
@@ -966,6 +971,9 @@ func conversionPolicyTx(ctx context.Context, tx execer, v GuestVisit, now time.T
 		case err != nil:
 			return fmt.Errorf("store: conversion policy: entry invite: %w", err)
 		}
+		if err := r.loadMakerTx(ctx, tx); err != nil {
+			return err
+		}
 		if !admitsAccount(r.joinAs) || r.closedAt.Valid || r.expiresAt <= now.UnixMilli() || !r.makerStillAllowed() {
 			return ErrConversionNotAllowed
 		}
@@ -1142,7 +1150,7 @@ func (s *Store) ConvertGuest(ctx context.Context, actor string, c GuestConversio
 			}
 		}
 		exp := now.Add(lifetime)
-		cred, err := insertCredentialTx(ctx, tx, c.PrincipalID, label, token, now, &exp, lifetime)
+		cred, err := insertCredentialTx(ctx, tx, c.PrincipalID, label, token, now, &exp, lifetime, issuerOf(actor))
 		if err != nil {
 			return err
 		}

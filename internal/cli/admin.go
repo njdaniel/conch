@@ -32,9 +32,12 @@ type adminOpts struct {
 	renewDays *int64
 	file      string
 	// noDecide adds a member without the right to decide approvals; off
-	// revokes it (issue #450).
+	// revokes a membership right (issue #450).
 	noDecide bool
 	off      bool
+	name     string
+	owner    bool
+	noOwner  bool
 	// invite holds the flags of `invite` and of the principal commands that
 	// administer invites (issue #438).
 	invite inviteOpts
@@ -47,6 +50,14 @@ type adminOpts struct {
 	// join holds the flags of `join` and `guest` (issue #715), in
 	// admin_guest.go.
 	join joinOpts
+	// permissions holds the flags of `permissions set` (issue #1022).
+	permissions permissionsOpts
+	// community holds the flags of `channel settings` (issue #994), in
+	// admin_community.go.
+	community communityOpts
+	// aiAdmin holds the flags of `ai-admin create` (issue #1332), in
+	// admin_ai_admin.go.
+	aiAdmin aiAdminOpts
 }
 
 // principalOpts holds the flags of the principal list, hide and sign-in-link
@@ -72,9 +83,13 @@ type adminRun struct {
 	// pos are the positional arguments; id is the one named by idAt, parsed.
 	pos    []string
 	id     int64
+	given  map[string]bool
 	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
+	// prompt asks the person a question; it shares stdin with the
+	// re-authentication prompt.
+	prompt *prompter
 }
 
 // adminCommand is one `conch admin <group> <verb>`.
@@ -85,9 +100,8 @@ type adminCommand struct {
 	// idAt is the 1-based position of the argument that must be a positive
 	// integer id, or 0 for none.
 	idAt int
-	// optionalArgs lets every positional argument be left out together, for
-	// a command that acts on one id or on what its flags select.
-	optionalArgs bool
+	// optionalArgs is how many trailing positional arguments may be omitted.
+	optionalArgs int
 	// flags is the command's own flags as the usage line shows them.
 	flags string
 	// required lists the flags that must be given.
@@ -100,16 +114,25 @@ type adminCommand struct {
 // lists the groups.
 var adminCommands = []adminCommand{
 	{group: "channel", verb: "create", args: []string{"name"}, run: adminChannelCreate},
+	// The community model (ADR-013, issue #994), in admin_community.go.
+	{group: "channel", verb: "settings", args: []string{"channel"}, flags: "[--public|--private] [--default on|off] [--archive|--restore] ",
+		bind: bindChannelSettings, run: adminChannelSettings},
 	{group: "principal", verb: "create", args: []string{"name"}, flags: "--kind human|agent ", required: []string{"kind"},
 		bind: func(fs *flag.FlagSet, o *adminOpts) { fs.StringVar(&o.kind, "kind", "", "human or agent") },
 		run:  adminPrincipalCreate},
 	{group: "principal", verb: "disable", args: []string{"id"}, idAt: 1, run: adminPrincipalDisable},
 	{group: "principal", verb: "enable", args: []string{"id"}, idAt: 1, run: adminPrincipalEnable},
 	{group: "principal", verb: "rename", args: []string{"id", "name"}, idAt: 1, run: adminPrincipalRename},
+	{group: "principal", verb: "role", args: []string{"id", "operator|member"}, idAt: 1, flags: "[--owner|--no-owner] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.owner, "owner", false, "grant the owner mark")
+			fs.BoolVar(&o.noOwner, "no-owner", false, "remove the owner mark")
+		},
+		run: adminPrincipalRole},
 	// The principal list and hiding accounts (issue #445).
 	{group: "principal", verb: "list", flags: "[--state active|disabled|hidden] [--prefix <name-prefix>] [--invite <id>] [--kind human|agent] ",
 		bind: bindPrincipalList, run: adminPrincipalList},
-	{group: "principal", verb: "hide", args: []string{"id"}, idAt: 1, optionalArgs: true,
+	{group: "principal", verb: "hide", args: []string{"id"}, idAt: 1, optionalArgs: 1,
 		flags: "[--prefix <name-prefix> | --invite <id>] [--kind human|agent] [--yes] ",
 		bind:  bindPrincipalHide, run: adminPrincipalHide},
 	{group: "credential", verb: "issue", args: []string{"principal-id"}, idAt: 1, flags: "--label <label> [--expires-at <RFC3339> | --renew-days <N>] ", required: []string{"label"},
@@ -128,11 +151,17 @@ var adminCommands = []adminCommand{
 		run: adminCredentialIssue},
 	{group: "credential", verb: "list", args: []string{"principal-id"}, idAt: 1, run: adminCredentialList},
 	{group: "credential", verb: "revoke", args: []string{"credential-id"}, idAt: 1, run: adminCredentialRevoke},
-	{group: "member", verb: "add", args: []string{"channel", "principal-id"}, idAt: 2, flags: "[--no-decide] ",
+	{group: "member", verb: "add", args: []string{"channel", "principal-id"}, idAt: 2, optionalArgs: 1, flags: "[--name <name>] [--no-decide] ",
 		bind: func(fs *flag.FlagSet, o *adminOpts) {
-			fs.BoolVar(&o.noDecide, "no-decide", false, "add the member without the right to decide the channel's approvals")
+			fs.StringVar(&o.name, "name", "", "add the person with this exact name instead of a principal id")
+			fs.BoolVar(&o.noDecide, "no-decide", false, "with an id, add the member without the right to decide the channel's approvals")
 		},
 		run: adminMemberAdd},
+	{group: "member", verb: "manage", args: []string{"channel", "principal-id"}, idAt: 2, flags: "[--off] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.off, "off", false, "take channel management away instead of granting it")
+		},
+		run: adminMemberManage},
 	{group: "member", verb: "decide", args: []string{"channel", "principal-id"}, idAt: 2, flags: "[--off] ",
 		bind: func(fs *flag.FlagSet, o *adminOpts) {
 			fs.BoolVar(&o.off, "off", false, "take the right away instead of granting it")
@@ -145,10 +174,17 @@ var adminCommands = []adminCommand{
 		},
 		run: adminManifestPut},
 	{group: "manifest", verb: "get", args: []string{"principal-id"}, idAt: 1, run: adminManifestGet},
+	// AI administrators (issue #1332), in admin_ai_admin.go.
+	{group: "ai-admin", verb: "create", args: []string{"name"},
+		flags: "[--channel <name>] [--grant <perm,...>] [--require-approval <action,...>] [--ttl <duration>] [--run-window <duration>] [--quorum <n>] [--max-pending <n>] [--credential-days <n>] [--client json|claude-code] [--entry-name <entry>] ",
+		bind:  bindAIAdminCreate, run: adminAIAdminCreate},
+	{group: "ai-admin", verb: "list", run: adminAIAdminList},
+	{group: "ai-admin", verb: "show", args: []string{"id"}, idAt: 1, run: adminAIAdminShow},
+	{group: "ai-admin", verb: "revoke", args: []string{"id"}, idAt: 1, run: adminAIAdminRevoke},
 	// Invites and their administration (issue #438), in admin_invite.go.
-	{group: "invite", verb: "create", flags: "--open|--personal --channel <name>... --expires <duration|RFC3339> [--max-uses <n>] [--voice] [--may-invite] [--credential-days <n>] [--join-as account|guest|both] ",
-		required: []string{"channel", "expires"}, bind: bindInviteCreate, run: adminInviteCreate},
-	{group: "invite", verb: "list", flags: "[--state open|used|expired|closed] [--kind personal|open] [--created-by <id>] ",
+	{group: "invite", verb: "create", flags: "[--expires <duration|RFC3339> | --never-expires] [--uses <n>] [--credential-days <n>] [--landing-channel <name>...] ",
+		bind: bindInviteCreate, run: adminInviteCreate},
+	{group: "invite", verb: "list", flags: "[--state open|used|expired|closed] [--created-by <id>] ",
 		bind: bindInviteList, run: adminInviteList},
 	{group: "invite", verb: "close", args: []string{"id"}, idAt: 1, run: adminInviteClose},
 	{group: "invite", verb: "joiners", args: []string{"id"}, idAt: 1, run: adminInviteJoiners},
@@ -164,34 +200,46 @@ var adminCommands = []adminCommand{
 	// admin_invite.go.
 	{group: "principal", verb: "sign-in-link", args: []string{"id"}, idAt: 1, flags: "[--purpose sign_in|reset|enrollment] [--expires <duration|RFC3339>] ",
 		bind: bindSignInLink, run: adminPrincipalSignInLink},
+	{group: "principal", verb: "voice", args: []string{"id", "on|off"}, idAt: 1, run: adminPrincipalVoice},
 	// Closing one that leaked, by the link's id (the id `principal
 	// sign-in-link` prints), without disabling its person.
 	{group: "sign-in-link", verb: "close", args: []string{"id"}, idAt: 1, run: adminSignInLinkClose},
 	// The joining policy and guest visits (issue #715), in admin_guest.go.
 	{group: "join", verb: "status", run: adminJoinStatus},
-	{group: "join", verb: "set", flags: "[--open-joining off|guest|account|both] [--guests on|off] [--paused on|off] [--voice on|off] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels] ",
+	{group: "join", verb: "set", flags: "[--open-signup on|off] [--link-expiry <duration|0>] [--open-joining off|account] [--guests off] [--paused on|off] [--voice on] [--max-guests <n>] [--max-guests-per-address <n>] [--guest-idle <duration>] [--guest-lifetime <duration>] [--open-channel <name>... | --no-open-channels] ",
 		bind: bindJoinSet, run: adminJoinSet},
 	{group: "guest", verb: "list", flags: "[--state active|ended|converted] [--origin address|invite] ", bind: bindGuestList, run: adminGuestList},
 	{group: "guest", verb: "end", args: []string{"id"}, idAt: 1, run: adminGuestEnd},
 	{group: "guest", verb: "end-all", flags: "[--origin address|invite] [--invite <id>] [--dry-run | --yes] ", bind: bindGuestEndAll, run: adminGuestEndAll},
 	{group: "guest", verb: "permit", args: []string{"id"}, idAt: 1, flags: "[--expires <duration|RFC3339>] ", bind: bindGuestPermit, run: adminGuestPermit},
+	// The permissions document (ADR-014, issue #1022), in admin_permissions.go.
+	{group: "permissions", verb: "show", run: adminPermissionsShow},
+	{group: "permissions", verb: "set", args: []string{"permission"}, flags: "[--members on|off] [--operators on|off] ",
+		bind: bindPermissionsSet, run: adminPermissionsSet},
+	{group: "permissions", verb: "preset", args: []string{"personal|group"}, flags: "[--yes] ",
+		bind: bindYes, run: adminPermissionsPreset},
+	{group: "directory", verb: "members", run: adminDirectoryMembers},
+	// Webhook hooks (issue #1228), in admin_hook.go.
+	{group: "hook", verb: "list", run: adminHookList},
+	{group: "hook", verb: "revoke", args: []string{"hook-id"}, idAt: 1, run: adminHookRevoke},
 	// Problem reports (issue #446), in admin_report.go.
 	{group: "reports", verb: "list", flags: "[--limit <n>] ", bind: bindReportsList, run: adminReportsList},
 	{group: "reports", verb: "show", args: []string{"id"}, idAt: 1, flags: "[--markdown] ", bind: bindReportsShow, run: adminReportsShow},
 	{group: "reports", verb: "file", args: []string{"id", "issue-url"}, idAt: 1, run: adminReportsFile},
 }
 
-const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link"
+const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions|directory|ai-admin"
 
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {
 	line := "conch admin " + c.group + " " + c.verb + " [--server <url>] [--json] " + c.flags
 	args := ""
-	for _, a := range c.args {
-		args += "<" + a + "> "
-	}
-	if c.optionalArgs && args != "" {
-		args = "[" + strings.TrimSpace(args) + "]"
+	for i, a := range c.args {
+		arg := "<" + a + ">"
+		if i >= len(c.args)-c.optionalArgs {
+			arg = "[" + arg + "]"
+		}
+		args += arg + " "
 	}
 	return strings.TrimSpace(line + args)
 }
@@ -251,11 +299,12 @@ func runAdminCommand(ctx context.Context, c adminCommand, args []string, stdin i
 			return usageErr("--%s is required", name)
 		}
 	}
-	if len(pos) != len(c.args) && (!c.optionalArgs || len(pos) != 0) {
+	minArgs := len(c.args) - c.optionalArgs
+	if len(pos) < minArgs || len(pos) > len(c.args) {
 		return usageErr("expected <%s>", strings.Join(c.args, "> <"))
 	}
-	r := &adminRun{opts: o, pos: pos, stdin: stdin, stdout: stdout, stderr: stderr}
-	if c.idAt > 0 && len(pos) > 0 {
+	r := &adminRun{opts: o, pos: pos, given: given, stdin: stdin, stdout: stdout, stderr: stderr}
+	if c.idAt > 0 && len(pos) >= c.idAt {
 		id, err := strconv.ParseInt(pos[c.idAt-1], 10, 64)
 		if err != nil || id <= 0 {
 			return usageErr("%s must be a positive integer", c.args[c.idAt-1])
@@ -270,7 +319,10 @@ func runAdminCommand(ctx context.Context, c adminCommand, args []string, stdin i
 	// sensitive commands need a recent proof on it (design §5.3): the server
 	// says reauth_required, the person proves it, and the request is sent
 	// again. A script credential is never asked.
-	askToReauth(client, newPrompter(ctx, stdin, stderr), stderr)
+	// One prompter serves the proof and any confirmation, so a piped stdin
+	// is read through one buffer.
+	r.prompt = newPrompter(ctx, stdin, stderr)
+	askToReauth(client, r.prompt, stderr)
 	r.client = client
 	return c.run(ctx, r)
 }
@@ -326,6 +378,36 @@ func adminPrincipalRename(ctx context.Context, r *adminRun) error {
 	return r.say("renamed principal %d to %s\n", p.ID, safeLine(p.Name))
 }
 
+func adminPrincipalRole(ctx context.Context, r *adminRun) error {
+	req := schema.RoleChangeRequestV1{Role: schema.PrincipalRole(r.pos[1])}
+	if r.opts.owner && r.opts.noOwner {
+		return errors.New("cli: admin principal role: give --owner or --no-owner, not both")
+	}
+	if r.opts.owner {
+		req.Owner = &r.opts.owner
+	} else if r.opts.noOwner {
+		owner := false
+		req.Owner = &owner
+	}
+	if err := req.Validate(); err != nil {
+		return fmt.Errorf("cli: admin principal role: %w", err)
+	}
+	resp, err := r.client.ChangePrincipalRole(ctx, r.id, req)
+	if err != nil {
+		return err
+	}
+	if r.opts.asJSON {
+		return r.printJSON(resp)
+	}
+	channels := make([]string, len(resp.Manages))
+	for i, id := range resp.Manages {
+		channels[i] = strconv.FormatInt(id, 10)
+	}
+	return r.say("principal %d role %s owner %t manages %s invites closed %d credentials revoked %d hooks revoked %d live credentials %d hooks bound %d\n",
+		resp.Principal.ID, safeLine(string(resp.Principal.Role)), resp.Principal.Owner, dashIfEmpty(strings.Join(channels, ",")),
+		resp.InvitesClosed, resp.CredentialsRevoked, resp.HooksRevoked, resp.LiveCredentials, resp.HooksBound)
+}
+
 func bindPrincipalList(fs *flag.FlagSet, o *adminOpts) {
 	fs.StringVar(&o.principal.state, "state", "", "only principals in this state: active, disabled or hidden (default: active and disabled)")
 	fs.StringVar(&o.principal.prefix, "prefix", "", "only principals whose name begins with this, exactly as typed")
@@ -353,7 +435,7 @@ func principalState(p schema.PrincipalAdminV1) schema.PrincipalState {
 }
 
 // adminPrincipalList prints
-// `<id> <kind> <role> <active|disabled|hidden> creds <n> invite <id|-> <name>`
+// `<id> <kind> <role>[ owner] <active|disabled|hidden> creds <n> invite <id|-> voice <on|off|-> may-invite <on|off|-> <name>`
 // per principal, newest first, following the server's pages to the end. The
 // name is last because it may contain spaces.
 func adminPrincipalList(ctx context.Context, r *adminRun) error {
@@ -369,7 +451,10 @@ func adminPrincipalList(ctx context.Context, r *adminRun) error {
 	}
 	filter := PrincipalListFilter{State: o.state, NamePrefix: o.prefix, Kind: r.opts.kind, InviteID: o.inviteID, Limit: schema.MaxListPrincipalsLimit}
 	all := []schema.PrincipalAdminV1{}
-	for {
+	for n := 0; ; n++ {
+		if n == maxListPages {
+			return errors.New("cli: admin principal list: the server's pages do not end")
+		}
 		page, err := r.client.ListPrincipals(ctx, filter)
 		if err != nil {
 			return err
@@ -392,8 +477,12 @@ func adminPrincipalList(ctx context.Context, r *adminRun) error {
 		if p.InviteID != nil {
 			invite = strconv.FormatInt(*p.InviteID, 10)
 		}
-		if _, err := fmt.Fprintf(r.stdout, "%d %s %s %s creds %d invite %s %s\n", p.ID, safeLine(string(p.Kind)), safeLine(string(p.Role)),
-			principalState(p), p.LiveCredentials, invite, safeLine(p.Name)); err != nil {
+		owner := ""
+		if p.Owner {
+			owner = " owner"
+		}
+		if _, err := fmt.Fprintf(r.stdout, "%d %s %s%s %s creds %d invite %s voice %s may-invite %s %s\n", p.ID, safeLine(string(p.Kind)), safeLine(string(p.Role)), owner,
+			principalState(p), p.LiveCredentials, invite, optionalOnOff(p.VoiceAllowed), optionalOnOff(p.MayInvite), safeLine(p.Name)); err != nil {
 			return err
 		}
 	}
@@ -477,6 +566,27 @@ func adminCredentialRevoke(ctx context.Context, r *adminRun) error {
 }
 
 func adminMemberAdd(ctx context.Context, r *adminRun) error {
+	byName := r.given["name"]
+	if (r.id > 0) == byName {
+		return errors.New("cli: admin member add: give exactly one of <principal-id> or --name")
+	}
+	if byName {
+		if r.opts.noDecide {
+			return errors.New("cli: admin member add: --no-decide requires <principal-id>; adding by name already withholds that right")
+		}
+		req := schema.AddChannelMemberRequestV1{Name: r.opts.name}
+		if err := req.Validate(); err != nil {
+			return fmt.Errorf("cli: admin member add: %w", err)
+		}
+		member, err := r.client.AddChannelMember(ctx, r.pos[0], req.Name)
+		if err != nil {
+			return err
+		}
+		if r.opts.asJSON {
+			return r.printJSON(member)
+		}
+		return r.say("added %d to %s\n", member.PrincipalID, safeLine(r.pos[0]))
+	}
 	if r.opts.noDecide {
 		no := false
 		if err := r.client.PutChannelMemberDecide(ctx, r.pos[0], r.id, &no); err != nil {
@@ -488,6 +598,17 @@ func adminMemberAdd(ctx context.Context, r *adminRun) error {
 		return err
 	}
 	return r.say("added %d to %s\n", r.id, safeLine(r.pos[0]))
+}
+
+func adminMemberManage(ctx context.Context, r *adminRun) error {
+	manages := !r.opts.off
+	if err := r.client.PutChannelMemberManage(ctx, r.pos[0], r.id, manages); err != nil {
+		return err
+	}
+	if manages {
+		return r.say("%d manages %s\n", r.id, safeLine(r.pos[0]))
+	}
+	return r.say("%d no longer manages %s\n", r.id, safeLine(r.pos[0]))
 }
 
 // adminMemberDecide grants a member the right to decide the channel's
@@ -694,8 +815,17 @@ func adminManifestGet(ctx context.Context, r *adminRun) error {
 		}
 		grants[i] = strconv.FormatInt(g.ChannelID, 10) + ":" + strings.Join(perms, ",")
 	}
-	_, err = fmt.Fprintf(r.stdout, "%d tier %s capabilities %s channels %s %s\n",
-		m.PrincipalID, safeLine(string(m.Tier)), dashIfEmpty(strings.Join(caps, ",")), dashIfEmpty(strings.Join(grants, " ")), safeLine(m.DisplayName))
+	// A grant (issue #1332) is shown only when there is one, so the line of an
+	// ordinary agent is unchanged.
+	granted := ""
+	if len(m.Permissions) > 0 {
+		granted = " permissions " + permissionNames(m)
+		if m.Admin != nil {
+			granted += " approvals-in " + strconv.FormatInt(m.Admin.ApprovalChannelID, 10)
+		}
+	}
+	_, err = fmt.Fprintf(r.stdout, "%d tier %s capabilities %s channels %s%s %s\n",
+		m.PrincipalID, safeLine(string(m.Tier)), dashIfEmpty(strings.Join(caps, ",")), dashIfEmpty(strings.Join(grants, " ")), granted, safeLine(m.DisplayName))
 	return err
 }
 

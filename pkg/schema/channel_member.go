@@ -27,19 +27,19 @@ type ChannelMemberV1 struct {
 	Name        string        `json:"name,omitempty"`
 	Kind        PrincipalKind `json:"kind,omitempty"`
 	// CanDecide is whether the member may decide the channel's approvals
-	// (issue #450). The server fills it for human members; it is absent for
-	// agents, which never decide. The store keeps it false for a guest
-	// (ADR-009; security review F1).
+	// (issue #450). It is filled for every human row when the viewer is an
+	// operator or channel manager; a plain member sees only their own. It is
+	// absent for agents, which never decide. The store keeps it false for a
+	// guest (ADR-009; security review F1).
 	CanDecide *bool `json:"can_decide,omitempty"`
 	// Manages is whether the member is a manager of the channel (ADR-010,
-	// issue #697). Filled for the caller's own row and when the caller is
-	// an operator or a manager of the channel; absent otherwise, and
-	// absent for agents and guests, which never manage.
+	// issue #697). Every viewer sees it on every human row, false for guests;
+	// it is absent for agents.
 	Manages *bool `json:"manages,omitempty"`
-	// Role is the member's server role: filled when the caller is an
-	// operator or a manager of the channel, and for the caller's own row,
-	// so a manager sees why an operator row cannot be removed; absent for
-	// other members, for agents and for guests.
+	// Role is the member's server role: filled for non-guest humans when the
+	// caller is an operator or a manager of the channel, so a manager sees why
+	// an operator row cannot be removed; absent for other viewers, agents and
+	// guests.
 	Role PrincipalRole `json:"role,omitempty"`
 	// HistoryAfter is the membership's history bound (issue #704, ADR-009
 	// §4.3): the id of the last message of the channel at admission, chosen
@@ -164,15 +164,38 @@ type PutChannelMemberRequestV1 struct {
 }
 
 // AddChannelMemberRequestV1 is the body of POST /v1/channels/{channel}/members
-// (ADR-010, issue #697): add a member by principal name, for a channel manager
-// who does not have the operator's principal list and its ids. An operator may
-// use it too. The new member cannot decide approvals (CanDecide is false, since
-// a manager never grants approval rights) and does not manage.
+// (ADR-010, issue #697): add a person to a channel only if they are not in it
+// already. It names the person by Name, for a channel manager who does not
+// have the operator's principal list and its ids, or by ID (issue #1206).
+// Exactly one is given. An operator may use it too.
+//
+// The add never changes an existing member: someone already in the channel
+// keeps their can_decide and manages, and the answer is 200 with their
+// membership as it stands, where a new member gets 201. So an add can never
+// take a decide right away, as PUT .../members/{id} with can_decide false
+// does for a member it finds there.
+//
+// A new member does not manage. They decide the channel's approvals only when
+// CanDecide is true, which only an operator may send (a manager sending it,
+// true or false, is refused with 403): absent or false, they do not.
 type AddChannelMemberRequestV1 struct {
-	Name string `json:"name"`
+	Name      string `json:"name,omitempty"`
+	ID        int64  `json:"id,omitempty"`
+	CanDecide *bool  `json:"can_decide,omitempty"`
 }
 
-// Validate reports whether Name meets the person-name rule.
+// Validate reports whether exactly one of Name and ID is given, and Name, when
+// it is, meets the person-name rule.
 func (r AddChannelMemberRequestV1) Validate() error {
+	switch {
+	case r.ID < 0:
+		return errors.New("schema: id must be a positive principal id")
+	case r.ID > 0 && r.Name != "":
+		return errors.New("schema: give a name or an id, not both")
+	case r.ID > 0:
+		return nil
+	case r.Name == "":
+		return errors.New("schema: give a name or an id")
+	}
 	return CreatePrincipalRequest{Kind: PrincipalHuman, Name: r.Name}.Validate()
 }

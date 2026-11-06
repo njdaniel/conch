@@ -836,6 +836,190 @@ END`,
 	{
 		`ALTER TABLE channel_members ADD COLUMN manages INTEGER NOT NULL DEFAULT 0 CHECK (manages IN (0, 1))`,
 	},
+	// 36: Temporary servers and password-only operators (issues #866 and
+	// #875, ADR-011 items 1, 2.1 and 5, ADR-012 items 3 and 4). server_mode
+	// is one row: the mode conchd last started in and whether it allowed
+	// password-only operators (StartMode), kept so the next start can tell
+	// when password-only stops and end what it made, and read by every
+	// store-side check that lets a password-only operator through. No row
+	// means no server has started since this migration: the next start
+	// writes it. setup_totp_only marks a setup credential that has set its
+	// operator's password where password-only is allowed: it keeps only the
+	// authenticator routes and its own end (setupTOTPOnlyRoutes), so it
+	// cannot replace the password again. It is on setup credentials only. Every existing credential starts without it,
+	// so nothing changes for them.
+	{
+		`CREATE TABLE server_mode (
+	id            INTEGER PRIMARY KEY CHECK (id = 1),
+	mode          TEXT    NOT NULL CHECK (mode IN ('normal', 'temporary')),
+	password_only INTEGER NOT NULL CHECK (password_only IN (0, 1) AND (password_only = 1 OR mode = 'normal')),
+	updated_at    INTEGER NOT NULL
+)`,
+		`ALTER TABLE credentials ADD COLUMN setup_totp_only INTEGER NOT NULL DEFAULT 0
+			CHECK (setup_totp_only IN (0, 1) AND (setup_totp_only = 0 OR scope = 'setup'))`,
+	},
+	// Message reactions (issue #765, docs/design/message-reactions.md §7.1). A
+	// reaction is one durable record (message, principal, emoji): one principal
+	// has reacted to one message with one canonical emoji key. The primary key
+	// is that uniqueness rule, in the order the summary (group by emoji within
+	// a message) and the reactor list (range over one emoji by principal) read
+	// it. channel_id is the message's channel, checked in the write
+	// transaction. guest_handle and guest_label are filled when the reactor is
+	// in an active guest visit at write time and never updated, as
+	// message_guest_attribution is for a message. Rows are never updated: only
+	// the owner's own removal or a moderator's deletes one. They outlive the
+	// reactor's access (leaving, disabling, hiding, ending a guest visit,
+	// conversion) on purpose, as messages do. Nothing is backfilled.
+	{
+		`CREATE TABLE message_reactions (
+	message_id   INTEGER NOT NULL REFERENCES messages (id),
+	emoji        TEXT    NOT NULL,
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	channel_id   INTEGER NOT NULL REFERENCES channels (id),
+	created_at   INTEGER NOT NULL,
+	guest_handle TEXT,
+	guest_label  TEXT,
+	PRIMARY KEY (message_id, emoji, principal_id)
+) WITHOUT ROWID`,
+		`CREATE INDEX message_reactions_by_principal ON message_reactions (message_id, principal_id)`,
+	},
+	// 38: Message edits (issue #845, docs/design/message-editing.md §8). The
+	// first migration under which a messages row changes: body and edited_at
+	// only, and only by EditOwnMessage (audience.go). A trigger refuses an
+	// UPDATE that names any other column. message_revisions keeps every
+	// version of an edited message's text, append-only: revision 1 is the
+	// text as posted, written by the first edit, so a message never edited
+	// has no rows. messages_fts is external content: its entry is replaced by
+	// deleting it with the old values and inserting the new, so old words
+	// stop matching. This supersedes the "messages are never updated" of
+	// migrations 15 and 22. Nothing is backfilled.
+	{
+		`ALTER TABLE messages ADD COLUMN edited_at INTEGER`,
+		`CREATE TABLE message_revisions (
+	message_id INTEGER NOT NULL REFERENCES messages (id),
+	revision   INTEGER NOT NULL CHECK (revision >= 1),
+	body       TEXT    NOT NULL,
+	created_at INTEGER NOT NULL,
+	PRIMARY KEY (message_id, revision)
+)`,
+		`CREATE TRIGGER message_revisions_no_update BEFORE UPDATE ON message_revisions
+BEGIN SELECT RAISE(ABORT, 'message revisions are append-only'); END`,
+		`CREATE TRIGGER message_revisions_no_delete BEFORE DELETE ON message_revisions
+BEGIN SELECT RAISE(ABORT, 'message revisions are append-only'); END`,
+		// A value comparison, not "UPDATE OF <columns>": the column list does not
+		// fire for an update through the rowid alias, which would change id.
+		`CREATE TRIGGER messages_only_body_changes BEFORE UPDATE ON messages
+WHEN NEW.id IS NOT OLD.id OR NEW.channel_id IS NOT OLD.channel_id
+  OR NEW.author_id IS NOT OLD.author_id OR NEW.created_at IS NOT OLD.created_at
+  OR NEW.payload_schema IS NOT OLD.payload_schema OR NEW.payload_json IS NOT OLD.payload_json
+  OR NEW.audience_kind IS NOT OLD.audience_kind OR NEW.net_id IS NOT OLD.net_id
+  OR NEW.thread_root_id IS NOT OLD.thread_root_id
+BEGIN SELECT RAISE(ABORT, 'only a message body and edited_at may change'); END`,
+		`CREATE TRIGGER messages_edited_at_forward BEFORE UPDATE OF edited_at ON messages
+WHEN NEW.edited_at IS NULL OR NEW.edited_at <= COALESCE(OLD.edited_at, OLD.created_at)
+BEGIN SELECT RAISE(ABORT, 'edited_at must move forward'); END`,
+		`CREATE TRIGGER messages_fts_update AFTER UPDATE OF body ON messages
+BEGIN
+	INSERT INTO messages_fts (messages_fts, rowid, body, fts_channel)
+		VALUES ('delete', OLD.id, OLD.body, OLD.fts_channel);
+	INSERT INTO messages_fts (rowid, body, fts_channel)
+		VALUES (NEW.id, NEW.body, NEW.fts_channel);
+END`,
+	},
+	// 39 (permissionsMigration): Configurable role permissions (issue #1013,
+	// ADR-014, docs/design/admin-roles.md §9). role_permissions holds the
+	// cells of the permissions document that have been written. An absent
+	// row reads as the catalog default (schema.Permission.Default), so the
+	// table starts empty and every route behaves as before. permission has no CHECK, so a permission added later
+	// needs no table rebuild; the store refuses an unknown one on write and
+	// ignores one on read, and decides fixed cells in code
+	// (schema.Permission.Fixed), never from a row. The Go step
+	// (initializePermissions) maps a hide_members setting, where one exists,
+	// onto the member cell of see_member_directory, writes the
+	// permissions_revision setting as 1 and audits permissions_initialized.
+	{
+		`CREATE TABLE role_permissions (
+	role       TEXT    NOT NULL CHECK (role IN ('member', 'operator')),
+	permission TEXT    NOT NULL,
+	granted    INTEGER NOT NULL CHECK (granted IN (0, 1)),
+	updated_at INTEGER NOT NULL,
+	PRIMARY KEY (role, permission)
+)`,
+	},
+	// 40 (communityMigration): One community (issue #979, ADR-013,
+	// docs/design/community-model.md §6). These are the DDL steps: a
+	// channel's visibility (step 1) and its default mark (step 2), with two
+	// triggers in place of the cross-column CHECK an ADD COLUMN cannot carry
+	// (a default channel is public); default_listed_by, who listed a default
+	// channel, in place of open_channels.added_by (the lister rule of
+	// ADR-014 §7.3; a principal id with no REFERENCES clause, which cannot
+	// dangle because principals are never deleted); the record of the
+	// history bounds step 5 clears; and invites.link (step 8), 'legacy' for
+	// every existing invite. The Go step (migrateToCommunity) runs the
+	// preflight and steps 3 to 11 in this same transaction. open_channels
+	// stays, unread, until a later migration drops it (I13).
+	{
+		`ALTER TABLE channels ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private' CHECK (visibility IN ('public', 'private'))`,
+		`ALTER TABLE channels ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0 CHECK (is_default IN (0, 1))`,
+		`ALTER TABLE channels ADD COLUMN default_listed_by INTEGER`,
+		`CREATE TRIGGER channels_default_public_insert BEFORE INSERT ON channels
+WHEN NEW.is_default = 1 AND NEW.visibility <> 'public'
+BEGIN SELECT RAISE(ABORT, 'a default channel must be public'); END`,
+		`CREATE TRIGGER channels_default_public_update BEFORE UPDATE OF is_default, visibility ON channels
+WHEN NEW.is_default = 1 AND NEW.visibility <> 'public'
+BEGIN SELECT RAISE(ABORT, 'a default channel must be public'); END`,
+		`CREATE TABLE legacy_history_bounds (
+	channel_id    INTEGER NOT NULL,
+	principal_id  INTEGER NOT NULL,
+	history_after INTEGER NOT NULL,
+	cleared_at    INTEGER NOT NULL,
+	PRIMARY KEY (channel_id, principal_id)
+)`,
+		`ALTER TABLE invites ADD COLUMN link TEXT NOT NULL DEFAULT 'legacy' CHECK (link IN ('legacy', 'member', 'guest'))`,
+	},
+	// 41 (archiveMigration): archive a channel without deleting it (issue
+	// #844). archived_at is Unix seconds; NULL means the channel is live, so
+	// every existing channel stays live.
+	{
+		`ALTER TABLE channels ADD COLUMN archived_at INTEGER`,
+	},
+	// 42 (issuedByMigration): who issued each credential and hook (issue
+	// #1024, ADR-014 O13, docs/design/admin-roles.md §7.5, §12 A12). The
+	// principal that issued the row, NULL when no principal did or none is
+	// on record. The Go step (backfillIssuedBy) fills it from the audit
+	// trail: the latest credential_created, credential_rotated or
+	// hook_created row naming the id whose actor is a principal; a row
+	// from before those events carried their actor (e48b6e3, 2026-10-08)
+	// stays NULL. The live paths (insertCredentialTx, CreateHookWithLabel)
+	// write it from then on.
+	{
+		`ALTER TABLE credentials ADD COLUMN issued_by INTEGER REFERENCES principals (id)`,
+		`ALTER TABLE hooks ADD COLUMN issued_by INTEGER REFERENCES principals (id)`,
+	},
+	// 43: AI administrators (issue #1326, slice S2 #1329,
+	// docs/design/ai-administrators.md §7). An agent's manifest may carry a
+	// grant from the agent-grantable subset of the operator permissions
+	// (permissions, a JSON list, '[]' for none) and how its gated actions are
+	// approved (admin, the JSON of AgentAdminV1, '' for none). admin_actions
+	// is written by the admin door (#1330) in the transaction that raises a
+	// gated action's approval, which is how the run proves the approval came
+	// from the door and not from a client (#1330, F1 of #1328's review);
+	// claimed_at is set once, by the run. Nothing changes on upgrade: no
+	// agent holds anything until an owner grants it.
+	{
+		`ALTER TABLE agent_manifests ADD COLUMN permissions TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE agent_manifests ADD COLUMN admin TEXT NOT NULL DEFAULT ''`,
+		`CREATE TABLE admin_actions (
+	approval_id  INTEGER PRIMARY KEY REFERENCES approvals (id),
+	agent_id     INTEGER NOT NULL REFERENCES principals (id),
+	action       TEXT    NOT NULL,
+	requested_at INTEGER NOT NULL,
+	claimed_at   INTEGER,
+	ran_at       INTEGER,
+	http_status  INTEGER,
+	error_code   TEXT
+)`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
@@ -850,6 +1034,15 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 	// Channel names are keyed as principal names are (issue #727).
 	channelNameKeyMigration: fillChannelNameKeys,
 	ownerMarkMigration:      reportPromotedOwners,
+
+	// The permissions document starts at revision 1 (issue #1013).
+	permissionsMigration: initializePermissions,
+
+	// One community: the preflight and steps 3 to 11 (issue #979).
+	communityMigration: migrateToCommunity,
+
+	// Who issued each credential and hook, from the audit trail (issue #1024).
+	issuedByMigration: backfillIssuedBy,
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.
@@ -901,7 +1094,8 @@ func (s *Store) announceRunsEnded(runs []EndedRun) {
 // Open opens (creating if necessary) the database at path, enables WAL mode
 // and foreign-key enforcement on every connection, and applies any pending
 // migrations. Migrations are idempotent: reopening an up-to-date database is
-// a no-op.
+// a no-op. Then it turns off any joining setting that admits guests
+// (NormalizeGuestSettings, issue #1005).
 func Open(ctx context.Context, path string) (*Store, error) {
 	// The database holds the hashes of every bearer credential and hook
 	// token and the whole message log, so it must never be readable by other
@@ -931,6 +1125,14 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err := s.migrate(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	// Guests are removed for now (issue #1005): a database whose settings
+	// still admit them is opened with them off, audited, or not at all.
+	if changed, err := s.NormalizeGuestSettings(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	} else if changed {
+		slog.Info("store: guests are removed for now; the joining settings that admitted them are turned off (a bare address open to both now offers accounts only)")
 	}
 	return s, nil
 }

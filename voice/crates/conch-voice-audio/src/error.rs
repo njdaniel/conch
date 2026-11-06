@@ -20,6 +20,14 @@ pub enum AudioError {
         got: f64,
     },
 
+    /// The platform has no real audio backend yet, so no microphone or speakers can be
+    /// opened. Test sources and sinks still work.
+    #[error("this platform ({platform}) has no audio backend yet")]
+    NoBackend {
+        /// The operating system, as `std::env::consts::OS` names it.
+        platform: &'static str,
+    },
+
     /// The WAV file could not be read at all.
     #[error("{}: cannot read: {source}", .file.display())]
     WavRead {

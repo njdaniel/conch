@@ -66,6 +66,9 @@ pub struct KeysConfig {
     pub deafen: Option<KeyCode>,
 }
 
+/// Why a device name that is empty or padded with white space is refused.
+const DEVICE_NAME_MUST_BE: &str = "must be the exact name of a device, or `default`, with no white space around it: an empty or padded name would be read as the default device";
+
 /// `[audio]`: devices and the transmit gate's timing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioConfig {
@@ -236,7 +239,7 @@ impl Config {
         Ok(config)
     }
 
-    /// Checks the values that have a range. [`Config::parse`] and [`Config::apply`] both end
+    /// Checks the values that have a range, and refuses `audio.echo_cancellation = true`. [`Config::parse`] and [`Config::apply`] both end
     /// here, so no layer can put in what another would have refused. `source` is the name
     /// errors give for where the values came from.
     ///
@@ -255,6 +258,29 @@ impl Config {
             key: key.to_owned(),
             message,
         };
+        // dmn-audio trims a device name and reads an empty one as PipeWire's default, so a
+        // name that is empty or has white space around it would open another device than
+        // the one written, the default among them. Refused, as an unknown key is: the
+        // exact `default`, and no key, are the ways to ask for the default.
+        for (key, name) in [
+            ("audio.input", &self.audio.input),
+            ("audio.output", &self.audio.output),
+        ] {
+            if name
+                .as_deref()
+                .is_some_and(|name| name.is_empty() || name.trim() != name)
+            {
+                return Err(invalid(key, DEVICE_NAME_MUST_BE.to_owned()));
+            }
+        }
+        // Echo cancellation (#186) is not built, so `true` would claim a protection nothing
+        // provides. Refused until it ships.
+        if self.audio.echo_cancellation {
+            return Err(invalid(
+                "audio.echo_cancellation",
+                ECHO_CANCELLATION_UNAVAILABLE.to_owned(),
+            ));
+        }
         if self.audio.release_tail_ms > MAX_RELEASE_TAIL_MS {
             return Err(invalid(
                 "audio.release_tail_ms",
@@ -523,11 +549,12 @@ pub fn set_audio_value(
     match key {
         AudioKey::Input | AudioKey::Output => {
             if value.is_empty()
+                || value.trim() != value
                 || value.contains(['"', '\\'])
                 || value.chars().any(char::is_control)
             {
                 return Err(refuse(
-                    "a device name must not be empty, and must hold no quotation mark, backslash or control character",
+                    "a device name must not be empty or have white space around it, and must hold no quotation mark, backslash or control character",
                 ));
             }
             let device = if key == AudioKey::Input {
@@ -749,6 +776,10 @@ impl<'de> Deserialize<'de> for RawKey {
     }
 }
 
+/// Why `audio.echo_cancellation = true` is refused.
+const ECHO_CANCELLATION_UNAVAILABLE: &str =
+    "echo cancellation is not available yet (issue #186); leave it false or remove the key";
+
 /// How serde words a key that `deny_unknown_fields` refused. The error carries no kind, only
 /// this text; `an_unknown_key_is_an_error_naming_the_key_and_the_file` fails if it changes.
 const UNKNOWN_FIELD: &str = "unknown field ";
@@ -838,7 +869,7 @@ deafen = 184
 [audio]
 input = "alsa_input.example-mic"
 output = "alsa_output.example-headset"
-echo_cancellation = true
+echo_cancellation = false
 release_tail_ms = 250
 max_transmit_secs = 45
 talk_mode = "open"
@@ -863,7 +894,7 @@ open_hang_ms = 650
             audio: AudioConfig {
                 input: Some("alsa_input.example-mic".to_owned()),
                 output: Some("alsa_output.example-headset".to_owned()),
-                echo_cancellation: true,
+                echo_cancellation: false,
                 release_tail_ms: 250,
                 max_transmit_secs: 45,
                 talk_mode: TalkMode::Open,
@@ -960,6 +991,41 @@ open_hang_ms = 650
                 "{text}"
             );
             assert_eq!(error.to_string(), format!("{FILE}: unknown key `{key}`"));
+        }
+    }
+
+    #[test]
+    fn an_empty_or_padded_device_name_is_refused_naming_the_key() {
+        for name in ["", " ", "\\t", " mic", "mic ", "  default"] {
+            for key in ["input", "output"] {
+                let text = format!("[audio]\n{key} = \"{name}\"\n");
+                let error = Config::parse(&text, FILE).unwrap_err();
+                assert!(
+                    matches!(&error, Error::InvalidConfigValue { key: k, .. } if *k == format!("audio.{key}")),
+                    "{name:?}: {error}"
+                );
+            }
+        }
+        for (text, want) in [
+            ("[audio]\ninput = \"default\"\n", Some("default")),
+            ("[audio]\ninput = \"mic\"\n", Some("mic")),
+            ("[audio]\n", None),
+        ] {
+            let config = Config::parse(text, FILE).unwrap();
+            assert_eq!(config.audio.input.as_deref(), want);
+        }
+    }
+
+    #[test]
+    fn config_set_refuses_an_empty_or_padded_device_name() {
+        for key in [AudioKey::Input, AudioKey::Output] {
+            for value in ["", " ", "  ", " mic", "mic "] {
+                let error = set_audio_value("", FILE, key, value).unwrap_err();
+                assert!(
+                    matches!(&error, Error::InvalidConfigValue { key: k, .. } if k == key.dotted()),
+                    "{value:?}: {error}"
+                );
+            }
         }
     }
 
@@ -1189,7 +1255,7 @@ open_hang_ms = 650
                     deafen: key("KEY_F14"),
                     input: Some("alsa_input.example-mic".to_owned()),
                     output: Some("alsa_output.example-headset".to_owned()),
-                    echo_cancellation: Some(true),
+                    echo_cancellation: Some(false),
                     release_tail_ms: Some(250),
                     max_transmit_secs: Some(45),
                     talk_mode: Some(TalkMode::Open),
@@ -1201,6 +1267,42 @@ open_hang_ms = 650
             .unwrap();
         assert_eq!(config, every_key());
         assert_eq!(config.server_or_default(), "https://conch.example.test");
+    }
+
+    #[test]
+    fn echo_cancellation_true_is_refused_from_the_file_and_from_an_override() {
+        // (text of the file, override, whether it is accepted)
+        let cases: [(&str, Option<bool>, bool); 8] = [
+            ("", None, true),
+            ("[audio]\necho_cancellation = false\n", None, true),
+            ("[audio]\necho_cancellation = true\n", None, false),
+            ("", Some(false), true),
+            ("", Some(true), false),
+            ("[audio]\necho_cancellation = true\n", Some(false), false),
+            ("[audio]\necho_cancellation = false\n", Some(true), false),
+            ("[audio]\necho_cancellation = false\n", Some(false), true),
+        ];
+        for (text, over, accepted) in cases {
+            let overrides = ConfigOverrides {
+                echo_cancellation: over,
+                ..ConfigOverrides::default()
+            };
+            let result = Config::parse(text, FILE).and_then(|mut config| {
+                config.apply(overrides, SOURCE)?;
+                Ok(config)
+            });
+            match (accepted, result) {
+                (true, Ok(config)) => assert!(!config.audio.echo_cancellation, "{text:?} {over:?}"),
+                (false, Err(Error::InvalidConfigValue { key, message, .. })) => {
+                    assert_eq!(key, "audio.echo_cancellation", "{text:?} {over:?}");
+                    assert!(message.contains("not available yet"), "{message}");
+                    assert!(message.contains("#186"), "{message}");
+                }
+                (accepted, other) => {
+                    panic!("{text:?} {over:?}: accepted={accepted}, got {other:?}")
+                }
+            }
+        }
     }
 
     #[test]

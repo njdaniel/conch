@@ -52,6 +52,15 @@ func (s *Store) ResolveCredentialDetail(ctx context.Context, token string) (Prin
 	return p, c.ID, err
 }
 
+// ResolveFullCredential is ResolveCredentialDetail that returns the whole
+// RequestCredential, for a front that serves a request as the middleware
+// would (the admin door over MCP, issue #1331): the dispatched route's
+// recent-authentication gate reads it. Full scope only, as every caller but
+// the middleware resolves.
+func (s *Store) ResolveFullCredential(ctx context.Context, token string) (Principal, RequestCredential, error) {
+	return s.resolveCredential(ctx, token, false)
+}
+
 // RequestCredential is what the authentication middleware learns of the
 // credential a request came with, beside its principal (issue #709).
 type RequestCredential struct {
@@ -66,6 +75,10 @@ type RequestCredential struct {
 	// RecentAuthUntil is its recent-auth proof as it was read, nil when it
 	// has none.
 	RecentAuthUntil *time.Time
+	// SetupTOTPOnly says a setup credential has set its operator's password
+	// where password-only is allowed: it reaches only the authenticator routes and its
+	// own end (ADR-011 item 2.1, the middleware's setupTOTPOnlyRoutes).
+	SetupTOTPOnly bool
 }
 
 // ResolveRequestCredential is ResolveCredentialDetail for the authentication
@@ -99,12 +112,12 @@ func (s *Store) resolveCredential(ctx context.Context, token string, admitSetup 
 	err := s.db.QueryRowContext(ctx,
 		`SELECT c.id, c.token_hash, c.expires_at, c.revoked_at, c.renew_ms, p.disabled_at, p.id, p.kind, p.name, p.role, p.owner, p.created_at,
 		        p.invited_by, p.invite_id, p.may_invite, p.voice_allowed, `+idleBoundColumns+`,
-		        c.auth_generation = p.auth_generation, c.scope, c.recent_auth_until
+		        c.auth_generation = p.auth_generation, c.scope, c.recent_auth_until, c.setup_totp_only
 		 FROM credentials c JOIN principals p ON p.id = c.principal_id
 		 WHERE c.token_hash = ?`, want,
 	).Scan(&cred.ID, &storedHash, &expiresAt, &revokedAt, &renewMs, &disabled, &p.ID, &kind, &p.Name, &role, &p.Owner, &createdAt,
 		&invitedBy, &inviteID, &p.MayInvite, &p.VoiceAllowed, &idle.createdAt, &idle.idleMs, &idle.lastUsedAt,
-		&idle.guestState, &idle.guestExpiresAt, &generationCurrent, &scope, &recentAuth)
+		&idle.guestState, &idle.guestExpiresAt, &generationCurrent, &scope, &recentAuth, &cred.SetupTOTPOnly)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Principal{}, RequestCredential{}, ErrCredentialInvalid
 	}

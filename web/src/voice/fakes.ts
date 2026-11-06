@@ -1,6 +1,48 @@
 // Test doubles for the voice client: a clock the test moves by hand. Imported
 // by tests only.
 import type { Clock } from '../state/feed';
+import type { Room } from './connection';
+
+// The camera half of a room for a test that never turns a camera on: nothing
+// is captured, and every capture is refused.
+export type CameraHalf = Pick<
+  Room,
+  | 'captureCamera'
+  | 'awaitCameraGrant'
+  | 'publishCamera'
+  | 'stopCamera'
+  | 'keepCamera'
+  | 'adoptCamera'
+  | 'cameraTrack'
+  | 'cameraInUse'
+  | 'cameras'
+  | 'switchCamera'
+  | 'attachSelf'
+  | 'setViewing'
+  | 'setShown'
+  | 'setCameras'
+  | 'attachCamera'
+>;
+
+export function noCamera(): CameraHalf {
+  return {
+    captureCamera: () => Promise.reject(new DOMException('no camera in this test', 'NotFoundError')),
+    awaitCameraGrant: () => Promise.reject(new Error('no camera in this test')),
+    publishCamera: () => Promise.reject(new Error('no camera in this test')),
+    stopCamera: () => Promise.resolve(),
+    keepCamera: () => null,
+    adoptCamera: () => undefined,
+    cameraTrack: () => 'none',
+    cameraInUse: () => null,
+    cameras: () => Promise.resolve(null),
+    switchCamera: () => Promise.resolve(),
+    attachSelf: () => undefined,
+    setViewing: () => undefined,
+    setShown: () => undefined,
+    setCameras: () => undefined,
+    attachCamera: () => undefined,
+  };
+}
 
 export class FakeClock implements Clock {
   now = 0;

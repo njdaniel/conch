@@ -7,7 +7,8 @@
 //! for the open microphone when its sound starts and when quiet starts.
 //! Owns: the transmit gate (microphone audio is handed onward only while it is open), the
 //! open microphone's level detector, one jitter buffer per speaker, and the mixer. Nothing
-//! here writes audio to disk.
+//! here writes audio to disk. It is platform-neutral: the real microphone and speakers, one
+//! backend per platform, live in `conch-voice` (`src/audio.rs` and `src/audio_*.rs`), behind the two traits below.
 //!
 //! The level detector ([`LevelDetector`]) looks at captured frames and hands none onward:
 //! it only says when the sound starts and stops, for the push-to-talk machine to decide

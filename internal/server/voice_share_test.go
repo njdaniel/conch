@@ -272,7 +272,7 @@ func TestVoiceShareClaimRefusals(t *testing.T) {
 }
 
 // joinWithoutVoice adds vic to the presence fixture as voiceFixture's does: a
-// member of ops through an invite that did not grant voice (issue #437).
+// member of ops through an invite, whose voice an operator then turned off.
 func (f *presenceFixture) joinWithoutVoice(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
@@ -285,8 +285,13 @@ func (f *presenceFixture) joinWithoutVoice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if joined.Principal.VoiceAllowed {
-		t.Fatal("the joiner holds voice")
+	// Every member who joins has voice (issue #986): an operator takes it
+	// away from vic with the per-person switch (issue #984).
+	if _, err := f.srv.store.SetVoiceAllowed(ctx, "system", f.root.ID, joined.Principal.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := f.srv.store.PrincipalByID(ctx, joined.Principal.ID); err != nil || p.VoiceAllowed {
+		t.Fatalf("vic = %+v, %v; want no voice", p, err)
 	}
 	f.tokens["vic"], f.ids["vic"] = joined.Token, joined.Principal.ID
 }
@@ -647,7 +652,8 @@ func TestVoiceShareEndsWithRotation(t *testing.T) {
 			f.publish(room, "ann", true, true)
 			f.at(500)
 			f.pass(t)
-			if code := f.doOrdered(t, tt.method, fmt.Sprintf(tt.path, f.ids["ann"]), f.rootTok); code != http.StatusNoContent {
+			// A removal answers 204, a disable 200 (issue #1024).
+			if code := f.doOrdered(t, tt.method, fmt.Sprintf(tt.path, f.ids["ann"]), f.rootTok); code != http.StatusNoContent && code != http.StatusOK {
 				t.Fatalf("status = %d", code)
 			}
 			want := []string{"ann started audio=true", "ann stopped principal=ann reason=rotated"}
@@ -976,7 +982,7 @@ func TestVoiceShareGrantIsNeverTakenBack(t *testing.T) {
 	waitUntil(t, "the pass to decide", func() bool {
 		f.srv.voice.mu.Lock()
 		defer f.srv.voice.mu.Unlock()
-		_, owed := r.withdrawing[f.ids["ann"]]
+		_, owed := r.withdrawing[voiceWithdrawKey{f.ids["ann"], voiceRolePerson}]
 		return owed
 	})
 	r.order.Lock()
@@ -1066,5 +1072,34 @@ func TestVoiceShareKeepsSecrets(t *testing.T) {
 		if !strings.Contains(text, exercised) {
 			t.Errorf("the run did not exercise %q", exercised)
 		}
+	}
+}
+
+// TestVoiceShareClaimFailsClosedOnLivenessReadError (issue #1089): if the
+// read of the room's liveness after the grant fails, the claim cannot tell
+// whether the room was rotated. It takes back what it granted and answers
+// 409 voice_no_session, never 200, for a first claim and for a holder's claim
+// again.
+func TestVoiceShareClaimFailsClosedOnLivenessReadError(t *testing.T) {
+	for _, kind := range []string{"first", "again"} {
+		t.Run(kind, func(t *testing.T) {
+			f, room := newShareFixture(t)
+			if kind == "again" {
+				f.mustClaim(t, "ann")
+			}
+			f.srv.voice.liveReadSeam = func(context.Context, int64) (bool, error) {
+				return false, errors.New("store: disk I/O error")
+			}
+			res := f.claimShare(t, "ann", "ops")
+			if res.status != http.StatusConflict || errCode(t, res.body) != schema.ErrorCodeVoiceNoSession {
+				t.Fatalf("claim whose liveness read fails: %d %s, want 409 voice_no_session", res.status, res.body)
+			}
+			if f.granted(t, room, "ann") {
+				t.Error("the grant was left after the claim was refused")
+			}
+			if holder := f.shareState(room); holder != 0 {
+				t.Errorf("the poller still holds a share for %d", holder)
+			}
+		})
 	}
 }

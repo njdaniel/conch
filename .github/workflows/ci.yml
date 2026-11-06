@@ -8,17 +8,72 @@ on:
 permissions:
   contents: read
 
+# One run per pull request and one per main at a time (#1305): a superseded
+# run should not hold runners (the self-hosted ones especially, when used).
+# A new push to a pull request cancels its older run. (So does re-running an
+# older run of the same pull request: re-run the newest instead.) On main a
+# run is never cancelled mid-way; while one runs, one pending run is kept and
+# the others are cancelled, so a burst of merges is checked once, not once per
+# merge. GitHub normally keeps the newest but does not guarantee the order:
+# the merge queue's main check skips cancelled runs and re-runs main's latest
+# run when it was cancelled and nothing is pending, so the tip is checked.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  agent-claims:
+  # Which kind of change this is (issue #1300). A pull request whose every
+  # changed path is documentation (scripts/ci-docs-only.sh) gets the text
+  # checks of the check job and nothing else; every other job is skipped,
+  # which satisfies branch protection. A push to main always runs everything.
+  # The classifier is taken from main's side of the merge, never from the
+  # pull request, so a pull request cannot rewrite it to skip its own
+  # checks; one that adds or changes the script runs everything. If this job
+  # fails, the run shows it red (so the merge queue waits for a person) and
+  # every other job runs in full.
+  changes:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
     steps:
       - uses: actions/checkout@v4
-      - name: claim lifecycle (local Git, mocked GitHub/model)
-        run: make agent-claim-test
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 2 # the merge commit and both its parents
 
-  check:
+      - name: classify the change
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          code=true
+          if [ "$EVENT" = pull_request ] && git rev-parse -q --verify HEAD^2 >/dev/null &&
+             git cat-file -e HEAD^1:scripts/ci-docs-only.sh 2>/dev/null &&
+             git diff --quiet HEAD^1 HEAD -- scripts/ci-docs-only.sh; then
+            git show HEAD^1:scripts/ci-docs-only.sh > "$RUNNER_TEMP/ci-docs-only.sh"
+            if [ "$(git diff --name-status --no-renames HEAD^1 HEAD | bash "$RUNNER_TEMP/ci-docs-only.sh")" = true ]; then
+              code=false
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "code=$code (false: docs only, light run)"
+
+  # The repository checks, as parallel jobs on GitHub-hosted runners (#1318).
+  # They used to be one job on the self-hosted runners (#1286), which the
+  # hosted runner ran out of disk for: the Rust jobs now free the runner's
+  # unused tool trees first and build with line tables instead of full debug
+  # info. check, at the end, is the one branch protection requires: it runs
+  # the text checks itself and passes only when every job it needs passed.
+  # Docs-only pull requests (#1300) skip every job but changes and check.
+  #
+  # The Rust-heavy jobs (rust here, voice-check below) can go back to the
+  # self-hosted runners without a code change: set the repository variable
+  # HEAVY_RUNNER to "local". A fork's pull request never reaches them.
+  go:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,14 +87,6 @@ jobs:
         run: |
           out=$(gofmt -l $(git ls-files -co --exclude-standard '*.go'))
           if [ -n "$out" ]; then echo "gofmt needed on:"; echo "$out"; exit 1; fi
-
-      # No tracked text file may hold a bidi control, a line or paragraph
-      # separator, or a control character other than tab, LF and CR (#244).
-      # The script's own test runs first.
-      - name: invisible characters
-        run: |
-          ./scripts/invisible-chars-test.sh
-          ./scripts/invisible-chars.sh
 
       - name: go vet
         run: go vet ./...
@@ -65,12 +112,6 @@ jobs:
           # run `golangci-lint config verify` after editing .golangci.yml.
           verify: false
 
-      - name: go test
-        # internal/server alone takes 7–10 minutes under -race on a runner,
-        # past go test's default 10-minute timeout per package (#471);
-        # making it faster is #472.
-        run: go test -race -timeout 25m ./...
-
       - name: schema compatibility
         env:
           SCHEMA_COMPAT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -85,25 +126,145 @@ jobs:
           ./scripts/schema-ts-check-test.sh
           ./scripts/schema-ts-check.sh
 
+      # The emoji catalog (#953): the vendored third_party/unicode/emoji-test.txt
+      # matches its pinned hash and scripts/emoji-update.sh refuses a mismatch.
+      # Drift of the generated catalog fails in go test (cmd/emoji-gen).
+      - name: emoji catalog
+        run: ./scripts/emoji-update-test.sh
+
       - name: dependency gate
         run: ./scripts/depgate.sh
 
       # The deployment files in ops/deploy (#435): shellcheck, systemd-analyze
       # verify, and the backup, restore, upgrade and rollback scripts against
-      # a real conchd. sqlite3 is a host prerequisite of those scripts; the
-      # runner image has shellcheck and systemd-analyze, and with CI set the
-      # test fails rather than skips when one is missing.
-      - name: deployment scripts
+      # a real conchd. sqlite3 and shellcheck are host prerequisites of those
+      # scripts; the image has systemd-analyze, and with CI set the test fails
+      # rather than skips when one is missing.
+      - name: deployment script packages
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends sqlite3 shellcheck
-          ./scripts/deploy-scripts-test.sh
 
-      # The Rust voice client under voice/ (ADR-006). The toolchain script
-      # fetches one pinned clang, cargo-deny and libwebrtc and verifies each
-      # against the SHA-256 in scripts/voice-pins.sh, which is therefore the
-      # cache key. rustup, already on the runner, installs the Rust version
-      # voice/rust-toolchain.toml names.
+      - name: deployment scripts
+        run: ./scripts/deploy-scripts-test.sh
+
+  # go test -race for internal/server, in five jobs. On a hosted runner the
+  # package alone took 12 minutes and store 5.5, so one job was the run's
+  # longest by ten minutes (#471, #1318). Shards 1 to 4 split the package's
+  # tests by the letter after "Test" (about 1150 tests, counted 2026-11-05);
+  # shard 4 also takes any test whose name continues with something other
+  # than a capital letter, so a test can't fall between the shards. Shard 5
+  # is the subpackages (store, approvals, hub, livekit, names). The package
+  # has no fuzz targets or examples, which -run '^Test' would leave out.
+  go-test-server:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    name: go-test-server (${{ matrix.shard }}/5)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { shard: 1, run: "^Test[A-E]" }
+          - { shard: 2, run: "^Test[F-M]" }
+          - { shard: 3, run: "^Test[N-S]" }
+          - { shard: 4, run: "^Test([T-Z]|[^A-Z])" }
+          - { shard: 5, run: "" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The pattern comes in through the environment, never through the
+      # shell's parsing: shard 4's "(" and "|" are regexp, not shell.
+      - name: go test (internal/server, shard ${{ matrix.shard }})
+        env:
+          RUN: ${{ matrix.run }}
+        run: |
+          if [ -z "$RUN" ]; then
+            # The package's examples and fuzz targets would match no shard's
+            # "^Test" pattern: fail here so one gets added when the first
+            # lands, rather than leave it unrun.
+            if go test -list '^(Example|Fuzz)' ./internal/server | grep -E '^(Example|Fuzz)'; then
+              echo "internal/server has examples or fuzz targets: give them a shard"; exit 1
+            fi
+            pkgs=$(go list ./internal/server/... | grep -v '/internal/server$')
+            [ -n "$pkgs" ] || { echo "no internal/server subpackages listed"; exit 1; }
+            go test -race -timeout 25m $pkgs
+          else
+            go test -race -timeout 25m ./internal/server -run "$RUN"
+          fi
+
+  go-test:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: go test (everything but internal/server)
+        run: |
+          pkgs=$(go list ./... | grep -v -e '/internal/server$' -e '/internal/server/')
+          [ -n "$pkgs" ] || { echo "no packages listed"; exit 1; }
+          go test -race -timeout 25m $pkgs
+
+  # The Rust voice client under voice/ (ADR-006), and the desktop
+  # voice-helper integration, which drives the conch-voice this job builds.
+  rust:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ${{ vars.HEAVY_RUNNER == 'local' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
+    timeout-minutes: 40
+    env:
+      # Line tables, not full debug info: the build directory is a few GB
+      # instead of about 7, which is what filled the hosted runner's disk
+      # (#1286, #1318). Panics still name file and line. Local builds keep
+      # the profile voice/Cargo.toml gives them.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+
+      # The hosted image ships tool trees no job here uses (.NET, Android,
+      # GHC, CodeQL, cached Docker images): about 20 GB. On the image that had
+      # about 14 GB free they had to go (#1286, #1318). Today's has about 88
+      # GB free and this job uses about 11, while removing them takes 3½
+      # minutes (#1352), so they go only when less than 30 GB is free.
+      - name: free disk
+        if: runner.environment == 'github-hosted'
+        run: |
+          df -h /
+          avail=$(df --output=avail -BG / | tail -n1 | tr -dc 0-9)
+          if [ "$avail" -ge 30 ]; then echo "free disk: ${avail} GB free, nothing removed"; exit 0; fi
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # The runner image names the apt cache below: its .debs are the image
+      # release's packages. Runner environment variables, so not in `env`.
+      - name: runner image
+        id: image
+        if: runner.environment == 'github-hosted'
+        run: |
+          echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
+          echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      # The toolchain script fetches one pinned clang, cargo-deny and
+      # libwebrtc and verifies each against the SHA-256 in
+      # scripts/voice-pins.sh, which is therefore the cache key. rustup, on
+      # the runner, installs the Rust version voice/rust-toolchain.toml names.
       - name: rust toolchain cache
         uses: actions/cache@v4
         with:
@@ -113,6 +274,8 @@ jobs:
             ~/.cache/conch/webrtc-*
           key: voice-toolchain-${{ runner.os }}-${{ hashFiles('scripts/voice-pins.sh') }}
 
+      # -lt: built with line tables (above), so never mixed with a cache of
+      # full-debug builds.
       - name: rust build cache
         uses: actions/cache@v4
         with:
@@ -120,18 +283,45 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             voice/target
-          key: voice-build-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
+          key: voice-build-lt-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
           # After a dependency change, start from the last build instead of
           # from nothing; cargo rebuilds only what changed.
           restore-keys: |
-            voice-build-${{ runner.os }}-
+            voice-build-lt-${{ runner.os }}-
+
+      # The .debs of the system packages, kept so a run downloads only the
+      # package indexes and not 40 MB from a mirror that can stall (13
+      # minutes once, #1352). Keyed on the script, which holds the package
+      # list, and on the image; a new image version starts from the last
+      # one's .debs and fetches only what changed.
+      - name: rust system packages cache
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch-apt
+          key: voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-${{ steps.image.outputs.version }}
+          restore-keys: |
+            voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-
 
       # The SDK's build needs GLib's headers (found through pkg-config). So does
       # dmn-audio's: the PipeWire headers (also found through pkg-config) and
       # libclang, which generates the Rust bindings to them. Nothing else comes
-      # from the system. scripts/voice-env.sh says so if any is missing.
+      # from the system. scripts/voice-env.sh says so if any is missing. The
+      # script installs from the cache above and bounds every download.
       - name: rust system packages
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config
+        if: runner.environment == 'github-hosted'
+        run: ./scripts/ci-voice-apt.sh ~/.cache/conch-apt
+
+      # The self-hosted runner installs nothing (it has no sudo): it has
+      # these, and this step says so when one is missing.
+      - name: host prerequisites (self-hosted)
+        if: runner.environment == 'self-hosted'
+        run: |
+          missing=""
+          for t in pkg-config; do command -v "$t" >/dev/null || missing="$missing $t"; done
+          for p in glib-2.0 libpipewire-0.3; do pkg-config --exists "$p" || missing="$missing $p"; done
+          ls /usr/lib/llvm-*/lib/libclang.so >/dev/null 2>&1 || missing="$missing libclang"
+          if [ -n "$missing" ]; then echo "the self-hosted runner lacks:$missing"; exit 1; fi
 
       - name: rust toolchain
         run: ./scripts/voice-toolchain.sh
@@ -139,9 +329,33 @@ jobs:
       - name: rust check
         run: make rust-check
 
-      # The web client under web/ (ADR-007). setup-node installs exactly the
-      # Node web/.nvmrc pins and caches npm's download cache by the lockfile.
-      # web-check installs with npm ci only, and downloads no browser.
+      # desktop/.nvmrc names the same Node as web/.nvmrc.
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      # The voice supervisor against the real conch-voice (#948): the binary
+      # rust check's cargo test built, a stub conchd on loopback, no audio.
+      - name: desktop voice-helper integration
+        run: CONCH_VOICE_BIN="$PWD/voice/target/debug/conch-voice" make desktop-voice-it
+
+      - name: disk after the build
+        if: always()
+        run: df -h / && du -sh voice/target 2>/dev/null || true
+
+  # The web client under web/ (ADR-007). setup-node installs exactly the
+  # Node web/.nvmrc pins and caches npm's download cache by the lockfile.
+  # web-check installs with npm ci only, and downloads no browser.
+  web:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version-file: web/.nvmrc
@@ -151,13 +365,153 @@ jobs:
       - name: web check
         run: make web-check
 
+  # The desktop shell under desktop/ (#940): the fetch script's test, the
+  # repository rules, the dependency and licence gates, then npm ci,
+  # typecheck, lint and unit tests. It downloads no Electron binary and
+  # needs no display; the packaged app is the desktop-smoke job's.
+  desktop:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: desktop check
+        run: make desktop-check
+
+  # The required status check. It runs the text checks every pull request
+  # gets, docs-only ones included, then passes only if every job above that
+  # should have run succeeded: skipped is accepted only for a docs-only
+  # change (changes said code=false). It runs even when one of them failed,
+  # so the failure is reported here rather than as a skipped check. changes
+  # itself is not judged: if it fails, code is unset and every job runs in
+  # full, so a pass here still means every check ran and passed.
+  check:
+    needs: [changes, go, go-test-server, go-test, rust, web, desktop]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # No tracked text file may hold a bidi control, a line or paragraph
+      # separator, or a control character other than tab, LF and CR (#244).
+      # The script's own test runs first.
+      - name: invisible characters
+        run: |
+          ./scripts/invisible-chars-test.sh
+          ./scripts/invisible-chars.sh
+          ./scripts/ci-docs-only-test.sh
+
+      # The issue-claim helper's lifecycle (#831): real local Git remotes,
+      # mocked GitHub and model calls, no network.
+      - name: agent claims
+        run: make agent-claim-test
+
+      - name: every check passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          DOCS_ONLY: ${{ needs.changes.outputs.code == 'false' }}
+        run: |
+          bad=$(jq -r --arg docs "$DOCS_ONLY" 'to_entries[] | select(.key != "changes")
+            | select(.value.result != "success" and ($docs != "true" or .value.result != "skipped"))
+            | "\(.key): \(.value.result)"' <<<"$NEEDS")
+          if [ -n "$bad" ]; then echo "not every check passed:"; echo "$bad"; exit 1; fi
+          echo "every check passed (docs only: $DOCS_ONLY)"
+
+  desktop-smoke:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    # The packaged desktop shell (#940): make desktop-build fetches the pinned
+    # Electron (scripts/desktop-electron.sh checks its SHA-256 twice), builds
+    # the web client for it and packs the unpacked Linux app with its fuses;
+    # the smoke test then starts that app under a virtual display and drives it
+    # over Chromium's remote-debugging port (desktop/tests/smoke/launch.ts says
+    # why not Playwright's Electron launcher). It prints the app's
+    # process.versions into this log. A job of its own: it needs a display and
+    # a 100 MB download, and `make check` needs neither.
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      # The REST smoke test (#942) builds a disposable conchd from this checkout.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      # The unpacked Electron, keyed by the pin file that names its version
+      # and hash. Without a hit the build downloads it and checks it.
+      - name: electron cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch/electron
+          key: desktop-electron-${{ runner.os }}-${{ hashFiles('scripts/desktop-pins.sh') }}
+
+      - name: virtual display
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xvfb
+
+      # The browser build must not change because the desktop shell exists:
+      # web/dist is hashed before and after the desktop build, and holds no
+      # desktop code.
+      - name: browser build before
+        run: |
+          make web-build
+          ./scripts/desktop-web-dist-check.sh
+          (cd web/dist && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$RUNNER_TEMP/web-dist.before"
+
+      - name: build the unpacked app
+        run: make desktop-build
+
+      # The feeds smoke test (#943) puts a browser user, in the Chromium that
+      # Playwright's own version pins, beside the app on the same conchd,
+      # which serves the web/dist built above at /app/.
+      - name: browser for the second client
+        working-directory: desktop
+        run: npx playwright install --with-deps chromium
+
+      - name: browser build after
+        run: |
+          (cd web/dist && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$RUNNER_TEMP/web-dist.after"
+          diff "$RUNNER_TEMP/web-dist.before" "$RUNNER_TEMP/web-dist.after"
+
+      # The Chromium sandbox stays on. This runner's kernel may restrict
+      # unprivileged user namespaces (Ubuntu 24.04's AppArmor), which the
+      # sandbox's namespace mode needs; the setuid helper is the other mode,
+      # and it is what the .deb package installs (#774). Here it is made so on
+      # the throwaway runner. Not verified before this job's first CI run: if
+      # the sandbox will not start, this step is where to look.
+      - name: sandbox helper
+        run: |
+          sudo chown root:root desktop/dist/linux-unpacked/chrome-sandbox
+          sudo chmod 4755 desktop/dist/linux-unpacked/chrome-sandbox
+
+      - name: smoke test
+        run: xvfb-run -a make desktop-smoke
+
   web-embedded:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The web client built into conchd (issue #347): make build-web-embedded
     # builds bin/conchd with -tags conchweb, and this job starts it with no
     # --web-dir and checks what an operator who downloaded a release binary
     # gets: /app/ with the security headers and no-store on the index, a
     # hashed asset as immutable, `conchd version` saying so, and --no-web
-    # turning it off. The untagged build is what the check job tests.
+    # turning it off. The untagged build is what the go and go-test jobs test.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -241,6 +595,8 @@ jobs:
           done
 
   rust-advisories:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # Known advisories against the crates conch-voice links (RustSec). A job of
     # its own and not part of check: it reads a database on the network, and a
     # new advisory turns it red with no change here. Red means look at it, and
@@ -254,6 +610,8 @@ jobs:
         run: ./scripts/voice-advisories.sh
 
   web-advisories:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # Known advisories (high or critical) against the packages web/dist ships:
     # the runtime dependencies, so development tools are left out. A job of
     # its own and not part of check, as rust-advisories is: it reads the npm
@@ -292,6 +650,8 @@ jobs:
         run: go run ./e2e/dogfood
 
   nets-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The V2 exit proof (issue #121): the 2x4 squad layout through real
     # conchd/conch binaries, asserting the exact set of message ids every
     # participant sees on each message read path the server has (MCP
@@ -313,6 +673,8 @@ jobs:
         run: go run ./e2e/nets
 
   conch-bot-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # conch-adapter against a real conchd, answering with the fixture
     # e2e/p3-local/fixtures/echo.sh (never a model): the reply loop in every
     # audience, the adapter's session and one run per reply seen through the
@@ -333,6 +695,8 @@ jobs:
         run: go run ./e2e/conch-bot
 
   p2-hardening-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The P2 exit gate (issue #81): a database written by a P1 conchd is
     # upgraded, and real conchd/conch binaries are driven through everything
     # P2 added on it: credentials, manifests and their refusals, rate limits,
@@ -355,6 +719,8 @@ jobs:
         run: go run ./e2e/p2-hardening
 
   p3-local-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The automated P3 suite (issues #283 and #284): builds conchd, conch and
     # conch-adapter and the web client, starts a disposable conchd with
     # --session-stale 2s --session-offline 5s, creates the test community and
@@ -369,7 +735,7 @@ jobs:
     # as not run. It runs on every pull request and every push to main, and
     # release.yml runs it before it builds. Its own tests (reset, interrupts,
     # the HOME sentinel, the walkthrough's commands, the screen the terminal
-    # driver reads) run in the check job's go test.
+    # driver reads) run in the go-test jobs.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -401,6 +767,8 @@ jobs:
         run: go run ./e2e/p3-local --non-loopback
 
   web-e2e:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The browser suite (issue #285, D7): the web client in Chromium, against
     # the fixture community of e2e/p3-local (started with --keep and a
     # temporary root by the suite's own global setup, removed by its teardown,
@@ -411,9 +779,26 @@ jobs:
     # web/package.json and installs the Chromium that version needs. A job of
     # its own and not part of check, which needs no browser. It runs on every
     # pull request and every push to main. Scripted agents only: the claude
-    # program is neither on this runner nor ever run.
+    # program is neither on this runner nor ever run. The suite takes 17-19
+    # minutes on main with the camera specs (44-46), so the bound is 30, not
+    # 20: a bound the passing suite runs into cancels a green run (#1268).
+    # On GitHub-hosted runners (#1305): it moved to the self-hosted ones for
+    # speed only (#1288), and there it competed with check and with local
+    # work for one machine's CPU. check stays self-hosted for its build cache.
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
+    # Three jobs, each with its own conchd, fixture community and LiveKit, each
+    # running a third of the spec files one at a time (#1290, #1305): 250 tests
+    # took 17-19 minutes in one.
+    name: web-e2e (${{ matrix.shard }}/3)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      # Labels this shard's LiveKit container, so the clean-up step below
+      # removes only its own (web/e2e/voice-world.ts reads it).
+      VOICE_CHECK_RUN: ${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.shard }}
     steps:
       - uses: actions/checkout@v4
 
@@ -438,7 +823,7 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: web-e2e
-        run: make web-e2e
+        run: make web-e2e E2E_ARGS=--shard=${{ matrix.shard }}/3
 
       # The spec removes its own container on every path; this is for the case
       # where the runner killed it. Only the container of this run.
@@ -454,12 +839,14 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: web-e2e-test-results
+          name: web-e2e-test-results-${{ matrix.shard }}
           path: web/test-results
           retention-days: 7
           if-no-files-found: ignore
 
   voice-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The V3 exit program (issue #129, ADR-004): a real conchd, the real conch
     # CLI and a real LiveKit server in Docker, plus the proof that the core is
     # unaffected with LiveKit down or not configured. From V4 (issue #188) it
@@ -468,22 +855,50 @@ jobs:
     # main, like check. CI=true makes a skip a failure: if Docker, the LiveKit
     # image, lk or the Rust toolchain cannot be had, this job is red rather
     # than quietly green.
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # On GitHub-hosted runners (#1318), or on the self-hosted ones for this
+    # repository's own branches when the variable HEAVY_RUNNER is "local".
+    runs-on: ${{ vars.HEAVY_RUNNER == 'local' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","conch-4tb"]') || 'ubuntu-latest' }}
+    # About three times a warm run (5 to 9 minutes): room for a cold run
+    # whose packages come slowly (#1352), still well short of half an hour.
+    timeout-minutes: 25
     env:
       CI: "true"
       # Labels this run's LiveKit container, so the clean-up step below can
       # only ever remove its own.
       VOICE_CHECK_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+      # As the rust job builds (#1318), so its cache serves this job.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
+
+      # The voice build cache would fill the hosted runner's disk with the
+      # image's unused tool trees still on it (#1286, #1318), on the image
+      # that had about 14 GB free. As in the rust job, they go only when less
+      # than 30 GB is free: removing them takes 3½ minutes (#1352).
+      - name: free disk
+        if: runner.environment == 'github-hosted'
+        run: |
+          df -h /
+          avail=$(df --output=avail -BG / | tail -n1 | tr -dc 0-9)
+          if [ "$avail" -ge 30 ]; then echo "free disk: ${avail} GB free, nothing removed"; exit 0; fi
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker image prune -af >/dev/null 2>&1 || true
+          df -h /
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
-      # The same pinned toolchain and build directory as the check job, read
-      # from its caches and never written from here: check builds everything
+      - name: runner image
+        id: image
+        if: runner.environment == 'github-hosted'
+        run: |
+          echo "os=$ImageOS" >> "$GITHUB_OUTPUT"
+          echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      # The same pinned toolchain and build directory as the rust job, read
+      # from its caches and never written from here: rust builds everything
       # this job needs (cargo test builds the conch-voice binary), so with a
       # warm cache the program's own `cargo build` has nothing left to do.
       - name: rust toolchain cache
@@ -502,12 +917,25 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             voice/target
-          key: voice-build-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
+          key: voice-build-lt-${{ runner.os }}-${{ hashFiles('voice/Cargo.lock', 'voice/rust-toolchain.toml', 'scripts/voice-pins.sh') }}
           restore-keys: |
-            voice-build-${{ runner.os }}-
+            voice-build-lt-${{ runner.os }}-
+
+      # The same apt cache as the rust job's, which this job, unlike its two
+      # caches above, writes as well as reads: the jobs run side by side, and this is where a stalled
+      # mirror cost 13 minutes (#1352). Whichever finishes first saves it.
+      - name: rust system packages cache
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/conch-apt
+          key: voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-${{ steps.image.outputs.version }}
+          restore-keys: |
+            voice-apt-${{ runner.os }}-${{ hashFiles('scripts/ci-voice-apt.sh') }}-${{ steps.image.outputs.os }}-
 
       - name: rust system packages
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libglib2.0-dev libpipewire-0.3-dev libclang-dev pkg-config
+        if: runner.environment == 'github-hosted'
+        run: ./scripts/ci-voice-apt.sh ~/.cache/conch-apt
 
       - name: rust toolchain
         run: ./scripts/voice-toolchain.sh
@@ -522,6 +950,8 @@ jobs:
         run: docker ps -aq --filter "label=conch-voice-check=$VOICE_CHECK_RUN" | xargs -r docker rm -f
 
   isolation-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # The private alpha's cross-group check (issue #447): two groups on one
     # conchd, a route-table-driven matrix proving a member of one reaches
     # nothing of the other over REST, the sockets and LiveKit's media (the
@@ -531,6 +961,7 @@ jobs:
     # failure: without Docker, the image or lk this job is red, not quietly
     # green. A run takes well under a minute once the image and lk are
     # fetched; the timeout leaves room for a slow pull.
+    # On GitHub-hosted runners (#1318): it builds no Rust and needs no disk.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -553,3 +984,39 @@ jobs:
       - name: remove any leftover LiveKit container
         if: always()
         run: docker ps -aq --filter "label=conch-isolation-check=$ISOLATION_CHECK_RUN" | xargs -r docker rm -f
+
+  community-check:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    # The community model's newcomer scenario (issue #989, ADR-013): the owner
+    # makes a member link; alice opens the bare address, redeems it, reads
+    # #general's full history, finds #project once it is public, joins it and
+    # its voice; her voice is switched off and she is out of LiveKit's room
+    # within the design's bound, and on again she rejoins; the closed link no
+    # longer redeems; the server admits no guest. A real conchd and the pinned
+    # LiveKit (Docker) and lk; the API and media-control path only, not the
+    # browser. It runs on every pull request and every push to main, like
+    # check. CI=true makes a skip a failure: without Docker, the image or lk
+    # this job is red, not quietly green.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CI: "true"
+      # Labels this run's LiveKit container, so the clean-up step below can
+      # only ever remove its own.
+      COMMUNITY_CHECK_RUN: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: community-check
+        run: go run ./e2e/community
+
+      # The program removes its own container on every path; this is for the
+      # case where the runner killed it. Only the container of this run.
+      - name: remove any leftover LiveKit container
+        if: always()
+        run: docker ps -aq --filter "label=conch-community-check=$COMMUNITY_CHECK_RUN" | xargs -r docker rm -f

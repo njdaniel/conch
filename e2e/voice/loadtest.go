@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -14,19 +15,22 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/njdaniel/conch/e2e/internal/lkit"
+	"github.com/njdaniel/conch/internal/server/livekit"
+	"github.com/njdaniel/conch/internal/server/store"
 	"github.com/njdaniel/conch/pkg/schema"
 )
 
 // ---- the load test's Go half (issue #448)
 //
-// scripts/alpha-loadtest.sh measures one screen share watched by many viewers
-// on a deployment. `lk load-test` makes the viewers, but it signs each one's
+// scripts/alpha-loadtest.sh measures screen shares and claimed camera video
+// watched by many viewers on a deployment. `lk load-test` makes the participants, but it signs each one's
 // join token itself, from a LiveKit API key and secret, and has no option to
 // use a token it is given. Run that way the test would bypass conchd and need
 // the deployment's LiveKit secret on the load generator. So the script runs
@@ -54,20 +58,27 @@ const loadtestTokenEnv = "CONCH_LOADTEST_TOKEN" // #nosec G101 -- the name of a 
 // a real person's account however the prefix is mistyped.
 var loadtestPrefixRE = regexp.MustCompile(`^loadtest-[a-z0-9][a-z0-9-]{0,39}$`)
 
+// loadtestPublisherRE recognizes the sequence lk load-test gives publishers.
+var loadtestPublisherRE = regexp.MustCompile(`_pub_([0-9]+)$`)
+
 // maxLoadtestViewers bounds one run: one bulk hide's worth.
 const maxLoadtestViewers = schema.MaxHidePrincipals - 1
 
+// maxLoadtestCameraPublishers is the voice room's camera cap.
+const maxLoadtestCameraPublishers = 9
+
 // loadtestConfig is what the script passes the loadtest subcommand.
 type loadtestConfig struct {
-	server      string // conchd's base URL, without a trailing slash
-	channel     string
-	viewers     int
-	prefix      string
-	fakeSharer  bool
-	lkBin       string // the pinned lk, for the fake sharer
-	ready       string // file the relay's URL is written to once it is up
-	cleanupOnly bool
-	lifetime    time.Duration // how long the viewers' credentials live
+	server           string // conchd's base URL, without a trailing slash
+	channel          string
+	viewers          int
+	cameraPublishers int
+	prefix           string
+	fakeSharer       bool
+	lkBin            string // the pinned lk, for the fake sharer
+	ready            string // file the relay's URL is written to once it is up
+	cleanupOnly      bool
+	lifetime         time.Duration // how long the viewers' credentials live
 }
 
 // parseLoadtestFlags reads the loadtest subcommand's arguments.
@@ -78,6 +89,7 @@ func parseLoadtestFlags(args []string) (loadtestConfig, error) {
 	fs.StringVar(&c.server, "server", "", "conchd's base URL")
 	fs.StringVar(&c.channel, "channel", "", "the channel whose voice room is loaded")
 	fs.IntVar(&c.viewers, "viewers", 0, "how many principals to make for lk load-test's participants")
+	fs.IntVar(&c.cameraPublishers, "camera-publishers", 0, "how many of the first participants claim and publish a camera")
 	fs.StringVar(&c.prefix, "prefix", "", "the name prefix of every principal made (loadtest-...)")
 	fs.BoolVar(&c.fakeSharer, "fake-sharer", false, "also share lk's demo video as a screen, with sound")
 	fs.StringVar(&c.lkBin, "lk", "", "the pinned lk binary (for --fake-sharer)")
@@ -106,6 +118,9 @@ func parseLoadtestFlags(args []string) (loadtestConfig, error) {
 	}
 	if c.viewers < 1 || c.viewers > maxLoadtestViewers {
 		return c, fmt.Errorf("-viewers must be 1 to %d", maxLoadtestViewers)
+	}
+	if c.cameraPublishers < 0 || c.cameraPublishers > maxLoadtestCameraPublishers || c.cameraPublishers > c.viewers {
+		return c, fmt.Errorf("-camera-publishers must be 0 to %d and no larger than -viewers", maxLoadtestCameraPublishers)
 	}
 	if c.fakeSharer && c.lkBin == "" {
 		return c, errors.New("-fake-sharer needs -lk")
@@ -204,9 +219,13 @@ type loadtest struct {
 	cfg loadtestConfig
 	op  api
 
-	mu      sync.Mutex
-	viewers []*person          // in the order they were made
-	byLK    map[string]*person // lk's identity for a participant -> its principal
+	mu          sync.Mutex
+	viewers     []*person          // in the order they were made
+	byLK        map[string]*person // lk's identity for a participant -> its principal
+	cameraGates map[string]*trackFilter
+	runCtx      context.Context
+	cancel      context.CancelFunc
+	runErr      error
 
 	cleanupErr error
 }
@@ -216,6 +235,11 @@ type loadtest struct {
 // first principal is made, so it runs however far the run got.
 func (lt *loadtest) run(ctx context.Context) error {
 	h, cfg := lt.h, lt.cfg
+	runCtx, cancel := context.WithCancel(ctx)
+	lt.mu.Lock()
+	lt.runCtx, lt.cancel = runCtx, cancel
+	lt.mu.Unlock()
+	defer cancel()
 	// Hiding by prefix must select only what this run makes.
 	already, err := lt.matching()
 	if err != nil {
@@ -228,7 +252,7 @@ func (lt *loadtest) run(ctx context.Context) error {
 
 	expires := schema.NewTimestamp(time.Now().Add(cfg.lifetime))
 	for i := 1; i <= cfg.viewers; i++ {
-		if ctx.Err() != nil {
+		if runCtx.Err() != nil {
 			return errInterrupted
 		}
 		v, err := lt.newMember(fmt.Sprintf("%s-v%03d", cfg.prefix, i), expires)
@@ -251,11 +275,11 @@ func (lt *loadtest) run(ctx context.Context) error {
 		return err
 	}
 	if cfg.fakeSharer {
-		if err := lt.startSharer(ctx, upstream, secure, expires); err != nil {
+		if err := lt.startSharer(runCtx, upstream, secure, expires); err != nil {
 			return err
 		}
 	}
-	rl, err := lkit.ServeRelay(&lkit.Relay{Upstream: upstream, Secure: secure, Mint: lt.mint})
+	rl, err := lkit.ServeRelay(&lkit.Relay{Upstream: upstream, Secure: secure, Mint: lt.mint, FilterFor: lt.filterFor})
 	if err != nil {
 		return err
 	}
@@ -264,11 +288,185 @@ func (lt *loadtest) run(ctx context.Context) error {
 		return err
 	}
 	h.say("relay up at %s in front of LiveKit; each participant lk opens is admitted on a conchd token of its own", rl.URL())
-	<-ctx.Done()
+	<-runCtx.Done()
 	lt.mu.Lock()
 	used := len(lt.byLK)
+	runErr := lt.runErr
 	lt.mu.Unlock()
 	h.say("run over: %d of %d viewers connected through the relay", used, cfg.viewers)
+	return runErr
+}
+
+// cameraLoadtest is the end-to-end row for --camera-publishers: lk load-test
+// runs two camera publishers and one viewer for ten seconds against the pinned
+// LiveKit, through the same loadtest helper the script uses.
+func (l *live) cameraLoadtest(ctx context.Context) error {
+	h := l.h
+	d, err := h.startConchdEnv("camera-loadtest", settingsOf(l.srv), livekit.EnvRoomPrefix+"=conchload-")
+	if err != nil {
+		return err
+	}
+	defer d.stop()
+	channelID, err := d.createChannel("loadcams")
+	if err != nil {
+		return err
+	}
+	if err := enableCamera(d); err != nil {
+		return fmt.Errorf("turn use_camera on for the load test: %w", err)
+	}
+	dir, err := h.mkdir("camera-loadtest-")
+	if err != nil {
+		return err
+	}
+	ready := filepath.Join(dir, "ready")
+	lt := &loadtest{
+		h: h,
+		cfg: loadtestConfig{
+			server: d.baseURL, channel: "loadcams", viewers: 3, cameraPublishers: 2,
+			prefix: "loadtest-e2e-camera", ready: ready, lifetime: time.Hour,
+		},
+		op: d.operator, byLK: map[string]*person{},
+	}
+	runCtx, cancelRun := context.WithCancel(ctx)
+	runDone := make(chan struct{})
+	var runErr error
+	go func() {
+		runErr = lt.run(runCtx)
+		close(runDone)
+	}()
+	defer func() {
+		cancelRun()
+		<-runDone
+	}()
+
+	var relay string
+	if err := waitForOrFail("the camera load-test relay", 60*time.Second, func() (bool, string, error) {
+		select {
+		case <-runDone:
+			if runErr == nil {
+				return false, "", errors.New("the loadtest helper exited before starting its relay")
+			}
+			return false, "", runErr
+		default:
+		}
+		data, err := os.ReadFile(ready) // #nosec G304 -- a path under this harness's temp dir
+		if os.IsNotExist(err) {
+			return false, "no ready file yet", nil
+		}
+		if err != nil {
+			return false, "", err
+		}
+		relay = strings.TrimSpace(string(data))
+		return relay != "", "the ready file is empty", nil
+	}); err != nil {
+		return err
+	}
+	s, err := lt.session(lt.viewers[0])
+	if err != nil {
+		return err
+	}
+	room := s.Rooms[0].Room
+
+	cmdCtx, cancelLK := context.WithCancel(ctx)
+	cmd := lkit.GroupCommand(cmdCtx, l.lkBin,
+		"--url", relay, "--api-key", "relay-only-key", "--api-secret", "relay-only-secret-not-known-to-livekit-0000000000",
+		"load-test", "--room", "relay-placeholder-room", "--duration", "10s",
+		"--video-publishers", "2", "--audio-publishers", "0", "--subscribers", "1")
+	cmd.Dir = dir
+	cmd.Env = append(cleanEnv(), "HOME="+dir)
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	lkDone := make(chan struct{})
+	var lkErr error
+	go func() {
+		lkErr = cmd.Run()
+		close(lkDone)
+	}()
+	defer func() {
+		cancelLK()
+		<-lkDone
+	}()
+
+	subject := fmt.Sprintf("channel:%d", channelID)
+	if err := waitForOrFail("both claimed cameras to be published", 45*time.Second, func() (bool, string, error) {
+		select {
+		case <-lkDone:
+			detail := h.redact(strings.TrimSpace(output.String()))
+			if lkErr != nil {
+				return false, "", fmt.Errorf("lk load-test ended before both cameras published: %w: %s", lkErr, detail)
+			}
+			return false, "", errors.New("lk load-test ended before both cameras published: " + detail)
+		default:
+		}
+		lt.mu.Lock()
+		type assignment struct {
+			id string
+			p  *person
+		}
+		assigned := make([]assignment, 0, len(lt.byLK))
+		for id, p := range lt.byLK {
+			assigned = append(assigned, assignment{id: id, p: p})
+		}
+		lt.mu.Unlock()
+		if len(assigned) != 3 {
+			return false, fmt.Sprintf("%d of 3 participants connected", len(assigned)), nil
+		}
+		for _, a := range assigned {
+			ok, participant, saw := l.lkHas(room, a.p.id)
+			if !ok {
+				return false, saw, nil
+			}
+			_, camera := lkTrack(participant, "CAMERA", lkSourceCamera)
+			wantCamera := loadtestCameraPublisher(a.id, 2)
+			if wantCamera && !camera {
+				return false, fmt.Sprintf("%s has sources %v", a.p.name, participant.Sources()), nil
+			}
+			if !wantCamera && camera {
+				return false, "", fmt.Errorf("the viewer %s published a camera", a.p.name)
+			}
+		}
+		started, err := l.auditCountOn(d, store.AuditVoiceCameraStarted, subject, "")
+		if err != nil {
+			return false, "", err
+		}
+		return started == 2, fmt.Sprintf("%d voice_camera_started rows", started), nil
+	}); err != nil {
+		return err
+	}
+	select {
+	case <-lkDone:
+	case <-time.After(30 * time.Second):
+		return errors.New("the ten-second lk load-test did not finish within 30 s of publishing")
+	}
+	if lkErr != nil {
+		return fmt.Errorf("lk load-test: %w: %s", lkErr, h.redact(strings.TrimSpace(output.String())))
+	}
+	cancelRun()
+	<-runDone
+	if runErr != nil {
+		return fmt.Errorf("loadtest helper: %w", runErr)
+	}
+	if err := lt.hideAll(); err != nil {
+		return err
+	}
+	if err := waitFor("both camera claims to end with the hidden principals", 30*time.Second, func() (bool, string) {
+		stopped, err := l.auditCountOn(d, store.AuditVoiceCameraStopped, subject, "")
+		if err != nil {
+			return false, err.Error()
+		}
+		return stopped == 2, fmt.Sprintf("%d voice_camera_stopped rows", stopped)
+	}); err != nil {
+		return err
+	}
+	if unclaimed, err := l.auditCountOn(d, store.AuditVoiceCameraUnclaimed, subject, ""); err != nil {
+		return err
+	} else if unclaimed != 0 {
+		return fmt.Errorf("%d voice_camera_unclaimed rows, want none", unclaimed)
+	}
+	if err := d.scanAudit("camera load test"); err != nil {
+		return err
+	}
+	h.say("ok   camera load test: 2 camera publishers and 1 viewer for 10 s; both cameras claimed and published, no voice_camera_unclaimed, all 3 principals hidden and both claims stopped")
 	return nil
 }
 
@@ -334,8 +532,89 @@ func (lt *loadtest) mint(_ context.Context, lkToken string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	lt.prepareCamera(id, v)
 	// The channel's room is the whole channel's (V3): the only grant.
 	return s.Rooms[0].Token, nil
+}
+
+// loadtestCameraPublisher reports whether id is one of lk's first count video
+// publishers, independently of the order in which connections finish joining.
+func loadtestCameraPublisher(id string, count int) bool {
+	match := loadtestPublisherRE.FindStringSubmatch(id)
+	if match == nil {
+		return false
+	}
+	sequence, err := strconv.Atoi(match[1])
+	return err == nil && sequence < count
+}
+
+// prepareCamera gives each camera publisher its own source filter and gate.
+// The claim runs after lk has joined and tried to publish, because mint cannot
+// wait for that without deadlocking the join.
+func (lt *loadtest) prepareCamera(id string, p *person) {
+	lt.mu.Lock()
+	if _, ok := lt.cameraGates[id]; ok {
+		lt.mu.Unlock()
+		return
+	}
+	if !loadtestCameraPublisher(id, lt.cfg.cameraPublishers) {
+		lt.mu.Unlock()
+		return
+	}
+	gate := newTrackFilter(true, sources(map[string]uint64{"video": lkSourceCamera, "video-simulcast": lkSourceCamera}))
+	if lt.cameraGates == nil {
+		lt.cameraGates = map[string]*trackFilter{}
+	}
+	lt.cameraGates[id] = gate
+	ctx := lt.runCtx
+	lt.mu.Unlock()
+	go func() {
+		if err := lt.claimCameraWhenHeld(ctx, p, gate); err != nil && ctx.Err() == nil {
+			lt.cameraFailed(err)
+		}
+	}()
+}
+
+// filterFor selects the gate belonging to this connection's lk participant.
+// Other participants' frames pass unchanged.
+func (lt *loadtest) filterFor(lkToken string) func(context.Context, []byte) []byte {
+	id, err := lkIdentity(lkToken)
+	if err != nil {
+		return nil
+	}
+	lt.mu.Lock()
+	defer lt.mu.Unlock()
+	if gate := lt.cameraGates[id]; gate != nil {
+		return gate.Filter
+	}
+	return nil
+}
+
+// claimCameraWhenHeld implements the publisher order: the rewritten camera is
+// waiting at the relay gate, its principal claims it, then the gate opens.
+func (lt *loadtest) claimCameraWhenHeld(ctx context.Context, p *person, gate *trackFilter) error {
+	select {
+	case <-gate.Held():
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if _, err := mustCamera(p, lt.cfg.channel, ""); err != nil {
+		return err
+	}
+	gate.Release()
+	return nil
+}
+
+func (lt *loadtest) cameraFailed(err error) {
+	lt.mu.Lock()
+	if lt.runErr == nil {
+		lt.runErr = err
+	}
+	cancel := lt.cancel
+	lt.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // assign returns the viewer for lk's participant id, choosing the next unused

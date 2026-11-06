@@ -16,10 +16,12 @@
 import { useCallback, useEffect, useId, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { waitWords } from './Invite';
+import { platform } from './platform';
 import { revealLimits, sharingLine, useTabSharing } from './Reveal';
 import { deviceLink } from './route';
 import type { SignInLinkV1 } from './schema/signin';
 import { insecureLine } from './transport';
+import { timeOf } from './time';
 
 type Line = { readonly text: string; readonly refused: boolean };
 
@@ -40,7 +42,7 @@ function makeLine(result: { readonly failure: api.ApiFailure; readonly code?: st
   }
 }
 
-const clock = (at: string) => new Date(at).toLocaleTimeString();
+const clock = (at: string) => timeOf(at);
 
 // insecure is a page served over plain HTTP beyond this machine (#713's
 // rule): no link is made there, since making one asks for the password.
@@ -114,7 +116,7 @@ export function AddDevice({ origin, insecure, onUnauthorized }: { readonly origi
     const link = address.current;
     if (link === null) return;
     try {
-      void navigator.clipboard.writeText(link).then(
+      void platform.services.copyText(link).then(
         () => {
           setCopied('yes');
         },

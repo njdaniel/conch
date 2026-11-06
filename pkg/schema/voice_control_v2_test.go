@@ -154,12 +154,26 @@ func (e VoiceControlEventV2) kind() VoiceControlEventKind {
 	return e.Unknown
 }
 
+// voiceControlV2CaseFiles are the conformance documents of the v2 readers,
+// read as one, for the reason voiceControlCaseFiles gives.
+var voiceControlV2CaseFiles = []string{"cases.json", "cases-strings.json"}
+
 func loadVoiceControlV2Cases(t *testing.T) []voiceControlCase {
+	t.Helper()
+	var cases []voiceControlCase
+	for _, file := range voiceControlV2CaseFiles {
+		cases = append(cases, loadVoiceControlV2CasesFrom(t, file)...)
+	}
+	return cases
+}
+
+// loadVoiceControlV2CasesFrom reads the cases of one document.
+func loadVoiceControlV2CasesFrom(t *testing.T, file string) []voiceControlCase {
 	t.Helper()
 	var doc struct {
 		Cases []voiceControlCase `json:"cases"`
 	}
-	if err := json.Unmarshal(readVoiceControlV2Fixture(t, "cases.json"), &doc); err != nil {
+	if err := json.Unmarshal(readVoiceControlV2Fixture(t, file), &doc); err != nil {
 		t.Fatal(err)
 	}
 	if len(doc.Cases) == 0 {
@@ -739,7 +753,10 @@ func checkVoiceControlV2Effect(t *testing.T, step int, p pendingCommandV2, state
 // TestVoiceControlV2FixturesAreAllClaimed fails on a file in the v2 fixture
 // directory that no test reads.
 func TestVoiceControlV2FixturesAreAllClaimed(t *testing.T) {
-	claimed := map[string]bool{"cases.json": true, "sensitive.json": true}
+	claimed := map[string]bool{"sensitive.json": true}
+	for _, file := range voiceControlV2CaseFiles {
+		claimed[file] = true
+	}
 	for _, g := range voiceControlV2Golden {
 		claimed[g.file] = true
 	}
@@ -840,8 +857,8 @@ func TestVoiceControlV2CarriesNoSecrets(t *testing.T) {
 			continue
 		}
 		data := readVoiceControlV2Fixture(t, name)
-		if name == "cases.json" {
-			for _, c := range loadVoiceControlV2Cases(t) {
+		if slices.Contains(voiceControlV2CaseFiles, name) {
+			for _, c := range loadVoiceControlV2CasesFrom(t, name) {
 				if c.Name == exempt {
 					continue
 				}

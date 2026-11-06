@@ -15,7 +15,7 @@
 // authenticator are recovered only on the server's host.
 import { useEffect, useId, useRef, useState, type ReactNode, type RefObject, type SyntheticEvent } from 'react';
 import * as api from './api';
-import { minPassword, passwordProblem } from './CreateAccount';
+import { passwordProblem } from './CreateAccount';
 import { serverLine, waitWords } from './Invite';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { typedCode } from './SignIn';
@@ -36,7 +36,7 @@ function passwordRefusal(result: { readonly failure: api.ApiFailure; readonly co
     case 'auth_failed':
       return wrong;
     case 'password_unacceptable':
-      return 'That password is too common, or has your name in it. Choose another.';
+      return 'That password is too common, a repeated pattern such as aaaa, blank, or has your name in it. Choose another.';
     case 'invalid_request':
       return serverLine(result.message, 'The server did not take that password.');
     case 'rate_limited':
@@ -64,7 +64,7 @@ export function NewPassword({
     <>
       <label htmlFor={`${id}-new`}>{label}</label>
       <p id={`${id}-help`} className="hint">
-        At least {minPassword} characters; a few words with spaces between them work well.
+        A few words with spaces between them work well.
       </p>
       <input id={`${id}-new`} ref={chosen} type="password" autoComplete="new-password" aria-describedby={`${id}-help`} />
       <label htmlFor={`${id}-again`}>Type it again</label>
@@ -100,6 +100,10 @@ export function PasswordSettings({
   const chosen = useRef<HTMLInputElement>(null);
   const again = useRef<HTMLInputElement>(null);
   const operator = who.role === 'operator';
+  // An operator is asked for a code only with an authenticator enrolled
+  // (ADR-012); one without, on a server that allows it, sends the password
+  // alone.
+  const coded = operator && who.auth?.totp_enrolled === true;
   const hasPassword = who.auth?.password_set === true;
 
   // Closing the section forgets whatever was typed in it.
@@ -144,7 +148,7 @@ export function PasswordSettings({
       return;
     }
     let code: string | undefined;
-    if (operator) {
+    if (coded) {
       const typed = typedCode(codeField.current?.value ?? '');
       if (typed === null) {
         setLine({ text: `Type the ${String(api.codeDigits)} digits your authenticator app shows.`, refused: true });
@@ -161,7 +165,7 @@ export function PasswordSettings({
       settle(
         result,
         'Your password is changed. Every other sign-in of yours has ended; this one goes on.',
-        operator ? 'The current password or the code is not right.' : 'The current password is not right.',
+        coded ? 'The current password or the code is not right.' : 'The current password is not right.',
       );
     });
   }
@@ -186,6 +190,14 @@ export function PasswordSettings({
         setLine({ text: 'That enrollment code does not work. Each works once, for a short time: ask an operator for a new one.', refused: true });
         return;
       }
+      if (!result.ok && result.failure !== 'unkept' && result.failure !== 'network' && result.code === 'enrollment_proof_required') {
+        // Not a recent-proof question: there is no password to prove. The
+        // code field is what is missing (issue #815).
+        setBusy(false);
+        setLine({ text: 'Setting a first password needs the enrollment code an operator gave you. Paste it above.', refused: true });
+        proofField.current?.focus();
+        return;
+      }
       settle(result, 'Your password is set. From now on you sign in with your name and this password.', 'The server refused.');
     });
   }
@@ -198,7 +210,7 @@ export function PasswordSettings({
       <form aria-label="Change your password" onSubmit={change}>
         <label htmlFor={`${id}-current`}>Current password</label>
         <input id={`${id}-current`} ref={currentField} type="password" autoComplete="current-password" />
-        {operator ? (
+        {coded ? (
           <>
             <label htmlFor={`${id}-code`}>Code from your authenticator app</label>
             <input

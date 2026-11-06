@@ -327,6 +327,9 @@ label {
   grid-template-rows: auto minmax(0, 1fr) auto;
   height: 100vh;
   height: 100dvh;
+  /* viewport-fit=cover draws the page under a notch and the home indicator:
+     pad for them at every width (zero where there are none, issue #929). */
+  padding-inline: env(safe-area-inset-left) env(safe-area-inset-right);
 }
 
 .topbar {
@@ -427,6 +430,41 @@ label {
   flex: none;
 }
 
+.notification-center {
+  position: relative;
+}
+
+.notification-panel {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + var(--s2));
+  right: 0;
+  width: min(24rem, calc(100vw - 2rem));
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.notification-panel ul {
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.notification-panel li button {
+  display: grid;
+  width: 100%;
+  gap: var(--s1);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
 .areas {
   display: grid;
   grid-template-columns: 15rem minmax(0, 1fr) 17rem;
@@ -484,25 +522,29 @@ label {
 
 .channel-list {
   display: grid;
+  /* A row is never wider than the column: its name is cut instead. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 2px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-.channel-list li {
+.channel-list > li {
   display: flex;
   align-items: center;
   gap: var(--s1);
 }
 
-.channel-list button {
-  flex: 1;
+.channel-list > li > button {
+  /* The name takes what the badges and the ⋯ leave, on one line, and is cut
+     with an ellipsis when that is too little (the whole name is the button's
+     name and its title), so a row stays one line however narrow the column. */
+  flex: 1 1 0;
   min-width: 0;
   justify-content: flex-start;
   padding: 0.4rem 0.6rem;
   text-align: left;
-  overflow-wrap: anywhere;
   color: var(--muted);
   font-size: 0.95rem;
   background: transparent;
@@ -511,19 +553,26 @@ label {
   border-radius: var(--radius-sm);
 }
 
+.channel-list .channel-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* The # is not part of the button's name ('#' / '' gives it no alt text). */
-.channel-list button::before {
+.channel-list > li > button::before {
   content: '#';
   content: '#' / '';
   margin-right: 0.15rem;
 }
 
-.channel-list button:hover:not(:disabled) {
+.channel-list > li > button:hover:not(:disabled) {
   color: var(--text);
   background: var(--raised);
 }
 
-.channel-list button[aria-current='true'] {
+.channel-list > li > button[aria-current='true'] {
   color: var(--text);
   font-weight: 600;
   background: var(--accent-bg);
@@ -557,6 +606,90 @@ label {
 .channel-list .in-voice .icon {
   width: 0.85rem;
   height: 0.85rem;
+}
+
+/* Who is in a channel's voice (issue #1103): a list of its own under the
+   row, on a line of its own, one person a row, indented under the channel's
+   name and quieter than it. A row opens the channel, as the row above does;
+   nothing here joins. */
+.channel-list .in-voice-people {
+  flex: 1 0 100%;
+  display: flex;
+  flex-direction: column;
+  margin: 0 0 var(--s1);
+  padding: 0 0 0 1.35rem;
+  list-style: none;
+}
+
+.channel-list .in-voice-people > li {
+  display: block;
+}
+
+.channel-list .in-voice-people button {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  width: 100%;
+  min-height: 1.6rem;
+  padding: 0 0.6rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+}
+
+/* A small dot before each person, the speaker's colour. */
+.channel-list .in-voice-people button::before {
+  content: '';
+  flex: none;
+  width: 0.4rem;
+  height: 0.4rem;
+  background: var(--accent);
+  border-radius: 50%;
+}
+
+.channel-list .in-voice-people .more button {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.channel-list .in-voice-people .more button::before {
+  background: transparent;
+}
+
+.channel-list .in-voice-people button:hover {
+  color: var(--text);
+  background: var(--raised);
+}
+
+/* A row's ⋯ menu (issue #1135): after the badges, in the row's line, not
+   floated over the row as on a message. The menu drops from it. The rename
+   form takes a line of its own under the row. */
+.channel-list > li {
+  flex-wrap: wrap;
+}
+
+/* Tighter than a message's, in the narrow channel column; a phone keeps its
+   44 px target. */
+@media (min-width: 700px) {
+  .channel-list .more-actions {
+    min-width: 1.75rem;
+    padding: 0 var(--s1);
+  }
+}
+
+.channel-list .message-menu {
+  position: relative;
+  top: auto;
+  right: auto;
+  flex: none;
+}
+
+.channel-list .rename-channel {
+  flex: 1 0 100%;
+  margin-top: 0;
 }
 
 .centre {
@@ -597,6 +730,9 @@ label {
   max-height: 50vh;
   overflow-y: auto;
   padding: var(--s2) var(--s4);
+  /* The bottom row clears the home indicator (the phone layout's navigation
+     is the bottom row there, and pads for it). */
+  padding-bottom: calc(var(--s2) + env(safe-area-inset-bottom));
   background: var(--surface);
   border-top: 1px solid var(--border);
 }
@@ -783,7 +919,7 @@ label {
   margin: 0 0 var(--s2);
 }
 
-/* Settings → Password, Add a device, and Joining and guests (issue #714):
+/* Settings → Password, Add a device, and Joining (issue #714):
    each opens in place, its forms one field under another, and wraps rather
    than widening the drawer. */
 .password-settings,
@@ -936,6 +1072,26 @@ label {
   width: 100%;
 }
 
+.report-summary {
+  margin: 0;
+}
+
+.report-summary dt {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.report-summary dd {
+  margin: 0 0 var(--s2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.report-technical > summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
 .report-preview {
   max-height: 40vh;
   overflow: auto;
@@ -983,6 +1139,142 @@ label {
   font-size: 1.3rem;
 }
 
+.conv-head > button {
+  margin-left: auto;
+  flex: none;
+}
+
+.search-panel,
+.search-results-view,
+.search-context {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.search-results-view[hidden] {
+  display: none;
+}
+
+.search-form {
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s3) var(--s4);
+}
+
+.search-query {
+  display: flex;
+  gap: var(--s2);
+}
+
+.search-query input {
+  flex: 1;
+  min-width: 0;
+}
+
+.search-results {
+  min-height: 4rem;
+}
+
+.search-open {
+  grid-column: 2;
+  justify-self: start;
+  padding: 0;
+  color: var(--accent);
+  font-size: var(--small);
+  background: transparent;
+  border: 0;
+}
+
+.message-action {
+  grid-column: 2;
+  justify-self: start;
+  min-height: 2.75rem;
+  padding: 0.35rem 0;
+  color: var(--accent);
+  font-size: var(--small);
+  text-align: left;
+  background: transparent;
+  border: 0;
+}
+
+.message > button.message-action {
+  /* The same size as every other phone control: the class above is beaten by
+     `.message > :not(.avatar)`, which resets min-width and comes later. */
+  min-width: 2.75rem;
+}
+
+.reply-context {
+  grid-column: 2;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-view {
+  grid-column: 1 / -1;
+  margin: var(--s2) 0 var(--s3) 2.25rem;
+  padding: var(--s2) var(--s3);
+  min-width: 0;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.thread-head,
+.reply-box {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.thread-head {
+  justify-content: space-between;
+}
+
+.thread-head h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.reply-composer {
+  display: grid;
+  /* The column may be narrower than the textarea's own width. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+
+.reply-box textarea {
+  flex: 1;
+  min-width: 0;
+}
+
+/* On a narrow phone the box is full width and Send reply wraps under it. */
+@media (max-width: 400px) {
+  .reply-box {
+    flex-wrap: wrap;
+  }
+
+  .reply-box textarea {
+    flex-basis: 100%;
+  }
+}
+
+.search-context > button,
+.search-context > h3 {
+  margin: var(--s3) var(--s4) 0;
+}
+
+.search-context > button {
+  align-self: flex-start;
+}
+
 .log-wrap {
   position: relative;
   display: flex;
@@ -1027,6 +1319,13 @@ label {
 .message:hover,
 .message:focus {
   background: var(--raised);
+}
+
+/* The message the arrow keys are on (issue #1040): marked beyond the
+   background, which a hover shares. */
+.messages > .message:focus-visible {
+  outline: 2px solid var(--focus, currentColor);
+  outline-offset: -2px;
 }
 
 .message > .avatar {
@@ -1100,6 +1399,100 @@ label {
   overflow-wrap: anywhere;
 }
 
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s3);
+  margin-top: var(--s2);
+  white-space: normal;
+}
+
+.attachment {
+  display: grid;
+  justify-items: start;
+  gap: var(--s1);
+  max-width: 100%;
+  margin: 0;
+}
+
+.attachment-thumbnail {
+  display: block;
+  max-width: min(20rem, 100%);
+  padding: 0;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.attachment-thumbnail img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(20rem, 75vw);
+  max-height: 16rem;
+  object-fit: contain;
+}
+
+.attachment-filename {
+  max-width: 20rem;
+  overflow-wrap: anywhere;
+  font-size: var(--small);
+}
+
+.attachment-note,
+.attachment-download-error {
+  max-width: 20rem;
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.attachment-download-error {
+  color: var(--danger);
+}
+
+.attachment-dialog-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: var(--s4);
+}
+
+.attachment-dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 0.75);
+}
+
+.attachment-dialog {
+  position: relative;
+  display: grid;
+  gap: var(--s3);
+  max-width: 95vw;
+  max-height: 95vh;
+  padding: var(--s4);
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.attachment-dialog h2 {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 1.1rem;
+}
+
+.attachment-enlarged {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 90vw;
+  max-height: 75vh;
+  object-fit: contain;
+}
+
 .state {
   color: var(--muted);
   font-size: var(--small);
@@ -1121,6 +1514,228 @@ label {
   display: flex;
   gap: var(--s2);
   margin: var(--s1) 0;
+}
+
+/* A message's actions menu (issue #845, docs/design/message-editing.md §13):
+   the ⋯ button at the message's top right, and the menu under it. With a
+   mouse it shows on hover and on focus within the message; on a touch screen
+   and on a phone it is always there. */
+.message.has-actions {
+  position: relative;
+  padding-right: 2.75rem;
+}
+
+.message-menu {
+  position: absolute;
+  top: 0.15rem;
+  right: var(--s1);
+}
+
+.more-actions {
+  min-width: 2.25rem;
+  padding: 0 var(--s2);
+  color: var(--muted);
+  background: transparent;
+  border-color: transparent;
+}
+
+@media (hover: hover) and (min-width: 700px) {
+  .message .more-actions {
+    opacity: 0;
+  }
+
+  .message:hover .more-actions,
+  .message:focus-within .more-actions,
+  .more-actions[aria-expanded='true'] {
+    opacity: 1;
+  }
+}
+
+.actions-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 10;
+  display: grid;
+  min-width: 9rem;
+  padding: var(--s1);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+}
+
+.actions-menu [role='menuitem'] {
+  justify-content: flex-start;
+  background: transparent;
+  border-color: transparent;
+}
+
+.actions-menu [role='menuitem'][aria-disabled='true'] {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.actions-menu [role='menuitem']:focus-visible,
+.actions-menu [role='menuitem']:hover {
+  background: var(--hover);
+}
+
+/* The inline editor, in place of the text. */
+.message-editor {
+  display: grid;
+  gap: var(--s1);
+  margin: var(--s1) 0;
+  white-space: normal;
+}
+
+.message-editor textarea {
+  width: 100%;
+  resize: vertical;
+  background: var(--bg);
+}
+
+.message-editor .hint {
+  margin: 0;
+}
+
+.editor-actions,
+.edit-discard {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.edit-discard p {
+  margin: 0;
+}
+
+.edit-error,
+.edit-notice {
+  margin: 0;
+  color: var(--danger);
+  font-size: var(--small);
+}
+
+/* "(edited)", muted, after the text; for the author a button that opens
+   Earlier versions. */
+.edited-marker,
+.edited {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.messages button.edited-marker {
+  display: inline;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+.messages button.edited-marker:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text);
+}
+
+.versions-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: var(--s4);
+  white-space: normal;
+}
+
+.versions-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 0.75);
+}
+
+.versions-dialog {
+  position: relative;
+  display: grid;
+  gap: var(--s3);
+  box-sizing: border-box;
+  width: min(36rem, 100%);
+  max-height: 85vh;
+  padding: var(--s4);
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.versions-dialog h2,
+.versions-dialog .hint {
+  margin: 0;
+}
+
+.versions {
+  display: grid;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Scoped to the list: the server-version badge is also a .version, and must
+   stay plain text in the card's flow, not take this box (F19). */
+.versions > .version {
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.versions > .version.current {
+  border-color: var(--accent);
+}
+
+.version-head {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.version-current {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.version-body {
+  margin: var(--s1) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A phone (below 700 px): no hover, so the ⋯ is always shown, a 44 px
+   square; the editor's buttons are 44 px; Earlier versions is a full-width
+   sheet from the bottom. */
+@media (max-width: 699px) {
+  .more-actions,
+  .actions-menu [role='menuitem'],
+  .editor-actions button,
+  .edit-discard button {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+
+  .versions-layer {
+    place-items: end stretch;
+    padding: 0;
+  }
+
+  .versions-dialog {
+    width: 100%;
+    max-height: 90vh;
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
 }
 
 .approval-card {
@@ -1146,8 +1761,73 @@ label {
   box-shadow: var(--shadow);
 }
 
+.image-file-input {
+  display: none;
+}
+
+.draft-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.draft-attachment {
+  display: grid;
+  grid-template-columns: 4rem minmax(5rem, 1fr);
+  gap: var(--s1) var(--s2);
+  align-items: center;
+  max-width: 100%;
+  padding: var(--s2);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.draft-attachment img,
+.draft-image-fallback {
+  grid-row: 1 / span 3;
+  width: 4rem;
+  height: 4rem;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+}
+
+.draft-image-fallback {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: var(--surface);
+  font-size: var(--small);
+}
+
+.draft-attachment-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.draft-attachment progress {
+  width: 7rem;
+  height: 0.65rem;
+}
+
+.draft-attachment-error {
+  max-width: 18rem;
+  color: var(--danger);
+  font-size: var(--small);
+}
+
+.attach-image {
+  align-self: center;
+  white-space: nowrap;
+}
+
 .composer {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.35rem;
   padding: var(--s2) var(--s4) var(--s3);
 }
@@ -1228,6 +1908,79 @@ label {
   white-space: nowrap;
 }
 
+/* The emoji picker and the `:short` suggestions (issue #763). Eight columns at
+   every width: a 320 px phone has room (8 x 2.25 rem), and the arrow keys move
+   by that many. */
+.emoji-picker {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+  padding: var(--s2);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.emoji-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.emoji-controls input[type='search'] {
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+
+.emoji-controls select {
+  flex: 1 1 6rem;
+  min-width: 0;
+}
+
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 2px;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
+.emoji-cell {
+  min-width: 0;
+  min-height: 2.25rem;
+  padding: 0;
+  font-size: 1.35rem;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+}
+
+.emoji-cell:hover,
+.emoji-cell:focus-visible {
+  background: var(--border);
+}
+
+.emoji-suggestions {
+  margin: 0;
+  padding: var(--s1);
+  list-style: none;
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.emoji-suggestions li {
+  padding: 0.25rem var(--s2);
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.emoji-suggestions li[aria-selected='true'] {
+  background: var(--border);
+}
+
 /* ---------------------------------------------------------------- members */
 
 .ag-panel ul {
@@ -1302,6 +2055,52 @@ label {
 .ag-sessions,
 .ag-runs {
   padding-left: var(--s4);
+}
+
+.member-admin,
+.member-admin form {
+  display: grid;
+  gap: var(--s2);
+}
+
+.member-admin {
+  margin-bottom: var(--s4);
+}
+
+/* A member row: the ⋯ button sits at the row's right edge, as on a message;
+   a refusal line takes the row's width under the name. */
+.member-row {
+  position: relative;
+}
+
+.member-row.has-actions {
+  padding-right: 2.75rem;
+}
+
+.member-row .message-menu {
+  top: 0;
+}
+
+/* The question removal asks (issue #1083): under the name, the row's width,
+   buttons a finger can hit. */
+.member-confirm {
+  flex-basis: 100%;
+  min-width: 0;
+}
+
+.member-confirm p {
+  margin: var(--s1) 0 var(--s2);
+  font-size: var(--small);
+  overflow-wrap: anywhere;
+}
+
+.member-confirm button {
+  min-height: 2.75rem;
+}
+
+.member-line {
+  flex-basis: 100%;
+  font-size: 0.75rem;
 }
 
 .ag-badge {
@@ -1509,9 +2308,12 @@ label {
   color: var(--accent);
 }
 
+/* A button with its border and fill, as the strip's others have, not the
+   quiet kind that reads as text (N08). */
 .voice-elsewhere button {
   padding-block: 0.2rem;
   font-size: var(--small);
+  border-color: var(--border-strong);
 }
 
 /* Who is in voice: how many, then every chip, wrapping onto more lines
@@ -1613,7 +2415,8 @@ label {
   font-size: 0.875rem;
 }
 
-.voice .sharing {
+.voice .sharing,
+.voice .mode-toggle[aria-pressed='true'] {
   background: var(--accent-bg);
   border-color: var(--accent);
   color: var(--accent);
@@ -1834,6 +2637,310 @@ label {
   padding-top: var(--s2);
 }
 
+/* The call view (ADR-015, design §7.4, §7.7): on the stage, under its height
+   rule, with a watched share inside it when both are open. Its title and
+   controls keep their height, and stay in view while the pictures scroll
+   under them. Tiles keep 16:9, and a picture is contained, never cropped.
+   The grid's columns and rows are gridOf's, as classes. */
+.call-view {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  gap: var(--s2);
+  min-height: 0;
+  /* What does not fit scrolls inside the view, under its head, and never
+     spills past its border. */
+  overflow-y: auto;
+  padding: 0 var(--s2) var(--s2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.call-view > * {
+  flex-shrink: 0;
+}
+
+/* While the call view is closed the share is drawn alone, as before: the
+   wrappers that hold its place take no part in the layout, and say nothing
+   (role none). */
+.call-stage,
+.call-pass,
+.call-pass > li {
+  display: contents;
+}
+
+/* Every control in the view is 44px each way at least (§7.7), the share's
+   volume slider included: its track is drawn in the middle of the box. */
+.call-view button,
+.call-view input,
+.call-view select {
+  min-width: 2.75rem;
+  min-height: 2.75rem;
+}
+
+.call-view p {
+  margin: 0;
+}
+
+.call-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  padding-top: var(--s2);
+  background: var(--surface);
+}
+
+.call-state {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.call-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  font-weight: 600;
+}
+
+.call-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.call-grid {
+  display: grid;
+  gap: var(--s2);
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.call-grid.cols-1 {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.call-grid.cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.call-grid.cols-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.call-grid.cols-1.rows-1 {
+  max-width: calc(40vh * 16 / 9);
+}
+
+.call-tile {
+  min-width: 0;
+}
+
+/* Enlarged, or beside a watched share (§7.4): one picture in the main area
+   and the rest in a strip, below it under 1100px and on its right from
+   1100px. A tile in the strip is still drawn, at a small size, so that the
+   picture received for it is a small one and never none (§7.3). Nothing in
+   the DOM moves: only the classes change. */
+.call-grid.focus {
+  grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
+}
+
+.call-grid.focus > .main {
+  grid-row: 1;
+  grid-column: 1 / -1;
+}
+
+/* Below the main picture the strip shares the view's height with it: the
+   main picture gives way, so that some of the strip is in view. */
+@media (max-width: 1099px) {
+  .call-grid.focus > .main .call-frame,
+  .call-grid.focus > .main .share-frame video {
+    max-height: 30vh;
+  }
+}
+
+@media (min-width: 1100px) {
+  .call-grid.focus {
+    grid-template-columns: minmax(0, 1fr) minmax(9rem, 14rem);
+    /* The strip's rows take what their tiles need, and the main picture's
+       height goes to the last row alone, so the strip is never spread out. */
+    grid-template-rows: repeat(9, max-content) minmax(0, 1fr);
+    row-gap: 0;
+  }
+
+  .call-grid.focus > .main {
+    grid-row: 1 / -1;
+    grid-column: 1;
+  }
+
+  .call-grid.focus > .in-strip {
+    grid-column: 2;
+    margin-bottom: var(--s2);
+  }
+}
+
+.call-tile-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  padding-top: var(--s2);
+}
+
+/* The share inside the call view: the view has the border. */
+.call-share .share-view {
+  padding: 0;
+  background: none;
+  border: 0;
+}
+
+/* In the strip its controls are still all there, their names only read out
+   beside an icon. */
+.call-share.in-strip .share-controls .label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.call-share.in-strip .volume input {
+  width: 100%;
+}
+
+.call-frame {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  max-height: 40vh;
+  margin: 0;
+  background: #000000;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.call-frame video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.call-frame:fullscreen {
+  max-height: none;
+  border-radius: 0;
+}
+
+/* The speaking person's tile: a ring, and the word (never colour alone). The
+   ring is a shadow outside the frame, so the focus outline shows with it. */
+.call-tile.speaking .call-frame {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 5px var(--accent);
+}
+
+.call-speaking {
+  position: absolute;
+  inset: var(--s1) var(--s1) auto auto;
+  padding: 0 var(--s2);
+  background: var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--on-accent);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+/* "Enlarge {name}'s video": the whole tile, over the picture, which keeps
+   its own label. */
+.call-view .call-enlarge {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: inherit;
+  cursor: zoom-in;
+}
+
+.call-view .call-enlarge:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.call-enlarge:focus-visible,
+.call-frame[tabindex='-1']:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: -3px;
+}
+
+/* The person's own picture, mirrored as a mirror shows them. */
+.mirrored {
+  transform: scaleX(-1);
+}
+
+.call-off {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  height: 100%;
+  color: #dddddd;
+}
+
+.call-name {
+  position: absolute;
+  inset: auto auto var(--s1) var(--s1);
+  padding: 0 var(--s2);
+  background: rgb(0 0 0 / 0.6);
+  border-radius: var(--radius-sm);
+  color: #ffffff;
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.call-waiting {
+  position: absolute;
+  inset: 0 0 auto;
+  padding: 0.4rem;
+  color: #dddddd;
+}
+
+.video-sending {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.camera-test {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+
+.camera-preview {
+  margin: 0;
+}
+
+.camera-preview video {
+  display: block;
+  width: min(100%, 20rem);
+  aspect-ratio: 16 / 9;
+  background: #000000;
+  border-radius: var(--radius-sm);
+  object-fit: contain;
+}
+
+.camera-preview figcaption {
+  font-size: var(--small);
+  color: var(--muted);
+}
+
 .volume {
   display: inline-flex;
   align-items: center;
@@ -1895,9 +3002,19 @@ label {
   font-size: 1.1rem;
 }
 
-.signin .credential-signin {
+.signin .operator-signin {
+  margin-top: var(--s5);
   padding-top: var(--s4);
   border-top: 1px solid var(--border);
+}
+
+.signin .operator-signin > summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.signin .credential-signin {
+  margin-top: var(--s3);
 }
 
 .signin .server-name {
@@ -2051,6 +3168,29 @@ button.link {
   font-weight: 600;
 }
 
+/* A link's buttons and the people who joined through it (issue #990): they
+   wrap, so the panel fits a phone. */
+.invite-list .actions {
+  flex-wrap: wrap;
+  margin-top: var(--s1);
+}
+
+.invite-joiners {
+  margin: var(--s1) 0 0;
+  padding-left: var(--s4);
+}
+
+.invite-ask {
+  margin-top: var(--s1);
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.invite-ask p {
+  margin: 0 0 var(--s1);
+}
+
 /* ---------------------------------------------------------------- sizes */
 
 /* Below the wide breakpoint the members panel is drawn over the right side
@@ -2079,19 +3219,43 @@ button.link {
   }
 }
 
-/* A phone (issue #467): one column. The channels are one row that scrolls
-   sideways within itself; the top bar's buttons show their icons, their
-   names hidden but still read out; the voice strip wraps. */
+/* A phone (issue #467, revised by #929): one column, and one of three views
+   drawn at a time (Chat, Channels, Voice: see the block after this one); the
+   top bar's buttons show their icons, their names hidden but still read out;
+   the voice strip wraps. */
 @media (max-width: 699px) {
   .areas,
   .areas.side-closed {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
+  /* The connection state is the only sign of an outage on a phone, so it gets
+     a row of its own under the brand and the buttons (issue #1030): at 320 px
+     four buttons leave no room beside it. The word comes first and is never
+     cut; the name shrinks after it. */
   .topbar {
-    gap: var(--s2);
-    padding: var(--s2) var(--s3);
+    flex-wrap: wrap;
+    gap: 0 var(--s2);
+    padding: var(--s1) var(--s3);
+  }
+
+  .topbar .status {
+    line-height: 1;
+    order: 3;
+    flex: 1 1 100%;
+  }
+
+  /* Everyone is offered Invite someone (issue #990), so four buttons of 44 px
+     stand beside the brand. At 320 px with the usual gap they are one pixel
+     too wide for the row and the buttons drop to a row of their own, taking
+     a row's height from the conversation. A smaller gap keeps them beside it. */
+  .topbar-actions {
+    gap: var(--s1);
+  }
+
+  .topbar .conn {
+    order: -1;
   }
 
   .brand {
@@ -2102,8 +3266,9 @@ button.link {
   .status .avatar,
   .status-server,
   .topbar .label,
-  .channels h2,
   .send .label,
+  .attach-image .label,
+  .emoji-trigger .label,
   .voice-controls button:not(.sharing) .label,
   .voice-controls .dest,
   .share-controls .label {
@@ -2113,90 +3278,6 @@ button.link {
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
-  }
-
-  .channels {
-    padding: var(--s2) var(--s3);
-    overflow: visible;
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .channel-list {
-    --fade: 2rem;
-    display: flex;
-    gap: var(--s1);
-    overflow-x: auto;
-  }
-
-  /* The fade at an edge the row has more beyond (issue #601). Each sticks to
-     its edge as the row scrolls and takes no room in it: its negative margin
-     gives back its width and the gap before or after it. Taps go through. */
-  .channel-list::before,
-  .channel-list::after {
-    content: '';
-    position: sticky;
-    z-index: 1;
-    flex: none;
-    width: var(--fade);
-    pointer-events: none;
-    opacity: 0;
-  }
-
-  .channel-list::before {
-    left: 0;
-    margin-right: calc(-1 * (var(--fade) + var(--s1)));
-    background: linear-gradient(to right, var(--surface), transparent);
-  }
-
-  .channel-list::after {
-    right: 0;
-    margin-left: calc(-1 * (var(--fade) + var(--s1)));
-    background: linear-gradient(to left, var(--surface), transparent);
-  }
-
-  .channel-list.more-before::before,
-  .channel-list.more-after::after {
-    opacity: 1;
-  }
-
-  /* A channel and its unread count read as one pill. The count stays outside
-     the button in the page, so the button's name is still the channel's
-     alone; only the drawing joins them. */
-  .channel-list li {
-    flex: none;
-    gap: 0;
-    background: var(--raised);
-    border: 1px solid var(--border);
-    border-radius: 999px;
-  }
-
-  .channel-list li:has(> button[aria-current='true']) {
-    background: var(--accent-bg);
-    border-color: var(--accent);
-  }
-
-  .channel-list button {
-    max-width: 14rem;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    background: transparent;
-    border-left: 0;
-    border-radius: 999px;
-  }
-
-  .channel-list button[aria-current='true'] {
-    background: transparent;
-  }
-
-  .channel-list .unread,
-  .channel-list .in-voice:last-child {
-    margin-right: var(--s2);
-  }
-
-  .channel-list .in-voice:not(:last-child) {
-    margin-right: var(--s1);
   }
 
   .conv-head {
@@ -2219,7 +3300,8 @@ button.link {
 
   /* The strip in voice fits in 200 px of a 390×844 phone (issue #600): the
      count beside the chips, the controls in one row, and less space between
-     the rows. */
+     the rows. (Under Chat and Channels it is now one row of four, issue
+     #1028, in the phone layout's block below.) */
   .voice-bar,
   .voice-row {
     row-gap: var(--s1);
@@ -2338,7 +3420,7 @@ button.link {
   /* While a share is watched on a phone, the picture, a few lines of the
      conversation and the composer share the column: the channel's name is
      already in the row above, so its heading is only read out. */
-  .centre:has(> .stage:not(:empty)) .conv-head {
+  .centre:has(> .stage:not(:empty)) .conversation-body > .conv-head {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -2354,7 +3436,9 @@ button.link {
   /* With four or more in voice (the roster capped), the picture gives way so
      that the log keeps 120 px (issue #641): a fifth of the window's height,
      which a 16:9 share of a phone's width is taller than. With fewer in
-     voice the strip is shorter and the picture keeps its size. */
+     voice the strip is shorter and the picture keeps its size. Since issue
+     #1028 the strip under Chat has no roster, so this applies only in the
+     Voice view, whose roster is drawn in full. */
   body:has(.voice-roster.capped) .share-frame video {
     max-height: 20vh;
   }
@@ -2404,6 +3488,409 @@ button.link {
   }
 }
 
+/* The phone layout (issue #929, docs/design/mobile-browser-layout.md): below
+   700 px the lobby draws one view at a time, chosen with the bottom
+   navigation. Every view stays mounted and laid out; the others are only
+   hidden (visibility), so the log keeps its place, the draft its text and the
+   call its element. Above 700 px none of this applies: the lobby has no
+   .phone class. */
+@media (max-width: 699px) {
+  .lobby.phone {
+    position: relative;
+    height: 100vh;
+    height: var(--app-height, 100dvh);
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    box-sizing: border-box;
+    /* The hidden conversation is laid out behind the Voice view at the
+       lobby's size; whatever its parts measure, it must not widen the page. */
+    overflow-x: clip;
+  }
+
+  /* The channel list and the conversation share one cell. */
+  .lobby.phone .areas > .channels,
+  .lobby.phone .areas > .centre {
+    grid-area: 1 / 1;
+  }
+
+  .lobby.phone.view-chat .channels,
+  .lobby.phone.view-voice .channels,
+  .lobby.phone.view-channels .centre {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  /* Channels: a list of full-width rows. */
+  .lobby.phone .channels {
+    padding: var(--s3);
+    overflow-y: auto;
+    border-right: 0;
+  }
+
+  .lobby.phone .channels h2 {
+    margin: var(--s1) var(--s1) var(--s3);
+    color: var(--text);
+    font-size: 1.15rem;
+    letter-spacing: normal;
+    text-transform: none;
+  }
+
+  .lobby.phone .channel-list {
+    gap: var(--s2);
+  }
+
+  .lobby.phone .channel-list > li {
+    gap: var(--s2);
+    padding-right: var(--s3);
+    background: var(--raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+  }
+
+  .lobby.phone .channel-list > li:has(> button[aria-current='true']) {
+    background: var(--accent-bg);
+    border-color: var(--accent);
+  }
+
+  .lobby.phone .channel-list > li > button {
+    min-height: 3rem;
+    padding: var(--s2) var(--s3);
+    color: var(--text);
+    font-size: 1rem;
+    background: transparent;
+    border-left: 0;
+  }
+
+  .lobby.phone .channel-list > li > button[aria-current='true'] {
+    background: transparent;
+  }
+
+  /* The people in a channel's voice keep a 44 px target each on a phone
+     (issue #1103), under the row inside its card. */
+  .lobby.phone .channel-list .in-voice-people {
+    margin: 0 0 var(--s1);
+    padding-left: var(--s3);
+  }
+
+  .lobby.phone .channel-list .in-voice-people button {
+    min-height: 2.75rem;
+    font-size: 0.95rem;
+  }
+
+  /* The strip: compact under Chat and Channels, and only while in voice
+     (Join voice and Watch only are in the Voice view). */
+  .lobby.phone:not(.in-voice):not(.view-voice) .dock {
+    display: none;
+  }
+
+  /* In voice it is one row of four controls (issue #1028): where voice is (a
+     button to the Voice view), Hold to talk, Mute and Leave voice, 44 px
+     high, so the strip is at most 64 px and the log, not the composer, gives
+     way. The notes and Voice options are kept, hidden, for the Voice view.
+     The row is as wide as the window, never its content: the state button
+     and Hold to talk give way, the channel's name ending in an ellipsis. */
+  .voice.strip .voice-bar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .voice.strip .voice-row {
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.2rem;
+  }
+
+  .voice.strip .voice-controls {
+    flex: 1 1 auto;
+    flex-wrap: nowrap;
+    width: auto;
+    min-width: 0;
+  }
+
+  .voice.strip .talk {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* With the open microphone the slot is the icon and the level: its words
+     are only read out (as .vh), and the meter keeps at least 2.25rem, so it is
+     never pushed out of the slot and clipped. */
+  .voice.strip .open-mic {
+    flex: 1 1 auto;
+    min-width: 3rem;
+    min-height: 2.75rem;
+    padding-inline: 0.25rem;
+  }
+
+  /* The mode switch beside it (issue #1244) takes a 44 px target of the row,
+     so at 320 px the slot gives up its microphone glyph: the switch says what
+     it is, and the level still has the room it needs. The state button is at
+     most 30% of the row here (38% elsewhere): wider fonts than the ones this
+     was measured with take their room from it, not from the controls. */
+  .voice.strip .open-mic .icon {
+    display: none;
+  }
+
+  .voice.strip .voice-open {
+    max-width: 30%;
+  }
+
+  /* With the camera on the state line is the glyph and "Camera on", which a
+     wide font (DejaVu Sans, on CI) sets about 100 px across: a little more of
+     the row (it does not shrink below its words), and less padding, so that
+     it fits at 320 px. */
+  .voice.strip .voice-open.has-camera {
+    flex-shrink: 0;
+    max-width: 38%;
+    padding-inline: 0.35rem;
+  }
+
+  .voice.strip .open-mic-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .voice.strip .open-mic meter {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 2.25rem;
+  }
+
+  .voice-notes[hidden] {
+    display: none;
+  }
+
+  .voice-open {
+    display: flex;
+    flex: 0 1 auto;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    min-width: 2.75rem;
+    max-width: 38%;
+    overflow: hidden;
+    padding: 0.1rem 0.5rem;
+    line-height: 1.2;
+    text-align: left;
+  }
+
+  .voice-open-phase {
+    color: var(--muted);
+    font-size: 0.75rem;
+    white-space: nowrap;
+  }
+
+  .voice-open-phase::before {
+    content: '';
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    margin-right: 0.3rem;
+    border-radius: 50%;
+    border: 2px solid var(--muted);
+    vertical-align: 0;
+  }
+
+  /* While the camera is on, its glyph stands where the dot does. */
+  .voice-open-phase.camera-on::before {
+    display: none;
+  }
+
+  .voice-open-phase.camera-on .icon {
+    width: 0.85rem;
+    height: 0.85rem;
+    margin-right: 0.25rem;
+    vertical-align: -0.12em;
+    color: var(--accent);
+  }
+
+  .phase-connected .voice-open-phase::before {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .phase-connecting .voice-open-phase::before,
+  .phase-reconnecting .voice-open-phase::before {
+    border-color: var(--warn);
+  }
+
+  .voice-open-where {
+    max-width: 100%;
+    overflow: hidden;
+    font-size: 0.875rem;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Voice: the stage (a watched share) on top, then the voice section filling
+     the page and scrolling inside itself. The conversation is laid out behind
+     it, hidden, so the log is where it was when Chat is back. */
+  .lobby.phone.view-voice {
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+  }
+
+  .lobby.phone.view-voice .areas {
+    grid-template-rows: auto;
+  }
+
+  .lobby.phone.view-voice .channels {
+    position: absolute;
+    inset: 0;
+  }
+
+  /* At the height it had under Chat (the lobby measures it while a view that
+     shows it is current), so that hiding it resizes nothing and the log keeps
+     its place, even a few pixels from its end. */
+  .lobby.phone.view-voice .conversation {
+    position: absolute;
+    top: 0;
+    left: env(safe-area-inset-left);
+    right: env(safe-area-inset-right);
+    height: var(--chat-height, 100%);
+  }
+
+  .lobby.phone.view-voice .centre {
+    display: block;
+    overflow: visible;
+  }
+
+  .lobby.phone.view-voice .conversation {
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .lobby.phone.view-voice .stage {
+    max-height: 45dvh;
+  }
+
+  .lobby.phone.view-voice .dock {
+    max-height: none;
+    padding: var(--s3);
+    overflow-y: auto;
+  }
+
+  /* The roster shows everyone, with names; the controls have their words. */
+  .lobby.phone.view-voice .voice-roster.capped li.beyond {
+    display: flex;
+  }
+
+  .lobby.phone.view-voice .voice-more {
+    display: none;
+  }
+
+  .lobby.phone.view-voice .voice-who:has(> .voice-roster.capped),
+  .lobby.phone.view-voice .voice-roster.capped {
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+
+  .lobby.phone.view-voice .voice-roster.capped li:not(.me) .who,
+  .lobby.phone.view-voice .voice-roster.capped .tag,
+  .lobby.phone.view-voice .voice-controls button:not(.sharing) .label,
+  .lobby.phone.view-voice .voice-controls .dest {
+    position: static;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip-path: none;
+    white-space: normal;
+  }
+
+  .lobby.phone.view-voice .voice-roster.capped li:not(.me) {
+    padding-right: 0.5rem;
+  }
+
+  .lobby.phone.view-voice .voice:has(.voice-roster.capped) .share-line {
+    font-size: inherit;
+  }
+
+  .lobby.phone.view-voice .voice-controls {
+    gap: var(--s2);
+  }
+
+  .lobby.phone.view-voice .voice-controls button {
+    flex: 1 1 calc(50% - var(--s2));
+    min-width: 0;
+  }
+
+  .lobby.phone.view-voice .voice-controls .talk {
+    flex-basis: 100%;
+    min-height: 4rem;
+    font-size: 1.1rem;
+  }
+
+  /* The bottom navigation. */
+  .phone-nav {
+    display: flex;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+  }
+
+  .phone-nav button {
+    position: relative;
+    display: flex;
+    flex: 1 1 0;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.1rem;
+    min-width: 0;
+    min-height: 3.25rem;
+    padding: var(--s1) var(--s2);
+    color: var(--muted);
+    font-size: var(--small);
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    border-top: 3px solid transparent;
+  }
+
+  .phone-nav button[aria-current='page'] {
+    color: var(--text);
+    font-weight: 600;
+    background: var(--accent-bg);
+    border-top-color: var(--accent);
+  }
+
+  .phone-nav .nav-live {
+    position: absolute;
+    top: 0.5rem;
+    left: calc(50% + 0.6rem);
+    width: 0.6rem;
+    height: 0.6rem;
+    background: var(--accent);
+    border: 2px solid var(--surface);
+    border-radius: 50%;
+  }
+}
+
+/* A phone on its side (a window under 560 px tall): the page scrolls as a
+   document, as the rule below says, and the navigation stays at the bottom
+   edge of what is shown. */
+@media (max-width: 699px) and (max-height: 560px) {
+  .lobby.phone {
+    height: auto;
+    min-height: 100vh;
+    min-height: var(--app-height, 100dvh);
+  }
+
+  .lobby.phone .phone-nav {
+    position: sticky;
+    bottom: 0;
+    z-index: 20;
+  }
+
+  .lobby.phone.view-voice .dock {
+    overflow-y: visible;
+  }
+}
+
 /* A short window (200% zoom of a laptop's screen is about 720×450): the page
    scrolls as a document rather than squeezing each column into the window.
    The conversation keeps a height of its own, so it still scrolls and loads
@@ -2437,6 +3924,16 @@ button.link {
   }
 }
 
+/* The call view's layout changes without animation for someone who asked for
+   less motion (§7.7): it has none of its own, and nothing may give it one. */
+@media (prefers-reduced-motion: reduce) {
+  .call-view,
+  .call-view * {
+    transition: none;
+    animation: none;
+  }
+}
+
 /* Only what is drawn over the page slides in: a column moving would widen
    the page while it moved. */
 @media (prefers-reduced-motion: no-preference) {
@@ -2460,4 +3957,936 @@ button.link {
   50% {
     box-shadow: 0 0 0 2px var(--surface), 0 0 0 6px var(--accent);
   }
+}
+
+/* The private microphone test (issue #846): a level meter and a switch, drawn
+   with classes and the meter element, no inline style. */
+.mic-test {
+  display: grid;
+  gap: var(--s1);
+  margin-top: var(--s2);
+}
+
+.mic-test-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+.mic-test-row select {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.mic-meter {
+  flex: 1 1 8rem;
+  min-width: 6rem;
+  max-width: 20rem;
+  height: 1rem;
+}
+
+@media (max-width: 480px) {
+  .mic-test-row > button,
+  .mic-test-row select {
+    flex: 1 1 100%;
+  }
+}
+
+/* ADR-011: the fixed line a temporary server shows beside its version. */
+.temporary-banner {
+  color: var(--muted);
+  min-height: 0;
+  margin: 0.25rem 0;
+}
+
+/* A message that names the viewer: a mark on the row, beside the hidden
+   "Mentions you" text; the words of the body are left alone. */
+.message.mentions-you {
+  background: var(--raised);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* The first-run panel and the empty conversation (issues #1032, #1034). */
+.first-run {
+  padding: 1.5rem;
+}
+.first-run-actions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+.empty-conversation p {
+  margin: 0 0 0.25rem;
+}
+
+.attachment-file {
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.attachment-size {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.draft-attachment-size {
+  white-space: nowrap;
+}
+
+/* The desktop app's server list and the strip over the client (issue #945). */
+.desktop-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  padding: var(--s2) var(--s3);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--small);
+}
+
+.desktop-bar-host {
+  font-weight: 600;
+}
+
+.desktop-bar-account,
+.desktop-bar-session {
+  color: var(--muted);
+}
+
+.desktop-bar-notice {
+  color: var(--warn);
+}
+
+.desktop-bar button {
+  margin-left: auto;
+}
+
+.desktop-servers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  padding: var(--s3);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.desktop-storage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.desktop-server-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.desktop-server {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  padding: var(--s2) var(--s3);
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.desktop-server-active {
+  border-color: var(--accent);
+}
+
+.desktop-server-name {
+  font-weight: 600;
+}
+
+.desktop-server-host,
+.desktop-server-account {
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.desktop-server-current {
+  color: var(--accent);
+  font-size: var(--small);
+}
+
+.desktop-server-actions {
+  display: flex;
+  gap: var(--s2);
+  margin-left: auto;
+}
+
+.desktop-server-confirm {
+  flex-basis: 100%;
+  padding: var(--s2) var(--s3);
+  background: var(--danger-bg);
+  border-radius: var(--radius-sm);
+}
+
+.desktop-server-add,
+.desktop-server-rename {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+/* Settings → Reports (issue #1029): a report is other people's text, shown
+   as it was written, wrapped rather than widening the drawer. */
+.report-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.report-technical {
+  max-width: 100%;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+}
+
+.report-view h4 {
+  margin: var(--s2) 0 var(--s1);
+  font-size: 0.9rem;
+}
+
+/* The administration console (ADR-014 design §10, issue #1018): sections one
+   under another in the Settings drawer; on a phone a list of sections, each
+   opening as its own page with a Back control. Nothing scrolls sideways, and
+   every button is at least 44px high there. */
+.admin-console {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.admin-console h3 {
+  margin: var(--s2) 0;
+  font-size: 1rem;
+}
+
+.admin-section + .admin-section {
+  margin-top: var(--s3);
+}
+
+.server-section {
+  display: grid;
+  gap: var(--s2);
+}
+
+.server-section p,
+.server-section ul {
+  margin: 0;
+}
+
+.summary-lines {
+  list-style: none;
+  padding: 0;
+}
+
+.setup-card {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s3);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+
+.setup-card h4 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.setup-card .actions,
+.invites-list .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.invites-list li {
+  display: grid;
+  gap: var(--s1);
+}
+
+.section-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.section-list button,
+.admin-console .back {
+  width: 100%;
+  min-height: 2.75rem;
+  text-align: left;
+}
+
+.admin-console .back {
+  margin-bottom: var(--s2);
+}
+
+.admin-console .link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+/* Roles and permissions (ADR-014 design §10.2, §10.3, issue #1019): preset
+   cards, then the matrix. A locked cell stays focusable (aria-disabled) so its
+   reason shows on hover and on keyboard focus; nothing scrolls sideways. */
+.roles-section {
+  display: grid;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.roles-section h4,
+.roles-section h5,
+.roles-section p,
+.roles-section ul {
+  margin: 0;
+}
+
+.roles-section h5 {
+  font-size: 0.9rem;
+}
+
+.preset-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--s2);
+}
+
+.preset-card,
+.issued-list {
+  display: grid;
+  gap: var(--s2);
+  align-content: start;
+  padding: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.preset-card.current {
+  border-color: var(--accent);
+}
+
+.current-mark {
+  color: var(--accent);
+  font-weight: normal;
+}
+
+.matrix {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.matrix th,
+.matrix td {
+  padding: var(--s2);
+  border-top: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.matrix thead th {
+  border-top: 0;
+}
+
+.matrix th:first-child {
+  width: 46%;
+}
+
+.matrix th[scope='row'] {
+  font-weight: normal;
+}
+
+.matrix tr.flagged,
+.matrix-list li.flagged {
+  background: var(--danger-bg);
+}
+
+.matrix td,
+.matrix thead th:not(:first-child) {
+  text-align: center;
+}
+
+.what {
+  display: block;
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.cell {
+  position: relative;
+  display: inline-block;
+}
+
+.cell input[type='checkbox'] {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.cell.locked input[type='checkbox'] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.cell.edited input[type='checkbox'] {
+  outline: 2px solid var(--accent);
+}
+
+.cell.edited.stale input[type='checkbox'] {
+  outline-color: var(--warn);
+}
+
+.edit-mark {
+  display: block;
+  color: var(--muted);
+  font-size: var(--small);
+}
+
+.cell .reason {
+  display: none;
+  position: absolute;
+  z-index: 2;
+  right: 0;
+  top: 100%;
+  width: 14rem;
+  max-width: 60vw;
+  padding: var(--s2);
+  background: var(--raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  font-size: var(--small);
+  text-align: left;
+}
+
+.cell:hover .reason,
+.cell:focus-within .reason {
+  display: block;
+}
+
+.matrix-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: var(--s1);
+}
+
+.matrix-list li {
+  border-top: 1px solid var(--border);
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  min-height: 2.75rem;
+  padding: var(--s2) 0;
+}
+
+.switch-row .describe {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.matrix-list .cell {
+  display: grid;
+  justify-items: end;
+  flex: none;
+  max-width: 45%;
+}
+
+.matrix-list .cell input[type='checkbox'] {
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.matrix-list .cell .reason {
+  display: block;
+  position: static;
+  width: auto;
+  max-width: none;
+  padding: 0;
+  background: none;
+  border: 0;
+  box-shadow: none;
+  color: var(--muted);
+  text-align: right;
+}
+
+.owners-line,
+.managers-block {
+  color: var(--muted);
+}
+
+.segmented {
+  display: flex;
+  gap: var(--s1);
+}
+
+.segmented button {
+  flex: 1;
+  min-height: 2.75rem;
+}
+
+.segmented button[aria-pressed='true'] {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+}
+
+.issued-list ul {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.issued-list li {
+  display: grid;
+  gap: var(--s1);
+}
+
+.roles-section .actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+@media (max-width: 699px) {
+  .admin-console button,
+  .admin-console input[type='text'] {
+    min-height: 2.75rem;
+  }
+
+  .admin-console label:has(input[type='checkbox']),
+  .admin-console label:has(input[type='radio']) {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    min-height: 2.75rem;
+  }
+}
+
+/* A private channel's row (issue #1183): a lock where the # is. Its words,
+   "private channel", describe the button and are not in its name. */
+.channel-list > li.private > button::before {
+  content: none;
+}
+
+.channel-list > li > button .icon {
+  flex: none;
+  width: 0.85rem;
+  height: 0.85rem;
+  margin-right: 0.3rem;
+}
+
+/* A settings change or Leave question and answer, in place under the row. */
+.channel-list .channel-settings-ask,
+.channel-list .channel-leave-ask,
+.channel-list .channel-leave-line {
+  flex: 1 0 100%;
+  min-width: 0;
+}
+
+.channel-list .channel-settings-ask,
+.channel-list .channel-leave-ask {
+  display: grid;
+  gap: var(--s2);
+  justify-items: start;
+}
+
+.channel-list .channel-settings-ask p,
+.channel-list .channel-leave-ask p,
+.channel-list .channel-leave-line {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-settings-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+.actions-menu .menu-reason {
+  max-width: 14rem;
+  padding: 0 var(--s2) var(--s1);
+  color: var(--muted);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+}
+
+/* Issue #991: the lock of a private channel, in the directory and before the
+   conversation's heading; its word, "Private", is for a screen reader. */
+.private-mark {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  color: var(--muted);
+}
+
+.private-mark .icon {
+  width: 0.9rem;
+  height: 0.9rem;
+}
+
+/* "Browse channels" and its list, under the channel list: rows wrap rather
+   than widen the column. */
+.channel-directory {
+  display: grid;
+  gap: var(--s2);
+  margin-top: var(--s3);
+  justify-items: start;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.channel-directory > section {
+  width: 100%;
+  min-width: 0;
+}
+
+.channel-directory ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.channel-directory .directory-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  min-width: 0;
+}
+
+.channel-directory .directory-row .channel-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-directory .directory-row > p,
+.channel-directory .directory-ask {
+  flex: 1 0 100%;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.channel-directory .directory-row > p:empty {
+  display: none;
+}
+
+.create-channel fieldset {
+  flex-basis: 100%;
+  display: grid;
+  gap: var(--s1);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.create-channel fieldset label {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+
+.create-channel fieldset input[type='radio'] {
+  flex: none;
+  min-width: 0;
+}
+
+.community-members {
+  margin-top: var(--s3);
+}
+
+.community-members ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--s1);
+}
+
+.community-members .community-member {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+  overflow-wrap: anywhere;
+}
+
+/* The console's Channels section (ADR-014 design §10.2, §10.3, issue #1021):
+   one row per channel with its ⋯ menu. On a phone the menu is a sheet from the
+   bottom of the screen, every item at least 44px; nothing scrolls sideways. */
+.channels-section {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.channels-section p,
+.channels-section ul {
+  margin: 0;
+}
+
+.channels-admin-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.channels-admin-list > li {
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  min-width: 0;
+}
+
+.channels-section .channel-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.channels-section .channel-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.channels-section .channel-panel {
+  display: grid;
+  gap: var(--s2);
+}
+
+.channels-section .channel-panel ul {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: var(--s2);
+}
+
+.channels-section .channel-panel li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+@media (max-width: 699px) {
+  .channels-section .actions-menu {
+    position: fixed;
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 50;
+    max-height: 70vh;
+    overflow-y: auto;
+    padding: var(--s2);
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+
+  .channels-section .actions-menu .menu-reason {
+    max-width: none;
+  }
+}
+
+/* The ⋯ button sits in its row, not at the corner of the drawer. */
+.channels-section .message-menu {
+  position: relative;
+  top: auto;
+  right: auto;
+  flex: none;
+}
+
+/* The Members section and the member panel's person menu (ADR-014 design
+   §10.2, §10.3, issue #1020): the ⋯ button at the row's edge, the question or
+   form an item opens under the name, and on a phone the menu a sheet from the
+   bottom, every item and control at least 44px. */
+.member-line:empty {
+  display: none;
+}
+
+.community-members .person-panel {
+  flex-basis: 100%;
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.community-members .person-form {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.community-members .person-form p,
+.community-members .person-form fieldset {
+  margin: 0;
+}
+
+.community-members .person-form .choice {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 2.75rem;
+}
+
+.community-members .secret-once {
+  display: grid;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.community-members .secret-once input {
+  width: 100%;
+  min-width: 0;
+}
+
+.community-members .member-confirm .actions,
+.community-members .person-form .actions,
+.community-members .secret-once .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+}
+
+@media (max-width: 699px) {
+  .community-members .actions-menu {
+    position: fixed;
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 50;
+    max-height: 70vh;
+    overflow-y: auto;
+    padding: var(--s2);
+    border-radius: var(--radius) var(--radius) 0 0;
+  }
+
+  .community-members .actions-menu .menu-reason {
+    max-width: none;
+  }
+
+  .community-members .person-panel button,
+  .community-members .person-panel input,
+  .community-members .person-panel select {
+    min-height: 2.75rem;
+  }
+
+  .community-members .more-actions {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+}
+
+/* The words of Join voice and Watch only are one flex item, so the channel
+   name follows them on the same line of text instead of beside them (F17). */
+.voice-controls .btn-text {
+  min-width: 0;
+}
+
+/* Archived channels (issue #844): a collapsed group under the live ones. */
+.archived-channels {
+  display: grid;
+  gap: 2px;
+  margin-top: var(--s2);
+}
+
+.archived-toggle {
+  justify-content: flex-start;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted, inherit);
+}
+
+.channel-list > li.archived .channel-name {
+  font-style: italic;
+  opacity: 0.8;
+}
+
+.archived-note {
+  margin: 0;
+}
+
+/* Add an AI administrator and the request card (issue #1334): fields one under
+   another, the button apart from the one above it, and the card's facts as
+   plain rows on a phone. */
+.add-ai-admin {
+  margin-top: var(--s2);
+}
+
+.add-ai-admin form p {
+  display: grid;
+  gap: var(--s1, 0.25rem);
+}
+
+.add-ai-admin form p label {
+  display: block;
+}
+
+.add-ai-admin form .choice {
+  display: flex;
+}
+
+.admin-action-card dl {
+  margin: 0;
+}
+
+.admin-action-card dd {
+  margin: 0 0 var(--s2) 0;
+  overflow-wrap: anywhere;
+}
+
+.admin-action-card pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.admin-approvals {
+  display: grid;
+  gap: var(--s2);
 }

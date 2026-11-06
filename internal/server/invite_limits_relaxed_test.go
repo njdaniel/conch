@@ -30,13 +30,14 @@ func TestInviteLimitsProductionDefaults(t *testing.T) {
 	}{
 		{relaxed.previewPerAddress, want.previewPerAddress},
 		{relaxed.redeemPerAddress, want.redeemPerAddress},
+		{relaxed.createPerPrincipal, want.createPerPrincipal},
 	} {
 		if l.got.burst <= l.base.burst || l.got.window != l.base.window || l.got.name != l.base.name {
 			t.Errorf("the option left %+v where it should have raised the burst of %+v", l.got, l.base)
 		}
 	}
-	if relaxed.redeemGlobal != want.redeemGlobal || relaxed.createPerPrincipal != want.createPerPrincipal {
-		t.Errorf("the option changed a limit that is not per-address: %+v", relaxed)
+	if relaxed.redeemGlobal != want.redeemGlobal {
+		t.Errorf("the option changed the server-wide redemption limit: %+v", relaxed.redeemGlobal)
 	}
 }
 
@@ -80,6 +81,28 @@ func TestInviteLimitsRelaxedDoNotRefuse(t *testing.T) {
 		if rec := f.send(t, "POST", "/v2/invites/redeem", "", body, "198.51.100.1:1000"); rec.Code != http.StatusNotFound {
 			t.Fatalf("attempt %d = %d %s", i+1, rec.Code, rec.Body)
 		}
+	}
+}
+
+// With the test-only option on, one principal makes more invites than the
+// production 20 an hour (issue #1161): the browser suite makes nearly all of
+// its invites and sign-in links as one operator.
+func TestInviteLimitsRelaxedCreateDoesNotRefuse(t *testing.T) {
+	limiter := newInviteLimiter(inviteLimitsFor(Config{TestRelaxInviteLimits: true}))
+	now := time.Now()
+	for i := range 200 {
+		if _, ok, _ := limiter.takeCreate(1, now); !ok {
+			t.Fatalf("create %d was refused", i+1)
+		}
+	}
+	production := newInviteLimiter(inviteLimitsFor(Config{}))
+	for i := range defaultCreatePerPrincipal {
+		if _, ok, _ := production.takeCreate(1, now); !ok {
+			t.Fatalf("production create %d was refused", i+1)
+		}
+	}
+	if _, ok, _ := production.takeCreate(1, now); ok {
+		t.Errorf("the production limit let create %d through", defaultCreatePerPrincipal+1)
 	}
 }
 

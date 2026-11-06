@@ -1,6 +1,12 @@
-import { useRef, type KeyboardEvent } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { EmojiPicker } from './EmojiPicker';
+import { closedShortcodeAt, completeShortcode, completionAt, emojiNow, exactEmoji, insertAt, loadEmoji, type Emoji, type EmojiIndex } from './emoji/emoji';
 import { Glyph } from './Icons';
+import { formatSize, isPreviewType } from './fileSize';
+import { completeMention, mentionAt } from './mention';
+import { validateImage } from './image';
 import type { Audience } from './schema/message';
+import { audienceScope, maxDraftAttachments, type DraftAttachment, type NewDraftAttachment } from './state/attachments';
 import type { Target, TargetAction } from './state/drafts';
 import type { Person } from './useLiveChannel';
 
@@ -14,6 +20,76 @@ const pausedId = 'composer-paused';
 const channelValue = 'channel';
 const whisperValue = 'whisper';
 const netValue = (id: number) => `net:${String(id)}`;
+
+export interface ComposerAttachmentContextValue {
+  readonly attachments: readonly DraftAttachment[];
+  readonly add: (files: readonly NewDraftAttachment[]) => void;
+  readonly remove: (clientId: number) => void;
+  readonly cancel: (clientId: number) => void;
+  readonly retry: (clientId: number) => void;
+  // The draft's images are about to change (issue #1066): said before any
+  // image is checked, so a send already on its way can no longer take this
+  // draft for its own.
+  readonly editing: () => void;
+}
+
+const noAttachments: ComposerAttachmentContextValue = {
+  attachments: [],
+  add: () => undefined,
+  remove: () => undefined,
+  cancel: () => undefined,
+  retry: () => undefined,
+  editing: () => undefined,
+};
+const ComposerAttachmentContext = createContext<ComposerAttachmentContextValue>(noAttachments);
+
+// App owns the bytes and upload lifecycle. The context keeps Conversation's
+// existing public props unchanged while Composer remains its child.
+export function ComposerAttachmentProvider({ value, children }: { readonly value: ComposerAttachmentContextValue; readonly children: ReactNode }) {
+  return <ComposerAttachmentContext.Provider value={value}>{children}</ComposerAttachmentContext.Provider>;
+}
+
+function DraftPreview({ attachment, busy, onRemove, onCancel, onRetry }: {
+  readonly attachment: DraftAttachment;
+  readonly busy: boolean;
+  readonly onRemove: () => void;
+  readonly onCancel: () => void;
+  readonly onRetry: () => void;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [broken, setBroken] = useState(false);
+  const image = isPreviewType(attachment.mediaType);
+  useEffect(() => {
+    if (!image) return;
+    const made = URL.createObjectURL(attachment.bytes);
+    setUrl(made);
+    return () => {
+      URL.revokeObjectURL(made);
+    };
+  }, [attachment.bytes, image]);
+
+  return (
+    <li className="draft-attachment">
+      {!image ? <span className="draft-image-fallback" aria-hidden="true">File</span> : url !== null && !broken ? <img src={url} alt="" onError={() => { setBroken(true); }} /> : <span className="draft-image-fallback" aria-hidden="true">Image</span>}
+      <span className="draft-attachment-name">{attachment.filename}</span>
+      {image ? null : <span className="hint draft-attachment-size">{formatSize(attachment.size)}</span>}
+      {attachment.status === 'uploading' ? (
+        <>
+          <progress aria-label={`Uploading ${attachment.filename}`} />
+          <span className="hint">Uploading…</span>
+          <button type="button" onClick={onCancel} aria-label={`Cancel upload of ${attachment.filename}`}>Cancel</button>
+        </>
+      ) : null}
+      {attachment.status === 'failed' || attachment.status === 'cancelled' ? (
+        <>
+          {attachment.status === 'failed' ? <span role="alert" className="draft-attachment-error">{attachment.error ?? 'Upload failed. Try again.'}</span> : <span className="hint">Upload cancelled.</span>}
+          <button type="button" onClick={onRetry} aria-label={`Retry upload of ${attachment.filename}`}>Retry</button>
+        </>
+      ) : null}
+      <button type="button" onClick={onRemove} disabled={busy} aria-label={`Remove ${attachment.filename}`}>Remove</button>
+    </li>
+  );
+}
 
 // The composer: who the message goes to, the box to write in, and Send. The
 // audience is the server's to allow; this offers what the viewer can see.
@@ -46,11 +122,34 @@ export function Composer({
   readonly paused: boolean;
   readonly onDraft: (text: string) => void;
   readonly onTarget: (action: TargetAction) => void;
-  readonly onSend: (body: string, audience: Audience | undefined) => void;
+  readonly onSend: (body: string, audience: Audience | undefined, attachments?: readonly DraftAttachment[]) => void;
   // Called when a send starts, so the log follows the new message.
   readonly atBottom: () => void;
 }) {
   const select = useRef<HTMLSelectElement>(null);
+  const picker = useRef<HTMLInputElement>(null);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const emojiButton = useRef<HTMLButtonElement>(null);
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const [caret, setCaret] = useState(0);
+  const [suggestion, setSuggestion] = useState(0);
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  const [emojiIndex, setEmojiIndex] = useState<EmojiIndex | null>(null);
+  // Where the caret goes once a chosen emoji is in the draft.
+  const caretAfter = useRef<number | null>(null);
+  // The last `:name:` swap, until anything else changes the draft: what Backspace
+  // right after it puts back.
+  // Whether an input method is composing: nothing is swapped while it is.
+  const composing = useRef(false);
+  const swapped = useRef<{ readonly text: string; readonly caret: number; readonly original: string; readonly originalCaret: number } | null>(null);
+  // Counted on each insertion, so the caret and focus are put back even when
+  // the text did not change (an emoji replaced by itself).
+  const [insertions, setInsertions] = useState(0);
+  const fileDraft = useContext(ComposerAttachmentContext);
+  const attachments = fileDraft.attachments;
+  const [inputError, setInputError] = useState<string | null>(null);
+  const [sending, setSending] = useState(false);
+  const validationGeneration = useRef(0);
   const whispering = target.whisper !== null;
   const chosen = target.whisper ?? [];
 
@@ -72,7 +171,6 @@ export function Composer({
       : `Message #${channel}`;
 
   const value = whispering ? whisperValue : target.net !== null ? netValue(target.net) : channelValue;
-  const canSend = enabled && draft.trim() !== '' && (!whispering || chosen.length > 0);
 
   function audience(): Audience | undefined {
     if (whispering) return { kind: 'principals', principal_ids: [...chosen] };
@@ -80,10 +178,106 @@ export function Composer({
     return undefined;
   }
 
+  const scope = `${channel}/${audienceScope(audience())}`;
+  const scopeNow = useRef(scope);
+  scopeNow.current = scope;
+  useEffect(() => {
+    setInputError(null);
+    setSending(false);
+  }, [scope]);
+  useEffect(() => {
+    if (attachments.length === 0 || attachments.some((a) => a.status === 'failed' || a.status === 'cancelled')) setSending(false);
+  }, [attachments]);
+  useEffect(() => () => {
+    validationGeneration.current++;
+  }, []);
+
+  const uploading = attachments.some((a) => a.status === 'uploading');
+  const busy = sending || uploading;
+  // The draft may be edited: the box is not read-only. An emoji is an edit, so
+  // neither the picker nor the suggestions work (or stay open) when it is.
+  const editable = enabled && !busy;
+  useEffect(() => {
+    if (!editable) setEmojiOpen(false);
+  }, [editable]);
+
+  // `:short` at the caret opens the suggestions. The catalog is fetched only
+  // once something has been typed that could use it.
+  const completion = editable && !emojiOpen ? completionAt(draft, caret) : null;
+  const completionKey = completion === null ? null : `${String(completion.start)}:${completion.query}`;
+  useEffect(() => {
+    if (completionKey === null || emojiIndex !== null) return;
+    let live = true;
+    loadEmoji().then((index) => { if (live) setEmojiIndex(index); }, () => undefined);
+    return () => { live = false; };
+  }, [completionKey, emojiIndex]);
+  const suggestions: readonly Emoji[] = completion !== null && emojiIndex !== null ? completeShortcode(emojiIndex, completion.query) : [];
+  const suggesting = completion !== null && suggestions.length > 0 && dismissed !== completionKey;
+  const activeSuggestion = Math.min(suggestion, Math.max(0, suggestions.length - 1));
+  const optionId = (i: number) => `composer-emoji-option-${String(i)}`;
+  // `@pre` at the caret offers this channel's members (not the viewer to
+  // themselves). One popup at a time: a `:short` wins.
+  const naming = editable && !emojiOpen && completion === null ? mentionAt(draft, caret) : null;
+  const namingKey = naming === null ? null : `@${String(naming.start)}:${naming.query}`;
+  const candidates = naming === null ? [] : completeMention(others.map(([, person]) => person.name), naming.query);
+  const mentioning = naming !== null && candidates.length > 0 && dismissed !== namingKey;
+  const activeCandidate = Math.min(suggestion, Math.max(0, candidates.length - 1));
+  const mentionId = (i: number) => `composer-mention-option-${String(i)}`;
+  const popup = mentioning ? 'composer-mention-list' : suggesting ? 'composer-emoji-list' : undefined;
+  const activeOption = mentioning ? mentionId(activeCandidate) : suggesting ? optionId(activeSuggestion) : undefined;
+  // The Backspace undo holds only while the draft is what the swap left: any
+  // other change (the picker, a completion, a mention, a send, a draft set from
+  // outside) drops it.
+  useEffect(() => {
+    if (swapped.current !== null && swapped.current.text !== draft) swapped.current = null;
+  }, [draft]);
+  useLayoutEffect(() => {
+    const at = caretAfter.current;
+    const box = textarea.current;
+    if (at === null || box === null) return;
+    caretAfter.current = null;
+    box.focus();
+    box.setSelectionRange(at, at);
+    setCaret(at);
+  }, [insertions]);
+
+  // Put an emoji where the selection is (or in place of the typed `:short`).
+  function insertEmoji(key: string, from: number, to: number): void {
+    if (!editable) return;
+    swapped.current = null;
+    const done = insertAt(draft, from, to, key);
+    caretAfter.current = done.caret;
+    setSuggestion(0);
+    onDraft(done.text);
+    setInsertions((n) => n + 1);
+  }
+  function insertMention(name: string, from: number, to: number): void {
+    if (!editable) return;
+    swapped.current = null;
+    const done = insertAt(draft, from, to, `@${name} `);
+    caretAfter.current = done.caret;
+    setSuggestion(0);
+    onDraft(done.text);
+    setInsertions((n) => n + 1);
+  }
+  function pickEmoji(emoji: Emoji): void {
+    const box = textarea.current;
+    setEmojiOpen(false);
+    insertEmoji(emoji.key, box?.selectionStart ?? draft.length, box?.selectionEnd ?? draft.length);
+  }
+  function closePicker(): void {
+    setEmojiOpen(false);
+    emojiButton.current?.focus();
+  }
+
+  const canSend = enabled && !busy && (draft.trim() !== '' || attachments.length > 0) && (!whispering || chosen.length > 0);
+
   function submit() {
     if (!canSend) return;
     atBottom();
-    onSend(draft, audience());
+    const body = draft.trim() === '' && attachments.length > 0 ? attachments.map((a) => a.filename).join(', ') : draft;
+    if (attachments.length > 0) setSending(true);
+    onSend(body, audience(), attachments);
   }
 
   function key(event: KeyboardEvent) {
@@ -103,9 +297,62 @@ export function Composer({
     }
   }
 
+  async function addFiles(incoming: readonly File[]): Promise<void> {
+    if (!enabled || busy || incoming.length === 0) return;
+    fileDraft.editing();
+    const generation = ++validationGeneration.current;
+    const frozenScope = scope;
+    const slots = Math.max(0, maxDraftAttachments - attachments.length);
+    const accepted = incoming.slice(0, slots);
+    const countError = incoming.length > slots ? `Only ${String(maxDraftAttachments)} files can be attached to one message.` : null;
+    if (accepted.length === 0) {
+      setInputError(countError);
+      return;
+    }
+    const checked = await Promise.all(accepted.map(async (file) => ({ file, result: await validateImage(file) })));
+    if (generation !== validationGeneration.current || scopeNow.current !== frozenScope) return;
+    // A PNG or JPEG that passes the sniff is an image, with a preview. Any
+    // other file, and an image that fails the sniff, goes as a plain file.
+    const valid: NewDraftAttachment[] = checked.map(({ file, result }) => {
+      if (result.ok) {
+        return {
+          filename: file.name === '' ? `image.${result.value.format === 'png' ? 'png' : 'jpg'}` : file.name,
+          mediaType: result.value.format === 'png' ? 'image/png' : 'image/jpeg',
+          bytes: file,
+        };
+      }
+      return {
+        filename: file.name === '' ? 'file' : file.name,
+        mediaType: isPreviewType(file.type) || file.type === '' ? 'application/octet-stream' : file.type,
+        bytes: file,
+      };
+    });
+    const errors: string[] = countError === null ? [] : [countError];
+    if (valid.length > 0) fileDraft.add(valid);
+    setInputError(errors.length === 0 ? null : errors.join(' '));
+  }
+
+  function paste(event: React.ClipboardEvent<HTMLTextAreaElement>): void {
+    const files = Array.from(event.clipboardData.files);
+    if (files.length === 0) return;
+    event.preventDefault();
+    void addFiles(files);
+  }
+
+  function drop(event: DragEvent<HTMLFormElement>): void {
+    const files = Array.from(event.dataTransfer.files);
+    if (files.length === 0 || !enabled) return;
+    event.preventDefault();
+    void addFiles(files);
+  }
+
   return (
     <form
       className={value === channelValue ? 'composer' : 'composer narrowed'}
+      onDragOver={(event) => {
+        if (enabled && event.dataTransfer.types.includes('Files')) event.preventDefault();
+      }}
+      onDrop={drop}
       onSubmit={(event) => {
         event.preventDefault();
         submit();
@@ -117,7 +364,7 @@ export function Composer({
           id="composer-to"
           ref={select}
           value={value}
-          disabled={!enabled}
+          disabled={!enabled || busy}
           aria-describedby={paused ? pausedId : undefined}
           onChange={(event) => {
             choose(event.target.value);
@@ -138,6 +385,7 @@ export function Composer({
       {whispering ? (
         <fieldset
           className="whisper-picker"
+          disabled={busy}
           onKeyDown={(event) => {
             if (event.key !== 'Escape') return;
             event.preventDefault();
@@ -163,17 +411,163 @@ export function Composer({
           ))}
         </fieldset>
       ) : null}
+      {attachments.length > 0 ? (
+        <ul className="draft-attachments" aria-label="Files to send" aria-busy={uploading}>
+          {attachments.map((attachment) => (
+            <DraftPreview
+              key={attachment.clientId}
+              attachment={attachment}
+              busy={busy}
+              onRemove={() => { fileDraft.remove(attachment.clientId); }}
+              onCancel={() => { fileDraft.cancel(attachment.clientId); }}
+              onRetry={() => { fileDraft.retry(attachment.clientId); }}
+            />
+          ))}
+        </ul>
+      ) : null}
+      {inputError === null ? null : <p role="alert" className="notice">{inputError}</p>}
+      {emojiOpen && editable ? <EmojiPicker onPick={pickEmoji} onClose={closePicker} /> : null}
+      {suggesting ? (
+        <ul id="composer-emoji-list" className="emoji-suggestions" role="listbox" aria-label="Emoji suggestions">
+          {suggestions.map((e, i) => (
+            <li
+              key={e.key}
+              id={optionId(i)}
+              role="option"
+              aria-selected={i === activeSuggestion}
+              onMouseDown={(event) => { event.preventDefault(); }}
+              onClick={() => { insertEmoji(e.key, completion.start, caret); }}
+            >
+              <span aria-hidden="true">{e.key}</span> :{e.shortcode}:
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {mentioning ? (
+        <ul id="composer-mention-list" className="emoji-suggestions" role="listbox" aria-label="Mention suggestions">
+          {candidates.map((name, i) => (
+            <li
+              key={name}
+              id={mentionId(i)}
+              role="option"
+              aria-selected={i === activeCandidate}
+              onMouseDown={(event) => { event.preventDefault(); }}
+              onClick={() => { insertMention(name, naming.start, caret); }}
+            >
+              @{name}
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <div className={paused ? 'composer-box paused' : 'composer-box'}>
+      <input
+        ref={picker}
+        type="file"
+        multiple
+        className="image-file-input"
+        aria-label="Choose files"
+        tabIndex={-1}
+        onChange={(event) => {
+          const input = event.currentTarget;
+          const files = Array.from(input.files ?? []);
+          void addFiles(files).finally(() => {
+            input.value = '';
+          });
+        }}
+      />
+      <button type="button" className="attach-image" aria-label="Attach" disabled={!enabled || busy} onClick={() => { picker.current?.click(); }}>
+        <Glyph name="image" />
+        <span className="label">Attach</span>
+      </button>
       <textarea
         id="composer-text"
+        ref={textarea}
         rows={2}
         value={draft}
         disabled={!enabled}
+        readOnly={busy}
         aria-describedby={paused ? pausedId : undefined}
+        aria-autocomplete="list"
+        aria-controls={popup}
+        aria-activedescendant={activeOption}
         onChange={(event) => {
-          onDraft(event.target.value);
+          const value = event.target.value;
+          const at = event.target.selectionStart;
+          swapped.current = null;
+          setSuggestion(0);
+          // Typing the closing colon of a known `:name:` swaps it for the emoji.
+          // Only typing: a paste, a drop or a composition is left as it came.
+          const native = event.nativeEvent as Partial<InputEvent>;
+          const closed = editable && native.inputType === 'insertText' && native.data === ':' && native.isComposing !== true && !composing.current ? closedShortcodeAt(value, at) : null;
+          const index = closed === null ? null : emojiNow();
+          const found = closed === null || index === null ? null : exactEmoji(index, closed.name);
+          if (closed !== null && found !== null) {
+            const done = insertAt(value, closed.start, at, found.key);
+            swapped.current = { text: done.text, caret: done.caret, original: value, originalCaret: at };
+            caretAfter.current = done.caret;
+            onDraft(done.text);
+            setInsertions((n) => n + 1);
+            return;
+          }
+          setCaret(at);
+          onDraft(value);
         }}
+        onCompositionStart={() => { composing.current = true; }}
+        onCompositionEnd={() => { composing.current = false; }}
+        onSelect={(event) => { setCaret(event.currentTarget.selectionStart); }}
+        onPaste={paste}
         onKeyDown={(event) => {
+          // One Backspace right after a swap gives back the `:name:` as typed.
+          const back = swapped.current;
+          if (back !== null && editable && event.key === 'Backspace' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.nativeEvent.isComposing) {
+            const box = event.currentTarget;
+            if (draft === back.text && box.selectionStart === back.caret && box.selectionEnd === back.caret) {
+              event.preventDefault();
+              swapped.current = null;
+              caretAfter.current = back.originalCaret;
+              onDraft(back.original);
+              setInsertions((n) => n + 1);
+              return;
+            }
+          }
+          if (mentioning && !event.nativeEvent.isComposing) {
+            const n = candidates.length;
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault();
+              setSuggestion((activeCandidate + (event.key === 'ArrowDown' ? 1 : n - 1)) % n);
+              return;
+            }
+            if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+              event.preventDefault();
+              const name = candidates[activeCandidate];
+              if (name !== undefined) insertMention(name, naming.start, caret);
+              return;
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              setDismissed(namingKey);
+              return;
+            }
+          }
+          if (suggesting && !event.nativeEvent.isComposing) {
+            const n = suggestions.length;
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault();
+              setSuggestion((activeSuggestion + (event.key === 'ArrowDown' ? 1 : n - 1)) % n);
+              return;
+            }
+            if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+              event.preventDefault();
+              const chosen = suggestions[activeSuggestion];
+              if (chosen !== undefined) insertEmoji(chosen.key, completion.start, caret);
+              return;
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              setDismissed(completionKey);
+              return;
+            }
+          }
           if (event.key === 'Escape' && whispering) {
             event.preventDefault();
             onTarget({ type: 'closePicker', channel });
@@ -183,6 +577,19 @@ export function Composer({
           key(event);
         }}
       />
+      <button
+        ref={emojiButton}
+        type="button"
+        className="attach-image emoji-trigger"
+        aria-label="Add emoji"
+        aria-haspopup="dialog"
+        aria-expanded={emojiOpen && editable}
+        disabled={!enabled || busy}
+        onClick={() => { setEmojiOpen(!emojiOpen); }}
+      >
+        <Glyph name="smile" />
+        <span className="label">Add emoji</span>
+      </button>
       <button type="submit" className="primary send" disabled={!canSend}>
         <Glyph name="send" />
         <span className="label">Send</span>

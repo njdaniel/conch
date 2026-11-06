@@ -1,0 +1,56 @@
+{
+  "architecture": "x86_64",
+  "chromium": {
+    "status": "not_measured"
+  },
+  "display_environment_present": {
+    "DISPLAY": true,
+    "WAYLAND_DISPLAY": true
+  },
+  "electron": {
+    "proposed_version": "45.1.0",
+    "status": "not_measured"
+  },
+  "evidence": "inventory_only_no_input_or_media_trial",
+  "execution_context": "sandbox",
+  "helper": {
+    "status": "missing_tool"
+  },
+  "input_device_visibility": {
+    "event_nodes": 0,
+    "note": "No device opened; visibility and access may be sandbox-restricted.",
+    "readable_by_this_process": 0
+  },
+  "kernel": "7.0.11-76070011-generic",
+  "os": {
+    "ID": "pop",
+    "PRETTY_NAME": "Pop!_OS 24.04 LTS",
+    "VERSION_ID": "24.04"
+  },
+  "packages": {
+    "cosmic-comp": "0.1~1782837583~24.04~bb584aa",
+    "cosmic-session": "1.0.0~1782340586~24.04~308c9d3",
+    "gnome-keyring": "46.1-2ubuntu0.2",
+    "libsecret-1-0": "0.21.4-1build3",
+    "pipewire": "1.6.8-1pop1~1787688714~24.04~fdff050",
+    "wireplumber": "0.5.12-2pop1~1766191027~24.04~d4bf441",
+    "xdg-desktop-portal": "1.18.4-1ubuntu2.24.04.2",
+    "xdg-desktop-portal-cosmic": "0.1.0pop1~1782500323~24.04~2948dd4",
+    "xdg-desktop-portal-gtk": "1.15.1-1build2",
+    "xserver-xorg-core": "2:21.1.12-1ubuntu1.6"
+  },
+  "pipewire_connection": "permission_denied",
+  "portal": {
+    "status": "permission_denied"
+  },
+  "portal_properties": {},
+  "recorded_at_utc": "2026-10-28T13:44:44.895385+00:00",
+  "secret_service": {
+    "status": "permission_denied"
+  },
+  "session": {
+    "XDG_CURRENT_DESKTOP": "COSMIC",
+    "XDG_SESSION_TYPE": "wayland"
+  },
+  "wireplumber_connection": "permission_denied"
+}

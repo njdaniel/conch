@@ -1,14 +1,16 @@
-// Issue #695: an operator makes a channel in the browser. It is listed and
-// opened at once, is still there after a reload, and making it joins no voice.
-// A second try at the same name is refused on the page and makes nothing. A
-// member is offered no control, and the server refuses the member's own
-// request whatever the page shows. The channels made here are the operator's
-// alone (the creator is a new channel's only member), so no other spec's
-// people see them.
+// Issues #695 and #991: a person makes a channel in the browser. It is listed
+// and opened at once, is still there after a reload, and making it joins no
+// voice. A second try at the same name is refused on the page, in the one
+// line every collision gets, and makes nothing. A member is offered the same
+// form with a choice of public or private, and the old operator-only route
+// still refuses a member whatever the page shows. The channels made here are
+// their makers' alone (the creator is a new channel's only member), so no
+// other spec's people see them.
 import type { Page } from '@playwright/test';
 import { listChannelsResponse, type CreateChannelRequest } from '../src/schema/channel';
+import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import { errorV0 } from '../src/schema/error';
-import { channelButton, expect, signIn, statusLine, test } from './fixtures';
+import { channelButton, credentialField, expect, signIn, statusLine, test } from './fixtures';
 import { call, ok, type World } from './world';
 
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Channels' });
@@ -35,7 +37,7 @@ test('C695 an operator makes a channel, sees it, reloads and still sees it, with
   const { page } = await meet();
   const voice = voiceRequests(page);
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(page)).fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await page.getByRole('button', { name: 'Continue anyway' }).click();
   await expect(statusLine(page)).toContainText('Connected');
@@ -57,7 +59,7 @@ test('C695 an operator makes a channel, sees it, reloads and still sees it, with
   await nav(page).getByRole('button', { name: 'New channel' }).click();
   await form.getByLabel('Channel name').fill(name);
   await form.getByRole('button', { name: 'Create channel' }).click();
-  await expect(nav(page).getByText('There is already a channel with that name, perhaps one you are not in. Choose another name.')).toBeVisible();
+  await expect(nav(page).getByText('That name is taken', { exact: true })).toBeVisible();
   await expect(form.getByLabel('Channel name')).toHaveValue(name);
   expect((await channelNames(world, world.tokens.operator)).filter((n) => n === name)).toHaveLength(1);
   await expect(channelButton(page, name)).toHaveCount(1);
@@ -65,18 +67,32 @@ test('C695 an operator makes a channel, sees it, reloads and still sees it, with
   expect(voice, 'voice sessions the page asked for').toEqual([]);
 });
 
-test('C695 a member is offered no control, and the server refuses the member anyway', async ({ meet, world }) => {
-  const { page } = await meet();
-  await signIn(page, world, world.tokens.browser, 'browser-test');
-  await expect(channelButton(page, 'general')).toBeVisible();
-  await expect(nav(page).getByRole('button', { name: 'New channel' })).toHaveCount(0);
-  await expect(page.getByRole('form', { name: 'New channel' })).toHaveCount(0);
+test('C991 a member is offered the form with a visibility choice and makes a channel, and the operator-only route still refuses a member', async ({ meet, secrets, world }) => {
+  const name = `c991-m-${Date.now().toString(36)}`;
+  const principal: CreatePrincipalRequest = { kind: 'human', name: `${name}-who` };
+  const id = (await ok(world, world.tokens.operator, 'POST', '/v0/principals', createPrincipalResponse, principal)).principal.id;
+  const credential: CreateCredentialRequestV1 = { label: name };
+  const { token } = await ok(world, world.tokens.operator, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, credential);
+  secrets.push(token);
 
-  // Made, the channel would be the member's alone, so their list would show it.
-  const request: CreateChannelRequest = { name: `c695-member-${String(Date.now())}` };
-  const refused = await call(world, world.tokens.browser, 'POST', '/v0/channels', request);
+  const { page } = await meet();
+  await signIn(page, world, token, principal.name);
+  await expect(nav(page).getByRole('button', { name: 'New channel' })).toBeVisible();
+  await nav(page).getByRole('button', { name: 'New channel' }).click();
+  const form = page.getByRole('form', { name: 'New channel' });
+  await expect(form.getByRole('radio', { name: /^Public/ })).toBeChecked();
+  await expect(form.getByRole('radio', { name: /^Private/ })).not.toBeChecked();
+  await form.getByLabel('Channel name').fill(name);
+  await form.getByRole('button', { name: 'Create channel' }).click();
+  await expect(nav(page).getByText(`Created #${name}`)).toBeVisible();
+  await expect(channelButton(page, name)).toHaveAttribute('aria-current', 'true');
+  expect(await channelNames(world, token)).toEqual([name]);
+
+  // The old route is still the operator's alone.
+  const request: CreateChannelRequest = { name: `${name}-v0` };
+  const refused = await call(world, token, 'POST', '/v0/channels', request);
   expect(refused.status).toBe(403);
   expect(errorV0(refused.body)).toEqual([]);
   expect((refused.body as { code: string }).code).toBe('forbidden');
-  expect(await channelNames(world, world.tokens.browser)).not.toContain(request.name);
+  expect(await channelNames(world, token)).not.toContain(request.name);
 });

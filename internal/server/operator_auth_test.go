@@ -206,10 +206,18 @@ func TestOperatorSetupAndSignIn(t *testing.T) {
 		!cred.IdleExpiresAt.Time().Equal(now.Add(time.Hour)) || cred.Renews {
 		t.Errorf("the operator session: %+v", cred)
 	}
-	if got := f.whoamiAuth(t, tok); !got.SetupComplete || !got.TOTPEnrolled || got.IdleExpiresAt == nil || got.RecentAuthUntil != nil {
+	// The sign-in with both factors is the proof for its first ten minutes
+	// (issue #1033), and the sensitive action needs nothing more.
+	if got := f.whoamiAuth(t, tok); !got.SetupComplete || !got.TOTPEnrolled || got.IdleExpiresAt == nil ||
+		got.RecentAuthUntil == nil || !got.RecentAuthUntil.Time().Equal(now.Add(schema.RecentAuthLifetimeSeconds*time.Second)) {
 		t.Errorf("whoami on the session: %+v", got)
 	}
 	f.nextStep()
+	if rec := f.sensitive(t, tok); rec.Code != http.StatusCreated {
+		t.Fatalf("a sensitive action just after the sign-in = %d %s", rec.Code, rec.Body)
+	}
+	// After them, it asks for a fresh one.
+	f.advance(schema.RecentAuthLifetimeSeconds * time.Second)
 	assertErrorBody(t, f.sensitive(t, tok), http.StatusForbidden, schema.ErrorCodeReauthRequired)
 	if rec := f.reauthOp(t, tok, newRoot, f.code(secret)); rec.Code != http.StatusOK {
 		t.Fatalf("reauth = %d %s", rec.Code, rec.Body)
@@ -237,9 +245,10 @@ func TestOperatorSetupAndSignIn(t *testing.T) {
 	}
 }
 
-// A setup-scoped credential reaches whoami, the password enrolment and the
-// TOTP enrolment, and every other route of the table answers 403
-// setup_incomplete (review F6), before and after the password it replaced.
+// A setup-scoped credential reaches whoami, the password enrolment, the
+// TOTP enrolment and its own sign-out (ADR-011 item 2.1), and every other
+// route of the table answers 403 setup_incomplete (review F6), before and
+// after the password it replaced.
 func TestSetupScopeReachesOnlySetupRoutes(t *testing.T) {
 	f := newOperatorFixture(t)
 	setup := f.redeemSetup(t, f.hostSetupToken(t, f.root.ID))
@@ -253,7 +262,7 @@ func TestSetupScopeReachesOnlySetupRoutes(t *testing.T) {
 			if !ok {
 				t.Fatalf("no expectation for %s", rt.pattern)
 			}
-			if rt.pattern == "POST /v1/totp/enroll" || rt.pattern == "POST /v1/password/mine" {
+			if rt.pattern == "POST /v1/totp/enroll" || rt.pattern == "POST /v1/password/mine" || rt.pattern == "DELETE /v1/credentials/current" {
 				continue // these write; they are run on their own below
 			}
 			rec := f.send(t, routeMethod(rt.pattern), exp.path, setup.Token, exp.body, "")
@@ -283,6 +292,13 @@ func TestSetupScopeReachesOnlySetupRoutes(t *testing.T) {
 	t.Run("after the password was replaced", check)
 	if rec := f.send(t, "POST", "/v1/totp/enroll", setup.Token, "", ""); rec.Code != http.StatusOK {
 		t.Errorf("enroll = %d %s", rec.Code, rec.Body)
+	}
+	// Skip: the setup credential ends itself, and is gone.
+	if rec := f.send(t, "DELETE", "/v1/credentials/current", setup.Token, "", ""); rec.Code != http.StatusNoContent {
+		t.Errorf("sign out = %d %s", rec.Code, rec.Body)
+	}
+	if code := f.status(t, setup.Token); code != http.StatusUnauthorized {
+		t.Errorf("whoami after the sign-out = %d, want 401", code)
 	}
 }
 
@@ -510,9 +526,12 @@ type reauthDecision struct {
 // decision that disagrees, and on a class entry for a route that is not in
 // the table or is not an operator route.
 var reauthDecisions = map[string]reauthDecision{
-	"POST /v0/channels":   {reauthNone, "makes a channel: no principal, credential, link, permit or hook, no grant"},
-	"POST /v0/principals": {reauthAlways, "creates a principal"},
-	"PUT /v1/channels/{channel}/members/{principal_id}":               {reauthAlways, "grants access, and can_decide (approval-path)"},
+	"POST /v0/channels":                                               {reauthNone, "makes a channel: no principal, credential, link, permit or hook, no grant"},
+	"PUT /v1/channels/{id}/settings":                                  {reauthNone, "changes a channel's visibility and default mark: no principal, credential, link, permit or hook, no grant"},
+	"POST /v0/principals":                                             {reauthAlways, "creates a principal"},
+	"PUT /v1/channels/{channel}/members/{principal_id}":               {reauthOperators, "grants access, and can_decide (approval-path); a manager's add is a member's write (issue #790)"},
+	"POST /v1/channels/{channel}/members":                             {reauthOperators, "grants access, as the PUT by id; a manager's add is a member's write (issue #790)"},
+	"PUT /v1/principals/{id}/role":                                    {reauthAlways, "makes or unmakes an operator or an owner (issue #790)"},
 	"DELETE /v1/channels/{channel}/members/{principal_id}":            {reauthNone, "narrows access; the person stays"},
 	"POST /v1/channels/{channel}/nets":                                {reauthNone, "a net, as a channel"},
 	"DELETE /v1/channels/{channel}/nets/{net}":                        {reauthNone, "archives a net"},
@@ -532,64 +551,88 @@ var reauthDecisions = map[string]reauthDecision{
 	"POST /v1/principals/hide":                                        {reauthAlways, "removes people in bulk"},
 	"GET /v1/principals":                                              {reauthNone, "a list"},
 	"POST /v1/principals/{id}/credentials/revoke-all":                 {reauthOnOthers, "bulk revoke of someone else; signing oneself out is not"},
-	"GET /v1/audit":                             {reauthNone, "audit export"},
-	"POST /v1/hooks":                            {reauthAlways, "creates a hook"},
-	"GET /v1/hooks":                             {reauthNone, "a list"},
-	"DELETE /v1/hooks/{id}":                     {reauthNone, "closes a hook, as an invite close"},
-	"GET /v1/invites/{id}/principals":           {reauthNone, "a list"},
-	"POST /v1/invites/{id}/disable-joiners":     {reauthAlways, "ends people in bulk"},
-	"POST /v1/principals/{id}/disable-invitees": {reauthAlways, "ends people in bulk"},
-	"PUT /v1/principals/{id}/invite-permission": {reauthAlways, "grants invite permission"},
-	"GET /v1/invites/settings":                  {reauthNone, "a settings read"},
-	"PUT /v1/invites/settings":                  {reauthAlways, "opens or closes joining through invites"},
-	"POST /v1/principals/{id}/sign-in-links":    {reauthAlways, "creates a link"},
-	"DELETE /v1/sign-in-links/{id}":             {reauthNone, "closes a link, as an invite close"},
-	"GET /v1/join/settings":                     {reauthNone, "a settings read"},
-	"PUT /v1/join/settings":                     {reauthAlways, "opens or closes joining to guests"},
-	"GET /v1/guests":                            {reauthNone, "a list"},
-	"POST /v1/guests/{id}/end":                  {reauthAlways, "ends a person"},
-	"POST /v1/guests/end":                       {reauthAlways, "ends people in bulk"},
-	"POST /v1/guests/{id}/conversion-permit":    {reauthAlways, "creates a permit"},
-	"GET /v1/reports":                           {reauthNone, "reports"},
-	"GET /v1/reports/{id}":                      {reauthNone, "reports"},
-	"PUT /v1/reports/{id}":                      {reauthNone, "files a report"},
+	"POST /v1/principals/{id}/issued/revoke-all":                      {reauthAlways, "bulk revoke of what someone issued to others, always other people's (issue #1024)"},
+	"GET /v1/audit":                                                   {reauthNonOwners, "audit export: names every member and private channel; an owner read it without a proof before ADR-014 and still does (#1015)"},
+	"GET /v1/permissions":                                             {reauthNone, "a read of the permissions document"},
+	"GET /v1/admin/actions":                                           {reauthNone, "the admin catalog as it applies to the caller (issue #1330)"},
+	"POST /v1/admin/actions":                                          {reauthNone, "the admin door: the dispatched route carries its own rule"},
+	"POST /v1/admin/actions/{approval_id}/run":                        {reauthNone, "the admin door's run: the dispatched route carries its own rule"},
+	"PUT /v1/permissions":                                             {reauthAlways, "grants rights (ADR-014 §7.2)"},
+	"POST /v1/hooks":                                                  {reauthAlways, "creates a hook"},
+	"GET /v1/hooks":                                                   {reauthNone, "a list"},
+	"DELETE /v1/hooks/{id}":                                           {reauthNone, "closes a hook, as an invite close"},
+	"GET /v1/invites/{id}/principals":                                 {reauthNone, "a list"},
+	"POST /v1/invites/{id}/disable-joiners":                           {reauthAlways, "ends people in bulk"},
+	"POST /v1/principals/{id}/disable-invitees":                       {reauthAlways, "ends people in bulk"},
+	"PUT /v1/principals/{id}/invite-permission":                       {reauthAlways, "grants invite permission"},
+	"PUT /v1/principals/{id}/voice-permission":                        {reauthAlways, "switches a person's voice"},
+	"GET /v1/invites/settings":                                        {reauthNone, "a settings read"},
+	"PUT /v1/invites/settings":                                        {reauthAlways, "opens or closes joining through invites"},
+	"POST /v1/principals/{id}/sign-in-links":                          {reauthAlways, "creates a link"},
+	"DELETE /v1/sign-in-links/{id}":                                   {reauthNone, "closes a link, as an invite close"},
+	"GET /v1/join/settings":                                           {reauthNone, "a settings read"},
+	"PUT /v1/join/settings":                                           {reauthAlways, "opens or closes joining to guests"},
+	"GET /v1/guests":                                                  {reauthNone, "a list"},
+	"POST /v1/guests/{id}/end":                                        {reauthAlways, "ends a person"},
+	"POST /v1/guests/end":                                             {reauthAlways, "ends people in bulk"},
+	"POST /v1/guests/{id}/conversion-permit":                          {reauthAlways, "creates a permit"},
+	"GET /v1/reports":                                                 {reauthNone, "reports"},
+	"GET /v1/reports/{id}":                                            {reauthNone, "reports"},
+	"PUT /v1/reports/{id}":                                            {reauthNone, "files a report"},
 
 	// Every write anyone authenticated may make: in the class only where an
 	// operator's use creates a principal or a link (rule: reauthOperators).
-	"POST /v1/invites":                           {reauthOperators, "an operator's invite makes principals, with no allowance"},
-	"DELETE /v1/invites/{id}":                    {reauthNone, "closes an invite"},
-	"POST /v1/ws-tickets":                        {reauthNone, "a one-use socket ticket for the caller's own credential, no principal or link"},
-	"POST /v0/channels/{channel}/messages":       {reauthNone, "a message"},
-	"POST /v1/channels/{channel}/messages":       {reauthNone, "a message"},
-	"POST /v2/channels/{channel}/messages":       {reauthNone, "a message"},
-	"POST /v2/channels/{channel}/files":          {reauthNone, "a file"},
-	"POST /v1/channels/{channel}/voice/session":  {reauthNone, "joins voice"},
-	"POST /v1/channels/{channel}/voice/transmit": {reauthNone, "a transmit report"},
-	"POST /v1/channels/{channel}/voice/share":    {reauthNone, "a screen share"},
-	"DELETE /v1/channels/{channel}/voice/share":  {reauthNone, "stops a share"},
-	"POST /v1/sessions":                          {reauthNone, "a session of the caller's own credential"},
-	"POST /v1/sessions/{id}/heartbeat":           {reauthNone, "a heartbeat"},
-	"DELETE /v1/sessions/{id}":                   {reauthNone, "ends the caller's own session"},
-	"POST /v1/sessions/{id}/runs":                {reauthNone, "an agent's run"},
-	"POST /v1/runs/{id}/state":                   {reauthNone, "a run report"},
-	"POST /v1/runs/{id}/activity":                {reauthNone, "a run report"},
-	"POST /v1/runs/{id}/interventions":           {reauthNone, "asks an agent to stop or change course"},
-	"POST /v1/interventions/{id}/ack":            {reauthNone, "an agent's answer"},
-	"PUT /v1/channels/{channel}/read-state":      {reauthNone, "the caller's read mark"},
-	"DELETE /v1/credentials/current":             {reauthNone, "signs the caller out"},
-	"DELETE /v1/credentials/mine/{id}":           {reauthNone, "ends one of the caller's own sign-ins"},
-	"POST /v1/sign-in-links/mine":                {reauthNone, "a member's own device link: the handler refuses operators and asks its own recent password proof (#712)"},
-	"DELETE /v1/sign-in-links/mine/{id}":         {reauthNone, "closes one of the caller's own device links"},
-	"POST /v1/guest/end":                         {reauthNone, "a guest ends its own visit"},
-	"POST /v1/guest/convert":                     {reauthNone, "a guest makes its own account: no operator acts, and it proves itself with the visit's credential and, when the policy is closed, an operator's permit"},
-	"POST /v1/password/mine":                     {reauthNone, "proves itself: a setup token or an enrolment link"},
-	"PUT /v1/password/mine":                      {reauthNone, "proves itself: the current password, and a code for an operator"},
-	"POST /v1/reauth":                            {reauthNone, "is the proof"},
-	"POST /v1/totp/enroll":                       {reauthNone, "setup scope only"},
-	"POST /v1/totp/confirm":                      {reauthNone, "setup scope only"},
-	"POST /v1/reports":                           {reauthNone, "a problem report"},
-	"POST /v1/approvals":                         {reauthNone, "an approval request (approval-path, unchanged)"},
-	"POST /v1/approvals/{id}/decisions":          {reauthNone, "a decision (approval-path, unchanged)"},
+	"POST /v1/invites":                                    {reauthNone, "retired for everyone: answers 409 invite_kind_retired and makes nothing (issue #1134)"},
+	"POST /v2/invites":                                    {reauthOperators, "an operator's member link makes principals, with no allowance, and may never expire"},
+	"DELETE /v1/invites/{id}":                             {reauthNone, "closes an invite"},
+	"POST /v1/ws-tickets":                                 {reauthNone, "a one-use socket ticket for the caller's own credential, no principal or link"},
+	"POST /v0/channels/{channel}/messages":                {reauthNone, "a message"},
+	"POST /v1/channels/{channel}/messages":                {reauthNone, "a message"},
+	"POST /v2/channels/{channel}/messages":                {reauthNone, "a message"},
+	"POST /v2/channels/{channel}/files":                   {reauthNone, "a file"},
+	"POST /v1/channels/{channel}/voice/session":           {reauthNone, "joins voice"},
+	"POST /v1/channels/{channel}/voice/transmit":          {reauthNone, "a transmit report"},
+	"POST /v1/channels/{channel}/voice/share":             {reauthNone, "a screen share"},
+	"DELETE /v1/channels/{channel}/voice/share":           {reauthNone, "stops a share"},
+	"POST /v1/channels/{channel}/voice/camera":            {reauthNone, "a camera"},
+	"DELETE /v1/channels/{channel}/voice/camera":          {reauthNone, "stops a camera"},
+	"POST /v1/channels/{channel}/voice/companion":         {reauthNone, "a companion's or viewer's join token"},
+	"DELETE /v1/channels/{channel}/voice/companion":       {reauthNone, "removes the caller's own companion"},
+	"PUT /v1/channels/{channel}/voice/companion/audio":    {reauthNone, "the caller's own consent to their companion's share audio"},
+	"DELETE /v1/channels/{channel}/voice/companion/audio": {reauthNone, "withdraws the caller's own consent"},
+	"POST /v1/sessions":                                   {reauthNone, "a session of the caller's own credential"},
+	"POST /v1/sessions/{id}/heartbeat":                    {reauthNone, "a heartbeat"},
+	"DELETE /v1/sessions/{id}":                            {reauthNone, "ends the caller's own session"},
+	"POST /v1/sessions/{id}/runs":                         {reauthNone, "an agent's run"},
+	"POST /v1/runs/{id}/state":                            {reauthNone, "a run report"},
+	"POST /v1/runs/{id}/activity":                         {reauthNone, "a run report"},
+	"POST /v1/runs/{id}/interventions":                    {reauthNone, "asks an agent to stop or change course"},
+	"POST /v1/interventions/{id}/ack":                     {reauthNone, "an agent's answer"},
+	"PUT /v1/channels/{channel}/read-state":               {reauthNone, "the caller's read mark"},
+	// Reactions (issue #765): authenticated self-writes, never an operator
+	// grant, and two reduce-only moderation removals, like membership removal.
+	"PUT /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                   {reauthNone, "the caller's own reaction"},
+	"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}":                {reauthNone, "takes back the caller's own reaction"},
+	"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}": {reauthNone, "reduce-only: removes one reaction, grants nothing"},
+	"DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}":          {reauthNone, "reduce-only: removes a person's reactions on one message, grants nothing"},
+	"PUT /v2/channels/{channel}/messages/{message_id}/body":                                {reauthNone, "the caller's own message text (issue #845); grants nothing, and an operator has no exemption"},
+	"DELETE /v1/credentials/current":                                                       {reauthNone, "signs the caller out"},
+	"DELETE /v1/credentials/mine/{id}":                                                     {reauthNone, "ends one of the caller's own sign-ins"},
+	"POST /v1/sign-in-links/mine":                                                          {reauthNone, "a member's own device link: the handler refuses operators and asks its own recent password proof (#712)"},
+	"DELETE /v1/sign-in-links/mine/{id}":                                                   {reauthNone, "closes one of the caller's own device links"},
+	"POST /v1/guest/end":                                                                   {reauthNone, "a guest ends its own visit"},
+	"POST /v1/guest/convert":                                                               {reauthNone, "a guest makes its own account: no operator acts, and it proves itself with the visit's credential and, when the policy is closed, an operator's permit"},
+	"POST /v1/password/mine":                                                               {reauthNone, "proves itself: a setup token or an enrolment link"},
+	"PUT /v1/password/mine":                                                                {reauthNone, "proves itself: the current password, and a code for an operator"},
+	"POST /v1/reauth":                                                                      {reauthNone, "is the proof"},
+	"POST /v1/totp/enroll":                                                                 {reauthNone, "setup scope only"},
+	"POST /v1/totp/confirm":                                                                {reauthNone, "setup scope only"},
+	"POST /v1/reports":                                                                     {reauthNone, "a problem report"},
+	"POST /v1/channels":                                                                    {reauthNone, "a member makes a channel: no grant beyond the creator's own membership of it"},
+	"POST /v1/channels/{channel}/join":                                                     {reauthNone, "a member joins a public channel themselves, with can_decide = 0: no grant"},
+	"POST /v1/channels/{channel}/leave":                                                    {reauthNone, "a member ends their own membership"},
+	"POST /v1/approvals":                                                                   {reauthNone, "an approval request (approval-path, unchanged)"},
+	"POST /v1/approvals/{id}/decisions":                                                    {reauthNone, "a decision (approval-path, unchanged)"},
 }
 
 func TestRecentAuthClass(t *testing.T) {
@@ -597,8 +640,8 @@ func TestRecentAuthClass(t *testing.T) {
 	inTable := map[string]route{}
 	for _, rt := range f.srv.routes {
 		inTable[rt.pattern] = rt
-		decide := rt.access == accessOperator || rt.access == accessOperatorOrSelf ||
-			(rt.access == accessAuthenticated && routeMethod(rt.pattern) != http.MethodGet)
+		decide := rt.access == accessOperator || rt.access == accessOperatorOrSelf || rt.access == accessOwner || rt.access == accessPermission ||
+			((rt.access == accessAuthenticated || rt.access == accessChannelManager) && routeMethod(rt.pattern) != http.MethodGet)
 		if !decide {
 			if _, ok := recentAuthRoutes[rt.pattern]; ok {
 				t.Errorf("%s is in the class but is neither an operator route nor an authenticated write", rt.pattern)
@@ -610,7 +653,7 @@ func TestRecentAuthClass(t *testing.T) {
 			t.Errorf("route %s has no re-authentication decision: classify it by the rule of design §5.3", rt.pattern)
 			continue
 		}
-		if rt.access == accessAuthenticated && d.rule != reauthNone && d.rule != reauthOperators {
+		if (rt.access == accessAuthenticated || rt.access == accessChannelManager) && d.rule != reauthNone && d.rule != reauthOperators {
 			t.Errorf("%s: an authenticated route is in the class for operators only, not %d", rt.pattern, d.rule)
 		}
 		if got := recentAuthRoutes[rt.pattern]; got != d.rule {
@@ -638,13 +681,25 @@ func TestRecentAuthGate(t *testing.T) {
 	f := newOperatorFixture(t)
 	secret := f.enrolOperator(t, f.root.ID)
 	_, session := f.operatorSession(t, secret)
-	for pattern := range recentAuthRoutes {
+	// The gate is held to a session with no proof: the sign-in's own
+	// (issue #1033) is let run out first.
+	f.advance(schema.RecentAuthLifetimeSeconds * time.Second)
+	for pattern, rule := range recentAuthRoutes {
 		exp := routeExpectations[pattern]
 		path := exp.path
 		if pattern == "POST /v1/principals/{id}/credentials/revoke-all" {
 			path = fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", f.alice.ID)
 		}
 		rec := f.send(t, routeMethod(pattern), path, session, exp.body, "")
+		// The session is the owner's: a route in the class for anyone but an
+		// owner lets it through (TestAuditExportNeedsAProofFromNonOwners has
+		// the operator's side).
+		if rule == reauthNonOwners {
+			if rec.Code != exp.allowed {
+				t.Errorf("%s on the owner's session with no proof = %d %s, want %d", pattern, rec.Code, rec.Body, exp.allowed)
+			}
+			continue
+		}
 		if rec.Code != http.StatusForbidden || decodeBody[schema.Error](t, rec).Code != schema.ErrorCodeReauthRequired {
 			t.Errorf("%s on a session with no proof = %d %s, want 403 reauth_required", pattern, rec.Code, rec.Body)
 		}
@@ -670,7 +725,7 @@ func TestRecentAuthGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertErrorBody(t, f.send(t, "POST", "/v1/invites", aliceSession, `{}`, ""), http.StatusBadRequest, "invalid_request")
+	assertErrorBody(t, f.send(t, "POST", "/v2/invites", aliceSession, `{}`, ""), http.StatusBadRequest, "invalid_request")
 	if rec := f.reauthOp(t, session, rootPassword, f.code(secret)); rec.Code != http.StatusOK {
 		t.Fatalf("reauth = %d %s", rec.Code, rec.Body)
 	}
@@ -683,6 +738,157 @@ func TestRecentAuthGate(t *testing.T) {
 	// it through with no proof. Last, since it ends the session.
 	if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", f.root.ID), session, "", ""); rec.Code == http.StatusForbidden {
 		t.Errorf("signing oneself out = %d %s", rec.Code, rec.Body)
+	}
+}
+
+// signInWithCode signs root in with password and code at the fixture's clock
+// and returns the session's token and the instant the code was accepted.
+func (f *operatorFixture) signInWithCode(t *testing.T, secret []byte) (string, time.Time) {
+	t.Helper()
+	ch := f.rootChallenge(t, rootPassword, "")
+	at := f.srv.now()
+	rec := f.completeLogin(t, ch, f.code(secret), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login/totp = %d %s", rec.Code, rec.Body)
+	}
+	return decodeBody[schema.LoginResponseV1](t, rec).Token, at
+}
+
+// inviteNow is the operator's first invite, a route of the
+// re-authentication class (audit 3 F8).
+func (f *operatorFixture) inviteNow(t *testing.T, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	return f.send(t, "POST", "/v2/invites", token, `{"kind":"member"}`, "")
+}
+
+// A full sign-in with password and code is the recent proof for its first
+// ten minutes (design §5.3, issue #1033, audit 3 F8): whoami shows it, the
+// class admits the session within the window and asks again after it, and
+// an older session of the same operator gets nothing from it.
+func TestSignInIsTheRecentProof(t *testing.T) {
+	f := newOperatorFixture(t)
+	secret := f.enrolOperator(t, f.root.ID)
+	_, older := f.operatorSession(t, secret)
+	lifetime := schema.RecentAuthLifetimeSeconds * time.Second
+	// The next sign-in comes after the older session's own proof ran out.
+	f.advance(lifetime + time.Minute)
+	session, signedIn := f.signInWithCode(t, secret)
+
+	got := f.whoamiAuth(t, session).RecentAuthUntil
+	if want := signedIn.Add(lifetime); got == nil || got.Time().Sub(want).Abs() > time.Second {
+		t.Errorf("whoami recent_auth_until = %v, want %v ±1s", got, want)
+	}
+	if got := f.whoamiAuth(t, older).RecentAuthUntil; got != nil {
+		t.Errorf("the older session holds a proof to %v", got)
+	}
+	tests := []struct {
+		name  string
+		at    time.Duration
+		token string
+		want  int
+	}{
+		{"the older session, a minute on", time.Minute, older, http.StatusForbidden},
+		{"the new session, a minute on", time.Minute, session, http.StatusCreated},
+		{"the new session, nine minutes on", 9 * time.Minute, session, http.StatusCreated},
+		{"the new session, ten minutes and a second on", lifetime + time.Second, session, http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f.advance(signedIn.Add(tt.at).Sub(f.srv.now()))
+			rec := f.inviteNow(t, tt.token)
+			if tt.want == http.StatusForbidden {
+				assertErrorBody(t, rec, http.StatusForbidden, schema.ErrorCodeReauthRequired)
+				return
+			}
+			if rec.Code != tt.want {
+				t.Errorf("invite = %d %s, want %d", rec.Code, rec.Body, tt.want)
+			}
+		})
+	}
+	// The sign-in is audited as one, not as a re-authentication.
+	if n := len(auditRows(t, f.authFixture, store.AuditReauth)); n != 0 {
+		t.Errorf("%d reauth rows, want none", n)
+	}
+}
+
+// Every change that cleared a re-authentication's proof clears the
+// sign-in's (issue #1033): a password change leaves the rotated session
+// without one, and a second factor change (recovery) or signing out
+// everywhere ends the session with it.
+func TestSignInProofClears(t *testing.T) {
+	tests := []struct {
+		name string
+		// clear makes the change and returns the token that is left, if any.
+		clear func(t *testing.T, f *operatorFixture, secret []byte, session string) string
+	}{
+		{"a password change", func(t *testing.T, f *operatorFixture, secret []byte, session string) string {
+			rec := f.send(t, "PUT", "/v1/password/mine", session,
+				inviteJSON(t, schema.ChangePasswordRequestV1{Current: rootPassword, Password: newAlicePassword, Code: f.code(secret)}), "")
+			if rec.Code != http.StatusOK {
+				t.Fatalf("change = %d %s", rec.Code, rec.Body)
+			}
+			return decodeBody[schema.PasswordUpdatedResponseV1](t, rec).Token
+		}},
+		{"a second factor change by recovery", func(t *testing.T, f *operatorFixture, _ []byte, _ string) string {
+			if _, err := f.srv.store.RecoverOperator(context.Background(), f.root.ID, f.srv.now()); err != nil {
+				t.Fatalf("RecoverOperator = %v", err)
+			}
+			return ""
+		}},
+		{"signing out everywhere", func(t *testing.T, f *operatorFixture, _ []byte, session string) string {
+			if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", f.root.ID), session, "", ""); rec.Code >= 300 {
+				t.Fatalf("revoke-all = %d %s", rec.Code, rec.Body)
+			}
+			return ""
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newOperatorFixture(t)
+			secret := f.enrolOperator(t, f.root.ID)
+			session, _ := f.signInWithCode(t, secret)
+			f.nextStep()
+			if f.whoamiAuth(t, session).RecentAuthUntil == nil {
+				t.Fatal("the sign-in made no proof")
+			}
+			left := tt.clear(t, f, secret, session)
+			if got := f.status(t, session); got != http.StatusUnauthorized {
+				t.Errorf("the signed-in session = %d after the change, want 401", got)
+			}
+			if left == "" {
+				return
+			}
+			if got := f.whoamiAuth(t, left).RecentAuthUntil; got != nil {
+				t.Errorf("the session left holds a proof to %v", got)
+			}
+			assertErrorBody(t, f.inviteNow(t, left), http.StatusForbidden, schema.ErrorCodeReauthRequired)
+		})
+	}
+}
+
+// A password-only operator's sign-in and a member's are not the proof
+// (issue #1033 keeps them out of scope): whoami shows none.
+func TestPasswordSignInsAreNotTheProof(t *testing.T) {
+	tests := []struct {
+		name     string
+		who      string
+		password string
+	}{
+		{"a password-only operator on a temporary server", "root", rootPassword},
+		{"a member", "alice", alicePassword},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newModeFixture(t, temporary)
+			rec := f.login(t, tt.who, tt.password, "")
+			resp := decodeBody[schema.LoginResponseV1](t, rec)
+			if rec.Code != http.StatusOK || resp.Next != schema.LoginNextSignedIn {
+				t.Fatalf("login = %d %s", rec.Code, rec.Body)
+			}
+			if got := f.whoamiAuth(t, resp.Token).RecentAuthUntil; got != nil {
+				t.Errorf("the sign-in made a proof to %v", got)
+			}
+		})
 	}
 }
 
@@ -1064,4 +1270,62 @@ func TestSoleOperatorWithBothFactorsCanSignOut(t *testing.T) {
 	if _, err := f.srv.store.DisablePrincipal(ctx, "system", f.root.ID); err != nil {
 		t.Errorf("disabling root with another operator able to sign in = %v", err)
 	}
+}
+
+// A role change drops the principal's recent-auth proofs (issue #1054): a
+// member's password-only proof must not satisfy an operator route, which
+// needs password and code, and a demoted operator's proof ends with the
+// role. Sessions are not ended: they carry no role, and the route's own
+// check asks for the fresh proof.
+func TestRoleChangeClearsRecentAuthProof(t *testing.T) {
+	setRole := func(t *testing.T, f *operatorFixture, role string) {
+		t.Helper()
+		rec := f.send(t, "PUT", fmt.Sprintf("/v1/principals/%d/role", f.alice.ID), f.rootTok, fmt.Sprintf(`{"role":%q}`, role), "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("set role %s = %d %s", role, rec.Code, rec.Body)
+		}
+	}
+	login := func(t *testing.T, f *operatorFixture) string {
+		t.Helper()
+		rec := f.login(t, "alice", alicePassword, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("login alice = %d %s", rec.Code, rec.Body)
+		}
+		return decodeBody[schema.LoginResponseV1](t, rec).Token
+	}
+	t.Run("promotion then fresh operator proof then demotion", func(t *testing.T) {
+		f := newOperatorFixture(t)
+		session := login(t, f)
+		f.nextStep()
+		if rec := f.reauthOp(t, session, alicePassword, ""); rec.Code != http.StatusOK {
+			t.Fatalf("member reauth = %d %s", rec.Code, rec.Body)
+		}
+		if f.whoamiAuth(t, session).RecentAuthUntil == nil {
+			t.Fatal("the member's re-authentication made no proof")
+		}
+		setRole(t, f, "operator")
+		if got := f.whoamiAuth(t, session).RecentAuthUntil; got != nil {
+			t.Errorf("the promoted operator still holds a proof to %v", got)
+		}
+		assertErrorBody(t, f.inviteNow(t, session), http.StatusForbidden, schema.ErrorCodeReauthRequired)
+
+		// A fresh operator re-authentication, password and code, works.
+		secret := f.enrolOperator(t, f.alice.ID)
+		if got := f.status(t, session); got != http.StatusOK {
+			t.Fatalf("the member's session = %d after promotion and enrolment, want 200 (sessions stand)", got)
+		}
+		assertErrorBody(t, f.inviteNow(t, session), http.StatusForbidden, schema.ErrorCodeReauthRequired)
+		if rec := f.reauthOp(t, session, alicePassword, f.code(secret)); rec.Code != http.StatusOK {
+			t.Fatalf("operator reauth = %d %s", rec.Code, rec.Body)
+		}
+		if rec := f.inviteNow(t, session); rec.Code >= 300 {
+			t.Errorf("operator route after a fresh re-authentication = %d %s", rec.Code, rec.Body)
+		}
+
+		// Demotion clears that proof too.
+		setRole(t, f, "member")
+		if got := f.whoamiAuth(t, session).RecentAuthUntil; got != nil {
+			t.Errorf("the demoted member still holds a proof to %v", got)
+		}
+	})
 }

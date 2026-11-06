@@ -87,6 +87,8 @@ interface Server {
   // returns whatever limit it asked for: a test that needs a nearly full
   // channel gets there without one render per page (#459).
   firstPage?: number;
+  // netsHeld, when set, holds every nets answer until it resolves.
+  netsHeld?: Promise<void>;
 }
 
 let server: Server;
@@ -125,7 +127,7 @@ function install() {
       if (m?.[1] === undefined) return Promise.resolve(json({}, 404));
       const channel = decodeURIComponent(m[1]);
       if (m[2] === 'members') return Promise.resolve(json(members));
-      if (m[2] === 'nets') return Promise.resolve(json(server.nets));
+      if (m[2] === 'nets') return (server.netsHeld ?? Promise.resolve()).then(() => json(server.nets));
       if (init?.method === 'POST') {
         const sent = JSON.parse(init.body as string) as { body: string; audience?: unknown };
         const body = sent.body;
@@ -138,6 +140,12 @@ function install() {
       const before = url.searchParams.get('before');
       const asked = Number(url.searchParams.get('limit'));
       const limit = server.firstPage !== undefined && server.historyRequests.length === 1 ? server.firstPage : asked;
+      if (url.searchParams.get('order') === 'asc') {
+        const after = Number(url.searchParams.get('after') ?? '0');
+        const visible = (server.history[channel] ?? []).filter((x) => (x as { id: number }).id > after);
+        const page = visible.slice(0, limit);
+        return Promise.resolve(json({ messages: page, ...(page.length === limit ? { next_after: (page.at(-1) as { id: number } | undefined)?.id ?? after } : {}) }));
+      }
       const visible = (server.history[channel] ?? []).filter((x) => before === null || (x as { id: number }).id < Number(before));
       return Promise.resolve(json({ messages: visible.slice(-limit).reverse() }));
     }),
@@ -163,7 +171,12 @@ async function connect(socket: FakeSocket) {
   });
 }
 
-const lines = () => within(screen.getByRole('log', { name: 'Messages' })).queryAllByRole('listitem').map((li) => li.textContent);
+const lines = () => within(screen.getByRole('log', { name: 'Messages' })).queryAllByRole('listitem').map((li) => {
+  const copy = li.cloneNode(true) as HTMLElement;
+  // The Reply and Open thread buttons are controls, not message text.
+  copy.querySelectorAll('button').forEach((button) => { button.remove(); });
+  return copy.textContent;
+});
 
 beforeEach(() => {
   window.sessionStorage.clear();
@@ -249,13 +262,81 @@ describe('loading', () => {
   });
 });
 
+// Issue #845: an edit arrives on the message socket as the message again, with
+// edited_at. It changes the message held and adds the marker; one for a
+// message the page does not hold is not drawn; a stale copy changes nothing.
+describe('a live edit', () => {
+  it('replaces the text in place, marks it, and is never a new message', async () => {
+    server.history.general = [message(1, 'helo'), message(2, 'two')];
+    const socket = await openChat();
+    await connect(socket);
+    socket.send(message(1, 'hello', { edited_at: '2026-10-14T10:43:00Z' }));
+    await screen.findByText('hello');
+    expect(screen.queryByText('helo')).toBeNull();
+    expect(screen.getAllByText('(edited)')).toHaveLength(1);
+    // An edit of a message older than anything held: dropped, not appended.
+    socket.send(message(0, 'from before the page', { edited_at: '2026-10-14T10:43:00Z' }));
+    // A stale copy of message 1 (the original, replayed) changes nothing.
+    socket.send(message(1, 'helo'));
+    socket.send(message(3, 'three'));
+    await screen.findByText('three');
+    expect(lines()).toHaveLength(3);
+    expect(screen.queryByText('from before the page')).toBeNull();
+    expect(screen.getByText('hello')).toBeTruthy();
+  });
+});
+
 describe('an empty channel', () => {
-  const emptyLine = 'No messages in #general yet. Say hello.';
+  const emptyLine = 'No messages here that you can see yet.';
 
   it('says so once its history has loaded with nothing in it', async () => {
     await openChat();
     await screen.findByText(emptyLine);
-    expect(within(screen.getByRole('log', { name: 'Messages' })).getByText(emptyLine).tagName).toBe('P');
+    const log = within(screen.getByRole('log', { name: 'Messages' }));
+    expect(log.getByText(emptyLine).tagName).toBe('P');
+    expect(log.getByText('Write a message to start.')).toBeTruthy();
+    // Never the claim that the channel is empty (issue #1034).
+    expect(screen.queryByText(/Say hello/)).toBeNull();
+    expect(screen.queryByText(/No messages in #general/)).toBeNull();
+  });
+
+  const hiding = "Messages sent before you joined aren't shown.";
+  const own = () => members.members[0] as { history_after?: number };
+
+  it('adds that earlier messages are not shown only when the own membership has a history bound', async () => {
+    own().history_after = 41;
+    try {
+      await openChat();
+      await screen.findByText(emptyLine);
+      await screen.findByText(hiding);
+    } finally {
+      delete own().history_after;
+    }
+  });
+
+  it('does not say earlier messages are hidden for an unbounded own membership', async () => {
+    await openChat();
+    await screen.findByText(emptyLine);
+    await act(async () => {});
+    expect(screen.queryByText(hiding)).toBeNull();
+  });
+
+  it('does not say it while the members are not known', async () => {
+    own().history_after = 41;
+    const real = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input instanceof URL ? input.pathname : input.url;
+      if (path.endsWith('/members')) return Promise.resolve(json({}, 500));
+      return real(input, init);
+    });
+    try {
+      await openChat();
+      await screen.findByText(emptyLine);
+      await act(async () => {});
+      expect(screen.queryByText(hiding)).toBeNull();
+    } finally {
+      delete own().history_after;
+    }
   });
 
   it('says nothing of the kind for a channel with messages', async () => {
@@ -380,6 +461,27 @@ describe('sending', () => {
   const enter = () => {
     fireEvent.keyDown(screen.getByLabelText('Message #general'), { key: 'Enter' });
   };
+  async function openWithEvents(): Promise<FakeSocket> {
+    const real = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, origin);
+      if (url.pathname === '/v1/sessions' && init?.method === 'POST') {
+        return Promise.resolve(json({
+          schema: 'conch.session.v1', id: 100, principal_id: 2, kind: 'human', name: 'ada', client: 'browser',
+          state: 'online', status: 'online', started_at: at, last_seen_at: at, interventions: [], outcome_unknown: false,
+        }, 201));
+      }
+      if (url.pathname === '/v1/runs') return Promise.resolve(json({ runs: [] }));
+      return real(input, init);
+    });
+    await connect(await openChat());
+    await waitFor(() => {
+      expect(FakeSocket.all.some((socket) => new URL(socket.url).pathname === '/v1/events/ws')).toBe(true);
+    });
+    const events = FakeSocket.all.find((socket) => new URL(socket.url).pathname === '/v1/events/ws') as FakeSocket;
+    events.open();
+    return events;
+  }
 
   it('names the audience, sends on Enter but not on Shift+Enter, shows Sending then Sent once', async () => {
     const socket = await openChat();
@@ -438,6 +540,138 @@ describe('sending', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeDefined();
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
     expect(screen.queryByText('maybe')).toBeNull();
+  });
+
+  it('reconciles concurrent identical retries against one stored message only once', async () => {
+    await connect(await openChat());
+    let calls = 0;
+    server.post = (_channel, body) => {
+      calls += 1;
+      if (calls === 1) server.history.general = [message(100, body, { author_id: 2 })];
+      return Promise.reject(new TypeError('connection dropped'));
+    };
+    type('same');
+    enter();
+    type('same');
+    enter();
+    await waitFor(() => { expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(2); });
+    nextId = 101;
+    server.post = (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201);
+    for (const retry of screen.getAllByRole('button', { name: 'Retry' })) fireEvent.click(retry);
+    await waitFor(() => { expect(server.posts).toHaveLength(3); });
+    // Both are stored and shown; "Sent" is under the newest of them only (F26).
+    await waitFor(() => { expect(screen.getAllByText('Sent')).toHaveLength(1); });
+    expect(server.posts[2]).toEqual({ channel: 'general', body: 'same' });
+    expect(lines().filter((line) => line.includes('same'))).toHaveLength(2);
+  });
+
+  it('invalidates an initial POST on rename and retries by id, not a recreated old name', async () => {
+    const events = await openWithEvents();
+    let answer: (response: Response) => void = () => undefined;
+    server.post = () => new Promise<Response>((resolve) => { answer = resolve; });
+    type('original only');
+    enter();
+    await screen.findByText('Sending');
+    server.channels = [
+      { id: 9, name: 'general', created_at: at },
+      { id: 7, name: 'original', created_at: at },
+      { id: 8, name: 'ops', created_at: at },
+    ];
+    events.send({ schema: 'conch.channel.v1', channel_id: 7, name: 'original', created_at: at });
+    await screen.findByLabelText('Message #original');
+    await screen.findByText(/^Not confirmed/);
+    await act(async () => {
+      answer(json({ message: message(100, 'original only', { author_id: 2 }) }, 201));
+      await Promise.resolve();
+    });
+    expect(screen.getByText(/^Not confirmed/)).toBeDefined();
+    expect(server.posts).toHaveLength(1);
+
+    server.post = (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Sent');
+    expect(server.posts.map((post) => post.channel)).toEqual(['general', 'original']);
+  });
+
+  it('drops reconciliation history after rename and old-name recreation, then retries under the current name', async () => {
+    const events = await openWithEvents();
+    server.post = () => Promise.reject(new TypeError('connection dropped'));
+    type('reconcile by id');
+    enter();
+    await screen.findByText(/^Not confirmed/);
+    const real = globalThis.fetch;
+    let answerHistory: (response: Response) => void = () => undefined;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, origin);
+      if (url.pathname === '/v2/channels/general/messages' && url.searchParams.get('order') === 'asc') {
+        return new Promise<Response>((resolve) => { answerHistory = resolve; });
+      }
+      return real(input, init);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Sending');
+    server.channels = [
+      { id: 9, name: 'general', created_at: at },
+      { id: 7, name: 'original', created_at: at },
+      { id: 8, name: 'ops', created_at: at },
+    ];
+    server.history.original = [];
+    events.send({ schema: 'conch.channel.v1', channel_id: 7, name: 'original', created_at: at });
+    await screen.findByLabelText('Message #original');
+    await act(async () => {
+      answerHistory(json({ messages: [] }));
+      await Promise.resolve();
+    });
+    await screen.findByText(/^Not confirmed/);
+    expect(server.posts).toHaveLength(1);
+
+    server.post = (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Sent');
+    expect(server.posts.map((post) => post.channel)).toEqual(['general', 'original']);
+  });
+
+  it('restores a pending send by channel id after a rename and old-name recreation during signout', async () => {
+    await connect(await openChat());
+    server.post = () => Promise.reject(new TypeError('connection dropped'));
+    type('for the original channel');
+    enter();
+    await screen.findByText(/^Not confirmed/);
+    const real = globalThis.fetch;
+    let expireHistory = false;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, origin);
+      if (expireHistory && url.pathname === '/v2/channels/general/messages' && url.searchParams.get('order') === 'asc') return Promise.resolve(json({}, 401));
+      return real(input, init);
+    });
+    expireHistory = true;
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByLabelText('Credential');
+    expireHistory = false;
+    server.channels = [
+      { id: 9, name: 'general', created_at: at },
+      { id: 7, name: 'original', created_at: at },
+      { id: 8, name: 'ops', created_at: at },
+    ];
+    server.history.original = [];
+    fireEvent.change(screen.getByLabelText('Credential'), { target: { value: secret } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
+    await screen.findByLabelText('Message #general');
+    fireEvent.click(screen.getByRole('button', { name: 'original' }));
+    await screen.findByText('for the original channel');
+    fireEvent.click(screen.getByRole('button', { name: 'general' }));
+    await screen.findByLabelText('Message #general');
+    expect(screen.queryByText('for the original channel')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'original' }));
+    await screen.findByText('for the original channel');
+    server.post = (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await screen.findByText('Sent');
+    expect(server.posts).toEqual([
+      { channel: 'general', body: 'for the original channel' },
+      { channel: 'original', body: 'for the original channel' },
+    ]);
   });
 
   it('treats a server error as not confirmed, and a refusal as failed', async () => {
@@ -540,6 +774,452 @@ describe('composing to a net or a whisper', () => {
     expect(screen.queryByRole('group', { name: 'Whisper to' })).toBeNull();
     expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('half a thought');
     expect(to().value).toBe('channel');
+  });
+
+  // A reload keeps the tab's sessionStorage (issue #1039): a draft kept for a
+  // few is never sent to everyone.
+  async function reopen(label: string) {
+    const socket = await openChat();
+    socket.open();
+    await waitFor(() => {
+      expect(screen.getByLabelText<HTMLTextAreaElement>(label).disabled).toBe(false);
+    });
+  }
+  async function reload(label: string) {
+    cleanup();
+    FakeSocket.all = [];
+    await reopen(label);
+  }
+  const keepDraft = (target: { net: number | null; whisper: number[] | null }) => {
+    window.sessionStorage.setItem('conch.web.drafts', JSON.stringify({ principal: 2, drafts: { '7': 'psst' }, targets: { '7': target }, edits: {} }));
+  };
+
+  it('a whisper draft is still a whisper to the same people after a reload', async () => {
+    await ready();
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    await reload('Whisper to bot');
+    await waitFor(() => {
+      expect(sendButton().disabled).toBe(false);
+    });
+    send();
+    await waitFor(() => {
+      expect(server.posts).toEqual([{ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } }]);
+    });
+  });
+
+  it('a net draft is still for the same net after a reload', async () => {
+    await ready();
+    choose('net:5');
+    type('on the net', 'Message net alpha');
+    await reload('Message net alpha');
+    await waitFor(() => {
+      expect(sendButton().disabled).toBe(false);
+    });
+    send();
+    await waitFor(() => {
+      expect(server.posts).toEqual([{ channel: 'general', body: 'on the net', audience: { kind: 'net', net_id: 5 } }]);
+    });
+  });
+
+  it('a whisper to someone who has left keeps the text, cannot be sent, and does not go to the channel', async () => {
+    keepDraft({ net: null, whisper: [3, 99] });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    await reopen('Whisper to…');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to…').value).toBe('psst');
+    await screen.findByText(/no longer available/);
+    expect(sendButton().disabled).toBe(true);
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Enter' });
+    expect(server.posts).toHaveLength(0);
+    // Choosing who it goes to again makes it sendable.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    expect(sendButton().disabled).toBe(false);
+  });
+
+  it('a net the person can no longer transmit to keeps the text, cannot be sent, and does not go to the channel', async () => {
+    keepDraft({ net: 77, whisper: null });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    await reopen('Whisper to…');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to…').value).toBe('psst');
+    await screen.findByText(/no longer available/);
+    expect(sendButton().disabled).toBe(true);
+    expect(server.posts).toHaveLength(0);
+  });
+
+  // checked waits until no kept audience is still being checked.
+  async function checked() {
+    await waitFor(() => {
+      expect(screen.queryByText(/Checking who this draft goes to/)).toBeNull();
+    });
+  }
+
+  it('a whisper chosen over a net is still that whisper after a reload, never the net', async () => {
+    await ready();
+    choose('net:5');
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    cleanup();
+    FakeSocket.all = [];
+    (await openChat()).open();
+    await checked();
+    await waitFor(() => {
+      expect(sendButton().disabled).toBe(false);
+    });
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } }]);
+  });
+
+  it('a choice made while a kept whisper is still being checked wins, and the check adds nobody to it', async () => {
+    keepDraft({ net: null, whisper: [3] });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    let release = () => {};
+    server.netsHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await reopen('Whisper to…');
+    await screen.findByText(/Checking who this draft goes to/);
+    fireEvent.click(screen.getByRole('checkbox', { name: '<b>mallory</b>' }));
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await screen.findByRole('option', { name: 'net alpha' });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to <b>mallory</b>').value).toBe('psst');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [4] } }]);
+  });
+
+  // A sign-in that ends by itself keeps the text for the same person (issue
+  // #714), and now who it was for (issue #1039). The credential stops working
+  // when ops is opened; the person signs back in with `token`, who is ada
+  // unless it is `other`, eve.
+  const otherToken = 'conch_other_token_value';
+  async function expireThenSignIn(token: string, meanwhile: () => void = () => {}) {
+    const ada = token === secret;
+    const real = globalThis.fetch;
+    let expired = true;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, origin);
+      const headers = new Headers(init?.headers);
+      if (headers.get('Authorization') === `Bearer ${otherToken}`) {
+        if (url.pathname === '/v1/whoami') return Promise.resolve(json({ id: 9, kind: 'human', name: 'eve', role: 'member', voice_allowed: false }));
+        headers.set('Authorization', `Bearer ${secret}`);
+        return real(input, { ...init, headers });
+      }
+      if (expired && url.pathname === '/v2/channels/ops/messages') return Promise.resolve(json({}, 401));
+      return real(input, init);
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+    await screen.findByText('Signed out: the credential is no longer valid');
+    expired = false;
+    meanwhile();
+    await signBackIn(token);
+    // The nets list ada alone, so eve is offered none.
+    if (ada) await screen.findByRole('option', { name: 'net alpha' });
+    else await screen.findByLabelText('Message #general');
+    await checked();
+  }
+
+  // signBackIn signs in again from the sign-in screen and opens `channel`,
+  // letting in every socket the page opens from here, once.
+  async function signBackIn(token: string, channel = 'general') {
+    FakeSocket.all = [];
+    fireEvent.change(screen.getByLabelText('Credential'), { target: { value: token } });
+    fireEvent.click(screen.getByRole('button', { name: 'Use credential' }));
+    await screen.findByRole('log', { name: 'Messages' });
+    fireEvent.click(await screen.findByRole('button', { name: channel }));
+    await letIn();
+  }
+
+  // letIn opens every socket the page has opened and not yet been let in on,
+  // until the composer is usable.
+  const admitted = new WeakSet<FakeSocket>();
+  async function letIn() {
+    await waitFor(() => {
+      for (const socket of FakeSocket.all) {
+        if (admitted.has(socket) || socket.closed) continue;
+        admitted.add(socket);
+        socket.open();
+      }
+      expect(document.querySelector<HTMLTextAreaElement>('textarea')?.disabled).toBe(false);
+    });
+  }
+
+  it('a whisper draft kept across a sign-in that ended goes to the same people', async () => {
+    await ready();
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    await expireThenSignIn(secret);
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    await waitFor(() => {
+      expect(sendButton().disabled).toBe(false);
+    });
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } }]);
+  });
+
+  it('a net draft kept across a sign-in that ended goes to the same net', async () => {
+    await ready();
+    choose('net:5');
+    type('on the net', 'Message net alpha');
+    await expireThenSignIn(secret);
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message net alpha').value).toBe('on the net');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'general', body: 'on the net', audience: { kind: 'net', net_id: 5 } }]);
+  });
+
+  it('a net lost while signed out keeps the text, cannot be sent, and does not go to the channel', async () => {
+    await ready();
+    choose('net:5');
+    type('on the net', 'Message net alpha');
+    await expireThenSignIn(secret, () => {
+      server.nets = netsOf({ id: 5, name: 'alpha', role: 'monitor' }, { id: 8, name: 'alpha' });
+    });
+    await screen.findByText(/no longer available/);
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to…').value).toBe('on the net');
+    expect(sendButton().disabled).toBe(true);
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Enter' });
+    expect(server.posts).toHaveLength(0);
+  });
+
+  it('a whisper draft kept across a sign-in follows its channel through a rename, and the new channel of the old name gets nothing', async () => {
+    await ready();
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    await expireThenSignIn(secret, () => {
+      server.channels = [
+        { id: 9, name: 'general', created_at: at },
+        { id: 7, name: 'original', created_at: at },
+        { id: 8, name: 'ops', created_at: at },
+      ];
+      server.history.original = [];
+    });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    expect(to().value).toBe('channel');
+    fireEvent.click(screen.getByRole('button', { name: 'original' }));
+    await letIn();
+    await screen.findByRole('option', { name: 'net alpha' });
+    await checked();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'original', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } }]);
+  });
+
+  it('a new channel given the old name while signed out never gets the text kept for the one that went', async () => {
+    await ready();
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    await expireThenSignIn(secret, () => {
+      server.channels = [
+        { id: 9, name: 'general', created_at: at },
+        { id: 8, name: 'ops', created_at: at },
+      ];
+    });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    expect(to().value).toBe('channel');
+    expect(document.body.innerHTML).not.toContain('psst');
+  });
+
+  it('a whisper a 401 gives back keeps the audience it was sent to, not the one chosen since, and is held until checked', async () => {
+    await ready();
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    let answer: (response: Response) => void = () => undefined;
+    server.post = () =>
+      new Promise<Response>((resolve) => {
+        answer = resolve;
+      });
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    // The person moves on to the whole channel before the answer comes.
+    choose('channel');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    await act(async () => {
+      answer(json({}, 401));
+      await Promise.resolve();
+    });
+    await screen.findByText('Signed out: the credential is no longer valid');
+    server.post = (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201);
+    let release = () => {};
+    server.netsHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await signBackIn(secret);
+    await screen.findByText(/Checking who this draft goes to/);
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to…').value).toBe('psst');
+    expect(sendButton().disabled).toBe(true);
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await checked();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(2);
+    });
+    expect(server.posts[1]).toEqual({ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } });
+  });
+
+  it('Escape does not end a hold while the kept audience is being checked', async () => {
+    keepDraft({ net: 5, whisper: null });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    let release = () => {};
+    server.netsHeld = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await reopen('Whisper to…');
+    await screen.findByText(/Checking who this draft goes to/);
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Escape' });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to…').value).toBe('psst');
+    expect(sendButton().disabled).toBe(true);
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Enter' });
+    expect(server.posts).toHaveLength(0);
+    // The check still runs, and gives the net back.
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await checked();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message net alpha').value).toBe('psst');
+  });
+
+  it('Escape does not end a hold once the kept audience is no longer available', async () => {
+    keepDraft({ net: 77, whisper: null });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    await reopen('Whisper to…');
+    await screen.findByText(/no longer available/);
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Escape' });
+    fireEvent.keyDown(screen.getByRole('checkbox', { name: 'bot [agent]' }), { key: 'Escape' });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to…').value).toBe('psst');
+    expect(sendButton().disabled).toBe(true);
+    fireEvent.keyDown(screen.getByLabelText('Whisper to…'), { key: 'Enter' });
+    expect(server.posts).toHaveLength(0);
+    // Choosing the channel is a choice, and ends it.
+    choose('channel');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('psst');
+  });
+
+  it('a whisper over a net given back after a reload is protected: Escape keeps the whisper, and choosing the net is what moves it', async () => {
+    await ready();
+    choose('net:5');
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    await reload('Whisper to bot');
+    await checked();
+    fireEvent.keyDown(screen.getByLabelText('Whisper to bot'), { key: 'Escape' });
+    fireEvent.keyDown(screen.getByRole('checkbox', { name: 'bot [agent]' }), { key: 'Escape' });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    expect(to().value).toBe('whisper');
+    // An explicit choice in the To: list ends the protection.
+    choose('net:5');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message net alpha').value).toBe('psst');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'general', body: 'psst', audience: { kind: 'net', net_id: 5 } }]);
+  });
+
+  // escapeThenSend presses Escape in the whisper box and its picker, then
+  // sends: a protected whisper still goes to [3] alone.
+  async function escapeThenSend(sent: number) {
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    fireEvent.keyDown(screen.getByLabelText('Whisper to bot'), { key: 'Escape' });
+    fireEvent.keyDown(screen.getByRole('checkbox', { name: 'bot [agent]' }), { key: 'Escape' });
+    expect(to().value).toBe('whisper');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(sent);
+    });
+    expect(server.posts[sent - 1]).toEqual({ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } });
+  }
+
+  it('a whisper over a lost net stays protected through a second reload', async () => {
+    keepDraft({ net: 77, whisper: [3] });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    await reopen('Whisper to bot');
+    await checked();
+    await reload('Whisper to bot');
+    await checked();
+    await escapeThenSend(1);
+  });
+
+  it('a whisper over a lost net stays protected through a sign-in that ended and began again', async () => {
+    keepDraft({ net: 77, whisper: [3] });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    await reopen('Whisper to bot');
+    await checked();
+    await expireThenSignIn(secret);
+    await escapeThenSend(1);
+  });
+
+  it('a whisper over a net that a 401 gives back is protected after signing in again: Escape and Send go to the whisper alone', async () => {
+    await ready();
+    choose('net:5');
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    server.post = () => json({}, 401);
+    send();
+    await screen.findByText('Signed out: the credential is no longer valid');
+    server.post = (_channel, body) => json({ message: message(nextId++, body, { author_id: 2 }) }, 201);
+    await signBackIn(secret);
+    await screen.findByRole('option', { name: 'net alpha' });
+    await checked();
+    await escapeThenSend(2);
+  });
+
+  it('Escape on a whisper whose net under it is gone keeps the whisper, never the whole channel', async () => {
+    keepDraft({ net: 77, whisper: [3] });
+    server.nets = netsOf({ id: 5, name: 'alpha' });
+    await reopen('Whisper to bot');
+    await checked();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    fireEvent.keyDown(screen.getByLabelText('Whisper to bot'), { key: 'Escape' });
+    fireEvent.keyDown(screen.getByRole('checkbox', { name: 'bot [agent]' }), { key: 'Escape' });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('psst');
+    expect(to().value).toBe('whisper');
+    send();
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(server.posts).toEqual([{ channel: 'general', body: 'psst', audience: { kind: 'principals', principal_ids: [3] } }]);
+  });
+
+  it('a whisper draft is not given, nor who it was for, to someone else signing in next', async () => {
+    await ready();
+    choose('whisper');
+    fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+    type('psst', 'Whisper to bot');
+    await expireThenSignIn(otherToken);
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    expect(to().value).toBe('channel');
+    expect(document.body.innerHTML).not.toContain('psst');
   });
 
   it('sends a whisper once, returns to the channel, and shows the audit notice only for the first', async () => {
@@ -680,6 +1360,185 @@ describe('composing to a net or a whisper', () => {
     expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to <b>mallory</b>').value).toBe('second');
   });
 
+  // Issue #1066: the answer to a send ends only the draft that send took,
+  // never a newer one to the same people. No answer widens a draft.
+  describe('an answer never widens a newer draft (issue #1066)', () => {
+    const toBot = { kind: 'principals', principal_ids: [3] };
+    const accepted = (body: string, ids: number[]) => json({ message: message(nextId++, body, { author_id: 2, audience: { kind: 'principals', principal_ids: ids } }) }, 201);
+    // held answers each POST only when the test says so, in order.
+    function held() {
+      const answers: ((response: Response) => void)[] = [];
+      server.post = () =>
+        new Promise<Response>((resolve) => {
+          answers.push(resolve);
+        });
+      return async (index: number, response: Response) => {
+        await waitFor(() => {
+          expect(answers.length).toBeGreaterThan(index);
+        });
+        await act(async () => {
+          answers[index]?.(response);
+          await Promise.resolve();
+        });
+      };
+    }
+    const immediately = () => {
+      server.post = (_c, body) => accepted(body, [2, 3]);
+    };
+    function whisperToBot(text: string) {
+      choose('whisper');
+      fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+      type(text, 'Whisper to bot');
+    }
+
+    it('a second whisper to the same person, typed while the first is on its way, goes to that person', async () => {
+      await ready();
+      const answer = held();
+      whisperToBot('a');
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(1);
+      });
+      type('b', 'Whisper to bot');
+      await answer(0, accepted('a', [2, 3]));
+      await screen.findByText('Sent');
+      expect(to().value).toBe('whisper');
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('b');
+      immediately();
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(2);
+      });
+      expect(server.posts[1]).toEqual({ channel: 'general', body: 'b', audience: toBot });
+    });
+
+    it('the same whisper chosen again while the first is on its way keeps its audience', async () => {
+      await ready();
+      const answer = held();
+      whisperToBot('a');
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(1);
+      });
+      choose('channel');
+      whisperToBot('b');
+      await answer(0, accepted('a', [2, 3]));
+      await screen.findByText('Sent');
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('b');
+      immediately();
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(2);
+      });
+      expect(server.posts[1]).toEqual({ channel: 'general', body: 'b', audience: toBot });
+    });
+
+    it('a refused whisper retried after a second one is typed leaves the second its audience', async () => {
+      await ready();
+      server.post = () => json({ code: 'forbidden', message: 'not now' }, 403);
+      whisperToBot('a');
+      send();
+      await screen.findByText('Failed');
+      type('b', 'Whisper to bot');
+      immediately();
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      await screen.findByText('Sent');
+      expect(server.posts[1]).toEqual({ channel: 'general', body: 'a', audience: toBot });
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('b');
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(3);
+      });
+      expect(server.posts[2]).toEqual({ channel: 'general', body: 'b', audience: toBot });
+    });
+
+    it('an unconfirmed whisper whose Retry is answered after a second one is typed leaves the second its audience', async () => {
+      await ready();
+      server.post = () => Promise.reject(new TypeError('connection dropped'));
+      whisperToBot('a');
+      send();
+      await screen.findByText(/^Not confirmed/);
+      const answer = held();
+      fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(2);
+      });
+      type('b', 'Whisper to bot');
+      await answer(0, accepted('a', [2, 3]));
+      await screen.findByText('Sent');
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('b');
+      immediately();
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(3);
+      });
+      expect(server.posts[2]).toEqual({ channel: 'general', body: 'b', audience: toBot });
+    });
+
+    it('a whisper confirmed while a different one is composed leaves that one as it is', async () => {
+      await ready();
+      const answer = held();
+      whisperToBot('a');
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(1);
+      });
+      fireEvent.click(screen.getByRole('checkbox', { name: 'bot [agent]' }));
+      fireEvent.click(screen.getByRole('checkbox', { name: '<b>mallory</b>' }));
+      type('b', 'Whisper to <b>mallory</b>');
+      await answer(0, accepted('a', [2, 3]));
+      await screen.findByText('Sent');
+      expect(to().value).toBe('whisper');
+      immediately();
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(2);
+      });
+      expect(server.posts[1]).toEqual({ channel: 'general', body: 'b', audience: { kind: 'principals', principal_ids: [4] } });
+    });
+
+    it('a whisper confirmed after a switch to another channel leaves that channel\'s whisper as it is', async () => {
+      await ready();
+      const answer = held();
+      whisperToBot('a');
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(1);
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+      await screen.findByLabelText('Message #ops');
+      await letIn();
+      choose('whisper');
+      fireEvent.click(await screen.findByRole('checkbox', { name: 'bot [agent]' }));
+      type('b', 'Whisper to bot');
+      await answer(0, accepted('a', [2, 3]));
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(1);
+      });
+      expect(to().value).toBe('whisper');
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Whisper to bot').value).toBe('b');
+      immediately();
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(2);
+      });
+      expect(server.posts[1]).toEqual({ channel: 'ops', body: 'b', audience: toBot });
+    });
+
+    it('a whisper confirmed with nothing typed since still ends, as before', async () => {
+      await ready();
+      const answer = held();
+      whisperToBot('a');
+      send();
+      await waitFor(() => {
+        expect(server.posts).toHaveLength(1);
+      });
+      await answer(0, accepted('a', [2, 3]));
+      await screen.findByText('Sent');
+      expect(to().value).toBe('channel');
+    });
+  });
+
   it('does not widen a net post to the channel while the nets are not known', async () => {
     server.nets = netsOf({ id: 5, name: 'alpha' });
     await connect(await openChat());
@@ -708,10 +1567,99 @@ describe('drafts', () => {
     expect((await screen.findByLabelText<HTMLTextAreaElement>('Message #ops')).value).toBe('ops note');
   });
 
-  it('are kept in memory only', async () => {
+  // A reload keeps what the tab holds in sessionStorage (issue #1039).
+  const reload = async () => {
+    cleanup();
+    FakeSocket.all = [];
+    await connect(await openChat());
+  };
+
+  it('survive a reload, and a reload after sending shows an empty box', async () => {
+    await connect(await openChat());
+    fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'half a thought' } });
+    await reload();
+    await waitFor(() => {
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('half a thought');
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    await waitFor(() => {
+      expect(server.posts).toHaveLength(1);
+    });
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    await reload();
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    expect(window.sessionStorage.getItem('conch.web.drafts')).toBeNull();
+  });
+
+  it('are kept under the channel id, never the name, and hold no credential', async () => {
     await connect(await openChat());
     fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'secretive draft' } });
+    const kept = window.sessionStorage.getItem('conch.web.drafts') ?? '';
+    expect(JSON.parse(kept)).toEqual({ principal: 2, drafts: { '7': 'secretive draft' }, targets: {}, edits: {} });
+    expect(kept).not.toContain(secret);
+    expect(kept).not.toContain('general');
+  });
+
+  it('survive a reload while the server cannot be reached, and are there when it is back', async () => {
+    window.sessionStorage.setItem('conch.web.drafts', JSON.stringify({ principal: 2, drafts: { '7': 'kept offline' }, targets: {}, edits: {} }));
+    server.whoami = () => {
+      throw new TypeError('Failed to fetch');
+    };
+    window.sessionStorage.setItem('conch.web.token', secret);
+    render(<App origin={origin} />);
+    await screen.findByText('Cannot reach the server');
+    expect(JSON.parse(window.sessionStorage.getItem('conch.web.drafts') ?? '{}')).toMatchObject({ drafts: { '7': 'kept offline' } });
+    cleanup();
+    server.whoami = () => json(member);
+    await connect(await openChat());
+    await waitFor(() => {
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('kept offline');
+    });
+  });
+
+  it('are pruned of channels the person lost while the page was closed', async () => {
+    window.sessionStorage.setItem(
+      'conch.web.drafts',
+      JSON.stringify({ principal: 2, drafts: { '7': 'mine', '99': 'lost channel' }, targets: { '99': { net: 5, whisper: null } }, edits: { '99': { message: 1, text: 'lost edit' } } }),
+    );
+    await connect(await openChat());
+    await waitFor(() => {
+      expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('mine');
+    });
+    expect(JSON.parse(window.sessionStorage.getItem('conch.web.drafts') ?? '{}')).toEqual({ principal: 2, drafts: { '7': 'mine' }, targets: {}, edits: {} });
+  });
+
+  it('leave nothing readable in storage after sign-out', async () => {
+    await connect(await openChat());
+    fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'secretive draft' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Yes, sign out' }));
+    await screen.findByLabelText('Credential');
     expect(JSON.stringify(Object.entries(window.sessionStorage))).not.toContain('secretive draft');
+  });
+
+  it('are not given to another person signing in on the tab', async () => {
+    window.sessionStorage.setItem('conch.web.drafts', JSON.stringify({ principal: 9, drafts: { '7': 'someone else’s' }, edits: {} }));
+    await connect(await openChat());
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #general').value).toBe('');
+    expect(window.sessionStorage.getItem('conch.web.drafts') ?? '').not.toContain('someone else');
+  });
+
+  it('work as before when storage is refused', async () => {
+    await connect(await openChat());
+    const refuse = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('blocked');
+    });
+    try {
+      fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'still here' } });
+      fireEvent.click(screen.getByRole('button', { name: 'ops' }));
+      await screen.findByLabelText('Message #ops');
+      fireEvent.click(screen.getByRole('button', { name: 'general' }));
+      expect((await screen.findByLabelText<HTMLTextAreaElement>('Message #general')).value).toBe('still here');
+    } finally {
+      refuse.mockRestore();
+    }
   });
 });
 
@@ -1043,10 +1991,16 @@ describe('a long channel', () => {
     server.firstPage = maxHeld - 2 * pageSize;
     await openChat();
     await screen.findByText(`m${String(maxHeld + 100)}`);
+    // Counted, not read: lines() copies every row to drop its buttons, and a
+    // role query walks every message's Reply button, both slow at maxHeld rows
+    // in jsdom (issue #842 added the buttons).
+    const rows = () => screen.getByRole('log', { name: 'Messages' }).querySelectorAll('li[data-message-id]').length;
     for (const held of [maxHeld - pageSize, maxHeld]) {
-      fireEvent.click(await screen.findByRole('button', { name: 'Load older messages' }));
+      const older = screen.queryByText('Load older messages', { selector: 'button' });
+      if (older === null) throw new Error('no Load older messages button');
+      fireEvent.click(older);
       await waitFor(() => {
-        expect(lines()).toHaveLength(held);
+        expect(rows()).toBe(held);
       });
     }
     expect(olderButton()).toBeNull();

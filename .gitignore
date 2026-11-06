@@ -3,6 +3,16 @@
 /conchd
 /bin/
 /dist/
+# What `go build ./e2e/<program>` leaves at the root (issue #1348: #1324
+# committed /isolation).
+/conch-bot
+/dogfood
+/isolation
+/nets
+/p2-hardening
+/p3-local
+/reviewpost
+/sdkprobe
 
 # Rust (voice/). What a build produces for this checkout; it is per-checkout
 # on purpose, so that no two worktrees build into the same directory
@@ -13,6 +23,14 @@
 # is committed; dist is what `make web-build` produces for conchd --web-dir.
 /web/node_modules/
 /web/dist/
+
+# Desktop shell (desktop/). node_modules is installed by npm ci; out/ is what
+# `make desktop-build` bundles (main, preload, the web client, the asset
+# manifest) and dist/ the unpacked app electron-builder makes from it.
+/desktop/node_modules/
+/desktop/out/
+/desktop/dist/
+/desktop/test-results/
 
 # The copy of web/dist that conchd embeds (-tags conchweb); `make web-embed`
 # makes it.

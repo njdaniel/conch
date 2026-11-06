@@ -5,8 +5,8 @@
 // operator's invite panel in 11-invites. This spec runs after both, so the
 // person it adds to the fixture channels touches no other spec.
 import type { Locator, Page } from '@playwright/test';
-import { makeInvite, post } from './api';
-import { accountPassword, channelButton, conversation, expect, expectFits, messages, phones, signIn, statusLine, test } from './fixtures';
+import { makeMemberLink, post, withDefaultChannels } from './api';
+import { accountPassword, channelButton, conversation, credentialField, expect, expectFits, expectStateReadable, mainNav, messages, phones, phoneSizes, showView, signIn, statusLine, test } from './fixtures';
 import { createCredentialResponseV1, createPrincipalResponse, type CreateCredentialRequestV1, type CreatePrincipalRequest } from '../src/schema/credential';
 import type { InvitePermissionRequestV1 } from '../src/schema/generated';
 import { call, inviteUrl, ok, type World } from './world';
@@ -27,10 +27,27 @@ for (const [size, options] of phones) {
     await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
     await expect(messages(page).getByText(longWord(size))).toBeVisible();
     await expect(messages(page).getByText(longAddress(size))).toBeVisible();
-    await expect(statusLine(page)).toContainText(world.origin);
-    // On the shared server the voice section says voice is not set up.
-    await expect(page.getByRole('region', { name: 'Voice' })).toContainText('Voice is not set up on this server');
+    await expect(statusLine(page)).not.toContainText(world.origin);
     await expectFits(page, 'the lobby with general open');
+    // On the shared server the voice section says voice is not set up. It is
+    // the Voice view's; not in voice, the strip is not under Chat.
+    await expect(page.getByRole('region', { name: 'Voice' })).toBeHidden();
+    await showView(page, 'Voice');
+    await expect(page.getByRole('region', { name: 'Voice' })).toContainText('Voice is not set up on this server');
+    await expectFits(page, 'the Voice view');
+    await showView(page, 'Channels');
+    await expectFits(page, 'the Channels view');
+    // The channel directory and the creation form fit too (issue #991).
+    const channelsNav = page.getByRole('navigation', { name: 'Channels' });
+    await channelsNav.getByRole('button', { name: 'Browse channels' }).tap();
+    await expect(channelsNav.getByRole('list', { name: 'All channels' })).toBeVisible();
+    await expectFits(page, 'the Channels view with the directory open');
+    await channelsNav.getByRole('button', { name: 'Browse channels' }).tap();
+    await channelsNav.getByRole('button', { name: 'New channel' }).tap();
+    await expect(page.getByRole('form', { name: 'New channel' }).getByRole('radio', { name: /^Private/ })).toBeVisible();
+    await expectFits(page, 'the Channels view with the New channel form open');
+    await channelsNav.getByRole('button', { name: 'New channel' }).tap();
+    await showView(page, 'Chat');
 
     // The whisper picker lays its people out in the composer.
     await page.getByLabel('To:').selectOption({ label: 'Whisper to…' });
@@ -65,6 +82,7 @@ for (const [size, options] of phones) {
     await expect(members).toHaveAttribute('aria-expanded', 'false');
     await members.tap();
     await expect(page.getByRole('region', { name: 'Members list' })).toBeVisible();
+    await expect(page.getByRole('region', { name: 'Community members' })).toBeVisible();
     await expectFits(page, 'the lobby with the members panel open');
   });
 
@@ -110,51 +128,78 @@ for (const [size, options] of phones) {
     expect(Math.abs(after.top - before.top), `${before.text} moved with the picker closed`).toBeLessThanOrEqual(1);
   });
 
-  test(`P467 at ${size} a member opens a channel, posts and makes an invite, all by tapping`, async ({ meet, secrets, world }) => {
-    const made = await makeInvite(world, world.tokens.operator, { kind: 'personal', channels: ['general', 'nets-demo'], voice: false, may_invite: true });
-    const name = unique(size.slice(0, 3));
+  test(`P467 at ${size} a member opens a channel, posts and makes a member link, all by tapping`, async ({ meet, secrets, world }) => {
+    await withDefaultChannels(world, ['general', 'nets-demo'], async () => {
+      const made = await makeMemberLink(world, world.tokens.operator);
+      const name = unique(size.slice(0, 3));
+      const { page } = await meet(options);
+      await page.goto(inviteUrl(world, made.code));
+      await expectFits(page, 'the invite landing page');
+      // An invite makes an account with a password (issue #713).
+      await page.getByLabel('Your name').tap();
+      await page.getByLabel('Your name').fill(name);
+      await page.getByLabel('Choose a password').fill(accountPassword);
+      await page.getByLabel('Type the password again').fill(accountPassword);
+      await page.getByRole('button', { name: 'Create account', exact: true }).tap();
+      await expect(statusLine(page)).toContainText(name);
+      await expect(statusLine(page)).toContainText('Connected');
+      await keepToken(page, secrets);
+      await expectFits(page, 'the lobby of a new member');
+
+      // Open a channel and back again, then post in it: each channel is chosen
+      // in Channels, which returns to Chat.
+      await tapChannel(page, 'nets-demo');
+      await expect(page.getByRole('heading', { name: 'nets-demo' })).toBeVisible();
+      await tapChannel(page, 'general');
+      await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
+      const body = `${name} posted by tapping`;
+      const box = page.getByLabel('Message #general');
+      await box.tap();
+      await expect(box).toBeFocused();
+      await box.fill(body);
+      await page.getByRole('button', { name: 'Send' }).tap();
+      await expect(messages(page).getByRole('listitem').filter({ hasText: body })).toHaveCount(1);
+      await expect(messages(page).getByRole('listitem').filter({ hasText: body })).not.toContainText('Sending');
+      await expectFits(page, 'a conversation after a post');
+
+      // F18: a touch screen has no Enter or Esc, so the editor names the
+      // buttons, and nothing names a keyboard key.
+      const mine = messages(page).getByRole('listitem').filter({ hasText: body });
+      await mine.getByRole('button', { name: /^More actions for / }).tap();
+      await page.getByRole('menuitem', { name: 'Edit' }).tap();
+      await expect(page.getByText('Editing. Save or Cancel.')).toBeVisible();
+      await expect(page.getByText(/Enter to save/)).toHaveCount(0);
+      await page.getByRole('button', { name: 'Cancel' }).tap();
+
+      // The link panel (issue #990): open it, choose a use limit, make a link,
+      // and see it listed, all by tapping.
+      const panel = page.getByRole('region', { name: 'Invites' });
+      await panel.getByRole('button', { name: 'Invite someone' }).tap();
+      await expect(panel.getByRole('button', { name: 'Make link' })).toBeVisible();
+      const limit = panel.getByRole('checkbox', { name: 'Limit the number of people' });
+      await limit.tap();
+      await expect(limit).toBeChecked();
+      await expect(panel.getByRole('spinbutton')).toBeVisible();
+      await expectFits(page, 'the link form with a use limit');
+      await panel.getByRole('button', { name: 'Make link' }).tap();
+      await expect(panel.getByRole('textbox', { name: 'Invite link' })).toBeVisible();
+      await expect(panel.getByRole('list', { name: 'Your links' }).getByRole('listitem')).toHaveCount(1);
+      await expectFits(page, 'the link panel with a new link');
+      await panel.getByRole('button', { name: 'Done' }).tap();
+      await expect(panel.getByRole('textbox', { name: 'Invite link' })).toHaveCount(0);
+    });
+  });
+
+  // Issue #990: the bare address of a server that is invite-only is a sign-in
+  // page and one line, and fits the screen; no account and no guest visit is
+  // offered.
+  test(`P990 at ${size} the sign-in-only front door fits and offers nothing to join`, async ({ meet, world }) => {
     const { page } = await meet(options);
-    await page.goto(inviteUrl(world, made.code));
-    await expectFits(page, 'the invite landing page');
-    // An invite makes an account with a password (issue #713).
-    await page.getByLabel('Your name').tap();
-    await page.getByLabel('Your name').fill(name);
-    await page.getByLabel('Choose a password').fill(accountPassword);
-    await page.getByLabel('Type the password again').fill(accountPassword);
-    await page.getByRole('button', { name: 'Create account', exact: true }).tap();
-    await expect(statusLine(page)).toContainText(name);
-    await expect(statusLine(page)).toContainText('Connected');
-    await keepToken(page, secrets);
-    await expectFits(page, 'the lobby of a new member');
-
-    // Open a channel and back again, then post in it.
-    await channelButton(page, 'nets-demo').tap();
-    await expect(page.getByRole('heading', { name: 'nets-demo' })).toBeVisible();
-    await channelButton(page, 'general').tap();
-    await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
-    const body = `${name} posted by tapping`;
-    const box = page.getByLabel('Message #general');
-    await box.tap();
-    await expect(box).toBeFocused();
-    await box.fill(body);
-    await page.getByRole('button', { name: 'Send' }).tap();
-    await expect(messages(page).getByRole('listitem').filter({ hasText: body })).toHaveCount(1);
-    await expect(messages(page).getByRole('listitem').filter({ hasText: body })).not.toContainText('Sending');
-    await expectFits(page, 'a conversation after a post');
-
-    // The invite panel: open it, pick a channel, make a link.
-    const panel = page.getByRole('region', { name: 'Invites' });
-    await panel.getByRole('button', { name: 'Invite someone' }).tap();
-    await expect(panel.getByRole('button', { name: 'Make invite' })).toBeVisible();
-    const channel = panel.getByRole('checkbox', { name: '#general' });
-    await channel.tap();
-    await expect(channel).toBeChecked();
-    await panel.getByRole('button', { name: 'Make invite' }).tap();
-    await expect(panel.getByRole('textbox', { name: 'Invite link' })).toBeVisible();
-    await expect(panel.getByRole('list', { name: 'Your invites' }).getByRole('listitem')).toHaveCount(1);
-    await expectFits(page, 'the invite panel with a new link');
-    await panel.getByRole('button', { name: 'Done' }).tap();
-    await expect(panel.getByRole('textbox', { name: 'Invite link' })).toHaveCount(0);
+    await page.goto(world.appUrl);
+    await expect(page.getByText('This server is invite-only.')).toBeVisible();
+    await expect(page.getByRole('button', { name: /create an account|guest/i })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Sign in', exact: true })).toBeVisible();
+    await expectFits(page, 'the sign-in-only front door');
   });
 
   // Issue #601: the channel row shows there are more channels than fit, and
@@ -163,7 +208,7 @@ for (const [size, options] of phones) {
   // invite (redeeming counts against the network's tries, which 13-sign-in-
   // link needs), in channels of their own, so the shared fixture people's
   // lists are left as they are. They may invite, so Invite someone is shown.
-  test(`P601 at ${size} the channel row shows there is more, and the top bar's buttons and the audience select are finger-sized`, async ({ meet, secrets, world }) => {
+  test(`P601 at ${size} the navigation, the top bar's buttons and the audience select are finger-sized, and more channels than fit are a column to scroll`, async ({ meet, secrets, world }) => {
     const tag = `p601-${size.slice(0, 3)}-${String(Date.now())}`;
     const op = world.tokens.operator;
     const person: CreatePrincipalRequest = { kind: 'human', name: tag };
@@ -180,7 +225,6 @@ for (const [size, options] of phones) {
     }
     const { page } = await meet(options);
     await signIn(page, world, token, tag);
-    await expect(channelButton(page, names[names.length - 1] ?? '')).toBeAttached();
     await expect(page.getByLabel('To:')).toBeVisible();
 
     for (const [what, target] of [
@@ -197,24 +241,41 @@ for (const [size, options] of phones) {
     }
     await expectFits(page, 'the lobby with more channels than fit');
 
-    // At the start the fade is on the right edge only; at the end, the left.
-    const row = page.getByRole('navigation', { name: 'Channels' }).getByRole('list');
-    const fades = () =>
-      row.evaluate((el) => ({ before: getComputedStyle(el, '::before').opacity, after: getComputedStyle(el, '::after').opacity }));
-    await row.evaluate((el) => {
-      el.scrollLeft = 0;
-    });
-    await expect(row).toHaveClass(/\bmore-after\b/);
-    await expect(row).not.toHaveClass(/\bmore-before\b/);
-    expect(await fades()).toEqual({ before: '0', after: '1' });
-    await row.evaluate((el) => {
-      el.scrollLeft = el.scrollWidth;
-    });
-    await expect(row).toHaveClass(/\bmore-before\b/);
-    await expect(row).not.toHaveClass(/\bmore-after\b/);
-    expect(await fades()).toEqual({ before: '1', after: '0' });
-    await expectFits(page, 'the lobby with the channel row scrolled to its end');
+    // The navigation's three buttons are finger-sized too, and the channels
+    // are the Channels view: a column of full-width rows (issue #929, which
+    // replaced the sideways row and its fade), none beyond the screen's edge,
+    // each reachable by scrolling the view.
+    for (const view of ['Chat', 'Channels', 'Voice'] as const) {
+      const box = await mainNav(page).getByRole('button', { name: view, exact: true }).boundingBox();
+      if (box === null) throw new Error(`${view} has no box on the screen`);
+      expect(box.width, `${view} is ${String(box.width)}×${String(box.height)}`).toBeGreaterThanOrEqual(44);
+      expect(box.height, `${view} is ${String(box.width)}×${String(box.height)}`).toBeGreaterThanOrEqual(44);
+    }
+    await showView(page, 'Channels');
+    const screen = page.viewportSize()?.width ?? 0;
+    let left: number | null = null;
+    for (const name of names) {
+      const row = channelButton(page, name);
+      await row.scrollIntoViewIfNeeded();
+      await expect(row).toBeInViewport();
+      const box = await row.boundingBox();
+      if (box === null) throw new Error(`${name} has no box on the screen`);
+      const where = `${name} is at x ${String(box.x)}, ${String(box.width)}×${String(box.height)}`;
+      expect(box.height, where).toBeGreaterThanOrEqual(44);
+      expect(box.x + box.width, where).toBeLessThanOrEqual(screen);
+      left ??= box.x;
+      expect(Math.abs(box.x - left), `${where}: the rows are one column`).toBeLessThanOrEqual(1);
+    }
+    await expectFits(page, 'the Channels view with more channels than fit');
   });
+}
+
+// tapChannel opens a channel with touch, as a phone does: Channels, the
+// channel, and Chat is back.
+async function tapChannel(page: Page, name: string): Promise<void> {
+  await mainNav(page).getByRole('button', { name: 'Channels', exact: true }).tap();
+  await channelButton(page, name).tap();
+  await expect(mainNav(page).getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-current', 'page');
 }
 
 // expectOnScreen checks that an element, scrolled into view, lies wholly
@@ -285,4 +346,158 @@ async function keepToken(page: Page, secrets: string[]): Promise<void> {
   const token = await page.evaluate(() => window.localStorage.getItem('conch.web.token'));
   if (token === null) throw new Error('no credential was kept');
   secrets.push(token);
+}
+
+// Issue #1030: on a phone the top bar keeps the connection state whole, with no
+// server address, for a member and for someone with four buttons (the
+// notifications bell, Invite someone, Members and Settings); who they are is in
+// the Settings button's name.
+for (const [size, options] of phoneSizes.filter(([name]) => name === '320×640' || name === '390×844')) {
+  for (const inviter of [false, true]) {
+    test(`P1030 at ${size} the top bar of ${inviter ? 'someone who invites' : 'a member'} shows the state whole and no address`, async ({ meet, secrets, world }) => {
+      const tag = `p1030-${size.slice(0, 3)}-${inviter ? 'op' : 'mem'}-${String(Date.now())}`;
+      const op = world.tokens.operator;
+      let token = world.tokens.browser;
+      let name = 'browser-test';
+      if (inviter) {
+        const person: CreatePrincipalRequest = { kind: 'human', name: tag };
+        const id = (await ok(world, op, 'POST', '/v0/principals', createPrincipalResponse, person)).principal.id;
+        const label: CreateCredentialRequestV1 = { label: tag };
+        token = (await ok(world, op, 'POST', `/v1/principals/${String(id)}/credentials`, createCredentialResponseV1, label)).token;
+        secrets.push(token);
+        const mayInvite: InvitePermissionRequestV1 = { may_invite: true };
+        await done(world, op, 'PUT', `/v1/principals/${String(id)}/invite-permission`, mayInvite);
+        await done(world, op, 'POST', '/v0/channels', { name: tag });
+        await done(world, op, 'PUT', `/v1/channels/${encodeURIComponent(tag)}/members/${String(id)}`);
+        name = tag;
+      }
+      const { page } = await meet(options);
+      await signIn(page, world, token, name);
+      await expect(page.getByLabel('To:')).toBeVisible();
+      await expect(statusLine(page)).not.toContainText(world.origin);
+      await expect(page.getByRole('button', { name: `Settings, signed in as ${name}` })).toBeVisible();
+      await expectStateReadable(page, 'Connected');
+    });
+  }
+}
+
+// Issue #1018, #1019: an operator's Settings, on a phone, lists the administration
+// sections that exist (Server, Roles and permissions, Members, Channels, Reports); each opens as its own page with a
+// Back control, nothing scrolls sideways, and every target is at least 44 px
+// high. One case for each built section.
+for (const [size, options] of phones) {
+  for (const section of ['Server', 'Roles and permissions', 'Members', 'Channels', 'Reports'] as const) {
+    test(`P1018 at ${size} the ${section} section opens as a page with Back, fits the screen and has 44 px targets`, async ({ meet, world }) => {
+      const { page } = await meet(options);
+      await page.goto(world.appUrl);
+      await (await credentialField(page)).fill(world.tokens.operator);
+      await page.getByRole('button', { name: 'Use credential' }).click();
+      await page.getByRole('button', { name: 'Continue anyway' }).click();
+      await expect(statusLine(page)).toContainText('Connected');
+      await page.getByRole('button', { name: 'Settings' }).tap();
+      const dialog = page.getByRole('dialog', { name: 'Settings' });
+      // The sections that exist are a list; the page of one is not drawn yet.
+      const list = dialog.getByRole('list', { name: 'Server administration' });
+      await expect(list.getByRole('button')).toHaveText(['Server', 'Roles and permissions', 'Members', 'Channels', 'Reports']);
+      await expect(dialog.getByRole('group', { name: 'Server settings' })).toHaveCount(0);
+      await expectFits(page, `${size}: the list of administration sections`);
+      await expectTargets(dialog, `${size}: the list of administration sections`);
+
+      await list.getByRole('button', { name: section, exact: true }).tap();
+      await expect(dialog.getByRole('heading', { name: section, exact: true })).toBeFocused();
+      await expect(dialog.getByRole('list', { name: 'Server administration' })).toHaveCount(0);
+      if (section === 'Server') {
+        await expect(dialog.getByRole('group', { name: 'Server settings' })).toBeVisible();
+        await dialog.getByRole('button', { name: 'Joining' }).tap();
+        await expect(dialog.getByRole('region', { name: 'Joining' })).toBeVisible();
+      } else if (section === 'Roles and permissions') {
+        const region = dialog.getByRole('region', { name: 'Roles and permissions' });
+        await expect(region.getByRole('switch').first()).toBeVisible();
+        await region.getByRole('button', { name: 'Operators', exact: true }).tap();
+        await expect(region.getByRole('list', { name: 'Operators permissions' })).toBeVisible();
+      } else if (section === 'Members') {
+        // Every person's actions are a sheet from the ⋯ button (issue #1020).
+        const region = dialog.getByRole('region', { name: 'Members' });
+        const more = region.getByRole('button', { name: /^Actions for / }).first();
+        await expect(more).toBeVisible();
+        await more.tap();
+        const sheet = region.getByRole('menu').first();
+        await expect(sheet).toBeVisible();
+        await expectTargets(dialog, `${size}: the Members sheet`);
+        const box = await sheet.boundingBox();
+        const height = page.viewportSize()?.height ?? 0;
+        expect(box === null ? 0 : box.y + box.height, `${size}: the sheet rests on the bottom of the screen`).toBeGreaterThanOrEqual(height - 1);
+        await page.keyboard.press('Escape');
+      } else if (section === 'Channels') {
+        // Every row's actions are a sheet from its ⋯ button (issue #1021).
+        const region = dialog.getByRole('region', { name: 'Channels' });
+        const more = region.getByRole('button', { name: /^Actions for / }).first();
+        await expect(more).toBeVisible();
+        await more.tap();
+        const sheet = region.getByRole('menu').first();
+        await expect(sheet).toBeVisible();
+        await expectTargets(dialog, `${size}: the Channels sheet`);
+        const box = await sheet.boundingBox();
+        const height = page.viewportSize()?.height ?? 0;
+        expect(box === null ? 0 : box.y + box.height, `${size}: the sheet rests on the bottom of the screen`).toBeGreaterThanOrEqual(height - 1);
+        await page.keyboard.press('Escape');
+      } else {
+        await dialog.getByRole('button', { name: 'Reports', exact: true }).tap();
+        await expect(dialog.getByRole('region', { name: 'Reports' })).toBeVisible();
+      }
+      await expectFits(page, `${size}: the ${section} page`);
+      await expectTargets(dialog, `${size}: the ${section} page`);
+
+      await dialog.getByRole('button', { name: 'Back to administration' }).tap();
+      await expect(dialog.getByRole('list', { name: 'Server administration' })).toBeVisible();
+      await expect(dialog.getByRole('list', { name: 'Server administration' }).getByRole('button', { name: section, exact: true })).toBeFocused();
+    });
+  }
+}
+
+// expectTargets checks that every button, text field and checkbox label in
+// the console is at least 44 px high (the checkbox itself is drawn inside its
+// label, which is the target).
+async function expectTargets(scope: Locator, view: string): Promise<void> {
+  const small = await scope.locator('.admin-console').evaluate((root) => {
+    const found: string[] = [];
+    for (const el of root.querySelectorAll<HTMLElement>('button, input[type="text"], label')) {
+      if (el.closest('[hidden]') !== null) continue;
+      const box = el.getBoundingClientRect();
+      if (box.width === 0 || box.height === 0) continue;
+      if (el instanceof HTMLLabelElement && el.querySelector('input[type="checkbox"], input[type="radio"]') === null) continue;
+      if (box.height < 43.5) found.push(`${el.tagName.toLowerCase()} "${el.textContent.trim().slice(0, 40)}" is ${String(Math.round(box.height))} px high`);
+    }
+    return found;
+  });
+  expect(small, `${view}: targets under 44 px`).toEqual([]);
+}
+
+// Issue #990: everyone is offered Invite someone, so the top bar holds four
+// 44 px buttons beside the brand. At every phone width, 320 included, they
+// stay on the brand's row and the connection state has the one row under it:
+// the bar costs two rows of height, not three, so the conversation keeps its
+// room (35-phone-voice-strip measures the log).
+for (const [size, options] of phoneSizes) {
+  test(`P990 at ${size} the top bar keeps its four buttons beside the brand, in two rows`, async ({ meet, world }) => {
+    const { page } = await meet(options);
+    await signIn(page, world, world.tokens.browser, 'browser-test');
+    await expect(page.getByLabel('To:')).toBeVisible();
+    const bar = await page.locator('.topbar').evaluate((el) => {
+      const top = (sel: string) => el.querySelector(sel)?.getBoundingClientRect() ?? null;
+      return {
+        height: el.getBoundingClientRect().height,
+        brandTop: top('.brand')?.top ?? -1,
+        actionsTop: top('.topbar-actions')?.top ?? -1,
+        statusTop: top('.status')?.top ?? -1,
+        buttons: el.querySelectorAll('.topbar-actions button').length,
+      };
+    });
+    expect(bar.buttons).toBe(4);
+    // The buttons are on the brand's row, not a row of their own, and the
+    // state is below both.
+    expect(Math.abs(bar.actionsTop - bar.brandTop), 'the buttons are on the brand’s row').toBeLessThan(24);
+    expect(bar.statusTop).toBeGreaterThan(bar.actionsTop + 40);
+    expect(bar.height, 'the top bar is two rows high').toBeLessThanOrEqual(72);
+  });
 }

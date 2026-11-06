@@ -16,12 +16,12 @@ import (
 // permits themselves. The routes' matrices are in
 // internal/server/conversion_test.go.
 
-// putJoin applies req as the operator, failing the test on a refusal.
+// putJoin applies req as PutJoinSettings did before guests were removed
+// (issue #1005), guests and all: the policies of the visits these tests
+// convert are those of a database from before then.
 func (f *inviteFixture) putJoin(req schema.PutJoinSettingsRequestV1) {
 	f.t.Helper()
-	if _, err := f.s.PutJoinSettings(f.ctx, "system", f.op.ID, req); err != nil {
-		f.t.Fatalf("PutJoinSettings: %v", err)
-	}
+	legacyJoinSettings(f.t, f.s, req)
 }
 
 // Every mode and pause of the bare address: an account is made exactly
@@ -66,17 +66,15 @@ func TestJoinAsAccountPolicy(t *testing.T) {
 	}
 }
 
-// What an account from the bare address is made with: its password, every
-// open channel with can_decide 0 and a history bound at the channel's last
-// message, join_voice, no right to invite, a renewable credential, and the
-// audit rows, all or nothing.
+// What open sign-up makes (issue #987): its password, every default channel
+// with can_decide 0 and no history bound, voice on, the may_invite brake on,
+// a renewable credential, and the audit rows, all or nothing.
 func TestJoinAsAccount(t *testing.T) {
 	f := newInviteFixture(t)
-	last, err := f.s.InsertMessage(f.ctx, f.general.ID, f.alice.ID, "before")
-	if err != nil {
+	if _, err := f.s.InsertMessage(f.ctx, f.general.ID, f.alice.ID, "before"); err != nil {
 		t.Fatal(err)
 	}
-	f.putJoin(schema.PutJoinSettingsRequestV1{OpenJoining: ptrMode(schema.OpenJoiningAccount), JoinVoice: boolRef(false),
+	f.putJoin(schema.PutJoinSettingsRequestV1{OpenJoining: ptrMode(schema.OpenJoiningAccount),
 		OpenChannels: &[]string{"general", "lobby"}})
 
 	// Names that are not to be had make nothing, the guest namespace and
@@ -97,7 +95,9 @@ func TestJoinAsAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Principal.Name != "newcomer" || a.Principal.Role != RoleMember || a.Principal.VoiceAllowed || a.Principal.MayInvite ||
+	// Voice and the may_invite brake are on, as for every member (ADR-013
+	// decisions 1 and 5).
+	if a.Principal.Name != "newcomer" || a.Principal.Role != RoleMember || !a.Principal.VoiceAllowed || !a.Principal.MayInvite ||
 		len(a.Channels) != 2 || !a.Credential.Renews || a.Token == "" {
 		t.Fatalf("account = %+v", a)
 	}
@@ -111,11 +111,13 @@ func TestJoinAsAccount(t *testing.T) {
 	if n := f.count("SELECT COUNT(*) FROM channel_members WHERE principal_id = ? AND can_decide = 0", p.ID); n != 2 {
 		t.Errorf("%d memberships without the decide right, want 2", n)
 	}
-	if n := f.count("SELECT COUNT(*) FROM channel_members WHERE principal_id = ? AND channel_id = ? AND history_after = ?", p.ID, f.general.ID, last.ID); n != 1 {
-		t.Error("general's membership has no history bound at its last message")
+	// No history bound: a member sees a channel's whole history (ADR-013).
+	if n := f.count("SELECT COUNT(*) FROM channel_members WHERE principal_id = ? AND history_after IS NULL", p.ID); n != 2 {
+		t.Errorf("%d memberships without a history bound, want 2", n)
 	}
-	if n := f.count("SELECT COUNT(*) FROM channel_members WHERE principal_id = ? AND channel_id = ? AND history_after = 0", p.ID, f.lobby.ID); n != 1 {
-		t.Error("the empty lobby's membership has no bound of 0")
+	var mayInvite, voice int
+	if err := f.s.db.QueryRow("SELECT may_invite, voice_allowed FROM principals WHERE id = ?", p.ID).Scan(&mayInvite, &voice); err != nil || mayInvite != 1 || voice != 1 {
+		t.Errorf("stored may_invite=%d voice_allowed=%d (%v), want both 1", mayInvite, voice, err)
 	}
 	if n := f.count("SELECT COUNT(*) FROM guest_visits WHERE principal_id = ?", p.ID); n != 0 {
 		t.Error("an account was made a guest")

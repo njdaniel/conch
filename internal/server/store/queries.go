@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
@@ -64,6 +65,12 @@ type Principal struct {
 	// MayInvite is the right to make personal invites. Operators may always
 	// invite whatever this says; nobody else holds it until granted.
 	MayInvite bool
+	// agentGrant is the agent-grantable permissions an agent holds by its
+	// manifest (issue #1326, ai-administrators §3.2 rule 1a), one bit per
+	// catalog position, filled only by withAgentGrantTx. Zero, the value of
+	// every principal read any other way, holds nothing: a reader that never
+	// loads the grant fails closed. A bitmask keeps Principal comparable.
+	agentGrant uint64
 	// VoiceAllowed is whether the principal may use voice. True for every
 	// account unless an invite made without it. Every voice route refuses a
 	// person without it (voicePresenceChannel, internal/server/voice.go).
@@ -78,6 +85,26 @@ type Principal struct {
 // IsOwner reports whether p is an operator holding the owner mark (issue #788,
 // docs/design/delegated-administration.md §1).
 func (p Principal) IsOwner() bool { return p.Role == RoleOperator && p.Owner }
+
+// ownerProtectedTx rechecks the target inside a write transaction. A missing
+// principal is left to the caller's usual not-found or idempotent path.
+func ownerProtectedTx(ctx context.Context, tx execer, principalID int64, forbidOwner bool) error {
+	if !forbidOwner {
+		return nil
+	}
+	var role string
+	var owner bool
+	switch err := tx.QueryRowContext(ctx, "SELECT role, owner FROM principals WHERE id = ?", principalID).Scan(&role, &owner); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("store: recheck owner %d: %w", principalID, err)
+	}
+	if Role(role) == RoleOperator && owner {
+		return ErrOwnerProtected
+	}
+	return nil
+}
 
 // IsGuest reports whether p is a guest now: its visit is active. A converted
 // guest is a member; an ended one can no longer authenticate.
@@ -99,6 +126,72 @@ type Channel struct {
 	// grant on this channel (ListChannelsForPrincipal, issue #789, ADR-010
 	// §3.2); false on reads that are not bound to a principal.
 	Manages bool
+	// Visibility is public or private, and IsDefault whether new members
+	// start in the channel (migration 40, ADR-013 decisions 2 and 5). A
+	// default channel is always public. Nothing reads them for
+	// authorization until channel settings and the directory ship (I3a,
+	// I3b).
+	Visibility schema.ChannelVisibility
+	IsDefault  bool
+	// ArchivedAt is when the channel was archived (migration 41, issue
+	// #844), at one-second precision; the zero time while it is live. An
+	// archived channel refuses every write the guards of this package name
+	// (ErrChannelArchived) and keeps its history, members and read state.
+	ArchivedAt time.Time
+}
+
+// Archived reports whether the channel is archived.
+func (c Channel) Archived() bool { return !c.ArchivedAt.IsZero() }
+
+// ErrChannelArchived is a write to an archived channel (HTTP 409
+// channel_archived, issue #844). Every guard answers it from inside the
+// transaction that would have written, so no route can miss it.
+var ErrChannelArchived = errors.New("store: channel is archived")
+
+// ErrChannelArchiveDefault is an archive of a channel that is, or in the same
+// request becomes, a default channel (HTTP 409 channel_archive_default).
+var ErrChannelArchiveDefault = errors.New("store: a default channel cannot be archived")
+
+// channelNotArchivedTx is the archived guard (issue #844): it answers
+// ErrChannelArchived when the channel is archived, from inside the
+// transaction that would write, and nil for a live channel. A channel that
+// does not exist is nil too: the caller's own existence check answers it, so
+// this guard adds no second answer for the callers that have none. Callers
+// run it only after they have established that the caller may see the
+// channel, so the answer leaks nothing to a non-member.
+func channelNotArchivedTx(ctx context.Context, tx execer, channelID int64) error {
+	var archived sql.NullInt64
+	switch err := tx.QueryRowContext(ctx, "SELECT archived_at FROM channels WHERE id = ?", channelID).Scan(&archived); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return fmt.Errorf("store: read archive state of channel %d: %w", channelID, err)
+	}
+	if archived.Valid {
+		return ErrChannelArchived
+	}
+	return nil
+}
+
+// channelColumns are the channel columns every Channel reader selects, in
+// scanChannel's order.
+const channelColumns = "id, name, created_at, visibility, is_default, archived_at"
+
+// scanChannel reads one row of channelColumns.
+func scanChannel(scan func(dest ...any) error) (Channel, error) {
+	var c Channel
+	var created int64
+	var vis string
+	var archived sql.NullInt64
+	if err := scan(&c.ID, &c.Name, &created, &vis, &c.IsDefault, &archived); err != nil {
+		return Channel{}, err
+	}
+	c.CreatedAt = time.UnixMilli(created)
+	if archived.Valid {
+		c.ArchivedAt = time.Unix(archived.Int64, 0)
+	}
+	c.Visibility = schema.ChannelVisibility(vis)
+	return c, nil
 }
 
 // Message is a single rendered message in a channel, with an optional typed
@@ -122,6 +215,9 @@ type Message struct {
 	// as a guest (issue #705), nil for every other message. It never
 	// changes, whatever the author does or is called later.
 	GuestAuthor *schema.GuestAttributionV1
+	// EditedAt is when the author last changed Body (issue #845); zero for
+	// a message never edited. It is always after CreatedAt and only grows.
+	EditedAt time.Time
 }
 
 // AuditEvent is one append-only entry in the audit log. Actor is free text
@@ -216,43 +312,37 @@ func (s *Store) CreateChannel(ctx context.Context, name string) (Channel, error)
 	if err != nil {
 		return Channel{}, err
 	}
-	return Channel{ID: id, Name: name, CreatedAt: now}, nil
+	return Channel{ID: id, Name: name, CreatedAt: now, Visibility: schema.ChannelPrivate}, nil
 }
 
 // ChannelByName returns the channel with name. It returns ErrNotFound when no
 // such channel exists.
 func (s *Store) ChannelByName(ctx context.Context, name string) (Channel, error) {
-	var ch Channel
-	var createdAt int64
-	err := s.db.QueryRowContext(ctx,
-		"SELECT id, name, created_at FROM channels WHERE name = ?", name,
-	).Scan(&ch.ID, &ch.Name, &createdAt)
+	ch, err := scanChannel(s.db.QueryRowContext(ctx,
+		"SELECT "+channelColumns+" FROM channels WHERE name = ?", name).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Channel{}, fmt.Errorf("store: find channel %q: %w", name, ErrNotFound)
 	}
 	if err != nil {
 		return Channel{}, fmt.Errorf("store: find channel %q: %w", name, err)
 	}
-	ch.CreatedAt = time.UnixMilli(createdAt)
 	return ch, nil
 }
 
 // ListChannels returns every channel ordered by id ascending. It returns an
 // empty, non-nil slice when there are none.
 func (s *Store) ListChannels(ctx context.Context) ([]Channel, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id, name, created_at FROM channels ORDER BY id ASC")
+	rows, err := s.db.QueryContext(ctx, "SELECT "+channelColumns+" FROM channels ORDER BY id ASC")
 	if err != nil {
 		return nil, fmt.Errorf("store: list channels: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	channels := []Channel{}
 	for rows.Next() {
-		var ch Channel
-		var createdAt int64
-		if err := rows.Scan(&ch.ID, &ch.Name, &createdAt); err != nil {
+		ch, err := scanChannel(rows.Scan)
+		if err != nil {
 			return nil, fmt.Errorf("store: scan channel: %w", err)
 		}
-		ch.CreatedAt = time.UnixMilli(createdAt)
 		channels = append(channels, ch)
 	}
 	if err := rows.Err(); err != nil {
@@ -264,18 +354,14 @@ func (s *Store) ListChannels(ctx context.Context) ([]Channel, error) {
 // ChannelByID returns the channel with id. It returns ErrNotFound when no
 // such channel exists.
 func (s *Store) ChannelByID(ctx context.Context, id int64) (Channel, error) {
-	var ch Channel
-	var createdAt int64
-	err := s.db.QueryRowContext(ctx,
-		"SELECT id, name, created_at FROM channels WHERE id = ?", id,
-	).Scan(&ch.ID, &ch.Name, &createdAt)
+	ch, err := scanChannel(s.db.QueryRowContext(ctx,
+		"SELECT "+channelColumns+" FROM channels WHERE id = ?", id).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Channel{}, fmt.Errorf("store: find channel %d: %w", id, ErrNotFound)
 	}
 	if err != nil {
 		return Channel{}, fmt.Errorf("store: find channel %d: %w", id, err)
 	}
-	ch.CreatedAt = time.UnixMilli(createdAt)
 	return ch, nil
 }
 
@@ -365,6 +451,16 @@ func (s *Store) InsertMessageV1(
 func insertChannelWideTx(
 	ctx context.Context, tx execer, channelID, authorID int64, body string, payload *schema.Payload, rootID int64, now time.Time,
 ) (int64, error) {
+	// A payload only the server may author is refused here, in the insert
+	// every channel-wide post, reply and webhook post ends in (issue #1345).
+	if payload != nil && schema.ReservedMessagePayload(payload.Schema) {
+		return 0, ErrReservedPayload
+	}
+	// The archived guard of every channel-wide post, reply and webhook post
+	// (issue #844): this is one of the two INSERT INTO messages.
+	if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
+		return 0, err
+	}
 	var payloadSchema, payloadJSON, thread any
 	if payload != nil {
 		payloadSchema = payload.Schema
@@ -482,4 +578,183 @@ func (s *Store) ListAuditEvents(ctx context.Context, afterID int64, limit int) (
 		return nil, fmt.Errorf("store: list audit events: %w", err)
 	}
 	return events, nil
+}
+
+// AuditChannelSettingsChanged records a channel-settings change (issue
+// #981): actor the operator, subject the channel, detail each setting that
+// changed as field=old->new (visibility=public->private default=true->false).
+const AuditChannelSettingsChanged = "channel_settings_changed"
+
+// ErrChannelSettingsConflict is a channel-settings change that would leave a
+// default channel private (HTTP 409 channel_settings_conflict).
+var ErrChannelSettingsConflict = errors.New("store: a default channel must be public")
+
+// ErrManageChannelsRequired is a channel-settings change by an actor that
+// does not hold manage_channels now (ADR-014).
+var ErrManageChannelsRequired = errors.New("store: changing a channel's settings needs manage_channels")
+
+// ChannelSettingsChange is what ChannelSettings is asked to change; a nil
+// field keeps its value.
+type ChannelSettingsChange struct {
+	Visibility *schema.ChannelVisibility
+	Default    *bool
+	// Archived archives (true) or restores (false) the channel (issue #844).
+	Archived *bool
+}
+
+// ChannelSettingsResult is what a channel-settings change did.
+type ChannelSettingsResult struct {
+	Channel Channel
+	// Changed is false when the request asked for what the channel was.
+	Changed bool
+	// OpenSignupTurnedOff is set when the change unmarked the last default
+	// channel while open sign-up was on, and so turned it off.
+	OpenSignupTurnedOff bool
+}
+
+// ChannelSettings changes a channel's visibility and default mark (issue
+// #981, ADR-013 O5) in one IMMEDIATE transaction. actorID is re-checked for
+// manage_channels under the write lock (0 is the system, or --auth off). A
+// result that would be a private default channel is
+// ErrChannelSettingsConflict; an unknown channel is ErrNotFound. Marking adds
+// no member and unmarking removes none; turning private keeps every member.
+// The change is audited channel_settings_changed. Unmarking the last default
+// channel while open sign-up is on turns it off in the same transaction,
+// audited join_settings_changed with reason=last_default_unmarked. A request
+// asking for what the channel is writes nothing.
+func (s *Store) ChannelSettings(ctx context.Context, actor string, actorID, channelID int64, req ChannelSettingsChange, now time.Time) (ChannelSettingsResult, error) {
+	now = now.Truncate(time.Millisecond)
+	var res ChannelSettingsResult
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		res = ChannelSettingsResult{}
+		if actorID != 0 {
+			ok, err := permittedTx(ctx, tx, actorID, schema.PermManageChannels)
+			if err != nil {
+				return err
+			}
+			// An agent never changes its own approval channel's settings
+			// (issue #1326, ai-administrators §3.5.6).
+			if ok {
+				actorP, _, err := queryPrincipal(ctx, tx, actorID)
+				if err != nil {
+					return err
+				}
+				if actorP.Kind != PrincipalHuman {
+					if ok, err = agentStandingTx(ctx, tx, actorP, channelID); err != nil {
+						return err
+					}
+				}
+			}
+			if !ok {
+				return ErrManageChannelsRequired
+			}
+		}
+		cur, err := channelByIDTx(ctx, tx, channelID)
+		if err != nil {
+			return err
+		}
+		vis, def := cur.Visibility, cur.IsDefault
+		if req.Visibility != nil {
+			vis = *req.Visibility
+		}
+		if req.Default != nil {
+			def = *req.Default
+		}
+		if def && vis != schema.ChannelPublic {
+			return ErrChannelSettingsConflict
+		}
+		archived := cur.Archived()
+		if req.Archived != nil {
+			archived = *req.Archived
+		}
+		// A default channel is never archived, and an archived one is never
+		// marked default (decision 4): the same refusal whether the two come
+		// in one request or one is already the channel's state, and even when
+		// the request unmarks it in the same breath, so archiving can never
+		// turn open sign-up off as a side effect.
+		if archived && (def || cur.IsDefault) {
+			return ErrChannelArchiveDefault
+		}
+		var changes []string
+		// Unmark before turning private, and turn public before marking: a
+		// trigger keeps every default channel public at each step.
+		if cur.IsDefault && !def {
+			if _, err := setDefaultChannelTx(ctx, tx, channelID, false, 0); err != nil {
+				return err
+			}
+		}
+		if vis != cur.Visibility {
+			if _, err := tx.ExecContext(ctx, "UPDATE channels SET visibility = ? WHERE id = ?", string(vis), channelID); err != nil {
+				return fmt.Errorf("store: channel settings %d: set visibility: %w", channelID, err)
+			}
+			changes = append(changes, fmt.Sprintf("visibility=%s->%s", cur.Visibility, vis))
+		}
+		if !cur.IsDefault && def {
+			if _, err := setDefaultChannelTx(ctx, tx, channelID, true, actorID); err != nil {
+				return err
+			}
+		}
+		if def != cur.IsDefault {
+			changes = append(changes, fmt.Sprintf("default=%t->%t", cur.IsDefault, def))
+		}
+		if archived != cur.Archived() {
+			var at any // NULL restores
+			if archived {
+				at = now.Unix()
+			}
+			if _, err := tx.ExecContext(ctx, "UPDATE channels SET archived_at = ? WHERE id = ?", at, channelID); err != nil {
+				return fmt.Errorf("store: channel settings %d: set archived_at: %w", channelID, err)
+			}
+			changes = append(changes, fmt.Sprintf("archived=%t->%t", cur.Archived(), archived))
+		}
+		if len(changes) == 0 {
+			res.Channel = cur
+			return nil
+		}
+		res.Changed = true
+		if err := appendAuditEventTx(ctx, tx, actor, AuditChannelSettingsChanged, channelSubject(channelID), strings.Join(changes, " "), now); err != nil {
+			return err
+		}
+		if cur.IsDefault && !def {
+			if res.OpenSignupTurnedOff, err = lastDefaultUnmarkedTx(ctx, tx, actor, now); err != nil {
+				return err
+			}
+		}
+		res.Channel, err = channelByIDTx(ctx, tx, channelID)
+		return err
+	})
+	if err != nil {
+		return ChannelSettingsResult{}, err
+	}
+	return res, nil
+}
+
+// lastDefaultUnmarkedTx turns open sign-up off when no default channel is
+// left and it was on (community-model §2.1): a new account would start in no
+// channel. It reports whether it did.
+func lastDefaultUnmarkedTx(ctx context.Context, tx execer, actor string, now time.Time) (bool, error) {
+	var left int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM channels WHERE is_default = 1").Scan(&left); err != nil {
+		return false, fmt.Errorf("store: count default channels: %w", err)
+	}
+	if left > 0 {
+		return false, nil
+	}
+	cur, err := joinSettingsTx(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	if cur.OpenSignup == nil || !*cur.OpenSignup {
+		return false, nil
+	}
+	next := cur
+	off := false
+	next.OpenSignup = &off
+	next.OpenJoining = schema.OpenJoiningOff
+	changes, err := writeJoinSettingsTx(ctx, tx, cur, next, now)
+	if err != nil || len(changes) == 0 {
+		return false, err
+	}
+	return true, appendAuditEventTx(ctx, tx, actor, AuditJoinSettingsChanged, "server",
+		strings.Join(changes, " ")+" reason=last_default_unmarked", now)
 }

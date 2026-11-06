@@ -307,6 +307,11 @@ func (s *suite) p307Freeze() error {
 		return err
 	}
 
+	// Opened before the freeze, so every roster frame from then on is kept.
+	feed, err := s.followEvents(partNick, chGeneral)
+	if err != nil {
+		return err
+	}
 	at, err := s.nextFreeze(time.Now())
 	if err != nil {
 		return err
@@ -320,34 +325,23 @@ func (s *suite) p307Freeze() error {
 	adapter := s.worker
 	s.cleanup(func() { _ = adapter.signal("CONT") })
 
-	// Stale first (the API and the TUI's members line both say so), then
-	// offline with the outcome unknown. The run is not touched.
-	var staleAPI, staleTUI bool
+	// Stale first (the events socket and the TUI's members line both say so),
+	// then offline with the outcome unknown. The run is not touched. Whether
+	// the session was stale is read from the roster frames the events socket
+	// delivered, in order, so a pause that makes a poll skip the stale window
+	// cannot hide it; the TUI is watched while it waits.
+	var staleTUI bool
 	err = s.until("worker-test's session to go stale and then offline", 40*time.Second, func() (bool, error) {
-		roster, err := s.roster(partNick, chGeneral)
-		if err != nil {
-			return false, err
+		staleTUI = staleTUI || showing(t.rows(), "worker-test ◐")
+		if err := feed.closed(); err != nil {
+			return false, fmt.Errorf("the events socket closed while the agent was frozen: %w", err)
 		}
-		sess, ok := sessionOf(roster, session)
-		if !ok {
-			return false, fmt.Errorf("session #%d left the roster while the agent was frozen", session)
-		}
-		switch sess.State {
-		case schema.SessionStateStale:
-			if sess.Status != schema.SessionStatusStale {
-				return false, fmt.Errorf("the stale session shows the status %q", sess.Status)
-			}
-			staleAPI = true
-			staleTUI = staleTUI || showing(t.rows(), "worker-test ◐")
-		case schema.SessionStateOffline:
-			if !staleAPI {
-				return false, fmt.Errorf("the session went offline without being seen stale")
-			}
-			return true, nil
-		}
-		return false, nil
+		return sessionStatesSeen(feed.rostersSeen(), session).has(schema.SessionStateOffline), nil
 	})
 	if err != nil {
+		return err
+	}
+	if err := staleBeforeOffline(feed.rostersSeen(), session); err != nil {
 		return err
 	}
 	if !staleTUI {

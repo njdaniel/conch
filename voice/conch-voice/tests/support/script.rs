@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use conch_voice::transmit::BoxedMic;
-use conch_voice_audio::{FRAME_LEN, Frame, MicRead, MicSource};
+use conch_voice::transmit::{BoxedMic, TxClock};
+use conch_voice_audio::{FRAME_LEN, FRAME_MS, Frame, MicRead, MicSource};
 
 use super::MakeMic;
 
@@ -54,6 +54,22 @@ pub struct Played {
     pub last_at: Mutex<Option<Instant>>,
     /// When the last loud frame was delivered.
     pub last_loud_at: Mutex<Option<Instant>>,
+}
+
+impl Played {
+    /// A clock for the transmit task (`Timings::transmit_clock`) that counts this script's
+    /// frames, 10 ms each, and nothing else: by it the hang, measured since the last sound,
+    /// passes at the same frame as the hang the detector counts in frames. On the real
+    /// clock, a loaded machine that reads the script late makes the hang pass, by the clock,
+    /// a few frames before the frames say so (issue #957); which frames are sent is then
+    /// decided by the machine's load and not by the script. Not for a script that stops or
+    /// trickles: what those test is the real clock.
+    pub fn clock(self: &Arc<Self>) -> TxClock {
+        let played = Arc::clone(self);
+        TxClock::from_fn(move || {
+            Duration::from_millis(played.frames.load(Ordering::SeqCst) * u64::from(FRAME_MS))
+        })
+    }
 }
 
 /// A microphone that plays `(frames, loud)` parts in order, then does as `after` says.
@@ -126,9 +142,15 @@ pub struct Switch(Arc<Switched>);
 pub struct Switched {
     loud: AtomicBool,
     frames: AtomicU64,
+    stalled: AtomicBool,
 }
 
 impl Switched {
+    /// From the next read the microphone delivers no frame (a stalled device), or again does.
+    pub fn stall(&self, stalled: bool) {
+        self.stalled.store(stalled, Ordering::SeqCst);
+    }
+
     /// Loud from the next frame, or quiet.
     pub fn set(&self, loud: bool) {
         self.loud.store(loud, Ordering::SeqCst);
@@ -137,6 +159,16 @@ impl Switched {
     /// Frames read so far.
     pub fn frames(&self) -> u64 {
         self.frames.load(Ordering::SeqCst)
+    }
+
+    /// A clock for the transmit task (`Timings::transmit_clock`) that counts the frames
+    /// this microphone has delivered, 10 ms each, as [`Played::clock`] does for a script:
+    /// the hang measured by the clock then passes at the frame the detector counts it in,
+    /// however late a loaded machine runs the task (issue #1098). Not for a test of a
+    /// stalled device: what that tests is the real clock.
+    pub fn clock(self: &Arc<Self>) -> TxClock {
+        let switched = Arc::clone(self);
+        TxClock::from_fn(move || Duration::from_millis(switched.frames() * u64::from(FRAME_MS)))
     }
 
     /// Waits until `count` more frames have been read: time as the level detector counts
@@ -160,6 +192,9 @@ impl Switch {
 
 impl MicSource for Switch {
     fn read(&mut self, frame: &mut Frame) -> MicRead {
+        if self.0.stalled.load(Ordering::SeqCst) {
+            return MicRead::NotYet;
+        }
         let n = self.0.frames.load(Ordering::SeqCst);
         *frame = numbered(n, self.0.loud.load(Ordering::SeqCst));
         self.0.frames.store(n + 1, Ordering::SeqCst);

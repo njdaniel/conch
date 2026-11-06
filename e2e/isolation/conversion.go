@@ -78,15 +78,15 @@ func (w *world) converted(g *member, name string, resp schema.ConvertGuestRespon
 	return m, nil
 }
 
-// conversionNeedsPermit: at a guest-only address a guest cannot create an
-// account by itself (design §9.2), and can with the operator's permit, made
-// for it by name; the permit makes nothing else.
+// conversionNeedsPermit: at an address that offers no account a guest
+// cannot create one by itself (design §9.2), and can with the operator's
+// permit, made for it by name; the permit makes nothing else.
 func (w *world) conversionNeedsPermit() error {
 	g, err := w.joinGuest("Lee", nil)
 	if err != nil {
 		return err
 	}
-	if err := w.convertRefused(g, answer{http.StatusForbidden, schema.ErrorCodeConversionNotAllowed}, "at a guest-only address"); err != nil {
+	if err := w.convertRefused(g, answer{http.StatusForbidden, schema.ErrorCodeConversionNotAllowed}, "at an address closed to accounts"); err != nil {
 		return err
 	}
 	var permit schema.CreateSignInLinkResponseV1
@@ -134,7 +134,7 @@ func (w *world) convertSam() (*member, int64, error) {
 		{"under a member's name", schema.ConvertGuestRequestV1{Name: p.pia.name, Password: convertPassword}, answer{http.StatusConflict, schema.ErrorCodePrincipalExists}},
 		{"under the reserved guest prefix", schema.ConvertGuestRequestV1{Name: "guest-sam", Password: convertPassword}, answer{http.StatusBadRequest, "invalid_request"}},
 		{"under a name that only looks like a guest's", schema.ConvertGuestRequestV1{Name: "gue\u0455t-sam", Password: convertPassword}, answer{http.StatusConflict, schema.ErrorCodePrincipalExists}},
-		{"with a password too short", schema.ConvertGuestRequestV1{Name: name, Password: "too short"}, answer{http.StatusBadRequest, "invalid_request"}},
+		{"with no password", schema.ConvertGuestRequestV1{Name: name}, answer{http.StatusBadRequest, "invalid_request"}},
 		{"with a common password", schema.ConvertGuestRequestV1{Name: name, Password: commonPassword}, answer{http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable}},
 		{"with a password that holds the name", schema.ConvertGuestRequestV1{Name: name, Password: name + " is my password"}, answer{http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable}},
 	} {
@@ -214,7 +214,7 @@ func (w *world) convertSam() (*member, int64, error) {
 	}
 
 	// Nothing gained: no invites, the plaza alone.
-	status, body, err := member.api.do(http.MethodPost, "/v1/invites", schema.CreateInviteRequestV1{Kind: schema.InviteKindPersonal, Channels: []string{p.channel}})
+	status, body, err := member.api.do(http.MethodPost, "/v2/invites", schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -234,6 +234,9 @@ func (w *world) convertSam() (*member, int64, error) {
 // (design §4.4).
 func (w *world) hideKeepsAttribution(member *member, guestPost int64, g schema.GuestV1) error {
 	if err := w.op.call(http.MethodPost, fmt.Sprintf("/v1/principals/%d/hide", member.id), nil, nil); err != nil {
+		return err
+	}
+	if err := w.voicePermissionHiddenIsGhost(member.id); err != nil {
 		return err
 	}
 	return w.checkAttribution(w.p.pia.api, guestPost, g)

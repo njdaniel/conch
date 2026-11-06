@@ -10,6 +10,7 @@ import type { Person } from '../useLiveChannel';
 import { initialVoice, VoiceClient, type Phase, type Processing, type VoiceState } from './connection';
 import { FakeClock } from './fakes';
 import { ownPageNote, soundNote, type ShareFeatures } from './share';
+import { MicTestShown, VoiceLive, VoiceStrip } from '../phone';
 import type { Snapshot, VoiceControl } from './useVoice';
 import { followsNote, missingNote, noOtherOutputs, noOutputChoice, processingLabel, processingOffNote, processingUseNote, reportedNote, stoppedFor, thresholdHint, VoicePanel } from './VoicePanel';
 
@@ -40,12 +41,15 @@ function control(state: VoiceState, calls: string[], snapshot: Snapshot): VoiceC
     features: chrome,
     client,
     setTalkKey: () => undefined,
+    setReleaseDelay: (ms: number) => {
+      calls.push(`release ${String(ms)}`);
+    },
     capture: () => undefined,
     join: () => {
       calls.push('join');
     },
-    watchOnly: () => {
-      calls.push('watch only');
+    watchOnly: (beside?: boolean) => {
+      calls.push(beside === true ? 'watch only beside' : 'watch only');
     },
     leave: () => {
       calls.push('leave');
@@ -78,10 +82,48 @@ function panel(state: VoiceState, viewed: string | null, snapshot: Snapshot = { 
   return { calls, opened, client: voice.client, redraw, voice: screen.getByRole('region', { name: 'Voice' }) };
 }
 
-const inVoice = (phase: Phase, channel: string): VoiceState => ({ ...initialVoice, phase, channel });
+// In push to talk, which most of these are of: the open microphone is the default (issue #1244).
+const inVoice = (phase: Phase, channel: string): VoiceState => ({ ...initialVoice, mode: 'ptt', phase, channel });
 
 afterEach(() => {
   cleanup();
+});
+
+describe('an archived channel (issue #844)', () => {
+  it('has no voice to join: the strip says so, and Join voice, Watch only and the test are gone', () => {
+    const calls: string[] = [];
+    render(<VoicePanel voice={control(initialVoice, calls, { kind: 'presence', presence })} viewer={7} people={new Map()} viewed="old" archived onOpen={() => undefined} />);
+    const voice = screen.getByRole('region', { name: 'Voice' });
+    expect(within(voice).getByText('Voice is off. This channel is archived.')).toBeTruthy();
+    expect(within(voice).queryByRole('button', { name: /join voice|watch only|test microphone/i })).toBeNull();
+  });
+
+  it('is the same panel as ever for a live channel', () => {
+    const { voice } = panel(initialVoice, 'general');
+    expect(within(voice).getByRole('button', { name: /join voice/i })).toBeTruthy();
+    expect(within(voice).queryByText(/archived/)).toBeNull();
+  });
+});
+
+describe('the private microphone test (issue #846)', () => {
+  it('is offered before joining, and joining voice takes it away', () => {
+    const { voice, redraw } = panel(initialVoice, 'general');
+    expect(within(voice).getByRole('button', { name: 'Test microphone' })).toBeTruthy();
+    redraw(inVoice('connecting', 'general'));
+    expect(within(voice).queryByRole('button', { name: /test microphone|stop test/i })).toBeNull();
+  });
+
+  it('is offered only when Join is: not while voice is down or the server is gone', () => {
+    const { voice, redraw } = panel(initialVoice, 'general');
+    const test = () => within(voice).queryByRole('button', { name: /test microphone|stop test/i });
+    expect(test()).not.toBeNull();
+    redraw(initialVoice, { kind: 'presence', presence: { ...presence, available: false } });
+    expect(test()).toBeNull();
+    redraw(initialVoice, { kind: 'gone' });
+    expect(test()).toBeNull();
+    redraw(initialVoice, { kind: 'presence', presence });
+    expect(test()).not.toBeNull();
+  });
 });
 
 describe('Join voice and Watch only', () => {
@@ -95,6 +137,25 @@ describe('Join voice and Watch only', () => {
     fireEvent.click(join);
     fireEvent.click(watch);
     expect(calls).toEqual(['join', 'watch only']);
+  });
+
+  // N08: one space between the verb and the channel, in the text itself; the
+  // stylesheet adds no margin to the span.
+  it('have one space between the verb and the channel', () => {
+    const { voice } = panel(initialVoice, 'general');
+    expect(within(voice).getByRole('button', { name: 'Join voice in #general' }).textContent).toBe('Join voice in #general');
+    expect(within(voice).getByRole('button', { name: 'Watch only in #general' }).textContent).toBe('Watch only in #general');
+  });
+
+  // F17: the verb and the channel are in one flex item, so the button's text is
+  // one run and cannot lay out as two columns.
+  it('keep the verb and the channel in one text item of the button', () => {
+    const { voice } = panel(initialVoice, 'general');
+    for (const name of ['Join voice in #general', 'Watch only in #general']) {
+      const text = within(voice).getByRole('button', { name }).querySelector('.btn-text');
+      expect(text?.querySelector('.dest')).not.toBeNull();
+      expect(text?.textContent).toBe(name);
+    }
   });
 
   it('name no room while no channel is on screen', () => {
@@ -408,6 +469,50 @@ describe('the strip in voice', () => {
     const { voice } = panel(joined(true), 'c', { kind: 'presence', presence: someone });
     expect(voice.querySelector('.voice-state')?.textContent).toContain('Deafened (you hear no one, and you are muted).');
     expect(shape(voice)).toEqual(before);
+  });
+});
+
+// Issue #965: the strip says Transmitting only while audio is sent; a press
+// that waits for conchd's answer says so, and Hold to talk shows pressed.
+// The release delay is set in Voice options.
+describe('what is sent, as the strip says it', () => {
+  it.each([
+    ['nothing held', { talking: false, transmitting: false }, 'Not transmitting', 'false'],
+    ['a press waiting for its answer', { talking: true, transmitting: false }, 'Waiting for the server', 'true'],
+    ['a press sending', { talking: true, transmitting: true }, 'Transmitting', 'true'],
+  ] as const)('%s', (_what, patch, said, pressed) => {
+    const { voice } = panel({ ...inVoice('connected', 'c'), ...patch }, 'c');
+    const line = voice.querySelector('.voice-tx')?.textContent ?? '';
+    expect(line.endsWith(said)).toBe(true);
+    if (said !== 'Transmitting') expect(line.endsWith('Transmitting') && !line.endsWith('Not transmitting')).toBe(false);
+    expect(within(voice).getByRole('button', { name: 'Hold to talk' }).getAttribute('aria-pressed')).toBe(pressed);
+    expect(voice.classList.contains('sending')).toBe(patch.transmitting);
+  });
+
+  it('the release delay is under Voice options in push to talk, says its value, and is set by its slider', () => {
+    const { voice, calls, redraw } = panel({ ...inVoice('connected', 'c'), releaseDelay: 200 }, 'c');
+    fireEvent.click(within(voice).getByRole('button', { name: 'Voice options' }));
+    const slider = within(voice).getByRole('slider', { name: /Release delay/ });
+    expect(slider.getAttribute('aria-valuetext')).toBe('200 ms');
+    fireEvent.change(slider, { target: { value: '450' } });
+    expect(calls).toContain('release 450');
+    redraw({ ...inVoice('connected', 'c'), releaseDelay: 450, mode: 'open' });
+    expect(within(voice).queryByRole('slider', { name: /Release delay/ })).toBeNull();
+  });
+
+  // F22: the slider steps 50 ms, PageUp and PageDown move 250 ms, within 0 to 2000.
+  it.each([
+    ['PageUp', 200, 'release 450'],
+    ['PageDown', 700, 'release 450'],
+    ['PageDown', 100, 'release 0'],
+    ['PageUp', 1900, 'release 2000'],
+  ])('%s from %d ms', (key, from, said) => {
+    const { voice, calls } = panel({ ...inVoice('connected', 'c'), releaseDelay: from }, 'c');
+    fireEvent.click(within(voice).getByRole('button', { name: 'Voice options' }));
+    const slider = within(voice).getByRole('slider', { name: /Release delay/ });
+    expect(slider.getAttribute('step')).toBe('50');
+    fireEvent.keyDown(slider, { key });
+    expect(calls).toContain(said);
   });
 });
 
@@ -748,6 +853,16 @@ describe('what the strip says is true', () => {
       });
     }
 
+    it('Watch only asks to watch beside the voice elsewhere; with no voice elsewhere it does not', () => {
+      const there = panel(initialVoice, 'c', room(one(3), one(7)), bob);
+      fireEvent.click(within(there.voice).getByRole('button', { name: 'Watch only in #c' }));
+      expect(there.calls).toEqual(['watch only beside']);
+      cleanup();
+      const alone = panel(initialVoice, 'c', room(one(3)), bob);
+      fireEvent.click(within(alone.voice).getByRole('button', { name: 'Watch only in #c' }));
+      expect(alone.calls).toEqual(['watch only']);
+    });
+
     it('says so on a page another device took over', () => {
       const why = 'Another device took over your place in this voice room';
       const { voice } = panel({ ...initialVoice, phase: 'stopped', why }, 'c', room(one(7)));
@@ -867,7 +982,7 @@ describe('where else people are in voice', () => {
         people={new Map()}
         viewed={viewed}
         channels={channels}
-        occupancy={new Map(occupancy)}
+        occupancy={new Map(occupancy.map(([id, count]) => [id, { count, people: null }]))}
         onOpen={(name) => {
           opened.push(name);
         }}
@@ -883,6 +998,8 @@ describe('where else people are in voice', () => {
     fireEvent.click(within(voice).getByRole('button', { name: 'Open #game-night' }));
     expect(opened).toEqual(['game-night']);
     expect(calls).toEqual([]);
+    // A button of its own, not the borderless quiet kind that reads as text (N08).
+    expect(within(voice).getByRole('button', { name: 'Open #game-night' }).classList.contains('quiet')).toBe(false);
     // Join voice still goes where it went: the channel on screen.
     expect(within(voice).getByRole('button', { name: 'Join voice in #general' })).toBeTruthy();
   });
@@ -1272,5 +1389,218 @@ describe('the strip while joined and voice is unreachable', () => {
     const { voice } = panel(initialVoice, 'c', down);
     expect(voice.textContent).not.toContain(note);
     expect(voice.textContent).toContain('Voice is unavailable right now; chat still works.');
+  });
+});
+
+describe('what the strip reports to the phone layout (issue #929)', () => {
+  const mount = (phase: Phase, shown = true) => {
+    const seen: boolean[] = [];
+    render(
+      <VoiceLive.Provider
+        value={(live) => {
+          seen.push(live);
+        }}
+      >
+        <MicTestShown.Provider value={shown}>
+          <VoicePanel voice={control(inVoice(phase, 'general'), [], { kind: 'presence', presence })} viewer={7} people={new Map()} viewed="general" onOpen={() => undefined} />
+        </MicTestShown.Provider>
+      </VoiceLive.Provider>,
+    );
+    return seen;
+  };
+
+  it.each([
+    ['connecting', true],
+    ['connected', true],
+    ['reconnecting', true],
+    ['unavailable', true],
+    ['idle', false],
+    ['stopped', false],
+  ] as const)('%s is reported as in voice: %s', (phase, live) => {
+    expect(mount(phase).at(-1)).toBe(live);
+  });
+
+  it('draws the microphone test only where the layout shows it: the phone layout hides it outside the Voice view, which ends a running test', () => {
+    mount('idle', false);
+    expect(screen.queryByRole('button', { name: /test microphone|stop test/i })).toBeNull();
+    cleanup();
+    mount('idle', true);
+    expect(screen.getByRole('button', { name: 'Test microphone' })).toBeTruthy();
+  });
+});
+
+// Issue #1028: on a phone under Chat and Channels, in voice, the section is
+// one row of four controls: where voice is (a button to the Voice view), Hold
+// to talk (or the open microphone's level), Mute and Leave voice. The rest is
+// in the Voice view, where the lobby gives no VoiceStrip.
+describe('the phone strip under Chat and Channels (issue #1028)', () => {
+  // Three in the room, the viewer (7) among them, and member-1 (3) sharing.
+  const crowd: Snapshot = {
+    kind: 'presence',
+    presence: {
+      ...presence,
+      rooms: [
+        {
+          participants: [3, 5, 7].map((id) => ({
+            principal_id: id,
+            can_publish: true,
+            transmitting: false,
+            joined_at: '2026-10-18T00:00:00Z',
+            ...(id === 3 ? { sharing: true, sharing_audio: true } : {}),
+          })),
+        },
+      ],
+    },
+  };
+  const people: ReadonlyMap<number, Person> = new Map([
+    [3, { name: 'member-1', kind: null }],
+    [5, { name: 'member-2', kind: null }],
+  ]);
+  const mount = (state: VoiceState, opens: (() => void) | null) => {
+    const calls: string[] = [];
+    const voice = control(state, calls, crowd);
+    render(
+      <VoiceStrip.Provider value={opens}>
+        <VoicePanel voice={voice} viewer={7} people={people} viewed="channel-a" onOpen={() => undefined} />
+      </VoiceStrip.Provider>,
+    );
+    return { calls, voice: screen.getByRole('region', { name: 'Voice' }) };
+  };
+  const buttons = (voice: HTMLElement) => within(voice).queryAllByRole('button').map((b) => b.textContent);
+  const stateName: Record<'connecting' | 'connected' | 'reconnecting', string> = {
+    connecting: 'Connecting to #channel-a',
+    connected: 'In voice in #channel-a',
+    reconnecting: 'Reconnecting to #channel-a',
+  };
+
+  it.each(['connecting', 'connected', 'reconnecting'] as const)('is the five controls, and nothing else, while %s', (phase) => {
+    const { voice } = mount(inVoice(phase, 'channel-a'), () => undefined);
+    expect(within(voice).getByRole('button', { name: stateName[phase] })).toBeTruthy();
+    expect(buttons(voice)).toEqual([stateName[phase], 'Hold to talk', 'Open mic', 'Mute', 'Leave voice']);
+    // No roster, status line, hint or share note is drawn; the notes and
+    // Voice options are kept, hidden, for the Voice view.
+    expect(within(voice).queryByRole('list')).toBeNull();
+    expect(within(voice).queryByText('Microphone in use')).toBeNull();
+    expect(voice.querySelector('.voice-phase')).toBeNull();
+    expect(voice.querySelector('.voice-notes')?.hasAttribute('hidden')).toBe(true);
+    expect(voice.querySelector('.voice-options')?.hasAttribute('hidden')).toBe(true);
+  });
+
+  it('is the five controls with the open microphone, its level in place of Hold to talk', () => {
+    const { voice } = mount({ ...inVoice('connected', 'channel-a'), mode: 'open' }, () => undefined);
+    expect(buttons(voice)).toEqual([stateName.connected, 'Open mic', 'Mute', 'Leave voice']);
+    const meter = within(voice).getByRole('meter', { name: 'Microphone level' });
+    // The words stay, for a screen reader, in their own span, which the strip
+    // hides on screen so the meter has the room.
+    expect(meter.parentElement?.querySelector('.open-mic-label')?.textContent).toBe('Open microphone');
+  });
+
+  it('opens the Voice view from the state button, and its Leave voice leaves', () => {
+    let opened = 0;
+    const { voice, calls } = mount(inVoice('connected', 'channel-a'), () => {
+      opened++;
+    });
+    fireEvent.click(within(voice).getByRole('button', { name: stateName.connected }));
+    expect(opened).toBe(1);
+    fireEvent.click(within(voice).getByRole('button', { name: 'Leave voice' }));
+    expect(calls).toEqual(['leave']);
+  });
+
+  it('is the whole section in the Voice view: who is in voice, the status, and every control', () => {
+    const { voice } = mount(inVoice('connected', 'channel-a'), null);
+    expect(within(voice).queryByRole('button', { name: stateName.connected })).toBeNull();
+    expect(within(voice).getByRole('list', { name: '3 in voice' })).toBeTruthy();
+    expect(voice.querySelector('.voice-phase')?.textContent).toBe('Connected in #channel-a');
+    for (const name of ['Hold to talk', 'Open mic', 'Mute', 'Deafen', 'Share screen', 'Watch', 'Voice options', 'Leave voice']) {
+      expect(within(voice).getByRole('button', { name })).toBeTruthy();
+    }
+    expect(voice.querySelector('.voice-notes')?.hasAttribute('hidden')).toBe(false);
+  });
+
+  it('keeps Voice options as they were left across the strip and the Voice view', () => {
+    const voiceControl = control(inVoice('connected', 'channel-a'), [], crowd);
+    const page = (opens: (() => void) | null) => (
+      <VoiceStrip.Provider value={opens}>
+        <VoicePanel voice={voiceControl} viewer={7} people={people} viewed="channel-a" onOpen={() => undefined} />
+      </VoiceStrip.Provider>
+    );
+    const { rerender } = render(page(null));
+    const voice = screen.getByRole('region', { name: 'Voice' });
+    const options = () => voice.querySelector('.voice-options')?.hasAttribute('hidden');
+    fireEvent.click(within(voice).getByRole('button', { name: 'Voice options' }));
+    expect(options()).toBe(false);
+    rerender(page(() => undefined));
+    expect(options()).toBe(true);
+    rerender(page(null));
+    expect(options()).toBe(false);
+  });
+
+  it('is not the strip out of voice: Join voice is the Voice view\'s, and the lobby hides the dock', () => {
+    const { voice } = mount(initialVoice, () => undefined);
+    expect(within(voice).getByRole('button', { name: 'Join voice in #channel-a' })).toBeTruthy();
+    expect(voice.classList.contains('strip')).toBe(false);
+  });
+});
+
+// Issue #1244: a one-tap switch between the open microphone and push to talk,
+// in the desktop voice bar and in the phone strip; Voice options follows it.
+describe('the microphone mode toggle (issue #1244)', () => {
+  const toggle = (voice: HTMLElement) => within(voice).getByRole('button', { name: 'Open mic' });
+
+  it('is pressed in the open microphone, and one tap goes to push to talk', () => {
+    const { voice, client } = panel({ ...inVoice('connected', 'c'), mode: 'open' }, 'c');
+    const set = vi.spyOn(client, 'setMode');
+    expect(toggle(voice).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(toggle(voice));
+    expect(set).toHaveBeenCalledWith('ptt');
+  });
+
+  it('is not pressed in push to talk, and one tap goes to the open microphone', () => {
+    const { voice, client } = panel(inVoice('connected', 'c'), 'c');
+    const set = vi.spyOn(client, 'setMode');
+    expect(toggle(voice).getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(toggle(voice));
+    expect(set).toHaveBeenCalledWith('open');
+  });
+
+  it('is not offered before joining', () => {
+    const { voice } = panel(initialVoice, 'c');
+    expect(within(voice).queryByRole('button', { name: 'Open mic' })).toBeNull();
+  });
+
+  it.each([
+    ['listen only', { listenOnly: true }],
+    ['watch only', { watchOnly: true }],
+  ])('is disabled while %s, as the radios are', (_what, only) => {
+    const { voice } = panel({ ...inVoice('connected', 'c'), ...only }, 'c');
+    expect(toggle(voice).hasAttribute('disabled')).toBe(true);
+    expect(within(voice).getByRole('radio', { name: 'Push to talk', hidden: true }).closest('fieldset')?.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('is enabled otherwise', () => {
+    const { voice } = panel(inVoice('connected', 'c'), 'c');
+    expect(toggle(voice).hasAttribute('disabled')).toBe(false);
+  });
+
+  it('is in the phone strip too, and Voice options follows the same state', () => {
+    const calls: string[] = [];
+    const voice = control({ ...inVoice('connected', 'c'), mode: 'open' }, calls, { kind: 'presence', presence });
+    const set = vi.spyOn(voice.client, 'setMode');
+    render(
+      <VoiceStrip.Provider value={() => undefined}>
+        <VoicePanel voice={voice} viewer={7} people={new Map()} viewed="c" onOpen={() => undefined} />
+      </VoiceStrip.Provider>,
+    );
+    const region = screen.getByRole('region', { name: 'Voice' });
+    expect(toggle(region).getAttribute('aria-pressed')).toBe('true');
+    expect(within(region).getByRole<HTMLInputElement>('radio', { name: 'Open microphone', hidden: true }).checked).toBe(true);
+    fireEvent.click(toggle(region));
+    expect(set).toHaveBeenCalledWith('ptt');
+  });
+
+  it('is followed by the radios: push to talk checks Push to talk', () => {
+    const { voice } = panel(inVoice('connected', 'c'), 'c');
+    expect(within(voice).getByRole<HTMLInputElement>('radio', { name: 'Push to talk', hidden: true }).checked).toBe(true);
+    expect(toggle(voice).getAttribute('aria-pressed')).toBe('false');
   });
 });

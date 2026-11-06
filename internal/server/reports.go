@@ -200,6 +200,29 @@ func (s *Server) handleGetReport(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
+	// Each half of the list goes to whoever may read every name in it
+	// (ADR-014 design §7.3, SF-1; decided for #1015): the channel and net
+	// names to a holder of manage_channels, the principal names to a holder
+	// of manage_members, the two permissions that read every such name
+	// elsewhere. An operator holding neither gets no list; one holding one
+	// gets that half and an empty other. Every other field the server sends
+	// is already free of names: diagnostics are codes, words and route
+	// patterns (never paths), by their schema, and the reporter's own words
+	// and environment stay as written.
+	channels, principals := true, true
+	if caller, authed := callerFrom(ctx); authed {
+		held, err := s.store.HeldBy(ctx, caller, schema.PermManageChannels, schema.PermManageMembers)
+		if err != nil {
+			slog.ErrorContext(ctx, "reports: check permissions failed", "principal", caller.ID, "error", err)
+			writeInternalError(w)
+			return
+		}
+		channels, principals = held[0], held[1]
+	}
+	if !channels && !principals {
+		writeJSON(w, http.StatusOK, report)
+		return
+	}
 	// The names an issue made from it must leave out, from the whole server:
 	// the operator's own channels are not enough when groups have private
 	// ones. Fail closed: a report without them could be filed unredacted.
@@ -208,6 +231,12 @@ func (s *Server) handleGetReport(w http.ResponseWriter, r *http.Request) {
 		slog.ErrorContext(ctx, "reports: read names to redact failed", "report", id, "error", err)
 		writeInternalError(w)
 		return
+	}
+	if !channels {
+		redact.Channels = []string{}
+	}
+	if !principals {
+		redact.Principals = []string{}
 	}
 	report.Redact = &redact
 	writeJSON(w, http.StatusOK, report)

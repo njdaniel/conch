@@ -1,0 +1,11 @@
+{
+  "kind": "member",
+  "server_name": "conch.example",
+  "inviter": "nick",
+  "channels": [],
+  "join": {
+    "guest": false,
+    "account": false,
+    "paused": true
+  }
+}

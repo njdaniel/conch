@@ -357,18 +357,17 @@ describe('the operator’s session ends', () => {
 });
 
 describe('the recent proof', () => {
-  // joining opens Settings → Joining and guests, turns guests on, and saves.
+  // joining opens Settings → Joining, offers accounts from the address, and saves.
   async function joining() {
     fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Joining and guests' }));
-    const region = screen.getByRole('region', { name: 'Joining and guests' });
-    fireEvent.click(await within(region).findByLabelText('Allow guest visits'));
-    fireEvent.click(within(region).getByLabelText('Join as guest'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Joining' }));
+    const region = screen.getByRole('region', { name: 'Joining' });
+    fireEvent.click(await within(region).findByLabelText('Create an account'));
     fireEvent.click(within(region).getByRole('button', { name: 'Save joining' }));
     return region;
   }
 
-  const saved = { ...settings, settings: { ...settings.settings, guests_enabled: true, open_joining: 'guest' } };
+  const saved = { ...settings, settings: { ...settings.settings, open_joining: 'account' } };
 
   it('asks for the password and a code over the form, then sends the same change once more', async () => {
     let proved = false;
@@ -384,8 +383,7 @@ describe('the recent proof', () => {
     const region = await joining();
     const dialog = await screen.findByRole('dialog', { name: 'Confirm it is you' });
     // The form underneath keeps what was chosen.
-    expect(within(region).getByLabelText<HTMLInputElement>('Allow guest visits').checked).toBe(true);
-    expect(within(region).getByLabelText<HTMLInputElement>('Join as guest').checked).toBe(true);
+    expect(within(region).getByLabelText<HTMLInputElement>('Create an account').checked).toBe(true);
     fireEvent.change(within(dialog).getByLabelText('Your password'), { target: { value: password } });
     fireEvent.change(within(dialog).getByLabelText('Code from your authenticator app'), { target: { value: '654321' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm' }));
@@ -393,8 +391,8 @@ describe('the recent proof', () => {
     expect(screen.queryByRole('dialog', { name: 'Confirm it is you' })).toBeNull();
     const puts = calls.filter((c) => c.method === 'PUT' && c.path === '/v1/join/settings');
     expect(puts.map((c) => c.body)).toEqual([
-      { guests_enabled: true, open_joining: 'guest' },
-      { guests_enabled: true, open_joining: 'guest' },
+      { open_joining: 'account' },
+      { open_joining: 'account' },
     ]);
     expect(calls.filter((c) => c.path === '/v1/reauth').map((c) => c.body)).toEqual([{ password, code: '654321' }]);
     expectNoSecret(view.container, password);
@@ -412,7 +410,7 @@ describe('the recent proof', () => {
     fireEvent.change(within(dialog).getByLabelText('Your password'), { target: { value: password } });
     fireEvent.change(within(dialog).getByLabelText('Code from your authenticator app'), { target: { value: '654321' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Confirm' }));
-    expect(await within(region).findByText('It needs your password and a code first. Nothing was changed.')).toBeDefined();
+    expect(await within(region).findByText('It needs your password first. Nothing was changed.')).toBeDefined();
     expect(screen.queryByRole('dialog', { name: 'Confirm it is you' })).toBeNull();
     expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(2);
     expect(calls.filter((c) => c.path === '/v1/reauth')).toHaveLength(1);
@@ -450,8 +448,8 @@ describe('the recent proof', () => {
     const region = await joining();
     const dialog = await screen.findByRole('dialog', { name: 'Confirm it is you' });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
-    expect(await within(region).findByText('It needs your password and a code first. Nothing was changed.')).toBeDefined();
-    expect(within(region).getByLabelText<HTMLInputElement>('Allow guest visits').checked).toBe(true);
+    expect(await within(region).findByText('It needs your password first. Nothing was changed.')).toBeDefined();
+    expect(within(region).getByLabelText<HTMLInputElement>('Create an account').checked).toBe(true);
     expect(calls.filter((c) => c.method === 'PUT')).toHaveLength(1);
     expect(calls.filter((c) => c.path === '/v1/reauth')).toEqual([]);
   });
@@ -650,7 +648,7 @@ describe('what was being typed', () => {
     expect(document.body.innerHTML).not.toContain('half a thought');
   });
 
-  it('is kept when the operator’s session ends, and given back when the same operator signs in again', async () => {
+  it('restores an initial POST 401 only as a draft when the same operator signs in again', async () => {
     const { revive } = await typedThenEnded();
     revive();
     signInWithPassword();
@@ -660,5 +658,7 @@ describe('what was being typed', () => {
     await waitFor(() => {
       expect(back.value).toBe('half a thought');
     });
+    expect(screen.queryByText(/^Not confirmed/)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
   });
 });

@@ -520,9 +520,10 @@ type VoiceControlEventV2 struct {
 // both versions reads its first line with the reader of the version that
 // line names, and from then on with that reader alone.
 //
-// The fields of set_devices have one rule of their own: a side that is absent
-// is left alone, and a side that is present and empty is invalid, so that a
-// reader cannot take an empty name for "leave it".
+// The fields of set_devices have the rule of every optional string: a side
+// that is absent is left alone, and a side that is present and empty is
+// invalid, so that a reader cannot take an empty name for "leave it"
+// (fieldReader.optWord).
 func ParseVoiceControlCommandV2(line []byte) (VoiceControlCommandV2, error) {
 	fields, err := decodeVoiceControlObject(line)
 	if err != nil {
@@ -567,8 +568,8 @@ func ParseVoiceControlCommandV2(line []byte) (VoiceControlCommandV2, error) {
 		cmd.Leave, msg = c, c
 	case VoiceControlCommandSetDevices:
 		c := &VoiceControlSetDevicesV2{Schema: VoiceControlSchemaV2, Kind: kind, ID: id}
-		c.Input = r.optName("input")
-		c.Output = r.optName("output")
+		c.Input = r.optWord("input")
+		c.Output = r.optWord("output")
 		cmd.SetDevices, msg = c, c
 	case VoiceControlCommandSetTalkMode:
 		c := &VoiceControlSetTalkModeV2{Schema: VoiceControlSchemaV2, Kind: kind, ID: id}
@@ -586,17 +587,6 @@ func ParseVoiceControlCommandV2(line []byte) (VoiceControlCommandV2, error) {
 		return VoiceControlCommandV2{}, &VoiceControlError{Code: VoiceControlErrorInvalid, ID: id, detail: err.Error()}
 	}
 	return cmd, nil
-}
-
-// optName reads an optional string that, when present, must not be empty: a
-// device name whose absence means "leave it", where an empty string could be
-// mistaken for the same.
-func (r *fieldReader) optName(key string) string {
-	s := r.optStr(key)
-	if _, present := r.fields[key]; present && s == "" && r.missing == "" {
-		r.missing = key
-	}
-	return s
 }
 
 // Kind is the kind of the command held.
@@ -677,12 +667,12 @@ func ParseVoiceControlEventV2(line []byte) (VoiceControlEventV2, error) {
 		a := &VoiceControlAckV2{Schema: VoiceControlSchemaV2, Kind: kind, Seq: seq}
 		a.ID = r.int("id")
 		a.OK = r.bool("ok")
-		a.Error = VoiceControlErrorCode(r.optStr("error"))
+		a.Error = VoiceControlErrorCode(r.optWord("error"))
 		ev.Ack, msg = a, a
 	case VoiceControlEventState:
 		s := &VoiceControlStateV2{Schema: VoiceControlSchemaV2, Kind: kind, Seq: seq}
 		s.Phase = VoiceControlPhase(r.str("phase"))
-		s.Reason = VoiceControlReason(r.optStr("reason"))
+		s.Reason = VoiceControlReason(r.optWord("reason"))
 		s.RetryInMS = r.optInt("retry_in_ms")
 		s.Capture = VoiceControlCapture(r.str("capture"))
 		s.Playback = VoiceControlPlayback(r.str("playback"))
@@ -697,7 +687,7 @@ func ParseVoiceControlEventV2(line []byte) (VoiceControlEventV2, error) {
 		}
 		s.TalkMode = VoiceControlTalkMode(r.str("talk_mode"))
 		s.PTT = VoiceControlPTT(r.str("ptt"))
-		s.PTTProblem = VoiceControlPTTProblem(r.optStr("ptt_problem"))
+		s.PTTProblem = VoiceControlPTTProblem(r.optWord("ptt_problem"))
 		ev.State, msg = s, s
 	case VoiceControlEventProtocolError:
 		e := &VoiceControlProtocolErrorV2{Schema: VoiceControlSchemaV2, Kind: kind, Seq: seq}

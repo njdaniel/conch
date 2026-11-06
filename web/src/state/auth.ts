@@ -17,11 +17,12 @@ import type { WhoAmIResponseV1 } from '../schema/principal';
 // its twelve hours, an hour without use or a revoke; codeOver is a sign-in
 // whose second step ran out of time or of tries, so the password comes
 // first again; setupDone is an operator's setup complete, which signs nobody
-// in.
+// in; setupSkipped is the same with no authenticator (ADR-012).
 export type AuthNotice =
   | 'sessionEnded'
   | 'codeOver'
   | 'setupDone'
+  | 'setupSkipped'
   | 'rejected'
   | 'network'
   | 'invalid'
@@ -51,7 +52,7 @@ export type AuthState =
 
 export type AuthAction =
   | { readonly type: 'submit' }
-  | { readonly type: 'verified'; readonly principal: WhoAmIResponseV1 }
+  | { readonly type: 'verified'; readonly principal: WhoAmIResponseV1; readonly own?: boolean }
   // held: on restore, an operator credential found kept to last, taken out of
   // storage and held back for the warning (issue #439).
   | { readonly type: 'held'; readonly principal: WhoAmIResponseV1 }
@@ -91,8 +92,12 @@ export function authReducer(state: AuthState, action: AuthAction): AuthState {
       if (state.phase === 'code' && state.checking) return { phase: 'signedIn', principal: action.principal };
       if (state.phase === 'checking') {
         // A new sign-in as an operator is warned about; a stored credential
-        // that was already accepted past the warning is not asked again.
-        return action.principal.role === 'operator'
+        // that was already accepted past the warning is not asked again. An
+        // operator's own session, which a password alone gives on a server
+        // that allows it (ADR-012, issue #867), is not a script's credential:
+        // no warning. A pasted credential is warned about whatever it is:
+        // only the warning's Continue stores and pins an operator's.
+        return action.principal.role === 'operator' && !(action.own === true && operatorSession(action.principal))
           ? { phase: 'operatorWarning', principal: action.principal }
           : { phase: 'signedIn', principal: action.principal };
       }
@@ -141,6 +146,7 @@ const lines: Record<AuthNotice, string> = {
     'Your operator sign-in has ended. It lasts twelve hours at most, and ends after an hour without use. Sign in again with your password and a code. Anything you were typing is kept for when you are back.',
   codeOver: 'That sign-in took too long, or had too many codes that were not right. Sign in again with your name and password.',
   setupDone: 'Setup is complete. Sign in with your name, your password and a code from your authenticator app.',
+  setupSkipped: 'Setup is complete. Sign in with your name and your password.',
   rejected: 'That credential was not accepted',
   network: 'Cannot reach the server',
   invalid: 'The server gave an unexpected reply',

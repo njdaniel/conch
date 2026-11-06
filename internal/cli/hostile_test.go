@@ -155,6 +155,10 @@ type walkCase struct {
 	// quietWhenOK is a command whose success prints none of the server's
 	// strings (an id, or only what the user typed).
 	quietWhenOK bool
+	// ownWords is a command that explains a refusal in its own words, by the
+	// server's code (refusal.go): whatever the server wrote there, code and
+	// message alike, must not reach the output at all, escaped or not.
+	ownWords bool
 }
 
 func walkCases(t *testing.T) []walkCase {
@@ -175,12 +179,30 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "nets archive", quietWhenOK: true, args: func(u, _ string) []string { return []string{"nets", "archive", "--server", u, "general", "alpha"} }},
 		{key: "nets add", quietWhenOK: true, args: func(u, _ string) []string { return []string{"nets", "add", "--server", u, "general", "alpha", "9"} }},
 		{key: "nets remove", quietWhenOK: true, args: func(u, _ string) []string { return []string{"nets", "remove", "--server", u, "general", "alpha", "9"} }},
+		// The community model (ADR-013, issue #994).
+		{key: "channels list", ownWords: true, args: func(u, _ string) []string { return []string{"channels", "list", "--server", u} }},
+		{key: "channels list", ownWords: true, args: func(u, _ string) []string { return []string{"channels", "list", "--server", u, "--all"} }},
+		{key: "channels join", ownWords: true, args: func(u, _ string) []string { return []string{"channels", "join", "--server", u, "general"} }},
+		{key: "channels leave", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"channels", "leave", "--server", u, "general"} }},
+		{key: "channels create", ownWords: true, args: func(u, _ string) []string {
+			return []string{"channels", "create", "--server", u, "--private", "general"}
+		}},
+		{key: "admin channel settings", ownWords: true, args: func(u, _ string) []string {
+			return []string{"admin", "channel", "settings", "--server", u, "--private", "--default", "off", "general"}
+		}},
+		{key: "admin principal voice", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "principal", "voice", "--server", u, "9", "off"}
+		}},
+		{key: "admin directory members", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "directory", "members", "--server", u} }},
 		{key: "admin channel create", args: func(u, _ string) []string { return []string{"admin", "channel", "create", "--server", u, "general"} }},
 		{key: "admin principal create", args: func(u, _ string) []string {
 			return []string{"admin", "principal", "create", "--server", u, "--kind", "human", "bob"}
 		}},
 		{key: "admin principal disable|enable", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "principal", "disable", "--server", u, "9"} }},
 		{key: "admin principal rename", args: func(u, _ string) []string { return []string{"admin", "principal", "rename", "--server", u, "9", "bob"} }},
+		{key: "admin principal role", args: func(u, _ string) []string {
+			return []string{"admin", "principal", "role", "--server", u, "9", "operator"}
+		}},
 		{key: "admin principal list", args: func(u, _ string) []string { return []string{"admin", "principal", "list", "--server", u} }},
 		{key: "admin principal hide", args: func(u, _ string) []string { return []string{"admin", "principal", "hide", "--server", u, "9"} }},
 		{key: "admin principal hide", args: func(u, _ string) []string {
@@ -191,14 +213,24 @@ func walkCases(t *testing.T) []walkCase {
 		}},
 		{key: "admin credential list", args: func(u, _ string) []string { return []string{"admin", "credential", "list", "--server", u, "9"} }},
 		{key: "admin credential revoke", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "credential", "revoke", "--server", u, "9"} }},
-		{key: "admin member add|remove", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "member", "add", "--server", u, "general", "9"} }},
+		{key: "admin member add", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "member", "add", "--server", u, "general", "9"} }},
+		{key: "admin member add", quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "member", "add", "--server", u, "general", "--name", "bob"}
+		}},
+		{key: "admin member manage|decide", quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "member", "manage", "--server", u, "general", "9"}
+		}},
+		{key: "admin member remove", quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"admin", "member", "remove", "--server", u, "general", "9"}
+		}},
 		{key: "admin manifest put", quietWhenOK: true, stdin: testManifest, args: func(u, _ string) []string { return []string{"admin", "manifest", "put", "--server", u, "9"} }},
 		{key: "admin manifest get", args: func(u, _ string) []string { return []string{"admin", "manifest", "get", "--server", u, "9"} }},
-		{key: "admin invite create", args: func(u, _ string) []string {
-			return []string{"admin", "invite", "create", "--server", u, "--open", "--channel", "general", "--expires", "1h"}
+		{key: "admin invite create", ownWords: true, args: func(u, _ string) []string {
+			return []string{"admin", "invite", "create", "--server", u, "--expires", "1h", "--uses", "3", "--landing-channel", "general"}
 		}},
-		{key: "admin invite list", args: func(u, _ string) []string { return []string{"admin", "invite", "list", "--server", u} }},
-		{key: "admin invite close|joiners", args: func(u, _ string) []string { return []string{"admin", "invite", "joiners", "--server", u, "9"} }},
+		{key: "admin invite list", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "invite", "list", "--server", u} }},
+		{key: "admin invite close|joiners", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "invite", "joiners", "--server", u, "9"} }},
+		{key: "admin invite close|joiners", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "invite", "close", "--server", u, "9"} }},
 		{key: "admin invite disable-joiners", quietWhenOK: true, args: func(u, _ string) []string {
 			return []string{"admin", "invite", "disable-joiners", "--server", u, "9"}
 		}},
@@ -216,6 +248,9 @@ func walkCases(t *testing.T) []walkCase {
 			return []string{"admin", "sign-in-link", "close", "--server", u, "9"}
 		}},
 		{key: "voice status", args: func(u, _ string) []string { return []string{"voice", "status", "--server", u, "general"} }},
+		{key: "voice camera", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string {
+			return []string{"voice", "camera", "stop", "--server", u, "general", "9"}
+		}},
 		{key: "voice where", quietWhenOK: true, args: func(u, _ string) []string { return []string{"voice", "where", "--server", u} }},
 		{key: "approvals list", args: func(u, _ string) []string { return []string{"approvals", "list", "--server", u} }},
 		{key: "approve", whoamiOK: true, args: func(u, _ string) []string { return []string{"approve", "--server", u, "--reason", "fine", "1"} }},
@@ -225,7 +260,6 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "login", stdin: walkSignInCode + "\n", args: func(u, _ string) []string { return []string{"login", "--server", u, "--link", "--yes"} }},
 		// Joining, guest visits, passwords and device links (issue #715).
 		{key: "join info", args: func(u, _ string) []string { return []string{"join", "info", "--server", u} }},
-		{key: "join guest", args: func(u, _ string) []string { return []string{"join", "guest", "--server", u, "--label", "Pat"} }},
 		{key: "join account", stdin: walkPassword + "\n", args: func(u, _ string) []string { return []string{"join", "account", "--server", u, "bob"} }},
 		{key: "account create", stdin: walkPassword + "\n", args: func(u, _ string) []string { return []string{"account", "create", "--server", u, "bob"} }},
 		{key: "end-visit", args: func(u, _ string) []string { return []string{"end-visit", "--server", u} }},
@@ -239,12 +273,23 @@ func walkCases(t *testing.T) []walkCase {
 		{key: "device-link create", quietWhenOK: true, args: func(u, _ string) []string { return []string{"device-link", "create", "--server", u} }},
 		{key: "device-link list", args: func(u, _ string) []string { return []string{"device-link", "list", "--server", u} }},
 		{key: "device-link close", quietWhenOK: true, args: func(u, _ string) []string { return []string{"device-link", "close", "--server", u, "9"} }},
-		{key: "admin join status", args: func(u, _ string) []string { return []string{"admin", "join", "status", "--server", u} }},
-		{key: "admin join set", args: func(u, _ string) []string { return []string{"admin", "join", "set", "--server", u, "--guests", "off"} }},
+		{key: "admin join status", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "join", "status", "--server", u} }},
+		{key: "admin join set", ownWords: true, args: func(u, _ string) []string {
+			return []string{"admin", "join", "set", "--server", u, "--guests", "off", "--open-signup", "on", "--link-expiry", "48h"}
+		}},
 		{key: "admin guest list", args: func(u, _ string) []string { return []string{"admin", "guest", "list", "--server", u} }},
 		{key: "admin guest end", args: func(u, _ string) []string { return []string{"admin", "guest", "end", "--server", u, "9"} }},
 		{key: "admin guest end-all", args: func(u, _ string) []string { return []string{"admin", "guest", "end-all", "--server", u} }},
 		{key: "admin guest permit", quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "guest", "permit", "--server", u, "9"} }},
+		{key: "admin hook list", ownWords: true, args: func(u, _ string) []string { return []string{"admin", "hook", "list", "--server", u} }},
+		{key: "admin hook revoke", ownWords: true, quietWhenOK: true, args: func(u, _ string) []string { return []string{"admin", "hook", "revoke", "--server", u, "9"} }},
+		{key: "admin permissions show", args: func(u, _ string) []string { return []string{"admin", "permissions", "show", "--server", u} }},
+		{key: "admin permissions set", args: func(u, _ string) []string {
+			return []string{"admin", "permissions", "set", "--server", u, "--members", "off", "use_voice"}
+		}},
+		{key: "admin permissions preset", args: func(u, _ string) []string {
+			return []string{"admin", "permissions", "preset", "--server", u, "--yes", "personal"}
+		}},
 		{key: "whoami", args: func(u, _ string) []string { return []string{"whoami", "--server", u} }},
 		{key: "rename", whoamiOK: true, args: func(u, _ string) []string { return []string{"rename", "--server", u, "bob"} }},
 		{key: "report", quietWhenOK: true, args: func(u, _ string) []string {
@@ -299,7 +344,7 @@ func usageCommands(t *testing.T) []string {
 		fields := strings.Fields(rest)
 		key := fields[0]
 		switch key {
-		case "nets", "voice", "audit", "approvals", "join", "account", "password", "device-link":
+		case "nets", "voice", "audit", "approvals", "join", "account", "password", "device-link", "channels":
 			key += " " + fields[1]
 		case "admin":
 			key += " " + fields[1] + " " + fields[2]
@@ -324,12 +369,12 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := r.Method + " " + r.URL.Path
 		if !ok && (!whoamiOK || key != "GET /v1/whoami") {
-			write(w, http.StatusForbidden, schema.Error{Code: "bad" + esc + "[31m" + rlo, Message: hostile})
+			write(w, http.StatusForbidden, schema.Error{Code: "bad" + esc + "[31m" + rlo, Message: hostile, Permission: schema.Permission(hostile)})
 			return
 		}
 		switch key {
 		case "GET /v1/whoami":
-			write(w, http.StatusOK, schema.WhoAmIResponseV1{ID: 42, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile)})
+			write(w, http.StatusOK, schema.WhoAmIResponseV1{ID: 42, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), Permissions: []schema.Permission{schema.Permission(hostile), schema.PermUseVoice}, PermissionsRevision: 1})
 		case "POST /v2/channels/general/messages":
 			write(w, http.StatusCreated, schema.PostMessageResponseV2{Message: schema.MessageV2{ID: 1, Body: hostile, CreatedAt: ts}})
 		case "GET /v2/channels/general/messages":
@@ -376,14 +421,20 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.ListPrincipalsResponseV1{Principals: []schema.PrincipalAdminV1{{
 				ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), CreatedAt: ts, InviteID: &invite,
 			}}})
+		case "PUT /v1/principals/9/role":
+			write(w, http.StatusOK, schema.RoleChangeResponseV1{Principal: schema.PrincipalAdminV1{
+				ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), Owner: true, CreatedAt: ts,
+			}, Manages: []int64{1}, InvitesClosed: 1, CredentialsRevoked: 2, HooksRevoked: 3, LiveCredentials: 4, HooksBound: 5})
 		case "POST /v1/principals/9/hide":
 			write(w, http.StatusOK, schema.HidePrincipalResponseV1{Principal: schema.PrincipalAdminV1{
 				ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), CreatedAt: ts, HiddenAt: &ts, DisabledAt: &ts,
 			}})
 		case "POST /v1/principals/hide":
 			write(w, http.StatusOK, schema.HidePrincipalsResponseV1{DryRun: true, Count: 1, Principals: []schema.HiddenPrincipalV1{{ID: 9, Name: hostile}}, Remaining: 2})
-		case "POST /v1/principals/9/disable", "DELETE /v1/credentials/9", "PUT /v1/channels/general/members/9":
+		case "POST /v1/principals/9/disable", "DELETE /v1/credentials/9", "PUT /v1/channels/general/members/9", "DELETE /v1/channels/general/members/9":
 			w.WriteHeader(http.StatusNoContent)
+		case "POST /v1/channels/general/members":
+			write(w, http.StatusCreated, schema.ChannelMemberV1{PrincipalID: 9, Name: hostile, Kind: schema.PrincipalKind(hostile), CreatedAt: ts})
 		case "POST /v1/principals/9/credentials":
 			write(w, http.StatusCreated, schema.CreateCredentialResponseV1{
 				Credential: schema.CredentialV1{ID: 5, PrincipalID: 9, Label: hostile, CreatedAt: ts},
@@ -416,7 +467,7 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.DisableJoinersResponseV1{DryRun: true, Count: 1, PrincipalIDs: []int64{5}})
 		case "GET /v1/invites/settings":
 			write(w, http.StatusOK, schema.InviteSettingsV1{Paused: true})
-		case "PUT /v1/principals/9/invite-permission", "DELETE /v1/sign-in-links/9":
+		case "PUT /v1/principals/9/invite-permission", "DELETE /v1/sign-in-links/9", "DELETE /v1/invites/9", "DELETE /v1/channels/general/voice/camera":
 			w.WriteHeader(http.StatusNoContent)
 		case "POST /v1/principals/9/sign-in-links":
 			write(w, http.StatusCreated, schema.CreateSignInLinkResponseV1{
@@ -425,7 +476,7 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			})
 		case "GET /v1/channels/general/voice":
 			write(w, http.StatusOK, schema.VoicePresenceV1{Schema: schema.VoicePresenceSchemaV1, ChannelID: 1, Configured: true, Available: true, Rooms: []schema.VoicePresenceRoom{{
-				Participants: []schema.VoiceParticipant{{PrincipalID: 42, JoinedAt: ts}},
+				Participants: []schema.VoiceParticipant{{PrincipalID: 42, JoinedAt: ts}, {PrincipalID: 43, CanPublish: true, Camera: true, JoinedAt: ts}},
 			}}})
 		case "GET /v1/voice/occupancy":
 			write(w, http.StatusOK, schema.VoiceOccupancyV1{Schema: schema.VoiceOccupancySchemaV1, Configured: true, Available: true,
@@ -500,8 +551,11 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 		case "GET /v1/sign-in-links/mine":
 			write(w, http.StatusOK, schema.ListOwnSignInLinksResponseV1{SignInLinks: []schema.SignInLinkV1{{ID: 3, PrincipalID: 42, CreatedBy: 42, CreatedAt: ts, ExpiresAt: ts, Label: hostile}}})
 		case "GET /v1/join/settings", "PUT /v1/join/settings":
+			yes, week := true, int64(604800)
 			write(w, http.StatusOK, schema.JoinSettingsResponseV1{ServerName: hostile, LiveGuests: 2, Warnings: []schema.JoinWarning{schema.JoinWarning(hostile), schema.JoinWarningLiveGuestsRemain},
-				Settings: schema.JoinSettingsV1{OpenJoining: schema.OpenJoiningMode(hostile), OpenChannels: []string{hostile}, MaxGuests: 5, MaxGuestsPerAddress: 1, GuestIdleSeconds: 60, GuestAbsoluteSeconds: 60}})
+				DefaultChannels: []schema.InviteChannelV1{{ID: 1, Name: hostile}},
+				Settings: schema.JoinSettingsV1{OpenJoining: schema.OpenJoiningMode(hostile), OpenChannels: []string{hostile}, MaxGuests: 5, MaxGuestsPerAddress: 1, GuestIdleSeconds: 60, GuestAbsoluteSeconds: 60,
+					OpenSignup: &yes, MemberLinkDefaultExpirySeconds: &week, OtherOpenChannels: 2}})
 		case "GET /v1/guests":
 			invite := int64(3)
 			write(w, http.StatusOK, schema.ListGuestsResponseV1{Guests: []schema.GuestAdminV1{{ID: 9, Handle: hostile, Label: hostile, Tag: hostile, State: schema.GuestState(hostile),
@@ -510,14 +564,85 @@ func hostileServer(t *testing.T, ok, whoamiOK bool) *httptest.Server {
 			write(w, http.StatusOK, schema.EndGuestResponseV1{Guest: schema.GuestAdminV1{ID: 9, Handle: hostile, State: schema.GuestStateEnded}})
 		case "POST /v1/guests/end":
 			write(w, http.StatusOK, schema.EndGuestsResponseV1{DryRun: true, Count: 1, Guests: []schema.GuestRefV1{{ID: 9, Handle: hostile}}, Remaining: 2})
+		case "GET /v1/permissions", "PUT /v1/permissions":
+			write(w, http.StatusOK, hostilePermissions(ts))
 		case "POST /v1/guests/9/conversion-permit":
 			write(w, http.StatusCreated, schema.CreateSignInLinkResponseV1{SignInLink: schema.SignInLinkV1{ID: 3, PrincipalID: 9, CreatedBy: 42, CreatedAt: ts, ExpiresAt: ts}, Code: walkSignInCode})
+		case "GET /v1/directory/channels":
+			members := int64(3)
+			write(w, http.StatusOK, schema.ChannelDirectoryResponseV1{Channels: []schema.ChannelListingV1{
+				{ID: 1, Name: "general", CreatedAt: ts, Visibility: schema.ChannelPublic, Default: true, Joined: true, Members: &members},
+				{ID: 2, Name: hostile, CreatedAt: ts, Visibility: schema.ChannelVisibility(hostile), Members: &members},
+			}})
+		case "POST /v1/channels/general/join":
+			write(w, http.StatusCreated, schema.JoinChannelResponseV1{Channel: schema.ChannelV0{ID: 1, Name: hostile, CreatedAt: ts.Time(), Visibility: schema.ChannelVisibility(hostile)},
+				Member: schema.ChannelMemberV1{PrincipalID: 42, Name: hostile, CreatedAt: ts}})
+		case "POST /v1/channels/general/leave":
+			w.WriteHeader(http.StatusNoContent)
+		case "POST /v1/channels":
+			write(w, http.StatusCreated, schema.CreateChannelResponseV1{Channel: schema.ChannelV0{ID: 1, Name: hostile, CreatedAt: ts.Time(), Visibility: schema.ChannelVisibility(hostile)}})
+		case "PUT /v1/channels/1/settings":
+			write(w, http.StatusOK, schema.ChannelSettingsResponseV1{Channel: schema.ChannelV0{ID: 1, Name: hostile, CreatedAt: ts.Time(), Visibility: schema.ChannelPrivate},
+				OpenSignupTurnedOff: true, Warnings: []schema.PermissionsWarning{schema.PermissionsWarning(hostile)}})
+		case "PUT /v1/principals/9/voice-permission":
+			write(w, http.StatusOK, schema.VoicePermissionResponseV1{PrincipalID: 9, Changed: true})
+		case "GET /v1/hooks":
+			revoked := ts
+			write(w, http.StatusOK, schema.ListHooksResponseV1{OtherHooks: 2, Hooks: []schema.HookV1{
+				{ID: 4, Channel: hostile, Principal: 9, Label: hostile, CreatedAt: ts},
+				{ID: 5, Channel: hostile, Principal: 9, Label: hostile, CreatedAt: ts, RevokedAt: &revoked},
+			}})
+		case "DELETE /v1/hooks/9":
+			w.WriteHeader(http.StatusNoContent)
+		case "GET /v1/directory/members":
+			yes, invitedBy := true, int64(1)
+			write(w, http.StatusOK, schema.ServerMembersResponseV1{Scope: schema.DirectoryScope(hostile), Members: []schema.ServerMemberV1{
+				{ID: 9, Kind: schema.PrincipalKind(hostile), Name: hostile, Role: schema.PrincipalRole(hostile), CreatedAt: ts, VoiceAllowed: &yes, MayInvite: &yes, InvitedBy: &invitedBy},
+			}})
+		case "POST /v2/invites":
+			write(w, http.StatusCreated, schema.CreateInviteResponseV2{
+				Invite: schema.InviteV2{ID: 3, Kind: schema.InviteKindV2(hostile), CreatedBy: 42, CreatedByName: hostile, CreatedAt: ts, ExpiresAt: &ts,
+					LandingChannels: []schema.InviteChannelV1{{ID: 1, Name: hostile}}},
+				Code: schema.InviteCodePrefix + strings.Repeat("A", schema.InviteCodeLength-len(schema.InviteCodePrefix)),
+			})
+		case "GET /v2/invites":
+			write(w, http.StatusOK, schema.ListInvitesResponseV2{Invites: []schema.InviteV2{{
+				ID: 3, Kind: schema.InviteKindV2(hostile), CreatedBy: 42, CreatedByName: hostile, CreatedAt: ts, ExpiresAt: &ts,
+				LandingChannels: []schema.InviteChannelV1{{ID: 1, Name: hostile}}, Channels: []schema.InviteChannelV1{{ID: 2, Name: hostile}},
+			}}})
+		case "GET /v2/invites/9/joiners":
+			write(w, http.StatusOK, schema.InviteJoinersResponseV1{Joiners: []schema.InviteJoinerV1{{ID: 5, Name: hostile, CreatedAt: ts}}})
 		default:
 			write(w, http.StatusNotFound, schema.Error{Code: "no_route", Message: key + hostile})
 		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// hostilePermissions is a permissions document whose every name is hostile:
+// an unknown permission, preset, warning and role, and issued items with
+// bogus ids and kinds.
+func hostilePermissions(ts schema.Timestamp) schema.PermissionsResponseV1 {
+	return schema.PermissionsResponseV1{
+		Revision: 3,
+		Rows: []schema.PermissionRowV1{
+			{Permission: schema.Permission(hostile), Member: true, Operator: true, MemberFixed: true, OperatorFixed: true},
+			{Permission: schema.PermUseVoice, Member: true, Operator: true},
+			{Permission: schema.PermActAsMembers, Operator: true, MemberFixed: true},
+		},
+		Preset:    schema.PermissionPreset(hostile),
+		Presets:   []schema.PermissionPresetV1{{Preset: schema.PresetPersonal, Member: []schema.Permission{schema.Permission(hostile)}}, {Preset: schema.PresetGroup, Member: []schema.Permission{schema.PermUseVoice}}},
+		Editable:  []schema.PermissionRole{schema.PermissionRole(hostile)},
+		Warnings:  []schema.PermissionsWarning{schema.PermissionsWarning(hostile), schema.PermissionsWarningOpenSignupOn},
+		UpdatedAt: ts,
+		IssuedToOthers: []schema.IssuedByOperatorV1{
+			{Kind: schema.IssuedKind(hostile), ID: 7, PrincipalID: 9, IssuedBy: 42, IssuedAt: ts},
+			{Kind: schema.IssuedCredential, ID: -1, PrincipalID: 9, IssuedBy: 42, IssuedAt: ts},
+			{Kind: schema.IssuedHook, ID: 0, PrincipalID: 9, IssuedBy: 42, IssuedAt: ts},
+			{Kind: schema.IssuedCredential, ID: 8, PrincipalID: 9, IssuedBy: 42, IssuedAt: ts},
+		},
+	}
 }
 
 // hostileReport is a problem report whose every string is hostile.
@@ -590,6 +715,19 @@ func TestPlainCommandsNeverPrintRawServerText(t *testing.T) {
 				}
 				if bad := firstUnsafe(all); bad != "" {
 					t.Errorf("%s in output %q", bad, all)
+				}
+				if mode == "error" && c.ownWords {
+					// The refusal is in the command's own words: none of the
+					// server's reached the output, escaped or not.
+					for _, marker := range []string{`\u202e`, `\x1b`, "pwned", "bad"} {
+						if strings.Contains(all, marker) {
+							t.Errorf("the server's own words (%q) reached the output %q", marker, all)
+						}
+					}
+					if strings.TrimSpace(all) == "" {
+						t.Errorf("a refusal printed nothing")
+					}
+					return
 				}
 				// The hostile text did reach the output, as an escape: the
 				// check above is not passing because nothing was printed.

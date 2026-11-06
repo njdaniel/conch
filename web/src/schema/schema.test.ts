@@ -8,17 +8,25 @@ import {
   approvalV1,
   channelMemberV1,
   channelV0,
+  errorV0,
   escalationTarget,
+  health,
   interventionV1,
+  joinSettingsResponseV1,
   listChannelsResponse,
   listMessagesResponseV2,
   messageV2,
+  permission,
+  permissionsResponseV1,
   postMessageResponseV2,
   runV1,
   sessionRosterV1,
   sessionV1,
   whoAmIResponseV1,
   wsTicketV1,
+  type JoinSettingsResponseV1,
+  type PermissionsResponseV1,
+  type WhoAmIResponseV1,
 } from './generated';
 import { families } from './generated.families';
 import type { Validator } from './validate';
@@ -113,9 +121,73 @@ describe('validators refuse', () => {
     { name: 'an intervention state outside the vocabulary', check: interventionV1, value: { schema: 'conch.intervention.v1', id: 1, run_id: 1, kind: 'cancel', state: 'done', requested_by: 1, requested_at: '2026-10-13T09:01:00Z' }, want: '$.state: want one of requested' },
     { name: 'an activity kind outside the vocabulary', check: agentActivityV1, value: { schema: 'conch.agent.activity.v1', id: 1, run_id: 1, principal_id: 1, kind: 'dance', summary: 's', at: '2026-10-13T09:01:00Z' }, want: '$.kind: want one of run_started' },
     { name: 'a page with a bad message', check: listMessagesResponseV2, value: { messages: [{ ...message, id: 'x' }] }, want: '$.messages[0].id: want an integer' },
+    // server_mode (ADR-011, issue #865): normal mode omits the field, so
+    // "normal" is never a wire value and only "temporary" is one.
+    { name: 'a server mode that is said by omission', check: whoAmIResponseV1, value: { ...whoami, server_mode: 'normal' }, want: '$.server_mode: want one of temporary' },
+    { name: 'a health answer with a server mode that is not one', check: health, value: { status: 'ok', version: 'v1', db: 'ok', voice: 'not_configured', server_mode: 'normal' }, want: '$.server_mode: want one of temporary' },
   ];
 
   it.each(refusals)('$name', ({ check, value, want }) => {
+    const problems = check(value);
+    expect(problems.some((p) => p.startsWith(want)), problems.join('; ')).toBe(true);
+  });
+});
+
+// A closed vocabulary the client tolerates (issue #1051): Permission,
+// PermissionsWarning, JoinWarning and the others pkg/schema/ts.go marks
+// tolerant. A bundle built before a value shipped reads a document that
+// carries it, and keeps the value, so a tab left open across an upgrade
+// still signs in. A strict vocabulary beside it refuses as before.
+describe('tolerant vocabularies', () => {
+  // A permission no bundle knows: the twelfth and every later one look like
+  // this to a bundle built before them.
+  const future = 'fly_the_server';
+  const whoami = byName.get('whoami-response-v1-permissions.json') as WhoAmIResponseV1;
+  const permissions = byName.get('permissions-response-v1.json') as PermissionsResponseV1;
+  const joining = byName.get('join-settings-response-v1.json') as JoinSettingsResponseV1;
+
+  it('reads the fixtures this test builds on', () => {
+    expect(whoami.permissions).toBeDefined();
+    expect(permissions.rows.length).toBeGreaterThan(0);
+    expect(joining.warnings).toBeDefined();
+  });
+
+  const accepted: { name: string; check: Validator<unknown>; value: unknown }[] = [
+    { name: 'a whoami naming an unknown permission', check: whoAmIResponseV1, value: { ...whoami, permissions: [...(whoami.permissions ?? []), future] } },
+    { name: 'a refusal naming an unknown permission', check: errorV0, value: { code: 'permission_denied', message: 'no', permission: future } },
+    {
+      name: 'a permissions document with an unknown permission, warning, preset and column',
+      check: permissionsResponseV1,
+      value: {
+        ...permissions,
+        rows: [...permissions.rows, { permission: future, member: false, operator: true }],
+        warnings: [...permissions.warnings, 'future_warning'],
+        presets: [...permissions.presets, { preset: 'future_preset', member: [future] }],
+        editable: [...permissions.editable, 'future_role'],
+        issued_to_others: [{ kind: 'future_kind', id: 1, principal_id: 2, issued_by: 3, issued_at: '2026-10-23T12:00:00.000Z' }],
+      },
+    },
+    { name: 'joining settings with an unknown warning', check: joinSettingsResponseV1, value: { ...joining, warnings: [...joining.warnings, 'future_warning'] } },
+  ];
+
+  it.each(accepted)('accepts $name', ({ check, value }) => {
+    expect(check(value)).toEqual([]);
+  });
+
+  it('keeps the value as it came', () => {
+    const doc = { ...whoami, permissions: [future] };
+    expect(whoAmIResponseV1(doc)).toEqual([]);
+    expect(doc.permissions).toEqual([future]);
+  });
+
+  const refused: { name: string; check: Validator<unknown>; value: unknown; want: string }[] = [
+    { name: 'an empty string', check: permission, value: '', want: '$: want one of create_public_channels' },
+    { name: 'something that is not a string', check: permission, value: 3, want: '$: want one of create_public_channels' },
+    { name: 'a null', check: permission, value: null, want: '$: want one of create_public_channels' },
+    { name: 'a strict vocabulary beside a tolerated value', check: whoAmIResponseV1, value: { ...whoami, permissions: [future], role: 'admin' }, want: '$.role: want one of operator, member' },
+  ];
+
+  it.each(refused)('still refuses $name', ({ check, value, want }) => {
     const problems = check(value);
     expect(problems.some((p) => p.startsWith(want)), problems.join('; ')).toBe(true);
   });

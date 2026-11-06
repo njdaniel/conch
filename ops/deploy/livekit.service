@@ -1,5 +1,5 @@
-# LiveKit, in Docker, from the image README.md pins by digest (change the
-# version in one place: here and in README.md together). Installed beside
+# LiveKit, in Docker, from the image docs/manual.md pins by digest (change the
+# version in one place: here and in docs/manual.md together). Installed beside
 # conchd; docs/deploy.md has the steps.
 #
 # Files it reads, all created by the operator:

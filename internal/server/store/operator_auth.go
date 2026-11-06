@@ -178,8 +178,14 @@ type TOTPLogin struct {
 // generation, with a password), and the code right and unused. Then the
 // step is recorded, the challenge spent, and the operator issued a browser
 // session: schema.OperatorSessionAbsoluteSeconds absolute and
-// schema.OperatorSessionIdleSeconds idle, never renewed. login and
-// credential_created are audited.
+// schema.OperatorSessionIdleSeconds idle, never renewed. The sign-in is
+// also the session's recent-auth proof (design §5.3, issue #1033): the
+// password, verified for this challenge and of the present generation, and
+// the code, accepted at now. The new session, and no other credential of
+// the operator, holds the proof until schema.RecentAuthLifetimeSeconds
+// after now, cleared as a re-authentication's is. login and
+// credential_created are audited; the proof is part of the login, not a
+// reauth.
 //
 // A wrong address or code counts as one of the challenge's attempts and is
 // committed as such (the challenge is spent at the last one), then answered
@@ -263,6 +269,11 @@ func (s *Store) CompleteTOTPLogin(ctx context.Context, in TOTPLogin, now time.Ti
 		if err != nil {
 			return err
 		}
+		// The password and the code just verified are the recent proof
+		// (design §5.3, issue #1033), on this session alone.
+		if err := setRecentAuthTx(ctx, tx, cred.ID, now.Add(schema.RecentAuthLifetimeSeconds*time.Second)); err != nil {
+			return err
+		}
 		out.Principal, out.Credential = p, cred
 		actor := principalActor(principalID)
 		if err := appendAuditEventTx(ctx, tx, actor, AuditLogin, actor, fmt.Sprintf("credential=%d", cred.ID), now); err != nil {
@@ -286,7 +297,7 @@ func (s *Store) CompleteTOTPLogin(ctx context.Context, in TOTPLogin, now time.Ti
 // is (review F5), so a socket or a ping loop does not keep it alive.
 func insertOperatorSessionTx(ctx context.Context, tx execer, principalID int64, token string, now time.Time) (schema.CredentialV1, error) {
 	exp := now.Add(schema.OperatorSessionAbsoluteSeconds * time.Second)
-	cred, err := insertCredentialTx(ctx, tx, principalID, OperatorSessionLabel, token, now, &exp, 0)
+	cred, err := insertCredentialTx(ctx, tx, principalID, OperatorSessionLabel, token, now, &exp, 0, principalID)
 	if err != nil {
 		return schema.CredentialV1{}, err
 	}
@@ -700,7 +711,7 @@ func (s *Store) RedeemSetupToken(ctx context.Context, tokenHash string, now time
 			return ErrSetupTokenInvalid
 		}
 		exp := now.Add(schema.SetupCredentialLifetimeSeconds * time.Second)
-		cred, err := insertCredentialTx(ctx, tx, principalID, SetupCredentialLabel, token, now, &exp, 0)
+		cred, err := insertCredentialTx(ctx, tx, principalID, SetupCredentialLabel, token, now, &exp, 0, principalID)
 		if err != nil {
 			return err
 		}

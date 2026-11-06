@@ -73,12 +73,29 @@ describe('channelsReducer renamed', () => {
   });
 });
 
+describe('channelsReducer managed', () => {
+  it('changes only the named channel and preserves every other standing', () => {
+    const from: ChannelsState = { ...listed('general'), channels: [{ ...general, manages: false }, { ...ops, manages: true }, dev] };
+    const granted = channelsReducer(from, { type: 'managed', id: 1, manages: true });
+    expect(granted.channels).toEqual([{ ...general, manages: true }, { ...ops, manages: true }, dev]);
+    expect(granted.selected).toBe('general');
+    const revoked = channelsReducer(granted, { type: 'managed', id: 2, manages: false });
+    expect(revoked.channels).toEqual([{ ...general, manages: true }, { ...ops, manages: false }, dev]);
+  });
+
+  it('returns the same state for an unknown channel or an unchanged grant', () => {
+    const from = listed('general');
+    expect(channelsReducer(from, { type: 'managed', id: 9, manages: true })).toBe(from);
+    expect(channelsReducer(from, { type: 'managed', id: 1, manages: false })).toBe(from);
+  });
+});
+
 describe('what is kept by name moves with a rename', () => {
   const message = (id: number) => ({ schema: 'conch.message.v2' as const, id, channel_id: 2, author_id: 3, created_at: at, body: `m${String(id)}` });
 
   it('chat: history and pending sends go under the new name, and the old name holds nothing', () => {
     let chat = chatReducer(initialChat, { type: 'historyLoaded', channel: 'ops', messages: [message(1), message(2)], more: false });
-    chat = chatReducer(chat, { type: 'sending', channel: 'ops', body: 'hello', at: 1 });
+    chat = chatReducer(chat, { type: 'sending', channelId: 2, authorId: 3, channel: 'ops', body: 'hello', at: 1 });
     chat = chatReducer(chat, { type: 'historyLoaded', channel: 'general', messages: [message(5)], more: false });
     const renamed = chatReducer(chat, { type: 'renamed', from: 'ops', to: 'ops-room' });
     expect(chatFor(renamed, 'ops-room')).toBe(chatFor(chat, 'ops'));
@@ -113,5 +130,51 @@ describe('what is kept by name moves with a rename', () => {
     expect(rekey(held, 'dev', 'engineering')).toBe(held);
     expect(rekey(held, 'ops', 'ops')).toBe(held);
     expect(rekey(held, 'ops', 'ops-room')).toEqual({ general: 1, 'ops-room': 2 });
+  });
+});
+
+describe('channelsReducer refreshed', () => {
+  const cases: { name: string; from: ChannelsState; channels: ChannelV0[]; want: ChannelsState }[] = [
+    {
+      name: 'replaces the list, adding a channel and dropping one, and keeps the open one open',
+      from: listed('general'),
+      channels: [general, dev, { id: 4, name: 'new', created_at: at }],
+      want: { channels: [general, dev, { id: 4, name: 'new', created_at: at }], loaded: true, selected: 'general' },
+    },
+    {
+      name: 'leaves the open channel, absent from the answer, with the line and the fallback',
+      from: listed('ops'),
+      channels: [dev, general],
+      want: { channels: [dev, general], loaded: true, selected: 'general', lost: 'ops' },
+    },
+    {
+      name: 'opens the first channel of a person who had none',
+      from: { channels: [], loaded: true, selected: null },
+      channels: [ops, dev],
+      want: { channels: [ops, dev], loaded: true, selected: 'ops' },
+    },
+    {
+      name: 'leaves nothing open when the answer is empty',
+      from: listed('ops'),
+      channels: [],
+      want: { channels: [], loaded: true, selected: null, lost: 'ops' },
+    },
+  ];
+  it.each(cases)('$name', ({ from, channels, want }) => {
+    expect(channelsReducer(from, { type: 'refreshed', channels })).toEqual(want);
+  });
+  it('returns the same state when the answer is the list already held', () => {
+    const from = listed('ops');
+    expect(channelsReducer(from, { type: 'refreshed', channels: [general, ops, dev] })).toBe(from);
+  });
+});
+
+describe('channelsReducer select', () => {
+  it('keeps the line when the channel already open is selected again (the address bar echoing the fallback)', () => {
+    const from = listed('ops', 'general');
+    expect(channelsReducer(from, { type: 'select', name: 'ops' })).toBe(from);
+  });
+  it('clears the line when another channel is chosen', () => {
+    expect(channelsReducer(listed('ops', 'general'), { type: 'select', name: 'dev' })).toEqual(listed('dev'));
   });
 });

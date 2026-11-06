@@ -79,7 +79,7 @@ func (h *harness) scanResponse(what string, header http.Header, body []byte, bod
 }
 
 // bodyCarriesCredentials reports whether a response is one whose body holds a
-// secret on purpose: a session (the token and room), or a credential just
+// secret on purpose: a session or a companion's grant (the token and room), or a credential just
 // issued or rotated (its token, shown once).
 func bodyCarriesCredentials(method, path string, status int) bool {
 	if status/100 != 2 {
@@ -87,7 +87,7 @@ func bodyCarriesCredentials(method, path string, status int) bool {
 	}
 	p := strings.SplitN(path, "?", 2)[0]
 	switch {
-	case method == http.MethodPost && strings.HasSuffix(p, "/voice/session"):
+	case method == http.MethodPost && (strings.HasSuffix(p, "/voice/session") || strings.HasSuffix(p, "/voice/companion")):
 		return true
 	case method == http.MethodPost && strings.HasPrefix(p, "/v1/principals/") && strings.HasSuffix(p, "/credentials"):
 		return true

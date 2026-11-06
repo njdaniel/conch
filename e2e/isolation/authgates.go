@@ -96,13 +96,40 @@ func timeClosed(t *timing, feeds []*feed, from time.Time, bound time.Duration, s
 // occupancy ones: each closed with 1008 and "credential no longer valid",
 // the close of a credential that went.
 func closedAllRevoked(feeds []*feed) error {
+	return closedWith(feeds, func(*feed) []string { return []string{credentialGone} })
+}
+
+// The two reasons a socket closes with 1008 for a guest whose visit ended.
+const (
+	credentialGone = "credential no longer valid" //nolint:gosec // close-frame reason text, not a credential
+	membershipGone = "no longer a member of this channel"
+)
+
+// closedAllExpired is closedAllRevoked for a guest whose visit expired.
+// Expiry both invalidates the credential and removes the guest from its
+// channels, so its events socket is closed by whichever path runs first:
+// both reasons are valid there (both 1008). Every other socket keeps the
+// single reason.
+func closedAllExpired(feeds []*feed) error {
+	return closedWith(feeds, func(f *feed) []string {
+		if strings.Contains(f.what, "/v1/events/ws") {
+			return []string{credentialGone, membershipGone}
+		}
+		return []string{credentialGone}
+	})
+}
+
+// closedWith requires that each socket closed with 1008 and one of the
+// reasons that reasons gives for it.
+func closedWith(feeds []*feed, reasons func(*feed) []string) error {
 	for _, f := range feeds {
 		f.mu.Lock()
 		err := f.err
 		f.mu.Unlock()
+		want := reasons(f)
 		var ce websocket.CloseError
-		if !errors.As(err, &ce) || ce.Code != websocket.StatusPolicyViolation || ce.Reason != "credential no longer valid" {
-			return fmt.Errorf("%s ended with %w, want 1008 \"credential no longer valid\"", f.what, err)
+		if !errors.As(err, &ce) || ce.Code != websocket.StatusPolicyViolation || !slices.Contains(want, ce.Reason) {
+			return fmt.Errorf("%s ended with %w, want 1008 %q", f.what, err, want)
 		}
 	}
 	return nil
@@ -540,10 +567,27 @@ func (w *world) operatorAuth() (timing, error) {
 		return timing{}, fmt.Errorf("the operator's session is bounded %+v, want an hour idle and twelve in all", sw.Auth)
 	}
 
-	// The session needs a recent proof on a sensitive route, and a code is
-	// good once.
+	// The sign-in with both factors is the session's recent proof for its
+	// first ten minutes (issue #1033): a sensitive route takes it at once.
+	if sw.Auth.RecentAuthUntil == nil || sw.Auth.RecentAuthUntil.Time().Before(now.Add(9*time.Minute)) ||
+		sw.Auth.RecentAuthUntil.Time().After(now.Add(11*time.Minute)) {
+		return timing{}, fmt.Errorf("the operator's session holds a proof to %v, want ten minutes from the sign-in", sw.Auth.RecentAuthUntil)
+	}
 	change := schema.PutJoinSettingsRequestV1{JoinVoice: ptr(true)}
-	if err := refusedAs(sess.api, http.MethodPut, "/v1/join/settings", change, answer{http.StatusForbidden, schema.ErrorCodeReauthRequired}, "the session changes the joining policy without a proof"); err != nil {
+	if err := sess.api.call(http.MethodPut, "/v1/join/settings", change, nil); err != nil {
+		return timing{}, fmt.Errorf("the session changes the joining policy with the sign-in's proof: %w", err)
+	}
+	// The proof is the signed-in credential's alone: the session rotated
+	// from it has none, needs one on a sensitive route, and a code is good
+	// once.
+	var rotated schema.RotateCredentialResponseV1
+	if err := sess.api.call(http.MethodPost, fmt.Sprintf("/v1/credentials/%d/rotate", sess.credID), nil, &rotated); err != nil {
+		return timing{}, err
+	}
+	w.h.secret("the operator's rotated session", rotated.Token)
+	sess.token, sess.credID = rotated.Token, rotated.Credential.ID
+	sess.api = w.as(sess)
+	if err := refusedAs(sess.api, http.MethodPut, "/v1/join/settings", change, answer{http.StatusForbidden, schema.ErrorCodeReauthRequired}, "the rotated session changes the joining policy without a proof"); err != nil {
 		return timing{}, err
 	}
 	if err := refusedAs(sess.api, http.MethodPost, "/v1/reauth", schema.ReauthRequestV1{Password: operatorPassword, Code: auth.spent()},
@@ -625,8 +669,21 @@ func (w *world) operatorAuth() (timing, error) {
 	}
 	// Until setup is done again, the password signs nobody in (design §9.8:
 	// an operator with a password but no confirmed second factor is
-	// auth_failed): recovery removed the second factor.
-	if err := refusedAs(w.newcomer("someone with the operator's password, after the recovery"), http.MethodPost, "/v1/login",
+	// auth_failed): recovery removed the second factor. Where password-only
+	// is allowed (a temporary server, or CONCHD_OPERATOR_TOTP=optional) the
+	// recovered operator is password-only, and the password alone signs them
+	// in (ADR-011 item 2.1, ADR-012 item 3); everything else here is the same.
+	if passwordOnlyAllowed() {
+		var in schema.LoginResponseV1
+		if err := w.newcomer("the operator's password, after the recovery, where password-only is allowed").call(http.MethodPost, "/v1/login",
+			schema.LoginRequestV1{Name: opName, Password: operatorPassword}, &in); err != nil {
+			return t, err
+		}
+		w.h.secret("a browser session", in.Token)
+		if in.Next != schema.LoginNextSignedIn || in.Token == "" {
+			return t, fmt.Errorf("the recovered operator's password where password-only is allowed answered %s, want signed in", in.Next)
+		}
+	} else if err := refusedAs(w.newcomer("someone with the operator's password, after the recovery"), http.MethodPost, "/v1/login",
 		schema.LoginRequestV1{Name: opName, Password: operatorPassword}, answer{http.StatusUnauthorized, schema.ErrorCodeAuthFailed},
 		"the operator's password between the recovery and the new setup"); err != nil {
 		return t, err

@@ -1,0 +1,15 @@
+{
+  "revision": 3,
+  "changes": [
+    {
+      "permission": "act_as_members",
+      "role": "operator",
+      "granted": false
+    },
+    {
+      "permission": "make_member_links",
+      "role": "member",
+      "granted": false
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 # every name below on its own (ports 80 and 443 must be open, and each name
 # must already resolve to this host). `reverse_proxy` keeps the Host header
 # the client sent and passes WebSocket upgrades, which is what conchd's
-# same-origin check needs (README, "Optional: TLS and a reverse proxy").
+# same-origin check needs (docs/manual.md, "Optional: TLS and a reverse proxy").
 #
 # example.com is a placeholder. Replace it everywhere before use:
 #   sed -i 's/example\.com/your.domain/g' /etc/caddy/Caddyfile
@@ -14,7 +14,9 @@
 # unix socket below, which only a Caddy started from this file listens on.
 
 {
-	# Where Let's Encrypt writes if a certificate cannot be renewed.
+	# Optional: the contact address of the ACME (Let's Encrypt) account. Delete
+	# this line to register without one; certificates are issued and renewed the
+	# same way.
 	email admin@example.com
 
 	# Caddy's admin API has no authentication. On its default address
@@ -27,6 +29,14 @@
 	admin unix//var/lib/caddy/admin.sock
 }
 
+# No `encode` directive, on purpose (issue #1037). conchd gzips the web
+# client's static files (/app/) itself, so a deployment without Caddy gets the
+# same; Caddy passes that Content-Encoding through untouched. Everything else
+# conchd answers (the REST API, WebSocket, MCP, attachments) carries tokens or
+# private messages and is deliberately never compressed, which keeps it clear
+# of BREACH-style size leaks. An `encode` here would compress exactly those
+# responses (Caddy skips only bodies already encoded), so do not add one.
+#
 # One block per instance: <instance>.<domain> -> that instance's loopback
 # port (CONCHD_LISTEN in /etc/conch/<instance>.env).
 alpha.example.com {

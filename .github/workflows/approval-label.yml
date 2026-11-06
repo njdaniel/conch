@@ -1,0 +1,29 @@
+name: Approval-path label
+
+# ci.yml runs dogfood-check on pull requests that carry the approval-path
+# label, but its pull_request trigger has no "labeled" type, so a label added
+# after the last push never ran it before merge (#72, #1010; issue #1170).
+# Adding "labeled" to ci.yml would start a whole CI run whose other jobs all
+# skip, and a skipped run can stand in for an earlier failed one. This
+# workflow runs only the canary, only when the approval-path label is added.
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  dogfood-check-on-label:
+    if: github.event.label.name == 'approval-path'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: dogfood-check
+        run: go run ./e2e/dogfood

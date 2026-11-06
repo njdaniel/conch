@@ -264,6 +264,7 @@ func (p *voicePoller) reportTransmit(ctx context.Context, room store.VoiceRoom, 
 		r.order.Unlock()
 		return nil
 	}
+	slog.DebugContext(ctx, "voice: transmit report applied", "channel", room.ChannelID, "principal", principalID, "started", started)
 
 	// Not tied to the caller: a client that hangs up now must not leave a
 	// reported state with no row. Bounded all the same, because the room's
@@ -307,7 +308,7 @@ func (p *voicePoller) reportTransmit(ctx context.Context, room store.VoiceRoom, 
 		slog.ErrorContext(ctx, "voice: could not tell whether a room was retired after a transmit report; the sweep checks", "channel", room.ChannelID, "error", err)
 		p.sweepSoon()
 	case !live:
-		p.forgetRoom(ctx, room.RoomName)
+		p.retireRoom(ctx, room) // the report's order is released; only its slot is held
 	}
 	return nil
 }

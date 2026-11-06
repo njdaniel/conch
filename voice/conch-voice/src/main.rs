@@ -64,12 +64,12 @@ fn main() {
         }
         Invocation::Managed(args) => {
             logger.set_level(args.log_level);
-            conch_voice::managed(
-                args,
-                &Environment::from_process(),
-                Arc::clone(&scrubber),
-                parent,
-            )
+            // The nonce is read for an endpoint and for nothing else.
+            let environment = match args.events_pipe {
+                Some(_) => Environment::from_process().with_attach_from_process(),
+                None => Environment::from_process(),
+            };
+            conch_voice::managed(args, &environment, Arc::clone(&scrubber), parent)
         }
         Invocation::Devices { json } => {
             conch_voice::devices(*json, &Environment::from_process(), &scrubber)

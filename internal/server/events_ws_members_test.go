@@ -129,7 +129,7 @@ func TestEventsMemberListFollowsChanges(t *testing.T) {
 			// the removal after it, and it still lists mute.
 			name: "a member is disabled, then another removed",
 			act: func() {
-				do("POST", fmt.Sprintf("/v1/principals/%d/disable", f.mute.ID), "", http.StatusNoContent)
+				do("POST", fmt.Sprintf("/v1/principals/%d/disable", f.mute.ID), "", http.StatusOK)
 				do("DELETE", fmt.Sprintf("/v1/channels/general/members/%d", f.shy.ID), "", http.StatusNoContent)
 			},
 			match: membersLack(f.shy.ID),
@@ -174,7 +174,14 @@ func TestEventsMemberListFollowsChanges(t *testing.T) {
 
 	// elsewhere heard none of it: its next frame is the change made to it.
 	do("PUT", fmt.Sprintf("/v1/channels/elsewhere/members/%d", f.carol.ID), "", http.StatusNoContent)
-	if fr := elsewhere.next(); fr.schema != schema.ChannelMembersSchemaV1 || len(fr.members.Members) != 2 {
+	// Renames and hides above also owed it the content-free directory signal
+	// (members hold see_member_directory, so every member's list moved);
+	// that is not a members frame and is not what this step asks.
+	fr := elsewhere.next()
+	for fr.schema == schema.DirectoryChangedSchemaV1 {
+		fr = elsewhere.next()
+	}
+	if fr.schema != schema.ChannelMembersSchemaV1 || len(fr.members.Members) != 2 {
 		t.Errorf("elsewhere: next frame = %v, want the list with carol added", fr)
 	}
 }

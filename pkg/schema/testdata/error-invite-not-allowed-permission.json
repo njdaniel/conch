@@ -1,0 +1,5 @@
+{
+  "code": "invite_not_allowed",
+  "message": "members can't make member links on this server",
+  "permission": "make_member_links"
+}

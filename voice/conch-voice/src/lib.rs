@@ -67,6 +67,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod audio;
+pub mod channel;
 pub mod cli;
 pub mod config_cmd;
 pub mod devices;
@@ -89,13 +90,13 @@ pub mod session;
 pub mod status;
 pub mod transmit;
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use conch_voice_audio::{CountingSink, ToneSource, WavSource};
-use dmn_audio::NodeTable;
 use tokio::sync::mpsc;
 
 use crate::audio::PipeWire;
@@ -241,6 +242,7 @@ pub fn join(
             .as_ref()
             .map(|(device, _)| device.display().to_string()),
         unreachable_note: resolved.unreachable_note,
+        share_audio_owner: args.share_audio_owner,
         timings: Timings::default(),
     };
     let out = Output::stdout(args.json);
@@ -287,6 +289,8 @@ pub fn join(
 /// # Errors
 ///
 /// [`Error::EventPipe`] if file descriptor 3 is not a pipe that can be written, before
+/// anything else is done; with `--events-pipe`, which file descriptor 3 is not consulted
+/// for, [`Error::Attach`] if the endpoint cannot be attached to ([`channel::attach`]), before
 /// anything else is done; otherwise what the owner was told in a failed state.
 pub fn managed(
     args: &ManagedArgs,
@@ -294,7 +298,20 @@ pub fn managed(
     scrubber: Arc<Scrubber>,
     parent: u32,
 ) -> Result<(), Error> {
-    let events = managed::open_event_pipe()?;
+    // Where the events go: the endpoint the owner listens on, with the attach line already
+    // written, or file descriptor 3. Exactly one is looked at.
+    let (events, end): (Box<dyn Write + Send>, Option<UnixStream>) = match &args.events_pipe {
+        Some(path) => {
+            let endpoint = channel::attach(path, environment, &scrubber)?;
+            (Box::new(endpoint.events), Some(endpoint.end))
+        }
+        None => (Box::new(managed::open_event_pipe()?), None),
+    };
+    // The nonce was spent on the attach line: the session is given an environment without it.
+    let environment = Environment {
+        conch_voice_attach: None,
+        ..environment.clone()
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -306,7 +323,7 @@ pub fn managed(
     let result = runtime.block_on(async {
         let (inputs, received) = mpsc::unbounded_channel();
         let host = managed::Host::new(
-            environment.clone(),
+            environment,
             LiveKit::new(Arc::clone(&scrubber)),
             scrubber,
             managed::Devices::Choices {
@@ -314,14 +331,25 @@ pub fn managed(
                 sink: args.sink.clone(),
             },
             keys,
+            args.share_audio_owner,
         );
         managed::signals(inputs.clone(), host.watchdog.clone()).map_err(Error::Runtime)?;
         managed::watch_parent(parent, inputs.clone(), host.watchdog.clone());
-        managed::run(host, std::io::stdin(), Box::new(events), inputs, received).await
+        if let Some(end) = end {
+            channel::watch_end(end, inputs.clone(), host.watchdog.clone());
+        }
+        managed::run(host, std::io::stdin(), events, inputs, received).await
     });
     // As for `join`: the SDK's tasks are not cancelled under it.
     std::mem::forget(runtime);
     result
+}
+
+/// The platform's devices as the neutral table: connects, reads the list and lets go. On a
+/// platform with no audio backend that is [`Error::Audio`] holding `NoBackend`, which
+/// `devices` prints as one line, as for a PipeWire that cannot be reached.
+fn list_devices(wait: Duration) -> Result<devices::DeviceTable, Error> {
+    PipeWire::connect()?.list_devices(wait)
 }
 
 /// `conch-voice devices`: the microphones and speakers PipeWire has, by the names the
@@ -342,11 +370,7 @@ pub fn devices(json: bool, environment: &Environment, scrubber: &Scrubber) -> Re
         json,
         environment,
         scrubber,
-        || {
-            PipeWire::connect()
-                .map(|pipewire| pipewire.nodes(audio::LISTING_WAIT))
-                .map_err(|error| error.to_string())
-        },
+        || list_devices(audio::LISTING_WAIT).map_err(|error| error.to_string()),
         |out| {
             devices::report(
                 Path::new(devices::BY_ID),
@@ -370,15 +394,18 @@ pub fn devices(json: bool, environment: &Environment, scrubber: &Scrubber) -> Re
 /// # Errors
 ///
 /// [`Error::Output`] if `out` cannot be written to.
-pub fn devices_with(
+pub fn devices_with<T>(
     json: bool,
     environment: &Environment,
     scrubber: &Scrubber,
-    connect: impl FnOnce() -> Result<NodeTable, String>,
+    connect: impl FnOnce() -> Result<T, String>,
     keyboards: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
     out: &mut dyn std::io::Write,
     err: &mut dyn std::io::Write,
-) -> Result<(), Error> {
+) -> Result<(), Error>
+where
+    for<'a> devices::DeviceTable: From<&'a T>,
+{
     if json {
         let (config, refused) = devices::config_view(environment);
         if let Some(refused) = refused {
@@ -459,6 +486,7 @@ mod tests {
             home: None,
             server: None,
             token: Some(Secret::new(FAKE_LOGIN)),
+            ..Environment::default()
         };
         let args = match cli::parse(["conch-voice", "join", "ops"]).unwrap() {
             cli::Invocation::Join(args) => args,

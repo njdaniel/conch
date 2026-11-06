@@ -54,7 +54,7 @@ func TestDisableEndpointsAccess(t *testing.T) {
 		setup  func(t *testing.T, f *authFixture)
 		wantOp int
 	}{
-		{"disable", func(f *authFixture) string { return f.disablePath(f.alice.ID) }, nil, http.StatusNoContent},
+		{"disable", func(f *authFixture) string { return f.disablePath(f.alice.ID) }, nil, http.StatusOK},
 		{"enable", func(f *authFixture) string { return f.enablePath(f.alice.ID) }, nil, http.StatusNoContent},
 		{"revoke-all", func(f *authFixture) string { return f.revokeAllPath(f.alice.ID) }, nil, http.StatusOK},
 	}
@@ -104,16 +104,17 @@ func TestDisableEndpointBehaviour(t *testing.T) {
 		t.Fatalf("root disabled despite 409: %d", r.Code)
 	}
 
-	// Disable alice: 204, token dead, audit attributed to root.
+	// Disable alice: 200 with nothing issued to others (issue #1024), token
+	// dead, audit attributed to root.
 	_, tok2 := f.newCred(t, f.alice.ID)
-	if rec := f.do(t, "POST", f.disablePath(f.alice.ID), f.rootTok, ""); rec.Code != 204 || rec.Body.Len() != 0 {
+	if rec := f.do(t, "POST", f.disablePath(f.alice.ID), f.rootTok, ""); rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != "{}" {
 		t.Fatalf("disable = %d %q", rec.Code, rec.Body)
 	}
 	for _, tok := range []string{f.aliceTok, tok2} {
 		assertErrorBody(t, f.do(t, "GET", "/v1/whoami", tok, ""), 401, "unauthenticated")
 	}
 	before := len(f.audit(t))
-	if rec := f.do(t, "POST", f.disablePath(f.alice.ID), f.rootTok, ""); rec.Code != 204 {
+	if rec := f.do(t, "POST", f.disablePath(f.alice.ID), f.rootTok, ""); rec.Code != 200 {
 		t.Fatalf("repeat disable = %d", rec.Code)
 	}
 	if after := len(f.audit(t)); after != before {
@@ -194,7 +195,7 @@ func TestDisableEndpointBehaviour(t *testing.T) {
 func TestDisabledTokenIndistinguishable(t *testing.T) {
 	f := newMemberFixture(t)
 	base := wsTestServer(t, f.srv)
-	if rec := f.do(t, "POST", f.disablePath(f.alice.ID), f.rootTok, ""); rec.Code != 204 {
+	if rec := f.do(t, "POST", f.disablePath(f.alice.ID), f.rootTok, ""); rec.Code != 200 {
 		t.Fatal(rec.Code)
 	}
 	unknown := schema.CredentialTokenPrefix + strings.Repeat("Z", 43)
@@ -358,7 +359,7 @@ func TestAuthOffStartsNoRecheck(t *testing.T) {
 	}
 
 	// The endpoints work with no caller and audit as system.
-	if rec := f.do(t, "POST", f.disablePath(f.alice.ID), "", ""); rec.Code != 204 {
+	if rec := f.do(t, "POST", f.disablePath(f.alice.ID), "", ""); rec.Code != 200 {
 		t.Fatalf("disable = %d", rec.Code)
 	}
 	if rec := f.do(t, "POST", f.enablePath(f.alice.ID), "", ""); rec.Code != 204 {
@@ -451,7 +452,7 @@ func TestDisabledPrincipalHooksStop(t *testing.T) {
 				t.Fatalf("ingest before disable = %d %s", rec.Code, rec.Body)
 			}
 
-			if rec := f.do(t, "POST", f.disablePath(f.bot.ID), tok, ""); rec.Code != http.StatusNoContent {
+			if rec := f.do(t, "POST", f.disablePath(f.bot.ID), tok, ""); rec.Code != http.StatusOK {
 				t.Fatalf("disable = %d %s", rec.Code, rec.Body)
 			}
 			if rec := ingest(); rec.Code != unknown.Code || rec.Body.String() != unknown.Body.String() {

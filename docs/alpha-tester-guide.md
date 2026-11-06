@@ -7,10 +7,6 @@ This guide is for the alpha's pre-release builds. Each build's version is shown 
 **Settings** (the gear at the top right of the Conch page; for example
 `Version v0.1.0-alpha.1`). Please quote it whenever you tell us about a problem.
 
-A few parts of this guide are still being finished. They are marked like this:
-*(lands with #444)*. The marks come out once those parts are in a build; if your
-build does not have one yet, skip that part.
-
 ## What you need
 
 - A computer with Chrome, Edge, Firefox or Safari, or a phone or tablet with its usual
@@ -19,24 +15,24 @@ build does not have one yet, skip that part.
 - Headphones, if you will use voice. They stop the others hearing themselves back.
 - The invite link you were sent.
 
-Please keep invite links to yourself. Anyone who has an open invite link can use it
+Please keep invite links to yourself. Anyone who has a member link can use it
 to join.
 
 ## 1. Open your invite
 
-1. Open the link you were sent, in the browser you want to use Conch in.
+1. Open the member link you were sent, in the browser you want to use Conch in.
+   Use that link, not the bare server address. The address is a sign-in page;
+   it offers account creation only if the owner has turned on open sign-up.
 2. The page says **You are invited to Conch**, and shows:
    - who invited you;
    - which channels you will be in;
-   - whether voice is included;
    - when the invite expires.
 3. The long code at the end of the link disappears from the address bar as soon as
-   the page opens. That is on purpose: the invite is not kept in your browser's
-   history.
+   the page opens. Keep the original link somewhere private if you need it again.
 
-If the page says **This invite no longer works**, the invite has been used, has
-expired or has been closed. Ask the person who sent it for a new one. A personal
-invite works only once, so do not pass yours on.
+If the page says **This link can't be used**, the link may have expired, reached
+its use limit or been closed. Ask the person who sent it for a new one. Member
+links can be reused unless a use limit was set. Keep yours private.
 
 If the page says you are already signed in as someone else, choose **Continue as a
 new person** only if you mean to make a second account. Otherwise choose **Go back**.
@@ -44,7 +40,14 @@ new person** only if you mean to make a second account. Otherwise choose **Go ba
 ## 2. Choose a name
 
 1. Type the name you want the others to see, under **Your name**.
-2. Choose **Join**. You arrive in Conch, in your first channel.
+2. Under **Choose a password**, choose a password, then **Type the password again**.
+3. Choose **Create account**. You start in the default channels, with their full
+   history. If the link names other landing channels, you start there instead.
+   If there are none, your channel list is empty. Ask the person who invited you
+   to add you, or use **Browse channels**.
+
+Voice is on for new members, unless the server's permissions withhold it. There
+are **no guests for now**. Every newcomer makes an account.
 
 Names are unique on the server. If the page says **That name is taken. Choose
 another.**, someone already has it, or a name that looks too much like it (for
@@ -69,18 +72,22 @@ Under **Settings** (the gear at the top right of the page) there are two buttons
 - **Sign out** ends your sign-in on this browser, in every tab.
 - **Sign out everywhere** ends every sign-in you have, on every device.
 
-**Please do not sign out unless you mean to leave.** There is no password. Once you
-sign out, you cannot sign back in by yourself: ask the person running the test to
-let you back in.
+To return after signing out, use your name and password on the sign-in page.
+If you forget your password, ask the person running the test for a reset link.
+Older accounts without a password need a sign-in link.
 
-To use Conch on a second device or another browser, ask the person running the test.
-They can give you a sign-in for your account, to paste on the sign-in page. A new
-invite would make a second, separate account instead.
+To use Conch on a second device or another browser, sign in with your name and
+password. A new member link would make a second, separate account instead.
 
 If the page says **Signed out: the credential is no longer valid**, your sign-in has
 ended: it expired, or your access was removed. Tell the person running the test.
 
 ## 4. Chat
+
+Choose **Browse channels** beside your channel list to find other public channels.
+Choose **Join** beside one to enter it and read its full history. The directory
+also lists private channels you are already in. Other private channels are not
+listed; ask a channel manager or operator to add you.
 
 - Your channels are listed on the left (in a row at the top on a phone). A number after a
   channel's name is how many messages you have not read yet.
@@ -106,17 +113,28 @@ voice, whether your microphone is in use, and who else is in voice.
 3. You are in. Everyone in the channel's voice is listed. Whoever is talking is marked
    **(speaking)**.
 
-There are two ways to talk. Choose one under **Voice options**, **Microphone**:
+There are two ways to talk. The browser starts in **Open microphone**. **Open mic**,
+beside the talk control, switches between the two in one tap. On a phone it is on
+the voice strip. The same choice is under **Voice options**, **Microphone**. The
+choice is remembered per browser.
 
-- **Push to talk** (the first choice). Hold the talk key while you speak, and let go
+- **Open microphone.** Your voice is sent when you speak. The level
+  meter in the strip shows it. Use the slider under **Voice options** with the
+  meter: move it until the meter opens the microphone for your voice but not for
+  the noise around you.
+- **Push to talk.** Hold the talk key while you speak, and let go
   when you have finished. The talk key is the backtick key, `` ` ``, which on most
   keyboards is just below Esc. **Change talk key**, under **Voice options**, sets another. On a phone or a touch
   screen, press and hold **Hold to talk** instead.
   - The talk key works only while the Conch tab is the one in front, and not while you
-    are typing in a box. Switching to another tab or app counts as letting go.
-- **Open microphone.** Your microphone opens by itself when you speak. Use the slider
-  under **Voice options** with the level meter in the strip: move it until the meter
-  opens the microphone for your voice but not for the noise around you.
+    are typing in a box. Switching to another tab or app shuts the microphone at once, without the
+    release delay below; press the key again to talk.
+  - The microphone stays open a moment after you let go, so your last word is not cut:
+    **Release delay**, under **Voice options**, sets how long (200 ms at first).
+  - The strip says **Transmitting** while you are heard. Just after you press it may
+    say **Waiting for the server** for a moment: you are not heard yet.
+
+In a noisy room, or if others hear an echo, switch to **Push to talk**.
 
 The other buttons:
 
@@ -133,7 +151,7 @@ Good to know:
 - **Voice is unavailable right now; chat still works** means the voice service is
   down for a moment. Conch keeps trying by itself.
 
-## 6. Share your screen *(lands with #444)*
+## 6. Share your screen
 
 You can share your screen with the others in a channel's voice. One person shares at
 a time.
@@ -169,7 +187,7 @@ If someone else is already sharing, the page says who. Wait until they stop.
 This is what the browsers say they do. Part of the test is finding out whether it is
 true, so please tell us when it is not.
 
-## 7. Watch a share, also on a phone *(lands with #444)*
+## 7. Watch a share, also on a phone
 
 - When someone shares, the Voice strip says who is sharing, and shows **Watch**.
   Choose it to see the share, above the conversation.
@@ -185,22 +203,105 @@ choose **Use microphone**.
 
 On a phone, keep the Conch page open on the screen while you watch.
 
-## 8. Which browser for what
+## 8. Your camera
 
-| | Chat | Voice | Talk key | Share a screen | Share its sound | Watch a share |
-| --- | --- | --- | --- | --- | --- | --- |
-| Windows, Chrome or Edge | yes | yes | while the tab is in front | yes | a tab, or the whole computer | yes |
-| Mac, Chrome or Edge | yes | yes | while the tab is in front | yes | a tab | yes |
-| Linux, Chrome or Edge | yes | yes | while the tab is in front | yes | a tab | yes |
-| Firefox or Safari, any computer | yes | yes | while the tab is in front | yes | none | yes |
-| iPhone or iPad | yes | yes | while the page is on screen | no | no | yes |
-| Android, Chrome | yes | yes | while the page is on screen | not known yet | no | yes |
+You can turn on a camera in a channel's voice, and the others in the voice can see it.
 
-The three share columns are about screen sharing *(lands with #444)*. Like the table
+**The camera is off for everyone but the owner until the owner turns it on.** If you
+are in voice and see no **Camera** button, your server has not turned it on for you.
+**Voice options** then says **Camera is off for you on this server.** Ask the person
+running the server. It is meant for one-to-one calls and small groups: up to 9 cameras at
+once.
+
+**Turn it on**
+
+1. Join voice (section 5).
+2. Choose **Camera**. Your browser asks whether Conch may use your camera. Choose
+   **Allow**. If you blocked it by mistake, allow the camera in the browser's settings
+   for this site, then choose **Camera** again.
+3. The page says **Starting your camera…**. Then you see two things, one after the other:
+   - **Camera in use**: the browser has your camera, and nothing is sent yet.
+   - **Sending video**: your picture is going to the others.
+4. A video view opens above the conversation with your own picture in it, labelled
+   **You** and mirrored like a mirror. **Hide self-view** hides only that tile; you are
+   still sending.
+
+Joining voice, unmuting and sharing your screen never turn the camera on. Only the
+**Camera** button does, and there is no key for it. Muting or deafening does not touch it
+either.
+
+**Choose or test a camera.** Under **Voice options**, **Camera** lists your cameras once
+you have turned the camera on or tested it. **Test camera** shows your picture with the
+words **Preview: not sent**: nobody sees it, and it stops when you close **Voice
+options**. If the camera you chose is not plugged in, the page says **Your chosen camera
+is not connected.** It does not use another one for you.
+
+**Turn it off.** Choose **Camera** again. Leaving voice and signing out turn it off too,
+and so does changing channel. Conch lets go of the camera, so its light goes off. If you
+want to check, look at the light.
+
+**It never turns itself back on.** If your connection drops, someone turns your camera
+off, you join from another device, or you unplug the camera, it stays off, and the page
+says why: for example **An operator turned off your camera.**, **Your camera was turned
+off.** or **Camera disconnected. Choose a camera in Voice options.** Choose **Camera**
+when you want it again.
+
+**Watching others**
+
+- When someone has a camera on, the voice buttons show **Show video (2)**, with the
+  number of cameras. Choose it to open the video view. **Hide video** closes it. Another
+  person turning on a camera never opens it for you.
+- Up to 9 people each get a tile. Someone without a camera shows their initial and
+  **Camera off**. Whoever is talking has a ring and the word **speaking**; the view does
+  not jump to them.
+- Choose a tile (**Enlarge** and the person's name) to make it big. **Back to grid**, or
+  Escape, brings the others back. **Full screen** works as for a share.
+- If someone shares a screen and you are watching it, the share is the big picture and the
+  cameras sit beside or below it.
+
+**Who sees you, and what happens to it**
+
+- Everyone in the channel's voice can see your camera, as they can hear you.
+- The picture is encrypted on its way to the server and on its way from the server to each
+  person. It is **not end-to-end encrypted**: the voice service, and the person who runs
+  the server, can see it.
+- **Conch does not record anything.** But anyone watching can record their own screen,
+  and nothing can stop that. Only turn the camera on where you are comfortable with that.
+
+**On a phone**
+
+- Video appears only in the **Voice** view. In **Chat** or **Channels** you receive no
+  video, so it spends no data. Your own camera keeps sending, and the voice strip says
+  **Camera on**; choose it to go to Voice.
+- **The camera stops when the page leaves the screen**: the phone locks, or you switch
+  apps. It does not come back by itself when you return; choose **Camera**.
+- The camera that faces you is used first, at a smaller picture than a computer sends.
+  Pick the other one under **Voice options** if you want it; Conch remembers.
+
+How many cameras a server can carry has not been measured yet. If a call with several
+cameras stutters, tell us how many there were and what you used (section 10).
+
+## 9. Which browser for what
+
+| | Chat | Voice | Talk key | Share a screen | Share its sound | Watch a share | Send a camera | See cameras |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Windows, Chrome or Edge | yes | yes | while the tab is in front | yes | a tab, or the whole computer | yes | not known yet | not known yet |
+| Mac, Chrome or Edge | yes | yes | while the tab is in front | yes | a tab | yes | not known yet | not known yet |
+| Linux, Chrome or Edge | yes | yes | while the tab is in front | yes | a tab | yes | not known yet | not known yet |
+| Firefox or Safari, any computer | yes | yes | while the tab is in front | yes | none | yes | not known yet | not known yet |
+| iPhone or iPad | yes | yes | while the page is on screen | no | no | yes | not known yet | not known yet |
+| Android, Chrome | yes | yes | while the page is on screen | not known yet | no | yes | not known yet | not known yet |
+
+The three share columns are about screen sharing. Like the table
 in section 6, this one says what the browsers say they do. Tell us what really
 happens on yours.
 
-## 9. Report a problem *(lands with #446)*
+The two camera columns are about section 8. **Nobody has tried a real camera in any of
+these yet.** The project's own tests have tried only Chrome's built-in fake camera, on
+Linux, so every camera cell says "not known yet" and part of the test is filling them
+in. Please try, and tell us what worked and what did not.
+
+## 10. Report a problem
 
 When something goes wrong, report it from inside Conch. It takes a minute, and it
 sends us what we need to find the cause.
@@ -229,26 +330,36 @@ If you cannot reach Conch at all, tell the person running the test instead. Say 
 you did, what happened, the version from **Settings** if you saw it, and
 your device and browser.
 
-## 10. What is known not to work yet
+## 11. What is known not to work yet
 
+If you see "Temporary server: no backups, and it may be removed. Don't keep
+anything here you need.", this server is for short-lived tests. Its messages and
+uploads may disappear when it is removed, and there is no off-site backup to
+recover them from. Keep anything you need somewhere else.
+
+- **No guest visits.** You cannot look in as a guest, without an account; that is
+  turned off for now. Every invite makes an account.
 - **The talk key works only while the Conch tab is in front.** A key that works while
   a game or another app is in front needs a desktop app, which comes after the alpha.
 - **On a phone, voice and watching stop when the page leaves the screen** (the phone
-  locks, or you switch app).
-- **Not every browser can share, or share sound.** See the tables in sections 6 and 8.
-- **Signing out cannot be undone by you**, and a private window forgets you. See
+  locks, or you switch app). The camera stops then too, and stays off until you choose
+  **Camera** again.
+- **On a phone, video shows only in the Voice view.** In Chat and Channels you receive no
+  camera video.
+- **No camera from the desktop app or the terminal app.** The terminal app
+  (`conch`) can say who has a camera on, and an operator can turn one off with it, but
+  it cannot send or show one. A camera is sent, and watched, in the browser only.
+- **The camera is off until the owner turns it on**, and how many cameras a server can
+  carry has not been measured. A call with many cameras may stutter.
+- **Not every browser can share, or share sound.** See the tables in sections 6 and 9.
+- **A private window forgets your sign-in.** Use your name and password to return. See
   section 3.
-- **No files, search or threads in the browser yet.** They come after the alpha.
-- **No notifications.** Conch does not alert you to new messages while its tab is in
-  the background, though the channel list counts them.
 - **On a slow connection, a message you send may show twice for a moment** while it is
   being sent. It settles to one.
 - **A share stops if the sharer's connection drops** for more than a few seconds. The
-  page says so; share again. *(lands with #444)*
-- **If a share is stopped for you**, for example by the person running the test, the
-  page does not yet say why. *(lands with #444)*
+  page says so; share again.
 
-## 11. Switching servers
+## 12. Switching servers
 
 You may be invited to more than one Conch server. Each server has its own address,
 such as `https://chat.example` and `https://other.example`, and the address is what
@@ -264,4 +375,4 @@ your browser goes by:
 **If you also use the terminal app** (`conch`): it keeps its sign-in in a settings
 folder. For a second server, or a second person, give each its own folder, by setting
 `CONCH_CONFIG_DIR` to that folder before you sign in and whenever you run `conch`.
-The project's README explains it, under "Human side".
+The [manual](manual.md#4-human-side-conch) explains it, under "Human side".

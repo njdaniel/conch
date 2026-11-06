@@ -29,9 +29,20 @@ var ErrLastOperator = errors.New("store: this would leave no owner able to sign 
 // ends a principal (a disable or role/mark removal) leaves its factors out;
 // one that ends only credentials (a revoke, a sign-out everywhere) keeps
 // them, since a password and a code still sign that owner in afterwards.
+//
+// Where password-only is allowed (the flag StartMode recorded, read in the
+// same transaction) a password alone signs an owner in (ADR-011 item 2.1,
+// ADR-012 item 3), so an owner with a password counts, with or without a
+// confirmed TOTP: the guard counts what the server really allows. Otherwise
+// it is as it always was, and either way an owner with no password, holding
+// only a setup credential, is not counted.
 func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID, exceptCredentialID, factorsExceptPrincipalID int64, now time.Time) (int, error) {
+	passwordOnly, err := storedPasswordOnlyTx(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
 	var n int
-	err := tx.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`SELECT (SELECT COUNT(*) FROM credentials c JOIN principals p ON p.id = c.principal_id
 		         WHERE p.role = 'operator' AND p.owner = 1 AND p.disabled_at IS NULL
 		           AND c.revoked_at IS NULL AND (c.expires_at IS NULL OR c.expires_at > ?)
@@ -41,8 +52,8 @@ func liveOperatorCredentialsTx(ctx context.Context, tx execer, exceptPrincipalID
 		         WHERE p.role = 'operator' AND p.owner = 1 AND p.kind = 'human' AND p.disabled_at IS NULL AND p.hidden_at IS NULL
 		           AND p.id <> ?
 		           AND EXISTS (SELECT 1 FROM passwords pw WHERE pw.principal_id = p.id)
-		           AND EXISTS (SELECT 1 FROM totp t WHERE t.principal_id = p.id AND t.secret IS NOT NULL AND t.enrolled_at IS NOT NULL))`,
-		now.UnixMilli(), exceptPrincipalID, exceptCredentialID, factorsExceptPrincipalID,
+		           AND (? OR EXISTS (SELECT 1 FROM totp t WHERE t.principal_id = p.id AND t.secret IS NOT NULL AND t.enrolled_at IS NOT NULL)))`,
+		now.UnixMilli(), exceptPrincipalID, exceptCredentialID, factorsExceptPrincipalID, passwordOnly,
 	).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("store: count live operator credentials: %w", err)
@@ -147,13 +158,13 @@ func principalState(ctx context.Context, tx execer, principalID int64) (role Rol
 // nothing, if the target is the only enabled operator. The guard runs inside
 // the same BEGIN IMMEDIATE transaction as the update, so two concurrent
 // disables of the last two operators serialize and exactly one succeeds.
-func (s *Store) DisablePrincipal(ctx context.Context, actor string, principalID int64) (changed bool, err error) {
+func (s *Store) DisablePrincipal(ctx context.Context, actor string, principalID int64, forbidOwner ...bool) (changed bool, err error) {
 	var runs []EndedRun
 	var guests []EndedGuest
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		runs, guests = nil, nil
 		now := credentialNow().Truncate(time.Millisecond)
-		if changed, err = disablePrincipalTx(ctx, tx, actor, principalID, now, &runs); err != nil {
+		if changed, err = disablePrincipalTx(ctx, tx, actor, principalID, now, &runs, len(forbidOwner) > 0 && forbidOwner[0]); err != nil {
 			return err
 		}
 		// Disabling a guest ends its visit for good (issue #705): enabling
@@ -172,9 +183,12 @@ func (s *Store) DisablePrincipal(ctx context.Context, actor string, principalID 
 // transaction: hiding a principal (issue #445) disables it this way first, in
 // its own transaction. The runs its ended sessions failed are added to runs,
 // for the caller to announce after the commit.
-func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalID int64, now time.Time, runs *[]EndedRun) (bool, error) {
+func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalID int64, now time.Time, runs *[]EndedRun, forbidOwner bool) (bool, error) {
 	role, owner, disabled, err := principalState(ctx, tx, principalID)
 	if err != nil {
+		return false, err
+	}
+	if err := ownerProtectedTx(ctx, tx, principalID, forbidOwner); err != nil {
 		return false, err
 	}
 	if disabled {
@@ -204,6 +218,32 @@ func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalI
 	if err := appendAuditEventTx(ctx, tx, actor, "principal_disabled", principalActor(principalID), "", now); err != nil {
 		return false, err
 	}
+	// Disabling an AI administrator revokes it (issue #1326,
+	// ai-administrators §3.1, §4.5): its grant is cleared here, so enabling
+	// the agent again gives it nothing back, and only an owner can grant
+	// it again. The trail records the change and the revocation beside the
+	// disable. Hiding disables first, so it revokes too.
+	var prevPerms, prevAdmin string
+	switch err := tx.QueryRowContext(ctx,
+		"SELECT permissions, admin FROM agent_manifests WHERE principal_id = ?", principalID).Scan(&prevPerms, &prevAdmin); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return false, fmt.Errorf("store: disable principal: read grant: %w", err)
+	case prevPerms != "[]" || prevAdmin != "":
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE agent_manifests SET permissions = '[]', admin = '' WHERE principal_id = ?", principalID); err != nil {
+			return false, fmt.Errorf("store: disable principal: clear grant: %w", err)
+		}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditAdminGrantChanged, principalActor(principalID),
+			fmt.Sprintf("permissions=%s->[] approval_channel=0 reason=disabled", prevPerms), now); err != nil {
+			return false, err
+		}
+		if prevPerms != "[]" {
+			if err := appendAuditEventTx(ctx, tx, actor, AuditAIAdminRevoked, principalActor(principalID), "reason=disabled", now); err != nil {
+				return false, err
+			}
+		}
+	}
 	// Every session of the principal ends first, whatever credential it
 	// was made with, so each is recorded as ended by the disabling and not
 	// by the revocations that follow (issue #265).
@@ -216,7 +256,7 @@ func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalI
 	// Redemption already refuses a disabled maker's invites; closing them
 	// makes the invite list say so too (issue #438), and enabling the
 	// principal again does not revive them.
-	if err := closeCreatorInvitesTx(ctx, tx, actor, principalID, "", InviteCloseCreatorDisabled, now); err != nil {
+	if err := closeCreatorInvitesTx(ctx, tx, actor, principalID, selectEveryInvite, InviteCloseCreatorDisabled, now); err != nil {
 		return false, err
 	}
 	// Likewise the sign-in links for them or made by them (issue #493).
@@ -239,10 +279,13 @@ func disablePrincipalTx(ctx context.Context, tx execer, actor string, principalI
 // its memberships are not restored. Idempotent: enabling an enabled principal
 // writes nothing and reports changed == false. It returns
 // ErrPrincipalNotFound for an unknown id.
-func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID int64) (changed bool, err error) {
+func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID int64, forbidOwner ...bool) (changed bool, err error) {
 	err = s.withImmediateTx(ctx, func(tx execer) error {
 		p, err := principalByIDTx(ctx, tx, principalID)
 		if err != nil {
+			return err
+		}
+		if err := ownerProtectedTx(ctx, tx, principalID, len(forbidOwner) > 0 && forbidOwner[0]); err != nil {
 			return err
 		}
 		if p.DisabledAt == nil {
@@ -286,14 +329,29 @@ func (s *Store) EnablePrincipal(ctx context.Context, actor string, principalID i
 // nothing, when the target is an enabled operator and no other enabled
 // operator holds a live credential, and no operator, the target included,
 // holds a password and a confirmed TOTP.
-func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principalID int64) (int, error) {
+func (s *Store) RevokeAllCredentials(ctx context.Context, actor string, principalID int64, forbidOwner ...bool) (int, error) {
+	return s.RevokeAllCredentialsAs(ctx, actor, 0, principalID, len(forbidOwner) > 0 && forbidOwner[0])
+}
+
+// RevokeAllCredentialsAs is RevokeAllCredentials by actorID, whose standing
+// is decided in the revoking transaction (selfOrAdministratorTx, ADR-014
+// design §7.2): a holder of manage_members signs anyone out everywhere,
+// anyone else only itself, and anyone else's is ErrManageMembersRequired,
+// decided before the target is read. actorID 0 is RevokeAllCredentials.
+func (s *Store) RevokeAllCredentialsAs(ctx context.Context, actor string, actorID, principalID int64, forbidOwner bool) (int, error) {
 	var n int
 	var runs []EndedRun
 	var guests []EndedGuest
 	err := s.withImmediateTx(ctx, func(tx execer) error {
 		runs, guests = nil, nil
+		if _, err := selfOrAdministratorTx(ctx, tx, actorID, principalID); err != nil {
+			return err
+		}
 		role, owner, disabled, err := principalState(ctx, tx, principalID)
 		if err != nil {
+			return err
+		}
+		if err := ownerProtectedTx(ctx, tx, principalID, forbidOwner); err != nil {
 			return err
 		}
 		now := credentialNow().Truncate(time.Millisecond)

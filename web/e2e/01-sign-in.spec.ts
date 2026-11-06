@@ -1,5 +1,5 @@
 // P3-01: the browser is one of the people, with a credential of its own.
-import { channelButton, expect, signIn, statusLine, test } from './fixtures';
+import { channelButton, consoleErrors, credentialField, expect, signIn, statusLine, test } from './fixtures';
 import { principalId } from './world';
 
 test('P3-01 browser-test signs in by pasting the credential and sees the fixture channels', async ({ meet, world }) => {
@@ -21,7 +21,7 @@ test('P3-01 a wrong credential shows the failure line and leaves no token in the
   const { page } = await meet();
   const wrong = 'not-a-credential-p3-01-wrong-token';
   await page.goto(world.appUrl);
-  const field = page.getByLabel('Credential');
+  const field = (await credentialField(page));
   await field.fill(wrong);
   await page.getByRole('button', { name: 'Use credential' }).click();
 
@@ -45,7 +45,7 @@ test('P3-01 a wrong credential shows the failure line and leaves no token in the
 test('A7 an operator is warned, and the credential stays with that one tab', async ({ meet, world }) => {
   const { context, page } = await meet();
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(world.tokens.operator);
+  await (await credentialField(page)).fill(world.tokens.operator);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await expect(page.getByRole('heading', { name: 'This is an operator credential' })).toBeVisible();
   // Nothing is kept until the warning is accepted.
@@ -58,7 +58,7 @@ test('A7 an operator is warned, and the credential stays with that one tab', asy
   // Another tab of the same browser is not signed in.
   const other = await context.newPage();
   await other.goto(world.appUrl);
-  await expect(other.getByLabel('Credential')).toBeVisible();
+  await expect((await credentialField(other))).toBeVisible();
   await other.close();
 });
 
@@ -70,10 +70,19 @@ test('A7 an operator is warned, and the credential stays with that one tab', asy
 test('G6 the front door says the server is invite-only, and refuses a wrong password with the one answer', async ({ meet, world }) => {
   const { page } = await meet();
   await page.goto(world.appUrl);
-  await expect(page.getByText('This server is invite-only. To join, ask someone on it for an invite link.')).toBeVisible();
+  await expect(page.getByText('This server is invite-only.')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Join as guest' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Create an account' })).toHaveCount(0);
+  // F24: operator setup and the credential field are behind a closed disclosure.
+  const operator = page.locator('details.operator-signin');
+  await expect(operator).not.toHaveAttribute('open', '');
+  await expect(operator.locator('summary')).toHaveText('Operator or script?');
+  await expect(page.getByLabel('Credential')).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Set up an operator account' })).toBeHidden();
+  await expect(page.getByLabel('Name', { exact: true })).toBeVisible();
+  await operator.locator('summary').click();
   await expect(page.getByRole('region', { name: 'Operators and scripts' })).toContainText('Paste the credential an operator issued');
+  await expect(page.getByLabel('Credential')).toBeVisible();
   await page.getByLabel('Name', { exact: true }).fill('nobody-p3-01');
   await page.getByLabel('Password', { exact: true }).fill('not the password of anyone at all');
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
@@ -81,4 +90,50 @@ test('G6 the front door says the server is invite-only, and refuses a wrong pass
   await expect(page.getByLabel('Password', { exact: true })).toHaveValue('');
   await expect(page.getByLabel('Password', { exact: true })).toBeFocused();
   expect(await page.evaluate(() => window.sessionStorage.length + window.localStorage.length)).toBe(0);
+});
+
+// Issue #1037 (browser UX audit 3, F12): conchd gzips the client's script, and
+// the page shows a loading line, in the HTML itself, until the script runs.
+test('F12 the main script arrives gzipped and the raw HTML holds the loading text', async ({ meet, world }) => {
+  const { page } = await meet();
+  const scripts: { encoding: string | undefined; vary: string | undefined }[] = [];
+  page.on('response', (response) => {
+    const { pathname } = new URL(response.url());
+    if (/\/assets\/index-[^/]*\.js$/.test(pathname)) {
+      const headers = response.headers();
+      scripts.push({ encoding: headers['content-encoding'], vary: headers['vary'] });
+    }
+  });
+
+  // The raw HTML, before any script has run (the request context runs none).
+  const raw = await page.request.get(world.appUrl);
+  expect(raw.ok()).toBe(true);
+  expect(await raw.text()).toMatch(/<div id="root">[\s\S]*Loading Conch…/);
+
+  await page.goto(world.appUrl);
+  // Once loaded, the sign-in form has taken the loading line's place.
+  await expect((await credentialField(page))).toBeVisible();
+  await expect(page.getByText('Loading Conch…')).toHaveCount(0);
+
+  expect(scripts.length).toBeGreaterThan(0);
+  expect(scripts[0]?.encoding).toBe('gzip');
+  expect(scripts[0]?.vary).toContain('Accept-Encoding');
+});
+
+// Issue #1084 (browser UX audit 4, F7): a page with no credential has nothing
+// to ask whoami, so a signed-out load makes no request that is known to fail
+// and the console has no error.
+test('F7 a signed-out load asks nothing of whoami and logs no console error', async ({ meet, world }) => {
+  const { page } = await meet({ viewport: { width: 1440, height: 900 } });
+  const errors = consoleErrors(page);
+  const asked: string[] = [];
+  page.on('request', (req) => {
+    if (new URL(req.url()).pathname === '/v1/whoami') asked.push(req.method());
+  });
+  await page.goto(world.appUrl);
+  await expect((await credentialField(page))).toBeVisible();
+  // Let any late start-up request go out before looking.
+  await page.waitForLoadState('networkidle');
+  expect(asked, 'requests to whoami').toEqual([]);
+  expect(errors).toEqual([]);
 });

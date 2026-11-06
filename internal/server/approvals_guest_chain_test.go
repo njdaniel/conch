@@ -188,8 +188,8 @@ func TestConvertedMemberGrantExportedFullChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.mustPutJoin(t, openBoth("general"))
-	g := mustJoined(t, secureDo(t, f, "POST", "/v1/join/guest", "", `{"label":"Pat"}`))
+	f.mustPutJoin(t, openAccounts("general"))
+	g := f.seedGuest(t, "Pat")
 	rec := secureDo(t, f, "POST", "/v1/guest/convert", g.Token, inviteJSON(t, schema.ConvertGuestRequestV1{Name: "patricia", Password: testJoinPassword}))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("convert = %d %s", rec.Code, rec.Body)

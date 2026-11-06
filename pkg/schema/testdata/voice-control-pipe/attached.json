@@ -1,0 +1,5 @@
+{
+  "schema": "conch.voice_control_pipe.v1",
+  "kind": "attached",
+  "nonce": "FAKE_nonce_do_not_print_0123456789abcdefghA"
+}

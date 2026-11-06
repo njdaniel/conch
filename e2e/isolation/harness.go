@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -254,10 +255,19 @@ func (h *harness) build() error {
 }
 
 // cleanEnv is the caller's environment without anything that would change who
-// conchd is or which LiveKit it talks to.
+// conchd is or which LiveKit it talks to. CONCHD_MODE and
+// CONCHD_OPERATOR_TOTP alone are kept, so the whole run can be made against a
+// temporary server (CONCHD_MODE=temporary go run ./e2e/isolation, ADR-011)
+// or one whose operators may sign in with a password alone
+// (CONCHD_OPERATOR_TOTP=optional, ADR-012): the approval chain and every
+// isolation row must hold there unchanged. recordBuild says which ran.
 func cleanEnv() []string {
 	var env []string
 	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "CONCHD_MODE=") || strings.HasPrefix(kv, "CONCHD_OPERATOR_TOTP=") {
+			env = append(env, kv)
+			continue
+		}
 		if strings.HasPrefix(kv, "CONCH_") || strings.HasPrefix(kv, "CONCHD_") ||
 			strings.HasPrefix(kv, "LIVEKIT_") || strings.HasPrefix(kv, "XDG_") || strings.HasPrefix(kv, "HOME=") {
 			continue
@@ -276,6 +286,42 @@ type conchdProc struct {
 	// runs beside it (conchd operator setup and recover, issue #709).
 	dataDir string
 	env     []string
+	// ntfy records the approval notifications conchd sends, so a row can
+	// assert the request → notify → resolve chain (issue #860).
+	ntfy *ntfyRecorder
+}
+
+// ntfyRecorder is an ntfy server on loopback that keeps the title of every
+// notification published to it.
+type ntfyRecorder struct {
+	srv    *httptest.Server
+	mu     sync.Mutex
+	titles []string
+}
+
+func newNtfyRecorder() *ntfyRecorder {
+	n := &ntfyRecorder{}
+	n.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		n.mu.Lock()
+		n.titles = append(n.titles, r.Header.Get("Title"))
+		n.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	return n
+}
+
+// mentioning is how many notifications so far have a title containing s.
+func (n *ntfyRecorder) mentioning(s string) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	c := 0
+	for _, t := range n.titles {
+		if strings.Contains(t, s) {
+			c++
+		}
+	}
+	return c
 }
 
 // trustedProxy is the proxy conchd is told to believe: loopback, where this
@@ -324,7 +370,10 @@ func (h *harness) startConchd(srv *lkit.Server) (*conchdProc, error) {
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"serve", "--data", dataDir, "--listen", addr, "--trusted-proxies", trustedProxy}
+	ntfy := newNtfyRecorder()
+	h.onCleanup(ntfy.srv.Close)
+	args := []string{"serve", "--data", dataDir, "--listen", addr, "--trusted-proxies", trustedProxy,
+		"--ntfy-server", ntfy.srv.URL, "--ntfy-topic", "isolation-approvals", "--ntfy-urgent-topic", "isolation-urgent"}
 	if srv != nil {
 		args = append(args, "--livekit-url", srv.WSURL)
 		env = append(env, "CONCHD_LIVEKIT_API_KEY="+srv.Key, "CONCHD_LIVEKIT_API_SECRET="+srv.Secret)
@@ -341,7 +390,7 @@ func (h *harness) startConchd(srv *lkit.Server) (*conchdProc, error) {
 		_ = logFile.Close()
 		return nil, err
 	}
-	p := &conchdProc{cmd: cmd, baseURL: "http://" + addr, done: make(chan struct{}), dataDir: dataDir, env: env}
+	p := &conchdProc{cmd: cmd, baseURL: "http://" + addr, done: make(chan struct{}), dataDir: dataDir, env: env, ntfy: ntfy}
 	p.op = api{h: h, base: p.baseURL, token: opToken, who: "the operator"}
 	go func() { _ = cmd.Wait(); _ = logFile.Close(); close(p.done) }()
 	h.onCleanup(func() {
@@ -382,6 +431,9 @@ func (h *harness) recordBuild(d *conchdProc) error {
 	if err := (api{h: h, base: d.baseURL, who: "anyone"}).call(http.MethodGet, "/healthz", nil, &health); err != nil {
 		return err
 	}
+	if (health.ServerMode == schema.ServerModeTemporary) != temporaryMode() {
+		return fmt.Errorf("conchd reports server mode %s, but this run was asked for %q", serverMode(health), os.Getenv("CONCHD_MODE"))
+	}
 	commit, reports := "unknown (not a git checkout)", "conchd reports "+health.Version
 	if h.commit != "" {
 		commit = h.commit
@@ -395,8 +447,30 @@ func (h *harness) recordBuild(d *conchdProc) error {
 		}
 		reports += ", the version the build stamped from it"
 	}
-	h.say("ok   build: git HEAD %s; %s; built with %s by go build ./cmd/conchd; run as go run ./e2e/isolation (CI %v)", commit, reports, runtime.Version(), inCI())
+	h.say("ok   build: git HEAD %s; %s; built with %s by go build ./cmd/conchd; run as go run ./e2e/isolation (CI %v); server mode %s; password-only operators %s",
+		commit, reports, runtime.Version(), inCI(), serverMode(health), map[bool]string{true: "allowed", false: "not allowed"}[passwordOnlyAllowed()])
 	return nil
+}
+
+// temporaryMode reports whether this run's conchd is a temporary server:
+// CONCHD_MODE is the one variable cleanEnv passes through, so conchd sees
+// what this process sees, and recordBuild checks /healthz agrees.
+func temporaryMode() bool { return os.Getenv("CONCHD_MODE") == "temporary" }
+
+// passwordOnlyAllowed reports whether this run's conchd lets an operator
+// with no authenticator sign in with a password alone (ADR-012 item 2): a
+// temporary server, or CONCHD_OPERATOR_TOTP=optional, both passed through
+// by cleanEnv.
+func passwordOnlyAllowed() bool {
+	return temporaryMode() || os.Getenv("CONCHD_OPERATOR_TOTP") == "optional"
+}
+
+// serverMode is the mode /healthz reported: normal when it says none.
+func serverMode(h schema.Health) string {
+	if h.ServerMode == "" {
+		return "normal"
+	}
+	return string(h.ServerMode)
 }
 
 // hostCommand runs a conchd host command on the server's data directory, as

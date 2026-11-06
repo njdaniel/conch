@@ -1,0 +1,17 @@
+{
+  "channel": {
+    "id": 11,
+    "name": "music",
+    "created_at": "2026-10-30T09:00:00Z",
+    "visibility": "public"
+  },
+  "member": {
+    "principal_id": 3,
+    "added_by": 3,
+    "created_at": "2026-10-30T12:00:00.000Z",
+    "name": "wren",
+    "kind": "human",
+    "can_decide": false,
+    "manages": false
+  }
+}

@@ -88,12 +88,17 @@ func decodeBoundedBody(w http.ResponseWriter, r *http.Request, dst any, maxBytes
 // inviteCaller is the check the three authenticated invite routes start with:
 // a verified human. With authentication off there is nobody to make or own an
 // invite, so the answer is the 401 of whoami. Invites are for people: an
-// agent is refused with human_required, audited, before anything is looked at.
+// agent is refused with human_required, audited, before anything is looked at,
+// unless the admin door dispatched this route for it (ai-administrators §3.3):
+// then what it may do is what its grant holds, as the store decides.
 func (s *Server) inviteCaller(w http.ResponseWriter, r *http.Request) (store.Principal, bool) {
 	caller, ok := callerFrom(r.Context())
 	if !ok {
 		writeUnauthenticated(w)
 		return store.Principal{}, false
+	}
+	if _, dispatched := dispatchedHere(r); dispatched && caller.Kind == store.PrincipalAgent {
+		return caller, true
 	}
 	if caller.Kind != store.PrincipalHuman {
 		s.auditAgentDenial(r.Context(), caller.ID, inviteAuditSubject(r), "", 0, denyAgentInvites)
@@ -103,63 +108,24 @@ func (s *Server) inviteCaller(w http.ResponseWriter, r *http.Request) (store.Pri
 	return caller, true
 }
 
-// handleCreateInvite serves POST /v1/invites: the caller makes an invite. The
-// code is in the 201 body and nowhere else, sent no-store.
-func (s *Server) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	caller, ok := s.inviteCaller(w, r)
-	if !ok {
-		return
-	}
-	if limit, ok, retry := s.inviteLimits.takeCreate(caller.ID, s.now()); !ok {
-		s.refuseInviteRateLimited(w, r, limit, retry, caller.ID, clientAddr(r, s.cfg.TrustedProxies))
-		return
-	}
-	var req schema.CreateInviteRequestV1
-	if !decodeInviteBody(w, r, &req) {
-		return
-	}
-	now := s.now()
-	// The schema's messages name the rule broken, never the value sent.
-	if err := req.Validate(now); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	resp, err := s.store.CreateInvite(ctx, auditActor(ctx), caller.ID, req, store.InviteOptions{Allowance: s.cfg.InviteAllowance}, now)
-	switch {
-	case errors.Is(err, store.ErrInviteRequestInvalid):
-		// Validated above; the clock moved past a just-valid expiry.
-		writeError(w, http.StatusBadRequest, "invalid_request", "the invite request is not valid")
-	case errors.Is(err, store.ErrInvitesPaused):
-		writeInvitesPaused(w)
-	case errors.Is(err, store.ErrInviteNotAllowed):
-		s.denyForbidden(w, r, caller, schema.ErrorCodeInviteNotAllowed, "you may not make this kind of invite")
-	case errors.Is(err, store.ErrInviteGrantExceedsInviter):
-		s.denyForbidden(w, r, caller, schema.ErrorCodeInviteGrantExceedsInviter, "an invite may grant only what its maker holds, and only an operator grants the right to invite")
-	case errors.Is(err, store.ErrInviteAllowanceExceeded):
-		s.denyForbidden(w, r, caller, schema.ErrorCodeInviteAllowanceExceeded, "you already have as many open personal invites as you may")
-	case errors.Is(err, store.ErrNotFound):
-		// Only an operator gets this far with a channel that does not exist;
-		// anyone else gets invite_grant_exceeds_inviter for it.
-		writeChannelNotFound(w)
-	case errors.Is(err, store.ErrPrincipalNotFound):
-		// The caller was resolved a moment ago; fail closed.
-		writeUnauthenticated(w)
-	case err != nil:
-		slog.ErrorContext(ctx, "invites: create failed", "principal", caller.ID, "error", err)
-		writeInternalError(w)
-	default:
-		slog.InfoContext(ctx, "invites: created", "principal", caller.ID, "invite", resp.Invite.ID, "kind", resp.Invite.Kind)
-		writeSecretJSON(w, http.StatusCreated, resp)
-	}
+// handleCreateInvite serves POST /v1/invites, which makes nothing for anyone:
+// every caller, an operator included, is answered 409 invite_kind_retired
+// (issue #1134). Member links (POST /v2/invites) replaced personal and open
+// invites. The route answers before it reads the body, looks at the caller's
+// permissions or touches the store, so nothing is written: no invite row, no
+// audit row.
+func (s *Server) handleCreateInvite(w http.ResponseWriter, _ *http.Request) {
+	writeError(w, http.StatusConflict, schema.ErrorCodeInviteKindRetired, inviteKindRetiredMessage)
 }
 
-// handleListInvites serves GET /v1/invites, newest first. An operator sees
-// every invite (issue #438); anyone else sees their own, as before. Both may
-// narrow the list with ?kind= (personal, open) and ?state= (open, used,
-// expired, closed); an operator also with ?created_by=<id>. A non-operator
-// naming anyone but themselves there gets an empty list: none of their own
-// invites was made by someone else.
+// handleListInvites serves GET /v1/invites, newest first. A holder of
+// manage_members sees every invite (issue #438, ADR-014 design §7.3); anyone
+// else sees their own, as before. Both may narrow the list with ?kind=
+// (personal, open) and ?state= (open, used, expired, closed); a holder also
+// with ?created_by=<id>. Anyone else naming anyone but themselves there gets
+// an empty list: none of their own invites was made by someone else. Without
+// manage_channels an invite lists only the channels the caller is in, and
+// counts the rest in other_channels.
 func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	caller, ok := s.inviteCaller(w, r)
@@ -170,7 +136,11 @@ func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !isOperator(caller) {
+	everyone, ok := s.canOrFail(w, r, caller, schema.PermManageMembers)
+	if !ok {
+		return
+	}
+	if !everyone {
 		if filter.CreatedBy != 0 && filter.CreatedBy != caller.ID {
 			writeJSON(w, http.StatusOK, schema.ListInvitesResponseV1{Invites: []schema.InviteV1{}})
 			return
@@ -183,7 +153,34 @@ func (s *Server) handleListInvites(w http.ResponseWriter, r *http.Request) {
 		writeInternalError(w)
 		return
 	}
+	sight, err := s.channelSightFor(ctx, caller)
+	if err != nil {
+		slog.ErrorContext(ctx, "invites: read channel sight failed", "principal", caller.ID, "error", err)
+		writeInternalError(w)
+		return
+	}
+	for i := range invites {
+		invites[i] = inviteAsSeen(invites[i], sight)
+	}
 	writeJSON(w, http.StatusOK, schema.ListInvitesResponseV1{Invites: invites})
+}
+
+// inviteAsSeen is inv with only the channels sight shows, and the rest
+// counted in OtherChannels (ADR-014 design §7.3, SF-1).
+func inviteAsSeen(inv schema.InviteV1, sight channelSight) schema.InviteV1 {
+	if sight.all {
+		return inv
+	}
+	shown := make([]schema.InviteChannelV1, 0, len(inv.Channels))
+	for _, c := range inv.Channels {
+		if sight.sees(c.ID) {
+			shown = append(shown, c)
+			continue
+		}
+		inv.OtherChannels++
+	}
+	inv.Channels = shown
+	return inv
 }
 
 // inviteFilterFrom reads the list filters from the query. On a value it does
@@ -290,7 +287,9 @@ func (s *Server) handlePreviewInvite(w http.ResponseWriter, r *http.Request) {
 // already holds. The store has applied the switch, the mode and the
 // server-wide cap.
 func (s *Server) previewGuestJoin(ctx context.Context, join *schema.JoinOptionsV1, addr netip.Addr) error {
-	if !s.cfg.authRequired() {
+	// Guests are removed for now (issue #1005): no invite offers a visit,
+	// whatever an invite made before said.
+	if guestsRemoved || !s.cfg.authRequired() {
 		join.Guest, join.GuestsFull = false, false
 		return nil
 	}
@@ -455,6 +454,10 @@ func (s *Server) writeRedeemed(w http.ResponseWriter, r *http.Request, res store
 		writeInternalError(w)
 	default:
 		slog.InfoContext(ctx, "invites: redeemed", "principal", res.Principal.ID, "invite", res.Principal.InviteID)
+		// A new principal has no socket open yet; the call covers a later
+		// route that redeems for an existing one (issue #1027).
+		s.events.notifyChannelsChanged(res.Principal.ID)
+		s.directoryPrincipalChanged(ctx, res.Principal.ID, nil)
 		writeSecretJSON(w, http.StatusCreated, schema.RedeemInviteResponseV1{
 			Principal:  principalFromStore(res.Principal),
 			Credential: res.Credential,
@@ -570,6 +573,9 @@ func (s *Server) handleDisableInvitees(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if s.ownerProtected(w, r, id) {
+		return
+	}
 	var req schema.DisableInviteesRequestV1
 	if !decodeInviteBody(w, r, &req) {
 		return
@@ -597,7 +603,7 @@ func (s *Server) handleDisableInvitees(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, schema.DisableJoinersResponseV1{DryRun: true, Count: len(targets), PrincipalIDs: targets})
 		return
 	}
-	done, err := s.disablePrincipals(ctx, targets)
+	done, err := s.disablePrincipals(ctx, targets, !isOwner(caller))
 	detail := fmt.Sprintf("root=%d depth=%s count=%d", id, req.EffectiveDepth(), len(done))
 	s.finishBulkDisable(w, r, err, store.AuditInviteesDisabled, fmt.Sprintf("principal:%d", id), detail, done)
 }
@@ -624,12 +630,12 @@ func bulkDisableTargets(caller store.Principal, found []store.Principal) []int64
 //
 // It does not stop when the operator's client goes away: a leak response cut
 // short by a dropped connection would leave the rest enabled, unseen.
-func (s *Server) disablePrincipals(ctx context.Context, ids []int64) ([]int64, error) {
+func (s *Server) disablePrincipals(ctx context.Context, ids []int64, forbidOwner ...bool) ([]int64, error) {
 	ctx = context.WithoutCancel(ctx)
 	actor := auditActor(ctx)
 	done := []int64{}
 	for _, id := range ids {
-		changed, err := s.store.DisablePrincipal(ctx, actor, id)
+		changed, err := s.store.DisablePrincipal(ctx, actor, id, forbidOwner...)
 		switch {
 		case errors.Is(err, store.ErrPrincipalNotFound), errors.Is(err, store.ErrLastOperator):
 			continue
@@ -638,6 +644,7 @@ func (s *Server) disablePrincipals(ctx context.Context, ids []int64) ([]int64, e
 		}
 		s.principalDisabled(ctx, id)
 		if changed {
+			s.directoryPrincipalChanged(ctx, id, nil)
 			done = append(done, id)
 		}
 	}
@@ -645,13 +652,18 @@ func (s *Server) disablePrincipals(ctx context.Context, ids []int64) ([]int64, e
 }
 
 // finishBulkDisable writes the summary audit row of a bulk disable, for what
-// was done even when it stopped early, and answers. A failure of either is a
-// 500: the principals already disabled stay disabled, and each has its own
-// audit rows.
+// was done even when it stopped early, and answers. An owner refused after the
+// selection is the same audited 403 as the single routes; any other failure is
+// a 500. Principals already disabled stay disabled, with their own audit rows.
 func (s *Server) finishBulkDisable(w http.ResponseWriter, r *http.Request, disableErr error, action, subject, detail string, done []int64) {
 	// The client may be gone; what was done must still be recorded.
 	ctx := context.WithoutCancel(r.Context())
 	_, auditErr := s.store.AppendAuditEvent(ctx, auditActor(ctx), action, subject, detail)
+	if errors.Is(disableErr, store.ErrOwnerProtected) && auditErr == nil {
+		caller, _ := callerFrom(ctx)
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
+		return
+	}
 	if disableErr != nil || auditErr != nil {
 		slog.ErrorContext(ctx, "invites: bulk disable failed", "action", action, "subject", subject, "disabled", len(done),
 			"error", errors.Join(disableErr, auditErr))
@@ -670,19 +682,25 @@ func (s *Server) finishBulkDisable(w http.ResponseWriter, r *http.Request, disab
 // transaction.
 func (s *Server) handleInvitePermission(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if _, ok := s.inviteCaller(w, r); !ok {
+	caller, ok := s.inviteCaller(w, r)
+	if !ok {
 		return
 	}
 	id, ok := pathID(w, r, "id", "principal")
 	if !ok {
 		return
 	}
+	if s.ownerProtected(w, r, id) {
+		return
+	}
 	var req schema.InvitePermissionRequestV1
 	if !decodeInviteBody(w, r, &req) {
 		return
 	}
-	_, err := s.store.SetMayInvite(ctx, auditActor(ctx), id, req.MayInvite)
+	changed, err := s.store.SetMayInvite(ctx, auditActor(ctx), id, req.MayInvite, !isOwner(caller))
 	switch {
+	case errors.Is(err, store.ErrOwnerProtected):
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
 	case errors.Is(err, store.ErrPrincipalNotFound):
 		writeError(w, http.StatusNotFound, "principal_not_found", "principal not found")
 	case errors.Is(err, store.ErrInviteNotAllowed):
@@ -693,6 +711,11 @@ func (s *Server) handleInvitePermission(w http.ResponseWriter, r *http.Request) 
 		slog.ErrorContext(ctx, "invites: set invite permission failed", "principal", id, "error", err)
 		writeInternalError(w)
 	default:
+		// A brake changes one person's permissions: they alone are told
+		// (ADR-014 design §8.6).
+		if changed {
+			s.events.notifyPermissionsChanged(id)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }

@@ -48,7 +48,7 @@ var ErrGuestVisitEnded = errors.New("guest visit ended")
 type GuestVisitEndedError struct{ Server string }
 
 func (e *GuestVisitEndedError) Error() string {
-	return fmt.Sprintf("your guest visit to %s has ended (or its credential no longer works); a later visit is a new guest: run 'conch join guest'", e.Server)
+	return fmt.Sprintf("your guest visit to %s has ended (or its credential no longer works); a later visit would be a new guest", e.Server)
 }
 
 // Is makes errors.Is true for ErrGuestVisitEnded and ErrUnauthenticated.
@@ -224,23 +224,11 @@ func (c *Client) ListMessages(ctx context.Context, channel string, after int64, 
 	query.Set("after", strconv.FormatInt(after, 10))
 	query.Set("limit", strconv.Itoa(limit))
 	endpoint.RawQuery = query.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return schema.ListMessagesResponseV1{}, fmt.Errorf("cli: create list messages request: %w", err)
+	result := messagesV1Doc{rows: pageRows(limit, maxMessagePage)}
+	if err := c.roundTrip(ctx, "list messages", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.ListMessagesResponseV1{}, err
 	}
-	resp, err := c.do(req)
-	if err != nil {
-		return schema.ListMessagesResponseV1{}, fmt.Errorf("cli: list messages: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return schema.ListMessagesResponseV1{}, c.decodeError(resp)
-	}
-	var result schema.ListMessagesResponseV1
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return schema.ListMessagesResponseV1{}, fmt.Errorf("cli: decode list messages response: %w", err)
-	}
-	return result, nil
+	return result.ListMessagesResponseV1, nil
 }
 
 // SendMessage posts a rendered v1 message to channel.
@@ -273,23 +261,11 @@ func (c *Client) SendMessage(ctx context.Context, channel string, authorID int64
 // ListChannels returns every channel on the server, ordered by id.
 func (c *Client) ListChannels(ctx context.Context) (schema.ListChannelsResponse, error) {
 	endpoint := c.resolve("v1", "channels")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return schema.ListChannelsResponse{}, fmt.Errorf("cli: create list channels request: %w", err)
+	var result channelListDoc
+	if err := c.roundTrip(ctx, "list channels", http.MethodGet, endpoint, nil, &result); err != nil {
+		return schema.ListChannelsResponse{}, err
 	}
-	resp, err := c.do(req)
-	if err != nil {
-		return schema.ListChannelsResponse{}, fmt.Errorf("cli: list channels: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return schema.ListChannelsResponse{}, c.decodeError(resp)
-	}
-	var result schema.ListChannelsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return schema.ListChannelsResponse{}, fmt.Errorf("cli: decode list channels response: %w", err)
-	}
-	return result, nil
+	return result.ListChannelsResponse, nil
 }
 
 // ListApprovals returns a list of open approvals.
@@ -508,7 +484,22 @@ func (c *Client) decodeError(resp *http.Response) error {
 	if !decoded {
 		return &statusError{status: resp.StatusCode, text: fmt.Sprintf("cli: server returned %s", safeLine(resp.Status))}
 	}
-	return &ServerError{Status: resp.StatusCode, Code: serverError.Code, Message: serverError.Message}
+	return &ServerError{Status: resp.StatusCode, Code: serverError.Code, Message: serverError.Message, Permission: string(serverError.Permission),
+		RetryAfterSeconds: retryAfterSeconds(resp.Header.Get("Retry-After"), serverError.RetryAfterSeconds)}
+}
+
+// maxRetryAfterSeconds bounds a wait a server asks for that a client repeats:
+// a day. A hostile server's larger number is read as this.
+const maxRetryAfterSeconds = 24 * 60 * 60
+
+// retryAfterSeconds reads a Retry-After header as whole seconds, falling back
+// to the error document's own count, and clamps the result to 0 through a day.
+func retryAfterSeconds(header string, fallback int) int {
+	n := fallback
+	if v, err := strconv.Atoi(strings.TrimSpace(header)); err == nil {
+		n = v
+	}
+	return max(0, min(n, maxRetryAfterSeconds))
 }
 
 // statusError is a refusal with no error document, such as the mux's 404 for
@@ -545,10 +536,22 @@ type ServerError struct {
 	// unescaped.
 	Code    string
 	Message string
+	// Permission is the permission the refusal was decided on (ADR-014), or
+	// empty. It is shown by name, so a permission this client does not know
+	// still reads.
+	Permission string
+	// RetryAfterSeconds is how long a 429 asks the caller to wait: the
+	// Retry-After header, or the document's own field when the header is
+	// absent or not a whole number of seconds. 0 when neither says.
+	RetryAfterSeconds int
 }
 
 func (e *ServerError) Error() string {
-	return fmt.Sprintf("cli: server error %s: %s", safeLine(e.Code), safeLine(e.Message))
+	text := fmt.Sprintf("cli: server error %s: %s", safeLine(e.Code), safeLine(e.Message))
+	if e.Permission != "" {
+		text += fmt.Sprintf(" (permission: %s)", safeLine(e.Permission))
+	}
+	return text
 }
 
 // roundTrip sends one JSON request and, when out is non-nil, decodes the
@@ -600,8 +603,26 @@ func (c *Client) roundTripOnce(ctx context.Context, what, method string, endpoin
 	if out == nil {
 		return nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+	var answer io.Reader = resp.Body
+	var capped *cappedReader
+	if l, ok := out.(interface{ maxBody() int64 }); ok {
+		// A document with a known size bound is read no further than it.
+		capped = &cappedReader{r: resp.Body, left: l.maxBody() + 1, limit: l.maxBody()}
+		answer = capped
+	}
+	if err := json.NewDecoder(answer).Decode(out); err != nil {
+		var tooLarge *bodyTooLargeError
+		if errors.As(err, &tooLarge) {
+			return fmt.Errorf("cli: %s: %w", what, tooLarge)
+		}
 		return fmt.Errorf("cli: decode %s response: %w", what, err)
+	}
+	if capped != nil && capped.left <= 0 {
+		// The decoder pulled cap+1 bytes and found its value complete without
+		// surfacing the reader's error. The cap is on the body the decoder
+		// reads, trailing bytes such as the encoder's newline included, so this
+		// is still over it.
+		return fmt.Errorf("cli: %s: %w", what, &bodyTooLargeError{limit: capped.limit})
 	}
 	return nil
 }
@@ -652,11 +673,11 @@ func (c *Client) ListMessagesV2Page(ctx context.Context, channel string, page Me
 	}
 	query.Set("limit", strconv.Itoa(limit))
 	endpoint.RawQuery = query.Encode()
-	var result schema.ListMessagesResponseV2
+	result := messagesV2Doc{rows: pageRows(limit, maxMessagePage)}
 	if err := c.roundTrip(ctx, "list v2 messages", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ListMessagesResponseV2{}, err
 	}
-	return result, nil
+	return result.ListMessagesResponseV2, nil
 }
 
 // SubscribeV2 connects to channel's v2 stream and calls receive for every
@@ -715,11 +736,11 @@ func (c *Client) subscribeV2(ctx context.Context, channel string, after *int64, 
 // ListNets returns the nets of channel that the caller may see, with rosters.
 func (c *Client) ListNets(ctx context.Context, channel string) (schema.ListNetsResponseV1, error) {
 	endpoint := c.resolve("v1", "channels", channel, "nets")
-	var result schema.ListNetsResponseV1
+	var result netsDoc
 	if err := c.roundTrip(ctx, "list nets", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ListNetsResponseV1{}, err
 	}
-	return result, nil
+	return result.ListNetsResponseV1, nil
 }
 
 // CreateNet creates the named net in channel.
@@ -765,15 +786,28 @@ func (c *Client) VoicePresence(ctx context.Context, channel string) (schema.Voic
 	return result, nil
 }
 
+// StopVoiceCamera turns off principalID's camera in channel's voice room. It
+// names the person always: an un-named stop would end the caller's own claim,
+// which only the browser holding it may do. The server answers 204 whether or
+// not a camera was on, so nothing is returned.
+func (c *Client) StopVoiceCamera(ctx context.Context, channel string, principalID int64) error {
+	endpoint := c.resolve("v1", "channels", channel, "voice", "camera")
+	query := endpoint.Query()
+	query.Set(schema.VoiceCameraPrincipalParam, strconv.FormatInt(principalID, 10))
+	endpoint.RawQuery = query.Encode()
+	return c.roundTrip(ctx, "stop voice camera", http.MethodDelete, endpoint, nil, nil)
+}
+
 // VoiceOccupancy returns one snapshot of how many people are in the voice of
 // each channel the caller may see voice in. As with presence, a document that
 // fails its own Validate is an error and is never shown.
 func (c *Client) VoiceOccupancy(ctx context.Context) (schema.VoiceOccupancyV1, error) {
 	endpoint := c.resolve("v1", "voice", "occupancy")
-	var result schema.VoiceOccupancyV1
-	if err := c.roundTrip(ctx, "voice occupancy", http.MethodGet, endpoint, nil, &result); err != nil {
+	var doc voiceOccupancyDoc
+	if err := c.roundTrip(ctx, "voice occupancy", http.MethodGet, endpoint, nil, &doc); err != nil {
 		return schema.VoiceOccupancyV1{}, err
 	}
+	result := doc.VoiceOccupancyV1
 	if err := result.Validate(); err != nil {
 		return schema.VoiceOccupancyV1{}, fmt.Errorf("cli: invalid voice occupancy: %w", err)
 	}
@@ -828,11 +862,11 @@ func (c *Client) SubscribeVoicePresence(ctx context.Context, channel string, rec
 // for people only; an agent gets human_required and a server with
 // authentication off gets read_state_require_auth.
 func (c *Client) ListReadState(ctx context.Context) (schema.ListReadStateResponseV1, error) {
-	var result schema.ListReadStateResponseV1
+	var result readStateDoc
 	if err := c.roundTrip(ctx, "list read state", http.MethodGet, c.resolve("v1", "read-state"), nil, &result); err != nil {
 		return schema.ListReadStateResponseV1{}, err
 	}
-	return result, nil
+	return result.ListReadStateResponseV1, nil
 }
 
 // MarkRead moves the caller's read mark in channel forward to lastReadID and
@@ -921,11 +955,11 @@ func (c *Client) ListPrincipals(ctx context.Context, filter PrincipalListFilter)
 		query.Set("limit", strconv.Itoa(filter.Limit))
 	}
 	endpoint.RawQuery = query.Encode()
-	var result schema.ListPrincipalsResponseV1
+	var result principalsDoc
 	if err := c.roundTrip(ctx, "list principals", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ListPrincipalsResponseV1{}, err
 	}
-	return result, nil
+	return result.ListPrincipalsResponseV1, nil
 }
 
 // HidePrincipal disables and hides a principal, which frees its name.
@@ -962,17 +996,23 @@ func (c *Client) CreateCredential(ctx context.Context, principalID int64, reques
 // ListCredentials returns a principal's credentials, newest first.
 func (c *Client) ListCredentials(ctx context.Context, principalID int64) (schema.ListCredentialsResponseV1, error) {
 	endpoint := c.resolve("v1", "principals", strconv.FormatInt(principalID, 10), "credentials")
-	var result schema.ListCredentialsResponseV1
+	var result credentialsDoc
 	if err := c.roundTrip(ctx, "list credentials", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ListCredentialsResponseV1{}, err
 	}
-	return result, nil
+	return result.ListCredentialsResponseV1, nil
 }
 
 // RevokeCredential revokes one credential.
 func (c *Client) RevokeCredential(ctx context.Context, credentialID int64) error {
 	endpoint := c.resolve("v1", "credentials", strconv.FormatInt(credentialID, 10))
 	return c.roundTrip(ctx, "revoke credential", http.MethodDelete, endpoint, nil, nil)
+}
+
+// RevokeCurrentCredential ends the credential this client is using, including
+// a setup credential whose operator chose to skip authenticator enrolment.
+func (c *Client) RevokeCurrentCredential(ctx context.Context) error {
+	return c.roundTrip(ctx, "revoke current credential", http.MethodDelete, c.resolve("v1", "credentials", "current"), nil, nil)
 }
 
 // PutChannelMember adds principalID to channel. It is idempotent.
@@ -1064,11 +1104,11 @@ func (c *Client) ListRuns(ctx context.Context, channel string, session int64, pa
 	}
 	query.Set("limit", strconv.Itoa(limit))
 	endpoint.RawQuery = query.Encode()
-	var result schema.ListRunsResponseV1
+	result := runsDoc{rows: pageRows(limit, maxRunPage)}
 	if err := c.roundTrip(ctx, "list runs", http.MethodGet, endpoint, nil, &result); err != nil {
 		return schema.ListRunsResponseV1{}, err
 	}
-	return result, nil
+	return result.ListRunsResponseV1, nil
 }
 
 // EventHandler is what SubscribeEvents calls for each document of the events
@@ -1080,6 +1120,10 @@ type EventHandler struct {
 	Run          func(schema.RunV1) error
 	Activity     func(schema.AgentActivityV1) error
 	Intervention func(schema.InterventionV1) error
+	// PermissionsChanged is called when the caller's effective permissions
+	// may have changed (ADR-014); the document carries nothing else, so the
+	// caller re-reads whoami.
+	PermissionsChanged func(schema.PermissionsChangedV1) error
 }
 
 // SubscribeEvents follows channel's events socket and calls the handler with
@@ -1174,6 +1218,15 @@ func dispatchEvent(frame json.RawMessage, handler EventHandler) error {
 			return err
 		}
 		return receiveEvent(handler.Intervention(iv))
+	case schema.PermissionsChangedSchemaV1:
+		if handler.PermissionsChanged == nil {
+			return nil
+		}
+		var doc schema.PermissionsChangedV1
+		if err := decodeEvent(frame, &doc, "permissions changed"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.PermissionsChanged(doc))
 	}
 	return nil
 }
@@ -1219,10 +1272,11 @@ func (c *Client) GetRun(ctx context.Context, id int64) (schema.RunV1, error) {
 func (c *Client) ListActivity(ctx context.Context, run, after int64, limit int) (schema.ListActivityResponseV1, error) {
 	endpoint := c.resolve("v1", "runs", strconv.FormatInt(run, 10), "activity")
 	pageQuery(endpoint, after, limit)
-	var result schema.ListActivityResponseV1
-	if err := c.roundTrip(ctx, "list activity", http.MethodGet, endpoint, nil, &result); err != nil {
+	doc := activityDoc{rows: pageRows(limit, maxRunPage)}
+	if err := c.roundTrip(ctx, "list activity", http.MethodGet, endpoint, nil, &doc); err != nil {
 		return schema.ListActivityResponseV1{}, err
 	}
+	result := doc.ListActivityResponseV1
 	for _, entry := range result.Activity {
 		if err := entry.Validate(); err != nil {
 			return schema.ListActivityResponseV1{}, fmt.Errorf("cli: invalid activity: %w", err)
@@ -1251,10 +1305,11 @@ func (c *Client) CreateIntervention(ctx context.Context, run int64, request sche
 func (c *Client) ListInterventions(ctx context.Context, run, after int64, limit int) (schema.ListInterventionsResponseV1, error) {
 	endpoint := c.resolve("v1", "runs", strconv.FormatInt(run, 10), "interventions")
 	pageQuery(endpoint, after, limit)
-	var result schema.ListInterventionsResponseV1
-	if err := c.roundTrip(ctx, "list interventions", http.MethodGet, endpoint, nil, &result); err != nil {
+	doc := interventionsDoc{rows: pageRows(limit, maxRunPage)}
+	if err := c.roundTrip(ctx, "list interventions", http.MethodGet, endpoint, nil, &doc); err != nil {
 		return schema.ListInterventionsResponseV1{}, err
 	}
+	result := doc.ListInterventionsResponseV1
 	for _, iv := range result.Interventions {
 		if err := iv.Validate(); err != nil {
 			return schema.ListInterventionsResponseV1{}, fmt.Errorf("cli: invalid intervention: %w", err)

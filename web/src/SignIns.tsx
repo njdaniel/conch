@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import * as api from './api';
 import type { OwnCredentialV1 } from './schema/credential';
+import { dateTimeOf } from './time';
 
 // "Your sign-ins" (issue #496): every browser or app signed in as this person,
 // each with "End this sign-in". One made through a sign-in link an operator
@@ -118,7 +119,7 @@ export function YourSignIns({
                 {c.current === true ? <strong className="signin-here"> This browser</strong> : null}
                 <span className="hint">
                   {' '}
-                  · since <time dateTime={c.created_at}>{new Date(c.created_at).toLocaleString()}</time>
+                  · since <time dateTime={c.created_at}>{dateTimeOf(c.created_at)}</time>
                 </span>{' '}
                 {confirming === c.id ? (
                   <div role="group" aria-labelledby={`${id}-question`} className="signout-confirm">

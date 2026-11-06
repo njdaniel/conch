@@ -40,6 +40,10 @@ func pch(w *world) string { return url.PathEscape(w.p.channel) }
 // historyRows are what a guest's bound means on every read route, and what
 // the member a guest became keeps.
 func historyRows() []row {
+	return slices.Concat(coreHistoryRows(), reactionHistoryRows(), editHistoryRows())
+}
+
+func coreHistoryRows() []row {
 	own := func(route, what string, inspect func(*world, api, []byte) error, p func(w *world) probe) row {
 		return row{route: route, what: what, own: true, inspect: inspect, probe: func(w *world, _ subject) probe { return p(w) }}
 	}
@@ -119,6 +123,8 @@ func historyRows() []row {
 			probe: func(_ *world, s subject) probe { return get("/v1/sessions?channel=" + url.QueryEscape(s.name)) }},
 		{route: "POST /v1/channels/{channel}/voice/session", what: "asks for a voice session in A's channel", pick: aChannel, want: channelNotFound,
 			probe: func(_ *world, s subject) probe { return post(ch(s)+"/voice/session", nil) }},
+		{route: "POST /v1/channels/{channel}/voice/camera", what: "claims a camera in A's channel", pick: aChannel, want: channelNotFound,
+			probe: func(_ *world, s subject) probe { return post(ch(s)+"/voice/camera", nil) }},
 		{route: "GET /v1/voice/ws", what: "opens the voice presence socket of A's channel", pick: aChannel, want: channelNotFound,
 			probe: func(_ *world, s subject) probe { return sock("/v1/voice/ws", s.name, nil, false) }},
 		{route: "GET /v2/ws", what: "opens the v2 message socket of A's channel with a ticket", pick: aChannel, want: channelNotFound,
@@ -140,10 +146,23 @@ func guestRows() []row {
 			probe: func(*world, subject) probe { return get("/v1/whoami") }},
 		{route: "GET /v1/channels", what: "lists her channels", own: true, inspect: onlyThePlaza,
 			probe: func(*world, subject) probe { return get("/v1/channels") }},
+		// The channel directory is a community member's (issue #982): a
+		// guest's channels are its link's.
+		refused("GET /v1/directory/channels", "lists the channel directory", notAllowed, func(*world) probe { return get("/v1/directory/channels") }),
 		{route: "GET /v1/credentials/mine", what: "lists her sign-ins", own: true, inspect: oneSignIn,
 			probe: func(*world, subject) probe { return get("/v1/credentials/mine") }},
-		{route: "GET /v1/channels/{channel}/voice", what: "reads the plaza's voice presence", own: true,
+		{route: "GET /v1/channels/{channel}/voice", what: "reads the plaza's voice presence (a guest holds no voice since A4, #1016)", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
 			probe: func(w *world, _ subject) probe { return get("/v1/channels/" + pch(w) + "/voice") }},
+		// A guest never claims a camera (ADR-015, S6): on main a guest holds
+		// no voice at all, so the claim is refused at its fourth check, as
+		// every voice route refuses a guest, and so is a release. The
+		// design's row "a guest in voice receives A's camera" (§11.3, O15)
+		// cannot be built while a guest holds no voice; it waits for the
+		// guest column, #1004.
+		{route: "POST /v1/channels/{channel}/voice/camera", what: "claims a camera in the plaza (a guest holds no voice since A4, #1016)", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
+			probe: func(w *world, _ subject) probe { return post("/v1/channels/"+pch(w)+"/voice/camera", nil) }},
+		{route: "DELETE /v1/channels/{channel}/voice/camera", what: "releases a camera in the plaza", want: answer{http.StatusForbidden, schema.ErrorCodeVoiceNotAllowed},
+			probe: func(w *world, _ subject) probe { return del("/v1/channels/" + pch(w) + "/voice/camera") }},
 		{route: "POST /v1/reports", what: "reports a problem", own: true,
 			probe: func(*world, subject) probe {
 				return post("/v1/reports", schema.CreateProblemReportRequestV1{Did: "d", Expected: "e", Happened: "h", Often: schema.ProblemReportOftenOnce,
@@ -217,6 +236,9 @@ func guestRows() []row {
 		refused("PUT /v1/principals/{id}/invite-permission", "lets herself invite", operatorOnly, func(w *world) probe {
 			return put("/v1/principals/"+id(w.prober.id)+"/invite-permission", schema.InvitePermissionRequestV1{MayInvite: true})
 		}),
+		refused("PUT /v1/principals/{id}/voice-permission", "switches her own voice on", operatorOnly, func(w *world) probe {
+			return put("/v1/principals/"+id(w.prober.id)+"/voice-permission", schema.VoicePermissionRequestV1{VoiceAllowed: true})
+		}),
 		refused("PUT /v1/join/settings", "opens the bare address wider", operatorOnly, func(*world) probe {
 			return put("/v1/join/settings", schema.PutJoinSettingsRequestV1{MaxGuests: ptr(int64(schema.MaxMaxGuests))})
 		}),
@@ -232,10 +254,12 @@ func guestRows() []row {
 }
 
 // entryRows are the entry routes as a newcomer tries them, each from an
-// address of its own, while the plaza is open to guests and accounts.
+// address of its own, while the plaza is open to accounts. Guests are
+// removed for now (issue #1005): the guest entry routes refuse every try
+// with guests_disabled before the label or the code is read.
 func entryRows() []row {
 	badLabel := func(what, label string) row {
-		return row{route: "POST /v1/join/guest", what: "joins as a guest under " + what, want: answer{http.StatusBadRequest, "invalid_request"},
+		return row{route: "POST /v1/join/guest", what: "joins as a guest under " + what, want: guestsDisabled,
 			probe: func(*world, subject) probe { return post("/v1/join/guest", schema.JoinGuestRequestV1{Label: label}) }}
 	}
 	takenName := func(what string, name func(w *world) string) row {
@@ -249,18 +273,22 @@ func entryRows() []row {
 	// say https. Here the proxy says http, or says nothing of the protocol.
 	// (Plain HTTP from a peer that is not loopback and not a trusted proxy
 	// is the unit tests': every peer of this run is loopback. See
-	// internal/server/clientaddr_test.go TestClientAddr, login_test.go
-	// TestSecureTransport and join_test.go TestGuestEntryNeedsHTTPS.)
+	// internal/server/clientaddr_test.go TestClientAddr and login_test.go
+	// TestSecureTransport.)
 	httpsRequired := answer{http.StatusForbidden, schema.ErrorCodeHTTPSRequired}
 	overHTTP := map[string]string{"X-Forwarded-Proto": "http"}
 	noProto := map[string]string{"X-Forwarded-Proto": ""}
 	unknownInvite := schema.InviteCodePrefix + strings.Repeat("Q", schema.InviteCodeLength-len(schema.InviteCodePrefix))
 	unknownLink := schema.SignInLinkCodePrefix + strings.Repeat("Q", schema.SignInLinkCodeLength-len(schema.SignInLinkCodePrefix))
 	return []row{
-		{route: "GET /v1/join", what: "reads the front door", own: true, inspect: offersBoth,
+		{route: "GET /v1/join", what: "reads the front door", own: true, inspect: offersAccounts,
 			probe: func(*world, subject) probe { return get("/v1/join") }},
-		{route: "POST /v1/join/guest", what: "joins as a guest at the bare address", own: true, inspect: joinedThePlaza,
+		{route: "POST /v1/join/guest", what: "joins as a guest at the bare address", want: guestsDisabled,
 			probe: func(*world, subject) probe { return post("/v1/join/guest", schema.JoinGuestRequestV1{Label: "Kim"}) }},
+		{route: "POST /v1/invites/redeem-guest", what: "joins as a guest through the plaza's invite for guests", want: guestsDisabled,
+			probe: func(w *world, _ subject) probe {
+				return post("/v1/invites/redeem-guest", schema.RedeemInviteGuestRequestV1{Code: w.p.invites[schema.InviteJoinGuest].code, Label: "Kim"})
+			}},
 		badLabel("a label with a bidi control", "Ki\u202em"),
 		badLabel("a label with a control character", "Ki\u0007m"),
 		badLabel("a label that fakes a second tag", "Kim \u00b7 a7k4"),
@@ -299,7 +327,7 @@ func entryRows() []row {
 				p.headers = noProto
 				return p
 			}},
-		{route: "POST /v1/invites/redeem-guest", what: "joins as a guest with a code nobody gave her", want: answer{http.StatusNotFound, schema.ErrorCodeInviteInvalid},
+		{route: "POST /v1/invites/redeem-guest", what: "joins as a guest with a code nobody gave her", want: guestsDisabled,
 			probe: func(*world, subject) probe {
 				return post("/v1/invites/redeem-guest", schema.RedeemInviteGuestRequestV1{Code: unknownInvite, Label: "Kim"})
 			}},
@@ -315,6 +343,10 @@ func entryRows() []row {
 		{route: "POST /v1/invites/preview", what: "previews a code nobody gave her", want: answer{http.StatusNotFound, schema.ErrorCodeInviteInvalid},
 			probe: func(*world, subject) probe {
 				return post("/v1/invites/preview", schema.InvitePreviewRequestV1{Code: unknownInvite})
+			}},
+		{route: "POST /v2/invites/preview", what: "previews a code nobody gave her", want: answer{http.StatusNotFound, schema.ErrorCodeInviteInvalid},
+			probe: func(*world, subject) probe {
+				return post("/v2/invites/preview", schema.InvitePreviewRequestV1{Code: unknownInvite})
 			}},
 		{route: "POST /v1/sign-in-links/preview", what: "previews a sign-in link nobody gave her", want: answer{http.StatusNotFound, schema.ErrorCodeSignInLinkInvalid},
 			probe: func(*world, subject) probe {
@@ -395,64 +427,47 @@ func oneSignIn(w *world, _ api, body []byte) error {
 	return nil
 }
 
-// offersBoth requires that the front door offers a visit and an account, as
-// the plaza's policy says, and names nothing else.
-func offersBoth(_ *world, _ api, body []byte) error {
+// offersAccounts requires that the front door offers an account and no
+// visit: guests are removed for now (issue #1005).
+func offersAccounts(w *world, _ api, body []byte) error {
 	var info schema.JoinInfoV1
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&info); err != nil {
 		return err
 	}
-	if !info.Join.Guest || !info.Join.Account || info.ServerName != "conch" || !info.PasswordLogin {
-		return fmt.Errorf("the front door says %+v, want a visit and an account at conch", info)
+	// Issue #987: never a guest, voice always.
+	if info.Join.Guest || info.Join.GuestsFull || !info.Join.Account || !info.Voice || info.ServerName != "conch" || !info.PasswordLogin {
+		return fmt.Errorf("the front door says %+v, want an account, voice and no visit at conch", info)
 	}
-	return nil
-}
-
-// joinedThePlaza requires that a visit from the bare address is a guest of
-// the plaza alone, named by its handle, and ends it with its own credential
-// so that it holds no place under the caps.
-func joinedThePlaza(w *world, a api, body []byte) error {
-	var resp schema.JoinGuestResponseV1
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return err
-	}
-	w.h.secret("a newcomer's credential", resp.Token)
-	g, err := w.guestJoined(resp, a.addr)
-	if err != nil {
-		return err
-	}
-	if g.guest.Origin != schema.GuestOriginAddress || g.guest.State != schema.GuestStateActive || g.guest.Label != "Kim" {
-		return fmt.Errorf("the visit is %+v, want an active one from the address labelled Kim", *g.guest)
-	}
-	var names []string
-	for _, c := range resp.Channels {
-		names = append(names, c.Name)
-	}
-	if !slices.Equal(names, []string{w.p.channel}) {
-		return fmt.Errorf("a visit from the bare address joined %v, want the plaza alone", names)
-	}
-	var ended schema.EndVisitResponseV1
-	if err := g.api.call(http.MethodPost, "/v1/guest/end", nil, &ended); err != nil {
-		return err
-	}
-	if ended.Guest.State != schema.GuestStateEnded || ended.Guest.EndReason != schema.GuestEndVisit {
-		return fmt.Errorf("the End visit answered %+v", ended.Guest)
+	// It names no channel at all (DisallowUnknownFields above), and so none
+	// of A's private channels; said again in bytes, for the record.
+	for _, name := range w.a.channels {
+		if bytes.Contains(body, []byte(name)) {
+			return fmt.Errorf("the front door names %q, a private channel of A's: %s", name, body)
+		}
 	}
 	return nil
 }
 
 // visibleAfter is how many messages of channel after id a sees in its v2
-// history: what an unread count after a mark at id must be.
+// history, excluding a's own posts: what an unread count after a mark at id must be.
 func visibleAfter(a api, channel string, after int64) (int, error) {
+	var who schema.WhoAmIResponseV1
+	if err := a.call(http.MethodGet, "/v1/whoami", nil, &who); err != nil {
+		return 0, err
+	}
 	n := 0
 	for {
 		var page schema.ListMessagesResponseV2
 		if err := a.call(http.MethodGet, fmt.Sprintf("/v2/channels/%s/messages?after=%d&limit=100", url.PathEscape(channel), after), nil, &page); err != nil {
 			return 0, err
 		}
-		n += len(page.Messages)
+		for _, message := range page.Messages {
+			if message.AuthorID != who.ID {
+				n++
+			}
+		}
 		if page.NextAfter <= after {
 			return n, nil
 		}

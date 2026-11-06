@@ -14,6 +14,8 @@ func TestPrincipalAdminGoldenFixtures(t *testing.T) {
 		{"principal-admin-v1-owner.json", func() any { return new(PrincipalAdminV1) }},
 		{"principal-admin-v1-hidden.json", func() any { return new(PrincipalAdminV1) }},
 		{"principal-admin-v1-guest.json", func() any { return new(PrincipalAdminV1) }},
+		// The voice switch and the may_invite brake (ADR-013, issue #978).
+		{"principal-admin-v1-voice.json", func() any { return new(PrincipalAdminV1) }},
 		{"list-principals-response-v1.json", func() any { return new(ListPrincipalsResponseV1) }},
 		{"list-principals-response-v1-empty.json", func() any { return new(ListPrincipalsResponseV1) }},
 		{"hide-principal-response-v1.json", func() any { return new(HidePrincipalResponseV1) }},

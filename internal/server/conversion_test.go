@@ -39,10 +39,12 @@ func hashedRecord(t *testing.T, srv *Server, password string) string {
 	return record
 }
 
-// openBoth is the settings change that lets guests and accounts join from
-// the bare address into channels.
-func openBoth(channels ...string) schema.PutJoinSettingsRequestV1 {
-	return schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(true), OpenJoining: modePtr(schema.OpenJoiningBoth), OpenChannels: &channels}
+// openAccounts is the settings change that lets accounts join from the bare
+// address into channels. The visits these tests convert are started through
+// the store (seedGuest), as no route starts one while guests are removed
+// (issue #1005).
+func openAccounts(channels ...string) schema.PutJoinSettingsRequestV1 {
+	return schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningAccount), OpenChannels: &channels}
 }
 
 // joinAccount asks the bare address for an account called name, with
@@ -138,17 +140,17 @@ func (f *loginFixture) passwordCount(t *testing.T, id int64) string {
 	return f.queryString(t, fmt.Sprintf("SELECT COUNT(*) FROM passwords WHERE principal_id = %d", id))
 }
 
-// An account from the bare address: made with its password, in every open
-// channel with no right to decide and a history bound at its admission, and
-// signed in again from another device with the password alone once it has
-// signed out.
+// An account from the bare address (open sign-up, issue #987): made with
+// its password, in every default channel with no right to decide and no
+// history bound, the may_invite brake on, and signed in again from another
+// device with the password alone once it has signed out.
 func TestJoinAccount(t *testing.T) {
 	ctx := context.Background()
 	f := newLoginFixture(t, Config{})
 	if _, err := f.srv.store.InsertMessage(ctx, f.red.ID, f.alice.ID, "said before the account joined"); err != nil {
 		t.Fatal(err)
 	}
-	f.mustPutJoin(t, openBoth("red"))
+	f.mustPutJoin(t, openAccounts("red"))
 	if info := f.frontDoor(t); !info.Join.Account || !info.PasswordLogin {
 		t.Fatalf("front door = %+v, want an account and password sign-in offered", info)
 	}
@@ -158,19 +160,21 @@ func TestJoinAccount(t *testing.T) {
 		t.Fatalf("account = %+v", acct)
 	}
 	id := acct.Principal.ID
-	if code, who := f.whoami(t, acct.Token); code != 200 || who.ID != id || who.IdentityClass != schema.IdentityMember || who.Guest != nil || who.MayInvite {
+	if code, who := f.whoami(t, acct.Token); code != 200 || who.ID != id || who.IdentityClass != schema.IdentityMember || who.Guest != nil || !who.MayInvite ||
+		who.VoiceAllowed == nil || !*who.VoiceAllowed {
 		t.Fatalf("whoami = %d %+v", code, who)
 	}
 	ms := f.memberships(t, id)
-	if len(ms) != 1 || ms[0].channel != f.red.ID || ms[0].canDecide || ms[0].historyAfter <= 0 {
-		t.Errorf("memberships = %+v, want red with no right to decide and a history bound", ms)
+	if len(ms) != 1 || ms[0].channel != f.red.ID || ms[0].canDecide || ms[0].historyAfter != -1 {
+		t.Errorf("memberships = %+v, want red with no right to decide and no history bound", ms)
 	}
 	if ok, err := f.srv.store.CanDecideApprovals(ctx, f.red.ID, id); err != nil || ok {
 		t.Errorf("CanDecideApprovals = %v, %v", ok, err)
 	}
+	// A member sees a channel's whole history (ADR-013).
 	msgs := decodeBody[schema.ListMessagesResponseV2](t, f.send(t, "GET", "/v2/channels/red/messages", acct.Token, "", ""))
-	if len(msgs.Messages) != 0 {
-		t.Errorf("the new account reads %d messages from before it joined", len(msgs.Messages))
+	if len(msgs.Messages) != 1 {
+		t.Errorf("the new account reads %d messages from before it joined, want 1", len(msgs.Messages))
 	}
 	if f.passwordCount(t, id) != "1" {
 		t.Error("the account has no password")
@@ -209,13 +213,14 @@ func TestJoinAccount(t *testing.T) {
 // one, and none makes a principal or stores a password.
 func TestJoinAccountRefusals(t *testing.T) {
 	f := newLoginFixture(t, Config{ServerName: "Harbour Club"})
-	f.mustPutJoin(t, openBoth("red"))
+	f.mustPutJoin(t, openAccounts("red"))
 	tests := []struct {
 		name, password string
 		status         int
 		code           string
 	}{
-		{"newcomer", "short", http.StatusBadRequest, "invalid_request"},
+		{"newcomer", "", http.StatusBadRequest, "invalid_request"},
+		{"newcomer", strings.Repeat("x", schema.MaxPasswordLength+1), http.StatusBadRequest, "invalid_request"},
 		{"newcomer", "newcomer and the rest of it", http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable},
 		{"newcomer", "a harbour club password", http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable},
 		{"guest-newcomer", testJoinPassword, http.StatusBadRequest, "invalid_request"},
@@ -245,7 +250,7 @@ func TestJoinAccountRefusals(t *testing.T) {
 // it spends anything.
 func TestJoinAccountLimits(t *testing.T) {
 	f := newLoginFixture(t, Config{})
-	f.mustPutJoin(t, openBoth("red"))
+	f.mustPutJoin(t, openAccounts("red"))
 	l := looseLoginLimits()
 	l.nameProbesPerAddress = inviteLimit{"name_probes_per_address", 2, time.Hour}
 	f.srv.setLoginLimits(l)
@@ -279,7 +284,7 @@ func TestJoinAccountRechecksAfterHashing(t *testing.T) {
 		code   string
 	}{
 		{"joining closed", func(t *testing.T, f *loginFixture) {
-			f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningGuest)})
+			f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningOff)})
 		}, http.StatusForbidden, schema.ErrorCodeJoiningClosed},
 		{"joining paused", func(t *testing.T, f *loginFixture) {
 			f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{JoiningPaused: boolPtr(true)})
@@ -293,7 +298,7 @@ func TestJoinAccountRechecksAfterHashing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newLoginFixture(t, Config{})
-			f.mustPutJoin(t, openBoth("red"))
+			f.mustPutJoin(t, openAccounts("red"))
 			f.srv.beforePasswordWrite = func() { tt.gap(t, f) }
 			assertErrorBody(t, f.joinAccount(t, "newcomer", ""), tt.status, tt.code)
 			f.srv.beforePasswordWrite = nil
@@ -318,10 +323,13 @@ func TestConvertGuestOverREST(t *testing.T) {
 	if _, err := f.srv.store.InsertMessage(ctx, f.red.ID, f.alice.ID, "said before the visit"); err != nil {
 		t.Fatal(err)
 	}
-	f.mustPutJoin(t, openBoth("red"))
+	f.mustPutJoin(t, openAccounts("red"))
 	const remote = "198.51.100.90:1"
-	g := mustJoined(t, f.joinGuest(t, "Pat", remote))
+	g := f.seedGuest(t, "Pat")
 	id := g.Principal.ID
+	// The address book holds the visit, as it did for one an entry route
+	// admitted from remote before guests were removed (issue #1005).
+	f.srv.guestAddrs.add(limitKey(clientAddrOf(t, remote)), id)
 	if code, who := f.whoami(t, g.Token); code != 200 || who.Guest == nil || !who.Guest.CanConvert {
 		t.Fatalf("whoami = %d %+v, want a guest that may convert", code, who)
 	}
@@ -416,16 +424,15 @@ func TestConvertGuestPolicyMatrix(t *testing.T) {
 		inv   int64
 	}
 	viaAddress := func(t *testing.T, f *loginFixture) world {
-		f.mustPutJoin(t, openBoth("red"))
-		g := mustJoined(t, f.joinGuest(t, "", ""))
+		f.mustPutJoin(t, openAccounts("red"))
+		g := f.seedGuest(t, "")
 		return world{loginFixture: f, token: g.Token, id: g.Principal.ID}
 	}
 	viaInvite := func(joinAs schema.InviteJoinMode, kind schema.InviteKind) func(t *testing.T, f *loginFixture) world {
 		return func(t *testing.T, f *loginFixture) world {
-			f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(true)})
-			req := schema.CreateInviteRequestV1{Kind: kind, Channels: []string{"red"}, JoinAs: joinAs}
-			inv := f.createInvite(t, f.rootTok, req)
-			g := mustJoined(t, f.redeemGuest(t, inv.Code, "", ""))
+			// An invite made before guests were removed (issue #1005).
+			inv := f.legacyInvite(t, schema.CreateInviteRequestV1{Kind: kind, Channels: []string{"red"}}, joinAs)
+			g := f.seedInviteGuest(t, inv.Invite, "")
 			return world{loginFixture: f, token: g.Token, id: g.Principal.ID, inv: inv.Invite.ID}
 		}
 	}
@@ -436,16 +443,13 @@ func TestConvertGuestPolicyMatrix(t *testing.T) {
 		status int
 		code   string
 	}{
-		{"address both", viaAddress, nil, http.StatusOK, ""},
+		{"address open to accounts", viaAddress, nil, http.StatusOK, ""},
 		{"address accounts only after", viaAddress, func(t *testing.T, w world) {
 			w.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningAccount)})
 		}, http.StatusOK, ""},
 		{"address with guests turned off", viaAddress, func(t *testing.T, w world) {
 			w.mustPutJoin(t, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolPtr(false)})
 		}, http.StatusOK, ""},
-		{"address guests only", viaAddress, func(t *testing.T, w world) {
-			w.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningGuest)})
-		}, http.StatusForbidden, schema.ErrorCodeConversionNotAllowed},
 		{"address off", viaAddress, func(t *testing.T, w world) {
 			w.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningOff)})
 		}, http.StatusForbidden, schema.ErrorCodeConversionNotAllowed},
@@ -502,8 +506,8 @@ func TestConvertGuestPolicyMatrix(t *testing.T) {
 // Refusals of the caller, the body and the name leave the guest unchanged.
 func TestConvertGuestRefusals(t *testing.T) {
 	f := newLoginFixture(t, Config{})
-	f.mustPutJoin(t, openBoth("red"))
-	g := mustJoined(t, f.joinGuest(t, "Pat", ""))
+	f.mustPutJoin(t, openAccounts("red"))
+	g := f.seedGuest(t, "Pat")
 	for _, tok := range []string{f.aliceTok, f.rootTok, f.botTok} {
 		assertErrorBody(t, f.convert(t, tok, "member", ""), http.StatusForbidden, schema.ErrorCodeNotAGuest)
 	}
@@ -512,7 +516,8 @@ func TestConvertGuestRefusals(t *testing.T) {
 		status                 int
 		code                   string
 	}{
-		{"member", "short", "", http.StatusBadRequest, "invalid_request"},
+		{"member", "", "", http.StatusBadRequest, "invalid_request"},
+		{"member", strings.Repeat("x", schema.MaxPasswordLength+1), "", http.StatusBadRequest, "invalid_request"},
 		{"member", "member and the rest of it", "", http.StatusBadRequest, schema.ErrorCodePasswordUnacceptable},
 		{"guest-member", testJoinPassword, "", http.StatusBadRequest, "invalid_request"},
 		{"guеst-member", testJoinPassword, "", http.StatusConflict, schema.ErrorCodePrincipalExists},
@@ -541,9 +546,10 @@ func TestConvertGuestRefusals(t *testing.T) {
 // for no ended or converted visit.
 func TestConversionPermit(t *testing.T) {
 	f := newLoginFixture(t, Config{})
-	f.mustPutJoin(t, openTo("red"))
-	g := mustJoined(t, f.joinGuest(t, "", ""))
-	h := mustJoined(t, f.joinGuest(t, "", ""))
+	// The address admits no account: only a permit lets a guest convert.
+	f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningOff), OpenChannels: &[]string{"red"}})
+	g := f.seedGuest(t, "")
+	h := f.seedGuest(t, "")
 	assertErrorBody(t, f.convert(t, g.Token, "member", ""), http.StatusForbidden, schema.ErrorCodeConversionNotAllowed)
 
 	permitPath := func(id int64) string { return fmt.Sprintf("/v1/guests/%d/conversion-permit", id) }
@@ -611,7 +617,7 @@ func TestConversionPermit(t *testing.T) {
 	}
 
 	// A permit runs out.
-	k := mustJoined(t, f.joinGuest(t, "", ""))
+	k := f.seedGuest(t, "")
 	short := issue(k.Principal.ID)
 	f.advance(schema.DefaultRestrictedLinkLifetime + time.Second)
 	assertErrorBody(t, f.convert(t, k.Token, "member2", short.Code), http.StatusNotFound, schema.ErrorCodeConversionPermitInvalid)
@@ -653,7 +659,7 @@ func TestConvertGuestRechecksAfterHashing(t *testing.T) {
 			}
 		}, http.StatusConflict, schema.ErrorCodeGuestEnded, true},
 		{"policy closed", func(t *testing.T, f *loginFixture, g schema.JoinGuestResponseV1) {
-			f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningGuest)})
+			f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningOff)})
 		}, http.StatusForbidden, schema.ErrorCodeConversionNotAllowed, false},
 		{"name taken", func(t *testing.T, f *loginFixture, g schema.JoinGuestResponseV1) {
 			if _, err := f.srv.store.CreatePrincipal(ctx, store.PrincipalHuman, "Member"); err != nil {
@@ -664,8 +670,8 @@ func TestConvertGuestRechecksAfterHashing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			f := newLoginFixture(t, Config{})
-			f.mustPutJoin(t, openBoth("red"))
-			g := mustJoined(t, f.joinGuest(t, "", ""))
+			f.mustPutJoin(t, openAccounts("red"))
+			g := f.seedGuest(t, "")
 			f.srv.beforePasswordWrite = func() { tt.gap(t, f, g) }
 			assertErrorBody(t, f.convert(t, g.Token, "member", ""), tt.status, tt.code)
 			f.srv.beforePasswordWrite = nil
@@ -699,8 +705,8 @@ func TestConvertGuestRechecksAfterHashing(t *testing.T) {
 func TestConvertGuestDuplicateRequests(t *testing.T) {
 	ctx := context.Background()
 	f := newLoginFixture(t, Config{})
-	f.mustPutJoin(t, openBoth("red"))
-	g := mustJoined(t, f.joinGuest(t, "", ""))
+	f.mustPutJoin(t, openAccounts("red"))
+	g := f.seedGuest(t, "")
 	inWrite, release := make(chan struct{}), make(chan struct{})
 	f.srv.beforePasswordWrite = func() {
 		close(inWrite)
@@ -737,7 +743,7 @@ func TestConvertGuestDuplicateRequests(t *testing.T) {
 	}
 	// The guard is per guest: another guest converts while nothing of the
 	// first is in flight, and the guard is gone once a conversion ends.
-	h := mustJoined(t, f.joinGuest(t, "", ""))
+	h := f.seedGuest(t, "")
 	assertErrorBody(t, f.convert(t, h.Token, "member0", ""), http.StatusConflict, schema.ErrorCodePrincipalExists)
 	mustConverted(t, f.convert(t, h.Token, "member2", ""))
 }
@@ -748,22 +754,22 @@ func TestConvertGuestDuplicateRequests(t *testing.T) {
 // spend nothing.
 func TestConvertGuestAttemptLimit(t *testing.T) {
 	f := newLoginFixture(t, Config{})
-	f.mustPutJoin(t, openBoth("red"))
+	f.mustPutJoin(t, openAccounts("red"))
 	l := looseLoginLimits()
 	l.conversionsPerPrincipal = inviteLimit{"conversions_per_principal", 2, time.Hour}
 	f.srv.setLoginLimits(l)
-	g := mustJoined(t, f.joinGuest(t, "", ""))
+	g := f.seedGuest(t, "")
 	// A refusal before the hash spends no attempt.
 	for range 3 {
 		assertErrorBody(t, f.convert(t, g.Token, "alice", ""), http.StatusConflict, schema.ErrorCodePrincipalExists)
 	}
 	// Two attempts that hash and then fail: the policy closes in the gap.
 	f.srv.beforePasswordWrite = func() {
-		f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningGuest)})
+		f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningOff)})
 	}
 	for range 2 {
 		assertErrorBody(t, f.convert(t, g.Token, "member", ""), http.StatusForbidden, schema.ErrorCodeConversionNotAllowed)
-		f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningBoth)})
+		f.mustPutJoin(t, schema.PutJoinSettingsRequestV1{OpenJoining: modePtr(schema.OpenJoiningAccount)})
 	}
 	f.srv.beforePasswordWrite = nil
 	hashed := f.srv.passwords.hashes.Load()
@@ -778,7 +784,7 @@ func TestConvertGuestAttemptLimit(t *testing.T) {
 	if code, who := f.whoami(t, g.Token); code != 200 || who.Guest == nil {
 		t.Errorf("the refused guest = %d %+v, want unchanged", code, who)
 	}
-	h := mustJoined(t, f.joinGuest(t, "", ""))
+	h := f.seedGuest(t, "")
 	mustConverted(t, f.convert(t, h.Token, "member", ""))
 }
 
@@ -788,7 +794,7 @@ func TestConvertGuestAttemptLimit(t *testing.T) {
 func TestAccountWritesOutliveTheCaller(t *testing.T) {
 	ctx := context.Background()
 	f := newLoginFixture(t, Config{})
-	f.mustPutJoin(t, openBoth("red"))
+	f.mustPutJoin(t, openAccounts("red"))
 	gone := func(path, token string, body any) {
 		t.Helper()
 		reqCtx, cancel := context.WithCancel(ctx)
@@ -806,7 +812,7 @@ func TestAccountWritesOutliveTheCaller(t *testing.T) {
 	if c, found, err := f.srv.store.LoginCandidate(ctx, "newcomer"); err != nil || !found || c.Record == "" {
 		t.Errorf("the account of a caller who left = %+v, %v, %v; want made, with its password", c, found, err)
 	}
-	g := mustJoined(t, f.joinGuest(t, "", ""))
+	g := f.seedGuest(t, "")
 	gone("/v1/guest/convert", g.Token, schema.ConvertGuestRequestV1{Name: "patricia", Password: testJoinPassword})
 	if v, err := f.srv.store.GuestVisitOf(ctx, g.Principal.ID); err != nil || v.State != schema.GuestStateConverted {
 		t.Errorf("the visit of a caller who left = %+v, %v; want converted", v, err)
@@ -820,14 +826,14 @@ func TestAccountWritesOutliveTheCaller(t *testing.T) {
 // address up, and a guest who spends its own holds up no other guest.
 func TestConversionNameProbesArePerGuest(t *testing.T) {
 	f := newLoginFixture(t, Config{})
-	f.mustPutJoin(t, openBoth("red"))
+	f.mustPutJoin(t, openAccounts("red"))
 	l := looseLoginLimits()
 	l.nameProbesPerAddress = inviteLimit{"name_probes_per_address", 1, time.Hour}
 	l.nameProbesPerPrincipal = inviteLimit{"name_probes_per_principal", 1, time.Hour}
 	f.srv.setLoginLimits(l)
 	const remote = "198.51.100.95:1"
-	g := mustJoined(t, f.joinGuest(t, "", remote))
-	h := mustJoined(t, f.joinGuest(t, "", remote))
+	g := f.seedGuest(t, "")
+	h := f.seedGuest(t, "")
 	assertErrorBody(t, f.joinAccount(t, "alice", remote), http.StatusConflict, schema.ErrorCodePrincipalExists)
 	assertErrorBody(t, f.joinAccount(t, "a-free-name", remote), http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
 	convertFrom := func(token, name string) *httptest.ResponseRecorder {

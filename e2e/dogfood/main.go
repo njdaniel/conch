@@ -7,7 +7,9 @@
 // every step, then reruns the approval half with ntfy unreachable to prove
 // graceful degradation, and then kills conchd between a commit and its
 // notification to prove the next start makes and records the attempt (issue
-// #158). Nonzero exit on any assertion failure.
+// #158), and last archives the channel mid-loop to prove new requests are
+// refused while the open approval still resolves (issue #1296). Nonzero exit
+// on any assertion failure.
 //
 // The happy path authenticates the agent with a credential issued through
 // the REST API (issues #78, #97) and ends by revoking it and asserting the
@@ -79,6 +81,16 @@ func run() error {
 	fmt.Println("== restart path (conchd killed between a commit and its notification) ==")
 	if err := restartPath(bin); err != nil {
 		return fmt.Errorf("restart path: %w", err)
+	}
+
+	fmt.Println("== archived path (approvals across an archive and a restore) ==")
+	if err := archivedPath(bin); err != nil {
+		return fmt.Errorf("archived path: %w", err)
+	}
+
+	fmt.Println("== AI administrator path (an agent administers through the door, a human approves) ==")
+	if err := aiAdminPath(bin); err != nil {
+		return fmt.Errorf("AI administrator path: %w", err)
 	}
 	return nil
 }

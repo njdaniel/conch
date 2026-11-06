@@ -15,11 +15,22 @@ describe('credential handling', () => {
     expect(Object.keys(sources).length).toBeGreaterThan(5);
   });
 
-  it('is in src/api.ts alone', () => {
-    const touching = Object.entries(sources)
-      .filter(([, code]) => /conch\.web\.token|Authorization|sessionStorage\.(get|set)Item\(tokenKey/.test(code))
+  // The credential's storage key is named by the browser's credential store
+  // alone, and the Authorization header is built by the browser's HTTP
+  // transport alone (issue #770): api.ts holds the credential in use and hands
+  // it to the platform.
+  it('is stored by src/platform/browser/credentials.ts alone and sent by src/platform/browser/http.ts alone', () => {
+    const keyed = Object.entries(sources)
+      .filter(([, code]) => /conch\.web\.token|\btokenKey\b/.test(withoutComments(code)))
       .map(([path]) => path);
-    expect(touching).toEqual(['./api.ts']);
+    expect(keyed).toEqual(['./platform/browser/credentials.ts']);
+    const sending = Object.entries(sources)
+      .filter(([, code]) => /Authorization/.test(withoutComments(code)))
+      .map(([path]) => path);
+    // The one other mention is the header of the MCP entry that Add an AI
+    // administrator shows once (issue #1334): text for another client's
+    // config file, never a request this page makes.
+    expect(sending).toEqual(['./admin/AddAIAdmin.tsx', './platform/browser/http.ts']);
   });
 
   it('is never logged: the page makes no console call', () => {
@@ -30,27 +41,42 @@ describe('credential handling', () => {
   });
 
   it('is read only through authed and authedPost (or by signIn, for a candidate)', () => {
+    // (The store is the platform's; see the platform seam below.)
     const code = sources['./api.ts'] ?? '';
     // Nothing exports the token's accessors for another module to use.
     // Storage is searched for a credential only by its definition, hasToken
     // and restore. Every other call sends the credential the page signed in
     // with (current(), #439 review M1), so none can fall through to another
     // one that happens to be stored.
-    expect(code.match(/\breadToken\(\)/g)?.length ?? 0).toBe(3);
-    // Storage is read for the token in four functions only: readToken (the
-    // search), current (is the pinned one still stored), dropToken (is it
-    // still the one to drop) and stillStored (is restore's unchecked one
-    // still stored, issue #469). A new reader trips this.
-    expect(code.match(/getItem\(tokenKey\)/g)?.length ?? 0).toBe(4);
-    expect(code).not.toMatch(/export\s+(async\s+)?function\s+((read|write|drop)Token|sendAs|current|forget)\b/);
+    expect(code.match(/\bplatform\.credentials\.read\(\)/g)?.length ?? 0).toBe(2);
+    // The store reads the token in three functions only: read (the search),
+    // isStored (is the pinned one, or restore's unchecked one, still stored,
+    // issue #469) and drop (is it still the one to drop). A new reader trips
+    // this. api.ts reads no storage at all.
+    expect(code).not.toMatch(/getItem\(/);
+    expect(sources['./platform/browser/credentials.ts']?.match(/getItem\(tokenKey\)/g)?.length ?? 0).toBe(3);
+    expect(code).not.toMatch(/export\s+(async\s+)?function\s+(sendAs|current|forget)\b/);
     // The pin is set in five places only: signIn, continueAsOperator,
     // restore, keepRedeemed (issue #440), which keeps the credential an
     // invite, a join or a password sign-in gives as signIn keeps a member's,
     // and convertGuest (issue #713), which keeps the member's credential a
     // guest's Create an account gives, and keepRotated (issue #714), which
     // keeps the credential a password change rotates this page's into, in
-    // the place of the one the server revoked.
-    expect(code.match(/\bpinned = \{|\bpinned = held\b/g)?.length ?? 0).toBe(6);
+    // the place of the one the server revoked. Each pins what the store says
+    // it kept (kept, or held), which for the desktop's is its stand-in.
+    // The last two rotate (issue #1000): the same sign-in, under a new
+    // credential. The pin itself is assigned by pin and rotate alone (any
+    // assignment, compound ones included), rotate is called twice, and only
+    // rotate adds to the credentials a 401 for which is sent again as the
+    // one pinned now (only pin empties it, and nothing takes one out).
+    expect(code.match(/\bpinned\s*(\?\?|\|\||&&)?=(?!=)/g)?.length ?? 0).toBe(2);
+    expect(code.match(/\bpin\((held|kept)\)/g)?.length ?? 0).toBe(4);
+    expect(code.match(/\brotate\(/g)?.length ?? 0).toBe(3);
+    expect(code.match(/\brotate\(held, kept\)/g)?.length ?? 0).toBe(2);
+    expect(code.match(/\breplaced\.(add|delete)\(/g)?.length ?? 0).toBe(1);
+    expect(code.match(/\breplaced\.clear\(/g)?.length ?? 0).toBe(1);
+    // Its declaration, a const, is its one assignment.
+    expect(code.match(/\breplaced\s*=(?!=)/g)?.length ?? 0).toBe(1);
   });
 
   it('is not placed in a URL: the only fetch sends it as a header', () => {
@@ -60,28 +86,35 @@ describe('credential handling', () => {
   });
 });
 
-// localStorage (issue #439, decision O1): a member's credential lasts there,
-// and nothing else of ours does. Comments are left out: saying where the SDK
-// keeps its log level is not using the storage.
+// localStorage (issue #439, decision O1): a member's credential lasts there.
+// Issue #840 also keeps non-sensitive, per-account notification preferences.
+// Comments are left out: saying where the SDK keeps its log level is not using
+// the storage.
 describe('local storage', () => {
-  it('is named in src/api.ts alone', () => {
+  it('is named in src/platform/browser/credentials.ts alone', () => {
     const naming = Object.entries(sources)
       .filter(([, code]) => /localStorage/.test(withoutComments(code)))
       .map(([path]) => path);
-    expect(naming).toEqual(['./api.ts']);
+    expect(naming).toEqual(['./platform/browser/credentials.ts']);
   });
 
-  it('is used in src/api.ts only for the token key', () => {
-    const code = withoutComments(sources['./api.ts'] ?? '');
-    // Named twice: where a lasting credential is kept, and the storage
-    // event's check that the change was there. Never read from directly.
+  it('is used there only for the credential and per-account preference keys', () => {
+    const code = withoutComments(sources['./platform/browser/credentials.ts'] ?? '');
+    // Credential storage and the storage event both go through storageAt.
     expect(code.match(/localStorage/g)?.length).toBe(2);
     expect(code).not.toMatch(/localStorage\s*(\.|\[)/);
-    // Every storage call in the module names the token key, and nothing
-    // lists, counts or clears a storage.
+    // Every storage call names an allowed key; nothing lists, counts or clears
+    // a storage.
     expect(code.match(storageCall)?.length).toBeGreaterThan(0);
     expect(code).not.toMatch(storageCallOtherKey);
     expect(code).not.toMatch(/\.(key|clear)\(|[sS]torage\.length/);
+    // The preference methods take the key from their caller, and the only
+    // callers name the notification preferences' key, the setup card's
+    // (a per-account mark that the card was put off) and the voice mode's
+    // (issue #1244).
+    const api = withoutComments(sources['./api.ts'] ?? '');
+    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|setupCardKey\(|voiceModeKey\b)/g) ?? []).toEqual([]);
+    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(6);
   });
 
   it('is not missed by the rules: a bare test of each', () => {
@@ -95,11 +128,14 @@ describe('local storage', () => {
     }
     expect(storageCallOtherKey.test('storage.getItem(tokenKey)')).toBe(false);
     expect(storageCallOtherKey.test('storage.setItem(tokenKey, token)')).toBe(false);
+    expect(storageCallOtherKey.test('storage.getItem(notificationPreferencesKey(origin, account))')).toBe(false);
+    expect(storageCallOtherKey.test('storage.getItem(key)')).toBe(false);
+    expect(storageCallOtherKey.test('storage.getItem(keys)')).toBe(true);
   });
 });
 
 const storageCall = /\.(getItem|setItem|removeItem)\(/g;
-const storageCallOtherKey = /\.(getItem|setItem|removeItem)\(\s*(?!tokenKey\b)/;
+const storageCallOtherKey = /\.(getItem|setItem|removeItem)\(\s*(?!tokenKey\b|key\b|notificationPreferencesKey\b)/;
 
 // withoutComments drops whole-line // comments and /* */ blocks. A // after
 // code on a line is kept, so that a // in a string cannot hide what follows it.
@@ -136,6 +172,14 @@ const screenApi = /getDisplayMedia|mediaDevices/;
 const screenCall = /getDisplayMedia\s*\(/;
 const screenChecker = './voice/share.ts';
 const notVoice = (path: string) => !path.startsWith('./voice/');
+// The SDK's camera shortcuts (N6), banned in every file, comments included:
+// the participant's own switches, and its createTracks, which captures a
+// camera and a microphone of the SDK's choosing together. (createScreenTracks,
+// the share's picker, is another name.)
+const cameraShortcut = /enableCameraAndMicrophone|setCameraEnabled|\bcreateTracks\b/;
+// The SDK's module specifier, or one of its subpaths, as a string: every
+// spelling of an import of it (static, dynamic, re-export, require) names it.
+const sdkImport = /['"`]livekit-client(\/[^'"`]*)?['"`]/;
 
 // Where the join token of a voice grant may be read: a property read
 // (grant.token, x.token), an index into rooms, or a destructuring that names
@@ -154,7 +198,13 @@ describe('media devices', () => {
     const naming = Object.entries(sources)
       .filter(([, code]) => screenApi.test(code))
       .map(([path]) => path);
-    expect(naming).toEqual([screenChecker]);
+    // src/voice/sdk.ts also names mediaDevices, for the device-change
+    // listener of the private microphone test (issue #846). It may not
+    // mention the screen API at all, not even outside a call (a bound or
+    // aliased reference would escape screenCall): share.ts stays its only
+    // checker.
+    expect(naming).toEqual(['./voice/sdk.ts', screenChecker]);
+    expect(withoutComments(sources['./voice/sdk.ts'] ?? '')).not.toMatch(/getDisplayMedia/);
     const code = sources[screenChecker] ?? '';
     expect(code).not.toMatch(screenCall);
     // It only looks the API up: a type of what it looks for, and the look.
@@ -163,19 +213,54 @@ describe('media devices', () => {
     expect(code).toContain("typeof devices.getDisplayMedia === 'function'");
   });
 
+  // The camera (ADR-015, N6): the SDK's own ways of turning a camera on,
+  // which capture a device of its choosing and publish it at once, are named
+  // by no file, src/voice/sdk.ts included. The one way a video track is
+  // captured is sdk.ts's createLocalVideoTrack, and only sdk.ts calls it.
+  it('the SDK turns no camera on by itself: enableCameraAndMicrophone and setCameraEnabled are named nowhere, and createLocalVideoTrack only in src/voice/sdk.ts', () => {
+    const naming = Object.entries(sources)
+      .filter(([, code]) => cameraShortcut.test(code))
+      .map(([path]) => path);
+    expect(naming).toEqual([]);
+    const capturing = Object.entries(sources)
+      .filter(([, code]) => /createLocalVideoTrack|createLocalTracks/.test(withoutComments(code)))
+      .map(([path]) => path);
+    expect(capturing).toEqual(['./voice/sdk.ts']);
+    expect(withoutComments(sources['./voice/sdk.ts'] ?? '')).not.toMatch(/createLocalTracks/);
+    for (const example of ['room.localParticipant.enableCameraAndMicrophone()', 'await lp.setCameraEnabled(true)', 'const { setCameraEnabled } = lp;', 'p["setCameraEnabled"](true)', 'await lp.createTracks({ video: true })', "lp['createTracks']()"]) {
+      expect(cameraShortcut.test(example), example).toBe(true);
+    }
+    for (const example of ['setMicrophone(choice)', 'room.localParticipant.createScreenTracks(captureOptions())']) {
+      expect(cameraShortcut.test(example), example).toBe(false);
+    }
+  });
+
   it('the LiveKit SDK is imported only from src/voice/sdk.ts', () => {
     const hits = Object.entries(sources)
-      .filter(([, code]) => /from\s+['"]livekit-client['"]/.test(code))
+      .filter(([, code]) => sdkImport.test(code))
       .map(([path]) => path);
     expect(hits).toEqual(['./voice/sdk.ts']);
+    // And the rule sees a dynamic import, which a bundle would load as well.
+    for (const example of [
+      "const lk = await import('livekit-client');",
+      'import ( "livekit-client" )',
+      "import { Room } from 'livekit-client';",
+      "export { Room } from 'livekit-client';",
+      'const m = `livekit-client`;',
+      "import x from 'livekit-client/dist/livekit-client.esm.mjs';",
+    ]) {
+      expect(sdkImport.test(example), example).toBe(true);
+    }
+    expect(sdkImport.test("import x from 'livekit-client-other';")).toBe(false);
   });
 
   it('the join token is in src/api.ts and src/voice/ only, and never logged', () => {
+    // (The credential store also reads the credential's own token field.)
     const touching = Object.entries(sources)
       .filter(([, code]) => tokenRead.test(code))
       .map(([path]) => path)
       .filter((path) => path !== './api.ts' && notVoice(path));
-    expect(touching).toEqual([]);
+    expect(touching).toEqual(['./platform/browser/credentials.ts', './platform/desktop/credentials.ts']);
   });
 
   it('are not mentioned by a pattern the rule would miss: a bare test of each rule', () => {
@@ -215,11 +300,15 @@ describe('media devices', () => {
 });
 
 describe('the socket ticket', () => {
-  it('is in src/api.ts alone, and the page is never navigated by script', () => {
-    const touching = Object.entries(sources)
-      .filter(([, code]) => /\bWebSocket\s*\(|ws-tickets/.test(code))
+  it('is asked for in src/api.ts alone, and opened in src/platform/browser/sockets.ts alone, and the page is never navigated by script', () => {
+    const asking = Object.entries(sources)
+      .filter(([, code]) => /ws-tickets|\bwsTicket\b/.test(withoutComments(code)))
       .map(([path]) => path);
-    expect(touching).toEqual(['./api.ts']);
+    expect(asking).toEqual(['./api.ts', './platform/operations.ts']);
+    const opening = Object.entries(sources)
+      .filter(([, code]) => /\bWebSocket\s*\(/.test(withoutComments(code)))
+      .map(([path]) => path);
+    expect(opening).toEqual(['./platform/browser/sockets.ts']);
     // Only the hash names the channel; nothing else may write the address
     // bar, but for the one history call that takes an invite code out of it.
     const navigating = Object.entries(sources)
@@ -246,19 +335,26 @@ const navigation: readonly RegExp[] = [
 // is in neither the address bar nor the back history.
 const inviteReplace = "window.history.replaceState(null, '', addressWithoutFragment(window.location))";
 
+// The other (F26): route.ts, once, replaces the history entry with the address
+// and the hash of the channel the page shows, when the hash named one the
+// person cannot open. It adds no history entry and writes no hash but the
+// shown channel's.
+const channelReplace = "window.history.replaceState(null, '', addressWithoutFragment(window.location) + hashForChannel(name))";
+
 // navigates says whether a source writes the address bar other than through
 // the hash. Comments are left out first; then the exception is taken out
 // (from route.ts only, and only once).
 function navigates(path: string, code: string): boolean {
   const bare = withoutComments(code);
-  const checked = path === './route.ts' ? bare.replace(inviteReplace, '') : bare;
+  const checked = path === './route.ts' ? bare.replace(inviteReplace, '').replace(channelReplace, '') : bare;
   return navigation.some((rule) => rule.test(checked));
 }
 
 describe('the history exception', () => {
-  it('is one call in src/route.ts, given the address without its fragment', () => {
+  it('is two calls in src/route.ts, each once: the address without its fragment, and the shown channel’s hash', () => {
     const code = sources['./route.ts'] ?? '';
     expect(code.split(inviteReplace)).toHaveLength(2);
+    expect(code.split(channelReplace)).toHaveLength(2);
     // That address is origin, path and query, and nothing else: no hash.
     const built = /export function addressWithoutFragment\([^)]*\): string \{\n\s*return (.*);\n\}/.exec(code)?.[1];
     expect(built).toBe('`${location.origin}${location.pathname}${location.search}`');
@@ -301,10 +397,15 @@ describe('the history exception', () => {
       "window.history.replaceState(null, '', addressWithoutFragment(window.location) + window.location.hash);",
       'location.replace(u);',
       `${inviteReplace};\n${inviteReplace};`,
+      `${channelReplace};\n${channelReplace};`,
+      "window.history.replaceState(null, '', addressWithoutFragment(window.location) + hashForChannel(name) + window.location.search);",
     ]) {
       expect(navigates('./route.ts', example), example).toBe(true);
     }
     expect(navigates('./route.ts', `${inviteReplace};`)).toBe(false);
+    expect(navigates('./route.ts', `${channelReplace};`)).toBe(false);
+    // Outside route.ts the second is no exception either.
+    expect(navigates('./App.tsx', channelReplace)).toBe(true);
     // Allowed: setting the hash, reading location, comparing it, and saying
     // in a comment what the code does not do.
     for (const example of [
@@ -340,11 +441,15 @@ describe('the invite code', () => {
     expect(holding).toEqual(inviteHolders);
   });
 
-  it('goes to the server from src/api.ts alone', () => {
+  it('goes to the server from src/api.ts alone, by the operation table, which alone names the route', () => {
     const calling = Object.entries(sources)
-      .filter(([, code]) => /\/v1\/invites/.test(code))
+      .filter(([, code]) => /\/v1\/invites/.test(withoutComments(code)))
       .map(([path]) => path);
-    expect(calling).toEqual(['./api.ts']);
+    expect(calling).toEqual(['./platform/operations.ts']);
+    const asking = Object.entries(sources)
+      .filter(([path, code]) => !path.startsWith('./platform/') && /\b(previewInvite|previewMemberLink|redeemInvite|redeemInviteGuest|createMemberLink|listInvites|closeInvite)'/.test(code))
+      .map(([path]) => path);
+    expect(asking).toEqual(['./api.ts']);
   });
 
   it('is never stored, put in a URL or rendered', () => {
@@ -395,11 +500,15 @@ describe('the sign-in link code', () => {
     expect(holding).toEqual(signInHolders);
   });
 
-  it('goes to the server from src/api.ts alone', () => {
+  it('goes to the server from src/api.ts alone, by the operation table, which alone names the route', () => {
     const calling = Object.entries(sources)
-      .filter(([, code]) => /\/v1\/sign-in-links/.test(code))
+      .filter(([, code]) => /\/v1\/sign-in-links/.test(withoutComments(code)))
       .map(([path]) => path);
-    expect(calling).toEqual(['./api.ts']);
+    expect(calling).toEqual(['./platform/operations.ts']);
+    const asking = Object.entries(sources)
+      .filter(([path, code]) => !path.startsWith('./platform/') && /\b(previewSignInLink|redeemSignInLink|createSignInLink|listSignInLinks|closeSignInLink)'/.test(code))
+      .map(([path]) => path);
+    expect(asking).toEqual(['./api.ts']);
   });
 
   it('is never stored, put in a URL or rendered', () => {
@@ -419,6 +528,45 @@ describe('the sign-in link code', () => {
     for (const example of ['<SignInLink signInCode={signInCode} />', 'if (signInCode !== null) {']) {
       expect(signInRendered.test(example), example).toBe(false);
     }
+  });
+});
+
+// A setup link's token (ADR-011 item 3) is held under the name setupToken by
+// route.ts, which takes it out of the address, and App.tsx, which hands it to
+// the setup page in a ref and never in state; the page puts it in its field.
+// It is never stored, put in a URL or rendered, and not held in state.
+const setupHolders = ['./App.tsx', './route.ts'];
+const setupStored = /(setItem|getItem|removeItem)\([^)]*\bsetupToken\b/;
+const setupInTemplate = /\$\{[^}]*\bsetupToken\b[^}]*\}/g;
+const setupRendered = /(?<!=)>\s*\{[^}]*\bsetupToken\b|\b(?!setupToken=)[\w-]+=\{[^}]*\bsetupToken\b/;
+const setupInState = /useState[^;]*\bsetupToken\b|\[setupToken,/;
+
+describe('the setup link token', () => {
+  it('is held only by src/route.ts and App', () => {
+    const holding = Object.entries(sources)
+      .filter(([, code]) => /\bsetupToken\b/.test(code))
+      .map(([path]) => path)
+      .sort();
+    expect(holding).toEqual(setupHolders);
+  });
+
+  it('is never stored, put in a URL, rendered, or kept in state', () => {
+    for (const [path, code] of Object.entries(sources)) {
+      expect(setupStored.test(code), path).toBe(false);
+      if (path.endsWith('.tsx')) expect(setupRendered.test(code), path).toBe(false);
+      expect(code.match(setupInTemplate) ?? [], path).toEqual([]);
+      expect(setupInState.test(code), path).toBe(false);
+    }
+  });
+
+  it('is not missed by the rules: a bare test of each', () => {
+    expect(setupStored.test('localStorage.setItem(key, setupToken)')).toBe(true);
+    for (const example of ['<p>{setupToken}</p>', '<input value={setupToken} />']) {
+      expect(setupRendered.test(example), example).toBe(true);
+    }
+    expect('fetch(`/v1/x/${setupToken}`)'.match(setupInTemplate)).toHaveLength(1);
+    expect(setupInState.test('const [setupToken, setSetupToken] = useState(null);')).toBe(true);
+    expect(setupRendered.test('if (setupToken !== null) {')).toBe(false);
   });
 });
 
@@ -478,11 +626,15 @@ describe('the diagnostic ring', () => {
 });
 
 describe('the built bundle', () => {
-  it('uses the screen API only as the SDK and src/voice/share.ts do, and storage only as the SDK and src/api.ts do', async () => {
+  it('uses the screen API only as the SDK and src/voice/share.ts do, and storage only as the SDK and the browser credential store do', async () => {
     const result = await build({ configFile: 'vite.config.ts', logLevel: 'silent', build: { write: false } });
     const outputs = (Array.isArray(result) ? result : [result]).flatMap((r) => ('output' in r ? r.output : []));
     const code = outputs.map((o) => (o.type === 'chunk' ? o.code : '')).join('\n');
     expect(code.length).toBeGreaterThan(1000);
+    // No desktop code in the browser bundle (issue #770): neither the bridge's
+    // name nor anything of the desktop adapter.
+    expect(code).not.toContain('conchDesktop');
+    expect(code).not.toContain(desktopMarker);
     // getDisplayMedia (issue #444) and localStorage (issue #439), counted
     // module by module: every mention in the bundle comes from a module the
     // table names, exactly as often as it says, so a mention from any other
@@ -518,9 +670,14 @@ describe('the built bundle', () => {
   }, 60_000);
 });
 
+// A string only the desktop stub holds, so that a bundle that holds it holds
+// the desktop adapter.
+const desktopMarker = 'the desktop bridge is missing';
+
 // Where the built bundle may name localStorage, and how many times.
 //
-// src/api.ts keeps a member's credential there (issue #439, decision O1).
+// src/platform/browser/credentials.ts keeps a member's credential there (issue
+// #439, decision O1), and per-account notification preferences (issue #840).
 //
 // The LiveKit SDK (livekit-client 2.22.3) bundles its logger, loglevel, into
 // its own ESM build, so loglevel's mentions are counted under the SDK's file.
@@ -533,7 +690,7 @@ describe('the built bundle', () => {
 // looked at.
 const livekitBundle = 'node_modules/livekit-client/dist/livekit-client.esm.mjs';
 const storageMentions: Record<string, number> = {
-  'src/api.ts': 2,
+  'src/platform/browser/credentials.ts': 2,
   [livekitBundle]: 3,
 };
 
@@ -567,3 +724,112 @@ function allIndexes(code: string, needle: string): number[] {
   for (let i = code.indexOf(needle); i !== -1; i = code.indexOf(needle, i + 1)) found.push(i);
   return found;
 }
+
+// The platform seam (issue #770, D2-2). Everything the client asks of where it
+// runs goes through src/platform, so the desktop shell can supply its own. The
+// browser's implementation, in src/platform/browser, is the only code that
+// calls the APIs below.
+const platformBrowser = './platform/browser/';
+// The global object, however it is named.
+const globalObject = '(?:window|globalThis|self)';
+const seamForbidden: readonly (readonly [string, RegExp])[] = [
+  ['fetch', new RegExp(`(?<![\\w.])fetch\\s*\\(|\\b${globalObject}\\s*(\\.\\s*fetch\\b|\\[\\s*['"\`]fetch)`)],
+  ['new WebSocket', new RegExp(`\\bnew\\s+(${globalObject}\\s*\\.\\s*)?WebSocket\\b|\\b${globalObject}\\s*(\\.\\s*WebSocket\\b|\\[\\s*['"\`]WebSocket)`)],
+  ['the clipboard', /\bnavigator\s*(\.\s*clipboard\b|\[\s*['"`]clipboard)/],
+  ['a Notification', new RegExp(`\\bnew\\s+(${globalObject}\\s*\\.\\s*)?Notification\\b|\\b${globalObject}\\s*(\\.\\s*Notification\\b|\\[\\s*['"\`]Notification)`)],
+  ['window.open', new RegExp(`\\b${globalObject}\\s*(\\.\\s*open\\s*\\(|\\[\\s*['"\`]open)`)],
+  ['the page origin or protocol', /\b(window\.)?location\.(origin|protocol)\b/],
+];
+// route.ts alone reads location.origin: it builds the address without its
+// fragment for the history entry, and an invite link, from the address bar
+// itself, not from the server's origin (issue #440).
+// The desktop adapter is a platform implementation too: its copyText is the
+// page's own clipboard write, which main permits for the app window right
+// after a click (issue #947).
+const seamExceptions: Readonly<Record<string, readonly string[]>> = {
+  'the page origin or protocol': ['./route.ts'],
+  'the clipboard': ['./platform/desktop/index.ts'],
+};
+
+describe('the platform seam', () => {
+  it('finds the browser implementation', () => {
+    expect(Object.keys(sources).filter((path) => path.startsWith(platformBrowser)).length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('is the only way the client calls fetch, WebSocket, the clipboard, Notification, window.open or the page origin', () => {
+    for (const [name, rule] of seamForbidden) {
+      const hits = Object.entries(sources)
+        .filter(([path, code]) => !path.startsWith(platformBrowser) && !(seamExceptions[name] ?? []).includes(path) && rule.test(withoutComments(code)))
+        .map(([path]) => path);
+      expect(hits, name).toEqual([]);
+    }
+  });
+
+  it('is still catching each: failing examples of each rule, through window, globalThis and self', () => {
+    const examples: Record<string, readonly string[]> = {
+      fetch: ['const r = await fetch(path);', 'globalThis.fetch(path)', 'self.fetch(path)', 'window.fetch(path)', "globalThis['fetch'](path)", 'const f = self.fetch;'],
+      'new WebSocket': ['new WebSocket(url)', 'new globalThis.WebSocket(url)', 'new self.WebSocket(url)', 'const W = window.WebSocket;', "self['WebSocket']"],
+      'the clipboard': ['navigator.clipboard.writeText(t)', 'globalThis.navigator.clipboard.readText()', 'self.navigator.clipboard', "navigator['clipboard']"],
+      'a Notification': ["new window.Notification('x')", "new Notification('x')", "new globalThis.Notification('x')", 'self.Notification.requestPermission()', 'const N = globalThis.Notification;'],
+      'window.open': ["window.open('https://example.com')", "globalThis.open('x')", "self.open ('x')"],
+      'the page origin or protocol': ['const o = window.location.origin;', 'globalThis.location.protocol', 'self.location.origin'],
+    };
+    for (const [name, rule] of seamForbidden) {
+      const fixtures = examples[name] ?? [];
+      expect(fixtures.length, name).toBeGreaterThan(0);
+      for (const fixture of fixtures) expect(rule.test(fixture), `${name}: ${fixture}`).toBe(true);
+    }
+    // Not fetch: a name that ends in it, or a method of that name.
+    expect(seamForbidden[0]?.[1].test('fetchFileBytes(id)')).toBe(false);
+    expect(seamForbidden[0]?.[1].test('platform.http.fetch(x)')).toBe(false);
+    expect(seamForbidden[4]?.[1].test('dialog.open(x)')).toBe(false);
+  });
+
+  it('names no route in src/api.ts: every request is an operation of the table', () => {
+    const code = withoutComments(sources['./api.ts'] ?? '');
+    expect(code).not.toMatch(/['"`]\/(v\d|healthz)/);
+    expect(code).not.toMatch(/\bsecretRoutes\b/);
+    // And the table is read by src/api.ts and the platform alone.
+    const reading = Object.entries(sources)
+      .filter(([, code]) => /from\s+['"](\.\.?\/)+(platform\/)?operations['"]/.test(code))
+      .map(([path]) => path)
+      .sort();
+    expect(reading).toEqual(['./api.ts', './platform/browser/http.ts', './platform/browser/sockets.ts', './platform/desktop/bridge.ts', './platform/desktop/http.ts', './platform/desktop/sockets.ts', './platform/types.ts']);
+  });
+
+  it('keeps the desktop adapter out of the browser graph', () => {
+    // Only the build-selected alias reaches the adapter; no source imports it.
+    const importing = Object.entries(sources)
+      .filter(([path, code]) => !path.startsWith('./platform/desktop/') && /platform\/desktop|from\s+['"]\.\/desktop/.test(code))
+      .map(([path]) => path);
+    expect(importing).toEqual([]);
+    expect(sources['./platform/index.ts']).toContain("from '#platform-selected'");
+  });
+
+  it('keeps the bridge to types and to schema types: no Electron, no any, no channel argument', () => {
+    const code = withoutComments(sources['./platform/desktop/bridge.ts'] ?? '');
+    expect(code).not.toMatch(/\bany\b|electron|ipcRenderer|IpcRenderer|\bchannel:\s*string\b/i);
+    // Every import is a type.
+    expect(code.match(/^import (?!type\b).*/gm) ?? []).toEqual([]);
+  });
+
+  it('selects the desktop adapter only under --mode desktop', async () => {
+    const result = await build({ configFile: 'vite.config.ts', mode: 'desktop', logLevel: 'silent', build: { write: false } });
+    const outputs = (Array.isArray(result) ? result : [result]).flatMap((r) => ('output' in r ? r.output : []));
+    const code = outputs.map((o) => (o.type === 'chunk' ? o.code : '')).join('\n');
+    expect(code).toContain(desktopMarker);
+    // And the browser's credential store is then not in it.
+    expect(code).not.toContain('conch.web.token');
+  }, 60_000);
+});
+
+// Every time and date the page shows comes from src/time.ts (F26), so they
+// share one locale and hour cycle: no other module formats one itself.
+describe('times and dates', () => {
+  it('are formatted in src/time.ts alone', () => {
+    const formatting = Object.entries(sources)
+      .filter(([path, code]) => path !== './time.ts' && /\.toLocale(Date|Time)?String\(|\bIntl\.DateTimeFormat\b/.test(withoutComments(code)))
+      .map(([path]) => path);
+    expect(formatting).toEqual([]);
+  });
+});

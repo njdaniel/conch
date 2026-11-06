@@ -32,6 +32,11 @@
 //! - [`parse_command`], [`parse_event`], [`to_line`]: the managed helper's control
 //!   protocol (`docs/design/tui-voice.md`); [`parse_command_v2`], [`parse_event_v2`]: its
 //!   version 2 (§20), which the hello offers beside v1.
+//! - [`VoiceControlPipeAttachedV1`], [`validate_nonce`], [`parse_attached`]: the attach line
+//!   a helper writes first when its events channel is an endpoint it connects to rather than
+//!   fd 3 (`conch.voice_control_pipe.v1`; `docs/design/windows-desktop.md` §3.4,
+//!   `docs/design/linux-desktop.md` §5.2). A spawn-to-pipe binding, not authentication; its
+//!   nonce is the one secret-shaped value on a control channel, and its `Debug` redacts it.
 //! - [`VoiceDevicesV1`]: the device list `conch-voice devices --json` writes.
 //! - [`PresenceStream`]: snapshots in order, then a [`StreamEnd`].
 //!
@@ -43,6 +48,7 @@
 
 mod client;
 mod control;
+mod control_pipe;
 mod control_v2;
 mod error;
 mod login;
@@ -67,6 +73,11 @@ pub use control::{
     VoiceControlPhase, VoiceControlProtocolErrorV1, VoiceControlPtt, VoiceControlPttProblem,
     VoiceControlReason, VoiceControlRefusal, VoiceControlSetDeafenV1, VoiceControlSetMuteV1,
     VoiceControlStartV1, VoiceControlStateV1, parse_command, parse_event, to_line,
+};
+pub use control_pipe::{
+    VOICE_CONTROL_PIPE_FLAG, VOICE_CONTROL_PIPE_NONCE_BYTES, VOICE_CONTROL_PIPE_NONCE_CHARS,
+    VOICE_CONTROL_PIPE_NONCE_ENV, VOICE_CONTROL_PIPE_SCHEMA_V1, VoiceControlPipeAttachedV1,
+    VoiceControlPipeKind, parse_attached, validate_nonce,
 };
 pub use control_v2::{
     VOICE_CONTROL_DEVICE_DEFAULT, VOICE_CONTROL_SCHEMA_V2, VoiceControlAckV2,

@@ -1,20 +1,22 @@
-// The landing page of an invite link (issue #440): what the invite grants,
-// then how to join with it, then the lobby. Since issue #713 an invite may
-// make an account (a name and a password together, through POST
-// /v2/invites/redeem), start a guest visit, or offer both: the page offers
-// what the server's preview says the invite allows now, and nothing else. The
-// code is a prop held in memory by App, sent only in request bodies, and
-// never rendered: nothing on this page shows it.
+// The landing page of a member link (issues #440, #990): who invited you and
+// where you land, then how to join with it, then the lobby. The link is
+// previewed through POST /v2/invites/preview and makes an account (a name and
+// a password together) through POST /v2/invites/redeem. Guests are removed
+// for now (issue #1005), so the page offers an account when the server's
+// preview says the link allows it, and nothing else: it never routes to the
+// guest flow. The code is a prop held in memory by App, sent only in request
+// bodies, and never rendered: nothing on this page shows it.
 import { useEffect, useRef, useState } from 'react';
 import * as api from './api';
 import { CreateAccount, type AccountProblem } from './CreateAccount';
-import { GuestJoin, guestJoinRefusal } from './Guest';
-import type { InvitePreviewV1 } from './schema/invite';
+import type { InvitePreviewV2 } from './schema/invite';
 import type { WhoAmIResponseV1 } from './schema/principal';
+import { isNameMessage, nameRefusalLine } from './nameRefusal';
 import { ServerVersion } from './ServerVersion';
 import { noticeText } from './state/auth';
 import { fallbackChannel } from './state/channels';
 import { insecureLine, needsHttps } from './transport';
+import { dateTimeOf } from './time';
 
 // The one answer for a code that is unknown, used, expired or closed. The
 // server does not say which, so neither does the page. Someone who joined from
@@ -40,11 +42,11 @@ export function serverLine(message: string | undefined, fallback: string): strin
   return `${line.charAt(0).toUpperCase()}${line.slice(1)}${/[.!?]$/.test(line) ? '' : '.'}`;
 }
 
-// What the page says when the server refuses a password or a guest visit
+// What the page says when the server refuses a password
 // because the connection is not HTTPS (design §5.4): what the operator has to
 // do, not just that it failed.
 export const httpsRequiredLine =
-  'The server takes passwords and starts guest visits only over HTTPS, and it does not see this connection as HTTPS. Ask the operator to serve Conch over HTTPS. Behind a reverse proxy, conchd must be started with --trusted-proxies naming the proxy, and the proxy must set X-Forwarded-Proto.';
+  'The server takes passwords only over HTTPS, and it does not see this connection as HTTPS. Ask the operator to serve Conch over HTTPS. Behind a reverse proxy, conchd must be started with --trusted-proxies naming the proxy, and the proxy must set X-Forwarded-Proto.';
 
 // A refusal of the server's, as the invite, joining and sign-in calls give it.
 export type Refusal = { readonly failure: api.ApiFailure; readonly code?: string; readonly message?: string; readonly retryAfter?: number };
@@ -63,7 +65,7 @@ export function refusalLine(result: Refusal): string {
     case 'https_required':
       return httpsRequiredLine;
     case 'accounts_require_auth':
-      return 'This server runs without sign-in, so it has no accounts or guest visits.';
+      return 'This server runs without sign-in, so it has no accounts.';
     default:
       return 'The server gave an unexpected reply. Try again.';
   }
@@ -77,9 +79,15 @@ export function accountRefusal(result: Refusal): AccountProblem | null {
     case 'principal_exists':
       return { line: 'That name is taken. Choose another.', field: 'name' };
     case 'password_unacceptable':
-      return { line: 'That password is too common, or it contains your name. Choose another.', field: 'password' };
+      return { line: 'That password is too common, a repeated pattern such as aaaa, blank, or has your name in it. Choose another.', field: 'password' };
     case 'invalid_request':
-      return { line: serverLine(result.message, 'The server did not accept that name or password. Check both and try again.'), field: 'name' };
+      // A refusal of the name never shows the server's own words: they speak
+      // of a "principal name" (issue #1082).
+      if (isNameMessage(result.message)) return { line: nameRefusalLine(result.message), field: 'name' };
+      // Nor any other of its words: a password rule is matched on its words
+      // and said in the page's own, and anything else gets one fixed line.
+      if (/password/i.test(result.message ?? '')) return { line: 'That password cannot be used. Choose another.', field: 'password' };
+      return { line: 'The server did not accept that name or password. Check both and try again.', field: 'name' };
     case 'joining_closed':
       return { line: 'Accounts cannot be made here now.' };
     case 'joining_paused':
@@ -97,20 +105,16 @@ export function accountRefusal(result: Refusal): AccountProblem | null {
 export const heldLine =
   'This browser holds another sign-in that could not be checked. Reload the page when the server can be reached: it will say who is signed in here and offer to sign them out before you join.';
 
-// What an invite lets a new person do now, from its preview. A server that
-// predates guests sends no join: its invites make accounts, as they always
-// did.
+// What a link lets a new person do now, from its preview: make an account,
+// or nothing. Guests are removed for now (issue #1005): whatever the server
+// says of guests, this page offers none.
 interface Offer {
   readonly account: boolean;
-  readonly guest: boolean;
-  readonly guestsFull: boolean;
   readonly paused: boolean;
 }
 
-function offerOf(preview: InvitePreviewV1): Offer {
-  const join = preview.join;
-  if (join === undefined) return { account: true, guest: false, guestsFull: false, paused: false };
-  return { account: join.account, guest: join.guest, guestsFull: join.guests_full === true, paused: join.paused === true };
+function offerOf(preview: InvitePreviewV2): Offer {
+  return { account: preview.join.account, paused: preview.join.paused === true };
 }
 
 // channelWords names an invite's channels in a sentence: "#red and #blue".
@@ -122,7 +126,7 @@ export function channelWords(channels: readonly string[]): string {
 
 type Preview =
   | { readonly state: 'loading' }
-  | { readonly state: 'ready'; readonly preview: InvitePreviewV1 }
+  | { readonly state: 'ready'; readonly preview: InvitePreviewV2 }
   // gone is the invite that no longer works: nothing on the page can help,
   // and only someone signed in here has somewhere to go back to.
   | { readonly state: 'refused'; readonly line: string; readonly gone: boolean };
@@ -160,11 +164,8 @@ export function Invite({
 }) {
   const [preview, setPreview] = useState<Preview>({ state: 'loading' });
   const [attempt, setAttempt] = useState(0);
-  // The way of joining chosen, when the invite offers both.
-  const [choice, setChoice] = useState<'account' | 'guest' | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<AccountProblem | null>(null);
-  const [guestProblem, setGuestProblem] = useState<string | null>(null);
   const [untold, setUntold] = useState(false);
   // Redeeming found another sign-in held here after all.
   const [held, setHeld] = useState(false);
@@ -172,7 +173,7 @@ export function Invite({
 
   useEffect(() => {
     let live = true;
-    void api.previewInvite(inviteCode).then((result) => {
+    void api.previewMemberLink(inviteCode).then((result) => {
       if (!live) return;
       if (result.ok) setPreview({ state: 'ready', preview: result.value });
       else setPreview({ state: 'refused', line: refusalLine(result), gone: result.code === 'invite_invalid' });
@@ -189,12 +190,10 @@ export function Invite({
   const ready = preview.state === 'ready' ? preview.preview : null;
   const offer = ready === null ? null : offerOf(ready);
   // A page on plain HTTP beyond this machine offers no form that would send
-  // a password or start a visit (design §5.4): the server would refuse it,
+  // a password (design §5.4): the server would refuse it,
   // but only after the password had crossed the network.
   const insecure = needsHttps(origin);
-  // One way offered is that way; two are a choice.
-  const way =
-    offer === null || insecure ? null : offer.account && offer.guest ? choice : offer.account ? 'account' : offer.guest ? 'guest' : null;
+  const way = offer === null || insecure ? null : offer.account ? 'account' : null;
 
   function newPerson() {
     if (busy) return;
@@ -246,21 +245,9 @@ export function Invite({
       joinedOr(result, (refusal) => {
         setProblem(
           refusal.code === 'joining_closed'
-            ? { line: 'This invite makes guest visits only, not accounts.' }
+            ? { line: 'This invite cannot be used to make an account.' }
             : (accountRefusal(refusal) ?? { line: refusalLine(refusal) }),
         );
-      });
-    });
-  }
-
-  function joinAsGuest(label: string) {
-    if (busy || ready === null || insecure) return;
-    setBusy(true);
-    setGuestProblem(null);
-    void api.redeemInviteAsGuest(inviteCode, label).then((result) => {
-      setBusy(false);
-      joinedOr(result, (refusal) => {
-        setGuestProblem(guestJoinRefusal(refusal));
       });
     });
   }
@@ -318,11 +305,13 @@ export function Invite({
                 ))}
               </ul>
             </dd>
-            <dt>Voice</dt>
-            <dd>{ready.voice ? 'Included' : 'Not included'}</dd>
             <dt>Expires</dt>
             <dd>
-              <time dateTime={ready.expires_at}>{new Date(ready.expires_at).toLocaleString()}</time>
+              {ready.expires_at === undefined ? (
+                'Does not expire'
+              ) : (
+                <time dateTime={ready.expires_at}>{dateTimeOf(ready.expires_at)}</time>
+              )}
             </dd>
           </dl>
           {signedInAs !== null ? (
@@ -359,40 +348,8 @@ export function Invite({
                 <p className="notice insecure">{insecureLine}</p>
               ) : offer.paused ? (
                 <p className="notice">Joining through this invite is paused for now. Try the link again later.</p>
-              ) : !offer.account && !offer.guest ? (
-                <p className="notice">
-                  {offer.guestsFull
-                    ? 'No more guests can join right now. Try the link again later.'
-                    : `This invite cannot be used to join right now. Ask ${ready.inviter} for another way in.`}
-                </p>
-              ) : offer.guestsFull ? (
-                <p className="hint">Guest visits are full right now; you can still create an account.</p>
-              ) : null}
-              {!insecure && offer.account && offer.guest && way === null ? (
-                <div role="group" aria-label="How to join" className="join-choice">
-                  <p className="hint">
-                    An account is yours to keep: you sign in again with its name and password. A guest visit needs no
-                    password, and ends when you end it or when it expires.
-                  </p>
-                  <div className="actions">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setChoice('account');
-                      }}
-                    >
-                      Create an account
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setChoice('guest');
-                      }}
-                    >
-                      Join as guest
-                    </button>
-                  </div>
-                </div>
+              ) : !offer.account ? (
+                <p className="notice">This invite cannot be used to join right now. Ask {ready.inviter} for another way in.</p>
               ) : null}
               {way === 'account' ? (
                 <CreateAccount
@@ -403,22 +360,7 @@ export function Invite({
                   onCancel={() => {
                     if (busy) return;
                     setProblem(null);
-                    if (offer.guest) setChoice(null);
-                    else onBack();
-                  }}
-                />
-              ) : null}
-              {way === 'guest' ? (
-                <GuestJoin
-                  busy={busy}
-                  problem={guestProblem}
-                  bounds="on its own within a day at most"
-                  onJoin={joinAsGuest}
-                  onCancel={() => {
-                    if (busy) return;
-                    setGuestProblem(null);
-                    if (offer.account) setChoice(null);
-                    else onBack();
+                    onBack();
                   }}
                 />
               ) : null}

@@ -15,7 +15,7 @@ import (
 // spends, which neither touches nor is touched by it.
 func TestConversionNameProbesAreLimitedPerAddress(t *testing.T) {
 	f := newLoginFixture(t, Config{})
-	f.mustPutJoin(t, openBoth("red"))
+	f.mustPutJoin(t, openAccounts("red"))
 	l := looseLoginLimits()
 	l.nameProbesPerAddress = inviteLimit{"name_probes_per_address", 1, time.Hour}
 	l.conversionNameProbesPerAddress = inviteLimit{"conversion_name_probes_per_address", 2, time.Hour}
@@ -28,9 +28,9 @@ func TestConversionNameProbesAreLimitedPerAddress(t *testing.T) {
 	// conversions' are untouched.
 	assertErrorBody(t, f.joinAccount(t, "alice", remote), http.StatusConflict, schema.ErrorCodePrincipalExists)
 	assertErrorBody(t, f.joinAccount(t, "a-free-name", remote), http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
-	a := mustJoined(t, f.joinGuest(t, "", remote))
-	b := mustJoined(t, f.joinGuest(t, "", remote))
-	c := mustJoined(t, f.joinGuest(t, "", remote))
+	a := f.seedGuest(t, "")
+	b := f.seedGuest(t, "")
+	c := f.seedGuest(t, "")
 	assertErrorBody(t, convertFrom(a.Token, "alice", remote), http.StatusConflict, schema.ErrorCodePrincipalExists)
 	assertErrorBody(t, convertFrom(b.Token, "alice", remote), http.StatusConflict, schema.ErrorCodePrincipalExists)
 	// The address's two are spent between them: a third guest, with probes
@@ -39,7 +39,7 @@ func TestConversionNameProbesAreLimitedPerAddress(t *testing.T) {
 	// Another address's guests are not affected, and the conversions spent
 	// nothing of that address's account allowance.
 	const other = "198.51.100.97:1"
-	d := mustJoined(t, f.joinGuest(t, "", other))
+	d := f.seedGuest(t, "")
 	mustConverted(t, convertFrom(d.Token, "member", other))
 	assertErrorBody(t, f.joinAccount(t, "alice", other), http.StatusConflict, schema.ErrorCodePrincipalExists)
 }

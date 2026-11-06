@@ -15,7 +15,7 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 
 type Json = Record<string, unknown>;
 type Call = { readonly method: string; readonly path: string; readonly body: unknown };
-type Channel = { id: number; name: string; created_at: string };
+type Channel = { id: number; name: string; created_at: string; manages?: boolean };
 type Who = { id: number; kind: string; name: string; role: string };
 
 const operator: Who = { id: 1, kind: 'human', name: 'nick', role: 'operator' };
@@ -149,7 +149,7 @@ function install(me: Who = operator) {
         if (channel === undefined) return notFound();
         switch (m[2]) {
           case 'members':
-            return Promise.resolve(json({ members: [{ principal_id: server.me.id, created_at: at, name: server.me.name, kind: 'human' }] }));
+            return Promise.resolve(json({ members: [{ principal_id: server.me.id, created_at: at, name: server.me.name, kind: 'human', manages: channel.manages }] }));
           case 'nets':
             return Promise.resolve(json({ nets: [] }));
           case 'read-state': {
@@ -200,9 +200,8 @@ async function open(): Promise<{ chat: FakeSocket; events: FakeSocket }> {
 
 // openForm opens the rename form of the open channel.
 function openForm(name: string): HTMLElement {
-  const toggle = within(nav()).getByRole('button', { name: `Rename #${name}` });
-  fireEvent.click(toggle);
-  expect(toggle.getAttribute('aria-expanded')).toBe('true');
+  fireEvent.click(within(nav()).getByRole('button', { name: `Actions for ${name}` }));
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Rename channel…' }));
   return screen.getByRole('form', { name: 'Rename channel' });
 }
 
@@ -241,17 +240,92 @@ afterEach(() => {
 describe('the rename control', () => {
   it('is offered to an operator, for the open channel', async () => {
     await open();
-    expect(within(nav()).getByRole('button', { name: 'Rename #general' })).toBeDefined();
-    expect((document.getElementById('rename-channel-form') as HTMLFormElement).hidden).toBe(true);
+    fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((i) => i.textContent)).toEqual(['Rename channel…', 'Leave channel', 'Make private', 'Make default channel', 'Archive channel…']);
+    // Nothing is shown under the list any more: the form is reached by the menu only.
+    expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
+    expect(within(nav()).queryByRole('button', { name: /^Rename #/ })).toBeNull();
   });
 
-  it('is not offered to a member', async () => {
+  it('is offered to this channel\'s manager, who can rename it', async () => {
+    window.sessionStorage.clear();
+    window.localStorage.setItem(key, secret);
+    install(member);
+    (server.channels[0] as Channel).manages = true;
+    await open();
+    const form = openForm('general');
+    fireEvent.change(field(), { target: { value: 'managed-room' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Rename channel' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
+    });
+    expect(renames()).toEqual([{ method: 'PUT', path: '/v1/channels/7/name', body: { name: 'managed-room', from: 'general' } }]);
+    await movedTo('managed-room', 'general');
+  });
+
+  it('keeps the draft typed in the channel, in the box and in the tab, under the same id (issue #1039)', async () => {
+    await open();
+    fireEvent.change(screen.getByLabelText('Message #general'), { target: { value: 'half a thought' } });
+    const form = openForm('general');
+    fireEvent.change(field(), { target: { value: 'renamed-room' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Rename channel' }));
+    await movedTo('renamed-room', 'general');
+    expect(screen.getByLabelText<HTMLTextAreaElement>('Message #renamed-room').value).toBe('half a thought');
+    await waitFor(() => {
+      expect(JSON.parse(window.sessionStorage.getItem('conch.web.drafts') ?? '{}')).toMatchObject({ drafts: { '7': 'half a thought' } });
+    });
+  });
+
+  it('is not offered to a member, whose menu still offers Leave', async () => {
     window.sessionStorage.clear();
     window.localStorage.setItem(key, secret);
     install(member);
     await open();
-    expect(within(nav()).queryByRole('button', { name: /^Rename/ })).toBeNull();
-    expect(document.getElementById('rename-channel-form')).toBeNull();
+    fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
+    expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
+    expect(renames()).toEqual([]);
+  });
+
+  it('is offered to a manager on the channel they manage only', async () => {
+    window.sessionStorage.clear();
+    window.localStorage.setItem(key, secret);
+    install(member);
+    (server.channels[1] as Channel).manages = true;
+    await open();
+    fireEvent.click(within(nav()).getByRole('button', { name: 'Actions for general' }));
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+    expect(within(nav()).getByRole('button', { name: 'Actions for ops' })).toBeDefined();
+  });
+
+  it('renames the row\'s channel, not the open one, and leaves the open one open', async () => {
+    await open();
+    openForm('ops');
+    expect(field().value).toBe('ops');
+    expect(within(nav().querySelectorAll('li')[1] as HTMLElement).getByRole('form', { name: 'Rename channel' })).toBeDefined();
+    type('workshop');
+    fireEvent.click(within(screen.getByRole('form', { name: 'Rename channel' })).getByRole('button', { name: 'Rename channel' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
+    });
+    expect(renames()).toEqual([{ method: 'PUT', path: '/v1/channels/8/name', body: { name: 'workshop', from: 'ops' } }]);
+    expect(within(nav()).getByRole('button', { name: 'workshop' })).toBeDefined();
+    expect(within(nav()).getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
+    expect(document.activeElement).toBe(within(nav()).getByRole('button', { name: 'Actions for workshop' }));
+  });
+
+  it('closes on Escape, or Cancel, and returns focus to the row\'s ⋯ without renaming', async () => {
+    await open();
+    openForm('general');
+    fireEvent.keyDown(field(), { key: 'Escape' });
+    expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
+    const more = within(nav()).getByRole('button', { name: 'Actions for general' });
+    expect(document.activeElement).toBe(more);
+    openForm('general');
+    fireEvent.click(within(screen.getByRole('form', { name: 'Rename channel' })).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
+    expect(document.activeElement).toBe(more);
     expect(renames()).toEqual([]);
   });
 });
@@ -268,12 +342,14 @@ describe('an operator renames the open channel', () => {
     expect(field().value).toBe('general');
     type('lounge');
     fireEvent.click(within(screen.getByRole('form', { name: 'Rename channel' })).getByRole('button', { name: 'Rename channel' }));
-    await within(nav()).findByText('Renamed to #lounge');
+    await waitFor(() => {
+      expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
+    });
 
     expect(renames()).toEqual([{ method: 'PUT', path: '/v1/channels/7/name', body: { name: 'lounge', from: 'general' } }]);
     await movedTo('lounge', 'general');
-    expect((document.getElementById('rename-channel-form') as HTMLFormElement).hidden).toBe(true);
-    expect(document.activeElement).toBe(within(nav()).getByRole('button', { name: 'Rename #lounge' }));
+    expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
+    expect(document.activeElement).toBe(within(nav()).getByRole('button', { name: 'Actions for lounge' }));
     // Nothing reloaded, no socket reopened, the history still on screen.
     await act(async () => {});
     expect(historyReads()).toHaveLength(readsBefore);
@@ -304,7 +380,7 @@ describe('an operator renames the open channel', () => {
     [
       'a name already taken',
       () => Promise.resolve(json({ code: 'channel_exists', message: 'taken' }, 409)),
-      'There is already a channel with that name, or one that reads the same, perhaps one you are not in. Choose another name.',
+      'That name is taken',
     ],
     ['no answer at all', () => Promise.reject(new TypeError('failed')), 'Cannot reach the server. Try again.'],
   ])('says so for %s, keeps the name as typed and renames nothing', async (_case, answer, line) => {
@@ -315,6 +391,7 @@ describe('an operator renames the open channel', () => {
     fireEvent.click(within(screen.getByRole('form', { name: 'Rename channel' })).getByRole('button', { name: 'Rename channel' }));
     const said = await within(nav()).findByText(line);
     expect(said.getAttribute('role')).toBe('status');
+    expect(said.textContent).not.toContain('perhaps one you are not in');
     expect(screen.getByRole('form', { name: 'Rename channel' }).hidden).toBe(false);
     expect(field().value).toBe(' lounge');
     expect(within(nav()).getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
@@ -339,7 +416,9 @@ describe('an operator renames the open channel', () => {
     expect(field().value).toBe('lounge');
     // Sent again, it now names what the channel is called.
     fireEvent.click(within(screen.getByRole('form', { name: 'Rename channel' })).getByRole('button', { name: 'Rename channel' }));
-    await within(nav()).findByText('Renamed to #lounge');
+    await waitFor(() => {
+      expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
+    });
     expect(renames()[1]?.body).toEqual({ name: 'lounge', from: 'town-square' });
     await movedTo('lounge', 'town-square');
   });
@@ -363,7 +442,9 @@ describe('an operator renames the open channel', () => {
     expect(within(form).getByRole('button', { name: 'Rename channel' }).hasAttribute('disabled')).toBe(true);
     (server.channels[0] as Channel).name = 'lounge';
     answer(json({ channel: { id: 7, name: 'lounge', created_at: at } }));
-    await within(nav()).findByText('Renamed to #lounge');
+    await waitFor(() => {
+      expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
+    });
     expect(renames()).toHaveLength(1);
   });
 
@@ -404,12 +485,29 @@ describe('a rename made elsewhere', () => {
     expect(renames()).toEqual([]);
   });
 
+  it('a frame that makes the channel private puts the lock on its row, and one that makes it public takes it off (issue #1183)', async () => {
+    const { events } = await open();
+    const described = () => {
+      const ids = (within(nav()).getByRole('button', { name: 'general' }).getAttribute('aria-describedby') ?? '').split(' ');
+      return ids.map((id) => document.getElementById(id)?.textContent ?? '').join(' ');
+    };
+    expect(described()).not.toContain('private channel');
+    events.send({ schema: 'conch.channel.v1', channel_id: 7, name: 'general', created_at: at, visibility: 'private' });
+    await waitFor(() => {
+      expect(described()).toContain('private channel');
+    });
+    events.send({ schema: 'conch.channel.v1', channel_id: 7, name: 'general', created_at: at, visibility: 'public' });
+    await waitFor(() => {
+      expect(described()).not.toContain('private channel');
+    });
+  });
+
   it('a channel document for another channel, or one that does not validate, changes nothing', async () => {
     const { events } = await open();
     events.send({ schema: 'conch.channel.v1', channel_id: 8, name: 'ops-room', created_at: at });
     events.send({ schema: 'conch.channel.v1', channel_id: 7, created_at: at });
     await act(async () => {});
-    expect(within(nav()).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['general', 'ops']);
+    expect(within(nav()).getAllByRole('listitem').map((li) => li.querySelector('li > button')?.textContent)).toEqual(['general', 'ops']);
     expect(window.location.hash).toBe('#/c/general');
   });
 

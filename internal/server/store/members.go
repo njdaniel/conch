@@ -29,6 +29,10 @@ const (
 	// to a member's right to manage the channel (issue #789, ADR-010 §3.2).
 	AuditMemberManageGranted = "member_manage_granted"
 	AuditMemberManageRevoked = "member_manage_revoked"
+	// AuditMemberAddRefused records a refused membership add by name or by a
+	// channel manager (issue #790, ADR-010 §3.3): actor the caller, subject
+	// the channel, detail empty so no tried name or id is stored.
+	AuditMemberAddRefused = "member_add_refused"
 )
 
 // ErrNotMember is returned by SetChannelMemberCanDecide and
@@ -39,10 +43,10 @@ var ErrNotMember = errors.New("store: not a member of the channel")
 // ErrNotAddable is returned when a membership add names a target that cannot
 // be added by that path or actor (issue #789, ADR-010 §3.2, §3.3): for a
 // manager, any principal that is unknown, hidden, disabled, an agent, a guest,
-// an operator or owner, or outside the manager's channels; for
-// AddChannelMemberByName, any name that is not an enabled, non-hidden,
-// non-guest human (and within the manager's bound when the actor is a
-// manager). Every case returns this one error so a caller cannot tell them
+// or an operator or owner (issue #983: sharing a channel with the manager is
+// no longer required); for AddChannelMemberByName, any name that is not an
+// enabled, non-hidden, non-guest human (and not an operator or owner when the
+// actor is a manager). Every case returns this one error so a caller cannot tell them
 // apart; it matches ErrPrincipalNotFound so handlers map it to 404
 // principal_not_found.
 var ErrNotAddable error = notAddableError{}
@@ -124,6 +128,21 @@ func nullableID(id int64) any {
 // channel's is taken, issue #727), and a name with empty keys is
 // ErrNameInvalid.
 func (s *Store) CreateChannelAs(ctx context.Context, actor, name string, creatorID int64) (Channel, error) {
+	return s.createChannel(ctx, actor, name, creatorID, schema.ChannelPrivate)
+}
+
+// CreateUnownedChannel is CreateChannelAs with no creator and the visibility
+// asked for, in the one creating transaction (POST /v1/channels with
+// authentication off, issue #981): the channel, its visibility and its
+// channel_created row are written together or not at all.
+func (s *Store) CreateUnownedChannel(ctx context.Context, actor, name string, v schema.ChannelVisibility) (Channel, error) {
+	if !v.Valid() {
+		return Channel{}, fmt.Errorf("store: create channel %q: unknown visibility %q", name, v)
+	}
+	return s.createChannel(ctx, actor, name, 0, v)
+}
+
+func (s *Store) createChannel(ctx context.Context, actor, name string, creatorID int64, v schema.ChannelVisibility) (Channel, error) {
 	// SQLite stores timestamps at millisecond precision. Normalize the
 	// returned value to the same precision so a create response exactly
 	// describes what a subsequent read returns.
@@ -134,26 +153,182 @@ func (s *Store) CreateChannelAs(ctx context.Context, actor, name string, creator
 		if err != nil {
 			return err
 		}
-		ch = Channel{ID: id, Name: name, CreatedAt: now}
 		// Quoted, as a rename's names are, so a name with spaces in it reads
 		// as one field.
-		if err := appendAuditEventTx(ctx, tx, actor, AuditChannelCreated, channelSubject(id), fmt.Sprintf("name=%q", name), now); err != nil {
+		detail := fmt.Sprintf("name=%q", name)
+		if v != schema.ChannelPrivate {
+			if _, err := tx.ExecContext(ctx, "UPDATE channels SET visibility = ? WHERE id = ?", string(v), id); err != nil {
+				return fmt.Errorf("store: create channel %d: set visibility: %w", id, err)
+			}
+			detail += " visibility=" + string(v)
+		}
+		ch = Channel{ID: id, Name: name, CreatedAt: now, Visibility: v}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditChannelCreated, channelSubject(id), detail, now); err != nil {
 			return err
 		}
 		if creatorID == 0 {
 			return nil
 		}
-		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO channel_members (channel_id, principal_id, added_by, created_at) VALUES (?, ?, ?, ?)",
-			id, creatorID, creatorID, now.UnixMilli()); err != nil {
-			return fmt.Errorf("store: add creator %d to channel %d: %w", creatorID, id, err)
-		}
-		return appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(id), memberDetail(creatorID), now)
+		return addChannelCreatorTx(ctx, tx, actor, id, creatorID, false, now)
 	})
 	if err != nil {
 		return Channel{}, err
 	}
 	return ch, nil
+}
+
+// addChannelCreatorTx makes creatorID the first member of the channel it
+// just created, deciding approvals (can_decide = 1), and its manager when
+// manages is set (ADR-013 O9), audited member_added and, for a manager,
+// member_manage_granted. It is the one membership write of channel
+// creation, the place a directory-signal hook joins it (issue #988).
+func addChannelCreatorTx(ctx context.Context, tx execer, actor string, channelID, creatorID int64, manages bool, now time.Time) error {
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide, manages) VALUES (?, ?, ?, ?, 1, ?)",
+		channelID, creatorID, creatorID, now.UnixMilli(), boolInt(manages)); err != nil {
+		return fmt.Errorf("store: add creator %d to channel %d: %w", creatorID, channelID, err)
+	}
+	if err := appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(channelID), memberDetail(creatorID), now); err != nil {
+		return err
+	}
+	if !manages {
+		return nil
+	}
+	return appendAuditEventTx(ctx, tx, actor, AuditMemberManageGranted, channelSubject(channelID), memberDetail(creatorID), now)
+}
+
+// AuditChannelCreateRefused counts a capped creator's refused channel
+// creation, a name collision (issue #981). Its detail carries no name, so
+// the audit trail is no copy of the existence oracle it bounds.
+const AuditChannelCreateRefused = "channel_create_refused"
+
+// ErrNotCommunityMember is a write only a member of the community may make
+// (design §1.1, isMemberTx), asked by anyone else: an agent, a guest, an
+// ended guest's identity.
+var ErrNotCommunityMember = errors.New("store: not a member of the community")
+
+// ChannelCreatePermissionError is a channel creation by a member who does
+// not hold Perm now (ADR-014: create_public_channels or
+// create_private_channels, by the visibility asked for).
+type ChannelCreatePermissionError struct{ Perm schema.Permission }
+
+func (e *ChannelCreatePermissionError) Error() string {
+	return "store: creating this channel needs " + string(e.Perm)
+}
+
+// ChannelCreate is a member's channel creation (POST /v1/channels).
+type ChannelCreate struct {
+	// CallerID is the creator, re-read under the write lock.
+	CallerID   int64
+	Name       string
+	Visibility schema.ChannelVisibility
+	// Limits bounds a creator who does not hold manage_channels, decided
+	// under the write lock; a holder is not bounded.
+	Limits RenameLimits
+}
+
+// channelCreatePermission is the permission creating a channel of
+// visibility v needs.
+func channelCreatePermission(v schema.ChannelVisibility) schema.Permission {
+	if v == schema.ChannelPublic {
+		return schema.PermCreatePublicChannels
+	}
+	return schema.PermCreatePrivateChannels
+}
+
+// CreateChannelV1 makes a channel for a member (issue #981, ADR-013
+// decision 2): in one IMMEDIATE transaction it re-reads the caller and
+// refuses one who is not a community member (ErrNotCommunityMember) or no
+// longer holds the create permission for the visibility
+// (ChannelCreatePermissionError); applies the daily bound to a caller not
+// holding manage_channels (RenameLimitedError); claims the name (ErrDuplicate
+// on any collision, ErrNameInvalid); writes the channel with its visibility,
+// audited channel_created with the creator as actor, the bounded ones marked
+// limited=1; and makes the creator its only member and its manager. A
+// collision is recorded by RecordChannelCreateRefused, after this rolls back.
+func (s *Store) CreateChannelV1(ctx context.Context, req ChannelCreate, now time.Time) (Channel, error) {
+	now = now.Truncate(time.Millisecond)
+	actor := principalActor(req.CallerID)
+	var ch Channel
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		capped, err := channelCreatorStandingTx(ctx, tx, req.CallerID, req.Visibility)
+		if err != nil {
+			return err
+		}
+		detail := ""
+		if capped {
+			if err := channelWriteLimitTx(ctx, tx, actor, AuditChannelCreated, AuditChannelCreateRefused, req.Limits, now); err != nil {
+				return err
+			}
+			detail = channelRenameLimitedDetail
+		}
+		id, err := insertChannelTx(ctx, tx, req.Name, now)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE channels SET visibility = ? WHERE id = ?", string(req.Visibility), id); err != nil {
+			return fmt.Errorf("store: create channel %d: set visibility: %w", id, err)
+		}
+		ch = Channel{ID: id, Name: req.Name, CreatedAt: now, Visibility: req.Visibility, Manages: true}
+		if err := appendAuditEventTx(ctx, tx, actor, AuditChannelCreated, channelSubject(id),
+			fmt.Sprintf("name=%q visibility=%s", req.Name, req.Visibility)+detail, now); err != nil {
+			return err
+		}
+		return addChannelCreatorTx(ctx, tx, actor, id, req.CallerID, true, now)
+	})
+	if err != nil {
+		return Channel{}, err
+	}
+	return ch, nil
+}
+
+// RecordChannelCreateRefused atomically re-checks a capped creator's bound
+// and records a refused creation without the name. A caller that is no
+// longer a member, or no longer holds the permission, is refused as
+// CreateChannelV1 refuses it; a holder of manage_channels records nothing.
+func (s *Store) RecordChannelCreateRefused(ctx context.Context, req ChannelCreate, now time.Time) error {
+	now = now.Truncate(time.Millisecond)
+	actor := principalActor(req.CallerID)
+	return s.withImmediateTx(ctx, func(tx execer) error {
+		capped, err := channelCreatorStandingTx(ctx, tx, req.CallerID, req.Visibility)
+		if err != nil || !capped {
+			return err
+		}
+		if err := channelWriteLimitTx(ctx, tx, actor, AuditChannelCreated, AuditChannelCreateRefused, req.Limits, now); err != nil {
+			return err
+		}
+		return appendAuditEventTx(ctx, tx, actor, AuditChannelCreateRefused, "server", "", now)
+	})
+}
+
+// channelCreatorStandingTx decides, under the write lock, whether callerID
+// may create a channel of visibility v, and whether the daily bound applies
+// to it (it does not hold manage_channels).
+func channelCreatorStandingTx(ctx context.Context, tx execer, callerID int64, v schema.ChannelVisibility) (capped bool, err error) {
+	member, err := isMemberTx(ctx, tx, callerID)
+	if err != nil {
+		return false, err
+	}
+	if !member {
+		return false, ErrNotCommunityMember
+	}
+	p, err := principalByIDTx(ctx, tx, callerID)
+	if err != nil {
+		return false, err
+	}
+	perm := channelCreatePermission(v)
+	ok, err := principalPermittedTx(ctx, tx, p, perm)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, &ChannelCreatePermissionError{Perm: perm}
+	}
+	manager, err := principalPermittedTx(ctx, tx, p, schema.PermManageChannels)
+	if err != nil {
+		return false, err
+	}
+	return !manager, nil
 }
 
 // checkChannelExistsTx reports ErrNotFound when channelID does not exist.
@@ -177,10 +352,19 @@ const (
 )
 
 // memberActorStandingTx re-reads the acting principal under the write lock
-// (issue #789, ADR-010 §5.1). An actorID of 0 means an unconstrained system
-// or unauthenticated caller and has owner standing. Otherwise the actor must
-// be an enabled, non-hidden, non-guest human who is either an operator (with
-// or without the owner mark) or a member of channelID holding manages = 1.
+// (issue #789, ADR-010 §5.1) and decides its standing by permission, never
+// by role alone (ADR-014, design §7.2.1):
+//
+//  1. actor 0 (an unconstrained system or unauthenticated caller): owner
+//     standing;
+//  2. a disabled, hidden, guest or non-human actor: refused;
+//  3. an owner: owner standing;
+//  4. an operator holding manage_channels: operator standing;
+//  5. otherwise an operator or member: manager standing if its membership of
+//     channelID holds manages = 1, else refused.
+//
+// So an operator the owner has restricted gets exactly a member-manager's
+// standing in a channel it manages: no can_decide, no manages, no agents.
 func memberActorStandingTx(ctx context.Context, tx execer, channelID, actorID int64) (memberActorStanding, error) {
 	if actorID == 0 {
 		return standingOwner, nil
@@ -189,59 +373,84 @@ func memberActorStandingTx(ctx context.Context, tx execer, channelID, actorID in
 	if err != nil {
 		return 0, err
 	}
-	if !found || actorP.DisabledAt != nil || actorP.HiddenAt != nil || actorP.Kind != PrincipalHuman || actorP.guestTarget() {
+	if !found || actorP.DisabledAt != nil || actorP.HiddenAt != nil || actorP.guestTarget() {
 		return 0, ErrManagerRefused
 	}
-	switch actorP.Role {
-	case RoleOperator:
-		if actorP.Owner {
-			return standingOwner, nil
-		}
-		return standingOperator, nil
-	case RoleMember:
-		if err := checkChannelExistsTx(ctx, tx, channelID); err != nil {
-			return 0, err
-		}
-		var manages int
-		switch err := tx.QueryRowContext(ctx,
-			"SELECT manages FROM channel_members WHERE channel_id = ? AND principal_id = ?",
-			channelID, actorID).Scan(&manages); {
-		case errors.Is(err, sql.ErrNoRows):
-			return 0, ErrManagerRefused
+	// A granted agent (issue #1326, ai-administrators §3.2) has operator
+	// standing where it holds manage_channels, and none anywhere else: it is
+	// never a manager, and it has none in its own approval channel
+	// (agentStandingTx). An ungranted agent holds nothing and is refused
+	// here, as before.
+	if actorP.Kind != PrincipalHuman {
+		switch ok, err := agentStandingTx(ctx, tx, actorP, channelID); {
 		case err != nil:
-			return 0, fmt.Errorf("store: check manager standing of %d in channel %d: %w", actorID, channelID, err)
+			return 0, err
+		case ok:
+			return standingOperator, nil
 		}
-		if manages != 1 {
-			return 0, ErrManagerRefused
-		}
-		return standingManager, nil
-	default:
 		return 0, ErrManagerRefused
 	}
+	if actorP.IsOwner() {
+		return standingOwner, nil
+	}
+	switch ok, err := principalPermittedTx(ctx, tx, actorP, schema.PermManageChannels); {
+	case err != nil:
+		return 0, err
+	case ok:
+		return standingOperator, nil
+	}
+	if err := checkChannelExistsTx(ctx, tx, channelID); err != nil {
+		return 0, err
+	}
+	var manages int
+	switch err := tx.QueryRowContext(ctx,
+		"SELECT manages FROM channel_members WHERE channel_id = ? AND principal_id = ?",
+		channelID, actorID).Scan(&manages); {
+	case errors.Is(err, sql.ErrNoRows):
+		return 0, ErrManagerRefused
+	case err != nil:
+		return 0, fmt.Errorf("store: check manager standing of %d in channel %d: %w", actorID, channelID, err)
+	}
+	if manages != 1 {
+		return 0, ErrManagerRefused
+	}
+	return standingManager, nil
 }
 
 // checkManagerAddTargetTx checks whether managerID may add targetID to a
-// channel (issue #789, ADR-010 §3.2): targetID must be an enabled, non-hidden,
-// non-guest human member (not an operator or owner) who already shares at
-// least one channel with managerID. Every refused case returns ErrNotAddable.
+// channel (issue #789, ADR-010 §3.2; issue #983, ADR-013 O10): targetID must
+// be a member of the community (isMemberTx's test) who is not an operator or
+// owner and whom the manager may know. The ADR-010 bound, that the target
+// already shares a channel with the manager, is gone. Every refused case
+// returns ErrNotAddable, so a caller cannot tell an unknown id from a hidden
+// person.
+//
+// Every refused class runs the same statements: the principal read, the
+// permission read and the may-know read happen whatever the first answer is,
+// and only then are the two verdicts combined. An early return after the
+// principal read would make a ghost id, a hidden person or an operator
+// measurably faster than a member the manager may not know, which is an
+// existence oracle by timing (security review S1 of #988).
 func checkManagerAddTargetTx(ctx context.Context, tx execer, managerID, targetID int64) error {
 	target, found, err := queryPrincipal(ctx, tx, targetID)
 	if err != nil {
 		return err
 	}
-	if !found || target.HiddenAt != nil || target.DisabledAt != nil || target.Kind != PrincipalHuman || target.guestTarget() || target.Role != RoleMember || target.Owner {
-		return ErrNotAddable
+	addable := found && target.HiddenAt == nil && target.DisabledAt == nil && target.Kind == PrincipalHuman &&
+		!target.guestTarget() && target.Role == RoleMember && !target.Owner
+	// Who the manager may know bounds who they may add (design §13.11): with
+	// see_member_directory, any member; without it, their channel-mates only.
+	// mayKnowTx asks the principals table by id, so a missing row is a plain
+	// "not known" and the statement still runs.
+	seeAll, err := permittedTx(ctx, tx, managerID, schema.PermSeeMemberDirectory)
+	if err != nil {
+		return err
 	}
-	var shared bool
-	if err := tx.QueryRowContext(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM channel_members m1
-			JOIN channel_members m2 ON m2.channel_id = m1.channel_id
-			WHERE m1.principal_id = ? AND m2.principal_id = ?
-		)`, managerID, targetID).Scan(&shared); err != nil {
-		return fmt.Errorf("store: check shared channel between %d and %d: %w", managerID, targetID, err)
+	known, err := mayKnowTx(ctx, tx, managerID, targetID, seeAll)
+	if err != nil {
+		return err
 	}
-	if !shared {
+	if !addable || !known {
 		return ErrNotAddable
 	}
 	return nil
@@ -301,6 +510,11 @@ func (s *Store) putChannelMember(ctx context.Context, actor string, actorID, cha
 			if err := checkManagerAddTargetTx(ctx, tx, actorID, principalID); err != nil {
 				return err
 			}
+			// The archived guard of adding a member (issue #844), after the
+			// actor's standing is decided.
+			if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
+				return err
+			}
 			res, err := tx.ExecContext(ctx,
 				`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide, manages) VALUES (?, ?, ?, ?, 0, 0)
 				 ON CONFLICT (channel_id, principal_id) DO NOTHING`,
@@ -319,6 +533,10 @@ func (s *Store) putChannelMember(ctx context.Context, actor string, actorID, cha
 			return appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(channelID), memberDetail(principalID)+" can_decide=0", now)
 		}
 		if err := checkChannelExistsTx(ctx, tx, channelID); err != nil {
+			return err
+		}
+		// The archived guard of adding a member (issue #844).
+		if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
 			return err
 		}
 		target, found, err := queryPrincipal(ctx, tx, principalID)
@@ -347,6 +565,16 @@ func (s *Store) putChannelMember(ctx context.Context, actor string, actorID, cha
 			}
 		}
 		decide := canDecide == nil || *canDecide
+		// An agent's add gives the right to decide only when it says so
+		// (ai-administrators §3.5.4 wall 3): saying so is
+		// set_channel_member_rights, which a person approves.
+		if canDecide == nil && actorID != 0 {
+			agent, err := principalIsAgentTx(ctx, tx, actorID)
+			if err != nil {
+				return err
+			}
+			decide = !agent
+		}
 		mgr := manages != nil && *manages
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide, manages) VALUES (?, ?, ?, ?, ?, ?)
@@ -394,15 +622,42 @@ func (s *Store) putChannelMember(ctx context.Context, actor string, actorID, cha
 	return added, nil
 }
 
+// principalIsAgentTx reports whether id is an agent's.
+func principalIsAgentTx(ctx context.Context, tx execer, id int64) (bool, error) {
+	p, found, err := queryPrincipal(ctx, tx, id)
+	if err != nil || !found {
+		return false, err
+	}
+	return p.Kind == PrincipalAgent, nil
+}
+
 // AddChannelMemberByName adds the principal with exact name to channelID with
 // can_decide = 0 and manages = 0, whoever calls it (issue #789, ADR-010 §3.3).
-// addedBy is the acting principal (0 when unconstrained) and is re-checked
-// under the write lock. When the named principal is already a member, it
-// returns the existing ChannelMember with added=false and writes nothing,
-// preserving any existing can_decide or manages flags. Any target that is
-// unknown, hidden, disabled, an agent, a guest, or (for a manager actor) an
-// operator/owner or outside the manager's channels returns ErrNotAddable.
+// It is AddChannelMemberIfAbsent by name, with no decide right.
 func (s *Store) AddChannelMemberByName(ctx context.Context, actor string, channelID, addedBy int64, name string) (ChannelMember, bool, error) {
+	return s.AddChannelMemberIfAbsent(ctx, actor, channelID, addedBy, MemberTarget{Name: name}, nil)
+}
+
+// MemberTarget names the person an add is for: by Name or by ID, exactly one.
+type MemberTarget struct {
+	Name string
+	ID   int64
+}
+
+// AddChannelMemberIfAbsent adds target to channelID only if they are not in it
+// (issues #789, #1206). addedBy is the acting principal (0 when
+// unconstrained) and is re-checked under the write lock.
+//
+// A new member does not manage, and decides approvals only when canDecide is
+// true; only an operator (or an unconstrained call) may pass canDecide, a
+// manager doing so gets ErrManagerRefused, and a non-owner operator passing it
+// for an owner gets ErrOwnerProtected, as PUT does. When target is already a member it
+// returns the existing ChannelMember with added=false and writes nothing:
+// their can_decide and manages stay exactly as they were, so an add can never
+// take a decide right away. Any target that is unknown, hidden, disabled, an
+// agent, a guest, or (for a manager actor) one the manager may not add
+// returns ErrNotAddable, the same for a name and an id.
+func (s *Store) AddChannelMemberIfAbsent(ctx context.Context, actor string, channelID, addedBy int64, target MemberTarget, canDecide *bool) (ChannelMember, bool, error) {
 	now := time.Now().Truncate(time.Millisecond)
 	var member ChannelMember
 	var added bool
@@ -411,33 +666,60 @@ func (s *Store) AddChannelMemberByName(ctx context.Context, actor string, channe
 		if err != nil {
 			return err
 		}
+		if standing == standingManager && canDecide != nil {
+			return ErrManagerRefused
+		}
+		// An agent adds a member without the right to decide, on every
+		// channel (ai-administrators §3.5.4 wall 3): it cannot seat a decider
+		// by adding one. Rights change only by set_channel_member_rights,
+		// which a person approves.
+		if canDecide != nil && *canDecide {
+			if agent, err := principalIsAgentTx(ctx, tx, addedBy); err != nil {
+				return err
+			} else if agent {
+				return ErrManagerRefused
+			}
+		}
 		if err := checkChannelExistsTx(ctx, tx, channelID); err != nil {
 			return err
 		}
-		var targetID int64
-		switch err := tx.QueryRowContext(ctx, "SELECT id FROM principals WHERE name = ?", name).Scan(&targetID); {
-		case errors.Is(err, sql.ErrNoRows):
-			return ErrNotAddable
-		case err != nil:
-			return fmt.Errorf("store: find principal by name: %w", err)
+		// The archived guard of adding a member (issue #844).
+		if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
+			return err
+		}
+		if (target.Name == "") == (target.ID == 0) {
+			return fmt.Errorf("store: add channel member: give exactly one of a name and an id")
+		}
+		targetID := target.ID
+		if target.Name != "" {
+			switch err := tx.QueryRowContext(ctx, "SELECT id FROM principals WHERE name = ?", target.Name).Scan(&targetID); {
+			case errors.Is(err, sql.ErrNoRows):
+				return ErrNotAddable
+			case err != nil:
+				return fmt.Errorf("store: find principal by name: %w", err)
+			}
 		}
 		if standing == standingManager {
 			if err := checkManagerAddTargetTx(ctx, tx, addedBy, targetID); err != nil {
 				return err
 			}
 		} else {
-			target, found, err := queryPrincipal(ctx, tx, targetID)
+			p, found, err := queryPrincipal(ctx, tx, targetID)
 			if err != nil {
 				return err
 			}
-			if !found || target.HiddenAt != nil || target.DisabledAt != nil || target.Kind != PrincipalHuman || target.guestTarget() {
+			if !found || p.HiddenAt != nil || p.DisabledAt != nil || p.Kind != PrincipalHuman || p.guestTarget() {
 				return ErrNotAddable
 			}
+			if standing == standingOperator && canDecide != nil && p.IsOwner() {
+				return ErrOwnerProtected
+			}
 		}
+		decide := canDecide != nil && *canDecide
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide, manages) VALUES (?, ?, ?, ?, 0, 0)
+			`INSERT INTO channel_members (channel_id, principal_id, added_by, created_at, can_decide, manages) VALUES (?, ?, ?, ?, ?, 0)
 			 ON CONFLICT (channel_id, principal_id) DO NOTHING`,
-			channelID, targetID, nullableID(addedBy), now.UnixMilli())
+			channelID, targetID, nullableID(addedBy), now.UnixMilli(), boolInt(decide))
 		if err != nil {
 			return fmt.Errorf("store: add member %d to channel %d: %w", targetID, channelID, err)
 		}
@@ -447,7 +729,12 @@ func (s *Store) AddChannelMemberByName(ctx context.Context, actor string, channe
 		}
 		if n > 0 {
 			added = true
-			if err := appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(channelID), memberDetail(targetID)+" can_decide=0", now); err != nil {
+			detail := memberDetail(targetID)
+			if !decide {
+				// Recorded, so the audit trail says who held the right when.
+				detail += " can_decide=0"
+			}
+			if err := appendAuditEventTx(ctx, tx, actor, AuditMemberAdded, channelSubject(channelID), detail, now); err != nil {
 				return err
 			}
 		}
@@ -858,7 +1145,7 @@ func scanChannelMember(scan func(dest ...any) error) (ChannelMember, error) {
 
 func channelMemberTx(ctx context.Context, tx execer, channelID, principalID int64) (ChannelMember, error) {
 	row := tx.QueryRowContext(ctx,
-		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind, p.role, m.can_decide, m.manages, m.history_after, v.handle, v.label
+		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind, p.role, m.can_decide, (m.manages AND `+listedManagerSQL+`), m.history_after, v.handle, v.label
 		 FROM channel_members m
 		 JOIN principals p ON p.id = m.principal_id
 		 LEFT JOIN guest_visits v ON v.principal_id = m.principal_id AND v.state = 'active'
@@ -876,7 +1163,7 @@ func channelMemberTx(ctx context.Context, tx execer, channelID, principalID int6
 // foreign key, and principals are never deleted.
 func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]ChannelMember, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind, p.role, m.can_decide, m.manages, m.history_after, v.handle, v.label
+		`SELECT m.principal_id, m.added_by, m.created_at, p.name, p.kind, p.role, m.can_decide, (m.manages AND `+listedManagerSQL+`), m.history_after, v.handle, v.label
 		 FROM channel_members m
 		 JOIN principals p ON p.id = m.principal_id
 		 LEFT JOIN guest_visits v ON v.principal_id = m.principal_id AND v.state = 'active'
@@ -905,7 +1192,7 @@ func (s *Store) ListChannelMembers(ctx context.Context, channelID int64) ([]Chan
 // slice when there are none.
 func (s *Store) ListChannelsForPrincipal(ctx context.Context, principalID int64) ([]Channel, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT c.id, c.name, c.created_at, m.manages FROM channels c
+		`SELECT c.id, c.name, c.created_at, c.visibility, c.is_default, c.archived_at, m.manages FROM channels c
 		 JOIN channel_members m ON m.channel_id = c.id
 		 WHERE m.principal_id = ? ORDER BY c.id ASC`, principalID)
 	if err != nil {
@@ -914,13 +1201,11 @@ func (s *Store) ListChannelsForPrincipal(ctx context.Context, principalID int64)
 	defer func() { _ = rows.Close() }()
 	channels := []Channel{}
 	for rows.Next() {
-		var ch Channel
-		var createdAt int64
 		var manages int
-		if err := rows.Scan(&ch.ID, &ch.Name, &createdAt, &manages); err != nil {
+		ch, err := scanChannel(func(dest ...any) error { return rows.Scan(append(dest, &manages)...) })
+		if err != nil {
 			return nil, fmt.Errorf("store: list channels of principal %d: %w", principalID, err)
 		}
-		ch.CreatedAt = time.UnixMilli(createdAt)
 		ch.Manages = manages == 1
 		channels = append(channels, ch)
 	}
@@ -928,4 +1213,71 @@ func (s *Store) ListChannelsForPrincipal(ctx context.Context, principalID int64)
 		return nil, fmt.Errorf("store: list channels of principal %d: %w", principalID, err)
 	}
 	return channels, nil
+}
+
+// CheckManagerAddTarget applies the manager-add bound without changing the
+// membership. PutChannelMember checks it again under its write lock.
+func (s *Store) CheckManagerAddTarget(ctx context.Context, channelID, managerID, targetID int64) error {
+	return s.withImmediateTx(ctx, func(tx execer) error {
+		if _, err := memberActorStandingTx(ctx, tx, channelID, managerID); err != nil {
+			return err
+		}
+		return checkManagerAddTargetTx(ctx, tx, managerID, targetID)
+	})
+}
+
+// CheckMemberAddLimit refuses a membership add when callerID has already had
+// limit or more refused member-add attempts in the RenameWindow ending at now
+// (issue #790, ADR-010 §3.3). When full, it returns a *RenameLimitedError
+// naming when the next attempt fits.
+func (s *Store) CheckMemberAddLimit(ctx context.Context, callerID int64, limit int, now time.Time) error {
+	return checkMemberAddLimit(ctx, s.db, callerID, limit, now)
+}
+
+func checkMemberAddLimit(ctx context.Context, q execer, callerID int64, limit int, now time.Time) error {
+	if callerID <= 0 || limit <= 0 {
+		return nil
+	}
+	now = now.Truncate(time.Millisecond)
+	since := now.Add(-RenameWindow).UnixMilli()
+	actor := principalActor(callerID)
+	const where = `FROM audit_events WHERE actor = ? AND action = ? AND created_at > ?`
+	var count int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) `+where, actor, AuditMemberAddRefused, since).Scan(&count); err != nil {
+		return fmt.Errorf("store: count refused member adds of principal %d: %w", callerID, err)
+	}
+	if count < limit {
+		return nil
+	}
+	var freeing int64
+	if err := q.QueryRowContext(ctx, `SELECT created_at `+where+` ORDER BY created_at, id LIMIT 1 OFFSET ?`,
+		actor, AuditMemberAddRefused, since, count-limit).Scan(&freeing); err != nil {
+		return fmt.Errorf("store: count refused member adds of principal %d: %w", callerID, err)
+	}
+	return &RenameLimitedError{Until: time.UnixMilli(freeing).Add(RenameWindow)}
+}
+
+// RecordMemberAddRefused atomically re-checks the daily limit and appends a
+// member_add_refused audit row for callerID on channelID, with an empty detail
+// so no tried name or principal id is recorded (issue #790, ADR-010 §3.3).
+func (s *Store) RecordMemberAddRefused(ctx context.Context, callerID, channelID int64, limit int, now time.Time) error {
+	return s.RecordMemberAddRefusedFor(ctx, callerID, channelID, "", limit, now)
+}
+
+// RecordMemberAddRefusedFor is RecordMemberAddRefused for a refusal that a
+// permission decided (ADR-014, design §8.5): a non-empty perm is recorded
+// as the detail "permission=<name>", so the trail says a restricted
+// operator was refused operator standing. It still names no tried target.
+func (s *Store) RecordMemberAddRefusedFor(ctx context.Context, callerID, channelID int64, perm schema.Permission, limit int, now time.Time) error {
+	now = now.Truncate(time.Millisecond)
+	detail := ""
+	if perm != "" {
+		detail = "permission=" + string(perm)
+	}
+	return s.withImmediateTx(ctx, func(tx execer) error {
+		if err := checkMemberAddLimit(ctx, tx, callerID, limit, now); err != nil {
+			return err
+		}
+		return appendAuditEventTx(ctx, tx, principalActor(callerID), AuditMemberAddRefused, channelSubject(channelID), detail, now)
+	})
 }

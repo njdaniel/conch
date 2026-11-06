@@ -124,6 +124,9 @@ func (s *Server) handleCreateIntervention(w http.ResponseWriter, r *http.Request
 	case errors.Is(err, store.ErrTooManyInterventions):
 		writeError(w, http.StatusTooManyRequests, schema.ErrorCodeTooManyInterventions, "this run already has the most interventions waiting for an answer it may have")
 		return
+	case errors.Is(err, store.ErrChannelArchived):
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
+		return
 	case err != nil:
 		slog.ErrorContext(ctx, "interventions: create failed", "principal", caller.ID, "run", runID, "error", err)
 		writeInternalError(w)

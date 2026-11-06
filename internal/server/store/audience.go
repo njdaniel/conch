@@ -144,8 +144,8 @@ func (s *Store) ListVisibleMessagesPage(ctx context.Context, channelID int64, re
 
 // CountVisibleMessagesAfter returns how many messages in channelID with ID
 // greater than afterID reader may see, counting no further than limit (so a
-// result equal to limit means "at least that many"). It is the unread count of
-// a read mark (issue #351). It embeds the same visibility condition as
+// result equal to limit means "at least that many"). It embeds the same
+// visibility condition as
 // ListVisibleMessages, in the same statement, so a message the reader cannot
 // see is not counted, and a count is never a way to learn that a hidden
 // message exists. The cap is applied inside the statement, so the work is
@@ -167,6 +167,26 @@ func (s *Store) CountVisibleMessagesAfter(ctx context.Context, channelID int64, 
 	return n, nil
 }
 
+// CountVisibleUnreadMessagesAfter is CountVisibleMessagesAfter for an unread badge:
+// the reader's own posts are not unread to them, while every other visibility
+// and history-bound rule is identical.
+func (s *Store) CountVisibleUnreadMessagesAfter(ctx context.Context, channelID int64, reader Reader, afterID int64, limit int) (int, error) {
+	if limit <= 0 {
+		return 0, fmt.Errorf("store: count messages: limit must be positive, got %d", limit)
+	}
+	if afterID < 0 {
+		return 0, errors.New("store: count messages: a cursor is never negative")
+	}
+	scoped, predArgs := visibilityArgs(reader)
+	var n int
+	err := s.db.QueryRowContext(ctx, unreadSQL(scoped),
+		append(append([]any{channelID, afterID, reader.PrincipalID}, predArgs...), limit)...).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count unread messages in channel %d: %w", channelID, err)
+	}
+	return n, nil
+}
+
 // newestVisibleMessageID returns the id of the newest message in channelID
 // that reader may see, or 0 when there is none. MarkRead clamps a mark to it,
 // so a mark can never point past what the reader has seen, nor be used to
@@ -182,6 +202,131 @@ func (s *Store) newestVisibleMessageID(ctx context.Context, channelID int64, rea
 		return 0, fmt.Errorf("store: newest message in channel %d: %w", channelID, err)
 	}
 	return id, nil
+}
+
+// ChannelAuthor is one author named by ListChannelAuthors.
+type ChannelAuthor struct {
+	PrincipalID int64
+	Name        string
+	Kind        PrincipalKind
+}
+
+// ListChannelAuthors answers, for each of ids, whether that principal
+// authored at least one message in channelID that reader may read, and names
+// the ones that did, ordered by id (design §13.5). "May read" is
+// messageVisible, the condition every message read here embeds, in the same
+// statement: a whisper the reader was not sent, or a message before the
+// reader's history bound, does not make its author known. An id that
+// authored nothing the reader may read is absent, whether or not the
+// principal exists, so the answer discloses only what a visible message
+// already disclosed to the channel. Authors may be departed, disabled or
+// ended guests: the message stays attributed. At most MaxChannelAuthorIDs
+// distinct positive ids are asked; more is an error.
+func (s *Store) ListChannelAuthors(ctx context.Context, channelID int64, reader Reader, ids []int64) ([]ChannelAuthor, error) {
+	distinct := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id > 0 {
+			distinct[id] = struct{}{}
+		}
+	}
+	if len(distinct) > schema.MaxChannelAuthorIDs {
+		return nil, fmt.Errorf("store: list channel authors: %d ids asked, at most %d", len(distinct), schema.MaxChannelAuthorIDs)
+	}
+	if len(distinct) == 0 {
+		return []ChannelAuthor{}, nil
+	}
+	scoped, predArgs := visibilityArgs(reader)
+	args := make([]any, 0, len(distinct)+1+len(predArgs))
+	marks := make([]string, 0, len(distinct))
+	for id := range distinct {
+		marks = append(marks, "?")
+		args = append(args, id)
+	}
+	args = append(append(args, channelID), predArgs...)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT p.id, p.name, p.kind FROM principals p
+		 WHERE p.id IN (`+strings.Join(marks, ",")+`)
+		   AND EXISTS (SELECT 1 FROM messages m
+		               WHERE m.channel_id = ? AND m.author_id = p.id AND `+messageVisible(scoped)+`)
+		 ORDER BY p.id`, // #nosec G202 -- only "?" marks and constant conditions are joined; every value is an argument
+		args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: list authors of channel %d: %w", channelID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []ChannelAuthor{}
+	for rows.Next() {
+		var a ChannelAuthor
+		var kind string
+		if err := rows.Scan(&a.PrincipalID, &a.Name, &kind); err != nil {
+			return nil, fmt.Errorf("store: list authors of channel %d: %w", channelID, err)
+		}
+		a.Kind = PrincipalKind(kind)
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list authors of channel %d: %w", channelID, err)
+	}
+	return out, nil
+}
+
+// AuthorReaders is who holds a message of authorID that the authors route
+// would let them name (issue #1282), for the hide signal: the ids of the
+// humans, enabled and not hidden, who are a member of a channel where authorID
+// authored a message that they may read. "May read" is messageVisible with
+// the same scoped reader ListChannelAuthors is asked with, so the answer is
+// exactly the people for whom GET /v1/channels/{channel}/authors names the
+// author, and a frame to them tells nobody anything the message had not
+// already told them. An agent is never listed (it has no directory), nor is
+// anyone with no such message, whatever they know of the author otherwise.
+// Called after the author was hidden: their messages stay, their memberships
+// are gone.
+func (s *Store) AuthorReaders(ctx context.Context, authorID int64) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT v.id FROM principals v
+		 JOIN channel_members cm ON cm.principal_id = v.id
+		 WHERE v.kind = 'human' AND v.disabled_at IS NULL AND v.hidden_at IS NULL
+		   AND v.id <> ?
+		   AND EXISTS (SELECT 1 FROM messages x WHERE x.channel_id = cm.channel_id AND x.author_id = ?)
+		 ORDER BY v.id`, authorID, authorID)
+	if err != nil {
+		return nil, fmt.Errorf("store: readers of author %d: %w", authorID, err)
+	}
+	candidates, err := scanIDs(rows)
+	if err != nil {
+		return nil, fmt.Errorf("store: readers of author %d: %w", authorID, err)
+	}
+	var out []int64
+	for _, id := range candidates {
+		scoped, predArgs := visibilityArgs(Reader{Scoped: true, PrincipalID: id})
+		args := append([]any{id, authorID}, predArgs...)
+		var ok bool
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT EXISTS (SELECT 1 FROM messages m
+			                JOIN channel_members rc ON rc.channel_id = m.channel_id AND rc.principal_id = ?
+			                WHERE m.author_id = ? AND `+messageVisible(scoped)+`)`, // #nosec G202 -- constant conditions only
+			args...).Scan(&ok); err != nil {
+			return nil, fmt.Errorf("store: readers of author %d: %w", authorID, err)
+		}
+		if ok {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+// scanIDs reads a single integer column and closes rows.
+func scanIDs(rows *sql.Rows) ([]int64, error) {
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // historyWatermarkTx is the history bound a guest admitted to channelID now
@@ -201,7 +346,8 @@ func historyWatermarkTx(ctx context.Context, tx execer, channelID int64) (int64,
 // messageColumns is the column list scanMessages reads.
 const messageColumns = `m.id, m.channel_id, m.author_id, m.body, m.payload_schema, m.payload_json, m.created_at, m.audience_kind, m.net_id, m.thread_root_id,
 	(SELECT g.handle FROM message_guest_attribution g WHERE g.message_id = m.id),
-	(SELECT g.label FROM message_guest_attribution g WHERE g.message_id = m.id)`
+	(SELECT g.label FROM message_guest_attribution g WHERE g.message_id = m.id),
+	m.edited_at`
 
 // The visibility rule for which messages a reader may see, as SQL conditions
 // over the messages table aliased m. The list and the search both embed the
@@ -307,6 +453,10 @@ func countSQL(scoped bool) string {
 	return countHead + messageVisible(scoped) + countTail
 }
 
+func unreadSQL(scoped bool) string {
+	return countHead + `m.author_id <> ? AND ` + messageVisible(scoped) + countTail
+}
+
 func newestSQL(scoped bool) string {
 	return newestHead + messageVisible(scoped) + newestTail
 }
@@ -318,17 +468,26 @@ func searchSQL(scoped bool) string {
 // scanMessages reads the rows of a statement selecting messageColumns, and
 // loads the audience of any whisper among them. It closes rows.
 func (s *Store) scanMessages(ctx context.Context, rows *sql.Rows) ([]Message, error) {
+	return scanMessagesWith(ctx, s.db, rows)
+}
+
+// scanMessagesWith is scanMessages reading the whisper audiences through q:
+// the transaction a statement ran in, when it ran in one.
+func scanMessagesWith(ctx context.Context, q execer, rows *sql.Rows) ([]Message, error) {
 	var msgs []Message
 	var whispers []int // indexes into msgs of principals-audience messages
 	for rows.Next() {
 		var m Message
 		var payloadSchema, kind, guestHandle, guestLabel sql.NullString
 		var payloadJSON []byte
-		var netID, threadRoot sql.NullInt64
+		var netID, threadRoot, editedAt sql.NullInt64
 		var createdAt int64
 		if err := rows.Scan(&m.ID, &m.ChannelID, &m.AuthorID, &m.Body, &payloadSchema, &payloadJSON, &createdAt, &kind, &netID, &threadRoot,
-			&guestHandle, &guestLabel); err != nil {
+			&guestHandle, &guestLabel, &editedAt); err != nil {
 			return nil, err
+		}
+		if editedAt.Valid {
+			m.EditedAt = time.UnixMilli(editedAt.Int64)
 		}
 		if guestHandle.Valid {
 			a := guestAttribution(guestHandle.String, guestLabel.String)
@@ -359,7 +518,7 @@ func (s *Store) scanMessages(ctx context.Context, rows *sql.Rows) ([]Message, er
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	return msgs, s.fillWhisperAudiences(ctx, msgs, whispers)
+	return msgs, fillWhisperAudiences(ctx, q, msgs, whispers)
 }
 
 // SearchVisibleMessages returns up to limit messages in channelID whose body
@@ -438,7 +597,7 @@ func ftsAllWords(words []string) string {
 // The list is the wire audience (a reader replies in kind by reusing it), so
 // it is loaded only for principals audiences; a net message's recipients are
 // never read back.
-func (s *Store) fillWhisperAudiences(ctx context.Context, msgs []Message, idx []int) error {
+func fillWhisperAudiences(ctx context.Context, q execer, msgs []Message, idx []int) error {
 	if len(idx) == 0 {
 		return nil
 	}
@@ -454,7 +613,7 @@ func (s *Store) fillWhisperAudiences(ctx context.Context, msgs []Message, idx []
 	if err != nil {
 		return fmt.Errorf("store: load whisper audiences: %w", err)
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := q.QueryContext(ctx,
 		`SELECT message_id, principal_id FROM message_recipients
 		 WHERE message_id IN (SELECT value FROM json_each(?))
 		 ORDER BY message_id ASC, principal_id ASC`, string(list))
@@ -939,6 +1098,15 @@ func (s *Store) InsertScopedMessage(ctx context.Context, p ScopedPost) (Message,
 func insertScopedTx(
 	ctx context.Context, tx execer, p ScopedPost, rootID int64, netID any, audience schema.Audience, recipients []int64, now time.Time,
 ) (Message, error) {
+	// The same reserved-payload refusal as insertChannelWideTx (issue #1345).
+	if p.Payload != nil && schema.ReservedMessagePayload(p.Payload.Schema) {
+		return Message{}, ErrReservedPayload
+	}
+	// The archived guard of every scoped post and reply (issue #844): the
+	// other of the two INSERT INTO messages.
+	if err := channelNotArchivedTx(ctx, tx, p.ChannelID); err != nil {
+		return Message{}, err
+	}
 	var payloadSchema, payloadJSON, thread any
 	if p.Payload != nil {
 		payloadSchema = p.Payload.Schema
@@ -1827,4 +1995,424 @@ func requestedInterventionsTx(ctx context.Context, tx execer, runID int64) (int,
 		return 0, fmt.Errorf("store: count requested interventions of run %d: %w", runID, err)
 	}
 	return n, nil
+}
+
+// Reactions (issue #765, docs/design/message-reactions.md §6.1). A reaction
+// is read and written only through the message it is on, so the statements
+// that name the messages table live here, in this file, and reactions.go holds
+// the ones over message_reactions alone. Every one of them embeds two
+// conditions for the caller, in the statement that selects the message:
+//
+//   - messageVisible(scoped = true): the audience rule and the history bound.
+//     For a channel-wide message it checks neither membership nor that the
+//     reader is enabled, because the handlers' gate does;
+//   - the explicit clause below: the reader is, now, a member of the
+//     message's channel and an enabled principal, in the form runVisibleHead
+//     uses. The gate cannot be relied on for this: a reader removed between
+//     the gate and the statement, or a subscriber whose reference was flushed
+//     after a removal committed and before its socket was dropped, would
+//     otherwise read a channel-wide message's reactions.
+//
+// A reader that is not Scoped, or has no verified principal, sees no message
+// here: reactions exist on v2 routes only, for a verified caller, so there is
+// nothing to read for anyone else and the answer fails closed.
+//
+// Removed messages (docs/design/moderation.md §7, not yet implemented) will
+// add AND NOT EXISTS (SELECT 1 FROM message_removals x WHERE x.message_id =
+// m.id) to reactionMessageCond, and reactionTargetTx will report the removal,
+// so every statement below picks it up at once. Until that table exists no
+// message is removed and the behaviour is identical.
+
+// ErrMessageNotFound is the one error for a message a reaction call cannot
+// use: it does not exist, is in another channel, or the reader cannot see it.
+// Message ids are sequential, so any difference between those would let a
+// reader probe for messages scoped away from them.
+var ErrMessageNotFound = errors.New("store: message not found")
+
+// reactionMemberCond takes the reader's principal id twice.
+const reactionMemberCond = `EXISTS (SELECT 1 FROM channel_members rc
+	                   WHERE rc.channel_id = m.channel_id AND rc.principal_id = ?)
+	     AND EXISTS (SELECT 1 FROM principals rp WHERE rp.id = ? AND rp.disabled_at IS NULL)`
+
+// reactionMessageCond is the whole condition a reaction statement puts on a
+// message aliased m: the message rule and the member-and-enabled clause. Its
+// arguments are reactionArgs(reader).
+var reactionMessageCond = messageVisible(true) + ` AND ` + reactionMemberCond
+
+// reactionArgs is the arguments of reactionMessageCond for reader, and false
+// when the reader may see no message at all.
+func reactionArgs(reader Reader) ([]any, bool) {
+	if !reader.Scoped || reader.PrincipalID <= 0 {
+		return nil, false
+	}
+	_, args := visibilityArgs(reader)
+	return append(args, reader.PrincipalID, reader.PrincipalID), true
+}
+
+// ReactionTarget is what a reaction needs to know of the message it is on.
+type ReactionTarget struct {
+	// Audience is nil for a channel-wide message, the net for a net message,
+	// and for a whisper a principals audience with every recipient id stored
+	// for it (the author among them), ascending: an agent's audience check
+	// (whisper_agent when another recipient is an agent) needs the ids, as a
+	// reply's does.
+	Audience *schema.Audience
+}
+
+// reactionTargetTx reads the audience of message messageID of channelID for
+// reader, or ErrMessageNotFound. It is the probe of §6.1: one statement, with
+// the reader's conditions in it.
+func reactionTargetTx(ctx context.Context, tx execer, channelID int64, reader Reader, messageID int64) (ReactionTarget, error) {
+	args, ok := reactionArgs(reader)
+	if !ok {
+		return ReactionTarget{}, ErrMessageNotFound
+	}
+	var kind sql.NullString
+	var net sql.NullInt64
+	switch err := tx.QueryRowContext(ctx,
+		`SELECT m.audience_kind, m.net_id FROM messages m
+		 WHERE m.id = ? AND m.channel_id = ? AND `+reactionMessageCond,
+		append([]any{messageID, channelID}, args...)...).Scan(&kind, &net); {
+	case errors.Is(err, sql.ErrNoRows):
+		return ReactionTarget{}, ErrMessageNotFound
+	case err != nil:
+		return ReactionTarget{}, fmt.Errorf("store: read message %d for a reaction: %w", messageID, err)
+	}
+	switch {
+	case !kind.Valid:
+		return ReactionTarget{}, nil
+	case schema.AudienceKind(kind.String) == schema.AudienceKindNet && net.Valid:
+		return ReactionTarget{Audience: &schema.Audience{Kind: schema.AudienceKindNet, NetID: net.Int64}}, nil
+	case schema.AudienceKind(kind.String) == schema.AudienceKindPrincipals:
+		// The recipients were decided at post time and are never changed, so
+		// these are the ids the message was said to.
+		ids, err := messageRecipientsTx(ctx, tx, messageID)
+		if err != nil {
+			return ReactionTarget{}, err
+		}
+		return ReactionTarget{Audience: &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: ids}}, nil
+	default:
+		// Never read an audience we do not understand as something wider.
+		return ReactionTarget{}, fmt.Errorf("store: message %d has an unreadable audience %q", messageID, kind.String)
+	}
+}
+
+// ReactionTargetOf is reactionTargetTx outside a transaction: the handler's
+// probe, which an agent's audience permission is decided from. The write
+// transaction reads the row again, so what is stored is what was authorized.
+func (s *Store) ReactionTargetOf(ctx context.Context, channelID int64, reader Reader, messageID int64) (ReactionTarget, error) {
+	return reactionTargetTx(ctx, s.db, channelID, reader, messageID)
+}
+
+// reactableMessagesTx returns which of ids are messages of channelID that
+// reader may see, ascending: the batch read's probe, one statement for every
+// requested id. ids are bound as one JSON array, so the statement does not
+// change with how many there are.
+func reactableMessagesTx(ctx context.Context, tx execer, channelID int64, reader Reader, ids []int64) ([]int64, error) {
+	args, ok := reactionArgs(reader)
+	if !ok || len(ids) == 0 {
+		return nil, nil
+	}
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return nil, fmt.Errorf("store: encode message ids: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT m.id FROM messages m
+		 WHERE m.channel_id = ? AND m.id IN (SELECT value FROM json_each(?)) AND `+reactionMessageCond+`
+		 ORDER BY m.id ASC`,
+		append([]any{channelID, string(list)}, args...)...)
+	if err != nil {
+		return nil, fmt.Errorf("store: read messages for reactions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var visible []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: read messages for reactions: %w", err)
+		}
+		visible = append(visible, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read messages for reactions: %w", err)
+	}
+	return visible, nil
+}
+
+// Message edits (issue #845, docs/design/message-editing.md §8). An author
+// changes the text of their own recent message; every version is kept in
+// message_revisions, which, like the message, is read only here: earlier
+// text is as sensitive as the current text (TestOnlyAudienceGoReadsMessageRows).
+//
+// Both functions find the message with the reaction probe's condition
+// (reactionMessageCond: the one visibility condition and the explicit
+// member-and-enabled clause) narrowed to author_id = the reader, in the
+// statement that selects it. So a message that is unknown, in another
+// channel, someone else's, a whisper the reader is not in, a net message they
+// cannot read, or from before their history bound is one answer,
+// ErrMessageNotFound, and only the author ever learns more.
+//
+// Removed messages (docs/design/moderation.md, M4, not yet implemented) will
+// be refused here too: reactionMessageCond's removal clause, once it lands,
+// makes the revision read ErrMessageNotFound, and EditOwnMessage must then
+// answer ErrMessageNotEditable for a removal the reader can see. Until that
+// table exists no message is removed.
+
+// AuditMessageEdited is written in the edit's transaction for every edit that
+// changed the text: subject "message:<id>", detail "channel=<id>
+// revision=<n>", n the revision the edit created. Never any text, length or
+// difference.
+const AuditMessageEdited = "message_edited"
+
+// Errors of EditOwnMessage, besides ErrMessageNotFound and
+// ErrNotChannelMember. Each is reachable only by the message's author, who can
+// read it.
+var (
+	// ErrMessageNotEditable: the message carries a payload other than a file
+	// attachment, or was said on a net where the author no longer holds a
+	// member seat.
+	ErrMessageNotEditable = errors.New("store: message not editable")
+	// ErrMessageEditWindowClosed: more than schema.MessageEditWindowSeconds
+	// have passed since the message was posted.
+	ErrMessageEditWindowClosed = errors.New("store: message edit window closed")
+	// ErrMessageEditLimitReached: the message has been edited
+	// schema.MaxMessageEdits times.
+	ErrMessageEditLimitReached = errors.New("store: message edit limit reached")
+)
+
+// MessageEdit is EditOwnMessage's answer.
+type MessageEdit struct {
+	// Message is the message as the author now reads it, by the projection
+	// a list read uses.
+	Message Message
+	// Recipients is who a scoped message was delivered to when it was
+	// posted, read back for the edit's broadcast; nil for a channel-wide one.
+	Recipients []int64
+	// Changed is false when the new text equals the current text: nothing
+	// was written.
+	Changed bool
+	// Revision is the revision the edit created; 0 when nothing changed.
+	Revision int
+}
+
+// MessageRevision is one version of a message's text.
+type MessageRevision struct {
+	Revision  int
+	Body      string
+	CreatedAt time.Time
+}
+
+// ownMessageSQL selects one message of the reader's own by the reaction
+// probe's condition. Its arguments are the message id, the channel id, the
+// reader as author, then reactionArgs(reader).
+var ownMessageSQL = `SELECT ` + messageColumns + ` FROM messages m
+	 WHERE m.id = ? AND m.channel_id = ? AND m.author_id = ? AND ` + reactionMessageCond
+
+// ownMessageTx reads message messageID of channelID if reader wrote it and may
+// see it now, or ErrMessageNotFound.
+func ownMessageTx(ctx context.Context, tx execer, channelID int64, reader Reader, messageID int64) (Message, error) {
+	args, ok := reactionArgs(reader)
+	if !ok || messageID <= 0 {
+		return Message{}, ErrMessageNotFound
+	}
+	rows, err := tx.QueryContext(ctx, ownMessageSQL, append([]any{messageID, channelID, reader.PrincipalID}, args...)...)
+	if err != nil {
+		return Message{}, fmt.Errorf("store: read own message %d: %w", messageID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	msgs, err := scanMessagesWith(ctx, tx, rows)
+	if err != nil {
+		return Message{}, fmt.Errorf("store: read own message %d: %w", messageID, err)
+	}
+	if len(msgs) != 1 {
+		return Message{}, ErrMessageNotFound
+	}
+	return msgs[0], nil
+}
+
+// holdsNetMemberSeatTx reports whether principalID holds a member seat (not a
+// monitor's) on live net netID of channelID: what transmitting there takes.
+func holdsNetMemberSeatTx(ctx context.Context, tx execer, channelID, netID, principalID int64) (bool, error) {
+	var role string
+	switch err := tx.QueryRowContext(ctx,
+		`SELECT nm.role FROM nets n JOIN net_members nm ON nm.net_id = n.id
+		 WHERE n.id = ? AND n.channel_id = ? AND n.archived_at IS NULL AND nm.principal_id = ?`,
+		netID, channelID, principalID).Scan(&role); {
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("store: read seat on net %d: %w", netID, err)
+	}
+	return schema.NetRole(role) == schema.NetRoleMember, nil
+}
+
+// EditOwnMessage replaces the text of message messageID of channelID, which
+// reader must have written, with body, and answers the message as reader now
+// reads it (§4.2 step 7). One IMMEDIATE transaction, the checks in this
+// order, each refusal storing nothing:
+//
+//  1. reader is, now, a member of the channel and enabled
+//     (ErrNotChannelMember);
+//  2. the message is reader's own and visible to reader (ErrMessageNotFound
+//     for every other case alike);
+//  3. it is a text message: no payload or a file attachment, and on a net the
+//     author still holds a member seat (ErrMessageNotEditable);
+//  4. body equal to the current text: nothing is written, Changed is false;
+//  5. at most schema.MessageEditWindowSeconds since created_at, by clock,
+//     read once the write lock is held (ErrMessageEditWindowClosed);
+//  6. fewer than schema.MaxMessageEdits edits so far
+//     (ErrMessageEditLimitReached);
+//  7. the write: revision 1 (the text as posted) on the first edit, the new
+//     revision, the row (the search index follows by trigger), and the
+//     message_edited audit row.
+//
+// The payload, attachments, audience, recipients, thread link, guest
+// attribution, reactions and read marks are not touched; the triggers of
+// migration 38 refuse an update of any column but body and edited_at.
+// edited_at is max(now, the previous edited_at or created_at + 1 ms), so it
+// is strictly after created_at and strictly increasing per message, whatever
+// the clock does. The emptiness and size of body are the caller's checks.
+func (s *Store) EditOwnMessage(ctx context.Context, channelID int64, reader Reader, messageID int64, body string, clock func() time.Time) (MessageEdit, error) {
+	var out MessageEdit
+	err := s.withImmediateTx(ctx, func(tx execer) error {
+		if err := reactionReaderTx(ctx, tx, channelID, reader); err != nil {
+			return err
+		}
+		// The archived guard of an edit (issue #844), after the reader's
+		// standing is known.
+		if err := channelNotArchivedTx(ctx, tx, channelID); err != nil {
+			return err
+		}
+		msg, err := ownMessageTx(ctx, tx, channelID, reader, messageID)
+		if err != nil {
+			return err
+		}
+		if msg.Payload != nil && msg.Payload.Schema != schema.FileAttachmentV1Name {
+			return ErrMessageNotEditable
+		}
+		if msg.Audience != nil && msg.Audience.Kind == schema.AudienceKindNet {
+			seat, err := holdsNetMemberSeatTx(ctx, tx, channelID, msg.Audience.NetID, reader.PrincipalID)
+			if err != nil {
+				return err
+			}
+			if !seat {
+				return ErrMessageNotEditable
+			}
+		}
+		if body == msg.Body {
+			out = MessageEdit{Message: msg}
+			return nil
+		}
+		now := clock().Truncate(time.Millisecond)
+		if now.UnixMilli()-msg.CreatedAt.UnixMilli() > schema.MessageEditWindowSeconds*1000 {
+			return ErrMessageEditWindowClosed
+		}
+		var last int
+		if err := tx.QueryRowContext(ctx,
+			"SELECT COALESCE(MAX(revision), 0) FROM message_revisions WHERE message_id = ?", messageID).Scan(&last); err != nil {
+			return fmt.Errorf("store: read revisions of message %d: %w", messageID, err)
+		}
+		if last > 0 && last-1 >= schema.MaxMessageEdits {
+			return ErrMessageEditLimitReached
+		}
+		if last == 0 {
+			if _, err := tx.ExecContext(ctx,
+				"INSERT INTO message_revisions (message_id, revision, body, created_at) VALUES (?, 1, ?, ?)",
+				messageID, msg.Body, msg.CreatedAt.UnixMilli()); err != nil {
+				return fmt.Errorf("store: keep the text of message %d as posted: %w", messageID, err)
+			}
+			last = 1
+		}
+		floor := msg.CreatedAt
+		if !msg.EditedAt.IsZero() {
+			floor = msg.EditedAt
+		}
+		editedAt := now
+		if !editedAt.After(floor) {
+			editedAt = floor.Add(time.Millisecond)
+		}
+		revision := last + 1
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO message_revisions (message_id, revision, body, created_at) VALUES (?, ?, ?, ?)",
+			messageID, revision, body, editedAt.UnixMilli()); err != nil {
+			return fmt.Errorf("store: keep revision %d of message %d: %w", revision, messageID, err)
+		}
+		res, err := tx.ExecContext(ctx,
+			"UPDATE messages SET body = ?, edited_at = ? WHERE id = ? AND channel_id = ? AND author_id = ?",
+			body, editedAt.UnixMilli(), messageID, channelID, reader.PrincipalID)
+		if err != nil {
+			return fmt.Errorf("store: edit message %d: %w", messageID, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("store: edit message %d: %w", messageID, err)
+		}
+		if n != 1 {
+			// The select above found the row in this transaction; anything
+			// else is a fault, and rolls the edit back.
+			return fmt.Errorf("store: edit message %d: changed %d rows", messageID, n)
+		}
+		if err := appendAuditEventTx(ctx, tx, principalActor(reader.PrincipalID), AuditMessageEdited,
+			messageSubject(messageID), fmt.Sprintf("channel=%d revision=%d", channelID, revision), editedAt); err != nil {
+			return err
+		}
+		var recipients []int64
+		if msg.Audience != nil {
+			if recipients, err = messageRecipientsTx(ctx, tx, messageID); err != nil {
+				return err
+			}
+		}
+		msg.Body, msg.EditedAt = body, editedAt
+		out = MessageEdit{Message: msg, Recipients: recipients, Changed: true, Revision: revision}
+		return nil
+	})
+	if err != nil {
+		return MessageEdit{}, err
+	}
+	return out, nil
+}
+
+// OwnMessageRevisions returns every version of the text of message messageID
+// of channelID, oldest first, if reader wrote it and may see it now (§5): the
+// stored revisions of an edited message, or, for one never edited, its one
+// revision from the message itself. The refusals are EditOwnMessage's first
+// two, ErrNotChannelMember and ErrMessageNotFound; there is no window.
+func (s *Store) OwnMessageRevisions(ctx context.Context, channelID int64, reader Reader, messageID int64) ([]MessageRevision, error) {
+	var out []MessageRevision
+	err := s.readTx(ctx, func(tx execer) error {
+		if err := reactionReaderTx(ctx, tx, channelID, reader); err != nil {
+			return err
+		}
+		msg, err := ownMessageTx(ctx, tx, channelID, reader, messageID)
+		if err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx,
+			"SELECT revision, body, created_at FROM message_revisions WHERE message_id = ? ORDER BY revision ASC", messageID)
+		if err != nil {
+			return fmt.Errorf("store: read revisions of message %d: %w", messageID, err)
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var r MessageRevision
+			var at int64
+			if err := rows.Scan(&r.Revision, &r.Body, &at); err != nil {
+				return fmt.Errorf("store: read revisions of message %d: %w", messageID, err)
+			}
+			r.CreatedAt = time.UnixMilli(at)
+			out = append(out, r)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("store: read revisions of message %d: %w", messageID, err)
+		}
+		if len(out) == 0 {
+			out = []MessageRevision{{Revision: 1, Body: msg.Body, CreatedAt: msg.CreatedAt}}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }

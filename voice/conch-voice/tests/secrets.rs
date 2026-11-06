@@ -320,3 +320,103 @@ fn nothing_a_whole_process_writes_to_standard_output_or_standard_error_holds_a_s
         );
     }
 }
+
+// ------------------------------------------------- the attach nonce (`--events-pipe`, #937)
+
+/// A fake nonce from `pkg/schema/testdata/voice-control-pipe/sensitive.json`: well formed,
+/// and obviously not one an owner generated.
+const FAKE_NONCE: &str = "FAKE_nonce_do_not_print_0123456789abcdefghA";
+
+/// A sink the test can read back, for a logger that writes where it is called.
+#[derive(Clone, Default)]
+struct Written(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Written {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Written {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+#[test]
+fn the_nonce_the_channel_module_accepts_is_scrubbed_from_a_log_record_and_from_every_debug() {
+    use log::Log;
+
+    let environment = conch_voice::cli::Environment {
+        conch_voice_attach: Some(conch_voice_api::Secret::new(FAKE_NONCE)),
+        ..conch_voice::cli::Environment::default()
+    };
+    // The command line holds no secret; its Debug and the environment's say so.
+    let args = match conch_voice::cli::parse([
+        "conch-voice",
+        "managed",
+        "--events-pipe",
+        "/run/user/1000/conch/FAKE/events.sock",
+    ])
+    .unwrap()
+    {
+        conch_voice::cli::Invocation::Managed(args) => args,
+        other => panic!("not managed: {other:?}"),
+    };
+    for shown in [format!("{environment:?}"), format!("{args:?}")] {
+        assert!(!shown.contains(FAKE_NONCE), "{shown}");
+    }
+
+    let written = Written::default();
+    let scrubber = Scrubber::new();
+    let logger = Logger::new(
+        LevelFilter::Trace,
+        Box::new(written.clone()),
+        Arc::clone(&scrubber),
+    );
+    let record = |text: &str| {
+        logger.log(
+            &log::Record::builder()
+                .level(Level::Warn)
+                .target("conch_voice::channel")
+                .args(format_args!("{text}"))
+                .build(),
+        );
+    };
+    // Before the nonce is registered nothing hides it: without this the test would pass
+    // on a logger that writes nothing.
+    record(&format!("before {FAKE_NONCE}"));
+    assert!(written.text().contains(FAKE_NONCE));
+    written.0.lock().unwrap().clear();
+
+    // The module's own entry registers it, as `managed` does on the way to connecting.
+    conch_voice::channel::nonce(&environment, &scrubber).unwrap();
+    record(&format!(
+        "a record that mentions {FAKE_NONCE} by construction"
+    ));
+    let text = written.text();
+    assert!(!text.contains(FAKE_NONCE), "{text}");
+    assert!(
+        text.contains(&format!(
+            "a record that mentions {REDACTED} by construction"
+        )),
+        "{text}"
+    );
+
+    // A refusal never repeats the value, in either rendering.
+    let bad = conch_voice::cli::Environment {
+        conch_voice_attach: Some(conch_voice_api::Secret::new(
+            "FAKE_short_nonce_do_not_print",
+        )),
+        ..conch_voice::cli::Environment::default()
+    };
+    let error = conch_voice::channel::nonce(&bad, &scrubber).unwrap_err();
+    for shown in [error.to_string(), format!("{error:?}")] {
+        assert!(!shown.contains("FAKE_short"), "{shown}");
+    }
+}

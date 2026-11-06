@@ -72,8 +72,9 @@ func TestUnconfiguredServerAdmitsNobody(t *testing.T) {
 	if info.Join != (schema.JoinOptionsV1{}) || !info.PasswordLogin {
 		t.Errorf("the front door of an unconfigured server offers %+v", info)
 	}
+	// Guests are removed for now (issue #1005): refused over any transport.
 	assertErrorBody(t, secureDo(t, f, "POST", "/v1/join/guest", "", `{}`), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
-	assertErrorBody(t, f.do(t, "POST", "/v1/join/guest", "", `{}`), http.StatusForbidden, schema.ErrorCodeHTTPSRequired)
+	assertErrorBody(t, f.do(t, "POST", "/v1/join/guest", "", `{}`), http.StatusForbidden, schema.ErrorCodeGuestsDisabled)
 	if n, err := f.srv.store.LiveGuests(context.Background()); err != nil || n != 0 {
 		t.Errorf("live guests = %d, %v", n, err)
 	}
@@ -260,7 +261,7 @@ func TestGuestEndClosesItsSockets(t *testing.T) {
 			}
 		}, guestSocketBound},
 		{"operator disables", time.Hour, func(t *testing.T, f *presenceFixture, g store.CreatedGuest) {
-			if rec := f.do(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", g.Principal.ID), f.rootTok, ""); rec.Code != http.StatusNoContent {
+			if rec := f.do(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", g.Principal.ID), f.rootTok, ""); rec.Code != http.StatusOK {
 				t.Fatalf("disable = %d %s", rec.Code, rec.Body)
 			}
 		}, guestSocketBound},
@@ -279,8 +280,10 @@ func TestGuestEndClosesItsSockets(t *testing.T) {
 			defer stop()
 			g := newGuest(t, f.srv, "", e.idle, time.Hour, f.ops.ID)
 			base := wsTestServer(t, f.srv)
-			families := []string{"/v0/ws?channel=ops", "/v1/ws?channel=ops", "/v2/ws?channel=ops", "/v1/events/ws?channel=ops",
-				"/v1/voice/ws?channel=ops", "/v1/voice/occupancy/ws"}
+			// No voice sockets: since A4 (#1016) voice is use_voice, and
+			// permittedTx answers false for every guest, so a guest is
+			// refused both (TestVoiceGuestHoldsNoVoice).
+			families := []string{"/v0/ws?channel=ops", "/v1/ws?channel=ops", "/v2/ws?channel=ops", "/v1/events/ws?channel=ops"}
 			var guestLogs []*frameLog
 			for _, path := range families {
 				guestLogs = append(guestLogs, recordFrames(dialAs(t, ctx, base, path, g.Token)))
@@ -371,6 +374,9 @@ func TestGuestMediaTeardown(t *testing.T) {
 		for _, c := range f.lk.calls()[base:] {
 			switch c.method {
 			case "RemoveParticipant":
+				if !personIdentity(c.identity) {
+					continue // the guest's companion and viewer go with them
+				}
 				if c.identity != identity {
 					t.Errorf("removed %q, want the guest only", c.identity)
 				}
@@ -397,8 +403,9 @@ func TestGuestMediaTeardown(t *testing.T) {
 		g := newGuest(t, f.srv, "", time.Hour, 300*time.Millisecond, f.ops.ID)
 		room := f.inUse(t, f.ops)
 		identity := voiceIdentity(g.Principal.ID)
+		// No pass before the deadline: a live guest holds no voice since A4
+		// (#1016) and the first pass would remove it as voice_not_allowed.
 		f.lk.setRoom(room, fakeParticipant{identity: identity, joinedMs: 1_000, published: true})
-		f.pass(t)
 		time.Sleep(400 * time.Millisecond)
 		f.clock.Advance(testPassGap)
 		f.pass(t)

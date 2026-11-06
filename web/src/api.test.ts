@@ -1,29 +1,50 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  changePassword,
+  channelAuthors,
   claimVoiceShare,
+  createVoiceViewer,
+  removeVoiceViewer,
   closeInvite,
+  createMemberLink,
+  convertGuest,
   continueAsOperator,
   endSession,
   endSignIn,
-  createInvite,
+  fetchFileBytes,
+  fileAttachmentPayload,
   forgetStored,
+  getFileMeta,
   hasToken,
   heldElsewhere,
   listChannels,
   listInvites,
   listSignIns,
+  loadMessagesAfter,
+  loadMessagesAscending,
+  editMessage,
+  loadThread,
+  messageRevisions,
+  onCredentialReplacing,
+  onReauthRequired,
   onSignedOutElsewhere,
   openSocket,
   postMessage,
   previewInvite,
+  reauth,
   redeemInvite,
   reportVoiceTransmit,
   restore,
+  searchMessages,
   signIn,
   signOut,
+  setPassword,
   signOutEverywhere,
+  readVoiceMode,
   stopVoiceShare,
+  uploadFile,
   whoAmI,
+  writeVoiceMode,
 } from './api';
 
 afterEach(async () => {
@@ -36,6 +57,7 @@ afterEach(async () => {
 });
 
 const key = 'conch.web.token';
+const revokedClose = 'credential no longer valid';
 const memberToken = 'conch_member_secret';
 const otherMemberToken = 'conch_other_member_secret';
 const operatorToken = 'conch_operator_secret';
@@ -528,7 +550,7 @@ describe('invites', () => {
     expect(window.localStorage.getItem(key)).toBe(joinerToken);
   });
 
-  it('makes, lists and closes invites with the signed-in credential', async () => {
+  it('lists and closes invites with the signed-in credential', async () => {
     await signedInFrom(window.localStorage, memberToken);
     const invite = {
       id: 4,
@@ -544,13 +566,11 @@ describe('invites', () => {
       credential_lifetime_seconds: 60,
     };
     const calls = serve((c) =>
-      c.method === 'POST' ? json({ invite, code: inviteCode }, 201) : c.method === 'DELETE' ? new Response(null, { status: 204 }) : json({ invites: [invite] }),
+      c.method === 'DELETE' ? new Response(null, { status: 204 }) : json({ invites: [invite] }),
     );
-    expect(await createInvite({ kind: 'personal', channels: ['red'], voice: false })).toEqual({ ok: true, value: { invite, code: inviteCode } });
     expect(await listInvites()).toEqual({ ok: true, value: [invite] });
     expect(await closeInvite(4)).toEqual({ ok: true, value: null });
     expect(calls).toEqual([
-      { path: '/v1/invites', method: 'POST', auth: `Bearer ${memberToken}` },
       { path: '/v1/invites', method: 'GET', auth: `Bearer ${memberToken}` },
       { path: '/v1/invites/4', method: 'DELETE', auth: `Bearer ${memberToken}` },
     ]);
@@ -577,6 +597,34 @@ describe('invites', () => {
     expect(await stopVoiceShare('red', '2026-10-16T12:00:04.125Z')).toEqual({ ok: false, failure: 'invalid', code: 'voice_share_stale' });
   });
 
+  // Issue #936: the viewer grant is asked for as publish none with subscribe
+  // true, and nothing else; its removal names publish=none.
+  it('asks for the viewer grant as publish none, reads its answer, and removes it with ?publish=none (issue #936)', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const grant = { livekit_url: 'wss://lk.example', identity: 'p2.view', room: 'room-name', token: 'viewer-token', publish: 'none', subscribe: true, expires_at: at };
+    const calls = serve((c) => (c.method === 'POST' ? json(grant) : new Response(null, { status: 204 })));
+    expect(await createVoiceViewer('red team')).toEqual({ ok: true, value: grant });
+    expect(await removeVoiceViewer('red team')).toEqual({ ok: true, value: null });
+    expect(calls).toEqual([
+      { path: '/v1/channels/red%20team/voice/companion', method: 'POST', auth: `Bearer ${memberToken}` },
+      { path: '/v1/channels/red%20team/voice/companion?publish=none', method: 'DELETE', auth: `Bearer ${memberToken}` },
+    ]);
+    const sent = vi.mocked(fetch).mock.calls.find(([, init]) => init?.method === 'POST')?.[1]?.body;
+    expect(typeof sent === 'string' ? JSON.parse(sent) : null).toEqual({ publish: 'none', subscribe: true });
+  });
+
+  it("answers a refused viewer grant with its status and the server's code, and a malformed one as invalid (issue #936)", async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ code: 'voice_no_session', message: 'no voice here' }, 409));
+    expect(await createVoiceViewer('red')).toEqual({ ok: false, failure: 'invalid', status: 409, code: 'voice_no_session' });
+    serve(() => json({ code: 'channel_not_found', message: 'no such channel' }, 404));
+    expect(await createVoiceViewer('red')).toEqual({ ok: false, failure: 'invalid', status: 404, code: 'channel_not_found' });
+    serve(() => json({ identity: 'p2.view' }));
+    expect(await createVoiceViewer('red')).toEqual({ ok: false, failure: 'invalid' });
+    serve(() => Promise.reject(new Error('offline')));
+    expect(await createVoiceViewer('red')).toEqual({ ok: false, failure: 'network' });
+  });
+
   it("answers a refused share claim with its status and the server's code, and a malformed one as invalid", async () => {
     await signedInFrom(window.localStorage, memberToken);
     serve(() => json({ code: 'voice_share_busy', message: 'someone else is sharing in this room' }, 409));
@@ -590,12 +638,29 @@ describe('invites', () => {
   it("answers a refused invite with the server's code and line", async () => {
     await signedInFrom(window.localStorage, memberToken);
     serve(() => json({ code: 'invite_allowance_exceeded', message: 'you already have as many open personal invites as you may' }, 403));
-    expect(await createInvite({ kind: 'personal', channels: ['red'], voice: false })).toEqual({
+    expect(await createMemberLink({ kind: 'member' })).toEqual({
       ok: false,
       failure: 'invalid',
       code: 'invite_allowance_exceeded',
       message: 'you already have as many open personal invites as you may',
     });
+  });
+
+  // Issue #1051: a newer server names a permission this bundle does not know.
+  // The error document still reads, so the code is passed through rather than
+  // dropped with the document.
+  it('passes a refusal naming an unknown permission through by its code', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ code: 'permission_denied', message: 'no', permission: 'fly_the_server' }, 403));
+    expect(await listChannels()).toEqual({ ok: false, failure: 'invalid', code: 'permission_denied' });
+  });
+
+  it('reads a whoami naming an unknown permission, and keeps it', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ ...member, permissions: ['use_voice', 'fly_the_server'] }));
+    const result = await whoAmI();
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.permissions).toEqual(['use_voice', 'fly_the_server']);
   });
 });
 
@@ -779,5 +844,869 @@ describe('signing in over a sign-in that could not be checked', () => {
     serve(whoami);
     expect(heldElsewhere()).toBe(false);
     expect((await signIn(memberToken)).ok).toBe(true);
+  });
+});
+
+describe('file attachments', () => {
+  const file = {
+    schema: 'conch.file.v1',
+    id: 17,
+    channel_id: 4,
+    uploader_id: 2,
+    filename: 'screen shot.png',
+    media_type: 'image/png',
+    size: 3,
+    sha256: 'a'.repeat(64),
+    created_at: '2026-10-25T12:00:00.000Z',
+  };
+  const message = (id: number, payload?: unknown) => ({
+    schema: 'conch.message.v2',
+    id,
+    channel_id: 4,
+    author_id: 2,
+    created_at: '2026-10-25T12:00:00.000Z',
+    body: 'caption',
+    ...(payload === undefined ? {} : { payload }),
+  });
+
+  it('uploads the raw Blob with its filename, declared type and pinned credential', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const bytes = new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' });
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockResolvedValue(json(file, 201));
+    vi.stubGlobal('fetch', request);
+    const controller = new AbortController();
+    expect(await uploadFile('red team', 'screen shot.png', 'image/png', bytes, controller.signal)).toEqual({ ok: true, file });
+    const [path, init] = request.mock.calls[0] ?? [];
+    expect(path).toBe('/v2/channels/red%20team/files?filename=screen%20shot.png');
+    expect(init?.method).toBe('POST');
+    expect(init?.body).toBe(bytes);
+    expect(init?.cache).toBe('no-store');
+    expect(init?.credentials).toBe('omit');
+    expect(init?.signal).toBe(controller.signal);
+    const headers = new Headers(init?.headers);
+    expect(headers.get('Authorization')).toBe(`Bearer ${memberToken}`);
+    expect(headers.get('Content-Type')).toBe('image/png');
+    expect(headers.get('Accept')).toBe('application/json');
+  });
+
+  it('downloads the raw bytes privately with the pinned credential', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const bytes = new Uint8Array([137, 80, 78, 71]);
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockResolvedValue(new Response(bytes as BodyInit));
+    vi.stubGlobal('fetch', request);
+    const result = await fetchFileBytes(17);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(new Uint8Array(await result.value.arrayBuffer())).toEqual(bytes);
+    const [path, init] = request.mock.calls[0] ?? [];
+    expect(path).toBe('/v2/files/17');
+    expect(init?.method).toBeUndefined();
+    expect(init?.body).toBeUndefined();
+    expect(init?.cache).toBe('no-store');
+    expect(init?.credentials).toBe('omit');
+    expect(new Headers(init?.headers).get('Authorization')).toBe(`Bearer ${memberToken}`);
+  });
+
+  it('reads metadata and maps the private 404 to unavailable', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json(file));
+    expect(await getFileMeta(17)).toEqual({ ok: true, value: file });
+    serve(() => json({ code: 'file_not_found', message: 'file not found' }, 404));
+    expect(await getFileMeta(17)).toEqual({ ok: false, failure: 'unavailable' });
+    expect(await fetchFileBytes(17)).toEqual({ ok: false, failure: 'unavailable' });
+  });
+
+  it('builds the registered payload and posts it as JSON', async () => {
+    const ids = [7, 11];
+    const payload = fileAttachmentPayload(ids);
+    ids.push(13);
+    expect(payload).toEqual({ schema: 'conch.file_attachment.v1', data: { file_ids: [7, 11] } });
+    await signedInFrom(window.localStorage, memberToken);
+    const answer = message(20, payload);
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockResolvedValue(json({ message: answer }, 201));
+    vi.stubGlobal('fetch', request);
+    expect(await postMessage('red team', 'caption', undefined, payload)).toEqual({ ok: true, message: answer });
+    const [path, init] = request.mock.calls[0] ?? [];
+    expect(path).toBe('/v2/channels/red%20team/messages');
+    expect(init?.body).toBe(JSON.stringify({ body: 'caption', payload }));
+  });
+
+  it('posts a reply with a root and no audience override', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const answer = { ...message(20), thread_root_id: 7 };
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockResolvedValue(json({ message: answer }, 201));
+    vi.stubGlobal('fetch', request);
+    expect(await postMessage('red team', 'reply', undefined, undefined, 7)).toEqual({ ok: true, message: answer });
+    const [path, init] = request.mock.calls[0] ?? [];
+    expect(path).toBe('/v2/channels/red%20team/messages');
+    expect(init?.body).toBe(JSON.stringify({ body: 'reply', thread_root_id: 7 }));
+  });
+
+  it("passes through an upload refusal's code and line", async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ code: 'file_too_large', message: 'a file may be at most 10 bytes' }, 413));
+    expect(await uploadFile('red', 'x.png', 'image/png', new Blob(['x']), new AbortController().signal)).toEqual({
+      ok: false,
+      outcome: 'refused',
+      code: 'file_too_large',
+      reason: 'a file may be at most 10 bytes',
+    });
+  });
+
+  it('calls an undocumented upload refusal an upload, not a message', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => new Response('no', { status: 502 }));
+    expect(await uploadFile('red', 'x.png', 'image/png', new Blob(['x']), new AbortController().signal)).toEqual({
+      ok: false,
+      outcome: 'refused',
+      reason: 'The server refused the upload',
+    });
+  });
+
+  it('distinguishes upload cancellation from a network failure', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const controller = new AbortController();
+    vi.stubGlobal('fetch', vi.fn((_input: RequestInfo | URL, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => {
+        reject(new DOMException('aborted', 'AbortError'));
+      }, { once: true });
+    })));
+    const pending = uploadFile('red', 'x.png', 'image/png', new Blob(['x']), controller.signal);
+    controller.abort();
+    expect(await pending).toEqual({ ok: false, outcome: 'cancelled' });
+    serve(() => Promise.reject(new TypeError('Failed to fetch')));
+    expect(await uploadFile('red', 'x.png', 'image/png', new Blob(['x']), new AbortController().signal)).toEqual({ ok: false, outcome: 'network' });
+  });
+
+  it.each([
+    { name: 'upload', run: () => uploadFile('red', 'x.png', 'image/png', new Blob(['x']), new AbortController().signal) },
+    { name: 'download', run: () => fetchFileBytes(17) },
+  ])('drops the pinned credential after a $name 401', async ({ run }) => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({}, 401));
+    expect(await run()).toMatchObject({ ok: false });
+    expect(window.localStorage.getItem(key)).toBeNull();
+  });
+
+  it('reads an ascending thread page with its cursor', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const found = message(9);
+    const calls = serve(() => json({ messages: [found], next_after: 9 }));
+    expect(await loadThread('red team', 7, 8)).toEqual({ ok: true, value: { messages: [found], next_after: 9 } });
+    expect(calls).toEqual([{ path: '/v2/channels/red%20team/messages?thread=7&after=8&limit=100', method: 'GET', auth: `Bearer ${memberToken}` }]);
+  });
+
+  it('reads one forward page for result context', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const found = message(9);
+    const calls = serve(() => json({ messages: [found] }));
+    expect(await loadMessagesAfter('red team', 8)).toEqual({ ok: true, value: [found] });
+    expect(calls).toEqual([{ path: '/v2/channels/red%20team/messages?order=asc&limit=100&after=8', method: 'GET', auth: `Bearer ${memberToken}` }]);
+  });
+
+  it('searches with an encoded query and an exclusive cursor', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const found = message(9);
+    const calls = serve(() => json({ messages: [found], next_before: 9 }));
+    expect(await searchMessages('red team', 'alpha & beta', 10)).toEqual({ ok: true, value: { messages: [found], next_before: 9 } });
+    expect(calls).toEqual([{ path: '/v2/channels/red%20team/messages/search?q=alpha+%26+beta&limit=100&before=10', method: 'GET', auth: `Bearer ${memberToken}` }]);
+  });
+
+  it('rejects a malformed search response', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ messages: [{ id: 9 }] }));
+    expect(await searchMessages('red', 'alpha')).toEqual({ ok: false, failure: 'invalid' });
+  });
+
+  it('follows ascending history cursors for uncertain-send reconciliation', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const first = message(10);
+    const second = message(11);
+    const calls = serve((call) => call.path.endsWith('after=0')
+      ? json({ messages: [first], next_after: 10 })
+      : json({ messages: [second] }));
+    expect(await loadMessagesAscending('red team', 0)).toEqual({ ok: true, complete: true, value: [first, second] });
+    expect(calls.map((call) => call.path)).toEqual([
+      '/v2/channels/red%20team/messages?order=asc&limit=100&after=0',
+      '/v2/channels/red%20team/messages?order=asc&limit=100&after=10',
+    ]);
+  });
+
+  it('marks a history walk incomplete when a matching message is beyond the page cap', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const pages = Array.from({ length: 101 }, (_, index) => message(index + 1));
+    const calls = serve((call) => {
+      const after = Number(new URL(call.path, 'https://conch.test').searchParams.get('after'));
+      return json({ messages: [pages[after]], ...(after < 100 ? { next_after: after + 1 } : {}) });
+    });
+    const result = await loadMessagesAscending('red', 0);
+    expect(result).toEqual({ ok: true, complete: false, value: pages.slice(0, 100) });
+    expect(calls).toHaveLength(100);
+    expect(calls.some((call) => call.path.endsWith('after=100'))).toBe(false);
+  });
+
+  it.each([
+    { name: 'non-advancing', next: 10 },
+    { name: 'malformed', next: -1 },
+  ])('marks a history walk with a $name cursor incomplete', async ({ next }) => {
+    await signedInFrom(window.localStorage, memberToken);
+    const first = message(11);
+    const calls = serve(() => json({ messages: [first], next_after: next }));
+    expect(await loadMessagesAscending('red', 10)).toEqual({ ok: true, complete: false, value: [first] });
+    expect(calls).toHaveLength(1);
+  });
+});
+
+// Issue #845: the author's edit of their own text, and its earlier versions.
+describe('message editing', () => {
+  const edited = { schema: 'conch.message.v2', id: 42, channel_id: 7, author_id: 2, created_at: '2026-10-30T12:34:56.789Z', body: 'hello', edited_at: '2026-10-30T12:40:02.105Z' };
+
+  it('PUTs the body sub-resource and hands back the server’s copy', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const request = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>().mockResolvedValue(json({ message: edited }));
+    vi.stubGlobal('fetch', request);
+    expect(await editMessage('red team', 42, 'hello')).toEqual({ ok: true, message: edited });
+    const [path, init] = request.mock.calls[0] ?? [];
+    expect(path).toBe('/v2/channels/red%20team/messages/42/body');
+    expect(init?.method).toBe('PUT');
+    expect(init?.body).toBe(JSON.stringify({ body: 'hello' }));
+  });
+
+  it.each([
+    ['a window closed', () => json({ code: 'message_edit_window_closed', message: 'too old' }, 409), { ok: false, failure: 'refused', code: 'message_edit_window_closed' }],
+    ['a rate limit, with how long', () => json({ code: 'rate_limited', message: 'slow down', retry_after_seconds: 4 }, 429), { ok: false, failure: 'refused', code: 'rate_limited', retryAfter: 4 }],
+    ['a refusal with no document', () => new Response('nope', { status: 400 }), { ok: false, failure: 'refused' }],
+    ['a server error, which may come after the write', () => new Response('', { status: 502 }), { ok: false, failure: 'network' }],
+    ['an answer that is not the schema', () => json({ message: { id: 42 } }), { ok: false, failure: 'network' }],
+  ])('answers %s', async (_name, response, want) => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(response);
+    expect(await editMessage('red', 42, 'hello')).toEqual(want);
+  });
+
+  it('reads the earlier versions, and passes a refusal’s code through', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const revisions = [{ revision: 1, body: 'helo', created_at: '2026-10-30T12:34:56.789Z' }, { revision: 2, body: 'hello', created_at: '2026-10-30T12:40:02.105Z' }];
+    const calls = serve(() => json({ channel_id: 7, message_id: 42, revisions }));
+    expect(await messageRevisions('red team', 42)).toEqual({ ok: true, value: revisions });
+    expect(calls).toEqual([{ path: '/v2/channels/red%20team/messages/42/revisions', method: 'GET', auth: `Bearer ${memberToken}` }]);
+    serve(() => json({ code: 'message_not_found', message: 'no' }, 404));
+    expect(await messageRevisions('red', 42)).toEqual({ ok: false, failure: 'invalid', code: 'message_not_found' });
+  });
+});
+
+// Issue #1000: a password change rotates the credential it is sent with, and
+// the server revokes the old one as it answers. A call out with the old one
+// meanwhile (a whoami after a socket the revocation closed, a ticket, a
+// write) comes back 401 although the person is still signed in, with the
+// new one: it is asked again with that, and the page is never signed out.
+describe('a credential replaced while a call was out', () => {
+  const rotatedToken = 'conch_member_rotated_secret';
+  const at = '2026-10-31T12:00:00.000Z';
+  const rotated = { credential: { id: 40, principal_id: 2, label: 'browser', created_at: at, renews: true }, token: rotatedToken, revoked: 1 };
+  const changing = '/v1/password/mine';
+
+  interface Later {
+    readonly answer: Promise<Response>;
+    readonly give: (res: Response) => void;
+  }
+
+  // later is an answer the test gives when it chooses.
+  function later(): Later {
+    let give: (res: Response) => void = () => undefined;
+    const answer = new Promise<Response>((resolve) => {
+      give = resolve;
+    });
+    return { answer, give };
+  }
+
+  const file = { schema: 'conch.file.v1', id: 17, channel_id: 4, uploader_id: 2, filename: 'a.png', media_type: 'image/png', size: 3, sha256: 'a'.repeat(64), created_at: at };
+  const uploading = '/v2/channels/ops/files?filename=a.png';
+
+  // A stand-in server whose password change rotates memberToken into
+  // rotatedToken: once it has, the old one is refused (and the new one too,
+  // once revokedRotated says so). A call put in held (by method, path and
+  // credential) waits, once, for the answer the test gives. A change answers
+  // the responses in before first, in turn.
+  interface Server {
+    readonly calls: Call[];
+    readonly held: Map<string, Later>;
+    readonly state: { revoked: boolean; revokedRotated: boolean; readonly before: Response[] };
+  }
+
+  async function signedInToChange(): Promise<Server> {
+    await signedInFrom(window.localStorage, memberToken);
+    const held = new Map<string, Later>();
+    const state = { revoked: false, revokedRotated: false, before: [] as Response[] };
+    const calls = serve((c) => {
+      const name = `${c.method} ${c.path} ${c.auth ?? ''}`;
+      const waiting = held.get(name);
+      if (waiting !== undefined) {
+        held.delete(name);
+        return waiting.answer;
+      }
+      if (c.path === changing) {
+        const first = state.before.shift();
+        if (first !== undefined) return first;
+        state.revoked = true;
+        return json(rotated);
+      }
+      if (c.auth === `Bearer ${memberToken}` && state.revoked) return json({}, 401);
+      if (c.auth === `Bearer ${rotatedToken}` && state.revokedRotated) return json({}, 401);
+      if (![memberToken, rotatedToken, otherMemberToken].some((t) => c.auth === `Bearer ${t}`)) return json({}, 401);
+      if (c.path === '/v1/whoami') return json(c.auth === `Bearer ${otherMemberToken}` ? otherMember : member);
+      if (c.path === '/v1/ws-tickets') return json({ ticket: 'conch_wst_T', expires_at: at }, 201);
+      if (c.path === '/v1/reauth') return json({ until: '2099-10-31T12:10:00.000Z' });
+      if (c.path === uploading) return json(file, 201);
+      if (c.path === '/v2/files/17') return new Response(new Uint8Array([1, 2, 3]));
+      return new Response(null, { status: 204 });
+    });
+    return { calls, held, state };
+  }
+
+  function holding(server: Server, method: string, path: string, token: string): Later {
+    const waiting = later();
+    server.held.set(`${method} ${path} Bearer ${token}`, waiting);
+    return waiting;
+  }
+
+  async function sent(server: Server, path: string): Promise<void> {
+    await vi.waitFor(() => {
+      expect(server.calls.some((c) => c.path === path)).toBe(true);
+    });
+  }
+
+  const auths = (server: Server, path: string) => server.calls.filter((c) => c.path === path).map((c) => c.auth);
+
+  it('asks again with the new credential when the old one is refused after the change', async () => {
+    const server = await signedInToChange();
+    // A whoami goes out with the old credential, and is answered only after
+    // the change has been kept.
+    const old = holding(server, 'GET', '/v1/whoami', memberToken);
+    const asking = whoAmI();
+    await sent(server, '/v1/whoami');
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    expect(window.localStorage.getItem(key)).toBe(rotatedToken);
+    old.give(json({}, 401));
+    expect(await asking).toEqual({ ok: true, value: member });
+    expect(auths(server, '/v1/whoami')).toEqual([`Bearer ${memberToken}`, `Bearer ${rotatedToken}`]);
+    // Still signed in, as the new credential.
+    expect(window.localStorage.getItem(key)).toBe(rotatedToken);
+    expect(hasToken()).toBe(true);
+    await whoAmI();
+    expect(server.calls.at(-1)?.auth).toBe(`Bearer ${rotatedToken}`);
+  });
+
+
+  // Issue #1084: a socket opened while the change is out would ask for its
+  // ticket with a credential about to be revoked, and be refused: a request
+  // known to fail, which the browser logs as an error. It waits for the answer
+  // instead, and asks once, with the new credential. A socket the revocation
+  // closed with 1008 is told to its owner as lost, not refused, so the owner
+  // asks nobody who it is with the old credential.
+  it('holds the opening of a socket while the change is out, and a 1008 the change caused reaches its owner as lost', async () => {
+    const server = await signedInToChange();
+    const opened: { url: string; onclose: ((event: { code: number; reason?: string }) => void) | null }[] = [];
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen: (() => void) | null = null;
+        onmessage: (() => void) | null = null;
+        onclose: ((event: { code: number; reason?: string }) => void) | null = null;
+        constructor(readonly url: string) {
+          opened.push(this);
+        }
+        close() {
+          return undefined;
+        }
+      },
+    );
+    const closes: number[] = [];
+    const events = { onOpen: () => undefined, onFrame: () => undefined, onClose: (code: number) => closes.push(code) };
+    // A socket open from before the change.
+    expect((await openSocket('ops', 0, events)).ok).toBe(true);
+    const change = holding(server, 'PUT', changing, memberToken);
+    const changed = changePassword('the old one', 'a new one');
+    await sent(server, changing);
+    const later = openSocket('ops', 0, events);
+    await new Promise((r) => setTimeout(r, 20));
+    // No ticket has been asked for, and no second socket opened.
+    expect(auths(server, '/v1/ws-tickets')).toHaveLength(1);
+    expect(opened).toHaveLength(1);
+    // The revocation closes the first socket, 1008, before the answer is read.
+    opened[0]?.onclose?.({ code: 1008, reason: revokedClose });
+    change.give(json(rotated));
+    expect((await changed).ok).toBe(true);
+    expect((await later).ok).toBe(true);
+    expect(auths(server, '/v1/ws-tickets')).toEqual([`Bearer ${memberToken}`, `Bearer ${rotatedToken}`]);
+    expect(opened).toHaveLength(2);
+    expect(closes).toEqual([1006]);
+    // After the change a 1008 of the socket opened under the old credential is
+    // still the change's, but one of the new credential's is a refusal.
+    opened[0]?.onclose?.({ code: 1008, reason: revokedClose });
+    opened[1]?.onclose?.({ code: 1008, reason: revokedClose });
+    expect(closes).toEqual([1006, 1006, 1008]);
+  });
+
+  // A 1008 that means something else (the channel lost, the session ended)
+  // keeps its reason while a change is out, failed or unanswered: the owner
+  // acts on it.
+  describe('a close that is not the credential revoked', () => {
+    async function openedWithChange(held: 'failed' | 'unanswered') {
+      const server = await signedInToChange();
+      const sockets: { onclose: ((event: { code: number; reason?: string }) => void) | null }[] = [];
+      vi.stubGlobal(
+        'WebSocket',
+        class {
+          onopen: (() => void) | null = null;
+          onmessage: (() => void) | null = null;
+          onclose: ((event: { code: number; reason?: string }) => void) | null = null;
+          constructor() {
+            sockets.push(this);
+          }
+          close() {
+            return undefined;
+          }
+        },
+      );
+      const closes: { code: number; reason?: string }[] = [];
+      expect((await openSocket('ops', 0, { onOpen: () => undefined, onFrame: () => undefined, onClose: (code, reason) => closes.push({ code, reason }) })).ok).toBe(true);
+      const change = holding(server, 'PUT', changing, memberToken);
+      const changed = changePassword('the old one', 'a new one');
+      await sent(server, changing);
+      if (held === 'failed') change.give(json({ code: 'auth_failed', message: 'no' }, 403));
+      return { sockets, closes, change, changed };
+    }
+
+    it.each(['failed', 'unanswered'] as const)('reaches its owner with its reason during a write that %s', async (held) => {
+      const { sockets, closes, change, changed } = await openedWithChange(held);
+      if (held === 'failed') await changed;
+      sockets[0]?.onclose?.({ code: 1008, reason: 'no longer a member of this channel' });
+      sockets[0]?.onclose?.({ code: 1008, reason: 'session ended' });
+      expect(closes).toEqual([
+        { code: 1008, reason: 'no longer a member of this channel' },
+        { code: 1008, reason: 'session ended' },
+      ]);
+      change.give(json(rotated));
+      await changed;
+    });
+  });
+
+  // A write that is not answered releases what waits for it at the deadline,
+  // and tells its listeners it ended unreplaced; answered later with a new
+  // credential, it tells them once more.
+  it('drops an unanswered change at the deadline, and tells a late answer', async () => {
+    const server = await signedInToChange();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const told: string[] = [];
+      const stop = onCredentialReplacing((e) => {
+        told.push(e.phase === 'begin' ? 'begin' : `end rotated=${String(e.rotated)} late=${String(e.late)}`);
+      });
+      vi.stubGlobal(
+        'WebSocket',
+        class {
+          onopen: (() => void) | null = null;
+          onmessage: (() => void) | null = null;
+          onclose: (() => void) | null = null;
+          close() {
+            return undefined;
+          }
+        },
+      );
+      const change = holding(server, 'PUT', changing, memberToken);
+      const changed = changePassword('the old one', 'a new one');
+      await sent(server, changing);
+      let opened = false;
+      void openSocket('ops', 0, { onOpen: () => undefined, onFrame: () => undefined, onClose: () => undefined }).then(() => {
+        opened = true;
+      });
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(opened).toBe(false);
+      expect(told).toEqual(['begin']);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(opened).toBe(true);
+      expect(told).toEqual(['begin', 'end rotated=false late=false']);
+      change.give(json(rotated));
+      await changed;
+      expect(told).toEqual(['begin', 'end rotated=false late=false', 'end rotated=true late=true']);
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('tells a listener that a change begins before it is sent, and ends with whether the credential was replaced', async () => {
+    const server = await signedInToChange();
+    const told: string[] = [];
+    const stop = onCredentialReplacing((event) => {
+      told.push(event.phase === 'begin' ? `begin (calls so far: ${String(server.calls.length)})` : `end rotated=${String(event.rotated)}`);
+    });
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    // A change the server refuses leaves the credential in force.
+    server.state.before.push(json({ code: 'auth_failed', message: 'no' }, 403));
+    expect((await changePassword('wrong', 'a new one')).ok).toBe(false);
+    stop();
+    await changePassword('the old one', 'again');
+    expect(told).toEqual(['begin (calls so far: 0)', 'end rotated=true', 'begin (calls so far: 1)', 'end rotated=false']);
+  });
+
+  it('waits for the change when the old one is refused before its answer is read', async () => {
+    const server = await signedInToChange();
+    const change = holding(server, 'PUT', changing, memberToken);
+    const changed = changePassword('the old one', 'a new one');
+    await sent(server, changing);
+    // The server has rotated, but its answer to the change is not read yet:
+    // a socket it closed asks whoami with the old credential, refused.
+    server.state.revoked = true;
+    const asking = whoAmI();
+    await sent(server, '/v1/whoami');
+    change.give(json(rotated));
+    expect((await changed).ok).toBe(true);
+    expect(await asking).toEqual({ ok: true, value: member });
+    expect(auths(server, '/v1/whoami')).toEqual([`Bearer ${memberToken}`, `Bearer ${rotatedToken}`]);
+    expect(window.localStorage.getItem(key)).toBe(rotatedToken);
+  });
+
+  it('asks for a socket ticket again with the new credential', async () => {
+    const server = await signedInToChange();
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onmessage = null;
+        onclose = null;
+        close(): void {
+          // Nothing to close.
+        }
+      },
+    );
+    const old = holding(server, 'POST', '/v1/ws-tickets', memberToken);
+    const opening = openSocket('ops', 0, { onOpen: () => undefined, onFrame: () => undefined, onClose: () => undefined });
+    await sent(server, '/v1/ws-tickets');
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    old.give(json({}, 401));
+    expect((await opening).ok).toBe(true);
+    expect(auths(server, '/v1/ws-tickets')).toEqual([`Bearer ${memberToken}`, `Bearer ${rotatedToken}`]);
+    expect(window.localStorage.getItem(key)).toBe(rotatedToken);
+  });
+
+  it('sends a write again with the new credential, once', async () => {
+    const server = await signedInToChange();
+    const old = holding(server, 'DELETE', '/v1/credentials/mine/7', memberToken);
+    const ending = endSignIn(7);
+    await sent(server, '/v1/credentials/mine/7');
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    old.give(json({}, 401));
+    expect(await ending).toEqual({ ok: true, value: null });
+    expect(auths(server, '/v1/credentials/mine/7')).toEqual([`Bearer ${memberToken}`, `Bearer ${rotatedToken}`]);
+  });
+
+  it('still signs out on a 401 for the new credential', async () => {
+    await signedInToChange();
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    serve(() => json({}, 401));
+    expect(await whoAmI()).toEqual({ ok: false, failure: 'unauthorized' });
+    expect(window.localStorage.getItem(key)).toBeNull();
+    expect(hasToken()).toBe(false);
+  });
+
+  it('still signs out on a 401 that waited for a change that replaced nothing', async () => {
+    const server = await signedInToChange();
+    // The credential was ended elsewhere: the change is refused too, so the
+    // 401 that waited for it signs out.
+    const change = holding(server, 'PUT', changing, memberToken);
+    const changed = changePassword('the old one', 'a new one');
+    await sent(server, changing);
+    const old = holding(server, 'GET', '/v1/whoami', memberToken);
+    const asking = whoAmI();
+    await sent(server, '/v1/whoami');
+    old.give(json({}, 401));
+    change.give(json({}, 401));
+    expect(await changed).toEqual({ ok: false, failure: 'unauthorized' });
+    expect(await asking).toEqual({ ok: false, failure: 'unauthorized' });
+    expect(window.localStorage.getItem(key)).toBeNull();
+    expect(auths(server, '/v1/whoami')).toHaveLength(1);
+  });
+
+  // A guest's Create an account revokes the guest credential in the
+  // transaction that makes the member: the same person, under a new one.
+  it('asks again as the member a call of the guest’s that the conversion refused', async () => {
+    const guestToken = 'conch_guest_secret';
+    const handle = 'guest-a7k4m2q9x3h5t8wz';
+    const visit = { state: 'active', origin: 'address', handle, label: 'Pat', tag: 'a7k4', started_at: at, expires_at: '2099-10-22T12:00:00.000Z', idle_expires_at: '2099-10-21T14:00:00.000Z', can_convert: true };
+    const guest = { id: 12, kind: 'human', name: handle, role: 'member', identity_class: 'guest', guest: visit };
+    const made = { id: 12, kind: 'human', name: 'pat', role: 'member', identity_class: 'member' };
+    const converted = { principal: { id: 12, kind: 'human', name: 'pat', created_at: at }, credential: { id: 31, principal_id: 12, label: 'browser', created_at: at, renews: true }, token: rotatedToken };
+    window.sessionStorage.setItem(key, guestToken);
+    let ended = false;
+    const conversion = later();
+    const calls = serve((c) => {
+      if (c.path === '/v1/guest/convert') {
+        ended = true;
+        return conversion.answer;
+      }
+      if (c.path === '/v1/whoami' && c.auth === `Bearer ${guestToken}`) return ended ? json({}, 401) : json(guest);
+      if (c.path === '/v1/whoami' && c.auth === `Bearer ${rotatedToken}`) return json(made);
+      return json({}, 401);
+    });
+    expect((await restore()).ok).toBe(true);
+    // The conversion has made the member, and a whoami of the guest's is
+    // refused before the conversion's answer is read.
+    const converting = convertGuest('pat', 'a password of hers');
+    await vi.waitFor(() => {
+      expect(ended).toBe(true);
+    });
+    const asking = whoAmI();
+    await vi.waitFor(() => {
+      expect(calls.filter((c) => c.path === '/v1/whoami')).toHaveLength(2);
+    });
+    conversion.give(json(converted));
+    expect(await converting).toEqual({ ok: true });
+    expect(await asking).toEqual({ ok: true, value: made });
+    expect(calls.filter((c) => c.path === '/v1/whoami').map((c) => c.auth)).toEqual([`Bearer ${guestToken}`, `Bearer ${guestToken}`, `Bearer ${rotatedToken}`]);
+    expect(window.localStorage.getItem(key)).toBe(rotatedToken);
+    expect(window.sessionStorage.getItem(key)).toBeNull();
+  });
+
+  it.each([
+    { name: 'an upload', path: uploading, method: 'POST', run: () => uploadFile('ops', 'a.png', 'image/png', new Blob([new Uint8Array([1, 2, 3])]), new AbortController().signal), want: { ok: true, file } },
+    { name: 'a download', path: '/v2/files/17', method: 'GET', run: () => fetchFileBytes(17), want: { ok: true, value: expect.any(Blob) as unknown } },
+  ])('sends $name again with the new credential', async ({ path, method, run, want }) => {
+    const server = await signedInToChange();
+    const old = holding(server, method, path, memberToken);
+    const running = run();
+    await sent(server, path);
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    old.give(json({}, 401));
+    expect(await running).toEqual(want);
+    expect(auths(server, path)).toEqual([`Bearer ${memberToken}`, `Bearer ${rotatedToken}`]);
+    expect(window.localStorage.getItem(key)).toBe(rotatedToken);
+  });
+
+  it('signs out when the call sent again is refused with the new credential too', async () => {
+    const server = await signedInToChange();
+    const old = holding(server, 'GET', '/v1/whoami', memberToken);
+    const asking = whoAmI();
+    await sent(server, '/v1/whoami');
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    server.state.revokedRotated = true;
+    old.give(json({}, 401));
+    expect(await asking).toEqual({ ok: false, failure: 'unauthorized' });
+    expect(auths(server, '/v1/whoami')).toEqual([`Bearer ${memberToken}`, `Bearer ${rotatedToken}`]);
+    expect(window.localStorage.getItem(key)).toBeNull();
+    expect(hasToken()).toBe(false);
+  });
+
+  // The identity claim: a 401 is sent again only as the same sign-in.
+  it('never sends a call from before a rotation again as the next person, after a sign-out and a sign-in', async () => {
+    const server = await signedInToChange();
+    const old = holding(server, 'GET', '/v1/whoami', memberToken);
+    const asking = whoAmI();
+    await sent(server, '/v1/whoami');
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    expect(await signOut()).toBe(true);
+    expect((await signIn(otherMemberToken)).ok).toBe(true);
+    old.give(json({}, 401));
+    expect(await asking).toEqual({ ok: false, failure: 'network' });
+    expect(auths(server, '/v1/whoami')).toEqual([`Bearer ${memberToken}`, `Bearer ${otherMemberToken}`]);
+    expect(window.localStorage.getItem(key)).toBe(otherMemberToken);
+    await whoAmI();
+    expect(server.calls.at(-1)?.auth).toBe(`Bearer ${otherMemberToken}`);
+  });
+
+  it('signs out, and sends nothing again, when another tab stored another credential after the rotation', async () => {
+    const server = await signedInToChange();
+    const old = holding(server, 'GET', '/v1/whoami', memberToken);
+    const asking = whoAmI();
+    await sent(server, '/v1/whoami');
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    window.localStorage.setItem(key, otherMemberToken);
+    old.give(json({}, 401));
+    expect(await asking).toEqual({ ok: false, failure: 'unauthorized' });
+    expect(auths(server, '/v1/whoami')).toEqual([`Bearer ${memberToken}`]);
+    // The other tab's credential is theirs: left alone.
+    expect(window.localStorage.getItem(key)).toBe(otherMemberToken);
+  });
+
+  // The proof a change asks for is sent with the old credential while a
+  // refused call waits for the change: it never waits for that call.
+  it.each([
+    { proof: 'given', answer: () => json({ until: '2099-10-31T12:10:00.000Z' }), changed: true, asked: { ok: true, value: member } },
+    { proof: 'refused', answer: () => json({}, 401), changed: false, asked: { ok: false, failure: 'unauthorized' } },
+  ])('settles a call that waited for a change whose proof was $proof', async ({ answer, changed, asked }) => {
+    const server = await signedInToChange();
+    server.state.before.push(json({ code: 'reauth_required', message: 'prove it' }, 403));
+    onReauthRequired(async () => (await reauth('the old one')).ok);
+    try {
+      const proof = holding(server, 'POST', '/v1/reauth', memberToken);
+      const writing = changePassword('the old one', 'a new one');
+      await sent(server, '/v1/reauth');
+      const old = holding(server, 'GET', '/v1/whoami', memberToken);
+      const asking = whoAmI();
+      await sent(server, '/v1/whoami');
+      old.give(json({}, 401));
+      proof.give(answer());
+      expect((await writing).ok).toBe(changed);
+      expect(await asking).toEqual(asked);
+      expect(auths(server, changing)).toEqual(changed ? [`Bearer ${memberToken}`, `Bearer ${memberToken}`] : [`Bearer ${memberToken}`]);
+      expect(window.localStorage.getItem(key)).toBe(changed ? rotatedToken : null);
+    } finally {
+      onReauthRequired(null);
+    }
+  });
+
+  // A write that replaces the credential carries a proof made for the one
+  // it was sent with: sent again with another, it would be a wrong password
+  // counted against the person (security review of #1045).
+  it.each([
+    { name: 'a password change', method: 'PUT', write: () => changePassword('the old one', 'another new one') },
+    { name: 'a first password', method: 'POST', write: () => setPassword('another new one', `conch_sil_${'E'.repeat(43)}`) },
+  ])('never sends $name again with the credential that replaced its own', async ({ method, write }) => {
+    const server = await signedInToChange();
+    const first = holding(server, method, changing, memberToken);
+    const writing = write();
+    await sent(server, changing);
+    // Another change, sent after it, rotates the credential first.
+    expect((await changePassword('the old one', 'a new one')).ok).toBe(true);
+    first.give(json({}, 401));
+    expect(await writing).toEqual({ ok: false, failure: 'network' });
+    expect(server.calls.filter((c) => c.path === changing).map((c) => [c.method, c.auth])).toEqual([
+      [method, `Bearer ${memberToken}`],
+      ['PUT', `Bearer ${memberToken}`],
+    ]);
+    expect(window.localStorage.getItem(key)).toBe(rotatedToken);
+  });
+
+  it('settles a 401 as it stands after waiting thirty seconds for a change that does not answer', async () => {
+    const server = await signedInToChange();
+    const change = holding(server, 'PUT', changing, memberToken);
+    const changed = changePassword('the old one', 'a new one');
+    await sent(server, changing);
+    vi.useFakeTimers();
+    try {
+      server.state.revoked = true;
+      let settled = false;
+      const asking = whoAmI().finally(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => {
+        expect(vi.getTimerCount()).toBe(1);
+      });
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(await asking).toEqual({ ok: false, failure: 'unauthorized' });
+      expect(window.localStorage.getItem(key)).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      change.give(json({}, 401));
+      await changed;
+    }
+  });
+
+  // A call from a sign-in that is over is never sent again as the one made
+  // since, and its 401 does not sign that one out.
+  it('neither signs out nor sends again as the next person a call from a sign-in that is over', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const old = later();
+    const calls = serve((c) => {
+      if (c.path === '/v1/whoami' && c.auth === `Bearer ${memberToken}`) return old.answer;
+      if (c.path === '/v1/credentials/current') return new Response(null, { status: 204 });
+      return whoami(c);
+    });
+    const asking = whoAmI();
+    await vi.waitFor(() => {
+      expect(calls.some((c) => c.path === '/v1/whoami')).toBe(true);
+    });
+    expect(await signOut()).toBe(true);
+    expect((await signIn(otherMemberToken)).ok).toBe(true);
+    old.give(json({}, 401));
+    expect(await asking).toEqual({ ok: false, failure: 'network' });
+    expect(window.localStorage.getItem(key)).toBe(otherMemberToken);
+    expect(calls.filter((c) => c.path === '/v1/whoami').map((c) => c.auth)).toEqual([`Bearer ${memberToken}`, `Bearer ${otherMemberToken}`]);
+    await whoAmI();
+    expect(calls.at(-1)?.auth).toBe(`Bearer ${otherMemberToken}`);
+  });
+});
+
+// Issue #1244: the microphone mode kept in this browser. Nothing kept, a value
+// that is neither mode, and a storage that throws are all no choice (null), so
+// the voice client starts in open microphone and shows no error.
+describe('the voice mode kept in the browser', () => {
+  it('reads nothing as no choice, and what was written back', () => {
+    expect(readVoiceMode()).toBeNull();
+    writeVoiceMode('ptt');
+    expect(readVoiceMode()).toBe('ptt');
+    writeVoiceMode('open');
+    expect(readVoiceMode()).toBe('open');
+  });
+
+  it('reads anything else as no choice', () => {
+    window.localStorage.setItem('conch.web.voice.mode.v1', 'loud');
+    expect(readVoiceMode()).toBeNull();
+  });
+
+  it('is tolerated when the storage throws', () => {
+    const refuse = () => {
+      throw new Error('storage is off');
+    };
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(refuse);
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(refuse);
+    expect(readVoiceMode()).toBeNull();
+    expect(() => { writeVoiceMode('ptt'); }).not.toThrow();
+    vi.restoreAllMocks();
+  });
+});
+
+describe('channelAuthors (design §13.5)', () => {
+  const author = (id: number) => ({ principal_id: id, name: `p${String(id)}`, kind: 'human' });
+
+  it('asks in batches of at most 100 ids, once each, and gathers the answers', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const ids = Array.from({ length: 250 }, (_, i) => i + 10);
+    const asked: number[][] = [];
+    serve((call) => {
+      const wanted = new URL(call.path, 'http://x').searchParams.get('ids')?.split(',').map(Number) ?? [];
+      asked.push(wanted);
+      return json({ authors: wanted.map(author) });
+    });
+    const result = await channelAuthors('general', [...ids, ...ids.slice(0, 5)]);
+    expect(asked.map((a) => a.length)).toEqual([100, 100, 50]);
+    expect(result.ok && result.value.length).toBe(250);
+  });
+
+  it('puts the channel in the path as one segment', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const calls = serve(() => json({ authors: [] }));
+    await channelAuthors('a/b c', [3]);
+    expect(calls.map((c) => c.path)).toEqual(['/v1/channels/a%2Fb%20c/authors?ids=3']);
+  });
+
+  it('keeps only names for ids it asked, and skips a batch that did not answer', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    let n = 0;
+    serve(() => (++n === 1 ? json({ authors: [author(10), author(999)] }) : json({ code: 'internal_error', message: 'x' }, 500)));
+    const ids = Array.from({ length: 101 }, (_, i) => i + 10);
+    const result = await channelAuthors('general', ids);
+    expect(result).toEqual({ ok: true, value: [author(10)] });
+  });
+
+  it('refuses a body that is not the schema’s shape, naming nobody', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({ authors: [{ principal_id: 'x', name: 1 }] }));
+    expect(await channelAuthors('general', [3])).toEqual({ ok: true, value: [] });
+  });
+
+  it('is a failure on a 401, so the page signs out', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    serve(() => json({}, 401));
+    expect(await channelAuthors('general', [3])).toEqual({ ok: false, failure: 'unauthorized' });
+  });
+
+  it('asks nothing for no ids', async () => {
+    await signedInFrom(window.localStorage, memberToken);
+    const calls = serve(() => json({ authors: [] }));
+    expect(await channelAuthors('general', [])).toEqual({ ok: true, value: [] });
+    expect(calls).toEqual([]);
   });
 });

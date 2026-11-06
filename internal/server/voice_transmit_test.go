@@ -453,7 +453,7 @@ func TestVoiceTransmitRotation(t *testing.T) {
 	// the test stops the poller removing him so that his transmission is
 	// open when the room is rotated.
 	f.srv.voice.entitle = func(_ context.Context, identity string, _ int64) (int64, string, error) {
-		id, _ := parseVoiceIdentity(identity)
+		id, _, _ := parseVoiceParticipant(identity)
 		return id, "", nil
 	}
 	f.at(0)
@@ -573,7 +573,8 @@ func TestVoiceTransmitRemovedByName(t *testing.T) {
 			}
 			f.at(700)
 			method, path := tt.remove(f)
-			if code := f.doOrdered(t, method, path, f.rootTok); code != 204 {
+			// A removal answers 204, a disable 200 (issue #1024).
+			if code := f.doOrdered(t, method, path, f.rootTok); code != 204 && code != 200 {
 				t.Fatalf("status = %d", code)
 			}
 			if got := f.transmitRows(t); !slices.Equal(got, tt.want) {
@@ -2053,7 +2054,7 @@ func TestVoiceTransmitTimesAreReadUnderTheLock(t *testing.T) {
 	state = p.roomNamed(room)
 	ann, ann2, bob := f.identity("ann"), f.identity("ann2"), f.identity("bob")
 	p.entitle = func(_ context.Context, identity string, _ int64) (int64, string, error) {
-		id, _ := parseVoiceIdentity(identity)
+		id, _, _ := parseVoiceParticipant(identity)
 		return id, "", nil
 	}
 	f.lk.setRoom(room,
@@ -2074,7 +2075,7 @@ func TestVoiceTransmitTimesAreReadUnderTheLock(t *testing.T) {
 	// bob is disabled while his rooms cannot be read: forgetEverywhere.
 	p.memberRooms = func(context.Context, int64) ([]store.VoiceRoom, error) { return nil, errors.New("store unavailable") }
 	f.at(700)
-	if code := f.doOrdered(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.ids["bob"]), f.rootTok); code != 204 {
+	if code := f.doOrdered(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.ids["bob"]), f.rootTok); code != 200 {
 		t.Fatalf("disable status = %d", code)
 	}
 	// ann's credential is replaced: the room is rotated, forgetRoom.

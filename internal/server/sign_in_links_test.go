@@ -332,7 +332,7 @@ func TestSignInLinkRateLimits(t *testing.T) {
 		limits := looseInviteLimits()
 		limits.createPerPrincipal = inviteLimit{"create_per_principal", 2, time.Hour}
 		f.srv.setInviteLimits(limits)
-		f.createInvite(t, f.rootTok, openLink("general"))
+		f.createMemberLink(t, f.rootTok, schema.CreateInviteRequestV2{Kind: schema.InviteKindMember})
 		f.createSignInLink(t, f.alice.ID, schema.CreateSignInLinkRequestV1{})
 		rec := f.send(t, "POST", signInLinkPath(f.alice.ID), f.rootTok, "{}", "")
 		assertErrorBody(t, rec, http.StatusTooManyRequests, schema.ErrorCodeRateLimited)
@@ -415,8 +415,9 @@ func TestSignInLinkSecretsStayOut(t *testing.T) {
 func TestSignInLinkDiesWithADisable(t *testing.T) {
 	f := newInviteFixture(t, Config{})
 	link := f.createSignInLink(t, f.alice.ID, schema.CreateSignInLinkRequestV1{})
-	for _, action := range []string{"disable", "enable"} {
-		if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/%s", f.alice.ID, action), f.rootTok, "", ""); rec.Code != http.StatusNoContent {
+	// A disable answers 200 with a body (issue #1024), an enable 204.
+	for action, want := range map[string]int{"disable": http.StatusOK, "enable": http.StatusNoContent} {
+		if rec := f.send(t, "POST", fmt.Sprintf("/v1/principals/%d/%s", f.alice.ID, action), f.rootTok, "", ""); rec.Code != want {
 			t.Fatalf("%s = %d %s", action, rec.Code, rec.Body)
 		}
 	}

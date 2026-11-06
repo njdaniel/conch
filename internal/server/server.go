@@ -73,7 +73,7 @@ type Config struct {
 	// clientaddr.go). Empty, the header is never read and the client is the
 	// connection's peer.
 	TrustedProxies []netip.Prefix
-	// InviteAllowance is how many outstanding personal invites one inviter
+	// InviteAllowance is how many open member links one maker
 	// who is not an operator may hold. Zero or less means
 	// store.DefaultPersonalInviteAllowance.
 	InviteAllowance int
@@ -86,9 +86,10 @@ type Config struct {
 	// loopback. Without it such an address stops the server at start.
 	MetricsAllowRemote bool
 	// TestRelaxInviteLimits raises the per-address rate limits of the invite and
-	// sign-in-link routes (invite_limits.go) so that a browser suite, which
-	// redeems everything from one address, does not share one budget across
-	// its specs (issue #609). It is for test servers only: Listen refuses it
+	// sign-in-link routes, and the per-principal limit on making invites and
+	// sign-in links (invite_limits.go), so that a browser suite, which redeems
+	// everything from one address and makes nearly everything as one operator,
+	// does not share one budget across its specs (issues #609, #1161). It is for test servers only: Listen refuses it
 	// unless every address the server binds is loopback and no trusted proxy
 	// is set, and logs a warning when it is on. Off, the default, the limits are the production ones.
 	TestRelaxInviteLimits bool
@@ -103,6 +104,32 @@ type Config struct {
 	// or sign in with a password, and every TOTP check fails closed;
 	// everything else works. conchd reads it from CONCHD_TOTP_KEY only.
 	TOTPKey *TOTPKey
+	// Mode is the server's mode (ADR-011, issue #866). Empty or
+	// store.ModeNormal is normal; store.ModeTemporary makes /healthz and
+	// whoami say the server is temporary, and allows password-only
+	// operators. conchd reads it from CONCHD_MODE only.
+	Mode store.Mode
+	// OperatorTOTP is whether an operator needs an authenticator to sign in
+	// to the browser (ADR-012, issue #875). store.OperatorTOTPOptional
+	// allows password-only operators on any server; empty or required
+	// allows them only in temporary mode. conchd reads it from
+	// CONCHD_OPERATOR_TOTP only. conchd records what the two settings allow
+	// with store.StartMode before New, and the store's own checks read what
+	// was recorded, so a Config that allows password-only over a store that
+	// does not still asks for the code.
+	OperatorTOTP store.OperatorTOTP
+}
+
+// temporary reports whether the server runs in temporary mode. It decides
+// the banner (server_mode on /healthz and whoami) and nothing else.
+func (c Config) temporary() bool { return c.Mode == store.ModeTemporary }
+
+// passwordOnlyAllowed reports whether an operator with no authenticator
+// signs in, re-authenticates, changes their password and completes setup
+// with a password alone (ADR-011 item 2.1, ADR-012 item 2): the server is
+// temporary or its operator TOTP is optional.
+func (c Config) passwordOnlyAllowed() bool {
+	return store.PasswordOnlyAllowed(c.Mode, c.OperatorTOTP)
 }
 
 // Broadcaster is the delivery seam invoked after a message is persisted.
@@ -182,6 +209,17 @@ type Server struct {
 	// events socket writes: a test blocks in it to be a subscriber that is
 	// stuck in a write.
 	eventsBeforeWrite func()
+	// eventsBeforeEpochWrite, when set by a test, runs before every frame an
+	// events socket writes that is held to a read-state epoch (a read state
+	// or a notification message), with the encoded frame. A test that must
+	// land a revocation between a frame's build and its write picks the frame
+	// it means by its schema; eventsBeforeWrite also sees the rosters and the
+	// other frames, whose number and order depend on timing.
+	eventsBeforeEpochWrite func(frame []byte)
+	// reactionBeforeRead, when set by a test, runs in an events socket
+	// just before it reads a message's reactions for a reference: a test
+	// lands a removal in that window. Nil in conchd.
+	reactionBeforeRead func()
 	// eventsRosterFloor is the least time between two roster rebuilds for one
 	// events socket (defaultEventsRosterFloor). It is measured on the
 	// monotonic clock, not now: it paces work, it is not a time anyone reads.
@@ -218,6 +256,14 @@ type Server struct {
 	// reportLimits is the problem-report rate limit (reports.go), in memory
 	// only; its clock is now. Tests replace it before serving.
 	reportLimits *reportLimiter
+	// reactionLimits is the people's reaction write limit (reactions.go), in
+	// memory only; its clock is now. Tests replace it with setReactionLimit
+	// before serving.
+	reactionLimits *reactionLimiter
+	// messageEditLimits is the people's message edit limit (message_edit.go),
+	// in memory only; its clock is now. Tests replace it with
+	// setMessageEditLimit before serving.
+	messageEditLimits *messageEditLimiter
 	// guestAddrs is which address each guest visit came from, for the
 	// per-address cap (join.go), in memory only.
 	guestAddrs guestAddressBook
@@ -274,9 +320,9 @@ func New(cfg Config, st *store.Store) *Server {
 				"missing", strings.Join(missing, ", "), "not_sent", ntfyNotSent(missing))
 		}
 	}
-	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()),
+	s := &Server{cfg: cfg, store: st, hub: hub.New(), approvals: approvals.New(st, notifier), broadcaster: broadcaster, credRecheckInterval: defaultCredentialRecheckInterval, sessionSweepInterval: defaultSessionSweepInterval, now: time.Now, renameFile: os.Rename, inviteLimits: newInviteLimiter(inviteLimitsFor(cfg)), reportLimits: newReportLimiter(defaultReportLimit()), reactionLimits: newReactionLimiter(defaultReactionLimit()),
 		passwords: newPasswords(), logins: newLoginLimiter(loginLimitsFor(cfg)), addressMAC: newAddressMACKey(),
-		setupLimits: newSetupLimiter(cfg)}
+		setupLimits: newSetupLimiter(cfg), messageEditLimits: newMessageEditLimiter(defaultMessageEditLimit())}
 	// The server's name is a permanent name nobody may take (issue #760):
 	// the store refuses it on every write of a name from here on.
 	st.SetServerName(s.serverName())
@@ -334,6 +380,9 @@ func New(cfg Config, st *store.Store) *Server {
 	// Outside authentication, so every answer has a request id, a refusal
 	// included (issue #446).
 	handler = s.requestIDMiddleware(handler)
+	// Outermost, so every answer carries a Permissions-Policy: the deny-all
+	// one everywhere but the web client's own (ADR-015, design §6.4, N8).
+	handler = permissionsPolicyMiddleware(handler)
 	s.http = &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           handler,
@@ -524,6 +573,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Version: s.cfg.Version,
 		DB:      schema.HealthOK,
 		Voice:   s.voice.health(),
+	}
+	// Public on purpose (ADR-011 item 2.3): the sign-in page shows the
+	// banner before anyone signs in. Normal mode says nothing.
+	if s.cfg.temporary() {
+		h.ServerMode = schema.ServerModeTemporary
 	}
 	code := http.StatusOK
 

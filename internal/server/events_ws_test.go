@@ -33,6 +33,8 @@ type eventFrame struct {
 	intervention schema.InterventionV1
 	members      schema.ChannelMembersV1
 	channel      schema.ChannelDocV1
+	readState    schema.ReadStateV1
+	message      schema.MessageV2
 }
 
 func (fr eventFrame) String() string {
@@ -126,6 +128,29 @@ func (c *eventsClient) next() eventFrame {
 	case schema.ChannelSchemaV1:
 		if err = json.Unmarshal(raw, &fr.channel); err == nil {
 			verr = fr.channel.Validate()
+		}
+	case schema.ReadStateSchemaV1:
+		if err = json.Unmarshal(raw, &fr.readState); err == nil {
+			verr = fr.readState.Validate()
+		}
+	case schema.MessageSchemaV2:
+		if err = json.Unmarshal(raw, &fr.message); err == nil {
+			verr = fr.message.Validate()
+		}
+	case schema.ChannelsChangedSchemaV1:
+		var doc schema.ChannelsChangedV1
+		if err = json.Unmarshal(raw, &doc); err == nil {
+			verr = doc.Validate()
+		}
+	case schema.PermissionsChangedSchemaV1:
+		var doc schema.PermissionsChangedV1
+		if err = json.Unmarshal(raw, &doc); err == nil {
+			verr = doc.Validate()
+		}
+	case schema.DirectoryChangedSchemaV1:
+		var doc schema.DirectoryChangedV1
+		if err = json.Unmarshal(raw, &doc); err == nil {
+			verr = doc.Validate()
 		}
 	default:
 		c.t.Fatalf("a frame of schema %q, which the events socket does not send:\n%s", head.Schema, raw)
@@ -758,7 +783,7 @@ func TestEventsChannelRenamed(t *testing.T) {
 		t.Fatalf("rename = %d %s", rec.Code, rec.Body)
 	}
 
-	want := schema.ChannelDocV1{Schema: schema.ChannelSchemaV1, ChannelID: f.ops.ID, Name: "ops-renamed", CreatedAt: schema.NewTimestamp(f.ops.CreatedAt)}
+	want := schema.ChannelDocV1{Schema: schema.ChannelSchemaV1, ChannelID: f.ops.ID, Name: "ops-renamed", CreatedAt: schema.NewTimestamp(f.ops.CreatedAt), Visibility: schema.ChannelPrivate}
 	for i, c := range renamedSocks {
 		if fr := c.next(); fr.schema != schema.ChannelSchemaV1 || fr.channel != want {
 			t.Fatalf("socket %d: frame after the rename = %v, want %+v", i, fr, want)
@@ -781,12 +806,21 @@ func TestEventsChannelRenamed(t *testing.T) {
 		}
 	}
 
-	// ops2 heard nothing: its next frame is the change made to it.
+	// ops2 heard nothing about the rename of ops: no channel document comes
+	// before the change made to it. ann owns this socket and is a member of
+	// ops, so the rename also sent it conch.channels_changed.v1 (#1049); that
+	// frame may arrive before or after the member list, depending on timing,
+	// and is the only other frame allowed before it.
 	if rec := f.do(t, http.MethodPut, fmt.Sprintf("/v1/channels/ops2/members/%d", f.ids["bob"]), f.rootTok, ""); rec.Code != http.StatusNoContent {
 		t.Fatalf("add bob to ops2 = %d %s", rec.Code, rec.Body)
 	}
-	if fr := other.next(); fr.schema != schema.ChannelMembersSchemaV1 || fr.members.ChannelID != f.ops2.ID {
-		t.Errorf("ops2: next frame = %v, want its member list", fr)
+	seen := other.until("ops2's member list", isMembers(func(d schema.ChannelMembersV1) bool {
+		return d.ChannelID == f.ops2.ID
+	}))
+	for _, fr := range seen[:len(seen)-1] {
+		if fr.schema != schema.ChannelsChangedSchemaV1 {
+			t.Errorf("ops2: frame before its member list = %v, want only %s: %v", fr, schema.ChannelsChangedSchemaV1, seen)
+		}
 	}
 
 	// The message socket's next frame is the next message, posted by the

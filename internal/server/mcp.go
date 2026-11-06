@@ -34,6 +34,9 @@ type mcpPostMessageInput struct {
 	Body     string           `json:"body" jsonschema:"rendered human-readable message body"`
 	Payload  *mcpPayloadInput `json:"payload,omitempty" jsonschema:"optional typed machine payload"`
 	Audience *mcpAudience     `json:"audience,omitempty" jsonschema:"optional audience; omit to post to the whole channel. To reply in kind, reuse the audience of the message being answered"`
+	// ThreadRootID replies in a thread. A reply takes its root's audience, so
+	// it cannot be combined with audience.
+	ThreadRootID int64 `json:"thread_root_id,omitempty" jsonschema:"optional id of the message to reply to; the reply takes that message's audience, so do not also give an audience. Threads are one level deep: the id must be a message that is not itself a reply"`
 }
 
 type mcpReadChannelInput struct {
@@ -107,6 +110,16 @@ type mcpMessageOutput struct {
 	// Audience is absent for a channel-wide message. A message that carries
 	// one was not sent to the whole channel, and a reply must not be either.
 	Audience *mcpAudience `json:"audience,omitempty"`
+	// EditedAt is when the author last changed the body (issue #845);
+	// absent for a message never edited. An agent polling by id never sees
+	// an edit as a new message: the id does not change.
+	EditedAt string `json:"edited_at,omitempty"`
+	// ThreadRootID is the message this one replies to; absent for a message
+	// that is not a reply (issue #25).
+	ThreadRootID int64 `json:"thread_root_id,omitempty"`
+	// GuestAuthor is the guest attribution a message carries when it was
+	// posted during a guest visit; absent otherwise (ADR-009 section 4.4).
+	GuestAuthor *schema.GuestAttributionV1 `json:"guest_author,omitempty"`
 }
 
 type mcpPostMessageOutput struct {
@@ -140,7 +153,7 @@ func addAgentTool[In, Out any](s *Server, server *mcp.Server, identity mcpIdenti
 // mcpServerFor builds the MCP server for one authenticated request.
 func (s *Server) mcpServerFor(identity mcpIdentity) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "conchd", Version: s.cfg.Version}, nil)
-	addAgentTool(s, server, identity, &mcp.Tool{Name: "post_message", Description: "Post a message to a Conch channel as the authenticated agent. Without an audience it goes to the whole channel; with one it goes only to a net or to the listed principals."},
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "post_message", Description: "Post a message to a Conch channel as the authenticated agent. Without an audience it goes to the whole channel; with one it goes only to a net or to the listed principals. With thread_root_id it is a reply in that message's thread, to the root's audience."},
 		func(ctx context.Context, scope *agentScope, in mcpPostMessageInput) (*mcp.CallToolResult, mcpPostMessageOutput, error) {
 			out, serr := s.postMessageMCP(ctx, scope, in)
 			if serr != nil {
@@ -201,7 +214,43 @@ func (s *Server) mcpServerFor(identity mcpIdentity) *mcp.Server {
 			}
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("approval %d is %s", in.ApprovalID, out.State)}}}, projected, nil
 		})
+	// Reactions (issue #765). Plain mirrors of the REST routes, over the same
+	// functions (reactions.go). They post nothing, notify no one and mark
+	// nothing read; the people who can see the message see the reaction.
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "set_reaction", Description: "React to a message in a Conch channel with one emoji, as the authenticated agent. Setting a reaction already held changes nothing. The agent needs read in the channel, since the answer is the message's whole summary, and the permission it would need to reply in the message's audience (post, post_net or whisper). Reacting does not post a message, does not notify anyone and does not mark anything read; the people who can see the message see the reaction."},
+		func(ctx context.Context, scope *agentScope, in mcpReactionInput) (*mcp.CallToolResult, mcpReactionSummary, error) {
+			out, serr := s.reactMCP(ctx, scope, in, true)
+			if serr != nil {
+				return mcpToolError(serr), mcpReactionSummary{}, nil
+			}
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("message %d has %d kinds of reaction", out.MessageID, len(out.Reactions))}}}, out, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "remove_reaction", Description: "Remove the authenticated agent's own reaction from a message. Removing one that is not held changes nothing. Removing does not post a message, notify anyone or mark anything read."},
+		func(ctx context.Context, scope *agentScope, in mcpReactionInput) (*mcp.CallToolResult, mcpReactionSummary, error) {
+			out, serr := s.reactMCP(ctx, scope, in, false)
+			if serr != nil {
+				return mcpToolError(serr), mcpReactionSummary{}, nil
+			}
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("message %d has %d kinds of reaction", out.MessageID, len(out.Reactions))}}}, out, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "read_reactions", Description: "Read the reactions on up to 100 messages of a Conch channel: one summary of emoji and counts for each listed message the agent can see that has any. A message that is missing from the answer has none, or is not one the agent can see."},
+		func(ctx context.Context, scope *agentScope, in mcpReadReactionsInput) (*mcp.CallToolResult, mcpReactionSummaries, error) {
+			out, serr := s.readReactionsMCP(ctx, scope, in)
+			if serr != nil {
+				return mcpToolError(serr), mcpReactionSummaries{}, nil
+			}
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("read reactions on %d messages", len(out.Summaries))}}}, out, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "list_reactors", Description: "List, one page at a time, who reacted to a message with one emoji: principal ids in ascending order. A reactor is named by id, as a message's author is."},
+		func(ctx context.Context, scope *agentScope, in mcpListReactorsInput) (*mcp.CallToolResult, mcpReactorList, error) {
+			out, serr := s.listReactorsMCP(ctx, scope, in)
+			if serr != nil {
+				return mcpToolError(serr), mcpReactorList{}, nil
+			}
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: fmt.Sprintf("listed %d reactors", len(out.Reactors))}}}, out, nil
+		})
 	s.addSessionTools(server, identity)
+	s.addAdminTools(server, identity)
 	return server
 }
 
@@ -247,6 +296,10 @@ func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPo
 	// given, which says nothing about any channel or net; then the request as
 	// given; then the audience is normalized with the author, and the store
 	// judges the normalized form.
+	if in.ThreadRootID != 0 && in.Audience != nil {
+		// As over REST: malformed whatever the root is; nothing is looked up.
+		return schema.PostMessageResponseV2{}, errThreadAudience
+	}
 	var audience *schema.Audience
 	if in.Audience != nil {
 		audience = &schema.Audience{Kind: schema.AudienceKind(in.Audience.Kind), NetID: in.Audience.NetID, PrincipalIDs: in.Audience.PrincipalIDs}
@@ -257,9 +310,12 @@ func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPo
 			return schema.PostMessageResponseV2{}, &schema.Error{Code: "invalid_audience", Message: "a whisper needs at least one recipient other than the author"}
 		}
 	}
-	req := schema.PostMessageRequestV2{AuthorID: authorID, Body: in.Body, Payload: schemaPayload, Audience: audience}
+	req := schema.PostMessageRequestV2{AuthorID: authorID, Body: in.Body, Payload: schemaPayload, Audience: audience, ThreadRootID: in.ThreadRootID}
 	if err := req.Validate(); err != nil {
 		return schema.PostMessageResponseV2{}, &schema.Error{Code: "invalid_request", Message: err.Error()}
+	}
+	if in.ThreadRootID > 0 {
+		return s.postReplyMCP(ctx, scope, in.Channel, in.ThreadRootID, in.Body, schemaPayload)
 	}
 	if audience != nil {
 		return s.postScopedMessageMCP(ctx, scope, in.Channel, in.Body, schemaPayload, audience.Normalize(authorID))
@@ -276,6 +332,12 @@ func (s *Server) postMessageMCP(ctx context.Context, scope *agentScope, in mcpPo
 		// honoured; as a server failure this was an error line in the log
 		// that any agent with the post grant could write at will.
 		return schema.PostMessageResponseV2{}, errInvalidFileAttachment
+	}
+	if errors.Is(err, errReservedPayloadRefused) {
+		return schema.PostMessageResponseV2{}, errReservedPayload
+	}
+	if errors.Is(err, errArchivedRefused) {
+		return schema.PostMessageResponseV2{}, errChannelArchived
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "mcp: insert failed", "error", err)
@@ -362,6 +424,9 @@ func (s *Server) requestApprovalMCP(ctx context.Context, scope *agentScope, in m
 	if err := req.Validate(); err != nil {
 		return schema.RequestApprovalOutput{}, &schema.Error{Code: "invalid_request", Message: err.Error()}
 	}
+	if adminPayloadAuthored(req.Payload) {
+		return schema.RequestApprovalOutput{}, &schema.Error{Code: "invalid_request", Message: errAdminPayloadAuthored}
+	}
 	// Raising an approval writes into the channel, so it needs the post
 	// permission there (agent-manifest.md).
 	channel, serr := scope.channelByID(ctx, in.ChannelID, schema.ChannelPermissionPost)
@@ -371,6 +436,9 @@ func (s *Server) requestApprovalMCP(ctx context.Context, scope *agentScope, in m
 	created, err := channel.createApproval(ctx, req, deadline)
 	if errors.Is(err, approvals.ErrInvalid) {
 		return schema.RequestApprovalOutput{}, &schema.Error{Code: "invalid_request", Message: err.Error()}
+	}
+	if errors.Is(err, errArchivedRefused) {
+		return schema.RequestApprovalOutput{}, errChannelArchived
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "mcp: create approval failed", "error", err)
@@ -515,6 +583,83 @@ type mcpPollInterventionsInput struct {
 type mcpAckInterventionInput struct {
 	InterventionID int64 `json:"intervention_id" jsonschema:"the intervention's id, as poll_interventions returned it"`
 	schema.AckInterventionRequestV1
+}
+
+// The admin door over MCP (issue #1331, #1326 slice S4; design §3.6): three
+// tools fronting GET /v1/admin/actions, POST /v1/admin/actions and POST
+// /v1/admin/actions/{approval_id}/run, over the functions those routes call
+// (admin_handlers.go). One capability, admin.act, says the agent may use the
+// door; its permissions say what it may do through it; the manifest's rate
+// limit on admin.act bounds how often. As the session tools, each returns the
+// pkg/schema document its route returns, with no output schema declared: an
+// AdminActionResultV1 carries a raw JSON result and Timestamps.
+
+// mcpAdminTargetInput is schema.AdminTargetV1 as a tool argument: kind and
+// id. The server reads the entity's name itself; none is taken here.
+type mcpAdminTargetInput struct {
+	Kind string `json:"kind" jsonschema:"what id names: principal, channel, credential, hook, invite or report"`
+	ID   int64  `json:"id" jsonschema:"the entity's id"`
+}
+
+// mcpSubmitAdminActionInput is schema.SubmitAdminActionRequestV1 with its
+// params as a JSON object: the SDK infers a json.RawMessage as a byte array.
+// As for every MCP argument, the library decodes and re-encodes the object,
+// so its keys come out sorted and its numbers pass through float64.
+type mcpSubmitAdminActionInput struct {
+	Action string               `json:"action" jsonschema:"the catalog action, as describe_admin_actions lists it"`
+	Target *mcpAdminTargetInput `json:"target,omitempty" jsonschema:"what the action acts on, kind and id; omit for a server-wide action"`
+	Params map[string]any       `json:"params,omitempty" jsonschema:"the dispatched route's body, a JSON object, which the catalog clamps; omit when the route takes none"`
+	Reason string               `json:"reason,omitempty" jsonschema:"why, in at most 500 characters; shown to the person who decides a gated action, labelled as the agent's words"`
+}
+
+type mcpRunApprovedActionInput struct {
+	ApprovalID int64 `json:"approval_id" jsonschema:"the approval submit_admin_action returned as pending_approval, once await_decision or check_decision says it is resolved"`
+}
+
+// addAdminTools registers the three tools of the admin door.
+func (s *Server) addAdminTools(server *mcp.Server, identity mcpIdentity) {
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "describe_admin_actions", Description: "List the admin actions of this server as they apply to the authenticated agent: each action's route, the permission it needs, whether the agent holds that permission (held), and whether running it first needs a person's approval (gated); and the agent's admin settings (approval channel, approval deadline, run window, pending cap). Returns a conch.admin_catalog.v1 document. Needs admin.act."},
+		func(ctx context.Context, scope *agentScope, _ struct{}) (*mcp.CallToolResult, any, error) {
+			out, serr := s.describeAdminActionsMCP(ctx, scope)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			return mcpText("%d admin actions", len(out.Actions)), out, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "submit_admin_action", Description: "Submit one admin action through the admin door as the authenticated agent: an action describe_admin_actions lists, its target (kind and id) where it takes one, the route's parameters, and a reason. An action the agent holds the permission for and that is not gated is run at once: the answer is status ran, with the route's http_status and its result verbatim. A gated action is not run: the server raises an approval in the agent's approval channel, composed by the server out of the stored action, with the reason shown to the decider as the agent's words, and answers status pending_approval with approval_id and the approval. Watch it with await_decision or check_decision (which need approvals.await or approvals.check, and read in the approval channel), and when it is approved, run it with run_approved_action; it is run once, within the run window after the decision, and never by itself. Nothing is retried: a refused or failed action is reported, not repeated. An action naming the agent itself or its approval channel is refused, as is one the agent holds no permission for."},
+		func(ctx context.Context, scope *agentScope, in mcpSubmitAdminActionInput) (*mcp.CallToolResult, any, error) {
+			req := schema.SubmitAdminActionRequestV1{Action: schema.AdminAction(in.Action), Reason: in.Reason}
+			if in.Target != nil {
+				req.Target = &schema.AdminTargetV1{Kind: schema.AdminTargetKind(in.Target.Kind), ID: in.Target.ID}
+			}
+			if in.Params != nil {
+				params, err := json.Marshal(in.Params)
+				if err != nil {
+					return mcpToolError(&schema.Error{Code: "invalid_request", Message: "params must be a JSON object"}), nil, nil //nolint:nilerr // a refusal is the tool's result, as for every other refusal here
+				}
+				req.Params = params
+			}
+			out, serr := s.submitAdminActionMCP(ctx, scope, req)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			if out.Status == schema.AdminActionPendingApproval {
+				return mcpText("%s awaits approval %d", in.Action, out.ApprovalID), out, nil
+			}
+			return mcpText("%s ran: %d", in.Action, out.HTTPStatus), out, nil
+		})
+	addAgentTool(s, server, identity, &mcp.Tool{Name: "run_approved_action", Description: "Run an admin action a person approved: the approval submit_admin_action returned as pending_approval, once its state is resolved and approved. The server performs exactly the stored action, once, as the agent, and answers status ran with the route's http_status and result. It is refused when the approval is not the agent's, not approved (pending, rejected or expired), older than the run window, already run, or its target has changed since the decider saw it; then submit the action again, if it is still wanted. Nothing is retried."},
+		func(ctx context.Context, scope *agentScope, in mcpRunApprovedActionInput) (*mcp.CallToolResult, any, error) {
+			if in.ApprovalID <= 0 {
+				// As the REST route's path check answers.
+				return mcpToolError(&schema.Error{Code: "invalid_request", Message: "approval id must be a positive integer"}), nil, nil
+			}
+			out, serr := s.runApprovedActionMCP(ctx, scope, in.ApprovalID)
+			if serr != nil {
+				return mcpToolError(serr), nil, nil
+			}
+			return mcpText("approval %d ran: %d", in.ApprovalID, out.HTTPStatus), out, nil
+		})
 }
 
 // mcpText is a tool result's human-readable line; the document is the

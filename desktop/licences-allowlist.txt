@@ -1,0 +1,23 @@
+# Licences a package in desktop/package-lock.json may carry (ADR-007). One SPDX
+# identifier per line; comments and blank lines ignored. Enforced by
+# scripts/web-licences.sh desktop/package-lock.json desktop/licences-allowlist.txt.
+# Adding a licence requires Nick's sign-off in the same PR.
+#
+# A list of its own, not web/'s, so web/'s licence surface is unchanged. Every
+# package here is a build, lint or test tool: none ships in the app.
+MIT
+Apache-2.0
+ISC
+BSD-3-Clause
+BSD-2-Clause
+BlueOak-1.0.0
+0BSD
+# lightningcss and its per-platform builds (Vite's CSS minifier), as in web/.
+MPL-2.0
+
+# New to the repository, approved by Nick on 2026-10-29 (#770, Q2). Both reach
+# desktop/ only through electron-builder, at build time, and ship nothing:
+#   Python-2.0  argparse 2.0.1 (the PSF licence; through js-yaml)
+#   WTFPL       truncate-utf8-bytes 1.0.2 (through sanitize-filename)
+Python-2.0
+WTFPL

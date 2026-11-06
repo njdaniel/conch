@@ -1,20 +1,37 @@
-// The only module that reads or writes the credential, and the only one that
-// calls conchd. Where the token lives depends on whose it is (issue #439,
-// decision O1). A member's lasts: it is kept in localStorage, so it survives
-// closing the browser and every tab of the origin shares it, until it is
-// signed out or stops working. An operator's stays with the one tab that
-// agreed to use it, in sessionStorage (decision D2, kept for operators). A
-// temporary guest's is kept for its one tab too (issue #713, ADR-009 D2): a
-// refresh keeps the visit, another tab or another browser does not have it,
-// and it is never kept to last. Closing a tab is no reliable end of a visit
-// (a browser may restore its tabs, storage and all): End visit is, and the
-// server's expiry bounds the rest. The
-// page has no third-party script (script-src 'self'), which is what makes
-// local storage acceptable. The token is sent only as the Authorization
-// header, and never put in a URL, a log call, the DOM or an error: a failure
-// is reported as a kind, never with the request in it.
+// The only module that holds the credential in use, and the only one that
+// asks conchd anything. Where the token lives depends on whose it is (issue
+// #439, decision O1). A member's lasts: it is kept so that it survives closing
+// the browser and every tab of the origin shares it, until it is signed out or
+// stops working. An operator's stays with the one tab that agreed to use it
+// (decision D2, kept for operators). A temporary guest's is kept for its one
+// tab too (issue #713, ADR-009 D2): a refresh keeps the visit, another tab or
+// another browser does not have it, and it is never kept to last. Closing a
+// tab is no reliable end of a visit (a browser may restore its tabs, storage
+// and all): End visit is, and the server's expiry bounds the rest.
+//
+// Where it is kept, and how a request reaches conchd, belong to the platform
+// (src/platform, issue #770): the browser's is src/platform/browser, which
+// alone touches web storage, fetch and WebSocket; every request is a call of
+// the operation table (src/platform/operations.ts). The token is sent only as
+// the Authorization header, and never put in a URL, a log call, the DOM or an
+// error: a failure is reported as a kind, never with the request in it.
 import { listActivityResponseV1, type AgentActivityV1 } from './schema/activity';
-import { listOwnCredentialsResponseV1, revokeAllCredentialsResponseV1, type OwnCredentialV1 } from './schema/credential';
+import {
+  createHookResponse,
+  hidePrincipalResponseV1,
+  roleChangeResponseV1,
+  voicePermissionResponseV1,
+  type CreateHookRequest,
+  type HidePrincipalResponseV1,
+  type InvitePermissionRequestV1,
+  type RoleChangeRequestV1,
+  type RoleChangeResponseV1,
+  type VoicePermissionRequestV1,
+  type VoicePermissionResponseV1,
+} from './schema/admin';
+import { createCredentialResponseV1, createPrincipalResponse, listOwnCredentialsResponseV1, revokeAllCredentialsResponseV1, type CreateCredentialRequestV1, type CreatePrincipalRequest, type OwnCredentialV1 } from './schema/credential';
+import { getAgentManifestResponseV1, type AgentManifestV1, type PutAgentManifestRequestV1 } from './schema/admin';
+import { listApprovalsResponseV1, type ApprovalV1, type CastDecisionRequestV1 } from './schema/approval';
 import { errorV0, type ErrorV0 } from './schema/error';
 import {
   loginResponseV1,
@@ -39,7 +56,6 @@ import {
   convertGuestResponseV1,
   endGuestsResponseV1,
   joinAccountResponseV1,
-  joinGuestResponseV1,
   joinInfoV1,
   joinSettingsResponseV1,
   listGuestsResponseV1,
@@ -49,39 +65,84 @@ import {
   type EndGuestsResponseV1,
   type GuestAdminV1,
   type JoinAccountRequestV1,
-  type JoinGuestRequestV1,
   type JoinInfoV1,
   type JoinSettingsResponseV1,
   type PutJoinSettingsRequestV1,
 } from './schema/guest';
 import { health } from './schema/health';
 import {
-  createInviteResponseV1,
+  inviteJoinersResponseV1,
+  listInvitesResponseV2,
+  permissionsResponseV1,
+  type InviteJoinerV1,
+  type InviteV2,
+  type PermissionsResponseV1,
+  type PutPermissionsRequestV1,
+} from './schema/permission';
+import {
+  createInviteResponseV2,
+  disableJoinersResponseV1,
+  invitePreviewV2,
+  type CreateInviteRequestV2,
+  type CreateInviteResponseV2,
+  type DisableJoinersRequestV1,
+  type DisableJoinersResponseV1,
+  type InvitePreviewV2,
+} from './schema/invite';
+import {
+  inviteSettingsV1,
   invitePreviewV1,
   listInvitesResponseV1,
   redeemInviteResponseV1,
-  type CreateInviteRequestV1,
-  type CreateInviteResponseV1,
   type InvitePreviewRequestV1,
   type InvitePreviewV1,
+  type InviteSettingsV1,
   type InviteV1,
-  type RedeemInviteGuestRequestV1,
   type RedeemInviteRequestV2,
 } from './schema/invite';
 import { interventionV1, listInterventionsResponseV1, type CreateInterventionRequestV1, type InterventionV1 } from './schema/intervention';
 import { listRunsResponseV1, runV1, type RunV1 } from './schema/run';
 import { sessionV1, type CreateSessionRequestV1, type SessionV1 } from './schema/session';
 import {
-  createChannelResponse,
+  channelMemberV1,
+  channelDirectoryResponseV1,
+  createChannelResponseV1,
+  joinChannelResponseV1,
+  channelAuthorsResponseV1,
   listChannelMembersResponseV1,
   listChannelsResponse,
   renameChannelResponseV1,
+  channelSettingsResponseV1,
+  type AddChannelMemberRequestV1,
+  type ChannelAuthorV1,
   type ChannelMemberV1,
   type ChannelV0,
-  type CreateChannelRequest,
+  type ChannelListingV1,
+  type CreateChannelRequestV1,
+  type JoinChannelResponseV1,
+  type ChannelVisibility,
+  type PutChannelMemberRequestV1,
   type RenameChannelRequestV1,
+  type ChannelSettingsRequestV1,
+  type ChannelSettingsResponseV1,
 } from './schema/channel';
-import { listMessagesResponseV2, postMessageResponseV2, type Audience, type MessageV2, type PostMessageRequestV2 } from './schema/message';
+import { fileAttachmentPayloadSchema, fileV1, type FileAttachmentV1, type FileV1 } from './schema/file';
+import {
+  editMessageResponseV1,
+  listMessageRevisionsResponseV1,
+  listMessagesResponseV2,
+  postMessageResponseV2,
+  searchMessagesResponseV2,
+  type Audience,
+  type EditMessageRequestV1,
+  type EditMessageResponseV1,
+  type ListMessagesResponseV2,
+  type MessageRevisionV1,
+  type MessageV2,
+  type Payload,
+  type PostMessageRequestV2,
+  type SearchMessagesResponseV2,
+} from './schema/message';
 import { listNetsResponseV1, type NetV1 } from './schema/net';
 import {
   createSignInLinkResponseV1,
@@ -89,26 +150,36 @@ import {
   redeemSignInLinkResponseV1,
   signInLinkPreviewV1,
   type CreateDeviceLinkRequestV1,
+  type CreateSignInLinkRequestV1,
   type RedeemSignInLinkRequestV1,
   type SignInLinkPreviewRequestV1,
   type SignInLinkPreviewV1,
+  type SignInLinkPurpose,
   type SignInLinkV1,
 } from './schema/signin';
 import { listReadStateResponseV1, readStateV1, type MarkReadRequestV1, type ReadStateV1 } from './schema/readstate';
 import {
   renamePrincipalResponseV1,
+  serverMembersResponseV1,
   whoAmIResponseV1,
   type PrincipalV0,
+  type ServerMemberV1,
+  type ServerMembersResponseV1,
   type RenamePrincipalRequestV1,
   type RenamePrincipalResponseV1,
   type WhoAmIResponseV1,
 } from './schema/principal';
 import { wsTicketV1, type WSTicketV1 } from './schema/ticket';
 import {
+  voiceCameraV1,
+  voiceCompanionResponseV1,
   voiceOccupancyV1,
   voicePresenceV1,
   voiceSessionResponseV1,
   voiceShareV1,
+  type VoiceCameraV1,
+  type VoiceCompanionRequestV1,
+  type VoiceCompanionResponseV1,
   type VoiceOccupancyV1,
   type VoicePresenceV1,
   type VoiceSessionResponseV1,
@@ -116,8 +187,21 @@ import {
   type VoiceTransmitReportV1,
   type VoiceTransmitState,
 } from './schema/voice';
-import { createProblemReportResponseV1, type CreateProblemReportRequestV1, type CreateProblemReportResponseV1, type DiagnosticSocket } from './schema/report';
+import {
+  createProblemReportResponseV1,
+  listProblemReportsResponseV1,
+  problemReportV1,
+  type CreateProblemReportRequestV1,
+  type CreateProblemReportResponseV1,
+  type DiagnosticSocket,
+  type ProblemReportSummaryV1,
+  type ProblemReportV1,
+  type UpdateProblemReportRequestV1,
+} from './schema/report';
 import type { Validator } from './schema/validate';
+import { call, fileQuery, operations, queryOf, type Call, type OperationId } from './platform/operations';
+import { platform } from './platform';
+import type { FeedConnection, Held, Place } from './platform/types';
 import type { FeedSocket, OpenSocket, SocketEvents } from './state/feed';
 import { forget as forgetDiagnostics, record } from './diagnostics';
 import { visitOf } from './guestName';
@@ -132,28 +216,11 @@ export type ApiResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly failure: ApiFailure; readonly code?: string };
 
-const tokenKey = 'conch.web.token';
-
-// Where a credential is kept: 'tab' is this tab alone (sessionStorage), for an
-// operator's and a guest's; 'lasting' is every tab of the origin until it is
-// signed out (localStorage), for a member's.
-type Place = 'tab' | 'lasting';
-
-// The credential this tab uses, and where it was found, so that what drops
-// it drops it from there.
-interface Held {
-  readonly token: string;
-  readonly place: Place;
-}
-
-// The tab's own credential comes first: an operator who continued in this tab
-// is that operator here, whatever member has signed in elsewhere.
-const places: readonly Place[] = ['tab', 'lasting'];
-
-// storageAt may throw (blocked site data); every caller is inside a try.
-function storageAt(place: Place): Storage {
-  return place === 'tab' ? window.sessionStorage : window.localStorage;
-}
+// Where a credential is kept is the platform's (platform.credentials): 'tab'
+// is this tab alone, for an operator's and a guest's; 'lasting' is every tab
+// of the origin until it is signed out, for a member's. A Held is the
+// credential this tab uses, and where it was found, so that what drops it
+// drops it from there.
 
 // An operator credential that checked out but that the person has not yet
 // agreed to use in this browser (ADR-007). It is kept in memory only, so a
@@ -168,6 +235,180 @@ let pending: string | null = null;
 // another person's credential under this page's name.
 let pinned: Held | null = null;
 
+// A write that replaces the credential it is sent with (a password write
+// rotates it; a guest's conversion makes it a member's) races every other
+// call sent with that credential: the server revokes it as it answers, so a
+// call already out with it, or sent before the answer is read, comes back 401
+// although the person is still signed in, with the new one (issue #1000).
+//
+// replacing holds, by the credential being replaced, when its write has been
+// answered and the new credential kept (or not). replaced holds the
+// credentials this page has replaced so, since it last signed in: a 401 for
+// one of them is sent again with the credential pinned now, which is the
+// same person's. Every other way the pin changes (a sign-in, a sign-out, a
+// 401) empties it, so a call is never sent again as someone else.
+const replacing = new Map<string, Promise<void>>();
+const replaced = new Set<string>();
+
+// The writes that replace the credential in force (a password change among
+// them) that are out now. The server revokes the old credential as it
+// answers, which closes every socket opened with it (1008) and ends its
+// session, and a ticket, a whoami or a presence read that follows from those
+// closes, asked for with it, is a request known to fail: the browser logs it
+// as an error whatever the page does with the answer (issue #1084). So while
+// one is out, no socket is opened (connect waits, and then asks for its ticket
+// with the credential the write left, the new one), and a socket closed 1008
+// by the replacement is told to its owner as lost, not refused, since an
+// owner's answer to a refusal is to ask the server who it is, and why, with
+// the credential that was just revoked.
+// A hold is dropped when its write is answered or after replacingWait,
+// whichever is first, so a write that never answers does not hold the page up.
+const requestHolds = new Set<Promise<void>>();
+
+// The reason conchd gives when it closes a socket (1008) because the
+// credential it was opened with has been revoked.
+const credentialInvalid = 'credential no longer valid';
+
+// A write that may replace this page's credential is about to be sent
+// ('begin'), and it has been answered ('end'; rotated says the page now holds
+// the new credential, so what was made with the old one is gone). A write not
+// answered by replacingWait ends with rotated false ('end' for the same id),
+// and, should it answer later with a new credential, ends again with late
+// true. Each write has its own id. The browser's own session listens: it is
+// the one thing the old credential's revocation ends on the server, and its
+// events socket would otherwise be opened again for it, refused 404 (issue
+// #1084).
+export type ReplacingEvent =
+  | { readonly phase: 'begin'; readonly id: number }
+  | { readonly phase: 'end'; readonly id: number; readonly rotated: boolean; readonly late: boolean };
+
+let replacingIds = 0;
+
+const replacingListeners = new Set<(event: ReplacingEvent) => void>();
+
+// onCredentialReplacing calls listener for each ReplacingEvent, and returns
+// the function that stops it.
+export function onCredentialReplacing(listener: (event: ReplacingEvent) => void): () => void {
+  replacingListeners.add(listener);
+  return () => {
+    replacingListeners.delete(listener);
+  };
+}
+
+function tellReplacing(event: ReplacingEvent): void {
+  for (const listener of [...replacingListeners]) listener(event);
+}
+
+// holdSockets resolves once no replacing write is out (a hold that has waited
+// replacingWait is dropped, see whileReplacing).
+async function holdSockets(): Promise<void> {
+  while (requestHolds.size > 0) await Promise.all([...requestHolds]);
+}
+
+// pin sets the credential this page signs in with, as a new sign-in (or none).
+function pin(held: Held | null): void {
+  pinned = held;
+  replaced.clear();
+}
+
+// rotate pins next in the place of from, which the server has revoked: the
+// same sign-in, under a new credential.
+function rotate(from: Held, next: Held): void {
+  pinned = next;
+  replaced.add(from.token);
+}
+
+// whileReplacing runs work, a write that may replace from, so that a 401 for
+// from meanwhile waits for its answer (see settleRefusal). It is in force
+// before work sends anything.
+function whileReplacing<T>(from: Held | null, work: () => Promise<T>): Promise<T> {
+  if (from === null) return work();
+  // No socket is opened until the write is answered (see requestHolds), and
+  // what holds a session of the old credential is told to let go of it
+  // first (see onCredentialReplacing).
+  let release = (): void => undefined;
+  const hold = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const id = ++replacingIds;
+  let expired = false;
+  let answered = false;
+  // Not answered in time: the hold is dropped and the listeners told, so the
+  // page's sockets and session go on with what they have.
+  const timer = setTimeout(() => {
+    if (answered) return;
+    expired = true;
+    requestHolds.delete(hold);
+    release();
+    tellReplacing({ phase: 'end', id, rotated: false, late: false });
+  }, replacingWait);
+  requestHolds.add(hold);
+  tellReplacing({ phase: 'begin', id });
+  const done = Promise.resolve().then(work);
+  void done
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    .then(() => {
+      answered = true;
+      clearTimeout(timer);
+      const rotated = replaced.has(from.token);
+      if (!expired) tellReplacing({ phase: 'end', id, rotated, late: false });
+      else if (rotated) tellReplacing({ phase: 'end', id, rotated, late: true });
+      requestHolds.delete(hold);
+      release();
+    });
+  const settled = done.then(
+    () => undefined,
+    () => undefined,
+  );
+  replacing.set(from.token, settled);
+  void settled.then(() => {
+    if (replacing.get(from.token) === settled) replacing.delete(from.token);
+  });
+  return done;
+}
+
+// settleRefusal decides what a 401 for a call sent with held means. A write
+// replacing held is waited for first, unless wait is false: the write's own
+// requests, and the proof it may ask for, never wait for themselves. Then:
+// held still the pinned credential (or none pinned) is a credential refused,
+// so it is forgotten and the page signs out (null); held replaced by the
+// credential pinned now is the same person, who is to be asked again with it;
+// held from a sign-in that is over is 'stale': no answer for this page, and
+// never a sign-out of the one now signed in.
+async function settleRefusal(held: Held, wait: boolean): Promise<Held | 'stale' | null> {
+  const change = wait ? replacing.get(held.token) : undefined;
+  if (change !== undefined) await within(change, replacingWait);
+  const now = current();
+  if (now === null || now.token === held.token) {
+    forget(held);
+    return null;
+  }
+  return replaced.has(held.token) ? now : 'stale';
+}
+
+// How many times a call is sent again after a 401 for a credential since
+// replaced: once per replacement, and never without end.
+const resends = 3;
+
+// How long a 401 waits for a replacement before it is settled as it stands:
+// a change held up (an answer that never comes, a proof the person never
+// gives) does not hold every refused call up with it.
+const replacingWait = 30_000;
+
+// within resolves when change does, or after ms, whichever is first.
+function within(change: Promise<void>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  return Promise.race([change, late]).finally(() => {
+    clearTimeout(timer);
+  });
+}
+
 // unchecked is the credential restore found stored but could not check (the
 // server did not answer): neither pinned nor dropped. Only it may be forgotten
 // by forgetStored, and only while it is still the one stored (issue #469).
@@ -175,11 +416,7 @@ let unchecked: Held | null = null;
 
 // stillStored says whether held is still the credential stored at its place.
 function stillStored(held: Held): boolean {
-  try {
-    return storageAt(held.place).getItem(tokenKey) === held.token;
-  } catch {
-    return false;
-  }
+  return platform.credentials.isStored(held);
 }
 
 // current is the pinned credential while it is still the one stored at its
@@ -187,14 +424,9 @@ function stillStored(held: Held): boolean {
 function current(): Held | null {
   const held = pinned;
   if (held === null) return null;
-  let stored: string | null = null;
-  try {
-    stored = storageAt(held.place).getItem(tokenKey);
-  } catch {
-    // Refused: as good as gone.
-  }
-  if (stored === held.token) return held;
-  pinned = null;
+  // A storage that refuses the read is as good as gone.
+  if (stillStored(held)) return held;
+  pin(null);
   return null;
 }
 
@@ -202,45 +434,9 @@ function current(): Held | null {
 // diagnostic ring goes with it: the session it describes is over, and the next
 // person to sign in on this browser must not report the last one's events.
 function forget(held: Held): void {
-  if (pinned?.token === held.token && pinned.place === held.place) pinned = null;
-  dropToken(held);
+  if (pinned?.token === held.token && pinned.place === held.place) pin(null);
+  platform.credentials.drop(held);
   forgetDiagnostics();
-}
-
-// readToken finds a credential left by an earlier load, for restore to check:
-// this tab's own first, then the lasting one. Nothing else reads storage for a
-// credential.
-function readToken(): Held | null {
-  for (const place of places) {
-    try {
-      const token = storageAt(place).getItem(tokenKey);
-      if (token !== null) return { token, place };
-    } catch {
-      // This storage is refused; the other may still hold one.
-    }
-  }
-  return null;
-}
-
-function writeToken(token: string, place: Place): boolean {
-  try {
-    storageAt(place).setItem(tokenKey, token);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// dropToken forgets the credential held, if it is still the one stored there:
-// another tab may have signed in again since this one read it, and a late 401
-// for the old credential must not sign the new one out.
-function dropToken(held: Held): void {
-  try {
-    const storage = storageAt(held.place);
-    if (storage.getItem(tokenKey) === held.token) storage.removeItem(tokenKey);
-  } catch {
-    // Nothing stored that could be removed.
-  }
 }
 
 // refusalCode is the code of the error document a refusal carries, or none.
@@ -297,14 +493,10 @@ async function refused(res: Response): Promise<{ readonly ok: false; readonly fa
   return code === undefined ? { ok: false, failure: 'invalid' } : { ok: false, failure: 'invalid', code };
 }
 
-async function get<T>(path: string, token: string, check: Validator<T>): Promise<ApiResult<T>> {
+async function get<T>(request: Call, token: string, check: Validator<T>): Promise<ApiResult<T>> {
   let res: Response;
   try {
-    res = await fetch(path, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-      cache: 'no-store',
-      credentials: 'omit',
-    });
+    res = await platform.http.get(request, token);
   } catch {
     noteNoAnswer();
     return { ok: false, failure: 'network' };
@@ -325,13 +517,21 @@ async function get<T>(path: string, token: string, check: Validator<T>): Promise
 // authed is every call made with the signed-in credential: it takes the pinned
 // token, makes the request and, on a 401, drops the token, so "a 401 anywhere
 // signs out" holds for every call added here without each one remembering it.
+// A 401 for a credential this page has since replaced is not a sign-out: the
+// call is asked again with the new one (settleRefusal, issue #1000).
 // signIn and restore are the calls that do not use it: they check a candidate.
-async function authed<T>(path: string, check: Validator<T>): Promise<ApiResult<T>> {
-  const held = current();
+async function authed<T>(request: Call, check: Validator<T>): Promise<ApiResult<T>> {
+  let held = current();
   if (held === null) return { ok: false, failure: 'unauthorized' };
-  const result = await get(path, held.token, check);
-  if (!result.ok && result.failure === 'unauthorized') forget(held);
-  return result;
+  for (let sent = 0; sent < resends; sent++) {
+    const result = await get(request, held.token, check);
+    if (result.ok || result.failure !== 'unauthorized') return result;
+    const next = await settleRefusal(held, true);
+    if (next === null) return result;
+    if (next === 'stale') break;
+    held = next;
+  }
+  return { ok: false, failure: 'network' };
 }
 
 // authedSend is the writing sibling of authed: the stored credential, a JSON
@@ -343,6 +543,12 @@ type PostReply =
   | { readonly kind: 'none' }
   | { readonly kind: 'unauthorized' };
 
+// What a write sent with a credential gave, before it is a PostReply:
+// replaced is a 401 for a credential this page has since replaced by `by`,
+// the same person's (settleRefusal); the server did nothing, since a 401
+// comes before a route acts.
+type Sent = PostReply | { readonly kind: 'replaced'; readonly by: Held };
+
 //
 // A write the server answers 403 reauth_required (design §5.3: it needs a
 // recent proof of the password, and an operator's code) is sent once more
@@ -352,24 +558,42 @@ type PostReply =
 // is the caller's answer, so a server that keeps asking gets one question,
 // not one after another (the CLI's rule, #715). Cancelled, the first answer
 // stands.
-async function authedSend(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<PostReply> {
-  const held = current();
+//
+// A 401 for a credential since replaced (a password changed meanwhile) is
+// sent again with the new one, as authed's is.
+async function authedSend(request: Call, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<PostReply> {
+  let held = current();
   if (held === null) return { kind: 'unauthorized' };
-  const reply = await sendAs(held, method, path, body, keepalive, signal);
+  for (let sent = 0; sent < resends; sent++) {
+    const reply = await sendProving(held, request, body, keepalive, signal);
+    if (reply.kind !== 'replaced') return reply;
+    // A write that replaces the credential carries a proof made for the
+    // one it was sent with (the current password, a one-use code): sent
+    // again with another, it would be a wrong password counted against the
+    // person. No answer for this one; they can try again.
+    if (replacingOps.has(request.op)) return { kind: 'none' };
+    held = reply.by;
+  }
+  return { kind: 'none' };
+}
+
+// sendProving is one send of authedSend's with held, and the one more after
+// a proof the server asked for.
+async function sendProving(held: Held, request: Call, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<Sent> {
+  const reply = await sendWith(held, request, body, keepalive, signal);
   if (reply.kind !== 'reply' || reply.res.status !== 403 || askReauth === null) return reply;
   if ((await refusalCode(reply.res.clone())) !== reauthRequired) return reply;
   if (!(await proveAgain())) return reply;
   const again = current();
   if (again === null) return { kind: 'unauthorized' };
-  return sendAs(again, method, path, body, keepalive, signal);
+  return sendWith(again, request, body, keepalive, signal);
 }
 
 // The server's codes the module acts on itself.
 const authFailed = 'auth_failed';
 
 // The routes that take a password or a code with a working credential, and
-// answer a wrong one 401 auth_failed (see sendAs).
-const secretRoutes: ReadonlySet<string> = new Set(['/v1/reauth', '/v1/password/mine', '/v1/totp/confirm']);
+// answer a wrong one 401 auth_failed (see sendAs), are the table's secret ones.
 const reauthRequired = 'reauth_required';
 
 // How the page asks the person to prove who they are again (issue #714): it
@@ -396,23 +620,25 @@ function proveAgain(): Promise<boolean> {
 }
 
 // sendAs is authedSend with the credential already taken, for the sign-outs,
-// which must drop the very credential they revoked.
-async function sendAs(held: Held, method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<PostReply> {
+// which must drop the very credential they revoked. It is never sent again
+// with another credential: a 401 for one since replaced, or from a sign-in
+// that is over, is no answer for this page (settleRefusal), not a sign-out.
+async function sendAs(held: Held, request: Call, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<PostReply> {
+  const reply = await sendWith(held, request, body, keepalive, signal);
+  return reply.kind === 'replaced' ? { kind: 'none' } : reply;
+}
+
+// The writes that replace the credential they are sent with, and the proof
+// one may ask for on the way (reauth): a 401 for theirs never waits for the
+// replacement, which is waiting for them (see whileReplacing), and is never
+// sent again with another credential (see authedSend).
+const replacingOps: ReadonlySet<OperationId> = new Set<OperationId>(['changePassword', 'setPassword', 'convertGuest', 'reauth']);
+
+// sendWith sends a write with held and reads a 401 as settleRefusal does.
+async function sendWith(held: Held, request: Call, body?: unknown, keepalive = false, signal?: AbortSignal): Promise<Sent> {
   let res: Response;
   try {
-    res = await fetch(path, {
-      method,
-      headers: {
-        Authorization: `Bearer ${held.token}`,
-        Accept: 'application/json',
-        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      cache: 'no-store',
-      credentials: 'omit',
-      keepalive,
-      ...(signal === undefined ? {} : { signal }),
-    });
+    res = await platform.http.send(request, held.token, { body, keepalive, ...(signal === undefined ? {} : { signal }) });
   } catch {
     // A request its caller gave up on (a transmit report past its use) is
     // not a failure of the server's.
@@ -426,9 +652,10 @@ async function sendAs(held: Held, method: 'POST' | 'PUT' | 'DELETE', path: strin
   // and the caller says what was wrong. Only those routes are believed when
   // they say so (secretRoutes); every other 401, auth_failed or not, is the
   // credential refused, which signs out.
-  if (res.status === 401 && !(secretRoutes.has(path) && (await refusalCode(res.clone())) === authFailed)) {
-    forget(held);
-    return { kind: 'unauthorized' };
+  if (res.status === 401 && !(operations[request.op].secret === true && (await refusalCode(res.clone())) === authFailed)) {
+    const next = await settleRefusal(held, !replacingOps.has(request.op));
+    if (next === null) return { kind: 'unauthorized' };
+    return next === 'stale' ? { kind: 'none' } : { kind: 'replaced', by: next };
   }
   // A 204 is a status alone by definition (sign-outs, closes, a transmit
   // report): read it out here so no caller has to remember to (issue #622).
@@ -436,7 +663,7 @@ async function sendAs(held: Held, method: 'POST' | 'PUT' | 'DELETE', path: strin
   return { kind: 'reply', res };
 }
 
-const authedPost = (path: string, body?: unknown) => authedSend('POST', path, body);
+const authedPost = (request: Call, body?: unknown) => authedSend(request, body);
 
 // The version of the server this page was first served by; see clientVersion.
 let pageVersion: string | null = null;
@@ -446,13 +673,26 @@ let pageVersion: string | null = null;
 // answer with a health document. A degraded server (503) still names its
 // version, so the status is not looked at.
 export async function serverVersion(): Promise<string | null> {
+  return (await serverHealth())?.version ?? null;
+}
+
+// What /healthz says that the page shows: the version, and whether this is a
+// temporary server (ADR-011). Only a temporary server carries server_mode.
+export interface ServerHealth {
+  readonly version: string;
+  readonly temporary: boolean;
+}
+
+// serverHealth reads GET /healthz; null when the server cannot be reached or
+// does not answer with a health document.
+export async function serverHealth(): Promise<ServerHealth | null> {
   try {
-    const res = await fetch('/healthz', { headers: { Accept: 'application/json' }, cache: 'no-store', credentials: 'omit' });
+    const res = await platform.http.health(call('health'));
     const body: unknown = await res.json();
     if (health(body).length > 0) return null;
-    const version = (body as { version: string }).version;
+    const { version, server_mode: mode } = body as { version: string; server_mode?: string };
     pageVersion ??= version;
-    return version;
+    return { version, temporary: mode === 'temporary' };
   } catch {
     return null;
   }
@@ -468,7 +708,7 @@ export function clientVersion(): string | null {
 // hasToken says whether this tab has a credential from an earlier load: its
 // own, or a member's lasting one.
 export function hasToken(): boolean {
-  return readToken() !== null;
+  return platform.credentials.read() !== null;
 }
 
 // signIn checks a credential with GET /v1/whoami. A member's is stored at
@@ -487,20 +727,20 @@ export async function signIn(candidate: string): Promise<ApiResult<WhoAmIRespons
   if (pending !== null || unchecked !== null) return { ok: false, failure: 'held' };
   if (hasToken()) return { ok: false, failure: 'stored' };
   pending = null;
-  pinned = null;
-  const result = await get('/v1/whoami', candidate, whoAmIResponseV1);
+  pin(null);
+  const result = await get(call('whoami'), candidate, whoAmIResponseV1);
   if (!result.ok) return result;
   // A guest's credential pasted here stays with this tab, as a visit's does.
   const place: Place = visitOf(result.value) === null ? 'lasting' : 'tab';
   if (result.value.role === 'operator') {
     pending = candidate;
-  } else if (writeToken(candidate, place)) {
-    pinned = { token: candidate, place };
-  } else {
-    // localStorage is refused (blocked site data): signing in would not last
-    // a reload, and the lobby could not call the API either.
-    return { ok: false, failure: 'invalid' };
+    return result;
   }
+  const kept = platform.credentials.write(candidate, place);
+  // localStorage is refused (blocked site data): signing in would not last
+  // a reload, and the lobby could not call the API either.
+  if (kept === null) return { ok: false, failure: 'invalid' };
+  pin(kept);
   return result;
 }
 
@@ -509,8 +749,9 @@ export async function signIn(candidate: string): Promise<ApiResult<WhoAmIRespons
 export function continueAsOperator(): boolean {
   const token = pending;
   pending = null;
-  if (token === null || !writeToken(token, 'tab')) return false;
-  pinned = { token, place: 'tab' };
+  const kept = token === null ? null : platform.credentials.write(token, 'tab');
+  if (kept === null) return false;
+  pin(kept);
   return true;
 }
 
@@ -527,42 +768,47 @@ export interface Restored {
 // the operator warning, as signIn holds one.
 export async function restore(): Promise<ApiResult<Restored>> {
   pending = null;
-  pinned = null;
+  pin(null);
   unchecked = null;
-  let held = readToken();
+  let held = platform.credentials.read();
   if (held === null) return { ok: false, failure: 'unauthorized' };
-  const result = await get('/v1/whoami', held.token, whoAmIResponseV1);
+  const result = await get(call('whoami'), held.token, whoAmIResponseV1);
   if (!result.ok) {
-    if (result.failure === 'unauthorized') dropToken(held);
+    if (result.failure === 'unauthorized') platform.credentials.drop(held);
     else unchecked = held;
     return result;
   }
   if (held.place === 'lasting' && result.value.role === 'operator') {
-    dropToken(held);
+    platform.credentials.drop(held);
     pending = held.token;
     return { ok: true, value: { principal: result.value, warn: true } };
   }
   if (held.place === 'lasting' && visitOf(result.value) !== null) {
     // A visit is never kept to last: found there, it is moved to this tab,
     // and the other tabs of the origin no longer have it.
-    dropToken(held);
-    held = { token: held.token, place: 'tab' };
-    if (!writeToken(held.token, held.place)) {
+    platform.credentials.drop(held);
+    const moved: Held = { token: held.token, place: 'tab' };
+    const kept = platform.credentials.write(moved.token, moved.place);
+    if (kept === null) {
       // This tab cannot keep it either: it is revoked (if the server
       // answers) rather than left alive and kept nowhere.
-      await sendAs(held, 'DELETE', '/v1/credentials/current');
+      await sendAs(moved, call('logout'));
       return { ok: false, failure: 'unauthorized' };
     }
+    held = kept;
   }
-  pinned = held;
+  pin(held);
   return { ok: true, value: { principal: result.value, warn: false } };
 }
 
 // whoAmI asks who the signed-in credential is, mid-session (after a socket was
 // refused, say). Unlike restore it never picks a credential: it asks with the
-// one this page signed in with, and a 401 drops it.
+// one this page signed in with, and a 401 drops it. A socket closed because
+// a password change revoked the credential it was opened with asks this
+// before the change's answer is read: the 401 for the old credential waits
+// for it, and is asked again with the new one (issue #1000).
 export function whoAmI(): Promise<ApiResult<WhoAmIResponseV1>> {
-  return authed('/v1/whoami', whoAmIResponseV1);
+  return authed(call('whoami'), whoAmIResponseV1);
 }
 
 // signOut revokes the credential this tab uses (DELETE /v1/credentials/current)
@@ -573,11 +819,11 @@ export function whoAmI(): Promise<ApiResult<WhoAmIResponseV1>> {
 export async function signOut(): Promise<boolean> {
   pending = null;
   const held = current();
-  pinned = null;
+  pin(null);
   forgetDiagnostics();
   if (held === null) return true;
-  const reply = await sendAs(held, 'DELETE', '/v1/credentials/current');
-  dropToken(held);
+  const reply = await sendAs(held, call('logout'));
+  platform.credentials.drop(held);
   // Again: the revoke itself may have been noted, and is the last session's.
   forgetDiagnostics();
   return reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok);
@@ -593,7 +839,7 @@ export async function signOutEverywhere(principal: number): Promise<ApiResult<nu
   pending = null;
   const held = current();
   if (held === null) return { ok: false, failure: 'unauthorized' };
-  const reply = await sendAs(held, 'POST', `/v1/principals/${String(principal)}/credentials/revoke-all`);
+  const reply = await sendAs(held, call('revokeAll', { principal }));
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return refused(reply.res);
@@ -613,7 +859,7 @@ export async function signOutEverywhere(principal: number): Promise<ApiResult<nu
 // theirs that still work, newest first, with the one this page uses marked
 // current. The server never sends a token in it.
 export async function listSignIns(): Promise<ApiResult<OwnCredentialV1[]>> {
-  const result = await authed('/v1/credentials/mine', listOwnCredentialsResponseV1);
+  const result = await authed(call('listOwnCredentials'), listOwnCredentialsResponseV1);
   return result.ok ? { ok: true, value: result.value.credentials } : result;
 }
 
@@ -622,7 +868,7 @@ export async function listSignIns(): Promise<ApiResult<OwnCredentialV1[]>> {
 // is ended by signOut instead, which also forgets it here. A refusal carries
 // the server's code: credential_not_found for an id that is not the caller's.
 export async function endSignIn(id: number): Promise<ApiResult<null>> {
-  const reply = await authedSend('DELETE', `/v1/credentials/mine/${String(id)}`);
+  const reply = await authedSend(call('endOwnCredential', { id }));
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return refused(reply.res);
@@ -661,7 +907,7 @@ export async function reauth(password: string, code?: string): Promise<InviteRes
   const held = current();
   if (held === null) return { ok: false, failure: 'unauthorized' };
   const request: ReauthRequestV1 = code === undefined ? { password } : { password, code };
-  return readSent(await sendAs(held, 'POST', '/v1/reauth', request), reauthResponseV1);
+  return readSent(await sendAs(held, call('reauth'), request), reauthResponseV1);
 }
 
 // What a password write gave: the answer, and whether this page's credential
@@ -677,7 +923,7 @@ export type PasswordResult = InviteResult<PasswordUpdatedResponseV1> | { readonl
 export async function changePassword(currentPassword: string, password: string, code?: string): Promise<PasswordResult> {
   const request: ChangePasswordRequestV1 = code === undefined ? { current: currentPassword, password } : { current: currentPassword, password, code };
   const before = current();
-  return keepRotated(before, await authedSend('PUT', '/v1/password/mine', request));
+  return whileReplacing(before, async () => keepRotated(before, await authedSend(call('changePassword'), request)));
 }
 
 // setPassword sets a first password for a member from before passwords
@@ -686,12 +932,13 @@ export async function changePassword(currentPassword: string, password: string, 
 export async function setPassword(password: string, proof: string): Promise<PasswordResult> {
   const request: SetPasswordRequestV1 = { password, proof };
   const before = current();
-  return keepRotated(before, await authedSend('POST', '/v1/password/mine', request));
+  return whileReplacing(before, async () => keepRotated(before, await authedSend(call('setPassword'), request)));
 }
 
 // keepRotated reads a password write's answer and, when it carries a new
 // credential for this page, keeps it in the place of the old one, which the
-// server has revoked.
+// server has revoked. A call of this page's that the server refused with the
+// old one, meanwhile or after, is sent again with the new one (issue #1000).
 //
 // before is the credential the write was sent with. When it is no longer
 // the one stored (another tab signed out or in meanwhile), the new
@@ -703,15 +950,16 @@ async function keepRotated(before: Held | null, reply: PostReply): Promise<Passw
   const next: Held = { token: result.value.token, place: before.place };
   const held = current();
   if (held === null || held.token !== before.token) {
-    await sendAs(next, 'DELETE', '/v1/credentials/current');
+    await sendAs(next, call('logout'));
     return { ok: false, failure: 'unkept' };
   }
-  if (!writeToken(next.token, next.place)) {
-    await sendAs(next, 'DELETE', '/v1/credentials/current');
+  const kept = platform.credentials.write(next.token, next.place);
+  if (kept === null) {
+    await sendAs(next, call('logout'));
     forget(held);
     return { ok: false, failure: 'unkept' };
   }
-  pinned = { token: next.token, place: next.place };
+  rotate(held, kept);
   return result;
 }
 
@@ -721,7 +969,7 @@ async function keepRotated(before: Held | null, reply: PostReply): Promise<Passw
 // in with the new password.
 export async function resetPassword(signInCode: string, password: string): Promise<InviteResult<PasswordUpdatedResponseV1>> {
   const request: ResetPasswordRequestV1 = { code: signInCode, password };
-  const res = await sendOpen('/v1/password/reset', request);
+  const res = await sendOpen(call('resetPassword'), request);
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   return readBody(res, passwordUpdatedResponseV1);
@@ -734,6 +982,11 @@ export async function resetPassword(signInCode: string, password: string): Promi
 // in memory only, never stored and never pinned: it signs nobody in, and a
 // reload drops it (a new token is made on the host).
 let setupHeld: Held | null = null;
+// The setup run in force: a number, not a secret. Starting a setup (a token
+// redeemed) and ending one (endSetup) each begin a new run, and a redemption
+// that answers after its run has ended is discarded, and its credential
+// revoked, so a late answer never replaces the credential of the run in force.
+let setupRun = 0;
 
 // What the setup credential says of its holder.
 export interface SetupState {
@@ -745,14 +998,23 @@ export interface SetupState {
 // goes in the body alone and is kept nowhere.
 export async function redeemSetupToken(token: string): Promise<InviteResult<SetupState>> {
   setupHeld = null;
+  const run = ++setupRun;
   const request: RedeemSetupTokenRequestV1 = { token };
-  const res = await sendOpen('/v1/setup/redeem', request);
+  const res = await sendOpen(call('setupRedeem'), request);
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   const redeemed = await readBody(res, redeemSetupTokenResponseV1);
   if (!redeemed.ok) return redeemed;
+  const held: Held = { token: redeemed.value.token, place: 'tab' };
+  if (run !== setupRun) {
+    // Answered after its setup ended or another began: nothing here uses
+    // this credential, so it is ended on the server (best effort) and
+    // forgotten.
+    await sendAs(held, call('logout'));
+    return { ok: false, failure: 'unauthorized' };
+  }
   const { principal, auth } = redeemed.value;
-  setupHeld = { token: redeemed.value.token, place: 'tab' };
+  setupHeld = held;
   return { ok: true, value: { name: principal.name, auth } };
 }
 
@@ -760,9 +1022,9 @@ export async function redeemSetupToken(token: string): Promise<InviteResult<Setu
 export async function setupState(): Promise<InviteResult<SetupState>> {
   const held = setupHeld;
   if (held === null) return { ok: false, failure: 'unauthorized' };
-  const who = await get('/v1/whoami', held.token, whoAmIResponseV1);
+  const who = await get(call('whoami'), held.token, whoAmIResponseV1);
   if (!who.ok) {
-    if (who.failure === 'unauthorized') setupHeld = null;
+    if (who.failure === 'unauthorized' && setupHeld === held) setupHeld = null;
     return who;
   }
   if (who.value.auth === undefined) return { ok: false, failure: 'invalid' };
@@ -771,11 +1033,11 @@ export async function setupState(): Promise<InviteResult<SetupState>> {
 
 // sendSetup is a write with the setup credential. A 401 that is not a wrong
 // code means it has ended (its fifteen minutes, or the setup completed).
-async function sendSetup(path: string, body?: unknown): Promise<PostReply> {
+async function sendSetup(request: Call, body?: unknown): Promise<PostReply> {
   const held = setupHeld;
   if (held === null) return { kind: 'unauthorized' };
-  const reply = await sendAs(held, 'POST', path, body);
-  if (reply.kind === 'unauthorized') setupHeld = null;
+  const reply = await sendAs(held, request, body);
+  if (reply.kind === 'unauthorized' && setupHeld === held) setupHeld = null;
   return reply;
 }
 
@@ -783,14 +1045,14 @@ async function sendSetup(path: string, body?: unknown): Promise<PostReply> {
 // /v1/password/mine), replacing any it had: the host-made token is the proof.
 export async function setupPassword(password: string): Promise<InviteResult<PasswordUpdatedResponseV1>> {
   const request: SetPasswordRequestV1 = { password };
-  return readSent(await sendSetup('/v1/password/mine', request), passwordUpdatedResponseV1);
+  return readSent(await sendSetup(call('setPassword'), request), passwordUpdatedResponseV1);
 }
 
 // enrollAuthenticator starts the authenticator's enrolment (POST
 // /v1/totp/enroll): a new secret, shown in this answer and never again. The
 // caller shows it only when asked to, and never while the tab shares.
 export async function enrollAuthenticator(): Promise<InviteResult<TOTPEnrollmentV1>> {
-  return readSent(await sendSetup('/v1/totp/enroll'), totpEnrollmentV1);
+  return readSent(await sendSetup(call('totpEnroll')), totpEnrollmentV1);
 }
 
 // confirmAuthenticator proves the enrolment with a code from the app (POST
@@ -798,12 +1060,27 @@ export async function enrollAuthenticator(): Promise<InviteResult<TOTPEnrollment
 // credential ends.
 export async function confirmAuthenticator(code: string): Promise<InviteResult<null>> {
   const request: ConfirmTOTPRequestV1 = { code };
-  return readDone(await sendSetup('/v1/totp/confirm', request));
+  return readDone(await sendSetup(call('totpConfirm'), request));
+}
+
+// skipAuthenticator ends the setup credential with the authenticator left
+// unset (DELETE /v1/credentials/current, which a setup credential may call):
+// ADR-012's Skip, offered only where whoami says setup is complete without
+// one. The credential is forgotten here once the server has confirmed it
+// ended (a 2xx) or says it has ended already (a 401); after a network error
+// or any other refusal it is kept, so the person can try again.
+export async function skipAuthenticator(): Promise<InviteResult<null>> {
+  const held = setupHeld;
+  if (held === null) return { ok: false, failure: 'unauthorized' };
+  const reply = await sendAs(held, call('logout'));
+  if ((reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok)) && setupHeld === held) setupHeld = null;
+  return readDone(reply);
 }
 
 // endSetup forgets the setup credential here. The server ends it at its
 // fifteen minutes, or once setup is complete; it can revoke nothing itself.
 export function endSetup(): void {
+  setupRun++;
   setupHeld = null;
 }
 
@@ -820,7 +1097,7 @@ export interface DeviceLink {
 // asks for and then sends again.
 export async function createDeviceLink(label: string): Promise<InviteResult<DeviceLink>> {
   const request: CreateDeviceLinkRequestV1 = label === '' ? {} : { label };
-  const made = await readSent(await authedSend('POST', '/v1/sign-in-links/mine', request), createSignInLinkResponseV1);
+  const made = await readSent(await authedSend(call('createSignInLink'), request), createSignInLinkResponseV1);
   if (!made.ok) return made;
   const { sign_in_link: link, code } = made.value;
   return { ok: true, value: { link, linkCode: code } };
@@ -829,7 +1106,7 @@ export async function createDeviceLink(label: string): Promise<InviteResult<Devi
 // listDeviceLinks reads the caller's open device links, newest first,
 // without their codes.
 export async function listDeviceLinks(): Promise<ApiResult<SignInLinkV1[]>> {
-  const result = await authed('/v1/sign-in-links/mine', listOwnSignInLinksResponseV1);
+  const result = await authed(call('listSignInLinks'), listOwnSignInLinksResponseV1);
   return result.ok ? { ok: true, value: result.value.sign_in_links } : result;
 }
 
@@ -837,7 +1114,7 @@ export async function listDeviceLinks(): Promise<ApiResult<SignInLinkV1[]>> {
 // nobody in. One used, closed or expired already is a success that changes
 // nothing; another's id is sign_in_link_not_found.
 export async function closeDeviceLink(id: number): Promise<InviteResult<null>> {
-  return readDone(await authedSend('DELETE', `/v1/sign-in-links/mine/${String(id)}`));
+  return readDone(await authedSend(call('closeSignInLink', { id })));
 }
 
 // Guest entry, for an operator (issue #714, design §2): the joining
@@ -846,19 +1123,192 @@ export async function closeDeviceLink(id: number): Promise<InviteResult<null>> {
 // asks for.
 
 export function joinSettings(): Promise<ApiResult<JoinSettingsResponseV1>> {
-  return authed('/v1/join/settings', joinSettingsResponseV1);
+  return authed(call('joinSettings'), joinSettingsResponseV1);
 }
 
 // putJoinSettings changes the settings it names and no others. A refusal
 // carries the server's code: join_policy_conflict for settings that cannot
 // stand together.
 export async function putJoinSettings(request: PutJoinSettingsRequestV1): Promise<InviteResult<JoinSettingsResponseV1>> {
-  return readSent(await authedSend('PUT', '/v1/join/settings', request), joinSettingsResponseV1);
+  return readSent(await authedSend(call('putJoinSettings'), request), joinSettingsResponseV1);
+}
+
+// inviteSettings reads whether every invite is paused (GET /v1/invites/settings).
+export function inviteSettings(): Promise<ApiResult<InviteSettingsV1>> {
+  return authed(call('inviteSettings'), inviteSettingsV1);
+}
+
+// putInviteSettings pauses or resumes every invite (PUT /v1/invites/settings),
+// as `conch admin invite pause|resume` does, and answers with what the server
+// now holds. It needs a recent proof (reauth_required), as authedSend asks
+// for; a refusal carries the server's code.
+export async function putInviteSettings(request: InviteSettingsV1): Promise<InviteResult<InviteSettingsV1>> {
+  return readSent(await authedSend(call('putInviteSettings'), request), inviteSettingsV1);
+}
+
+// permissions reads the permissions document (GET /v1/permissions, an
+// operator's): the revision, the grid, the presets and the warnings.
+export function permissions(): Promise<ApiResult<PermissionsResponseV1>> {
+  return authed(call('getPermissions'), permissionsResponseV1);
+}
+
+// putPermissions changes the document (PUT /v1/permissions): a preset or
+// cells, against the revision that was read. It needs change_server_settings
+// and a recent proof (reauth_required), as authedSend asks for. A refusal
+// carries the server's code, and for permission_denied the permission.
+export async function putPermissions(request: PutPermissionsRequestV1): Promise<InviteResult<PermissionsResponseV1>> {
+  return readSent(await authedSend(call('putPermissions'), request), permissionsResponseV1);
+}
+
+// signOutPrincipalEverywhere revokes every credential of another person
+// (POST /v1/principals/{id}/credentials/revoke-all), as the permissions
+// console's issued_to_others list offers it. Unlike signOutEverywhere it does
+// not forget the credential held here: if the person is the caller, the next
+// request is refused and the page signs out as for any revoked credential. It
+// needs manage_members and a recent proof; a refusal carries the server's code.
+export async function signOutPrincipalEverywhere(principal: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('revokeAll', { principal })));
+}
+
+// The Members section's actions on a person (ADR-014 design §10.2, issue
+// #1020). Each is a write that needs a recent proof of the password
+// (reauth_required), which authedSend asks for; a refusal carries the
+// server's code and the permission it names. The page treats no answer as
+// true until the server has given it.
+
+// setRole changes a person's role and owner mark (PUT /v1/principals/{id}/role;
+// the owner's alone). The answer says what the change did to their sign-ins,
+// hooks and links.
+export async function setRole(id: number, request: RoleChangeRequestV1): Promise<InviteResult<RoleChangeResponseV1>> {
+  return readSent(await authedSend(call('setRole', { id }), request), roleChangeResponseV1);
+}
+
+// setVoicePermission switches one person's voice and screen share on or off
+// (PUT /v1/principals/{id}/voice-permission; manage_members).
+export async function setVoicePermission(id: number, voiceAllowed: boolean): Promise<InviteResult<VoicePermissionResponseV1>> {
+  const request: VoicePermissionRequestV1 = { voice_allowed: voiceAllowed };
+  return readSent(await authedSend(call('setVoicePermission', { id }), request), voicePermissionResponseV1);
+}
+
+// setInvitePermission switches one member's member links on or off (PUT
+// /v1/principals/{id}/invite-permission; manage_members).
+export async function setInvitePermission(id: number, mayInvite: boolean): Promise<InviteResult<null>> {
+  const request: InvitePermissionRequestV1 = { may_invite: mayInvite };
+  return readDone(await authedSend(call('setInvitePermission', { id }), request));
+}
+
+// hidePrincipal removes a person from the server's lists and ends their
+// access (POST /v1/principals/{id}/hide; manage_members).
+export async function hidePrincipal(id: number): Promise<InviteResult<HidePrincipalResponseV1>> {
+  return readSent(await authedSend(call('hidePrincipal', { id })), hidePrincipalResponseV1);
+}
+
+// disablePrincipal and enablePrincipal stop and allow a person's sign-in
+// (POST /v1/principals/{id}/disable and /enable; manage_members). Both are
+// repeatable.
+export async function disablePrincipal(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('disablePrincipal', { id })));
+}
+
+export async function enablePrincipal(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('enablePrincipal', { id })));
+}
+
+// makeLinkFor makes a one-use link that signs in as another person, or resets
+// their password or enrols them (POST /v1/principals/{id}/sign-in-links;
+// act_as_members). The code is in the answer alone, to be shown once.
+export async function makeLinkFor(id: number, purpose: SignInLinkPurpose): Promise<InviteResult<{ readonly secret: string; readonly expiresAt: string }>> {
+  const request: CreateSignInLinkRequestV1 = { purpose };
+  const made = await readSent(await authedSend(call('createPrincipalSignInLink', { id }), request), createSignInLinkResponseV1);
+  if (!made.ok) return made;
+  const { sign_in_link: link, ...rest } = made.value;
+  return { ok: true, value: { secret: rest.code, expiresAt: link.expires_at } };
+}
+
+// issueCredentialFor issues a credential that acts as another person (POST
+// /v1/principals/{id}/credentials; act_as_members). The token is in the answer
+// alone, to be shown once.
+export async function issueCredentialFor(id: number, label: string, renewLifetimeSeconds?: number): Promise<InviteResult<{ readonly secret: string }>> {
+  const request: CreateCredentialRequestV1 = { label, ...(renewLifetimeSeconds === undefined ? {} : { renew_lifetime_seconds: renewLifetimeSeconds }) };
+  const made = await readSent(await authedSend(call('createPrincipalCredential', { id }), request), createCredentialResponseV1);
+  return made.ok ? { ok: true, value: { secret: made.value.token } } : made;
+}
+
+// createAgent makes an agent principal (POST /v0/principals; manage_members,
+// a recent proof): the first step of Add an AI administrator (issue #1334).
+export async function createAgent(name: string): Promise<InviteResult<PrincipalV0>> {
+  const request: CreatePrincipalRequest = { kind: 'agent', name };
+  const made = await readSent(await authedSend(call('createPrincipal'), request), createPrincipalResponse);
+  return made.ok ? { ok: true, value: made.value.principal } : made;
+}
+
+// putAgentManifest replaces an agent's manifest (PUT
+// /v1/principals/{id}/manifest). A grant in it is the owner's alone: anyone
+// else is refused with forbidden.
+export async function putAgentManifest(id: number, request: PutAgentManifestRequestV1): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('putManifest', { id }), request));
+}
+
+// agentManifest reads an agent's manifest (GET /v1/principals/{id}/manifest;
+// operators): the agent card shows its grant from it.
+export async function agentManifest(id: number): Promise<InviteResult<AgentManifestV1>> {
+  const reply = await authed(call('getManifest', { id }), getAgentManifestResponseV1);
+  return reply.ok ? { ok: true, value: reply.value.manifest } : reply;
+}
+
+// openApprovals reads the approvals still open in the caller's channels (GET
+// /v1/approvals), with the ids the caller may see but not decide.
+export async function openApprovals(): Promise<ApiResult<{ readonly approvals: ApprovalV1[]; readonly readOnly: readonly number[] }>> {
+  const result = await authed(call('listApprovals'), listApprovalsResponseV1);
+  return result.ok ? { ok: true, value: { approvals: result.value.approvals, readOnly: result.value.read_only ?? [] } } : result;
+}
+
+// castDecision records the viewer's decision on an approval (POST
+// /v1/approvals/{id}/decisions): the admin-action card's two buttons.
+export async function castDecision(approval: number, principal: number, option: string, reason: string): Promise<InviteResult<null>> {
+  const request: CastDecisionRequestV1 = { principal_id: principal, option_id: option, reason };
+  return readDone(await authedSend(call('castDecision', { id: approval }), request));
+}
+
+// bindHookFor binds a webhook that posts in a channel as another person (POST
+// /v1/hooks; act_as_members). The token is in the answer alone, to be shown once.
+export async function bindHookFor(channel: string, principal: number, label: string): Promise<InviteResult<{ readonly secret: string }>> {
+  const request: CreateHookRequest = { channel, principal, ...(label === '' ? {} : { label }) };
+  const made = await readSent(await authedSend(call('createHook'), request), createHookResponse);
+  return made.ok ? { ok: true, value: { secret: made.value.token } } : made;
+}
+
+// revokeIssuedCredential revokes one credential an operator issued to someone
+// else (DELETE /v1/credentials/{id}); manage_members and a recent proof.
+export async function revokeIssuedCredential(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('revokeCredential', { id })));
+}
+
+// revokeIssuedHook revokes one hook an operator bound to someone else
+// (DELETE /v1/hooks/{id}); manage_members and a recent proof.
+export async function revokeIssuedHook(id: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('revokeHook', { id })));
+}
+
+// memberLinks reads the member links the caller may see (GET /v2/invites),
+// newest first: every link with manage_members, else the caller's own. Without
+// manage_channels a link names only the caller's channels and counts the
+// rest in other_channels.
+export async function memberLinks(): Promise<ApiResult<InviteV2[]>> {
+  const result = await authed(call('listMemberLinks'), listInvitesResponseV2);
+  return result.ok ? { ok: true, value: result.value.invites } : result;
+}
+
+// memberLinkJoiners reads who came through one link (GET
+// /v2/invites/{id}/joiners), to its maker or a holder of manage_members.
+export async function memberLinkJoiners(id: number): Promise<ApiResult<InviteJoinerV1[]>> {
+  const result = await authed(call('memberLinkJoiners', { id }), inviteJoinersResponseV1);
+  return result.ok ? { ok: true, value: result.value.joiners } : result;
 }
 
 // listGuests reads the live guest visits, newest first: one page.
 export async function listGuests(): Promise<ApiResult<GuestAdminV1[]>> {
-  const result = await authed('/v1/guests', listGuestsResponseV1);
+  const result = await authed(call('listGuests'), listGuestsResponseV1);
   return result.ok ? { ok: true, value: result.value.guests } : result;
 }
 
@@ -867,7 +1317,7 @@ export async function listGuests(): Promise<ApiResult<GuestAdminV1[]>> {
 // never one of them.
 export async function endAllGuests(dryRun: boolean): Promise<InviteResult<EndGuestsResponseV1>> {
   const request: EndGuestsRequestV1 = { dry_run: dryRun };
-  return readSent(await authedSend('POST', '/v1/guests/end', request), endGuestsResponseV1);
+  return readSent(await authedSend(call('endGuests'), request), endGuestsResponseV1);
 }
 
 // Invites (issue #440). Preview and redeem need no credential: the code is
@@ -886,6 +1336,9 @@ export type InviteResult<T> =
       readonly code?: string;
       readonly message?: string;
       readonly retryAfter?: number;
+      // The permission a permission_denied refusal names (ADR-014 design
+      // §7.4), as the server wrote it.
+      readonly permission?: string;
     };
 
 export type InviteRefusal = Extract<InviteResult<never>, { ok: false }>;
@@ -905,6 +1358,7 @@ async function inviteRefused(res: Response): Promise<InviteRefusal> {
     failure: 'invalid',
     ...(doc === undefined ? {} : { code: doc.code }),
     ...(message === '' ? {} : { message }),
+    ...(doc?.permission === undefined ? {} : { permission: doc.permission }),
     ...(Number.isFinite(retryAfter) && retryAfter >= 0 ? { retryAfter } : {}),
   };
 }
@@ -922,16 +1376,10 @@ async function readBody<T>(res: Response, check: Validator<T>): Promise<InviteRe
 // sendOpen posts a JSON body with no credential at all, for the invite,
 // sign-in link, joining and password routes that take none; with no body it
 // is a GET (the front door). It is null when there was no answer.
-async function sendOpen(path: string, body?: unknown): Promise<Response | null> {
+async function sendOpen(request: Call, body?: unknown): Promise<Response | null> {
   let res: Response;
   try {
-    res = await fetch(path, {
-      method: body === undefined ? 'GET' : 'POST',
-      headers: body === undefined ? { Accept: 'application/json' } : { Accept: 'application/json', 'Content-Type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      cache: 'no-store',
-      credentials: 'omit',
-    });
+    res = await platform.http.open(request, body);
   } catch {
     noteNoAnswer();
     return null;
@@ -943,7 +1391,7 @@ async function sendOpen(path: string, body?: unknown): Promise<Response | null> 
 // previewInvite asks what an invite would grant, without using it.
 export async function previewInvite(inviteCode: string): Promise<InviteResult<InvitePreviewV1>> {
   const request: InvitePreviewRequestV1 = { code: inviteCode };
-  const res = await sendOpen('/v1/invites/preview', request);
+  const res = await sendOpen(call('previewInvite'), request);
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   return readBody(res, invitePreviewV1);
@@ -978,8 +1426,8 @@ export async function forgetStored(): Promise<boolean> {
   const held = unchecked;
   unchecked = null;
   if (held === null || !stillStored(held)) return true;
-  const reply = await sendAs(held, 'DELETE', '/v1/credentials/current');
-  dropToken(held);
+  const reply = await sendAs(held, call('logout'));
+  platform.credentials.drop(held);
   return reply.kind === 'unauthorized' || (reply.kind === 'reply' && reply.res.ok);
 }
 
@@ -996,9 +1444,9 @@ export async function forgetStored(): Promise<boolean> {
 // The password goes in the body alone and is kept nowhere.
 export async function redeemInvite(inviteCode: string, name: string, password: string): Promise<RedeemResult> {
   if (heldElsewhere()) return { ok: false, failure: 'held' };
-  pinned = null;
+  pin(null);
   const request: RedeemInviteRequestV2 = { code: inviteCode, name, password };
-  const res = await sendOpen('/v2/invites/redeem', request);
+  const res = await sendOpen(call('redeemInvite'), request);
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   const redeemed = await readBody(res, redeemInviteResponseV1);
@@ -1006,45 +1454,15 @@ export async function redeemInvite(inviteCode: string, name: string, password: s
   return keepRedeemed(redeemed.value.token, redeemed.value.principal.id, 'lasting');
 }
 
-// redeemInviteAsGuest uses an invite that admits guests to start a visit
-// (POST /v1/invites/redeem-guest), with the display label typed, if any. The
-// visit's credential is kept for this tab alone. It is refused while this
-// browser holds another sign-in, as redeemInvite is.
-export async function redeemInviteAsGuest(inviteCode: string, label: string): Promise<RedeemResult> {
-  if (heldElsewhere()) return { ok: false, failure: 'held' };
-  pinned = null;
-  const request: RedeemInviteGuestRequestV1 = label === '' ? { code: inviteCode } : { code: inviteCode, label };
-  const res = await sendOpen('/v1/invites/redeem-guest', request);
-  if (res === null) return { ok: false, failure: 'network' };
-  if (!res.ok) return inviteRefused(res);
-  const joined = await readBody(res, joinGuestResponseV1);
-  if (!joined.ok) return joined;
-  return keepRedeemed(joined.value.token, joined.value.principal.id, 'tab');
-}
-
 // Joining from the bare address (issue #713). The front door says what the
 // address offers now; the server decides again when someone joins.
 
 // joinInfo reads the front door (GET /v1/join), with no credential.
 export async function joinInfo(): Promise<InviteResult<JoinInfoV1>> {
-  const res = await sendOpen('/v1/join');
+  const res = await sendOpen(call('joinInfo'));
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   return readBody(res, joinInfoV1);
-}
-
-// joinAsGuest starts a visit from the bare address (POST /v1/join/guest).
-// Its credential is kept for this tab alone, as an invite's guest's is.
-export async function joinAsGuest(label: string): Promise<RedeemResult> {
-  if (heldElsewhere()) return { ok: false, failure: 'held' };
-  pinned = null;
-  const request: JoinGuestRequestV1 = label === '' ? {} : { label };
-  const res = await sendOpen('/v1/join/guest', request);
-  if (res === null) return { ok: false, failure: 'network' };
-  if (!res.ok) return inviteRefused(res);
-  const joined = await readBody(res, joinGuestResponseV1);
-  if (!joined.ok) return joined;
-  return keepRedeemed(joined.value.token, joined.value.principal.id, 'tab');
 }
 
 // createAccount makes a member from the bare address, name and password
@@ -1052,9 +1470,9 @@ export async function joinAsGuest(label: string): Promise<RedeemResult> {
 // invite's member's is.
 export async function createAccount(name: string, password: string): Promise<RedeemResult> {
   if (heldElsewhere()) return { ok: false, failure: 'held' };
-  pinned = null;
+  pin(null);
   const request: JoinAccountRequestV1 = { name, password };
-  const res = await sendOpen('/v1/join/account', request);
+  const res = await sendOpen(call('joinAccount'), request);
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   const made = await readBody(res, joinAccountResponseV1);
@@ -1071,14 +1489,15 @@ export async function createAccount(name: string, password: string): Promise<Red
 // needs no warning, since it is the operator's sign-in rather than a script's
 // credential.
 async function keepRedeemed(token: string, principal: number, place: Place, operator = false): Promise<RedeemResult> {
-  const held: Held = { token, place: operator ? 'tab' : place };
-  if (!writeToken(held.token, held.place)) {
+  const made: Held = { token, place: operator ? 'tab' : place };
+  const held = platform.credentials.write(made.token, made.place);
+  if (held === null) {
     // The credential works, but cannot be kept here: it is revoked (if the
     // server answers) rather than left alive.
-    await sendAs(held, 'DELETE', '/v1/credentials/current');
+    await sendAs(made, call('logout'));
     return { ok: false, failure: 'unkept' };
   }
-  pinned = { token: held.token, place: held.place };
+  pin(held);
   const who = await whoAmI();
   if (!who.ok) return { ok: false, failure: 'unchecked' };
   if ((who.value.role === 'operator') !== operator || who.value.id !== principal || (held.place === 'lasting' && visitOf(who.value) !== null)) {
@@ -1087,7 +1506,7 @@ async function keepRedeemed(token: string, principal: number, place: Place, oper
     // ever say otherwise, or name someone else, the
     // credential is revoked on the server (best effort, as when it cannot
     // be kept) and not left in this browser.
-    await sendAs(held, 'DELETE', '/v1/credentials/current');
+    await sendAs(held, call('logout'));
     forget(held);
     return { ok: false, failure: 'invalid' };
   }
@@ -1130,10 +1549,10 @@ export async function signInWithPassword(name: string, password: string): Promis
   if (unchecked !== null && !stillStored(unchecked)) unchecked = null;
   if (pending !== null || unchecked !== null) return { ok: false, failure: 'held' };
   if (hasToken()) return { ok: false, failure: 'stored' };
-  pinned = null;
+  pin(null);
   pendingLogin = null;
   const request: LoginRequestV1 = { name, password };
-  const res = await sendOpen('/v1/login', request);
+  const res = await sendOpen(call('login'), request);
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   const answer = await readBody(res, loginResponseV1);
@@ -1143,7 +1562,18 @@ export async function signInWithPassword(name: string, password: string): Promis
     pendingLogin = { challenge: answer.value.challenge, expiresAt: until, tries: 0 };
     return { ok: false, failure: 'totp', expiresAt: answer.value.challenge_expires_at };
   }
-  return keepRedeemed(answer.value.token, answer.value.principal.id, 'lasting');
+  // A session straight from the password is a member's, or an operator's on
+  // a server that lets an operator sign in with a password alone (ADR-012).
+  // Which one decides where it is kept: an operator's is for this tab alone.
+  // So whoami is asked with it before it is stored anywhere; nothing is kept
+  // on a refusal, and the credential is then revoked, best effort.
+  const token = answer.value.token;
+  const who = await get(call('whoami'), token, whoAmIResponseV1);
+  if (!who.ok) {
+    await sendAs({ token, place: 'tab' }, call('logout'));
+    return { ok: false, failure: who.failure === 'network' ? 'network' : 'invalid' };
+  }
+  return keepRedeemed(token, answer.value.principal.id, 'lasting', who.value.role === 'operator');
 }
 
 // What the code's step gave besides an answer: over is a sign-in that has
@@ -1170,7 +1600,7 @@ export async function signInWithCode(code: string): Promise<CodeSignInResult> {
   }
   login.tries++;
   const request: TOTPLoginRequestV1 = { challenge: login.challenge, code };
-  const res = await sendOpen('/v1/login/totp', request);
+  const res = await sendOpen(call('loginTotp'), request);
   if (res === null) {
     // No answer: the code may or may not have been looked at. The next try
     // is the person's.
@@ -1209,7 +1639,7 @@ export function cancelCodeSignIn(): void {
 export async function endVisit(): Promise<'ended' | 'unconfirmed' | 'unsent'> {
   const held = current();
   if (held === null) return 'unsent';
-  const reply = await sendAs(held, 'POST', '/v1/guest/end');
+  const reply = await sendAs(held, call('endVisit'));
   // sendAs has forgotten it on a 401.
   if (reply.kind === 'unauthorized') return 'ended';
   if (reply.kind === 'none') return 'unconfirmed';
@@ -1248,8 +1678,13 @@ export type ConvertResult =
 export async function convertGuest(name: string, password: string): Promise<ConvertResult> {
   const held = current();
   if (held === null) return { ok: false, failure: 'gone' };
+  return whileReplacing(held, () => convertAs(held, name, password));
+}
+
+// convertAs is convertGuest with the guest credential taken.
+async function convertAs(held: Held, name: string, password: string): Promise<ConvertResult> {
   const request: ConvertGuestRequestV1 = { name, password };
-  const reply = await sendAs(held, 'POST', '/v1/guest/convert', request);
+  const reply = await sendAs(held, call('convertGuest'), request);
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'gone' };
   // A 5xx may come from something in front of conchd after it committed.
   if (reply.kind === 'none' || reply.res.status >= 500) return lostConversion(held);
@@ -1276,24 +1711,27 @@ export async function convertGuest(name: string, password: string): Promise<Conv
     // member's new credential: it is revoked (best effort) rather than left
     // alive, and the person signs in with the password.
     const stray = tokenIn(body);
-    if (stray !== null) await sendAs({ token: stray, place: 'tab' }, 'DELETE', '/v1/credentials/current');
+    if (stray !== null) await sendAs({ token: stray, place: 'tab' }, call('logout'));
     return lostConversion(held);
   }
   const made = { value: body as ConvertGuestResponseV1 };
   // The guest credential is revoked already, with the visit.
-  dropToken(held);
-  pinned = null;
+  platform.credentials.drop(held);
+  pin(null);
   forgetDiagnostics();
   // The member's credential is kept to last, as any member's is, unless
   // another tab keeps a sign-in there (with this tab's gone, hasToken finds
   // only that one): writing over it would leave it alive and unrevoked, so
   // this tab keeps the member's instead.
   const member: Held = { token: made.value.token, place: hasToken() ? 'tab' : 'lasting' };
-  if (!writeToken(member.token, member.place)) {
-    await sendAs(member, 'DELETE', '/v1/credentials/current');
+  const kept = platform.credentials.write(member.token, member.place);
+  if (kept === null) {
+    await sendAs(member, call('logout'));
     return { ok: false, failure: 'unkept' };
   }
-  pinned = { token: member.token, place: member.place };
+  // The same person, as a member now: a call of the guest's that the
+  // conversion refused is sent again with the member's credential.
+  rotate(held, kept);
   return { ok: true };
 }
 
@@ -1308,7 +1746,7 @@ function tokenIn(body: unknown): string | null {
 // lostConversion asks whether the guest credential still works, after a
 // conversion whose answer was lost.
 async function lostConversion(held: Held): Promise<ConvertResult> {
-  const who = await get('/v1/whoami', held.token, whoAmIResponseV1);
+  const who = await get(call('whoami'), held.token, whoAmIResponseV1);
   if (!who.ok && who.failure === 'unauthorized') {
     forget(held);
     return { ok: false, failure: 'gone' };
@@ -1325,7 +1763,7 @@ async function lostConversion(held: Held): Promise<ConvertResult> {
 // it.
 export async function previewSignInLink(signInCode: string): Promise<InviteResult<SignInLinkPreviewV1>> {
   const request: SignInLinkPreviewRequestV1 = { code: signInCode };
-  const res = await sendOpen('/v1/sign-in-links/preview', request);
+  const res = await sendOpen(call('previewSignInLink'), request);
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   return readBody(res, signInLinkPreviewV1);
@@ -1337,9 +1775,9 @@ export async function previewSignInLink(signInCode: string): Promise<InviteResul
 // redeemInvite is: the page signs that one out first, revoking it.
 export async function redeemSignInLink(signInCode: string): Promise<RedeemResult> {
   if (heldElsewhere()) return { ok: false, failure: 'held' };
-  pinned = null;
+  pin(null);
   const request: RedeemSignInLinkRequestV1 = { code: signInCode };
-  const res = await sendOpen('/v1/sign-in-links/redeem', request);
+  const res = await sendOpen(call('redeemSignInLink'), request);
   if (res === null) return { ok: false, failure: 'network' };
   if (!res.ok) return inviteRefused(res);
   const redeemed = await readBody(res, redeemSignInLinkResponseV1);
@@ -1347,32 +1785,56 @@ export async function redeemSignInLink(signInCode: string): Promise<RedeemResult
   return keepRedeemed(redeemed.value.token, redeemed.value.principal.id, 'lasting');
 }
 
-// createInvite makes an invite. The answer carries its code, shown once to
-// whoever made it and nowhere else.
-export async function createInvite(request: CreateInviteRequestV1): Promise<InviteResult<CreateInviteResponseV1>> {
-  const reply = await authedPost('/v1/invites', request);
-  if (reply.kind === 'none') return { ok: false, failure: 'network' };
-  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
-  if (!reply.res.ok) return inviteRefused(reply.res);
-  return readBody(reply.res, createInviteResponseV1);
-}
-
 // listInvites reads the invites the caller may see, newest first. For an
 // operator that may be everyone's (issue #438): the panel shows only the
 // caller's own.
 export async function listInvites(): Promise<ApiResult<InviteV1[]>> {
-  const result = await authed('/v1/invites', listInvitesResponseV1);
+  const result = await authed(call('listInvites'), listInvitesResponseV1);
   return result.ok ? { ok: true, value: result.value.invites } : result;
 }
 
 // closeInvite closes an invite, so its link stops working. Uses already made
 // stand.
 export async function closeInvite(id: number): Promise<InviteResult<null>> {
-  const reply = await authedSend('DELETE', `/v1/invites/${String(id)}`);
+  const reply = await authedSend(call('closeInvite', { id }));
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return inviteRefused(reply.res);
   return { ok: true, value: null };
+}
+
+// Member links (issue #990, ADR-013): the invite family's second version.
+// Anyone who may make one does, with an optional expiry and use limit; the
+// server decides again who may, and what a link lands its joiner in.
+
+// createMemberLink makes a member link (POST /v2/invites). The answer carries
+// its code, shown once to whoever made it and nowhere else.
+export async function createMemberLink(request: CreateInviteRequestV2): Promise<InviteResult<CreateInviteResponseV2>> {
+  const reply = await authedPost(call('createMemberLink'), request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return inviteRefused(reply.res);
+  return readBody(reply.res, createInviteResponseV2);
+}
+
+// previewMemberLink asks what a member link would offer, without using it
+// (POST /v2/invites/preview, no credential): the inviter, the server and the
+// channels the joiner lands in.
+export async function previewMemberLink(inviteCode: string): Promise<InviteResult<InvitePreviewV2>> {
+  const request: InvitePreviewRequestV1 = { code: inviteCode };
+  const res = await sendOpen(call('previewMemberLink'), request);
+  if (res === null) return { ok: false, failure: 'network' };
+  if (!res.ok) return inviteRefused(res);
+  return readBody(res, invitePreviewV2);
+}
+
+// disableJoiners disables the members who joined through a link
+// (POST /v1/invites/{id}/disable-joiners), for a holder of manage_members; with
+// dryRun it disables none and says how many it would. Disabling asks for a
+// recent proof of the operator's password, which authedSend gets first.
+export async function disableJoiners(id: number, dryRun: boolean): Promise<InviteResult<DisableJoinersResponseV1>> {
+  const request: DisableJoinersRequestV1 = { dry_run: dryRun };
+  return readSent(await authedSend(call('disableJoiners', { id }), request), disableJoinersResponseV1);
 }
 
 // onSignedOutElsewhere calls back when another tab of this origin removes the
@@ -1382,25 +1844,13 @@ export async function closeInvite(id: number): Promise<InviteResult<null>> {
 // never in the one that made the change. It returns the function that stops
 // listening.
 export function onSignedOutElsewhere(callback: () => void): () => void {
-  const listener = (event: StorageEvent) => {
-    // key null is the whole storage cleared.
-    if (event.key !== null && event.key !== tokenKey) return;
-    let lasting: boolean;
-    try {
-      lasting = event.storageArea === window.localStorage;
-    } catch {
-      return;
-    }
-    if (!lasting || pinned?.place !== 'lasting') return;
+  return platform.credentials.onLastingChange(() => {
+    if (pinned?.place !== 'lasting') return;
     // Still the credential this page signed in with: nothing changed for it.
     if (current() !== null) return;
     forgetDiagnostics();
     callback();
-  };
-  window.addEventListener('storage', listener);
-  return () => {
-    window.removeEventListener('storage', listener);
-  };
+  });
 }
 
 // renamePrincipal changes a principal's name (issue #441): the caller's own,
@@ -1409,7 +1859,7 @@ export function onSignedOutElsewhere(callback: () => void): () => void {
 // rate_limited (too many renames today) or invalid_request (not a valid name).
 export async function renamePrincipal(id: number, name: string): Promise<ApiResult<PrincipalV0>> {
   const request: RenamePrincipalRequestV1 = { name };
-  const reply = await authedSend('PUT', `/v1/principals/${String(id)}/name`, request);
+  const reply = await authedSend(call('renamePrincipal', { id }), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return refused(reply.res);
@@ -1425,28 +1875,85 @@ export async function renamePrincipal(id: number, name: string): Promise<ApiResu
 // listChannels reads the channels the caller can use. A 401 drops the
 // credential, so the caller only has to go back to sign-in.
 export async function listChannels(): Promise<ApiResult<ChannelV0[]>> {
-  const result = await authed('/v1/channels', listChannelsResponse);
+  const result = await authed(call('listChannels'), listChannelsResponse);
   if (!result.ok) return result;
   return { ok: true, value: result.value.channels };
 }
 
-// createChannel makes a channel (issue #695). The server allows operators
-// alone (403 forbidden for anyone else) and makes the caller its only member,
-// so it is one of theirs from then on. A refusal carries the server's code and
-// line as an invite call's does: channel_exists for a name already used,
-// invalid_request with the rule a name broke. It is never repeated here.
-export async function createChannel(name: string): Promise<InviteResult<ChannelV0>> {
-  const request: CreateChannelRequest = { name };
-  const reply = await authedPost('/v0/channels', request);
+// createChannel makes a public or private channel (POST /v1/channels, issues
+// #981 and #991): any member the server lets create one, who becomes its only
+// member and its manager. A refusal carries the server's code, never repeated
+// here: channel_exists for every collision (it never says whose channel is in
+// the way), rate_limited with its Retry-After, permission_denied, forbidden,
+// invalid_request for a name that breaks the rule.
+export async function createChannel(name: string, visibility: ChannelVisibility): Promise<InviteResult<ChannelV0>> {
+  const request: CreateChannelRequestV1 = { name, visibility };
+  const reply = await authedPost(call('createChannel'), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return inviteRefused(reply.res);
-  const created = await readBody(reply.res, createChannelResponse);
+  const created = await readBody(reply.res, createChannelResponseV1);
   return created.ok ? { ok: true, value: created.value.channel } : created;
 }
 
-// renameChannel renames a channel by its id (issue #728): operators alone
-// (403 forbidden for anyone else). from is the name the caller's list shows
+// channelDirectory reads the channel directory (GET /v1/directory/channels,
+// issue #982): every public channel and the caller's own private ones, as the
+// server answers. A member count is sent only to a holder of manage_channels
+// who asks for scope=all (channelDirectoryAll), and the member's pages read none.
+export async function channelDirectory(): Promise<ApiResult<ChannelListingV1[]>> {
+  const result = await authed(call('channelDirectory'), channelDirectoryResponseV1);
+  return result.ok ? { ok: true, value: result.value.channels } : result;
+}
+
+// channelDirectoryAll reads every channel with its member count (GET
+// /v1/directory/channels?scope=all, issues #982 and #1021): for a holder of
+// manage_channels, who is refused with permission_denied otherwise. It reads
+// no channel's content, and a private channel's name comes only to such a
+// holder.
+export async function channelDirectoryAll(): Promise<ApiResult<ChannelListingV1[]>> {
+  const result = await authed(call('channelDirectory', {}, 'scope=all'), channelDirectoryResponseV1);
+  return result.ok ? { ok: true, value: result.value.channels } : result;
+}
+
+// joinChannel joins a public channel (POST /v1/channels/{channel}/join, issue
+// #982). A private channel the caller is not in is the same channel_not_found
+// as one that never was.
+export async function joinChannel(name: string): Promise<InviteResult<JoinChannelResponseV1>> {
+  return readSent(await authedPost(call('joinChannel', { channel: name })), joinChannelResponseV1);
+}
+
+// leaveChannel leaves a channel (POST /v1/channels/{channel}/leave). The last
+// member of a private channel is refused with channel_last_member.
+export async function leaveChannel(name: string): Promise<InviteResult<null>> {
+  return readDone(await authedPost(call('leaveChannel', { channel: name })));
+}
+
+const directoryLimit = 100;
+const maxDirectoryPages = 50;
+
+// directoryMembers reads the community's member list (GET
+// /v1/directory/members, issue #983), every page of it, in the server's order.
+// What it holds is what the server answered: operator fields only if the
+// server sent them, and the scope it says it applied.
+export async function directoryMembers(): Promise<ApiResult<ServerMembersResponseV1>> {
+  const members: ServerMemberV1[] = [];
+  let scope: ServerMembersResponseV1['scope'];
+  let after = 0;
+  for (let page = 0; page < maxDirectoryPages; page++) {
+    const query = `limit=${String(directoryLimit)}${after === 0 ? '' : `&after=${String(after)}`}`;
+    const result = await authed(call('directoryMembers', {}, query), serverMembersResponseV1);
+    if (!result.ok) return result;
+    members.push(...result.value.members);
+    scope = result.value.scope;
+    const next = result.value.after;
+    if (next === undefined || next <= after) break;
+    after = next;
+  }
+  return { ok: true, value: { members, ...(scope === undefined ? {} : { scope }) } };
+}
+
+// renameChannel renames a channel by its id (issue #728): operators and this
+// channel's managers. from is the name the caller's list shows
 // now; the server refuses the rename when that is no longer the channel's name
 // (channel_name_stale), so two operators cannot rename past each other. Other
 // refusals carry their code and line as createChannel's do: channel_exists for
@@ -1455,12 +1962,25 @@ export async function createChannel(name: string): Promise<InviteResult<ChannelV
 // here.
 export async function renameChannel(id: number, from: string, name: string): Promise<InviteResult<ChannelV0>> {
   const request: RenameChannelRequestV1 = { name, from };
-  const reply = await authedSend('PUT', `/v1/channels/${String(id)}/name`, request);
+  const reply = await authedSend(call('renameChannel', { id }), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return inviteRefused(reply.res);
   const renamed = await readBody(reply.res, renameChannelResponseV1);
   return renamed.ok ? { ok: true, value: renamed.value.channel } : renamed;
+}
+
+// channelSettings makes a channel public or private, a default or not
+// (PUT /v1/channels/{id}/settings, issue #1183): for holders of manage_channels,
+// after a recent proof (reauth_required, which authedSend asks for). A refusal
+// carries the server's code: channel_settings_conflict (a default channel must
+// be public), permission_denied, channel_not_found. The answer is the channel
+// as it now is, and whether unmarking the last default turned open sign-up off.
+// `archived` (issue #844) archives or restores the channel, for the same
+// holders: channel_archive_default refuses archiving a default channel, and
+// the answer's channel carries archived_at while it is archived.
+export async function channelSettings(id: number, request: ChannelSettingsRequestV1): Promise<InviteResult<ChannelSettingsResponseV1>> {
+  return readSent(await authedSend(call('channelSettings', { id }), request), channelSettingsResponseV1);
 }
 
 // How every channel-addressed route answers a name that is not a channel of
@@ -1469,11 +1989,11 @@ export async function renameChannel(id: number, from: string, name: string): Pro
 export const channelNotFound = 'channel_not_found';
 
 // A channel name goes in the path as one segment.
-const channelPath = (channel: string) => `/v1/channels/${encodeURIComponent(channel)}`;
 
 // A page of history is the most the server returns for one call, and the
 // size the client asks for. A page that comes back shorter is the last one.
 export const historyLimit = 100;
+const maxHistoryPages = 100;
 
 // loadMessages reads one page of a channel's history: the newest page, or with
 // `before` the page just below that id. The server answers newest first
@@ -1481,19 +2001,167 @@ export const historyLimit = 100;
 // is one request however long its history is.
 export async function loadMessages(channel: string, before?: number): Promise<ApiResult<MessageV2[]>> {
   const cursor = before === undefined ? '' : `&before=${String(before)}`;
-  const path = `/v2/channels/${encodeURIComponent(channel)}/messages?order=desc&limit=${String(historyLimit)}${cursor}`;
-  const result = await authed(path, listMessagesResponseV2);
+  const request = call('listMessages', { channel }, `order=desc&limit=${String(historyLimit)}${cursor}`);
+  const result = await authed(request, listMessagesResponseV2);
   if (!result.ok) return result;
   return { ok: true, value: [...result.value.messages].reverse() };
 }
 
+export async function loadMessagesAfter(channel: string, after: number): Promise<ApiResult<MessageV2[]>> {
+  const result = await authed(call('listMessages', { channel }, queryOf({ order: 'asc', limit: String(historyLimit), after: String(after) })), listMessagesResponseV2);
+  return result.ok ? { ok: true, value: result.value.messages } : result;
+}
+
+export async function loadThread(channel: string, root: number, after = 0): Promise<ApiResult<ListMessagesResponseV2>> {
+  return authed(call('listMessages', { channel }, queryOf({ thread: String(root), after: String(after), limit: String(historyLimit) })), listMessagesResponseV2);
+}
+
+export async function searchMessages(channel: string, words: string, before?: number): Promise<ApiResult<SearchMessagesResponseV2>> {
+  const query = new URLSearchParams({ q: words, limit: String(historyLimit) });
+  if (before !== undefined) query.set('before', String(before));
+  return authed(call('searchMessages', { channel }, query.toString()), searchMessagesResponseV2);
+}
+
+// What an edit of one's own message came to (issue #845,
+// docs/design/message-editing.md §4). refused is the server's no, with its
+// code (message_edit_window_closed, rate_limited, …) and, for a rate limit,
+// how long to wait; network is no answer, or one that cannot be trusted, and
+// is safe to send again: a repeated PUT of the same text changes nothing (§3.5).
+export type EditResult =
+  | { readonly ok: true; readonly message: MessageV2 }
+  | { readonly ok: false; readonly failure: 'unauthorized' | 'network' }
+  | { readonly ok: false; readonly failure: 'refused'; readonly code?: string; readonly retryAfter?: number };
+
+// editMessage replaces the text of one's own message. It is never repeated
+// here: Save again is the person's.
+export async function editMessage(channel: string, id: number, body: string): Promise<EditResult> {
+  const request: EditMessageRequestV1 = { body };
+  const reply = await authedSend(call('editMessage', { channel, id }), request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  const res = reply.res;
+  if (res.status >= 500) return { ok: false, failure: 'network' };
+  if (!res.ok) {
+    try {
+      const doc: unknown = await res.json();
+      if (errorV0(doc).length === 0) {
+        const { code, retry_after_seconds: retryAfter } = doc as ErrorV0;
+        return { ok: false, failure: 'refused', code, ...(retryAfter === undefined ? {} : { retryAfter }) };
+      }
+    } catch {
+      // No document, or not one.
+    }
+    return { ok: false, failure: 'refused' };
+  }
+  try {
+    const parsed: unknown = await res.json();
+    if (editMessageResponseV1(parsed).length === 0) return { ok: true, message: (parsed as EditMessageResponseV1).message };
+  } catch {
+    // Fall through: the body was cut off.
+  }
+  return { ok: false, failure: 'network' };
+}
+
+// messageRevisions reads one's own message's earlier versions, oldest first.
+// Only the author is answered; anyone else is message_not_found.
+export async function messageRevisions(channel: string, id: number): Promise<ApiResult<MessageRevisionV1[]>> {
+  const result = await authed(call('messageRevisions', { channel, id }), listMessageRevisionsResponseV1);
+  return result.ok ? { ok: true, value: result.value.revisions } : result;
+}
+
+export type AscendingMessagesResult =
+  | { readonly ok: true; readonly complete: boolean; readonly value: MessageV2[] }
+  | { readonly ok: false; readonly failure: ApiFailure; readonly code?: string };
+
+// loadMessagesAscending follows the server's after cursor from after. It is
+// the reconciliation read after an uncertain post: match the frozen body,
+// audience and attachment ids before deciding whether a retry is safe. An
+// incomplete result is partial evidence only: absence from value is not proof
+// that a retry is safe. The walk is complete only at a cursor-less final page.
+export async function loadMessagesAscending(channel: string, after = 0): Promise<AscendingMessagesResult> {
+  const all: MessageV2[] = [];
+  let from = after;
+  for (let page = 0; page < maxHistoryPages; page++) {
+    const request = call('listMessages', { channel }, queryOf({ order: 'asc', limit: String(historyLimit), after: String(from) }));
+    const result = await authed(request, listMessagesResponseV2);
+    if (!result.ok) return result;
+    all.push(...result.value.messages);
+    const next = result.value.next_after;
+    if (next === undefined) return { ok: true, complete: true, value: all };
+    if (!Number.isSafeInteger(next) || next <= from || result.value.messages.length === 0) {
+      return { ok: true, complete: false, value: all };
+    }
+    from = next;
+  }
+  return { ok: true, complete: false, value: all };
+}
+
 export async function listMembers(channel: string): Promise<ApiResult<ChannelMemberV1[]>> {
-  const result = await authed(`${channelPath(channel)}/members`, listChannelMembersResponseV1);
+  const result = await authed(call('listMembers', { channel }), listChannelMembersResponseV1);
   return result.ok ? { ok: true, value: result.value.members } : result;
 }
 
+// How many ids one authors call may ask about (pkg/schema
+// MaxChannelAuthorIDs): the server refuses more.
+export const authorBatch = 100;
+
+// channelAuthors names the people who wrote in a channel but are not in the
+// list the page holds (GET /v1/channels/{channel}/authors, design §13.5): a
+// message's author stays named for everyone who can read the message. The ids
+// go in batches of at most authorBatch. What comes back is only what the
+// server named for an id that was asked: another id in an answer is dropped,
+// and a batch that did not answer names nobody (those ids read #<id>). A 401
+// is the whole call's failure, so the page signs out.
+export async function channelAuthors(channel: string, ids: readonly number[]): Promise<ApiResult<ChannelAuthorV1[]>> {
+  const wanted = [...new Set(ids)].filter((id) => Number.isSafeInteger(id) && id > 0);
+  const named = new Map<number, ChannelAuthorV1>();
+  for (let from = 0; from < wanted.length; from += authorBatch) {
+    const batch = wanted.slice(from, from + authorBatch);
+    const result = await authed(call('channelAuthors', { channel }, queryOf({ ids: batch.join(',') })), channelAuthorsResponseV1);
+    if (!result.ok) {
+      if (result.failure === 'unauthorized') return result;
+      continue;
+    }
+    for (const author of result.value.authors) {
+      if (batch.includes(author.principal_id)) named.set(author.principal_id, author);
+    }
+  }
+  return { ok: true, value: [...named.values()] };
+}
+
+export async function addChannelMember(channel: string, name: string): Promise<InviteResult<ChannelMemberV1>> {
+  const request: AddChannelMemberRequestV1 = { name };
+  return readSent(await authedPost(call('addMember', { channel }), request), channelMemberV1);
+}
+
+// What adding a person by id gave: added is a 201 (a new member), not added a
+// 200 (already in the channel, left exactly as they were).
+export interface MemberAddition {
+  readonly added: boolean;
+  readonly member: ChannelMemberV1;
+}
+
+// addChannelMemberById is the server's add-if-absent form (POST
+// /v1/channels/{channel}/members {id, can_decide}): it can never change an
+// existing member's right to decide approvals, so it needs no read first.
+export async function addChannelMemberById(channel: string, id: number, canDecide: boolean): Promise<InviteResult<MemberAddition>> {
+  const request: AddChannelMemberRequestV1 = { id, can_decide: canDecide };
+  const reply = await authedPost(call('addMember', { channel }), request);
+  const result = await readSent(reply, channelMemberV1);
+  if (!result.ok) return result;
+  return { ok: true, value: { added: reply.kind === 'reply' && reply.res.status === 201, member: result.value } };
+}
+
+export async function putChannelMember(channel: string, principal: number, request: PutChannelMemberRequestV1): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('putMember', { channel, principal }), request));
+}
+
+export async function removeChannelMember(channel: string, principal: number): Promise<InviteResult<null>> {
+  return readDone(await authedSend(call('removeMember', { channel, principal })));
+}
+
 export async function listNets(channel: string): Promise<ApiResult<NetV1[]>> {
-  const result = await authed(`${channelPath(channel)}/nets`, listNetsResponseV1);
+  const result = await authed(call('listNets', { channel }), listNetsResponseV1);
   return result.ok ? { ok: true, value: result.value.nets } : result;
 }
 
@@ -1508,29 +2176,37 @@ export type PostResult =
   // one.
   | { readonly ok: false; readonly outcome: 'refused'; readonly reason: string; readonly code?: string };
 
-// postRefusal is the line and the code of the error document a refusal
-// carries, the line on one line, or a fallback.
-async function postRefusal(res: Response): Promise<{ readonly reason: string; readonly code?: string }> {
+// requestRefusal is the line and code of an error document, or a fallback
+// specific to the request when there is no usable document.
+async function requestRefusal(res: Response, fallback: string): Promise<{ readonly reason: string; readonly code?: string }> {
   try {
     const body: unknown = await res.json();
     if (errorV0(body).length === 0) {
       const doc = body as ErrorV0;
       const line = doc.message.replace(/\s+/g, ' ').trim();
-      const reason = line === '' ? 'The server refused the message' : line.length > 300 ? `${line.slice(0, 299)}…` : line;
+      const reason = line === '' ? fallback : line.length > 300 ? `${line.slice(0, 299)}…` : line;
       return { reason, code: doc.code };
     }
   } catch {
     // No document, or not one.
   }
-  return { reason: 'The server refused the message' };
+  return { reason: fallback };
 }
 
+const postRefusal = (res: Response) => requestRefusal(res, 'The server refused the message');
+
 // postMessage sends one message, to the whole channel or, with an audience, to
-// a net or a list of principals. It is never repeated here: sending again is
-// the caller's, on a click.
-export async function postMessage(channel: string, body: string, audience?: Audience): Promise<PostResult> {
-  const request: PostMessageRequestV2 = audience === undefined ? { body } : { body, audience };
-  const reply = await authedPost(`/v2/channels/${encodeURIComponent(channel)}/messages`, request);
+// a net or a list of principals, with a payload (an attachment's file ids, say)
+// when it carries one. It is never repeated here: sending again is the
+// caller's, on a click.
+export async function postMessage(channel: string, body: string, audience?: Audience, payload?: Payload, threadRootId?: number): Promise<PostResult> {
+  const request: PostMessageRequestV2 = {
+    body,
+    ...(audience === undefined ? {} : { audience }),
+    ...(payload === undefined ? {} : { payload }),
+    ...(threadRootId === undefined ? {} : { thread_root_id: threadRootId }),
+  };
+  const reply = await authedPost(call('postMessage', { channel }), request);
   if (reply.kind === 'none') return { ok: false, outcome: 'unconfirmed' };
   if (reply.kind === 'unauthorized') return { ok: false, outcome: 'unauthorized' };
   const res = reply.res;
@@ -1546,6 +2222,118 @@ export async function postMessage(channel: string, body: string, audience?: Audi
   return { ok: false, outcome: 'unconfirmed' };
 }
 
+// File attachments (issue #762): the browser face of the routes of issue #23.
+
+// fileAttachmentPayload builds the registered payload from generated types.
+// The server enforces ownership, channel, count and single-use attachment.
+export function fileAttachmentPayload(fileIds: readonly number[]): Payload {
+  const data: FileAttachmentV1 = { file_ids: [...fileIds] };
+  return { schema: fileAttachmentPayloadSchema, data };
+}
+
+// What an upload came to. cancelled is the person's own Cancel; refused is the
+// server's no, with its code (uploads_disabled, file_too_large, …) and its own
+// line; network is no answer at all, which for an upload is safe to try again:
+// the bytes are content-addressed and no message attached them. A retry makes
+// another row. Completed rows and bytes have no automatic retention cleanup,
+// whether or not the client learns their ids.
+export type UploadResult =
+  | { readonly ok: true; readonly file: FileV1 }
+  | { readonly ok: false; readonly outcome: 'cancelled' | 'unauthorized' | 'network' }
+  | { readonly ok: false; readonly outcome: 'refused'; readonly reason: string; readonly code?: string };
+
+// uploadFile stores one file in a channel (POST /v2/channels/{channel}/files):
+// the bytes are the request body itself (not JSON, not multipart), and the
+// declared media type goes as the Content-Type, which the server reduces to
+// type/subtype, records, and never serves back. Progress is an honest
+// indeterminate state, with Cancel through signal: fetch cannot stream a
+// request body portably (Chrome-only, and a streamed body would defeat the
+// server's early 413, which answers before reading), so a byte counter would
+// be a lie. A 401 signs out, as everywhere.
+export async function uploadFile(channel: string, name: string, mediaType: string, bytes: Blob, signal: AbortSignal): Promise<UploadResult> {
+  let held = current();
+  if (held === null) return { ok: false, outcome: 'unauthorized' };
+  let res: Response;
+  for (let sent = 0; ; sent++) {
+    try {
+      res = await platform.http.upload(call('uploadFile', { channel }, fileQuery(name)), held.token, mediaType, bytes, signal);
+    } catch {
+      if (signal.aborted) return { ok: false, outcome: 'cancelled' };
+      noteNoAnswer();
+      return { ok: false, outcome: 'network' };
+    }
+    if (!res.ok) await noteRefusal(res);
+    if (res.status !== 401) break;
+    // A 401 is answered before the bytes are stored: sent again with a
+    // credential since replaced, it is still one file (issue #1000).
+    await discard(res);
+    const next = await settleRefusal(held, true);
+    if (next === null) return { ok: false, outcome: 'unauthorized' };
+    if (next === 'stale' || sent + 1 >= resends) return { ok: false, outcome: 'network' };
+    held = next;
+  }
+  if (!res.ok) return { ok: false, outcome: 'refused', ...(await requestRefusal(res, 'The server refused the upload')) };
+  try {
+    const parsed: unknown = await res.json();
+    if (fileV1(parsed).length === 0) return { ok: true, file: parsed as FileV1 };
+  } catch {
+    // Fall through: the body was cut off.
+  }
+  // The created row and bytes persist even when their id is lost here.
+  return { ok: false, outcome: 'refused', reason: 'The server’s answer was not readable' };
+}
+
+// What reading a file gave. unavailable is the server's one 404 (file_not_found),
+// which covers "no such file", "not your channel" and "not a message you may
+// see" alike: it is quiet, and never a sign-out.
+export type FileResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly failure: 'unavailable' | ApiFailure };
+
+// getFileMeta reads a file's metadata (GET /v2/files/{id}/meta).
+export async function getFileMeta(id: number): Promise<FileResult<FileV1>> {
+  const result = await authed(call('fileMeta', { id }), fileV1);
+  if (!result.ok && result.failure === 'invalid' && result.code === 'file_not_found') return { ok: false, failure: 'unavailable' };
+  return result;
+}
+
+// fetchFileBytes reads a file's bytes (GET /v2/files/{id}). The download is
+// always application/octet-stream with nosniff: the caller that renders them
+// must validate the content itself, and never trust the stored media type.
+export async function fetchFileBytes(id: number): Promise<FileResult<Blob>> {
+  let held = current();
+  if (held === null) return { ok: false, failure: 'unauthorized' };
+  let res: Response;
+  for (let sent = 0; ; sent++) {
+    try {
+      res = await platform.http.download(call('fileBytes', { id }), held.token);
+    } catch {
+      noteNoAnswer();
+      return { ok: false, failure: 'network' };
+    }
+    if (!res.ok) await noteRefusal(res);
+    if (res.status !== 401) break;
+    await discard(res);
+    const next = await settleRefusal(held, true);
+    if (next === null) return { ok: false, failure: 'unauthorized' };
+    if (next === 'stale' || sent + 1 >= resends) return { ok: false, failure: 'network' };
+    held = next;
+  }
+  if (res.status === 404) {
+    await discard(res);
+    return { ok: false, failure: 'unavailable' };
+  }
+  if (!res.ok) {
+    await discard(res);
+    return { ok: false, failure: 'invalid' };
+  }
+  try {
+    return { ok: true, value: await res.blob() };
+  } catch {
+    return { ok: false, failure: 'network' };
+  }
+}
+
 // Read state (UX-02). Both calls are for people: an agent credential, or
 // conchd with authentication off, is refused with one of the codes below and
 // the caller then asks for nothing more.
@@ -1554,7 +2342,7 @@ export const readStateRefusals: readonly string[] = ['read_state_require_auth', 
 // listReadState reads the caller's mark and unread count in every channel they
 // are in, by channel id.
 export async function listReadState(): Promise<ApiResult<ReadStateV1[]>> {
-  const result = await authed('/v1/read-state', listReadStateResponseV1);
+  const result = await authed(call('listReadState'), listReadStateResponseV1);
   return result.ok ? { ok: true, value: result.value.read_state } : result;
 }
 
@@ -1563,7 +2351,7 @@ export async function listReadState(): Promise<ApiResult<ReadStateV1[]>> {
 // ahead of `id`.
 export async function markRead(channel: string, id: number): Promise<ApiResult<ReadStateV1>> {
   const request: MarkReadRequestV1 = { last_read_id: id };
-  const reply = await authedSend('PUT', `${channelPath(channel)}/read-state`, request);
+  const reply = await authedSend(call('markRead', { channel }), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return refused(reply.res);
@@ -1576,9 +2364,85 @@ export async function markRead(channel: string, id: number): Promise<ApiResult<R
   return { ok: false, failure: 'invalid' };
 }
 
+export type NotificationPolicy = 'off' | 'mentions' | 'all';
+export interface NotificationPreferences {
+  readonly policy: NotificationPolicy;
+  readonly muted: readonly number[];
+  readonly native: boolean;
+}
+
+const emptyNotificationPreferences: NotificationPreferences = { policy: 'off', muted: [], native: false };
+const notificationPreferencesKey = (origin: string, account: number) => `conch.web.notifications.v1.${origin}.${String(account)}`;
+
+export function readNotificationPreferences(origin: string, account: number): NotificationPreferences {
+  try {
+    const raw: unknown = JSON.parse(platform.credentials.readPreference(notificationPreferencesKey(origin, account)) ?? 'null');
+    if (typeof raw !== 'object' || raw === null) return emptyNotificationPreferences;
+    const value = raw as { policy?: unknown; muted?: unknown; native?: unknown };
+    return {
+      policy: value.policy === 'mentions' || value.policy === 'all' ? value.policy : 'off',
+      muted: Array.isArray(value.muted) ? value.muted.filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0) : [],
+      native: value.native === true,
+    };
+  } catch {
+    return emptyNotificationPreferences;
+  }
+}
+
+export function writeNotificationPreferences(origin: string, account: number, preferences: NotificationPreferences): void {
+  try {
+    platform.credentials.writePreference(notificationPreferencesKey(origin, account), JSON.stringify(preferences));
+  } catch {
+    // Storage can be unavailable; the in-memory preference still applies.
+  }
+}
+
+// The microphone mode the person chose for voice (issue #1244): a per-browser,
+// non-secret preference. Absent, unreadable or anything else is no choice (null),
+// and the voice client then starts in open microphone.
+// web/e2e/fixtures.ts's rememberPushToTalk writes this key by name: rename both.
+const voiceModeKey = 'conch.web.voice.mode.v1';
+
+export function readVoiceMode(): 'ptt' | 'open' | null {
+  try {
+    const kept = platform.credentials.readPreference(voiceModeKey);
+    return kept === 'ptt' || kept === 'open' ? kept : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeVoiceMode(mode: 'ptt' | 'open'): void {
+  try {
+    platform.credentials.writePreference(voiceModeKey, mode);
+  } catch {
+    // Storage can be unavailable; the choice lasts until the page reloads.
+  }
+}
+
+// The setup card's "Decide later" (ADR-014 design §10.2): a per-browser,
+// per-account, non-secret mark that keeps the card from showing again.
+const setupCardKey = (origin: string, account: number) => `conch.web.setup-card.v1.${origin}.${String(account)}`;
+
+export function setupCardDismissed(origin: string, account: number): boolean {
+  try {
+    return platform.credentials.readPreference(setupCardKey(origin, account)) === 'dismissed';
+  } catch {
+    return false;
+  }
+}
+
+export function dismissSetupCard(origin: string, account: number): void {
+  try {
+    platform.credentials.writePreference(setupCardKey(origin, account), 'dismissed');
+  } catch {
+    // Storage can be unavailable; the card stays dismissed until the page reloads.
+  }
+}
+
 // requestTicket asks for a single-use ticket to open a socket with.
 async function requestTicket(): Promise<ApiResult<WSTicketV1>> {
-  const reply = await authedPost('/v1/ws-tickets');
+  const reply = await authedPost(call('wsTicket'));
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return { ok: false, failure: 'invalid' };
@@ -1589,15 +2453,6 @@ async function requestTicket(): Promise<ApiResult<WSTicketV1>> {
     // Fall through.
   }
   return { ok: false, failure: 'invalid' };
-}
-
-// socketUrl is built here from the page's own origin, so the socket is
-// same-origin (connect-src 'self'), and it is handed to the WebSocket and to
-// nothing else: never to location, history or the DOM, because it carries the
-// ticket.
-function socketUrl(path: string, query: Record<string, string>): string {
-  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${scheme}//${window.location.host}${path}?${new URLSearchParams(query).toString()}`;
 }
 
 // The page's sockets. The occupancy socket (issue #596) is a voice socket to
@@ -1613,21 +2468,30 @@ const retries: Record<SocketName, number> = { messages: 0, events: 0, voice: 0, 
 const lost: Record<SocketName, boolean> = { messages: false, events: false, voice: false, occupancy: false };
 
 // connect asks for a ticket with the credential and opens the socket that
-// `address` names, given the ticket. The ticket is single use, so a reconnect
-// calls this again. The diagnostic ring is told of each open, each close with
-// its code and each try after a loss, by kind, never by address: the
-// address holds the channel and the ticket.
-async function connect(name: SocketName, address: (ticket: string) => string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
+// `query` names, with the ticket added. The ticket is single use, so a
+// reconnect calls this again. A platform that opens its sockets with the
+// credential it holds (the desktop shell's main) is asked for none. The
+// diagnostic ring is told of each open, each close with its code and each try
+// after a loss, by kind, never by address: the address holds the channel and
+// the ticket.
+async function connect(name: SocketName, id: OperationId, query: Readonly<Record<string, string>>, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
   const kind = diagnosticOf[name];
   if (lost[name]) record({ kind: 'reconnect', socket: kind, attempt: ++retries[name] });
   // Lost until it opens: a ticket refused or a socket that never opens is
   // followed by another try.
   lost[name] = true;
-  const ticket = await requestTicket();
-  if (!ticket.ok) return ticket;
-  let socket: WebSocket;
+  await holdSockets();
+  // The credential this socket is opened with, which a replacement may end.
+  const opened = current();
+  let address = query;
+  if (platform.sockets.ticket) {
+    const ticket = await requestTicket();
+    if (!ticket.ok) return ticket;
+    address = { ...query, ticket: ticket.value.ticket };
+  }
+  let socket: FeedConnection;
   try {
-    socket = new WebSocket(address(ticket.value.ticket));
+    socket = platform.sockets.open(id, address);
   } catch {
     return { ok: false, failure: 'network' };
   }
@@ -1644,7 +2508,13 @@ async function connect(name: SocketName, address: (ticket: string) => string, ev
   socket.onclose = (event: CloseEvent) => {
     lost[name] = true;
     record({ kind: 'socket_close', socket: kind, code: event.code });
-    events.onClose(event.code, event.reason);
+    // Closed because its credential was revoked, by a replacement that is out
+    // or has been kept: an abnormal close, which the owner opens again after
+    // its wait. Any other 1008 (the channel lost, the session ended) keeps
+    // its reason, which its owner acts on.
+    const replacedMeanwhile = requestHolds.size > 0 || (opened !== null && replaced.has(opened.token));
+    if (event.code === 1008 && event.reason === credentialInvalid && replacedMeanwhile) events.onClose(1006, '');
+    else events.onClose(event.code, event.reason);
   };
   const handle: FeedSocket = {
     close: () => {
@@ -1661,13 +2531,13 @@ async function connect(name: SocketName, address: (ticket: string) => string, ev
 // heartbeat=1 asks for the server's heartbeat frames, which the feed's silence
 // watchdog lives on; without it /v2/ws sends messages and nothing else.
 export const openSocket: OpenSocket = (channel, after, events) =>
-  connect('messages', (ticket) => socketUrl('/v2/ws', { channel, after: String(after), heartbeat: '1', ticket }), events);
+  connect('messages', 'messagesSocket', { channel, after: String(after), heartbeat: '1' }, events);
 
 // openEventsSocket opens the events stream of a channel (roster, runs,
 // activity, interventions) with the browser's own session, which the server
 // then keeps online while the socket is open.
 export function openEventsSocket(channel: string, session: number, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  return connect('events', (ticket) => socketUrl('/v1/events/ws', { channel, session: String(session), ticket }), events);
+  return connect('events', 'eventsSocket', { channel, session: String(session) }, events);
 }
 
 // The browser's own session (UX-18): created after sign-in, ended on sign-out
@@ -1676,7 +2546,7 @@ export function openEventsSocket(channel: string, session: number, events: Socke
 // createSession registers the browser as a client of the signed-in principal.
 export async function createSession(client: string): Promise<ApiResult<SessionV1>> {
   const request: CreateSessionRequestV1 = { client };
-  const reply = await authedPost('/v1/sessions', request);
+  const reply = await authedPost(call('createSession'), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return refused(reply.res);
@@ -1695,7 +2565,7 @@ export async function createSession(client: string): Promise<ApiResult<SessionV1
 // the promise before it revokes: revoking ends the credential's sessions, so a
 // request still in flight would find its session gone and be answered 404.
 export function endSession(id: number): Promise<void> {
-  return authedSend('DELETE', `/v1/sessions/${String(id)}`, undefined, true).then(() => undefined);
+  return authedSend(call('endSession', { id }), undefined, true).then(() => undefined);
 }
 
 // Runs, their activity and their interventions.
@@ -1704,7 +2574,7 @@ export function endSession(id: number): Promise<void> {
 // first, with one request (the server's order=desc, issue #317).
 export async function listSessionRuns(channel: string, session: number, limit: number): Promise<ApiResult<RunV1[]>> {
   const query = new URLSearchParams({ channel, session: String(session), order: 'desc', limit: String(limit) });
-  const result = await authed(`/v1/runs?${query.toString()}`, listRunsResponseV1);
+  const result = await authed(call('listRuns', undefined, query.toString()), listRunsResponseV1);
   return result.ok ? { ok: true, value: result.value.runs } : result;
 }
 
@@ -1714,12 +2584,12 @@ export async function listSessionRuns(channel: string, session: number, limit: n
 export async function listChannelRuns(channel: string, limit: number, before?: number): Promise<ApiResult<RunV1[]>> {
   const query = new URLSearchParams({ channel, order: 'desc', limit: String(limit) });
   if (before !== undefined && before > 0) query.set('before', String(before));
-  const result = await authed(`/v1/runs?${query.toString()}`, listRunsResponseV1);
+  const result = await authed(call('listRuns', undefined, query.toString()), listRunsResponseV1);
   return result.ok ? { ok: true, value: result.value.runs } : result;
 }
 
 export function getRun(id: number): Promise<ApiResult<RunV1>> {
-  return authed(`/v1/runs/${String(id)}`, runV1);
+  return authed(call('getRun', { id }), runV1);
 }
 
 // The most pages one read follows; past it the newest entries are what is
@@ -1731,8 +2601,8 @@ export async function listActivity(run: number, after: number): Promise<ApiResul
   const all: AgentActivityV1[] = [];
   let from = after;
   for (let page = 0; page < maxPages; page++) {
-    const path = `/v1/runs/${String(run)}/activity?after=${String(from)}&limit=${String(historyLimit)}`;
-    const result = await authed(path, listActivityResponseV1);
+    const request = call('listActivity', { id: run }, queryOf({ after: String(from), limit: String(historyLimit) }));
+    const result = await authed(request, listActivityResponseV1);
     if (!result.ok) return result;
     all.push(...result.value.activity);
     const next = result.value.next_after ?? 0;
@@ -1748,8 +2618,8 @@ export async function listInterventions(run: number): Promise<ApiResult<Interven
   const all: InterventionV1[] = [];
   let after = 0;
   for (let page = 0; page < maxPages; page++) {
-    const path = `/v1/runs/${String(run)}/interventions?after=${String(after)}&limit=${String(historyLimit)}`;
-    const result = await authed(path, listInterventionsResponseV1);
+    const request = call('listInterventions', { id: run }, queryOf({ after: String(after), limit: String(historyLimit) }));
+    const result = await authed(request, listInterventionsResponseV1);
     if (!result.ok) return result;
     all.push(...result.value.interventions);
     const last = result.value.interventions[result.value.interventions.length - 1];
@@ -1762,7 +2632,7 @@ export async function listInterventions(run: number): Promise<ApiResult<Interven
 // createIntervention asks a run to take a message or to stop. The answer is
 // the intervention as stored, "requested"; it is never repeated here.
 export async function createIntervention(run: number, request: CreateInterventionRequestV1): Promise<ApiResult<InterventionV1>> {
-  const reply = await authedPost(`/v1/runs/${String(run)}/interventions`, request);
+  const reply = await authedPost(call('createIntervention', { id: run }), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return refused(reply.res);
@@ -1787,7 +2657,7 @@ export type VoiceSessionResult =
 // createVoiceSession asks for the session that admits the caller to a
 // channel's voice room. It is asked for before every connection attempt.
 export async function createVoiceSession(channel: string): Promise<VoiceSessionResult> {
-  const reply = await authedPost(`${channelPath(channel)}/voice/session`);
+  const reply = await authedPost(call('voiceSession', { channel }));
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   const res = reply.res;
@@ -1804,11 +2674,50 @@ export async function createVoiceSession(channel: string): Promise<VoiceSessionR
   return { ok: false, failure: 'invalid' };
 }
 
+// The viewer (issue #936, voice-control-plane.md §13). A person whose own
+// voice is in another client (the helper, the TUI) watches a share here as
+// p<id>.view, which publishes nothing, so the page never takes the person's
+// own p<id> from that client. The join token is handed to the caller and kept
+// nowhere here.
+export type VoiceViewerResult =
+  | { readonly ok: true; readonly value: VoiceCompanionResponseV1 }
+  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string };
+
+// createVoiceViewer asks for the viewer grant of a channel's room.
+export async function createVoiceViewer(channel: string): Promise<VoiceViewerResult> {
+  const request: VoiceCompanionRequestV1 = { publish: 'none', subscribe: true };
+  const reply = await authedPost(call('voiceViewer', { channel }), request);
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  const res = reply.res;
+  if (!res.ok) {
+    const code = await refusalCode(res);
+    return code === undefined ? { ok: false, failure: 'invalid', status: res.status } : { ok: false, failure: 'invalid', status: res.status, code };
+  }
+  try {
+    const parsed: unknown = await res.json();
+    if (voiceCompanionResponseV1(parsed).length === 0) return { ok: true, value: parsed as VoiceCompanionResponseV1 };
+  } catch {
+    // Fall through.
+  }
+  return { ok: false, failure: 'invalid' };
+}
+
+// removeVoiceViewer removes the caller's own viewer from the room: 204 whether
+// or not one was there, and it never touches the person's own p<id>.
+export async function removeVoiceViewer(channel: string): Promise<ApiResult<null>> {
+  const reply = await authedSend(call('voiceViewerEnd', { channel }, queryOf({ publish: 'none' })));
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return refused(reply.res);
+  return { ok: true, value: null };
+}
+
 // getVoicePresence reads who is in a channel's voice, once. The page keeps
 // presence on its socket, joined or not, and reads this only to learn why
 // the server closed that socket (1008).
 export function getVoicePresence(channel: string): Promise<ApiResult<VoicePresenceV1>> {
-  return authed(`${channelPath(channel)}/voice`, voicePresenceV1);
+  return authed(call('voicePresence', { channel }), voicePresenceV1);
 }
 
 // How a transmit report was answered. no_session is "go back to conchd" (409
@@ -1823,7 +2732,7 @@ export type TransmitAnswer = 'ok' | 'no_session' | 'rate_limited' | 'unauthorize
 // late.
 export async function reportVoiceTransmit(channel: string, state: VoiceTransmitState, signal: AbortSignal): Promise<TransmitAnswer> {
   const report: VoiceTransmitReportV1 = { state };
-  const reply = await authedSend('POST', `${channelPath(channel)}/voice/transmit`, report, false, signal);
+  const reply = await authedSend(call('voiceTransmit', { channel }), report, false, signal);
   if (reply.kind === 'none') return 'failed';
   if (reply.kind === 'unauthorized') return 'unauthorized';
   const status = reply.res.status;
@@ -1836,7 +2745,7 @@ export async function reportVoiceTransmit(channel: string, state: VoiceTransmitS
 // openVoiceSocket opens the presence stream of a channel's voice with a ticket:
 // the roster, and who is transmitting.
 export function openVoiceSocket(channel: string, events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  return connect('voice', (ticket) => socketUrl('/v1/voice/ws', { channel, ticket }), events);
+  return connect('voice', 'voiceSocket', { channel }, events);
 }
 
 // Voice occupancy (issue #596): how many are in each channel's voice, for
@@ -1846,24 +2755,48 @@ export function openVoiceSocket(channel: string, events: SocketEvents): Promise<
 // getVoiceOccupancy reads it once. The page keeps it on its socket, and reads
 // this only to learn why the server closed that socket (1008).
 export function getVoiceOccupancy(): Promise<ApiResult<VoiceOccupancyV1>> {
-  return authed('/v1/voice/occupancy', voiceOccupancyV1);
+  return authed(call('voiceOccupancy'), voiceOccupancyV1);
 }
 
 // openOccupancySocket opens its stream with a ticket: the whole document on
 // connect, and again whenever a count changes.
 export function openOccupancySocket(events: SocketEvents): Promise<ApiResult<FeedSocket>> {
-  return connect('occupancy', (ticket) => socketUrl('/v1/voice/occupancy/ws', { ticket }), events);
+  return connect('occupancy', 'occupancySocket', {}, events);
 }
 
 // sendReport sends a problem report (issue #446) to the server's operator.
 // The answer is its id. A refusal says why as an invite call's does: the
 // server's code and line, and for rate_limited the seconds to wait.
 export async function sendReport(request: CreateProblemReportRequestV1): Promise<InviteResult<CreateProblemReportResponseV1>> {
-  const reply = await authedPost('/v1/reports', request);
+  const reply = await authedPost(call('sendReport'), request);
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return inviteRefused(reply.res);
   return readBody(reply.res, createProblemReportResponseV1);
+}
+
+// Problem reports, for operators (issue #1029). The server decides who may
+// read them (every route is operator-only): a caller who may not gets the
+// code "forbidden", which the page says in a line. What a report names is
+// shown as the server gave it; nothing here redacts or un-redacts.
+
+// listReports reads the reports, newest first, with no free text.
+export async function listReports(): Promise<ApiResult<ProblemReportSummaryV1[]>> {
+  const result = await authed(call('listReports'), listProblemReportsResponseV1);
+  return result.ok ? { ok: true, value: result.value.reports } : result;
+}
+
+// getReport reads one report whole.
+export function getReport(id: number): Promise<ApiResult<ProblemReportV1>> {
+  return authed(call('getReport', { id }), problemReportV1);
+}
+
+// fileReport marks a report filed, with the address of the issue it became.
+// A refusal carries the server's code (invalid_request names the rule broken;
+// forbidden is a caller who may not).
+export async function fileReport(id: number, issue: string): Promise<InviteResult<ProblemReportV1>> {
+  const request: UpdateProblemReportRequestV1 = { state: 'filed', issue };
+  return readSent(await authedSend(call('fileReport', { id }), request), problemReportV1);
 }
 
 // Screen share (issue #444, voice-control-plane.md section 12). The page
@@ -1881,7 +2814,7 @@ export type ShareClaimResult =
 // claimVoiceShare claims the room's share for the caller, or claims it again
 // (after a reconnect), which keeps the share as it was.
 export async function claimVoiceShare(channel: string): Promise<ShareClaimResult> {
-  const reply = await authedPost(`${channelPath(channel)}/voice/share`);
+  const reply = await authedPost(call('claimShare', { channel }));
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   const res = reply.res;
@@ -1898,6 +2831,54 @@ export async function claimVoiceShare(channel: string): Promise<ShareClaimResult
   return { ok: false, failure: 'invalid' };
 }
 
+// The camera (ADR-015, design docs/design/webcam-video.md §4.2). As for a
+// share, the page connects first, then claims, then publishes: the join token
+// allows the microphone alone, and the claim is what lets that connection
+// publish a camera. A claim refused carries the status and the server's code:
+// 403 permission_denied is a person without use_camera, 409
+// voice_camera_full a room with all its cameras on, 409 voice_camera_stale a
+// named claim the server no longer holds, 409 voice_no_session no connection
+// to grant it to, 429 voice_camera_rate_limited too many claims.
+export type CameraClaimResult =
+  | { readonly ok: true; readonly value: VoiceCameraV1 }
+  | { readonly ok: false; readonly failure: ApiFailure; readonly status?: number; readonly code?: string };
+
+// claimVoiceCamera claims the caller's camera. Without startedAt it starts a
+// claim, which only the person's camera button asks for. With it, it names
+// the claim it continues (schema.VoiceCameraClaimParam): the server answers
+// with that claim while it holds it, accepts the adoption of a claim the
+// room's rotation ended moments ago, and otherwise answers 409
+// voice_camera_stale and changes nothing (S2).
+export async function claimVoiceCamera(channel: string, startedAt?: string): Promise<CameraClaimResult> {
+  const query = startedAt === undefined ? '' : queryOf({ started_at: startedAt });
+  const reply = await authedPost(call('claimCamera', { channel }, query));
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  const res = reply.res;
+  if (!res.ok) {
+    const code = await refusalCode(res);
+    return code === undefined ? { ok: false, failure: 'invalid', status: res.status } : { ok: false, failure: 'invalid', status: res.status, code };
+  }
+  try {
+    const parsed: unknown = await res.json();
+    if (voiceCameraV1(parsed).length === 0) return { ok: true, value: parsed as VoiceCameraV1 };
+  } catch {
+    // Fall through.
+  }
+  return { ok: false, failure: 'invalid' };
+}
+
+// stopVoiceCamera ends the caller's camera claim, naming it: conchd ends it
+// only while it is still the caller's current one, and otherwise answers 409
+// voice_camera_stale and changes nothing. No claim at all is 204.
+export async function stopVoiceCamera(channel: string, startedAt: string): Promise<ApiResult<null>> {
+  const reply = await authedSend(call('stopCamera', { channel }, queryOf({ started_at: startedAt })));
+  if (reply.kind === 'none') return { ok: false, failure: 'network' };
+  if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
+  if (!reply.res.ok) return refused(reply.res);
+  return { ok: true, value: null };
+}
+
 // stopVoiceShare ends the caller's share. A share nobody holds is 204 too, so
 // stopping twice is harmless.
 //
@@ -1907,8 +2888,8 @@ export async function claimVoiceShare(channel: string): Promise<ShareClaimResult
 // changes nothing, so a release sent late never ends somebody's newer share.
 // The parameter is schema.VoiceShareClaimParam.
 export async function stopVoiceShare(channel: string, startedAt?: string): Promise<ApiResult<null>> {
-  const query = startedAt === undefined ? '' : `?${new URLSearchParams({ started_at: startedAt }).toString()}`;
-  const reply = await authedSend('DELETE', `${channelPath(channel)}/voice/share${query}`);
+  const query = startedAt === undefined ? '' : queryOf({ started_at: startedAt });
+  const reply = await authedSend(call('stopShare', { channel }, query));
   if (reply.kind === 'none') return { ok: false, failure: 'network' };
   if (reply.kind === 'unauthorized') return { ok: false, failure: 'unauthorized' };
   if (!reply.res.ok) return refused(reply.res);

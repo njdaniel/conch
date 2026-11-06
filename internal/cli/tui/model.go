@@ -142,8 +142,11 @@ type approvalsLoaded struct {
 	err      error
 }
 type whoAmILoaded struct {
-	who schema.WhoAmIResponseV1
-	err error
+	// refresh marks a re-read after a permissions change: success updates
+	// what the caller holds and nothing else, and a failure changes nothing.
+	refresh bool
+	who     schema.WhoAmIResponseV1
+	err     error
 }
 type decisionCast struct {
 	err error
@@ -164,6 +167,11 @@ const (
 	// modeRuns is the Runs view: the channel's runs. r in the Agents view enters
 	// it, a goes back, tab moves on to the channels.
 	modeRuns
+	// modeDirectory is the channel directory and modeCommunity the community's
+	// members (ADR-013, directory.go and community.go). Both are entered from
+	// the chat view and esc goes back to it.
+	modeDirectory
+	modeCommunity
 )
 
 // Model is the root Bubble Tea model. Network results enter Update as messages,
@@ -239,6 +247,11 @@ type Model struct {
 	// A channel whose list never loaded has no entry, and its authors show as
 	// numbers.
 	members map[string]map[int64]schema.ChannelMemberV1
+	// departed is what the channel's authors route named for authors the member
+	// list does not have, and authorsAsked the ids it has been asked about
+	// (authors.go). Both are dropped when the member list is read again.
+	departed     map[string]map[int64]schema.ChannelAuthorV1
+	authorsAsked map[string]map[int64]bool
 	// now and loc give the clock and the time zone message times are shown in.
 	// Injectable so tests do not depend on the machine or on today's date; a nil
 	// loc means the local zone.
@@ -323,6 +336,18 @@ type Model struct {
 	// vc is voice: the supervisor of the conch-voice helper this TUI owns,
 	// and what it last said (voicectl.go).
 	vc voiceCtl
+	// comm is the client's community calls, nil when it has none. role is the
+	// caller's role from whoami: the voice switch is offered to operators.
+	// dir and people are the directory and the member view.
+	comm CommunityAPI
+	role schema.PrincipalRole
+	// owner and permissions are what whoami said the caller holds; permsKnown
+	// is false for a server that sends no permissions.
+	owner       bool
+	permissions []schema.Permission
+	permsKnown  bool
+	dir         directoryView
+	community   communityView
 }
 
 // setStatus records status for mode; modeDecision shares the inbox's.
@@ -350,6 +375,10 @@ func (m Model) status() string {
 		return m.runStatus()
 	case modeRuns:
 		return m.runsStatus()
+	case modeDirectory:
+		return m.directoryStatus()
+	case modeCommunity:
+		return m.communityStatus()
 	}
 	return m.inboxStatus
 }
@@ -379,6 +408,9 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		sessionRuns: make(map[sessionRunKey][]schema.RunV1), rs: newReadState()}
 	if v, ok := api.(VoiceAPI); ok {
 		m.voice.api = v
+	}
+	if c, ok := api.(CommunityAPI); ok {
+		m.comm = c
 	}
 	if len(clean) == 0 {
 		m.loadingChannels = true
@@ -436,6 +468,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.opensHelp(msg.String()) {
 			m.help, m.helpTop, m.helpTopic = true, 0, topicKeys
 			return m, nil
+		}
+		if m.mode == modeDirectory {
+			return m.directoryKey(msg)
+		}
+		if m.mode == modeCommunity {
+			return m.communityKey(msg)
+		}
+		if m.mode == modeChannels {
+			// Not typed text: the directory and the community.
+			switch msg.String() {
+			case "ctrl+d":
+				return m.enterDirectory()
+			case "ctrl+p":
+				return m.enterCommunity()
+			}
 		}
 		if m.mode == modeRun {
 			return m.runKey(msg)
@@ -629,6 +676,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+	case directoryLoaded:
+		return m.directoryLoaded(msg)
+	case channelActed:
+		return m.channelActed(msg)
+	case communityLoaded:
+		return m.communityLoaded(msg)
+	case voiceSwitched:
+		return m.voiceSwitched(msg)
 	case readStateLoaded:
 		return m.readStateLoaded(msg)
 	case readMarked:
@@ -659,6 +714,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.eventsActivity(msg)
 	case eventsInterventionReceived:
 		return m.eventsIntervention(msg)
+	case eventsPermissionsReceived:
+		// The frame says only that they may have changed: whoami is read
+		// again, and the pane and the offered commands follow its answer.
+		if msg.gen != m.ev.gen {
+			return m, m.waitEvent()
+		}
+		return m, tea.Batch(m.waitEvent(), m.reloadWhoAmI())
 	case runRead:
 		return m.runRead(msg)
 	case activityRead:
@@ -678,6 +740,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case eventsRetryDue:
 		return m.eventsRetry(msg)
 	case whoAmILoaded:
+		if msg.refresh {
+			if msg.err == nil {
+				m.role = msg.who.Role
+				m.owner = msg.who.Owner
+				m.permissions = msg.who.Permissions
+				m.permsKnown = msg.who.Permissions != nil || msg.who.PermissionsRevision > 0
+				m = m.permissionsMoved()
+			}
+			return m, nil
+		}
 		if msg.err != nil {
 			m.whoErr = msg.err
 			m.setStatus(modeChannels, whoErrText(msg.err))
@@ -690,6 +762,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.whoErr = nil
 		m.authorID = msg.who.ID
 		m.userName = msg.who.Name
+		m.role = msg.who.Role
+		m.owner = msg.who.Owner
+		m.permissions = msg.who.Permissions
+		m.permsKnown = msg.who.Permissions != nil || msg.who.PermissionsRevision > 0
 		m.visit = nil
 		if g := msg.who.Guest; g != nil {
 			// Shown from the visit the server describes, never from the
@@ -781,7 +857,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				names[member.PrincipalID] = member
 			}
 			m.members[msg.channel] = names
+			m.forgetAuthors(msg.channel)
+			return m, m.nameAuthors(msg.channel)
 		}
+	case authorsLoaded:
+		return m.authorsLoaded(msg)
 	case messagesLoaded:
 		// The result of a channel the user has since left must not overwrite
 		// the status of the channel they are looking at.
@@ -811,8 +891,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loaded[msg.channel] = true
 		m.addMessages(msg.channel, msg.messages)
 		m.markStreamed(msg.channel, msg.messages...)
+		naming := m.nameAuthors(msg.channel)
 		if stale {
-			return m, nil
+			return m, naming
 		}
 		switch {
 		case m.notice != "":
@@ -824,13 +905,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			m.setStatus(modeChannels, "connected")
 		}
-		return m, m.markReading()
+		return m, tea.Batch(m.markReading(), naming)
 	case messageReceived:
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
 		m.addMessages(msg.channel, []schema.MessageV2{msg.message})
 		m.markStreamed(msg.channel, msg.message)
-		return m, tea.Batch(m.waitEvent(), m.countArrival(msg.channel, msg.message), m.markReading())
+		return m, tea.Batch(m.waitEvent(), m.countArrival(msg.channel, msg.message), m.markReading(), m.nameAuthors(msg.channel))
 	case subscriptionOpened:
 		if msg.channel == m.current() && m.channelStatus == statusReconnecting && m.notice == "" {
 			m.setStatus(modeChannels, "connected")
@@ -941,6 +1022,12 @@ func (m Model) selectChannel(delta int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.selected = next
+	return m.openSelected()
+}
+
+// openSelected opens the selected channel: its nets, members, voice, events
+// and history, as selecting it does.
+func (m Model) openSelected() (Model, tea.Cmd) {
 	m.scroll = 0
 	// The Runs view is of one channel.
 	m.runs = runsView{channel: m.current(), filter: m.runs.filter}
@@ -1001,6 +1088,24 @@ func whoErrText(err error) string {
 		return err.Error()
 	}
 	return "whoami: " + err.Error()
+}
+
+// reloadWhoAmI reads whoami again after a permissions change.
+func (m Model) reloadWhoAmI() tea.Cmd {
+	return func() tea.Msg {
+		who, err := m.api.WhoAmI(m.ctx)
+		return whoAmILoaded{who: who, err: err, refresh: true}
+	}
+}
+
+// permissionsMoved drops what the caller can no longer use: the directory's
+// every-channel view needs manage_channels. The offered keys and hints are
+// decided from the permissions each time they are drawn.
+func (m Model) permissionsMoved() Model {
+	if m.dir.all && !m.canManageChannels() {
+		m.dir.all, m.dir.rows, m.dir.loaded = false, nil, false
+	}
+	return m
 }
 
 func (m Model) loadWhoAmI() tea.Cmd {
@@ -1578,7 +1683,7 @@ func clipTail(value string, width int) string {
 // secrecy, and users should not mistake it for the latter.
 const whisperNotice = "note: whispers are recorded in the audit log"
 
-const slashHint = `commands: /net [name], /w <ids> <text>, /voice help, /help; start a message with // to send a literal /`
+const slashHint = `commands: /net [name], /w <ids> <text>, /channels, /people, /voice help, /help; start a message with // to send a literal /`
 
 // submit handles enter in the channel pane: a slash command, or a message sent
 // to the current target. Every refusal leaves the input as typed and sends
@@ -1615,6 +1720,12 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/voice":
 		return m.voiceCommand(rest)
+	case "/channels":
+		m.input = ""
+		return m.enterDirectory()
+	case "/people":
+		m.input = ""
+		return m.enterCommunity()
 	default:
 		m.setStatus(modeChannels, fmt.Sprintf("unknown command %q; %s", sanitize(name), slashHint))
 		return m, nil
@@ -1954,6 +2065,12 @@ func (m Model) authorName(channel string, id int64) (name string, agent bool) {
 		// the server keeps, never from the name's text (ADR-009 §4.1).
 		if g := member.Guest; g != nil && g.Validate() == nil {
 			name = safeName(schema.GuestDisplayName(g.Label, g.Handle))
+		}
+	}
+	if _, listed := m.members[channel][id]; !listed {
+		if a, ok := m.departed[channel][id]; ok {
+			name = safeName(a.Name)
+			agent = a.Kind == schema.PrincipalAgent
 		}
 	}
 	if name == "" {

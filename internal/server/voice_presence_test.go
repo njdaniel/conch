@@ -19,35 +19,78 @@ import (
 )
 
 func TestParseVoiceIdentity(t *testing.T) {
+	longRun := "p" + strings.Repeat("9", 400)
 	tests := []struct {
-		in     string
-		wantID int64
-		wantOK bool
+		in       string
+		wantID   int64
+		wantRole voiceRole
+		wantOK   bool
 	}{
-		{"p1", 1, true},
-		{"p7", 7, true},
-		{"p123456", 123456, true},
-		{"", 0, false},
-		{"p", 0, false},
-		{"p0", 0, false},
-		{"p07", 0, false},
-		{"p+7", 0, false},
-		{"p-7", 0, false},
-		{"p7 ", 0, false},
-		{" p7", 0, false},
-		{"P7", 0, false},
-		{"7", 0, false},
-		{"p7x", 0, false},
-		{"pp7", 0, false},
-		{"p1.5", 0, false},
-		{"p٣", 0, false}, // non-ASCII digit
-		{"p99999999999999999999", 0, false},
-		{"agent-1", 0, false},
+		{"p1", 1, voiceRolePerson, true},
+		{"p7", 7, voiceRolePerson, true},
+		{"p123456", 123456, voiceRolePerson, true},
+		{"p7.screen", 7, voiceRoleScreen, true},
+		{"p7.view", 7, voiceRoleView, true},
+		{"p123456789012345678.screen", 123456789012345678, voiceRoleScreen, true},
+		{"", 0, 0, false},
+		{"p", 0, 0, false},
+		{"p0", 0, 0, false},
+		{"p07", 0, 0, false},
+		{"p+7", 0, 0, false},
+		{"p-7", 0, 0, false},
+		{"p7 ", 0, 0, false},
+		{" p7", 0, 0, false},
+		{"P7", 0, 0, false},
+		{"7", 0, 0, false},
+		{"p7x", 0, 0, false},
+		{"pp7", 0, 0, false},
+		{"p1.5", 0, 0, false},
+		{"p٣", 0, 0, false}, // non-ASCII digit
+		{"p99999999999999999999", 0, 0, false},
+		{"agent-1", 0, 0, false},
+		// Hostile suffixes: nothing but exactly .screen or .view, once.
+		{"p7.", 0, 0, false},
+		{"p7..screen", 0, 0, false},
+		{"p7.Screen", 0, 0, false},
+		{"p7.SCREEN", 0, 0, false},
+		{"p7.View", 0, 0, false},
+		{"p7.screen.screen", 0, 0, false},
+		{"p7.screen.view", 0, 0, false},
+		{"p7.view.screen", 0, 0, false},
+		{"p7.view.view", 0, 0, false},
+		{"p07.screen", 0, 0, false},
+		{"p07.view", 0, 0, false},
+		{"p0.screen", 0, 0, false},
+		{"p7.screen2", 0, 0, false},
+		{"p7.screens", 0, 0, false},
+		{"p7.views", 0, 0, false},
+		{"screen.p7", 0, 0, false},
+		{"p.screen", 0, 0, false},
+		{".screen", 0, 0, false},
+		{".view", 0, 0, false},
+		{"p7 .screen", 0, 0, false},
+		{"p7. screen", 0, 0, false},
+		{"p7.screen ", 0, 0, false},
+		{" p7.screen", 0, 0, false},
+		{"p-1.view", 0, 0, false},
+		{"p+1.view", 0, 0, false},
+		{"p1.5.view", 0, 0, false},
+		{"p7.screen\x00", 0, 0, false},
+		{"p7\x00.screen", 0, 0, false},
+		{"p7.screen\n", 0, 0, false},
+		{"p7:screen", 0, 0, false},
+		{"p7_screen", 0, 0, false},
+		{"p٣.view", 0, 0, false}, // non-ASCII digit
+		{"p99999999999999999999.screen", 0, 0, false},
+		{"p1234567890123456789.view", 0, 0, false}, // 19 digits
+		{longRun, 0, 0, false},
+		{longRun + ".screen", 0, 0, false},
+		{longRun + ".view", 0, 0, false},
 	}
 	for _, tt := range tests {
-		id, ok := parseVoiceIdentity(tt.in)
-		if id != tt.wantID || ok != tt.wantOK {
-			t.Errorf("parseVoiceIdentity(%q) = %d, %v; want %d, %v", tt.in, id, ok, tt.wantID, tt.wantOK)
+		id, role, ok := parseVoiceParticipant(tt.in)
+		if id != tt.wantID || role != tt.wantRole || ok != tt.wantOK {
+			t.Errorf("parseVoiceParticipant(%q) = %d, %v, %v; want %d, %v, %v", tt.in, id, role, ok, tt.wantID, tt.wantRole, tt.wantOK)
 		}
 	}
 }
@@ -623,7 +666,7 @@ func TestVoiceImmediateRemoval(t *testing.T) {
 		// audited is whether voice_participant_removed names the reason.
 	}{
 		{"member removed", "DELETE", func(f *presenceFixture) string { return fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]) }, 204, []string{"ops"}, voiceReasonMemberRemoved},
-		{"principal disabled", "POST", func(f *presenceFixture) string { return fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]) }, 204, []string{"ops", "ops2"}, voiceReasonPrincipalOff},
+		{"principal disabled", "POST", func(f *presenceFixture) string { return fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]) }, 200, []string{"ops", "ops2"}, voiceReasonPrincipalOff},
 	}
 	for _, tt := range tests {
 		for _, failing := range []bool{false, true} {
@@ -654,6 +697,9 @@ func TestVoiceImmediateRemoval(t *testing.T) {
 				for _, c := range f.lk.calls()[base:] {
 					switch c.method {
 					case "RemoveParticipant":
+						if !personIdentity(c.identity) {
+							continue // their companion and viewer go with them
+						}
 						if c.identity != ann {
 							t.Errorf("removed %q, want ann only", c.identity)
 						}
@@ -1293,7 +1339,7 @@ func TestVoicePollerOneFailedEntitlementCheck(t *testing.T) {
 	real := f.srv.voice.entitle
 	f.srv.voice.entitle = func(ctx context.Context, identity string, channelID int64) (int64, string, error) {
 		if failing[identity] {
-			id, _ := parseVoiceIdentity(identity)
+			id, _, _ := parseVoiceParticipant(identity)
 			return id, "", errors.New("store unavailable")
 		}
 		return real(ctx, identity, channelID)
@@ -1440,7 +1486,7 @@ func TestVoicePollerKeepsPollingARoomItCouldNotClear(t *testing.T) {
 		{"entitlement unreadable",
 			func(f *presenceFixture) {
 				f.srv.voice.entitle = func(_ context.Context, identity string, _ int64) (int64, string, error) {
-					id, _ := parseVoiceIdentity(identity)
+					id, _, _ := parseVoiceParticipant(identity)
 					return id, "", errors.New("store unavailable")
 				}
 			},
@@ -1503,7 +1549,7 @@ func TestVoiceDisableWhenTheRoomListCannotBeRead(t *testing.T) {
 	}
 	f.srv.voice.memberRooms = func(context.Context, int64) ([]store.VoiceRoom, error) { return nil, errors.New("store unavailable") }
 	before := f.lk.count("RemoveParticipant")
-	if code := f.doOrdered(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]), f.rootTok); code != 204 {
+	if code := f.doOrdered(t, "POST", fmt.Sprintf("/v1/principals/%d/disable", f.ids["ann"]), f.rootTok); code != 200 {
 		t.Fatalf("disable = %d: a store failure in the voice hook must not fail the request", code)
 	}
 	if got := f.who(t, f.ops); got != "ann2" {
@@ -1658,7 +1704,7 @@ func TestVoiceRemovalHookReadIsBounded(t *testing.T) {
 				}
 				read := &stalledRead{stall: stall, giveUp: giveUp}
 				tt.seam(f, read)
-				before := f.lk.count("RemoveParticipant")
+				before := f.lk.personRemovals()
 
 				code := f.doOrdered(t, tt.method, tt.path(f), f.rootTok)
 
@@ -1676,8 +1722,9 @@ func TestVoiceRemovalHookReadIsBounded(t *testing.T) {
 				if !read.bounded || read.budget > limit || (!stall && read.budget <= 0) {
 					t.Errorf("the read's context: deadline set = %v, %v away; want one at most %v away", read.bounded, read.budget, limit)
 				}
-				if code != http.StatusNoContent {
-					t.Fatalf("status = %d, want 204: the voice hook must not fail the request", code)
+				// A removal answers 204, a disable 200 (issue #1024).
+				if code != http.StatusNoContent && code != http.StatusOK {
+					t.Fatalf("status = %d, want 2xx: the voice hook must not fail the request", code)
 				}
 				logs := f.logs.buf.String()
 				// The buffer is not printed on failure: the point of one of
@@ -1691,7 +1738,7 @@ func TestVoiceRemovalHookReadIsBounded(t *testing.T) {
 						failed = append(failed, line)
 					}
 				}
-				removals := f.lk.count("RemoveParticipant") - before
+				removals := f.lk.personRemovals() - before
 
 				if !stall {
 					// The store answered: nothing has changed for the hook.
@@ -1886,8 +1933,8 @@ func TestVoiceImmediateRemovalIsAuditedWhenLiveKitHadThem(t *testing.T) {
 			if code := f.doOrdered(t, "DELETE", fmt.Sprintf("/v1/channels/ops/members/%d", f.ids["ann"]), f.rootTok); code != 204 {
 				t.Fatalf("removal = %d", code)
 			}
-			if f.lk.count("RemoveParticipant") != 1 {
-				t.Fatalf("RemoveParticipant calls = %d, want 1", f.lk.count("RemoveParticipant"))
+			if f.lk.personRemovals() != 1 {
+				t.Fatalf("RemoveParticipant calls = %d, want 1", f.lk.personRemovals())
 			}
 			want := 0
 			if connected {
@@ -2054,7 +2101,7 @@ func voiceTriggers() []voiceTrigger {
 		}, 204, []string{"ops"}, store.VoiceRotateMemberRemoved},
 		{"principal disabled", "POST", func(t *testing.T, f *presenceFixture, who string) string {
 			return fmt.Sprintf("/v1/principals/%d/disable", f.ids[who])
-		}, 204, []string{"ops", "ops2"}, store.VoiceRotatePrincipalDisabled},
+		}, 200, []string{"ops", "ops2"}, store.VoiceRotatePrincipalDisabled},
 		{"all credentials revoked", "POST", func(t *testing.T, f *presenceFixture, who string) string {
 			return fmt.Sprintf("/v1/principals/%d/credentials/revoke-all", f.ids[who])
 		}, 200, []string{"ops", "ops2"}, store.VoiceRotateRevoked},

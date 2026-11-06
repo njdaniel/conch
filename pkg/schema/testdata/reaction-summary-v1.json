@@ -1,0 +1,21 @@
+{
+  "schema": "conch.reaction_summary.v1",
+  "channel_id": 3,
+  "message_id": 1042,
+  "reactions": [
+    {
+      "emoji": "👍",
+      "count": 3,
+      "me": true
+    },
+    {
+      "emoji": "❤️",
+      "count": 1
+    },
+    {
+      "emoji": "👍🏽",
+      "count": 1
+    }
+  ],
+  "as_of": "2026-10-28T14:03:11.204Z"
+}

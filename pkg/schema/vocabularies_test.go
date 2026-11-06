@@ -194,6 +194,7 @@ var validators = map[string]func(string) bool{
 	"PrincipalState":           validOf[PrincipalState](),
 	"Outcome":                  validOf[Outcome](),
 	"RunState":                 validOf[RunState](),
+	"ServerMode":               validOf[ServerMode](),
 	"SessionState":             validOf[SessionState](),
 	"SessionStatus":            validOf[SessionStatus](),
 	"VoiceControlBlock":        validOf[VoiceControlBlock](),
@@ -203,15 +204,37 @@ var validators = map[string]func(string) bool{
 	"VoiceControlErrorCode":    validOf[VoiceControlErrorCode](),
 	"VoiceControlEventKind":    validOf[VoiceControlEventKind](),
 	"VoiceControlPhase":        validOf[VoiceControlPhase](),
+	"VoiceControlPipeKind":     validOf[VoiceControlPipeKind](),
 	"VoiceControlPlayback":     validOf[VoiceControlPlayback](),
 	"VoiceControlPTT":          validOf[VoiceControlPTT](),
 	"VoiceControlPTTProblem":   validOf[VoiceControlPTTProblem](),
+	"VoiceCompanionPublish":    validOf[VoiceCompanionPublish](),
 	"VoiceControlReason":       validOf[VoiceControlReason](),
 	"VoiceControlTalkMode":     validOf[VoiceControlTalkMode](),
 	"VoiceDevicesConfig":       validOf[VoiceDevicesConfig](),
 	"VoiceDevicesPipeWire":     validOf[VoiceDevicesPipeWire](),
+	"VoiceShareAudioScope":     validOf[VoiceShareAudioScope](),
 	"VoiceShareEndReason":      validOf[VoiceShareEndReason](),
+	"VoiceCameraEndReason":     validOf[VoiceCameraEndReason](),
 	"VoiceTransmitState":       validOf[VoiceTransmitState](),
+
+	// Roles and permissions (ADR-014, issue #1012).
+	"Permission":         validOf[Permission](),
+	"PermissionRole":     validOf[PermissionRole](),
+	"PermissionPreset":   validOf[PermissionPreset](),
+	"PermissionsWarning": validOf[PermissionsWarning](),
+	"IssuedKind":         validOf[IssuedKind](),
+
+	// The community model (ADR-013, issue #978).
+	"ChannelVisibility": validOf[ChannelVisibility](),
+	"InviteKindV2":      validOf[InviteKindV2](),
+	"DirectoryScope":    validOf[DirectoryScope](),
+
+	// AI administrators (issue #1326).
+	"AdminAction":       validOf[AdminAction](),
+	"AdminGate":         validOf[AdminGate](),
+	"AdminTargetKind":   validOf[AdminTargetKind](),
+	"AdminActionStatus": validOf[AdminActionStatus](),
 }
 
 // namers is every …Names() func, by the type it names. TestVocabularies fails

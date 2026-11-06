@@ -20,16 +20,35 @@ func int64Ref(n int64) *int64 { return &n }
 // holds, a mode is off and a number is its default.
 func TestJoinSettingsFailClosed(t *testing.T) {
 	f := newInviteFixture(t)
+	// Since migration 40 (issue #979, Option B) the settings always answer
+	// open_signup and the member link expiry, and join_voice reads true.
+	show := func(s schema.JoinSettingsV1) string {
+		signup, expiry := "<nil>", "<nil>"
+		if s.OpenSignup != nil {
+			signup = fmt.Sprint(*s.OpenSignup)
+		}
+		if s.MemberLinkDefaultExpirySeconds != nil {
+			expiry = fmt.Sprint(*s.MemberLinkDefaultExpirySeconds)
+		}
+		s.OpenSignup, s.MemberLinkDefaultExpirySeconds = nil, nil
+		return fmt.Sprintf("%+v signup=%s expiry=%s", s, signup, expiry)
+	}
+	defaults := func() schema.JoinSettingsV1 {
+		d := schema.DefaultJoinSettings()
+		off, expiry := false, schema.DefaultMemberLinkExpirySeconds
+		d.JoinVoice, d.OpenSignup, d.MemberLinkDefaultExpirySeconds = true, &off, &expiry
+		return d
+	}
 	got, err := joinSettingsTx(f.ctx, f.s.db)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(got) != fmt.Sprint(schema.DefaultJoinSettings()) {
-		t.Errorf("no rows = %+v, want the defaults", got)
+	if show(got) != show(defaults()) {
+		t.Errorf("no rows = %s, want the defaults %s", show(got), show(defaults()))
 	}
 	for key, value := range map[string]string{
-		settingGuestsEnabled: "yes please", settingJoiningPaused: "nah", settingJoinVoice: "maybe",
-		settingOpenJoining: "sometimes", settingMaxGuests: "lots", settingGuestIdleSeconds: "",
+		settingGuestsEnabled: "yes please", settingJoiningPaused: "nah", settingOpenSignup: "maybe",
+		settingMemberLinkDefaultExpirySeconds: "forever", settingMaxGuests: "lots", settingGuestIdleSeconds: "",
 	} {
 		if _, err := f.s.db.Exec("INSERT INTO server_settings (key, value, updated_at) VALUES (?, ?, 0)", key, value); err != nil {
 			t.Fatal(err)
@@ -39,10 +58,10 @@ func TestJoinSettingsFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := schema.DefaultJoinSettings()
+	want := defaults()
 	want.JoiningPaused = true
-	if fmt.Sprint(got) != fmt.Sprint(want) {
-		t.Errorf("unreadable rows = %+v, want %+v", got, want)
+	if show(got) != show(want) {
+		t.Errorf("unreadable rows = %s, want %s", show(got), show(want))
 	}
 }
 
@@ -83,9 +102,8 @@ func ptrMode(m schema.OpenJoiningMode) *schema.OpenJoiningMode { return &m }
 // makes nothing; one that succeeds spends one.
 func TestRedeemInviteGuestFullSpendsNothing(t *testing.T) {
 	f := newInviteFixture(t)
-	if _, err := f.s.PutJoinSettings(f.ctx, "system", f.op.ID, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolRef(true), MaxGuests: int64Ref(1)}); err != nil {
-		t.Fatal(err)
-	}
+	// The policy of a database from before guests were removed (issue #1005).
+	legacyJoinSettings(t, f.s, schema.PutJoinSettingsRequestV1{GuestsEnabled: boolRef(true), MaxGuests: int64Ref(1)})
 	req := open("general")
 	req.JoinAs = schema.InviteJoinBoth
 	inv := f.mustCreate(f.op, req)
@@ -114,39 +132,33 @@ func TestRedeemInviteGuestFullSpendsNothing(t *testing.T) {
 	}
 }
 
-// The predicates the previews and the writes share.
+// What the bare address offers (issue #987): an account while open sign-up
+// is on, not paused and with a default channel; never a guest, whatever
+// guests_enabled and the mode say.
 func TestGuestEntryPredicates(t *testing.T) {
-	on := schema.DefaultJoinSettings()
-	on.GuestsEnabled, on.OpenJoining, on.MaxGuests, on.MaxGuestsPerAddress = true, schema.OpenJoiningBoth, 2, 1
+	with := func(mode schema.OpenJoiningMode, guests, paused bool, channels ...string) schema.JoinSettingsV1 {
+		s := schema.DefaultJoinSettings()
+		s.OpenJoining, s.GuestsEnabled, s.JoiningPaused, s.MaxGuests = mode, guests, paused, 2
+		s.OpenChannels = append([]string{}, channels...)
+		return s
+	}
 	tests := []struct {
-		name                     string
-		set                      schema.JoinSettingsV1
-		channels, live, fromAddr int
-		want                     schema.JoinOptionsV1
+		name string
+		set  schema.JoinSettingsV1
+		want schema.JoinOptionsV1
 	}{
-		// An account is offered wherever the mode offers one, the address
-		// has a channel and joining is not paused (issue #711); the guest
-		// caps and the guest switch do not touch it.
-		{"open", on, 1, 0, 0, schema.JoinOptionsV1{Guest: true, Account: true}},
-		{"no channel", on, 0, 0, 0, schema.JoinOptionsV1{}},
-		{"server cap", on, 1, 2, 0, schema.JoinOptionsV1{GuestsFull: true, Account: true}},
-		{"address cap", on, 1, 1, 1, schema.JoinOptionsV1{GuestsFull: true, Account: true}},
-		{"uncapped", func() schema.JoinSettingsV1 { s := on; s.MaxGuests = 0; return s }(), 1, 9000, 0, schema.JoinOptionsV1{Guest: true, Account: true}},
-		{"paused", func() schema.JoinSettingsV1 { s := on; s.JoiningPaused = true; return s }(), 1, 0, 0, schema.JoinOptionsV1{Paused: true}},
-		{"accounts only", func() schema.JoinSettingsV1 { s := on; s.OpenJoining = schema.OpenJoiningAccount; return s }(), 1, 0, 0, schema.JoinOptionsV1{Account: true}},
-		{"accounts only, no channel", func() schema.JoinSettingsV1 { s := on; s.OpenJoining = schema.OpenJoiningAccount; return s }(), 0, 0, 0, schema.JoinOptionsV1{}},
-		{"accounts only, paused", func() schema.JoinSettingsV1 {
-			s := on
-			s.OpenJoining, s.JoiningPaused = schema.OpenJoiningAccount, true
-			return s
-		}(), 1, 0, 0, schema.JoinOptionsV1{Paused: true}},
-		{"guests only", func() schema.JoinSettingsV1 { s := on; s.OpenJoining = schema.OpenJoiningGuest; return s }(), 1, 0, 0, schema.JoinOptionsV1{Guest: true}},
-		{"guests off", func() schema.JoinSettingsV1 { s := on; s.GuestsEnabled = false; return s }(), 1, 0, 0, schema.JoinOptionsV1{Account: true}},
-		{"off", func() schema.JoinSettingsV1 { s := on; s.OpenJoining = schema.OpenJoiningOff; return s }(), 1, 0, 0, schema.JoinOptionsV1{}},
+		{"open sign-up", with(schema.OpenJoiningAccount, false, false, "general"), schema.JoinOptionsV1{Account: true}},
+		{"open sign-up, guests seeded on", with(schema.OpenJoiningAccount, true, false, "general"), schema.JoinOptionsV1{Account: true}},
+		{"both, guests seeded on", with(schema.OpenJoiningBoth, true, false, "general"), schema.JoinOptionsV1{Account: true}},
+		{"guest-only, guests seeded on", with(schema.OpenJoiningGuest, true, false, "general"), schema.JoinOptionsV1{}},
+		{"open sign-up, no default channel", with(schema.OpenJoiningAccount, false, false), schema.JoinOptionsV1{}},
+		{"open sign-up, paused", with(schema.OpenJoiningAccount, false, true, "general"), schema.JoinOptionsV1{Paused: true}},
+		{"off", with(schema.OpenJoiningOff, false, false, "general"), schema.JoinOptionsV1{}},
+		{"off and paused", with(schema.OpenJoiningOff, false, true, "general"), schema.JoinOptionsV1{}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := AddressJoinOptions(tt.set, tt.channels, tt.live, tt.fromAddr); got != tt.want {
+			if got := AddressJoinOptions(tt.set); got != tt.want {
 				t.Errorf("AddressJoinOptions = %+v, want %+v", got, tt.want)
 			}
 		})

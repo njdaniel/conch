@@ -1,0 +1,562 @@
+{
+  "description": "Conformance cases for the reader of the attach line: direction attached is the owner reading the first line of an events endpoint (Go ParseVoiceControlPipeAttached, Rust parse_attached). Each case is one line, given by line (text), line_hex (bytes) or line_file (a file under this directory holding the line with no line feed). want.result is accept (with the kind read) or refuse (with the code; the id is always 0, since the line has none). The refusals come in the reader's order: too_long, malformed, unknown_schema (a v1 hello arriving first included), invalid (kind or nonce missing, null, of the wrong type, empty, or a nonce that is not 43 characters of canonical unpadded base64url), unknown_kind (a kind other than attached, once the nonce is well-formed). The golden nonce is this directory's fake secret (sensitive.json); a case holding it shows nothing real.",
+  "cases": [
+    {
+      "name": "attached",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "white space around the object, carriage return included",
+      "direction": "attached",
+      "line": " \t{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"} \r",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "the fields in another order",
+      "direction": "attached",
+      "line": "{\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"kind\":\"attached\",\"schema\":\"conch.voice_control_pipe.v1\"}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "attached with a field it does not declare, named pid: ignored, and never repeated",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pid\":4242}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field holding a number too large for a float: not converted, ignored",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pid\":1e999}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field named id holding such a number: this line has no id",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"id\":1e999}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field named seq holding such a number: this line has no seq",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"seq\":1e999}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field holding a negative number too large for a float",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pid\":-1e999}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field holding a number too small for a float",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pid\":1e-999}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field holding negative zero",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pid\":-0}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field holding an integer too large for 64 bits",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pid\":99999999999999999999999999}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "an undeclared field holding such numbers nested in an array and an object",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pid\":{\"deep\":[1e999,-0,1e-999,99999999999999999999999999]}}",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "schema as a number too large for a float",
+      "direction": "attached",
+      "line": "{\"schema\":1e999,\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema",
+        "id": 0
+      }
+    },
+    {
+      "name": "schema as negative zero",
+      "direction": "attached",
+      "line": "{\"schema\":-0,\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema",
+        "id": 0
+      }
+    },
+    {
+      "name": "kind as a number too large for a float",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":1e999,\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "nonce as a number too large for a float",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":1e999}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "nonce as a number too small for a float",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":1e-999}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "nonce as an integer too large for 64 bits",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":99999999999999999999999999}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "exactly the longest line",
+      "direction": "attached",
+      "line_file": "lines/attached-at-limit.txt",
+      "want": {
+        "result": "accept",
+        "kind": "attached"
+      }
+    },
+    {
+      "name": "one byte longer than the longest line",
+      "direction": "attached",
+      "line_file": "lines/attached-too-long.txt",
+      "want": {
+        "result": "refuse",
+        "code": "too_long",
+        "id": 0
+      }
+    },
+    {
+      "name": "an empty line",
+      "direction": "attached",
+      "line": "",
+      "want": {
+        "result": "refuse",
+        "code": "malformed",
+        "id": 0
+      }
+    },
+    {
+      "name": "not JSON: a bare word",
+      "direction": "attached",
+      "line": "attached",
+      "want": {
+        "result": "refuse",
+        "code": "malformed",
+        "id": 0
+      }
+    },
+    {
+      "name": "a JSON array",
+      "direction": "attached",
+      "line": "[{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}]",
+      "want": {
+        "result": "refuse",
+        "code": "malformed",
+        "id": 0
+      }
+    },
+    {
+      "name": "two objects on one line",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed",
+        "id": 0
+      }
+    },
+    {
+      "name": "something after the object",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"} x",
+      "want": {
+        "result": "refuse",
+        "code": "malformed",
+        "id": 0
+      }
+    },
+    {
+      "name": "a key given twice",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed",
+        "id": 0
+      }
+    },
+    {
+      "name": "not valid UTF-8",
+      "direction": "attached",
+      "line_hex": "7b22736368656d61223a22636f6e63682e766f6963655f636f6e74726f6c5f706970652e7631222c226b696e64223a226174746163686564222c226e6f6e6365223a22ff414b455f6e6f6e63655f646f5f6e6f745f7072696e745f30313233343536373839616263646566676841227d",
+      "want": {
+        "result": "refuse",
+        "code": "malformed",
+        "id": 0
+      }
+    },
+    {
+      "name": "a lone surrogate escape in the nonce",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"\\ud800AKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed",
+        "id": 0
+      }
+    },
+    {
+      "name": "a lone surrogate escape in a field that is ignored",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\",\"pad\":\"\\udc00\"}",
+      "want": {
+        "result": "refuse",
+        "code": "malformed",
+        "id": 0
+      }
+    },
+    {
+      "name": "no schema",
+      "direction": "attached",
+      "line": "{\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema",
+        "id": 0
+      }
+    },
+    {
+      "name": "schema null",
+      "direction": "attached",
+      "line": "{\"schema\":null,\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema",
+        "id": 0
+      }
+    },
+    {
+      "name": "a hello first: the control protocol is not the attach line",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control.v1\",\"kind\":\"hello\",\"seq\":1,\"versions\":[\"conch.voice_control.v1\"],\"helper_version\":\"0.1.0\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema",
+        "id": 0
+      }
+    },
+    {
+      "name": "a later version",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v2\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema",
+        "id": 0
+      }
+    },
+    {
+      "name": "the schema in other case",
+      "direction": "attached",
+      "line": "{\"schema\":\"Conch.Voice_Control_Pipe.V1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_schema",
+        "id": 0
+      }
+    },
+    {
+      "name": "no kind",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "kind null",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":null,\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "an empty kind",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "kind as a number",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":1,\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "no nonce",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "nonce null",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":null}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "an empty nonce",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "nonce as a number",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":4242}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "nonce as an array",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":[\"FAKE_nonce_do_not_print_0123456789abcdefghA\"]}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "a nonce of 42 characters",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefgh\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "a nonce of 44 characters",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghAA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "a nonce of 43 characters whose last one is not canonical: the two trailing bits are not zero",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghB\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "a nonce in the standard alphabet: +",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE+nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "a nonce in the standard alphabet: /",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE/nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "a padded nonce",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefgh=\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "a nonce of 64 hex characters",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "a nonce with a space",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "a nonce with an escaped line feed, which a base64 decoder would skip",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefgh\\n\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "a nonce with a character outside ASCII",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdef\\u00e9A\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "another kind and a bad nonce: the nonce is checked first",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"hello\",\"nonce\":\"\"}",
+      "want": {
+        "result": "refuse",
+        "code": "invalid",
+        "id": 0
+      }
+    },
+    {
+      "name": "a hello is not a kind of this schema",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"hello\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 0
+      }
+    },
+    {
+      "name": "a kind in other case",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"Attached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 0
+      }
+    },
+    {
+      "name": "a kind this version does not have",
+      "direction": "attached",
+      "line": "{\"schema\":\"conch.voice_control_pipe.v1\",\"kind\":\"detached\",\"nonce\":\"FAKE_nonce_do_not_print_0123456789abcdefghA\"}",
+      "want": {
+        "result": "refuse",
+        "code": "unknown_kind",
+        "id": 0
+      }
+    }
+  ]
+}

@@ -1,5 +1,12 @@
 # The private communications alpha
 
+> **Superseded in part, 2026-10-30.** [ADR-013](../adr/ADR-013-one-community-model.md)
+> replaces §3's per-person grant to invite: every member may now make member links
+> by default. Role permissions and the per-person brake can withhold that right.
+> Exit step 3 now reads: “They chat in their group's channel, and see nothing of
+> the other groups' private channels.” Members and public channels are community-wide
+> by default. The original record below is kept.
+
 Issue [#420](https://github.com/njdaniel/conch/issues/420). The decision is
 [ADR-008](../adr/ADR-008-private-communications-alpha.md). This note is the plan: what
 the alpha is, what is decided, what is still open with a recommendation, the work in
@@ -27,7 +34,7 @@ go-ahead to file the implementation issues in §5.
 7. Nick revokes one tester and closes the open link. The tester is out at once, and the link no longer works.
 8. A tester reports a bug from inside the product with the build version and diagnostics. It becomes an issue in the backlog.
 
-**What A14 (#447) measured, 2026-10-17.** Steps 3 and 7 have a check of their own: `go run ./e2e/isolation`, run in CI as the `isolation-check` job. It runs two groups on one `conchd`, with the pinned LiveKit in Docker. A member of one group tries every route of the server against the other group's channels, people, messages, files, sessions, runs, approvals, invites and reports, and its sockets and LiveKit's media too. Every answer is the documented refusal (or, on a route that answers only about the caller, the caller's own data) and says nothing of the other group (the README lists the checks). Revocation is timed from the moment the operator's request is sent:
+**What A14 (#447) measured, 2026-10-17.** Steps 3 and 7 have a check of their own: `go run ./e2e/isolation`, run in CI as the `isolation-check` job. It runs two groups on one `conchd`, with the pinned LiveKit in Docker. A member of one group tries every route of the server against the other group's channels, people, messages, files, sessions, runs, approvals, invites and reports, and its sockets and LiveKit's media too. Every answer is the documented refusal (or, on a route that answers only about the caller, the caller's own data) and says nothing of the other group (the manual lists the checks). Revocation is timed from the moment the operator's request is sent:
 
 | Step | Measured (loopback, five runs) | Bound the check holds |
 | --- | --- | --- |

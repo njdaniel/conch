@@ -2,7 +2,7 @@
 // (never a second tab of one), and every page of every context is checked,
 // when the test ends, for a credential in the address bar or in
 // performance.getEntries(): the one thing that must hold throughout.
-import { expect, test as base, type BrowserContext, type BrowserContextOptions, type Page } from '@playwright/test';
+import { expect, test as base, type BrowserContext, type BrowserContextOptions, type Locator, type Page } from '@playwright/test';
 import { allTokens, loadWorld, type World } from './world';
 
 // leaks lists where in a page a credential shows, none when it does not.
@@ -74,10 +74,25 @@ export { expect };
 
 // ---------------------------------------------------------------- the page
 
+// openOperatorSection opens the sign-in page's "Operator or script?"
+// disclosure (F24), where operator setup and the credential field are, unless
+// it is already open. A page that is signed in has none, and waits in vain.
+export async function openOperatorSection(page: Page): Promise<void> {
+  const disclosure = page.locator('details.operator-signin');
+  await disclosure.waitFor({ state: 'attached' });
+  if (!(await disclosure.evaluate((d) => (d as HTMLDetailsElement).open))) await disclosure.locator('summary').click();
+}
+
+// credentialField opens that disclosure and returns the credential field.
+export async function credentialField(page: Page): Promise<Locator> {
+  await openOperatorSection(page);
+  return page.getByLabel('Credential');
+}
+
 // signIn pastes a credential into the sign-in field and waits for the lobby.
 export async function signIn(page: Page, world: Pick<World, 'appUrl'>, token: string, name: string): Promise<void> {
   await page.goto(world.appUrl);
-  await page.getByLabel('Credential').fill(token);
+  await (await credentialField(page)).fill(token);
   await page.getByRole('button', { name: 'Use credential' }).click();
   await expect(statusLine(page)).toContainText(name);
   await expect(statusLine(page)).toContainText('Connected');
@@ -107,6 +122,72 @@ export async function signInWithPassword(page: Page, name: string, password = ac
 
 export const statusLine = (page: Page) => page.getByRole('status', { name: 'Status' });
 export const channelButton = (page: Page, name: string) => page.getByRole('navigation', { name: 'Channels' }).getByRole('button', { name, exact: true });
+// The phone layout's bottom navigation (issue #929), present only below 700 px.
+export const mainNav = (page: Page) => page.getByRole('navigation', { name: 'Main navigation' });
+
+// showView taps the phone navigation's Chat, Channels or Voice. Where there is
+// none (700 px and wider) every view is already on screen and it does nothing.
+// chooseMicrophone puts a joined voice panel in push to talk or the open
+// microphone with the one-tap switch (issue #1244), and waits for it. A browser
+// that never chose joins in the open microphone, so a test of Hold to talk
+// chooses push to talk explicitly. A phone taps; a desktop clicks.
+export async function chooseMicrophone(voice: Locator, mode: 'push to talk' | 'open', how: 'click' | 'tap' = 'click'): Promise<void> {
+  const toggle = voice.getByRole('button', { name: 'Open mic', exact: true });
+  const want = mode === 'open' ? 'true' : 'false';
+  // Right after a join the strip can still be settling, and a press then may
+  // not take: press again until the toggle says the mode asked for. A press
+  // that did take is never repeated, because the state is read first.
+  await expect(async () => {
+    await expect(toggle).toBeEnabled({ timeout: 2000 });
+    if ((await toggle.getAttribute('aria-pressed')) !== want) {
+      if (how === 'tap') await toggle.tap();
+      else await toggle.click();
+    }
+    await expect(toggle).toHaveAttribute('aria-pressed', want, { timeout: 2000 });
+  }).toPass({ timeout: 20_000 });
+}
+
+// rememberPushToTalk is a browser that chose push to talk before it joined:
+// the choice a person's browser keeps (issue #1244), set before each page
+// load. A browser that never chose joins in the open microphone, which opens
+// the gate on any sound and so reports a transmission nobody held a key for;
+// a test that counts what a held key sends starts from this, not from a blip.
+export async function rememberPushToTalk(where: BrowserContext | Page): Promise<void> {
+  await where.addInitScript(() => {
+    try {
+      window.localStorage.setItem('conch.web.voice.mode.v1', 'ptt');
+    } catch {
+      // No storage, no choice: the open microphone.
+    }
+  });
+}
+
+export async function showView(page: Page, view: 'Chat' | 'Channels' | 'Voice'): Promise<void> {
+  const nav = mainNav(page);
+  // Whether there is a navigation is the width's to say, not the page's at this
+  // instant: just after a reload the lobby is not drawn yet, and a page with no
+  // navigation yet is not a page with none. A phone waits for it (issue #1214).
+  if ((page.viewportSize()?.width ?? Infinity) >= 700) return;
+  await expect(nav).toBeVisible();
+  // The members panel is drawn over the page, the navigation's right end
+  // included; a person closes it before moving on, as Escape does.
+  const members = page.getByRole('region', { name: 'Members list' });
+  if (await members.isVisible()) {
+    await page.keyboard.press('Escape');
+    await expect(members).toBeHidden();
+  }
+  await nav.getByRole('button', { name: view, exact: true }).click();
+  await expect(nav.getByRole('button', { name: view, exact: true })).toHaveAttribute('aria-current', 'page');
+}
+
+// openChannel opens a channel from the channel list, which on a phone is the
+// Channels view; the phone then shows its chat.
+export async function openChannel(page: Page, name: string): Promise<void> {
+  await showView(page, 'Channels');
+  await channelButton(page, name).click();
+  await showView(page, 'Chat');
+}
+
 export const messages = (page: Page) => page.getByRole('log', { name: 'Messages' });
 export const conversation = (page: Page) => page.getByRole('region', { name: 'Conversation' });
 
@@ -115,6 +196,16 @@ export const conversation = (page: Page) => page.getByRole('region', { name: 'Co
 export const phones = [
   ['390×844', { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
   ['360×740', { viewport: { width: 360, height: 740 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
+] as const satisfies readonly (readonly [string, BrowserContextOptions])[];
+
+// The four phone sizes of the phone layout (issue #929): the narrowest still
+// in use, two common ones and a large one. A portrait phone is under 700 px
+// wide; turned on its side it is wider, and has the tablet layout.
+export const phoneSizes = [
+  ['320×640', { viewport: { width: 320, height: 640 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true }],
+  ['360×740', { viewport: { width: 360, height: 740 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
+  ['390×844', { viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
+  ['430×932', { viewport: { width: 430, height: 932 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true }],
 ] as const satisfies readonly (readonly [string, BrowserContextOptions])[];
 
 // expectFits checks that the page is no wider than the window: nothing scrolls
@@ -132,4 +223,47 @@ export async function expectFits(page: Page, view: string): Promise<void> {
 export async function say(page: Page, channel: string, body: string): Promise<void> {
   await page.getByLabel(`Message #${channel}`).fill(body);
   await page.getByRole('button', { name: 'Send' }).click();
+}
+
+// consoleErrors collects what a page writes to its console as an error (issue
+// #1084). The browser logs a failed request there ("Failed to load resource")
+// whatever the page does with the answer, so a page that handles a state
+// without asking for what is known to fail leaves the list empty. Call it
+// before the page loads; each line is the message and, for a failed request,
+// the address it was for.
+export function consoleErrors(page: Page): string[] {
+  const found: string[] = [];
+  page.on('console', (m) => {
+    if (m.type() === 'error') found.push(`${m.text()} ${m.location().url}`.trim());
+  });
+  page.on('pageerror', (err) => {
+    found.push(`pageerror: ${err.message}`);
+  });
+  return found;
+}
+
+// expectStateReadable checks the top bar's connection state on a phone (issue
+// #1030): the word is drawn whole (not cut by an ellipsis or the clip of its
+// box), no button's box meets its box, and what is on top at its middle and
+// both ends is the word itself, not a button over it.
+export async function expectStateReadable(page: Page, word: string): Promise<void> {
+  const state = statusLine(page).locator('.conn');
+  await expect(state).toHaveText(word);
+  await expect(state).toBeVisible();
+  const found = await state.evaluate((el) => {
+    const box = el.getBoundingClientRect();
+    const buttons = [...document.querySelectorAll('header.topbar button')].map((b) => {
+      const r = b.getBoundingClientRect();
+      return { name: b.getAttribute('aria-label') ?? b.textContent, hit: r.left < box.right && r.right > box.left && r.top < box.bottom && r.bottom > box.top };
+    });
+    const topAt = (x: number) => {
+      const top = document.elementFromPoint(x, box.top + box.height / 2);
+      return top !== null && el.contains(top);
+    };
+    return { scroll: el.scrollWidth, client: el.clientWidth, width: box.width, buttons, covered: [box.left + 2, box.left + box.width / 2, box.right - 2].map((x) => !topAt(x)) };
+  });
+  expect(found.width, `${word} has a box`).toBeGreaterThan(0);
+  expect(found.scroll, `${word} is cut`).toBeLessThanOrEqual(found.client);
+  expect(found.buttons.filter((b) => b.hit), `${word} meets a button`).toEqual([]);
+  expect(found.covered, `${word} is covered`).toEqual([false, false, false]);
 }

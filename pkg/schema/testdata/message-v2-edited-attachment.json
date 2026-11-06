@@ -1,0 +1,18 @@
+{
+  "schema": "conch.message.v2",
+  "id": 43,
+  "channel_id": 7,
+  "author_id": 3,
+  "created_at": "2026-07-13T12:35:10.000Z",
+  "body": "the whiteboard after the meeting",
+  "payload": {
+    "schema": "conch.file_attachment.v1",
+    "data": {
+      "file_ids": [
+        1,
+        2
+      ]
+    }
+  },
+  "edited_at": "2026-07-13T12:36:00.250Z"
+}

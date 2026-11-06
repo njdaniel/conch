@@ -1,7 +1,7 @@
 // The page of someone not signed in: the bare address's front door (issue
 // #713, ADR-009, design §3.1, §3.2). It offers what the server's front door
-// says the address allows now (Join as guest, Create an account, either or
-// neither, with honest words for paused and full), then Sign in with a name
+// says the address allows now (Create an account, or nothing, with honest words
+// for paused; guests are removed for now, issue #1005), then Sign in with a name
 // and a password for a returning member, then the advanced way in: a
 // credential an operator issued, for operators and scripts. The server
 // decides again whatever is sent; hiding a button is not enforcement.
@@ -14,13 +14,13 @@
 import { useEffect, useRef, useState, type SyntheticEvent } from 'react';
 import * as api from './api';
 import { CreateAccount, type AccountProblem } from './CreateAccount';
-import { durationWords, GuestJoin, guestJoinRefusal } from './Guest';
 import { accountRefusal, heldLine, refusalLine } from './Invite';
 import type { JoinInfoV1 } from './schema/guest';
 import type { WhoAmIResponseV1 } from './schema/principal';
 import { ServerVersion } from './ServerVersion';
 import { noticeText, type AuthNotice } from './state/auth';
 import { insecureLine, needsHttps } from './transport';
+import { timeWithSeconds } from './time';
 
 // Said when a join went through but this browser would not keep its sign-in.
 const keepLine = 'You joined, but this browser will not let the page keep your sign-in. Allow this site to keep data, then try again.';
@@ -72,7 +72,7 @@ export function SignIn({
   // Forgetting a stored sign-in that could not be checked (issue #469),
   // offered only when signing in was refused because of one.
   readonly onForget: () => void;
-  // Joined from the front door, as a guest or with a new account. principal
+  // Joined from the front door, with a new account. principal
   // is null when the credential was kept but whoami did not answer.
   readonly onJoined: (principal: WhoAmIResponseV1 | null) => void;
 }) {
@@ -80,11 +80,12 @@ export function SignIn({
   const nameField = useRef<HTMLInputElement>(null);
   const passwordField = useRef<HTMLInputElement>(null);
   const [info, setInfo] = useState<Info>({ state: 'loading' });
-  const [way, setWay] = useState<'guest' | 'account' | null>(null);
+  const [way, setWay] = useState<'account' | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<AccountProblem | null>(null);
-  const [guestProblem, setGuestProblem] = useState<string | null>(null);
   const [credentialLine, setCredentialLine] = useState<string | null>(null);
+  // The disclosure for operators and scripts (F24), folded until opened.
+  const [operatorOpen, setOperatorOpen] = useState(false);
   const insecure = needsHttps(origin);
 
   useEffect(() => {
@@ -147,32 +148,6 @@ export function SignIn({
     onPassword(name, typed);
   }
 
-  function joinAsGuest(label: string) {
-    if (busy) return;
-    setBusy(true);
-    setGuestProblem(null);
-    void api.joinAsGuest(label).then((result) => {
-      setBusy(false);
-      if (result.ok) {
-        onJoined(result.value);
-        return;
-      }
-      switch (result.failure) {
-        case 'unchecked':
-          onJoined(null);
-          return;
-        case 'held':
-          setGuestProblem(heldLine);
-          return;
-        case 'unkept':
-          setGuestProblem(keepLine);
-          return;
-        default:
-          setGuestProblem(guestJoinRefusal(result));
-      }
-    });
-  }
-
   function createAccount(name: string, password: string) {
     if (busy) return;
     setBusy(true);
@@ -203,6 +178,14 @@ export function SignIn({
   const join = ready?.join;
   const passwordLogin = ready === null || ready.password_login;
   const shown = line ?? (notice === null ? '' : noticeText(notice));
+  // The disclosure stays open where the credential field is the one way in,
+  // or an answer about the credential has to be read and acted on.
+  const operatorForced = !passwordLogin || notice === 'rejected' || notice === 'held' || credentialLine !== null;
+  // Once it has opened by itself it stays open: a retried credential has no
+  // notice while it is checked, and the fold must not shut over the button.
+  useEffect(() => {
+    if (operatorForced) setOperatorOpen(true);
+  }, [operatorForced]);
 
   if (code !== undefined) {
     return <CodeSignIn origin={origin} step={code} insecure={insecure} onCode={onCode} onCodeOver={onCodeOver} />;
@@ -220,56 +203,28 @@ export function SignIn({
       </p>
       {insecure ? (
         <p className="notice insecure">{insecureLine}</p>
-      ) : join === undefined ? null : (
+      ) : join === undefined ? null : !join.paused && !join.account ? (
+        // Invite-only (issue #990): Sign in alone, and the one line. No guest
+        // visit is ever offered, whatever the server says of guests.
+        <p className="hint front-door">This server is invite-only.</p>
+      ) : (
         <section aria-labelledby="join-heading" className="front-door">
           <h2 id="join-heading">Join</h2>
           {join.paused ? (
             <p className="notice">Joining is paused on this server for now. If you have an account, sign in below.</p>
-          ) : !join.guest && !join.account ? (
-            <p className="hint">
-              {join.guests_full
-                ? 'No more guests can join right now. Try again later.'
-                : 'This server is invite-only. To join, ask someone on it for an invite link.'}
-            </p>
           ) : (
             <>
-              {join.guests_full ? <p className="hint">Guest visits are full right now; you can still create an account.</p> : null}
               {way === null ? (
                 <div className="actions">
-                  {join.guest ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setWay('guest');
-                      }}
-                    >
-                      Join as guest
-                    </button>
-                  ) : null}
-                  {join.account ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setWay('account');
-                      }}
-                    >
-                      Create an account
-                    </button>
-                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWay('account');
+                    }}
+                  >
+                    Create an account
+                  </button>
                 </div>
-              ) : null}
-              {way === 'guest' && ready !== null ? (
-                <GuestJoin
-                  busy={busy}
-                  problem={guestProblem}
-                  bounds={`after ${durationWords(ready.guest_idle_seconds)} without activity, and after ${durationWords(ready.guest_absolute_seconds)} at most`}
-                  onJoin={joinAsGuest}
-                  onCancel={() => {
-                    if (busy) return;
-                    setGuestProblem(null);
-                    setWay(null);
-                  }}
-                />
               ) : null}
               {way === 'account' ? (
                 <CreateAccount
@@ -314,47 +269,58 @@ export function SignIn({
           </form>
         </section>
       )}
-      <section aria-labelledby="credential-heading" className="credential-signin">
-        <h2 id="credential-heading">Operators and scripts</h2>
-        <p className="hint">
-          An operator signs in above, with a name, a password and a code from an authenticator app. A credential pasted here
-          is a script’s: no password or code is checked, so it is never an operator’s sign-in.
-        </p>
-        {onSetup === undefined || insecure ? null : (
-          <div className="actions">
-            <button type="button" onClick={onSetup}>
-              Set up an operator account
-            </button>
-          </div>
-        )}
-        <form onSubmit={submit}>
-          <label htmlFor="credential">Credential</label>
-          <p id="credential-help" className="hint">
-            Paste the credential an operator issued to you. People sign in with a name and a password above.
+      <details
+        className="operator-signin"
+        open={operatorForced || operatorOpen}
+        onToggle={(event) => {
+          const details = event.currentTarget;
+          if (operatorForced) details.open = true;
+          else setOperatorOpen(details.open);
+        }}
+      >
+        <summary>Operator or script?</summary>
+        <section aria-labelledby="credential-heading" className="credential-signin">
+          <h2 id="credential-heading">Operators and scripts</h2>
+          <p className="hint">
+            An operator signs in above, with a name, a password and a code from an authenticator app. A credential pasted here
+            is a script’s: no password or code is checked, so it is never an operator’s sign-in.
           </p>
-          <input
-            id="credential"
-            ref={field}
-            type="password"
-            autoComplete="off"
-            autoCapitalize="off"
-            autoCorrect="off"
-            spellCheck={false}
-            aria-describedby="credential-help"
-          />
-          <button type="submit" aria-busy={checking}>
-            {checking ? 'Checking…' : 'Use credential'}
-          </button>
-          {notice === 'held' && (
-            <button type="button" onClick={onForget}>
-              Forget the stored sign-in
-            </button>
+          {onSetup === undefined || insecure ? null : (
+            <div className="actions">
+              <button type="button" onClick={onSetup}>
+                Set up an operator account
+              </button>
+            </div>
           )}
-          <p role="status" className="notice">
-            {credentialLine ?? ''}
-          </p>
-        </form>
-      </section>
+          <form onSubmit={submit}>
+            <label htmlFor="credential">Credential</label>
+            <p id="credential-help" className="hint">
+              Paste the credential an operator issued to you. People sign in with a name and a password above.
+            </p>
+            <input
+              id="credential"
+              ref={field}
+              type="password"
+              autoComplete="off"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+              aria-describedby="credential-help"
+            />
+            <button type="submit" aria-busy={checking}>
+              {checking ? 'Checking…' : 'Use credential'}
+            </button>
+            {notice === 'held' && (
+              <button type="button" onClick={onForget}>
+                Forget the stored sign-in
+              </button>
+            )}
+            <p role="status" className="notice">
+              {credentialLine ?? ''}
+            </p>
+          </form>
+        </section>
+      </details>
       <ServerVersion className="hint" />
     </main>
   );
@@ -447,7 +413,7 @@ function CodeSignIn({
               aria-describedby="signin-code-help"
             />
             <p id="signin-code-help" className="hint">
-              This step ends at <time dateTime={step.until}>{until.toLocaleTimeString()}</time>; after that, sign in with
+              This step ends at <time dateTime={step.until}>{timeWithSeconds(until)}</time>; after that, sign in with
               your password again. Lost your authenticator? Recovery happens on the server’s host: conchd operator recover.
             </p>
             <button type="submit" aria-busy={step.checking}>

@@ -39,14 +39,41 @@ func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	caller, authed := callerFrom(ctx)
 	channel, err := s.store.ChannelByName(ctx, req.Channel)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusBadRequest, "channel_not_found", "channel not found")
-		return
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		slog.ErrorContext(ctx, "hooks: find channel failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	// Without manage_channels a hook goes only into a channel the caller is
+	// in (ADR-014 design §7.3), and a name that is no channel gets the
+	// answer a channel it is not in gets, so the route is not an oracle on
+	// private channels' names (the security review of #1015).
+	if authed {
+		all, ok := s.canOrFail(w, r, caller, schema.PermManageChannels)
+		if !ok {
+			return
+		}
+		if !all {
+			in := false
+			if err == nil {
+				if in, err = s.store.IsChannelMember(ctx, channel.ID, caller.ID); err != nil {
+					slog.ErrorContext(ctx, "hooks: check channel membership failed", "error", err)
+					writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+					return
+				}
+			}
+			if !in {
+				s.denyForbiddenFor(w, r, caller, schema.ErrorCodePermissionDenied,
+					"a hook into a channel you are not in needs the manage_channels permission",
+					refusedPermission(caller, schema.PermManageChannels))
+				return
+			}
+		}
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusBadRequest, "channel_not_found", "channel not found")
 		return
 	}
 	principal, err := s.store.PrincipalByID(ctx, req.Principal)
@@ -56,6 +83,11 @@ func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request) {
 	} else if err != nil {
 		slog.ErrorContext(ctx, "hooks: find principal failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+		return
+	}
+	forbidOwner := authed && !isOwner(caller)
+	if forbidOwner && principal.IsOwner() {
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
 		return
 	}
 	// A hook is a posting credential for its principal, so a disabled
@@ -71,7 +103,11 @@ func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
-	hook, err := s.store.CreateHookWithLabel(ctx, auditActor(ctx), token, req.Label, channel.ID, req.Principal)
+	hook, err := s.store.CreateHookWithLabel(ctx, auditActor(ctx), token, req.Label, channel.ID, req.Principal, forbidOwner)
+	if errors.Is(err, store.ErrOwnerProtected) {
+		s.denyForbidden(w, r, caller, "forbidden", "only an owner may act on an owner")
+		return
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "hooks: create failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -83,13 +119,44 @@ func (s *Server) handleCreateHook(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListHooks(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	hooks, err := s.store.ListHooks(ctx)
+	caller, authed := callerFrom(ctx)
+	hooks, err := s.store.ListHooks(ctx, authed && !isOwner(caller))
 	if err != nil {
 		slog.ErrorContext(ctx, "hooks: list failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 		return
 	}
-	writeJSON(w, http.StatusOK, schema.ListHooksResponseV1{Hooks: hooks})
+	resp := schema.ListHooksResponseV1{Hooks: hooks}
+	if authed {
+		// Without manage_channels, a hook posting in a channel the caller is
+		// not in is left out and counted (ADR-014 design §7.3, SF-1).
+		sight, err := s.channelSightFor(ctx, caller)
+		if err != nil {
+			slog.ErrorContext(ctx, "hooks: read channel sight failed", "principal", caller.ID, "error", err)
+			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
+			return
+		}
+		resp = hooksAsSeen(resp, sight)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// hooksAsSeen is resp with only the hooks in channels sight shows; the rest
+// are counted in OtherHooks.
+func hooksAsSeen(resp schema.ListHooksResponseV1, sight channelSight) schema.ListHooksResponseV1 {
+	if sight.all {
+		return resp
+	}
+	shown := make([]schema.HookV1, 0, len(resp.Hooks))
+	for _, h := range resp.Hooks {
+		if sight.seesName(h.Channel) {
+			shown = append(shown, h)
+			continue
+		}
+		resp.OtherHooks++
+	}
+	resp.Hooks = shown
+	return resp
 }
 
 // handleRevokeHook revokes a hook by its numeric id (never its token), the way
@@ -100,7 +167,8 @@ func (s *Server) handleRevokeHook(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	err := s.store.RevokeHook(ctx, auditActor(ctx), id)
+	caller, authed := callerFrom(ctx)
+	err := s.store.RevokeHook(ctx, auditActor(ctx), id, authed && !isOwner(caller))
 	switch {
 	case errors.Is(err, store.ErrHookNotFound):
 		writeError(w, http.StatusNotFound, "hook_not_found", "hook not found")

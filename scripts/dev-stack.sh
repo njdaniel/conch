@@ -7,7 +7,7 @@
 # LiveKit is limited to 2 CPUs and 4 GB by default, the alpha droplet's size
 # (docs/design/private-alpha.md, O7), so what is seen here compares with it.
 # Everything listens on 127.0.0.1 except LiveKit's media ports, which listen
-# on every interface (README, "Run LiveKit beside conchd"). State lives
+# on every interface (docs/manual.md, "Run LiveKit beside conchd"). State lives
 # outside the checkout, in ${XDG_CACHE_HOME:-~/.cache}/conch-dev. The script
 # stops only what it started: conchd by the PID it recorded, and the
 # container by its own name.
@@ -175,6 +175,9 @@ up() {
     # bootstrap-operator makes the first principal of a new database, id 1.
     conch admin channel create "$channel" >/dev/null 2>&1 || true
     conch admin member add "$channel" 1 >/dev/null 2>&1 || true
+    # An invite is a member link: it lands the joiner in the default channels.
+    conch admin channel settings "$channel" --public >/dev/null 2>&1 || true
+    conch admin channel settings "$channel" --default on >/dev/null 2>&1 || true
     curl -fsS -o /dev/null -H "Authorization: Bearer $(cat "$state/operator.token")" \
         "$server/v1/channels/$channel/members" ||
         fail "channel \"$channel\" could not be made or read; see $state/conchd.log (CONCH_DEV_CHANNEL?)"
@@ -202,7 +205,7 @@ token() {
 
 invite() {
     require_up
-    conch admin invite create --personal --channel "$channel" --expires 2h --voice
+    conch admin invite create --expires 2h
 }
 
 # Every CPU except LiveKit's, for the load generator.

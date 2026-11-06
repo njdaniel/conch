@@ -6,14 +6,17 @@ import (
 )
 
 // Voice occupancy (issue #596; design note docs/design/voice-occupancy.md):
-// how many people are in each channel's voice, for every channel the reader
-// may see voice in, so that someone told "meet in voice" can see where the
-// others are. It is a new type; nothing published changes.
+// how many people are in each channel's voice, and who (issue #1103), for
+// every channel the reader may see voice in, so that someone told "meet in
+// voice" can see where the others are. It is a type of its own; nothing
+// published changes.
 //
-// It is presence reduced to one number per channel. It names nobody: who is
-// there is in that channel's own presence (VoicePresenceV1), one request
-// away for a reader who may read it. Like presence it carries no token and no
-// room name, and voice_occupancy_test.go asserts that.
+// It is presence reduced to a count and the principals behind it, per
+// channel. It names nobody in text: a principal is its id, as in
+// VoicePresenceV1, and the reader resolves the name from the channel's
+// members, which it may read. A row reveals exactly what that channel's
+// presence already shows the same reader. Like presence it carries no token
+// and no room name, and voice_occupancy_test.go asserts that.
 
 // VoiceOccupancySchemaV1 is the versioned name identifying the v1 voice
 // occupancy document on the wire. It is carried in VoiceOccupancyV1.Schema so
@@ -21,8 +24,8 @@ import (
 // a presence document, without out-of-band context.
 const VoiceOccupancySchemaV1 = "conch.voice_occupancy.v1"
 
-// VoiceChannelOccupancy is one channel the reader may see voice in, and how
-// many people are in its channel-wide room.
+// VoiceChannelOccupancy is one channel the reader may see voice in, how many
+// people are in its channel-wide room, and who they are.
 type VoiceChannelOccupancy struct {
 	// ChannelID references the channel.
 	ChannelID int64 `json:"channel_id"`
@@ -33,6 +36,14 @@ type VoiceChannelOccupancy struct {
 	// anyone, so the number means the same to everyone who sees it. Zero is
 	// written out: it says "nobody", where an absent channel says nothing.
 	InVoice int `json:"in_voice"`
+	// PrincipalIDs is who is in the channel-wide room (issue #1103,
+	// additive): the distinct principals InVoice counts, ascending, each
+	// once, and never anyone a room with an audience holds. conchd always
+	// writes it, as [] when nobody is there. It is absent only from a
+	// document written before the field existed; a reader then has the
+	// count alone. Ids, not names: the reader names them from the channel's
+	// members, as it names a presence roster.
+	PrincipalIDs []int64 `json:"principal_ids,omitzero"`
 }
 
 // VoiceOccupancyV1 is the whole voice occupancy of the server as one reader
@@ -62,7 +73,10 @@ type VoiceOccupancyV1 struct {
 // Validate reports whether the document is structurally well-formed: the v1
 // schema name; available only when configured; channels an array (never
 // null), empty unless available; every channel_id positive, in ascending
-// order and listed once; and no count negative.
+// order and listed once; no count negative; and, where principal_ids is
+// stated, exactly in_voice positive ids, ascending and none twice. A row
+// without principal_ids is one written before the field existed: its count
+// stands alone and is not held against it.
 func (o VoiceOccupancyV1) Validate() error {
 	if o.Schema != VoiceOccupancySchemaV1 {
 		return fmt.Errorf("schema: voice occupancy schema must be %q, got %q", VoiceOccupancySchemaV1, o.Schema)
@@ -90,7 +104,34 @@ func (o VoiceOccupancyV1) Validate() error {
 		if c.InVoice < 0 {
 			return fmt.Errorf("schema: voice occupancy in_voice of channel %d must not be negative, got %d", c.ChannelID, c.InVoice)
 		}
+		if c.PrincipalIDs != nil {
+			if err := validateOccupancyPrincipals(c); err != nil {
+				return err
+			}
+		}
 		prev = c.ChannelID
+	}
+	return nil
+}
+
+// validateOccupancyPrincipals checks a row's stated principal_ids against
+// its count: as many as in_voice, each positive, ascending and listed once.
+func validateOccupancyPrincipals(c VoiceChannelOccupancy) error {
+	if len(c.PrincipalIDs) != c.InVoice {
+		return fmt.Errorf("schema: voice occupancy of channel %d lists %d principal_ids for in_voice %d", c.ChannelID, len(c.PrincipalIDs), c.InVoice)
+	}
+	var prev int64
+	for _, id := range c.PrincipalIDs {
+		if id <= 0 {
+			return fmt.Errorf("schema: voice occupancy of channel %d has a principal_id that is not positive: %d", c.ChannelID, id)
+		}
+		if id == prev {
+			return fmt.Errorf("schema: voice occupancy of channel %d lists principal %d more than once", c.ChannelID, id)
+		}
+		if id < prev {
+			return fmt.Errorf("schema: voice occupancy of channel %d must list principal_ids in ascending order, got %d after %d", c.ChannelID, id, prev)
+		}
+		prev = id
 	}
 	return nil
 }

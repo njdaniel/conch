@@ -16,7 +16,7 @@ import (
 
 const (
 	defaultMessageLimit = 50
-	maxMessageLimit     = 100
+	maxMessageLimit     = schema.MaxListMessagesLimit
 	// What a client must be able to read back is derived from this limit
 	// (schema.MaxMessageFrameBytes), which is why it is the schema's.
 	maxMessageBodyBytes = schema.MaxPostRequestBytes
@@ -71,6 +71,10 @@ func (s *Server) decodePostRequest(w http.ResponseWriter, r *http.Request, req a
 	return true
 }
 
+// errReservedPayload is the one answer to a message post whose payload schema
+// only the server may author (issue #1345). Nothing was stored.
+var errReservedPayload = &schema.Error{Code: "invalid_request", Message: "payload schema is reserved: approvals and admin actions are not posted as messages"}
+
 func (s *Server) postMessage(
 	w http.ResponseWriter, r *http.Request, authorID int64, body string, payload *schema.Payload, version apiVersion,
 ) {
@@ -121,6 +125,15 @@ func (s *Server) postMessage(
 		writeError(w, http.StatusBadRequest, errInvalidFileAttachment.Code, errInvalidFileAttachment.Message)
 		return
 	}
+	if errors.Is(err, store.ErrReservedPayload) {
+		writeError(w, http.StatusBadRequest, errReservedPayload.Code, errReservedPayload.Message)
+		return
+	}
+	if errors.Is(err, store.ErrChannelArchived) {
+		// The store's archived guard (issue #844): nothing was stored.
+		writeError(w, http.StatusConflict, errChannelArchived.Code, errChannelArchived.Message)
+		return
+	}
 	if err != nil {
 		slog.ErrorContext(ctx, "messages: insert failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
@@ -141,6 +154,8 @@ func (s *Server) postMessage(
 	messageV0 := messageV0FromStore(stored)
 	s.hub.BroadcastMessage(ctx, messageV0)
 	s.broadcaster.BroadcastMessage(ctx, messageV0)
+	s.events.notifyReadState(channel.ID, authorID)
+	s.events.notifyMessage(channel.ID, stored.ID, authorID)
 	switch version {
 	case apiV2:
 		writeJSON(w, http.StatusCreated, schema.PostMessageResponseV2{Message: messageV2})
@@ -404,6 +419,12 @@ func messageV2FromStore(message store.Message) schema.MessageV2 {
 		a := *message.GuestAuthor
 		m.GuestAuthor = &a
 	}
+	// v0 and v1 have no form for it (docs/design/message-editing.md §6.3):
+	// they serve the current body unmarked.
+	if !message.EditedAt.IsZero() {
+		at := schema.NewTimestamp(message.EditedAt)
+		m.EditedAt = &at
+	}
 	return m
 }
 
@@ -574,6 +595,8 @@ func (s *Server) storeScopedPost(ctx context.Context, post store.ScopedPost, age
 		return schema.MessageV2{}, nil, serr
 	}
 	s.countScopedPost(agentSubject)
+	s.events.notifyReadState(post.ChannelID, post.AuthorID)
+	s.events.notifyMessage(post.ChannelID, stored.ID, post.AuthorID)
 	return messageV2FromStore(stored), recipients, nil
 }
 
@@ -609,12 +632,17 @@ func (s *Server) scopedPostRefusal(ctx context.Context, err error, channelID, au
 		return &schema.Error{Code: "invalid_audience", Message: "every recipient must be a member of the channel, and a whisper needs a recipient other than the author"}
 	case errors.Is(err, store.ErrFileAttachment):
 		return errInvalidFileAttachment
+	case errors.Is(err, store.ErrReservedPayload):
+		return errReservedPayload
 	case errors.Is(err, store.ErrThreadNotFound):
 		// The root became unusable between the check and the insert.
 		return errThreadNotFound
 	case errors.Is(err, store.ErrNotChannelMember):
 		// Removed from the channel after the caller's membership check.
 		return errChannelNotFound
+	case errors.Is(err, store.ErrChannelArchived):
+		// The store's archived guard (issue #844): nothing was stored.
+		return errChannelArchived
 	default:
 		slog.ErrorContext(ctx, "messages: insert scoped failed", "error", err)
 		return errInternal
@@ -740,6 +768,8 @@ func (s *Server) postReply(w http.ResponseWriter, r *http.Request, req schema.Po
 		s.hub.BroadcastReply(ctx, messageV1FromStore(stored), message)
 		s.broadcaster.BroadcastMessage(ctx, messageV0)
 	}
+	s.events.notifyReadState(channel.ID, req.AuthorID)
+	s.events.notifyMessage(channel.ID, stored.ID, req.AuthorID)
 	writeJSON(w, http.StatusCreated, schema.PostMessageResponseV2{Message: message})
 }
 
@@ -750,7 +780,9 @@ func scopedPostStatus(code string) int {
 		return http.StatusNotFound
 	case errForbidden.Code:
 		return http.StatusForbidden
-	case "invalid_audience", errInvalidFileAttachment.Code:
+	case errChannelArchived.Code:
+		return http.StatusConflict
+	case "invalid_audience", errInvalidFileAttachment.Code, errReservedPayload.Code:
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError

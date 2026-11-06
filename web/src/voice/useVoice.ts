@@ -4,10 +4,13 @@
 // releases (blur, hidden, pagehide).
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import * as api from '../api';
+import { pageHiddenOnPhone } from '../phone';
 import type { ChannelV0 } from '../schema/channel';
 import type { VoicePresenceV1 } from '../schema/voice';
 import { Feed, type FeedStatus } from '../state/feed';
-import { VoiceClient, type Microphone, type Output, type ProcessingStore, type VoiceState } from './connection';
+import type { Camera } from './camera';
+import { VoiceClient, type Microphone, type ModeStore, type Output, type ProcessingStore, type VoiceState } from './connection';
+import { defaultTail, snapTail } from './gate';
 import { defaultTalkKey, isTyping } from './keys';
 import { parsePresence } from './presence';
 import { canChooseOutput, newLiveKitRoom } from './sdk';
@@ -33,6 +36,50 @@ function readKey(): string {
 function writeKey(code: string): void {
   try {
     window.sessionStorage.setItem(keyStore, code);
+  } catch {
+    // The choice lasts until the page is reloaded.
+  }
+}
+
+// The release delay (issue #965), for as long as the tab lasts, as the talk
+// key is: none stored, or one that is not a number of ms, is the default.
+const releaseStore = 'conch.web.voice.release';
+
+function readRelease(): number {
+  try {
+    const kept = window.sessionStorage.getItem(releaseStore);
+    return kept === null || !/^\d{1,4}$/.test(kept) ? defaultTail : snapTail(Number(kept));
+  } catch {
+    return defaultTail;
+  }
+}
+
+// The voice trace (issue #1041): with this key set in the tab's session
+// storage, each step of a press is appended, with the time in ms, to
+// window.conchVoiceTrace (the page makes no console call: hygiene.test.ts). Off
+// unless a person or a test sets it.
+const traceStore = 'conch.web.voice.trace';
+
+function traceSink(): ((line: string) => void) | undefined {
+  try {
+    if (window.sessionStorage.getItem(traceStore) === null) return undefined;
+  } catch {
+    return undefined;
+  }
+  const kept: string[] = [];
+  try {
+    Object.defineProperty(window, 'conchVoiceTrace', { value: kept, configurable: true });
+  } catch {
+    return undefined;
+  }
+  return (line) => {
+    kept.push(line);
+  };
+}
+
+function writeRelease(ms: number): void {
+  try {
+    window.sessionStorage.setItem(releaseStore, String(ms));
   } catch {
     // The choice lasts until the page is reloaded.
   }
@@ -96,6 +143,49 @@ function writeOutput(choice: Output | null): void {
   }
 }
 
+// The camera chosen (ADR-015), by device id and by name, for as long as the
+// tab lasts: none stored is the browser's own choice. The name is how the
+// same camera is found again under a new id, and only if exactly one camera
+// carries it (N7).
+const cameraStore = 'conch.web.voice.camera';
+const cameraNameStore = 'conch.web.voice.camera.name';
+
+function readCamera(): Camera | null {
+  try {
+    const id = window.sessionStorage.getItem(cameraStore);
+    if (id === null) return null;
+    return { id, label: window.sessionStorage.getItem(cameraNameStore) ?? '' };
+  } catch {
+    return null;
+  }
+}
+
+function writeCamera(choice: Camera | null): void {
+  try {
+    if (choice === null) {
+      window.sessionStorage.removeItem(cameraStore);
+      window.sessionStorage.removeItem(cameraNameStore);
+    } else {
+      window.sessionStorage.setItem(cameraStore, choice.id);
+      window.sessionStorage.setItem(cameraNameStore, choice.label);
+    }
+  } catch {
+    // The choice lasts until the page is reloaded.
+  }
+}
+
+// Every voice client this page made, for leaveVoice.
+const clients = new Set<VoiceClient>();
+
+// leaveVoice leaves voice on every client of the page, and resolves once each
+// has: the camera stopped and its claim released, naming it, the share
+// stopped, the last report sent. Signing out calls it first, while the
+// credential still works, so nothing of this person's voice or camera is
+// carried into the next identity (ADR-015, design §6.2).
+export async function leaveVoice(): Promise<void> {
+  await Promise.all([...clients].map((c) => c.leave()));
+}
+
 // The voice processing chosen for each microphone (issue #659), for as long
 // as the tab lasts: a device under its id, and System default under a key of
 // its own. A device never set has it on.
@@ -134,6 +224,14 @@ function processingChoices(): ProcessingStore {
   };
 }
 
+// The microphone mode the person chose (issue #1244), kept in this browser
+// through the platform's preferences: a per-viewer convenience. Storage that
+// throws or holds anything else reads as no choice, and the client starts in
+// open microphone.
+function modeChoice(): ModeStore {
+  return { get: api.readVoiceMode, set: api.writeVoiceMode };
+}
+
 // What is known about the channel's voice, as the strip says it. loading is
 // before the first frame; presence is a frame on an open socket; unreachable
 // is the socket lost and not back, so the server cannot be reached;
@@ -150,6 +248,11 @@ export type Snapshot =
 // (schema.ErrorCodeVoiceNotAllowed).
 const voiceNotAllowed = 'voice_not_allowed';
 
+// The reason conchd gives when it closes a voice socket (1008) because its
+// reader is no longer a member of the channel. The channel is then gone, and
+// the read that would say so is a request known to fail (issue #1084).
+const noLongerMember = 'no longer a member of this channel';
+
 export interface VoiceControl {
   readonly state: VoiceState;
   readonly snapshot: Snapshot;
@@ -162,10 +265,14 @@ export interface VoiceControl {
   readonly features: ShareFeatures;
   readonly client: VoiceClient;
   readonly setTalkKey: (code: string) => void;
+  // Sets the release delay, and keeps it for the tab.
+  readonly setReleaseDelay: (ms: number) => void;
   readonly capture: (on: boolean) => void;
   readonly join: () => void;
   // Joins to watch, without the microphone.
-  readonly watchOnly: () => void;
+  // beside: the person's own voice is in another client, so watch as the
+  // viewer (issue #936).
+  readonly watchOnly: (beside?: boolean) => void;
   readonly leave: () => void;
 }
 
@@ -198,14 +305,22 @@ export function useVoice({
       clock: realClock,
       random: Math.random,
       createSession: api.createVoiceSession,
+      createViewer: api.createVoiceViewer,
+      removeViewer: api.removeVoiceViewer,
       report: api.reportVoiceTransmit,
       newRoom: newLiveKitRoom,
       claimShare: api.claimVoiceShare,
       stopShare: api.stopVoiceShare,
+      claimCamera: api.claimVoiceCamera,
+      stopCamera: api.stopVoiceCamera,
+      camera: readCamera(),
       microphone: readMicrophone(),
       processing: processingChoices(),
+      mode: modeChoice(),
       outputSelection: canChooseOutput(),
       output: readOutput(),
+      gate: { tail: readRelease() },
+      trace: traceSink(),
     });
   }
   const client = clientRef.current;
@@ -255,12 +370,39 @@ export function useVoice({
     writeMicrophone(state.microphone);
   }, [state.microphone]);
 
+  // So is the camera: the person's choice, and the same camera found again
+  // under a new id.
+  useEffect(() => {
+    writeCamera(state.cameraChoice);
+  }, [state.cameraChoice]);
+
+  // Every client of the page, for leaveVoice.
+  useEffect(() => {
+    clients.add(client);
+    return () => {
+      clients.delete(client);
+    };
+  }, [client]);
+
   // So are the speakers: the person's choice, the same output found again
   // under a new id, the one the SDK moved sound to, and the system default
   // after one the browser refused.
   useEffect(() => {
     writeOutput(state.output);
   }, [state.output]);
+
+  // A hidden page on a phone ends the camera as its button does (design §8,
+  // O9); the desktop's hidden page changes nothing. Showing the page again
+  // starts nothing: only the button does.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (pageHiddenOnPhone()) client.pageHidden();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [client]);
 
   // Signing out ends voice.
   useEffect(() => {
@@ -314,6 +456,8 @@ export function useVoice({
         setSnapshot({ kind: 'unreachable' });
       }
     };
+    // The reason of the socket's last close.
+    let closeReason = '';
     const feed = new Feed({
       channel: named(),
       clock: realClock,
@@ -322,7 +466,14 @@ export function useVoice({
       // silence watchdog is long: a reconnect is a fresh snapshot.
       silence: 300_000,
       // Each attempt names the channel as it is called then.
-      open: (_channel, _after, events) => api.openVoiceSocket(named(), events),
+      open: (_channel, _after, events) =>
+        api.openVoiceSocket(named(), {
+          ...events,
+          onClose: (code, why) => {
+            closeReason = why ?? '';
+            events.onClose(code, why);
+          },
+        }),
       onFrame: (data) => {
         const presence = parsePresence(data);
         if (presence === null || !live) return;
@@ -343,6 +494,12 @@ export function useVoice({
     // voice withdrawn, the channel lost, or neither (it answers), when the
     // feed goes back through its backoff rather than retrying at once.
     const settle = () => {
+      // Told it by the close itself: the channel is gone, and asking would
+      // only be answered 404.
+      if (closeReason === noLongerMember) {
+        set('gone');
+        return;
+      }
       void api.getVoicePresence(named()).then((result) => {
         if (!live) return;
         if (result.ok) {
@@ -381,6 +538,26 @@ export function useVoice({
     if (reachable && feedStatus.current === 'waiting') feedRef.current?.start();
   }, [reachable]);
 
+  // Losing focus or visibility shuts the gate at once (issue #965), always:
+  // not only while the talk key listens. Hold to talk works while a new key
+  // is being chosen, and a transmission it opened must shut on a blur too.
+  useEffect(() => {
+    const away = () => {
+      client.lost();
+    };
+    const hidden = () => {
+      if (document.visibilityState === 'hidden') client.lost();
+    };
+    window.addEventListener('blur', away);
+    window.addEventListener('pagehide', away);
+    document.addEventListener('visibilitychange', hidden);
+    return () => {
+      window.removeEventListener('blur', away);
+      window.removeEventListener('pagehide', away);
+      document.removeEventListener('visibilitychange', hidden);
+    };
+  }, [client]);
+
   // The talk key, only while the tab has focus and focus is not in a field.
   useEffect(() => {
     if (!signedIn || capturing) return;
@@ -392,26 +569,14 @@ export function useVoice({
     const up = (e: KeyboardEvent) => {
       if (e.code === talkKey) client.release();
     };
-    const away = () => {
-      client.lost();
-    };
-    const hidden = () => {
-      if (document.visibilityState === 'hidden') client.lost();
-    };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
-    window.addEventListener('blur', away);
-    window.addEventListener('pagehide', away);
-    document.addEventListener('visibilitychange', hidden);
     return () => {
       // A key held while the key, capture or sign-in changes would never see
       // its keyup here: let go of it.
       client.release();
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
-      window.removeEventListener('blur', away);
-      window.removeEventListener('pagehide', away);
-      document.removeEventListener('visibilitychange', hidden);
     };
   }, [signedIn, capturing, talkKey, client]);
 
@@ -420,6 +585,10 @@ export function useVoice({
     setKey(code);
     setCapturing(false);
   }, []);
+  const setReleaseDelay = useCallback((ms: number) => {
+    client.setReleaseDelay(ms);
+    writeRelease(client.snapshot().releaseDelay);
+  }, [client]);
   // The id of the channel joined is noted first, so the render the join
   // causes already follows it by id.
   const channelsNow = useRef(channels);
@@ -433,10 +602,10 @@ export function useVoice({
     note(channel);
     client.join(channel);
   }, [channel, client, note]);
-  const watchOnly = useCallback(() => {
+  const watchOnly = useCallback((beside = false) => {
     if (channel === null) return;
     note(channel);
-    client.join(channel, { watchOnly: true });
+    client.join(channel, { watchOnly: true, beside });
   }, [channel, client, note]);
   const leave = useCallback(() => {
     void client.leave();
@@ -452,6 +621,7 @@ export function useVoice({
     features,
     client,
     setTalkKey,
+    setReleaseDelay,
     capture: setCapturing,
     join,
     watchOnly,

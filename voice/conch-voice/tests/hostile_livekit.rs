@@ -17,7 +17,7 @@
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use conch_voice::livekit::{ERROR_CHARS, LiveKit};
+use conch_voice::livekit::{ERROR_CHARS, LiveKit, Subscription};
 use conch_voice::logger::{Logger, RECORD_CHARS};
 use conch_voice::sdk::Transport;
 use conch_voice::secrets::{CUT_MARK, Scrubber};
@@ -110,7 +110,10 @@ async fn what_answers_in_livekits_place_cannot_flood_or_forge_the_status_line_or
     // As the session loop does before it joins.
     scrubber.connection(&token, &Secret::new(FAKE_ROOM));
     let transport = LiveKit::new(Arc::clone(&scrubber));
-    let error = match transport.connect(&url, &token).await {
+    let error = match transport
+        .connect(&url, &token, &Subscription::default())
+        .await
+    {
         Ok(_) => panic!("joined a room that does not exist"),
         Err(error) => error.to_string(),
     };

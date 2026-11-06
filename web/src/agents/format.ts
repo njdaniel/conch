@@ -1,6 +1,7 @@
 // How times read in the panel and in run detail, and the timeline of a run.
 import type { AgentActivityV1 } from '../schema/activity';
 import type { InterventionV1 } from '../schema/intervention';
+import { timeWithSeconds } from '../time';
 
 // ago is how long before now `at` was, as a short phrase (the TUI's).
 export function ago(now: number, at: string): string {
@@ -17,10 +18,10 @@ export function ago(now: number, at: string): string {
 
 const two = (n: number) => String(n).padStart(2, '0');
 
-// clockSeconds is HH:MM:SS in the reader's own time zone.
+// clockSeconds is the time of day to the second, in the reader's own locale
+// and time zone (time.ts).
 export function clockSeconds(at: string): string {
-  const d = new Date(at);
-  return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`;
+  return timeWithSeconds(at);
 }
 
 // spanText is a stretch of time as the views write it: 12.4s, 3m02s, 1h02m03s

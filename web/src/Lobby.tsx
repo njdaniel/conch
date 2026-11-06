@@ -1,9 +1,13 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { ChannelList } from './ChannelList';
+import type { SettingsChange } from './ChannelSettingsAsk';
 import type { InVoice } from './voice/useOccupancy';
 import { headingId } from './Conversation';
 import { Avatar, Glyph } from './Icons';
-import { ServerVersion } from './ServerVersion';
+import { ServerVersion, TemporaryBanner } from './ServerVersion';
+import { AddPerson, JoiningSettings, SettingsOpen, type JoiningRequest } from './joiningSettings';
+import { MicTestShown, phoneViews, ShowChat, useAppHeight, usePhone, VoiceLive, VoiceStrip, type PhoneView } from './phone';
+import type { ChannelV0 } from './schema/channel';
 import { StageHost } from './stage';
 import type { ChannelsState } from './state/channels';
 import { connectionLabel, type ConnectionState } from './state/connection';
@@ -55,16 +59,27 @@ export function Lobby({
   origin,
   name,
   me = 0,
+  temporary,
   channels,
   unread,
   occupancy,
+  voiceNames,
+  notificationCenter,
   connection,
   conversation,
+  firstRun,
   panel,
   voice,
   invites,
   newChannel,
-  renameChannel,
+  canRename,
+  renderRename,
+  canManage,
+  renderSettings,
+  onInviteTo,
+  onLeft,
+  onUnauthorized,
+  onAddPerson,
   account,
   signIns,
   report,
@@ -77,18 +92,28 @@ export function Lobby({
   banner,
   visit,
   admin,
+  onSettingsOpen,
   overlay,
 }: {
   readonly origin: string;
   readonly name: string;
   // The signed-in principal's id, for the colour of their initial.
   readonly me?: number;
+  // Whoami said this is a temporary server (ADR-011): the banner shows.
+  readonly temporary?: boolean;
   readonly channels: ChannelsState;
   readonly unread: ReadonlyMap<string, number>;
-  // How many are in each channel's voice (issue #596), shown in the list.
+  // Who is in each channel's voice (issues #596, #1103), shown in the list,
+  // and the names the page has for them by principal id.
   readonly occupancy?: InVoice;
+  readonly voiceNames?: ReadonlyMap<number, string>;
+  readonly notificationCenter?: ReactNode;
   readonly connection: ConnectionState;
   readonly conversation: ReactNode;
+  // The first-run panel for an operator with no channels (issue #1032). It
+  // stands where the conversation would; on a phone, where that is not shown
+  // with nothing open, it is drawn in the Channels view instead. Never both.
+  readonly firstRun?: ReactNode;
   readonly panel: ReactNode;
   // The voice section: kept by the caller, which owns the voice client. It is
   // rendered in one place only, the strip, whatever the window's width.
@@ -98,10 +123,20 @@ export function Lobby({
   // "New channel" (issue #695), under the channel list, or null for a person
   // who may not make one.
   readonly newChannel?: ReactNode;
-  // Rename the open channel (issue #728), under the channel list, or null for
-  // a person who may not.
-  readonly renameChannel?: ReactNode;
-  // The caller's own account: changing their name (issue #441), in Settings.
+  // Per-channel actions in each row's ⋯ menu (issues #1135, #1095): who may
+  // rename which channel, the rename form for one, the opener of the invite
+  // panel, and the channel-removal handler after a Leave succeeds.
+  readonly canRename?: (channel: ChannelV0) => boolean;
+  readonly renderRename?: (channel: ChannelV0, close: () => void) => ReactNode;
+  readonly canManage?: boolean;
+  readonly renderSettings?: (channel: ChannelV0, change: SettingsChange, close: () => void) => ReactNode;
+  readonly onInviteTo?: (channel: ChannelV0) => void;
+  readonly onLeft?: (name: string) => void;
+  readonly onUnauthorized?: () => void;
+  // The console's Members section asks for the member-link panel (issue
+  // #1020, "Add a person"): Settings closes, then the page opens it.
+  readonly onAddPerson?: () => void;
+  // The caller's standing and own account settings, in Settings.
   readonly account?: ReactNode;
   // "Your sign-ins" (issue #496), in Settings. Ending this browser's own
   // sign-in is signing out, so the section is handed endThis, which asks the
@@ -128,6 +163,8 @@ export function Lobby({
   // The server's own settings, for an operator (issue #714): joining and
   // guests, in Settings.
   readonly admin?: ReactNode;
+  // Called each time Settings opens, so what it shows from whoami is fresh.
+  readonly onSettingsOpen?: () => void;
   // A question over the whole page, Settings included (issue #714: a recent
   // proof of the password). While it is shown everything else is inert and
   // stays as it was, so what was being typed is kept.
@@ -142,7 +179,85 @@ export function Lobby({
     setWasWide(wideNow);
     if (!wideNow) setPanelOpen(false);
   }
+  // The phone layout (issue #929): below 700 px one of three views is drawn at
+  // a time. All of them stay mounted, so a switch only changes what is shown:
+  // the draft, the log's place and the call are untouched.
+  const phone = usePhone();
+  useAppHeight(phone);
+  // Until a view is chosen: Chat once a channel is open, Channels while the
+  // list is loading, failed to load, or has nothing open to chat in.
+  const [chosen, setView] = useState<PhoneView | null>(null);
+  // Chat with nothing open (the channel was lost or closed on this tab) is
+  // Channels.
+  const chatOpen = channels.loaded && channels.selected !== null;
+  const wanted: PhoneView = chosen ?? 'chat';
+  const view: PhoneView = wanted === 'chat' && !chatOpen ? 'channels' : wanted;
+  const [live, setLive] = useState(false);
+  // Leaving voice under Chat or Channels takes the strip off the screen
+  // (Join voice was focused in it): focus goes to the Voice button, where Join
+  // voice now is, rather than to the page's top. Only focus that was in the
+  // strip, or nowhere.
+  const dock = useRef<HTMLDivElement>(null);
+  const voiceTab = useRef<HTMLButtonElement>(null);
+  // The strip's state button opens the Voice view (issue #1028). It is not
+  // drawn there, so focus goes to the Voice button, now the current view's.
+  const openVoice = useCallback(() => {
+    voiceTab.current?.focus();
+    setView('voice');
+  }, []);
+  // The conversation's height while a view that shows it (or leaves it laid out
+  // at the same size) is current, kept as --chat-height on the lobby for the
+  // Voice view, which lays it out hidden behind. Resizing it there would clamp
+  // the log's scroll position, and a reader a few pixels above the end would
+  // come back to somewhere else. Set through the CSSOM (no inline style).
+  const lobbyEl = useRef<HTMLDivElement>(null);
+  const conversationEl = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const box = lobbyEl.current;
+    const el = conversationEl.current;
+    if (!phone || view === 'voice' || box === null || el === null || typeof ResizeObserver !== 'function') return;
+    const watch = new ResizeObserver(() => {
+      box.style.setProperty('--chat-height', `${String(el.getBoundingClientRect().height)}px`);
+    });
+    watch.observe(el);
+    return () => {
+      watch.disconnect();
+    };
+  }, [phone, view]);
+  const wasLive = useRef(false);
+  useEffect(() => {
+    const left = wasLive.current && !live;
+    wasLive.current = live;
+    if (!left || !phone || view === 'voice') return;
+    const at = document.activeElement;
+    if (at === null || at === document.body || dock.current?.contains(at) === true) voiceTab.current?.focus();
+  }, [phone, live, view]);
+  // Choosing a channel on a phone returns to Chat, and focus follows the page
+  // to the conversation's heading (the list it was on is no longer shown).
+  const toHeading = useRef(false);
+  useEffect(() => {
+    if (view !== 'chat' || !toHeading.current) return;
+    toHeading.current = false;
+    document.getElementById(headingId)?.focus();
+  }, [view]);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Settings with Joining expanded, asked for from the invite panel
+  // (issue #909).
+  const [joiningAsks, setJoiningAsks] = useState(0);
+  // Opened from there, the section takes focus, not the heading, so the
+  // switch is in view.
+  const toJoining = useRef(false);
+  const joining = useMemo<JoiningRequest>(
+    () => ({
+      count: joiningAsks,
+      open: () => {
+        toJoining.current = true;
+        setJoiningAsks((n) => n + 1);
+        setSettingsOpen(true);
+      },
+    }),
+    [joiningAsks],
+  );
   const asking = overlay !== undefined && overlay !== null;
   // Which sign-out is waiting for its yes, if one is.
   const [confirming, setConfirming] = useState<'here' | 'everywhere' | null>(null);
@@ -177,8 +292,13 @@ export function Lobby({
   // button is inert behind it, and cannot take focus.
   const settingsClosed = useRef(false);
   useEffect(() => {
-    if (settingsOpen) settingsHeading.current?.focus();
-    else if (settingsClosed.current) {
+    if (settingsOpen) onSettingsOpen?.();
+  }, [settingsOpen, onSettingsOpen]);
+  useEffect(() => {
+    if (settingsOpen) {
+      if (toJoining.current) toJoining.current = false;
+      else settingsHeading.current?.focus();
+    } else if (settingsClosed.current) {
       settingsClosed.current = false;
       settingsButton.current?.focus();
     }
@@ -191,7 +311,8 @@ export function Lobby({
   // conversation is shown, focus goes to its heading (issue #590). Only then:
   // opening another channel later leaves focus where it is.
   const arrived = useRef(false);
-  const showing = channels.loaded && conversation !== null && conversation !== undefined;
+  const hasFirstRun = firstRun !== null && firstRun !== undefined;
+  const showing = channels.loaded && ((conversation !== null && conversation !== undefined) || hasFirstRun);
   useEffect(() => {
     if (!showing || arrived.current) return;
     const heading = document.getElementById(headingId);
@@ -205,6 +326,10 @@ export function Lobby({
     setConfirming(null);
     settingsClosed.current = true;
   }
+  function addPerson() {
+    closeSettings();
+    onAddPerson?.();
+  }
   function closeMembers() {
     setPanelOpen(false);
     membersButton.current?.focus();
@@ -217,219 +342,285 @@ export function Lobby({
   };
 
   return (
-    <div className="lobby">
-      {/* While Settings is open the rest of the page is inert: the panel is
-          modal, and focus cannot wander behind its backdrop. */}
-      <header className="topbar" inert={settingsOpen || asking}>
-        <h1 className="brand">Conch</h1>
-        <div role="status" aria-label="Status" className="status">
-          <Avatar id={me} name={name} />
-          <span className="status-who">{name}</span>
-          <span className="status-server">{origin}</span>
-          <span className={`conn conn-${connection}`}>{connectionLabel(connection)}</span>
-        </div>
-        <div className="topbar-actions">
-          {invites}
-          <button
-            ref={membersButton}
-            type="button"
-            className="icon-button"
-            aria-expanded={panelOpen}
-            aria-controls="members-body"
-            onClick={() => {
-              setPanelOpen(!panelOpen);
-            }}
-          >
-            <Glyph name="members" />
-            <span className="label">Members</span>
-          </button>
-          <button
-            ref={settingsButton}
-            type="button"
-            className="icon-button"
-            aria-expanded={settingsOpen}
-            aria-controls="settings-panel"
-            onClick={() => {
-              if (settingsOpen) closeSettings();
-              else setSettingsOpen(true);
-            }}
-          >
-            <Glyph name="settings" />
-            <span className="label">Settings</span>
-          </button>
-        </div>
-      </header>
-      <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
-        <nav aria-label="Channels" className="channels">
-          <h2>Channels</h2>
-          {channels.loaded ? (
-            <>
-              <ChannelList
-                channels={channels.channels}
-                selected={channels.selected}
-                unread={unread}
-                occupancy={occupancy}
-                empty={newChannel === null || newChannel === undefined ? undefined : 'No channels yet'}
-                rename={renameChannel}
-                onOpen={onOpen}
-              />
-              {newChannel}
-            </>
-          ) : connection === 'reconnecting' ? (
-            <div className="problem">
-              <p className="empty">Cannot reach the server</p>
-              <button type="button" onClick={onRetry}>
-                Try again
-              </button>
-              {report}
+    <JoiningSettings.Provider value={joining}>
+    <SettingsOpen.Provider value={settingsOpen}>
+    <AddPerson.Provider value={onAddPerson === undefined ? null : addPerson}>
+      <div ref={lobbyEl} className={phone ?`lobby phone view-${view}${live ? ' in-voice' : ''}` : 'lobby'}>
+        {/* While Settings is open the rest of the page is inert: the panel is
+            modal, and focus cannot wander behind its backdrop. */}
+        <header className="topbar" inert={settingsOpen || asking}>
+          <h1 className="brand">Conch</h1>
+          <div role="status" aria-label="Status" className="status">
+            <Avatar id={me} name={name} />
+            <span className="status-who">{name}</span>
+            {/* A phone has no room for it (issue #1030). */}
+            {phone ? null : <span className="status-server">{origin}</span>}
+            <span className={`conn conn-${connection}`}>{connectionLabel(connection)}</span>
+          </div>
+          <div className="topbar-actions">
+            {notificationCenter}
+            {invites}
+            <button
+              ref={membersButton}
+              type="button"
+              className="icon-button"
+              aria-expanded={panelOpen}
+              aria-controls="members-body"
+              onClick={() => {
+                setPanelOpen(!panelOpen);
+              }}
+            >
+              <Glyph name="members" />
+              <span className="label">Members</span>
+            </button>
+            <button
+              ref={settingsButton}
+              type="button"
+              className="icon-button"
+              aria-expanded={settingsOpen}
+              aria-controls="settings-panel"
+              aria-label={phone ? `Settings, signed in as ${name}` : undefined}
+              onClick={() => {
+                if (settingsOpen) closeSettings();
+                else setSettingsOpen(true);
+              }}
+            >
+              <Glyph name="settings" />
+              <span className="label">Settings</span>
+            </button>
+          </div>
+        </header>
+        <div className={panelOpen ? 'areas' : 'areas side-closed'} inert={settingsOpen || asking}>
+          <nav aria-label="Channels" className="channels">
+            <h2>Channels</h2>
+            {channels.loaded ? (
+              <>
+                <ChannelList
+                  channels={channels.channels}
+                  selected={channels.selected}
+                  unread={unread}
+                  occupancy={occupancy}
+                  voiceNames={voiceNames}
+                  viewer={me}
+                  empty={newChannel === null || newChannel === undefined ? undefined : 'No channels yet'}
+                  {...(canRename === undefined ? {} : { canRename })}
+                  {...(renderRename === undefined ? {} : { renderRename })}
+                  {...(canManage === undefined ? {} : { canManage })}
+                  {...(renderSettings === undefined ? {} : { renderSettings })}
+                  {...(onInviteTo === undefined ? {} : { onInvite: onInviteTo })}
+                  {...(onLeft === undefined ? {} : { onLeft })}
+                  {...(onUnauthorized === undefined ? {} : { onUnauthorized })}
+                  onOpen={(name) => {
+                    onOpen(name);
+                    if (phone) {
+                      toHeading.current = true;
+                      setView('chat');
+                    }
+                  }}
+                />
+                <ShowChat.Provider
+                  value={() => {
+                    if (!phone) return;
+                    toHeading.current = true;
+                    setView('chat');
+                  }}
+                >
+                  {newChannel}
+                </ShowChat.Provider>
+                {phone ? firstRun : null}
+              </>
+            ) : connection === 'reconnecting' ? (
+              <div className="problem">
+                <p className="empty">Cannot reach the server</p>
+                <button type="button" onClick={onRetry}>
+                  Try again
+                </button>
+                {report}
+              </div>
+            ) : (
+              <p className="empty">Loading channels…</p>
+            )}
+          </nav>
+          <main className="centre">
+            <div ref={setStage} className="stage" />
+            <section ref={conversationEl} aria-label="Conversation" className="conversation">
+              {temporary === true ? <TemporaryBanner /> : null}
+              {banner}
+              {channels.lost === undefined ? null : (
+                <p role="alert" className="banner">
+                  You no longer have access to #{channels.lost}
+                </p>
+              )}
+              {conversation}
+              {phone ? null : firstRun}
+            </section>
+          </main>
+          <aside aria-label="Members panel" className="panel">
+            <div
+              ref={membersBody}
+              id="members-body"
+              hidden={!panelOpen}
+              tabIndex={panelOpen ? 0 : undefined}
+              aria-label="Members list"
+              role="region"
+              onKeyDown={membersOver ? onEscape(closeMembers) : undefined}
+            >
+              {membersOver ? (
+                <button type="button" className="icon-button close" onClick={closeMembers}>
+                  <Glyph name="close" />
+                  <span className="label">Close</span>
+                </button>
+              ) : null}
+              {panel}
             </div>
-          ) : (
-            <p className="empty">Loading channels…</p>
+          </aside>
+          {membersOver ? <div className="backdrop" onClick={closeMembers} /> : null}
+        </div>
+        <div ref={dock} className="dock" inert={settingsOpen || asking}>
+          <VoiceLive.Provider value={setLive}>
+            <MicTestShown.Provider value={!phone || view === 'voice'}>
+              <VoiceStrip.Provider value={phone && view !== 'voice' ? openVoice : null}>
+                <StageHost.Provider value={stage}>{voice}</StageHost.Provider>
+              </VoiceStrip.Provider>
+            </MicTestShown.Provider>
+          </VoiceLive.Provider>
+        </div>
+        {phone ? (
+          <nav aria-label="Main navigation" className="phone-nav" inert={settingsOpen || asking}>
+            {phoneViews.map(({ view: v, label }) => (
+              <button
+                key={v}
+                ref={v === 'voice' ? voiceTab : undefined}
+                type="button"
+                aria-current={view === v ? 'page' : undefined}
+                aria-describedby={v === 'voice' && live ? 'nav-voice-live' : undefined}
+                onClick={() => {
+                  setView(v);
+                }}
+              >
+                <Glyph name={v === 'chat' ? 'chat' : v === 'channels' ? 'channels' : 'headphones'} />
+                <span className="nav-label">{label}</span>
+                {v === 'voice' && live ? <span className="nav-live" aria-hidden="true" /> : null}
+              </button>
+            ))}
+            {/* Outside the button, so the button's name stays Voice. */}
+            {live ? (
+              <span id="nav-voice-live" className="vh">
+                You are in voice
+              </span>
+            ) : null}
+          </nav>
+        ) : null}
+        {settingsOpen && !asking ? <div className="backdrop" onClick={closeSettings} /> : null}
+        <div
+          id="settings-panel"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="settings-heading"
+          className="drawer" hidden={!settingsOpen} inert={asking} onKeyDown={onEscape(closeSettings)}>
+          <div className="drawer-head">
+            <h2 id="settings-heading" ref={settingsHeading} tabIndex={-1}>
+              Settings
+            </h2>
+            <button type="button" className="icon-button close" onClick={closeSettings}>
+              <Glyph name="close" />
+              <span className="label">Close</span>
+            </button>
+          </div>
+          <section aria-label="Account" className="drawer-section">
+            <p className="who">
+              <Avatar id={me} name={name} />
+              <span>
+                Signed in as <strong>{name}</strong>
+                <br />
+                <span className="hint">{origin}</span>
+              </span>
+            </p>
+            {account}
+            {signIns?.(() => {
+              setConfirming('here');
+            })}
+          </section>
+          {admin === undefined || admin === null ? null : (
+            <section aria-label="Administration" className="drawer-section">
+              {admin}
+            </section>
           )}
-        </nav>
-        <main className="centre">
-          <div ref={setStage} className="stage" />
-          <section aria-label="Conversation" className="conversation">
-            {banner}
-            {channels.lost === undefined ? null : (
-              <p role="alert" className="banner">
-                You no longer have access to #{channels.lost}
+          <section aria-label="Sign out" className="drawer-section signout">
+            {visit !== undefined ? (
+              visit
+            ) : confirming === null ? (
+              <>
+                <div className="actions">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirming('here');
+                    }}
+                    aria-describedby="signout-note"
+                  >
+                    Sign out
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirming('everywhere');
+                    }}
+                    aria-describedby="signout-note"
+                  >
+                    Sign out everywhere
+                  </button>
+                </div>
+                <p id="signout-note" className="hint">
+                  Sign out ends this sign-in, in every tab of this browser. Sign out everywhere ends all of yours, on every device.
+                  {passwordSet
+                    ? ' Either way, you sign in again with your name and password.'
+                    : ' Either way, you will need a new link from an operator to come back into this account.'}
+                </p>
+              </>
+            ) : (
+              <div role="group" aria-labelledby="signout-question" className="signout-confirm">
+                <p id="signout-question">{signOutQuestion(confirming, passwordSet)}</p>
+                <div className="actions">
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => {
+                      const which = confirming;
+                      setConfirming(null);
+                      if (which === 'here') onSignOut();
+                      else onSignOutEverywhere();
+                    }}
+                  >
+                    {confirming === 'here' ? 'Yes, sign out' : 'Yes, sign out everywhere'}
+                  </button>
+                  <button
+                    ref={cancel}
+                    type="button"
+                    onClick={() => {
+                      setConfirming(null);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+            {signOutProblem === null ? null : (
+              <p role="alert" className="notice">
+                {signOutProblem}
               </p>
             )}
-            {conversation}
           </section>
-        </main>
-        <aside aria-label="Members panel" className="panel">
-          <div
-            ref={membersBody}
-            id="members-body"
-            hidden={!panelOpen}
-            tabIndex={panelOpen ? 0 : undefined}
-            aria-label="Members list"
-            role="region"
-            onKeyDown={membersOver ? onEscape(closeMembers) : undefined}
-          >
-            {membersOver ? (
-              <button type="button" className="icon-button close" onClick={closeMembers}>
-                <Glyph name="close" />
-                <span className="label">Close</span>
-              </button>
-            ) : null}
-            {panel}
-          </div>
-        </aside>
-        {membersOver ? <div className="backdrop" onClick={closeMembers} /> : null}
-      </div>
-      <div className="dock" inert={settingsOpen || asking}>
-        <StageHost.Provider value={stage}>{voice}</StageHost.Provider>
-      </div>
-      {settingsOpen && !asking ? <div className="backdrop" onClick={closeSettings} /> : null}
-      <div
-        id="settings-panel"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="settings-heading"
-        className="drawer" hidden={!settingsOpen} inert={asking} onKeyDown={onEscape(closeSettings)}>
-        <div className="drawer-head">
-          <h2 id="settings-heading" ref={settingsHeading} tabIndex={-1}>
-            Settings
-          </h2>
-          <button type="button" className="icon-button close" onClick={closeSettings}>
-            <Glyph name="close" />
-            <span className="label">Close</span>
-          </button>
+          <section aria-label="Help" className="drawer-section">
+            {report}
+            <ServerVersion className="hint" quiet />
+          </section>
         </div>
-        <section aria-label="Account" className="drawer-section">
-          <p className="who">
-            <Avatar id={me} name={name} />
-            <span>
-              Signed in as <strong>{name}</strong>
-              <br />
-              <span className="hint">{origin}</span>
-            </span>
-          </p>
-          {account}
-          {signIns?.(() => {
-            setConfirming('here');
-          })}
-        </section>
-        {admin === undefined || admin === null ? null : (
-          <section aria-label="Server" className="drawer-section">
-            {admin}
-          </section>
-        )}
-        <section aria-label="Sign out" className="drawer-section signout">
-          {visit !== undefined ? (
-            visit
-          ) : confirming === null ? (
-            <>
-              <div className="actions">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setConfirming('here');
-                  }}
-                  aria-describedby="signout-note"
-                >
-                  Sign out
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setConfirming('everywhere');
-                  }}
-                  aria-describedby="signout-note"
-                >
-                  Sign out everywhere
-                </button>
-              </div>
-              <p id="signout-note" className="hint">
-                Sign out ends this sign-in, in every tab of this browser. Sign out everywhere ends all of yours, on every device.
-                {passwordSet
-                  ? ' Either way, you sign in again with your name and password.'
-                  : ' Either way, you will need a new link from an operator to come back into this account.'}
-              </p>
-            </>
-          ) : (
-            <div role="group" aria-labelledby="signout-question" className="signout-confirm">
-              <p id="signout-question">{signOutQuestion(confirming, passwordSet)}</p>
-              <div className="actions">
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={() => {
-                    const which = confirming;
-                    setConfirming(null);
-                    if (which === 'here') onSignOut();
-                    else onSignOutEverywhere();
-                  }}
-                >
-                  {confirming === 'here' ? 'Yes, sign out' : 'Yes, sign out everywhere'}
-                </button>
-                <button
-                  ref={cancel}
-                  type="button"
-                  onClick={() => {
-                    setConfirming(null);
-                  }}
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-          {signOutProblem === null ? null : (
-            <p role="alert" className="notice">
-              {signOutProblem}
-            </p>
-          )}
-        </section>
-        <section aria-label="Help" className="drawer-section">
-          {report}
-          <ServerVersion className="hint" />
-        </section>
+        {overlay}
       </div>
-      {overlay}
-    </div>
+    </AddPerson.Provider>
+    </SettingsOpen.Provider>
+    </JoiningSettings.Provider>
   );
 }

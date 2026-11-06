@@ -81,7 +81,7 @@ An external runtime cannot be signalled: `conchd` makes no outbound call to it, 
 - **A direct sender** lists kinds in `CreateSessionRequestV1.Interventions` only if it polls `GET /v1/sessions/{id}/interventions?state=requested` (the issue's `list_interventions` is `poll_interventions` over MCP). It answers each one through `POST /v1/interventions/{id}/ack`. A kind it does not list is refused at once with 409 `intervention_unsupported` and audited. The TUI and browser do not offer it (UX-19, P3-08).
 - **The relay** declares the kinds set in `CONCH_ADAPTER_INTERVENTIONS`, empty by default. It passes the poll and the answer through its socket (§7). It never answers on the runtime's behalf except in one case: an intervention the runtime has not answered within `CONCH_ADAPTER_INTERVENTION_TIMEOUT` (default 60 s) is answered `failed` with the reason `not taken by <runtime> within 60s`. A person who asks gets an answer. A late answer from the runtime then gets `conchd`'s 409 `invalid_transition`, passed back.
 - **Answering never moves the run** (#287). After applying a cancel, the runtime reports the run `cancelled` itself.
-- A `message` intervention's text reaches the external runtime as input. Whoever can see the run can send it (D10). The runtime's owner must treat that text as they would a chat message, as the README says for the subprocess adapter.
+- A `message` intervention's text reaches the external runtime as input. Whoever can see the run can send it (D10). The runtime's owner must treat that text as they would a chat message, as the manual says for the subprocess adapter.
 
 ## 6. Question 4: the shape
 
@@ -168,7 +168,7 @@ Not in the log:
 - Anything the relay refuses before `conchd` sees it.
 - No token, credential or socket path is ever written to the log.
 
-**Compromise.** A stolen reporter credential can show misleading runs, in its granted channels, up to its rate limit, until it is revoked or expires; it can also answer a person's intervention `applied` without acting on it, a false assurance that a run stopped; and a run's `link` is any `https://` host, rendered to members as a link, so a forged run can carry a phishing link. It cannot do anything else in Conch. Tokens cross the network in the clear unless the operator puts TLS in front of `conchd`, as for every client (README, Known limitations).
+**Compromise.** A stolen reporter credential can show misleading runs, in its granted channels, up to its rate limit, until it is revoked or expires; it can also answer a person's intervention `applied` without acting on it, a false assurance that a run stopped; and a run's `link` is any `https://` host, rendered to members as a link, so a forged run can carry a phishing link. It cannot do anything else in Conch. Tokens cross the network in the clear unless the operator puts TLS in front of `conchd`, as for every client (manual, Known limitations).
 
 ## 9. What the code says that the issue assumed otherwise
 
@@ -185,7 +185,7 @@ None of these conflicts with a locked decision in ADR-000.
 
 The child issues are filed: #386 (F10a), #387 (F10b), #388 (F10c).
 
-1. **C1, S: document and test reporting from outside over the REST contract.** A README recipe and a REST-only end-to-end test of the happy path and every refusal. No change to the server. This alone answers the issue for every sender that can set a header.
+1. **C1, S: document and test reporting from outside over the REST contract.** A manual recipe and a REST-only end-to-end test of the happy path and every refusal. No change to the server. This alone answers the issue for every sender that can set a header.
 2. **C2, M: the relay mode (§7).** Security-reviewer pass. Blocked by C1.
 3. **C3, M: server-side bounds on open runs per session and activity per run.** Two error codes, added through `schema-change`. Security-reviewer pass. It applies to every agent and is independent of C1 and C2.
 

@@ -3,6 +3,7 @@ package tui
 import (
 	"errors"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -76,6 +77,10 @@ func (m Model) panes(l layout) string {
 		return m.agentsPanes(l)
 	case modeRuns:
 		return m.runsPanes(l)
+	case modeDirectory:
+		return m.directoryPanes(l)
+	case modeCommunity:
+		return m.communityPanes(l)
 	case modeRun:
 		return paneBox("RUN #"+strconv.FormatInt(m.rd.runID, 10), true, m.runLines(l.width-2, l.contentH), l.width, l.contentH, "")
 	}
@@ -250,6 +255,8 @@ func (m Model) inputRow(width int) string {
 		return row.Render(prompt + " " + clipTail(sanitize(m.input), width-cellWidth(prompt)-3) + cursor)
 	case modeRun:
 		return row.Render(fitCells(m.runPrompt(width), width))
+	case modeDirectory:
+		return row.Render(m.directoryPrompt(width))
 	}
 	return row.Render("")
 }
@@ -273,6 +280,24 @@ func (m Model) statusHints() []hint {
 		hints = []hint{{"↑/↓", "runs", 4}, {"enter", "open", 1}, {"f", "filter", 3}, {"a", "agents", 2}, {"esc", "quit", 0}}
 	case modeInbox:
 		hints = []hint{{"↑/↓", "approvals", 3}, {"enter", "decide", 1}, {"tab", "agents", 2}, {"esc", "quit", 0}}
+	case modeDirectory:
+		if m.dir.creating {
+			hints = []hint{{"enter", "create", 1}, {"tab", "public/private", 2}, {"esc", "cancel", 0}}
+		} else {
+			hints = []hint{{"↑/↓", "channels", 4}, {"enter", "join", 1}, {"l", "leave", 2}, {"n", "new", 3}, {"esc", "back", 0}}
+			if m.canManageChannels() {
+				label := "all"
+				if m.dir.all {
+					label = "mine"
+				}
+				hints = slices.Insert(hints, 4, hint{"a", label, 2})
+			}
+		}
+	case modeCommunity:
+		hints = []hint{{"↑/↓", "people", 3}, {"r", "refresh", 2}, {"esc", "back", 0}}
+		if m.canManageMembers() {
+			hints = slices.Insert(hints, 1, hint{"v", "voice", 1})
+		}
 	default:
 		arrows := hint{"↑/↓", "channels", 3}
 		if m.focus == focusMessages {
@@ -303,12 +328,17 @@ func (m Model) statusRow(width int) string {
 			// already fill the line the name goes, never the hints. lipgloss's
 			// Width only pads, so without this clip a long name wraps and breaks
 			// the layout.
-			if room := width - cellWidth(status) - 3; room > 0 {
+			room := width - cellWidth(status) - 3
+			// The permissions take only the room the status and the hints
+			// leave: a message the user has to read is never cut for them.
+			name += m.permissionsFit(room - cellWidth(name))
+			if room > 0 {
 				status = clip(name, room) + " | " + status
 			}
 		}
 	} else {
 		if name := sanitize(m.userName); name != "" {
+			name += m.permissionsFit(width - cellWidth(statusKeys) - cellWidth(name) - 3 - cellWidth(status))
 			status = name + " | " + status
 		}
 		// One line whatever it holds, so the panes are never pushed up off
@@ -400,6 +430,12 @@ func (m Model) viewTabs() (string, int) {
 		}
 		parts = append(parts, statusStyle.Render(name))
 		plain = append(plain, name)
+	}
+	for md, label := range map[mode]string{modeDirectory: "[directory]", modeCommunity: "[community]"} {
+		if m.mode == md {
+			parts = append(parts, activeStyle.Render(label))
+			plain = append(plain, label)
+		}
 	}
 	if m.mode == modeRun {
 		run := "[run #" + strconv.FormatInt(m.rd.runID, 10) + "]"
@@ -589,4 +625,40 @@ func (m Model) people() []human {
 		return out[i].id < out[j].id
 	})
 	return out
+}
+
+// permissionsSummary is the caller's permissions from whoami, compactly, for
+// the status line: "" for a server that sends none (nothing extra is shown),
+// "perms: none" for one that says the caller holds none. A name the server
+// sent is shown as sent, made safe for the terminal.
+func (m Model) permissionsSummary() string {
+	if !m.permsKnown {
+		return ""
+	}
+	if len(m.permissions) == 0 {
+		return "perms: none"
+	}
+	names := make([]string, len(m.permissions))
+	for i, p := range m.permissions {
+		names[i] = sanitize(string(p))
+	}
+	return "perms: " + strings.Join(names, ", ")
+}
+
+// permissionsFit is " | " and the permissions summary, in full if it fits in
+// room cells, as a count if only that does, and "" when neither does. It is
+// what the status line adds after the name.
+func (m Model) permissionsFit(room int) string {
+	full := m.permissionsSummary()
+	if full == "" {
+		return ""
+	}
+	if cellWidth(full)+3 <= room {
+		return " | " + full
+	}
+	short := "perms: " + strconv.Itoa(len(m.permissions))
+	if cellWidth(short)+3 <= room {
+		return " | " + short
+	}
+	return ""
 }

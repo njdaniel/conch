@@ -132,6 +132,8 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 interface Server {
   sessionCreates: Json[];
   sessionStatus: () => number;
+  // The channels /v1/channels lists; two unless a test says otherwise.
+  channels: Json[];
   deletes: { id: number; keepalive: boolean | undefined }[];
   runList: Json[];
   runListUrls: string[];
@@ -170,6 +172,7 @@ function install() {
   server = {
     sessionCreates: [],
     sessionStatus: () => 201,
+    channels: [{ id: 7, name: 'general', created_at: at }, { id: 8, name: 'ops', created_at: at }],
     deletes: [],
     runList: [],
     runListUrls: [],
@@ -199,7 +202,7 @@ function install() {
       const path = url.pathname;
       const method = init?.method ?? 'GET';
       if (path === '/v1/whoami') return Promise.resolve(json(me));
-      if (path === '/v1/channels') return Promise.resolve(json({ channels: [{ id: 7, name: 'general', created_at: at }, { id: 8, name: 'ops', created_at: at }] }));
+      if (path === '/v1/channels') return Promise.resolve(json({ channels: server.channels }));
       if (path === '/v1/ws-tickets') return Promise.resolve(json({ ticket: ticketValue, expires_at: at }, 201));
       if (path === '/v1/sessions' && method === 'POST') {
         server.sessionCreates.push(JSON.parse(init?.body as string) as Json);
@@ -350,6 +353,27 @@ describe('the browser own session', () => {
   });
 });
 
+describe('with no channel open (issue #1032)', () => {
+  it('says No channel open, never Connecting', async () => {
+    server.channels = [];
+    window.sessionStorage.setItem('conch.web.token', secret);
+    render(<App origin={origin} />);
+    const members = await screen.findByRole('region', { name: 'Members list' });
+    await within(members).findByText('No channel open');
+    expect(within(members).queryByText('Connecting…')).toBeNull();
+  });
+
+  it('still says a session that could not be started', async () => {
+    server.channels = [];
+    server.sessionStatus = () => 429;
+    window.sessionStorage.setItem('conch.web.token', secret);
+    render(<App origin={origin} />);
+    const members = await screen.findByRole('region', { name: 'Members list' });
+    await within(members).findByText('Could not start a session');
+    expect(within(members).queryByText('No channel open')).toBeNull();
+  });
+});
+
 describe('the panel', () => {
   it('says Connecting until the first roster, then lists People and Agents joined with the members', async () => {
     const socket = await openApp();
@@ -459,6 +483,46 @@ async function openSettled(sessions: Json[] = [session(100, 2)]) {
 }
 
 describe('the member list the socket sends', () => {
+  it('applies a live grant and revocation to the badge, rename and member controls, and the standing line', async () => {
+    const socket = await openSettled();
+    const nav = () => within(screen.getByRole('navigation', { name: 'Channels' }));
+    const granted = members.members.map((member) => (member.principal_id === 2 ? { ...member, manages: true, can_decide: false, role: 'member' } : member));
+
+    socket.send(memberList(granted, 8));
+    await act(async () => {});
+    expect(nav().queryByText('manages')).toBeNull();
+    expect(panel().queryByRole('form', { name: 'Add person by name' })).toBeNull();
+
+    socket.send(memberList(granted));
+    await panel().findByRole('form', { name: 'Add person by name' });
+    expect(nav().getByText('manages')).toBeDefined();
+    expect(nav().getByRole('button', { name: 'Actions for general' })).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(screen.getByText('You manage #general.')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+    // Rename is open when the grant is revoked: the form goes with it, and
+    // focus lands on the channel's button, not nowhere.
+    fireEvent.click(nav().getByRole('button', { name: 'Actions for general' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Rename channel…' }));
+    expect(screen.getByRole('form', { name: 'Rename channel' })).toBeDefined();
+
+    socket.send(memberList(granted.map((member) => (member.principal_id === 2 ? { ...member, manages: false } : member))));
+    await waitFor(() => {
+      expect(panel().queryByRole('form', { name: 'Add person by name' })).toBeNull();
+    });
+    expect(nav().queryByText('manages')).toBeNull();
+    // Leave remains after the manager grant and its Rename item go (#1095).
+    expect(screen.queryByRole('form', { name: 'Rename channel' })).toBeNull();
+    expect(document.activeElement).toBe(nav().getByRole('button', { name: 'general' }));
+    fireEvent.click(nav().getByRole('button', { name: 'Actions for general' }));
+    expect(screen.getAllByRole('menuitem').map((item) => item.textContent)).toEqual(['Leave channel']);
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+    expect(panel().getByText('Only operators and this channel\'s managers add people.')).toBeDefined();
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(screen.getByText('You are a member.')).toBeDefined();
+  });
+
   it('drops a member who left, without reading the list again', async () => {
     const socket = await openSettled();
     const reads = server.membersReads;

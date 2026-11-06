@@ -7,6 +7,8 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import * as api from '../api';
 import type { ChannelDocV1, ChannelMemberV1 } from '../schema/channel';
 import type { CreateInterventionRequestV1 } from '../schema/intervention';
+import type { MessageV2 } from '../schema/message';
+import type { ReadStateV1 } from '../schema/readstate';
 import type { RunV1 } from '../schema/run';
 import { Feed, firstDelay, maxDelay, type FeedStatus } from '../state/feed';
 import { parseEventFrame } from './frames';
@@ -58,6 +60,10 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
   // Counts the sessions asked for; an answer for an older one is ended at once.
   const generation = useRef(0);
   const replaced = useRef(false);
+  // The generation of the creation in flight, if any, and the generations a
+  // credential's replacement made out of date (issue #1084).
+  const creating = useRef<number | null>(null);
+  const dropped = useRef(new Set<number>());
   // Set by release: the session was ended on purpose (sign-out), so the
   // server's closing of its socket is not a reason to make another.
   const released = useRef(false);
@@ -90,11 +96,16 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
   const start = useCallback(
     (why: 'ended' | 'unavailable') => {
       const mine = ++generation.current;
+      creating.current = mine;
       setSession({ phase: 'starting' });
       void api.createSession(sessionClient).then((result) => {
+        if (creating.current === mine) creating.current = null;
         if (mine !== generation.current) {
-          // Signed out, or replaced, while it was being made.
-          if (result.ok) void api.endSession(result.value.id);
+          // Signed out, or replaced, while it was being made. One made for a
+          // credential being replaced is left: the replacement ends it on the
+          // server, or it lapses, and asking to end it is a request that may
+          // be refused (issue #1084).
+          if (result.ok && !dropped.current.has(mine)) void api.endSession(result.value.id);
           return;
         }
         if (result.ok) {
@@ -161,6 +172,68 @@ export function useOwnSession(active: boolean, onUnauthorized: () => void): OwnS
     replaced.current = false;
   }, []);
 
+  // A write that may replace the page's credential (a password change) ends
+  // the session on the server if it does, and its events socket would be
+  // opened again for it and refused (issue #1084). So the session is let go
+  // of before the write is sent, which stops that socket; when the write
+  // replaced the credential, a new session is made with the new one, else the
+  // same session is taken up again.
+  useEffect(() => {
+    if (!active) return;
+    // The writes out now, whether any replaced the credential, the session
+    // let go of (null when none was held), and whether a creation in flight
+    // was let go of: the page resumes once every write has settled.
+    const outstanding = new Set<number>();
+    let rotated = false;
+    let paused: number | null = null;
+    let fresh = false;
+    let recovering = false;
+    const rotatedNow = () => {
+      held.current = null;
+      replaced.current = false;
+      start('unavailable');
+    };
+    return api.onCredentialReplacing((event) => {
+      if (event.phase === 'begin') {
+        if (outstanding.size === 0) {
+          paused = held.current;
+          fresh = creating.current !== null;
+          // A recovery waiting out its backoff (replace) is let go of too:
+          // its timer is cancelled, and it runs when the writes settle.
+          recovering = timer.current !== null;
+          if (timer.current !== null) window.clearTimeout(timer.current);
+          timer.current = null;
+          rotated = false;
+          dropped.current.add(generation.current);
+          generation.current++;
+          setSession({ phase: 'starting' });
+        }
+        outstanding.add(event.id);
+        return;
+      }
+      if (event.late) {
+        // Answered after the wait with a new credential: what was taken up
+        // again belongs to the old one.
+        if (outstanding.size > 0) rotated = true;
+        else rotatedNow();
+        return;
+      }
+      if (!outstanding.delete(event.id)) return;
+      if (event.rotated) rotated = true;
+      if (outstanding.size > 0) return;
+      const id = paused;
+      const again = fresh;
+      const recover = recovering;
+      paused = null;
+      fresh = false;
+      recovering = false;
+      if (rotated) rotatedNow();
+      else if (id !== null) setSession({ phase: 'ready', id });
+      else if (recover) start('ended');
+      else if (again) start('unavailable');
+    });
+  }, [active, start]);
+
   return { session, release, replace, healthy };
 }
 
@@ -168,6 +241,10 @@ export interface Agents {
   readonly state: AgentsState;
   readonly session: OwnSession;
   readonly members: readonly ChannelMemberV1[];
+  // The channel whose members `members` is the answer for, or null before it
+  // comes: an empty list is only "nobody" once this is the open channel's id.
+  readonly membersFor: number | null;
+  readonly refreshMembers: () => void;
   readonly release: () => Promise<void>;
   readonly loadRuns: (session: number) => void;
   readonly openRun: (runId: number, sessionId: number, known: RunV1 | null) => void;
@@ -206,13 +283,22 @@ export function useAgents({
   channel,
   channelId,
   nameOf,
+  viewer,
   onUnauthorized,
   onChannel,
+  onManages,
   onMissing,
+  onReadState,
+  onMessage,
+  onMessageEdited,
+  onChannelsChanged,
+  onPermissionsChanged,
+  onDirectoryChanged,
 }: {
   readonly signedIn: boolean;
   readonly channel: string | null;
   readonly channelId: number | null;
+  readonly viewer: number;
   // The channel's name now, by id: what a reconnect and a read name, so a
   // channel renamed while open (issue #728) keeps its socket.
   readonly nameOf: (channelId: number) => string | null;
@@ -220,12 +306,29 @@ export function useAgents({
   // The channel as it now is, from the events socket (conch.channel.v1): it
   // was renamed.
   readonly onChannel: (channel: ChannelDocV1) => void;
+  // The accepted member list's word on the caller's grant in this channel.
+  readonly onManages: (channelId: number, manages: boolean) => void;
   // A read for the channel answered channel_not_found: it may have been
   // renamed under this page.
   readonly onMissing: (channelId: number) => void;
+  readonly onReadState: (state: ReadStateV1) => void;
+  readonly onMessage: (message: MessageV2) => void;
+  // A message edited (issue #845, conch.message_edited.v1): an update of one
+  // the page may hold, never a new one.
+  readonly onMessageEdited?: (message: MessageV2) => void;
+  // The person's channel list may have changed (issue #1027): the frame, and
+  // each reconnect of the socket, which may have missed one.
+  readonly onChannelsChanged?: () => void;
+  // The permissions may have changed (conch.permissions_changed.v1), or the
+  // socket was down and they may have meanwhile.
+  readonly onPermissionsChanged?: () => void;
+  // The directory answer may have changed (conch.directory_changed.v1, issue
+  // #993): the community is read again and replaced.
+  readonly onDirectoryChanged?: () => void;
 }): Agents {
   const [state, dispatch] = useReducer(agentsReducer, initialAgents);
   const [members, setMembers] = useState<readonly ChannelMemberV1[]>([]);
+  const [membersFor, setMembersFor] = useState<number | null>(null);
   const own = useOwnSession(signedIn, onUnauthorized);
   const sessionId = own.session.phase === 'ready' ? own.session.id : null;
   const { replace, healthy, release } = own;
@@ -253,6 +356,7 @@ export function useAgents({
   const membersSent = useRef(0);
   useEffect(() => {
     setMembers([]);
+    setMembersFor(null);
   }, [channelId]);
   useEffect(() => {
     if (!open || channelId === null) return;
@@ -264,14 +368,18 @@ export function useAgents({
     void api.listMembers(name).then((result) => {
       if (!live) return;
       if (result.ok) {
-        if (asked === membersSent.current) setMembers(result.value);
+        if (asked === membersSent.current) {
+          setMembers(result.value);
+          setMembersFor(id);
+          onManages(id, result.value.some((member) => member.principal_id === viewer && member.manages === true));
+        }
       } else if (result.failure === 'unauthorized') onUnauthorized();
       else if (result.code === api.channelNotFound) onMissing(id);
     });
     return () => {
       live = false;
     };
-  }, [open, channelId, nameOf, membersAttempt, onUnauthorized, onMissing]);
+  }, [open, channelId, nameOf, viewer, membersAttempt, onUnauthorized, onManages, onMissing]);
 
   const heldIds = members.map((m) => m.principal_id).join(',');
   const unknownKey = (() => {
@@ -313,11 +421,24 @@ export function useAgents({
     let reason = '';
     let denials = firstDelay;
     let retry: unknown = null;
+    // Set when the socket goes down, so that its next open catches up.
+    let interrupted = false;
 
     function onStatus(status: FeedStatus) {
       if (!live) return;
       switch (status) {
+        case 'open':
+          if (interrupted) {
+            interrupted = false;
+            onChannelsChanged?.();
+          }
+          // Every subscription that is established reads the permissions
+          // again, the first of a feed too: a feed made after a channel was
+          // selected has missed whatever changed before it, and no event says so.
+          onPermissionsChanged?.();
+          break;
         case 'waiting':
+          interrupted = true;
           dispatch({ type: 'down' });
           break;
         case 'unauthorized':
@@ -325,6 +446,7 @@ export function useAgents({
           onUnauthorized();
           break;
         case 'denied':
+          interrupted = true;
           dispatch({ type: 'down' });
           if (reason === sessionEnded) {
             replace();
@@ -372,6 +494,8 @@ export function useAgents({
             if (frame.members.channel_id !== id) return;
             membersSent.current++;
             setMembers(frame.members.members);
+            setMembersFor(id);
+            onManages(id, frame.members.members.some((member) => member.principal_id === viewer && member.manages === true));
             break;
           case 'run':
             dispatch({ type: 'run', run: frame.run });
@@ -387,6 +511,24 @@ export function useAgents({
             if (frame.channel.channel_id !== id) return;
             onChannel(frame.channel);
             break;
+          case 'readState':
+            onReadState(frame.state);
+            break;
+          case 'message':
+            onMessage(frame.message);
+            break;
+          case 'messageEdited':
+            onMessageEdited?.(frame.message);
+            break;
+          case 'channelsChanged':
+            onChannelsChanged?.();
+            break;
+          case 'permissionsChanged':
+            onPermissionsChanged?.();
+            break;
+          case 'directoryChanged':
+            onDirectoryChanged?.();
+            break;
         }
       },
       onStatus,
@@ -397,7 +539,7 @@ export function useAgents({
       if (retry !== null) realClock.clearTimeout(retry);
       feed.stop();
     };
-  }, [open, channelId, nameOf, sessionId, onUnauthorized, onChannel, replace, healthy]);
+  }, [open, channelId, nameOf, viewer, sessionId, onUnauthorized, onChannel, onManages, onReadState, onMessage, onMessageEdited, onChannelsChanged, onPermissionsChanged, onDirectoryChanged, replace, healthy]);
 
   // The members line is read again each time the socket comes back.
   useEffect(() => {
@@ -550,5 +692,9 @@ export function useAgents({
     [onUnauthorized, readRun],
   );
 
-  return { state, session: own.session, members, release, loadRuns, openRun, closeRun, moreRuns, setRunFilter, ask };
+  const refreshMembers = useCallback(() => {
+    setMembersAttempt((n) => n + 1);
+  }, []);
+
+  return { state, session: own.session, members, membersFor, refreshMembers, release, loadRuns, openRun, closeRun, moreRuns, setRunFilter, ask };
 }

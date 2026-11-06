@@ -31,6 +31,11 @@ const (
 // learns nothing about a file that is not theirs. The post stores nothing.
 var ErrFileAttachment = errors.New("store: invalid file attachment")
 
+// ErrReservedPayload is returned by the message inserts when a message's
+// payload schema is one only the server may author (schema.ReservedMessagePayload).
+// The check sits in the insert, so no post route can forget it. Nothing is stored.
+var ErrReservedPayload = errors.New("store: reserved payload schema")
+
 // File is an uploaded file's metadata. The bytes are not in the database.
 type File struct {
 	ID         int64
@@ -81,6 +86,10 @@ func (s *Store) InsertFile(ctx context.Context, n NewFile) (File, error) {
 		}
 		if !member {
 			return ErrNotChannelMember
+		}
+		// The archived guard of an upload (issue #844).
+		if err := channelNotArchivedTx(ctx, tx, n.ChannelID); err != nil {
+			return err
 		}
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO files (channel_id, uploader_id, filename, media_type, size, sha256, created_at)

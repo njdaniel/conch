@@ -92,6 +92,9 @@ type ApprovalParams struct {
 	GraceDeadline time.Time
 	Quorum        int
 	Escalation    *schema.EscalationTarget
+	// AdminAction, set only by the admin door (issue #1330), makes this a
+	// gated admin action's approval: see AdminActionRequest.
+	AdminAction *AdminActionRequest
 }
 
 // execer is the subset of *sql.Conn / *sql.DB used inside a transaction body.
@@ -227,6 +230,27 @@ func (s *Store) CreateApproval(ctx context.Context, p ApprovalParams) (Approval,
 	}
 
 	err = s.withImmediateTx(ctx, func(tx execer) error {
+		// An archived channel takes no new approvals (issue #1296). The check
+		// shares the insert's transaction, so an archive cannot slip in
+		// between. Approvals already open there are untouched: they can still
+		// be decided, escalate and expire.
+		if err := channelNotArchivedTx(ctx, tx, p.ChannelID); err != nil {
+			return err
+		}
+		// The admin door's payload is the door's alone (F1 of #1328's
+		// review): an approval carrying it without the door's request is
+		// refused here, whatever route asked.
+		if (p.Payload != nil && p.Payload.Schema == schema.AdminActionV1Name) != (p.AdminAction != nil) {
+			return ErrAdminPayloadReserved
+		}
+		if p.AdminAction != nil && p.AdminAction.Action.AgentID != p.RequesterID {
+			return ErrAdminPayloadReserved
+		}
+		if p.AdminAction != nil {
+			if err := checkAdminActionBoundsTx(ctx, tx, p.AdminAction); err != nil {
+				return err
+			}
+		}
 		res, err := tx.ExecContext(ctx,
 			`INSERT INTO approvals (requester_id, channel_id, title, body,
 			   payload_schema, payload_json, options_json,
@@ -247,10 +271,20 @@ func (s *Store) CreateApproval(ctx context.Context, p ApprovalParams) (Approval,
 			return fmt.Errorf("store: insert approval: %w", err)
 		}
 		a.ID = id
-		return appendAuditEventTx(ctx, tx,
+		if err := appendAuditEventTx(ctx, tx,
 			principalActor(p.RequesterID), AuditApprovalCreated, approvalSubject(id),
 			fmt.Sprintf("title=%q deadline=%s quorum=%d", p.Title, schema.NewTimestamp(a.Deadline).Time().Format(time.RFC3339), p.Quorum),
-			now)
+			now); err != nil {
+			return err
+		}
+		// The door's row, in the approval's own transaction: it is how the
+		// run proves this approval came from the door (#1330, F1 of #1328's
+		// review), and admin_action_requested follows approval_created in
+		// the trail (ai-administrators §3.5.1).
+		if p.AdminAction != nil {
+			return insertAdminActionTx(ctx, tx, id, p.AdminAction, now)
+		}
+		return nil
 	})
 	if err != nil {
 		return Approval{}, err
@@ -413,10 +447,13 @@ func (s *Store) castDecision(ctx context.Context, approvalID, principalID int64,
 			// a guest, whatever its membership row says (issue #706, review
 			// F1): the guest flag is read here, inside the deciding
 			// transaction, so no membership written by any path can let a
-			// guest decide.
+			// guest decide. Nor an agent (issue #1326, ai-administrators
+			// §3.5.4 wall 2): deciding is a human act, whatever an agent's
+			// membership row or grant says, so no AI administrator can
+			// decide the approval its own gated action raised.
 			var can int
 			err := tx.QueryRowContext(ctx,
-				`SELECT m.can_decide AND p.disabled_at IS NULL AND NOT `+activeGuestSQL+` FROM channel_members m
+				`SELECT m.can_decide AND p.kind = 'human' AND p.disabled_at IS NULL AND NOT `+activeGuestSQL+` FROM channel_members m
 				 JOIN principals p ON p.id = m.principal_id
 				 WHERE m.channel_id = ? AND m.principal_id = ?`,
 				a.ChannelID, principalID).Scan(&can)
@@ -446,14 +483,14 @@ func (s *Store) castDecision(ctx context.Context, approvalID, principalID int64,
 
 		// Quorum: concurring decisions select the same option
 		// (approval-object.md §1). For members, only the decisions of those
-		// who hold the right now, are not disabled and are not guests, count
-		// (issues #453, #706).
+		// who hold the right now, are humans, are not disabled and are not
+		// guests, count (issues #453, #706, #1326).
 		count := "SELECT COUNT(*) FROM approval_decisions WHERE approval_id = ? AND option_id = ?"
 		args := []any{approvalID, optionID}
 		if members {
 			count = `SELECT COUNT(*) FROM approval_decisions d
 			 JOIN channel_members m ON m.channel_id = ? AND m.principal_id = d.principal_id AND m.can_decide = 1
-			 JOIN principals p ON p.id = d.principal_id AND p.disabled_at IS NULL AND NOT ` + activeGuestSQL + `
+			 JOIN principals p ON p.id = d.principal_id AND p.kind = 'human' AND p.disabled_at IS NULL AND NOT ` + activeGuestSQL + `
 			 WHERE d.approval_id = ? AND d.option_id = ?`
 			args = []any{a.ChannelID, approvalID, optionID}
 		}
