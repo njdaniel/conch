@@ -25,6 +25,7 @@ export const BRIDGE_FUNCTIONS = [
   'joinAsGuest',
   'createAccount',
   'signOut',
+  'replaceCredential',
   'uploadFile',
   'downloadFile',
   'saveFile',
