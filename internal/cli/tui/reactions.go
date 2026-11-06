@@ -179,7 +179,9 @@ func (m Model) reactionsHydrated(msg reactionsLoaded) Model {
 			}
 		} else if current[id] == msg.revisions[id] {
 			if summary, ok := byID[id]; ok {
-				// Keep the timestamp watermark, but an omission has no timestamp
+				// Only an id the reader cannot see is omitted (a visible one with
+				// no reactions comes back as a timestamped empty summary). Keep
+				// the timestamp watermark, but an omission has no timestamp
 				// of its own. Non-batch frames need a confirming batch first.
 				summary.Reactions = nil
 				byID[id] = summary
