@@ -1215,6 +1215,23 @@ func (s *Store) ListChannelsForPrincipal(ctx context.Context, principalID int64)
 	return channels, nil
 }
 
+// CheckChannelModerator re-reads the acting principal's moderation standing in
+// channelID under the write lock and returns ErrManagerRefused (or
+// ErrNotFound for an unknown channel) when it has none: an owner, an operator
+// holding manage_channels, or a member holding manages passes. A zero actor
+// (authentication off) passes. It changes nothing; it is for a moderation that
+// does its work outside the store, so that a grant revoked after the route
+// guard is met before the work starts (docs/design/moderation.md §3.1).
+func (s *Store) CheckChannelModerator(ctx context.Context, channelID, actorID int64) error {
+	return s.withImmediateTx(ctx, func(tx execer) error {
+		if err := checkChannelExistsTx(ctx, tx, channelID); err != nil {
+			return err
+		}
+		_, err := memberActorStandingTx(ctx, tx, channelID, actorID)
+		return err
+	})
+}
+
 // CheckManagerAddTarget applies the manager-add bound without changing the
 // membership. PutChannelMember checks it again under its write lock.
 func (s *Store) CheckManagerAddTarget(ctx context.Context, channelID, managerID, targetID int64) error {

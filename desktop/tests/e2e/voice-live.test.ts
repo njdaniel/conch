@@ -204,6 +204,13 @@ class Owner {
     };
     this.service = new VoiceService({
       supervisor: this.sup,
+      // No one-shot helper runs in this test (#1378): devices and saves are
+      // refused, and teardown has nothing to cancel.
+      oneShot: {
+        devices: () => Promise.resolve({ ok: false, error: 'unsupported' } as const),
+        save: () => Promise.resolve({ ok: false, error: 'unsupported' } as const),
+        cancel: () => Promise.resolve(),
+      },
       identity: () =>
         Promise.resolve({
           profileId: this.profileId,

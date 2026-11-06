@@ -20,6 +20,7 @@ import { acquire, prepareRoot } from './instance.ts';
 import { Client } from './api/client.ts';
 import { Session } from './api/session.ts';
 import { deliverVoice } from './voice/events.ts';
+import { OneShot } from './voice/oneshot.ts';
 import { VoiceService } from './voice/service.ts';
 import { Supervisor } from './voice/supervisor.ts';
 import { createNodeConnect } from './api/socket.ts';
@@ -202,6 +203,8 @@ export async function start(): Promise<void> {
   // media hook leaves and stops the helper before identity changes.
   const voice = new VoiceService({
     supervisor: new Supervisor({ resources: process.resourcesPath, env: process.env, log }),
+    // The device list and the saves run the same trusted helper, with no token.
+    oneShot: new OneShot({ resources: process.resourcesPath, env: process.env, log }),
     identity: async () => {
       const activation = profiles.active;
       const id = activation?.profileId ?? null;

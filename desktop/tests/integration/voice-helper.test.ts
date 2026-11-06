@@ -18,6 +18,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 import { VOICE_CONTROL_OWNER_LOSS_EXIT_MS, VOICE_CONTROL_STOP_KILL_AFTER_MS } from '../../../web/src/schema/generated.ts';
 import { HELPER_NAME, defaultSpawn } from '../../main/voice/spawn.ts';
+import { OneShot } from '../../main/voice/oneshot.ts';
 import { CEILING_ARGS, VoiceService } from '../../main/voice/service.ts';
 import { Supervisor, type VoiceState } from '../../main/voice/supervisor.ts';
 import { FAKE_TOKEN, readFixture, scratch, until, type Scratch } from '../unit/voice-support.ts';
@@ -131,6 +132,7 @@ describe.runIf(have)('the supervisor with the real conch-voice', () => {
   it('the service joins with --transmit-ceiling-secs 30 and the real helper accepts it', async () => {
     const service = new VoiceService({
       supervisor: sup,
+      oneShot: new OneShot({ resources: s.resources, env: { HOME: s.root, XDG_RUNTIME_DIR: s.run }, log: () => undefined }),
       identity: () =>
         Promise.resolve({
           profileId: 'it1',

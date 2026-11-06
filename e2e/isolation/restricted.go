@@ -434,6 +434,10 @@ func (w *world) restrictedPhase() (int, error) {
 		// manage_channels and is not in A's channel.
 		{"DELETE /v1/channels/{channel}/voice/camera?principal=", http.MethodDelete,
 			"/v1/channels/" + aChan + "/voice/camera?principal=" + itoa(w.a.people[0].id), "/v1/channels/" + ghost + "/voice/camera?principal=" + itoa(w.a.people[0].id)},
+		// Removing an A member from voice only (issue #850, moderation.md
+		// §9 case 1): the same uniform 404.
+		{"DELETE /v1/channels/{channel}/voice/participants/{principal_id}", http.MethodDelete,
+			"/v1/channels/" + aChan + "/voice/participants/" + itoa(w.a.people[0].id), "/v1/channels/" + ghost + "/voice/participants/" + itoa(w.a.people[0].id)},
 	} {
 		var body any
 		if c.method == http.MethodPost || c.method == http.MethodPut {

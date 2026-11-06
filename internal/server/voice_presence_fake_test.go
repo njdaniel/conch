@@ -132,6 +132,9 @@ type scriptedLiveKit struct {
 	// removeStatus is the status of RemoveParticipant; 0 means 200, or 404
 	// not_found when the identity is not in the room, as LiveKit answers.
 	removeStatus int
+	// removeFail names rooms whose RemoveParticipant fails while others
+	// answer (a partial-room failure).
+	removeFail map[string]bool
 	// listFail names rooms whose ListParticipants fails while others answer.
 	listFail map[string]bool
 	// deleteStatus is the status of DeleteRoom; 0 means 200, or 404 not_found
@@ -319,6 +322,9 @@ func (f *scriptedLiveKit) serve(w http.ResponseWriter, r *http.Request) {
 	case "RemoveParticipant":
 		f.record(method, req.Room, req.Identity)
 		status, keep, hook := f.removeStatus, f.keepAfterRemove, f.onRemove
+		if f.removeFail[req.Room] {
+			status = http.StatusInternalServerError
+		}
 		f.mu.Unlock()
 		if hook != nil {
 			hook(req.Room, req.Identity)

@@ -16,6 +16,12 @@ function fake(initial: NativeVoiceView = v(1)) {
     voiceSetDeafen: vi.fn(() => Promise.resolve({ ok: false, error: 'busy' } as const)),
     voiceSetDevices: vi.fn(() => Promise.resolve({ ok: true } as const)),
     voiceSetTalkMode: vi.fn(() => Promise.resolve({ ok: true } as const)),
+    // The one-shot helper runs (#1378); the store does not use them.
+    voiceDevices: vi.fn(() => Promise.resolve({ ok: false, error: 'unsupported' } as const)),
+    voiceSaveDevice: vi.fn(() => Promise.resolve({ ok: false, error: 'unsupported' } as const)),
+    // Talk-key setup (#1381).
+    voiceKeyDevices: vi.fn(() => Promise.resolve({ ok: false, error: 'unsupported' } as const)),
+    voiceSaveTalkBinding: vi.fn(() => Promise.resolve({ ok: false, error: 'unsupported' } as const)),
     onVoiceState: vi.fn((l: (view: NativeVoiceView) => void) => {
       listener = l;
       return unsubscribe;
