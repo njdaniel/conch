@@ -29,6 +29,7 @@ func rewindToBeforeCommunity(t *testing.T, path string) {
 	}
 	defer func() { _ = db.Close() }()
 	for _, stmt := range []string{
+		`CREATE TABLE open_channels (channel_id INTEGER PRIMARY KEY REFERENCES channels (id), added_by INTEGER REFERENCES principals (id), added_at INTEGER NOT NULL)`, // migration 46 (issue #998)
 		"DROP TABLE message_removals",                         // migration 45 (issue #849); its triggers go with it
 		"DROP TABLE channel_bans",                             // migration 45 (issue #849)
 		"DROP TABLE admin_actions",                            // migration 43 (issue #1326)
@@ -153,7 +154,6 @@ func newCommunityAlpha(t *testing.T) communityAlpha {
 			a.general.ID, a.alice.ID, a.belgium.ID, a.bob.ID),
 		"UPDATE principals SET voice_allowed = 0, may_invite = 0 WHERE kind = 'human'",
 		fmt.Sprintf("UPDATE principals SET disabled_at = 1 WHERE id = %d", a.carol.ID),
-		fmt.Sprintf("INSERT INTO open_channels (channel_id, added_by, added_at) VALUES (%d, %d, 0)", a.general.ID, a.owner.ID),
 		`INSERT INTO server_settings (key, value, updated_at) VALUES ('guests_enabled', 'true', 0), ('open_joining', 'both', 0), ('join_voice', 'false', 0)
 			ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
 	} {
@@ -165,6 +165,16 @@ func newCommunityAlpha(t *testing.T) communityAlpha {
 		t.Fatal(err)
 	}
 	rewindToBeforeCommunity(t, path)
+	// open_channels is gone at the current version (migration 46); the rewind
+	// recreated it empty, so the alpha's list goes in now.
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(fmt.Sprintf("INSERT INTO open_channels (channel_id, added_by, added_at) VALUES (%d, %d, 0)", a.general.ID, a.owner.ID)); err != nil {
+		t.Fatalf("seed open_channels: %v", err)
+	}
 	return a
 }
 

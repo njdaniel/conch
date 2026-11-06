@@ -48,8 +48,8 @@ func TestModerationMigrationFromSchema44(t *testing.T) {
 	readable := func(pass int, banned bool) {
 		t.Helper()
 		var version int
-		if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != len(migrations) || version != moderationMigration {
-			t.Errorf("pass %d: user_version = %d, %v; want %d", pass, version, err, moderationMigration)
+		if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != len(migrations) || version < moderationMigration {
+			t.Errorf("pass %d: user_version = %d, %v; want %d (the newest)", pass, version, err, len(migrations))
 		}
 		// The member sees everything, as before.
 		got, err := s.ListVisibleMessages(ctx, 1, Reader{PrincipalID: 1, Scoped: true}, 0, 10)
