@@ -20,20 +20,24 @@ by default on a new server.
 The headline is push-to-talk that no longer cuts off the first word: both
 voice clients now send from the moment the key goes down, where a press used
 to wait a round trip for conchd (134 to 174 ms of speech lost with reports
-held back 150 ms; now 0 to 24 ms). It also brings the first server-side piece
-of moderation: the owner, an operator with `manage_channels` or a channel's
-manager can remove one participant from voice only, without touching their
-membership. The Linux
-desktop client's native voice code is also merged, but that client is in
+held back 150 ms; now 0 to 24 ms). It also brings the first server-side moderation: the
+owner, an operator with `manage_channels` or a channel's manager can remove
+someone from voice only, ban them from a channel, or remove a message, which
+leaves a tombstone. CLI and browser controls for these come later (M6). The
+Linux desktop client's native voice code is also merged, but that client is in
 development and not yet supported: see the desktop entry under Added. Upgrade
 with `conch-server upgrade v0.1.0-alpha.16` from your workstation, or with
 `conch-upgrade.sh` on the droplet (docs/deploy.md step 11).
 
 **Upgrade notes.**
 
-- There are two migrations since `alpha.15`: 44 (the camera default, see
-  Changed) and 45 (`channel_bans` and `message_removals`, with triggers that
-  refuse any update or delete of a removal; no existing row is touched). A
+- There are three migrations since `alpha.15`: 44 (the camera default, see
+  Changed), 45 (`channel_bans` and `message_removals`, with triggers that
+  refuse any update or delete of a removal; no existing row is touched) and
+  46, which drops the `open_channels` table (#998, PR #1424). Nothing has
+  read it since `alpha.10`, where migration 40 copied it into each channel's
+  default mark; the joining settings' `open_channels` field reads that mark
+  and is unchanged. A
   binary from before them refuses a database that has them, so rolling back
   to `alpha.15` restores the pre-upgrade backup (docs/deploy.md step 11; the
   rollback script does it), and what was written since is forgotten.
@@ -52,8 +56,9 @@ with `conch-server upgrade v0.1.0-alpha.16` from your workstation, or with
   existing one** (#1361). Migration 44 stores the camera off on an existing
   server, so it matches no preset until an owner applies one; the commands
   are in the Changed entry.
-- Nothing else changes on upgrade: the voice-only removal route is new, and
-  the moderation shapes have no routes yet.
+- Nothing else changes on upgrade: the voice-only removal, ban and message
+  removal routes are new. One approval rule tightens: a banned approver
+  cannot decide an approval or count toward its quorum (#1419).
 
 ### Added
 
@@ -65,9 +70,8 @@ with `conch-server upgrade v0.1.0-alpha.16` from your workstation, or with
   `MessageRemovedBody`. `MessageV2` gains an optional `removed`, which
   carries the body with no payload and no `edited_at`; `MessageV1FromV2`
   drops it. The MCP message output gains `removed`; no tool definition
-  changes, and the TypeScript types are regenerated. **There are no routes
-  and no behaviour yet** for bans or message removal: those are later
-  slices.
+  changes, and the TypeScript types are regenerated. M3 and M4 below add
+  the routes.
 - **Moderation M2: remove a participant from voice only** (#850, PR #1414).
   `DELETE /v1/channels/{channel}/voice/participants/{principal_id}` closes
   the target's presence sockets for the channel, ends their presence,
@@ -82,6 +86,30 @@ with `conch-server upgrade v0.1.0-alpha.16` from your workstation, or with
   Audit: `voice_participant_kicked` once per authorized request, and
   `voice_participant_removed reason=moderator_kick` for a real disconnection.
   CLI and TUI parity is not part of this change.
+- **Moderation M3: channel bans** (#851, PR #1419; approval-path).
+  `GET`, `PUT` and `DELETE /v1/channels/{channel}/bans[/{principal_id}]`. A
+  ban removes the member and their net rows in one transaction, and every
+  way in (adding a member, guest admission, self-join) refuses a banned
+  principal; lifting a ban restores nothing. Owners and operators ban anyone,
+  members or not, ahead of time included, and the owner is protected from
+  operators. A channel's manager bans only current human members who are not
+  operators or approvers, and lifts only their own bans. A non-member, or the
+  manager of another channel, gets the unknown-channel 404. Bans work in an
+  archived channel. A banned approver cannot decide or count toward quorum.
+  AI administrators gain `ban_channel_member` and `unban_channel_member`
+  (each waits for an approval) and `list_channel_bans`, under
+  `manage_channels`: three additive `AdminAction` values, no version bump.
+- **Moderation M4: message removal** (#852, PR #1425; approval-path).
+  `DELETE /v2/channels/{channel}/messages/{message_id}`, for the same people
+  as M2. The message stays as a tombstone: its body, payload and edit time
+  are blanked in every read, `MessageV2.removed` is set, and v0 and v1
+  clients get a fixed body. Search leaves it out, its files are 404 (for the
+  uploader too), reactions, edits and revisions are refused, and a removed
+  thread root takes no new reply (REST and MCP). Live sockets get the
+  tombstone and the events socket `MessageRemovedV1`, with no notification;
+  a queued notification for it is dropped. Audit: one `message_removed` row,
+  IDs only. Removing an approval card leaves the approval pending and
+  decidable.
 - **`conch-voice managed --transmit-ceiling-secs N`** (#1372, PR #1397),
   whole seconds from 1 to 600. It limits each push-to-talk press to the
   smaller of `audio.max_transmit_secs` and N; open-mode openings keep the
