@@ -67,6 +67,8 @@ class Fake {
     },
     setDevices: () => Promise.resolve({ ok: true }),
     setTalkMode: () => Promise.resolve({ ok: true }),
+    devices: () => Promise.resolve({ ok: false, error: 'unsupported' }),
+    saveDevice: () => Promise.resolve({ ok: true }),
   };
   set(view: NativeVoiceView) {
     this.view = view;
@@ -124,7 +126,8 @@ describe('NativeVoicePanel', () => {
     expect(room).not.toHaveBeenCalled();
     expect(gum).not.toHaveBeenCalled();
     expect(devices).not.toHaveBeenCalled();
-    expect(screen.queryByText('Voice options')).toBeNull();
+    // Voice options is the helper's list, closed until opened.
+    expect(screen.getByRole('button', { name: 'Voice options' }).getAttribute('aria-expanded')).toBe('false');
   });
 
   it('Join names the channel on screen and sends the last mute and deafen', async () => {
