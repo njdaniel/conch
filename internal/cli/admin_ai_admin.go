@@ -205,7 +205,7 @@ func aiAdminRequest(o aiAdminOpts, name string, channelID int64) (schema.PutAgen
 
 // shellTraceOn reports whether the caller's shell exports a trace option that
 // would echo what a command is given. It can only see an exported SHELLOPTS;
-// the README says the rest is the caller's.
+// the manual says the rest is the caller's.
 func shellTraceOn() bool {
 	for _, opt := range strings.Split(os.Getenv("SHELLOPTS"), ":") {
 		if opt == "xtrace" {

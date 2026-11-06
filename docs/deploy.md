@@ -6,7 +6,7 @@ One droplet runs three things:
 
 - `conchd`, one instance per systemd unit `conchd@<name>`, each as its own user, on a loopback port;
 - Caddy, which holds the public names, gets and renews their certificates, and proxies to `conchd` and to LiveKit's signalling port;
-- LiveKit, in Docker from the digest-pinned image the README uses, for the audio.
+- LiveKit, in Docker from the digest-pinned image the manual uses, for the audio.
 
 Everything is parameterised by an **instance name** (`alpha` below) and a **domain** (`example.com` below, a placeholder: replace it everywhere). A second server is one command, [`conch-server new`](#a-second-instance), not a new design, and [`conch-server rm`](#removing-a-server) removes it.
 
@@ -157,9 +157,9 @@ Release assets are named `conchd_<tag>_<os>_<arch>`, with a `checksums.txt`, and
 
 ## 4. LiveKit
 
-LiveKit runs in Docker, from the image the README pins by digest (`livekit/livekit-server:v1.13.7@sha256:...`). The version is named in `ops/deploy/livekit.service` and in the README: change both together, after reading the release notes.
+LiveKit runs in Docker, from the image the manual pins by digest (`livekit/livekit-server:v1.13.7@sha256:...`). The version is named in `ops/deploy/livekit.service` and in the manual: change both together, after reading the release notes.
 
-Each instance has its own LiveKit key pair ([README](../README.md#run-livekit-beside-conchd): one key per server). Keys live in one file, one `<key>: <secret>` line per instance, mode 0600:
+Each instance has its own LiveKit key pair ([manual](manual.md#run-livekit-beside-conchd): one key per server). Keys live in one file, one `<key>: <secret>` line per instance, mode 0600:
 
 ```sh
 umask 077
@@ -751,7 +751,7 @@ An operator never reads a channel it isn't a member of: membership is the bounda
   - **The audit export.** The trail names every member and every private channel. That is why `read_audit_log` is off for operators by default and needs a recent sign-in from anyone but an owner. Turning it on for operators shows them everything.
   - **A problem report's own text.** The server stores a report as written and only attaches a `redact` list of names at read time. The diagnostics it adds carry no names. The three free-text answers are the reporter's own words and may name a channel or a person, and every operator can read reports.
   - **The counts**, which say that channels exist but not which. This one gives no name.
-- Whoever has the host can read the database. See [Trust and scope](../README.md#trust-and-scope).
+- Whoever has the host can read the database. See [Trust and scope](manual.md#trust-and-scope).
 
 ### Taking `act_as_members` away
 
@@ -770,7 +770,7 @@ Revoke what you don't want. The list is only in the answer to that change; it is
 
 Cameras use the droplet's bandwidth and CPU, and **how much a droplet carries is not yet measured**. Nothing here is a capacity.
 
-What there is is the browser's presets, which are the SDK's figures and not measurements ([README, Camera](../README.md#camera)):
+What there is is the browser's presets, which are the SDK's figures and not measurements ([manual, Camera](manual.md#camera)):
 
 - A computer sends a top layer of at most 1.2 Mbps, with smaller layers of 450 kbps and 150 kbps; a phone sends at most 450 kbps, with one smaller layer of 150 kbps.
 - For scale: in a one-to-one call each side sends at most about 1.8 Mbps across all its layers and receives one layer. In a call with 9 cameras each person receives 8 small layers, and LiveKit sends roughly 9 × 8 streams.
