@@ -723,7 +723,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reactionsLoaded:
 		return m.reactionsHydrated(msg), nil
 	case reactionWritten:
-		return m.reactionDone(msg), nil
+		return m.reactionDone(msg)
 	case reactorsListed:
 		return m.reactorsDone(msg), nil
 	case eventsRunReceived:

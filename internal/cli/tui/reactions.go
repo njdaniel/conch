@@ -26,6 +26,7 @@ type reactionModel struct {
 	api         reactionAPI
 	messages    map[string]map[int64]schema.ReactionSummaryV1
 	revisions   map[string]map[int64]uint64
+	unversioned map[string]map[int64]bool
 	pending     map[string]map[int64]schema.MessageV2
 	unsupported map[string]bool
 	text        bool
@@ -71,6 +72,7 @@ func newReactionModel(api API) reactionModel {
 	r := reactionModel{
 		messages:    make(map[string]map[int64]schema.ReactionSummaryV1),
 		revisions:   make(map[string]map[int64]uint64),
+		unversioned: make(map[string]map[int64]bool),
 		pending:     make(map[string]map[int64]schema.MessageV2),
 		unsupported: make(map[string]bool),
 	}
@@ -98,12 +100,10 @@ func (m Model) loadReactions(channel string, messages []schema.MessageV2) tea.Cm
 	var commands []tea.Cmd
 	for start := 0; start < len(ids); start += schema.MaxReactionBatchMessages {
 		batch := slices.Clone(ids[start:min(start+schema.MaxReactionBatchMessages, len(ids))])
-		// Reserve a revision before launching the request. A later request,
-		// event or write supersedes it for that message alone.
+		// Snapshot applied-state revisions; only omissions need this guard.
 		revisions := make(map[int64]uint64, len(batch))
 		current := m.reactionRevisions(channel)
 		for _, id := range batch {
-			current[id]++
 			revisions[id] = current[id]
 		}
 		commands = append(commands, func() tea.Msg {
@@ -120,9 +120,6 @@ func (m Model) reloadReactions(channel string) tea.Cmd {
 
 func (m Model) reactionsHydrated(msg reactionsLoaded) Model {
 	current := m.reactionRevisions(msg.channel)
-	if !slices.ContainsFunc(msg.requested, func(id int64) bool { return current[id] == msg.revisions[id] }) {
-		return m
-	}
 	if cli.ReactionsUnsupported(msg.err) {
 		m.react.unsupported[msg.channel] = true
 		delete(m.react.messages, msg.channel)
@@ -147,16 +144,30 @@ func (m Model) reactionsHydrated(msg reactionsLoaded) Model {
 		summaries[summary.MessageID] = summary
 	}
 	for _, id := range msg.requested {
-		if current[id] != msg.revisions[id] {
-			continue
-		}
-		current[id]++
 		if summary, ok := summaries[id]; ok {
-			applyReactionSummary(byID, summary)
-		} else if summary, ok := byID[id]; ok {
-			// Omissions clear counts, but keep the last known as_of watermark.
-			summary.Reactions = nil
-			byID[id] = summary
+			// Present summaries are ordered solely by as_of, even if another
+			// request, event or write changed state while this batch ran.
+			if applyReactionSummary(byID, summary) {
+				current[id]++
+				delete(m.react.unversioned[msg.channel], id)
+			}
+		} else if current[id] == msg.revisions[id] {
+			if summary, ok := byID[id]; ok {
+				// Keep the timestamp watermark, but an omission has no timestamp
+				// of its own. Non-batch frames need a confirming batch first.
+				summary.Reactions = nil
+				byID[id] = summary
+			}
+			current[id]++
+			if m.react.unversioned[msg.channel] == nil {
+				m.react.unversioned[msg.channel] = make(map[int64]bool)
+			}
+			if m.react.unversioned[msg.channel][id] {
+				// A second, confirming omission settles the unversioned clear.
+				delete(m.react.unversioned[msg.channel], id)
+			} else {
+				m.react.unversioned[msg.channel][id] = true
+			}
 		}
 	}
 	return m
@@ -179,15 +190,25 @@ func (m Model) reactionEvent(msg reactionSummaryReceived) (Model, tea.Cmd) {
 	if msg.gen != m.ev.gen || msg.channel != m.current() {
 		return m, wait
 	}
-	byID := m.react.messages[msg.channel]
+	confirm := m.receiveReactionSummary(msg.channel, msg.summary)
+	return m, tea.Batch(wait, confirm)
+}
+
+// receiveReactionSummary handles events and own-write responses. An unversioned
+// clear cannot order these frames, so coalesce an authoritative batch read.
+func (m Model) receiveReactionSummary(channel string, summary schema.ReactionSummaryV1) tea.Cmd {
+	if m.react.unversioned[channel][summary.MessageID] {
+		return m.queueReactionHydration(channel, schema.MessageV2{ID: summary.MessageID})
+	}
+	byID := m.react.messages[channel]
 	if byID == nil {
 		byID = make(map[int64]schema.ReactionSummaryV1)
-		m.react.messages[msg.channel] = byID
+		m.react.messages[channel] = byID
 	}
-	if applyReactionSummary(byID, msg.summary) {
-		m.reactionRevisions(msg.channel)[msg.summary.MessageID]++
+	if applyReactionSummary(byID, summary) {
+		m.reactionRevisions(channel)[summary.MessageID]++
 	}
-	return m, wait
+	return nil
 }
 
 func (m Model) reactionLines(channel string, messageID int64, width int) []string {
@@ -304,7 +325,7 @@ func (m Model) writeReaction(channel string, messageID int64, key, raw string, s
 	}
 }
 
-func (m Model) reactionDone(msg reactionWritten) Model {
+func (m Model) reactionDone(msg reactionWritten) (Model, tea.Cmd) {
 	m.react.writing = false
 	if msg.err != nil {
 		if cli.ReactionsUnsupported(msg.err) {
@@ -313,22 +334,15 @@ func (m Model) reactionDone(msg reactionWritten) Model {
 		if msg.channel == m.current() {
 			m.setStatus(modeChannels, msg.err.Error())
 		}
-		return m
+		return m, nil
 	}
 	if msg.summary.MessageID != msg.messageID {
 		if msg.channel == m.current() {
 			m.setStatus(modeChannels, "server answered about a different message; reaction not displayed")
 		}
-		return m
+		return m, nil
 	}
-	byID := m.react.messages[msg.channel]
-	if byID == nil {
-		byID = make(map[int64]schema.ReactionSummaryV1)
-		m.react.messages[msg.channel] = byID
-	}
-	if applyReactionSummary(byID, msg.summary) {
-		m.reactionRevisions(msg.channel)[msg.summary.MessageID]++
-	}
+	confirm := m.receiveReactionSummary(msg.channel, msg.summary)
 	if msg.channel == m.current() {
 		m.input = strings.TrimPrefix(m.input, msg.raw)
 		if msg.set {
@@ -337,7 +351,7 @@ func (m Model) reactionDone(msg reactionWritten) Model {
 			m.setStatus(modeChannels, "reaction removed")
 		}
 	}
-	return m
+	return m, confirm
 }
 
 func (m Model) reactorsCommand(fields []string) (Model, tea.Cmd) {

@@ -158,6 +158,9 @@ func TestReactionKeysTargetVisibleMessage(t *testing.T) {
 
 func TestReactionHydrationOrdersAndClears(t *testing.T) {
 	m, api := reactionModelForTest()
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.ctx = ctx
+	cancel() // Model-only event commands must not wait for a socket.
 	for _, second := range []int{2, 1} {
 		api.summaries.Summaries = []schema.ReactionSummaryV1{tuiReactionSummary(41, second, schema.ReactionCountV1{Emoji: "👍", Count: second + 1})}
 		m = feed(m, m.reloadReactions("general"))
@@ -171,7 +174,10 @@ func TestReactionHydrationOrdersAndClears(t *testing.T) {
 		t.Error("an omitted id did not clear its counts")
 	}
 	m.ev.gen = 1
-	m, _ = update(m, reactionSummaryReceived{gen: 1, channel: "general", summary: tuiReactionSummary(41, 4, schema.ReactionCountV1{Emoji: "👍", Count: 4})})
+	incoming := tuiReactionSummary(41, 4, schema.ReactionCountV1{Emoji: "👍", Count: 4})
+	m, cmd := update(m, reactionSummaryReceived{gen: 1, channel: "general", summary: incoming})
+	api.summaries.Summaries = []schema.ReactionSummaryV1{incoming}
+	m = feed(m, cmd)
 	m, _ = update(m, reactionSummaryReceived{gen: 0, channel: "general", summary: tuiReactionSummary(41, 5)})
 	if got := m.react.messages["general"][41]; len(got.Reactions) != 1 || got.Reactions[0].Count != 4 {
 		t.Errorf("stale event changed state: %+v", got)
@@ -331,7 +337,7 @@ func TestReactionEmptySummaryKeepsWatermark(t *testing.T) {
 	}
 }
 
-func TestReactionHydrationDropsSupersededResults(t *testing.T) {
+func TestReactionHydrationOrdersPresentAndGuardsOmissions(t *testing.T) {
 	for _, result := range []string{"omitted", "nonempty"} {
 		for _, change := range []string{"event", "write", "new hydration"} {
 			t.Run(result+"/"+change, func(t *testing.T) {
@@ -354,8 +360,12 @@ func TestReactionHydrationDropsSupersededResults(t *testing.T) {
 					m, _ = update(m, msg)
 				}
 				got := m.react.messages["general"][41]
-				if len(got.Reactions) != 1 || got.Reactions[0].Count != 4 {
-					t.Errorf("superseded batch replaced newer state: %+v", got)
+				want := 4
+				if result == "nonempty" {
+					want = 1 // as_of 5 wins over 4, regardless of request revisions.
+				}
+				if len(got.Reactions) != 1 || got.Reactions[0].Count != want {
+					t.Errorf("batch result = %+v, want count %d", got, want)
 				}
 			})
 		}
@@ -432,5 +442,122 @@ func TestReactionHydrationRevisionIsPerMessage(t *testing.T) {
 				t.Errorf("batch did not update unchanged message: %+v", got)
 			}
 		})
+	}
+}
+
+func TestReactionOverlappingHydrationFailure(t *testing.T) {
+	for _, omitted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("omitted=%v", omitted), func(t *testing.T) {
+			m, api := reactionModelForTest()
+			m.react.messages["general"] = map[int64]schema.ReactionSummaryV1{41: tuiReactionSummary(41, 1, schema.ReactionCountV1{Emoji: "👍", Count: 1})}
+			if !omitted {
+				api.summaries.Summaries = []schema.ReactionSummaryV1{tuiReactionSummary(41, 3, schema.ReactionCountV1{Emoji: "👍", Count: 3})}
+			}
+			older := collect(m.reloadReactions("general"))
+			api.batchErr = errors.New("read failed")
+			m = feed(m, m.reloadReactions("general"))
+			for _, msg := range older {
+				m, _ = update(m, msg)
+			}
+			got := m.react.messages["general"][41]
+			if omitted && len(got.Reactions) != 0 || !omitted && (len(got.Reactions) != 1 || got.Reactions[0].Count != 3) {
+				t.Fatalf("failed newer request discarded successful older result: %+v", got)
+			}
+		})
+	}
+}
+
+func TestReactionOmissionConfirmsNonBatchSummaries(t *testing.T) {
+	for _, source := range []string{"delayed write", "new event"} {
+		for _, present := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/present=%v", source, present), func(t *testing.T) {
+				m, api := reactionModelForTest()
+				ctx, cancel := context.WithCancel(m.ctx)
+				m.ctx = ctx
+				cancel() // No socket waiter in this model-only test.
+				m.react.messages["general"] = map[int64]schema.ReactionSummaryV1{41: tuiReactionSummary(41, 1, schema.ReactionCountV1{Emoji: "👍", Count: 1})}
+				m = feed(m, m.reloadReactions("general")) // An unversioned omission.
+				second := 2
+				if source == "new event" {
+					second = 5
+				}
+				incoming := tuiReactionSummary(41, second, schema.ReactionCountV1{Emoji: "👍", Count: 2})
+				var msg tea.Msg = reactionWritten{channel: "general", messageID: 41, summary: incoming}
+				if source == "new event" {
+					msg = reactionSummaryReceived{channel: "general", summary: incoming}
+				}
+				m, cmd := update(m, msg)
+				if len(m.react.messages["general"][41].Reactions) != 0 {
+					t.Fatal("non-batch summary resurrected an unversioned clear")
+				}
+				if cmd == nil || len(m.react.pending["general"]) != 1 {
+					t.Fatal("confirming hydration was not queued")
+				}
+				// Repeated frames and replay hydration share the same timer and ID.
+				m, _ = update(m, msg)
+				if extra := m.queueReactionHydration("general", schema.MessageV2{ID: 41}); extra != nil {
+					t.Fatal("confirmation did not coalesce with pending hydration")
+				}
+				api.batchErr = errors.New("confirmation failed")
+				m = feed(m, cmd)
+				if len(m.react.messages["general"][41].Reactions) != 0 {
+					t.Fatal("failed confirmation changed counts")
+				}
+				m, cmd = update(m, msg)
+				if cmd == nil || len(m.react.pending["general"]) != 1 {
+					t.Fatal("failed confirmation lost unversioned state")
+				}
+				api.batchErr = nil
+				if present {
+					api.summaries.Summaries = []schema.ReactionSummaryV1{tuiReactionSummary(41, 6, schema.ReactionCountV1{Emoji: "👍", Count: 6})}
+				}
+				m = feed(m, cmd)
+				got := m.react.messages["general"][41]
+				if present && (len(got.Reactions) != 1 || got.Reactions[0].Count != 6) || !present && len(got.Reactions) != 0 {
+					t.Fatalf("confirmation did not decide state: %+v", got)
+				}
+				// Either confirming answer clears the mark, so future summaries apply.
+				m, _ = update(m, reactionSummaryReceived{channel: "general", summary: tuiReactionSummary(41, 7, schema.ReactionCountV1{Emoji: "👍", Count: 7})})
+				if got := m.react.messages["general"][41]; len(got.Reactions) != 1 || got.Reactions[0].Count != 7 {
+					t.Fatalf("confirmation left message unversioned: %+v", got)
+				}
+			})
+		}
+	}
+}
+
+func TestReactionRevisionsTrackAppliedState(t *testing.T) {
+	for _, source := range []string{"batch", "event", "write"} {
+		for _, second := range []int{2, 3, 4} {
+			t.Run(fmt.Sprintf("%s/as_of=%d", source, second), func(t *testing.T) {
+				m, api := reactionModelForTest()
+				m.react.messages["general"] = map[int64]schema.ReactionSummaryV1{41: tuiReactionSummary(41, 3, schema.ReactionCountV1{Emoji: "👍", Count: 3})}
+				m.reactionRevisions("general")[41] = 1
+				incoming := tuiReactionSummary(41, second, schema.ReactionCountV1{Emoji: "👍", Count: second})
+				api.summaries.Summaries = []schema.ReactionSummaryV1{incoming}
+				cmd := m.reloadReactions("general")
+				if got := m.reactionRevisions("general")[41]; got != 1 {
+					t.Fatalf("request start bumped revision to %d", got)
+				}
+				switch source {
+				case "batch":
+					m = feed(m, cmd)
+				case "event":
+					m, _ = update(m, reactionSummaryReceived{channel: "general", summary: incoming})
+				case "write":
+					m, _ = update(m, reactionWritten{channel: "general", messageID: 41, summary: incoming})
+				}
+				wantRevision := uint64(2)
+				if second < 3 {
+					wantRevision = 1
+				}
+				if got := m.reactionRevisions("general")[41]; got != wantRevision {
+					t.Errorf("revision = %d, want %d", got, wantRevision)
+				}
+				if got := m.react.messages["general"][41]; got.AsOf != tuiReactionSummary(41, max(3, second)).AsOf {
+					t.Errorf("summary did not follow timestamp order: %+v", got)
+				}
+			})
+		}
 	}
 }
