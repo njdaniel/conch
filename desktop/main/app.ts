@@ -19,6 +19,7 @@ import { ProfileStore } from './profiles/store.ts';
 import { acquire, prepareRoot } from './instance.ts';
 import { Client } from './api/client.ts';
 import { Session } from './api/session.ts';
+import { deliverVoice } from './voice/events.ts';
 import { VoiceService } from './voice/service.ts';
 import { Supervisor } from './voice/supervisor.ts';
 import { createNodeConnect } from './api/socket.ts';
@@ -196,7 +197,8 @@ export async function start(): Promise<void> {
   // Native voice (issue #1373): the one owner of the helper in this instance.
   // The helper is found only in the app's own resources directory, which is
   // Electron's, never an environment variable or an argument. Nothing here
-  // starts voice: only the person's join and retry do (the IPC is D3-3). The
+  // starts voice: only the person's join and retry do (the IPC, issue #1374,
+  // takes them only after a gesture). The
   // media hook leaves and stops the helper before identity changes.
   const voice = new VoiceService({
     supervisor: new Supervisor({ resources: process.resourcesPath, env: process.env, log }),
@@ -222,6 +224,10 @@ export async function start(): Promise<void> {
     log,
   });
   teardownHooks.media('voice', () => voice.teardown());
+  // Every change of the helper's confirmed state goes to the owned window.
+  voice.subscribe((view) => {
+    deliverVoice({ contents: () => (live.owned() === null ? null : (live.window?.webContents ?? null)), gate: () => live.gate }, view);
+  });
 
   // The one registry of IPC handlers, reading the newest activation's parts.
   // Nothing is registered before a window exists to be checked against.
@@ -245,6 +251,7 @@ export async function start(): Promise<void> {
     },
     gestures,
     profiles,
+    voice,
     now: Date.now,
     log,
   }).register(ipcMain);

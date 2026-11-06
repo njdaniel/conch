@@ -274,13 +274,13 @@ export interface ConchDesktopBridge {
 declare global {
   interface Window {
     // Present only in the desktop shell's renderer.
-    readonly conchDesktop?: ConchDesktopBridge;
+    readonly conchDesktop?: ConchDesktopBridge & Partial<DesktopVoiceBridge>;
   }
 }
 
 // Native voice (issue #1373, D3-2 of #771; linux-desktop.md §5, §9). Its own
-// interface, so ConchDesktopBridge keeps compiling until the preload (D3-3)
-// wires it. In-process TypeScript (decision Q1 on #770), not a wire shape.
+// interface, which the preload exposes beside ConchDesktopBridge (issue #1374,
+// D3-3; ExposedDesktopBridge below). In-process TypeScript (decision Q1 on #770), not a wire shape.
 // No press, release, gate or transmit method exists: push-to-talk is the
 // helper's own. No token, path, nonce, pid or stderr is in any type here.
 export type NativeVoiceStatus = 'idle' | 'unavailable' | 'starting' | 'running' | 'stopping' | 'ended' | 'failed' | 'lost';
@@ -330,3 +330,7 @@ export interface DesktopVoiceBridge {
   voiceSetTalkMode(mode: VoiceControlTalkMode): Promise<VoiceCommandResult>;
   onVoiceState(listener: (view: NativeVoiceView) => void): Unsubscribe;
 }
+
+// The object the preload exposes: the bridge and the voice family. Still no
+// press, release, gate or transmit function in either.
+export type ExposedDesktopBridge = ConchDesktopBridge & DesktopVoiceBridge;
