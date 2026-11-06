@@ -52,6 +52,9 @@ type layout struct {
 	// members is the members line, "" outside the channels view and in the
 	// wide layout, where the people pane says more.
 	members string
+	// confirm is the pending moderation request as wrapped rows above the
+	// status line, nil when there is none.
+	confirm []string
 }
 
 // titled reports whether the screen has a title bar: from fullWidth x
@@ -88,7 +91,10 @@ func (m Model) layout() layout {
 			l.members = m.membersLine(width)
 		}
 	}
-	l.contentH = height - l.top - 4
+	if m.mode == modeChannels {
+		l.confirm = m.confirmationLines(width)
+	}
+	l.contentH = height - l.top - 4 - len(l.confirm)
 	if l.voice != "" {
 		l.contentH--
 	}

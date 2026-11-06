@@ -3,9 +3,12 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/njdaniel/conch/internal/cli"
 	"github.com/njdaniel/conch/pkg/schema"
@@ -17,6 +20,14 @@ type moderationStub struct {
 	err         error
 	bans        schema.ListChannelBansResponseV1
 	memberReads int
+	history     schema.ListMessagesResponseV2
+	historyErr  error
+	historyRead int
+}
+
+func (a *moderationStub) ListMessagesV2Page(context.Context, string, cli.MessagesPage, int) (schema.ListMessagesResponseV2, error) {
+	a.historyRead++
+	return a.history, a.historyErr
 }
 
 func (a *moderationStub) KickVoiceParticipant(_ context.Context, channel string, id int64) error {
@@ -333,5 +344,158 @@ func TestEventsReconnectReloadsMembers(t *testing.T) {
 	}
 	if !found || api.memberReads != 1 {
 		t.Fatalf("member reload found=%v reads=%d", found, api.memberReads)
+	}
+}
+
+func removedCopy(id int64) schema.MessageV2 {
+	return schema.MessageV2{ID: id, Removed: true, Body: schema.MessageRemovedBody}
+}
+
+func TestRemovalRememberedBeforeOriginalArrives(t *testing.T) {
+	tests := []struct {
+		name  string
+		later func(Model) (Model, tea.Cmd)
+	}{
+		{"history read before removal lands after it", func(m Model) (Model, tea.Cmd) {
+			return update(m, messagesLoaded{channel: "general", messages: []schema.MessageV2{originalMessage(42)}})
+		}},
+		{"stream original after removal", func(m Model) (Model, tea.Cmd) {
+			return update(m, messageReceived{channel: "general", message: originalMessage(42)})
+		}},
+		{"reconcile read", func(m Model) (Model, tea.Cmd) {
+			return update(m, messagesReconciled{channel: "general", messages: []schema.MessageV2{originalMessage(42)}})
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, _ := moderationModelForTest()
+			m.mode = modeAgents
+			m.rs.unread["general"] = 2
+			m, _ = update(m, messageRemovalReceived{gen: m.ev.gen, channel: "general", message: removedCopy(42)})
+			if len(m.messages["general"]) != 1 {
+				t.Fatalf("removal of an unheld id added state: %+v", m.messages["general"])
+			}
+			m, _ = tt.later(m)
+			var got *schema.MessageV2
+			for i := range m.messages["general"] {
+				if m.messages["general"][i].ID == 42 {
+					got = &m.messages["general"][i]
+				}
+			}
+			if got == nil || !got.Removed || got.Body != schema.MessageRemovedBody {
+				t.Fatalf("original shown after its removal: %+v", got)
+			}
+			if m.rs.unread["general"] != 2 {
+				t.Fatalf("a removed original counted as an arrival: unread %d", m.rs.unread["general"])
+			}
+		})
+	}
+}
+
+func TestRemovedIDsAreBoundedPerChannel(t *testing.T) {
+	m, _ := moderationModelForTest()
+	for id := int64(1); id <= maxRemembered+10; id++ {
+		m.mod.remember("general", id)
+	}
+	if n := len(m.mod.removed["general"]); n != maxRemembered {
+		t.Fatalf("remembered %d ids, want %d", n, maxRemembered)
+	}
+	if m.mod.knows("general", 1) || !m.mod.knows("general", maxRemembered+10) || m.mod.knows("ops", maxRemembered+10) {
+		t.Fatal("eviction or per-channel scoping wrong")
+	}
+}
+
+func TestReconnectReconcilesHeldMessages(t *testing.T) {
+	tests := []struct {
+		name      string
+		history   []schema.MessageV2
+		err       error
+		wantBody  string
+		wantStale bool
+	}{
+		{"removal while disconnected shows tombstone", []schema.MessageV2{removedCopy(41)}, nil, schema.MessageRemovedBody, false},
+		{"unchanged message stays", []schema.MessageV2{originalMessage(41)}, nil, "original", false},
+		{"failed read marks the view stale", nil, errors.New("down"), "original", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m, api := moderationModelForTest()
+			api.history = schema.ListMessagesResponseV2{Messages: tt.history}
+			api.historyErr = tt.err
+			var delays []time.Duration
+			m.after = func(d time.Duration, msg tea.Msg) tea.Cmd {
+				delays = append(delays, d)
+				return func() tea.Msg { return msg }
+			}
+			m.streamed["general"] = 50
+			m.ev.gen, m.ev.state = 2, eventsDown
+			m, cmd := update(m, eventsRosterReceived{gen: 2})
+			for _, msg := range collect(cmd) {
+				if _, ok := msg.(messagesReconciled); ok {
+					m, _ = update(m, msg)
+				}
+			}
+			if api.historyRead != 1 {
+				t.Fatalf("history reads = %d, want 1", api.historyRead)
+			}
+			if got := m.messages["general"][0].Body; got != tt.wantBody {
+				t.Fatalf("body = %q, want %q", got, tt.wantBody)
+			}
+			if m.streamed["general"] != 50 {
+				t.Fatalf("reconcile moved the stream cursor to %d", m.streamed["general"])
+			}
+			if m.mod.stale["general"] != tt.wantStale {
+				t.Fatalf("stale = %v, want %v", m.mod.stale["general"], tt.wantStale)
+			}
+			if tt.wantStale {
+				if !strings.Contains(m.View(), "stale") || len(delays) != 1 || delays[0] != minResubscribeDelay {
+					t.Fatalf("stale not shown or no backoff retry: delays=%v", delays)
+				}
+				// The retry doubles its wait and, once the read works, clears the flag.
+				m, _ = update(m, messagesReconciled{channel: "general", err: errors.New("down")})
+				if len(delays) != 2 || delays[1] != 2*minResubscribeDelay {
+					t.Fatalf("backoff did not grow: %v", delays)
+				}
+				m, _ = update(m, messagesReconciled{channel: "general", messages: []schema.MessageV2{removedCopy(41)}})
+				if m.mod.stale["general"] || m.messages["general"][0].Body != schema.MessageRemovedBody || strings.Contains(m.View(), "[stale") {
+					t.Fatalf("recovery left stale state: %+v", m.messages["general"])
+				}
+			}
+		})
+	}
+}
+
+func TestConfirmationPanelShowsFullConsequenceAtNarrowWidths(t *testing.T) {
+	tests := []struct {
+		command string
+		want    []string
+	}{
+		{"/ban 9", []string{"an operator must unban and re-add you", "y to confirm", "any other key to cancel"}},
+		{"/remove-message 41", []string{"cannot be recalled", "y to confirm", "any other key to cancel"}},
+	}
+	for _, tt := range tests {
+		for _, width := range []int{80, 100} {
+			t.Run(fmt.Sprintf("%s/%d", tt.command, width), func(t *testing.T) {
+				m, _ := moderationModelForTest()
+				m.width, m.height = width, 30
+				m, _ = submitText(t, m, tt.command)
+				view := m.View()
+				flat := strings.Join(strings.Fields(view), " ")
+				for _, want := range tt.want {
+					if !strings.Contains(flat, want) {
+						t.Errorf("confirmation lacks %q at %d columns:\n%s", want, width, view)
+					}
+				}
+				lines := strings.Split(view, "\n")
+				if len(lines) != 30 {
+					t.Errorf("view has %d rows, want 30", len(lines))
+				}
+				for _, line := range lines {
+					if w := cellWidth(line); w > width {
+						t.Errorf("row of %d cells at width %d: %q", w, width, line)
+					}
+				}
+			})
+		}
 	}
 }

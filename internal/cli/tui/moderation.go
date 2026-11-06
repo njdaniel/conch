@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +44,71 @@ type moderationModel struct {
 	api     moderationAPI
 	pending *moderationRequest
 	writing bool
+	// removed is, per channel, the ids known to be removed (bounded, oldest
+	// forgotten first); removedOrder is the insertion order for eviction.
+	removed      map[string]map[int64]bool
+	removedOrder map[string][]int64
+	// stale marks channels whose held messages could not be reconciled after a
+	// reconnect; reconcileBackoff is the wait before the next attempt.
+	stale            map[string]bool
+	reconcileBackoff map[string]time.Duration
+}
+
+// maxRemembered bounds the removed ids kept per channel.
+const maxRemembered = 512
+
+// remember records that id was removed in channel, so a copy of the original
+// that arrives later (an older history read, a stream replay) shows the
+// tombstone. The oldest ids are forgotten past maxRemembered.
+func (m *moderationModel) remember(channel string, id int64) {
+	if m.removed[channel][id] {
+		return
+	}
+	if m.removed[channel] == nil {
+		m.removed[channel] = make(map[int64]bool)
+	}
+	m.removed[channel][id] = true
+	m.removedOrder[channel] = append(m.removedOrder[channel], id)
+	for len(m.removedOrder[channel]) > maxRemembered {
+		delete(m.removed[channel], m.removedOrder[channel][0])
+		m.removedOrder[channel] = m.removedOrder[channel][1:]
+	}
+}
+
+func (m moderationModel) knows(channel string, id int64) bool { return m.removed[channel][id] }
+
+// tombstoned is message as a removal leaves it.
+func tombstoned(message schema.MessageV2) schema.MessageV2 {
+	message.Removed = true
+	message.Body = schema.MessageRemovedBody
+	message.Payload = nil
+	message.EditedAt = nil
+	return message
+}
+
+// withoutRemoved replaces every message in incoming whose id is known removed
+// by its tombstone. It copies the slice only when something changes.
+func (m moderationModel) withoutRemoved(channel string, incoming []schema.MessageV2) []schema.MessageV2 {
+	var out []schema.MessageV2
+	for i, message := range incoming {
+		if message.Removed || !m.knows(channel, message.ID) {
+			continue
+		}
+		if out == nil {
+			out = slices.Clone(incoming)
+		}
+		out[i] = tombstoned(message)
+	}
+	if out == nil {
+		return incoming
+	}
+	return out
+}
+
+type messagesReconciled struct {
+	channel  string
+	messages []schema.MessageV2
+	err      error
 }
 
 type moderationDone struct {
@@ -58,7 +124,7 @@ type messageRemovalReceived struct {
 }
 
 func newModerationModel(api API) moderationModel {
-	m := moderationModel{}
+	m := moderationModel{removed: map[string]map[int64]bool{}, removedOrder: map[string][]int64{}, stale: map[string]bool{}, reconcileBackoff: map[string]time.Duration{}}
 	m.api, _ = api.(moderationAPI)
 	return m
 }
@@ -118,7 +184,7 @@ func (m Model) moderationCommand(command, rest string) (Model, tea.Cmd) {
 	}
 	m.input = ""
 	m.mod.pending = &req
-	m.setStatus(modeChannels, moderationQuestion(req)+" y to confirm; any other key to cancel")
+	m.setStatus(modeChannels, moderationQuestion(req)+" "+confirmKeys)
 	return m, nil
 }
 
@@ -190,6 +256,7 @@ func (m Model) moderationFinished(msg moderationDone) Model {
 		return m
 	}
 	if req.op == moderateMessage {
+		m.mod.remember(req.channel, req.target)
 		m.tombstoneHeld(req.channel, req.target)
 	}
 	if req.channel != m.current() {
@@ -233,18 +300,20 @@ func (m *Model) tombstoneHeld(channel string, id int64) {
 		if message.ID != id {
 			continue
 		}
-		message.Removed = true
-		message.Body = schema.MessageRemovedBody
-		message.Payload = nil
-		message.EditedAt = nil
-		m.addMessages(channel, []schema.MessageV2{message})
+		m.addMessages(channel, []schema.MessageV2{tombstoned(message)})
 		return
 	}
 }
 
 func (m Model) messageRemoval(msg messageRemovalReceived) (tea.Model, tea.Cmd) {
 	wait := m.waitEvent()
-	if msg.gen != m.ev.gen || msg.channel != m.current() {
+	if msg.gen != m.ev.gen {
+		return m, wait
+	}
+	// Remembered even when the message is not held: a history read that began
+	// before the removal may still be on its way with the original.
+	m.mod.remember(msg.channel, msg.message.ID)
+	if msg.channel != m.current() {
 		return m, wait
 	}
 	for _, message := range m.messages[msg.channel] {
@@ -255,3 +324,98 @@ func (m Model) messageRemoval(msg messageRemovalReceived) (tea.Model, tea.Cmd) {
 	}
 	return m, wait
 }
+
+// reconcileMessages re-reads the held window of channel, newest first back to
+// the oldest id held, so a removal made while the sockets were down (which
+// neither replays) reaches messages below the stream cursor.
+func (m Model) reconcileMessages(channel string) tea.Cmd {
+	if channel == "" || m.api == nil {
+		return nil
+	}
+	var oldest int64
+	for _, message := range m.messages[channel] {
+		if oldest == 0 || message.ID < oldest {
+			oldest = message.ID
+		}
+	}
+	if oldest == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		var all []schema.MessageV2
+		var before int64
+		for range maxReconcilePages {
+			page, err := m.api.ListMessagesV2Page(m.ctx, channel, cli.MessagesPage{NewestFirst: true, Before: before}, historyLimit)
+			if err != nil {
+				return messagesReconciled{channel: channel, err: err}
+			}
+			all = append(all, page.Messages...)
+			if len(page.Messages) < historyLimit {
+				break
+			}
+			before = page.Messages[0].ID
+			for _, message := range page.Messages {
+				if message.ID < before {
+					before = message.ID
+				}
+			}
+			if before <= oldest {
+				break
+			}
+		}
+		return messagesReconciled{channel: channel, messages: all}
+	}
+}
+
+// maxReconcilePages bounds one reconcile read.
+const maxReconcilePages = 20
+
+type reconcileDue struct{ channel string }
+
+// reconciled applies a reconcile read. A failure marks the channel's view
+// stale (its originals may include removed ones) and retries with backoff.
+func (m Model) reconciled(msg messagesReconciled) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		if msg.channel != m.current() {
+			return m, nil
+		}
+		delay := m.mod.reconcileBackoff[msg.channel]
+		if delay <= 0 {
+			delay = minResubscribeDelay
+		}
+		m.mod.stale[msg.channel] = true
+		m.mod.reconcileBackoff[msg.channel] = 2 * delay
+		if m.mod.reconcileBackoff[msg.channel] > maxResubscribeDelay {
+			m.mod.reconcileBackoff[msg.channel] = maxResubscribeDelay
+		}
+		m.setStatus(modeChannels, "history may be stale: removed messages might still show; retrying…")
+		return m, m.after(delay, reconcileDue{channel: msg.channel})
+	}
+	delete(m.mod.stale, msg.channel)
+	delete(m.mod.reconcileBackoff, msg.channel)
+	m.addMessages(msg.channel, msg.messages)
+	return m, m.nameAuthors(msg.channel)
+}
+
+func (m Model) reconcileRetry(msg reconcileDue) (tea.Model, tea.Cmd) {
+	if !m.mod.stale[msg.channel] || msg.channel != m.current() {
+		return m, nil
+	}
+	return m, m.reconcileMessages(msg.channel)
+}
+
+// confirmationLines is the pending moderation request as a panel of wrapped
+// rows, the full consequence and the keys, in width cells. Nil when none.
+func (m Model) confirmationLines(width int) []string {
+	if m.mod.pending == nil || width < 1 {
+		return nil
+	}
+	text := "Confirm: " + moderationQuestion(*m.mod.pending) + " " + confirmKeys
+	var lines []string
+	for _, line := range wrapWords(sanitize(text), width, width) {
+		lines = append(lines, warnStyle.Render(fitCells(line, width)))
+	}
+	return lines
+}
+
+const confirmKeys = "y to confirm; any other key to cancel"

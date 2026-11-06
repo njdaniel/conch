@@ -741,6 +741,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.membersEvent(msg)
 	case messageRemovalReceived:
 		return m.messageRemoval(msg)
+	case messagesReconciled:
+		return m.reconciled(msg)
+	case reconcileDue:
+		return m.reconcileRetry(msg)
 	case eventsRunReceived:
 		return m.eventsRun(msg)
 	case eventsActivityReceived:
@@ -940,7 +944,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var hydrate, arrival tea.Cmd
 		held := slices.ContainsFunc(m.messages[msg.channel], func(message schema.MessageV2) bool { return message.ID == msg.message.ID })
 		heldRemoved := slices.ContainsFunc(m.messages[msg.channel], func(message schema.MessageV2) bool { return message.ID == msg.message.ID && message.Removed })
-		if !msg.message.Removed && !heldRemoved {
+		if !msg.message.Removed && !heldRemoved && !m.mod.knows(msg.channel, msg.message.ID) {
 			arrival = m.countArrival(msg.channel, msg.message)
 			if !held {
 				hydrate = m.queueReactionHydration(msg.channel, msg.message)
@@ -1332,6 +1336,7 @@ func min(a, b int) int {
 // scrolled up, messages that arrive push the scroll along with them by the
 // lines they take, so the lines on screen do not move.
 func (m *Model) addMessages(channel string, incoming []schema.MessageV2) {
+	incoming = m.mod.withoutRemoved(channel, incoming)
 	if channel == m.current() && m.scroll > 0 {
 		held := make(map[int64]bool, len(m.messages[channel])+len(incoming))
 		for _, message := range m.messages[channel] {

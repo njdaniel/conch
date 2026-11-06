@@ -330,7 +330,7 @@ func (m Model) eventsRoster(msg eventsRosterReceived) (tea.Model, tea.Cmd) {
 	cmds := []tea.Cmd{wait}
 	if !wasLive {
 		// Member and reaction frames have no replay; replace them after a drop.
-		cmds = append(cmds, m.loadMembers(), m.reloadReactions(m.current()))
+		cmds = append(cmds, m.loadMembers(), m.reloadReactions(m.current()), m.reconcileMessages(m.current()))
 		// Frames were missed while the socket was down: the Runs view's newest
 		// page is read again and merged.
 		if m.runs.loaded && m.runs.channel == m.current() {
