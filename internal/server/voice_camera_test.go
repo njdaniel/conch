@@ -233,6 +233,11 @@ func TestVoiceCameraClaimRefusals(t *testing.T) {
 	cameraOn := func(t *testing.T, f *presenceFixture) {
 		f.setCamera(t, true, schema.PermissionRoleOperator, schema.PermissionRoleMember)
 	}
+	// A new server has the camera on (issue #1361); these rows turn it off,
+	// the member cell first.
+	cameraOff := func(t *testing.T, f *presenceFixture) {
+		f.setCamera(t, false, schema.PermissionRoleMember, schema.PermissionRoleOperator)
+	}
 	both := func(fns ...func(*testing.T, *presenceFixture)) func(*testing.T, *presenceFixture) {
 		return func(t *testing.T, f *presenceFixture) {
 			for _, fn := range fns {
@@ -281,9 +286,9 @@ func TestVoiceCameraClaimRefusals(t *testing.T) {
 		{"an agent member", presenceOpts{auth: AuthRequired}, both(cameraOn, connected), "robo", "ops", "", 403, "forbidden", "", denyAgentVoice, 0},
 		{"a member without voice", presenceOpts{auth: AuthRequired}, cameraOn, "vic", "ops", "", 403, schema.ErrorCodeVoiceNotAllowed, schema.PermUseVoice, schema.ErrorCodeVoiceNotAllowed, 0},
 		{"a member, voice not configured", presenceOpts{auth: AuthRequired, unconfigured: true}, cameraOn, "ann", "ops", "", 503, schema.ErrorCodeVoiceNotConfigured, "", "", 0},
-		{"a member without use_camera (the default)", presenceOpts{auth: AuthRequired}, connected, "ann", "ops", "", 403, schema.ErrorCodePermissionDenied, schema.PermUseCamera, "", 0},
+		{"a member without use_camera (the cells turned off)", presenceOpts{auth: AuthRequired}, both(cameraOff, connected), "ann", "ops", "", 403, schema.ErrorCodePermissionDenied, schema.PermUseCamera, "", 0},
 		{"an operator member without use_camera", presenceOpts{auth: AuthRequired},
-			func(t *testing.T, f *presenceFixture) { f.addPerson(t, "operator-1", true) }, "operator-1", "ops", "", 403, schema.ErrorCodePermissionDenied, schema.PermUseCamera, "", 0},
+			func(t *testing.T, f *presenceFixture) { cameraOff(t, f); f.addPerson(t, "operator-1", true) }, "operator-1", "ops", "", 403, schema.ErrorCodePermissionDenied, schema.PermUseCamera, "", 0},
 		{"a member who was never issued a session", presenceOpts{auth: AuthRequired}, cameraOn, "ann", "ops", "", 409, schema.ErrorCodeVoiceNoSession, "", "", 0},
 		{"a session in another channel", presenceOpts{auth: AuthRequired}, both(cameraOn, connected), "ann", "ops2", "", 409, schema.ErrorCodeVoiceNoSession, "", "", 0},
 		{"a session under another credential", presenceOpts{auth: AuthRequired},

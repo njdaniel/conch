@@ -1186,7 +1186,7 @@ func TestWhoAmI(t *testing.T) {
 			Permissions: schema.Permissions, PermissionsRevision: 1}},
 		{"member human", f.aliceTok, schema.WhoAmIResponseV1{ID: f.alice.ID, Kind: schema.PrincipalHuman, Name: "alice", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(true), IdentityClass: schema.IdentityMember,
 			Auth:        &schema.AuthStateV1{Scope: schema.CredentialScopeFull},
-			Permissions: []schema.Permission{schema.PermCreatePublicChannels, schema.PermCreatePrivateChannels, schema.PermSeeMemberDirectory, schema.PermUseVoice, schema.PermShareScreen}, PermissionsRevision: 1}},
+			Permissions: []schema.Permission{schema.PermCreatePublicChannels, schema.PermCreatePrivateChannels, schema.PermSeeMemberDirectory, schema.PermUseVoice, schema.PermShareScreen, schema.PermUseCamera}, PermissionsRevision: 1}},
 		{"member agent", f.botTok, schema.WhoAmIResponseV1{ID: f.bot.ID, Kind: schema.PrincipalAgent, Name: "bot", Role: schema.RoleMember, ServerVersion: "v1.2.3-test", VoiceAllowed: boolPtr(false), IdentityClass: schema.IdentityAgent,
 			PermissionsRevision: 1}},
 	}

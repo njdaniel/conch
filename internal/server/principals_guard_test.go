@@ -122,6 +122,8 @@ var principalReads = []principalRead{
 	{"store/operator_auth.go", "Store.RedeemSetupToken", 1, readOwnOrInternal},
 	{"store/operator_auth.go", "issueSetupTokenTx", 1, readOwnOrInternal},
 	{"store/passwords.go", "Store.LoginCandidate", 1, readOwnOrInternal},
+	// #1361: migration 44 asks only whether any principal exists.
+	{"store/camera_default.go", "pinCameraOff", 1, readOwnOrInternal},
 	{"store/passwords.go", "Store.PasswordSubject", 1, readOwnOrInternal},
 	{"store/passwords.go", "bumpAuthGenerationTx", 1, readOwnOrInternal},
 	{"store/passwords.go", "callerCredentialTx", 1, readOwnOrInternal},

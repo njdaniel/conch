@@ -1044,20 +1044,24 @@ func (w *world) voiceMemberRows(rchan string, talker, stranger *member) (rows in
 	if err := w.setCells(schema.PermissionRoleMember, true, schema.PermShareScreen); err != nil {
 		return rows, "", fmt.Errorf("give the member column back: %w", err)
 	}
-	// use_camera is off for members by default (ADR-015): the claim is
-	// refused naming it, 403 permission_denied, the camera's own code. Like
-	// the share's, the claim sits behind "voice is not configured".
+	// With use_camera turned off for both columns (it is on by default since
+	// #1361), the claim is refused naming it, 403 permission_denied, the
+	// camera's own code. Like the share's, the claim sits behind "voice is
+	// not configured".
 	if w.lk == nil {
 		skipped += "; the camera claim of a member without use_camera"
 	} else {
+		if err := w.setCameraCells(false); err != nil {
+			return rows, "", err
+		}
 		status, body, err := talker.api.do(http.MethodPost, voice+"/camera", nil)
 		if err := refusedNaming("a member without use_camera at the camera claim", status, body, err, schema.ErrorCodePermissionDenied, schema.PermUseCamera); err != nil {
 			return rows, "", err
 		}
 		rows++
-		// The control: with the camera on for both columns (the operator's
-		// first: precedence), the claim is judged on its merits (no voice
-		// session), not refused for the right; then both go back off.
+		// The control: with the camera back on for both columns (the
+		// default), the claim is judged on its merits (no voice session), not
+		// refused for the right.
 		if err := w.setCameraCells(true); err != nil {
 			return rows, "", err
 		}
@@ -1067,9 +1071,6 @@ func (w *world) voiceMemberRows(rchan string, talker, stranger *member) (rows in
 		}
 		if status != http.StatusConflict || errorCode(body) != schema.ErrorCodeVoiceNoSession {
 			return rows, "", fmt.Errorf("the control: with use_camera on the camera claim of a member with no session = %d %s, want 409 %s", status, body, schema.ErrorCodeVoiceNoSession)
-		}
-		if err := w.setCameraCells(false); err != nil {
-			return rows, "", err
 		}
 	}
 	if w.lk != nil {

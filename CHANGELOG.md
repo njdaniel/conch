@@ -8,6 +8,22 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+### Changed
+
+- **Cameras are on by default for members and operators on a new server, and
+  both presets include them** (#1361, amending ADR-015 decisions 2 and 5).
+  `personal` is now voice, screen share and camera; `group` gains camera and
+  still equals the member defaults. **Upgrade:** nothing changes on an
+  existing server. Migration 44 stores the camera off there unless an owner
+  had already set it, so such a server matches no preset. A preset sets
+  the member column only, and members never exceed operators, so to apply
+  one there the owner first turns the operators' camera on
+  (`conch admin permissions set --operators on use_camera`), then runs
+  `conch admin permissions preset personal|group`; in the other order the
+  preset is refused, 409 `permissions_conflict` naming `use_camera`. Turning
+  voice off for a column now needs the camera off in the same change, as
+  screen share already did (409 `permissions_conflict` otherwise).
+
 ## [0.1.0-alpha.15] - 2026-11-05
 
 This is a pre-1.0 release (`v0.1.0-alpha.15`): the API and the wire shapes
