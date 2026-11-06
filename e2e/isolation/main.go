@@ -46,6 +46,22 @@
 //     bound: 2 s for a socket, one voice poller pass plus a room rotation for
 //     LiveKit (read from the server's source). Then the revoked must stay
 //     out: a kept ticket and a kept join grant no longer work.
+//   - Moderation (issue #853, moderation.go, modmessages.go, modguests.go): a
+//     group of its own, M, with a manager, plain members, an observer, a
+//     second channel the targets keep and a net. A member removed and a member
+//     banned each hold every socket variant on two credentials, the occupancy
+//     socket, a LiveKit participant and a join grant kept from before; each is
+//     timed to the revocation bounds, then refused every route and socket as
+//     for a ghost, on both credentials, while the unrelated channel stays
+//     good. Seeded residual membership and net seats are invisible, cleaned
+//     by a repeat ban and by the unban (cleanup first), and stay absent; a
+//     ban row beside a live membership is the voice poller's and the repeat
+//     ban's; session requests race a ban (both sides of the final voice check).
+//     Message removal: who may remove what, each socket family's tombstone, the
+//     scoped audience's non-disclosure, every history, thread, search, file
+//     and reply surface, reconnects on another credential, and replaying
+//     sockets against posting and removing in threes. The guests: a removal
+//     before or after a visit's bound, a ban of a guest and the next visit.
 //   - The guests (issue #717, guests.go and the files it names): a third
 //     part of the world, the plaza, open at the bare address, where members
 //     who made accounts there leave private markers before any guest comes.
@@ -325,6 +341,13 @@ func run(h *harness) (summary, error) {
 		return sum, fmt.Errorf("the guests: %w", err)
 	}
 	sum.timings = append(sum.timings, gt...)
+
+	// Moderation (issue #853, docs/design/moderation.md §9): membership
+	// removal, bans, residual membership, the ban's race with the final voice
+	// check, message removal and the guests', on a real server.
+	if err := w.moderationPhase(sum.bounds, bsock); err != nil {
+		return sum, fmt.Errorf("moderation: %w", err)
+	}
 
 	// The restricted operator (issue #1015, ADR-014 design §7.7 item 1):
 	// the owner cuts the operator column through the real PUT, the
