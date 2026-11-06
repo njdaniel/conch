@@ -255,7 +255,10 @@ describe('Leave', () => {
     const said = await screen.findByText('You are the last member of this private channel. Add someone else before you leave.');
     expect(said.getAttribute('role')).toBe('status');
     // The confirmation that held focus is gone: focus is on the row's Leave.
-    expect(document.activeElement).toBe(within(rowOf('vault')).getByRole('button', { name: 'Leave vault' }));
+    // Focus returns in a passive effect, which can land after the status text.
+    await waitFor(() => {
+      expect(document.activeElement).toBe(within(rowOf('vault')).getByRole('button', { name: 'Leave vault' }));
+    });
     expect(seen.left).toEqual([]);
     expect(within(rowOf('vault')).getByRole('button', { name: 'Leave vault' })).toBeDefined();
   });
