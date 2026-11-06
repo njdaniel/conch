@@ -89,7 +89,8 @@ compatibility is a property of the schema layer, inherited for free.
     "payload": { "schema": "leviathan.trade_signal.v1", "data": { } },
     "audience": { "kind": "net", "net_id": 5 },  // absent for a channel-wide message
     "thread_root_id": 40,  // absent unless the message is a reply
-    "guest_author": { "handle": "guest-...", "tag": "7h3k" }  // absent unless posted during a guest visit
+    "guest_author": { "handle": "guest-...", "tag": "7h3k" },  // absent unless posted during a guest visit
+    "removed": true  // absent unless a moderator removed the message; body is then the fixed tombstone text, with no payload
 } }
 ```
 

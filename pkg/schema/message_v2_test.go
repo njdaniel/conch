@@ -131,6 +131,35 @@ func TestMessageV2Validate(t *testing.T) {
 		{name: "thread root is itself", mutate: func(m *MessageV2) { m.ThreadRootID = m.ID }, wantErr: "thread_root_id must be omitted or the id of an earlier message"},
 		{name: "thread root is later", mutate: func(m *MessageV2) { m.ThreadRootID = m.ID + 1 }, wantErr: "thread_root_id must be omitted or the id of an earlier message"},
 
+		// A removed message is the tombstone (moderation.md §7.3, issue
+		// #849): the fixed body, no payload, no edited_at. Position and
+		// attribution stay. A message not removed may say the sentence.
+		{name: "valid removed", mutate: func(m *MessageV2) { m.Body, m.Removed = MessageRemovedBody, true }},
+		{name: "valid removed reply", mutate: func(m *MessageV2) {
+			m.Body, m.Removed = MessageRemovedBody, true
+			m.ID, m.ThreadRootID = 5, 4
+		}},
+		{name: "valid removed with guest author", mutate: func(m *MessageV2) {
+			m.Body, m.Removed = MessageRemovedBody, true
+			m.GuestAuthor = &GuestAttributionV1{Handle: goodHandle, Label: "Pat", Tag: "a7k4"}
+		}},
+		{name: "valid removed whisper", mutate: func(m *MessageV2) {
+			m.Body, m.Removed = MessageRemovedBody, true
+			m.Audience = &Audience{Kind: AudienceKindPrincipals, PrincipalIDs: []int64{3, 4}}
+		}},
+		{name: "valid not removed with the removed body", mutate: func(m *MessageV2) { m.Body = MessageRemovedBody }},
+		{name: "removed with its text", mutate: func(m *MessageV2) { m.Removed = true }, wantErr: `removed message body must be "This message was removed by a moderator."`},
+		{name: "removed with an empty body", mutate: func(m *MessageV2) { m.Body, m.Removed = "", true }, wantErr: "body is required"},
+		{name: "removed with a payload", mutate: func(m *MessageV2) {
+			m.Body, m.Removed = MessageRemovedBody, true
+			m.Payload = &Payload{Schema: LeviathanTradeSignalV1Name, Data: json.RawMessage(`{"any":"json"}`)}
+		}, wantErr: "removed message must not carry a payload"},
+		{name: "removed with edited_at", mutate: func(m *MessageV2) {
+			m.Body, m.Removed = MessageRemovedBody, true
+			ts := NewTimestamp(m.CreatedAt.Time().Add(time.Minute))
+			m.EditedAt = &ts
+		}, wantErr: "removed message must not carry edited_at"},
+
 		// Everything MessageV1.Validate enforces.
 		{name: "v1 schema", mutate: func(m *MessageV2) { m.Schema = MessageSchemaV1 }, wantErr: `schema must be "conch.message.v2"`},
 		{name: "empty schema", mutate: func(m *MessageV2) { m.Schema = "" }, wantErr: `schema must be "conch.message.v2"`},

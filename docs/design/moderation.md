@@ -316,6 +316,29 @@ Nothing in this section is approved merely by appearing here. Before implementat
 
 All new REST routes otherwise have empty DELETE/PUT bodies or simple GET responses, so no confirmation-token, reason, expiry, role, address or ban-request shape is introduced. No MCP tool-definition change is needed for administration, but MCP message output must be checked against the additive `MessageV2` field in the same schema PR. `scripts/schema-compat.sh`, schema golden tests and generated consumers are mandatory.
 
+### 10.1 As signed off, 2026-11-05 (M1, #849)
+
+Nick signed off the shapes above as recommended on the M1 sign-off sheet, with the changes below. Everything is additive: no version bump, every existing fixture byte-identical. This subsection records what M1 built; the table above is the proposal it was built from.
+
+**Shapes as built** (`pkg/schema/moderation.go`, `pkg/schema/message_v2.go`):
+
+- `ChannelBanV1 {principal_id, name, created_by (omitempty), created_at}`: one entry of `GET /v1/channels/{channel}/bans`. REST-only, no `schema` field. `name` is the principal's current name as the server renders it everywhere (a guest's handle, `hidden-<id>` for a hidden principal), read at list time and never stored with the ban; authorization never uses it. `created_by` is omitted for a ban written with authentication off. Validate: `principal_id > 0`, `name` not blank, `created_by >= 0` (it may equal `principal_id`: a manager may ban themselves, §6.1), `created_at` set. No reason, expiry, role, kind, address or credential; no `guest` attribution (Q5).
+- `ListChannelBansResponseV1 {bans}`: always an array, strictly ascending `principal_id`, as the member and reactor lists are.
+- `MessageV2.removed` (`bool`, `omitempty`) and the constant `MessageRemovedBody = "This message was removed by a moderator."`. Validate: a removed message has that body, no `payload` and no `edited_at` (message-editing.md §10 asked for the last); `id`, `channel_id`, `author_id`, `created_at`, `audience`, `thread_root_id` and `guest_author` stay. A message that is not removed may say the sentence. `MessageV1FromV2` drops `removed` as it drops `edited_at`: a v1 reader gets the fixed body with no marker.
+- `MessageRemovedV1` (`conch.message_removed.v1`) `{schema, message}`: the events-socket frame for a removal, mirroring `MessageEditedV1`, so a client updates the copy it holds rather than notifying on a new message. Sent only to a subscriber who could see the message. The messages sockets still get the tombstone as a `MessageV2` with `removed: true` (§7.4). Schema type and fixture only in M1; the server emits it from M4.
+- Error code: `message_not_found` already exists (`pkg/schema/reaction.go`, #765) and is reused; nothing new.
+- SQLite migration 45 (`internal/server/store/store.go`): `channel_bans (channel_id, principal_id, created_by NULL-able, created_at; PK channel_id, principal_id)` and `message_removals (message_id PK, channel_id, removed_by NULL-able, removed_at)` with update and delete triggers that abort (`message removals are permanent`). The `messages` row is never touched; the tombstone is projected on read. No backfill. Audit action strings (`channel_ban_added`, `channel_ban_removed`, `message_removed`) are not schema and land with M3/M4.
+- Fixtures: `channel-ban-v1.json`, `channel-ban-v1-no-creator.json`, `list-channel-bans-response-v1.json`, `list-channel-bans-response-v1-empty.json`, `message-v2-removed.json`, `message-v2-removed-reply.json`, `message-removed-v1.json`. Generated TypeScript in `web/src/schema/generated.ts` and `generated.families.ts`; `mcpMessageOutput` gains `removed` so the MCP projection guard passes. No MCP tool-definition change; no `MessageRemovedBody` TypeScript constant (Q6: the client keys off `removed`, the body is server-rendered).
+
+**Decisions recorded (Q1 to Q6, as recommended):**
+
+- Q1, archived channels (#844): ban, unban and message removal are reduce-only and allowed in an archived channel, like member removal. Enforced in M3/M4; no shape impact.
+- Q2, a message carrying a reserved payload (`conch.approval.*`, `conch.admin_action.*`): removal is allowed and the tombstone drops the payload; the approval stays pending and decidable through `/v1/approvals`, `await_decision`/`check_decision` and the approvals list. No new error code. M4 therefore carries the `approval-path` label and an end-to-end case (request, notify, remove the card, resolve, audit).
+- Q3, threads: the tombstone keeps `thread_root_id`; a removed root is a tombstone, not `thread_not_found`. M4 refuses new replies to a removed root with the existing `thread_not_found`; existing replies stand.
+- Q4, AI administrators (#1326): land with M3, not M1 (the catalog's structural test needs the route): `list_channel_bans` (direct), `ban_channel_member` (approval), `unban_channel_member` (approval), all under `manage_channels`, target channel. `remove_message` is deferred to a follow-up: the door's agent must be a channel member who can see the message (§7.1).
+- Q5, `guest` attribution on `ChannelBanV1`: not in M1; `name` reads the handle, which is enough to confirm an unban. Additive later if M6 needs it.
+- Q6, `MessageRemovedBody` as a TypeScript constant: no.
+
 ## 11. Candidate follow-up issues for principal review
 
 The follow-ups are filed as **#849 (M1), #850 (M2), #851 (M3), #852 (M4), #853 (M5) and #854 (M6)**. IDs M1–M6 are local ordering labels. Each implementation issue is security-sensitive and gets a `security-reviewer` pass. M1 additionally records Nick's §10 approval before dispatch.

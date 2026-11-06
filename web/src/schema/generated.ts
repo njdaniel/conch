@@ -407,6 +407,30 @@ export const addChannelMemberRequestV1 = object<AddChannelMemberRequestV1>({
   can_decide: optional(bool),
 });
 
+// schema.ChannelBanV1
+export interface ChannelBanV1 {
+  principal_id: number;
+  name: string;
+  created_by?: number;
+  created_at: string;
+}
+
+export const channelBanV1 = object<ChannelBanV1>({
+  principal_id: int,
+  name: str,
+  created_by: optional(int),
+  created_at: timestamp,
+});
+
+// schema.ListChannelBansResponseV1
+export interface ListChannelBansResponseV1 {
+  bans: ChannelBanV1[];
+}
+
+export const listChannelBansResponseV1 = object<ListChannelBansResponseV1>({
+  bans: array(channelBanV1),
+});
+
 // schema.Payload
 export interface Payload {
   schema: string;
@@ -462,6 +486,7 @@ export interface MessageV2 {
   thread_root_id?: number;
   guest_author?: GuestAttributionV1;
   edited_at?: string;
+  removed?: boolean;
 }
 
 export const messageV2 = object<MessageV2>({
@@ -476,6 +501,7 @@ export const messageV2 = object<MessageV2>({
   thread_root_id: optional(int),
   guest_author: optional(guestAttributionV1),
   edited_at: optional(timestamp),
+  removed: optional(bool),
 });
 
 // schema.PostMessageRequestV2
@@ -591,6 +617,19 @@ export interface MessageEditedV1 {
 
 export const messageEditedV1 = object<MessageEditedV1>({
   schema: vocab<typeof messageEditedV1Schema>({ [messageEditedV1Schema]: true }),
+  message: messageV2,
+});
+
+// schema.MessageRemovedV1
+export const messageRemovedV1Schema = 'conch.message_removed.v1';
+
+export interface MessageRemovedV1 {
+  schema: typeof messageRemovedV1Schema;
+  message: MessageV2;
+}
+
+export const messageRemovedV1 = object<MessageRemovedV1>({
+  schema: vocab<typeof messageRemovedV1Schema>({ [messageRemovedV1Schema]: true }),
   message: messageV2,
 });
 

@@ -29,6 +29,8 @@ func rewindToBeforeCommunity(t *testing.T, path string) {
 	}
 	defer func() { _ = db.Close() }()
 	for _, stmt := range []string{
+		"DROP TABLE message_removals",                         // migration 45 (issue #849); its triggers go with it
+		"DROP TABLE channel_bans",                             // migration 45 (issue #849)
 		"DROP TABLE admin_actions",                            // migration 43 (issue #1326)
 		"ALTER TABLE agent_manifests DROP COLUMN admin",       // migration 43
 		"ALTER TABLE agent_manifests DROP COLUMN permissions", // migration 43
