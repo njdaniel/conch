@@ -4,8 +4,10 @@ import type { Feeds } from '../../main/api/feeds.ts';
 import type { Files } from '../../main/files.ts';
 import type { Service } from '../../main/api/service.ts';
 import { DocumentGate } from '../../main/document.ts';
-import { checkCaller, Ipc, parseRequest, plain, type ProfilesApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
-import { INVOKED_FUNCTIONS } from '../../shared/bridge-names.ts';
+import { checkCaller, Ipc, parseRequest, plain, type ProfilesApi, type VoiceApi, type ContentsLike, type FrameLike, type InvokeEvent } from '../../main/ipc.ts';
+import { INVOKED_FUNCTIONS, VOICE_EVENTS, VOICE_FUNCTIONS } from '../../shared/bridge-names.ts';
+import { deliverVoice } from '../../main/voice/events.ts';
+import type { NativeVoiceView } from '../../../web/src/platform/desktop/bridge.ts';
 
 function frame(token = 'frame-1', over: Partial<FrameLike> = {}): FrameLike {
   return { frameToken: token, parent: null, detached: false, url: 'conch-app://ui/', ...over };
@@ -44,8 +46,9 @@ function fixture(): Fixture {
   const clock = { now: 1_000_000 };
   const input = { recent: false };
   const files = new Proxy({} as Files, { get: (_t, name: string) => record(`files.${name}`) });
+  const voice = new Proxy({} as VoiceApi, { get: (_t, name: string) => record(`voice.${name}`) });
   const gestures = { take: () => (input.recent ? ('pointer' as const) : null) };
-  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, now: () => clock.now, log: (line) => logs.push(line) });
+  const ipc = new Ipc({ owned: () => contents, gate, service, feeds, files, gestures, profiles, voice, now: () => clock.now, log: (line) => logs.push(line) });
   return { ipc, gate, contents, main, calls, logs, clock, permit, input, event: (over = {}) => ({ sender: contents, senderFrame: main, ...over }) };
 }
 
@@ -87,6 +90,7 @@ describe('every invocation is checked before anything else', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: {} as ProfilesApi,
+      voice: {} as VoiceApi,
       now: () => 0,
       log: () => undefined,
     });
@@ -306,6 +310,7 @@ describe('arguments', () => {
       files: {} as Files,
       gestures: { take: () => null },
       profiles: { add: () => { throw new Error('boom secret-arg'); } } as unknown as ProfilesApi,
+      voice: {} as VoiceApi,
       now: () => 0,
       log: (line) => f.logs.push(line),
     });
@@ -333,5 +338,243 @@ describe('the caller check alone', () => {
   it('is null for the one document', () => {
     const f = fixture();
     expect(checkCaller(f.event(), f.contents, f.gate)).toBeNull();
+  });
+});
+
+describe('the voice family (issue #1374)', () => {
+  const join = { channel: 'general', muted: false, deafened: false };
+
+  it('has no function whose name says press, release, transmit, gate or ptt', () => {
+    for (const name of [...VOICE_FUNCTIONS, ...INVOKED_FUNCTIONS]) expect(name).not.toMatch(/press|release|transmit|gate|ptt/i);
+  });
+
+  it('passes the parsed arguments to the service and gives its answer back', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    await f.ipc.invoke(f.event(), 'voiceState', []);
+    await f.ipc.invoke(f.event(), 'voiceJoin', [join]);
+    await f.ipc.invoke(f.event(), 'voiceLeave', []);
+    await f.ipc.invoke(f.event(), 'voiceRetry', []);
+    await f.ipc.invoke(f.event(), 'voiceSetMute', [true]);
+    await f.ipc.invoke(f.event(), 'voiceSetDeafen', [false]);
+    await f.ipc.invoke(f.event(), 'voiceSetDevices', [{ output: 'Speakers' }]);
+    await f.ipc.invoke(f.event(), 'voiceSetDevices', [{ input: 'Mic', output: 'Speakers' }]);
+    await f.ipc.invoke(f.event(), 'voiceSetTalkMode', ['open']);
+    await f.ipc.invoke(f.event(), 'voiceSetTalkMode', ['push_to_talk']);
+    expect(f.calls).toEqual([
+      ['voice.state', []],
+      ['voice.join', [join]],
+      ['voice.leave', []],
+      ['voice.retry', []],
+      ['voice.setMute', [true]],
+      ['voice.setDeafen', [false]],
+      ['voice.setDevices', [{ output: 'Speakers' }]],
+      ['voice.setDevices', [{ input: 'Mic', output: 'Speakers' }]],
+      ['voice.setTalkMode', ['open']],
+      ['voice.setTalkMode', ['push_to_talk']],
+    ]);
+    expect(f.ipc.refusals).toBe(0);
+  });
+
+  it.each([
+    ['voiceState', [1]],
+    ['voiceLeave', ['x']],
+    ['voiceRetry', [{}]],
+    ['voiceJoin', []],
+    ['voiceJoin', ['general']],
+    ['voiceJoin', [null]],
+    ['voiceJoin', [[]]],
+    ['voiceJoin', [{ channel: 'general', muted: false }]],
+    // The protocol's own rules (validChannel, validDeviceName): a blank
+    // channel, a lone surrogate, and a quote or backslash in a device name.
+    ['voiceJoin', [{ channel: '   ', muted: false, deafened: false }]],
+    ['voiceJoin', [{ channel: 'gen\ud800eral', muted: false, deafened: false }]],
+    ['voiceSetDevices', [{ input: 'Mic "USB"' }]],
+    ['voiceSetDevices', [{ output: 'Speakers\\1' }]],
+    ['voiceJoin', [{ muted: false, deafened: false }]],
+    ['voiceJoin', [{ ...join, extra: 1 }]],
+    ['voiceJoin', [{ ...join, token: 't' }]],
+    ['voiceJoin', [{ ...join, helperPath: '/bin/sh' }]],
+    ['voiceJoin', [{ ...join, channel: '' }]],
+    ['voiceJoin', [{ ...join, channel: 5 }]],
+    ['voiceJoin', [{ ...join, channel: 'a\nb' }]],
+    ['voiceJoin', [{ ...join, channel: 'a\u0000b' }]],
+    ['voiceJoin', [{ ...join, channel: 'x'.repeat(401) }]],
+    ['voiceJoin', [{ ...join, channel: '\u00e9'.repeat(201) }]],
+    ['voiceJoin', [{ ...join, muted: 'no' }]],
+    ['voiceJoin', [{ ...join, deafened: 0 }]],
+    ['voiceJoin', [join, 'extra']],
+    ['voiceSetMute', []],
+    ['voiceSetMute', ['true']],
+    ['voiceSetMute', [1]],
+    ['voiceSetMute', [{ muted: true }]],
+    ['voiceSetMute', [true, false]],
+    ['voiceSetDeafen', [null]],
+    ['voiceSetDeafen', ['false']],
+    ['voiceSetDevices', []],
+    ['voiceSetDevices', [{}]],
+    ['voiceSetDevices', ['Mic']],
+    ['voiceSetDevices', [{ input: '' }]],
+    ['voiceSetDevices', [{ input: 5 }]],
+    ['voiceSetDevices', [{ input: 'a\nb' }]],
+    ['voiceSetDevices', [{ input: 'x'.repeat(256) }]],
+    ['voiceSetDevices', [{ output: 'x'.repeat(256) }]],
+    ['voiceSetDevices', [{ input: 'Mic', path: '/dev/snd' }]],
+    ['voiceSetDevices', [{ other: 'Mic' }]],
+    ['voiceSetDevices', [{ input: 'Mic' }, 'extra']],
+    ['voiceSetTalkMode', []],
+    ['voiceSetTalkMode', ['hold']],
+    ['voiceSetTalkMode', ['press']],
+    ['voiceSetTalkMode', ['OPEN']],
+    ['voiceSetTalkMode', [{ mode: 'open' }]],
+    ['voiceSetTalkMode', ['open', 'extra']],
+    ['voiceSetTalkMode', ['toString']],
+  ])('refuses a bad argument before the service is called: %s %j', async (name, args) => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('accepts a channel of exactly the byte cap and refuses one byte over', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    expect((await f.ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: 'x'.repeat(400) }])).ok).toBe(true);
+    expect((await f.ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: 'x'.repeat(401) }])).ok).toBe(false);
+    // Two bytes a character: 200 fit, 201 do not.
+    expect((await f.ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: '\u00e9'.repeat(200) }])).ok).toBe(true);
+    expect((await f.ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: '\u00e9'.repeat(201) }])).ok).toBe(false);
+  });
+
+  it('refuses an oversized or non-plain argument before it is parsed', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    expect(await f.ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: 'x'.repeat(5000) }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(size)');
+    expect(await f.ipc.invoke(f.event(), 'voiceSetMute', [new Boolean(true)])).toEqual({ ok: false, kind: 'refused' });
+    expect(await f.ipc.invoke(f.event(), 'voiceJoin', [Object.assign(Object.create({ inherited: 1 }) as object, join)])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it.each([
+    ['voiceJoin', [{ channel: 'general', muted: false, deafened: false }]],
+    ['voiceRetry', []],
+    ['voiceSetTalkMode', ['open']],
+  ] as const)('refuses %s without a recent gesture and executes nothing', async (name, args) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), name, args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.at(-1)).toContain('(gesture)');
+    expect(f.calls).toEqual([]);
+    f.input.recent = true;
+    expect((await f.ipc.invoke(f.event(), name, args)).ok).toBe(true);
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('needs no gesture to leave, mute, deafen, set devices or choose push-to-talk, nor to read the state', async () => {
+    const f = fixture();
+    for (const [name, args] of [
+      ['voiceState', []],
+      ['voiceLeave', []],
+      ['voiceSetMute', [true]],
+      ['voiceSetDeafen', [true]],
+      ['voiceSetDevices', [{ input: 'Mic' }]],
+      ['voiceSetTalkMode', ['push_to_talk']],
+    ] as const) {
+      expect((await f.ipc.invoke(f.event(), name, args)).ok, name).toBe(true);
+    }
+    expect(f.ipc.refusals).toBe(0);
+  });
+
+  it('does not ask for a gesture of an open-mic request that is refused for its shape', async () => {
+    const f = fixture();
+    const asked: number[] = [];
+    const ipc = new Ipc({
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi, voice: {} as VoiceApi,
+      gestures: { take: (_c, within) => { asked.push(within); return 'pointer'; } }, now: () => 0, log: () => undefined,
+    });
+    await ipc.invoke(f.event(), 'voiceSetTalkMode', ['bogus']);
+    expect(asked).toEqual([]);
+  });
+
+  const callerCases: [string, (f: Fixture) => InvokeEvent][] = [
+    ['a subframe', (f) => f.event({ senderFrame: frame('frame-2', { parent: f.main }) })],
+    ['another window', (f) => f.event({ sender: { isDestroyed: () => false, mainFrame: f.main } })],
+    ['a destroyed sender', (f) => { f.contents.destroyed = true; return f.event(); }],
+    ['a stale document generation', (f) => { f.gate.begin(); return f.event(); }],
+    ['a foreign origin', (f) => f.event({ senderFrame: frame('frame-1', { url: 'https://evil.example/' }) })],
+  ];
+
+  it.each(callerCases)('refuses every voice function from %s and calls the service for none', async (_name, make) => {
+    const f = fixture();
+    f.input.recent = true;
+    const event = make(f);
+    const calls: [string, unknown[]][] = [
+      ['voiceState', []], ['voiceJoin', [join]], ['voiceLeave', []], ['voiceRetry', []], ['voiceSetMute', [true]],
+      ['voiceSetDeafen', [true]], ['voiceSetDevices', [{ input: 'Mic' }]], ['voiceSetTalkMode', ['open']],
+    ];
+    expect(calls.map(([name]) => name).sort()).toEqual([...VOICE_FUNCTIONS].sort());
+    for (const [name, args] of calls) expect(await f.ipc.invoke(event, name, args), name).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('says only "refused" when the service throws, and logs no argument', async () => {
+    const f = fixture();
+    f.input.recent = true;
+    const ipc = new Ipc({
+      owned: () => f.contents, gate: f.gate, service: {} as Service, feeds: {} as Feeds, files: {} as Files, profiles: {} as ProfilesApi,
+      voice: { join: () => { throw new Error('boom secret-channel'); } } as unknown as VoiceApi,
+      gestures: { take: () => 'pointer' }, now: () => 0, log: (line) => f.logs.push(line),
+    });
+    expect(await ipc.invoke(f.event(), 'voiceJoin', [{ ...join, channel: 'secret-channel' }])).toEqual({ ok: false, kind: 'refused' });
+    expect(f.logs.join('\n')).not.toContain('secret-channel');
+  });
+
+  it.each([
+    ['voiceState', [], 600],
+    ['voiceJoin', [join], 20],
+    ['voiceLeave', [], 60],
+    ['voiceRetry', [], 20],
+    ['voiceSetMute', [true], 120],
+    ['voiceSetDeafen', [true], 120],
+    ['voiceSetDevices', [{ input: 'Mic' }], 30],
+    ['voiceSetTalkMode', ['open'], 30],
+  ] as const)('limits %s to its own budget a minute', async (name, args, limit) => {
+    const f = fixture();
+    f.input.recent = true;
+    let accepted = 0;
+    for (let i = 0; i < limit + 5; i++) if ((await f.ipc.invoke(f.event(), name, args)).ok) accepted++;
+    expect(accepted).toBe(limit);
+    expect(f.logs.at(-1)).toContain('(rate)');
+    f.clock.now += 60_001;
+    expect((await f.ipc.invoke(f.event(), name, args)).ok).toBe(true);
+  });
+});
+
+describe('voice events (issue #1374)', () => {
+  const view: NativeVoiceView = { status: 'idle', generation: 1, channel: null, retryable: false };
+
+  function target(committed: boolean, present = true) {
+    const sent: [string, unknown][] = [];
+    const gate = new DocumentGate();
+    gate.begin();
+    if (committed) gate.commit({ frameToken: 'f' });
+    return { sent, gate, target: { contents: () => (present ? { send: (c: string, v: NativeVoiceView) => void sent.push([c, v]) } : null), gate: () => gate } };
+  }
+
+  it('sends the view on the voice channel to the owned contents while its document is committed', () => {
+    const t = target(true);
+    deliverVoice(t.target, view);
+    expect(t.sent).toEqual([[VOICE_EVENTS, view]]);
+  });
+
+  it('sends nothing to a document that has begun but not committed, or after it ends, or with no window', () => {
+    const uncommitted = target(false);
+    deliverVoice(uncommitted.target, view);
+    const ended = target(true);
+    ended.gate.begin();
+    deliverVoice(ended.target, view);
+    const gone = target(true, false);
+    deliverVoice(gone.target, view);
+    expect([uncommitted.sent, ended.sent, gone.sent]).toEqual([[], [], []]);
   });
 });

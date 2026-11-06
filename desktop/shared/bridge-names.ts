@@ -6,7 +6,7 @@
 // bridge's subscribe is not one invoke: the preload carries it as the three
 // feed calls below, and main answers with feed events on the one channel
 // FEED_EVENTS (issue #943).
-import type { ConchDesktopBridge } from '../../web/src/platform/desktop/bridge.ts';
+import type { ConchDesktopBridge, DesktopVoiceBridge } from '../../web/src/platform/desktop/bridge.ts';
 
 export const BRIDGE_FUNCTIONS = [
   'serverAddress',
@@ -43,6 +43,23 @@ export const PROFILE_FUNCTIONS = [
 
 export type ProfileFunction = (typeof PROFILE_FUNCTIONS)[number];
 
+// Native voice (issue #1374, D3-3 of #771): the invoked functions of
+// DesktopVoiceBridge (onVoiceState is its event, not an invoke). There is no
+// press, release, gate or transmit function: the talk key never crosses IPC,
+// the helper reads it natively (linux-desktop.md §4).
+export const VOICE_FUNCTIONS = [
+  'voiceState',
+  'voiceJoin',
+  'voiceLeave',
+  'voiceRetry',
+  'voiceSetMute',
+  'voiceSetDeafen',
+  'voiceSetDevices',
+  'voiceSetTalkMode',
+] as const satisfies readonly (keyof DesktopVoiceBridge)[];
+
+export type VoiceFunction = (typeof VOICE_FUNCTIONS)[number];
+
 export type BridgeFunction = (typeof BRIDGE_FUNCTIONS)[number];
 
 // The calls a subscription is made of: open a feed under a number the preload
@@ -52,12 +69,13 @@ export const FEED_CALLS = ['feedSubscribe', 'feedAck', 'feedUnsubscribe'] as con
 export type FeedCall = (typeof FEED_CALLS)[number];
 
 // The functions that cross into main as one invoke each.
-export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction;
+export type InvokedFunction = Exclude<BridgeFunction, 'subscribe'> | FeedCall | ProfileFunction | VoiceFunction;
 
 export const INVOKED_FUNCTIONS: readonly InvokedFunction[] = [
   ...BRIDGE_FUNCTIONS.filter((name): name is Exclude<BridgeFunction, 'subscribe'> => name !== 'subscribe'),
   ...FEED_CALLS,
   ...PROFILE_FUNCTIONS,
+  ...VOICE_FUNCTIONS,
 ];
 
 export function channelOf(name: InvokedFunction): string {
@@ -83,3 +101,8 @@ export type FeedEvent =
   | { readonly id: number; readonly type: 'open' }
   | { readonly id: number; readonly type: 'frames'; readonly frames: readonly string[] }
   | { readonly id: number; readonly type: 'close'; readonly code: number; readonly reason: string };
+
+// The second channel main sends on: the helper's confirmed voice state, a
+// NativeVoiceView as the message. Main sends it to the owned web contents
+// only, while its current document is committed.
+export const VOICE_EVENTS = 'conch:voice';
