@@ -794,20 +794,55 @@ func (m *mod) outEverywhere(what string, h *held, msg, file int64, term string, 
 // liveFrame is what a message or events socket sends, as far as the
 // scenarios read it.
 type liveFrame struct {
-	Schema  string `json:"schema"`
-	ID      int64  `json:"id"`
-	Body    string `json:"body"`
-	Removed bool   `json:"removed"`
-	Message *struct {
-		ID      int64  `json:"id"`
-		Body    string `json:"body"`
-		Removed bool   `json:"removed"`
-	} `json:"message"`
+	Schema  string
+	ID      int64
+	Body    string
+	Removed bool
+	Payload *schema.Payload
+	Message *schema.MessageV2
 }
 
 func decodeFrame(raw []byte) liveFrame {
 	var f liveFrame
-	_ = json.Unmarshal(raw, &f)
+	var head struct {
+		Schema string `json:"schema"`
+	}
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return f
+	}
+	f.Schema = head.Schema
+	set := func(msg schema.MessageV2) {
+		f.ID, f.Body, f.Removed, f.Payload = msg.ID, msg.Body, msg.Removed, msg.Payload
+	}
+	switch f.Schema {
+	case "":
+		var msg schema.MessageV0
+		if err := json.Unmarshal(raw, &msg); err == nil {
+			set(schema.MessageV2{ID: msg.ID, Body: msg.Body})
+		}
+	case schema.MessageSchemaV1:
+		var msg schema.MessageV1
+		if err := json.Unmarshal(raw, &msg); err == nil {
+			set(schema.MessageV2FromV1(msg))
+		}
+	case schema.MessageSchemaV2:
+		var msg schema.MessageV2
+		if err := json.Unmarshal(raw, &msg); err == nil {
+			set(msg)
+		}
+	case schema.MessageRemovedSchemaV1:
+		var event schema.MessageRemovedV1
+		if err := json.Unmarshal(raw, &event); err == nil {
+			f.Message = &event.Message
+		}
+	default:
+		var event struct {
+			Message *schema.MessageV2 `json:"message"`
+		}
+		if err := json.Unmarshal(raw, &event); err == nil {
+			f.Message = event.Message
+		}
+	}
 	return f
 }
 
@@ -823,14 +858,14 @@ func (f liveFrame) isMessage() bool {
 }
 
 // tombstone reports whether the frame is the tombstone of message id, in any
-// envelope: a message frame with the fixed body, or the events socket's
-// conch.message_removed.v1.
+// envelope: a message frame with the fixed body and no payload, removed:true
+// in v2, or the events socket's conch.message_removed.v1.
 func (f liveFrame) tombstone(id int64) bool {
 	switch {
 	case f.Schema == schema.MessageRemovedSchemaV1:
-		return f.Message != nil && f.Message.ID == id && f.Message.Removed && f.Message.Body == schema.MessageRemovedBody
+		return f.Message != nil && f.Message.ID == id && f.Message.Removed && f.Message.Body == schema.MessageRemovedBody && f.Message.Payload == nil
 	case f.isMessage() && f.ID == id:
-		return f.Body == schema.MessageRemovedBody
+		return f.Body == schema.MessageRemovedBody && f.Payload == nil && (f.Schema != schema.MessageSchemaV2 || f.Removed)
 	}
 	return false
 }
@@ -1398,8 +1433,30 @@ func (m *mod) legacyBan() error {
 		return err
 	}
 	// The ban row alone, as a restore beside live data would have it: no
-	// route made it, no socket was dropped, no room rotated.
+	// route made it, no socket was dropped, no room rotated. Watch LiveKit
+	// from before the insert so the refusal requests below are not charged to
+	// the poller's eviction time.
+	type disappearance struct {
+		after time.Duration
+		err   error
+	}
+	var departed chan disappearance
 	start := time.Now()
+	if w.lk != nil {
+		departed = make(chan disappearance, 1)
+		go func() {
+			deadline := start.Add(m.bounds.total() + modWait)
+			for time.Now().Before(deadline) && stopCtx.Err() == nil {
+				if gone, _ := w.lk.gone(h.room, tess.id); gone {
+					departed <- disappearance{after: time.Since(start)}
+					return
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+			_, saw := w.lk.gone(h.room, tess.id)
+			departed <- disappearance{err: fmt.Errorf("LiveKit still lists tess after %s: %s", m.bounds.total()+modWait, saw)}
+		}()
+	}
 	if err := w.underDB("INSERT INTO channel_bans (channel_id, principal_id, created_by, created_at) VALUES (?, ?, NULL, ?)", m.mainID, tess.id, time.Now().UnixMilli()); err != nil {
 		return err
 	}
@@ -1415,13 +1472,11 @@ func (m *mod) legacyBan() error {
 	// The voice poller is the backstop for what no route revoked: LiveKit
 	// stops listing her within one pass and a room rotation.
 	if w.lk != nil {
-		if err := waitFor("LiveKit to stop listing tess", m.bounds.total()+modWait, func() (bool, string) {
-			gone, saw := w.lk.gone(h.room, tess.id)
-			return gone, saw
-		}); err != nil {
-			return err
+		d := <-departed
+		if d.err != nil {
+			return d.err
 		}
-		took := time.Since(start)
+		took := d.after
 		if took > m.bounds.total() {
 			return fmt.Errorf("the voice poller took %s to remove a banned participant, bound %s", took.Round(time.Millisecond), m.bounds.total())
 		}

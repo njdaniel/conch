@@ -185,8 +185,7 @@ func (m *mod) post(p *member, what string, req schema.PostMessageRequestV2) (int
 }
 
 func (m *mod) remove(a api, id int64) (result, error) {
-	status, body, err := a.do(http.MethodDelete, "/v2/channels/"+url.PathEscape(m.main)+"/messages/"+itoa(id), nil)
-	return result{status: status, body: body}, err
+	return m.w.send(a, del("/v2/channels/"+url.PathEscape(m.main)+"/messages/"+itoa(id)))
 }
 
 // list reads the moderated channel as a, v2, by path suffix.
@@ -371,6 +370,9 @@ func (m *mod) messages() error {
 		if leaks := m.marks.leaks(got.body, as); len(leaks) > 0 {
 			return fmt.Errorf("%s removing: the body holds %s", c.who, strings.Join(leaks, "; "))
 		}
+		if leaks := m.marks.headerLeaks(got.header, as); len(leaks) > 0 {
+			return fmt.Errorf("%s removing: the headers hold %s", c.who, strings.Join(leaks, "; "))
+		}
 		if err := checkRefusal(got, c.want, as); err != nil {
 			return fmt.Errorf("%s removing: %w", c.who, err)
 		}
@@ -526,7 +528,7 @@ func (m *mod) messages() error {
 
 	// ---- a net's message
 
-	if err := m.netRemoval(st, readers, all); err != nil {
+	if err := m.netRemoval(readers, all); err != nil {
 		return err
 	}
 
@@ -636,7 +638,8 @@ func (m *mod) surfaces(st *removedState) (int, error) {
 				}
 			}
 		}
-		// v0 and v1: the fixed body, no marker, no whisper at all.
+		// v0 and v1: the fixed body on the wide message's own id, no marker,
+		// and no scoped message at all.
 		for _, v := range []string{"/v0/channels/", "/v1/channels/"} {
 			status, body, err := p.a.do(http.MethodGet, v+url.PathEscape(m.main)+"/messages?limit=100", nil)
 			n++
@@ -651,8 +654,39 @@ func (m *mod) surfaces(st *removedState) (int, error) {
 					return n, fmt.Errorf("%s: GET %smessages holds %q", p.name, v, o)
 				}
 			}
-			if !bytes.Contains(body, []byte(schema.MessageRemovedBody)) {
-				return n, fmt.Errorf("%s: GET %smessages has no tombstone for the removed message", p.name, v)
+			var msgs []schema.MessageV1
+			switch v {
+			case "/v0/channels/":
+				var page schema.ListMessagesResponse
+				if err := json.Unmarshal(body, &page); err != nil {
+					return n, fmt.Errorf("%s: decode GET %smessages: %w", p.name, v, err)
+				}
+				for _, msg := range page.Messages {
+					msgs = append(msgs, schema.MessageV1{ID: msg.ID, Body: msg.Body})
+				}
+			case "/v1/channels/":
+				var page schema.ListMessagesResponseV1
+				if err := json.Unmarshal(body, &page); err != nil {
+					return n, fmt.Errorf("%s: decode GET %smessages: %w", p.name, v, err)
+				}
+				msgs = page.Messages
+			}
+			for _, scoped := range []int64{st.m4, st.m5, st.m6} {
+				if slices.ContainsFunc(msgs, func(msg schema.MessageV1) bool { return msg.ID == scoped }) {
+					return n, fmt.Errorf("%s: GET %smessages names scoped message %d", p.name, v, scoped)
+				}
+			}
+			found := false
+			for _, msg := range msgs {
+				if msg.ID == st.m1 {
+					found = true
+					if msg.Body != schema.MessageRemovedBody || msg.Payload != nil {
+						return n, fmt.Errorf("%s: GET %smessages has message %d as %+v, want the fixed body and no payload", p.name, v, st.m1, msg)
+					}
+				}
+			}
+			if !found {
+				return n, fmt.Errorf("%s: GET %smessages has no tombstone for removed message %d", p.name, v, st.m1)
 			}
 			if bytes.Contains(body, []byte(`"removed"`)) {
 				return n, fmt.Errorf("%s: GET %smessages carries a removed marker an older reader did not ask for", p.name, v)
@@ -967,7 +1001,7 @@ func (m *mod) ordering() error {
 				continue
 			}
 			switch {
-			case df.Body == schema.MessageRemovedBody && df.Removed:
+			case df.tombstone(df.ID):
 				if state[df.ID] == "tomb" {
 					return fmt.Errorf("%s: frame %d is a second tombstone for message %d", f.what, i, df.ID)
 				}
@@ -997,7 +1031,7 @@ func (m *mod) ordering() error {
 // update it is, their events sockets, and nothing of anyone else's, the
 // member who is on no net included; a replaying socket of a seat is told the
 // tombstone once and one of the member off the net is told nothing.
-func (m *mod) netRemoval(st *removedState, readers []*reader, all func() []*feed) error {
+func (m *mod) netRemoval(readers []*reader, all func() []*feed) error {
 	if err := m.putSeat(m.mia); err != nil {
 		return err
 	}
@@ -1042,6 +1076,10 @@ func (m *mod) netRemoval(st *removedState, readers []*reader, all func() []*feed
 	if err := m.checkRemoval("a net's message", all(), base, m7, owed, r7); err != nil {
 		return err
 	}
+	sentinel := m.text("channel-wide replay sentinel after the net removal")
+	if _, err := m.post(m.pat, "the replay sentinel after the net removal", schema.PostMessageRequestV2{Body: sentinel}); err != nil {
+		return err
+	}
 	for _, c := range []struct {
 		p     *member
 		onNet bool
@@ -1050,15 +1088,14 @@ func (m *mod) netRemoval(st *removedState, readers []*reader, all func() []*feed
 		if err != nil || f == nil {
 			return fmt.Errorf("a replaying socket: %s %d %s", errText(err), r.status, r.body)
 		}
-		err = waitFor(f.what+" to replay up to the control", modWait, func() (bool, string) {
+		err = waitFor(f.what+" to replay up to the post-removal sentinel", modWait, func() (bool, string) {
 			for _, fr := range f.received() {
-				if bytes.Contains(fr, []byte(st.r3)) {
+				if bytes.Contains(fr, []byte(sentinel)) {
 					return true, ""
 				}
 			}
 			return false, fmt.Sprintf("%d frames", len(f.received()))
 		})
-		time.Sleep(500 * time.Millisecond)
 		tombs, names := 0, 0
 		for _, fr := range f.received() {
 			df := decodeFrame(fr)
