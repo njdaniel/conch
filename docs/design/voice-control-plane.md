@@ -268,6 +268,8 @@ Measured on 2026-10-09 against LiveKit server 1.13.7 (the `livekit/livekit-serve
 
 Wire details observed: field names are snake case (`joined_at_ms`, `num_participants`), 64-bit integers are strings, and enums are names (`"MICROPHONE"`, `"AUDIO"`). The token's `canPublishSources: ["microphone"]` is honoured. Each room call was accepted with only the grant it needs.
 
+**Reconnect URLs expose the refresh token in Chromium's console (#646).** Measured on 2026-11-06 with the web client's livekit-client 2.22.3, real Chromium and `conchd`, against the pinned server: one minute after LiveKit was stopped, every logged reconnect URL carried LiveKit's first refresh token, not `conchd`'s join token. Its `exp - iat` was 600 seconds, with the identity and grant unchanged (join, subscribe, microphone only, no data). No further token-bearing URL appeared later: the last of the eight messages was 34.2 seconds into the outage; at ten minutes the same token's nominal expiry had just passed, with finding 6's 60-second leeway still applying. LiveKit 1.13.7 hard-codes this as `tokenDefaultTTL` in `pkg/service/roommanager.go`; its configuration has no refresh-token lifetime setting, so `conchd` cannot shorten it. A console capture early in an outage can therefore contain a credential valid for several more minutes, and the report form says not to paste browser console output.
+
 Checked against LiveKit's documentation, not a server: its webhooks have no mute event (§6).
 
 ## 11. Out of scope
