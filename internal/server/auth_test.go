@@ -830,9 +830,17 @@ func TestAuthOffUnchanged(t *testing.T) {
 		// issue #445), alice's and bot's credentials 1 each, the fixture's
 		// three member_added events, and the fixture agent's
 		// manifest_created; no request may add to that (in particular no
-		// access_denied).
-		if n := len(f.audit(t)); n != 9 {
-			t.Errorf("mode %q: audit events = %d, want 9", mode, n)
+		// access_denied). The one exception is the voice-only removal (issue
+		// #850): an authorized request writes voice_participant_kicked even when
+		// it removes nobody (design §3.3), and the sweep authorizes it twice,
+		// once with no credential and once with a garbage one, both
+		// unconstrained under AuthOff. Voice is not configured here, so
+		// nothing is removed and no voice_participant_removed row follows.
+		if n := len(f.audit(t)); n != 11 {
+			t.Errorf("mode %q: audit events = %d, want 11", mode, n)
+		}
+		if n := countAction(f.audit(t), store.AuditVoiceParticipantKicked); n != 2 {
+			t.Errorf("mode %q: voice_participant_kicked events = %d, want 2", mode, n)
 		}
 	}
 }
