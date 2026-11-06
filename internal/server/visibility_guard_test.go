@@ -129,16 +129,17 @@ func checkMessageReads(t *testing.T, fset *token.FileSet, path string, file *ast
 				// in the same statement, held to the same reader rule below.
 				// EditOwnMessage and OwnMessageRevisions (issue #845) select the
 				// reader's own message by the same condition and are held to
-				// the same reader rule below.
+				// the same reader rule below. RemoveMessage (issue #852) finds the
+				// message to remove by the same condition and is held to it too.
 				case "ListVisibleMessages", "ListVisibleMessagesPage", "SearchVisibleMessages", "CountVisibleMessagesAfter", "CountVisibleUnreadMessagesAfter", "ListThreadMessages", "ReplyRootMessage", "InsertReplyMessage",
-					"InsertMessage", "InsertMessageV1", "InsertScopedMessage", "EditOwnMessage", "OwnMessageRevisions":
+					"InsertMessage", "InsertMessageV1", "InsertScopedMessage", "EditOwnMessage", "OwnMessageRevisions", "RemoveMessage":
 				default:
 					t.Errorf("%s: %s calls the store's %s; server code may only use the visibility functions and the inserts", path, fset.Position(x.Pos()), name)
 					return true
 				}
 			}
 			takesReader := name == "ReplyRootMessage" || name == "InsertReplyMessage" || name == "ListThreadMessages" ||
-				name == "EditOwnMessage" || name == "OwnMessageRevisions"
+				name == "EditOwnMessage" || name == "OwnMessageRevisions" || name == "RemoveMessage"
 			listsMessages := takesReader || strings.Contains(name, "Message") &&
 				(strings.HasPrefix(name, "List") || strings.HasPrefix(name, "Read") || strings.HasPrefix(name, "Get") ||
 					strings.HasPrefix(name, "Fetch") || strings.HasPrefix(name, "Query") || strings.HasPrefix(name, "Search") ||

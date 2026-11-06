@@ -50,6 +50,11 @@ var reactionRoutes = []reactionRoute{
 		probe: func(ch string, m int64) probe { return del(reactionBase(ch, m) + reactionEmoji() + "/1") }},
 	{route: "DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}", moderation: true,
 		probe: func(ch string, m int64) probe { return del(reactionBase(ch, m) + "/reactors/1") }},
+	// Message removal (issue #852) is the same class: the same channel gate,
+	// the same message_not_found for a message that is not the caller's to
+	// see, the same refusal of an agent and a guest.
+	{route: "DELETE /v2/channels/{channel}/messages/{message_id}", moderation: true,
+		probe: func(ch string, m int64) probe { return del(reactionBase(ch, m)) }},
 }
 
 func reactionBase(ch string, m int64) string { return "/v2/channels/" + ch + "/messages/" + id(m) }

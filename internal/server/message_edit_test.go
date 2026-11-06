@@ -80,7 +80,7 @@ func (w *editWorld) mustEdit(t *testing.T, who string, msg int64, text string) s
 
 // visibleAs reads message id the way who's v2 list does, failing when it is
 // not there.
-func (w *editWorld) visibleAs(t *testing.T, who string, id int64) schema.MessageV2 {
+func (w *scopedFixture) visibleAs(t *testing.T, who string, id int64) schema.MessageV2 {
 	t.Helper()
 	res := w.callREST(t, "GET", fmt.Sprintf("/v2/channels/ops/messages?after=%d&limit=1", id-1), w.p(who).token, "")
 	var list schema.ListMessagesResponseV2
