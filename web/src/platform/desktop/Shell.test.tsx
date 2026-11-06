@@ -39,6 +39,7 @@ function install(overrides: Partial<ConchDesktopBridge>): void {
     joinAsGuest: never,
     createAccount: never,
     signOut: never,
+    replaceCredential: never,
     profiles: () => Promise.resolve(view()),
     profileAdd: never,
     profileRename: never,

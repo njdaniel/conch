@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { errorV0, loginResponseV1, passwordUpdatedResponseV1, whoAmIResponseV1 } from '../../schema/generated';
 import { call } from '../operations';
-import type { BridgeReply, ConchDesktopBridge, SignInOutcome } from './bridge';
+import type { BridgeReply, ConchDesktopBridge, ReplaceCredentialRequest, SignInOutcome } from './bridge';
 import { credentials, isSessionToken, STAND_IN } from './credentials';
 import { http } from './http';
 
@@ -26,6 +26,7 @@ function fakeBridge(overrides: Partial<ConchDesktopBridge>): ConchDesktopBridge 
     joinAsGuest: unexpected('joinAsGuest'),
     createAccount: unexpected('createAccount'),
     signOut: unexpected('signOut'),
+    replaceCredential: unexpected('replaceCredential'),
     profiles: unexpected('profiles'),
     profileAdd: unexpected('profileAdd'),
     profileRename: unexpected('profileRename'),
@@ -209,6 +210,48 @@ describe('the desktop transport: sign-in', () => {
     install(fakeBridge({ request }));
     await http.open(call('joinInfo'));
     expect(request).toHaveBeenCalledWith({ operation: 'joinInfo' });
+  });
+});
+
+describe('the desktop transport: the writes that replace the credential (issue #1422)', () => {
+  const rotated = { revoked: 2 } as const;
+
+  it('sends a password change to main alone and reads the answer with the stand-in where the token was', async () => {
+    const replaceCredential = vi.fn((...[,]: [ReplaceCredentialRequest]): Promise<SignInOutcome> => Promise.resolve({ ok: true, who, answer: { ...rotated, credential } }));
+    const request = vi.fn();
+    install(fakeBridge({ replaceCredential, request }));
+    const res = await http.send(call('changePassword'), STAND_IN, { keepalive: false, body: { current: 'old-canary', password: 'new-canary' } });
+    expect(replaceCredential).toHaveBeenCalledWith({ operation: 'changePassword', body: { current: 'old-canary', password: 'new-canary' } });
+    // Not through the generic request, which refuses the operation anyway.
+    expect(request).not.toHaveBeenCalled();
+    const body: unknown = await res.json();
+    expect(passwordUpdatedResponseV1(body)).toEqual([]);
+    expect(body).toMatchObject({ token: STAND_IN, revoked: 2 });
+  });
+
+  it.each([
+    ['setPassword', { password: 'p', proof: 'c' }],
+    ['convertGuest', { name: 'ada', password: 'p' }],
+    ['reauth', { password: 'p' }],
+  ] as const)('routes %s to the same function', async (op, body) => {
+    const replaceCredential = vi.fn((...[,]: [ReplaceCredentialRequest]): Promise<SignInOutcome> => Promise.resolve({ ok: true, who: null, answer: { until: '2026-11-06T10:10:00Z' } }));
+    install(fakeBridge({ replaceCredential }));
+    await http.send(call(op), STAND_IN, { keepalive: false, body });
+    expect(replaceCredential).toHaveBeenCalledWith({ operation: op, body });
+  });
+
+  it('keeps the server’s refusal of a wrong password: 401 auth_failed', async () => {
+    install(fakeBridge({ replaceCredential: () => Promise.resolve({ ok: false, kind: 'unauthorized', status: 401, code: 'auth_failed', message: 'wrong' }) }));
+    const res = await http.send(call('changePassword'), STAND_IN, { keepalive: false, body: { current: 'x', password: 'y' } });
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ code: 'auth_failed' });
+  });
+
+  it('sends a body that is not the operation’s request to nobody', async () => {
+    const replaceCredential = vi.fn();
+    install(fakeBridge({ replaceCredential }));
+    await expect(http.send(call('changePassword'), STAND_IN, { keepalive: false, body: { current: 1 } })).rejects.toBeInstanceOf(TypeError);
+    expect(replaceCredential).not.toHaveBeenCalled();
   });
 });
 

@@ -29,8 +29,16 @@ import type {
   VoiceDevice,
   VoiceDevicesPipeWire,
 } from '../../schema/generated';
-import type { LoginRequestV1, RedeemSetupTokenRequestV1, ResetPasswordRequestV1, TOTPLoginRequestV1 } from '../../schema/auth';
-import type { JoinAccountRequestV1, JoinGuestRequestV1 } from '../../schema/guest';
+import type {
+  ChangePasswordRequestV1,
+  LoginRequestV1,
+  ReauthRequestV1,
+  RedeemSetupTokenRequestV1,
+  ResetPasswordRequestV1,
+  SetPasswordRequestV1,
+  TOTPLoginRequestV1,
+} from '../../schema/auth';
+import type { ConvertGuestRequestV1, JoinAccountRequestV1, JoinGuestRequestV1 } from '../../schema/guest';
 import type { RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../schema/invite';
 import type { WhoAmIResponseV1 } from '../../schema/principal';
 import type { RedeemSignInLinkRequestV1 } from '../../schema/signin';
@@ -164,6 +172,14 @@ export type SignInOutcome =
   | { readonly ok: false; readonly kind: 'unkept' }
   | { readonly ok: false; readonly kind: 'challenge'; readonly challenge: string; readonly expiresAt: string };
 
+// Exactly an operation of the replacing family and the request body of its
+// type; main refuses any other key, type or size.
+export type ReplaceCredentialRequest =
+  | { readonly operation: 'changePassword'; readonly body: ChangePasswordRequestV1 }
+  | { readonly operation: 'setPassword'; readonly body: SetPasswordRequestV1 }
+  | { readonly operation: 'convertGuest'; readonly body: ConvertGuestRequestV1 }
+  | { readonly operation: 'reauth'; readonly body: ReauthRequestV1 };
+
 export type SignOutOutcome = 'ended' | 'unconfirmed' | 'unsent';
 
 // A live feed the renderer may subscribe to. Main owns the socket, the bearer
@@ -248,6 +264,13 @@ export interface ConchDesktopBridge {
   joinAsGuest(request: JoinGuestRequestV1): Promise<SignInOutcome>;
   createAccount(request: JoinAccountRequestV1): Promise<SignInOutcome>;
   signOut(): Promise<SignOutOutcome>;
+  // The writes that replace the credential they are sent with (issue #1422):
+  // change password, first password, a guest's conversion, and a
+  // re-authentication. Main sends the operation, rotates its bearer to the
+  // token the answer holds, and answers the account with the token left out
+  // (the client puts a stand-in in its place). The password and code are sent
+  // once and kept nowhere.
+  replaceCredential(request: ReplaceCredentialRequest): Promise<SignInOutcome>;
 
   // Attachments (issue #947). Upload sends the operation uploadFile; the
   // answer is the server's, validated. Download gives a file's bytes for a
@@ -339,7 +362,9 @@ export type VoiceOneShotError =
 
 // The device list as the page gets it: the validated document's microphones
 // and speakers (each with its default flag), and whether PipeWire was
-// reached. No path, no configuration state.
+// reached, and the names saved in voice.toml (issue #1421; absent when none is
+// saved, 'default' being said by absence). No path, nothing else of the
+// configuration.
 export type NativeVoiceDevicesResult =
   | {
       readonly ok: true;
@@ -347,6 +372,8 @@ export type NativeVoiceDevicesResult =
       readonly synced: boolean;
       readonly microphones: readonly VoiceDevice[];
       readonly speakers: readonly VoiceDevice[];
+      readonly configuredInput?: string;
+      readonly configuredOutput?: string;
     }
   | { readonly ok: false; readonly error: VoiceOneShotError };
 

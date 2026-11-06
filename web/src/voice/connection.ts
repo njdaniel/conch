@@ -7,13 +7,13 @@
 // The join token is passed to Room.connect and dropped. It is never stored,
 // logged or put in the DOM.
 //
-// A press reports `started` and waits for conchd's answer before the track
-// opens, and a release mutes the track before it reports `stopped` (issue
-// #495). conchd's poller compares what it sees of the microphone with the
-// reports; the other order let it see a press before its report, and record an
-// honest press as unreported. The wait is bounded (reportWait): past it, or if
-// the report is still being retried, the track opens anyway, so audio never
-// depends on conchd being reachable (conch-voice.md section 6, "Client side").
+// A press opens the track at once and reports `started` in parallel (issue
+// #970; before it, #495 held the track until conchd had answered, and a round
+// trip of speech was lost at the start of every press). A release mutes the
+// track before it reports `stopped`. If the report is late, conchd's poller
+// may see the microphone first and record an unreported transmission, closed
+// `reason=reported` once the report arrives (or `reason=muted`, if the release
+// comes first): truthful, and rare (conch-voice.md section 6, "Client side"). Audio never depends on conchd being reachable.
 //
 // What the page says of a transmission is what is sent (issue #965): it says
 // transmitting once the track is unmuted, not when the key goes down, and
@@ -419,9 +419,9 @@ export const levelEvery = 10;
 export const meterEvery = 50;
 // How long a Leave waits for the last report.
 const leaveDrain = 1000;
-// The longest a press waits for the answer to its `started` report before the
-// track opens anyway, and the longest the release of a press waits for the
-// track to mute before `stopped` is reported.
+// The longest a press waits for its track to unmute, and the longest the
+// release of a press waits for the track to mute before `stopped` is
+// reported.
 export const reportWait = 1000;
 
 export const initialVoice: VoiceState = {
@@ -1247,20 +1247,20 @@ export class VoiceClient {
     this.set(open ? { talking: true } : { talking: false, transmitting: false });
   }
 
-  // opened reports `started` and opens the track once conchd has answered,
-  // or after reportWait, unless the gate has changed since or the connection
-  // has gone. A report that fails for good drops the connection first. Once
-  // the track is unmuted, if the gate has not changed meanwhile, the page
-  // says it is transmitting.
+  // opened unmutes the track at once and queues the `started` report to go
+  // in parallel (issue #970), unless the gate has changed since or the
+  // connection has gone. The report's answer is not waited for: one that fails
+  // for good drops the connection, which mutes the track. Once the track is
+  // unmuted, if the gate has not changed meanwhile, the page says it is
+  // transmitting.
   private async opened(talk: number, edge: number): Promise<void> {
     if (talk !== this.talk) return;
-    const answered = new Promise<void>((resolve) => {
-      this.reports.push('started', resolve);
-    });
-    await this.within(answered, reportWait);
-    this.trace('started answered or waited out');
+    // Always reported, so that the `stopped` that follows a press is never
+    // alone, even for one let go before the track could open.
+    this.reports.push('started');
+    this.trace('started reported');
     const room = this.room;
-    if (talk !== this.talk || edge !== this.edge || room === null) return;
+    if (edge !== this.edge || room === null) return;
     // Said when the unmute lands, however late: past reportWait the steps go
     // on without it, but the track is open once it does. Not if the gate has
     // shut, or the connection gone, meanwhile.

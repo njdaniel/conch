@@ -206,6 +206,7 @@ export function createBridge(invoke: Invoke, listen: Listen, listenVoice: Listen
     joinAsGuest: call('joinAsGuest'),
     createAccount: call('createAccount'),
     signOut: call('signOut'),
+    replaceCredential: call('replaceCredential'),
     uploadFile: call('uploadFile'),
     downloadFile: call('downloadFile'),
     saveFile: call('saveFile'),

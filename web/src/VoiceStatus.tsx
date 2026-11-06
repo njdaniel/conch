@@ -1,6 +1,8 @@
 // Where voice appears: join and leave, mute and deafen, push-to-talk or an open
 // microphone, and who is in the room and who is talking. The SDK and the
 // microphone are reached only from src/voice/.
+import { useState } from 'react';
+import { readTalkKeyLabel, writeTalkKeyLabel } from './api';
 import { isArchived } from './archived';
 import { platform } from './platform';
 import type { ChannelV0 } from './schema/channel';
@@ -18,10 +20,20 @@ type Props = Parameters<typeof BrowserVoiceStatus>[0];
 // built there (ADR-007, linux-desktop.md section 6).
 export function VoiceStatus(props: Props) {
   const native = platform.nativeVoice;
-  if (native !== undefined) {
-    return (
+  if (native !== undefined) return <NativeStatus native={native} {...props} />;
+  return <BrowserVoiceStatus {...props} />;
+}
+
+function NativeStatus({ native, ...props }: Props & { readonly native: NonNullable<typeof platform.nativeVoice> }) {
+  const [label, setLabel] = useState(readTalkKeyLabel);
+  return (
       <NativeVoicePanel
         source={native}
+        binding={label}
+        onBound={(next) => {
+          writeTalkKeyLabel(next);
+          setLabel(next);
+        }}
         signedIn={props.signedIn}
         channel={props.channel}
         viewer={props.viewer}
@@ -31,9 +43,7 @@ export function VoiceStatus(props: Props) {
         onUnauthorized={props.onUnauthorized}
         onOpen={props.onOpen}
       />
-    );
-  }
-  return <BrowserVoiceStatus {...props} />;
+  );
 }
 
 function BrowserVoiceStatus({

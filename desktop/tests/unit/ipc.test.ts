@@ -319,6 +319,85 @@ describe('arguments', () => {
   });
 });
 
+describe('the credential-replacing writes (issue #1422)', () => {
+  const change = { operation: 'changePassword', body: { current: 'old-pw', password: 'new-pw' } };
+
+  it('passes a good request to replaceCredential with the operation and body, and nothing else', async () => {
+    const f = fixture();
+    await f.ipc.invoke(f.event(), 'replaceCredential', [change]);
+    await f.ipc.invoke(f.event(), 'replaceCredential', [{ operation: 'setPassword', body: { password: 'new-pw', proof: 'code' } }]);
+    await f.ipc.invoke(f.event(), 'replaceCredential', [{ operation: 'convertGuest', body: { name: 'ada', password: 'new-pw' } }]);
+    await f.ipc.invoke(f.event(), 'replaceCredential', [{ operation: 'reauth', body: { password: 'pw', code: '123456' } }]);
+    expect(f.calls).toEqual([
+      ['replaceCredential', ['changePassword', { current: 'old-pw', password: 'new-pw' }]],
+      ['replaceCredential', ['setPassword', { password: 'new-pw', proof: 'code' }]],
+      ['replaceCredential', ['convertGuest', { name: 'ada', password: 'new-pw' }]],
+      ['replaceCredential', ['reauth', { password: 'pw', code: '123456' }]],
+    ]);
+  });
+
+  it.each([
+    ['no argument', []],
+    ['a second argument', [change, 'x']],
+    ['a bare body', [{ current: 'a', password: 'b' }]],
+    ['a string', ['changePassword']],
+    ['an extra key', [{ ...change, token: 'conch_x' }]],
+    ['a missing body', [{ operation: 'changePassword' }]],
+    ['a missing operation', [{ body: change.body }]],
+    ['an extra key in the body', [{ operation: 'changePassword', body: { current: 'a', password: 'b', admin: true } }]],
+    ['a body of the wrong type', [{ operation: 'changePassword', body: { current: 1, password: 'b' } }]],
+    ['a body of another operation', [{ operation: 'changePassword', body: { name: 'ada', password: 'b' } }]],
+    ['an array body', [{ operation: 'reauth', body: [] }]],
+    ['an operation outside the family', [{ operation: 'login', body: { name: 'ada', password: 'b' } }]],
+    ['an operation that is not one', [{ operation: 'constructor', body: {} }]],
+    ['a non-string operation', [{ operation: 7, body: {} }]],
+    ['an oversize password', [{ operation: 'changePassword', body: { current: 'a', password: 'p'.repeat(20_000) } }]],
+  ])('refuses %s, executes nothing, and logs no password', async (_name, args) => {
+    const f = fixture();
+    expect(await f.ipc.invoke(f.event(), 'replaceCredential', args)).toEqual({ ok: false, kind: 'refused' });
+    expect(f.calls).toEqual([]);
+    expect(f.logs.join('\n')).not.toContain('old-pw');
+    expect(f.logs.join('\n')).not.toContain('new-pw');
+  });
+
+  it('limits its rate like the sign-in steps', async () => {
+    const f = fixture();
+    let accepted = 0;
+    for (let i = 0; i < 40; i++) if ((await f.ipc.invoke(f.event(), 'replaceCredential', [change])).ok) accepted++;
+    expect(accepted).toBe(30);
+    expect(f.logs.at(-1)).toContain('(rate)');
+  });
+
+  it('sends nothing when the server is not one the app may sign in to', async () => {
+    const f = fixture();
+    f.permit.value = false;
+    expect(await f.ipc.invoke(f.event(), 'replaceCredential', [change])).toEqual({ ok: true, value: { ok: false, kind: 'network', reason: 'incompatible' } });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('keeps the rotated credential where the old one was kept, and answers the account without a token', async () => {
+    const f = fixture();
+    const who = { id: 7, kind: 'human', name: 'ada', role: 'member' } as const;
+    const bound: unknown[] = [];
+    const ipc = new Ipc({
+      owned: () => f.contents,
+      gate: f.gate,
+      service: { replaceCredential: () => Promise.resolve({ ok: true, who, answer: { revoked: 1 } }) } as unknown as Service,
+      feeds: {} as Feeds,
+      files: {} as Files,
+      gestures: { take: () => null },
+      profiles: { signInPermitted: () => true, signedIn: (account: unknown) => { bound.push(account); return Promise.resolve(true); } } as unknown as ProfilesApi,
+      voice: {} as VoiceApi,
+      now: () => 0,
+      log: () => undefined,
+    });
+    const answer = await ipc.invoke(f.event(), 'replaceCredential', [change]);
+    expect(answer).toEqual({ ok: true, value: { ok: true, who, answer: { revoked: 1 } } });
+    expect(JSON.stringify(answer)).not.toContain('token');
+    expect(bound).toEqual([{ id: 7, name: 'ada', lasting: true, guest: false }]);
+  });
+});
+
 describe('the registry', () => {
   it('registers one handler per invoked function and no other channel', () => {
     const f = fixture();
