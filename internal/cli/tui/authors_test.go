@@ -127,7 +127,7 @@ func TestDepartedNamesAreDroppedWhenTheListIsRead(t *testing.T) {
 	// The list is read again, and the route no longer names the author.
 	api.named = nil
 	var cmd tea.Cmd
-	m, cmd = update(m, membersLoaded{channel: "ops", members: []schema.ChannelMemberV1{{PrincipalID: 7, Name: "nick", Kind: schema.PrincipalHuman}}})
+	m, cmd = update(m, membersLoaded{channel: "ops", revision: m.memberRevision["ops"], members: []schema.ChannelMemberV1{{PrincipalID: 7, Name: "nick", Kind: schema.PrincipalHuman}}})
 	m = namedAfter(m, cmd)
 	if view := historyOf(m); strings.Contains(view, "dee") || !strings.Contains(view, "#5: second") {
 		t.Errorf("a name outlived the list that was replaced:\n%s", view)

@@ -38,6 +38,9 @@ func (m Model) View() string {
 	if (m.mode == modeInbox || m.mode == modeDecision) && (width < minApprovalWidth || l.height < minApprovalHeight) {
 		return tooSmall(width, l.height)
 	}
+	if l.compact {
+		return m.compactConfirmation(width, l.height)
+	}
 	var rows []string
 	if l.top > 0 {
 		rows = append(rows, m.titleBar(width))
@@ -54,6 +57,7 @@ func (m Model) View() string {
 	if l.voice != "" {
 		rows = append(rows, statusStyle.Width(width).Render(l.voice))
 	}
+	rows = append(rows, l.confirm...)
 	rows = append(rows, m.statusRow(width))
 	return strings.Join(rows, "\n")
 }
@@ -122,6 +126,9 @@ func (m Model) chatTitle() string {
 	title := "# " + channel
 	if m.target != nil && m.target.channel == m.current() {
 		title += " › net " + sanitize(m.target.name)
+	}
+	if m.mod.stale[m.current()] {
+		title += " [stale]"
 	}
 	return title
 }

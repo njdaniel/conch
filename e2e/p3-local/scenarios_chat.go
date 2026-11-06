@@ -803,7 +803,7 @@ func (s *suite) p310Access() error {
 	}
 
 	// The two changes.
-	if err := s.admin("member", "remove", chGeneral, id(s.pid("jamie-test"))); err != nil {
+	if err := s.admin("member", "remove", "--yes", chGeneral, id(s.pid("jamie-test"))); err != nil {
 		return err
 	}
 	if err := s.admin("credential", "revoke", id(s.r.fx.creds[partBrowser].id)); err != nil {

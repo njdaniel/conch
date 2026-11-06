@@ -88,9 +88,10 @@ type netsLoaded struct {
 // membersLoaded carries a channel's member list, which names the authors of its
 // messages.
 type membersLoaded struct {
-	channel string
-	members []schema.ChannelMemberV1
-	err     error
+	channel  string
+	revision uint64
+	members  []schema.ChannelMemberV1
+	err      error
 }
 
 // netTarget is where plain messages go instead of the whole channel.
@@ -245,7 +246,8 @@ type Model struct {
 	// members is each channel's member names as last loaded, by principal id.
 	// A channel whose list never loaded has no entry, and its authors show as
 	// numbers.
-	members map[string]map[int64]schema.ChannelMemberV1
+	members        map[string]map[int64]schema.ChannelMemberV1
+	memberRevision map[string]uint64
 	// departed is what the channel's authors route named for authors the member
 	// list does not have, and authorsAsked the ids it has been asked about
 	// (authors.go). Both are dropped when the member list is read again.
@@ -323,6 +325,8 @@ type Model struct {
 	// react is whole reaction state by channel and message, hydrated over REST
 	// and replaced by events or write responses.
 	react reactionModel
+	// mod is the confirmed moderation operation and its in-flight request.
+	mod moderationModel
 	// clockTicking is true while the once-a-second redraw (clockTick) is armed.
 	clockTicking bool
 	// focus is the pane of the chat view the arrow keys move. Like the draft
@@ -403,11 +407,11 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		}
 	}
 	m := Model{ctx: ctx, api: api, authorID: authorID,
-		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), now: time.Now, subscribed: make(map[string]bool),
+		messages: make(map[string][]schema.MessageV2), nets: make(map[string][]schema.NetV1), members: make(map[string]map[int64]schema.ChannelMemberV1), memberRevision: make(map[string]uint64), now: time.Now, subscribed: make(map[string]bool),
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
 		own: &ownSession{}, loaded: make(map[string]bool), streamed: make(map[string]int64), expanded: make(map[int64]bool),
-		sessionRuns: make(map[sessionRunKey][]schema.RunV1), rs: newReadState(), react: newReactionModel(api)}
+		sessionRuns: make(map[sessionRunKey][]schema.RunV1), rs: newReadState(), react: newReactionModel(api), mod: newModerationModel(api)}
 	if v, ok := api.(VoiceAPI); ok {
 		m.voice.api = v
 	}
@@ -478,6 +482,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.communityKey(msg)
 		}
 		if m.mode == modeChannels {
+			if m.mod.pending != nil {
+				return m.moderationKey(msg)
+			}
 			// Not typed text: the directory and the community.
 			switch msg.String() {
 			case "ctrl+d":
@@ -728,6 +735,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.reactionDone(msg)
 	case reactorsListed:
 		return m.reactorsDone(msg), nil
+	case moderationDone:
+		return m.moderationFinished(msg), nil
+	case membersEventReceived:
+		return m.membersEvent(msg)
+	case messageRemovalReceived:
+		return m.messageRemoval(msg)
+	case messagesReconciled:
+		return m.reconciled(msg)
+	case reconcileDue:
+		return m.reconcileRetry(msg)
 	case eventsRunReceived:
 		return m.eventsRun(msg)
 	case eventsActivityReceived:
@@ -871,14 +888,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case membersLoaded:
 		// A failure changes nothing: names already known stay, and without any
 		// the authors show as numbers. The next open or reconnect asks again.
-		if msg.err == nil {
-			names := make(map[int64]schema.ChannelMemberV1, len(msg.members))
-			for _, member := range msg.members {
-				names[member.PrincipalID] = member
-			}
-			m.members[msg.channel] = names
-			m.forgetAuthors(msg.channel)
-			return m, m.nameAuthors(msg.channel)
+		if msg.err == nil && msg.revision == m.memberRevision[msg.channel] {
+			return m.replaceMembers(msg.channel, msg.members)
 		}
 	case authorsLoaded:
 		return m.authorsLoaded(msg)
@@ -930,13 +941,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messageReceived:
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
-		var hydrate tea.Cmd
-		if !slices.ContainsFunc(m.messages[msg.channel], func(message schema.MessageV2) bool { return message.ID == msg.message.ID }) {
-			hydrate = m.queueReactionHydration(msg.channel, msg.message)
+		var hydrate, arrival tea.Cmd
+		held := slices.ContainsFunc(m.messages[msg.channel], func(message schema.MessageV2) bool { return message.ID == msg.message.ID })
+		heldRemoved := slices.ContainsFunc(m.messages[msg.channel], func(message schema.MessageV2) bool { return message.ID == msg.message.ID && message.Removed })
+		if !msg.message.Removed && !heldRemoved && !m.mod.knows(msg.channel, msg.message.ID) {
+			arrival = m.countArrival(msg.channel, msg.message)
+			if !held {
+				hydrate = m.queueReactionHydration(msg.channel, msg.message)
+			}
 		}
 		m.addMessages(msg.channel, []schema.MessageV2{msg.message})
 		m.markStreamed(msg.channel, msg.message)
-		return m, tea.Batch(m.waitEvent(), m.countArrival(msg.channel, msg.message), m.markReading(), m.nameAuthors(msg.channel), hydrate)
+		return m, tea.Batch(m.waitEvent(), arrival, m.markReading(), m.nameAuthors(msg.channel), hydrate)
 	case subscriptionOpened:
 		if msg.channel == m.current() && m.channelStatus == statusReconnecting && m.notice == "" {
 			m.setStatus(modeChannels, "connected")
@@ -1059,6 +1075,7 @@ func (m Model) openSelected() (Model, tea.Cmd) {
 	// A target belongs to the channel it was chosen in.
 	m.target = nil
 	m.pendingNet = ""
+	m.mod.pending = nil
 	m.setStatus(modeChannels, "loading…")
 	commands := []tea.Cmd{m.loadNets(false, ""), m.loadMembers(), m.beginVoice(), m.beginEvents(), m.markReading()}
 	// A pending retry timer will start the subscription itself.
@@ -1127,6 +1144,9 @@ func (m Model) reloadWhoAmI() tea.Cmd {
 // every-channel view needs manage_channels. The offered keys and hints are
 // decided from the permissions each time they are drawn.
 func (m Model) permissionsMoved() Model {
+	if m.mod.pending != nil && !m.moderationStanding() {
+		m.mod.pending = nil
+	}
 	if m.dir.all && !m.canManageChannels() {
 		m.dir.all, m.dir.rows, m.dir.loaded = false, nil, false
 	}
@@ -1286,6 +1306,9 @@ func mergeMessages(existing, incoming []schema.MessageV2) []schema.MessageV2 {
 		byID[message.ID] = message
 	}
 	for _, message := range incoming {
+		if held, ok := byID[message.ID]; ok && held.Removed && !message.Removed {
+			continue
+		}
 		byID[message.ID] = message
 	}
 	merged := make([]schema.MessageV2, 0, len(byID))
@@ -1313,6 +1336,7 @@ func min(a, b int) int {
 // scrolled up, messages that arrive push the scroll along with them by the
 // lines they take, so the lines on screen do not move.
 func (m *Model) addMessages(channel string, incoming []schema.MessageV2) {
+	incoming = m.mod.withoutRemoved(channel, incoming)
 	if channel == m.current() && m.scroll > 0 {
 		held := make(map[int64]bool, len(m.messages[channel])+len(incoming))
 		for _, message := range m.messages[channel] {
@@ -1787,6 +1811,8 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m.reactionCommand(strings.TrimPrefix(name, "/"), rest)
 	case "/emoji":
 		return m.emojiCommand(rest), nil
+	case "/voice-kick", "/member-remove", "/ban", "/unban", "/bans", "/remove-message":
+		return m.moderationCommand(strings.TrimPrefix(name, "/"), rest)
 	case "/help":
 		m.input = ""
 		m.help, m.helpTop, m.helpTopic = true, 0, topicKeys
@@ -1962,9 +1988,10 @@ func (m Model) loadMembers() tea.Cmd {
 	if channel == "" {
 		return nil
 	}
+	revision := m.memberRevision[channel]
 	return func() tea.Msg {
 		resp, err := m.api.ListChannelMembers(m.ctx, channel)
-		return membersLoaded{channel: channel, members: resp.Members, err: err}
+		return membersLoaded{channel: channel, revision: revision, members: resp.Members, err: err}
 	}
 }
 

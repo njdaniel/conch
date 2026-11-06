@@ -14,8 +14,8 @@
 // and writes one environment file per participant. With --keep it prints the
 // command for each participant and returns, leaving the server running.
 // Without it, it starts the server with short session thresholds, checks that
-// each participant can connect and send, runs the automated P3 suite (issue
-// #284: the thirteen rows of the brief's test table, with terminal clients on
+// each participant can connect and send, runs the automated P3 suite (the
+// brief's rows and later end-to-end scenarios, with terminal clients on
 // pseudo-terminals, the scripted agents as conch-adapter processes, and the API
 // to look at what the server shows), and tears everything down. --reset stops
 // what an earlier run started and removes its root. docs/p3-walkthrough.md is

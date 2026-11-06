@@ -87,6 +87,14 @@ func (m Model) helpEntries() []helpEntry {
 				helpEntry{"/emoji text|unicode", "explicit shortcode fallback or Unicode reaction glyphs; no font detection"},
 			)
 		}
+		if m.moderationStanding() {
+			entries = append(entries,
+				helpEntry{"/voice-kick ID", "remove a principal from current voice; they may rejoin"},
+				helpEntry{"/member-remove ID", "remove channel and net membership; not a ban"},
+				helpEntry{"/ban /unban ID; /bans", "block or lift this principal's channel entry; unban does not re-add"},
+				helpEntry{"/remove-message [ID]", "tombstone a message for its audience; received copies are not recalled"},
+			)
+		}
 		if m.vc.owner != nil {
 			entries = append(entries, helpEntry{"/voice …", "join, leave, mute and deafen voice, and choose the microphone and speakers; /voice help says how"})
 		}

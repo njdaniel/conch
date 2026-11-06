@@ -66,7 +66,7 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 	case "admin":
 		return runAdmin(ctx, args[1:], stdin, stdout, stderr)
 	case "voice":
-		return runVoice(ctx, args[1:], stdout, stderr)
+		return runVoice(ctx, args[1:], stdin, stdout, stderr)
 	case "audit":
 		return runAudit(ctx, args[1:], stdout, stderr)
 	case "approvals":
@@ -149,7 +149,10 @@ Usage:
   conch admin member add [--server <url>] [--json] [--no-decide] <channel> <principal-id>
   conch admin member add [--server <url>] [--json] <channel> --name <name>
   conch admin member manage|decide [--server <url>] [--json] [--off] <channel> <principal-id>
-  conch admin member remove [--server <url>] [--json] <channel> <principal-id>
+  conch admin member remove [--server <url>] [--json] [--yes] <channel> <principal-id>
+  conch admin ban list [--server <url>] [--json] <channel>
+  conch admin ban add|remove [--server <url>] [--json] [--yes] <channel> <principal-id>
+  conch admin message remove [--server <url>] [--json] [--yes] <channel> <message-id>
   conch admin manifest put [--server <url>] [--json] [--file <path>] <principal-id>
   conch admin manifest get [--server <url>] [--json] <principal-id>
   conch admin invite create [--server <url>] [--json] [--expires <duration|RFC3339> | --never-expires] [--uses <n>] [--credential-days <n>] [--landing-channel <name>...]
@@ -179,6 +182,7 @@ Usage:
   conch admin reports show [--server <url>] [--json] [--markdown] <id>
   conch admin reports file [--server <url>] [--json] <id> <issue-url>
   conch voice status [--server <url>] [--watch] <channel>
+  conch voice kick [--server <url>] [--yes] <channel> <principal-id>
   conch voice camera stop [--server <url>] <channel> <person-id>
   conch voice where [--server <url>] [--json]
   conch audit export [--server <url>] [--after <id>] [--limit <n>]
@@ -1280,13 +1284,15 @@ func runRename(ctx context.Context, args []string, stdout, stderr io.Writer) err
 // block; a variable so tests can fix it.
 var voiceNow = time.Now
 
-func runVoice(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+func runVoice(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("cli: voice requires a subcommand (status, where, camera stop)")
+		return errors.New("cli: voice requires a subcommand (status, kick, where, camera stop)")
 	}
 	switch args[0] {
 	case "status":
 		return runVoiceStatus(ctx, args[1:], stdout, stderr)
+	case "kick":
+		return runVoiceKick(ctx, args[1:], stdin, stdout, stderr)
 	case "where":
 		return runVoiceWhere(ctx, args[1:], stdout, stderr)
 	case "camera":

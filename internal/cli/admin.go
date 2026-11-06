@@ -57,8 +57,9 @@ type adminOpts struct {
 	community communityOpts
 	// aiAdmin holds the flags of `ai-admin create` (issue #1332), in
 	// admin_ai_admin.go.
-	aiAdmin     aiAdminOpts
-	reactionYes bool
+	aiAdmin       aiAdminOpts
+	reactionYes   bool
+	moderationYes bool
 }
 
 // principalOpts holds the flags of the principal list, hide and sign-in-link
@@ -168,7 +169,23 @@ var adminCommands = []adminCommand{
 			fs.BoolVar(&o.off, "off", false, "take the right away instead of granting it")
 		},
 		run: adminMemberDecide},
-	{group: "member", verb: "remove", args: []string{"channel", "principal-id"}, idAt: 2, run: adminMemberRemove},
+	{group: "member", verb: "remove", args: []string{"channel", "principal-id"}, idAt: 2, flags: "[--yes] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.moderationYes, "yes", false, "remove without asking")
+		}, run: adminMemberRemove},
+	{group: "ban", verb: "list", args: []string{"channel"}, run: adminBanList},
+	{group: "ban", verb: "add", args: []string{"channel", "principal-id"}, idAt: 2, flags: "[--yes] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.moderationYes, "yes", false, "ban without asking")
+		}, run: adminBanAdd},
+	{group: "ban", verb: "remove", args: []string{"channel", "principal-id"}, idAt: 2, flags: "[--yes] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.moderationYes, "yes", false, "unban without asking")
+		}, run: adminBanRemove},
+	{group: "message", verb: "remove", args: []string{"channel", "message-id"}, idAt: 2, flags: "[--yes] ",
+		bind: func(fs *flag.FlagSet, o *adminOpts) {
+			fs.BoolVar(&o.moderationYes, "yes", false, "remove without asking")
+		}, run: adminMessageRemove},
 	{group: "manifest", verb: "put", args: []string{"principal-id"}, idAt: 1, flags: "[--file <path>] ",
 		bind: func(fs *flag.FlagSet, o *adminOpts) {
 			fs.StringVar(&o.file, "file", "", "read the manifest from this file instead of standard input")
@@ -233,7 +250,7 @@ var adminCommands = []adminCommand{
 	{group: "reports", verb: "file", args: []string{"id", "issue-url"}, idAt: 1, run: adminReportsFile},
 }
 
-const adminGroups = "channel|principal|credential|member|manifest|invite|join|guest|reports|sign-in-link|permissions|directory|ai-admin|reaction"
+const adminGroups = "channel|principal|credential|member|ban|message|manifest|invite|join|guest|reports|sign-in-link|permissions|directory|ai-admin|reaction"
 
 // usage is the one line shown for a malformed command.
 func (c adminCommand) usage() string {
@@ -631,10 +648,15 @@ func adminMemberDecide(ctx context.Context, r *adminRun) error {
 }
 
 func adminMemberRemove(ctx context.Context, r *adminRun) error {
-	if err := r.client.RemoveChannelMember(ctx, r.pos[0], r.id); err != nil {
+	channel := safeLine(r.pos[0])
+	question := fmt.Sprintf("Remove principal %d from %s and its nets. This does not ban them or revoke their account; an authorized actor can re-add them.", r.id, channel)
+	if err := confirmModeration(r.prompt, r.opts.moderationYes, question); err != nil {
 		return err
 	}
-	return r.say("removed %d from %s\n", r.id, safeLine(r.pos[0]))
+	if err := r.client.RemoveChannelMember(ctx, r.pos[0], r.id); err != nil {
+		return refused(err, moderationRefusals)
+	}
+	return r.say("principal %d is removed or was already absent from %s and its nets; this is not a ban and no account was revoked\n", r.id, channel)
 }
 
 // say prints a result line unless --json asked for documents only.

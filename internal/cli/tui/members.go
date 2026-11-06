@@ -171,6 +171,12 @@ type eventsModel struct {
 // permissions may have changed, and whoami says what they are now.
 type eventsPermissionsReceived struct{ gen int }
 
+type membersEventReceived struct {
+	gen     int
+	channel string
+	members []schema.ChannelMemberV1
+}
+
 // eventsRosterReceived carries one roster frame. gen tells which socket sent
 // it, so a late frame from a channel the user has left is dropped.
 type eventsRosterReceived struct {
@@ -257,6 +263,12 @@ func (m Model) startEvents(ctx context.Context, gen int, channel string, session
 				Reaction: func(summary schema.ReactionSummaryV1) error {
 					return push(reactionSummaryReceived{gen: gen, channel: channel, summary: summary})
 				},
+				Members: func(members schema.ChannelMembersV1) error {
+					return push(membersEventReceived{gen: gen, channel: channel, members: members.Members})
+				},
+				MessageRemoved: func(removed schema.MessageRemovedV1) error {
+					return push(messageRemovalReceived{gen: gen, channel: channel, message: removed.Message})
+				},
 			})
 			select {
 			case events <- eventsEnded{gen: gen, err: err, lived: time.Since(started)}:
@@ -317,8 +329,8 @@ func (m Model) eventsRoster(msg eventsRosterReceived) (tea.Model, tea.Cmd) {
 	m.ev.recreated = false
 	cmds := []tea.Cmd{wait}
 	if !wasLive {
-		// Reactions have no replay; replace every visible summary after a drop.
-		cmds = append(cmds, m.reloadReactions(m.current()))
+		// Member and reaction frames have no replay; replace them after a drop.
+		cmds = append(cmds, m.loadMembers(), m.reloadReactions(m.current()), m.startReconcile())
 		// Frames were missed while the socket was down: the Runs view's newest
 		// page is read again and merged.
 		if m.runs.loaded && m.runs.channel == m.current() {
@@ -335,6 +347,29 @@ func (m Model) eventsRoster(msg eventsRosterReceived) (tea.Model, tea.Cmd) {
 	}
 	m, resync := m.resyncRun()
 	return m, tea.Batch(append(cmds, resync)...)
+}
+
+func (m Model) replaceMembers(channel string, members []schema.ChannelMemberV1) (Model, tea.Cmd) {
+	names := make(map[int64]schema.ChannelMemberV1, len(members))
+	for _, member := range members {
+		names[member.PrincipalID] = member
+	}
+	m.memberRevision[channel]++
+	m.members[channel] = names
+	m.forgetAuthors(channel)
+	if m.mod.pending != nil && m.mod.pending.channel == channel && !m.moderationStanding() {
+		m.mod.pending = nil
+	}
+	return m, m.nameAuthors(channel)
+}
+
+func (m Model) membersEvent(msg membersEventReceived) (tea.Model, tea.Cmd) {
+	wait := m.waitEvent()
+	if msg.gen != m.ev.gen || msg.channel != m.current() {
+		return m, wait
+	}
+	m, naming := m.replaceMembers(msg.channel, msg.members)
+	return m, tea.Batch(wait, naming)
 }
 
 // eventsEnded decides what the end of an events socket means. The roster is

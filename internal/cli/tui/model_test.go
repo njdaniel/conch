@@ -2727,7 +2727,7 @@ func TestMembersLoadedRecordsNamesPerChannel(t *testing.T) {
 		t.Errorf("general author 7 = %q", got)
 	}
 	// A refreshed list replaces the old one: a member who left goes back to a number.
-	m, _ = update(m, membersLoaded{channel: "ops", members: nil})
+	m, _ = update(m, membersLoaded{channel: "ops", revision: m.memberRevision["ops"], members: nil})
 	if got, _ := m.authorName("ops", 7); got != "#7" {
 		t.Errorf("after refresh = %q, want #7", got)
 	}
