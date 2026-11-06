@@ -329,8 +329,13 @@ async fn a_held_press_with_repeats_ends_at_the_push_to_talk_ceiling() {
     rig.ready().await;
 
     rig.line(Down);
+    // The repeats are queued at once behind the press, and not spaced by sleeps or yields: on a loaded machine sleeps of 20 ms add up to more than
+    // the 100 ms ceiling, and a `down` that arrives after the ceiling is, by design, a new
+    // press (the machine cannot tell it from one whose release was lost, `Ptt::press`), which
+    // sends frames of its own (#1453). That the repeats do not move the ceiling is shown
+    // deterministically by the machine's own tests (`ptt.rs`), and the gate's frame count
+    // holds the bound whatever the timing.
     for _ in 0..3 {
-        tokio::time::sleep(Duration::from_millis(20)).await;
         rig.line(Down);
     }
     rig.until("the ceiling", |rig| {

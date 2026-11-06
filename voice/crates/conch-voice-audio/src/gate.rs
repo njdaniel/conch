@@ -230,6 +230,19 @@ pub struct TransmitGate {
     forwarded: u64,
 }
 
+/// A limit in whole frames, rounded down.
+fn frames_in(max_open_ms: Option<u32>) -> Result<Option<u64>, AudioError> {
+    match max_open_ms {
+        None => Ok(None),
+        Some(ms) if ms >= FRAME_MS => Ok(Some(u64::from(ms / FRAME_MS))),
+        Some(ms) => Err(AudioError::InvalidSetting {
+            what: "max_open_ms",
+            must_be: "at least one frame (10 ms)",
+            got: f64::from(ms),
+        }),
+    }
+}
+
 impl TransmitGate {
     /// A shut gate that has never been opened, with no forcing condition set.
     ///
@@ -237,17 +250,7 @@ impl TransmitGate {
     ///
     /// [`AudioError::InvalidSetting`] if `max_open_ms` is shorter than one frame.
     pub fn new(config: GateConfig) -> Result<Self, AudioError> {
-        let max_frames = match config.max_open_ms {
-            None => None,
-            Some(ms) if ms >= FRAME_MS => Some(u64::from(ms / FRAME_MS)),
-            Some(ms) => {
-                return Err(AudioError::InvalidSetting {
-                    what: "max_open_ms",
-                    must_be: "at least one frame (10 ms)",
-                    got: f64::from(ms),
-                });
-            }
-        };
+        let max_frames = frames_in(config.max_open_ms)?;
         Ok(Self {
             state: State::Shut(ShutReason::NeverOpened),
             forced: 0,
@@ -256,6 +259,20 @@ impl TransmitGate {
             offered: 0,
             forwarded: 0,
         })
+    }
+
+    /// Changes the longest a single transmission may last, as `max_open_ms` does in
+    /// [`GateConfig`]. For a caller whose limit depends on a mode, to be called while the gate
+    /// is shut (after [`cut`](Self::cut)): a transmission under way is judged by the new
+    /// limit from its next frame.
+    ///
+    /// # Errors
+    ///
+    /// [`AudioError::InvalidSetting`] if `max_open_ms` is shorter than one frame; the limit
+    /// is then unchanged.
+    pub fn set_max_open_ms(&mut self, max_open_ms: Option<u32>) -> Result<(), AudioError> {
+        self.max_frames = frames_in(max_open_ms)?;
+        Ok(())
     }
 
     /// An open command: a press of the talk key.
@@ -397,6 +414,20 @@ mod tests {
     use super::*;
     use crate::FRAME_LEN;
     use crate::testutil::Lcg;
+
+    /// #1453: the limit can be changed while shut, and the new one is a hard cap in frames.
+    #[test]
+    fn a_changed_limit_caps_the_next_transmission_by_its_frames() {
+        let mut gate = TransmitGate::new(GateConfig {
+            release_tail_ms: 0,
+            max_open_ms: Some(120_000),
+        })
+        .unwrap();
+        gate.set_max_open_ms(Some(100)).unwrap();
+        assert_eq!(gate.open(), OpenOutcome::Opened);
+        assert_eq!(samples_forwarded(&mut gate, 50), 10 * FRAME_LEN);
+        assert!(gate.set_max_open_ms(Some(5)).is_err());
+    }
 
     /// A frame in which every sample is non-zero.
     const LOUD: Frame = [0.5; FRAME_LEN];

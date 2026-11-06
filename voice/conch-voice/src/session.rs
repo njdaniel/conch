@@ -937,8 +937,9 @@ impl<T: Transport> Session<T> {
             share_audio_owner,
             timings,
         } = settings;
-        let transmitter = transmit::spawn_with_level(
+        let transmitter = transmit::spawn_with_press_cap(
             transmit::gate_config(release_tail_ms, max_transmit),
+            Some(transmit::press_cap_ms(max_transmit, push_to_talk_max)),
             level,
             timings.transmit_clock.clone(),
         )?;
