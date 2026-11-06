@@ -25,6 +25,7 @@ function voiceBridge(): DesktopVoiceBridge | undefined {
 
 const lost = { ok: false, error: 'lost' } as const;
 const unsupported = { ok: false, error: 'unsupported' } as const;
+const failed = { ok: false, error: 'failed' } as const;
 
 // createNativeVoice builds a store over the voice bridge that get returns.
 export function createNativeVoice(get: () => DesktopVoiceBridge | undefined = voiceBridge): NativeVoice {
@@ -111,6 +112,24 @@ export function createNativeVoice(get: () => DesktopVoiceBridge | undefined = vo
     setTalkMode: (mode: VoiceControlTalkMode) => command((b) => b.voiceSetTalkMode(mode)),
     devices: () => oneShot((b) => b.voiceDevices(), { ok: false, error: 'unsupported' }),
     saveDevice: (request) => oneShot((b) => b.voiceSaveDevice(request), { ok: false, error: 'failed' }),
+    keyDevices: async () => {
+      const b = get();
+      if (b === undefined || typeof b.voiceKeyDevices !== 'function') return unsupported;
+      try {
+        return await b.voiceKeyDevices();
+      } catch {
+        return failed;
+      }
+    },
+    saveTalkBinding: async (request) => {
+      const b = get();
+      if (b === undefined || typeof b.voiceSaveTalkBinding !== 'function') return unsupported;
+      try {
+        return await b.voiceSaveTalkBinding(request);
+      } catch {
+        return failed;
+      }
+    },
   };
 }
 

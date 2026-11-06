@@ -111,10 +111,10 @@ describe('local storage', () => {
     // The preference methods take the key from their caller, and the only
     // callers name the notification preferences' key, the setup card's
     // (a per-account mark that the card was put off) and the voice mode's
-    // (issue #1244).
+    // (issue #1244) and the talk key's name (issue #1382).
     const api = withoutComments(sources['./api.ts'] ?? '');
-    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|setupCardKey\(|voiceModeKey\b)/g) ?? []).toEqual([]);
-    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(6);
+    expect(api.match(/credentials\.(read|write)Preference\(\s*(?!notificationPreferencesKey\(|setupCardKey\(|voiceModeKey\b|talkKeyLabelKey\b)/g) ?? []).toEqual([]);
+    expect(api.match(/credentials\.(read|write)Preference\(/g)?.length).toBe(8);
   });
 
   it('is not missed by the rules: a bare test of each', () => {
@@ -801,7 +801,8 @@ describe('the platform seam', () => {
     // Only the build-selected alias reaches the adapter; no source imports it.
     // A type-only import of the bridge contract is erased and is allowed (the
     // native-voice view types, issue #1375).
-    const typeOnlyBridge = /^import type [^;]*from\s+'[^']*desktop\/bridge';?$/gm;
+    // The DOM-to-evdev table is pure data and imports nothing (issue #1382).
+    const typeOnlyBridge = /^import (type )?[^;]*from\s+'[^']*desktop\/(bridge|evdev)';?$/gm;
     const importing = Object.entries(sources)
       .filter(([path, code]) => !path.startsWith('./platform/desktop/') && /platform\/desktop|from\s+['"]\.\/desktop/.test(code.replace(typeOnlyBridge, '')))
       .map(([path]) => path);
