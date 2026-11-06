@@ -21,6 +21,8 @@ const (
 	keyDown  = "\x1b[B"
 	keyEsc   = "\x1b"
 	keyCtrlC = "\x03"
+	keyCtrlR = "\x12"
+	keyCtrlU = "\x15"
 )
 
 // ttyRows and ttyCols are the size of every TUI's terminal: wide enough for a

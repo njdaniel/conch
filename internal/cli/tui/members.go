@@ -254,6 +254,9 @@ func (m Model) startEvents(ctx context.Context, gen int, channel string, session
 				PermissionsChanged: func(schema.PermissionsChangedV1) error {
 					return push(eventsPermissionsReceived{gen: gen})
 				},
+				Reaction: func(summary schema.ReactionSummaryV1) error {
+					return push(reactionSummaryReceived{gen: gen, channel: channel, summary: summary})
+				},
 			})
 			select {
 			case events <- eventsEnded{gen: gen, err: err, lived: time.Since(started)}:
@@ -314,6 +317,8 @@ func (m Model) eventsRoster(msg eventsRosterReceived) (tea.Model, tea.Cmd) {
 	m.ev.recreated = false
 	cmds := []tea.Cmd{wait}
 	if !wasLive {
+		// Reactions have no replay; replace every visible summary after a drop.
+		cmds = append(cmds, m.reloadReactions(m.current()))
 		// Frames were missed while the socket was down: the Runs view's newest
 		// page is read again and merged.
 		if m.runs.loaded && m.runs.channel == m.current() {

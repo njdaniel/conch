@@ -47,6 +47,12 @@ func RunWithStdin(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return runTail(ctx, args[1:], stdout, stderr)
 	case "search":
 		return runSearch(ctx, args[1:], stdout, stderr)
+	case "react":
+		return runReact(ctx, args[1:], stdout, stderr, true)
+	case "unreact":
+		return runReact(ctx, args[1:], stdout, stderr, false)
+	case "reactions":
+		return runReactions(ctx, args[1:], stdout, stderr)
 	case "thread":
 		return runThread(ctx, args[1:], stdout, stderr)
 	case "upload":
@@ -114,6 +120,9 @@ Usage:
   conch tail [--server <url>] <channel>
   conch thread [--server <url>] <channel> <id>
   conch search [--server <url>] [--limit <n>] [--before <id>] <channel> <words...>
+  conch react [--server <url>] [--json] [--text] <channel> <message-id> <emoji-or-shortcode>
+  conch unreact [--server <url>] [--json] [--text] <channel> <message-id> <emoji-or-shortcode>
+  conch reactions [--server <url>] [--json] [--text] [--limit <n>] <channel> <message-id> [<emoji-or-shortcode>]
   conch upload [--server <url>] [--message <text>] <channel> <path>
   conch download [--server <url>] [-o <path>] <file-id>
   conch nets list [--server <url>] <channel>
@@ -163,6 +172,7 @@ Usage:
   conch admin permissions set [--server <url>] [--json] [--members on|off] [--operators on|off] <permission>
   conch admin permissions preset [--server <url>] [--json] [--yes] personal|group
   conch admin directory members [--server <url>] [--json]
+  conch admin reaction remove [--server <url>] [--json] [--yes] <channel> <message-id> <principal-id> [<emoji-or-shortcode>]
   conch admin hook list [--server <url>] [--json]
   conch admin hook revoke [--server <url>] <hook-id>
   conch admin reports list [--server <url>] [--json] [--limit <n>]
@@ -215,6 +225,19 @@ Scope:
   never a query language. No match prints nothing and exits 0. --limit caps
   the count (1 to 100); when more remain, standard error names the --before
   value that continues.
+  react adds and unreact removes your own reaction to a message id. The emoji
+  may be ordinary Unicode or a pinned shortcode such as :thumbsup: or :+1:;
+  unknown shortcodes are refused before any request. reactions lists counts and
+  reactor ids, names and times, with an optional emoji to select one kind.
+  --text prints readable shortcodes instead of glyphs (an unknown key uses
+  code-point notation); --json prints write summaries or reactor JSON Lines.
+  In the TUI, ctrl+r, ctrl+u and ctrl+o prefill react, unreact and reactors for
+  the bottom visible message; /react, /unreact and /reactors also accept an
+  explicit id. Known closed shortcodes in messages become Unicode on send and
+  unknown ones stay literal. /emoji text selects the explicit terminal fallback
+  and /emoji unicode restores glyphs; there is no automatic font detection.
+  admin reaction remove removes one principal's reaction, or all of theirs when
+  no emoji is named; --yes skips its confirmation.
   upload sends a file to a channel, posts one message to the whole channel
   that attaches it (--message is its text; the file's name by default), and
   prints the file id. The server stores the file on its own disk; it can be

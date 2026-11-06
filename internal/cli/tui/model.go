@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -321,6 +320,9 @@ type Model struct {
 	runs runsView
 	// rs is the person's read state: the unread counts and the read mark.
 	rs readState
+	// react is whole reaction state by channel and message, hydrated over REST
+	// and replaced by events or write responses.
+	react reactionModel
 	// clockTicking is true while the once-a-second redraw (clockTick) is armed.
 	clockTicking bool
 	// focus is the pane of the chat view the arrow keys move. Like the draft
@@ -405,7 +407,7 @@ func NewModel(ctx context.Context, api API, authorID int64, channels []string) M
 		events: make(chan tea.Msg, 64), mode: modeChannels,
 		backoff: make(map[string]time.Duration), retryPending: make(map[string]bool), after: tickAfter, wrapped: &wrappedBody{},
 		own: &ownSession{}, loaded: make(map[string]bool), streamed: make(map[string]int64), expanded: make(map[int64]bool),
-		sessionRuns: make(map[sessionRunKey][]schema.RunV1), rs: newReadState()}
+		sessionRuns: make(map[sessionRunKey][]schema.RunV1), rs: newReadState(), react: newReactionModel(api)}
 	if v, ok := api.(VoiceAPI); ok {
 		m.voice.api = v
 	}
@@ -482,6 +484,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.enterDirectory()
 			case "ctrl+p":
 				return m.enterCommunity()
+			case "ctrl+r":
+				return m.reactionKeyCommand("react"), nil
+			case "ctrl+u":
+				return m.reactionKeyCommand("unreact"), nil
+			case "ctrl+o":
+				return m.reactionKeyCommand("reactors"), nil
 			}
 		}
 		if m.mode == modeRun {
@@ -665,8 +673,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "backspace":
 			// The Agents and Runs views have no input: the draft is the channel's.
 			if m.input != "" && m.mode != modeAgents && m.mode != modeRuns {
-				_, size := utf8.DecodeLastRuneInString(m.input)
-				m.input = m.input[:len(m.input)-size]
+				clusters := textClusters(m.input)
+				m.input = strings.TrimSuffix(m.input, clusters[len(clusters)-1].text)
 			}
 		default:
 			// A lone space arrives as KeySpace, not KeyRunes; both carry Runes.
@@ -708,6 +716,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.sessionStarted(msg)
 	case eventsRosterReceived:
 		return m.eventsRoster(msg)
+	case reactionSummaryReceived:
+		return m.reactionEvent(msg)
+	case reactionsLoaded:
+		return m.reactionsHydrated(msg), nil
+	case reactionWritten:
+		return m.reactionDone(msg), nil
+	case reactorsListed:
+		return m.reactorsDone(msg), nil
 	case eventsRunReceived:
 		return m.eventsRun(msg)
 	case eventsActivityReceived:
@@ -892,8 +908,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addMessages(msg.channel, msg.messages)
 		m.markStreamed(msg.channel, msg.messages...)
 		naming := m.nameAuthors(msg.channel)
+		hydrate := m.loadReactions(msg.channel, msg.messages)
 		if stale {
-			return m, naming
+			return m, tea.Batch(naming, hydrate)
 		}
 		switch {
 		case m.notice != "":
@@ -905,7 +922,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			m.setStatus(modeChannels, "connected")
 		}
-		return m, tea.Batch(m.markReading(), naming)
+		return m, tea.Batch(m.markReading(), naming, hydrate)
 	case messageReceived:
 		// Data flowing proves the subscription is healthy.
 		delete(m.backoff, msg.channel)
@@ -1599,20 +1616,59 @@ func (m Model) scrollBody(down bool) Model {
 	return m
 }
 
-// runeCells is how many cells r takes on a terminal, rounded up: never less
-// than lipgloss measures it as, so text fitted with it cannot wrap.
-func runeCells(r rune) int {
-	if r < utf8.RuneSelf {
-		return 1
-	}
-	return max(1, lipgloss.Width(string(r)))
+type textCluster struct {
+	text  string
+	width int
 }
 
-// cellWidth is the width of s as runeCells counts it.
+// textClusters keeps terminal emoji and combining sequences together. It is
+// deliberately local: the terminal already measures whole strings through
+// lipgloss, and no additional dependency is needed for these Unicode rules.
+func textClusters(s string) []textCluster {
+	var clusters []textCluster
+	start := 0
+	for i, r := range s {
+		if i == 0 || !clusterContinues(s[start:i], r) {
+			if i > 0 {
+				text := s[start:i]
+				clusters = append(clusters, textCluster{text: text, width: max(1, lipgloss.Width(text))})
+			}
+			start = i
+		}
+	}
+	if start < len(s) {
+		text := s[start:]
+		clusters = append(clusters, textCluster{text: text, width: max(1, lipgloss.Width(text))})
+	}
+	return clusters
+}
+
+func clusterContinues(cluster string, r rune) bool {
+	if r == '\u200d' || unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) ||
+		r == '\ufe0e' || r == '\ufe0f' || r >= 0x1f3fb && r <= 0x1f3ff || r >= 0xe0020 && r <= 0xe007f {
+		return true
+	}
+	if strings.HasSuffix(cluster, "\u200d") {
+		return true
+	}
+	if r >= 0x1f1e6 && r <= 0x1f1ff {
+		indicators := 0
+		for _, existing := range cluster {
+			if existing >= 0x1f1e6 && existing <= 0x1f1ff {
+				indicators++
+			}
+		}
+		return indicators%2 == 1
+	}
+	return false
+}
+
+// cellWidth measures whole emoji clusters, so a ZWJ sequence, skin tone or flag
+// is neither split nor charged once per code point.
 func cellWidth(s string) int {
 	n := 0
-	for _, r := range s {
-		n += runeCells(r)
+	for _, cluster := range textClusters(s) {
+		n += cluster.width
 	}
 	return n
 }
@@ -1627,12 +1683,12 @@ func fitCells(s string, width int) string {
 	}
 	var b strings.Builder
 	used := 0
-	for _, r := range s {
-		if used+runeCells(r) > width-1 {
+	for _, cluster := range textClusters(s) {
+		if used+cluster.width > width-1 {
 			break
 		}
-		used += runeCells(r)
-		b.WriteRune(r)
+		used += cluster.width
+		b.WriteString(cluster.text)
 	}
 	return b.String() + "…"
 }
@@ -1646,14 +1702,14 @@ func wrapCells(s string, width int) []string {
 	var lines []string
 	var b strings.Builder
 	used := 0
-	for _, r := range s {
-		if w := runeCells(r); used+w > width && used > 0 {
+	for _, cluster := range textClusters(s) {
+		if used+cluster.width > width && used > 0 {
 			lines = append(lines, b.String())
 			b.Reset()
 			used = 0
 		}
-		used += runeCells(r)
-		b.WriteRune(r)
+		used += cluster.width
+		b.WriteString(cluster.text)
 	}
 	return append(lines, b.String())
 }
@@ -1670,20 +1726,25 @@ func clipTail(value string, width int) string {
 	if cellWidth(value) <= width {
 		return value
 	}
-	runes := []rune(value)
-	used, start := 0, len(runes)
-	for start > 0 && used+runeCells(runes[start-1]) <= width-1 {
+	clusters := textClusters(value)
+	used, start := 0, len(clusters)
+	for start > 0 && used+clusters[start-1].width <= width-1 {
 		start--
-		used += runeCells(runes[start])
+		used += clusters[start].width
 	}
-	return "…" + string(runes[start:])
+	var b strings.Builder
+	b.WriteString("…")
+	for _, cluster := range clusters[start:] {
+		b.WriteString(cluster.text)
+	}
+	return b.String()
 }
 
 // whisperNotice mirrors the plain CLI's note: a whisper is discretion, not
 // secrecy, and users should not mistake it for the latter.
 const whisperNotice = "note: whispers are recorded in the audit log"
 
-const slashHint = `commands: /net [name], /w <ids> <text>, /channels, /people, /voice help, /help; start a message with // to send a literal /`
+const slashHint = `commands: /net [name], /w <ids> <text>, /react, /unreact, /reactors, /emoji, /channels, /people, /voice help, /help; start a message with // to send a literal /`
 
 // submit handles enter in the channel pane: a slash command, or a message sent
 // to the current target. Every refusal leaves the input as typed and sends
@@ -1702,11 +1763,11 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if !strings.HasPrefix(body, "/") {
-		return m.sendToTarget(body)
+		return m.sendToTarget(cli.ExpandShortcodes(body))
 	}
 	// "//text" is the escape for a message that really starts with "/".
 	if strings.HasPrefix(body, "//") {
-		return m.sendToTarget(body[1:])
+		return m.sendToTarget(cli.ExpandShortcodes(body[1:]))
 	}
 	name, rest := splitCommand(body)
 	switch name {
@@ -1714,6 +1775,10 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m.netCommand(rest)
 	case "/w":
 		return m.whisperCommand(rest)
+	case "/react", "/unreact", "/reactors":
+		return m.reactionCommand(strings.TrimPrefix(name, "/"), rest)
+	case "/emoji":
+		return m.emojiCommand(rest), nil
 	case "/help":
 		m.input = ""
 		m.help, m.helpTop, m.helpTopic = true, 0, topicKeys
@@ -1784,7 +1849,7 @@ func (m Model) whisperCommand(rest string) (tea.Model, tea.Cmd) {
 		m.setStatus(modeChannels, "/w: a whisper needs someone other than you")
 		return m, nil
 	}
-	return m.post(text, &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: ids}, true)
+	return m.post(cli.ExpandShortcodes(text), &schema.Audience{Kind: schema.AudienceKindPrincipals, PrincipalIDs: ids}, true)
 }
 
 // parsePrincipalIDs reads a comma-separated list of positive, distinct
