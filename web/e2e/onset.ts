@@ -7,9 +7,10 @@
 // A stall is a stretch with no reading: it is not quiet. So a run of loud
 // readings ends only at quiet that was read (at least minQuiet ms of it),
 // never at a gap; and an edge is only as precise as the readings on either
-// side of it. A measurement whose edges are less precise than maxSlack, or
-// whose spans are not the ones the signal makes, is refused (null), and the
-// spec measures again.
+// side of it. A measurement whose edges are less precise than maxSlack is
+// refused (null), and the spec measures again. Missing audio or an unexpected
+// span is null too, but burstAudioFailure identifies it when sampling was
+// reliable, so the spec fails instead of hiding it with a retry.
 
 export interface Sample {
   readonly t: number;
@@ -92,17 +93,43 @@ export function pressMeasure(samples: readonly Sample[], down: number, up: numbe
   return { path, lost: first.from - down - path, kept: last.to - path - up };
 }
 
+const burstSpans = (samples: readonly Sample[], on: number, off: number) => spans(samples).filter((s) => s.from >= on && s.from < off + pathRange.max);
+
 // burstMeasure is one burst of the open microphone: the signal on at on and
 // off at off, from quiet. The gate is still open (its hang) when the signal
 // stops, so the end of what was heard, less off, is the path latency; with
 // it, what was lost at the onset.
 export function burstMeasure(samples: readonly Sample[], on: number, off: number): { path: number; lost: number } | null {
-  const ss = spans(samples).filter((s) => s.from >= on && s.from < off + 1000);
+  const ss = burstSpans(samples, on, off);
   const heard = ss[0];
   if (ss.length !== 1 || heard === undefined || !precise(heard, ['from', 'to'])) return null;
   const path = heard.to - off;
   if (!pathOk(path)) return null;
   return { path, lost: heard.from - on - path };
+}
+
+// burstAudioFailure separates a null measurement that observed no audio, or
+// an audio dropout, from one whose missing readings make that impossible to
+// know. Coverage through the latest possible path end is required so a stall
+// cannot make an unobserved burst count as lost audio.
+export function burstAudioFailure(samples: readonly Sample[], on: number, off: number): boolean {
+  if (burstSpans(samples, on, off).length === 1) return false;
+  const end = off + pathRange.max;
+  const observed = samples.filter((s) => s.t >= on - maxSlack && s.t <= end + maxSlack);
+  const first = observed[0];
+  const last = observed[observed.length - 1];
+  if (first === undefined || last === undefined || first.t > on || last.t < end) return false;
+  for (let i = 1; i < observed.length; i++) {
+    const previous = observed[i - 1];
+    const current = observed[i];
+    if (previous === undefined || current === undefined || current.t - previous.t > maxSlack) return false;
+  }
+  return true;
+}
+
+export function p90(xs: readonly number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.ceil(0.9 * s.length) - 1] ?? Number.POSITIVE_INFINITY;
 }
 
 export function median(xs: readonly number[]): number {

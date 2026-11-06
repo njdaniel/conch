@@ -21,7 +21,7 @@
 // Without Docker it fails when CI is set and is skipped otherwise.
 import type { Page } from '@playwright/test';
 import { chooseMicrophone, expect, openChannel, signIn, test } from './fixtures';
-import { burstMeasure, median, pressMeasure, type Sample } from './onset';
+import { burstAudioFailure, burstMeasure, median, p90, pressMeasure, type Sample } from './onset';
 import { dockerAvailable, startVoiceWorld, watchPage, type VoiceWorld } from './voice-world';
 
 const voiceRegion = (page: Page) => page.getByRole('region', { name: 'Voice' });
@@ -175,7 +175,8 @@ test.describe('speech kept at the edges of a transmission', () => {
   });
 
   test('push to talk and the open microphone, timed at the listener', async ({ browser }) => {
-    test.setTimeout(360_000);
+    // Full retry allowances sleep for 450 s; leave 150 s for setup and browser work.
+    test.setTimeout(600_000);
     const talkerContext = await browser.newContext();
     const listenerContext = await browser.newContext();
     try {
@@ -294,8 +295,10 @@ test.describe('speech kept at the edges of a transmission', () => {
         await sleep(800);
         const off = await signal(talker, false);
         await sleep(1500);
-        const got = burstMeasure(await heard(listener), on, off);
+        const samples = await heard(listener);
+        const got = burstMeasure(samples, on, off);
         if (got === null) {
+          expect(burstAudioFailure(samples, on, off), 'open microphone audio missing or dropped out while sampling was reliable').toBe(false);
           burstsRefused++;
           continue;
         }
@@ -319,7 +322,7 @@ test.describe('speech kept at the edges of a transmission', () => {
       expect(onsetLost.length, 'open microphone bursts measured cleanly').toBe(20);
       // At least 18 of the 20 onsets lose no more than 80 ms beyond the path.
       // With the old 50 ms reads the 90th percentile was 86 ms.
-      const onsetP90 = [...onsetLost].sort((a, b) => a - b)[18] ?? Number.POSITIVE_INFINITY;
+      const onsetP90 = p90(onsetLost);
       expect(onsetP90, '90th percentile of ms lost at an open-microphone onset').toBeLessThanOrEqual(80);
       // The bounds are wide, for a loaded runner; what they tell apart is
       // far wider still. The release delay is heard (issue #965): a 200 ms
