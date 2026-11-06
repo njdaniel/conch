@@ -65,6 +65,20 @@ async function tapUntil(target: Locator, done: () => Promise<boolean>): Promise<
   }).toPass({ timeout: 30_000 });
 }
 
+// openVoiceView taps the strip's state button, which opens the Voice view.
+// The button's name is the connection's state ("In voice in #room", but
+// "Reconnecting to #room" while the connection is coming back), so on a
+// loaded machine that dips for a moment the name this looks for is not there
+// to tap. A bare tap would then wait for the whole test's time (issue #1441,
+// the third flake of this spec: the trace ended in this tap, with no error to
+// show for it): this waits for the state a person would, a button saying the
+// phone is in voice, and taps until the Voice view is the one shown.
+async function openVoiceView(page: Page): Promise<void> {
+  const state = voiceRegion(page).getByRole('button', { name: stateButton });
+  await expect(state, 'the strip says the phone is in voice').toBeVisible({ timeout: 45_000 });
+  await tapUntil(state, async () => (await mainNav(page).getByRole('button', { name: 'Voice', exact: true }).getAttribute('aria-current')) === 'page');
+}
+
 // Whether two boxes share any area.
 function overlap(a: Box, b: Box): boolean {
   return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
@@ -100,6 +114,9 @@ function hitEverywhere(el: Locator): Promise<boolean> {
 }
 
 test.describe('the phone voice strip with LiveKit', () => {
+  // An action that cannot be done fails in 20 s naming itself, and not at the
+  // end of the test's 300 s with only "Test ended" (issue #1441).
+  test.use({ actionTimeout: 20_000 });
   let vw: VoiceWorld;
   let stopWorld: (() => void) | undefined;
 
@@ -370,7 +387,7 @@ test.describe('the phone voice strip with LiveKit', () => {
         const { page } = p;
         await showView(page, 'Chat');
         const voice = voiceRegion(page);
-        await voice.getByRole('button', { name: stateButton }).tap();
+        await openVoiceView(page);
         await expect(mainNav(page).getByRole('button', { name: 'Voice', exact: true })).toHaveAttribute('aria-current', 'page');
         // Each phone before this one has left, and presence says so a few
         // seconds later: the roster is above the controls, so a person waits
@@ -399,7 +416,7 @@ test.describe('the phone voice strip with LiveKit', () => {
         await expect(voice.getByLabel('Open microphone')).toBeChecked();
         await showView(page, 'Chat');
         await expectOpenMicrophone(p);
-        await voice.getByRole('button', { name: stateButton }).tap();
+        await openVoiceView(page);
         await tapUntil(voice.getByLabel('Push to talk'), () => voice.getByLabel('Push to talk').isChecked());
         await expect(voice.getByLabel('Push to talk')).toBeChecked();
         await tapUntil(options, expanded('false'));
