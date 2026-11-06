@@ -1064,15 +1064,13 @@ mod tests {
         let (events, _) = mpsc::unbounded_channel();
         let (_, commands) = mpsc::unbounded_channel();
         let (ring, record) = (Ring::default(), Record::default());
-        let mut gate = TransmitGate::new(gate_config(0, Duration::from_secs(120))).unwrap();
-        gate.set_max_open_ms(Some(press_cap_ms(
-            Duration::from_secs(120),
-            Duration::from_millis(100),
-        )))
-        .unwrap();
+        let (press, open) = (Duration::from_millis(100), Duration::from_millis(300));
+        let mut gate = TransmitGate::new(gate_config(0, open)).unwrap();
+        gate.set_max_open_ms(Some(press_cap_ms(open, press)))
+            .unwrap();
         let mut task = Task {
             gate,
-            open_max_ms: Some(120_000),
+            open_max_ms: Some(300),
             press_max_ms: Some(100),
             mic: Some(Box::new(RingMic(ring.clone()))),
             mic_present: true,
@@ -1086,21 +1084,59 @@ mod tests {
             listen: push_to_talk(),
             mic_changes: 0,
         };
-        task.obey(TxCommand::Gate(GateCommand::Open));
-        for n in 1..=30 {
-            ring.push(n);
+        // Opens the gate, offers `n` frames that are all waiting at once, and says how many
+        // went through: the gate's own limit, since no timer acts here.
+        async fn sent(task: &mut Task<Record>, ring: &Ring, record: &Record, n: usize) -> usize {
+            let before = record.heard().len();
+            task.obey(TxCommand::Gate(GateCommand::Open));
+            for k in 1..=n {
+                ring.push(k);
+            }
+            let mut captured = SILENCE;
+            for _ in 0..n {
+                task.frame(&mut captured).await;
+            }
+            record.heard().len() - before
         }
-        let mut captured = SILENCE;
-        for _ in 0..30 {
-            task.frame(&mut captured).await;
-        }
-        assert_eq!(record.heard().len(), 10, "100 ms is ten frames");
 
-        // Open mode: the transmit limit again.
+        assert_eq!(
+            sent(&mut task, &ring, &record, 40).await,
+            10,
+            "a press: 100 ms"
+        );
         task.obey(TxCommand::Gate(GateCommand::TalkMode(TalkMode::Open)));
-        assert_eq!(task.open_max_ms, Some(120_000));
+        assert_eq!(
+            sent(&mut task, &ring, &record, 60).await,
+            30,
+            "open mode: 300 ms"
+        );
         task.obey(TxCommand::Gate(GateCommand::TalkMode(TalkMode::PushToTalk)));
-        assert_eq!(task.press_max_ms, Some(100));
+        assert_eq!(
+            sent(&mut task, &ring, &record, 40).await,
+            10,
+            "a press again"
+        );
+
+        // A switch during a transmission ends it: nothing passes until a fresh open, which
+        // then has the new mode's limit.
+        task.obey(TxCommand::Gate(GateCommand::Open));
+        ring.push(1);
+        let mut captured = SILENCE;
+        task.frame(&mut captured).await;
+        for mode in [TalkMode::Open, TalkMode::PushToTalk] {
+            task.obey(TxCommand::Gate(GateCommand::Open));
+            let before = record.heard().len();
+            task.obey(TxCommand::Gate(GateCommand::TalkMode(mode)));
+            for k in 1..=5 {
+                ring.push(k);
+            }
+            for _ in 0..5 {
+                task.frame(&mut captured).await;
+            }
+            assert_eq!(record.heard().len(), before, "{mode:?}: shut by the switch");
+            let want = if mode == TalkMode::Open { 30 } else { 10 };
+            assert_eq!(sent(&mut task, &ring, &record, 60).await, want, "{mode:?}");
+        }
     }
 
     /// The bound between a lost key device and the gate shutting, the half this test can
