@@ -8,7 +8,9 @@
 // clipboard or the Notification API, and nothing but browser/credentials.ts
 // touches the credential's storage.
 import type { ComponentType, ReactNode } from 'react';
+import type { VoiceControlTalkMode } from '../schema/generated';
 import type { Call, OperationId } from './operations';
+import type { ChannelName, NativeVoiceView, VoiceCommandResult } from './desktop/bridge';
 
 // HttpTransport makes the requests of conchd that the operation table names.
 // Each takes a call (an operation id with its path values and query) and
@@ -119,6 +121,33 @@ export interface Services {
   appVersion?(): Promise<string | null>;
 }
 
+// What a refused or failed native-voice call comes to: the bridge's own
+// refusal vocabulary, never a thrown string.
+export type NativeVoiceError = Extract<VoiceCommandResult, { readonly ok: false }>['error'];
+
+// A call that answers with the new view (join, leave, retry).
+export type NativeVoiceOutcome =
+  | { readonly ok: true; readonly view: NativeVoiceView }
+  | { readonly ok: false; readonly error: NativeVoiceError };
+
+// The native voice of the desktop shell (issue #1375, D3-4 of #771). The
+// helper, not the page, owns the microphone and push-to-talk: the store only
+// shows the helper's confirmed state and asks main to act. It is a
+// useSyncExternalStore source: snapshot() is stable until the view changes.
+// Present only where services.browserVoice is false and a native voice
+// exists; the browser's platform has none.
+export interface NativeVoice {
+  readonly snapshot: () => NativeVoiceView;
+  readonly subscribe: (listener: () => void) => () => void;
+  join(request: { readonly channel: ChannelName; readonly muted?: boolean; readonly deafened?: boolean }): Promise<NativeVoiceOutcome>;
+  leave(): Promise<NativeVoiceOutcome>;
+  retry(): Promise<NativeVoiceOutcome>;
+  setMute(muted: boolean): Promise<VoiceCommandResult>;
+  setDeafen(deafened: boolean): Promise<VoiceCommandResult>;
+  setDevices(devices: { readonly input?: string; readonly output?: string }): Promise<VoiceCommandResult>;
+  setTalkMode(mode: VoiceControlTalkMode): Promise<VoiceCommandResult>;
+}
+
 export interface Platform {
   readonly name: 'browser' | 'desktop';
   // What the client is rendered inside, when the place needs a step before the
@@ -129,4 +158,6 @@ export interface Platform {
   readonly sockets: SocketTransport;
   readonly credentials: CredentialStore;
   readonly services: Services;
+  // Native voice, where the place has one (the desktop shell). Absent in the browser.
+  readonly nativeVoice?: NativeVoice;
 }

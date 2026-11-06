@@ -3,11 +3,38 @@
 // malicious IPC; TLS; and the canary scans (no secret in the renderer, its
 // storage, or main's log). The server is a disposable conchd on loopback
 // built from this checkout; see conchd.ts.
+import { existsSync, lstatSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { chromium, expect, test, type Browser, type Page } from '@playwright/test';
 
 import { makePki, sendJson, startHttps, type Fake, type Pki } from '../unit/support.ts';
 import { listedVersion, startConchd, type Disposable } from './conchd.ts';
-import { credentialField, launch, livePage, type Launched } from './launch.ts';
+import { APP, credentialField, launch, livePage, type Launched } from './launch.ts';
+
+// The helper electron-builder's step in scripts/desktop-voice-helper.sh puts
+// beside the app (issue #1377).
+const BUNDLED_HELPER = resolve(APP, '..', 'resources', 'conch-voice');
+
+// The helper's canonical path, as /proc/<pid>/exe names it.
+function helperPath(): string {
+  return existsSync(BUNDLED_HELPER) ? realpathSync(BUNDLED_HELPER) : BUNDLED_HELPER;
+}
+
+// The pids of processes running the bundled helper, by their executable: a
+// point-in-time check that none is running.
+function helperPids(): string[] {
+  return readdirSync('/proc')
+    .filter((d) => /^\d+$/.test(d))
+    .filter((d) => {
+      try {
+        // The kernel names the canonical path, and " (deleted)" once replaced.
+        return readlinkSync(`/proc/${d}/exe`).replace(/ \(deleted\)$/, '') === helperPath();
+      } catch {
+        return false; // gone, or not ours to read
+      }
+    });
+}
 
 // A conch credential has this shape; none may be anywhere the renderer or the
 // log can see, except a pasted one while it is being typed.
@@ -127,6 +154,21 @@ test.describe('the packaged app against a real conchd', () => {
     await page.getByRole('button', { name: 'Sign in', exact: true }).click();
     await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'general' })).toBeVisible();
+  });
+
+  test('has the bundled voice helper when built with it, and starts none by launching and signing in', () => {
+    // DESKTOP_REQUIRE_VOICE=1 (the build's own switch) makes absence a failure
+    // here too; without it a build without the helper is a valid build.
+    if (process.env['DESKTOP_REQUIRE_VOICE'] === '1') expect(existsSync(BUNDLED_HELPER)).toBe(true);
+    if (existsSync(BUNDLED_HELPER)) {
+      const st = lstatSync(BUNDLED_HELPER);
+      expect(st.isFile()).toBe(true);
+      expect(st.mode & 0o777).toBe(0o755);
+    }
+    // No helper is running once the app is up and signed in: it runs only
+    // on an explicit Join. (A point-in-time check: one that started and
+    // already exited would not be seen.)
+    expect(helperPids()).toEqual([]);
   });
 
   test('lists channels, posts, and loads history through main', async () => {

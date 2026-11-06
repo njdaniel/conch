@@ -16,6 +16,17 @@
 //  - every body is a type of web/src/schema, so none of this is a new wire
 //    shape (decision Q1: these in-process messages carry only existing
 //    pkg/schema types).
+import type {
+  VoiceControlBlock,
+  VoiceControlCapture,
+  VoiceControlErrorCode,
+  VoiceControlPhase,
+  VoiceControlPlayback,
+  VoiceControlPTT,
+  VoiceControlPTTProblem,
+  VoiceControlReason,
+  VoiceControlTalkMode,
+} from '../../schema/generated';
 import type { LoginRequestV1, RedeemSetupTokenRequestV1, ResetPasswordRequestV1, TOTPLoginRequestV1 } from '../../schema/auth';
 import type { JoinAccountRequestV1, JoinGuestRequestV1 } from '../../schema/guest';
 import type { RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../schema/invite';
@@ -265,4 +276,57 @@ declare global {
     // Present only in the desktop shell's renderer.
     readonly conchDesktop?: ConchDesktopBridge;
   }
+}
+
+// Native voice (issue #1373, D3-2 of #771; linux-desktop.md §5, §9). Its own
+// interface, so ConchDesktopBridge keeps compiling until the preload (D3-3)
+// wires it. In-process TypeScript (decision Q1 on #770), not a wire shape.
+// No press, release, gate or transmit method exists: push-to-talk is the
+// helper's own. No token, path, nonce, pid or stderr is in any type here.
+export type NativeVoiceStatus = 'idle' | 'unavailable' | 'starting' | 'running' | 'stopping' | 'ended' | 'failed' | 'lost';
+
+// The helper's confirmed state, from VoiceControlStateV1 or V2: never what
+// the page asked for, only what the helper reported.
+export interface NativeVoiceHelper {
+  readonly version: 1 | 2;
+  readonly phase: VoiceControlPhase;
+  readonly reason?: VoiceControlReason;
+  readonly retryInMs?: number;
+  readonly capture: VoiceControlCapture;
+  readonly playback?: VoiceControlPlayback;
+  readonly transmitting: boolean;
+  readonly muted: boolean;
+  readonly deafened: boolean;
+  readonly blocked: readonly VoiceControlBlock[];
+  readonly talkMode?: VoiceControlTalkMode;
+  readonly ptt: VoiceControlPTT;
+  readonly pttProblem?: VoiceControlPTTProblem;
+}
+
+export interface NativeVoiceView {
+  readonly status: NativeVoiceStatus;
+  readonly generation: number;
+  // The destination: set only by voiceJoin, never by browsing.
+  readonly channel: ChannelName | null;
+  // A supervisor refusal, failure or loss kind, or a helper's reason: a
+  // fixed vocabulary, never free text.
+  readonly problem?: string;
+  readonly retryable: boolean;
+  readonly helper?: NativeVoiceHelper;
+}
+
+export type VoiceCommandResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' };
+
+export interface DesktopVoiceBridge {
+  voiceState(): Promise<NativeVoiceView>;
+  voiceJoin(request: { readonly channel: ChannelName; readonly muted: boolean; readonly deafened: boolean }): Promise<NativeVoiceView>;
+  voiceLeave(): Promise<NativeVoiceView>;
+  voiceRetry(): Promise<NativeVoiceView>;
+  voiceSetMute(muted: boolean): Promise<VoiceCommandResult>;
+  voiceSetDeafen(deafened: boolean): Promise<VoiceCommandResult>;
+  voiceSetDevices(devices: { readonly input?: string; readonly output?: string }): Promise<VoiceCommandResult>;
+  voiceSetTalkMode(mode: VoiceControlTalkMode): Promise<VoiceCommandResult>;
+  onVoiceState(listener: (view: NativeVoiceView) => void): Unsubscribe;
 }
