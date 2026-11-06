@@ -128,9 +128,10 @@ export class Session {
   // the native voice service's start (issue #1373), at Join time only. The
   // helper asks conchd for the person's own voice session with it
   // (CONCH_TOKEN in the helper's environment, never argv); the caller passes
-  // it on at once and keeps no copy. Null when signed out or no server is set.
-  voiceCredential(): { readonly origin: string; readonly token: string } | null {
-    return this.#origin === null || this.#token === null ? null : { origin: this.#origin, token: this.#token };
+  // it on at once and keeps no copy. The generation is the identity the credential belongs to: the caller
+  // fences on it. Null when signed out or no server is set.
+  voiceCredential(): { readonly origin: string; readonly token: string; readonly generation: number } | null {
+    return this.#origin === null || this.#token === null ? null : { origin: this.#origin, token: this.#token, generation: this.#generation };
   }
 
   // current says whether a capture is still the identity in force.
