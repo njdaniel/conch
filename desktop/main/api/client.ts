@@ -120,6 +120,10 @@ function parseJson(bytes: Uint8Array): { readonly ok: true; readonly value: unkn
   }
 }
 
+// The writes whose body holds a password or a proof of one: the credential
+// replacing steps (convertGuest has the member's password and no secret flag).
+const carriesPassword = (op: OperationId): boolean => operations[op].secret === true || op === 'convertGuest';
+
 export class Client {
   readonly #deps: ClientDeps;
 
@@ -128,6 +132,12 @@ export class Client {
   }
 
   async send(request: Send): Promise<Exchange> {
+    return this.#send(request, null);
+  }
+
+  // resendToken is set for the one re-send a rotated credential earns, which
+  // is never followed by another.
+  async #send(request: Send, resendToken: string | null): Promise<Exchange> {
     const { session } = this.#deps;
     const capture = request.capture ?? session.capture();
     const op: Operation = operations[request.op];
@@ -137,7 +147,7 @@ export class Client {
 
     const headers = new Headers({ Accept: 'application/json' });
     if (op.auth === 'bearer') {
-      const token = request.token ?? capture.token;
+      const token = resendToken ?? request.token ?? capture.token;
       // No credential is a 401 without asking the server.
       if (token === null) return { kind: 'unauthorized' };
       headers.set('Authorization', `Bearer ${token}`);
@@ -193,6 +203,16 @@ export class Client {
     // done, unless the operation takes a secret with a working credential
     // (a wrong password there is auth_failed and the person stays in).
     if (response.status === 401 && op.auth === 'bearer' && op.secret !== true && request.token === undefined) {
+      // The credential this request carried may have been replaced, at the
+      // server, by a password change that finished while it was in flight: the
+      // same identity, refused for a credential it no longer holds. Ask once
+      // more with the one in force. Never for a write that carries a password
+      // (it is not repeated), never after a sign-out, a switch of account or
+      // of server (successor is null then), and a 401 for the credential in
+      // force, or for the re-send, is a revocation and ends the sign-in.
+      const sent = capture.token;
+      const next = resendToken === null && request.detached !== true && sent !== null && !carriesPassword(request.op) ? session.successor(capture, sent) : null;
+      if (next !== null) return this.#send(request, next);
       session.forget();
       return { kind: 'unauthorized' };
     }
