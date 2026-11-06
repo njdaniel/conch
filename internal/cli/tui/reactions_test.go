@@ -472,9 +472,8 @@ func TestReactionOmissionConfirmsNonBatchSummaries(t *testing.T) {
 		for _, present := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/present=%v", source, present), func(t *testing.T) {
 				m, api := reactionModelForTest()
-				ctx, cancel := context.WithCancel(m.ctx)
-				m.ctx = ctx
-				cancel() // No socket waiter in this model-only test.
+				close(m.events) // No socket waiter in this model-only test.
+				m.after = func(_ time.Duration, msg tea.Msg) tea.Cmd { return func() tea.Msg { return msg } }
 				m.react.messages["general"] = map[int64]schema.ReactionSummaryV1{41: tuiReactionSummary(41, 1, schema.ReactionCountV1{Emoji: "👍", Count: 1})}
 				m = feed(m, m.reloadReactions("general")) // An unversioned omission.
 				second := 2
@@ -499,12 +498,16 @@ func TestReactionOmissionConfirmsNonBatchSummaries(t *testing.T) {
 					t.Fatal("confirmation did not coalesce with pending hydration")
 				}
 				api.batchErr = errors.New("confirmation failed")
-				m = feed(m, cmd)
+				for _, due := range collect(cmd) {
+					m, cmd = update(m, due)
+					for _, result := range collect(cmd) {
+						m, cmd = update(m, result)
+					}
+				}
 				if len(m.react.messages["general"][41].Reactions) != 0 {
 					t.Fatal("failed confirmation changed counts")
 				}
-				m, cmd = update(m, msg)
-				if cmd == nil || len(m.react.pending["general"]) != 1 {
+				if cmd == nil {
 					t.Fatal("failed confirmation lost unversioned state")
 				}
 				api.batchErr = nil
@@ -559,5 +562,110 @@ func TestReactionRevisionsTrackAppliedState(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestReactionConfirmationRecovery(t *testing.T) {
+	for _, source := range []string{"frame", "write"} {
+		for _, failure := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/failure=%v", source, failure), func(t *testing.T) {
+				m, api := reactionModelForTest()
+				m.after = func(_ time.Duration, msg tea.Msg) tea.Cmd { return func() tea.Msg { return msg } }
+				m = feed(m, m.reloadReactions("general"))
+				incoming := tuiReactionSummary(41, 2, schema.ReactionCountV1{Emoji: "👍", Count: 1})
+				_ = m.receiveReactionSummary("general", incoming)
+				if failure {
+					api.batchErr = errors.New("transient read failure")
+				} else {
+					api.summaries.Summaries = []schema.ReactionSummaryV1{incoming}
+				}
+				// Start C1 and hold its result while the removal arrives.
+				_, cmd := update(m, reactionHydrationDue{channel: "general"})
+				results := collect(cmd)
+				if !failure {
+					removal := tuiReactionSummary(41, 3)
+					if source == "write" {
+						m, cmd = update(m, reactionWritten{channel: "general", messageID: 41, summary: removal})
+					} else {
+						cmd = m.receiveReactionSummary("general", removal)
+					}
+					if cmd != nil {
+						t.Error("started overlapping confirmation for removal")
+					}
+				}
+				api.batchErr = nil
+				api.summaries.Summaries = nil // C2 observes the removal.
+				if failure {
+					api.summaries.Summaries = []schema.ReactionSummaryV1{incoming}
+				}
+				for _, result := range results {
+					m, cmd = update(m, result)
+				}
+				if cmd == nil {
+					t.Fatal("confirmation work lost; no follow-up scheduled")
+				}
+				m = feed(m, cmd)
+				got := m.react.messages["general"][41]
+				if failure && len(got.Reactions) != 1 || !failure && len(got.Reactions) != 0 {
+					t.Fatalf("confirmation did not recover: %+v", got)
+				}
+				if len(api.batches) != 3 {
+					t.Fatalf("reads = %d, want initial omission, C1, C2", len(api.batches))
+				}
+			})
+		}
+	}
+}
+
+func TestReactionConfirmationBackoffAndStop(t *testing.T) {
+	for _, stop := range []string{"model stopped", "channel closed", "success"} {
+		t.Run(stop, func(t *testing.T) {
+			m, api := reactionModelForTest()
+			ctx, cancel := context.WithCancel(m.ctx)
+			defer cancel()
+			m.ctx = ctx
+			var delays []time.Duration
+			m.after = func(delay time.Duration, msg tea.Msg) tea.Cmd {
+				delays = append(delays, delay)
+				return func() tea.Msg { return msg }
+			}
+			m = feed(m, m.reloadReactions("general"))
+			_ = m.receiveReactionSummary("general", tuiReactionSummary(41, 2))
+			api.batchErr = errors.New("unavailable")
+			cmd := m.flushReactionHydration("general")
+			for i, seconds := range []int{1, 2, 4, 8, 16, 30, 30} {
+				for _, result := range collect(cmd) {
+					m, cmd = update(m, result)
+				}
+				if len(delays) != i+1 || delays[i] != time.Duration(seconds)*time.Second {
+					t.Fatalf("retry delays = %v at attempt %d", delays, i)
+				}
+				if i < 6 {
+					for _, due := range collect(cmd) {
+						m, cmd = update(m, due)
+					}
+				}
+			}
+			before := len(api.batches)
+			switch stop {
+			case "model stopped":
+				cancel()
+			case "channel closed":
+				m.channels = []string{"ops"}
+			case "success":
+				api.batchErr = nil
+			}
+			m = feed(m, cmd)
+			wantReads := before
+			if stop == "success" {
+				wantReads++
+			}
+			if len(api.batches) != wantReads || len(delays) != 7 {
+				t.Fatalf("work continued after %s: reads=%d, delays=%v", stop, len(api.batches), delays)
+			}
+			if len(m.react.confirming["general"]) != 0 {
+				t.Fatal("confirmation work was not retired")
+			}
+		})
 	}
 }

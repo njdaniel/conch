@@ -718,10 +718,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.eventsRoster(msg)
 	case reactionSummaryReceived:
 		return m.reactionEvent(msg)
+	case reactionConfirmationDue:
+		return m, m.retryReactionConfirmation(msg)
 	case reactionHydrationDue:
 		return m, m.flushReactionHydration(msg.channel)
 	case reactionsLoaded:
-		return m.reactionsHydrated(msg), nil
+		return m.reactionLoadDone(msg)
 	case reactionWritten:
 		return m.reactionDone(msg)
 	case reactorsListed:

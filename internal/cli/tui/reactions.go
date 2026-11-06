@@ -22,7 +22,21 @@ type reactionAPI interface {
 	ListReactors(context.Context, string, int64, string, int64, int) (schema.ListReactorsResponseV1, error)
 }
 
+// Confirmation state is owned by the update loop, including during retry waits.
+type reactionConfirmation struct {
+	inFlight bool
+	dirty    bool
+	newest   schema.ReactionSummaryV1
+	backoff  time.Duration
+}
+
+type reactionConfirmationDue struct {
+	channel   string
+	messageID int64
+}
+
 type reactionModel struct {
+	confirming  map[string]map[int64]*reactionConfirmation
 	api         reactionAPI
 	messages    map[string]map[int64]schema.ReactionSummaryV1
 	revisions   map[string]map[int64]uint64
@@ -34,11 +48,12 @@ type reactionModel struct {
 }
 
 type reactionsLoaded struct {
-	channel   string
-	requested []int64
-	revisions map[int64]uint64
-	summaries []schema.ReactionSummaryV1
-	err       error
+	channel    string
+	requested  []int64
+	confirming map[int64]bool
+	revisions  map[int64]uint64
+	summaries  []schema.ReactionSummaryV1
+	err        error
 }
 
 type reactionHydrationDue struct {
@@ -70,6 +85,7 @@ type reactorsListed struct {
 
 func newReactionModel(api API) reactionModel {
 	r := reactionModel{
+		confirming:  make(map[string]map[int64]*reactionConfirmation),
 		messages:    make(map[string]map[int64]schema.ReactionSummaryV1),
 		revisions:   make(map[string]map[int64]uint64),
 		unversioned: make(map[string]map[int64]bool),
@@ -90,6 +106,14 @@ func (m Model) loadReactions(channel string, messages []schema.MessageV2) tea.Cm
 	}
 	ids := make([]int64, 0, len(messages))
 	for _, message := range messages {
+		if work := m.react.confirming[channel][message.ID]; work != nil {
+			if work.inFlight {
+				work.dirty = true
+				continue
+			}
+			work.inFlight = true
+			work.dirty = false
+		}
 		if message.ID > 0 {
 			ids = append(ids, message.ID)
 		}
@@ -101,14 +125,16 @@ func (m Model) loadReactions(channel string, messages []schema.MessageV2) tea.Cm
 	for start := 0; start < len(ids); start += schema.MaxReactionBatchMessages {
 		batch := slices.Clone(ids[start:min(start+schema.MaxReactionBatchMessages, len(ids))])
 		// Snapshot applied-state revisions; only omissions need this guard.
+		confirming := make(map[int64]bool)
 		revisions := make(map[int64]uint64, len(batch))
 		current := m.reactionRevisions(channel)
 		for _, id := range batch {
 			revisions[id] = current[id]
+			confirming[id] = m.react.confirming[channel][id] != nil
 		}
 		commands = append(commands, func() tea.Msg {
 			response, err := m.react.api.ReactionSummaries(m.ctx, channel, batch)
-			return reactionsLoaded{channel: channel, requested: batch, revisions: revisions, summaries: response.Summaries, err: err}
+			return reactionsLoaded{channel: channel, requested: batch, confirming: confirming, revisions: revisions, summaries: response.Summaries, err: err}
 		})
 	}
 	return tea.Batch(commands...)
@@ -197,7 +223,18 @@ func (m Model) reactionEvent(msg reactionSummaryReceived) (Model, tea.Cmd) {
 // receiveReactionSummary handles events and own-write responses. An unversioned
 // clear cannot order these frames, so coalesce an authoritative batch read.
 func (m Model) receiveReactionSummary(channel string, summary schema.ReactionSummaryV1) tea.Cmd {
+	if work := m.react.confirming[channel][summary.MessageID]; work != nil {
+		work.dirty = true
+		if !work.newest.AsOf.Time().After(summary.AsOf.Time()) {
+			work.newest = summary
+		}
+		return nil
+	}
 	if m.react.unversioned[channel][summary.MessageID] {
+		if m.react.confirming[channel] == nil {
+			m.react.confirming[channel] = make(map[int64]*reactionConfirmation)
+		}
+		m.react.confirming[channel][summary.MessageID] = &reactionConfirmation{newest: summary}
 		return m.queueReactionHydration(channel, schema.MessageV2{ID: summary.MessageID})
 	}
 	byID := m.react.messages[channel]
@@ -479,4 +516,56 @@ func (m Model) flushReactionHydration(channel string) tea.Cmd {
 	}
 	slices.SortFunc(messages, func(a, b schema.MessageV2) int { return cmp.Compare(a.ID, b.ID) })
 	return m.loadReactions(channel, messages)
+}
+
+// reactionLoadDone settles each serialized confirmation after applying its read.
+func (m Model) reactionLoadDone(msg reactionsLoaded) (Model, tea.Cmd) {
+	m = m.reactionsHydrated(msg)
+	var commands []tea.Cmd
+	for id, confirming := range msg.confirming {
+		if !confirming {
+			continue
+		}
+		work := m.react.confirming[msg.channel][id]
+		if work == nil {
+			continue
+		}
+		work.inFlight = false
+		if m.ctx.Err() != nil || !slices.Contains(m.channels, msg.channel) || !m.reactionsAvailable(msg.channel) {
+			delete(m.react.confirming[msg.channel], id)
+			continue
+		}
+		if msg.err != nil {
+			delay := work.backoff
+			if delay == 0 {
+				delay = minResubscribeDelay
+			}
+			work.backoff = delay * 2
+			if work.backoff > maxResubscribeDelay {
+				work.backoff = maxResubscribeDelay
+			}
+			commands = append(commands, m.after(delay, reactionConfirmationDue{channel: msg.channel, messageID: id}))
+		} else if work.dirty {
+			work.dirty = false
+			work.backoff = 0
+			commands = append(commands, m.loadReactions(msg.channel, []schema.MessageV2{{ID: id}}))
+		} else {
+			delete(m.react.confirming[msg.channel], id)
+		}
+	}
+	return m, tea.Batch(commands...)
+}
+
+func (m Model) retryReactionConfirmation(msg reactionConfirmationDue) tea.Cmd {
+	work := m.react.confirming[msg.channel][msg.messageID]
+	if work == nil || work.inFlight {
+		return nil
+	}
+	if m.ctx.Err() != nil || !slices.Contains(m.channels, msg.channel) || !m.reactionsAvailable(msg.channel) {
+		delete(m.react.confirming[msg.channel], msg.messageID)
+		return nil
+	}
+	// The retry itself covers all frames received during the backoff.
+	work.dirty = false
+	return m.loadReactions(msg.channel, []schema.MessageV2{{ID: msg.messageID}})
 }
