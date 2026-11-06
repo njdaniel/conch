@@ -395,6 +395,9 @@ func (m Model) reconciled(msg messagesReconciled) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if msg.err != nil {
+		// The pages read before the failure moved the cursor past them, so
+		// they are applied now; the retry continues below them.
+		m.addMessages(msg.channel, msg.messages)
 		delay := m.mod.reconcileBackoff[msg.channel]
 		if delay <= 0 {
 			delay = minResubscribeDelay

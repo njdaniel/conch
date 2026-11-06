@@ -610,3 +610,26 @@ func TestConfirmationFitsShortTerminalsAndLongNames(t *testing.T) {
 		}
 	}
 }
+
+// A batch that fails after its first pages still applies them: the retry
+// resumes below those pages, so a tombstone on them would otherwise be lost
+// and the original shown once the window is reported covered.
+func TestReconcileFailureAppliesThePagesAlreadyRead(t *testing.T) {
+	m, _ := moderationModelForTest()
+	m.messages["general"] = []schema.MessageV2{originalMessage(41), originalMessage(400)}
+	m.mod.stale["general"] = true
+	m, _ = update(m, messagesReconciled{
+		channel:  "general",
+		messages: []schema.MessageV2{removedCopy(41)},
+		before:   41,
+		oldest:   41,
+		err:      errors.New("page 2 failed"),
+	})
+	held := m.messages["general"][0]
+	if held.ID != 41 || !held.Removed {
+		t.Fatalf("the tombstone on the page read before the failure was not applied: %+v", held)
+	}
+	if !m.mod.stale["general"] {
+		t.Fatal("a failed batch cleared stale")
+	}
+}
