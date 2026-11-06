@@ -154,7 +154,7 @@ resolved set and Nick signs each line in their PRs.
 Rows carry ids the design's §4, §5, §7.4 and §11 use. Columns are the two OS lanes; a cell is
 filled only by the experiment on a physical device of that OS and names the device model in the
 receipt. `P` = pending real trial, `D` = verified-by-docs or source-inspected (mechanism only),
-`—` = not applicable, `U` = unsupported by policy in this phase. **Every device cell is P.** An
+`—` = not applicable, `U` = unsupported by policy in this phase. **Every device cell is P**, the camera rows M-C1 to M-C10 included. An
 emulator or simulator result goes in its own column of the M4 or M5 report, never here.
 
 Pass criteria are measured; where a number is given it is the design's proposal and the
@@ -224,6 +224,17 @@ experiment records the actual figure beside the verdict.
 | M-H1 | Lock-screen or notification Hold to talk control | **U**; recorded only: do press and release both arrive | U / P | U / P | ME3 |
 | M-H2 | Volume or other hardware key as a talk key | **U**; recorded only | U / P | U / P | ME3 |
 | M-H3 | iOS Push to Talk framework (system PTT UI, 16.0+) as a later path | **U**; recorded only: whether it fits Conch's gate rule (no system-initiated transmit) | — | U / P | ME3 |
+| **Camera** | | | | | |
+| M-C1 | **Claim and release** | Only the camera button sends the claim, and the order is: capture, un-named `POST …/voice/camera` (200 `VoiceCameraV1`), wait for LiveKit's permission update, publish. Presence then lists `camera` for the phone's principal. Turning the button off unpublishes, stops the capture (the OS camera indicator goes off) and sends `DELETE …?started_at=<claim>` (204). Over 10 cycles: no `voice_camera_unclaimed` audit row, and each claim ends with `reason=self`. The time from tap to the first frame at the second principal is recorded. | P | P | ME10 |
+| M-C2 | **Off on joining** | No capture and no camera request on 20 joins, a forced reconnect or a room rotation; the OS camera indicator never lights. | P | P | ME10 |
+| M-C3 | **Background** with the camera on | Capture stops within 1 s of the lifecycle event (proposed figure; the actual one is recorded), and the claim ends. Either the phone's `DELETE` (`reason=self`) or the server's idle end (`reason=idle`, ≤ 5 s after the track goes, plus one pass) does it; the receipt says which, with the time. The second principal's tile shows the camera off. The receipt also records whether the OS would have kept capturing had the app not stopped it. | P | P | ME10 |
+| M-C4 | **Screen lock** with the camera on | As M-C3. | P | P | ME10 |
+| M-C5 | **Interruption** with the camera on: an incoming call, the voice assistant, and another app taking the camera | Capture stops and the claim is released. The app never falls back to another camera. The UI says why. | P | P | ME10 |
+| M-C6 | **No auto-resume** | After returning to the foreground, unlocking, the end of an interruption, a Wi-Fi to cellular switch and a full reconnect, the camera stays off. In 10 cycles, nothing captures and no camera request is sent until the button is pressed. A named continue (`?started_at=`) is sent only while a capture is still held in the foreground; a `409 voice_camera_stale` answer stops the capture. | P | P | ME10 |
+| M-C7 | **Permission prompt** | The OS camera prompt appears on the first camera tap, never at launch or at Join. Denied: an actionable message, no claim sent, voice and chat unaffected. A one-time grant and revocation in system settings mid-call: capture ends, the claim is released, no crash, no retry loop. Server-side `use_camera` off (403 `permission_denied`): "Camera is off for you on this server" and no capture. Turned off live while the camera is on: `camera_ended` with `reason=access_lost` stops it. | P | P | ME10 |
+| M-C8 | **Receiving others' cameras** | Cameras of one, then three, other principals (browsers with fake cameras) are subscribed only while the Voice view is shown, and never opened automatically (webcam-video §7.4, O8). Leaving the Voice view, or backgrounding, unsubscribes them, shown in LiveKit's subscription state and a drop in data. A track whose kind disagrees with its source is never rendered (unit test, §7.3 S1). Each tile names its person. | P | P | ME10 |
+| M-C9 | **Hand-off with the camera on** | If the browser or desktop takes `p<id>` while the phone's camera is on, the phone stops its capture at once on `duplicate_identity`, before the claim expires. The reverse is recorded too. | P | P | ME10 |
+| M-C10 | **Battery and data** | Recorded, with no threshold. Three runs of 15 min with the screen on, Wi-Fi, same phone: sending its own camera while receiving one; receiving one camera only; and voice only as the baseline. Data and battery come from the OS's own screens. | P | P | ME10 |
 
 There are no supported rows.
 
@@ -246,6 +257,7 @@ run of any of these is recorded in a separate column of the M4 or M5 report.
 | ME7 | Energy and data: three 30 min runs against an idle baseline on the same phone, read from the OS's own battery and data screens | M-E1 to M-E3 |
 | ME8 | Reachability: LAN plain HTTP, public certificate over cellular, private CA, LiveKit down | M-R1 to M-R4 |
 | ME9 | Accessibility: screen reader walk-through and largest text, against M2's flows | M-A1, M-A2 |
+| ME10 | Camera: claim and release, off on joining, background, lock and interruption with the camera on, no auto-resume, the permission prompt and its server-side switch, receiving one and three other cameras, the hand-off in both directions, and 15 min battery and data runs against a voice-only baseline | M-C1 to M-C10 |
 
 ## Fetches that returned no usable text (2026-11-01)
 
