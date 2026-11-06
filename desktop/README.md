@@ -90,6 +90,18 @@ make desktop-build   # fetch Electron, build, pack: desktop/dist/linux-unpacked/
 make desktop-smoke   # drive that app; needs a display
 ```
 
+`desktop-build` also copies the voice helper, `bin/conch-voice` (`make rust-build`)
+or the file `CONCH_VOICE_BIN` names, to `dist/linux-unpacked/resources/conch-voice`
+(mode 0755, `scripts/desktop-voice-helper.sh`), the one path `findHelper` runs;
+nothing is looked up on `PATH`. A `bin/conch-voice` older than any file under
+`voice/` is refused as not built from this tree. With no helper the build
+succeeds and says "built without the voice helper" (the app shows voice
+unavailable, text works); `DESKTOP_REQUIRE_VOICE=1` makes that a failure. The
+`.deb` and release versioning are #774. CI's `desktop-smoke` job builds without
+the helper today, so the smoke test's presence and mode checks run only on a
+machine that built `bin/conch-voice`; `desktop/tests/unit/voice-bundle.test.ts`
+covers the copy and `findHelper` in CI.
+
 `desktop-check` downloads no Electron and needs no display. `desktop-build`
 fetches the pinned Electron with `scripts/desktop-electron.sh` into
 `~/.cache/conch/electron/` (a directory of its own that the script makes private, mode 700, and refuses if group or other can write to it) (`CONCH_CACHE` moves it), once. It does not
