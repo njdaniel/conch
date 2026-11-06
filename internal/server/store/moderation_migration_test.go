@@ -71,6 +71,15 @@ func TestModerationMigrationFromSchema44(t *testing.T) {
 			{3, "agreed", 1, false, 2},
 		} {
 			m := got[i]
+			// Message 2 is removed from the second pass on (issue #852): it
+			// reads as the tombstone, with its attribution and place intact.
+			removed := pass == 2 && want.id == 2
+			if removed {
+				want.body = schema.MessageRemovedBody
+			}
+			if m.Removed != removed {
+				t.Errorf("pass %d: message %d removed = %v, want %v", pass, m.ID, m.Removed, removed)
+			}
 			if m.ID != want.id || m.Body != want.body || m.ThreadRootID != want.root || m.AuthorID != want.authorID || !m.EditedAt.IsZero() || m.Payload != nil {
 				t.Errorf("pass %d: message %d = %+v; want id %d, body %q, root %d, author %d, no edit, no payload", pass, i, m, want.id, want.body, want.root, want.authorID)
 			}

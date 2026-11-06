@@ -180,6 +180,11 @@ func (s *Server) routeTable() []route {
 		// .../messages/{message_id}/ route ends in.
 		rt("PUT /v2/channels/{channel}/messages/{message_id}/body", accessAuthenticated, hf(s.handleEditMessage)),
 		rt("GET /v2/channels/{channel}/messages/{message_id}/revisions", accessAuthenticated, hf(s.handleListMessageRevisions)),
+		// Message removal (issue #852, docs/design/moderation.md §7): an owner,
+		// an operator or this channel's manager removes a message they are a
+		// member of the channel to see, for its whole audience. Reduce-only.
+		// The handler applies the content rules (message_removal.go).
+		rt("DELETE /v2/channels/{channel}/messages/{message_id}", accessChannelManager, hf(s.handleRemoveMessage)),
 		rt("GET /v1/read-state", accessAuthenticated, hf(s.handleListReadState)),
 		rt("PUT /v1/channels/{channel}/read-state", accessAuthenticated, hf(s.handlePutReadState)),
 		rt("PUT /v1/principals/{id}/manifest", accessPermission, hf(s.handlePutManifest)).needs(schema.PermManageMembers),

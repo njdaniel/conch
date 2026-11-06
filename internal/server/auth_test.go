@@ -329,6 +329,7 @@ var routeExpectations = map[string]routeExpectation{
 	"GET /v2/channels/{channel}/reactions":                                                 {classAuth, "/v2/channels/general/reactions?messages=9999", "", 200},
 	"DELETE /v2/channels/{channel}/messages/{message_id}/reactions/{emoji}/{principal_id}": {classManager, "/v2/channels/general/messages/9999/reactions/%F0%9F%91%8D/2", "", 404},
 	"DELETE /v2/channels/{channel}/messages/{message_id}/reactors/{principal_id}":          {classManager, "/v2/channels/general/messages/9999/reactors/2", "", 404},
+	"DELETE /v2/channels/{channel}/messages/{message_id}":                                  {classManager, "/v2/channels/general/messages/9999", "", 404},
 	"PUT /v2/channels/{channel}/messages/{message_id}/body":                                {classAuth, "/v2/channels/general/messages/9999/body", `{"body":"x"}`, 404},
 	"GET /v2/channels/{channel}/messages/{message_id}/revisions":                           {classAuth, "/v2/channels/general/messages/9999/revisions", "", 404},
 	"PUT /v1/principals/{id}/manifest":                                                     {classPerm, "/v1/principals/1/manifest", `{}`, 400},

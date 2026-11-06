@@ -862,6 +862,11 @@ func (s *Server) postReplyMCP(ctx context.Context, scope *agentScope, channelNam
 		slog.ErrorContext(ctx, "mcp: find thread root failed", "error", err)
 		return schema.PostMessageResponseV2{}, errInternal
 	}
+	// A removed root takes no new reply (moderation.md §10.1, Q3), as on the
+	// REST route: refused before the manifest or a rate-limit charge.
+	if root.Removed {
+		return schema.PostMessageResponseV2{}, errThreadNotFound
+	}
 	if root.Audience == nil {
 		if serr := scope.channel(ctx, granted.channel, schema.ChannelPermissionPost, errChannelNotFound); serr != nil {
 			return schema.PostMessageResponseV2{}, serr
