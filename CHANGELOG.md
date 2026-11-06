@@ -8,6 +8,46 @@ release that Nick publishes.
 
 ## [Unreleased]
 
+## [0.1.0-alpha.15] - 2026-11-05
+
+This is a pre-1.0 release (`v0.1.0-alpha.15`): the API and the wire shapes
+can still change between alphas. There is no schema version bump, and the wire
+changes are additive only. Three behaviours do change, listed in the upgrade
+notes below: `POST /v1/invites` now refuses everyone, disabling a principal
+answers 200 with a body, and `conch-voice` refuses `echo_cancellation = true`.
+
+The headline is AI administrators: an owner can let an agent administer the
+server through one audited door, with a person deciding everything that closes
+or opens something. It also brings archiving a channel without deleting its
+history, a companion's share audio on the holder's consent, a one-step revoke
+of what a demoted or disabled operator issued, and a security fix that stops
+a client posting the server's own approval payloads. Upgrade with
+`conch-server upgrade v0.1.0-alpha.15` from your workstation, or with
+`conch-upgrade.sh` on the droplet (docs/deploy.md step 11).
+
+**Upgrade notes.**
+
+- There are three migrations since `alpha.14`: 41 (`channels.archived_at`),
+  42 (`issued_by` on credentials and hooks) and 43 (an agent manifest's
+  `permissions` and `admin`, and the `admin_actions` table). A binary from
+  before them refuses a database that has them, so rolling back to
+  `alpha.14` restores the pre-upgrade backup (docs/deploy.md step 11; the
+  rollback script does it), and what was written since is forgotten.
+- **`POST /v1/invites` answers 409 `invite_kind_retired` to every caller,
+  operators included** (#1134). Members have been refused since `alpha.12`.
+  Make member links with `POST /v2/invites`, which the CLI, the browser and
+  `scripts/dev-stack.sh` already use. Reading, listing, deleting, previewing
+  and redeeming existing v1 invites are unchanged.
+- **Disabling a principal answers 200 with a body, not 204** (#1024). The
+  body is `{}` or lists what the person issued to others. Every client in
+  the repository accepts any 2xx; a script that tests for exactly 204 needs
+  the same.
+- **`conch-voice` refuses `echo_cancellation = true`** in `[audio]` (#566).
+  It was read and never acted on, because echo cancellation (#186) is not
+  built. Set it to `false` or remove it.
+- Agents hold no permission unless an owner grants one, and nothing is
+  archived, so nothing else changes on upgrade.
+
 ### Added
 
 - AI administrators (#1326, slices #1327 to #1335): an owner can grant an
@@ -32,8 +72,8 @@ release that Nick publishes.
   `admin`); no schema version bump. `e2e/dogfood` gains the AI-administrator
   loop. **Upgrade:** agents hold no permission unless an owner grants one;
   nothing changes on upgrade.
-- Archive and restore a channel without deleting its history (#844, server,
-  schema and CLI; the browser follows). `PUT /v1/channels/{id}/settings` takes
+- Archive and restore a channel without deleting its history (#844, PR #1295:
+  server, schema, CLI and the browser). `PUT /v1/channels/{id}/settings` takes
   `"archived": true|false` (`manage_channels`, audited as
   `channel_settings_changed`). An archived channel keeps its history, members
   and read marks and refuses anything new with 409 `channel_archived`: posts
@@ -41,9 +81,147 @@ release that Nick publishes.
   adding members, and invites naming it. Voice in progress ends when it is
   archived. A default channel cannot be archived (409
   `channel_archive_default`). `conch admin channel settings <channel>
-  --archive|--restore`; `conch channels list` gains an `archived` column.
-  Additive wire fields (`archived_at`, `archived`) and migration 41
-  (`channels.archived_at`); no schema version bump.
+  --archive|--restore`; `conch channels list` gains an `archived` column. In
+  the browser, archived channels sit in a collapsed "Archived (n)" group, an
+  archived channel shows "This channel is archived." where the composer was,
+  and Archive and Restore are in the channel menu and the admin console for
+  `manage_channels` holders. Additive wire fields (`archived_at`, `archived`)
+  and migration 41 (`channels.archived_at`); no schema version bump.
+- **Add an AI administrator in the browser** (#1334, PR #1344). Owner-only,
+  in the members section: name, approval channel, the grant (the three
+  defaults on, the two powerful permissions off under a warning), credential
+  days and the entry's form, shown once. The agent card shows its grant and
+  has Remove access. An admin-action approval is drawn as text (action,
+  target, parameters, and the agent's reason labelled as its own words) with
+  **Run it** and **Do not run**, the first browser control that decides an
+  approval; the server decides whether the viewer may.
+- **A companion's share audio, on the holder's consent** (#898, PR #1317).
+  `PUT /v1/channels/{channel}/voice/companion/audio` with `{"scope":
+  "application"|"system_excluding_call"}` records the share holder's consent
+  and lets their companion publish `screen_share_audio`; `DELETE` takes it
+  back. Every way a share ends withdraws the sound, and sound published
+  without consent is removed. Audited `voice_share_audio_started|stopped`.
+  Additive schema (`VoiceCompanionAudioV1` and its request); no bump.
+- **`conch-voice` leaves the session's companion's audio to it** (#934,
+  PR #1313). It reads the session's optional `companion_identity` and, by
+  default (`--share-audio-owner helper`), subscribes to every remote audio
+  track except the companion's; `--share-audio-owner companion` leaves screen
+  audio to the companion. The flag is on `join` and `managed` only.
+- **Watch a share beside native voice, as `p<id>.view`** (#936, PR #1312).
+  When presence puts the person in voice on another device (the helper, the
+  TUI or another tab), Watch only asks for the viewer grant instead of a voice
+  session and connects with publishing off. The panel hides Use microphone and
+  Share and says "Watching beside your voice on another device."
+- **The TUI shows your permissions and follows their changes** (#1148,
+  PR #1302). The status line shows them after your name where the status
+  message and key hints leave room (the full list, else a count), and the help
+  overlay lists them all. The TUI re-reads whoami on
+  `conch.permissions_changed.v1`, and losing `manage_channels` leaves the
+  every-channel directory view.
+- **Demoting or disabling an operator lists what they issued, and one call
+  revokes it** (#1024, ADR-014 O13, PR #1325; migration 42). Every credential
+  and hook now records who issued it (`issued_by`, backfilled from the audit
+  rows). Demoting an operator to member
+  (`RoleChangeResponseV1.issued_to_others`) and disabling one answer with the
+  live credentials and hooks they issued to others.
+  `POST /v1/principals/{id}/issued/revoke-all` (owner-only, recent sign-in
+  required) revokes all of it, each item as `DELETE /v1/credentials/{id}`
+  would, and writes an `issued_revoked_all` row. Additive wire fields; no
+  schema version bump.
+
+### Changed
+
+- **New approvals, runs and interventions are refused in an archived channel;
+  work already open carries on** (#1296, PR #1297). `request_approval`,
+  `POST /v1/approvals`, `POST /v1/sessions/{id}/runs`, MCP `start_run` and
+  `POST /v1/runs/{id}/interventions` answer 409 `channel_archived` with
+  nothing stored, notified or audited. An approval opened before the archive
+  can still be decided, escalates and expires as usual.
+- **`POST /v1/invites` is retired for everyone** (#1134, PR #1304); see the
+  upgrade notes. The browser's unused v1 `createInvite` is gone.
+- **`conch-voice` takes `dmn-audio` on Linux only** (#930, PR #1314). The
+  device list reads a neutral table, so off Linux `conch-voice devices`
+  prints "not listed: ... no audio backend" and exits cleanly. The rest of a
+  Windows build is #1309.
+- **`conch-voice` refuses `echo_cancellation = true`** (#566, PR #1354); see
+  the upgrade notes.
+- **The voice strip's Open button looks like a button** (#647, PR #1359). It
+  had no border or fill, so it read as text.
+
+### Fixed
+
+- **Watch only on a fresh page joins plainly when none of the person's voice
+  is in the room** (#1340, PR #1350). Presence names the person, not the
+  client, so a page could mistake presence a closed page left behind for a live
+  voice elsewhere and ask for the viewer, which the server refused with 409
+  `voice_no_session`. On that one refusal it now asks once for the person's own
+  session as a plain Watch only; nobody is displaced. Every other refusal
+  still stops.
+- **`go test ./...`, `go vet` and the linter stay out of `desktop/`** (#954,
+  PR #1299), as they already did out of `web/`: once `npm ci` had run there,
+  they picked up Go source shipped in `desktop/node_modules`. `make go-scope`,
+  part of `make check`, guards it.
+- **The CLI build's VCS diagnostics look where `go` looks** (#886,
+  PR #1347). In a linked worktree nested in a checkout, the diagnostics
+  printed after a VCS failure ran git in the wrong repository. The failure
+  itself did not reproduce, so #886 stays open.
+
+### Security
+
+- **The server refuses client-posted `conch.approval.v1` and
+  `conch.admin_action.v1` message payloads** (#1345, PR #1351). Those two
+  payloads are written by the server alone; a client could post one and draw
+  a forged approval card. Both message inserts now refuse them before any
+  write, so every post route is covered (v0, v1 and v2 posts, nets, whispers,
+  replies, webhook ingest and the MCP post, net, whisper and reply tools):
+  400 `invalid_request`, nothing stored. The browser already declined to draw
+  such a card (#1344).
+- **The desktop app keeps a pasted credential in its main process** (#1123,
+  PR #1310). After a sign-in with a pasted credential, the page holds only a
+  one-time handle (`paste-<32 hex>`), compared in constant time and used once;
+  it lapses on a timeout, a sign-out, a changed origin or a new adopt. A raw
+  bearer string is refused at the IPC edge.
+
+### Docs
+
+- **Three design proposals, status Proposed, none implemented** (docs only):
+  guest names with a Guest badge (#1003, PR #1320), read-only Preview as
+  member (#1007, PR #1322) and profile avatars (#974, PR #1323). Merging them
+  records the proposals; Nick decides their open points.
+- **AI administrators are documented** (#1326, PR #1327, the design and ADR
+  amendment; #1335, PR #1346): README has an AI administrators subsection,
+  and `docs/design/approval-object.md` section 6b describes the payload and
+  the one-shot run.
+- **`may_invite` is the person's own brake** (#1182, PR #1298; #1306,
+  PR #1308). `docs/design/admin-roles.md` and ADR-014 decision 6 say that no
+  link carries a `may_invite` grant, since every member is made with it on.
+  Nick asked for the ADR edit on 2026-11-04.
+
+### Tests
+
+- **Docs-only pull requests run a light check** (#1300, PR #1303). A PR whose
+  every changed path is under `docs/` or ends in `.md` runs `check` with only
+  the invisible-characters check; the classifier is read from main's side of
+  the merge, and a failure means a full run.
+- **CI moves back to GitHub-hosted runners, with `check` split into parallel
+  jobs** (#1305, PR #1315; #1318, PR #1319): `go`, `go-test-server`,
+  `go-test`, `rust`, `web` (three shards) and `desktop`, with `check` still
+  the required status. One run per pull request, and only the newest pending
+  one on main. This reverses the self-hosted runners of `alpha.14` (#1286).
+  The Rust jobs free disk and build with line tables only in CI.
+- **`voice-check` is bounded against a slow mirror** (#1352, PR #1353;
+  PR #1357). The voice build's apt packages come from a cache, each download
+  is cut off and resumed, disk is freed only when under 30 GB is free, and the
+  job's timeout is 25 minutes.
+- **`e2e/isolation` gains rows** for the member a guest became raising and
+  deciding an approval (#860, PR #1324, with an ntfy stand-in), and for the
+  voice gates #1190 left pending (#1217, PR #1356; run with LiveKit up).
+- The committed 20 MB `isolation` binary is removed and `e2e/` build outputs
+  are ignored (#1348, PR #1349).
+- Test-only fixes: the voice-check frame judgement under CPU load (#1316,
+  PR #1321), the web e2e specs 34-message-editing and the voice roster test,
+  and a secret-panel unit test (#1048, PR #1307; #633, PR #1358; #1301,
+  PR #1311).
 
 ## [0.1.0-alpha.14] - 2026-11-04
 
