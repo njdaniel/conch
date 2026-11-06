@@ -59,6 +59,10 @@ func TestBuildCLIWith(t *testing.T) {
 
 func TestGoVCSRoot(t *testing.T) {
 	tmp := t.TempDir()
+	// Relative paths keep the upward search inside this fixture. Absolute paths
+	// would also inspect shared temporary-directory ancestors, where another
+	// process can briefly create a .git directory.
+	t.Chdir(tmp)
 	mk := func(rel string, file bool) {
 		p := filepath.Join(tmp, rel)
 		if file {
@@ -87,12 +91,8 @@ func TestGoVCSRoot(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			want := ""
-			if tc.want != "" {
-				want = filepath.Join(tmp, tc.want)
-			}
-			if got := goVCSRoot(filepath.Join(tmp, tc.dir)); got != want {
-				t.Errorf("goVCSRoot = %q, want %q", got, want)
+			if got := goVCSRoot(tc.dir); got != tc.want {
+				t.Errorf("goVCSRoot = %q, want %q", got, tc.want)
 			}
 		})
 	}
