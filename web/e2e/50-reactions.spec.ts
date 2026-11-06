@@ -59,9 +59,17 @@ test('two clients converge on add/remove/count/list/reload/reconnect without mov
   await signIn(second.page, world, reader.token, reader.principal.name);
   const message = await post(world, author.token, 'general', unique('two-clients'));
   const a = row(first.page, message.id); const b = row(second.page, message.id);
+  await expect(a.locator('.reactions')).toHaveCount(0);
   await pick(first.page, a);
   await expect(chip(a, 1)).toHaveAttribute('aria-pressed', 'true');
   await expect(chip(b, 1)).toHaveAttribute('aria-pressed', 'false');
+  // Add occupies the existing action row; a chip and its Who button fit in
+  // one separate row on the phone, without the Add button forcing a wrap.
+  await expect(b.locator('.reactions .reaction-add')).toHaveCount(0);
+  const bar = await b.locator('.reactions').boundingBox();
+  const pair = await b.locator('.reaction-pair').boundingBox();
+  if (bar === null || pair === null) throw new Error('missing reaction row');
+  expect(bar.height).toBeLessThanOrEqual(pair.height + 1);
   await ok(world, author.token, 'PUT', '/v1/channels/general/read-state', readStateV1, { last_read_id: message.id });
   const before = await readState(world, author.token);
   await chip(b, 1).tap();
@@ -130,6 +138,35 @@ test('two clients converge on add/remove/count/list/reload/reconnect without mov
   await expect(b.getByRole('button', { name: /thumbs up:/ })).toHaveCount(0);
   await expectFits(second.page, 'reaction controls on a phone');
 });
+
+for (const width of [320, 360, 390, 1440]) {
+  test(`empty reactions add no message height at ${String(width)}px`, async ({ meet, world, secrets }) => {
+    const author = await human(world, secrets, 'general');
+    const { page } = await meet({ viewport: { width, height: 740 } });
+    await signIn(page, world, author.token, author.principal.name);
+    const message = await post(world, author.token, 'general', unique('compact'));
+    const item = row(page, message.id);
+    const add = item.getByRole('button', { name: /^Add reaction to / });
+    await expect(add).toBeEnabled();
+    await expect(item.locator('.reactions')).toHaveCount(0);
+    const sizes = await item.evaluate((element) => {
+      // Compare with the same message's original layout, before reactions:
+      // retain Reply in its original grid cell and remove only the new UI.
+      const original = element.cloneNode(true);
+      if (!(original instanceof HTMLElement)) throw new Error('missing original message');
+      const controls = original.querySelector('.reaction-controls');
+      const actions = controls?.querySelector('.message-reaction-actions');
+      if (controls === null || actions === null || actions === undefined) throw new Error('missing actions');
+      controls.replaceWith(...Array.from(actions.children).filter((child) => !child.classList.contains('reaction-add')));
+      element.after(original);
+      try {
+        return { current: element.getBoundingClientRect().height, original: original.getBoundingClientRect().height };
+      } finally { original.remove(); }
+    });
+    expect(sizes.current).toBeLessThanOrEqual(sizes.original + 1);
+    await expectFits(page, 'message actions without reactions');
+  });
+}
 
 async function human(world: World, secrets: string[], channel: string) {
   const name = unique('reader');

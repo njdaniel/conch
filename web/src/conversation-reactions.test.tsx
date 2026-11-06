@@ -84,3 +84,20 @@ it('does not advertise arrow navigation in search/context messages', () => {
   render(<Message message={by(1, 2)} people={members} nets={new Map()} viewer={2} channel="general" sent={false} cont={false} />);
   expect(document.querySelector('li[aria-description]')).toBeNull();
 });
+
+it('puts Add beside Reply without rendering an empty reaction row', async () => {
+  render(view([by(1, 2)]));
+  const root = document.querySelector<HTMLElement>('li[data-message-id="1"]');
+  if (root === null) throw new Error('missing root');
+  const add = within(root).getByRole('button', { name: /Add reaction/ });
+  const reply = within(root).getByRole('button', { name: /Reply to/ });
+  expect(add.parentElement).toBe(reply.parentElement);
+  expect(root.querySelector('.reactions')).toBeNull();
+  await waitFor(() => { expect(add.hasAttribute('disabled')).toBe(false); });
+  expect(root.querySelector('.reactions')).toBeNull();
+  fireEvent.click(add);
+  expect(within(root).getByRole('dialog', { name: 'Emoji' })).toBeTruthy();
+  fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
+  expect(root.querySelector('.reactions')).toBeNull();
+  expect(document.activeElement).toBe(add);
+});

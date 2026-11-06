@@ -215,8 +215,10 @@ export function ReactionScope({ channel, channelId, ids, children, onUnauthorize
   return <Context.Provider value={controls}>{children}</Context.Provider>;
 }
 
-export function ReactionBar({ id, channel, label, people, onUnauthorized, logNavigation = false }: {
+export function ReactionBar({ id, channel, label, people, onUnauthorized, logNavigation = false, children, enabled = true }: {
   readonly logNavigation?: boolean;
+  readonly children?: ReactNode;
+  readonly enabled?: boolean;
   readonly id: number; readonly channel: string; readonly label: string;
   readonly people: ReadonlyMap<number, Person>; readonly onUnauthorized?: () => void;
 }) {
@@ -227,6 +229,7 @@ export function ReactionBar({ id, channel, label, people, onUnauthorized, logNav
   // The main log enters reactions with Right Arrow and keeps explicit -1
   // stops. Thread controls use normal Tab access; both support toolbar arrows.
   const toolbar = useRef<HTMLDivElement>(null);
+  const canAdd = useRef(false);
   const reactionPair = useCallback((node: HTMLSpanElement | null) => {
     if (node === null) return;
     // Ref cleanup runs before React removes the pair. Recover focus while
@@ -234,7 +237,7 @@ export function ReactionBar({ id, channel, label, people, onUnauthorized, logNav
     return () => {
       if (!node.contains(document.activeElement)) return;
       const add = toolbar.current?.querySelector<HTMLButtonElement>('button.reaction-add');
-      if (add !== undefined && add !== null && !add.disabled) add.focus();
+      if (canAdd.current && add !== undefined && add !== null) add.focus();
       else toolbar.current?.closest<HTMLElement>('li[data-message-id]')?.focus();
     };
   }, []);
@@ -259,24 +262,30 @@ export function ReactionBar({ id, channel, label, people, onUnauthorized, logNav
   }
   const names = useMemo(() => new Map(emojiNow()?.all.map((e) => [e.key, e.name]) ?? []), []);
   const close = useCallback(() => { setPicker(false); setListing(null); opener.current?.focus(); }, []);
-  if (controls === null || controls.unsupported) return null;
+  if (controls === null || controls.unsupported || !enabled) return <>{children}</>;
   const counts = controls.counts(id);
   const busy = controls.pending.has(id);
   const cooling = controls.cooling.has(id);
   const ready = controls.ready.has(id);
+  canAdd.current = ready && !cooling;
   const problem = controls.errors.get(id);
-  return <div ref={toolbar} onKeyDown={onControlKey} className="reactions" role="group" aria-label={`Reactions for ${label}`} aria-live="off">
-    {/* Keep the opener focusable during a save so choosing an emoji returns
-        focus reliably; aria-disabled and the click guard block repeat opens. */}
-    <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" className="reaction-add" aria-label={`Add reaction to ${label}`} aria-expanded={picker} aria-busy={busy} aria-disabled={busy || !ready || cooling} disabled={!ready || cooling} onClick={(event) => { if (busy) return; opener.current = event.currentTarget; setListing(null); setPicker(!picker); }}>Add reaction</button>
-    {counts.map((r) => <span ref={reactionPair} className="reaction-pair" key={r.emoji}>
-      <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" className="reaction-chip" aria-label={`${names.get(r.emoji) ?? 'Emoji'}: ${String(r.count)} reaction${r.count === 1 ? '' : 's'}`} aria-pressed={Boolean(r.me)} aria-busy={busy} disabled={busy || !ready || cooling} onClick={() => { controls.change(id, r.emoji, !r.me); }}><span aria-hidden="true">{r.emoji} {r.count}</span></button>
-      <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" className="reaction-list-button" aria-label={`Who reacted with ${names.get(r.emoji) ?? 'this emoji'}`} onClick={(event) => { opener.current = event.currentTarget; setPicker(false); setListing(r.emoji); }}>Who?</button>
-    </span>)}
-    {busy ? <span className="hint">Saving reaction…</span> : !ready && problem === undefined ? <span className="hint">Loading reactions…</span> : null}
-    {problem === undefined ? null : <span role="status" className="reaction-error">{problem} <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" disabled={busy || cooling} onClick={() => { controls.retry(id); }}>Retry reaction</button></span>}
-    {picker && ready ? <EmojiPicker onClose={close} onPick={(emoji) => { close(); controls.change(id, emoji.key, true); }} /> : null}
-    {listing === null || !ready ? null : <ReactorPage key={`${channel}/${listing}`} channel={channel} id={id} emoji={listing} name={names.get(listing) ?? 'emoji'} people={people} version={controls.version(id)} onClose={close} onUnauthorized={onUnauthorized} />}
+  return <div ref={toolbar} onKeyDown={onControlKey} className="reaction-controls" role="group" aria-label={`Reactions for ${label}`} aria-live="off">
+    <div className="message-reaction-actions">
+      {children}
+      {/* Keep the opener focusable during a save so choosing an emoji returns
+          focus reliably; aria-disabled and the click guard block repeat opens. */}
+      <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" className="reaction-add" aria-label={`Add reaction to ${label}`} aria-expanded={picker} aria-busy={busy} aria-disabled={busy || !ready || cooling} disabled={!ready || cooling} onClick={(event) => { if (busy) return; opener.current = event.currentTarget; setListing(null); setPicker(!picker); }}>Add reaction</button>
+    </div>
+    {counts.length > 0 || problem !== undefined || (picker && ready) || (listing !== null && ready) ? <div className="reactions">
+      {counts.map((r) => <span ref={reactionPair} className="reaction-pair" key={r.emoji}>
+        <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" className="reaction-chip" aria-label={`${names.get(r.emoji) ?? 'Emoji'}: ${String(r.count)} reaction${r.count === 1 ? '' : 's'}`} aria-pressed={Boolean(r.me)} aria-busy={busy} disabled={busy || !ready || cooling} onClick={() => { controls.change(id, r.emoji, !r.me); }}><span aria-hidden="true">{r.emoji} {r.count}</span></button>
+        <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" className="reaction-list-button" aria-label={`Who reacted with ${names.get(r.emoji) ?? 'this emoji'}`} onClick={(event) => { opener.current = event.currentTarget; setPicker(false); setListing(r.emoji); }}>Who?</button>
+      </span>)}
+      {problem === undefined ? null : <span role="status" className="reaction-error">{problem} <button type="button" tabIndex={logNavigation ? -1 : 0} data-reaction-control="" disabled={busy || cooling} onClick={() => { controls.retry(id); }}>Retry reaction</button></span>}
+      {picker && ready ? <EmojiPicker onClose={close} onPick={(emoji) => { close(); controls.change(id, emoji.key, true); }} /> : null}
+      {listing === null || !ready ? null : <ReactorPage key={`${channel}/${listing}`} channel={channel} id={id} emoji={listing} name={names.get(listing) ?? 'emoji'} people={people} version={controls.version(id)} onClose={close} onUnauthorized={onUnauthorized} />}
+    </div> : null}
+    {busy ? <span className="vh">Saving reaction…</span> : !ready && problem === undefined ? <span className="vh">Loading reactions…</span> : null}
   </div>;
 }
 

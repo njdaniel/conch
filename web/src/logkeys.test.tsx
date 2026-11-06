@@ -98,6 +98,7 @@ describe('the log is one tab stop', () => {
     expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['29', 'Reply']);
     fireEvent.keyDown(item(29), { key: 'ArrowRight' });
     expect(document.activeElement).toBe(add(29));
+    expect(add(29).parentElement).toBe(within(item(29)).getByRole('button', { name: /^Reply to / }).parentElement);
     fireEvent.keyDown(add(29), { key: 'ArrowRight' });
     const chip = within(item(29)).getByRole('button', { name: /1 reaction$/ });
     expect(document.activeElement).toBe(chip);

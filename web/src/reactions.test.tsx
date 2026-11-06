@@ -32,6 +32,7 @@ describe('reaction controls', () => {
     fireEvent.click(button);
     expect(screen.queryByRole('button', { name: /thumbs up:/ })).toBeNull();
     expect(document.activeElement).toBe(add());
+    expect(document.querySelector('.reactions')).toBeNull();
     await act(async () => { finish(result === 'success' ? { ok: true, value: sum(0) } : { ok: false, failure: 'network' }); await Promise.resolve(); });
     expect(screen.queryByRole('button', { name: /thumbs up:/ }) !== null).toBe(result === 'rollback');
     expect(document.activeElement).toBe(add());

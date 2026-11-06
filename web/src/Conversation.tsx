@@ -238,7 +238,6 @@ export function Message({
           </span>
         )}
       </Line>
-      {message.removed === true ? null : <ReactionBar logNavigation={reactionNavigation} id={message.id} channel={channel} label={who} people={people} onUnauthorized={onUnauthorized} />}
       {notice === undefined || notice === null ? null : <p role="status" className="edit-notice">{notice}</p>}
       {items.length === 0 ? null : (
         <ActionsMenu label={`More actions for ${who}`} items={items} open={menuOpen} onOpenChange={setMenuOpen} button={more} />
@@ -246,15 +245,17 @@ export function Message({
       {onOpen === undefined ? null : <button type="button" className="search-open" aria-label={`Open context for ${who}`} onClick={() => {
         onOpen(message.id);
       }}>Open context</button>}
-      {onReply === undefined || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to ${who}`} onClick={(event) => {
-        onReply(message.id, event.currentTarget);
-      }}>Reply</button>}
-      {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for ${who}`} onClick={(event) => {
-        onOpenThread(message.thread_root_id as number, event.currentTarget);
-      }}>Open thread</button>}
-      {replies === undefined || replies === 0 || onOpenThread === undefined ? null : <button type="button" className="message-action reply-count" onClick={(event) => {
-        onOpenThread(message.id, event.currentTarget);
-      }}>{replies === 1 ? '1 reply' : `${String(replies)} replies`}</button>}
+      <ReactionBar enabled={message.removed !== true} logNavigation={reactionNavigation} id={message.id} channel={channel} label={who} people={people} onUnauthorized={onUnauthorized}>
+        {onReply === undefined || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to ${who}`} onClick={(event) => {
+          onReply(message.id, event.currentTarget);
+        }}>Reply</button>}
+        {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for ${who}`} onClick={(event) => {
+          onOpenThread(message.thread_root_id as number, event.currentTarget);
+        }}>Open thread</button>}
+        {replies === undefined || replies === 0 || onOpenThread === undefined ? null : <button type="button" className="message-action reply-count" onClick={(event) => {
+          onOpenThread(message.id, event.currentTarget);
+        }}>{replies === 1 ? '1 reply' : `${String(replies)} replies`}</button>}
+      </ReactionBar>
       {thread}
     </li>
   );
@@ -802,7 +803,7 @@ export function Conversation({
     let to: number;
     switch (event.key) {
       case 'ArrowRight': {
-        const reaction = item.querySelector<HTMLButtonElement>(':scope > .reactions [data-reaction-control]:not(:disabled):not([aria-disabled="true"])');
+        const reaction = item.querySelector<HTMLButtonElement>(':scope > .reaction-controls [data-reaction-control]:not(:disabled):not([aria-disabled="true"])');
         if (reaction !== null) { event.preventDefault(); reaction.focus(); }
         return;
       }
