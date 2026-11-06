@@ -501,6 +501,15 @@ func coreMatrixRows() []row {
 		byChannel("DELETE /v1/channels/{channel}/voice/camera", "stops an A member's camera in A's room", func(w *world, s subject) probe {
 			return del(ch(s) + "/voice/camera?" + schema.VoiceCameraPrincipalParam + "=" + id(w.a.people[0].id))
 		}),
+		// Voice-only removal (issue #850, moderation design §4, §9 case 1): a
+		// channel-manager route, so a member of B is told A's channel does not
+		// exist whoever the target is, and so is B's own manager, who manages
+		// B's channel and is not in A's.
+		byChannel("DELETE /v1/channels/{channel}/voice/participants/{principal_id}", "removes an A member from voice in A's channel", func(w *world, s subject) probe {
+			return del(ch(s) + "/voice/participants/" + id(w.a.people[0].id))
+		}),
+		{route: "DELETE /v1/channels/{channel}/voice/participants/{principal_id}", what: "removes an A member from voice in A's channel, as B's manager", pick: aChannel, manager: true, want: channelNotFound,
+			probe: func(w *world, s subject) probe { return del(ch(s) + "/voice/participants/" + id(w.a.people[0].id)) }},
 		byChannel("POST /v1/channels/{channel}/voice/companion", "asks for a screen companion in A's room", func(_ *world, s subject) probe { return post(ch(s)+"/voice/companion", companion) }),
 		byChannel("DELETE /v1/channels/{channel}/voice/companion", "removes a companion from A's room", func(_ *world, s subject) probe { return del(ch(s) + "/voice/companion") }),
 		// The companion's share audio (issue #898): the consent and its withdrawal.

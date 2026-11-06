@@ -112,8 +112,11 @@ const (
 	voiceReasonNotHuman         = "not_human"
 	voiceReasonNotMember        = "not_member"
 	voiceReasonMemberRemoved    = "member_removed"
-	voiceReasonPrincipalOff     = "principal_disabled"
-	voiceReasonCredsRevoked     = "credentials_revoked"
+	// voiceReasonModeratorKick: a moderator removed the person from voice only
+	// (docs/design/moderation.md §4); their membership is unchanged.
+	voiceReasonModeratorKick = "moderator_kick"
+	voiceReasonPrincipalOff  = "principal_disabled"
+	voiceReasonCredsRevoked  = "credentials_revoked"
 	// voiceReasonShareUnclaimed: a participant published a screen share
 	// without holding the room's share, and its sources could not be
 	// withdrawn (voice_share.go).
@@ -1626,6 +1629,17 @@ func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, p
 	// before LiveKit is asked, and so before their removal and their leaving
 	// are written.
 	was, ok := p.forget(ctx, room.RoomName, principalID)
+	// A failure is logged and left to the passes.
+	_ = p.evictForgotten(ctx, room, principalID, identity, reason, was, ok)
+}
+
+// evictForgotten is the LiveKit half of evictFromRoom, for a principal that
+// forget already took out of presence (was and ok are what it returned). It
+// reports the first failure to remove the person or their companion or viewer,
+// after trying them all: a caller that must not answer success on a failed
+// removal (a moderator's, docs/design/moderation.md §4) needs it, the rest
+// leave a failure to the passes.
+func (p *voicePoller) evictForgotten(ctx context.Context, room store.VoiceRoom, principalID int64, identity, reason string, was voiceSeen, ok bool) error {
 	removed, err := p.s.lk.Evict(ctx, room.RoomName, identity)
 	var events []voiceEvent
 	if err != nil {
@@ -1647,7 +1661,8 @@ func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, p
 	// publishing until the next. LiveKit's not_found is removed=false, so a
 	// room with nobody by that identity writes no row. Each removal is its own
 	// row.
-	events = append(events, p.evictCompanions(ctx, room, principalID, reason)...)
+	companionEvents, companionErr := p.evictCompanions(ctx, room, principalID, reason)
+	events = append(events, companionEvents...)
 	if ok {
 		actor := fmt.Sprintf("principal:%d", principalID)
 		detail := fmt.Sprintf("channel=%d audience=channel source=observed", room.ChannelID)
@@ -1656,26 +1671,29 @@ func (p *voicePoller) evictFromRoom(ctx context.Context, room store.VoiceRoom, p
 		p.notifyOccupancy()
 	}
 	p.writeEvents(ctx, events...)
+	return errors.Join(err, companionErr)
 }
 
 // evictCompanions removes principalID's companion and viewer from room, whose
 // person lost their place for reason, and returns the voice_participant_removed
-// rows for those LiveKit disconnected. A failure is logged and left to the
-// passes.
-func (p *voicePoller) evictCompanions(ctx context.Context, room store.VoiceRoom, principalID int64, reason string) []voiceEvent {
+// rows for those LiveKit disconnected, and the failures joined. A failure is
+// logged and left to the passes.
+func (p *voicePoller) evictCompanions(ctx context.Context, room store.VoiceRoom, principalID int64, reason string) ([]voiceEvent, error) {
 	var events []voiceEvent
+	var errs []error
 	for _, role := range []voiceRole{voiceRoleScreen, voiceRoleView} {
 		identity := voiceParticipantIdentity(principalID, role)
 		removed, err := p.s.lk.Evict(ctx, room.RoomName, identity)
 		if err != nil {
 			slog.WarnContext(ctx, "voice: immediate removal of a companion failed; passes retry", "channel", room.ChannelID, "principal", principalID, "participant", role.label(), "reason", reason, "error", err)
+			errs = append(errs, err)
 			continue
 		}
 		if removed && p.firstRemoval(room.RoomName, identity, time.Time{}) {
 			events = append(events, p.removedEvent(room.ChannelID, principalID, reason, role))
 		}
 	}
-	return events
+	return events, errors.Join(errs...)
 }
 
 // roomNamed returns the state of the room called name, or nil if the poller
