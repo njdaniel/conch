@@ -8,7 +8,7 @@ import type { FileV1 } from './schema/file';
 import type { MessageV2, Payload } from './schema/message';
 import type { ChannelChat } from './state/messages';
 
-vi.mock('./api', () => ({ fetchFileBytes: vi.fn(), getFileMeta: vi.fn() }));
+vi.mock('./api', async (importOriginal) => ({ ...await importOriginal<typeof import('./api')>(), fetchFileBytes: vi.fn(), getFileMeta: vi.fn(), readReactions: vi.fn().mockResolvedValue({ ok: true, value: { summaries: [] } }) }));
 vi.mock('./image', async (importOriginal) => ({
   ...await importOriginal<typeof import('./image')>(),
   validateImage: vi.fn(),

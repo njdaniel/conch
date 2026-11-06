@@ -4913,3 +4913,21 @@ button.link {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* Add shares the existing message action row, even with no reactions. The
+   wrapper contributes no grid row; only chips or an open panel get a bar. */
+.reaction-controls { display: contents; }
+.message-reaction-actions { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; column-gap: .75rem; min-width: 0; }
+.message-reaction-actions > button { min-width: 2.75rem; }
+.reaction-add { min-height: 2.75rem; padding: .35rem 0; border: 0; background: transparent; color: var(--accent); font-size: var(--small); white-space: nowrap; }
+/* Reactions stay visible for touch and keyboard; all layout obeys the CSP. */
+.reactions { grid-column: 2 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; margin-block: .25rem; min-width: 0; }
+.reaction-pair { display: inline-flex; gap: .15rem; }
+.reactions button { min-height: 2.75rem; }
+.reaction-chip[aria-pressed="true"] { border: 2px solid currentColor; background: var(--raised); }
+.reaction-controls button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.reaction-controls button[aria-busy="true"] { cursor: wait; }
+.reaction-error { flex-basis: 100%; }
+.reactions .emoji-picker, .reactor-page { flex-basis: 100%; max-width: 100%; min-width: 0; }
+.reactor-page { border: 1px solid currentColor; border-radius: .5rem; padding: .5rem; overflow-wrap: anywhere; }
+.reactor-page ul { max-height: 16rem; overflow-y: auto; }

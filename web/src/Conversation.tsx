@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import * as api from './api';
 import { archivedLine } from './archived';
+import { ReactionBar, ReactionScope, useHasReactions } from './Reactions';
 import { Composer } from './Composer';
 import { guestName } from './guestName';
 import { Avatar, PrivateMark } from './Icons';
@@ -159,6 +160,7 @@ export function Message({
   editor,
   notice,
   stop = false,
+  reactionNavigation = false,
 }: {
   readonly message: MessageV2;
   readonly people: ReadonlyMap<number, Person>;
@@ -187,7 +189,9 @@ export function Message({
   readonly notice?: string | null;
   // This message is the log's one tab stop (issue #1040); the rest are -1.
   readonly stop?: boolean;
+  readonly reactionNavigation?: boolean;
 }) {
+  const hasReactions = useHasReactions() && message.removed !== true;
   const who = messageName(message, people);
   const approval = approvalOf(message);
   const attachments = attachmentsOf(message);
@@ -205,7 +209,7 @@ export function Message({
   const named = approval === null && editor === undefined && mentions(message.body, people.get(viewer)?.name ?? '');
   const classes = ['message', ...(cont ? ['cont'] : []), ...(named ? ['mentions-you'] : []), ...(items.length > 0 ? ['has-actions'] : []), ...(editor === undefined ? [] : ['editing'])];
   return (
-    <li className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
+    <li className={classes.join(' ')} data-message-id={message.id} tabIndex={stop ? 0 : -1} aria-description={hasReactions && reactionNavigation ? "Use Right Arrow for reaction controls; Left and Right Arrow move between them, Escape returns to the message." : undefined} {...(context === undefined ? {} : { 'aria-describedby': `reply-context-${String(message.id)}` })} {...openers}>
       {named ? <span className="vh">Mentions you. </span> : null}
       {context === undefined ? null : (
         <p className="reply-context" id={`reply-context-${String(message.id)}`}>
@@ -241,15 +245,17 @@ export function Message({
       {onOpen === undefined ? null : <button type="button" className="search-open" aria-label={`Open context for ${who}`} onClick={() => {
         onOpen(message.id);
       }}>Open context</button>}
-      {onReply === undefined || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to ${who}`} onClick={(event) => {
-        onReply(message.id, event.currentTarget);
-      }}>Reply</button>}
-      {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for ${who}`} onClick={(event) => {
-        onOpenThread(message.thread_root_id as number, event.currentTarget);
-      }}>Open thread</button>}
-      {replies === undefined || replies === 0 || onOpenThread === undefined ? null : <button type="button" className="message-action reply-count" onClick={(event) => {
-        onOpenThread(message.id, event.currentTarget);
-      }}>{replies === 1 ? '1 reply' : `${String(replies)} replies`}</button>}
+      <ReactionBar enabled={message.removed !== true} logNavigation={reactionNavigation} id={message.id} channel={channel} label={who} people={people} onUnauthorized={onUnauthorized}>
+        {onReply === undefined || message.thread_root_id !== undefined ? null : <button type="button" className="message-action reply-action" aria-label={`Reply to ${who}`} onClick={(event) => {
+          onReply(message.id, event.currentTarget);
+        }}>Reply</button>}
+        {onOpenThread === undefined || message.thread_root_id === undefined ? null : <button type="button" className="message-action" aria-label={`Open thread for ${who}`} onClick={(event) => {
+          onOpenThread(message.thread_root_id as number, event.currentTarget);
+        }}>Open thread</button>}
+        {replies === undefined || replies === 0 || onOpenThread === undefined ? null : <button type="button" className="message-action reply-count" onClick={(event) => {
+          onOpenThread(message.id, event.currentTarget);
+        }}>{replies === 1 ? '1 reply' : `${String(replies)} replies`}</button>}
+      </ReactionBar>
       {thread}
     </li>
   );
@@ -420,6 +426,7 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
   const me = people.get(viewer) ?? { name: `#${String(viewer)}`, kind: null };
   const pending = chat.pending.filter((send) => send.threadRootId === rootId);
   return (
+    <ReactionScope key={`${String(viewer)}/${channel}/${String(rootId)}`} channel={channel} channelId={messages[0]?.channel_id ?? 0} ids={messages.filter((m) => m.removed !== true).map((m) => m.id)} onUnauthorized={onUnauthorized}>
     <section className="thread-view" aria-label={rootMessage === undefined ? 'Thread' : `Thread around ${messageName(rootMessage, people)}`}>
       <div className="thread-head">
         <h3>Thread</h3>
@@ -470,6 +477,7 @@ function ThreadView({ rootId, root, chat, channel, live, archived, people: known
         </form>
       )}
     </section>
+    </ReactionScope>
   );
 }
 
@@ -794,6 +802,11 @@ export function Conversation({
     const at = all.indexOf(item);
     let to: number;
     switch (event.key) {
+      case 'ArrowRight': {
+        const reaction = item.querySelector<HTMLButtonElement>(':scope > .reaction-controls [data-reaction-control]:not(:disabled):not([aria-disabled="true"])');
+        if (reaction !== null) { event.preventDefault(); reaction.focus(); }
+        return;
+      }
       case 'ArrowUp':
         to = Math.max(0, at - 1);
         break;
@@ -879,7 +892,7 @@ export function Conversation({
   }
 
   return (
-    <>
+    <ReactionScope key={`${String(viewer)}/${String(channelId ?? channel)}`} channel={channel} channelId={channelId ?? shown[0]?.channel_id ?? 0} ids={shown.filter((m) => m.removed !== true).map((m) => m.id)} onUnauthorized={onUnauthorized}>
       <header className="conv-head">
         <span className="hash" aria-hidden="true">
           #
@@ -949,6 +962,7 @@ export function Conversation({
           {shown.map((message, i) => (
             <Message
               stop={message.id === stop}
+              reactionNavigation
               replies={replyCounts.get(message.id) ?? 0}
               {...(message.thread_root_id === undefined ? {} : { context: replyContext(chat.byId.get(message.thread_root_id), people) })}
               key={message.id}
@@ -1064,6 +1078,6 @@ export function Conversation({
         }}
       />
       )}
-    </>
+    </ReactionScope>
   );
 }

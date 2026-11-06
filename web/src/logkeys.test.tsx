@@ -1,11 +1,17 @@
 // The message log as one tab stop (issue #1040): a roving tabindex over the
 // messages, arrows between them, Tab into a message's own controls and out,
 // and controls named by author and time, never by id.
-import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as api from './api';
 import { clock, Conversation, messageName } from './Conversation';
 import type { MessageV2 } from './schema/message';
 import type { ChannelChat } from './state/messages';
+
+vi.mock('./api', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./api')>(),
+  readReactions: vi.fn(),
+}));
 
 const viewer = 2;
 const people = new Map([[viewer, { name: 'member-1', kind: 'human' as const }], [3, { name: 'owner', kind: 'human' as const }]]);
@@ -55,11 +61,12 @@ const log = () => screen.getByRole('log', { name: 'Messages' });
 // The elements Tab would stop at inside the log, in order: what the browser
 // would visit, given each one's tabindex.
 function stops(): HTMLElement[] {
-  return Array.from(log().querySelectorAll<HTMLElement>('li[data-message-id], button, a[href], textarea, input')).filter((el) => el.tabIndex >= 0);
+  return Array.from(log().querySelectorAll<HTMLElement>('li[data-message-id], button, a[href], textarea, input')).filter((el) => el.tabIndex >= 0 && !(el instanceof HTMLButtonElement && el.disabled));
 }
 
 beforeEach(() => {
   HTMLElement.prototype.scrollIntoView = vi.fn();
+  vi.mocked(api.readReactions).mockResolvedValue({ ok: true, value: { summaries: [] } });
 });
 
 afterEach(() => {
@@ -74,6 +81,40 @@ describe('the log is one tab stop', () => {
     expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['30', '⋯', 'Reply']);
     expect(stops()[0]).toBe(item(30));
     expect(log().tabIndex).toBe(-1);
+  });
+
+  it('keeps hydrated reactions out of Tab and reaches only the active message controls with arrows', async () => {
+    vi.mocked(api.readReactions).mockResolvedValue({ ok: true, value: { summaries: many(30).map((message) => ({
+      schema: 'conch.reaction_summary.v1', channel_id: 7, message_id: message.id,
+      as_of: '2026-11-06T10:00:00Z', reactions: [{ emoji: '👍', count: 1, me: false }],
+    })) } });
+    render(conversation(many(30)));
+    const add = (id: number) => within(item(id)).getByRole('button', { name: /^Add reaction to / });
+    await waitFor(() => { expect(add(30).hasAttribute('disabled')).toBe(false); });
+    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['30', '⋯', 'Reply']);
+    act(() => { item(30).focus(); });
+    fireEvent.keyDown(item(30), { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(item(29));
+    expect(stops().map((el) => el.getAttribute('data-message-id') ?? el.textContent)).toEqual(['29', 'Reply']);
+    fireEvent.keyDown(item(29), { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(add(29));
+    expect(add(29).parentElement).toBe(within(item(29)).getByRole('button', { name: /^Reply to / }).parentElement);
+    fireEvent.keyDown(add(29), { key: 'ArrowRight' });
+    const chip = within(item(29)).getByRole('button', { name: /1 reaction$/ });
+    expect(document.activeElement).toBe(chip);
+    fireEvent.keyDown(chip, { key: 'ArrowRight' });
+    const who = within(item(29)).getByRole('button', { name: /^Who reacted/ });
+    expect(document.activeElement).toBe(who);
+    fireEvent.keyDown(who, { key: 'Escape' });
+    expect(document.activeElement).toBe(item(29));
+    // Explicit -1 survives the generic log roving helper in both messages.
+    expect(add(29).tabIndex).toBe(-1);
+    expect(add(30).tabIndex).toBe(-1);
+    fireEvent.keyDown(item(29), { key: 'ArrowRight' });
+    fireEvent.click(add(29));
+    expect(document.activeElement).toBe(screen.getByRole('searchbox'));
+    fireEvent.keyDown(screen.getByRole('searchbox'), { key: 'Escape' });
+    expect(document.activeElement).toBe(add(29));
   });
 
   it('keeps the log itself focusable for scrolling when it holds no message', () => {
