@@ -28,6 +28,10 @@ export interface MemberControlsProps {
   // open picker reads the other channels again and replaces its candidates.
   readonly directoryTick?: number;
   readonly onUnauthorized: () => void;
+  // Set by Members (issue #1450): the open menu and pending question per
+  // person, kept above the Online and Offline lists.
+  readonly rowUi?: (principalId: number) => RowUi;
+  readonly setRowUi?: (principalId: number, patch: Partial<RowUi>) => void;
 }
 
 function displayName(member: ChannelMemberV1): string {
@@ -210,6 +214,13 @@ function AddPeople(props: MemberControlsProps) {
 // (MessageMenu.tsx), opened by its button, Enter or Space on it, a right-click
 // on the row or a long press. A row with no actions draws no button and
 // suppresses no native menu. A refusal after an action stays in the row.
+export interface RowUi {
+  readonly menuOpen: boolean;
+  readonly confirming: boolean;
+  readonly moderating: ModerationOperation | null;
+}
+const noUi: RowUi = { menuOpen: false, confirming: false, moderating: null };
+
 export function MemberRow({
   className,
   principalId,
@@ -221,13 +232,25 @@ export function MemberRow({
   const member = members.find((m) => m.principal_id === principalId);
   const [busy, setBusy] = useState(false);
   const [line, setLine] = useState<string | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [localUi, setLocalUi] = useState<RowUi>(noUi);
+  // The open menu and a pending question live above the Online and Offline
+  // lists when Members hosts the row (issue #1450), so a person changing
+  // presence, which remounts their row, does not close them.
+  const ui = controls.rowUi?.(principalId) ?? localUi;
+  const setUi = (patch: Partial<RowUi>) => {
+    if (controls.setRowUi === undefined) setLocalUi((cur) => ({ ...cur, ...patch }));
+    else controls.setRowUi(principalId, patch);
+  };
+  const menuOpen = ui.menuOpen;
+  const setMenuOpen = (v: boolean) => { setUi({ menuOpen: v }); };
+  const moderating = ui.moderating;
+  const setModerating = (v: ModerationOperation | null) => { setUi({ moderating: v }); };
+  const confirming = ui.confirming;
+  const setConfirming = (v: boolean) => { setUi({ confirming: v }); };
   const more = useRef<HTMLButtonElement>(null);
   // Removal asks first (issue #1083): "Remove from channel" opens this
   // question in the row, with focus on Cancel; Escape and Cancel put focus
   // back on the row's ⋯ button.
-  const [moderating, setModerating] = useState<ModerationOperation | null>(null);
-  const [confirming, setConfirming] = useState(false);
   const cancel = useRef<HTMLButtonElement>(null);
   const questionId = useId();
   useEffect(() => {
@@ -369,6 +392,15 @@ function PeopleGroup({ title, people, controls }: { readonly title: string; read
 
 export function Members({ people, ...controls }: MemberControlsProps & { readonly people: readonly Entry[] }) {
   const [feedback, setFeedback] = useState<string | null>(null);
+  const [rowUis, setRowUis] = useState<{ readonly channel: number; readonly byId: Readonly<Record<number, RowUi>> }>({ channel: controls.channel.id, byId: {} });
+  const byId = rowUis.channel === controls.channel.id ? rowUis.byId : {};
+  const rowUi = (id: number): RowUi => byId[id] ?? noUi;
+  const setRowUi = (id: number, patch: Partial<RowUi>) => {
+    setRowUis((cur) => {
+      const base = cur.channel === controls.channel.id ? cur.byId : {};
+      return { channel: controls.channel.id, byId: { ...base, [id]: { ...(base[id] ?? noUi), ...patch } } };
+    });
+  };
   const operator = !controls.viewer.guest && ((controls.viewer.role === 'operator' && controls.viewer.owner === true) || (controls.viewer.permissions === undefined ? controls.viewer.role === 'operator' : controls.viewer.permissions.includes('manage_channels')));
   const manager = !operator && !controls.viewer.guest && controls.channel.manages === true;
   const canAdd = operator || manager;
@@ -388,8 +420,8 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
         <p className="empty">Nobody</p>
       ) : (
         <>
-          <PeopleGroup title="Online" people={online} controls={{ ...controls, onModerated: setFeedback }} />
-          <PeopleGroup title="Offline" people={offline} controls={{ ...controls, onModerated: setFeedback }} />
+          <PeopleGroup title="Online" people={online} controls={{ ...controls, onModerated: setFeedback, rowUi, setRowUi }} />
+          <PeopleGroup title="Offline" people={offline} controls={{ ...controls, onModerated: setFeedback, rowUi, setRowUi }} />
         </>
       )}
     </>
