@@ -188,14 +188,18 @@ func camerasIn(viewer *person) ([]int64, *schema.VoiceCameraEnded, error) {
 // enableCamera turns use_camera on for operators and members, as the owner,
 // in one PUT: precedence (member ⇒ operator) wants the operator cell on with
 // the member cell.
-func enableCamera(d *conchdProc) error {
+func enableCamera(d *conchdProc) error { return setCamera(d, true) }
+
+// setCamera turns use_camera on or off for both columns in one PUT, as the
+// owner.
+func setCamera(d *conchdProc, on bool) error {
 	var doc schema.PermissionsResponseV1
 	if err := d.operator.call(http.MethodGet, "/v1/permissions", nil, &doc); err != nil {
 		return err
 	}
 	req := schema.PutPermissionsRequestV1{Revision: doc.Revision, Changes: []schema.PermissionChangeV1{
-		{Permission: schema.PermUseCamera, Role: schema.PermissionRoleOperator, Granted: true},
-		{Permission: schema.PermUseCamera, Role: schema.PermissionRoleMember, Granted: true},
+		{Permission: schema.PermUseCamera, Role: schema.PermissionRoleOperator, Granted: on},
+		{Permission: schema.PermUseCamera, Role: schema.PermissionRoleMember, Granted: on},
 	}}
 	return d.operator.call(http.MethodPut, "/v1/permissions", req, nil)
 }
@@ -260,8 +264,12 @@ func (l *live) camera(ctx context.Context) error {
 		return hl, f, room, err
 	}
 
-	// Off by default (ADR-015 decision 1): a member's claim is refused until
-	// the owner turns the camera on for members.
+	// On by default on a new server (issue #1361, amending ADR-015): with the
+	// owner's cells off, a member's claim is refused; turned back on, it is
+	// allowed again.
+	if err := setCamera(d, false); err != nil {
+		return fmt.Errorf("turn use_camera off: %w", err)
+	}
 	if _, err := h.session(cal, "cams"); err != nil {
 		return err
 	}
@@ -273,7 +281,7 @@ func (l *live) camera(ctx context.Context) error {
 	if err := enableCamera(d); err != nil {
 		return fmt.Errorf("turn use_camera on: %w", err)
 	}
-	h.say("ok   camera: off by default (a member's claim is 403 permission_denied); the owner turned it on for operators and members in one PUT")
+	h.say("ok   camera: with the owner's cells off a member's claim is 403 permission_denied; the owner turned it back on for operators and members in one PUT")
 
 	// K1: the join grant refuses a camera. dee publishes lk's demo video,
 	// which lk declares a camera, with no claim.

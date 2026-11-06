@@ -1020,6 +1020,10 @@ BEGIN SELECT RAISE(ABORT, 'a default channel must be public'); END`,
 	error_code   TEXT
 )`,
 	},
+	// 44 (cameraDefaultMigration): use_camera is on by default from now on
+	// (issue #1361), and a server that existed before keeps it off. No SQL:
+	// pinCameraOff stores the old value where no cell was stored.
+	{},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction
@@ -1043,6 +1047,10 @@ var migrationSteps = map[int]func(ctx context.Context, tx *sql.Tx) error{
 
 	// Who issued each credential and hook, from the audit trail (issue #1024).
 	issuedByMigration: backfillIssuedBy,
+
+	// Cameras stay off on a server that existed before they became a default
+	// (issue #1361).
+	cameraDefaultMigration: pinCameraOff,
 }
 
 // Store is the embedded SQLite database. It is safe for concurrent use.

@@ -96,7 +96,9 @@ func (f *presenceFixture) revision(t *testing.T) int64 {
 }
 
 var (
-	voiceCells = []schema.Permission{schema.PermShareScreen, schema.PermUseVoice}
+	// Turning voice off takes what needs it: the share, and the camera, on by
+	// default since issue #1361.
+	voiceCells = []schema.Permission{schema.PermShareScreen, schema.PermUseCamera, schema.PermUseVoice}
 	shareCell  = []schema.Permission{schema.PermShareScreen}
 	bothRoles  = []schema.PermissionRole{schema.PermissionRoleMember, schema.PermissionRoleOperator}
 	memberCol  = []schema.PermissionRole{schema.PermissionRoleMember}
@@ -299,6 +301,7 @@ func TestPutUseVoiceOffRemovesThoseAffectedAtOnce(t *testing.T) {
 
 	res := f.putPermissionsREST(t, schema.PutPermissionsRequestV1{Revision: f.revision(t), Changes: []schema.PermissionChangeV1{
 		{Permission: schema.PermShareScreen, Role: schema.PermissionRoleMember, Granted: false},
+		{Permission: schema.PermUseCamera, Role: schema.PermissionRoleMember, Granted: false},
 		{Permission: schema.PermUseVoice, Role: schema.PermissionRoleMember, Granted: false},
 	}})
 	if res.code != http.StatusOK {
@@ -352,6 +355,7 @@ func TestJoinTokenMintedBeforeARoleChange(t *testing.T) {
 	room := decodeSession(t, f.session(t, "ann", "ops")).Rooms[0].Room // the token
 	res := f.putPermissionsREST(t, schema.PutPermissionsRequestV1{Revision: f.revision(t), Changes: []schema.PermissionChangeV1{
 		{Permission: schema.PermShareScreen, Role: schema.PermissionRoleMember, Granted: false},
+		{Permission: schema.PermUseCamera, Role: schema.PermissionRoleMember, Granted: false},
 		{Permission: schema.PermUseVoice, Role: schema.PermissionRoleMember, Granted: false},
 	}})
 	if res.code != http.StatusOK {
@@ -443,6 +447,7 @@ func TestEnforcedPermissionsRefuseAnUnenforcedCell(t *testing.T) {
 	before := revisionOf(t, f)
 	res := f.putPermissions(t, f.rootTok, schema.PutPermissionsRequestV1{Revision: before, Changes: []schema.PermissionChangeV1{
 		{Permission: schema.PermShareScreen, Role: schema.PermissionRoleMember, Granted: false},
+		{Permission: schema.PermUseCamera, Role: schema.PermissionRoleMember, Granted: false},
 		{Permission: schema.PermUseVoice, Role: schema.PermissionRoleMember, Granted: false},
 	}})
 	if res.code != http.StatusConflict || res.errorCode(t) != schema.ErrorCodePermissionsConflict || !strings.Contains(string(res.body), "use_voice") {

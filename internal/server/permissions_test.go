@@ -174,19 +174,19 @@ func TestPermissionsGetAnswersTheFullCatalog(t *testing.T) {
 		}
 	}
 	last := doc.Rows[len(doc.Rows)-1]
-	want := schema.PermissionRowV1{Permission: schema.PermUseCamera}
+	want := schema.PermissionRowV1{Permission: schema.PermUseCamera, Member: true, Operator: true}
 	if last != want {
-		t.Errorf("the last row = %+v, want use_camera off for both and nothing fixed", last)
+		t.Errorf("the last row = %+v, want use_camera on for both and nothing fixed (issue #1361)", last)
 	}
-	// Operators and members do not hold it; the owner does. whoami says so.
+	// On a new server everyone holds it (issue #1361). whoami says so.
 	for _, tc := range []struct {
 		who  string
 		tok  string
 		held bool
 	}{
 		{"owner", f.rootTok, true},
-		{"operator", f.opTok, false},
-		{"member", f.memberTok, false},
+		{"operator", f.opTok, true},
+		{"member", f.memberTok, true},
 	} {
 		who := decodeBody[schema.WhoAmIResponseV1](t, f.do(t, "GET", "/v1/whoami", tc.tok, ""))
 		if got := slices.Contains(who.Permissions, schema.PermUseCamera); got != tc.held {
@@ -199,10 +199,11 @@ func TestPermissionsGetAnswersTheFullCatalog(t *testing.T) {
 // PUT now takes use_camera's cells, under the same rules as every other
 // cell. It needs use_voice in its own column, and a member cell needs the
 // operator cell; a conflict is 409 permissions_conflict naming the
-// permission and changes nothing. Turning it on for members is two cells,
-// in one PUT or in two (N2, O2), and whoami then lists it. A preset leaves
-// the operator column as it was and the member cell off, and a member cell
-// that is on matches no preset (O3).
+// permission and changes nothing. A new server starts with both cells on
+// (issue #1361); turning it back on for members after both were turned off
+// is two cells, in one PUT or in two (N2, O2), and whoami then lists it. A
+// member cell that is off matches no preset (O3), and either preset turns it
+// on again.
 func TestPermissionsPutUseCamera(t *testing.T) {
 	if !slices.Contains(enforcedPermissions, schema.PermUseCamera) {
 		t.Fatal("use_camera is not in enforcedPermissions: the PUT still refuses its cells")
@@ -252,27 +253,38 @@ func TestPermissionsPutUseCamera(t *testing.T) {
 		return false, false, ""
 	}
 
+	// bothOff turns use_camera off in both columns, the member cell first: a
+	// new server starts with it on (issue #1361).
+	bothOff := func(t *testing.T, f *restrictedFixture) {
+		t.Helper()
+		ok(t, put(t, f, member(schema.PermUseCamera, false), operator(schema.PermUseCamera, false)), "use_camera off for both")
+	}
+
 	// The dependency is checked in the member column: operators can't lose
 	// use_voice while members hold it (precedence), so the member column is
 	// where use_voice can be off beside a use_camera cell.
 	t.Run("on without use_voice in the column is refused", func(t *testing.T) {
 		f := newRestrictedFixture(t, Config{})
-		ok(t, put(t, f, operator(schema.PermUseCamera, true), member(schema.PermShareScreen, false), member(schema.PermUseVoice, false)), "member voice off, operator camera on")
+		ok(t, put(t, f, member(schema.PermShareScreen, false), member(schema.PermUseCamera, false), member(schema.PermUseVoice, false)), "member voice and camera off")
 		conflict(t, f, "member use_camera on without use_voice", member(schema.PermUseCamera, true))
 	})
 	t.Run("use_voice off while use_camera is on is refused", func(t *testing.T) {
 		f := newRestrictedFixture(t, Config{})
-		ok(t, put(t, f, operator(schema.PermUseCamera, true), member(schema.PermUseCamera, true)), "use_camera on for both")
 		conflict(t, f, "member use_voice off with use_camera on", member(schema.PermShareScreen, false), member(schema.PermUseVoice, false))
 	})
 	t.Run("the member cell without the operator cell is refused", func(t *testing.T) {
 		f := newRestrictedFixture(t, Config{})
+		bothOff(t, f)
 		conflict(t, f, "member use_camera on with the operator cell off", member(schema.PermUseCamera, true))
 		ok(t, put(t, f, operator(schema.PermUseCamera, true), member(schema.PermUseCamera, true)), "both cells on")
 		conflict(t, f, "operator use_camera off with the member cell on", operator(schema.PermUseCamera, false))
 	})
 	t.Run("operator then member in one PUT", func(t *testing.T) {
 		f := newRestrictedFixture(t, Config{})
+		bothOff(t, f)
+		if holds(t, f, f.memberTok) || holds(t, f, f.opTok) {
+			t.Error("whoami lists use_camera with both cells off")
+		}
 		ok(t, put(t, f, operator(schema.PermUseCamera, true), member(schema.PermUseCamera, true)), "both cells in one PUT")
 		if !holds(t, f, f.memberTok) || !holds(t, f, f.opTok) {
 			t.Error("whoami does not list use_camera for the member and the operator once both cells are on")
@@ -280,6 +292,7 @@ func TestPermissionsPutUseCamera(t *testing.T) {
 	})
 	t.Run("operator then member in two PUTs", func(t *testing.T) {
 		f := newRestrictedFixture(t, Config{})
+		bothOff(t, f)
 		ok(t, put(t, f, operator(schema.PermUseCamera, true)), "the operator cell")
 		if !holds(t, f, f.opTok) || holds(t, f, f.memberTok) {
 			t.Error("after the operator cell alone, the operator should hold use_camera and the member not")
@@ -292,29 +305,29 @@ func TestPermissionsPutUseCamera(t *testing.T) {
 	t.Run("a stale revision changes nothing", func(t *testing.T) {
 		f := newRestrictedFixture(t, Config{})
 		before := revisionOf(t, f)
-		res := f.putPermissions(t, f.rootTok, schema.PutPermissionsRequestV1{Revision: before + 5, Changes: []schema.PermissionChangeV1{operator(schema.PermUseCamera, true)}})
+		res := f.putPermissions(t, f.rootTok, schema.PutPermissionsRequestV1{Revision: before + 5, Changes: []schema.PermissionChangeV1{member(schema.PermUseCamera, false)}})
 		if res.code != http.StatusConflict || res.errorCode(t) != schema.ErrorCodePermissionsStale {
 			t.Fatalf("a stale PUT = %d %s, want 409 permissions_stale", res.code, res.body)
 		}
-		if op, _, _ := cell(t, f); op || revisionOf(t, f) != before {
+		if _, mem, _ := cell(t, f); !mem || revisionOf(t, f) != before {
 			t.Error("a stale PUT changed the document")
 		}
 	})
-	t.Run("a member cell on matches no preset, and a preset turns it off", func(t *testing.T) {
+	t.Run("a member cell off matches no preset, and a preset turns it on", func(t *testing.T) {
 		for _, preset := range []schema.PermissionPreset{schema.PresetPersonal, schema.PresetGroup} {
 			t.Run(string(preset), func(t *testing.T) {
 				f := newRestrictedFixture(t, Config{})
 				if _, _, p := cell(t, f); p != schema.PresetGroup {
 					t.Fatalf("a fresh server matches preset %q, want group", p)
 				}
-				ok(t, put(t, f, operator(schema.PermUseCamera, true), member(schema.PermUseCamera, true)), "both cells on")
+				ok(t, put(t, f, member(schema.PermUseCamera, false)), "the member cell off")
 				if _, _, p := cell(t, f); p != "" {
-					t.Errorf("with the member cell on the document matches preset %q, want none (O3)", p)
+					t.Errorf("with the member cell off the document matches preset %q, want none (O3)", p)
 				}
 				ok(t, f.putPermissions(t, f.rootTok, schema.PutPermissionsRequestV1{Revision: revisionOf(t, f), Preset: preset}), "the preset")
 				op, mem, p := cell(t, f)
-				if !op || mem {
-					t.Errorf("after %s: operator %t member %t, want the operator cell as it was (on) and the member cell off", preset, op, mem)
+				if !op || !mem {
+					t.Errorf("after %s: operator %t member %t, want both on (both presets keep the camera, issue #1361)", preset, op, mem)
 				}
 				if p != preset {
 					t.Errorf("after %s the document matches preset %q", preset, p)
@@ -372,7 +385,7 @@ func TestPermissionsPut(t *testing.T) {
 			return schema.PutPermissionsRequestV1{Revision: rev, Changes: []schema.PermissionChangeV1{operator(schema.PermManageMembers, false)}}
 		}, http.StatusConflict, schema.ErrorCodePermissionsConflict, false},
 		{"use_voice, which A4 enforces", false, false, func(rev int64) schema.PutPermissionsRequestV1 {
-			return schema.PutPermissionsRequestV1{Revision: rev, Changes: []schema.PermissionChangeV1{member(schema.PermShareScreen, false), member(schema.PermUseVoice, false)}}
+			return schema.PutPermissionsRequestV1{Revision: rev, Changes: []schema.PermissionChangeV1{member(schema.PermShareScreen, false), member(schema.PermUseCamera, false), member(schema.PermUseVoice, false)}}
 		}, http.StatusOK, "", true},
 		{"no change", false, false, func(rev int64) schema.PutPermissionsRequestV1 {
 			return schema.PutPermissionsRequestV1{Revision: rev, Changes: []schema.PermissionChangeV1{member(schema.PermCreatePrivateChannels, true)}}

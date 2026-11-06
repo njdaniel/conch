@@ -39,6 +39,7 @@ func TestPutUseVoiceOffClosesWatchers(t *testing.T) {
 
 	res := f.putPermissionsREST(t, schema.PutPermissionsRequestV1{Revision: f.revision(t), Changes: []schema.PermissionChangeV1{
 		{Permission: schema.PermShareScreen, Role: schema.PermissionRoleMember, Granted: false},
+		{Permission: schema.PermUseCamera, Role: schema.PermissionRoleMember, Granted: false},
 		{Permission: schema.PermUseVoice, Role: schema.PermissionRoleMember, Granted: false},
 	}})
 	if res.code != http.StatusOK {
@@ -82,6 +83,7 @@ func TestPutUseVoiceOffClosesWatchersWithoutLiveKit(t *testing.T) {
 	}
 	res := f.putPermissionsREST(t, schema.PutPermissionsRequestV1{Revision: f.revision(t), Changes: []schema.PermissionChangeV1{
 		{Permission: schema.PermShareScreen, Role: schema.PermissionRoleMember, Granted: false},
+		{Permission: schema.PermUseCamera, Role: schema.PermissionRoleMember, Granted: false},
 		{Permission: schema.PermUseVoice, Role: schema.PermissionRoleMember, Granted: false},
 	}})
 	if res.code != http.StatusOK {

@@ -187,8 +187,9 @@ func restrictedManagerApprovalChain(t *testing.T, cut func(t *testing.T, f *rest
 
 // TestUseCameraToggleKeepsAnOpenApprovalFullChain (webcam C3, #1240;
 // CLAUDE.md rule 3): request → notify → resolve → audit, with the owner
-// turning use_camera on for both columns and off again through
-// PUT /v1/permissions while the approval is open. use_camera is no part of
+// turning use_camera off for both columns and on again through
+// PUT /v1/permissions while the approval is open (on is the default since
+// issue #1361). use_camera is no part of
 // deciding: the approval stays pending, who may decide is unchanged, and it
 // resolves with the quorum it had.
 func TestUseCameraToggleKeepsAnOpenApprovalFullChain(t *testing.T) {
@@ -241,8 +242,10 @@ func TestUseCameraToggleKeepsAnOpenApprovalFullChain(t *testing.T) {
 		name    string
 		changes []schema.PermissionChangeV1
 	}{
-		{"on", []schema.PermissionChangeV1{cell(schema.PermissionRoleOperator, true), cell(schema.PermissionRoleMember, true)}},
+		// A new server starts with the camera on (issue #1361), so the
+		// toggle goes off, then on again.
 		{"off", []schema.PermissionChangeV1{cell(schema.PermissionRoleMember, false), cell(schema.PermissionRoleOperator, false)}},
+		{"on", []schema.PermissionChangeV1{cell(schema.PermissionRoleOperator, true), cell(schema.PermissionRoleMember, true)}},
 	} {
 		res := f.putPermissions(t, f.rootTok, schema.PutPermissionsRequestV1{Revision: revisionOf(t, f), Changes: step.changes})
 		if res.code != http.StatusOK {
@@ -302,6 +305,6 @@ func TestUseCameraToggleKeepsAnOpenApprovalFullChain(t *testing.T) {
 		t.Errorf("audit chain = %q, want %q", chain, want)
 	}
 	if changes != 2 {
-		t.Errorf("%d permissions_changed rows name use_camera, want 2 (on, then off)", changes)
+		t.Errorf("%d permissions_changed rows name use_camera, want 2 (off, then on)", changes)
 	}
 }
