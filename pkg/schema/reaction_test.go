@@ -248,6 +248,7 @@ func TestReactionConstants(t *testing.T) {
 		"VOICE_CONTROL_STOP_KILL_AFTER_MS":       VoiceControlStopKillAfterMS,
 		"VOICE_CONTROL_DEVICE_DEFAULT":           VoiceControlDeviceDefault,
 		"VOICE_DEVICES_MAX_NAME_BYTES":           VoiceDevicesMaxNameBytes,
+		"VOICE_DEVICES_MAX_BYTES":                VoiceDevicesMaxBytes,
 		"VOICE_CONTROL_PIPE_FLAG":                VoiceControlPipeFlag,
 		"VOICE_CONTROL_PIPE_NONCE_ENV":           VoiceControlPipeNonceEnv,
 		"VOICE_CONTROL_PIPE_NONCE_BYTES":         VoiceControlPipeNonceBytes,

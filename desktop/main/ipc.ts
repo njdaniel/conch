@@ -12,8 +12,9 @@
 // name a channel, a URL, a header or a method.
 import type { IpcMain } from 'electron';
 
-import type { BridgeReply, BridgeRequest, FeedRequest, SignInOutcome } from '../../web/src/platform/desktop/bridge.ts';
+import type { BridgeReply, BridgeRequest, FeedRequest, SignInOutcome, VoiceDeviceKey } from '../../web/src/platform/desktop/bridge.ts';
 import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
+import { isSaveKey, saveValueFits } from './voice/oneshot.ts';
 import { validChannel, validDeviceName } from './voice/protocol.ts';
 import { operations } from '../../web/src/platform/operations.ts';
 import { channelOf, INVOKED_FUNCTIONS, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
@@ -69,7 +70,7 @@ export type ProfilesApi = Pick<
   'view' | 'add' | 'rename' | 'remove' | 'switchTo' | 'retry' | 'recover' | 'signOut' | 'signedIn' | 'keptCredential' | 'signInPermitted'
 >;
 
-export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode'>;
+export type VoiceApi = Pick<VoiceService, 'state' | 'join' | 'leave' | 'retry' | 'setMute' | 'setDeafen' | 'setDevices' | 'setTalkMode' | 'devices' | 'saveDevice'>;
 
 // What a sign-in step answers when the server's release is not one the app may
 // sign in to (issue #946): nothing was sent.
@@ -248,6 +249,17 @@ function parseJoin(args: readonly unknown[]): readonly unknown[] | null {
   return [{ channel, muted, deafened }];
 }
 
+// A save is exactly a key `config set` takes from the page and a value that
+// fits it (a device name or `default`, a talk mode): checked again, in the
+// same way, by the one-shot run before anything is passed.
+function parseSaveDevice(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['key', 'value'])) return null;
+  const { key, value } = request;
+  if (!isSaveKey(key) || !saveValueFits(key, value)) return null;
+  return [{ key, value }];
+}
+
 // At least one of input and output; each a printable device name.
 function parseDevices(args: readonly unknown[]): readonly unknown[] | null {
   const [devices] = args;
@@ -399,6 +411,17 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
     parse: (args) => (args.length === 1 && typeof args[0] === 'string' && voiceControlTalkMode(args[0]).length === 0 ? args : null),
     run: ({ voice }, [mode]) => voice.setTalkMode(mode as VoiceControlTalkMode),
     gesture: (args) => args[0] === 'open',
+  },
+  // The helper's one-shot runs (issue #1378). The list is read-only; a save
+  // writes the person's voice.toml and is the person's act alone. Each is
+  // one process at a time, so the rates are low.
+  voiceDevices: { limit: 30, maxBytes: 0, parse: none, run: ({ voice }) => voice.devices() },
+  voiceSaveDevice: {
+    limit: 30,
+    maxBytes: 2 * VOICE_DEVICES_MAX_NAME_BYTES + 128,
+    parse: parseSaveDevice,
+    run: ({ voice }, [request]) => voice.saveDevice(request as { key: VoiceDeviceKey; value: string }),
+    gesture: true,
   },
   feedUnsubscribe: { limit: 600, maxBytes: 32, parse: feedId, run: ({ feeds, document }, [id]) => feeds.unsubscribe(document, id as number) },
 };

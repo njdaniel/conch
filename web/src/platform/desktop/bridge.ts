@@ -26,6 +26,8 @@ import type {
   VoiceControlPTTProblem,
   VoiceControlReason,
   VoiceControlTalkMode,
+  VoiceDevice,
+  VoiceDevicesPipeWire,
 } from '../../schema/generated';
 import type { LoginRequestV1, RedeemSetupTokenRequestV1, ResetPasswordRequestV1, TOTPLoginRequestV1 } from '../../schema/auth';
 import type { JoinAccountRequestV1, JoinGuestRequestV1 } from '../../schema/guest';
@@ -319,6 +321,41 @@ export type VoiceCommandResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: VoiceControlErrorCode | 'not-running' | 'busy' | 'unsupported' | 'lost' };
 
+// The helper's one-shot runs (issue #1378, D3-7): the device list and a save.
+// Why a run did not give what was asked; never text of the helper's.
+export type VoiceOneShotError =
+  | 'not-signed-in'
+  | 'not-installed'
+  | 'untrusted'
+  | 'busy'
+  | 'invalid'
+  | 'spawn-failed'
+  | 'timed-out'
+  | 'too-much-output'
+  | 'unsupported'
+  | 'failed'
+  | 'bad-output'
+  | 'cancelled';
+
+// The device list as the page gets it: the validated document's microphones
+// and speakers (each with its default flag), and whether PipeWire was
+// reached. No path, no configuration state.
+export type NativeVoiceDevicesResult =
+  | {
+      readonly ok: true;
+      readonly pipewire: VoiceDevicesPipeWire;
+      readonly synced: boolean;
+      readonly microphones: readonly VoiceDevice[];
+      readonly speakers: readonly VoiceDevice[];
+    }
+  | { readonly ok: false; readonly error: VoiceOneShotError };
+
+// What `config set` saves from the page. A device is a name from the list or
+// 'default'; the talk mode a word of its vocabulary.
+export type VoiceDeviceKey = 'audio.input' | 'audio.output' | 'audio.talk_mode';
+
+export type VoiceSaveResult = { readonly ok: true } | { readonly ok: false; readonly error: VoiceOneShotError };
+
 export interface DesktopVoiceBridge {
   voiceState(): Promise<NativeVoiceView>;
   voiceJoin(request: { readonly channel: ChannelName; readonly muted: boolean; readonly deafened: boolean }): Promise<NativeVoiceView>;
@@ -328,6 +365,8 @@ export interface DesktopVoiceBridge {
   voiceSetDeafen(deafened: boolean): Promise<VoiceCommandResult>;
   voiceSetDevices(devices: { readonly input?: string; readonly output?: string }): Promise<VoiceCommandResult>;
   voiceSetTalkMode(mode: VoiceControlTalkMode): Promise<VoiceCommandResult>;
+  voiceDevices(): Promise<NativeVoiceDevicesResult>;
+  voiceSaveDevice(request: { readonly key: VoiceDeviceKey; readonly value: string }): Promise<VoiceSaveResult>;
   onVoiceState(listener: (view: NativeVoiceView) => void): Unsubscribe;
 }
 

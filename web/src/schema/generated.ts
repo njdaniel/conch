@@ -36,6 +36,7 @@ export const VOICE_CONTROL_STOP_TERM_AFTER_MS = 4000;
 export const VOICE_CONTROL_STOP_KILL_AFTER_MS = 5000;
 export const VOICE_CONTROL_DEVICE_DEFAULT = 'default';
 export const VOICE_DEVICES_MAX_NAME_BYTES = 255;
+export const VOICE_DEVICES_MAX_BYTES = 262144;
 export const VOICE_CONTROL_PIPE_FLAG = '--events-pipe';
 export const VOICE_CONTROL_PIPE_NONCE_ENV = 'CONCH_VOICE_ATTACH';
 export const VOICE_CONTROL_PIPE_NONCE_BYTES = 32;
@@ -2080,6 +2081,63 @@ export const voiceControlPipeAttachedV1 = object<VoiceControlPipeAttachedV1>({
   schema: vocab<typeof voiceControlPipeAttachedV1Schema>({ [voiceControlPipeAttachedV1Schema]: true }),
   kind: voiceControlPipeKind,
   nonce: str,
+});
+
+// schema.VoiceDevice
+export interface VoiceDevice {
+  name: string;
+  description: string;
+  default: boolean;
+}
+
+export const voiceDevice = object<VoiceDevice>({
+  name: str,
+  description: str,
+  default: bool,
+});
+
+// schema.VoiceDevicesPipeWire
+export type VoiceDevicesPipeWire = 'ok' | 'unavailable';
+
+export const voiceDevicesPipeWire = vocab<VoiceDevicesPipeWire>({ ok: true, unavailable: true });
+
+// schema.VoiceDevicesConfig
+export type VoiceDevicesConfig = 'ok' | 'missing' | 'refused' | 'none';
+
+export const voiceDevicesConfig = vocab<VoiceDevicesConfig>({
+  ok: true,
+  missing: true,
+  refused: true,
+  none: true,
+});
+
+// schema.VoiceDevicesV1
+export const voiceDevicesV1Schema = 'conch.voice_devices.v1';
+
+export interface VoiceDevicesV1 {
+  schema: typeof voiceDevicesV1Schema;
+  pipewire: VoiceDevicesPipeWire;
+  synced: boolean;
+  microphones: VoiceDevice[];
+  speakers: VoiceDevice[];
+  unshown_microphones: number;
+  unshown_speakers: number;
+  config: VoiceDevicesConfig;
+  configured_input?: string;
+  configured_output?: string;
+}
+
+export const voiceDevicesV1 = object<VoiceDevicesV1>({
+  schema: vocab<typeof voiceDevicesV1Schema>({ [voiceDevicesV1Schema]: true }),
+  pipewire: voiceDevicesPipeWire,
+  synced: bool,
+  microphones: array(voiceDevice),
+  speakers: array(voiceDevice),
+  unshown_microphones: int,
+  unshown_speakers: int,
+  config: voiceDevicesConfig,
+  configured_input: optional(str),
+  configured_output: optional(str),
 });
 
 // schema.PrincipalV0
