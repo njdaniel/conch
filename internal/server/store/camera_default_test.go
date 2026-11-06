@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/njdaniel/conch/pkg/schema"
 )
@@ -83,4 +85,51 @@ func TestCameraDefaultMigration(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestPresetAfterCameraDefaultMigration pins what an owner meets on an
+// upgraded server (the security review of #1363): migration 44 stored the
+// operator cell off, and a preset sets the member column only, so applying
+// either preset is refused, 409 permissions_conflict naming use_camera
+// (members never exceed operators), until the owner turns the operator cell
+// on. Then the preset applies and members hold the camera.
+func TestPresetAfterCameraDefaultMigration(t *testing.T) {
+	people := `INSERT INTO principals (id, kind, name, name_key, name_skel, role, owner, voice_allowed, may_invite, created_at) VALUES
+		(1, 'human', 'owner', 'owner', 'owner', 'operator', 1, 1, 0, 1),
+		(3, 'human', 'member-1', 'member-1', 'member-1', 'member', 0, 1, 1, 3)`
+	for _, p := range []schema.PermissionPreset{schema.PresetPersonal, schema.PresetGroup} {
+		t.Run(string(p), func(t *testing.T) {
+			s, _ := migrateTo(t, cameraDefaultMigration-1, []string{people})
+			defer func() { _ = s.Close() }()
+			ctx := context.Background()
+			put := func(req schema.PutPermissionsRequestV1) error {
+				doc, err := s.Permissions(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				req.Revision = doc.Revision
+				_, err = s.PutPermissions(ctx, principalActor(1), 1, req, time.Now())
+				return err
+			}
+			err := put(schema.PutPermissionsRequestV1{Preset: p})
+			var pe *PermissionError
+			if !errors.Is(err, ErrPermissionsConflict) || !errors.As(err, &pe) || pe.Permission != schema.PermUseCamera {
+				t.Fatalf("preset %s before the operator cell = %v, want a conflict naming use_camera", p, err)
+			}
+			if err := put(schema.PutPermissionsRequestV1{Changes: []schema.PermissionChangeV1{
+				{Permission: schema.PermUseCamera, Role: schema.PermissionRoleOperator, Granted: true},
+			}}); err != nil {
+				t.Fatalf("the operator cell on: %v", err)
+			}
+			if err := put(schema.PutPermissionsRequestV1{Preset: p}); err != nil {
+				t.Fatalf("preset %s after the operator cell: %v", p, err)
+			}
+			if got, err := s.Permitted(ctx, 3, schema.PermUseCamera); err != nil || !got {
+				t.Errorf("after %s member-1 holds use_camera = %v, %v; want true", p, got, err)
+			}
+			if doc, err := s.Permissions(ctx); err != nil || doc.Preset != p {
+				t.Errorf("after %s the document matches preset %q, %v", p, doc.Preset, err)
+			}
+		})
+	}
 }

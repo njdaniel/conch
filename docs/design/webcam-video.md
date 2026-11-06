@@ -118,7 +118,7 @@ Row 12 of ADR-014's catalog:
 
 **The dependency.** `use_camera` ⇒ `use_voice`, in the same column. The PUT refuses anything else with 409 `permissions_conflict`, as for `share_screen`. A camera is published by a voice connection, and a person without voice has no connection.
 
-**Presets.** Both presets turn `use_camera` on (amended 2026-11-05, #1361), so `PresetGroup` still equals the defaults, and `personal` is voice, screen share and camera. An upgraded server whose camera cells migration 44 stored off matches no preset until its owner applies one, and the console says so, as it does for any edited column (O3).
+**Presets.** Both presets turn `use_camera` on (amended 2026-11-05, #1361), so `PresetGroup` still equals the defaults, and `personal` is voice, screen share and camera. An upgraded server whose camera cells migration 44 stored off matches no preset, and the console says so, as it does for any edited column (O3). A preset sets the member column only, so there the owner turns the operators' camera on before applying one; in the other order the preset is refused, 409 `permissions_conflict` naming `use_camera`, as for any preset whose member cell the operator column lacks.
 
 ### 3.2 The brake
 
