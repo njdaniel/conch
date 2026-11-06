@@ -401,14 +401,21 @@ func (m *mod) messages() error {
 	}
 	// B's manager reaches the same message through her own channel: not hers.
 	bea := w.b.people[0]
-	got, err := bea.api.do2(http.MethodDelete, "/v2/channels/"+url.PathEscape(w.b.main())+"/messages/"+itoa(st.m1))
+	got, err := m.w.send(bea.api, del("/v2/channels/"+url.PathEscape(w.b.main())+"/messages/"+itoa(st.m1)))
 	if err != nil {
 		return err
 	}
-	if err := checkRefusal(got, messageNotFound, asked{ids: []kindID{{"message", st.m1}}}); err != nil {
+	bAs := asked{strs: []string{w.b.main()}, ids: []kindID{{"message", st.m1}}}
+	if leaks := m.marks.leaks(got.body, bAs); len(leaks) > 0 {
+		return fmt.Errorf("the manager of B removing it through her own channel: the body holds %s", strings.Join(leaks, "; "))
+	}
+	if leaks := m.marks.headerLeaks(got.header, bAs); len(leaks) > 0 {
+		return fmt.Errorf("the manager of B removing it through her own channel: the headers hold %s", strings.Join(leaks, "; "))
+	}
+	if err := checkRefusal(got, messageNotFound, bAs); err != nil {
 		return fmt.Errorf("the manager of B removing it through her own channel: %w", err)
 	}
-	gh, err := bea.api.do2(http.MethodDelete, "/v2/channels/"+url.PathEscape(w.b.main())+"/messages/"+itoa(ghostMsg))
+	gh, err := m.w.send(bea.api, del("/v2/channels/"+url.PathEscape(w.b.main())+"/messages/"+itoa(ghostMsg)))
 	if err != nil {
 		return err
 	}
