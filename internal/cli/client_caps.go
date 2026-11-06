@@ -36,6 +36,7 @@ const (
 
 	maxChannelDirectoryBody = listRowCeiling*listRowBound + listSlack
 	maxChannelMembersBody   = listRowCeiling*listRowBound + listSlack
+	maxChannelBansBody      = listRowCeiling*listRowBound + listSlack
 	maxMemberLinksBody      = listRowCeiling*inviteRowBound + listSlack
 	maxJoinersBody          = listRowCeiling*listRowBound + listSlack
 	maxChannelAuthorsBody   = schema.MaxChannelAuthorIDs*listRowBound + listSlack
@@ -125,6 +126,9 @@ type (
 	channelMembersDoc struct {
 		schema.ListChannelMembersResponseV1
 	}
+	channelBansDoc struct {
+		schema.ListChannelBansResponseV1
+	}
 	memberLinksDoc    struct{ schema.ListInvitesResponseV2 }
 	channelAuthorsDoc struct {
 		schema.ChannelAuthorsResponseV1
@@ -181,6 +185,7 @@ type (
 
 func (channelDirectoryDoc) maxBody() int64 { return maxChannelDirectoryBody }
 func (channelMembersDoc) maxBody() int64   { return maxChannelMembersBody }
+func (channelBansDoc) maxBody() int64      { return maxChannelBansBody }
 func (memberLinksDoc) maxBody() int64      { return maxMemberLinksBody }
 func (channelAuthorsDoc) maxBody() int64   { return maxChannelAuthorsBody }
 func (joinersDoc) maxBody() int64          { return maxJoinersBody }

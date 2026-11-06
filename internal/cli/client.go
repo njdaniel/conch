@@ -1122,6 +1122,10 @@ type EventHandler struct {
 	Intervention func(schema.InterventionV1) error
 	// Reaction is one message's whole reaction state, replacing earlier state.
 	Reaction func(schema.ReactionSummaryV1) error
+	// Members is the channel's whole member list, replacing earlier state.
+	Members func(schema.ChannelMembersV1) error
+	// MessageRemoved updates a held message; it is not a new-message notice.
+	MessageRemoved func(schema.MessageRemovedV1) error
 	// PermissionsChanged is called when the caller's effective permissions
 	// may have changed (ADR-014); the document carries nothing else, so the
 	// caller re-reads whoami.
@@ -1129,14 +1133,14 @@ type EventHandler struct {
 }
 
 // SubscribeEvents follows channel's events socket and calls the handler with
-// each document it sends: the session roster (the whole state on connect and
-// on every change), and the runs, activity entries, interventions and reaction
-// summaries the caller may see, each whole and possibly repeated. With session
+// each document it sends: the session and member rosters (whole state on
+// connect and every change), runs, activity entries, interventions, reaction
+// summaries and message-removal updates the caller may see. With session
 // set (the caller's own, not ended) the server keeps that session online while
 // the socket is open. A frame of any other schema is skipped, so a newer server
 // may send more. A document that fails Validate ends the subscription with an
-// error. There is no replay: a caller that reconnects takes the next roster as
-// the state and reads runs and reactions over REST. A server shutdown is reported through
+// error. There is no replay: a caller that reconnects takes the next rosters as
+// state and reads members, runs and reactions over REST. A server shutdown is reported through
 // websocket.StatusGoingAway, and loss of membership or of the credential
 // through websocket.StatusPolicyViolation.
 func (c *Client) SubscribeEvents(ctx context.Context, channel string, session int64, handler EventHandler) error {
@@ -1238,6 +1242,24 @@ func dispatchEvent(frame json.RawMessage, handler EventHandler) error {
 			return err
 		}
 		return receiveEvent(handler.Reaction(summary))
+	case schema.ChannelMembersSchemaV1:
+		if handler.Members == nil {
+			return nil
+		}
+		var members schema.ChannelMembersV1
+		if err := decodeEvent(frame, &members, "channel members"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.Members(members))
+	case schema.MessageRemovedSchemaV1:
+		if handler.MessageRemoved == nil {
+			return nil
+		}
+		var removed schema.MessageRemovedV1
+		if err := decodeEvent(frame, &removed, "message removal"); err != nil {
+			return err
+		}
+		return receiveEvent(handler.MessageRemoved(removed))
 	}
 	return nil
 }
