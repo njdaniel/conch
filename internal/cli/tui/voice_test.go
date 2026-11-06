@@ -137,6 +137,7 @@ func TestVoiceEndedClassification(t *testing.T) {
 		{"agent caller (403)", &cli.ServerError{Status: 403, Code: "forbidden"}, false, "", false},
 		{"not logged in", &cli.UnauthenticatedError{Server: "http://h:1"}, false, "", false},
 		{"removed from the channel", fmt.Errorf("read: %w", websocket.CloseError{Code: websocket.StatusPolicyViolation}), true, "", false},
+		{"removed from voice only", fmt.Errorf("read: %w", websocket.CloseError{Code: websocket.StatusPolicyViolation, Reason: string(schema.SocketCloseVoiceRemoved)}), true, "voice: removed from voice; you are still a member and may join again", false},
 		{"voice unavailable refusal", &cli.ServerError{Status: 503, Code: schema.ErrorCodeVoiceUnavailable}, false, "voice: unavailable", true},
 		{"network drop, was live", errors.New("eof"), true, "voice: reconnecting", true},
 		{"network drop, never connected", errors.New("connection refused"), false, "", true},
