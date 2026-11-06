@@ -112,7 +112,7 @@ describe('the listing', () => {
   });
 
   it('refuses a name the helper would refuse: it is not listed and has no rule', async () => {
-    const bad = ['usb-Evil", RUN+="/bin/sh-event-kbd', 'usb-Evil $devnode-event-kbd', 'usb-Evil\nKERNEL=="*"-event-kbd', 'usb-Evil/../x-event-kbd', 'usb-Evil\\x-event-kbd', 'usb-Evil*-event-kbd', 'usb-Évil-event-kbd', 'usb-Evil‮-event-kbd', ' -event-kbd'];
+    const bad = ['usb-Evil", RUN+="/bin/sh-event-kbd', 'usb-Evil $devnode-event-kbd', 'usb-Evil\nKERNEL=="*"-event-kbd', 'usb-Evil/../x-event-kbd', 'usb-Evil\\x-event-kbd', 'usb-Evil*-event-kbd', 'usb-Évil-event-kbd', 'usb-Evil\u202e-event-kbd', ' -event-kbd'];
     for (const name of bad) {
       expect(udevRule(name, 1000), name).toBeNull();
       expect(fitForARule(name), name).toBe(false);
