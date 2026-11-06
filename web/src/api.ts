@@ -205,6 +205,7 @@ import type { FeedConnection, Held, Place } from './platform/types';
 import type { FeedSocket, OpenSocket, SocketEvents } from './state/feed';
 import { forget as forgetDiagnostics, record } from './diagnostics';
 import { visitOf } from './guestName';
+import { keyboardKeys, mouseKeys } from './platform/desktop/evdev';
 
 // Why a call failed. unauthorized is a 401: the server does not accept the
 // credential. network means no answer at all. invalid is any other reply
@@ -2417,6 +2418,31 @@ export function writeVoiceMode(mode: 'ptt' | 'open'): void {
     platform.credentials.writePreference(voiceModeKey, mode);
   } catch {
     // Storage can be unavailable; the choice lasts until the page reloads.
+  }
+}
+
+// The talk key's name as the person knows it ("Mouse 4", "Caps Lock"): a
+// non-secret preference for the strip's "hold <key> to talk" (issue #1382).
+const talkKeyLabelKey = 'conch.desktop.voice.talk-key-label.v1';
+
+export function readTalkKeyLabel(): string | undefined {
+  try {
+    const kept = platform.credentials.readPreference(talkKeyLabelKey);
+    // Only a label from the key table is shown: anything else kept under the
+    // key reads as no key named.
+    if (kept === null) return undefined;
+    const known = keyboardKeys().some(([, k]) => k.label === kept) || mouseKeys().some((k) => k.label === kept);
+    return known ? kept : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function writeTalkKeyLabel(label: string): void {
+  try {
+    platform.credentials.writePreference(talkKeyLabelKey, label);
+  } catch {
+    // Storage can be unavailable; the name lasts until the page reloads.
   }
 }
 

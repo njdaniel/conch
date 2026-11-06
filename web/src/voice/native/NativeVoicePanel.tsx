@@ -17,6 +17,7 @@ import { Roster } from '../VoicePanel';
 import { useVoiceNames } from '../useVoiceNames';
 import { usePresence } from './usePresence';
 import { useNativeVoice } from './useNativeVoice';
+import { TalkKeySetup } from './TalkKeySetup';
 
 // How long the duplicate-identity warning waits for a second Join.
 export const confirmWithin = 10_000;
@@ -84,6 +85,7 @@ export function NativeVoicePanel({
   channels,
   onUnauthorized,
   onOpen,
+  onBound,
 }: {
   readonly source: NativeVoice;
   // The talk key as the person knows it, when known.
@@ -96,9 +98,12 @@ export function NativeVoicePanel({
   readonly channels: readonly ChannelV0[];
   readonly onUnauthorized: () => void;
   readonly onOpen: (name: string) => void;
+  // The talk key's name once the setup saved it.
+  readonly onBound?: (label: string) => void;
 }) {
   const { view, words, actions } = useNativeVoice(source, binding);
   const session = hasSession(view);
+  const [setup, setSetup] = useState(false);
   const joined = session ? view.channel : null;
   const shown = joined ?? (signedIn ? channel : null);
   const snapshot = usePresence({ channel: shown, voiceAllowed, onUnauthorized });
@@ -264,7 +269,20 @@ export function NativeVoicePanel({
         {idle === null ? null : <p role="status" className="hint">{idle}</p>}
         {!session && warned !== null && warned === channel ? <p role="status" className="hint">{duplicateWarning}</p> : null}
         {!session && !unavailable && channel !== null && presence === null && idle === null ? <p className="hint">Checking whether voice is available.</p> : null}
+        {unavailable || source.keyDevices === undefined || setup ? null : (
+          <button type="button" className="more" onClick={() => { setSetup(true); }}>
+            {helper?.ptt === 'not_configured' || helper?.ptt === 'unavailable' || helper?.ptt === 'lost' ? 'Set up the talk key' : 'Talk key'}
+          </button>
+        )}
       </div>
+      {setup ? (
+        <TalkKeySetup
+          source={source}
+          joined={session}
+          onSaved={(label) => { onBound?.(label); }}
+          onClose={() => { setSetup(false); }}
+        />
+      ) : null}
     </section>
   );
 }
