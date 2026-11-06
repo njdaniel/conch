@@ -22,7 +22,7 @@ import { isProfileId } from './profiles/ids.ts';
 import { MISMATCH, type ProfilesService } from './profiles/service.ts';
 import { parseFeedRequest, type Feeds } from './api/feeds.ts';
 import { targetOf, isOperationId } from './api/target.ts';
-import { invocable, type Service, type SignInStep } from './api/service.ts';
+import { invocable, type ReplaceStep, type Service, type SignInStep } from './api/service.ts';
 import { isFileId, parseUpload, MAX_UPLOAD_BYTES, type Files } from './files.ts';
 import { LINK_GESTURE_MS, type Gestures } from './gestures.ts';
 import type { DocumentGate } from './document.ts';
@@ -239,6 +239,20 @@ const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): 
   return own.length === keys.length && keys.every((key) => own.includes(key));
 };
 
+const REPLACE_STEPS: readonly ReplaceStep[] = ['changePassword', 'setPassword', 'convertGuest', 'reauth'];
+
+// parseReplace is exactly { operation, body }: an operation of the replacing
+// family and a body that passes that operation's request validator. A password
+// is data here, never echoed: a refusal names the reason, not the value.
+function parseReplace(args: readonly unknown[]): readonly unknown[] | null {
+  const [request] = args;
+  if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['operation', 'body'])) return null;
+  const { operation, body } = request;
+  if (typeof operation !== 'string' || !(REPLACE_STEPS as readonly string[]).includes(operation)) return null;
+  if (!isRecord(body) || operations[operation as ReplaceStep].request?.(body).length !== 0) return null;
+  return [{ operation, body }];
+}
+
 const oneBoolean = (args: readonly unknown[]): readonly unknown[] | null => (args.length === 1 && typeof args[0] === 'boolean' ? args : null);
 
 function parseJoin(args: readonly unknown[]): readonly unknown[] | null {
@@ -327,6 +341,22 @@ export const SPECS: Readonly<Record<InvokedFunction, Spec>> = {
   joinAsGuest: signIn('joinGuest'),
   createAccount: signIn('joinAccount'),
   signOut: { limit: 120, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.signOut() },
+  // The writes that replace the credential they are sent with (issue #1422):
+  // main sends the write, takes the new token from the answer and keeps it;
+  // the renderer is answered the account, never the token. Rated as the
+  // sign-in steps are, since each carries a password.
+  replaceCredential: {
+    limit: 30,
+    maxBytes: 16 * 1024,
+    parse: parseReplace,
+    run: async ({ service, profiles }, [request]) => {
+      if (!profiles.signInPermitted()) return INCOMPATIBLE;
+      const { operation, body } = request as { operation: ReplaceStep; body: Record<string, unknown> };
+      // bound keeps the rotated credential where the old one was kept (the
+      // vault, for a member's), or binds the member a guest has become.
+      return bound(profiles, await service.replaceCredential(operation, body));
+    },
+  },
   // The saved server profiles (issue #945). Ids are 32 hex characters; a
   // label is plain text of at most 64 characters (main trims and checks it).
   profiles: { limit: 120, maxBytes: 0, parse: none, run: ({ profiles }) => profiles.view() },

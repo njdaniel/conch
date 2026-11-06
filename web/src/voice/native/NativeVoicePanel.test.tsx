@@ -300,4 +300,14 @@ describe('NativeVoicePanel', () => {
       expect(fake.calls).toEqual([]);
     });
   });
+
+  it('names the talk key from the binding, else the fallback', async () => {
+    const named = new Fake(running({ ptt: 'ready' }));
+    const a = strip(named, 'general', 'Mouse 4');
+    expect(await screen.findByText(/hold Mouse 4 to talk/)).toBeTruthy();
+    a.unmount();
+    cleanup();
+    strip(new Fake(running({ ptt: 'ready' })));
+    expect(await screen.findByText(/hold your talk key to talk/)).toBeTruthy();
+  });
 });

@@ -52,6 +52,12 @@ export type SignInStep =
   | 'joinGuest'
   | 'joinAccount';
 
+// The writes that replace the credential they are sent with, by the bridge
+// function that carries them (replaceCredential). reauth gives no credential,
+// but carries a password and a code with the one in force, so it goes the same
+// way.
+export type ReplaceStep = 'changePassword' | 'setPassword' | 'convertGuest' | 'reauth';
+
 // Operations the renderer may invoke that still have their own bridge
 // function, so the generic request refuses them.
 const DEDICATED: ReadonlySet<OperationId> = new Set<OperationId>(['logout']);
@@ -72,7 +78,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 // strip removes every credential field of the operation from an answer, and
 // a field called token whatever the table says.
-function strip(step: SignInStep, body: unknown): Record<string, unknown> {
+function strip(step: SignInStep | ReplaceStep, body: unknown): Record<string, unknown> {
   if (!isRecord(body)) return {};
   const removed = new Set<string>(['token', ...(operations[step].credentials ?? [])]);
   return Object.fromEntries(Object.entries(body).filter(([key]) => !removed.has(key)));
@@ -266,6 +272,48 @@ export class Service {
     if ('outcome' in checked) {
       // The credential works or it does not; either way it is not kept.
       if (session.signedIn) {
+        const dropped = session.forget();
+        if (dropped !== null) await this.#revoke(capture.origin, dropped);
+      }
+      return checked.outcome;
+    }
+    return { ok: true, who: checked.who, answer: strip(step, answer) };
+  }
+
+  // The writes that replace the credential in force: a password change or
+  // first password (the session is rotated), a guest's conversion (the guest
+  // credential is revoked and the member's given) and a re-authentication (no
+  // credential; a proof). The request is already validated against the
+  // operation's request validator, and is sent and forgotten: nothing here
+  // keeps a password or logs one.
+  //
+  // The token the answer holds never leaves main. It is put in the place of
+  // the one the write was sent with (Session.rotate: the same identity, so a
+  // request in flight is not aborted), and the answer goes back without it.
+  async replaceCredential(step: ReplaceStep, request: Readonly<Record<string, unknown>>): Promise<SignInOutcome> {
+    const { session, client } = this.#deps;
+    const capture = session.capture();
+    if (capture.token === null) return { ok: false, kind: 'unauthorized', status: 401 };
+    const exchange = await client.send({ op: step, body: request, capture });
+    if (exchange.kind !== 'answer') return failed(exchange);
+    if (!exchange.ok) return failed(exchange);
+    const answer = exchange.body;
+    if (!isRecord(answer)) return { ok: false, kind: 'invalid', status: exchange.status };
+    const token = answer['token'];
+    if (token === undefined && step !== 'convertGuest') return { ok: true, who: null, answer: strip(step, answer) };
+    if (typeof token !== 'string' || token === '') return { ok: false, kind: 'invalid', status: exchange.status };
+    // The identity that asked has ended, or its credential was replaced
+    // meanwhile: the new credential has nobody here to hold it.
+    if (!session.current(capture) || !session.rotate(capture.token, token)) {
+      await this.#revoke(capture.origin, token);
+      return { ok: false, kind: 'network', reason: 'stale' };
+    }
+    // The rotated identity: a sign-in adopted while whoami runs is another
+    // one, and is not forgotten for this write's failure.
+    const rotated = session.capture();
+    const checked = await this.#whoami();
+    if ('outcome' in checked) {
+      if (session.current(rotated)) {
         const dropped = session.forget();
         if (dropped !== null) await this.#revoke(capture.origin, dropped);
       }

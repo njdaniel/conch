@@ -29,6 +29,7 @@ const named: Record<keyof ConchDesktopBridge | keyof DesktopVoiceBridge, true> =
   joinAsGuest: true,
   createAccount: true,
   signOut: true,
+  replaceCredential: true,
   profiles: true,
   profileAdd: true,
   profileRename: true,
@@ -79,7 +80,9 @@ describe('the preload', () => {
     expect(invoke).toHaveBeenLastCalledWith('conch:serverAddress');
     await bridge.signInWithPassword({ name: 'a', password: 'b' });
     expect(invoke).toHaveBeenLastCalledWith('conch:signInWithPassword', { name: 'a', password: 'b' });
-    expect(INVOKED_FUNCTIONS).toHaveLength(40);
+    await bridge.replaceCredential({ operation: 'changePassword', body: { current: 'a', password: 'b' } });
+    expect(invoke).toHaveBeenLastCalledWith('conch:replaceCredential', { operation: 'changePassword', body: { current: 'a', password: 'b' } });
+    expect(INVOKED_FUNCTIONS).toHaveLength(41);
   });
 
   it('rejects with a bare "refused" when main refuses, or answers anything but an envelope', async () => {

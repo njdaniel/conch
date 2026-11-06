@@ -13,7 +13,7 @@ import type { RedeemInviteGuestRequestV1, RedeemInviteRequestV2 } from '../../sc
 import type { RedeemSignInLinkRequestV1 } from '../../schema/signin';
 import { operations, type Call, type OperationId } from '../operations';
 import type { HttpTransport } from '../types';
-import type { BridgeReply, BridgeRequest, ConchDesktopBridge, NoAnswerReason, SignInOutcome } from './bridge';
+import type { BridgeReply, BridgeRequest, ConchDesktopBridge, NoAnswerReason, ReplaceCredentialRequest, SignInOutcome } from './bridge';
 import { bridge } from './access';
 import { holdHandle, isSessionToken, kept, STAND_IN } from './credentials';
 
@@ -118,6 +118,9 @@ const steps: Partial<Record<OperationId, Step>> = {
   joinAccount: (b, body: JoinAccountRequestV1) => b.createAccount(body),
 };
 
+const replacing: ReadonlySet<OperationId> = new Set<OperationId>(['changePassword', 'setPassword', 'convertGuest', 'reauth']);
+const isReplacing = (id: OperationId): id is ReplaceCredentialRequest['operation'] => replacing.has(id);
+
 // withSignal ends a wait when the caller's signal does, as fetch's rejection.
 function withSignal<T>(wait: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
   if (signal === undefined) return wait;
@@ -184,6 +187,14 @@ export const http: HttpTransport = {
       const ended = await withSignal(b.signOut(), signal);
       if (ended === 'unsent') return noAnswer();
       return ended === 'ended' ? jsonResponse(204, undefined) : jsonResponse(502, { code: 'unconfirmed', message: 'The server did not confirm.' });
+    }
+    // The writes that replace the credential they are sent with go to main's
+    // one function for them: it sends the write, keeps the new bearer and
+    // answers the account, so the answer's token is the stand-in again.
+    if (isReplacing(call.op)) {
+      const check = operations[call.op].request;
+      if (check === undefined || check(body).length > 0) return noAnswer();
+      return withSignal(b.replaceCredential({ operation: call.op, body } as ReplaceCredentialRequest).then((outcome) => fromOutcome(call.op, outcome)), signal);
     }
     // An operation whose answer holds a credential, a ticket or the person's
     // voice grant is main's alone: the client does not get to ask.

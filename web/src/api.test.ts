@@ -40,10 +40,12 @@ import {
   signOut,
   setPassword,
   signOutEverywhere,
+  readTalkKeyLabel,
   readVoiceMode,
   stopVoiceShare,
   uploadFile,
   whoAmI,
+  writeTalkKeyLabel,
   writeVoiceMode,
 } from './api';
 
@@ -1655,6 +1657,25 @@ describe('the voice mode kept in the browser', () => {
     expect(readVoiceMode()).toBeNull();
     expect(() => { writeVoiceMode('ptt'); }).not.toThrow();
     vi.restoreAllMocks();
+  });
+});
+
+// The talk key's name is shown in the voice status (issue #1382). Only a
+// label from the key table is ever read back.
+describe('the talk key name kept for the voice status', () => {
+  it('reads a label from the key table back', () => {
+    expect(readTalkKeyLabel()).toBeUndefined();
+    writeTalkKeyLabel('F13');
+    expect(readTalkKeyLabel()).toBe('F13');
+    writeTalkKeyLabel('Mouse 4');
+    expect(readTalkKeyLabel()).toBe('Mouse 4');
+  });
+
+  it('reads anything else as no key named', () => {
+    writeTalkKeyLabel('press here to win');
+    expect(readTalkKeyLabel()).toBeUndefined();
+    writeTalkKeyLabel('');
+    expect(readTalkKeyLabel()).toBeUndefined();
   });
 });
 

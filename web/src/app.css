@@ -4890,3 +4890,26 @@ button.link {
   display: grid;
   gap: var(--s2);
 }
+
+/* The talk-key setup (issue #1382). */
+.talk-setup {
+  display: grid;
+  gap: var(--s2);
+  margin-top: var(--s2);
+  padding: var(--s2);
+  border: 1px solid var(--border, currentcolor);
+  border-radius: 0.4rem;
+}
+
+.talk-setup h3 {
+  margin: 0;
+  font-size: var(--small);
+}
+
+.talk-rule-line {
+  margin: 0;
+  padding: var(--s1);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
