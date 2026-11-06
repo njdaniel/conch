@@ -1,6 +1,6 @@
 # Design: the phone app (Mobile M1, issue #1106)
 
-- **Status:** Proposed, 2026-11-01. Nothing in this note is accepted. Stack selection, every new dependency, any wire shape and the ADR itself are Nick's decisions (ADR-000); §0 lists each one. The proposed ADR is [ADR-016](../adr/ADR-016-mobile-app.md), status Proposed.
+- **Status:** Accepted with ADR-016, 2026-11-05 (Nick, on #1106: "accept ADR-016 as recommended, include the phone camera"): §0's decisions as recommended, with M1-9 amended so the phone camera is in scope. Proposed 2026-11-01; the text below is otherwise as proposed. Stack selection, every new dependency, any wire shape and the ADR itself are Nick's decisions (ADR-000); §0 lists each one. The proposed ADR is [ADR-016](../adr/ADR-016-mobile-app.md), status Proposed.
 - **Issues:** parent [#757](https://github.com/njdaniel/conch/issues/757); this note is M1 (#1106). Beside it: M2 (#1107, `docs/design/mobile-app-ux.md` and the mockups) and M3 (#1108, `docs/design/mobile-notifications.md`), written in parallel; where this note touches their ground it points at them and decides nothing for them. After it: M4 (#1109, Android) and M5 (#1110, iPhone), the real-device experiments, then M6 (#1111), the stack decision.
 - **Baseline inspected:** main at `7472b65c2756530370e28a547817e46afbffdb92` (2026-11-01). The issue named `ebc66c6`, which is itself the merge of #1099; one merge (#1097) landed after it before dispatch, not touching the files below. Every claim about current code names a file at this commit; §1 separates what is merged from what the community model (ADR-013) still plans.
 - **Governed by:** [ADR-000](../adr/ADR-000-charter.md), [ADR-001](../adr/ADR-001-mcp-native-architecture.md) (parity), [ADR-004](../adr/ADR-004-voice-via-livekit.md), [ADR-007](../adr/ADR-007-client-interfaces.md), [ADR-008](../adr/ADR-008-private-communications-alpha.md), [ADR-013](../adr/ADR-013-one-community-model.md) with [community-model.md](community-model.md), [ADR-014](../adr/ADR-014-fixed-roles-configurable-permissions.md), [ADR-015](../adr/ADR-015-webcam-video.md); the voice contracts [voice-control-plane.md](voice-control-plane.md) and [conch-voice.md](conch-voice.md); the desktop designs [linux-desktop.md](linux-desktop.md) and [windows-desktop.md](windows-desktop.md), whose media-ownership evidence this note reuses; the phone browser layout [mobile-browser-layout.md](mobile-browser-layout.md).
@@ -21,7 +21,7 @@ A member opens an invite on their phone, confirms which server it names, signs i
 | M1-6 | OS floors (§5) | Android 12 (API 31) and iOS 16.4 as the experiment floors; supported combinations are only the ones M4, M5 and the alpha records test | the floors |
 | M1-7 | Push (§6) | Optional, as #757 says; the design is M3's; this note fixes only what the app must do without it | nothing here; M3 brings its own list |
 | M1-8 | Distribution for the experiments (§7.3) | Android: a locally built APK installed by hand; iOS: a development build signed with free provisioning (7-day profiles) on one phone, or a TestFlight build if Nick holds the Apple Developer Program; no store listing, no tester invitation, nothing public | whether to pay for the Apple Developer Program now (99 USD a year) or run M5 on free provisioning |
-| M1-9 | Scope line (§8) | Out: phone screen broadcasting, camera, background or hardware PTT, DMs, administration beyond what the API already gives every member, SSO, guests, approval decisions on the phone (ADR-000 D7 stands) | confirm the line |
+| M1-9 | Scope line (§8) | Out: phone screen broadcasting, background or hardware PTT, DMs, administration beyond what the API already gives every member, SSO, guests, approval decisions on the phone (ADR-000 D7 stands). **Amended on acceptance: the camera is in** | accepted with that amendment (Nick, 2026-11-05) |
 
 ## 1. Inventory of current main
 
@@ -98,7 +98,7 @@ The `Platform` seam in `web/src/platform/types.ts` (`HttpTransport`, `SocketTran
 | `GET /v1/channels` lists the member's channels; `POST /v0/channels` is operator-only | I3a creation and settings, I3b directory, join, leave, I4 member directory | first phone Channels view is "my channels"; a directory tab follows the slices, as it does in the browser (I9b) |
 | `voice_allowed` on `whoami`; entitlement re-read in `voiceStillEntitled`; companion route and poller folding (#932, #933) | I5 `PUT …/voice-permission` | nothing to add on the phone beyond honouring loss (§3.5) |
 | Guests refused everywhere (#1005) | #1004, guests later | no guest entry point on the phone, by #757's rule and by the server |
-| Camera claim routes and `use_camera` (ADR-015, A-slices in flight) | — | out of the phone's scope (§8); the phone **receives** cameras in the Voice view only if and when M13's viewing work takes it, which this note does not promise |
+| Camera claim routes and `use_camera` (ADR-015, amended by #1361) | — | **in the phone's scope** (ADR-016 Decision 10 as amended on acceptance, 2026-11-05): the phone claims its own camera and receives the room's, through these routes unchanged |
 
 ## 2. The stack: four options compared
 
@@ -306,7 +306,7 @@ Beyond their own acceptance criteria (#1109, #1110), each must return, per OS an
 
 Security review precedes the merge of M7 (sign-in, profiles, keystore), M11/M12 (push) and M9/M10 (production voice lifecycle), as CLAUDE.md requires for authn/authz and tokens. M4 and M5 add no authn code of their own (they use the API as the browser does) but carry a review for the credential handling in the spike.
 
-**Out of scope in this phase, by #757 and this note** (the same list as ADR-016 Decision 10 and M1-9): phone screen broadcasting; the camera (ADR-015 is browser and desktop); global, background or hardware push-to-talk; DMs; administration beyond what every member already has; SSO; guests; store submission; approval decisions.
+**Out of scope in this phase, by #757 and this note** (the same list as ADR-016 Decision 10 and M1-9): phone screen broadcasting; global, background or hardware push-to-talk; DMs; administration beyond what every member already has; SSO; guests; store submission; approval decisions. **The phone camera is in scope** (Nick, 2026-11-05, on accepting ADR-016): it follows ADR-015, and M4 and M5 measure its lifecycle beside the microphone's.
 
 ## 9. Where it goes in the repository, later
 
