@@ -308,6 +308,9 @@ export class VoiceService {
     await this.stopBounded(true);
     this.channel = null;
     this.override = null;
+    // Nothing left to retry: a later lost or ended state must not rejoin the
+    // channel left (security review of #1374).
+    this.last = null;
     return this.state();
   }
 

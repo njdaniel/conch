@@ -836,7 +836,9 @@ export function validChannel(channel: string): boolean {
   );
 }
 
-function validDeviceName(name: string): boolean {
+// validDeviceName is the device-name rule the encoder applies; the IPC layer
+// uses it too, so an invalid name never enters the service's state.
+export function validDeviceName(name: string): boolean {
   return (
     name !== '' &&
     Buffer.byteLength(name, 'utf8') <= VOICE_DEVICES_MAX_NAME_BYTES &&
