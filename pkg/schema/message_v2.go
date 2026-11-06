@@ -212,6 +212,15 @@ type MessageV2 struct {
 	// current text with no marker. A frame carrying it on a message socket
 	// is an update of a message already sent, not a new message.
 	EditedAt *Timestamp `json:"edited_at,omitempty"`
+	// Removed is true for a message a moderator removed (moderation.md §7):
+	// the tombstone. Body is then MessageRemovedBody; payload, attachments
+	// and edited_at are omitted; id, channel, author, guest_author, audience,
+	// thread_root_id and created_at stay, so position and attribution hold.
+	// Omitted when false. Additive: a client that predates it renders the
+	// fixed body. A frame carrying it on a socket is an update of a message
+	// already sent, never a new message; a removed copy is never replaced by
+	// one that is not.
+	Removed bool `json:"removed,omitempty"`
 }
 
 // Validate reports whether the envelope is structurally well-formed. It
@@ -219,8 +228,11 @@ type MessageV2 struct {
 // present audience to be well-formed and, for a principals audience, in the
 // normalized read-back form: sorted ascending, distinct, including the
 // author, and including at least one other principal. A present edited_at
-// must be strictly after created_at. Unknown payload schemas are tolerated by design (forward
-// compatibility); unknown audience kinds are not (fail closed).
+// must be strictly after created_at. A removed message carries
+// MessageRemovedBody and no payload or edited_at; a message that is not
+// removed may say anything, that sentence included. Unknown payload schemas
+// are tolerated by design (forward compatibility); unknown audience kinds are
+// not (fail closed).
 func (m MessageV2) Validate() error {
 	if m.Schema != MessageSchemaV2 {
 		return fmt.Errorf("schema: message schema must be %q, got %q", MessageSchemaV2, m.Schema)
@@ -262,6 +274,17 @@ func (m MessageV2) Validate() error {
 	if m.EditedAt != nil && !m.EditedAt.Time().After(m.CreatedAt.Time()) {
 		return errors.New("schema: message edited_at must be after created_at")
 	}
+	if m.Removed {
+		if m.Body != MessageRemovedBody {
+			return fmt.Errorf("schema: removed message body must be %q", MessageRemovedBody)
+		}
+		if m.Payload != nil {
+			return errors.New("schema: removed message must not carry a payload")
+		}
+		if m.EditedAt != nil {
+			return errors.New("schema: removed message must not carry edited_at")
+		}
+	}
 	return nil
 }
 
@@ -285,7 +308,9 @@ func MessageV2FromV1(m MessageV1) MessageV2 {
 // through v1 would present a whisper as an open message. Callers serving v1
 // readers must therefore drop scoped messages rather than downgrade them.
 // EditedAt has no v1 form and is dropped: a v1 reader gets the current body
-// without the edited marker (docs/design/message-editing.md §6.3).
+// without the edited marker (docs/design/message-editing.md §6.3). Removed is
+// dropped the same way: a v1 reader gets MessageRemovedBody with no marker
+// (docs/design/moderation.md §7.3).
 func MessageV1FromV2(m MessageV2) (MessageV1, error) {
 	if m.Audience != nil {
 		return MessageV1{}, errors.New("schema: a scoped message has no v1 form")

@@ -83,7 +83,7 @@ function harness() {
         profileId: p?.id ?? null,
         token: () => session.capture().token,
         voiceCredential: () => session.voiceCredential(),
-        voiceCurrent: () => session.signedIn,
+        voiceCurrent: (generation) => session.generation === generation,
         whoami: () => Promise.resolve(null),
         signOut: () => service.signOut(),
         endSockets: () => {

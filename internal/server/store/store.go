@@ -1024,6 +1024,36 @@ BEGIN SELECT RAISE(ABORT, 'a default channel must be public'); END`,
 	// (issue #1361), and a server that existed before keeps it off. No SQL:
 	// pinCameraOff stores the old value where no cell was stored.
 	{},
+	// 45: Channel moderation (issue #849, docs/design/moderation.md §6 and
+	// §7, signed off 2026-11-05). channel_bans keeps a principal out of a
+	// channel, keyed by id so a rename, conversion or hide does not lift it;
+	// no name is stored, the list reads the principal's current one.
+	// message_removals marks a message removed: the messages row is never
+	// touched (migration 38's messages_only_body_changes stays as it is) and
+	// the tombstone is projected on read. Both are append-only in meaning;
+	// the triggers make "no unremove" a database fact, as message revisions
+	// are append-only. created_by and removed_by are NULL for a write with
+	// authentication off (the system actor), as credentials.issued_by is.
+	// Nothing is backfilled; no published field changes meaning.
+	{
+		`CREATE TABLE channel_bans (
+	channel_id   INTEGER NOT NULL REFERENCES channels (id),
+	principal_id INTEGER NOT NULL REFERENCES principals (id),
+	created_by   INTEGER REFERENCES principals (id),
+	created_at   INTEGER NOT NULL,
+	PRIMARY KEY (channel_id, principal_id)
+)`,
+		`CREATE TABLE message_removals (
+	message_id INTEGER PRIMARY KEY REFERENCES messages (id),
+	channel_id INTEGER NOT NULL REFERENCES channels (id),
+	removed_by INTEGER REFERENCES principals (id),
+	removed_at INTEGER NOT NULL
+)`,
+		`CREATE TRIGGER message_removals_no_update BEFORE UPDATE ON message_removals
+BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
+		`CREATE TRIGGER message_removals_no_delete BEFORE DELETE ON message_removals
+BEGIN SELECT RAISE(ABORT, 'message removals are permanent'); END`,
+	},
 }
 
 // migrationSteps holds Go code that runs inside a migration's transaction

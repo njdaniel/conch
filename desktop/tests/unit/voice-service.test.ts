@@ -18,6 +18,9 @@ class FakeSupervisor implements VoiceSupervisor {
   readonly calls: string[] = [];
   next: VoiceState = { status: 'running', generation: 1, helper: helper() };
   gate: Promise<void> | null = null;
+  // Blocks start before it records anything or publishes starting.
+  preGate: Promise<void> | null = null;
+  entered = 0;
   hangStop = false;
   private listeners = new Set<(s: VoiceState) => void>();
   ack: CommandResult = { ok: true };
@@ -31,6 +34,8 @@ class FakeSupervisor implements VoiceSupervisor {
     return () => this.listeners.delete(l);
   }
   async start(req: StartRequest): Promise<VoiceState> {
+    this.entered++;
+    if (this.preGate !== null) await this.preGate;
     this.starts.push(req);
     this.set({ status: 'starting', generation: 1 });
     if (this.gate !== null) await this.gate;
@@ -317,6 +322,49 @@ describe('teardown and the generation fence', () => {
     release();
     expect((await p).status).toBe('idle');
     expect(fake.calls.filter((c) => c === 'stop').length).toBe(2);
+  });
+});
+
+describe('a join still inside Supervisor.start', () => {
+  it('teardown waits for it to be stopped, and state() shows nothing of it meanwhile', async () => {
+    let release: () => void = () => undefined;
+    fake.preGate = new Promise((r) => {
+      release = r;
+    });
+    const p = join('secret-room');
+    await until(() => fake.entered === 1, 1000, 'the start');
+    expect(fake.starts).toEqual([]);
+    let done = false;
+    const t = svc.teardown().then(() => {
+      done = true;
+    });
+    // The switch goes on: the identity is overtaken while the start is blocked.
+    id.live = false;
+    await new Promise((r) => setTimeout(r, 50));
+    expect(done).toBe(false);
+    expect(svc.state()).toMatchObject({ status: 'idle', channel: null });
+    release();
+    await t;
+    await p;
+    // The start went through, was seen to be overtaken, and was stopped before teardown resolved.
+    expect(fake.starts.length).toBe(1);
+    expect(fake.calls.filter((c) => c === 'stop').length).toBe(2);
+    expect(svc.state().status).toBe('idle');
+  });
+
+  it('with a start that never returns, teardown still resolves within the bound', async () => {
+    vi.useFakeTimers();
+    fake.preGate = new Promise(() => undefined);
+    void join();
+    await vi.advanceTimersByTimeAsync(10);
+    let done = false;
+    void svc.teardown().then(() => {
+      done = true;
+    });
+    await vi.advanceTimersByTimeAsync(150);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(done).toBe(true);
   });
 });
 

@@ -142,6 +142,9 @@ var TSTypes = []TSType{
 	{Value: ChannelMembersV1{}, Family: "channel-members-v1", Schema: ChannelMembersSchemaV1},
 	{Value: PutChannelMemberRequestV1{}, Family: "put-channel-member-request-v1"},
 	{Value: AddChannelMemberRequestV1{}, Family: "add-channel-member-request-v1"},
+	// The channel's ban list (issue #849, docs/design/moderation.md §6).
+	{Value: ChannelBanV1{}, Family: "channel-ban-v1"},
+	{Value: ListChannelBansResponseV1{}, Family: "list-channel-bans-response-v1"},
 
 	// Messages, and the ticket that opens the socket that streams them.
 	{Value: Payload{}},
@@ -158,6 +161,9 @@ var TSTypes = []TSType{
 	{Value: MessageRevisionV1{}, Family: "message-revision-v1"},
 	{Value: ListMessageRevisionsResponseV1{}, Family: "list-message-revisions-response-v1"},
 	{Value: MessageEditedV1{}, Family: "message-edited-v1", Schema: MessageEditedSchemaV1},
+	// A moderator removes a message (issue #849); the events socket says so
+	// with a frame of its own, carrying the tombstone.
+	{Value: MessageRemovedV1{}, Family: "message-removed-v1", Schema: MessageRemovedSchemaV1},
 
 	// An approval, as a message carries it in its payload.
 	{Value: Option{}, Family: "approval-option-v1"},

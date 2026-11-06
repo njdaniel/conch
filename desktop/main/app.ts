@@ -213,12 +213,21 @@ export async function start(): Promise<void> {
       } catch {
         return null;
       }
+      // The session generation the credential was read under: the fence
+      // compares to it, so a sign-in inside this activation (before the join)
+      // is fine and a sign-out or 401 after it trips.
+      let read = -1;
       return {
         profileId: id,
         configDir: join(root, 'profiles', id),
         principalId: principal.id,
-        credential: () => activation.voiceCredential(),
-        current: () => profiles.active === activation && activation.voiceCurrent(),
+        credential: () => {
+          const c = activation.voiceCredential();
+          if (c === null) return null;
+          read = c.generation;
+          return { origin: c.origin, token: c.token };
+        },
+        current: () => profiles.active === activation && activation.voiceCurrent(read),
       };
     },
     log,
