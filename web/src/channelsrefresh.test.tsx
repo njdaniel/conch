@@ -262,13 +262,25 @@ describe('the list follows the server', () => {
     render(<App origin={origin} />);
     await screen.findByText(/No channels yet/);
     expect(server.listGets).toBe(1);
-    // Another part of the page may keep a 30 s timer of its own: all are run.
-    expect(timers.length).toBeGreaterThan(0);
+    // Another part of the page keeps a 30 s timer of its own, and the list's
+    // timer is set by an effect that can run after "No channels yet" shows: on
+    // a loaded runner a snapshot taken now may hold only the other one (#1427).
+    // Each timer is run once, as it appears, until the list is read again.
     server.channels = [general];
-    await act(async () => {
-      for (const timer of timers) timer.run();
-      await Promise.resolve();
-    });
+    const ran = new Set<{ run: () => void; ms: number }>();
+    await waitFor(
+      () => {
+        for (const timer of timers) {
+          if (ran.has(timer)) continue;
+          ran.add(timer);
+          act(() => {
+            timer.run();
+          });
+        }
+        expect(server.listGets).toBe(2);
+      },
+      { timeout: 5000 },
+    );
     await screen.findByRole('button', { name: 'general' }, { timeout: 5000 });
     expect(screen.getByRole('button', { name: 'general' }).getAttribute('aria-current')).toBe('true');
     expect(server.listGets).toBe(2);
