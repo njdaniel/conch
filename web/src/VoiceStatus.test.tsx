@@ -20,6 +20,8 @@ const nv: NativeVoice = {
   setDeafen: () => Promise.resolve({ ok: true }),
   setDevices: () => Promise.resolve({ ok: true }),
   setTalkMode: () => Promise.resolve({ ok: true }),
+  devices: () => Promise.resolve({ ok: false, error: 'unsupported' }),
+  saveDevice: () => Promise.resolve({ ok: true }),
 };
 
 function strip() {
