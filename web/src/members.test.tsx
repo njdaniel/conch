@@ -577,3 +577,26 @@ describe('a person changing presence keeps their open menu and question (issue #
     expect(within(row('avery')).queryByRole('group')).not.toBeNull();
   });
 });
+
+describe('a removed person does not get their menu or question back (issue #1450)', () => {
+  it.each(['Remove from channel', 'Ban from channel'])('%s: closed after the person leaves and returns', (item) => {
+    const p = props('operator');
+    const without = { ...p, members: memberList.filter((m) => m.principal_id !== 3) };
+    const view = render(<Members {...p} people={people} />);
+    choose('avery', item);
+    view.rerender(<Members {...without} people={people.filter((e) => e.id !== 3)} />);
+    view.rerender(<Members {...p} people={people} />);
+    expect(within(row('avery')).queryByRole('group')).toBeNull();
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('an open menu is closed after the person leaves and returns', () => {
+    const p = props('operator');
+    const without = { ...p, members: memberList.filter((m) => m.principal_id !== 3) };
+    const view = render(<Members {...p} people={people} />);
+    openMenu('avery');
+    view.rerender(<Members {...without} people={people.filter((e) => e.id !== 3)} />);
+    view.rerender(<Members {...p} people={people} />);
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+});

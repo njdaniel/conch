@@ -401,6 +401,18 @@ export function Members({ people, ...controls }: MemberControlsProps & { readonl
       return { channel: controls.channel.id, byId: { ...base, [id]: { ...(base[id] ?? noUi), ...patch } } };
     });
   };
+  // A person who leaves the channel takes their open menu and question with
+  // them, so they do not return if the person is added again; presence
+  // changes keep them. A channel that goes away drops its whole map.
+  const present = people.map((p) => p.id).join(',') + '|' + controls.members.map((m) => m.principal_id).join(',');
+  useEffect(() => {
+    const here = new Set<number>([...people.map((p) => p.id), ...controls.members.map((m) => m.principal_id)]);
+    setRowUis((cur) => {
+      if (cur.channel !== controls.channel.id) return { channel: controls.channel.id, byId: {} };
+      const keep = Object.entries(cur.byId).filter(([id]) => here.has(Number(id)));
+      return keep.length === Object.keys(cur.byId).length ? cur : { channel: cur.channel, byId: Object.fromEntries(keep) };
+    });
+  }, [present, controls.channel.id]);
   const operator = !controls.viewer.guest && ((controls.viewer.role === 'operator' && controls.viewer.owner === true) || (controls.viewer.permissions === undefined ? controls.viewer.role === 'operator' : controls.viewer.permissions.includes('manage_channels')));
   const manager = !operator && !controls.viewer.guest && controls.channel.manages === true;
   const canAdd = operator || manager;
