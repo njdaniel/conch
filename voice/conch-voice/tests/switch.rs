@@ -247,7 +247,7 @@ async fn a_switch_during_a_press_ends_it_and_nothing_is_sent_until_a_new_press()
 /// is sent though the key is still held, the transmission has its one `stopped` once the
 /// answer comes, and the answer opens nothing, since no press waits for it any more.
 #[tokio::test]
-async fn a_switch_while_a_press_waits_for_its_started_answer_ends_it_before_the_track_opens() {
+async fn a_switch_while_a_started_is_unanswered_ends_the_press_and_the_answer_opens_nothing() {
     let log = Log::default();
     let mut timings = support::quick();
     // Long enough that the press is still waiting when the switch comes.
@@ -275,6 +275,7 @@ async fn a_switch_while_a_press_waits_for_its_started_answer_ends_it_before_the_
     rig.not_talking().await;
     rig.ready().await;
     several_frames().await;
+    let sent = rig.sdk.frames();
     // The answer comes after the press was ended: it opens nothing.
     answer.notify_one();
     rig.reported(2).await;
@@ -283,23 +284,33 @@ async fn a_switch_while_a_press_waits_for_its_started_answer_ends_it_before_the_
     assert_eq!(rig.conchd.reported(), ["started", "stopped"], "one stopped");
     assert_eq!(
         rig.sdk.frames(),
-        0,
-        "nothing was sent, though the key is held"
+        sent,
+        "nothing was sent after the switch, though the key is held"
     );
     assert_eq!(rig.sdk.frames_while_muted(), 0);
-    assert!(
-        !rig.sdk.calls().contains(&Call::Unmute),
-        "the track was never unmuted: {:?}",
+    assert_eq!(
+        rig.sdk
+            .calls()
+            .iter()
+            .filter(|c| **c == Call::Unmute)
+            .count(),
+        1,
+        "the track was unmuted by the press alone: {:?}",
         rig.sdk.calls()
     );
     assert!(rig.sdk.is_muted());
 
     // A fresh press sends, from the new microphone.
+    let sent_before = usize::try_from(rig.sdk.frames()).unwrap();
     rig.line(Up);
     rig.line(Down);
     rig.talking().await;
     rig.frames_beyond(3).await;
-    assert!(levels_sent(&rig, 0).iter().all(|level| *level == USB_LEVEL));
+    assert!(
+        levels_sent(&rig, sent_before)
+            .iter()
+            .all(|level| *level == USB_LEVEL)
+    );
     assert_frames_only_while_unmuted(&rig.sdk.calls());
 }
 

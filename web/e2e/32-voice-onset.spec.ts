@@ -15,7 +15,8 @@
 // less that latency; "kept after the key" is how long sound goes on after
 // the key is let go, less the latency. The figures go into the test's
 // annotations and its output; the assertions hold only what issue #965
-// fixed, with room for the measurement's own noise (about 20 ms).
+// fixed (and issue #970's: a press opens at once, so reports held back do
+// not cost speech), with room for the measurement's own noise (about 20 ms).
 //
 // Without Docker it fails when CI is set and is skipped otherwise.
 import type { Page } from '@playwright/test';
@@ -258,7 +259,7 @@ test.describe('speech kept at the edges of a transmission', () => {
       };
       const fast = await pttBatch(5);
       // Again with every transmit report held back 150 ms on its way to
-      // conchd, as on a slow link: the press waits for its answer.
+      // conchd, as on a slow link: the press does not wait for its answer.
       await talker.route('**/voice/transmit', async (route) => {
         await sleep(150);
         await route.continue();
@@ -326,6 +327,11 @@ test.describe('speech kept at the edges of a transmission', () => {
       // about 20 ms of the audio now; before, with reports held back 150 ms,
       // it was said 133 to 173 ms early.
       expect(median(slow.indicatorAhead), 'ms the indicator was ahead of the audio, reports slow').toBeLessThan(80);
+      // The press opens at once and reports in parallel (issue #970): with
+      // reports held back 150 ms the start loss is still within about 30 ms
+      // of the path's latency (the measurement's own noise is about 20 ms);
+      // before, it was the held-back 134 to 174 ms.
+      expect(median(slow.lost), 'ms of speech lost at the start of a press, beyond the path, reports slow').toBeLessThanOrEqual(30);
       await tv.getByRole('button', { name: 'Leave voice' }).click();
       await voiceRegion(listener).getByRole('button', { name: 'Leave voice' }).click();
     } finally {

@@ -290,19 +290,19 @@ test.describe('with LiveKit', () => {
     }
   });
 
-  // Issue #495: conchd's poller compares the microphone it sees with the
-  // reports. With each report held back 500 ms on its way to conchd, a page
-  // that opened its track before its report was answered was seen transmitting
-  // unreported; it opens it only after. The delay stays comfortably inside the
-  // client's 1 s reportWait: past that bound audio deliberately opens anyway,
-  // and the late report is audited as unreported. A 700 ms delay left too
-  // little room for scheduling under load and accidentally tested that case.
+  // Issue #970 (before it, #495): a press opens its track at once and reports
+  // in parallel, so with each report held back 500 ms on its way to conchd the
+  // poller may see the microphone before the report. A press is then audited
+  // as its reported pair, and at most one `voice_transmit_unreported` row,
+  // closed `reason=reported` once the report lands (or `reason=muted`, when
+  // no pass fell between the report and the release): truthful, and nothing
+  // else. (conch-voice.md section 6, "Client side".)
   //
   // Carol is in no other test of this world, and the press waits until conchd
   // has seen her join: a press made before the poller has noticed a new
   // connection is a different case (the next test's), and is not what this
   // test is about.
-  test('a push-to-talk whose reports are slow is still audited as only the reported pair', async ({ browser }) => {
+test('a push-to-talk whose reports are slow is audited as the reported pair and at most one unreported row closed as reported', async ({ browser }) => {
     const c = await person(browser, 'carol');
     try {
       await c.page.route('**/voice/transmit', async (route) => {
@@ -315,23 +315,42 @@ test.describe('with LiveKit', () => {
       await expect(voice).toContainText(/Connected in #voice-room/, { timeout: 30_000 });
       await chooseMicrophone(voice, 'push to talk');
       await expect.poll(async () => (await vw.audit()).some((e) => e.actor === actor && e.action === 'voice_joined'), { timeout: 15_000 }).toBe(true);
-      const transmits = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit')).map((e) => e.action);
+      const rows = async () => (await vw.audit()).filter((e) => e.actor === actor && e.action.startsWith('voice_transmit'));
+      const reportedOf = async (action: string) => (await rows()).filter((e) => e.action === action && e.detail.includes('source=reported')).length;
+      const unreported = async () => (await rows()).filter((e) => e.action === 'voice_transmit_unreported').length;
       // Five presses, each followed by its two reports. Two passes inside one
       // held-back report are likely but far from certain, so with fewer
-      // presses the old order passed too often.
-      const pair = ['voice_transmit_started', 'voice_transmit_stopped'];
+      // presses a wrong order passed too often.
       await c.page.getByRole('heading', { name: 'Conch' }).click();
+      let seen = 0;
       for (let i = 1; i <= 5; i++) {
         await c.page.keyboard.down('Backquote');
         await expect(voice).toContainText('Transmitting');
         await new Promise((r) => setTimeout(r, 1200));
         await c.page.keyboard.up('Backquote');
         await expect(voice).toContainText('Not transmitting');
-        await expect.poll(transmits, { timeout: 15_000 }).toEqual(Array<string[]>(i).fill(pair).flat());
+        await expect.poll(async () => (await reportedOf('voice_transmit_started')) + (await reportedOf('voice_transmit_stopped')), { timeout: 15_000 }).toBe(2 * i);
+        // Let anything the poller writes for this press land, then count.
+        await new Promise((r) => setTimeout(r, 3000));
+        const now = await unreported();
+        expect(now - seen, `unreported rows written for press ${String(i)}`).toBeLessThanOrEqual(1);
+        seen = now;
       }
-      // Nothing the poller writes later, either.
-      await new Promise((r) => setTimeout(r, 3000));
-      expect(await transmits()).toEqual(Array<string[]>(5).fill(pair).flat());
+      const all = await rows();
+      // Only the reported pairs, the unreported rows and their closing rows.
+      for (const e of all) {
+        const reported = e.detail.includes('source=reported');
+        // Closed `reported` when a pass falls between the report and the
+        // release, else `muted` at the first pass after it (the first that
+        // applies, in that order: voice-control-plane.md section 7).
+        const closedLate = e.action === 'voice_transmit_stopped' && e.detail.includes('source=observed') && /reason=(reported|muted)/.test(e.detail);
+        expect(reported || e.action === 'voice_transmit_unreported' || closedLate, `unexpected row ${e.action} ${e.detail}`).toBe(true);
+      }
+      expect(all.filter((e) => e.action === 'voice_transmit_started')).toHaveLength(5);
+      // Every unreported row is closed, none left open.
+      await expect
+        .poll(async () => (await rows()).filter((e) => e.action === 'voice_transmit_stopped' && e.detail.includes('source=observed')).length, { timeout: 10_000 })
+        .toBe(seen);
       await voice.getByRole('button', { name: 'Leave voice' }).click();
       await expect(voice).toContainText('Not in voice', { timeout: 10_000 });
     } finally {
@@ -566,7 +585,7 @@ test.describe('with LiveKit', () => {
       await page.keyboard.up('Enter');
       await expect(heard).not.toContainText('alice (transmitting)', { timeout: 15_000 });
       await expect.poll(async () => (await transmits()).slice(before), { timeout: 15_000 }).toEqual(Array<string[]>(3).fill(pair).flat());
-      expect((await vw.audit()).filter((e) => e.action === 'voice_transmit_unreported')).toEqual([]);
+      expect((await vw.audit()).filter((e) => e.actor === actor && e.action === 'voice_transmit_unreported')).toEqual([]);
 
       // Escape is not a way out of voice (UX-21).
       await page.keyboard.press('Escape');
