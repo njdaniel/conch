@@ -10,7 +10,7 @@ import { call, ok, type World } from './world';
 import { dockerAvailable, startVoiceWorld } from './voice-world';
 
 let serial = 0;
-const unique = (label: string) => `m1440-${label}-${Date.now().toString(36)}-${String(++serial)}`;
+const unique = (label: string) => `m1440-${label}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}-${String(++serial)}`;
 const panel = (page: Page) => page.getByRole('region', { name: 'Members list' });
 const personRow = (page: Page, name: string) => panel(page).locator('li').filter({ has: page.locator('.ag-name').getByText(name, { exact: true }) });
 const messageRow = (page: Page, id: number) => page.getByRole('log', { name: 'Messages' }).locator(`[data-message-id="${String(id)}"]`).first();
@@ -77,6 +77,9 @@ test('manager confirms membership removal, ban and own unban; a plain member has
   await expect(row).toBeVisible();
   await targetPage.reload(); await openChannel(targetPage, channel);
   await expect(messageRow(targetPage, beforeRemoval.id)).toContainText(beforeRemoval.body);
+  // The reloaded target's session makes the manager's row move from Offline to Online, which remounts it and closes any open menu (trace of
+  // run 42280124229 attempt 1: the menu had Ban, then vanished). Open the menu only once the row has settled there.
+  await expect(row.locator('.ag-status')).toHaveText('online');
   await choose(row, target.name, 'Ban from channel');
   await expect(row.getByRole('group', { name: 'Confirm moderation' })).toContainText('A new account or guest visit is not identified by this ban.');
   await row.getByRole('button', { name: 'Confirm' }).click();
