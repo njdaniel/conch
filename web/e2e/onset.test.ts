@@ -101,6 +101,18 @@ describe('an open microphone burst', () => {
     expect(burstMeasure(stalled, on, off)).toBeNull();
     expect(burstAudioFailure(stalled, on, off)).toBe(false);
   });
+
+  it('a premature ending under reliable sampling is an audio failure', () => {
+    const early = readings(800, 3000, within(1140, 1500));
+    expect(burstMeasure(early, on, off)).toBeNull();
+    expect(burstAudioFailure(early, on, off)).toBe(true);
+  });
+
+  it('a later sampling stall does not hide an observed dropout', () => {
+    const dropoutThenStall = readings(800, 3000, (t) => burst(t) && !within(1400, 1440)(t), [[2400, 2440]]);
+    expect(burstMeasure(dropoutThenStall, on, off)).toBeNull();
+    expect(burstAudioFailure(dropoutThenStall, on, off)).toBe(true);
+  });
 });
 
 describe('nearest-rank p90', () => {

@@ -108,12 +108,23 @@ export function burstMeasure(samples: readonly Sample[], on: number, off: number
   return { path, lost: heard.from - on - path };
 }
 
-// burstAudioFailure separates a null measurement that observed no audio, or
-// an audio dropout, from one whose missing readings make that impossible to
-// know. Coverage through the latest possible path end is required so a stall
-// cannot make an unobserved burst count as lost audio.
+// burstAudioFailure separates a null measurement that observed no audio, an
+// audio dropout, or an impossible path from one whose missing readings make
+// that impossible to know. Only the samples bracketing a dropout or an early
+// ending must be reliable. With no audio, coverage through the latest possible
+// path end is required so a stall cannot make an unobserved burst count as lost.
 export function burstAudioFailure(samples: readonly Sample[], on: number, off: number): boolean {
-  if (burstSpans(samples, on, off).length === 1) return false;
+  const ss = burstSpans(samples, on, off);
+  if (ss.length === 1) {
+    const heard = ss[0];
+    return heard !== undefined && precise(heard, ['to']) && !pathOk(heard.to - off);
+  }
+  if (ss.length > 1) {
+    return ss.some((heard, i) => {
+      const next = ss[i + 1];
+      return next !== undefined && precise(heard, ['to']) && precise(next, ['from']);
+    });
+  }
   const end = off + pathRange.max;
   const observed = samples.filter((s) => s.t >= on - maxSlack && s.t <= end + maxSlack);
   const first = observed[0];
