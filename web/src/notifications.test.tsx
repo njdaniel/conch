@@ -168,7 +168,7 @@ describe('notification policies and preferences', () => {
 });
 
 describe('browser permission and cleanup', () => {
-  it('keeps alerts across reconnects and backfills only unseen messages', async () => {
+  it('drops stale alert copies on disconnect and backfills only unseen messages', async () => {
     visibility('hidden');
     const history = vi.spyOn(api, 'loadMessagesAscending').mockResolvedValue({ ok: true, complete: true, value: [message(1)] });
     const { result, rerender } = renderHook((p: Props) => useNotifications(p), { initialProps: props() });
@@ -185,12 +185,12 @@ describe('browser permission and cleanup', () => {
     expect(FakeNotification.all).toHaveLength(1);
     expect(result.current.alerts).toHaveLength(1);
     rerender({ ...props(), eventsLive: false });
-    expect(result.current.alerts).toHaveLength(1);
-    expect(FakeNotification.all[0]?.closed).not.toHaveBeenCalled();
+    expect(result.current.alerts).toHaveLength(0);
+    expect(FakeNotification.all[0]?.closed).toHaveBeenCalled();
     history.mockResolvedValue({ ok: true, complete: true, value: [message(2), message(3), message(4)] });
     rerender({ ...props(), eventsLive: true });
     await vi.waitFor(() => {
-      expect(result.current.alerts.map((item) => item.message.id)).toEqual([2, 3, 4]);
+      expect(result.current.alerts.map((item) => item.message.id)).toEqual([3, 4]);
     });
     expect(history).toHaveBeenLastCalledWith('general', 1);
     expect(FakeNotification.all).toHaveLength(3);

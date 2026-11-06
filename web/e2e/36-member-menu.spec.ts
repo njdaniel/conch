@@ -71,7 +71,7 @@ for (const [size, options, phone] of sizes) {
     const press = async (target: Locator) => (phone ? target.tap() : target.click());
 
     await press(more);
-    await expect(row.getByRole('menuitem')).toHaveText(['Remove from channel', 'Make manager', 'Stop deciding approvals']);
+    await expect(row.getByRole('menuitem')).toHaveText(['Remove from voice', 'Ban from channel', 'Remove from channel', 'Make manager', 'Stop deciding approvals']);
     await expectFits(page, `${size}: a row's menu open`);
     await press(row.getByRole('menuitem', { name: 'Make manager' }));
     await expect(row.getByText('Manager', { exact: true })).toBeVisible();

@@ -1,3 +1,4 @@
+import { listChannelBansResponseV1 } from '../schema/generated';
 import { reactionSummaryV1, reactionSummariesResponseV1, listReactorsResponseV1 } from '../schema/reaction';
 // The operation table: every request the client makes of conchd, keyed by a
 // stable id. Pure data and generated validators, with no DOM and no window, so
@@ -317,6 +318,11 @@ export const operations = {
   channelAuthors: op('GET', '/v1/channels/{channel}/authors', 'bearer', { response: check(channelAuthorsResponseV1) }),
   addMember: op('POST', '/v1/channels/{channel}/members', 'bearer', { request: check(addChannelMemberRequestV1), response: check(channelMemberV1) }),
   putMember: op('PUT', '/v1/channels/{channel}/members/{principal}', 'bearer', { request: check(putChannelMemberRequestV1) }),
+  listBans: op('GET', '/v1/channels/{channel}/bans', 'bearer', { response: check(listChannelBansResponseV1) }),
+  banMember: op('PUT', '/v1/channels/{channel}/bans/{principal}', 'bearer'),
+  unbanMember: op('DELETE', '/v1/channels/{channel}/bans/{principal}', 'bearer'),
+  kickVoice: op('DELETE', '/v1/channels/{channel}/voice/participants/{principal}', 'bearer'),
+  removeMessage: op('DELETE', '/v2/channels/{channel}/messages/{id}', 'bearer'),
   removeMember: op('DELETE', '/v1/channels/{channel}/members/{principal}', 'bearer'),
   listNets: op('GET', '/v1/channels/{channel}/nets', 'bearer', { response: check(listNetsResponseV1) }),
 

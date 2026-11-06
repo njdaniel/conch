@@ -1,5 +1,5 @@
 import { cloneElement } from 'react';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as api from './api';
 import { clock, Conversation } from './Conversation';
@@ -373,4 +373,28 @@ describe('an archived channel (issue #844)', () => {
     expect(within(thread).queryByRole('button', { name: 'Send reply' })).toBeNull();
     expect(within(thread).getByText('This channel is archived.')).toBeTruthy();
   });
+});
+
+
+it('scrubs fetched thread copies and late pages when live tombstones arrive', async () => {
+  let receive: (message: MessageV2) => void = () => undefined;
+  vi.spyOn(api, 'watchRemovals').mockImplementation((callback) => { receive = callback; return () => undefined; });
+  let finish: (result: Awaited<ReturnType<typeof api.loadThread>>) => void = () => undefined;
+  vi.spyOn(api, 'loadThread').mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+  view([root()]);
+  fireEvent.click(screen.getByRole('button', { name: replyName }));
+  const thread = await screen.findByRole('region', { name: threadName });
+  const body = 'This message was removed by a moderator.';
+  await act(async () => {
+    receive({ ...reply(2), body, removed: true });
+    finish({ ok: true, value: { messages: [root(), reply(2, 'secret reply')] } });
+    await Promise.resolve();
+  });
+  expect(within(thread).queryByText('secret reply')).toBeNull();
+  expect(within(thread).getByText(body)).toBeDefined();
+  expect(within(thread).getAllByRole('listitem')).toHaveLength(2);
+  await act(async () => { receive({ ...root(), body, removed: true }); await Promise.resolve(); });
+  expect(within(thread).queryByText('root')).toBeNull();
+  expect(within(thread).queryByRole('textbox')).toBeNull();
+  expect(within(thread).getAllByText(body)).toHaveLength(2);
 });

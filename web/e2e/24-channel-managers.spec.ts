@@ -87,10 +87,12 @@ test('C793 an operator delegates a channel; its manager adds, removes and rename
   await byName.getByRole('button', { name: 'Add by name' }).click();
   await expect(memberRow(mgr, target.name)).toBeVisible();
 
-  await expect(memberRow(mgr, operatorName).getByRole('button', { name: `Actions for ${operatorName}` })).toHaveCount(0);
+  await memberRow(mgr, operatorName).getByRole('button', { name: `Actions for ${operatorName}` }).click();
+  await expect(memberRow(mgr, operatorName).getByRole('menuitem')).toHaveText(['Remove from voice']);
+  await mgr.keyboard.press('Escape');
   await expect(panel(mgr).getByText('Only operators choose who manages a channel or decides approvals.', { exact: true })).toBeVisible();
   await memberRow(mgr, target.name).getByRole('button', { name: `Actions for ${target.name}` }).click();
-  await expect(memberRow(mgr, target.name).getByRole('menuitem')).toHaveText(['Remove from channel']);
+  await expect(memberRow(mgr, target.name).getByRole('menuitem')).toHaveText(['Remove from voice', 'Ban from channel', 'Remove from channel']);
   await mgr.keyboard.press('Escape');
 
   const member = (await meet()).page;
@@ -159,7 +161,7 @@ for (const [size, options, phone] of removeSizes) {
     // The menu item asks; nothing is sent. Focus is on Cancel.
     await press(more);
     await press(row.getByRole('menuitem', { name: 'Remove from channel' }));
-    const question = row.getByRole('group', { name: `Remove ${target.name} from #${channel}? They lose this channel and its history.` });
+    const question = row.getByRole('group', { name: `Remove ${target.name} from #${channel} and its nets? They lose this channel and its history. This does not ban them or revoke their account.` });
     await expect(question).toBeVisible();
     const cancel = question.getByRole('button', { name: 'Cancel' });
     const yes = question.getByRole('button', { name: 'Yes, remove' });

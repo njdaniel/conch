@@ -55,6 +55,8 @@ export type OlderStatus = 'idle' | 'loading' | 'error';
 export interface ChannelChat {
   // The id is the identity of a message: one that arrives twice is one.
   readonly byId: ReadonlyMap<number, MessageV2>;
+  // Safe envelopes survive a window replacement while older reads are in flight.
+  readonly removed?: ReadonlyMap<number, MessageV2>;
   readonly pending: readonly PendingSend[];
   // Messages this tab sent and the POST confirmed, shown as `Sent`.
   readonly sentIds: ReadonlySet<number>;
@@ -109,6 +111,7 @@ export type ChatAction =
   // An edited copy of a message the tab may hold (issue #845): the edit's own
   // answer, or the events socket's conch.message_edited.v1. Applied only to a
   // message held, under the client rule (isLater); never appended.
+  | { readonly type: 'removed'; readonly channel: string; readonly message: MessageV2 }
   | { readonly type: 'edited'; readonly channel: string; readonly message: MessageV2 }
   // The server refused an edit for good (issue #1031): the limit, the window
   // closed or not editable. The message is final for the page's life.
@@ -162,7 +165,8 @@ function editedMs(message: MessageV2): number {
 // so a history page read before an edit but answered after its frame, two
 // edit frames out of order and a replay overlap all leave the newest text.
 export function isLater(incoming: MessageV2, held: MessageV2): boolean {
-  return editedMs(incoming) >= editedMs(held);
+  if (held.removed === true) return incoming.removed === true;
+  return incoming.removed === true || editedMs(incoming) >= editedMs(held);
 }
 
 // mergeMessages is the TUI's: a map by id, so a message held already is
@@ -205,9 +209,16 @@ export function editsKnown(chat: ChannelChat, id: number): number {
 }
 
 // hold merges and keeps only the newest maxHeld.
+function remember(base: ChannelChat, incoming: readonly MessageV2[]) {
+  const removed = new Map(base.removed);
+  for (const message of incoming) if (message.removed === true) removed.set(message.id, message);
+  const messages = incoming.map((message) => removed.get(message.id) ?? message);
+  return { channel: { ...base, removed }, messages };
+}
 function hold(base: ChannelChat, incoming: readonly MessageV2[]): ChannelChat {
-  const c = track(base, incoming);
-  const merged = merge(c.byId, incoming);
+  const safe = remember(base, incoming);
+  const c = track(safe.channel, safe.messages);
+  const merged = merge(c.byId, safe.messages);
   if (merged.size <= maxHeld) return merged === c.byId ? c : { ...c, byId: merged };
   const newest = [...merged.keys()].sort((a, b) => a - b).slice(merged.size - maxHeld);
   const keep = new Set(newest);
@@ -301,6 +312,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         const held = hold(c, [message]);
         return action.own === true ? reconcile(held, [message]) : held;
       });
+    case 'removed':
+      return known(state, action.channel, (c) => hold(c, [action.message]));
     case 'edited':
       return known(state, action.channel, (c) => (c.byId.has(action.message.id) ? hold(c, [action.message]) : c));
     case 'editFinal':
@@ -381,12 +394,15 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return known(state, action.channel, (c) => ({ ...c, older: 'loading' }));
     case 'olderLoaded':
       // Merged without hold's trim: canLoadOlder kept this page within maxHeld.
-      return known(state, action.channel, (c) => ({
-        ...track(c, action.messages),
-        byId: merge(c.byId, action.messages),
-        older: 'idle',
-        exhausted: !action.more,
-      }));
+      return known(state, action.channel, (c) => {
+        const safe = remember(c, action.messages);
+        return {
+          ...track(safe.channel, safe.messages),
+          byId: merge(c.byId, safe.messages),
+          older: 'idle',
+          exhausted: !action.more,
+        };
+      });
     case 'olderFailed':
       return known(state, action.channel, (c) => ({ ...c, older: 'error' }));
     case 'renamed':

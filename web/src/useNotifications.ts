@@ -78,6 +78,7 @@ export function useNotifications({
   const [browserPermission, setBrowserPermission] = useState<BrowserPermission>(permission);
   const natives = useRef(new Map<string, NativeNotification>());
   const consumed = useRef<MessageV2 | null>(null);
+  const removed = useRef(new Set<number>());
   const delivered = useRef(new Set<string>());
   const lastSeen = useRef(new Map<number, number>());
   const initialized = useRef(new Set<number>());
@@ -106,6 +107,7 @@ export function useNotifications({
   useEffect(() => {
     skipWrite.current = true;
     consumed.current = null;
+    removed.current.clear();
     delivered.current.clear();
     lastSeen.current.clear();
     initialized.current.clear();
@@ -126,8 +128,10 @@ export function useNotifications({
   }, [origin, account, preferences]);
 
   useEffect(() => {
-    if (!signedIn) clear();
-  }, [signedIn, clear]);
+    // Missed removals are not replayed below the cursor. Drop these copies
+    // before backfill rather than retain stale bodies from the disconnected feed.
+    if (!signedIn || !eventsLive) clear();
+  }, [signedIn, eventsLive, clear]);
 
   useEffect(() => {
     if (!loaded) return;
@@ -153,6 +157,7 @@ export function useNotifications({
   }, [alerts, channels, close]);
 
   const deliver = useCallback((message: MessageV2) => {
+    if (message.removed === true || removed.current.has(message.id)) return;
     if (!signedIn || !eventsLive || principal === null || preferences.policy === 'off' || preferences.muted.includes(message.channel_id) || message.author_id === principal.id) return;
     const channel = channels.find((candidate) => candidate.id === message.channel_id);
     if (channel === undefined) return;
@@ -181,12 +186,22 @@ export function useNotifications({
   }, [signedIn, eventsLive, principal, preferences, browserPermission, channels, origin, account, close]);
   useEffect(() => {
     if (editEvent === null) return;
+    if (editEvent.removed === true) removed.current.add(editEvent.id);
+    if (consumed.current?.id === editEvent.id && editEvent.removed === true) consumed.current = null;
+    if (editEvent.removed === true) for (const alert of alerts) if (alert.message.id === editEvent.id) close(alert.id);
     // The alert of this message, under the client rule: an older copy never
     // replaces a newer one.
     const stale = (alert: NotificationAlert) =>
-      alert.message.id === editEvent.id && alert.message.channel_id === editEvent.channel_id && isLater(editEvent, alert.message);
+      alert.message !== editEvent && alert.message.id === editEvent.id && alert.message.channel_id === editEvent.channel_id && isLater(editEvent, alert.message);
     setAlerts((previous) => (previous.some(stale) ? previous.map((alert) => (stale(alert) ? { ...alert, message: editEvent } : alert)) : previous));
-  }, [editEvent]);
+  }, [editEvent, alerts, close]);
+
+  useEffect(() => api.watchRemovals((message) => {
+    removed.current.add(message.id);
+    if (consumed.current?.id === message.id) consumed.current = null;
+    close(`${origin}:${String(account)}:${String(message.id)}`);
+    setAlerts((previous) => previous.map((alert) => alert.message.id === message.id ? { ...alert, message } : alert));
+  }), [origin, account, close]);
 
   const latestDeliver = useRef(deliver);
   latestDeliver.current = deliver;

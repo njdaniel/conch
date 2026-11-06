@@ -127,6 +127,17 @@ export function useLiveChannel({
       if (!live) return;
       switch (next) {
         case 'open':
+          if (reached) {
+            // A removal may be older than the replay cursor. Re-read the
+            // window on reconnect; the reducer drops the previous window and
+            // never lets this read replace a tombstone with a delayed original.
+            void api.loadMessages(name()).then((result) => {
+              if (!live) return;
+              if (result.ok) dispatchChat({ type: 'historyLoaded', channel: name(), messages: result.value, more: result.value.length >= api.historyLimit });
+              else if (result.failure === 'unauthorized') onUnauthorized();
+              else if (result.code === api.channelNotFound) onMissing(id);
+            });
+          }
           reached = true;
           setStatus('open');
           dispatchConnection({ type: 'reached' });

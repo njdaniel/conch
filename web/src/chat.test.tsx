@@ -2227,3 +2227,19 @@ describe('scrolling', () => {
     expect(screen.queryByRole('button', { name: 'Load older messages' })).toBeNull();
   });
 });
+
+
+it('re-reads an older removal on reconnect instead of keeping text below the socket cursor', async () => {
+  server.history.general = [message(1, 'secret before disconnect'), message(2, 'newest')];
+  const first = await openChat();
+  await connect(first);
+  await screen.findByText('secret before disconnect');
+  first.drop(1006);
+  server.history.general = [{ ...message(1, 'This message was removed by a moderator.'), removed: true }, message(2, 'newest')];
+  await waitFor(() => { expect(FakeSocket.all).toHaveLength(2); }, { timeout: 3000 });
+  const second = FakeSocket.all[1] as FakeSocket;
+  expect(new URL(second.url).searchParams.get('after')).toBe('2');
+  second.open();
+  await screen.findByText('This message was removed by a moderator.');
+  expect(screen.queryByText('secret before disconnect')).toBeNull();
+});
