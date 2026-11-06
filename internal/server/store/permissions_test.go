@@ -32,9 +32,10 @@ var (
 		schema.PermManageChannels:        {false, true},
 		schema.PermChangeServerSettings:  {false, false},
 		schema.PermReadAuditLog:          {false, false},
-		// Row 12 (ADR-015, docs/design/webcam-video.md §3.1): off for both,
-		// configurable in both columns, and needs use_voice.
-		schema.PermUseCamera: {false, false},
+		// Row 12 (ADR-015 as amended by issue #1361, webcam-video.md §3.1):
+		// on for both on a new server, configurable in both columns, and
+		// needs use_voice. An upgraded server has it stored off (migration 44).
+		schema.PermUseCamera: {true, true},
 	}
 	designFixed = map[permissionCell]bool{
 		{schema.PermissionRoleMember, schema.PermManageMembers}:        false,
@@ -51,9 +52,10 @@ var (
 	}
 	// designPresets are the member cells each preset turns on (§6).
 	designPresets = map[schema.PermissionPreset][]schema.Permission{
-		schema.PresetPersonal: {schema.PermUseVoice, schema.PermShareScreen},
+		// Both presets keep the camera (issue #1361).
+		schema.PresetPersonal: {schema.PermUseVoice, schema.PermShareScreen, schema.PermUseCamera},
 		schema.PresetGroup: {schema.PermCreatePublicChannels, schema.PermCreatePrivateChannels, schema.PermMakeMemberLinks,
-			schema.PermSeeMemberDirectory, schema.PermUseVoice, schema.PermShareScreen},
+			schema.PermSeeMemberDirectory, schema.PermUseVoice, schema.PermShareScreen, schema.PermUseCamera},
 	}
 )
 
@@ -470,7 +472,8 @@ func TestPermittedUseCamera(t *testing.T) {
 						who = role + "-no-voice"
 					}
 					name := fmt.Sprintf("%s cell=%s use_voice=%t voice_allowed=%t", role, []string{"absent", "off", "on"}[c], voice, allowed)
-					want := c == on && voice && allowed
+					// An absent cell is on: the default since issue #1361.
+					want := c != off && voice && allowed
 					t.Run(name, func(t *testing.T) {
 						f.setRows(rows(role, c, voice))
 						if got, err := f.s.Permitted(f.ctx, f.ids[who], schema.PermUseCamera); err != nil || got != want {
@@ -490,8 +493,10 @@ func TestPermittedUseCamera(t *testing.T) {
 		who  string
 		want bool
 	}{
-		{"an absent row is false (operator)", nil, "operator-1", false},
-		{"an absent row is false (member)", nil, "member-1", false},
+		{"an absent row is true (operator, issue #1361)", nil, "operator-1", true},
+		{"an absent row is true (member, issue #1361)", nil, "member-1", true},
+		{"a stored off row is false (operator)", []storedRow{{"operator", "use_camera", 0}, {"member", "use_camera", 0}}, "operator-1", false},
+		{"a stored off row is false (member)", []storedRow{{"member", "use_camera", 0}}, "member-1", false},
 		{"voice_allowed off is false", everything, "member-no-voice", false},
 		{"use_voice off is false", append([]storedRow{{"member", "use_voice", 0}, {"member", "share_screen", 0}}, everything...), "member-1", false},
 		{"the owner is true with no row", nil, "owner", true},
@@ -682,7 +687,7 @@ func TestPutPermissions(t *testing.T) {
 		},
 		{
 			name:   "dependency: share on without voice",
-			setup:  []schema.PermissionChangeV1{member(schema.PermShareScreen, false), member(schema.PermUseVoice, false)},
+			setup:  []schema.PermissionChangeV1{member(schema.PermShareScreen, false), member(schema.PermUseCamera, false), member(schema.PermUseVoice, false)},
 			writer: "owner",
 			req:    changes(member(schema.PermShareScreen, true)),
 			want:   result{ErrPermissionsConflict, schema.PermShareScreen},
@@ -694,7 +699,7 @@ func TestPutPermissions(t *testing.T) {
 		},
 		{
 			name: "dependency: operator voice off under share", writer: "owner",
-			setup: []schema.PermissionChangeV1{member(schema.PermShareScreen, false), member(schema.PermUseVoice, false)},
+			setup: []schema.PermissionChangeV1{member(schema.PermShareScreen, false), member(schema.PermUseCamera, false), member(schema.PermUseVoice, false)},
 			req:   changes(operatorCell(schema.PermUseVoice, false)),
 			want:  result{ErrPermissionsConflict, schema.PermShareScreen},
 		},
@@ -807,7 +812,7 @@ func TestPutPermissions(t *testing.T) {
 		},
 		{
 			name:   "operator turns on a member cell its own voice brake withholds",
-			setup:  []schema.PermissionChangeV1{grantSettings, member(schema.PermShareScreen, false), member(schema.PermUseVoice, false)},
+			setup:  []schema.PermissionChangeV1{grantSettings, member(schema.PermShareScreen, false), member(schema.PermUseCamera, false), member(schema.PermUseVoice, false)},
 			writer: "operator-no-voice",
 			req:    changes(member(schema.PermUseVoice, true)),
 			want:   result{ErrPermissionDenied, schema.PermUseVoice},
@@ -823,7 +828,7 @@ func TestPutPermissions(t *testing.T) {
 			// The owner turned the operator cell on; an operator whose own
 			// voice brake withholds use_camera may not grant it to members.
 			name:   "operator turns on the camera its own voice brake withholds",
-			setup:  []schema.PermissionChangeV1{grantSettings, operatorCell(schema.PermUseCamera, true)},
+			setup:  []schema.PermissionChangeV1{grantSettings, member(schema.PermUseCamera, false), operatorCell(schema.PermUseCamera, true)},
 			writer: "operator-no-voice",
 			req:    changes(member(schema.PermUseCamera, true)),
 			want:   result{ErrPermissionDenied, schema.PermUseCamera},
@@ -837,12 +842,12 @@ func TestPutPermissions(t *testing.T) {
 		},
 		{
 			name: "restricted operator turns cells off", setup: []schema.PermissionChangeV1{grantSettings}, writer: "operator-no-voice",
-			req: changes(member(schema.PermShareScreen, false), member(schema.PermUseVoice, false)),
+			req: changes(member(schema.PermShareScreen, false), member(schema.PermUseCamera, false), member(schema.PermUseVoice, false)),
 			after: map[permissionCell]bool{
 				{schema.PermissionRoleMember, schema.PermShareScreen}: false,
 				{schema.PermissionRoleMember, schema.PermUseVoice}:    false,
 			},
-			detail: "revision=3;member.use_voice=true->false;member.share_screen=true->false",
+			detail: "revision=3;member.use_voice=true->false;member.share_screen=true->false;member.use_camera=true->false",
 		},
 		{
 			name: "stale revision", writer: "owner",
@@ -896,7 +901,7 @@ func TestPutPermissions(t *testing.T) {
 		},
 		{
 			name:   "preset personal from a customised column",
-			setup:  []schema.PermissionChangeV1{member(schema.PermShareScreen, false), member(schema.PermUseVoice, false), member(schema.PermMakeMemberLinks, false)},
+			setup:  []schema.PermissionChangeV1{member(schema.PermShareScreen, false), member(schema.PermUseCamera, false), member(schema.PermUseVoice, false), member(schema.PermMakeMemberLinks, false)},
 			writer: "owner",
 			req:    preset(schema.PresetPersonal),
 			after: map[permissionCell]bool{
@@ -905,12 +910,12 @@ func TestPutPermissions(t *testing.T) {
 				{schema.PermissionRoleMember, schema.PermMakeMemberLinks}: false,
 			},
 			detail: "revision=3;preset=personal;member.create_public_channels=true->false;member.create_private_channels=true->false;" +
-				"member.see_member_directory=true->false;member.use_voice=false->true;member.share_screen=false->true",
+				"member.see_member_directory=true->false;member.use_voice=false->true;member.share_screen=false->true;member.use_camera=false->true",
 		},
 		{
 			name: "preset personal after the operators' voice was cut",
-			setup: []schema.PermissionChangeV1{member(schema.PermShareScreen, false), member(schema.PermUseVoice, false),
-				operatorCell(schema.PermShareScreen, false), operatorCell(schema.PermUseVoice, false)},
+			setup: []schema.PermissionChangeV1{member(schema.PermShareScreen, false), member(schema.PermUseCamera, false), member(schema.PermUseVoice, false),
+				operatorCell(schema.PermShareScreen, false), operatorCell(schema.PermUseCamera, false), operatorCell(schema.PermUseVoice, false)},
 			writer: "owner",
 			req:    preset(schema.PresetPersonal),
 			want:   result{ErrPermissionsConflict, schema.PermUseVoice},
@@ -924,7 +929,7 @@ func TestPutPermissions(t *testing.T) {
 		},
 		{
 			name:   "preset by an operator whose voice is braked",
-			setup:  []schema.PermissionChangeV1{grantSettings, member(schema.PermShareScreen, false), member(schema.PermUseVoice, false)},
+			setup:  []schema.PermissionChangeV1{grantSettings, member(schema.PermShareScreen, false), member(schema.PermUseCamera, false), member(schema.PermUseVoice, false)},
 			writer: "operator-no-voice",
 			req:    preset(schema.PresetPersonal),
 			want:   result{ErrPermissionDenied, schema.PermUseVoice},
@@ -1036,8 +1041,8 @@ func preset(p schema.PermissionPreset) func(int64) schema.PutPermissionsRequestV
 func TestPermissionPresetIsItsCells(t *testing.T) {
 	starts := map[string][]schema.PermissionChangeV1{
 		"defaults":         nil,
-		"voice cut":        {member(schema.PermShareScreen, false), member(schema.PermUseVoice, false)},
-		"operators' voice": {member(schema.PermShareScreen, false), member(schema.PermUseVoice, false), operatorCell(schema.PermShareScreen, false), operatorCell(schema.PermUseVoice, false)},
+		"voice cut":        {member(schema.PermShareScreen, false), member(schema.PermUseCamera, false), member(schema.PermUseVoice, false)},
+		"operators' voice": {member(schema.PermShareScreen, false), member(schema.PermUseCamera, false), member(schema.PermUseVoice, false), operatorCell(schema.PermShareScreen, false), operatorCell(schema.PermUseCamera, false), operatorCell(schema.PermUseVoice, false)},
 		"operators' links": {member(schema.PermMakeMemberLinks, false), operatorCell(schema.PermMakeMemberLinks, false)},
 		"directory off":    {member(schema.PermSeeMemberDirectory, false)},
 	}
@@ -1215,8 +1220,10 @@ func TestPermissionsMigration(t *testing.T) {
 				if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != len(migrations) {
 					t.Errorf("pass %d: user_version = %d, %v; want %d", pass, version, err, len(migrations))
 				}
-				if n := countRows(t, s, "role_permissions"); n != tt.rows {
-					t.Errorf("pass %d: %d role_permissions rows, want %d", pass, n, tt.rows)
+				// Plus the two use_camera cells migration 44 stores off on a
+				// database with history (issue #1361).
+				if n := countRows(t, s, "role_permissions"); n != tt.rows+2 {
+					t.Errorf("pass %d: %d role_permissions rows, want %d", pass, n, tt.rows+2)
 				}
 				var rev string
 				if err := s.db.QueryRow("SELECT value FROM server_settings WHERE key = 'permissions_revision'").Scan(&rev); err != nil || rev != "1" {

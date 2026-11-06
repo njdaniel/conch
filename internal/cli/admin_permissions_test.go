@@ -69,7 +69,7 @@ act_as_members           off      on         members
 manage_channels          off      on         members
 change_server_settings   off      off        members
 read_audit_log           off      off        members
-use_camera               off      off        -
+use_camera               on       on         -
 act_as_members: can sign in as, and post as, any member who isn't an owner
 read_audit_log: sees every member and every private channel's name in the audit trail
 preset: group
@@ -425,11 +425,12 @@ func TestWhoAmIPermissions(t *testing.T) {
 		who  string
 		want string
 	}{
-		// The owner holds every permission, use_camera included (ADR-015);
-		// operators and members do not, because its default is off.
+		// The owner holds every permission; operators and members hold
+		// use_camera too, on by default since issue #1361, and personal
+		// keeps it.
 		{"owner", "permissions: create_public_channels, create_private_channels, make_member_links, see_member_directory, use_voice, share_screen, manage_members, act_as_members, manage_channels, change_server_settings, read_audit_log, use_camera\n"},
-		{"operator-1", "permissions: create_public_channels, create_private_channels, make_member_links, see_member_directory, use_voice, share_screen, manage_members, act_as_members, manage_channels\n"},
-		{"member", "permissions: use_voice, share_screen\n"},
+		{"operator-1", "permissions: create_public_channels, create_private_channels, make_member_links, see_member_directory, use_voice, share_screen, manage_members, act_as_members, manage_channels, use_camera\n"},
+		{"member", "permissions: use_voice, share_screen, use_camera\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.who, func(t *testing.T) {

@@ -151,7 +151,7 @@ func (f *presenceFixture) revokeUseVoice(t *testing.T) {
 		t.Fatal(err)
 	}
 	var changes []schema.PermissionChangeV1
-	for _, p := range []schema.Permission{schema.PermShareScreen, schema.PermUseVoice} {
+	for _, p := range []schema.Permission{schema.PermShareScreen, schema.PermUseCamera, schema.PermUseVoice} {
 		for _, r := range []schema.PermissionRole{schema.PermissionRoleMember, schema.PermissionRoleOperator} {
 			changes = append(changes, schema.PermissionChangeV1{Permission: p, Role: r, Granted: false})
 		}

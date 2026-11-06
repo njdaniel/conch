@@ -64,8 +64,8 @@
     },
     {
       "permission": "use_camera",
-      "member": false,
-      "operator": false
+      "member": true,
+      "operator": true
     }
   ],
   "preset": "group",
@@ -74,7 +74,8 @@
       "preset": "personal",
       "member": [
         "use_voice",
-        "share_screen"
+        "share_screen",
+        "use_camera"
       ]
     },
     {
@@ -85,7 +86,8 @@
         "make_member_links",
         "see_member_directory",
         "use_voice",
-        "share_screen"
+        "share_screen",
+        "use_camera"
       ]
     }
   ],

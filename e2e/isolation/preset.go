@@ -132,13 +132,13 @@ func (w *world) presetPhase() (int, error) {
 		rows++
 	}
 
-	// 3b. The camera (issue #1241, ADR-015): use_camera is off under
-	// personal, as under group (both presets leave it off), so a member's
-	// claim is refused naming it. The claim sits behind "voice is not
-	// configured", so the row runs only with LiveKit.
+	// 3b. The camera (issue #1241, ADR-015 as amended by #1361): personal
+	// keeps use_camera, as group does, so a member's claim is not refused for
+	// the right; it is judged on its merits (this member holds no voice
+	// session). The claim sits behind "voice is not configured", so the row
+	// runs only with LiveKit.
 	if w.lk != nil {
-		status, body, err := m.api.do(http.MethodPost, "/v1/channels/"+room+"/voice/camera", nil)
-		if err := refusedNaming("a member claims a camera under personal", status, body, err, schema.ErrorCodePermissionDenied, schema.PermUseCamera); err != nil {
+		if err := cameraNotRefused(m, room, "personal"); err != nil {
 			return rows, err
 		}
 		rows++
@@ -168,10 +168,9 @@ func (w *world) presetPhase() (int, error) {
 		return rows, err
 	}
 	rows += 2
-	// Group is the defaults, and use_camera is off in them: still refused.
+	// Group is the defaults, and use_camera is on in them (#1361).
 	if w.lk != nil {
-		status, body, err := m.api.do(http.MethodPost, "/v1/channels/"+room+"/voice/camera", nil)
-		if err := refusedNaming("a member claims a camera under group", status, body, err, schema.ErrorCodePermissionDenied, schema.PermUseCamera); err != nil {
+		if err := cameraNotRefused(m, room, "group"); err != nil {
 			return rows, err
 		}
 		rows++
@@ -184,4 +183,19 @@ func (w *world) presetPhase() (int, error) {
 		return rows, fmt.Errorf("the directory under group: %w", err)
 	}
 	return rows, nil
+}
+
+// cameraNotRefused checks that a member's camera claim under preset is
+// judged on its merits, not refused for the right: both presets keep
+// use_camera (issue #1361). This member holds no voice session, so the
+// answer is 409 voice_no_session.
+func cameraNotRefused(m *member, room, preset string) error {
+	status, body, err := m.api.do(http.MethodPost, "/v1/channels/"+room+"/voice/camera", nil)
+	if err != nil {
+		return fmt.Errorf("a member claims a camera under %s: %w", preset, err)
+	}
+	if status != http.StatusConflict || errorCode(body) != schema.ErrorCodeVoiceNoSession {
+		return fmt.Errorf("a member claims a camera under %s = %d %s, want 409 %s (judged on its merits, not refused for use_camera)", preset, status, body, schema.ErrorCodeVoiceNoSession)
+	}
+	return nil
 }

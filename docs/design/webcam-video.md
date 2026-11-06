@@ -29,7 +29,7 @@ Nick asked on 2026-10-30 for webcam video, "starting with one-on-one conversatio
 
 | # | Decision | Section |
 | --- | --- | --- |
-| 1 | A new permission, `use_camera`, which needs `use_voice`. It is **off by default for members and operators**: ADR-014's rule for a new permission is that an upgrade changes nothing. Owners always hold it. The voice switch (`voice_allowed`) also withholds it. There is no camera-only brake. | §3 |
+| 1 | A new permission, `use_camera`, which needs `use_voice`. It is **on by default for members and operators on a new server** (amended 2026-11-05, #1361; it was off). An upgrade still changes nothing, ADR-014's rule: migration 44 stores it off on a server that existed before. Owners always hold it. The voice switch (`voice_allowed`) also withholds it. There is no camera-only brake. | §3 |
 | 2 | The camera is **off on joining, and exists only while `conchd` holds a claim for it.** What the server enforces is exactly this: the join token grants the microphone alone; a camera is granted only to a claim; a request that *continues* a claim must name it (`?started_at=`), and a named request never starts a new claim, except the adoption of a claim that the room's rotation ended. Whether an un-named request was the person's choice is the client's honesty, and only the camera button sends one (S2). | §3.4, §4.2 |
 | 3 | Turning the camera on is a **server claim**, like the screen share but without the one-per-room rule. `POST …/voice/camera[?started_at=…]` grants the `camera` source to the participant the caller is, and `DELETE` takes it away. A name that is not the caller's current claim is 409 `voice_camera_stale`. The room has a cap of 9 cameras. | §4 |
 | 4 | **One function computes every publish permission conchd writes**, at all four `UpdateParticipant` call sites, from the person's current claims under the room's claims lock, never from a pass's snapshot. It covers the microphone, the screen while the person holds the share, and the camera while they hold a camera claim. Stopping a share must never take a camera down, and stopping a camera must never take a share down. A structural test forbids any other call site (S4). | §4.3 |
@@ -110,7 +110,7 @@ Row 12 of ADR-014's catalog:
 
 | # | Permission | What it allows | Member default | Operator default | Owner | Configurable by |
 | --- | --- | --- | --- | --- | --- | --- |
-| 12 | `use_camera` | Turn on a camera in voice, in channels they are in (needs `use_voice`) | **off** | **off** | always | as row 1: the member cell by the owner, or by an operator with `change_server_settings` who holds it; the operator cell by the owner |
+| 12 | `use_camera` | Turn on a camera in voice, in channels they are in (needs `use_voice`) | **on** (#1361) | **on** (#1361) | always | as row 1: the member cell by the owner, or by an operator with `change_server_settings` who holds it; the operator cell by the owner |
 
 **Why off for both.** ADR-014 decision 2 says "a permission added later must default to the behaviour from before it existed", and the schema says the same (`permission.go:27`). Before this, no one could publish a camera. A default of on would put every member's camera one click away the moment a server upgraded, with no word from its owner. That matters most on a personal server, where people who should not see each other may still share a channel with the owner. Owners hold every permission, so the owner can try the feature at once. Turning it on for members is **two cells**, not one: precedence (admin-roles §4.4.1, member ⇒ operator) means the operator cell must be on before, or in the same PUT as, the member cell. A PUT that turns the operator cell off while the member cell is on is refused 409 `permissions_conflict` (N2, O2).
 
@@ -118,7 +118,7 @@ Row 12 of ADR-014's catalog:
 
 **The dependency.** `use_camera` ⇒ `use_voice`, in the same column. The PUT refuses anything else with 409 `permissions_conflict`, as for `share_screen`. A camera is published by a voice connection, and a person without voice has no connection.
 
-**Presets.** Both presets leave `use_camera` off, so `PresetGroup` still equals the defaults and neither preset's published member list changes. An owner who turns camera on for members on a personal server then has a member column that matches no preset, and the console says so, as it does for any edited column (O3).
+**Presets.** Both presets turn `use_camera` on (amended 2026-11-05, #1361), so `PresetGroup` still equals the defaults, and `personal` is voice, screen share and camera. An upgraded server whose camera cells migration 44 stored off matches no preset until its owner applies one, and the console says so, as it does for any edited column (O3).
 
 ### 3.2 The brake
 

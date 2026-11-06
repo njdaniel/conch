@@ -90,12 +90,24 @@ func TestPermissionFixturesValidate(t *testing.T) {
 					member = append(member, row.Permission)
 				}
 			}
-			if !slices.Equal(member, PresetMemberPermissions[r.Preset]) {
-				t.Errorf("member column %v, preset %q is %v", member, r.Preset, PresetMemberPermissions[r.Preset])
+			// The preset table as this fixture's server knew it: only the
+			// permissions its rows carry. An eleven-row fixture predates
+			// use_camera, and so its presets do (issue #1361).
+			inRows := func(ps []Permission) []Permission {
+				var out []Permission
+				for _, p := range ps {
+					if slices.Contains(rowPermissions(r.Rows), p) {
+						out = append(out, p)
+					}
+				}
+				return out
+			}
+			if want := inRows(PresetMemberPermissions[r.Preset]); !slices.Equal(member, want) {
+				t.Errorf("member column %v, preset %q is %v", member, r.Preset, want)
 			}
 			for _, p := range r.Presets {
-				if !slices.Equal(p.Member, PresetMemberPermissions[p.Preset]) {
-					t.Errorf("presets[%s] = %v, want %v", p.Preset, p.Member, PresetMemberPermissions[p.Preset])
+				if want := inRows(PresetMemberPermissions[p.Preset]); !slices.Equal(p.Member, want) {
+					t.Errorf("presets[%s] = %v, want %v", p.Preset, p.Member, want)
 				}
 			}
 		})
@@ -220,16 +232,17 @@ var permissionTable = map[Permission]permissionCell{
 	PermChangeServerSettings:  {memberFixed: true, operatorOnly: true},
 	PermReadAuditLog:          {memberFixed: true, operatorOnly: true},
 	// ADR-015: off for both, member-grantable, nothing fixed.
-	PermUseCamera: {},
+	PermUseCamera: {member: true, operator: true}, // on by default since issue #1361
 }
 
-// TestUseCameraDefaultsOff is the dedicated test the security review of
-// ADR-015 asked for (design §11.1, §15): use_camera is off by default for
-// both roles, not operator-only, not fixed in either column, and requires
-// exactly use_voice. It is written out, not derived from the table above, so
-// that it fails on its own if the value is ever on by default or treated as
-// operator-only, whichever way the methods are reshaped.
-func TestUseCameraDefaultsOff(t *testing.T) {
+// TestUseCameraDefaults is the dedicated test the security review of
+// ADR-015 asked for (design §11.1, §15), as amended by issue #1361: use_camera
+// is on by default for both roles on a new server (an existing one keeps its
+// cells off: store migration 44), is in both presets, is not operator-only,
+// not fixed in either column, and requires exactly use_voice. It is written
+// out, not derived from the table above, so that it fails on its own if the
+// value or its treatment changes, whichever way the methods are reshaped.
+func TestUseCameraDefaults(t *testing.T) {
 	if !PermUseCamera.Valid() {
 		t.Fatal("use_camera is not in the catalog")
 	}
@@ -237,8 +250,8 @@ func TestUseCameraDefaultsOff(t *testing.T) {
 		t.Errorf("the last permission is %s, want use_camera", got)
 	}
 	for _, r := range []PermissionRole{PermissionRoleMember, PermissionRoleOperator} {
-		if PermUseCamera.Default(r) {
-			t.Errorf("Default(%s) = true: use_camera must be off until the owner turns it on (ADR-014 decision 2)", r)
+		if !PermUseCamera.Default(r) {
+			t.Errorf("Default(%s) = false: use_camera is on by default on a new server (issue #1361)", r)
 		}
 		if fixed, value := PermUseCamera.Fixed(r); fixed || value {
 			t.Errorf("Fixed(%s) = (%v, %v), want (false, false): the cell is configurable", r, fixed, value)
@@ -250,9 +263,9 @@ func TestUseCameraDefaultsOff(t *testing.T) {
 	if got := PermUseCamera.Requires(); !slices.Equal(got, []Permission{PermUseVoice}) {
 		t.Errorf("Requires() = %v, want exactly [use_voice]", got)
 	}
-	for _, on := range PresetMemberPermissions {
-		if slices.Contains(on, PermUseCamera) {
-			t.Errorf("a preset turns use_camera on: %v", on)
+	for preset, on := range PresetMemberPermissions {
+		if !slices.Contains(on, PermUseCamera) {
+			t.Errorf("preset %s leaves use_camera off: %v", preset, on)
 		}
 	}
 	// The reshaped Default falls through to off, and OperatorOnly to
@@ -291,7 +304,7 @@ func TestPermissionDefaultsUnchanged(t *testing.T) {
 		PermManageChannels:        {false, true},
 		PermChangeServerSettings:  {false, false},
 		PermReadAuditLog:          {false, false},
-		PermUseCamera:             {false, false},
+		PermUseCamera:             {true, true}, // issue #1361
 	}
 	if len(want) != len(Permissions) {
 		t.Fatalf("the list has %d rows, the catalog %d", len(want), len(Permissions))
@@ -450,7 +463,7 @@ func TestPresetMemberPermissions(t *testing.T) {
 	if got := PresetMemberPermissions[PresetGroup]; !slices.Equal(got, defaults) {
 		t.Errorf("group = %v, want the member defaults %v", got, defaults)
 	}
-	if got, want := PresetMemberPermissions[PresetPersonal], []Permission{PermUseVoice, PermShareScreen}; !slices.Equal(got, want) {
+	if got, want := PresetMemberPermissions[PresetPersonal], []Permission{PermUseVoice, PermShareScreen, PermUseCamera}; !slices.Equal(got, want) {
 		t.Errorf("personal = %v, want %v", got, want)
 	}
 	for preset, on := range PresetMemberPermissions {

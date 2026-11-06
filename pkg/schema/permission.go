@@ -170,15 +170,18 @@ func (p Permission) Fixed(r PermissionRole) (fixed, value bool) {
 
 // Default reports p's default for role r: the value a cell has while no row
 // is stored for it (design §4.1). Members hold rows 1 to 6 (channel
-// creation, member links, the directory, voice and screen share); operators
-// hold rows 1 to 9; change_server_settings, read_audit_log and use_camera
-// are off for both. The defaults reproduce what a server did before the
-// permission existed (ADR-014 decision 2). An unknown permission or role
-// defaults to off.
+// creation, member links, the directory, voice and screen share) and row 12
+// (use_camera); operators hold rows 1 to 9 and row 12;
+// change_server_settings and read_audit_log are off for both. Rows 1 to 11
+// reproduce what a server did before the permission existed (ADR-014
+// decision 2). use_camera is on by Nick's decision of 2026-11-05 (issue
+// #1361, amending ADR-015 decisions 2 and 5); a server that existed before
+// that keeps camera off, because migration 44 stored its cells as off. An
+// unknown permission or role defaults to off.
 //
-// The six permissions that are on by default for both roles are named, and
-// the switch falls through to off: a permission added to the catalog without
-// a case here is off until someone decides otherwise, never on (ADR-015,
+// The permissions that are on by default for both roles are named, and the
+// switch falls through to off: a permission added to the catalog without a
+// case here is off until someone decides otherwise, never on (ADR-015,
 // design §10).
 func (p Permission) Default(r PermissionRole) bool {
 	if !p.Valid() || !r.Valid() {
@@ -186,7 +189,7 @@ func (p Permission) Default(r PermissionRole) bool {
 	}
 	switch p {
 	case PermCreatePublicChannels, PermCreatePrivateChannels, PermMakeMemberLinks,
-		PermSeeMemberDirectory, PermUseVoice, PermShareScreen:
+		PermSeeMemberDirectory, PermUseVoice, PermShareScreen, PermUseCamera:
 		return true
 	case PermManageMembers, PermActAsMembers, PermManageChannels:
 		return r == PermissionRoleOperator
@@ -240,8 +243,9 @@ func (r PermissionRole) Valid() bool {
 type PermissionPreset string
 
 const (
-	// PresetPersonal: a personal server. Members keep voice and screen share
-	// and nothing else: no channel creation, no member links, no directory.
+	// PresetPersonal: a personal server. Members keep voice, screen share and
+	// their camera and nothing else: no channel creation, no member links, no
+	// directory.
 	PresetPersonal PermissionPreset = "personal"
 	// PresetGroup: a group server, equal to the member defaults.
 	PresetGroup PermissionPreset = "group"
@@ -262,10 +266,10 @@ func (p PermissionPreset) Valid() bool {
 // The server sends this table in the permissions answer (presets), so no
 // client keeps a copy of it.
 var PresetMemberPermissions = map[PermissionPreset][]Permission{
-	PresetPersonal: {PermUseVoice, PermShareScreen},
+	PresetPersonal: {PermUseVoice, PermShareScreen, PermUseCamera},
 	PresetGroup: {
 		PermCreatePublicChannels, PermCreatePrivateChannels, PermMakeMemberLinks,
-		PermSeeMemberDirectory, PermUseVoice, PermShareScreen,
+		PermSeeMemberDirectory, PermUseVoice, PermShareScreen, PermUseCamera,
 	},
 }
 

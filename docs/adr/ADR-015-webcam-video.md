@@ -76,6 +76,12 @@ ADR-014 governs who may do what through a closed catalog of permissions. Its rul
 
     `VoiceSessionResponseV1` and occupancy are unchanged. A1's fixture test is loosened so that a document from a server before `use_camera`, with eleven rows, stays valid. No published fixture changes.
 
+> **Amended 2026-11-05 (#1361).** Nick, in session: "members should have access to screen share and webcams.. that should be default", then "and voice".
+> - **Decision 2,** "it is off for members and for operators, by ADR-014's rule for new permissions": `use_camera` is **on** by default for members and for operators, as `use_voice` and `share_screen` are. Owners always hold it, it still needs `use_voice`, and the voice switch still withholds it.
+> - **ADR-014's rule still holds for upgrades.** An upgrade turns nothing on: store migration 44 stores the camera cells as off on any server that existed before, unless an owner had already set them. Only a new server starts with cameras on.
+> - **The amendment of ADR-014 decision 5,** "both presets leave `use_camera` off": both presets turn it on. `personal` is voice, screen share and camera; `group` gains camera and still equals the member defaults. An upgraded server whose camera cells were stored off matches no preset until its owner applies one.
+> - The alternative this ADR rejected ("`use_camera` on by default for members") is taken for new servers only. The reason it gave against upgrades still holds, which is why migration 44 exists.
+
 ## Alternatives considered
 
 | Option | Why not |
