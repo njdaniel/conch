@@ -13,7 +13,8 @@
 import type { IpcMain } from 'electron';
 
 import type { BridgeReply, BridgeRequest, FeedRequest, SignInOutcome } from '../../web/src/platform/desktop/bridge.ts';
-import { VOICE_CONTROL_MAX_CHANNEL_BYTES, VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
+import { VOICE_DEVICES_MAX_NAME_BYTES, voiceControlTalkMode, type VoiceControlTalkMode } from '../../web/src/schema/generated.ts';
+import { validChannel, validDeviceName } from './voice/protocol.ts';
 import { operations } from '../../web/src/platform/operations.ts';
 import { channelOf, INVOKED_FUNCTIONS, type Envelope, type InvokedFunction } from '../shared/bridge-names.ts';
 import { isProfileId } from './profiles/ids.ts';
@@ -223,12 +224,14 @@ export function parseRequest(value: unknown): BridgeRequest | null {
   };
 }
 
-// The voice family's argument shapes. A name is text without a control
-// character (a newline, an escape, a NUL), counted in UTF-8 bytes.
-const NO_CONTROL = /^[^\u0000-\u001f\u007f-\u009f\u2028\u2029]+$/u;
-const utf8 = new TextEncoder();
-const isName = (value: unknown, maxBytes: number): value is string =>
-  typeof value === 'string' && value.length > 0 && NO_CONTROL.test(value) && utf8.encode(value).length <= maxBytes;
+// The voice family's argument shapes. A channel and a device name are
+// checked by the protocol's own validators (validChannel, validDeviceName),
+// so the IPC layer and the encoder agree and a request the encoder would
+// refuse never enters the service's state. The extra pattern refuses the
+// line and paragraph separators as well.
+const NO_SEPARATOR = /[\u2028\u2029]/u;
+const isChannel = (value: unknown): value is string => typeof value === 'string' && validChannel(value) && !NO_SEPARATOR.test(value);
+const isDeviceName = (value: unknown): value is string => typeof value === 'string' && validDeviceName(value) && !NO_SEPARATOR.test(value);
 
 const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => {
   const own = Object.keys(value);
@@ -241,7 +244,7 @@ function parseJoin(args: readonly unknown[]): readonly unknown[] | null {
   const [request] = args;
   if (args.length !== 1 || !isRecord(request) || !hasExactKeys(request, ['channel', 'muted', 'deafened'])) return null;
   const { channel, muted, deafened } = request;
-  if (!isName(channel, VOICE_CONTROL_MAX_CHANNEL_BYTES) || typeof muted !== 'boolean' || typeof deafened !== 'boolean') return null;
+  if (!isChannel(channel) || typeof muted !== 'boolean' || typeof deafened !== 'boolean') return null;
   return [{ channel, muted, deafened }];
 }
 
@@ -252,7 +255,7 @@ function parseDevices(args: readonly unknown[]): readonly unknown[] | null {
   const keys = Object.keys(devices);
   if (keys.length === 0 || !keys.every((key) => key === 'input' || key === 'output')) return null;
   const { input, output } = devices;
-  if ((input !== undefined && !isName(input, VOICE_DEVICES_MAX_NAME_BYTES)) || (output !== undefined && !isName(output, VOICE_DEVICES_MAX_NAME_BYTES))) return null;
+  if ((input !== undefined && !isDeviceName(input)) || (output !== undefined && !isDeviceName(output))) return null;
   return [{ ...(input === undefined ? {} : { input }), ...(output === undefined ? {} : { output }) }];
 }
 

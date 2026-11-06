@@ -385,6 +385,12 @@ describe('the voice family (issue #1374)', () => {
     ['voiceJoin', [null]],
     ['voiceJoin', [[]]],
     ['voiceJoin', [{ channel: 'general', muted: false }]],
+    // The protocol's own rules (validChannel, validDeviceName): a blank
+    // channel, a lone surrogate, and a quote or backslash in a device name.
+    ['voiceJoin', [{ channel: '   ', muted: false, deafened: false }]],
+    ['voiceJoin', [{ channel: 'gen\ud800eral', muted: false, deafened: false }]],
+    ['voiceSetDevices', [{ input: 'Mic "USB"' }]],
+    ['voiceSetDevices', [{ output: 'Speakers\\1' }]],
     ['voiceJoin', [{ muted: false, deafened: false }]],
     ['voiceJoin', [{ ...join, extra: 1 }]],
     ['voiceJoin', [{ ...join, token: 't' }]],
