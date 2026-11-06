@@ -130,6 +130,17 @@ fn sink_tones(text: &str) -> Result<Vec<f32>, String> {
     Ok(tones)
 }
 
+/// `--transmit-ceiling-secs`: whole seconds, `1` to `MAX_MAX_TRANSMIT_SECS`.
+fn transmit_ceiling_secs(text: &str) -> Result<u32, String> {
+    let max = conch_voice_control::MAX_MAX_TRANSMIT_SECS;
+    match text.parse::<u32>() {
+        Ok(secs) if (1..=max).contains(&secs) => Ok(secs),
+        _ => Err(format!(
+            "expected a whole number of seconds from 1 to {max}"
+        )),
+    }
+}
+
 fn log_level(text: &str) -> Result<LevelFilter, String> {
     text.parse()
         .map_err(|_| "expected off, error, warn, info, debug or trace".to_owned())
@@ -200,6 +211,9 @@ pub struct ManagedArgs {
     /// `--share-audio-owner`, passed by an owner that runs a companion (`helper` for the
     /// TUI, which passes nothing).
     pub share_audio_owner: ShareAudioOwner,
+    /// `--transmit-ceiling-secs`, passed by the desktop owner: a missed-release bound for
+    /// push-to-talk presses, in seconds. A shorter `audio.max_transmit_secs` still wins.
+    pub transmit_ceiling_secs: Option<u32>,
 }
 
 /// What the command line asked for.
@@ -347,6 +361,13 @@ pub fn command() -> Command {
                 .help("Test only: read key records from this named pipe instead of the key device voice.toml names"),
         )
         .arg(share_audio_owner_arg())
+        .arg(
+            Arg::new("transmit-ceiling-secs")
+                .long("transmit-ceiling-secs")
+                .value_name("SECONDS")
+                .value_parser(transmit_ceiling_secs)
+                .help("Cap each push-to-talk press at SECONDS (1 to 600), or at audio.max_transmit_secs if that is shorter; open mode is not capped by it"),
+        )
         .arg(
             Arg::new("events-pipe")
                 .long("events-pipe")
@@ -557,6 +578,7 @@ where
                     .get_one::<OsString>("events-pipe")
                     .map(PathBuf::from),
                 share_audio_owner: share_audio_owner(managed),
+                transmit_ceiling_secs: managed.get_one::<u32>("transmit-ceiling-secs").copied(),
             }));
         }
         Some(("devices", devices)) => {
@@ -1145,6 +1167,34 @@ mod tests {
     }
 
     #[test]
+    fn managed_takes_a_transmit_ceiling_from_1_to_600_seconds_and_refuses_the_rest() {
+        let parsed =
+            |value: &str| match parse(["conch-voice", "managed", "--transmit-ceiling-secs", value])
+            {
+                Ok(Invocation::Managed(args)) => Some(args.transmit_ceiling_secs),
+                _ => None,
+            };
+        for (value, want) in [
+            ("1", Some(Some(1))),
+            ("30", Some(Some(30))),
+            ("600", Some(Some(600))),
+            ("0", None),
+            ("601", None),
+            ("-1", None),
+            ("abc", None),
+            ("", None),
+            ("1.5", None),
+            ("30s", None),
+        ] {
+            assert_eq!(parsed(value), want, "{value:?}");
+        }
+        assert!(
+            parse(["conch-voice", "join", "--transmit-ceiling-secs", "30"]).is_err(),
+            "join has no such flag"
+        );
+    }
+
+    #[test]
     fn managed_takes_no_channel_server_or_login_and_hides_its_test_options() {
         assert_eq!(
             parse(["conch-voice", "managed"]).unwrap(),
@@ -1155,6 +1205,7 @@ mod tests {
                 test_key_device: None,
                 events_pipe: None,
                 share_audio_owner: ShareAudioOwner::Helper,
+                transmit_ceiling_secs: None,
             })
         );
         assert_eq!(
@@ -1178,6 +1229,7 @@ mod tests {
                 test_key_device: Some(PathBuf::from("/tmp/FAKE-pipe")),
                 events_pipe: None,
                 share_audio_owner: ShareAudioOwner::Helper,
+                transmit_ceiling_secs: None,
             })
         );
         // Nothing that names what to join, or where, or as whom.

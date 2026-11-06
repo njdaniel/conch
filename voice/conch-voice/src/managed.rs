@@ -1248,6 +1248,8 @@ pub struct Host<T: Transport> {
     /// Who plays other participants' share audio when the session names a companion
     /// (`--share-audio-owner`).
     pub share_audio_owner: ShareAudioOwner,
+    /// `--transmit-ceiling-secs`: a bound on each push-to-talk press, if the owner passed one.
+    pub transmit_ceiling_secs: Option<u32>,
     /// The session loop's waits.
     pub timings: Timings,
     /// The key device's waits.
@@ -1276,6 +1278,7 @@ impl<T: Transport> Host<T> {
             devices,
             keys,
             share_audio_owner,
+            transmit_ceiling_secs: None,
             timings: Timings::default(),
             key_timings: KeyTimings::default(),
             start_timeout: Duration::from_millis(VOICE_CONTROL_START_TIMEOUT_MS),
@@ -1371,12 +1374,14 @@ pub async fn run<T: Transport>(
         devices,
         keys,
         share_audio_owner,
+        transmit_ceiling_secs,
         timings,
         key_timings,
         ..
     } = host;
     let setup = Setup {
         share_audio_owner,
+        transmit_ceiling_secs,
         environment: &environment,
         scrubber: &scrubber,
         keys: &keys,
@@ -1470,6 +1475,15 @@ fn begin(first: Option<First>, early: Vec<Input>) -> Begin {
     }
 }
 
+/// The longest one push-to-talk press may transmit: `audio.max_transmit_secs`, or the
+/// owner's `--transmit-ceiling-secs` if that is shorter (#1372). Open mode keeps the file's
+/// value alone, since a missed release is not possible there.
+fn push_to_talk_limit(file_secs: u32, ceiling_secs: Option<u32>) -> Duration {
+    Duration::from_secs(u64::from(
+        ceiling_secs.map_or(file_secs, |ceiling| file_secs.min(ceiling)),
+    ))
+}
+
 /// What the start-up reads its settings from.
 struct Setup<'a> {
     environment: &'a Environment,
@@ -1477,6 +1491,7 @@ struct Setup<'a> {
     keys: &'a KeySource,
     key_timings: KeyTimings,
     share_audio_owner: ShareAudioOwner,
+    transmit_ceiling_secs: Option<u32>,
     inputs: &'a mpsc::UnboundedSender<Input>,
 }
 
@@ -1883,6 +1898,10 @@ impl Boot {
             sink_tones,
             release_tail_ms: config.audio.release_tail_ms,
             max_transmit: Duration::from_secs(u64::from(config.audio.max_transmit_secs)),
+            push_to_talk_max: push_to_talk_limit(
+                config.audio.max_transmit_secs,
+                setup.transmit_ceiling_secs,
+            ),
             talk_mode,
             level: crate::transmit::level_config(
                 config.audio.open_threshold_db,
@@ -1965,6 +1984,27 @@ fn key_source(
 
 #[cfg(test)]
 mod tests {
+    /// #1372: the push-to-talk limit is the shorter of the file's value and the ceiling;
+    /// without a ceiling it is the file's value.
+    #[test]
+    fn the_push_to_talk_limit_is_the_shorter_of_the_file_and_the_ceiling() {
+        for (file, ceiling, want) in [
+            (120, Some(30), 30),
+            (20, Some(30), 20),
+            (60, Some(30), 30),
+            (120, None, 120),
+            (600, Some(1), 1),
+            (600, Some(600), 600),
+            (1, Some(600), 1),
+        ] {
+            assert_eq!(
+                super::push_to_talk_limit(file, ceiling),
+                Duration::from_secs(want),
+                "file {file}, ceiling {ceiling:?}"
+            );
+        }
+    }
+
     use super::*;
 
     fn line(text: &str) -> Bounded<'_> {

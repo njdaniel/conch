@@ -210,6 +210,8 @@ pub struct Setup {
     pub timings: Timings,
     pub release_tail_ms: u32,
     pub max_transmit: Duration,
+    /// The push-to-talk limit (`--transmit-ceiling-secs`); `max_transmit` when `None`.
+    pub push_to_talk_max: Option<Duration>,
     /// How long one attempt at a transmit report may take.
     pub report_timeout: Duration,
     pub sink_tones: Vec<f32>,
@@ -256,6 +258,7 @@ impl Default for Setup {
             timings: quick(),
             release_tail_ms: 20,
             max_transmit: Duration::from_secs(120),
+            push_to_talk_max: None,
             // As long as every other request is given (`Rig::start_scrubbing`). An attempt
             // that runs out is tried again, and the stub, which had the first and answered it
             // late, records the state twice: on a loaded machine a stub's answer can take
@@ -378,6 +381,7 @@ impl Rig {
             sink_tones: setup.sink_tones,
             release_tail_ms: setup.release_tail_ms,
             max_transmit: setup.max_transmit,
+            push_to_talk_max: setup.push_to_talk_max.unwrap_or(setup.max_transmit),
             talk_mode: setup.talk_mode,
             level: transmit::level_config(setup.open_threshold_db, setup.open_hang_ms),
             key_device: setup.key_device,

@@ -428,6 +428,7 @@ impl ManagedRig {
                 KeySource::Configured
             },
             share_audio_owner: ShareAudioOwner::Helper,
+            transmit_ceiling_secs: None,
             timings,
             key_timings: quick_keys(),
             start_timeout: setup.start_timeout,

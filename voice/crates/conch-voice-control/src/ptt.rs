@@ -379,7 +379,11 @@ enum Stage {
 /// The push-to-talk state machine. See the module documentation for its rules.
 #[derive(Debug)]
 pub struct Ptt {
+    /// The longest one opening may transmit in open mode (`max_transmit_secs`).
     max_transmit: Duration,
+    /// The longest one press may transmit in push-to-talk mode: `max_transmit`, or less
+    /// where the owner asked for a missed-release ceiling.
+    push_to_talk_max: Duration,
     transmission: Transmission,
     /// A reason shut the gate during the transmission, with no tail: nothing more is sent,
     /// although the gate has not yet said so. Cleared when the transmission ends or a new
@@ -419,6 +423,19 @@ impl Ptt {
     /// microphone that is already loud opens nothing until it has been quiet.
     #[must_use]
     pub fn with_talk_mode(max_transmit: Duration, talk_mode: TalkMode) -> (Self, Vec<PttOutput>) {
+        Self::with_limits(max_transmit, max_transmit, talk_mode)
+    }
+
+    /// As [`Ptt::with_talk_mode`], with a limit for a push-to-talk press of its own:
+    /// `max_transmit` limits each opening in open mode, `push_to_talk_max` each press in
+    /// push-to-talk mode. A missed release is only possible with a key, so a shorter limit
+    /// for presses cannot cut a person off mid-sentence in open mode.
+    #[must_use]
+    pub fn with_limits(
+        max_transmit: Duration,
+        push_to_talk_max: Duration,
+        talk_mode: TalkMode,
+    ) -> (Self, Vec<PttOutput>) {
         let mut reasons = ShutReasons::none();
         let mut outputs = Vec::new();
         if talk_mode == TalkMode::Open {
@@ -439,6 +456,7 @@ impl Ptt {
         outputs.push(PttOutput::Status(shown));
         let ptt = Self {
             max_transmit,
+            push_to_talk_max,
             transmission: Transmission::Idle,
             cut: false,
             reasons,
@@ -463,7 +481,7 @@ impl Ptt {
         // Whatever else happened, a press, or an opening, that has gone on too long ends
         // first.
         if let Transmission::Open { since } = self.transmission
-            && now.saturating_sub(since) >= self.max_transmit
+            && now.saturating_sub(since) >= self.limit()
         {
             self.force_shut(ShutReason::MaxTransmit, &mut out);
         }
@@ -532,8 +550,17 @@ impl Ptt {
     #[must_use]
     pub fn deadline(&self) -> Option<Duration> {
         match self.transmission {
-            Transmission::Open { since } => since.checked_add(self.max_transmit),
+            Transmission::Open { since } => since.checked_add(self.limit()),
             Transmission::Idle | Transmission::Shutting { .. } => None,
+        }
+    }
+
+    /// The transmit limit of the talk mode in force. A change of mode ends any transmission,
+    /// so a limit never outlasts the mode it was taken from.
+    fn limit(&self) -> Duration {
+        match self.talk_mode {
+            TalkMode::PushToTalk => self.push_to_talk_max,
+            TalkMode::Open => self.max_transmit,
         }
     }
 
@@ -820,7 +847,11 @@ mod tests {
     impl Harness {
         /// A machine that has just been made, with its first outputs.
         fn new() -> (Self, Vec<PttOutput>) {
-            let (ptt, first) = Ptt::new(MAX);
+            Self::from(Ptt::new(MAX))
+        }
+
+        /// A machine made by [`Ptt::with_limits`] or the like, with its first outputs.
+        fn from((ptt, first): (Ptt, Vec<PttOutput>)) -> (Self, Vec<PttOutput>) {
             let mut harness = Self {
                 ptt,
                 now: Duration::from_secs(1000),
@@ -2042,6 +2073,110 @@ mod tests {
             assert!(harness.quit, "seed {seed}");
             assert_ne!(harness.last_report, Some(Started), "seed {seed}");
             assert_eq!(harness.gate, FakeGate::Shut, "seed {seed}");
+        }
+    }
+
+    /// The push-to-talk ceiling (#1372): a press is limited by its own limit, an opening in
+    /// open mode by the other, and a repeated down renews neither.
+    mod limits {
+        use super::*;
+
+        const SOUND: PttInput = PttInput::Sound(true);
+        const QUIET: PttInput = PttInput::Sound(false);
+        const OPEN: Duration = Duration::from_secs(120);
+        const CEILING: Duration = Duration::from_secs(30);
+
+        fn ready(mode: TalkMode) -> Harness {
+            let (mut harness, _) = Harness::from(Ptt::with_limits(OPEN, CEILING, mode));
+            harness.send(PttInput::KeyDevice(true));
+            harness.send(PttInput::Microphone(true));
+            harness.send(PttInput::PublishGrant(true));
+            harness.send(PttInput::Connected(true));
+            if mode == TalkMode::Open {
+                harness.send(QUIET);
+            }
+            harness
+        }
+
+        fn begin(harness: &mut Harness, mode: TalkMode) {
+            match mode {
+                TalkMode::PushToTalk => harness.send(DOWN),
+                TalkMode::Open => harness.send(SOUND),
+            };
+            assert_eq!(harness.gate, FakeGate::Open);
+        }
+
+        #[test]
+        fn each_mode_is_cut_at_its_own_limit() {
+            for (mode, limit) in [(TalkMode::PushToTalk, CEILING), (TalkMode::Open, OPEN)] {
+                let mut harness = ready(mode);
+                begin(&mut harness, mode);
+                assert_eq!(harness.ptt.deadline(), Some(harness.now + limit), "{mode}");
+                harness.advance(limit - Duration::from_millis(1));
+                assert_eq!(harness.send(PttInput::Tick), [], "{mode}");
+                assert_eq!(harness.gate, FakeGate::Open, "{mode}");
+                harness.advance(Duration::from_millis(1));
+                assert_eq!(
+                    harness.send(PttInput::Tick),
+                    [
+                        Gate(ForceShut(ShutReason::MaxTransmit)),
+                        status(false, &[ShutReason::MaxTransmit]),
+                        Report(Stopped),
+                    ],
+                    "{mode}"
+                );
+            }
+        }
+
+        #[test]
+        fn repeated_downs_never_renew_the_ceiling() {
+            let mut harness = ready(TalkMode::PushToTalk);
+            begin(&mut harness, TalkMode::PushToTalk);
+            let deadline = harness.ptt.deadline();
+            for _ in 0..29 {
+                harness.advance(Duration::from_secs(1));
+                assert_eq!(harness.send(DOWN), [], "a repeat");
+                assert_eq!(harness.ptt.deadline(), deadline);
+            }
+            harness.advance(Duration::from_secs(1));
+            assert_eq!(
+                harness.send(PttInput::Tick),
+                [
+                    Gate(ForceShut(ShutReason::MaxTransmit)),
+                    status(false, &[ShutReason::MaxTransmit]),
+                    Report(Stopped),
+                ]
+            );
+            harness.advance(Duration::from_secs(60));
+            assert_eq!(
+                harness.send(PttInput::Tick),
+                [],
+                "still held: nothing transmits"
+            );
+            assert_eq!(harness.gate, FakeGate::Shut);
+            assert_eq!(
+                harness.send(UP),
+                [Gate(Clear(ShutReason::MaxTransmit)), status(false, &[])]
+            );
+            assert_eq!(
+                harness.send(DOWN),
+                [Gate(Open), Report(Started), status(true, &[])]
+            );
+        }
+
+        #[test]
+        fn a_switch_of_mode_applies_the_new_modes_limit_from_the_next_start() {
+            let mut harness = ready(TalkMode::PushToTalk);
+            begin(&mut harness, TalkMode::PushToTalk);
+            harness.send(PttInput::TalkMode(TalkMode::Open));
+            harness.send(PttInput::GateShut);
+            harness.send(QUIET);
+            harness.send(SOUND);
+            assert_eq!(harness.ptt.deadline(), Some(harness.now + OPEN));
+            harness.send(PttInput::TalkMode(TalkMode::PushToTalk));
+            harness.send(PttInput::GateShut);
+            harness.send(DOWN);
+            assert_eq!(harness.ptt.deadline(), Some(harness.now + CEILING));
         }
     }
 
